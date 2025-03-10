@@ -20,24 +20,60 @@
 
 namespace tracer {
 
-enum class id_t { OK, NOT_FOUND, PERMISSION_DENIED, ERROR };
-
 /* VALUE */
+template <typename T>
+class name_t : public serdes_i {
+   public:
+    const tlv_t::id_t ID = tlv_t::NAME;
+
+   private:
+    T* value;
+};
+
 /* NAME */
-using name_t = std::string;
+class name_t : public std::string, serdes_i {
+   public:
+    const tlv_t::id_t ID = tlv_t::NAME;
+};
+
 /* DESCRIPTION */
+class name_t : public std::string, serdes_i {
+   public:
+    const tlv_t::id_t ID = tlv_t::DESCRIPTION;
+};
+
 /* SUBSCRIBER */
+
 /* LIST */
-// template<typename T>
-// using list = std::vector<T>;
-/* PATH */
-using path_t = std::vector<name_t>;
+// list of serdes objects
+
 /* ERROR */
-/* STATUS */
-using status_t = std::pair<id_t, std::string>;
+class error_t : serdes_i {
+   public:
+    enum class id_t { OK, NOT_FOUND, PERMISSION_DENIED, ERROR };
+    id_t operator=(id_t err) { return (this->err = err); }
+
+   private:
+    id_t err;
+};
+
 /* ACL */
+
 /* SETTINGS */
+
 /* TIME */
+
+/* STATUS */
+class status_t : public std::pair<id_t, std::string>, public serdes_i {
+   public:
+    const tlv_t::id_t ID = tlv_t::PATH;
+};
+
+/* PATH */
+class path_t : public std::vector<name_t>, public serdes_i {
+   public:
+    const tlv_t::id_t ID = tlv_t::PATH;
+};
 
 /* POINT */
 class point_i {
@@ -53,23 +89,15 @@ class point_i {
     name_t name;
 };
 
-class data_point_t : public point_i, public serdes_i {
+class point_t : public point_i, public serdes_i {
    public:
-    const tlv_t::id_t ID = tlv_t::PATH;
+    const tlv_t::id_t ID = tlv_t::POINT;
 };
 
-class data_status_t : public point_i, public serdes_i {
+/* ROUTER */
+class router_t : public point_i, public serdes_i {
    public:
-    status_t status;
-
-    const tlv_t::id_t ID = tlv_t::PATH;
-};
-
-class data_path_t : public point_i, public serdes_i {
-   public:
-    path_t path;
-
-    const tlv_t::id_t ID = tlv_t::PATH;
+    const tlv_t::id_t ID = tlv_t::ROUTER;
 };
 
 };  // namespace tracer

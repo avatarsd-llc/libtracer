@@ -30,7 +30,8 @@ struct tlv_t {
         STATUS = 0x09,      /**< Containing communication error code and description, empty if ok */
         ACL = 0x0A,         /**< Access control list */
         SETTINGS = 0x0B,    /**< Settings (e.g., bandwidth, ACLs) */
-        TIME = 0x0C    /**< Timestamp of last update (64-bit nanoseconds) */
+        TIME = 0x0C,    /**< Timestamp (64-bit nanoseconds) */
+        ROUTER = 0x0D    /**< Router object */
     };
 
     /** @brief Enum defining options for TLV
