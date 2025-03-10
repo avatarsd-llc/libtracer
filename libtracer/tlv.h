@@ -25,16 +25,24 @@ struct tlv_t {
         SUBSCRIBER = 0x04,  /**< Subscriber with path and settings */
         LIST = 0x05,        /**< List of TLVs (e.g., subscribers, endpoints) */
         PATH = 0x06,        /**< Routing path as a list of names */
-        ENDPOINT = 0x07,    /**< Endpoint with related data */
+        POINT = 0x07,    /**< Endpoint with related data */
         ERROR = 0x08,       /**< Error code */
         STATUS = 0x09,      /**< Containing communication error code and description, empty if ok */
         ACL = 0x0A,         /**< Access control list */
         SETTINGS = 0x0B,    /**< Settings (e.g., bandwidth, ACLs) */
-        TIMESTAMP = 0x0C    /**< Timestamp of last update (64-bit nanoseconds) */
+        TIME = 0x0C    /**< Timestamp of last update (64-bit nanoseconds) */
+    };
+
+    /** @brief Enum defining options for TLV
+     */
+    struct  opt_t {
+        uint8_t TIMESTAMP : 1; /**< Timestamp as 64bit nanosec resolution presented at the end of tlv */
+        uint8_t CRC = 1;
+        uint8_t _RES : 6;
     };
 
     id_t type;       /**< TLV type identifier */
-    uint8_t _res;    /**< Reserved for padding  */
+    opt_t _res;      /**< Options  */
     uint16_t crc;    /**< CRC16, valid if FLAG_CRC is set */
     uint32_t length; /**< Length of the data field in bytes */
     uint8_t data[];  /**< Flexible array member for variable-length data */
