@@ -25,28 +25,34 @@ struct tlv_t {
         SUBSCRIBER = 0x04,  /**< Subscriber with path and settings */
         LIST = 0x05,        /**< List of TLVs (e.g., subscribers, endpoints) */
         PATH = 0x06,        /**< Routing path as a list of names */
-        POINT = 0x07,    /**< Endpoint with related data */
+        POINT = 0x07,       /**< Endpoint with related data */
         ERROR = 0x08,       /**< Error code */
         STATUS = 0x09,      /**< Containing communication error code and description, empty if ok */
         ACL = 0x0A,         /**< Access control list */
         SETTINGS = 0x0B,    /**< Settings (e.g., bandwidth, ACLs) */
-        TIME = 0x0C,    /**< Timestamp (64-bit nanoseconds) */
-        ROUTER = 0x0D    /**< Router object */
+        TIME = 0x0C,        /**< Timestamp (64-bit nanoseconds) */
+        ROUTER = 0x0D       /**< Router object */
     };
 
-    /** @brief Enum defining options for TLV
+    /** @brief Options bitfield for TLV header. */
+    struct opt_t {
+        uint8_t TIMESTAMP : 1; /**< @brief Flag for timestamp inclusion. */
+        uint8_t CRC : 1;       /**< @brief Flag for CRC usage. */
+        uint8_t _RES : 6;      /**< @brief Reserved bits. */
+    };
+
+    /**
+     * @brief Header struct for safe memory handling (no flexible array member).
      */
-    struct  opt_t {
-        uint8_t TIMESTAMP : 1; /**< Timestamp as 64bit nanosec resolution presented at the end of tlv */
-        uint8_t CRC = 1;
-        uint8_t _RES : 6;
+    struct header_t {
+        tlv_t::id_t type;  /**< @brief TLV type field. */
+        tlv_t::opt_t _res; /**< @brief TLV options field. */
+        uint16_t crc;      /**< @brief CRC checksum. */
+        uint32_t length;   /**< @brief Length of data payload. */
     };
 
-    id_t type;       /**< TLV type identifier */
-    opt_t _res;      /**< Options  */
-    uint16_t crc;    /**< CRC16, valid if FLAG_CRC is set */
-    uint32_t length; /**< Length of the data field in bytes */
-    uint8_t data[];  /**< Flexible array member for variable-length data */
+    header_t header; /**< @brief TLV type field. */
+    uint8_t data[];  /**< @brief Flexible array for data (not used directly). */
 } /* packed(aligned by sizes) */;
 
 #endif
