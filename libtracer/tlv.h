@@ -4,9 +4,9 @@
  * @brief Type-Lengh-Value wrapper
  * @version 0.1
  * @date 2025-03-03
- * 
+ *
  * @copyright Copyright (c) 2025
- * 
+ *
  */
 
 #ifndef TLV_H
@@ -15,7 +15,7 @@
 #include <inttypes.h>
 
 struct tlv_t {
-    /** @brief Enum defining TLV types 
+    /** @brief Enum defining TLV types
      *         The most hardcoded values in the system
      */
     enum id_t : uint8_t {
