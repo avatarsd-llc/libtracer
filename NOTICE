@@ -1,0 +1,21 @@
+libtracer
+Copyright 2026 Avatar LLC
+
+This product includes software developed by Avatar LLC and contributors
+to the libtracer project (https://github.com/avatarsd/libtracer).
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+The libtracer protocol specification (under docs/spec/) is licensed
+separately under the Creative Commons Attribution 4.0 International
+License (CC BY 4.0). See docs/spec/LICENSE.
+
+Example code (under examples/) is dedicated to the public domain under
+Creative Commons Zero v1.0 Universal (CC0 1.0). See examples/LICENSE.
+
+"libtracer" is a trademark of Avatar LLC. See TRADEMARKS.md for the
+trademark policy. The trademark is not granted under the Apache License.
