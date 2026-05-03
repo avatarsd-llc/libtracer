@@ -1,12 +1,9 @@
-/**
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+ *
  * @file tlv.h
- * @author avatarsd (avatarsd2@gmail.com)
- * @brief Type-Lengh-Value wrapper
- * @version 0.1
- * @date 2025-03-03
- *
- * @copyright Copyright (c) 2025
- *
+ * @brief Type-Length-Value wire-format primitives.
  */
 
 #ifndef TLV_H

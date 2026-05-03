@@ -1,12 +1,9 @@
-/**
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+ *
  * @file serdes.h
- * @author avatarsd (you@domain.com)
- * @brief 
- * @version 0.1
- * @date 2025-03-10
- * 
- * @copyright Copyright (c) 2025
- * 
+ * @brief Serialization/deserialization interface for TLV-backed types.
  */
 
 #ifndef SERDES_I

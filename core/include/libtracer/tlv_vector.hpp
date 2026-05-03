@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+ */
+
 #include <inttypes.h>
 #include <cstdint>
 #include <cstring>

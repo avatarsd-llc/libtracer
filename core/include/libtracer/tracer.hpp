@@ -1,12 +1,9 @@
-/**
- * @file tracer.h
- * @author avatarsd (avatarsd2@gmail.com)
- * @brief Tracer protocol core definitions
- * @version 0.1
- * @date 2025-03-07
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
  *
- * @copyright Copyright (c) 2025
- *
+ * @file tracer.hpp
+ * @brief libtracer protocol core definitions
  */
 
 #ifndef H_TRACER
