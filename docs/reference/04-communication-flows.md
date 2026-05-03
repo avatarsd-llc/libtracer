@@ -185,11 +185,11 @@ Operator                          Vertex
 
 QoS changes apply to the **next** dispatch from this vertex. In-flight dispatches with the prior settings are not re-evaluated.
 
-For atomic multi-field updates, write a SETTINGS LIST TLV containing both fields to the parent path:
+For atomic multi-field updates, write a SETTINGS TLV containing both fields to the parent path:
 
 ```
 write("/sensor/temp:settings",
-      LIST { reliability=reliable, deadline_ns=5000000 })
+      SETTINGS { reliability=reliable, deadline_ns=5000000 })
 ```
 
 ---
@@ -228,9 +228,9 @@ External peer        Transport module       Bridge vertex          Local router 
 Two strips happen in this flow, and they are at different layers:
 
 - **L0 trailer strip**: the transport module validates `trailer_crc` (and optionally `trailer_ts`), then the trailer is consumed — the bare `header + payload` is what the bridge sees. This is universal across all transports.
-- **L2 ROUTER shed**: the bridge unwraps the `LIST { ROUTER, data }` envelope, saves `(origin_peer_id, origin_timestamp, hop_count)` from `ROUTER` to its per-proxy metadata table, and stores only the bare data TLV at the proxy vertex. This applies only when the incoming TLV was bridge-wrapped.
+- **L2 ROUTER shed**: the bridge unwraps the `ROUTER` envelope, saves `(origin_peer_id, origin_timestamp, hop_count)` from ROUTER's metadata children to its per-proxy metadata table, and stores only the wrapped data TLV (ROUTER's last child, tagged by `NAME "data"`) at the proxy vertex. This applies only when the incoming TLV is itself a ROUTER.
 
-When a local subscriber that is itself reachable via another transport pulls this data, the bridge re-emits in mirror order: re-wrap into `LIST { ROUTER (incremented hop), data }`, attach a fresh outbound trailer (new wire-time, new CRC), send. The payload bytes never move.
+When a local subscriber that is itself reachable via another transport pulls this data, the bridge re-emits in mirror order: re-wrap into a `ROUTER` envelope with `hop_count` incremented and the data TLV as the last child, attach a fresh outbound trailer (new wire-time, new CRC), send. The payload bytes never move.
 
 Dedup is essential because the global topology may have cycles (see [07-host-embedding.md](07-host-embedding.md) §cycle handling). The bridge maintains a **recent-set** of `(origin_peer_id, origin_timestamp)` pairs and silently drops TLVs already seen.
 
@@ -351,17 +351,21 @@ Caller                              Vertex
    |                                   |
    | read("/sensor/temp:schema")       |
    |──────────────────────────────────>|
-   | <── LIST{                         |
-   |       NAME "subscribers", LIST{...}, |
-   |       NAME "settings", LIST{           |
-   |         NAME "reliability", u8 enum,    |
-   |         NAME "deadline_ns", u64,         |
-   |         NAME "transport_tcp", LIST{       |
-   |           NAME "send_buf_kb", u32          |
-   |         }                                   |
-   |       },                                    |
-   |       ...                                   |
-   |     } ─────────────────────────────────────|
+   | <── POINT (PL=1) {                |
+   |       NAME "subscribers"           |
+   |       SUBSCRIBER ...               |
+   |       ...                          |
+   |       NAME "settings"              |
+   |       SETTINGS (PL=1) {            |
+   |         NAME "reliability" VALUE u8|
+   |         NAME "deadline_ns" VALUE u64|
+   |         NAME "transport_tcp"       |
+   |         SETTINGS (PL=1) {          |
+   |           NAME "send_buf_kb" VALUE u32 |
+   |         }                          |
+   |       }                            |
+   |       ...                          |
+   |     } ───────────────────────────|
 ```
 
 Schema is the introspection root. All tooling (`tracer-top`, future web GUI, conformance tests) walks `:schema` on every vertex of interest.
@@ -373,10 +377,15 @@ Caller                              Local router
    |                                   |
    | read("/sensor")                   |
    |──────────────────────────────────>|
-   | <── LIST{ NAME "temp", NAME "humidity", ... } ──|
+   | <── POINT (PL=1) {                |
+   |       NAME "sensor"               |
+   |       POINT child_temp            |
+   |       POINT child_humidity        |
+   |       ...                         |
+   |     } ──────────────────────────|
 ```
 
-Reading a parent vertex returns a LIST of NAME TLVs naming the children. This makes browsing the graph trivial:
+Reading a parent vertex returns a POINT TLV whose children include POINT TLVs for each sub-vertex (and other metadata children per the POINT spec in [05-protocol-tlvs.md](05-protocol-tlvs.md)). This makes browsing the graph trivial:
 
 ```
 read("/")              -> top-level children

@@ -94,7 +94,7 @@ A bridge receiving a TLV SHALL:
 When the same bridge later re-emits this data on another transport (e.g., the local subscriber that received it is itself a remote subscriber over a second transport), the bridge:
 
 1. Looks up the saved `(origin_peer_id, origin_timestamp, hop_count)` in its per-proxy metadata table.
-2. Wraps the bare data TLV back into `LIST { ROUTER {...}, data }` with `hop_count` incremented.
+2. Wraps the bare data TLV back into a `ROUTER` envelope (ROUTER's children are NAME-tagged metadata followed by `NAME "data"` and the wrapped TLV as last child) with `hop_count` incremented.
 3. Attaches a fresh wire trailer (`opt.TS`, `opt.CR`) per the egress transport's conventions ([01-data-format.md](01-data-format.md) §the trailer is append-only).
 
 The `ROUTER` lives on the wire between bridges, never inside a vertex's stored value.

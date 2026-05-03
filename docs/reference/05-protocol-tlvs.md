@@ -13,9 +13,15 @@
 | `0x20` – `0x7F` | Reserved for future core extensions |
 | `0x80` – `0xFF` | User-defined application payload types |
 
-Currently assigned: `0x01` – `0x0D` (13 types). The remaining `0x0E` – `0x1F` are reserved for v0.1 fast-track additions; `0x20` – `0x7F` is the long-term registry.
+Currently assigned: `0x01`–`0x04`, `0x06`–`0x0D` (12 types). `0x05` is **retired** (was generic LIST in earlier drafts; see §`0x05`). The remaining `0x0E` – `0x1F` are reserved for v0.1 fast-track additions; `0x20` – `0x7F` is the long-term registry.
 
-The names below match the C enum in [`libtracer/tlv.h`](../../libtracer/tlv.h).
+The names below match the C enum in [`libtracer/tlv.h`](../../libtracer/tlv.h) (which is being updated to drop LIST and reflect this revision).
+
+### Structured TLVs
+
+Several core type codes are **structured** — they carry `opt.PL=1` and their payload is a concatenation of child TLVs. The structured types are: `0x04` SUBSCRIBER, `0x06` PATH, `0x07` POINT, `0x09` STATUS (when non-empty), `0x0A` ACL, `0x0B` SETTINGS, `0x0D` ROUTER. Each entry below specifies its own children layout.
+
+Earlier drafts had a generic `0x05` LIST type that any structured container could use; that's gone. Every structured container declares its purpose via its type code. User-range type codes (`0x80–0xFF`) MAY also be structured (set `opt.PL=1`) for application-defined records.
 
 ---
 
@@ -36,14 +42,14 @@ The payload is a contiguous, untouched user region. Wire-time TS and CRC live in
 - `opt.PL = 0` (payload is opaque, not nested).
 - `opt.CR` recommended `1` for any non-loopback transport.
 - `opt.TS` recommended `1` when wire-time-stamping matters (latency telemetry, dedup tie-breaking).
-- For application-domain timestamps, embed a sibling `TIME` TLV inside a wrapping `LIST` instead.
+- For application-domain timestamps, embed a sibling `TIME` TLV inside a wrapping structured TLV (a user-range type code with `opt.PL=1`) instead.
 
 ### Where it appears
 
 - Body of normal `tracer_write` / `tracer_read`.
 - Inside `SUBSCRIBER` records as the configuration scalar.
-- Inside `SETTINGS` LISTs as field values.
-- Inside `STATUS` LISTs as error-detail bytes.
+- Inside `SETTINGS` as field values.
+- Inside `STATUS` as error-detail bytes.
 
 ### Validation
 
@@ -52,29 +58,29 @@ The payload is a contiguous, untouched user region. Wire-time TS and CRC live in
 
 ### Hex example
 
-5-byte payload `AA BB CC DD EE`, CRC enabled, no wire-time:
+5-byte payload `AA BB CC DD EE`, CRC-32 enabled, no wire-time (default `LL=0` u16 length):
 
 ```
-01 10 05 00 00 00 AA BB CC DD EE [crc:4]
-^  ^  ^^^^^^^^^^^ ^^^^^^^^^^^^^^  ^^^^^
-|  |  length = 5  payload          trailer_crc (CRC-32C over payload)
+01 10 05 00 AA BB CC DD EE [crc:4]
+^  ^  ^^^^^ ^^^^^^^^^^^^^^  ^^^^^
+|  |  len=5  payload         trailer_crc (CRC-32C over payload)
 |  opt = 0x10 (CR=1)
 type = 0x01 VALUE
 ```
 
-`6 (header) + 5 (payload) + 4 (trailer_crc) = 15 bytes`.
+`4 (header) + 5 (payload) + 4 (trailer_crc) = 13 bytes`.
 
-Same payload with wire-time-stamp:
+Same payload with absolute wire-time-stamp + CRC-32:
 
 ```
-01 30 05 00 00 00 AA BB CC DD EE [ts:8] [crc:4]
-^  ^  ^^^^^^^^^^^ ^^^^^^^^^^^^^^  ^^^^^  ^^^^^
-|  |  length = 5  payload          ts     CRC over payload+ts
+01 30 05 00 AA BB CC DD EE [ts:8] [crc:4]
+^  ^  ^^^^^ ^^^^^^^^^^^^^^  ^^^^^  ^^^^^
+|  |  len=5  payload         ts     CRC over payload+ts
 |  opt = 0x30 (TS=1, CR=1)
 type = 0x01 VALUE
 ```
 
-`6 + 5 + 8 + 4 = 23 bytes`.
+`4 + 5 + 8 + 4 = 21 bytes`.
 
 ---
 
@@ -97,23 +103,23 @@ A single name segment. UTF-8 bytes, **no NUL terminator on the wire**.
 ### Where it appears
 
 - Inside PATH TLVs (one NAME per segment).
-- Inside SETTINGS LISTs as field-name keys.
-- Inside SCHEMA LISTs as field labels.
+- Inside SETTINGS as field-name keys.
+- Inside `:schema` responses as field labels.
 - Wherever a "label" is needed inside a structured TLV.
 
 ### Hex example
 
-NAME "sensor" (6 bytes), no trailer (typical when nested inside a LIST whose outer trailer covers everything):
+NAME "sensor" (6 bytes), no trailer (typical when nested inside a structured TLV whose outer trailer covers everything):
 
 ```
-02 00 06 00 00 00 73 65 6E 73 6F 72
-^  ^  ^^^^^^^^^^^ ^^^^^^^^^^^^^^^^^
-|  |  length = 6  "sensor"
+02 00 06 00 73 65 6E 73 6F 72
+^  ^  ^^^^^ ^^^^^^^^^^^^^^^^^
+|  |  len=6  "sensor"
 |  opt = 0 (no PL, no TS, no CR)
 type = 0x02 NAME
 ```
 
-`6 (header) + 6 (payload) = 12 bytes`.
+`4 (header) + 6 (payload) = 10 bytes`.
 
 ---
 
@@ -135,7 +141,7 @@ Free-form UTF-8 human-readable description of a vertex or field. Optional in eve
 ### Where it appears
 
 - `<vertex>:description` field.
-- Inside SCHEMA LISTs annotating fields.
+- Inside `:schema` responses annotating fields.
 - Inside ERROR TLVs as the human-readable detail.
 
 ---
@@ -146,10 +152,10 @@ Subscription record. The presence of a SUBSCRIBER TLV at `<vertex>:subscribers[N
 
 ### Payload layout
 
-Always a LIST (`opt.PL=1`). The LIST contains, in order:
+Always structured (`opt.PL=1`). Children, in order:
 
 ```
-LIST {
+SUBSCRIBER (PL=1) {
   PATH        target_path     ; required — where to dispatch matched writes
   SETTINGS    qos_settings    ; optional — QoS overrides for this subscription
   ACL         capability      ; optional — capability token if enforced
@@ -160,7 +166,7 @@ LIST {
 ### Where it appears
 
 - `<vertex>:subscribers[N]` slot, one per subscription.
-- Inside `<vertex>:subscribers[]` reads (returned as a LIST of SUBSCRIBER TLVs).
+- Inside `<vertex>:subscribers[]` reads (returned as a sequence of SUBSCRIBER TLVs nested in the response).
 
 ### Validation
 
@@ -169,66 +175,34 @@ LIST {
 
 ### Future extensions
 
-The optional fields after `target_path` may grow. New optional sub-fields MUST appear after the existing ones in the LIST and MUST be NAME-tagged so older parsers can skip them.
+The optional fields after `target_path` may grow. New optional sub-fields MUST appear after the existing ones and MUST be NAME-tagged so older parsers can skip them.
 
 ---
 
-## `0x05` — LIST
+## `0x05` — RETIRED (formerly LIST)
 
-Ordered container of nested TLVs. The graph-node primitive of the same-substrate insight.
+Type code `0x05` was a generic structured container in earlier drafts. **Retired.** Every structured TLV in the registry now has a specific purpose declared by its type code; the generic-container concept is gone.
 
-### Payload layout
+- Senders MUST NOT emit `type=0x05`.
+- Receivers MUST treat `type=0x05` as a reserved-but-unassigned code per [01-data-format.md](01-data-format.md) §handling unknown type codes (skip safely, do not crash).
+- The code is permanently retired; collision-prevention prevents reuse.
 
-```
-[ child TLV 1 ] [ child TLV 2 ] [ ... ] [ child TLV K ]
-```
+The structural concept survives: any TLV with `opt.PL=1` is a structured container holding concatenated child TLVs. The protocol's structured types are SUBSCRIBER (0x04), PATH (0x06), POINT (0x07), STATUS (0x09), ACL (0x0A), SETTINGS (0x0B), ROUTER (0x0D). User-defined structured records use user-range type codes (`0x80–0xFF`) with `PL=1`.
 
-Each child is a complete TLV (header + length + payload), concatenated end-to-end. Children may have any type code, including nested LIST.
+### Why retired
 
-### Header settings
-
-- `opt.PL` MUST be `1`. (A type-LIST TLV with `PL=0` is invalid.)
-- The `length` field gives the total byte size of all concatenated children.
-
-### Constraints
-
-- Nesting depth ≤ 32 (per [01-data-format.md](01-data-format.md) §iterative parsing).
-- Number of children: unbounded by the protocol; bounded by `length` and per-application limits.
-
-### Where it appears
-
-- Wherever structured data is needed: SUBSCRIBER, SETTINGS, ACL, STATUS, schema, vertex enumeration.
-
-### Hex example
-
-A 2-element PATH (which is a LIST containing two NAME TLVs) for `/sensor/temp`, with outer CRC:
-
-```
-06 50 16 00 00 00 [inner 22 bytes] [crc:4]
-^  ^  ^^^^^^^^^^^
-|  |  length = 22 (sum of two child TLVs)
-|  opt = 0x50 (PL=1, CR=1)
-type = 0x06 PATH
-
-  Inner LIST contents (22 bytes):
-  02 00 06 00 00 00 73 65 6E 73 6F 72   ← NAME "sensor", 12 bytes
-  02 00 04 00 00 00 74 65 6D 70           ← NAME "temp",  10 bytes
-```
-
-`6 (outer header) + 22 (inner LIST) + 4 (outer CRC) = 32 bytes total`. The inner NAMEs carry no trailer of their own; the outer CRC covers their bytes.
-
-(PATH is a specialization of LIST; see `0x06` PATH.)
+Generic LIST had no semantic meaning of its own — it was the un-named default whose role was always "structured stuff goes here." Real uses always have a specific purpose. Forcing every container to declare its purpose via type code is what makes the type byte a proper L1 concern.
 
 ---
 
 ## `0x06` — PATH
 
-A hierarchical address as a LIST of NAME TLVs. Distinct from raw LIST so the parser can validate path-segment constraints up-front.
+A hierarchical address. Structured TLV (`opt.PL=1`) whose children are NAME TLVs, one per segment. Distinct from a generic structured TLV in that the parser validates path-segment constraints up-front.
 
 ### Payload layout
 
 ```
-LIST {
+PATH (PL=1) {
   NAME segment_1
   NAME segment_2
   ...
@@ -242,7 +216,7 @@ LIST {
 
 ### Constraints
 
-- Each child MUST be a NAME TLV (`type=0x02`); other types in the LIST are invalid in PATH context.
+- Each child MUST be a NAME TLV (`type=0x02`); other types are invalid in PATH context.
 - Total path length (sum of NAME bytes + segment separators) ≤ 1024 bytes.
 - Segment count ≤ 32.
 
@@ -257,7 +231,7 @@ LIST {
 A path may be expressed two ways:
 
 - **String form**: `"/sensor/temp"` — a UTF-8 byte string with `/` separators. Used at the API surface for ergonomics. Stored as a single VALUE TLV when transported as data.
-- **PATH-TLV form**: a PATH TLV (LIST of NAMEs). Used inside structured TLVs (SUBSCRIBER, ROUTER) where the parser needs to validate segments individually.
+- **PATH-TLV form**: a PATH TLV (structured, NAME children). Used inside structured TLVs (SUBSCRIBER, ROUTER) where the parser needs to validate segments individually.
 
 Both forms canonicalize to the same internal representation. Implementations MUST accept either form where a path is expected.
 
@@ -269,15 +243,23 @@ Endpoint definition: a vertex's full descriptor as a structured TLV. Used for ve
 
 ### Payload layout
 
+POINT is structured (`opt.PL=1`). Children, in order:
+
 ```
-LIST {
+POINT (PL=1) {
   NAME           vertex_name        ; required — the leaf segment
   DESCRIPTION    description        ; optional
   SETTINGS       default_settings   ; optional
-  LIST           subscribers        ; optional — current subscribers as LIST of SUBSCRIBER
-  LIST           children           ; optional — child POINTs (recursive)
+  SUBSCRIBER     sub_0              ; zero or more, in slot order
+  SUBSCRIBER     sub_1
+  ...
+  POINT          child_0            ; zero or more, recursive
+  POINT          child_1
+  ...
 }
 ```
+
+Subscribers and children appear as direct children of POINT, identified by their type code. There is no intermediate "subscribers list" or "children list" wrapper — the type byte of each child tells its role.
 
 ### Where it appears
 
@@ -289,7 +271,7 @@ LIST {
 
 - `opt.PL` MUST be `1`.
 - The `vertex_name` MUST be the first child.
-- Nested `children` LIST entries MUST themselves be POINT TLVs.
+- Children that represent recursive vertex structure MUST themselves be POINT TLVs (type `0x07`).
 
 ---
 
@@ -305,7 +287,7 @@ A single error condition. Used inside STATUS TLVs (which may carry zero or more 
 [ optional VALUE (binary detail, error-code-specific) ]
 ```
 
-The error code is always the first byte. Optional follow-on TLVs (DESCRIPTION, VALUE) are nested by setting `opt.PL=1` and packing them into the LIST after the leading code byte. (For implementers: the leading u8 is treated as a single-byte payload prefix; the rest of the payload is the LIST. This packing is deliberately compact for the common case of "code only.")
+The error code is always the first byte. Optional follow-on TLVs (DESCRIPTION, VALUE) are nested by setting `opt.PL=1` and packing them as children after the leading code byte. (For implementers: the leading u8 is treated as a single-byte payload prefix; the rest of the payload is concatenated child TLVs. This packing is deliberately compact for the common case of "code only.")
 
 ### Error code registry
 
@@ -323,7 +305,7 @@ The error code is always the first byte. Optional follow-on TLVs (DESCRIPTION, V
 0x0A  SCHEMA_NOT_FOUND     Field read on a vertex that does not expose it
 0x0B  ADDRESS_SHIFT_GAP    Missing index in an address-shift group at deadline
 0x0C  TRUNCATED            TLV stream ended mid-frame
-0x0D  NESTING_TOO_DEEP     LIST nesting exceeded depth cap
+0x0D  NESTING_TOO_DEEP     Structured-TLV nesting exceeded depth cap
 0x0E  PATH_IN_USE          Bind attempted on an already-owned vertex name
 0x0F  – 0x7F  reserved for future core
 0x80  – 0xFF  user-defined
@@ -342,14 +324,14 @@ Communication status / response signal. An empty STATUS means OK; a non-empty ST
 
 ### Payload layout
 
-When empty: `length = 0`. (Smallest valid STATUS is the 7-byte empty-OK form.)
+When empty: `length = 0`. (Smallest valid STATUS is the 4-byte empty-OK form.)
 
-When non-empty:
+When non-empty: structured (`opt.PL=1`) with children:
 
 ```
-LIST {
+STATUS (PL=1) {
   ERROR        first_error
-  ERROR        second_error      ; optional
+  ERROR        second_error      ; optional, multiple permitted
   DESCRIPTION  human_message     ; optional
   ...
 }
@@ -371,14 +353,14 @@ LIST {
 Empty STATUS=OK (the smallest valid libtracer TLV — used as the unsubscribe sentinel and the implicit OK reply):
 
 ```
-09 00 00 00 00 00
-^  ^  ^^^^^^^^^^^
-|  |  length = 0
-|  opt = 0  (no PL, no TS, no CR)
+09 00 00 00
+^  ^  ^^^^^
+|  |  length = 0 (u16 LE)
+|  opt = 0  (no flags; LL=0 default u16)
 type = 0x09 STATUS
 ```
 
-**6 bytes total.** No trailer.
+**4 bytes total.** No trailer.
 
 ---
 
@@ -388,18 +370,22 @@ Access control list — a collection of capabilities granting permissions on a v
 
 ### Payload layout
 
+ACL is structured (`opt.PL=1`). Its children are themselves ACL TLVs, each representing one capability. (The recursion is deliberate: the outer ACL is the capability collection; each inner ACL is one capability with NAME-tagged fields.)
+
 ```
-LIST {
-  LIST {
-    NAME      subject       ; the holder of this capability
-    VALUE     permissions   ; u8 bitfield: READ=0x1, WRITE=0x2, SUBSCRIBE=0x4
-    VALUE     expires_ns    ; optional u64 expiration timestamp
+ACL (PL=1) {                                ; outer = collection
+  ACL (PL=1) {                              ; inner = one capability
+    NAME "subject"      <UTF-8 holder>
+    NAME "permissions"  VALUE <u8 bitfield: READ=0x1 WRITE=0x2 SUBSCRIBE=0x4>
+    NAME "expires_ns"   VALUE <u64>          ; optional
   }
-  LIST {
-    ...                     ; next capability
+  ACL (PL=1) {
+    ...                                       ; next capability
   }
 }
 ```
+
+This shape may be revised when the `security_acl` module ships post-MVP; the v0.1 TLV layout is structurally defined but enforcement is deferred.
 
 ### Header settings
 
@@ -418,23 +404,25 @@ LIST {
 
 ## `0x0B` — SETTINGS
 
-QoS and configuration block. A LIST of NAME-keyed values describing the writable fields under `:settings`.
+QoS and configuration block. Structured (`opt.PL=1`); children are NAME-keyed value pairs describing writable fields under `:settings`.
 
 ### Payload layout
 
 ```
-LIST {
-  NAME "reliability"       VALUE u8
-  NAME "durability"        VALUE u8
-  NAME "history_keep_last" VALUE u32
-  NAME "deadline_ns"       VALUE u64
-  NAME "priority"          VALUE u8
-  NAME "queue_max_bytes"   VALUE u32
-  ; module-namespaced fields:
-  NAME "transport_tcp"     LIST { NAME "send_buf_kb" VALUE u32 ... }
+SETTINGS (PL=1) {
+  NAME "reliability"       VALUE <u8>
+  NAME "durability"        VALUE <u8>
+  NAME "history_keep_last" VALUE <u32>
+  NAME "deadline_ns"       VALUE <u64>
+  NAME "priority"          VALUE <u8>
+  NAME "queue_max_bytes"   VALUE <u32>
+  ; module-namespaced fields use a nested SETTINGS:
+  NAME "transport_tcp"     SETTINGS (PL=1) { NAME "send_buf_kb" VALUE <u32> ... }
   ...
 }
 ```
+
+Nested SETTINGS for module namespacing (instead of an unnamed structured wrapper) keeps the type byte semantically meaningful at every level.
 
 ### Header settings
 
@@ -447,7 +435,7 @@ LIST {
 
 ### Validation
 
-- Unknown NAMEs in the LIST MUST be either (a) ignored if module-namespaced and the module is not loaded, or (b) rejected with `ERROR=SCHEMA_NOT_FOUND` if in the core namespace.
+- Unknown NAMEs MUST be either (a) ignored if module-namespaced and the module is not loaded, or (b) rejected with `ERROR=SCHEMA_NOT_FOUND` if in the core namespace.
 - Type mismatches (e.g., a u32 where u8 expected) MUST return `ERROR=TYPE_MISMATCH`.
 
 ### The five core QoS knobs
@@ -476,7 +464,7 @@ LIST {
 
 ### Where it appears
 
-- Inside LIST TLVs as a sibling of VALUE when application-domain timestamps matter (sample-acquisition time, sensor exposure window, control deadline). Multiple TIME TLVs in one LIST is permitted; semantics are application-defined (typically discriminated by a sibling NAME).
+- Inside structured TLVs (typically a user-range record type with `opt.PL=1`) as a sibling of VALUE when application-domain timestamps matter (sample-acquisition time, sensor exposure window, control deadline). Multiple TIME TLVs in one structured TLV is permitted; semantics are application-defined (typically discriminated by a sibling NAME).
 - The wire-trailer `opt.TS=1` (see [01-data-format.md](01-data-format.md)) is **transport-time** — it tells you when the sender put the TLV on the wire. That is a different concern from application-domain time and the two SHOULD NOT be conflated.
 
 ### Constraints
@@ -486,45 +474,52 @@ LIST {
 
 ### Hex example
 
-A LIST containing a TIME and a VALUE, with outer CRC:
+A user-range record TLV (`type=0x80`, application-defined, `opt.PL=1`) containing a TIME and a VALUE, with outer CRC-32:
 
 ```
-05 50 1A 00 00 00 [inner 26 bytes] [crc:4]
-^  ^  ^^^^^^^^^^^
-|  |  length = 26
+80 50 14 00 [inner 20 bytes] [crc:4]
+^  ^  ^^^^^
+|  |  length = 20
 |  opt = 0x50 (PL=1, CR=1)
-type = 0x05 LIST
+type = 0x80 (user-range record, sender and receiver agree on shape)
 
-  Inner LIST contents (26 bytes):
-  0C 00 08 00 00 00 00 00 00 00 00 00 00 00 00   ← TIME, 14 bytes
-  ^  ^  ^^^^^^^^^^^ ^^^^^^^^^^^^^^^^^^^^^^^
-  |  |  length = 8  u64 = 0 (epoch)
+  Children (20 bytes):
+  0C 00 08 00 00 00 00 00 00 00 00 00 00         ← TIME, 12 bytes
+  ^  ^  ^^^^^ ^^^^^^^^^^^^^^^^^^^^^^^
+  |  |  len=8  u64 = 0 (epoch)
   |  opt = 0
   type = 0x0C TIME
 
-  01 00 04 00 00 00 DE AD BE EF                  ← VALUE, 10 bytes
+  01 00 04 00 DE AD BE EF                         ← VALUE u32 = 0xDEADBEEF, 8 bytes
 ```
 
-`6 (outer) + 26 (inner) + 4 (CRC) = 36 bytes`.
+`4 (outer header) + 20 (children) + 4 (outer CRC) = 28 bytes total`.
+
+(Earlier drafts wrapped TIME + VALUE in a generic `0x05 LIST`. With LIST retired, the application uses a specific user-range type code to declare what the wrapper means.)
 
 ---
 
 ## `0x0D` — ROUTER
 
-Bridge / router metadata. Attached to TLVs that traverse a bridge so the recipient can detect cycles, route preferentially, and surface diagnostics.
+Bridge envelope. ROUTER **wraps** a data TLV with routing metadata when the data crosses a bridge. To downstream subscribers, ROUTER is invisible (the bridge sheds it on ingest); to other bridges, ROUTER carries the dedup key and routing telemetry.
 
 ### Payload layout
 
+ROUTER is structured (`opt.PL=1`). Its children are NAME-tagged metadata fields followed by the wrapped data TLV:
+
 ```
-LIST {
-  NAME      origin_peer_id    ; UUIDv4 or device-derived ID of the original sender
-  TIME      origin_timestamp  ; required for cycle dedup
-  VALUE     hop_count         ; u8, incremented at each bridge
-  NAME      transport_label   ; optional, e.g., "transport_can"
-  VALUE     route_cost        ; optional u16, application-defined metric
-  PATH      original_path     ; optional, the path on the source side before mount-prefix
+ROUTER (PL=1) {
+  NAME "origin_peer_id"   VALUE <16 bytes peer id>     ; required
+  NAME "origin_timestamp" TIME  <u64 ns>                ; required, cycle dedup key
+  NAME "hop_count"        VALUE <u8>                    ; required, incremented per bridge
+  NAME "transport_label"  NAME  <utf-8>                 ; optional, e.g. "transport_can"
+  NAME "route_cost"       VALUE <u16>                   ; optional, application metric
+  NAME "original_path"    PATH  <segments>              ; optional, source-side path before mount-prefix
+  NAME "data"             <wrapped TLV of any type>     ; required, MUST be the last child
 }
 ```
+
+The `NAME "data"` marker tags the wrapped data TLV so that future metadata extensions (more `NAME "foo" + value` pairs) can be inserted before it without breaking parsers. **The wrapped data TLV MUST be the last child of ROUTER.**
 
 ### Header settings
 
@@ -532,7 +527,7 @@ LIST {
 
 ### Where it appears
 
-- Attached to bridged TLVs (inside the LIST that wraps the original payload, OR carried as a sibling at the top-level when the bridge wraps the original TLV).
+- Wrapping a TLV at the moment a bridge re-emits it on a transport. The wrapping is shed on ingest at the next bridge and the bare data TLV is stored at the proxy vertex (see [02-graph-model.md](02-graph-model.md) §the ROUTER shedding rule).
 
 ### Cycle handling
 
@@ -541,6 +536,7 @@ The `(origin_peer_id, origin_timestamp)` pair is the dedup key. A receiving brid
 ### Constraints
 
 - `hop_count` SHOULD start at 0 at the source bridge and be incremented by each subsequent bridge. A bridge encountering `hop_count >= MAX_HOPS` (recommended 32) MUST drop the TLV and emit a local `STATUS=ERROR(NESTING_TOO_DEEP)`.
+- The wrapped data TLV's own `opt.PL`, type, and trailer are independent of ROUTER's. ROUTER's outer trailer (if present) covers the entire concatenated children including the wrapped data TLV; the wrapped TLV's own trailer is preserved verbatim through the wrap/unwrap cycle.
 
 ---
 

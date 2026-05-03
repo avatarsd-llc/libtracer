@@ -2,7 +2,7 @@
 
 > **Status**: draft, v0.1, 2026-05-03. How application-level data of any size — from a single boolean to a streaming GB/s feed — gets put into the graph and delivered with appropriate copy semantics.
 > **Audience**: anyone designing the data layout for their application.
-> **See also**: [02-graph-model.md](02-graph-model.md) §read-vs-write copy semantics; [03-addressing.md](03-addressing.md) §address-shift slicing; [05-protocol-tlvs.md](05-protocol-tlvs.md) §VALUE / §LIST.
+> **See also**: [02-graph-model.md](02-graph-model.md) §read-vs-write copy semantics; [03-addressing.md](03-addressing.md) §address-shift slicing; [05-protocol-tlvs.md](05-protocol-tlvs.md) §VALUE.
 
 ---
 
@@ -14,8 +14,8 @@ The protocol does not impose a serialization layer. The user picks the packing t
 | ---- | ---- |
 | Single scalar (bool, u8, u16, u32, u64, i32, f32, f64) | One `VALUE` TLV with raw little-endian bytes; or a user-range type code (`0x80..0xFF`) with implicit length |
 | Fixed-shape struct (e.g., `{u32, u32, f32, f32}` IMU sample) | One `VALUE` TLV with packed-struct bytes; sender and receiver agree on the layout out-of-band |
-| Self-describing record with named fields | `LIST` of `NAME` + value-TLV pairs |
-| Variable-length collection | `LIST` of homogeneous TLVs |
+| Self-describing record with named fields | User-range structured TLV (PL=1) with `NAME` + value-TLV children |
+| Variable-length collection | User-range structured TLV (PL=1) with homogeneous children |
 | Memory-mapped hardware register | Single `VALUE` TLV whose payload view points directly into MMIO space (zero-copy on read) |
 | Large payload (anything where a single TLV is too big to ship) | Address-shift slicing across `ep[0..N]` with shared timestamp |
 | Multiple coherent streams (camera + LIDAR) | Separate vertices, common timestamp domain; subscriber joins by timestamp |
@@ -36,19 +36,21 @@ tlv_t *tlv = tlv_new_value(&b, sizeof b);
 tracer_write("/dashboard/led", tlv);
 ```
 
-On the wire (no trailer):
+On the wire (no trailer, default `LL=0` u16 length):
 
 ```
-01 00 01 00 00 00 01
-^  ^  ^^^^^^^^^^^ ^
-|  |  length = 1   payload byte (0x01 = true)
-|  opt = 0  (no PL, no TS, no CR)
+01 00 01 00 01
+^  ^  ^^^^^ ^
+|  |  len=1  payload byte (0x01 = true)
+|  opt = 0  (no flags)
 type = 0x01 VALUE
 ```
 
-**7 bytes total.** With CRC trailer enabled (`opt.CR=1`), add 4 bytes → 11 bytes. With both wire-time-stamp and CRC (`opt.TS=1, opt.CR=1`), add 12 bytes → 19 bytes total.
+**5 bytes total.** With CRC-16 trailer (`opt.CR=1, opt.CW=1`), 7 bytes. With CRC-32, 9 bytes. With absolute TS + CRC-32 (`opt.TS=1, opt.CR=1`), 17 bytes.
 
-Header overhead is **6 bytes fixed** regardless of payload size. Trailer overhead is paid per-TLV only when the corresponding `opt` flag is set, and adds 0 / 8 / 12 bytes. Per-message overhead is the same whether the payload is 1 byte or 1 MiB; the cost amortizes immediately past the smallest payloads.
+Header overhead is **4 bytes** in the default case (`LL=0`, payload ≤ 64 KiB), or 6 bytes when `LL=1`. Trailer overhead is paid per-TLV only when the corresponding `opt` flags are set, and adds 0 / 2 / 4 / 6 / 8 / 10 / 12 / 14 / 16 bytes depending on which combinations of `TS`, `CR`, `TF`, `CW` are selected. See [01-data-format.md](01-data-format.md) §frame size summary for the full table.
+
+Per-message overhead is the same whether the payload is 1 byte or 1 MiB; the cost amortizes immediately past the smallest payloads.
 
 ### Casting trick for true zero-copy on the read side
 
@@ -138,7 +140,7 @@ To a subscriber, all three look identical. Tooling like `tracer-top` enumerates 
 
 ## Structured record with named fields
 
-For self-describing data, use a LIST of NAME + value pairs.
+For self-describing data, define a user-range structured TLV (`opt.PL=1`) with NAME + value children. Pick a type code in `0x80–0xFF` and document its layout for your project.
 
 ```c
 struct imu_sample {
@@ -148,18 +150,19 @@ struct imu_sample {
 };
 
 void publish_imu(const struct imu_sample *s) {
-    tlv_t *list = tlv_new_list();
-    tlv_list_append(list, tlv_new_name("ts_ns"));
-    tlv_list_append(list, tlv_new_value(&s->ts_ns, sizeof s->ts_ns));
-    tlv_list_append(list, tlv_new_name("accel"));
-    tlv_list_append(list, tlv_new_value(&s->accel_x, 3 * sizeof(float)));
-    tlv_list_append(list, tlv_new_name("gyro"));
-    tlv_list_append(list, tlv_new_value(&s->gyro_x, 3 * sizeof(float)));
-    tracer_write("/imu", list);
+    // type=0x80 USER_IMU_RECORD, opt.PL=1
+    tlv_t *rec = tlv_new_structured(USER_IMU_RECORD);
+    tlv_append_child(rec, tlv_new_name("ts_ns"));
+    tlv_append_child(rec, tlv_new_value(&s->ts_ns, sizeof s->ts_ns));
+    tlv_append_child(rec, tlv_new_name("accel"));
+    tlv_append_child(rec, tlv_new_value(&s->accel_x, 3 * sizeof(float)));
+    tlv_append_child(rec, tlv_new_name("gyro"));
+    tlv_append_child(rec, tlv_new_value(&s->gyro_x, 3 * sizeof(float)));
+    tracer_write("/imu", rec);
 }
 ```
 
-A subscriber walks the LIST iteratively (per [01-data-format.md](01-data-format.md) §iterative parsing) and extracts fields by NAME match. This is **self-describing on the wire**: if the IMU schema gains a `mag` field later, old subscribers ignore it; new subscribers read it.
+A subscriber walks the children iteratively (per [01-data-format.md](01-data-format.md) §iterative parsing) and extracts fields by NAME match. This is **self-describing on the wire**: if the IMU record gains a `mag` field later, old subscribers ignore it; new subscribers read it.
 
 For a **fixed-shape** struct where schema evolution doesn't matter and bytes are precious, pack the whole struct as one VALUE TLV instead:
 
@@ -387,8 +390,8 @@ The same vertex/edge primitives across **eight orders of magnitude** of payload 
 | Single boolean (LED on/off) | 1 byte | 1 Hz | 8 B/s | 1 VALUE TLV |
 | RC control input | 5 bytes | 100 Hz | 1.2 KB/s | 1 VALUE TLV |
 | GPIO register | 4 bytes | poll | n/a (read-only) | view into MMIO |
-| IMU sample | 28 bytes | 1 kHz | 35 KB/s | LIST or packed VALUE |
-| 1 KB sensor record | 1 KiB | 1 kHz | 1 MB/s | LIST of named fields |
+| IMU sample | 28 bytes | 1 kHz | 35 KB/s | user-range record (PL=1) or packed VALUE |
+| 1 KB sensor record | 1 KiB | 1 kHz | 1 MB/s | user-range record (PL=1) of named fields |
 | 4K camera stream | 8 MiB | 30 Hz | 240 MB/s | address-shift `frame[0..N]` |
 | Lidar + camera fusion | varies | 10 Hz | 250 MB/s | two vertex trees, ts-join |
 | 1 GS/s ADC | 4 KiB slices | 244 kHz | 1 GB/s | address-shift `raw[0..N]` |
@@ -407,24 +410,24 @@ The protocol's job is to be invariant under these knobs; the user's job is to ch
 
 ## Same-substrate operations: mix, split, concat
 
-A LIST TLV can be manipulated structurally without touching bytes. These operations are useful in routers, transforms, and any code that aggregates / disassembles structured TLVs.
+A structured TLV (any type with `opt.PL=1`) can be manipulated structurally without touching bytes. These operations are useful in routers, transforms, and any code that aggregates / disassembles structured TLVs.
 
-### Concat: merge two LISTs
+### Concat: merge two structured TLVs of the same type
 
 ```c
-tlv_t *a = ...; // LIST {NAME "x", VALUE 1}
-tlv_t *b = ...; // LIST {NAME "y", VALUE 2}
-tlv_t *merged = tlv_list_concat(a, b);
-// merged is a LIST {NAME "x", VALUE 1, NAME "y", VALUE 2}
+tlv_t *a = ...; // SETTINGS {NAME "x", VALUE 1}
+tlv_t *b = ...; // SETTINGS {NAME "y", VALUE 2}
+tlv_t *merged = tlv_struct_concat(a, b);
+// merged is SETTINGS {NAME "x", VALUE 1, NAME "y", VALUE 2}
 // No bytes copied. 'merged' holds views into a's and b's segments.
 ```
 
-### Split: cut a LIST at index K
+### Split: cut a structured TLV at child index K
 
 ```c
-tlv_t *whole = ...; // LIST with K1+K2 children
+tlv_t *whole = ...; // structured TLV with K1+K2 children
 tlv_t *first, *rest;
-tlv_list_split(whole, K1, &first, &rest);
+tlv_struct_split(whole, K1, &first, &rest);
 // first holds first K1 children; rest holds the remaining K2.
 // Both share whole's underlying segment via refcount.
 ```
@@ -432,7 +435,7 @@ tlv_list_split(whole, K1, &first, &rest);
 ### Mix: insert a child at position K
 
 ```c
-tlv_list_insert(whole, K, new_child);
+tlv_struct_insert(whole, K, new_child);
 // View tree updated; insertion point's children shifted in the view-array.
 // No bytes copied unless serialization is requested.
 ```
@@ -445,7 +448,7 @@ uint8_t *out = malloc(n);
 tlv_serialize_to(merged, out, n);
 // 'out' contains the canonical wire bytes for merged.
 // The proof obligation from [02-graph-model.md] guarantees this is identical
-// to the bytes that would result from constructing the same logical LIST
+// to the bytes that would result from constructing the same logical container
 // from scratch.
 ```
 

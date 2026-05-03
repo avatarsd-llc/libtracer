@@ -14,7 +14,7 @@
 
 - **Path**: an ordered list of UTF-8 NAME segments rooted at `/`, addressing a vertex (or a field on a vertex). Syntax in [03-addressing.md](03-addressing.md).
 
-- **Schema**: the LIST TLV at `<vertex>:schema` enumerating the writable fields the vertex exposes. Includes the core fields (`:subscribers[]`, `:settings.*`, `:liveness.*`, `:acl`) plus any module-namespaced fields. Read-only.
+- **Schema**: a structured TLV (typically a `POINT` or a `SETTINGS`-shaped record) returned at `<vertex>:schema`, enumerating the writable fields the vertex exposes. Includes the core fields (`:subscribers[]`, `:settings.*`, `:liveness.*`, `:acl`) plus any module-namespaced fields. Read-only.
 
 - **Router** (also called bridge): a vertex that receives TLVs from one transport and re-publishes them onto the local graph. To downstream subscribers a router is indistinguishable from a local source.
 
@@ -33,13 +33,13 @@ The protocol stack has four distinct layers of concern. Concepts in this referen
 | Layer | Concern | What it sees | Doc that specifies it |
 | ---- | ---- | ---- | ---- |
 | **L0 — Frame envelope** | Slice the byte stream into framed units; verify integrity; carry wire-time | `length`, `payload`, optional `trailer_ts` and `trailer_crc` | [01-data-format.md](01-data-format.md) |
-| **L1 — TLV semantics** | Interpret the type code; recurse into nested LIST containers | `type`, `opt.PL`, payload-as-bytes-or-children | [05-protocol-tlvs.md](05-protocol-tlvs.md) |
+| **L1 — TLV semantics** | Interpret the type code; recurse into structured (PL=1) containers | `type`, `opt.PL`, payload-as-bytes-or-children | [05-protocol-tlvs.md](05-protocol-tlvs.md) |
 | **L2 — Graph endpoint logic** | Route TLVs to vertices, fan out to subscribers, enforce QoS / ACL, manage liveness, handle bridges | paths, vertices, edges, schemas, settings | [02-graph-model.md](02-graph-model.md) (this doc), [03-addressing.md](03-addressing.md), [04-communication-flows.md](04-communication-flows.md) |
 | **L3 — Application semantics** | What the bytes inside a `VALUE` mean; what an endpoint's value represents; control logic over the data | application-defined | application code |
 
 The `type` byte sits at the L0 / L1 boundary. It is **carried** in the wire header (so a router can decide whether to recurse without parsing payload) but its **meaning** is L1. A pure-framing parser that just dispatches by `length + CRC` could ignore `type` entirely; a TLV-aware router uses `type` (and `opt.PL`) to decide whether to walk into nested children.
 
-The `opt.PR` priority hint sits at the L0 / L2 boundary — carried in the header so routers can sort dispatch order without parsing `:settings`. The authoritative value of priority lives in the `:settings.priority` field (L2).
+Priority is **NOT** an L0 concern. An earlier design carried priority bits in `opt`; that was wrong — priority is transport-time and per-link, not coherent across the network. A router that wants priority-aware dispatch reads `:settings.priority` once per subscription (L2) and caches it. See [01-data-format.md](01-data-format.md) §why no priority bits.
 
 Implementations MAY refactor `type` out of the wire header (into "first byte of payload") in a future major version without semantic change; this is a layout question internal to L0/L1, not a protocol-level decision.
 
@@ -61,12 +61,12 @@ In libtracer, all three collapse into one. The mechanism: **buffer chains of vie
 
 ### How nested TLVs work structurally
 
-When the `PL` (payload-is-LIST) bit is set in the header `opt` byte, the payload is interpreted as a sequence of child TLVs concatenated end-to-end. Each child has its own 6-byte header (and optional trailer per [01-data-format.md](01-data-format.md)), and may itself have `PL=1` for further nesting.
+When the `PL` (payload-is-structured) bit is set in the header `opt` byte, the payload is interpreted as a sequence of child TLVs concatenated end-to-end. Each child has its own header (4 or 6 bytes per [01-data-format.md](01-data-format.md), depending on `opt.LL`) and optional trailer; any child may itself have `PL=1` for further nesting.
 
 ```
-Outer TLV (LIST, PL=1):
+Outer structured TLV (PL=1, e.g. PATH, SETTINGS, ROUTER, or a user-range record):
   +-----------+--------+----------+
-  | type=0x05 | opt=PL | length   |  header (6 bytes)
+  | type=0xXX | opt=PL | length   |  header (4 bytes default; 6 if LL=1)
   +-----------+--------+----------+
   | inner TLV 1: header + payload  |
   +--------------------------------+
@@ -74,15 +74,15 @@ Outer TLV (LIST, PL=1):
   +--------------------------------+
   | inner TLV 3: header + payload  |
   +--------------------------------+
-  | optional outer trailer         |  trailer (0 / 8 / 12 bytes)
+  | optional outer trailer         |  trailer (0 / 4 / 6 / 8 / 10 / 12 / 14 / 16 bytes)
   +--------------------------------+
 ```
 
-Inner TLVs typically carry no trailer of their own — the outer LIST's CRC (if present) covers the whole concatenated content. A bridge that wants to split children out and re-route them independently MAY emit them with their own trailers, paying the per-child cost.
+Inner TLVs typically carry no trailer of their own — the outer's CRC (if present) covers the whole concatenated content. A bridge that wants to split children out and re-route them independently MAY emit them with their own trailers, paying the per-child cost.
 
-This LIST IS the graph node. To walk a vertex's children: parse the LIST, iterate the inner TLVs, recurse (iteratively, per [01-data-format.md](01-data-format.md)) into any with `PL=1`.
+This structured TLV IS the graph node. To walk a vertex's children: parse the children, iterate them, recurse (iteratively, per [01-data-format.md](01-data-format.md)) into any with `PL=1`.
 
-### How that LIST exists in memory
+### How that structured TLV exists in memory
 
 Underneath, each inner TLV is represented as a **view**: a struct holding `{owner_segment, offset, length}` where `owner_segment` is a refcounted pointer to the real memory backing the buffer. The graph "contains" inner TLVs by holding views into the parent's memory.
 
@@ -91,7 +91,7 @@ Real memory (received from socket):
   [TCP recv buffer; 4 KiB; refcount=1]
    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Outer LIST view:
+Outer structured TLV view:
   { owner = recv_buffer_segment,
     offset = 0,
     length = 1024 }                       refcount on segment += 1
@@ -110,6 +110,48 @@ Inner TLV 2 view:
 Operations that look like data manipulation — split a list into two, concatenate two lists, insert a new child, slice off the trailing N children — **do not move bytes**. They construct new view structs whose `owner_segment` field bumps the refcount of the underlying buffer.
 
 When all views into a segment are released, the segment's refcount drops to zero, the segment's `destroy` callback fires, and the underlying memory is returned to whatever pool / allocator owns it (heap free, recv-pool return, mmap unmap, etc.).
+
+### Structured TLV as abstraction, memory as rope
+
+There is a careful distinction between **the structured TLV as a logical container** and **the memory backing it**.
+
+A structured TLV's logical content is "an ordered sequence of children." That definition says nothing about how the children's bytes are laid out in memory. In practice:
+
+- **Wire-receive case**: the structured TLV has just been reconstituted from a transport buffer. All children's bytes live contiguously in one segment. The "rope" has one link — a flat buffer.
+- **In-memory assembled case**: the structured TLV was built up via append / concat / split operations. Different children may live in different segments — possibly received from different transports, possibly carved out of a memory-mapped region, possibly synthesized from static data. The rope has many links.
+
+```
+Logical structured-TLV view:
+   ┌──────────────────────────────────────────┐
+   │  child_0  child_1  child_2  child_3  ... │
+   └──────────────────────────────────────────┘
+
+Underlying rope (in-memory case):
+   ┌─ view ─┐  ┌─ view ─┐    ┌─ view ──────────┐
+   │ child_0│  │ child_1│    │ child_2 child_3 │
+   │ in seg │  │ in seg │    │   in segment C  │
+   │   A    │  │   B    │    │                 │
+   └────────┘  └────────┘    └─────────────────┘
+       │           │                 │
+       ▼           ▼                 ▼
+   segment A   segment B        segment C
+   (refcounted) (refcounted)    (refcounted)
+```
+
+**Operations on a structured TLV do not move bytes**:
+
+- `concat(C1, C2)` produces a new container whose rope is the concatenation of C1's view chain and C2's view chain. Refcounts on the underlying segments are bumped per child.
+- `split(C, K)` produces two containers whose ropes share underlying segments with the original. The view chain is partitioned at child K.
+- `insert(C, K, child)` produces a container whose rope is `C[0..K-1] + child + C[K..]`. The new child becomes another link in the chain.
+
+**Serialization is the rope-to-flat-buffer walk**: when a structured TLV is sent on the wire, the serializer iterates the rope in order and emits bytes contiguously. The wire form IS contiguous; the in-memory form is NOT required to be. The proof obligation below guarantees that this walk produces the same bytes regardless of how the rope was assembled.
+
+**The parser must handle both substrates** ([01-data-format.md](01-data-format.md) §two parser contexts):
+
+- A wire-receive parser walks byte offsets within one buffer.
+- An in-memory walker steps across view boundaries when crossing from one rope link to the next.
+
+The same iterative pattern (recurse on `PL=1`, bound depth at 32) applies to both. Implementations typically share the parsing logic with two different cursor advance functions.
 
 ### Spec-level proof obligation
 
@@ -227,14 +269,14 @@ A subscriber that wants the application-domain timestamp reads it from a sibling
 
 ## Schema and field discipline
 
-A vertex exposes a **schema** describing every writable field. The schema lives at `<vertex>:schema` as a read-only LIST TLV.
+A vertex exposes a **schema** describing every writable field. The schema lives at `<vertex>:schema` as a read-only structured TLV (typically a `POINT` whose children describe each field, or a `SETTINGS`-shaped record).
 
 ### Core writable fields (frozen for v0.1)
 
 | Field path | Type | Writable | Meaning |
 | ---- | ---- | ---- | ---- |
 | `:subscribers[N]` | SUBSCRIBER | yes | Subscription record N |
-| `:subscribers[]` | LIST of SUBSCRIBER | read-only; write to `[]` appends | Full list (read) or new slot (write) |
+| `:subscribers[]` | sequence of SUBSCRIBER | read-only; write to `[]` appends | Full list (read) or new slot (write) |
 | `:settings.reliability` | u8 enum | yes | `0=best-effort, 1=reliable` |
 | `:settings.durability` | u8 enum | yes | `0=volatile, 1=transient-local` |
 | `:settings.history_keep_last` | u32 | yes | N samples retained for late joiners |
@@ -244,7 +286,7 @@ A vertex exposes a **schema** describing every writable field. The schema lives 
 | `:liveness.heartbeat_hz` | u8 | yes | Subscriber heartbeat rate; 0 = no liveness check |
 | `:liveness.last_seen_ns` | u64 | read-only | Wall-clock of last write observed |
 | `:liveness.missed_deadlines` | u32 | read-only | Counter |
-| `:schema` | LIST | read-only | Self-describing schema of fields and types |
+| `:schema` | structured TLV | read-only | Self-describing schema of fields and types |
 | `:description` | UTF-8 | yes (with permission) | Human-readable description |
 | `:acl` | ACL | yes (with permission) | Access control list |
 
@@ -294,8 +336,8 @@ The unifying feature: in libtracer, every cross-walk row is the **same primitive
 
 The TLV substrate plays two distinct roles:
 
-- **Graph data** — what's stored at a vertex. Identity = vertex path. Content = the user's payload, possibly wrapped in a LIST with sibling metadata (`TIME`, etc.). No routing metadata.
-- **In-flight message** — what crosses a transport between vertices, especially when bridged. Identity = `(origin_peer_id, origin_timestamp)`. Content = a wrapping `LIST` containing a `ROUTER` TLV (type `0x0D`, [05-protocol-tlvs.md](05-protocol-tlvs.md)) plus the actual data TLV.
+- **Graph data** — what's stored at a vertex. Identity = vertex path. Content = the user's payload, possibly a structured TLV with sibling metadata (e.g., `TIME`). No routing metadata.
+- **In-flight message** — what crosses a transport between vertices, especially when bridged. Identity = `(origin_peer_id, origin_timestamp)`. Content = a `ROUTER` TLV (type `0x0D`, [05-protocol-tlvs.md](05-protocol-tlvs.md)) **wrapping** the data TLV: ROUTER is structured (PL=1) with NAME-tagged metadata children followed by `NAME "data"` and the wrapped TLV as its last child.
 
 Both roles use the **same TLV substrate** — same wire format, same in-memory view tree. The difference is structural and lives in the `ROUTER` TLV's presence and where it appears.
 
@@ -311,7 +353,7 @@ When a bridge dispatches an incoming TLV into the local graph:
 When the bare data TLV is then bridged out again to another transport:
 
 1. Look up the ROUTER metadata from the bridge's table.
-2. **Attach a fresh `LIST { ROUTER {...}, data }` wrapping** at egress, with `hop_count` incremented.
+2. **Attach a fresh `ROUTER {...}, NAME "data", data}` wrapping** at egress, with `hop_count` incremented (ROUTER is the wrapper itself; the data TLV is its last child).
 3. Append the wire trailer (`trailer_ts`, `trailer_crc`) per the egress transport.
 
 ### Why this matters
@@ -325,9 +367,9 @@ When the bare data TLV is then bridged out again to another transport:
 ```
                             Wire on CAN              Graph on Linux brain        Wire on TCP
 Sender (STM32):
-  emits LIST{ROUTER{origin=A, ts=T0}, VALUE{...}}
+  emits ROUTER{origin=A, ts=T0, hop=1, ..., data=VALUE{...}}
   ────────────────────────────────────────►
-                            (CAN frames carrying the LIST)
+                            (CAN frames carrying the ROUTER wrapping)
                                                      │
                             Bridge ingests, checks recent-set, NOT seen.
                             Strips ROUTER. Stores VALUE{...} at /can-bridge/X.
@@ -342,9 +384,9 @@ Sender (STM32):
                                              via TCP. Bridge re-emits:
                                                      │
                                                      ▼
-                                             LIST{ROUTER{origin=A, ts=T0, hop=2}, VALUE{...}}
+                                             ROUTER{origin=A, ts=T0, hop=2, ..., data=VALUE{...}}
                                              ────────────────────────────►
-                                                                          (TCP carrying the LIST)
+                                                                          (TCP carrying the ROUTER wrapping)
                                                                           │
                                                                           ESP32 bridge ingests.
                                                                           (A, T0) NOT in its recent-set.

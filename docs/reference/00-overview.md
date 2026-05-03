@@ -63,11 +63,11 @@ The protocol stack has four layers of concern. Concepts in this reference suite 
 | Layer | Concern | Specified in |
 | ---- | ---- | ---- |
 | **L0 — Frame envelope** | Slice the byte stream into framed units; verify integrity; carry wire-time | [01-data-format.md](01-data-format.md) |
-| **L1 — TLV semantics** | Interpret the type code; recurse into nested LIST containers | [05-protocol-tlvs.md](05-protocol-tlvs.md) |
+| **L1 — TLV semantics** | Interpret the type code; recurse into structured (PL=1) containers | [05-protocol-tlvs.md](05-protocol-tlvs.md) |
 | **L2 — Graph endpoint logic** | Vertices, edges, paths, subscriptions, fan-out, QoS, ACL, bridges | [02-graph-model.md](02-graph-model.md), [03-addressing.md](03-addressing.md), [04-communication-flows.md](04-communication-flows.md) |
 | **L3 — Application semantics** | What the bytes inside `VALUE` mean; control logic | application code |
 
-The wire format (L0) carries a few L1/L2 hints (the `type` byte, `opt.PL`, `opt.PR` priority) at fixed positions so routers can make dispatch decisions without parsing payload. Their meaning lives in the upper layers; their position in the wire header is purely for routing convenience. See [02-graph-model.md](02-graph-model.md) §the four-layer model for full discussion.
+The wire format (L0) carries the `type` byte and `opt.PL` at fixed positions so routers can decide whether to recurse into nested children without parsing payload. The `type` byte's meaning is L1; it sits in the L0 header for routing convenience. Priority is **not** an L0 concern — it is cached at L2 from `:settings.priority`. The L0 `opt` byte's other bits select wire-format variants (`LL` length width, `CW` CRC width, `TF` TS form) — these are framing choices, not semantic information. See [02-graph-model.md](02-graph-model.md) §the four-layer model for full discussion and [01-data-format.md](01-data-format.md) §options bitfield for bit assignments.
 
 ### TLV-at-rest = TLV-in-transit + trailer
 
@@ -84,7 +84,7 @@ The trailer is **append-only at egress, strip-only at ingress**. A bridge or rec
 The TLV substrate plays two distinct roles structurally distinguished by the `ROUTER` TLV (type `0x0D`):
 
 - **Graph data** at a vertex: just the payload, no `ROUTER`. Identity = vertex path.
-- **In-flight message** crossing a bridge: a wrapping `LIST { ROUTER {...}, data }`. Identity = `(origin_peer_id, origin_timestamp)`.
+- **In-flight message** crossing a bridge: a `ROUTER` TLV (type `0x0D`) wrapping the data — ROUTER is structured (PL=1) with NAME-tagged metadata children followed by `NAME "data"` and the wrapped TLV as last child. Identity = `(origin_peer_id, origin_timestamp)`.
 
 Bridges shed the `ROUTER` when ingesting (storing only the bare data) and attach a fresh `ROUTER` when emitting on the outbound side. This keeps graph reads clean while preserving the cycle-dedup metadata at the bridge boundary. See [02-graph-model.md](02-graph-model.md) §the ROUTER shedding rule and [07-host-embedding.md](07-host-embedding.md) §cycle handling.
 
@@ -138,11 +138,11 @@ A pure-C++ port would be a thin layer (the C reference implementation already us
 
 ## Versioning
 
-The wire format major version lives in the **`VR` bit** of the TLV `opt` field ([01-data-format.md](01-data-format.md) §options). v0.1 is `VR=0`. A future v1.0 is `VR=1`.
+**libtracer v0.1 is the wire format. It does not version per-frame.** There is no version bit in `opt`. The wire format is a one-shot commitment: get it right, ship it, don't bump.
 
-There is no minor-version field. Any change to type-code semantics, header layout, or option-bit meaning is a major bump. New type codes in the reserved-but-unassigned range (`0x0E`–`0x7F` as of v0.1) are non-breaking; older receivers ignore unknowns per [01-data-format.md](01-data-format.md) §forward compatibility.
+Future incompatible changes — should they ever be needed — are versioned at the **discovery layer**: a different mDNS service name (`_libtracer-v2._tcp` vs `_libtracer._tcp`), a different default TCP port, a different CAN-ID prefix, etc. Peers learn each other's wire-format identity at discovery time.
 
-A v0.1 receiver encountering `VR=1` traffic SHALL respond with `ERROR=VERSION_MISMATCH` and SHALL NOT attempt to interpret the payload.
+The forward-extension path within v0.1 is the type-code registry: new core type codes can be added in `0x0E – 0x7F` without breaking existing receivers, who gracefully ignore unknown codes per [01-data-format.md](01-data-format.md) §handling unknown type codes.
 
 ---
 
