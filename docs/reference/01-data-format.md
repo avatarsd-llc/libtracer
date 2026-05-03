@@ -81,7 +81,7 @@ TF  Timestamp form.        0 = absolute u64 ns since Unix epoch (8 bytes). DEFAU
 R   Reserved (bit 0). MUST be zero. Receivers MUST reject non-zero as INVALID.
 ```
 
-Two reserved bits remain (bits 7 and 0) for unforeseen L0 needs.
+Two reserved bits remain (bits 7 and 0) for unforeseen L2 needs.
 
 ### Default vs extended forms
 
@@ -89,7 +89,7 @@ The default header is **4 bytes**. A typical small TLV has no trailer (4-byte to
 
 ### Why no priority bits
 
-An earlier draft put a 2-bit priority field in `opt`. Removed. Priority is a **transport-time, per-link, non-coherent** concern; the L0 header should carry coherent things or things every router must see. Per-TLV priority bits buy nothing that `:settings.priority` cached at the bridge doesn't already cover. See [02-graph-model.md](02-graph-model.md) §the four-layer model — priority lives at L2.
+An earlier draft put a 2-bit priority field in `opt`. Removed. Priority is a **transport-time, per-link, non-coherent** concern; the L2 header should carry coherent things or things every router must see. Per-TLV priority bits buy nothing that `:settings.priority` cached at the bridge doesn't already cover. See [02-graph-model.md](02-graph-model.md) §the six-layer model — priority lives at L4.
 
 ---
 
@@ -138,7 +138,7 @@ Polynomial `0x1021`, common variant.
 - **Initial value**: `0xFFFF`.
 - **Final XOR**: `0x0000`.
 - **Field width on the wire**: 16 bits, little-endian.
-- **Why offer it**: 2-byte savings per TLV with CRC. False-positive rate ~`1/65536` versus ~`1/2^32` for CRC-32C — acceptable for short messages on tightly-bounded buses (CAN, UART) where the L0 medium itself adds another integrity check.
+- **Why offer it**: 2-byte savings per TLV with CRC. False-positive rate ~`1/65536` versus ~`1/2^32` for CRC-32C — acceptable for short messages on tightly-bounded buses (CAN, UART) where the L2 medium itself adds another integrity check.
 
 Both variants are mandatory for conforming receivers. A receiver that sees `CR=1` MUST verify whichever variant `CW` selects; mismatches return `ERROR=CRC_FAIL`.
 
@@ -226,7 +226,7 @@ Type code `0x05` is **retired** (was `LIST` in earlier drafts; see §rejected de
 
 ### Type byte layering
 
-The `type` byte lives at offset 0 of the wire header (L0) but its meaning is L1. A pure-framing parser can route by length+CRC alone; a TLV-aware router uses `type` and `opt.PL` to decide whether to walk into nested children. See [02-graph-model.md](02-graph-model.md) §the four-layer model.
+The `type` byte lives at offset 0 of the wire header (L2) but its meaning is L3. A pure-framing parser can route by length+CRC alone; a TLV-aware router uses `type` and `opt.PL` to decide whether to walk into nested children. See [02-graph-model.md](02-graph-model.md) §the six-layer model.
 
 ### Versioning and compatibility
 
@@ -421,7 +421,7 @@ For future readers wondering about paths not taken:
 - **Generic `LIST` type code (`0x05`)** — earlier drafts had a generic structured-container type code with no specific semantic. Removed. Every structured TLV in the registry has a specific purpose (SUBSCRIBER, PATH, POINT, ROUTER, ACL, SETTINGS, STATUS, ERROR); user-defined structured records use user-range type codes (`0x80–0xFF`) with `PL=1`. The `PL` bit alone signals "has nested children"; the type byte tells what those children mean. Type code `0x05` is permanently retired (collision-prevention) — never reused.
 
 - **Per-frame version bit (`VR`)** — earlier drafts had bit 7 of `opt` as a version-bump flag. Removed. The wire format is committed once and not bumped per-frame; future incompatible changes (if ever needed) are versioned at the discovery layer (mDNS service name, port, etc.). The bit becomes one more reserved.
-- **Per-TLV priority bits in `opt`** — priority is transport-time and per-link; cached `:settings.priority` at L2 covers it. The bits are reclaimed for `LL`/`CW`/`TF` instead.
+- **Per-TLV priority bits in `opt`** — priority is transport-time and per-link; cached `:settings.priority` at L4 covers it. The bits are reclaimed for `LL`/`CW`/`TF` instead.
 - **Alignment-promise bit** — modern CPUs handle unaligned loads efficiently; promising alignment requires sender padding, which forces variable framing. Net loss. Rejected.
 - **Variable-width TS field beyond {abs-u64, rel-i32}** — exhaustively explored; no third form earns its complexity.
 - **u64 length** — intentionally absent. Capping at u32 forces address-shift discipline and protects minimum-impl interop.

@@ -1,9 +1,20 @@
 # libtracer Protocol Reference (v0.1-draft)
 
 > **Status**: draft suite. All sections written; promotion to "frozen" gated by the conformance milestone of [../plans/02-roadmap-weeks-1-to-8.md](../plans/02-roadmap-weeks-1-to-8.md).
-> **Last revision**: 2026-05-03 — wire-format design reviews this day produced the current spec. Notable choices: (1) fixed-width length with `LL` bit selecting u16 (default, ≤ 64 KiB) or u32 (≤ 4 GiB); (2) trailer-positioned CRC with `CW` bit selecting CRC-32C (default) or CRC-16-CCITT; (3) trailer-positioned wire-time TS with `TF` bit selecting absolute u64 (default) or i32 relative-to-parent for stream packing; (4) four-layer model (L0 frame / L1 TLV / L2 graph / L3 application); (5) explicit ROUTER shedding rule for cycle dedup at bridges, with ROUTER itself becoming the bridge envelope (not a `LIST { ROUTER, data }` wrapper); (6) explicit structured-TLV-as-abstraction / memory-as-rope distinction; (7) **no per-frame version bit** — the wire format is a one-shot commitment, future incompatible changes are versioned at the discovery layer; (8) **no generic `LIST` type code** (`0x05` retired) — every structured container has a specific purpose declared by its type code; user-defined records use user-range types (`0x80–0xFF`) with `opt.PL=1`. The plans under [../plans/](../plans/) predate these revisions and are now historical context for the design choices, not the byte-level spec.
+> **Last revision**: 2026-05-03. Notable architectural commitments:
+>
+> 1. **Six-layer model**, numbered bottom-up: L0 memory substrate / L1 views and ownership / L2 frame envelope / L3 TLV semantics / L4 graph endpoint logic / L5 application semantics.
+> 2. **Everything is a module.** No "core vs module" split. Some modules are required for every conforming node (frame codec, dispatcher, refcount/view machinery, router, bridge logic); the rest are opt-in (transports, discovery, security, executors, memory backends, view modules). The required set is identified in [10-module-catalog.md](10-module-catalog.md), not by architectural privilege.
+> 3. **Wire format is one-shot.** No per-frame version bit. Future incompatible changes are versioned at the discovery layer (different mDNS service name, port). Get it right once.
+> 4. **Fixed-width length** with `LL` bit selecting u16 (default, ≤ 64 KiB) or u32 (≤ 4 GiB). No u64 — interop ceiling forces address-shift discipline.
+> 5. **Trailer-positioned CRC and TS.** Header + payload + optional trailer. Trailer is append-only at egress, strip-only at ingress. Payload bytes invariant from publication to all subscribers.
+> 6. **No generic `LIST` type code** (`0x05` retired). Every structured TLV declares its purpose via type code. User-defined records use user-range types `0x80–0xFF` with `opt.PL=1`.
+> 7. **ROUTER as bridge envelope.** The `ROUTER` TLV wraps the data TLV at the bridge boundary; bridges shed it on ingest, attach a fresh one on egress. Cycle dedup uses `(origin_peer_id, origin_timestamp)` recent-set.
+> 8. **No fragmentation in the wire format.** Logically large messages are addressed across `ep[0..N]` slices with shared timestamp.
+>
+> The plans under [../plans/](../plans/) predate these revisions and are now historical context for design rationale, not the byte-level spec.
 > **Audience**: a second implementer writing an interoperable libtracer in any language, on any platform, without reading the C reference implementation.
-> **Reading time**: full suite ~2 h.
+> **Reading time**: full suite ~2.5 h.
 
 ---
 
@@ -13,44 +24,64 @@ This directory describes **the libtracer protocol as a standard**, independent o
 
 Planning documents under [../plans/](../plans/) — design rationale, roadmap, comparisons — explain *why* the protocol looks the way it does. Reference documents here describe *what it is*. When the two disagree, reference wins; planning docs are revised.
 
-The reference covers:
-
-1. **Data format** — the byte layout of every protocol-defined message on the wire.
-2. **Structural aspects** — the graph model: vertices, edges, paths, naming, the same-substrate insight.
-3. **Addressing** — path syntax, field-path resolution, wildcards, address-shift slicing.
-4. **Execution flows** — read, write, await, subscribe, fan-out, bridge republish, deadline expiry, liveness, partition.
-5. **Protocol-specific TLVs** — every TLV the protocol itself defines, byte-precise.
-6. **User data packing** — how application data of any size (single byte → GB/s stream) lands in the graph; worked examples covering boolean, GPIO MMIO, structured records, ADC streaming, camera + LIDAR temporal sync, and the "shared variable" pattern.
-7. **Host embedding** — per-host DAG ↔ global topology with cycles, dedup rules, bridge identity, "every host is a router."
-
 ---
 
 ## Section index
 
-| File | Topic | Companion plan doc(s) |
+The reference is ordered with most-significant concerns first (graph mental model and how nodes talk), narrower-scope concerns later (per-TLV byte spec, substrate layers).
+
+| File | Layer | Topic |
 | ---- | ---- | ---- |
-| [00-overview.md](00-overview.md) | The standard in one document; conformance levels (L0–L3); module catalog index; portability to C++/Rust/Go; versioning. | [../plans/00-vision-and-reality-check.md](../plans/00-vision-and-reality-check.md) |
-| [01-data-format.md](01-data-format.md) | TLV header, opt bits (VR/PL/TS/FP/CR/R), LEB128 + finite-pool length, CRC-32C, type-code registry, forward/backward compat. | [../plans/03-wire-format-and-data-model.md](../plans/03-wire-format-and-data-model.md) |
-| [02-graph-model.md](02-graph-model.md) | Vertex / edge / path / view / segment definitions; the same-substrate insight (TLV in memory IS graph node IS wire bytes); refcount memory ordering; read=zero-copy / write=single-copy at medium boundary; schema discipline. | [../plans/04-graph-and-endpoint-api.md](../plans/04-graph-and-endpoint-api.md) + [../plans/03-wire-format-and-data-model.md](../plans/03-wire-format-and-data-model.md) |
-| [03-addressing.md](03-addressing.md) | Path EBNF, field-chain resolution, atomic multi-field writes, wildcards, address-shift slicing rules, address scopes (local/bridged/global), canonicalization. | [../plans/04-graph-and-endpoint-api.md](../plans/04-graph-and-endpoint-api.md) |
-| [04-communication-flows.md](04-communication-flows.md) | ASCII sequence diagrams for read, write+fanout, await, subscribe, unsubscribe, QoS update, bridge republish, address-shift fanout, deadline expiry, liveness loss, partition+recovery, schema discovery. | [../plans/04-graph-and-endpoint-api.md](../plans/04-graph-and-endpoint-api.md) |
-| [05-protocol-tlvs.md](05-protocol-tlvs.md) | Per-TLV byte spec for `0x01`–`0x0D`: VALUE, NAME, DESCRIPTION, SUBSCRIBER, LIST, PATH, POINT, ERROR, STATUS, ACL, SETTINGS, TIME, ROUTER. Error code registry. Reserved-range policy. | [../plans/03-wire-format-and-data-model.md](../plans/03-wire-format-and-data-model.md) |
-| [06-user-data-packing.md](06-user-data-packing.md) | Worked examples spanning eight orders of magnitude: 1-byte boolean, GPIO register as MMIO view, IMU record, 1 GB/s ADC streaming, camera+LIDAR temporal join, shared-variable pattern. Mix/split/concat invariants. | [../plans/03-wire-format-and-data-model.md](../plans/03-wire-format-and-data-model.md) + [../plans/04-graph-and-endpoint-api.md](../plans/04-graph-and-endpoint-api.md) |
-| [07-host-embedding.md](07-host-embedding.md) | Per-host DAG (own vertices + bridge proxies); global topology (any shape, cycles allowed); cycle handling via `(origin_peer_id, origin_timestamp)` recent-set; bridge identity; embedding examples (RC car, robot, fleet, mesh, WAN). | [../plans/04-graph-and-endpoint-api.md](../plans/04-graph-and-endpoint-api.md) + [../plans/05-modules-transport-and-discovery.md](../plans/05-modules-transport-and-discovery.md) |
+| [00-overview.md](00-overview.md) | all | The standard in one document; six-layer model; load-bearing claims; conformance profiles; portability. |
+| [01-data-format.md](01-data-format.md) | L2 | TLV header (4-byte default, 6-byte extended); `opt` bits PL/TS/CR/LL/CW/TF; trailer-positioned TS + CRC; type-code registry; rejected designs. |
+| [02-graph-model.md](02-graph-model.md) | L4 | Vertex / edge / path / view / segment definitions; the same-substrate insight (TLV in memory IS graph node IS wire bytes); refcount memory ordering; structured-TLV-as-abstraction / memory-as-rope; ROUTER shedding rule; schema discipline. |
+| [03-addressing.md](03-addressing.md) | L4 | Path EBNF, field-chain resolution, atomic multi-field writes, wildcards, address-shift slicing rules, address scopes (local/bridged/global), canonicalization. |
+| [04-communication-flows.md](04-communication-flows.md) | L4 | ASCII sequence diagrams for read, write+fanout, await, subscribe, unsubscribe, QoS update, bridge republish, address-shift fanout, deadline expiry, liveness loss, partition+recovery, schema discovery. |
+| [05-protocol-tlvs.md](05-protocol-tlvs.md) | L3 | Per-TLV byte spec for `0x01`–`0x0D` (with `0x05` retired): VALUE, NAME, DESCRIPTION, SUBSCRIBER, PATH, POINT, ERROR, STATUS, ACL, SETTINGS, TIME, ROUTER. Error code registry. Reserved-range policy. |
+| [06-user-data-packing.md](06-user-data-packing.md) | L4/L5 | Worked examples spanning eight orders of magnitude: 1-byte boolean, GPIO register as MMIO view, IMU record, 1 GB/s ADC streaming with DMA, camera+LIDAR temporal join, shared-variable pattern. Mix/split/concat invariants. |
+| [07-host-embedding.md](07-host-embedding.md) | L4 | Per-host DAG (own vertices + bridge proxies); global topology (any shape, cycles allowed); cycle handling via `(origin_peer_id, origin_timestamp)` recent-set; bridge identity; embedding examples (RC car, robot, fleet, mesh, WAN). |
+| [08-views-and-ownership.md](08-views-and-ownership.md) | L1 | Refcounted-view layer. Canonical view struct; rope (chain of views) semantics; refcount memory ordering; the TLV-as-cast operation; two parser contexts (wire-receive vs in-memory walk); view-module catalog; cross-substrate transitions; **end-to-end DMA→ADC→network trace** across all six layers. **OPEN QUESTION callouts** for hard-to-implement integrations (boost streambuf, MMIO TOCTOU, cross-process refcount, lwIP pbuf aliasing, rope walk cost). |
+| [09-memory-substrate.md](09-memory-substrate.md) | L0 | Categories of memory (heap, pool, MMIO, DMA, network-stack buffers, shared memory, peripheral FIFOs); backend interface (`mem_backend_t`); backend catalog; ownership rules; cache coherency; pressure handling. |
+| [10-module-catalog.md](10-module-catalog.md) | all | Every module across all layers, in one place. Required vs optional. Pairing table: which L0 backend pairs with which L1 view module pairs with which transport. Inter-module interfaces. Per-profile build manifests. |
+
+> **Note on file numbering vs significance ordering**: 00–07 follows the original layer-agnostic narrative (overview → wire → graph → addressing → flows → TLV registry → user data → host embedding). 08–09 are the substrate layers (added when the L(-1)/L(-2) design split out into its own pair of docs); they sit at the end because most readers reach them only after the protocol layers click. 10 is the cross-cutting catalog. Layer numbers (L0..L5) are bottom-up by architecture, not by file order.
+
+---
+
+## Conformance profiles (build-size axes)
+
+Distinct from the architectural layers above — these describe what set of modules a deployment loads.
+
+| Profile | What it loads | Typical use |
+| ---- | ---- | ---- |
+| **P0 — in-process** | required modules only | unit tests; in-process pub/sub; the substrate other profiles compose against |
+| **P1 — single-transport leaf** | required + 1 transport | RC car over UART; sensor over CAN; ESP32 over Wi-Fi |
+| **P2 — bridge** | required + ≥2 transports + cycle-dedup | gateway between buses (CAN ↔ IP); edge router |
+| **P3 — full** | P2 + discovery + executor + security | production deployment |
+
+Higher profiles are strict supersets. See [10-module-catalog.md](10-module-catalog.md) §per-profile manifests for the literal module list per profile.
 
 ---
 
 ## Reading paths
 
-**First-time reader**: 00 → 01 → 02 → 03 → 04 → 05 → 06 → 07.
+**First-time reader (top-down, narrative)**: 00 → 01 → 02 → 03 → 04 → 05 → 06 → 07.
 
-**Writing a parser/sender in another language**: 01 → 03 → 05 → 06, then 02 once you optimize for zero-copy.
+**First-time reader (bottom-up, substrate-first)**: 00 → 09 → 08 → 01 → 02 → 03 → 04 → 05 → 06 → 07. Use this path if you want to understand zero-copy and ownership before the wire format.
 
-**Implementing a router or bridge**: 02 → 03 → 04 → 07 are mandatory; 06 is illustrative.
+**Writing a parser/sender in another language**: 01 → 03 → 05 → 06, then 02 + 08 once you optimize for zero-copy.
+
+**Porting libtracer to a new platform** (new MCU, new RTOS, new buffer ecosystem): 09 → 08 → 10 → 01 + 02. Substrate work is in the lower-layer docs; the protocol contract is unchanged.
+
+**Implementing a router or bridge**: 02 → 03 → 04 → 07 mandatory; 06 illustrative; 08 if you need to reason about cross-substrate transitions.
 
 **Designing an application's data layout**: 06 → 03 → 02. Refer back to 05 for any TLV you handle.
 
 **Auditing a deployment for cycles or routing storms**: 07 → 04 (bridge republish flow).
+
+**Building or extending a module** (transport, discovery, security, executor, memory backend): 10 first, then the layer-specific spec (08 for view modules, 09 for memory backends, 05 for protocol-level wraps).
+
+**Tracing the DMA→ADC→network path end-to-end**: [08-views-and-ownership.md](08-views-and-ownership.md) §end-to-end trace. This walks one buffer from a DMA-half-complete interrupt all the way to an egress NIC, naming each layer's contribution.
 
 ---
 
@@ -64,13 +95,13 @@ A reference section is promoted from "draft" to "frozen for v0.1" when:
 
 Until all three are satisfied, the planning doc is the operating reference for active development; the reference doc is the operating reference for second-implementer questions.
 
-Wire-format versioning follows the `opt.VR` bit (see [01-data-format.md](01-data-format.md)). v0.1 = draft, breakable. v1.0 = frozen, semver thereafter.
+The wire format does not version per-frame. v0.1 is committed once; future incompatible changes are versioned at the discovery layer (different mDNS service name, port, etc.). See [01-data-format.md](01-data-format.md) §versioning and compatibility.
 
 ---
 
 ## What this suite is NOT
 
-- Not a C ABI specification. The reference C core's headers describe its ABI; this suite is language-agnostic.
+- Not a C ABI specification. The reference C implementation's headers describe its ABI; this suite is language-agnostic.
 - Not a build / packaging guide. See [../plans/02-roadmap-weeks-1-to-8.md](../plans/02-roadmap-weeks-1-to-8.md).
 - Not a feature comparison vs Zenoh / DDS / MQTT. See [../plans/01-comparison-to-existing-protocols.md](../plans/01-comparison-to-existing-protocols.md).
 - Not a security architecture. The wire format is security-agnostic; security wraps it at the transport layer per [../plans/06-modules-executor-security-gui.md](../plans/06-modules-executor-security-gui.md).

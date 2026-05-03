@@ -27,16 +27,18 @@ A conforming **node** MAY load any subset of transport, discovery, security, and
 
 A conforming **TLV** SHALL fit in the header layout of [01-data-format.md](01-data-format.md), use a type code from a defined range, and pass CRC-32C verification when the `CR` bit is set.
 
-### Conformance levels
+### Conformance profiles
 
-| Level | Required | Typical use |
+(Distinct from the architectural layers below — these are build-size profiles, not protocol layers. Named with a `P` prefix to avoid collision.)
+
+| Profile | Required | Typical use |
 | ---- | ---- | ---- |
-| **L0 — in-process** | core only, zero transports | unit tests, in-process pub/sub, the API substrate other layers compose against |
-| **L1 — single-transport leaf** | core + 1 transport | RC car over UART, sensor over CAN, ESP32 over Wi-Fi |
-| **L2 — bridge** | core + ≥2 transports + cycle-dedup | gateway between buses (CAN ↔ IP), edge router |
-| **L3 — full** | L2 + discovery + executor + security | production deployment |
+| **P0 — in-process** | required modules only, zero transports | unit tests, in-process pub/sub, the API substrate other layers compose against |
+| **P1 — single-transport leaf** | required + 1 transport | RC car over UART, sensor over CAN, ESP32 over Wi-Fi |
+| **P2 — bridge** | required + ≥2 transports + cycle-dedup | gateway between buses (CAN ↔ IP), edge router |
+| **P3 — full** | P2 + discovery + executor + security | production deployment |
 
-Higher levels are strict supersets. A conformance test suite (week 4 of [../plans/02-roadmap-weeks-1-to-8.md](../plans/02-roadmap-weeks-1-to-8.md)) exercises L0 mandatorily; L1+ are exercised against the available transport modules.
+Higher profiles are strict supersets. A conformance test suite (week 4 of [../plans/02-roadmap-weeks-1-to-8.md](../plans/02-roadmap-weeks-1-to-8.md)) exercises P0 mandatorily; P1+ are exercised against the available transport modules.
 
 ---
 
@@ -56,22 +58,32 @@ Any conforming implementation must honor these. They are what distinguishes libt
 
 ---
 
-## The four-layer model
+## The six-layer model
 
-The protocol stack has four layers of concern. Concepts in this reference suite belong to exactly one layer; conflating them produces design confusion.
+The protocol stack has six layers of concern, numbered bottom-up from memory at L0 to application semantics at L5. Concepts in this reference suite belong to exactly one layer; conflating them produces design confusion.
 
 | Layer | Concern | Specified in |
 | ---- | ---- | ---- |
-| **L0 — Frame envelope** | Slice the byte stream into framed units; verify integrity; carry wire-time | [01-data-format.md](01-data-format.md) |
-| **L1 — TLV semantics** | Interpret the type code; recurse into structured (PL=1) containers | [05-protocol-tlvs.md](05-protocol-tlvs.md) |
-| **L2 — Graph endpoint logic** | Vertices, edges, paths, subscriptions, fan-out, QoS, ACL, bridges | [02-graph-model.md](02-graph-model.md), [03-addressing.md](03-addressing.md), [04-communication-flows.md](04-communication-flows.md) |
-| **L3 — Application semantics** | What the bytes inside `VALUE` mean; control logic | application code |
+| **L0 — Memory substrate** | Real buffers, MMIO, queues, pools, peripheral FIFOs; allocation, lifetime, cache, DMA | [09-memory-substrate.md](09-memory-substrate.md) |
+| **L1 — Views and ownership** | Memory views, refcounted segments, ropes (view chains), the TLV-as-cast | [08-views-and-ownership.md](08-views-and-ownership.md) |
+| **L2 — Frame envelope** | Slice the byte stream into framed units; verify integrity; carry wire-time | [01-data-format.md](01-data-format.md) |
+| **L3 — TLV semantics** | Interpret the type code; recurse into structured (PL=1) containers | [05-protocol-tlvs.md](05-protocol-tlvs.md) |
+| **L4 — Graph endpoint logic** | Vertices, edges, paths, subscriptions, fan-out, QoS, ACL, bridges | [02-graph-model.md](02-graph-model.md), [03-addressing.md](03-addressing.md), [04-communication-flows.md](04-communication-flows.md) |
+| **L5 — Application semantics** | What the bytes inside `VALUE` mean; control logic | application code |
 
-The wire format (L0) carries the `type` byte and `opt.PL` at fixed positions so routers can decide whether to recurse into nested children without parsing payload. The `type` byte's meaning is L1; it sits in the L0 header for routing convenience. Priority is **not** an L0 concern — it is cached at L2 from `:settings.priority`. The L0 `opt` byte's other bits select wire-format variants (`LL` length width, `CW` CRC width, `TF` TS form) — these are framing choices, not semantic information. See [02-graph-model.md](02-graph-model.md) §the four-layer model for full discussion and [01-data-format.md](01-data-format.md) §options bitfield for bit assignments.
+Each adjacent pair of layers communicates through a small contract:
+
+- **L0 ↔ L1**: backend interface (`alloc`, `release`, cache hooks). Bytes flow up as segments; lifetime flows down via `destroy` callbacks per backend.
+- **L1 ↔ L2**: views are cast to TLVs. The cast is zero-copy reinterpretation.
+- **L2 ↔ L3**: the `type` byte (carried at L2, meaningful at L3) and `opt.PL` (signal to recurse).
+- **L3 ↔ L4**: the protocol-defined TLV registry (SUBSCRIBER, PATH, POINT, ROUTER, …) and what each means at the graph layer.
+- **L4 ↔ L5**: the path / read / write / await API and the field-write control surface.
+
+The wire format (L2) carries the `type` byte and `opt.PL` at fixed positions so routers can decide whether to recurse into nested children without parsing payload. The `type` byte's meaning is L3; it sits in the L2 header for routing convenience. Priority is **not** an L2 concern — it is cached at L4 from `:settings.priority`. The L2 `opt` byte's other bits select wire-format variants (`LL` length width, `CW` CRC width, `TF` TS form) — these are framing choices, not semantic information.
 
 ### TLV-at-rest = TLV-in-transit + trailer
 
-The L0 frame has a **header + payload + optional trailer** structure. The payload region is byte-identical across every state of the TLV's life:
+The L2 frame has a **header + payload + optional trailer** structure. The payload region is byte-identical across every state of the TLV's life:
 
 - **At rest** in the graph (stored at a vertex, on disk in a recorder file): `header + payload`.
 - **In transit** on a transport: `header + payload + trailer` (wire-time TS + CRC).
@@ -90,28 +102,17 @@ Bridges shed the `ROUTER` when ingesting (storing only the bare data) and attach
 
 ---
 
-## Core vs module boundary
+## Everything is a module
 
-The protocol distinguishes two things:
+There is **no "core" carved out from "modules"**. A libtracer node is a chosen set of modules linked together. Some modules are required by every conforming node (frame codec, path resolver, refcount/view machinery, router/dispatcher, bridge logic) — those are tagged `required` in the catalog. The rest are tagged by what they bring (a transport, a discovery mechanism, a security wrap, an executor, a memory backend, an I/O view module). A bare-minimum node loads only the `required` modules; a feature-rich node loads many.
 
-| Layer | Required | Examples |
-| ---- | ---- | ---- |
-| **Core** | every conforming node has it | TLV codec, path resolver, refcount/view machinery, router/dispatcher, bridge logic, schema registry |
-| **Module** | opt-in, separately compilable | every transport (TCP, UDP, CAN, I²C, SPI, UART, WS, QUIC, SHM, RDMA, BLE), every discovery (mDNS, static, gossip, DNS-SD), every security wrap (TLS, DTLS, PSK, Noise, ACL enforcement), every executor (C callback, MicroPython, Lua, WASM) |
+This framing matters because the so-called "core" itself is a bundle of modules separated by clean interfaces — frame codec is one module, path resolver another, dispatcher a third. They happen to be required for every conformance profile, but they are not architecturally privileged.
 
-A node's footprint is **core + the modules it loads**. The reference C core targets ≤ 16 KB stripped on `arm-none-eabi-gcc -std=c23 -Os` (sentinel test in week 4 of [../plans/02-roadmap-weeks-1-to-8.md](../plans/02-roadmap-weeks-1-to-8.md)). Adding `transport_tcp` brings ~5 KB on Linux / ~8 KB on Cortex-M (lwIP-dependent). A robot-fleet build pulling in TCP, UDP, mDNS, CAN, TLS would land in the 30-50 KB range; an RC-car build with only one UART transport stays under 25 KB.
+The full module catalog — everything across L0..L5 — is in [10-module-catalog.md](10-module-catalog.md), with a pairing table that says which L0 backends pair with which L1 view modules pair with which transports.
 
-The module ABI itself is described in [../plans/05-modules-transport-and-discovery.md](../plans/05-modules-transport-and-discovery.md) §module ABI; this reference suite does not re-specify it because the ABI is an implementation contract, not a wire/protocol property. **Two implementations of the libtracer protocol need not share a module ABI** — they need to share the wire format, addressing scheme, and flows.
+A node's footprint is the sum of its loaded modules. The reference implementation targets ≤ 16 KB stripped (required modules only) on `arm-none-eabi-gcc -std=c23 -Os` (sentinel test in week 4 of [../plans/02-roadmap-weeks-1-to-8.md](../plans/02-roadmap-weeks-1-to-8.md)). Adding `transport_tcp` brings ~5 KB on Linux / ~8 KB on Cortex-M (lwIP-dependent). A robot-fleet build pulling in TCP, UDP, mDNS, CAN, TLS lands in the 30–50 KB range; an RC-car build with only one UART transport stays under 25 KB.
 
-### What modules are mentioned in v0.1 (catalog index)
-
-These are described elsewhere; listed here so the reader knows what exists in the design space:
-
-- **Transports**: `transport_tcp`, `transport_udp`, `transport_quic`, `transport_ws`, `transport_unix`, `transport_shm`, `transport_can`, `transport_i2c`, `transport_spi`, `transport_uart`, `transport_ble_gatt`, `transport_rdma`. (Future: `transport_iceoryx2`, `transport_ros2dds`.) See [../plans/05-modules-transport-and-discovery.md](../plans/05-modules-transport-and-discovery.md).
-- **Discovery**: `discovery_mdns`, `discovery_static`, `discovery_gossip`, `discovery_dns_sd`. See [../plans/05-modules-transport-and-discovery.md](../plans/05-modules-transport-and-discovery.md).
-- **Security**: `security_tls`, `security_dtls`, `security_psk`, `security_acl`, `security_noise`. See [../plans/06-modules-executor-security-gui.md](../plans/06-modules-executor-security-gui.md).
-- **Executors**: `executor_c`, `executor_micropython`, `executor_python`, `executor_lua`, `executor_wasm`. (Future: `executor_dataflow`, `executor_fpga`.) See [../plans/06-modules-executor-security-gui.md](../plans/06-modules-executor-security-gui.md).
-- **Tools**: `tracer-top` (CLI introspection), web GUI (post-MVP), `recorder` (post-MVP). See [../plans/06-modules-executor-security-gui.md](../plans/06-modules-executor-security-gui.md).
+The module ABI itself is an **implementation** concern, not a protocol property — two implementations need not share a module ABI; they need to share the wire format, addressing scheme, and flows. See [../plans/05-modules-transport-and-discovery.md](../plans/05-modules-transport-and-discovery.md) §module ABI for the reference C ABI.
 
 ---
 

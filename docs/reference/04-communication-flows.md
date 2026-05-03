@@ -227,8 +227,8 @@ External peer        Transport module       Bridge vertex          Local router 
 
 Two strips happen in this flow, and they are at different layers:
 
-- **L0 trailer strip**: the transport module validates `trailer_crc` (and optionally `trailer_ts`), then the trailer is consumed — the bare `header + payload` is what the bridge sees. This is universal across all transports.
-- **L2 ROUTER shed**: the bridge unwraps the `ROUTER` envelope, saves `(origin_peer_id, origin_timestamp, hop_count)` from ROUTER's metadata children to its per-proxy metadata table, and stores only the wrapped data TLV (ROUTER's last child, tagged by `NAME "data"`) at the proxy vertex. This applies only when the incoming TLV is itself a ROUTER.
+- **L2 trailer strip**: the transport module validates `trailer_crc` (and optionally `trailer_ts`), then the trailer is consumed — the bare `header + payload` is what the bridge sees. This is universal across all transports.
+- **L4 ROUTER shed**: the bridge unwraps the `ROUTER` envelope, saves `(origin_peer_id, origin_timestamp, hop_count)` from ROUTER's metadata children to its per-proxy metadata table, and stores only the wrapped data TLV (ROUTER's last child, tagged by `NAME "data"`) at the proxy vertex. This applies only when the incoming TLV is itself a ROUTER.
 
 When a local subscriber that is itself reachable via another transport pulls this data, the bridge re-emits in mirror order: re-wrap into a `ROUTER` envelope with `hop_count` incremented and the data TLV as the last child, attach a fresh outbound trailer (new wire-time, new CRC), send. The payload bytes never move.
 

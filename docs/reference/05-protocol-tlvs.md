@@ -191,7 +191,7 @@ The structural concept survives: any TLV with `opt.PL=1` is a structured contain
 
 ### Why retired
 
-Generic LIST had no semantic meaning of its own — it was the un-named default whose role was always "structured stuff goes here." Real uses always have a specific purpose. Forcing every container to declare its purpose via type code is what makes the type byte a proper L1 concern.
+Generic LIST had no semantic meaning of its own — it was the un-named default whose role was always "structured stuff goes here." Real uses always have a specific purpose. Forcing every container to declare its purpose via type code is what makes the type byte a proper L3 concern.
 
 ---
 

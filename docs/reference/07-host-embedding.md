@@ -155,7 +155,7 @@ A specialized **WAN router** is a host that runs:
 - A discovery module to find peers.
 - No application vertices — the host's job is purely to route.
 
-This is **convention**, not a separate node type in the protocol. Such a host conforms at L2 (per [00-overview.md](00-overview.md) §conformance levels); the protocol does not single it out.
+This is **convention**, not a separate node type in the protocol. Such a host conforms at profile P2 (per [00-overview.md](00-overview.md) §conformance profiles); the protocol does not single it out.
 
 A future `router_wan` "module" (in the [../plans/05-modules-transport-and-discovery.md](../plans/05-modules-transport-and-discovery.md) catalog) may package up the typical WAN-router config (multiple transports + discovery + dedup tuning + observability) for ergonomics, but it does not extend the protocol.
 
@@ -175,7 +175,7 @@ A future `router_wan` "module" (in the [../plans/05-modules-transport-and-discov
   └ transport_uart on USB-CDC ↔ host PC running tracer-cli
 ```
 
-Local DAG = entire view. The host PC is also a 1-bridge node (it bridges UART to its own local graph) but the topology has no cycles to worry about. Conformance: L1 (single-transport leaf) on the ESP32, L1 on the PC.
+Local DAG = entire view. The host PC is also a 1-bridge node (it bridges UART to its own local graph) but the topology has no cycles to worry about. Conformance: P1 (single-transport leaf) on the ESP32, P1 on the PC.
 
 ### Robot with CAN bus + Wi-Fi
 
@@ -192,7 +192,7 @@ Local DAG = entire view. The host PC is also a 1-bridge node (it bridges UART to
                                      /control/...                  (own vertices)
 ```
 
-Linux brain is a 2-transport bridge: `transport_can` and `transport_tcp`. Each STM32 device's vertices appear under `/can-bridge/...` on the Linux brain's local DAG. The ground station subscribes to `/can-bridge/imu/accel` over TCP; from its view, the accelerometer is just `/peer/linux-brain/can-bridge/imu/accel`. The chain `STM32 → CAN → Linux → TCP → Laptop` looks like one path. Conformance: L1 on each STM32, L2 on the Linux brain, L2 on the laptop.
+Linux brain is a 2-transport bridge: `transport_can` and `transport_tcp`. Each STM32 device's vertices appear under `/can-bridge/...` on the Linux brain's local DAG. The ground station subscribes to `/can-bridge/imu/accel` over TCP; from its view, the accelerometer is just `/peer/linux-brain/can-bridge/imu/accel`. The chain `STM32 → CAN → Linux → TCP → Laptop` looks like one path. Conformance: P1 on each STM32, P2 on the Linux brain, P2 on the laptop.
 
 ### Fleet of robots with central monitor (star)
 
@@ -210,7 +210,7 @@ Monitor subscribes:
     write("/peer/**:subscribers[]", SUBSCRIBER{path="/local/recorder"})
 ```
 
-A wildcard subscription on `/peer/**` aggregates everything from every robot into the monitor's recorder. Conformance: L1 on each robot, L2 on the monitor.
+A wildcard subscription on `/peer/**` aggregates everything from every robot into the monitor's recorder. Conformance: P1 on each robot, P2 on the monitor.
 
 ### Mesh of robots with no central node (cycles)
 
@@ -226,7 +226,7 @@ A wildcard subscription on `/peer/**` aggregates everything from every robot int
 
 A bridges to B and C; B bridges to A and C; C bridges to A and B. A TLV written on A reaches B directly and via C. Without dedup, B sees it twice; with dedup (`origin_peer_id, origin_timestamp` recent-set), B sees it once.
 
-Conformance: L2 on each. The cycle is structurally fine; the protocol's dedup requirement is what makes it operationally fine.
+Conformance: P2 on each. The cycle is structurally fine; the protocol's dedup requirement is what makes it operationally fine.
 
 ### WAN: edge sites bridged via QUIC router
 
@@ -238,7 +238,7 @@ Conformance: L2 on each. The cycle is structurally fine; the protocol's dedup re
 [ site B devices ]──LAN──[ B router ]─┘
 ```
 
-Each router is a host with `transport_tcp` (LAN) + `transport_quic` (WAN). Sites are bridged. From site B's view, site A's devices appear under `/peer/A-router/...`. Conformance: L2 on routers, L1 on devices.
+Each router is a host with `transport_tcp` (LAN) + `transport_quic` (WAN). Sites are bridged. From site B's view, site A's devices appear under `/peer/A-router/...`. Conformance: P2 on routers, P1 on devices.
 
 ---
 
