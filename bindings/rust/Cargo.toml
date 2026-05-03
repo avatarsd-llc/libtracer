@@ -1,0 +1,16 @@
+[package]
+name = "libtracer"
+version = "0.0.1"
+edition = "2021"
+authors = ["Avatar LLC"]
+description = "Rust binding for libtracer — a lightweight decentralized graph-based networking protocol."
+license = "Apache-2.0"
+repository = "https://github.com/avatarsd/libtracer"
+homepage = "https://github.com/avatarsd/libtracer"
+documentation = "https://docs.rs/libtracer"
+readme = "README.md"
+keywords = ["protocol", "iot", "sensor", "graph", "tlv"]
+categories = ["embedded", "network-programming", "no-std"]
+
+[lib]
+path = "src/lib.rs"
