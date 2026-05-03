@@ -151,18 +151,24 @@ Harness rules (doc 02 specifies in detail):
 
 ---
 
-## What libtracer is NOT competitive at
+## What libtracer is NOT competitive at — today
 
-Honesty section. Don't pitch libtracer for these:
+Two flavors of "not competitive": **structurally out of scope** (the architecture rules it out) and **addressable via a future module** (the architecture allows it; nobody has written it yet). Be explicit about which is which — the modular core means most "missing" features are extension points, not closed doors. If most gaps live in the second list, the architecture is doing its job; if every gap demands a core change, the architecture is wrong.
 
-- **WAN-scale routing** with NAT traversal, bandwidth metering, multi-tenant isolation. → Use Zenoh or NATS.
-- **Durable / replayable message logs**. → Use NATS JetStream or Kafka.
-- **Strict consistency / consensus** across replicas. → Use Raft / etcd / a real CRDT library.
-- **Industrial automation with strict OPC UA / Modbus / EtherCAT compatibility**. → Use OPC UA. libtracer might bridge to it via a module someday, post-MVP.
-- **Smart-home device certification** (Matter, Thread). → Use Matter.
-- **Linux-only intra-host zero-copy with safety-cert pedigree**. → Use iceoryx2.
-- **Production robotics dev tooling (live topic browser, recording, playback)**. → Use eCAL or ROS2 + rosbag2.
-- **Web framework messaging (browser ↔ server REST + websocket conventions)**. → Use plain WebSocket / SSE / gRPC-Web. libtracer is overkill and underspecified for the browser-app use case.
+### Structurally out of scope (don't pitch libtracer for these)
+
+- **Strict consistency / consensus across replicas.** Raft / Paxos / CRDT semantics belong in a layer above libtracer. The wire format carries last-write-wins by timestamp; anything stronger is the application's job. → Use etcd / a CRDT library on top.
+- **Smart-home device certification** (Matter, Thread). Compliance, not protocol. → Use Matter.
+- **Linux-only intra-host zero-copy with safety-cert pedigree.** Matching iceoryx2's audit trail and lock-free MPMC SHM bookkeeping is a multi-year project, not a module. A "good-enough" SHM module is on the roadmap; head-to-head displacement is not. → Use iceoryx2 if cert pedigree matters.
+- **Web framework messaging.** Browser ↔ REST/WebSocket app patterns are well-served by gRPC-Web / SSE / plain fetch. libtracer is overkill for that shape — it's pub/sub graph addressing, not request/response. (Browser as a *node in a libtracer graph* via the WS module is in scope; "use libtracer as your web app's HTTP layer" is not.)
+
+### Addressable via a future module (architecturally fine; just not built yet)
+
+- **WAN-scale routing** with NAT traversal, STUN/TURN relays, bandwidth metering. The bridge mechanism in core is the building block; a `router_wan` module on top of `transport_quic` or `transport_ws` is the path. The hard work is NAT/relay engineering, not protocol. Until that module ships, use Zenoh or NATS.
+- **Durable / replayable message logs.** A passive recorder host subscribed to `/**` writing to disk is a single-purpose module. No core change required. Until it ships, use NATS JetStream or Kafka.
+- **Industrial automation (OPC UA / Modbus / EtherCAT compatibility).** A bridge module per protocol; the address-space-unification story is a natural fit. Real engineering per protocol — not free. Until they ship, use OPC UA / Modbus libraries directly.
+- **ROS request/reply (services) and actions.** Pure read/write doesn't carry a return-path token natively. Solvable as a `request_reply` endpoint type in core or as a module. Latency floor with ownership transfer is competitive with `rmw_zenoh`; the gap vs full ROS is action state machines and parameters, not transport.
+- **Production robotics dev tooling.** Recorder, monitor, launcher, replay — each is a separate process speaking libtracer, not part of the library. Modularity helps here (the GUI is just a subscriber on `/**`); it doesn't replace the engineering work. Until the tooling exists, use eCAL Monitor / rosbag2 / Foxglove.
 
 ---
 
