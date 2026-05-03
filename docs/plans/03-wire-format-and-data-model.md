@@ -1,8 +1,25 @@
 # 03 — Wire Format and Data Model
 
-> **Status**: draft, v0.1, 2026-05-03 — promoted to "stable" at end of week 2 of [doc 02](02-roadmap-weeks-1-to-8.md). Until then, byte positions may shift.
-> **Audience**: anyone implementing a parser/serializer; anyone porting libtracer to a new language; anyone debugging on the wire with `tcpdump`.
-> **Reading time**: ~25 min.
+> **Status**: superseded for byte layout, valid for rationale. The byte layout described below (front-loaded CRC, LEB128 length, finite-pool mode, in-payload TS prefix) was revised in design review 2026-05-03. **The current byte spec is in [docs/reference/01-data-format.md](../reference/01-data-format.md).**
+>
+> Sections that remain authoritative as historical/design rationale:
+>
+> - Why CRC-32C over XOR-16 (the choice itself stands; only its on-wire position moved to the trailer).
+> - Why iterative parsing with bounded depth (mandate unchanged).
+> - Refcount memory ordering for atomic operations (unchanged; lives in [docs/reference/02-graph-model.md](../reference/02-graph-model.md) §required atomic operations).
+> - Same-substrate insight (now expanded in [docs/reference/02-graph-model.md](../reference/02-graph-model.md) with the trailer-symmetry argument).
+> - Forward/backward compatibility framing (carried into the reference).
+>
+> Sections that are **outdated** by the revision:
+>
+> - Header byte table (CRC at offset 2; replaced by trailer-CRC).
+> - LEB128 length encoding section (replaced by fixed u32 LE).
+> - Finite-pool length mode (removed as a wire concept; survives only as a receive-buffer pool convention).
+> - Inline `opt.TS` payload-prefix timestamp (replaced by trailer `trailer_ts`).
+> - All "Concrete hex examples" — they show the pre-revision layout.
+>
+> **Audience**: anyone implementing a parser/serializer; anyone porting libtracer to a new language; anyone debugging on the wire with `tcpdump`. **Read [docs/reference/01-data-format.md](../reference/01-data-format.md) first**; refer back here for the design rationale behind the choices the reference now spec'd.
+> **Reading time**: ~25 min (much of it now historical).
 
 ---
 
