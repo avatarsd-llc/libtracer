@@ -11,6 +11,7 @@
 > 6. **No generic `LIST` type code** (`0x05` retired). Every structured TLV declares its purpose via type code. User-defined records use user-range types `0x80–0xFF` with `opt.PL=1`.
 > 7. **ROUTER as bridge envelope.** The `ROUTER` TLV wraps the data TLV at the bridge boundary; bridges shed it on ingest, attach a fresh one on egress. Cycle dedup uses `(origin_peer_id, origin_timestamp)` recent-set.
 > 8. **No fragmentation in the wire format.** Logically large messages are addressed across `ep[0..N]` slices with shared timestamp.
+> 9. **Path handles, encoded once.** Every vertex address used more than once is encoded into a PATH TLV at build time (`.rodata` literal) or at node init (one allocation), not at every write. Hot-path APIs accept handles, never strings; `snprintf` is a code-size luxury, not a protocol requirement. Normative in [../spec/v1.md](../spec/v1.md) §3.1; design in [03-addressing.md](03-addressing.md), [05-protocol-tlvs.md](05-protocol-tlvs.md), [04-communication-flows.md](04-communication-flows.md), [06-user-data-packing.md](06-user-data-packing.md).
 >
 > The plans under [../plans/](../plans/) predate these revisions and are now historical context for design rationale, not the byte-level spec.
 > **Audience**: a second implementer writing an interoperable libtracer in any language, on any platform, without reading the C reference implementation.
@@ -77,6 +78,8 @@ Higher profiles are strict supersets. See [10-module-catalog.md](10-module-catal
 **Implementing a router or bridge**: 02 → 03 → 04 → 07 mandatory; 06 illustrative; 08 if you need to reason about cross-substrate transitions.
 
 **Designing an application's data layout**: 06 → 03 → 02. Refer back to 05 for any TLV you handle.
+
+**Targeting a 16–32 KB MCU (Cortex-M0/M3/M4, RISC-V µC)**: [../spec/v1.md](../spec/v1.md) §3.1 → [03-addressing.md](03-addressing.md) §static path handles → [05-protocol-tlvs.md](05-protocol-tlvs.md) §static / pre-encoded PATH TLV → [06-user-data-packing.md](06-user-data-packing.md) §MCU-friendly publishing → [04-communication-flows.md](04-communication-flows.md) §the static-path write flow. This path explains the no-`snprintf`, no-malloc-on-the-hot-path discipline that makes libtracer fit in a Cortex-M0 ISR.
 
 **Auditing a deployment for cycles or routing storms**: 07 → 04 (bridge republish flow).
 

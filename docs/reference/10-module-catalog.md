@@ -88,8 +88,9 @@ The view + rope + cast machinery itself is one `required` module; integrations w
 | Module | Tag | What it does |
 | ---- | ---- | ---- |
 | `graph_runtime` | required | Vertex map, edge / subscription registry, dispatch loop |
-| `path_resolver` | required | Path EBNF parsing, wildcard match, field-chain resolution |
-| `dispatcher` | required | Fan-out to subscribers, per-subscriber QoS / ACL gating |
+| `path_handle` | required | Build-time and init-time PATH TLV encoder; `.rodata` literal helpers; init-time path registration. Hot-path API takes handles only. ([03-addressing.md](03-addressing.md) §static path handles, [../spec/v1.md](../spec/v1.md) §3.1) |
+| `path_resolver` | required | Path EBNF parsing, wildcard match, field-chain resolution. Slow path only — string-form entry point used at init or for ergonomics. P0 builds MAY omit the string-form entry. |
+| `dispatcher` | required | Fan-out to subscribers, per-subscriber QoS / ACL gating. Vertex map is keyed on canonical PATH TLV bytes ([02-graph-model.md](02-graph-model.md) §dispatch keyed on canonical PATH TLV bytes). |
 | `bridge` | required | Cross-transport forwarding; ROUTER attach/strip; cycle dedup recent-set |
 | `subscriber_mux` | required | Per-subscriber state slots, rate limit, deadline / liveness watchdog |
 | `schema_registry` | required | Per-vertex `:schema` storage and lookup |
@@ -255,6 +256,48 @@ typedef struct {
 ```
 
 A transport accepts a `view_t *` (which may be a rope) and emits its bytes through whatever its egress facility is. A transport never sees TLV semantics — it sees framed bytes. A scatter-gather-capable transport walks the rope; a contiguous-only transport calls a `view_flatten()` helper that materializes the rope into a single segment (a single copy at the egress boundary).
+
+### Application ↔ L4: path-handle entry points
+
+The hot-path API surface is **handle-typed**, not string-typed. Per [../spec/v1.md](../spec/v1.md) §3.1.4:
+
+```c
+typedef const struct path_handle *path_handle_t;   // opaque pointer to a PATH TLV
+                                                    // (in .rodata or registered heap)
+
+int  tracer_write (path_handle_t h, const view_t *value);
+int  tracer_read  (path_handle_t h, view_t **out_value);
+int  tracer_await (path_handle_t h, uint64_t deadline_ns, view_t **out_value);
+```
+
+The handle's bytes are the canonical PATH TLV; the dispatcher's vertex map is keyed by those bytes. No string formatting, no allocation, no parser walk on the hot path.
+
+A string-form convenience (`tracer_write_str(const char *path, ...)`) MAY be exposed by an implementation but MUST internally route through the same handle dispatch — typically via an init-time `tracer_path_register(...)` cache. P0 (in-process minimum) builds MAY omit the string entry entirely.
+
+### Module composition for the hot path
+
+```mermaid
+flowchart LR
+    APP[application]
+    PH[path_handle module<br/>.rodata + register]
+    DISP[dispatcher<br/>PATH-TLV-keyed map]
+    SUBM[subscriber_mux]
+    BR[bridge]
+    TXA[transport A]
+    TXB[transport B]
+
+    APP -- "tracer_write(h, view)" --> DISP
+    PH -. "handle bytes" .-> DISP
+    DISP --> SUBM
+    SUBM --> BR
+    BR --> TXA
+    BR --> TXB
+    style APP fill:#fce7f3,stroke:#9f1239
+    style PH fill:#dcfce7,stroke:#166534
+    style DISP fill:#dbeafe,stroke:#1e40af
+```
+
+The handle module supplies bytes; the dispatcher uses them; the subscriber multiplexer fans out; the bridge picks transports per outbound subscriber. No module on this path takes a string.
 
 ---
 

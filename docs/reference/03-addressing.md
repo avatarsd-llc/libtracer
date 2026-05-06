@@ -246,3 +246,167 @@ Two textually-different paths that name the same vertex MUST canonicalize to the
 Field paths do not have a trailing-separator equivalent; `:settings.` (trailing dot) is invalid.
 
 UTF-8 normalization: implementations MAY normalize path bytes to NFC at the parse boundary, but MUST be consistent: normalized paths and pre-normalized paths from peers must round-trip without collision. The recommended choice is to NOT normalize and to require senders to canonicalize before transmission. (Application authors generally use ASCII-only path components, so this is rarely an issue in practice.)
+
+---
+
+## Static path handles (MCU-friendly addressing)
+
+> **Normative reference**: [../spec/v1.md](../spec/v1.md) §3.1.
+> **See also**: [05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x06` PATH for byte-precise PATH TLV layout.
+
+The string form `"/sensor/temp"` is convenient at the API surface but hostile to the hot path on MCU-class hardware: it forces a parser walk, allocates segment structures per call, and pulls in `snprintf` (a few KB of code) when the path includes runtime indices. libtracer addresses this with a **static path handle**: a path is encoded into a PATH TLV exactly once — at build time or at node-init — and every subsequent reference uses the pre-encoded bytes directly.
+
+**The contract.** A path handle is whatever opaque token an implementation hands back from path registration. It MUST resolve to wire bytes byte-equal to the canonical PATH TLV for the named vertex, and the resolution MUST NOT allocate, parse, or format strings on the hot path.
+
+### Path lifecycle
+
+Three modes, in order of preference for embedded targets:
+
+| Mode | Where the PATH TLV lives | When the bytes are produced | Hot path cost |
+| ---- | ---- | ---- | ---- |
+| **Build-time literal** | `.rodata` / flash | At compile time (macro or codegen emits the byte literal) | Pointer-load — zero runtime work |
+| **Init-time registration** | RAM (long-lived segment) | Once during `tracer_init` | Pointer-load |
+| **String at hot path** (legacy / convenience) | RAM (short-lived) | On every call | Parse + alloc + canonicalize |
+
+The string-at-hot-path mode is **NOT required** of conforming implementations and a minimum-feature (P0) build MAY omit the string entry points entirely.
+
+### Diagram: how a static path is constructed and used
+
+```mermaid
+flowchart LR
+  subgraph Build["Build time"]
+    S["Source path string<br/>&quot;/sensor/temp&quot;"]
+    M["TRACER_PATH(&quot;/sensor/temp&quot;)<br/>macro / codegen"]
+    R[".rodata bytes:<br/>06 50 12 00 ... NAME &quot;sensor&quot; ... NAME &quot;temp&quot;"]
+    S --> M --> R
+  end
+
+  subgraph Init["Node init (once)"]
+    I["tracer_path_register(string)"]
+    H["heap segment with same bytes"]
+    I --> H
+  end
+
+  subgraph Hot["Hot path (per write)"]
+    HND["path handle<br/>(&rodata or &heap)"]
+    W["tracer_write(handle, value_tlv)"]
+    DISP["router dispatch<br/>(byte-compare on PATH bytes)"]
+    HND --> W --> DISP
+  end
+
+  R -.holds bytes for.-> HND
+  H -.holds bytes for.-> HND
+```
+
+Both paths land in the same shape: a const region whose bytes are a valid PATH TLV. The hot-path API treats them identically.
+
+### Build-time encoding via macro
+
+A reference C23 implementation supplies a `TRACER_PATH` macro that expands a literal string to a `static const` PATH TLV byte array. The shape (informative — implementation choice, not normative):
+
+```c
+// Expands to a static const uint8_t[] containing exactly the PATH TLV bytes.
+// All segment validation (length caps, reserved chars) happens at compile time
+// via _Static_assert; a malformed path fails the build.
+static const tracer_path_t SENSOR_TEMP = TRACER_PATH("/sensor/temp");
+
+// Hot path — no allocation, no string parsing.
+void on_sample(float t) {
+    tlv_t value = TLV_VALUE_F32_INLINE(t);   // value also static-friendly
+    tracer_write(&SENSOR_TEMP, &value);
+}
+```
+
+The macro's job is to walk the literal at preprocessor time, count segments, reject reserved characters via `_Static_assert`, and emit the byte sequence:
+
+```
+06 PL=1+CR=0  LL=0  length=u16  | type, opt, length
+02 00 06 00 's' 'e' 'n' 's' 'o' 'r'   ← NAME "sensor" (10 bytes)
+02 00 04 00 't' 'e' 'm' 'p'           ← NAME "temp"   (8  bytes)
+```
+
+Since `.rodata` is read-only, the bytes are never modified. The router's dispatch table indexes by **byte-equality on the PATH TLV's payload**, so two TLVs that name the same vertex hash and compare identically regardless of where their bytes live (flash, heap, or transport receive buffer).
+
+### Init-time registration for runtime-derived paths
+
+Some paths are not known at compile time:
+
+- Peer-id-mounted paths (`/peer/{peer_id}/sensor/temp`) — the peer-id is discovered at runtime.
+- Address-shift slice paths (`/camera/frame[0]`, `/camera/frame[1]`, …) — the index varies per slice.
+
+For these, the implementation provides:
+
+```c
+// Validate, canonicalize, encode once. Returned handle is stable for node lifetime.
+tracer_path_handle_t h_frame_slice[N];
+for (size_t i = 0; i < N; i++) {
+    char buf[64];
+    snprintf(buf, sizeof buf, "/camera/frame[%zu]", i);   // sprintf allowed at INIT
+    h_frame_slice[i] = tracer_path_register(buf);          // encodes once
+}
+
+// Hot path — no snprintf.
+void on_dma_complete(const uint8_t *frame, uint64_t ts) {
+    for (size_t i = 0; i < N; i++) {
+        tracer_write(h_frame_slice[i], view_into(frame + i*S, S, ts));
+    }
+}
+```
+
+`tracer_path_register` allocates exactly one PATH TLV in a long-lived segment, validates per [03-addressing.md](03-addressing.md) §path syntax, and returns the handle. After init, the handle behaves identically to a build-time literal: a pointer-load and a dispatch.
+
+### Indexed slot paths without runtime formatting
+
+For the common case of `name[i]` where `i` ranges over a known set, the implementation MAY offer an **indexed-handle** form that encodes the name once and supplies the index as a separate u16 at the dispatch boundary:
+
+```c
+// One PATH TLV for "/camera/frame", plus per-call index.
+static const tracer_path_t CAMERA_FRAME = TRACER_PATH("/camera/frame");
+
+void on_dma_complete(...) {
+    for (size_t i = 0; i < N; i++) {
+        tracer_write_indexed(&CAMERA_FRAME, /*index=*/i, slice_tlv);
+    }
+}
+```
+
+The router treats an indexed-handle write as equivalent to a write to `/camera/frame[i]`. This is an optimization, not a different addressing scheme — the resolved vertex and the wire bytes (after index expansion) are identical.
+
+### Diagram: hot-path dispatch with a static handle
+
+```mermaid
+sequenceDiagram
+    participant App as Application (ISR / sample loop)
+    participant Hnd as Path handle (.rodata)
+    participant Disp as Router dispatch
+    participant Vtx as Vertex
+    participant Subs as Subscribers
+
+    App->>Hnd: load pointer (1 cycle on Cortex-M)
+    App->>Disp: tracer_write(handle, value_tlv)
+    Disp->>Disp: dispatch_table[hash(handle.bytes)]
+    Note over Disp: byte-compare on PATH bytes;<br/>no string parse, no alloc
+    Disp->>Vtx: store value_tlv as LKV
+    Disp->>Subs: refcount-bump and enqueue (per subscriber)
+```
+
+The boxed note is the load-bearing one: dispatch never re-parses the path. The handle's bytes are the cache key.
+
+### Why this matters
+
+- **Code size.** Removing `snprintf` from the publisher saves 2–6 KB on Cortex-M (depending on libc). For a 16 KB target ([10-module-catalog.md](10-module-catalog.md) §profile sentinel), this is the difference between fitting and not fitting.
+- **Determinism.** No allocation on the hot path means no fragmentation, no malloc-under-ISR, predictable worst-case latency.
+- **Cache behavior.** Build-time PATH TLVs live in flash and are streamed via XIP / cached I-side accesses; they never compete with the data cache.
+- **Wire correctness by construction.** Validation is done once at encode time; the hot path can assume the handle's bytes are a valid PATH TLV. There is no class of "malformed path on the hot path" bug to worry about.
+
+### Conformance summary
+
+A conforming node:
+
+- MUST accept path handles at every read / write / await entry point ([../spec/v1.md](../spec/v1.md) §3.1.4).
+- MUST treat a path handle and the equivalent string-form path as semantically identical.
+- SHOULD provide a build-time encoding macro for paths known at compile time.
+- MAY omit string-form entry points entirely on minimum-feature builds.
+- MUST NOT require the application to format paths on the hot path.
+
+The full byte layout of the encoded PATH TLV is in [05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x06`. The init-time vs hot-path distinction is in [04-communication-flows.md](04-communication-flows.md) §the static-path write flow.

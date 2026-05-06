@@ -22,6 +22,28 @@ What lives behind the path is **deliberately unconstrained**. It can be a stored
 
 This is the **facade principle**. The `:schema` field ([02-graph-model.md](02-graph-model.md) §schema discipline) is the only mechanism the protocol gives a subscriber to *interrogate* the contract — but it never reveals the implementation.
 
+```mermaid
+flowchart LR
+    H["path handle<br/>(canonical PATH TLV bytes)"]
+    API[/"read · write · await"/]
+    R{{"vertex role<br/>(stored / stream / sink+model /<br/>computed / proxy / aggregate / live MMIO)"}}
+    BACK1[("RAM segment")]
+    BACK2[("MMIO register")]
+    BACK3[("function-on-read")]
+    BACK4[("remote vertex<br/>via bridge")]
+    H --> API
+    API --> R
+    R --> BACK1
+    R --> BACK2
+    R --> BACK3
+    R --> BACK4
+    style H fill:#dcfce7,stroke:#166534
+    style API fill:#dbeafe,stroke:#1e40af
+    style R fill:#fef3c7,stroke:#92400e
+```
+
+A consumer holds a path handle and calls read / write / await. What's behind the role boundary is invisible. Two vertices with the same schema are observationally equivalent regardless of role.
+
 The rest of this document is the catalog of implementation kinds and the addressing patterns that compose them.
 
 ---

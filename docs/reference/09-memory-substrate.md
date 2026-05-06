@@ -107,6 +107,37 @@ Bytes transit through peripheral hardware queues; the "buffer" is at fixed regis
 
 Lifetime: continuous (data flows through, no stable identity per byte). Ownership: peripheral hardware.
 
+### Substrate categories at a glance
+
+```mermaid
+flowchart TB
+    subgraph CPU_OWNED["CPU-owned (free at will)"]
+        A1[mem_heap]
+        A2[mem_pool_static]
+        A3[mem_pool_class]
+    end
+    subgraph HW_OWNED["HW-owned (lifetime determined externally)"]
+        B1[mem_dma_buffer<br/><i>cache hooks required</i>]
+        B2[mem_mmio<br/><i>permanent segment</i>]
+        B3[mem_uart_rx_dma<br/>mem_can_reassembly]
+    end
+    subgraph STACK_OWNED["Network-stack-owned"]
+        C1[mem_lwip_pbuf]
+        C2[mem_skbuff<br/><i>future</i>]
+    end
+    subgraph SHARED["Shared / cross-process"]
+        D1[mem_shared<br/><i>single-publisher default</i>]
+        D2[mem_iceoryx2<br/><i>future, robust SHM</i>]
+        D3[mem_rdma<br/><i>aspirational</i>]
+    end
+    style CPU_OWNED fill:#dcfce7,stroke:#166534
+    style HW_OWNED fill:#fef3c7,stroke:#92400e
+    style STACK_OWNED fill:#dbeafe,stroke:#1e40af
+    style SHARED fill:#fce7f3,stroke:#9f1239
+```
+
+All four families implement the same `mem_backend_t` interface ([§the backend abstraction](#the-backend-abstraction) below); the differences are in how they honor `destroy`, whether they need cache hooks, and what their per-segment lifetime story is.
+
 ---
 
 ## The backend abstraction

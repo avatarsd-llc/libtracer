@@ -235,6 +235,84 @@ A path may be expressed two ways:
 
 Both forms canonicalize to the same internal representation. Implementations MUST accept either form where a path is expected.
 
+### Static / pre-encoded PATH TLV (init-time form)
+
+> **Normative reference**: [../spec/v1.md](../spec/v1.md) §3.1.
+> **See also**: [03-addressing.md](03-addressing.md) §static path handles for the addressing-level rationale, and [04-communication-flows.md](04-communication-flows.md) §the static-path write flow for hot-path semantics.
+
+For MCU-class deployments the PATH TLV is intended to be **encoded once** — at build time as a `.rodata` byte literal, or at node init as a single allocation — and reused for the lifetime of the node. The hot path treats the pre-encoded bytes as the address of a vertex; no parser walk, no string formatting, no allocation occurs per write.
+
+#### Build-time-encodable byte layout
+
+Every conforming PATH TLV is byte-equivalent to the following structure. A correct build-time encoder produces exactly these bytes:
+
+```mermaid
+flowchart LR
+  subgraph Outer["PATH TLV outer"]
+    direction LR
+    T["type<br/>= 0x06"]
+    O["opt<br/>PL=1"]
+    L["length<br/>u16 LE"]
+  end
+  subgraph Children["payload (concatenated NAME children)"]
+    direction LR
+    N1["NAME segment_1<br/>02 00 LL LL bytes..."]
+    N2["NAME segment_2<br/>02 00 LL LL bytes..."]
+    NK["NAME segment_K<br/>02 00 LL LL bytes..."]
+  end
+  Outer --> Children
+  N1 --> N2 --> NK
+```
+
+The encoder's invariants:
+
+- **Outer header** (4 bytes, default `LL=0`): `06 50 LL_lo LL_hi`. `0x50` = `PL=1` (bit 6) only, no TS, no CR, `LL=0`.
+- **`length`** = sum of child NAME TLV total sizes. With no inner trailers, each NAME costs `4 + len(segment_bytes)`.
+- **Each NAME child**: `02 00 SS_lo SS_hi <segment_bytes>`, where `SS` is the segment's UTF-8 byte length (`1..64`).
+- **No inner trailers.** Children inside a PATH carry no TS and no CRC; the outer (when in transit) covers everything.
+- **Reserved characters** (`/ : . [ ] * ?`) MUST NOT appear inside any segment_bytes.
+
+A path that resolves to more than 32 segments, has a single segment longer than 64 bytes, or whose total segment-bytes exceed the addressing-level cap MUST fail to encode.
+
+#### Byte literal — `/sensor/temp`
+
+```
+06 50 12 00     ← outer: type=PATH(0x06), opt=PL=1 (0x50), length=18 (u16 LE)
+   02 00 06 00 73 65 6E 73 6F 72        ← NAME "sensor" (10 bytes)
+   02 00 04 00 74 65 6D 70              ← NAME "temp"   (8 bytes)
+```
+
+**22 bytes total** when stored as graph data (no outer trailer). When transmitted with CRC-32, the outer trailer adds 4 bytes; the inner NAME children are unchanged.
+
+#### Byte literal — `/camera/frame`
+
+```
+06 50 13 00     ← outer: length=19
+   02 00 06 00 63 61 6D 65 72 61        ← NAME "camera" (10 bytes)
+   02 00 05 00 66 72 61 6D 65           ← NAME "frame"  (9 bytes)
+```
+
+**23 bytes total.** A C macro emitting this literal is straightforward; a code generator emitting one per registered path is even simpler.
+
+#### Conformance for the static form
+
+A pre-encoded PATH TLV intended for use as a path handle ([../spec/v1.md](../spec/v1.md) §3.1.1) MUST:
+
+1. Be byte-identical to the canonical encoding above.
+2. Pass the segment-validity rules of [03-addressing.md](03-addressing.md) at encode time.
+3. Be stored in memory whose lifetime spans every read / write / await that uses it.
+
+A conforming receiver MUST treat a PATH TLV the same regardless of whether it arrives over the wire, was assembled from heap segments, or points into the sender's `.rodata`. **The wire bytes are the contract; the segment they live in is implementation choice.**
+
+#### Why no allocation on the hot path
+
+The motivation for this section is twofold:
+
+- **MCU deployments** (Cortex-M, ESP32) cannot afford `snprintf`+`malloc` per write. Code size and ISR-safety both forbid it.
+- **The TLV-as-bytes invariant** ([02-graph-model.md](02-graph-model.md) §the same-substrate insight) extends naturally: if a TLV in memory IS the wire bytes IS the graph node, then a TLV in `.rodata` is the same — just at a different address. Routers and dispatchers read it identically.
+
+Implementations on hosted platforms (Linux, Windows) MAY accept string-form paths at the API surface for ergonomics, but the dispatch underneath SHOULD canonicalize to a PATH TLV byte-blob exactly once and key its routing tables on those bytes.
+
 ---
 
 ## `0x07` — POINT

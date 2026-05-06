@@ -146,6 +146,37 @@ Underlying rope:
 
 **Walking a rope**: parsers and serializers use `view_walk` or equivalent. The iterative TLV parser ([01-data-format.md](01-data-format.md) §iterative parsing requirement) treats a rope-cursor specially when traversing children: advancing the cursor across a link boundary is one extra branch in the iteration, but otherwise the parser logic is identical.
 
+### Refcount fan-out and release sequence
+
+The lifetime drawing for a single segment under fan-out:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant TX as Transport RX
+    participant V as View layer
+    participant D as Dispatcher
+    participant S1 as Subscriber 1
+    participant S2 as Subscriber 2
+    participant L0 as L0 backend
+
+    TX->>V: create segment (refcount=1)
+    Note over V: backend retains 1 (recv buffer)
+    V->>D: hand off view (refcount += 1 → 2)
+    Note over V: TX releases its hold (refcount = 1)
+    D->>V: clone for Subscriber 1 (refcount = 2)
+    D->>V: clone for Subscriber 2 (refcount = 3)
+    D->>S1: deliver view
+    D->>S2: deliver view
+    Note over D: dispatcher releases its own hold<br/>(refcount = 2)
+    S1->>V: view_release (refcount = 1)
+    S2->>V: view_release (refcount = 0)
+    V->>L0: segment->destroy(seg)
+    Note over L0: backend reclaims bytes<br/>(heap free / pool return /<br/>DMA half marked reusable)
+```
+
+The publisher and the transport never wait for subscribers; back-pressure surfaces as **the segment refcount staying high**, which the L0 backend observes when it tries to reuse the slot. This is the protocol's flow-control signal at the substrate layer.
+
 ---
 
 ## Casting a view to a TLV

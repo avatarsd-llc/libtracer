@@ -461,3 +461,122 @@ The proof obligation is the contract that makes mix/split/concat **safe to compo
 - A serialization framework. libtracer doesn't replace Cap'n Proto / FlatBuffers / Protobuf for **typed**, **schema-evolving**, **reflection-rich** payloads. If you need that, embed those formats inside VALUE TLVs.
 - A compression layer. libtracer doesn't compress; if your payload benefits from compression, do it in the publisher and document the encoding (NAME field "encoding" = "zstd-3" inside a LIST).
 - A type system. libtracer's "TLV type" is a transport routing concern, not a data type. The user-range `0x80..0xFF` is for *protocol* tagging, not for substituting a real schema language.
+
+---
+
+## MCU-friendly publishing (zero-alloc, no `snprintf`)
+
+> **Normative reference**: [../spec/v1.md](../spec/v1.md) §3.1.
+> **See also**: [03-addressing.md](03-addressing.md) §static path handles; [04-communication-flows.md](04-communication-flows.md) §the static-path write flow.
+
+The examples earlier in this document use `tracer_write("/path/string", tlv)` for clarity. On hosted platforms (Linux laptops, ESP32 with PSRAM and a relaxed code budget) this is fine. On a 16 KB Cortex-M0+ flashing telemetry from an ISR, it is unacceptable: `snprintf` alone is 2–6 KB of code, the parser walks the path string each call, and the segment allocator runs from interrupt context.
+
+The MCU-friendly variant is to **encode the PATH TLV at build time** and pass a handle to the writer. Three orders of magnitude less per-write cost, and `snprintf` is no longer linked.
+
+### Recipe — single sensor, build-time path
+
+```c
+#include "tracer.h"
+
+// PATH TLV is generated at compile time and lives in .rodata / flash.
+// The macro validates the literal at preprocessor time; an invalid
+// path fails the build, not the runtime.
+static const tracer_path_t TEMP_PATH = TRACER_PATH("/sensor/temp");
+
+void tim2_irq_handler(void) {       // hard-real-time ISR
+    float t = read_thermistor_adc();
+
+    // Inline value TLV; no heap touch.
+    uint8_t buf[12];
+    tlv_t value = tlv_inline_value_f32(buf, sizeof buf, t);
+
+    // Single load + dispatch. ~0.4 µs at 100 MHz.
+    tracer_write(&TEMP_PATH, &value);
+
+    TIM2->SR &= ~TIM_SR_UIF;
+}
+```
+
+What the macro emits, verbatim, into `.rodata`:
+
+```
+06 50 12 00                                ← outer PATH TLV: type=0x06, opt=PL=1, length=18
+   02 00 06 00 73 65 6E 73 6F 72           ← NAME "sensor"
+   02 00 04 00 74 65 6D 70                 ← NAME "temp"
+```
+
+22 bytes of flash. Zero RAM. Zero per-write allocation.
+
+### Recipe — N indexed slots, init-time registration
+
+When the path includes a runtime-derived index (an address-shift slice number, a peer-id), encode once at init and reuse the handle:
+
+```c
+#define N_SLICES  64
+
+// File scope — handles are filled in at init.
+static tracer_path_handle_t h_slice[N_SLICES];
+
+// Called once from main() before the DMA / capture loop starts.
+void publisher_init(void) {
+    for (size_t i = 0; i < N_SLICES; i++) {
+        char buf[40];
+        // sprintf is ALLOWED here — init runs once, code-size of one
+        // sprintf call amortizes across the program lifetime.
+        snprintf(buf, sizeof buf, "/adc/raw[%zu]", i);
+        h_slice[i] = tracer_path_register(buf);
+        // h_slice[i] now points at a heap-allocated PATH TLV that
+        // will not be freed for the rest of the node's life.
+    }
+}
+
+// DMA-half-complete ISR — has to be fast and ISR-safe.
+void dma_half_complete_irq(const uint8_t *bytes, size_t len, uint64_t ts_ns) {
+    size_t slice = (current_offset / SLICE_SIZE) % N_SLICES;
+    tlv_t v = tlv_view_into_with_ts(bytes, len, &dma_segment, ts_ns);
+    tracer_write(h_slice[slice], &v);    // pointer load + dispatch; no string ops
+}
+```
+
+The trade: a one-time RAM cost of ~1.6 KB (64 PATH TLVs averaging ~25 bytes each + bookkeeping) buys ISR-safe publishing of 64 distinct slot paths.
+
+### Recipe — indexed-handle helper (when registering N is too costly)
+
+For very large N (e.g., 4096 slices) where individual registration burns RAM, the indexed-handle form encodes the **base path** once and supplies the index at write time. The implementation expands `[i]` into the dispatch key on the fly without allocating:
+
+```c
+// One PATH TLV for the base name.
+static const tracer_path_t ADC_RAW = TRACER_PATH("/adc/raw");
+
+void dma_half_complete_irq(...) {
+    for (size_t i = 0; i < n_slices_in_buf; i++) {
+        tlv_t v = tlv_view_into_with_ts(bytes + i*S, S, &dma_segment, ts_ns);
+        tracer_write_indexed(&ADC_RAW, /*index=*/i, &v);
+    }
+}
+```
+
+The router treats `tracer_write_indexed(&ADC_RAW, i, v)` as semantically equivalent to a write to `/adc/raw[i]`. From the subscriber's perspective the wire bytes are identical.
+
+### What this buys, concretely
+
+For a representative Cortex-M4 RC-car build (1 transport, no GUI, 32 KB flash budget):
+
+| Variant | Flash overhead | RAM overhead | Per-write cost | ISR-safe? |
+| ---- | ---- | ---- | ---- | ---- |
+| String-form `tracer_write_str(...)` | +5 KB (`snprintf` etc.) | small heap alloc per write | 1–10 µs | No |
+| Build-time `TRACER_PATH(...)` literal | +bytes of the path | none | ~0.4 µs | Yes |
+| Init-registered handle | +bytes of the path | one PATH TLV per path | ~0.4 µs | Yes |
+| Indexed-handle on a base path | +bytes of the base path | none | ~0.5 µs | Yes |
+
+### When the string form is still the right answer
+
+- Configuration tools / CLIs (`tracer-top`, REPLs) where path is a runtime user input — the user typed a string; parse it.
+- Glue code on hosted platforms where the publisher runs at human-speed (a few writes per second from a worker thread). The string form is more readable; the cost is unmeasurable.
+- Tests, where the verbosity is welcome and code size is irrelevant.
+
+The string-form entry point is implementation-defined and OPTIONAL ([../spec/v1.md](../spec/v1.md) §3.1.4). A bare-metal build MAY omit it entirely; an ESP32 build with the IDE-companion module loaded will include it.
+
+### Don't conflate this with serialization
+
+The static-path optimization is purely about **the address of a vertex**, not about the value being written. The value TLV (`VALUE`, a user-range record, an MMIO view) is constructed per-write and follows the rules earlier in this document. What changed is only that the path side of `(path, value)` no longer requires runtime string work.

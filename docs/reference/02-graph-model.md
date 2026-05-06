@@ -41,6 +41,27 @@ The protocol stack has six distinct layers of concern, numbered bottom-up from m
 
 The substrate layers (L0 and L1) are what give libtracer zero-copy reach. A TLV in flight or at rest is **a view tree over real memory**, not a decoded message struct. The wire bytes IS the in-memory representation IS the graph node — across boundaries, the trailer attaches/strips ([01-data-format.md](01-data-format.md)) but the payload bytes are invariant.
 
+```mermaid
+flowchart BT
+    L0["L0 — Memory substrate<br/><i>real bytes: heap, MMIO, DMA, pbuf, pool</i>"]
+    L1["L1 — Views and ownership<br/><i>refcounted segments, ropes, TLV-as-cast</i>"]
+    L2["L2 — Frame envelope<br/><i>header + payload + optional trailer</i>"]
+    L3["L3 — TLV semantics<br/><i>type code, opt.PL recursion</i>"]
+    L4["L4 — Graph endpoint logic<br/><i>vertices, paths, subscriptions, bridges</i>"]
+    L5["L5 — Application semantics<br/><i>what the bytes mean</i>"]
+    L0 -- "alloc / release / cache hooks" --> L1
+    L1 -- "view_as_tlv (zero-copy cast)" --> L2
+    L2 -- "type byte + opt.PL" --> L3
+    L3 -- "TLV registry: VALUE, PATH, ROUTER…" --> L4
+    L4 -- "read / write / await on handle" --> L5
+    style L0 fill:#fef3c7,stroke:#92400e
+    style L1 fill:#fef3c7,stroke:#92400e
+    style L2 fill:#dbeafe,stroke:#1e40af
+    style L3 fill:#dbeafe,stroke:#1e40af
+    style L4 fill:#dcfce7,stroke:#166534
+    style L5 fill:#fce7f3,stroke:#9f1239
+```
+
 The `type` byte sits at the L2 / L3 boundary. It is **carried** in the wire header (so a router can decide whether to recurse without parsing payload) but its **meaning** is L3. A pure-framing parser that just dispatches by `length + CRC` could ignore `type` entirely; a TLV-aware router uses `type` (and `opt.PL`) to decide whether to walk into nested children.
 
 Priority is **NOT** an L2 concern. An earlier design carried priority bits in `opt`; that was wrong — priority is transport-time and per-link, not coherent across the network. A router that wants priority-aware dispatch reads `:settings.priority` once per subscription (L4) and caches it. See [01-data-format.md](01-data-format.md) §why no priority bits.
@@ -164,6 +185,41 @@ The same iterative pattern (recurse on `PL=1`, bound depth at 32) applies to bot
 This invariant is testable: construct a view tree by parsing wire bytes, mutate it, serialize, and compare to the wire-bytes equivalent constructed from scratch. The reference implementation has `tests/test_substrate_invariant.c` exercising this in week 1 of [../plans/02-roadmap-weeks-1-to-8.md](../plans/02-roadmap-weeks-1-to-8.md).
 
 A second-language implementation that fails this invariant is **not conforming**, regardless of whether its wire output is otherwise valid.
+
+---
+
+## Dispatch keyed on canonical PATH TLV bytes
+
+This is the structural rule that lets [03-addressing.md](03-addressing.md) §static path handles work. The graph runtime's vertex map is **keyed on the bytes of the PATH TLV's payload**, not on the string form of the path:
+
+- A vertex registered as `/sensor/temp` lives in the map at the key whose bytes are the canonical PATH TLV payload `NAME("sensor") + NAME("temp")`.
+- A write whose path argument is a build-time `.rodata` PATH TLV byte literal hashes / compares against that same key — no string is involved at any point.
+- A write whose path argument is the equivalent string `"sensor/temp"` is canonicalized into the same PATH TLV bytes once (by the slow-path string entry, if the implementation provides one) and then dispatched against the same key.
+
+**Implication.** Two paths that name the same vertex MUST canonicalize to byte-identical PATH TLV payload bytes. The canonicalization rules in [03-addressing.md](03-addressing.md) §path canonicalization are the spec for this; conformance test vectors at `tests/conformance/vectors/v1/path_canonical/` check byte equality.
+
+```mermaid
+flowchart LR
+    BL["build-time literal<br/>.rodata PATH TLV<br/>(handle = &bytes, len)"]
+    IR["init-time registered<br/>heap PATH TLV<br/>(handle = pointer)"]
+    SR["string-form path<br/>(slow path only)"]
+    CB["canonical PATH TLV bytes"]
+    DT["dispatch table<br/>(byte-equality key)"]
+    V[/"vertex at /sensor/temp"/]
+    BL -- "no parse, no alloc" --> CB
+    IR -- "validated once at init" --> CB
+    SR -- "parse + canonicalize<br/>(P0 may omit)" --> CB
+    CB --> DT
+    DT --> V
+    style BL fill:#dcfce7,stroke:#166534
+    style IR fill:#dcfce7,stroke:#166534
+    style SR fill:#fef3c7,stroke:#92400e
+    style DT fill:#dbeafe,stroke:#1e40af
+```
+
+**Why this matters at L4.** The dispatch table is a hashmap (or radix tree, or whatever the implementation uses) whose key is the PATH TLV's payload bytes. Insertion, lookup, and removal all see those bytes — never a parsed string. This is what makes path-handle dispatch O(1) on the hot path: the handle already holds the bytes that the dispatch table is indexed by. There is no resolution step at all, just a hash + memcmp.
+
+The string-form entry point is a courtesy for hosts that don't care about µs-class hot paths. On the wire, in storage, and through the dispatcher, **paths are PATH TLV bytes**.
 
 ---
 
@@ -368,34 +424,24 @@ When the bare data TLV is then bridged out again to another transport:
 
 ### A worked sequence
 
-```
-                            Wire on CAN              Graph on Linux brain        Wire on TCP
-Sender (STM32):
-  emits ROUTER{origin=A, ts=T0, hop=1, ..., data=VALUE{...}}
-  ────────────────────────────────────────►
-                            (CAN frames carrying the ROUTER wrapping)
-                                                     │
-                            Bridge ingests, checks recent-set, NOT seen.
-                            Strips ROUTER. Stores VALUE{...} at /can-bridge/X.
-                            Records (A, T0, hop=1) in metadata.
-                                                     │
-                                                     ▼
-                                             Subscriber on Linux reads
-                                             /can-bridge/X → VALUE{...}
-                                             (no ROUTER visible)
-                                                     │
-                                             ALSO subscribed by remote ESP32
-                                             via TCP. Bridge re-emits:
-                                                     │
-                                                     ▼
-                                             ROUTER{origin=A, ts=T0, hop=2, ..., data=VALUE{...}}
-                                             ────────────────────────────►
-                                                                          (TCP carrying the ROUTER wrapping)
-                                                                          │
-                                                                          ESP32 bridge ingests.
-                                                                          (A, T0) NOT in its recent-set.
-                                                                          Strips ROUTER. Stores at
-                                                                          /peer/linux-brain/can-bridge/X.
+```mermaid
+sequenceDiagram
+    autonumber
+    participant STM as STM32 sender
+    participant CAN as CAN bus
+    participant LB as Linux bridge
+    participant LSub as Linux subscriber
+    participant TCP as TCP link
+    participant ESP as ESP32 bridge
+
+    STM->>CAN: ROUTER{origin=A, ts=T0, hop=1, data=VALUE}
+    CAN->>LB: deliver wrapped TLV
+    Note over LB: recent-set check<br/>(A, T0) NOT seen<br/>add → strip ROUTER<br/>store VALUE at /can-bridge/X
+    LB->>LSub: deliver bare VALUE (no ROUTER)
+    Note over LB: also subscribed by ESP32 via TCP<br/>look up (A, T0, hop=1)<br/>wrap fresh ROUTER (hop=2)
+    LB->>TCP: ROUTER{origin=A, ts=T0, hop=2, data=VALUE}
+    TCP->>ESP: deliver wrapped TLV
+    Note over ESP: recent-set check<br/>(A, T0) NOT seen<br/>add → strip ROUTER<br/>store VALUE at /peer/linux-brain/can-bridge/X
 ```
 
 If the ESP32 then bridges back to a different CAN bus that the original sender STM32 also listens on (cycle), the STM32's bridge would receive the wrapped TLV, look up `(A, T0)` in its recent-set, find it (because A is the STM32 itself), and drop. **Cycle terminates.**

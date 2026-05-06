@@ -212,6 +212,36 @@ Monitor subscribes:
 
 A wildcard subscription on `/peer/**` aggregates everything from every robot into the monitor's recorder. Conformance: P1 on each robot, P2 on the monitor.
 
+### Bridge dispatch end-to-end
+
+The full path of one bridged write — emphasizing that **every dispatch step uses a path handle**, no string parsing happens on the hot path:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as App on STM32
+    participant TxA as transport_can (egress)
+    participant CAN as CAN bus
+    participant RxB as transport_can (ingress)
+    participant DT as Bridge dispatcher<br/>(PATH-TLV-keyed)
+    participant Sub as Local subscriber
+
+    Note over App: path handle h_wheel<br/>= &.rodata PATH TLV<br/>for "/wheel/left"
+    App->>TxA: write(h_wheel, VALUE)
+    Note over TxA: wrap ROUTER<br/>emit on CAN (hop=1)
+    TxA->>CAN: framed bytes
+    CAN->>RxB: framed bytes
+    Note over RxB: parse frame<br/>extract ROUTER<br/>recent-set check (A, T0)<br/>strip ROUTER → bare VALUE
+    RxB->>DT: dispatch(h_proxy, VALUE)
+    Note over DT: h_proxy = pre-bound handle<br/>for /can-bridge/wheel/left<br/>(allocated at mount time,<br/>not per-write)
+    DT->>Sub: deliver(VALUE)
+    Note over Sub: subscriber holds<br/>its own .rodata handle<br/>for /can-bridge/wheel/left;<br/>byte-equality match
+```
+
+Step 6 is the key one: the bridge's dispatcher holds a **pre-allocated path handle** for each bridge proxy vertex. When the bridge mount is created (via `[[bridge]] mount = "/can-bridge"`), the implementation walks the configured proxy paths and registers handles for each — exactly once, at config time. After that, every CAN frame that arrives feeds into a dispatch keyed on those bytes; no string is parsed on the hot path.
+
+This generalizes: any vertex that routinely receives or emits — every bridge proxy, every periodic publisher, every wildcard subscription's matched-set member — has a handle allocated at the time it becomes addressable, not at the time of each operation.
+
 ### Mesh of robots with no central node (cycles)
 
 ```
@@ -246,11 +276,12 @@ Each router is a host with `transport_tcp` (LAN) + `transport_quic` (WAN). Sites
 
 ### Path resolution is local
 
-Every `tracer_read` / `tracer_write` / `tracer_await` call resolves against the **local** DAG. If the path is a bridge proxy, the bridge handles forwarding transparently. The application does NOT:
+Every `tracer_read` / `tracer_write` / `tracer_await` call resolves against the **local** DAG using a **path handle** (per [03-addressing.md](03-addressing.md) §static path handles): a build-time `.rodata` PATH TLV literal or an init-time-registered handle, never a string parsed on the hot path. If the path is a bridge proxy, the bridge handles forwarding transparently. The application does NOT:
 
 - Choose a transport for a write.
 - Know the network topology.
 - Distinguish "is this path local or remote?" (it MAY introspect via `:transport` field in the proxy's schema, but isn't required to).
+- Format strings to dispatch to a bridge proxy. The proxy's PATH TLV is encoded once when the bridge mount is created; subsequent writes pass the handle.
 
 ### Failure surfaces locally
 

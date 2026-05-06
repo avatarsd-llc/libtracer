@@ -406,3 +406,111 @@ A subscriber's view of errors is via:
 - **STATUS write** to `/path:status` for asynchronous events (deadline, liveness, transport-down). Subscribers can subscribe to `/path:status` if they want async error notification; the field is in every vertex's schema.
 
 The `:status` subscription channel is a normal subscription using the normal subscribe-via-field-write flow — no special API.
+
+---
+
+## The static-path write flow
+
+> **Normative reference**: [../spec/v1.md](../spec/v1.md) §3.1.4.
+> **See also**: [03-addressing.md](03-addressing.md) §static path handles; [05-protocol-tlvs.md](05-protocol-tlvs.md) §static / pre-encoded PATH TLV.
+
+This flow is the MCU-friendly variant of `write`. The path's PATH TLV is encoded once — at build time or at init — and the hot path operates on a path **handle** (pointer or small index) rather than a string. There is no `snprintf`, no allocation, and no parser walk on the publisher side.
+
+### Init-time path encoding
+
+```mermaid
+sequenceDiagram
+    participant App as Application init
+    participant Reg as Path registry
+    participant Mem as Long-lived segment
+
+    Note over App,Mem: Once at startup
+    App->>Reg: tracer_path_register("/sensor/temp")
+    Reg->>Reg: validate per addressing rules<br/>(segments, length caps, reserved chars)
+    Reg->>Mem: allocate PATH TLV bytes once
+    Reg->>App: path handle h_sensor_temp
+
+    Note over App,Mem: For build-time literals,<br/>this entire phase is skipped —<br/>the PATH TLV is in .rodata already.
+```
+
+Build-time literals skip registration entirely: the macro `TRACER_PATH("/sensor/temp")` expands to a `static const` byte array, and the handle is a pointer to that array.
+
+### Hot-path write through a path handle
+
+```mermaid
+sequenceDiagram
+    participant Pub as Publisher (ISR / sample loop)
+    participant Hnd as Path handle
+    participant Disp as Router dispatch
+    participant Vtx as Vertex
+    participant S1 as Subscriber 1
+    participant S2 as Subscriber 2
+
+    Pub->>Hnd: load handle (1 memory read)
+    Pub->>Disp: tracer_write(handle, value_tlv)
+    Note over Disp: dispatch keyed on PATH bytes<br/>(no string parse, no alloc)
+    Disp->>Vtx: store as last-known-value
+    Disp->>S1: refcount += 1, enqueue view
+    Disp->>S2: refcount += 1, enqueue view
+    Disp-->>Pub: OK (synchronous return)
+
+    Note over S1,S2: subscribers consume and<br/>release independently
+```
+
+Compare to the string-form write flow at the top of this document. The bytes that flow through the router are identical. The only difference is **where the path bytes came from** — a pre-encoded blob vs. a freshly-parsed string.
+
+### Cross-mode equivalence
+
+A subscriber registered against `/sensor/temp` (string form) MUST receive deliveries from a publisher writing through a static handle for `/sensor/temp`, and vice-versa. The router's dispatch table is keyed on canonical PATH TLV bytes; both forms produce the same key.
+
+```mermaid
+flowchart TB
+  subgraph PubBuild["Publisher (build-time path)"]
+    P1[".rodata PATH TLV<br/>for /sensor/temp"]
+    P2["tracer_write(P1, value)"]
+    P1 --> P2
+  end
+
+  subgraph PubInit["Publisher (init-registered path)"]
+    Q1["heap PATH TLV<br/>for /sensor/temp<br/>(allocated once at init)"]
+    Q2["tracer_write(Q1, value)"]
+    Q1 --> Q2
+  end
+
+  subgraph PubStr["Publisher (string-form, hosted)"]
+    R1["tracer_write_str(&quot;/sensor/temp&quot;, value)"]
+    R2["parse + canonicalize"]
+    R1 --> R2
+  end
+
+  subgraph Router["Router dispatch"]
+    KEY["dispatch table key:<br/>canonical PATH TLV bytes"]
+  end
+
+  P2 --> KEY
+  Q2 --> KEY
+  R2 --> KEY
+
+  KEY --> Vtx["/sensor/temp vertex<br/>(same target for all three)"]
+```
+
+This diagram is the assertion behind [../spec/v1.md](../spec/v1.md) §3.1.1 condition (1): byte-equivalence on the wire after canonicalization.
+
+### Performance envelope
+
+| Mode | Per-write cost (Cortex-M4 @ 100 MHz, ballpark) |
+| ---- | ---- |
+| Build-time literal handle | ~10 cycles to load handle + ~30 cycles dispatch lookup = **~0.4 µs** |
+| Init-registered handle | same as above (the handle's bytes live in heap, not flash, but access pattern is identical) |
+| String-form (`snprintf` + parse) | 1–10 µs depending on path depth and libc; **NOT ISR-safe** |
+
+The static-path flow is the only one usable from a hard-real-time ISR. The string-form is fine on hosted platforms where the publisher runs in a worker thread.
+
+### Errors specific to the static flow
+
+A static-handle write can return:
+
+- `ERROR=NOT_FOUND` — the handle is well-formed but the target vertex was unbound (e.g., a transport module that owned the vertex was unloaded). The handle's bytes remain valid; only the resolution failed.
+- `ERROR=PATH_IN_USE` — only at init-time `tracer_path_register`, never on the hot path. A handle that survives init has been validated.
+
+There is no `INVALID_PATH` error on the hot path: invalidity is detected exclusively at encode time. This is the practical payoff of paying for validation once.

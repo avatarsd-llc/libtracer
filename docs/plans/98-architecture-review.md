@@ -12,7 +12,7 @@ The design is internally consistent, intellectually honest about what it skips (
 
 But the architecture has **five blockers** that prevent it from being a serious replacement for Zenoh / Iceoryx2 / DDS in production deployments above a few thousand vertices or a few hundred MB/s:
 
-1. **Path resolution cost is unspecified** — every read/write/subscribe walks a UTF-8 string against a tree. The spec doesn't mandate interning or a hash-on-write tokenization. At the rates the design claims to support, naïve path resolution becomes the bottleneck before the wire format even gets a chance to be slow.
+1. ~~**Path resolution cost is unspecified**~~ **RESOLVED 2026-05-06** — [../spec/v1.md](../spec/v1.md) §3.1 now mandates path handles. Hot-path API takes a handle (a pointer to a pre-encoded PATH TLV in `.rodata` or an init-time-allocated heap segment); dispatcher's vertex map is keyed on canonical PATH TLV bytes ([../reference/02-graph-model.md](../reference/02-graph-model.md) §dispatch keyed on canonical PATH TLV bytes). No `snprintf`, no parser walk, no allocation per write. P0 builds MAY omit the string-form entry entirely. Original concern: every read/write/subscribe walked a UTF-8 string against a tree, which would have dominated the latency budget at the documented rates.
 2. **Address-shift slicing imposes O(N) dispatch overhead per logical message** at the L4 layer — even though L0/L1 are zero-copy, sending a 1 GB frame as 16384 × 64 KiB slices means 16384 path resolutions, 16384 wildcard match passes, and 16384 entries churning through the bridge dedup recent-set. The bandwidth claim survives; the messages-per-second claim does not.
 3. **Refcount memory ordering is correct but unsharded** — fan-out under contention reduces to a single hot cache line per segment. At 4+ subscribers cloning a hot vertex's view from independent CPU cores, the contended atomic dominates the latency budget at the µs scale.
 4. **Bridge dedup recent-set sizing is fundamentally a function of network rate × delivery window**, not of "expected_max_fanout × publish_rate" as currently documented — and degrades badly under bursts. Eviction on bursts is when cycle storms happen, not when the network is calm.
@@ -433,8 +433,8 @@ Sorted by what blocks shipping a v0.1 anyone other than the maintainer would ado
 
 ### P0 — must address before v0.1 freeze
 
-1. **Document path interning convention** (~1 page in 03-addressing.md).
-2. **Document the latency contract** (1 paragraph in 00-overview.md plus an appendix listing the assumptions: interning, lock-free queues, spinning subscribers).
+1. ~~**Document path interning convention**~~ **DONE 2026-05-06** — addressed via static path handles in [../spec/v1.md](../spec/v1.md) §3.1, [../reference/03-addressing.md](../reference/03-addressing.md) §static path handles, and the dispatch-keyed-on-PATH-TLV-bytes rule in [../reference/02-graph-model.md](../reference/02-graph-model.md). Stronger than the original ask: not just interning convention but a normative MUST.
+2. **Document the latency contract** (1 paragraph in 00-overview.md plus an appendix listing the assumptions: handle dispatch, lock-free queues, spinning subscribers).
 3. **Document the manifest pattern for address-shift groups** to amortize dispatch and dedup cost.
 4. **Resolve and specify lwIP pbuf and DMA cache OPEN QUESTIONS** in 09-memory-substrate.md, not just listed as open.
 5. **Specify per-subscriber overflow behavior** (`:settings.on_overrun`).

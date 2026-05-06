@@ -22,6 +22,7 @@ A conforming **implementation** SHALL:
 4. Reserve type codes per [05-protocol-tlvs.md](05-protocol-tlvs.md) and treat unknown codes safely.
 5. Maintain the same-substrate invariant of [02-graph-model.md](02-graph-model.md): any sequence of mix/split/concat operations on the in-memory view tree, followed by serialization, MUST produce the same wire bytes as the equivalent fresh-buffer construction.
 6. Drop already-seen TLVs by `(origin-peer-id, timestamp)` per [07-host-embedding.md](07-host-embedding.md) §cycle handling, when acting as a bridge.
+7. Provide path handles per [../spec/v1.md](../spec/v1.md) §3.1: encode each address used more than once into a PATH TLV exactly once (build-time literal or init-time registration); reuse the encoded bytes on every read / write / await; do not require string parsing or allocation on the hot path.
 
 A conforming **node** MAY load any subset of transport, discovery, security, and executor modules. A node loading **zero** transport modules is still conforming — it is an in-process-only graph. A node loading **multiple** transport modules SHALL implement the bridge logic of [07-host-embedding.md](07-host-embedding.md) §bridges.
 
@@ -42,7 +43,7 @@ Higher profiles are strict supersets. A conformance test suite (week 4 of [../pl
 
 ---
 
-## The five load-bearing claims
+## The six load-bearing claims
 
 Any conforming implementation must honor these. They are what distinguishes libtracer from existing protocols (see [../plans/01-comparison-to-existing-protocols.md](../plans/01-comparison-to-existing-protocols.md) for the comparison).
 
@@ -55,6 +56,8 @@ Any conforming implementation must honor these. They are what distinguishes libt
 4. **Bridges are core.** Any host with two transport modules loaded is a bridge. The "one address space across CAN + IP + RDMA" claim is structural, not opt-in. From a subscriber's API view, transport choice is invisible. ([07-host-embedding.md](07-host-embedding.md))
 
 5. **The graph imposes no shape on user data.** An endpoint is a name attached to a memory view. The protocol makes no claim about what that memory contains, how it's chunked, or how endpoints are arranged. A single boolean fits in one byte; a 10-GB camera frame fits across `ep[0..N]` slices; a memory-mapped GPIO register fits as a one-byte view backed by `mmio_base + offset`. ([06-user-data-packing.md](06-user-data-packing.md))
+
+6. **Paths are encoded once, used many times.** A vertex address is encoded into a PATH TLV at build time (a `.rodata` literal) or at node init (one allocation), and reused thereafter. The hot-path API takes a path **handle**, not a string — no `snprintf`, no parser walk, no allocation per write. This is what makes a 16 KB Cortex-M0 a first-class libtracer node and what lets a publisher write from inside an ISR. ([../spec/v1.md](../spec/v1.md) §3.1, [03-addressing.md](03-addressing.md), [05-protocol-tlvs.md](05-protocol-tlvs.md))
 
 ---
 
@@ -79,7 +82,61 @@ Each adjacent pair of layers communicates through a small contract:
 - **L3 ↔ L4**: the protocol-defined TLV registry (SUBSCRIBER, PATH, POINT, ROUTER, …) and what each means at the graph layer.
 - **L4 ↔ L5**: the path / read / write / await API and the field-write control surface.
 
+```mermaid
+flowchart TB
+  L5["L5 — Application semantics<br/>(what bytes inside VALUE mean)"]
+  L4["L4 — Graph endpoint logic<br/>vertices, edges, paths, fanout, QoS, ACL, bridges"]
+  L3["L3 — TLV semantics<br/>type byte, structured (PL=1) recursion"]
+  L2["L2 — Frame envelope<br/>header + payload + trailer; CRC; wire-time TS"]
+  L1["L1 — Views and ownership<br/>refcounted view tree, rope, TLV-as-cast"]
+  L0["L0 — Memory substrate<br/>heap, pool, MMIO, DMA, pbuf, skbuff, FIFO"]
+
+  L5 -->|read/write/await + path handle| L4
+  L4 -->|PATH, SUBSCRIBER, ROUTER...| L3
+  L3 -->|type byte + opt.PL| L2
+  L2 -->|view-cast| L1
+  L1 -->|alloc/release/cache hooks| L0
+
+  classDef applic fill:#fdf,stroke:#333
+  classDef graph  fill:#dfd,stroke:#333
+  classDef tlv    fill:#dff,stroke:#333
+  classDef wire   fill:#ddf,stroke:#333
+  classDef view   fill:#ffd,stroke:#333
+  classDef mem    fill:#fdd,stroke:#333
+  class L5 applic
+  class L4 graph
+  class L3 tlv
+  class L2 wire
+  class L1 view
+  class L0 mem
+```
+
 The wire format (L2) carries the `type` byte and `opt.PL` at fixed positions so routers can decide whether to recurse into nested children without parsing payload. The `type` byte's meaning is L3; it sits in the L2 header for routing convenience. Priority is **not** an L2 concern — it is cached at L4 from `:settings.priority`. The L2 `opt` byte's other bits select wire-format variants (`LL` length width, `CW` CRC width, `TF` TS form) — these are framing choices, not semantic information.
+
+### Static path handles in the layer model
+
+The path-handle mechanism (load-bearing claim 6) sits at the **L4 ↔ L5 boundary**: applications hold handles, the graph layer consumes them. Encoding a path into a PATH TLV is an L3 act; storing the result in `.rodata` or a long-lived L0 segment is an L0/L1 act; reusing the bytes on every write keeps L4 dispatch keyed on canonical PATH bytes.
+
+```mermaid
+flowchart LR
+  subgraph BuildOrInit["Once — build time or node init"]
+    SRC["Path string<br/>&quot;/sensor/temp&quot;"]
+    ENC["Encode &amp; validate<br/>(L3 PATH TLV layout)"]
+    ROD[".rodata / heap segment<br/>(L0 backing memory)"]
+    SRC --> ENC --> ROD
+  end
+
+  subgraph Hot["Hot path — once per write"]
+    HND["L4 path handle<br/>(pointer into segment)"]
+    API["L5 calls tracer_write(handle, value)"]
+    DISP["L4 router dispatch<br/>(byte-keyed on PATH bytes)"]
+    HND --> API --> DISP
+  end
+
+  ROD -.points to.-> HND
+```
+
+The diagram is the visual form of [../spec/v1.md](../spec/v1.md) §3.1: encoding is an init-phase concern, dispatch is hot-path-clean, and the bytes that flow through L4's dispatch table are the same regardless of whether the handle was a build-time literal or a runtime registration.
 
 ### TLV-at-rest = TLV-in-transit + trailer
 
