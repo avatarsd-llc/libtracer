@@ -266,7 +266,7 @@ flowchart LR
 
 The encoder's invariants:
 
-- **Outer header** (4 bytes, default `LL=0`): `06 50 LL_lo LL_hi`. `0x50` = `PL=1` (bit 6) only, no TS, no CR, `LL=0`.
+- **Outer header** (4 bytes, default `LL=0`): `06 40 LL_lo LL_hi`. `0x40` = `PL=1` (bit 6) only, no TS, no CR, `LL=0`. (Earlier drafts of this section showed `0x50` for "PL only" — that was a bug; `0x50` = PL+CR per [01-data-format.md](01-data-format.md) §options bitfield.)
 - **`length`** = sum of child NAME TLV total sizes. With no inner trailers, each NAME costs `4 + len(segment_bytes)`.
 - **Each NAME child**: `02 00 SS_lo SS_hi <segment_bytes>`, where `SS` is the segment's UTF-8 byte length (`1..64`).
 - **No inner trailers.** Children inside a PATH carry no TS and no CRC; the outer (when in transit) covers everything.
@@ -277,7 +277,7 @@ A path that resolves to more than 32 segments, has a single segment longer than 
 #### Byte literal — `/sensor/temp`
 
 ```
-06 50 12 00     ← outer: type=PATH(0x06), opt=PL=1 (0x50), length=18 (u16 LE)
+06 40 12 00     ← outer: type=PATH(0x06), opt=PL=1 (0x40), length=18 (u16 LE)
    02 00 06 00 73 65 6E 73 6F 72        ← NAME "sensor" (10 bytes)
    02 00 04 00 74 65 6D 70              ← NAME "temp"   (8 bytes)
 ```
@@ -287,7 +287,7 @@ A path that resolves to more than 32 segments, has a single segment longer than 
 #### Byte literal — `/camera/frame`
 
 ```
-06 50 13 00     ← outer: length=19
+06 40 13 00     ← outer: length=19 (opt=0x40 = PL only)
    02 00 06 00 63 61 6D 65 72 61        ← NAME "camera" (10 bytes)
    02 00 05 00 66 72 61 6D 65           ← NAME "frame"  (9 bytes)
 ```

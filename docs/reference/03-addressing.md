@@ -7,21 +7,25 @@
 
 ## Path syntax
 
-EBNF (using ABNF-like notation):
+EBNF (using ABNF-like notation). Two non-terminals: `path` is the **concrete** form used as the argument to `read` / `write` / `await`; `subscriber-path` is the **wildcard-admitting** form valid only inside SUBSCRIBER's PATH child.
 
 ```
-path        = root *segment-sep [ field-sep field-chain ]
-root        = "/"
-segment-sep = "/"
-field-sep   = ":"
-segment     = name [ index ]
-name        = 1*64 ( UTF8-codepoint - reserved )
-index       = "[" ( 1*5DIGIT / "*" / "" ) "]"
-field-chain = field *( "." field )
-field       = name [ index ]
-reserved    = "/" / ":" / "." / "[" / "]" / "*" / "?"
-DIGIT       = %x30-39
+path             = root [ segment *( segment-sep segment ) ] [ field-sep field-chain ]
+subscriber-path  = root [ wild-segment *( segment-sep wild-segment ) ] [ field-sep field-chain ]
+root             = "/"
+segment-sep      = "/"
+field-sep        = ":"
+segment          = name [ index ]
+wild-segment     = segment / "*" / "**"
+name             = 1*64 ( UTF8-codepoint - reserved )
+index            = "[" ( 1*5DIGIT / "*" / "" ) "]"
+field-chain      = field *( "." field )
+field            = name [ index ]
+reserved         = "/" / ":" / "." / "[" / "]" / "*" / "?"
+DIGIT            = %x30-39
 ```
+
+Wildcard segments (`*`, `**`) and the wildcard index (`[*]`) appear ONLY inside `subscriber-path`. `read`, `write`, and `await` take the strict `path` form and MUST reject any wildcard with `ERROR=INVALID_PATH`.
 
 - All names are UTF-8, case-sensitive, **case-folded NOT performed** (Unicode normalization is the application's responsibility — `/Sensor/temp` and `/sensor/temp` are different paths).
 - Maximum **single-name** length: 64 bytes (UTF-8 encoded).
@@ -277,7 +281,7 @@ flowchart LR
   subgraph Build["Build time"]
     S["Source path string<br/>&quot;/sensor/temp&quot;"]
     M["TRACER_PATH(&quot;/sensor/temp&quot;)<br/>macro / codegen"]
-    R[".rodata bytes:<br/>06 50 12 00 ... NAME &quot;sensor&quot; ... NAME &quot;temp&quot;"]
+    R[".rodata bytes:<br/>06 40 12 00 ... NAME &quot;sensor&quot; ... NAME &quot;temp&quot;"]
     S --> M --> R
   end
 

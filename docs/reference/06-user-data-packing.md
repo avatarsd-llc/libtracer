@@ -500,7 +500,7 @@ void tim2_irq_handler(void) {       // hard-real-time ISR
 What the macro emits, verbatim, into `.rodata`:
 
 ```
-06 50 12 00                                ← outer PATH TLV: type=0x06, opt=PL=1, length=18
+06 40 12 00                                ← outer PATH TLV: type=0x06, opt=PL=1 (0x40), length=18
    02 00 06 00 73 65 6E 73 6F 72           ← NAME "sensor"
    02 00 04 00 74 65 6D 70                 ← NAME "temp"
 ```
