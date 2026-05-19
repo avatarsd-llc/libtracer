@@ -83,6 +83,8 @@ R   Reserved (bit 0). MUST be zero. Receivers MUST reject non-zero as INVALID.
 
 Two reserved bits remain (bits 7 and 0) for unforeseen L2 needs.
 
+**Reserved bits are committed for the lifetime of v0.1.** They are not "reserved for v0.1-minor evolution"; they are forever-frozen. A v0.1 receiver that observes a reserved bit set MUST reject the TLV as `INVALID`, and the spec MUST NOT allocate them in any v0.1.x. Forward-compatible extensions live exclusively in the type-code registry (`0x0E – 0x7F`); incompatible changes live at the discovery layer per §versioning. This makes it safe for receivers to harden the reserved-bit check at compile time without anticipating future thaw.
+
 ### Default vs extended forms
 
 The default header is **4 bytes**. A typical small TLV has no trailer (4-byte total) or a small trailer (CRC-16 only, 6 bytes total). The extended forms (`LL=1`, full TS, full CRC) are opt-in and pay only for what they buy.
