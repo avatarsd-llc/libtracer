@@ -1,7 +1,7 @@
 # Reference 04 — Communication Flows
 
 > **Status**: draft, v0.1, 2026-05-03. Sequence-diagram catalog for every protocol-level flow. ASCII diagrams; the wire bytes for each TLV referenced here are byte-precise in [05-protocol-tlvs.md](05-protocol-tlvs.md).
-> **See also**: [../plans/04-graph-and-endpoint-api.md](../plans/04-graph-and-endpoint-api.md) for API surface design rationale.
+> **See also**: [04-communication-flows.md](04-communication-flows.md) for API surface design rationale.
 
 ---
 

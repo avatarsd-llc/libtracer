@@ -1,12 +1,12 @@
 # Reference 00 — Core Overview (the libtracer Standard)
 
-> **Status**: draft, v0.1, 2026-05-03. This is the standard. The plans (under [../plans/](../plans/)) describe how a specific implementation gets built; this document describes what *any* conforming implementation must do.
+> **Status**: draft, v0.1, 2026-05-03. This is the standard. This document describes what *any* conforming implementation must do; design rationale is recorded in [../../docs/adr/](../../docs/adr/) and git history.
 
 ---
 
 ## What this document is
 
-libtracer is a wire and addressing protocol for a **decentralized graph of endpoints**. Hosts publish and subscribe to **paths**; the underlying transport is whatever is loaded as a module (TCP, UDP, CAN, I²C, SHM, RDMA — all opt-in). The protocol is **language-agnostic**: the reference implementation is in C23 (per [../plans/02-roadmap-weeks-1-to-8.md](../plans/02-roadmap-weeks-1-to-8.md)), but any C++17, Rust, Zig, or Go implementation that honors this spec interoperates byte-for-byte.
+libtracer is a wire and addressing protocol for a **decentralized graph of endpoints**. Hosts publish and subscribe to **paths**; the underlying transport is whatever is loaded as a module (TCP, UDP, CAN, I²C, SHM, RDMA — all opt-in). The protocol is **language-agnostic**: the reference implementation is in C23, but any C++17, Rust, Zig, or Go implementation that honors this spec interoperates byte-for-byte.
 
 The remaining sections of this reference suite specify byte format, graph semantics, addressing, communication flows, protocol-defined TLVs, user-data packing, and how a host's local view embeds into the global network.
 
@@ -39,13 +39,13 @@ A conforming **TLV** SHALL fit in the header layout of [01-data-format.md](01-da
 | **P2 — bridge** | required + ≥2 transports + cycle-dedup | gateway between buses (CAN ↔ IP), edge router |
 | **P3 — full** | P2 + discovery + executor + security | production deployment |
 
-Higher profiles are strict supersets. A conformance test suite (week 4 of [../plans/02-roadmap-weeks-1-to-8.md](../plans/02-roadmap-weeks-1-to-8.md)) exercises P0 mandatorily; P1+ are exercised against the available transport modules.
+Higher profiles are strict supersets. A conformance test suite exercises P0 mandatorily; P1+ are exercised against the available transport modules.
 
 ---
 
 ## The six load-bearing claims
 
-Any conforming implementation must honor these. They are what distinguishes libtracer from existing protocols (see [../plans/01-comparison-to-existing-protocols.md](../plans/01-comparison-to-existing-protocols.md) for the comparison).
+Any conforming implementation must honor these. They are what distinguishes libtracer from existing protocols (see [../../README.md](../../README.md) for the comparison).
 
 1. **A TLV in memory IS a graph node IS the wire bytes.** No separate serialization layer. The in-memory representation is a tree of refcounted **views** over real backing memory. Mix/split/concat at the graph level rearranges views without touching bytes. Serialization is a walk of the view tree. ([02-graph-model.md](02-graph-model.md), [06-user-data-packing.md](06-user-data-packing.md))
 
@@ -167,9 +167,9 @@ This framing matters because the so-called "core" itself is a bundle of modules 
 
 The full module catalog — everything across L0..L5 — is in [10-module-catalog.md](10-module-catalog.md), with a pairing table that says which L0 backends pair with which L1 view modules pair with which transports.
 
-A node's footprint is the sum of its loaded modules. The reference implementation targets ≤ 16 KB stripped (required modules only) on `arm-none-eabi-gcc -std=c23 -Os` (sentinel test in week 4 of [../plans/02-roadmap-weeks-1-to-8.md](../plans/02-roadmap-weeks-1-to-8.md)). Adding `transport_tcp` brings ~5 KB on Linux / ~8 KB on Cortex-M (lwIP-dependent). A robot-fleet build pulling in TCP, UDP, mDNS, CAN, TLS lands in the 30–50 KB range; an RC-car build with only one UART transport stays under 25 KB.
+A node's footprint is the sum of its loaded modules. The reference implementation targets ≤ 16 KB stripped (required modules only) on `arm-none-eabi-gcc -std=c23 -Os` (guarded by a sentinel test). Adding `transport_tcp` brings ~5 KB on Linux / ~8 KB on Cortex-M (lwIP-dependent). A robot-fleet build pulling in TCP, UDP, mDNS, CAN, TLS lands in the 30–50 KB range; an RC-car build with only one UART transport stays under 25 KB.
 
-The module ABI itself is an **implementation** concern, not a protocol property — two implementations need not share a module ABI; they need to share the wire format, addressing scheme, and flows. See [../plans/05-modules-transport-and-discovery.md](../plans/05-modules-transport-and-discovery.md) §module ABI for the reference C ABI.
+The module ABI itself is an **implementation** concern, not a protocol property — two implementations need not share a module ABI; they need to share the wire format, addressing scheme, and flows. See [10-module-catalog.md](10-module-catalog.md) §module ABI for the reference C ABI.
 
 ---
 
@@ -190,7 +190,7 @@ The protocol itself is implementable in **any language** with:
 
 A pure-C++ port would be a thin layer (the C reference implementation already uses C++ headers in `tlv_vector.hpp` / `tlv_string.hpp` for the wrapper view types). A pure-Rust port is straightforward — `Bytes` from the `bytes` crate maps directly to libtracer's view + refcount; `tokio` or `mio` provides the run loop. A pure-Go port would lose the explicit refcount (Go has GC) but could use the same wire format and addressing.
 
-**The wire format and the addressing scheme — not the C ABI — are the standard.** A future spec audit at the end of the v0.1 milestones (per [../plans/02-roadmap-weeks-1-to-8.md](../plans/02-roadmap-weeks-1-to-8.md)) is the gate to declaring this reference suite "frozen for v0.1," at which point a second implementation in C++ or Rust becomes the conformance test.
+**The wire format and the addressing scheme — not the C ABI — are the standard.** A future spec audit at the end of the v0.1 milestones is the gate to declaring this reference suite "frozen for v0.1," at which point a second implementation in C++ or Rust becomes the conformance test.
 
 ---
 
@@ -224,8 +224,8 @@ For a router / bridge implementer: 02, 03, 04, 07 are mandatory; 06 is illustrat
 
 ## Out-of-scope for this reference suite
 
-- The C ABI of any specific implementation (header signatures, struct layouts beyond the packed wire header). See the implementation's own headers — for the reference C core, those land in `libtracer/core/` per week 4 of [../plans/02-roadmap-weeks-1-to-8.md](../plans/02-roadmap-weeks-1-to-8.md).
-- The module ABI (`transport_vtable_t`, etc.). See [../plans/05-modules-transport-and-discovery.md](../plans/05-modules-transport-and-discovery.md) §module ABI.
-- The configuration file format (TOML for bridges/discovery). See [../plans/05-modules-transport-and-discovery.md](../plans/05-modules-transport-and-discovery.md) §bridging configuration.
-- Build options and CMake toggles. See [../plans/02-roadmap-weeks-1-to-8.md](../plans/02-roadmap-weeks-1-to-8.md) week 1.
-- Cluster consensus, CRDTs, distributed transactions — explicit non-goals. See [../plans/04-graph-and-endpoint-api.md](../plans/04-graph-and-endpoint-api.md) §coherency.
+- The C ABI of any specific implementation (header signatures, struct layouts beyond the packed wire header). See the implementation's own headers — for the reference C core, those land in [../../core/](../../core/).
+- The module ABI (`transport_vtable_t`, etc.). See [10-module-catalog.md](10-module-catalog.md) §module ABI.
+- The configuration file format (TOML for bridges/discovery). See [10-module-catalog.md](10-module-catalog.md) §bridging configuration.
+- Build options and CMake toggles (defined with the `core/` rebuild).
+- Cluster consensus, CRDTs, distributed transactions — explicit non-goals. See [04-communication-flows.md](04-communication-flows.md) §coherency.

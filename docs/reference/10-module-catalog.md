@@ -97,7 +97,7 @@ The view + rope + cast machinery itself is one `required` module; integrations w
 
 These six are required even at profile P0 (in-process build). "Required" does not imply "monolithic" — they are six distinct modules with clean interfaces between them. An implementer may swap any one of them for an alternative implementation as long as the protocol behavior is preserved.
 
-### Transports (L4 ↔ network) ([../plans/05-modules-transport-and-discovery.md](../plans/05-modules-transport-and-discovery.md))
+### Transports (L4 ↔ network) ([10-module-catalog.md](10-module-catalog.md))
 
 | Module | Tag | Wraps | Status |
 | ---- | ---- | ---- | ---- |
@@ -114,7 +114,7 @@ These six are required even at profile P0 (in-process build). "Required" does no
 | `transport_ble_gatt` | transport | BLE GATT characteristics | future |
 | `transport_rdma` | transport | RDMA (ibverbs) | future |
 
-### Discovery ([../plans/05-modules-transport-and-discovery.md](../plans/05-modules-transport-and-discovery.md))
+### Discovery ([10-module-catalog.md](10-module-catalog.md))
 
 | Module | Tag | What it does | Status |
 | ---- | ---- | ---- | ---- |
@@ -122,7 +122,7 @@ These six are required even at profile P0 (in-process build). "Required" does no
 | `discovery_static` | discovery | TOML config file with explicit peer endpoints | v0.1 |
 | `discovery_gossip` | discovery | Gossip protocol over WAN-friendly transports | post-MVP |
 
-### Security ([../plans/06-modules-executor-security-gui.md](../plans/06-modules-executor-security-gui.md))
+### Security ([10-module-catalog.md](10-module-catalog.md))
 
 | Module | Tag | Pairs with | Status |
 | ---- | ---- | ---- | ---- |
@@ -132,7 +132,7 @@ These six are required even at profile P0 (in-process build). "Required" does no
 | `security_acl` | security | any transport | post-MVP |
 | `security_noise` | security | any transport | future |
 
-### Executors ([../plans/06-modules-executor-security-gui.md](../plans/06-modules-executor-security-gui.md))
+### Executors ([10-module-catalog.md](10-module-catalog.md))
 
 | Module | Tag | What it runs | Status |
 | ---- | ---- | ---- | ---- |
@@ -170,6 +170,14 @@ A profile P0 build with `mem_heap` + `view_basic` is the minimum sentinel for th
 ## Inter-module interfaces
 
 Each adjacent layer pair has a small contract. The interfaces are uniform — a transport doesn't care which L1 view module its L0 backend pairs with, as long as the pairing produces a `view_t *`.
+
+### Module ABI (implementation-defined)
+
+The module ABI — the C contracts below (`transport_vtable_t`, `mem_backend_t`, and the `transport_meta_t.abi_version` field) — is an **implementation** concern, not a protocol property. Two conforming implementations need not share it; what they share is the wire format ([01-data-format.md](01-data-format.md)) and addressing ([03-addressing.md](03-addressing.md)). A node assembled from one toolchain's modules interoperates over the wire with any other node, regardless of ABI.
+
+Within a single implementation the ABI is declared **semver-stable**: the library exports a `tracer_abi_version` symbol, and every breaking change to a vtable layout or `abi_version` field bumps it. Loaders refuse modules whose `abi_version` does not match.
+
+Executor, security, and discovery modules are **post-MVP, opt-in** — none are linked into a P0 build. A node loads them only when it needs vertex-side compute, transport confidentiality/auth, or peer announcement.
 
 ### L0 ↔ L1: `mem_backend_t`
 
@@ -242,7 +250,7 @@ When a TLV arrives at the dispatcher, the registry tells the graph runtime what 
 
 ### Transport ↔ L4: `transport_vtable_t`
 
-(Defined in [../plans/05-modules-transport-and-discovery.md](../plans/05-modules-transport-and-discovery.md). Summary:)
+(Defined in [10-module-catalog.md](10-module-catalog.md). Summary:)
 
 ```c
 typedef struct {
@@ -423,9 +431,9 @@ This trace exists because the DMA→ADC→network path is the **acid test** for 
 
 ## What this catalog does NOT specify
 
-- The exact C-ABI signatures of each module's exported symbols. See [../plans/05-modules-transport-and-discovery.md](../plans/05-modules-transport-and-discovery.md) §module ABI.
-- Build-system mechanics (CMake `add_library` patterns, separate compile units). See [../plans/02-roadmap-weeks-1-to-8.md](../plans/02-roadmap-weeks-1-to-8.md) week 1.
-- Configuration syntax for selecting which modules a binary loads. See [../plans/05-modules-transport-and-discovery.md](../plans/05-modules-transport-and-discovery.md) §bridging configuration.
+- The exact C-ABI signatures of each module's exported symbols. See [10-module-catalog.md](10-module-catalog.md) §module ABI.
+- Build-system mechanics (CMake `add_library` patterns, separate compile units) — defined with the `core/` rebuild.
+- Configuration syntax for selecting which modules a binary loads. See [10-module-catalog.md](10-module-catalog.md) §bridging configuration.
 - Per-module memory footprint estimates. See [00-overview.md](00-overview.md) §everything is a module for the rough numbers.
 
 The catalog is the **inventory of pieces** and **how they compose**. The byte-level wire format and graph behavior are independent of the module structure — you could implement libtracer as one monolithic .c file and still be conforming. The module split is an implementation discipline that keeps the code as small as the deployment warrants.

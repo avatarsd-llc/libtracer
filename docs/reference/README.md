@@ -1,6 +1,6 @@
 # libtracer Protocol Reference (v0.1-draft)
 
-> **Status**: draft suite. All sections written; promotion to "frozen" gated by the conformance milestone of [../plans/02-roadmap-weeks-1-to-8.md](../plans/02-roadmap-weeks-1-to-8.md).
+> **Status**: draft suite. All sections written; promotion to "frozen" gated by the conformance milestone tracked in the issue tracker.
 > **Last revision**: 2026-05-03. Notable architectural commitments:
 >
 > 1. **Six-layer model**, numbered bottom-up: L0 memory substrate / L1 views and ownership / L2 frame envelope / L3 TLV semantics / L4 graph endpoint logic / L5 application semantics.
@@ -13,7 +13,7 @@
 > 8. **No fragmentation in the wire format.** Logically large messages are addressed across `ep[0..N]` slices with shared timestamp.
 > 9. **Path handles, encoded once.** Every vertex address used more than once is encoded into a PATH TLV at build time (`.rodata` literal) or at node init (one allocation), not at every write. Hot-path APIs accept handles, never strings; `snprintf` is a code-size luxury, not a protocol requirement. Normative in [../spec/v1.md](../spec/v1.md) §3.1; design in [03-addressing.md](03-addressing.md), [05-protocol-tlvs.md](05-protocol-tlvs.md), [04-communication-flows.md](04-communication-flows.md), [06-user-data-packing.md](06-user-data-packing.md).
 >
-> The plans under [../plans/](../plans/) predate these revisions and are now historical context for design rationale, not the byte-level spec.
+> Design rationale is recorded in [../../docs/adr/](../../docs/adr/) and git history; this suite is the byte-level spec.
 > **Audience**: a second implementer writing an interoperable libtracer in any language, on any platform, without reading the C reference implementation.
 > **Reading time**: full suite ~2.5 h.
 
@@ -23,7 +23,7 @@
 
 This directory describes **the libtracer protocol as a standard**, independent of any implementation. The C reference implementation under [../../libtracer/](../../libtracer/) is one conforming implementation; a TypeScript core, a Rust core, a hardware FPGA implementation are all admissible if they conform to what is written here.
 
-Planning documents under [../plans/](../plans/) — design rationale, roadmap, comparisons — explain *why* the protocol looks the way it does. Reference documents here describe *what it is*. When the two disagree, reference wins; planning docs are revised.
+Design rationale is recorded in [../../docs/adr/](../../docs/adr/) and git history — they explain *why* the protocol looks the way it does. Reference documents here describe *what it is*, and are canonical.
 
 ---
 
@@ -95,9 +95,9 @@ A reference section is promoted from "draft" to "frozen for v0.1" when:
 
 1. The corresponding plan-doc section is implemented and tested in the C reference.
 2. A second-implementer review confirms the spec is sufficient to write an interoperable parser/sender/bridge from the spec alone (not from the C source).
-3. The conformance test suite (week 4 of [../plans/02-roadmap-weeks-1-to-8.md](../plans/02-roadmap-weeks-1-to-8.md)) covers the section's behavior.
+3. The conformance test suite covers the section's behavior.
 
-Until all three are satisfied, the planning doc is the operating reference for active development; the reference doc is the operating reference for second-implementer questions.
+Until all three are satisfied, the reference doc is the operating reference for second-implementer questions.
 
 The wire format does not version per-frame. v0.1 is committed once; future incompatible changes are versioned at the discovery layer (different mDNS service name, port, etc.). See [01-data-format.md](01-data-format.md) §versioning and compatibility.
 
@@ -106,7 +106,7 @@ The wire format does not version per-frame. v0.1 is committed once; future incom
 ## What this suite is NOT
 
 - Not a C ABI specification. The reference C implementation's headers describe its ABI; this suite is language-agnostic.
-- Not a build / packaging guide. See [../plans/02-roadmap-weeks-1-to-8.md](../plans/02-roadmap-weeks-1-to-8.md).
-- Not a feature comparison vs Zenoh / DDS / MQTT. See [../plans/01-comparison-to-existing-protocols.md](../plans/01-comparison-to-existing-protocols.md).
-- Not a security architecture. The wire format is security-agnostic; security wraps it at the transport layer per [../plans/06-modules-executor-security-gui.md](../plans/06-modules-executor-security-gui.md).
-- Not a roadmap. See [../plans/02-roadmap-weeks-1-to-8.md](../plans/02-roadmap-weeks-1-to-8.md).
+- Not a build / packaging guide (see the `core/` rebuild).
+- Not a feature comparison vs Zenoh / DDS / MQTT. See [../../README.md](../../README.md).
+- Not a security architecture. The wire format is security-agnostic; security wraps it at the transport layer per [10-module-catalog.md](10-module-catalog.md).
+- Not a roadmap. See the issue tracker.

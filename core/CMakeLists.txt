@@ -15,7 +15,8 @@ target_include_directories(libtracer INTERFACE
 )
 target_compile_features(libtracer INTERFACE cxx_std_17)
 
-if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING)
+# Tests return with the protocol-v1 rebuild (core/tests/ does not exist yet).
+if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
     enable_testing()
     add_subdirectory(tests)
 endif()

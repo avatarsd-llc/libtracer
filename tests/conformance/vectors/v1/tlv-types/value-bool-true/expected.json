@@ -1,0 +1,27 @@
+{
+  "name": "value-bool-true",
+  "category": "tlv-types",
+  "hex": "0100010001",
+  "total_bytes": 5,
+  "decoded": {
+    "type": "0x01 VALUE",
+    "opt": {
+      "raw": "0x00",
+      "PL": 0,
+      "TS": 0,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 1,
+    "payload": "01",
+    "trailer": {
+      "ts": null,
+      "crc": null
+    },
+    "meaning": "boolean true"
+  }
+}

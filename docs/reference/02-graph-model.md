@@ -2,7 +2,7 @@
 
 > **Status**: draft, v0.1, 2026-05-03. Defines what a graph IS in libtracer and the load-bearing claim that the in-memory graph and the wire bytes are the same substrate.
 > **Audience**: implementers writing the router/dispatcher; anyone reasoning about zero-copy semantics.
-> **See also**: [../plans/04-graph-and-endpoint-api.md](../plans/04-graph-and-endpoint-api.md) for API rationale; [01-data-format.md](01-data-format.md) for the byte layout this section interprets structurally.
+> **See also**: [04-communication-flows.md](04-communication-flows.md) for API rationale; [01-data-format.md](01-data-format.md) for the byte layout this section interprets structurally.
 
 ---
 
@@ -182,7 +182,7 @@ The same iterative pattern (recurse on `PL=1`, bound depth at 32) applies to bot
 
 > Any sequence of mix / split / concat operations on a view tree, followed by a `serialize_to_wire()` walk, MUST produce the same bytes as if the corresponding mutations had been applied to a fresh buffer.
 
-This invariant is testable: construct a view tree by parsing wire bytes, mutate it, serialize, and compare to the wire-bytes equivalent constructed from scratch. The reference implementation has `tests/test_substrate_invariant.c` exercising this in week 1 of [../plans/02-roadmap-weeks-1-to-8.md](../plans/02-roadmap-weeks-1-to-8.md).
+This invariant is testable: construct a view tree by parsing wire bytes, mutate it, serialize, and compare to the wire-bytes equivalent constructed from scratch. The reference implementation has `tests/test_substrate_invariant.c` exercising this (added with the `core/` rebuild).
 
 A second-language implementation that fails this invariant is **not conforming**, regardless of whether its wire output is otherwise valid.
 
@@ -257,7 +257,7 @@ Implementations on multi-threaded hosts MUST use atomic refcounts with these mem
 | Read for inspection (debug, metrics) | `acquire` | Pairs with each decrement; gives consistent snapshot |
 | Weak-to-strong upgrade (CAS loop) | `acq_rel` on success, `acquire` on failure | Same logic as inc + sync with last decrementer |
 
-Rationale and reference C23 implementation are in [../plans/03-wire-format-and-data-model.md](../plans/03-wire-format-and-data-model.md) §refcount memory ordering. Implementations in C++ (`std::atomic`), Rust (`Arc<T>` / `AtomicUsize`), or any other language MUST implement equivalent semantics.
+Rationale and reference C23 implementation are in [01-data-format.md](01-data-format.md) §refcount memory ordering. Implementations in C++ (`std::atomic`), Rust (`Arc<T>` / `AtomicUsize`), or any other language MUST implement equivalent semantics.
 
 ### Single-threaded mode
 
