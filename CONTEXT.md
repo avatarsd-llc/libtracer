@@ -1,6 +1,6 @@
 # libtracer — Context Glossary
 
-The canonical vocabulary for the libtracer protocol. It **supersedes** [docs/plans/99-glossary.md](docs/plans/99-glossary.md), which predates the [docs/reference/](docs/reference/) suite and carries pre-spec definitions. It tracks `docs/reference/` and the normative [docs/spec/v1.md](docs/spec/v1.md) — except where a maintainer decision recorded here resolves a conflict the reference had not (e.g. **Versioning**, **LIST**, **ERROR `0x06`/`0x08`**, **`io_dir_t`**), in which case the affected docs are brought into line with this file.
+The canonical vocabulary for the libtracer protocol. It **supersedes** the former `docs/plans/99-glossary.md` (removed), which predated the [docs/reference/](docs/reference/) suite and carried pre-spec definitions. It tracks `docs/reference/` and the normative [docs/spec/v1.md](docs/spec/v1.md) — except where a maintainer decision recorded here resolves a conflict the reference had not (e.g. **Versioning**, **LIST**, **ERROR `0x06`/`0x08`**, **`io_dir_t`**), in which case the affected docs are brought into line with this file.
 
 ## Language
 

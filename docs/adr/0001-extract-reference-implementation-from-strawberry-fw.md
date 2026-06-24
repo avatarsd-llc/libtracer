@@ -3,8 +3,7 @@
 - **Date:** 2026-06-24
 - **Status:** Proposed
 - **Deciders:** Avatar LLC (spec + reference-impl domains, see [GOVERNANCE.md](../../GOVERNANCE.md))
-- **Related:** [docs/plans/00-vision-and-reality-check.md](../plans/00-vision-and-reality-check.md),
-  [docs/plans/02-roadmap-weeks-1-to-8.md](../plans/02-roadmap-weeks-1-to-8.md),
+- **Related:** the original design plans (`00-vision-and-reality-check`, `02-roadmap-weeks-1-to-8`; removed — see git history),
   [docs/reference/02-graph-model.md](../reference/02-graph-model.md),
   [docs/reference/08-views-and-ownership.md](../reference/08-views-and-ownership.md)
 
@@ -102,7 +101,7 @@ Sequenced ship-first, each phase with a checkpoint:
 - libtracer gets its first real implementation **and** its first adopter at once, breaking the
   protocol chicken-and-egg problem (a protocol with zero implementers has near-zero value).
 - The wire format is frozen from code proven on hardware, the central commitment of
-  [docs/plans/00-vision-and-reality-check.md](../plans/00-vision-and-reality-check.md).
+  the original "vision and reality check" design plan (removed; see git history).
 - strawberry gains a unified "horizontal + vertical → graph" comms substrate, retiring two
   bespoke codecs.
 - The static-graph / static-polymorphism thesis is validated (or falsified) on a real CAN link
@@ -118,10 +117,9 @@ Sequenced ship-first, each phase with a checkpoint:
 - `core/` must first be reconciled to its own v0.1 spec (Phase 1) before extraction can target it.
 
 **Relationship to existing docs**
-- Complements the "reality check" in
-  [docs/plans/00-vision-and-reality-check.md](../plans/00-vision-and-reality-check.md).
-- Supersedes the *greenfield* framing of
-  [docs/plans/02-roadmap-weeks-1-to-8.md](../plans/02-roadmap-weeks-1-to-8.md): the L0–L4 work is
-  sourced from strawberry-fw's `io_layer` rather than written from scratch.
+- Complements the "reality check" in the original design plans (removed; see git history).
+- Supersedes the *greenfield* framing of the original 8-week roadmap plan (removed; see git
+  history): the L0–L4 work is sourced from strawberry-fw's `io_layer` rather than written from
+  scratch.
 - This is the **first ADR** in the repo; it establishes `docs/adr/` per
   [CLAUDE.md](../../CLAUDE.md).

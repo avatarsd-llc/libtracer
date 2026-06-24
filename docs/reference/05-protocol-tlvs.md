@@ -472,7 +472,7 @@ This shape may be revised when the `security_acl` module ships post-MVP; the v0.
 ### Where it appears
 
 - `<vertex>:acl` field.
-- ACL enforcement is performed by the `security_acl` module (post-MVP per [../plans/06-modules-executor-security-gui.md](../plans/06-modules-executor-security-gui.md)). The TLV layout is **structurally defined** in v0.1 even though enforcement is deferred.
+- ACL enforcement is performed by the `security_acl` module (post-MVP per [10-module-catalog.md](10-module-catalog.md)). The TLV layout is **structurally defined** in v0.1 even though enforcement is deferred.
 
 ### Constraints
 
@@ -518,7 +518,7 @@ Nested SETTINGS for module namespacing (instead of an unnamed structured wrapper
 
 ### The five core QoS knobs
 
-(Full semantics in [../plans/04-graph-and-endpoint-api.md](../plans/04-graph-and-endpoint-api.md) §QoS knobs.)
+(Full semantics in [04-communication-flows.md](04-communication-flows.md) §QoS knobs.)
 
 | Field | Type | Default | Effect |
 | ---- | ---- | ---- | ---- |

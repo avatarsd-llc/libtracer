@@ -649,5 +649,5 @@ The "I want an endpoint backed by `&my_uint32` directly" pattern:
 - The wire format that views are interpreted as — see [01-data-format.md](01-data-format.md).
 - The graph-level meaning of a TLV at a vertex — see [02-graph-model.md](02-graph-model.md).
 - Per-substrate allocation and destruction details — see [09-memory-substrate.md](09-memory-substrate.md).
-- Transport-level framing (when bytes form a complete TLV) — see [05-modules-transport-and-discovery.md](../plans/05-modules-transport-and-discovery.md).
+- Transport-level framing (when bytes form a complete TLV) — see [05-modules-transport-and-discovery.md](10-module-catalog.md).
 - Memory-pressure policy — see [09-memory-substrate.md](09-memory-substrate.md) §pressure and pool exhaustion.

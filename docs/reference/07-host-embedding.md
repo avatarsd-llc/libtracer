@@ -1,6 +1,6 @@
 # Reference 07 — Host Graph Embedded in the Larger System
 
-> **Status**: draft, v0.1, 2026-05-03. New material — this section synthesizes [../plans/04-graph-and-endpoint-api.md](../plans/04-graph-and-endpoint-api.md) (graph model, bridges) and [../plans/05-modules-transport-and-discovery.md](../plans/05-modules-transport-and-discovery.md) (bridges, discovery) and is the canonical home for the per-host-DAG ↔ global-topology distinction.
+> **Status**: draft, v0.1, 2026-05-03. New material — this section synthesizes [04-communication-flows.md](04-communication-flows.md) (graph model, bridges) and [10-module-catalog.md](10-module-catalog.md) (bridges, discovery) and is the canonical home for the per-host-DAG ↔ global-topology distinction.
 > **Audience**: anyone designing a multi-host deployment; anyone implementing the bridge / dedup logic.
 
 ---
@@ -157,7 +157,7 @@ A specialized **WAN router** is a host that runs:
 
 This is **convention**, not a separate node type in the protocol. Such a host conforms at profile P2 (per [00-overview.md](00-overview.md) §conformance profiles); the protocol does not single it out.
 
-A future `router_wan` "module" (in the [../plans/05-modules-transport-and-discovery.md](../plans/05-modules-transport-and-discovery.md) catalog) may package up the typical WAN-router config (multiple transports + discovery + dedup tuning + observability) for ergonomics, but it does not extend the protocol.
+A future `router_wan` "module" (in the [10-module-catalog.md](10-module-catalog.md) catalog) may package up the typical WAN-router config (multiple transports + discovery + dedup tuning + observability) for ergonomics, but it does not extend the protocol.
 
 ---
 

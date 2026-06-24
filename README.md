@@ -93,8 +93,7 @@ libtracer/
 ├── examples/                      Runnable examples per platform
 ├── docs/
 │   ├── spec/                      Normative protocol specification
-│   ├── reference/                 Architecture, design notes, ADRs
-│   └── plans/                     Roadmap and design drafts
+│   └── reference/                 Architecture, design notes, ADRs
 ├── tests/conformance/             Cross-implementation test vectors
 ├── GOVERNANCE.md                  Decision-making process
 ├── CONTRIBUTING.md                How to contribute

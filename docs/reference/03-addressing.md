@@ -1,7 +1,7 @@
 # Reference 03 — Addressing
 
 > **Status**: draft, v0.1, 2026-05-03. Defines how vertices and fields are named, how subscriptions match paths, and how application-level slicing replaces wire-level fragmentation.
-> **See also**: [../plans/04-graph-and-endpoint-api.md](../plans/04-graph-and-endpoint-api.md) for API rationale; [02-graph-model.md](02-graph-model.md) for the schema discipline that gives field names meaning.
+> **See also**: [04-communication-flows.md](04-communication-flows.md) for API rationale; [02-graph-model.md](02-graph-model.md) for the schema discipline that gives field names meaning.
 
 ---
 
@@ -176,7 +176,7 @@ The subscriber assembles the slices into a coherent group by **`(timestamp, inde
 
 ### Subscriber assembly policies
 
-The subscriber's QoS at `:settings.address_shift.*` controls assembly behavior. (Field names finalize at week 6 of [../plans/02-roadmap-weeks-1-to-8.md](../plans/02-roadmap-weeks-1-to-8.md) once the cross-bus demo exercises them; documented here as the v0.1 design.)
+The subscriber's QoS at `:settings.address_shift.*` controls assembly behavior. (Field names are defined here as the v0.1 design.)
 
 | Field | Type | Default | Effect |
 | ---- | ---- | ---- | ---- |

@@ -28,7 +28,7 @@ A multi-agent consistency audit of the protocol-v1 draft (57 confirmed inconsist
 - the normative gate (`tests/conformance/vectors/v1/`, the RFC directory) pointed at artifacts that did not exist;
 - and the reference is **not internally clean**: `VERSION_MISMATCH (0x06)` references a deleted `opt.VR` bit; `ERROR (0x08)` packs a raw byte before its `PL=1` children (breaking the universal "`PL=1` ⇒ concatenated child TLVs" rule); `0x05`/`LIST` is retired in `01`/`05` but still used in `03`/`06`; `io_dir_t` is defined three incompatible ways.
 
-Per `GOVERNANCE.md` and `CLAUDE.md` precedence (spec > reference > plans/glossary; code least authoritative), the reference wins and the rest are reconciled to it — except the few genuine forks decided in the interview that produced the ADRs.
+Per `GOVERNANCE.md` and `CLAUDE.md` precedence (spec > reference > (the now-removed plans/glossary); code least authoritative), the reference wins and the rest are reconciled to it — except the few genuine forks decided in the interview that produced the ADRs.
 
 ## Proposed change
 
