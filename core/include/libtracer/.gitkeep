@@ -1,0 +1,2 @@
+# This directory is part of the public API (#include <libtracer/...>).
+# Headers return with the protocol-v1 rebuild — see ../../README.md.

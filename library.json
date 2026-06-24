@@ -5,31 +5,29 @@
   "keywords": ["protocol", "iot", "sensor", "graph", "esp32", "stm32", "esphome", "tlv"],
   "repository": {
     "type": "git",
-    "url": "https://github.com/avatarsd/libtracer.git"
+    "url": "https://github.com/avatarsd-llc/libtracer.git"
   },
   "authors": [
     {
       "name": "Avatar LLC",
-      "url": "https://github.com/avatarsd/libtracer",
+      "url": "https://github.com/avatarsd-llc/libtracer",
       "maintainer": true
     }
   ],
   "license": "Apache-2.0",
-  "homepage": "https://github.com/avatarsd/libtracer",
+  "homepage": "https://github.com/avatarsd-llc/libtracer",
   "frameworks": "*",
   "platforms": "*",
   "headers": "libtracer/tracer.hpp",
   "export": {
     "include": [
       "core/include/**",
-      "core/src/**",
       "library.json",
       "LICENSE",
       "README.md"
     ]
   },
   "build": {
-    "includeDir": "core/include",
-    "srcDir": "core/src"
+    "includeDir": "core/include"
   }
 }
