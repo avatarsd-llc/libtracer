@@ -47,9 +47,9 @@ Already correct in `reference/01`; this RFC makes them normative for protocol v1
 
 ### C. Reference-internal crack fixes (normative)
 
-1. **`ERROR (0x08)`** becomes a clean structured TLV: the error code is a **leading child TLV** (1-byte VALUE), not a raw prefix byte; `ERROR` joins the §Structured TLVs list. (Edit `05` §0x08.)
-2. **`0x06 VERSION_MISMATCH`** is redefined as a **discovery/bridge-level** error ("peer advertised an incompatible protocol version"); strike the `opt.VR` wording. (Edit `05` §0x08 registry.)
-3. **`0x0F INVALID`** is added to the registry (general structural invalidity: reserved-bit set, `type=0x00`, oversize length) — the code `01` already names but `05` did not define.
+1. **`ERROR (0x08)`** — **⚠ withdrawn; superseded by [RFC-0002](0002-protocol-error-model.md).** The leading-child-`VALUE` code shape is replaced by the `tr::<concept>::<error>` identity model (registered code *or* string); see RFC-0002 §C for the `ERROR` byte layout and §D for the registry.
+2. **`0x06 VERSION_MISMATCH`** is redefined as a **discovery/bridge-level** error ("peer advertised an incompatible protocol version"); strike the `opt.VR` wording. (Edit `05` §0x08 registry.) **(Subsumed by [RFC-0002](0002-protocol-error-model.md) as `tr::version::mismatch`.)**
+3. **`0x0F INVALID`** is added to the registry (general structural invalidity: reserved-bit set, `type=0x00`, oversize length) — the code `01` already names but `05` did not define. **(Subsumed by [RFC-0002](0002-protocol-error-model.md) as `tr::frame::invalid`.)**
 4. **`LIST` retirement sweep:** remove the four surviving "LIST" references in `03-addressing.md` / `06-user-data-packing.md` and the dead `01:273` cross-ref. An array-whole read returns a `PL=1` reply whose children are the element TLVs; an atomic multi-field write is a **SETTINGS (`0x0B`)**. (ADR-0003.)
 5. **Address-shift:** group key is **`(origin_peer_id, ts)`** (matching `02`'s in-flight identity), and `03`'s loss-detection claim is narrowed — tail-slice loss is undetectable without an explicit `expected_count`. Implementation note: the assembler must retain `origin_peer_id` after a bridge sheds the ROUTER.
 6. **`io_dir_t`** canonical spelling is `IO_DIR_DEVICE_TO_CPU` / `IO_DIR_CPU_TO_DEVICE` across `08`/`09`/`10` (module-ABI; Normal-bar, included here for completeness).

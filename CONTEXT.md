@@ -59,17 +59,31 @@ The control surface: subscriptions, QoS, ACLs, liveness are all writable fields 
 An array-whole read like `read('/x:subscribers[]')` returns a `PL=1` reply whose children are the element TLVs (SUBSCRIBER `0x04` for subscribers). An atomic multi-field write is a **SETTINGS (`0x0B`)** TLV. Neither uses a generic container.
 _Avoid_: "returns a LIST", "write a single LIST TLV".
 
+**Fixed-stride array**:
+An array-typed vertex field whose elements are all the same size, so `:field[N]` resolves by direct offset (`base + N × stride`, O(1)) on **contiguous** backing. Variable-size arrays — and arrays whose in-memory rope scatters elements across segments — resolve by **walking** children (O(n)). Array-ness is a **schema (L4)** property, never a wire bit; on the wire an array is just a `PL=1` TLV with homogeneous children (ADR-0008).
+_Avoid_: "array type code", "`opt.ARRAY` bit", a wire-level array marker — none exist.
+
 ### Errors
 
-**Error-code registry**:
-The first **child TLV** of an ERROR (`0x08`) — a namespace separate from type codes. Canonical: `0x00` OK, `0x01` NOT_FOUND, `0x02` PERMISSION_DENIED, `0x03` INVALID_PATH, `0x04` TYPE_MISMATCH, `0x05` CRC_FAIL, `0x06` VERSION_MISMATCH, `0x07` BACKPRESSURE, `0x08` TIMEOUT, `0x09` TRANSPORT_DOWN, `0x0A` SCHEMA_NOT_FOUND, `0x0B` ADDRESS_SHIFT_GAP, `0x0C` TRUNCATED, `0x0D` NESTING_TOO_DEEP, `0x0E` PATH_IN_USE, **`0x0F` INVALID** (general structural invalidity: reserved-bit set, `type=0x00`, oversize length); `0x10–0x7F` reserved-core, `0x80–0xFF` user.
+**`tr::` error namespace**:
+The identity space for **protocol/stack** errors — `tr::<concept>::<error>`, keyed by stable protocol **concept** (`frame`, `tlv`, `path`, `schema`, `flow`, `access`, `transport`, `version`), never by an implementation module. Prefix-filterable like a path (`tr::flow::*`). Specified in [RFC-0002](docs/spec/rfcs/0002-protocol-error-model.md) (proposed; ratification pending) + [ADR-0009](docs/adr/0009-built-in-error-model-tr-concept-namespace.md).
+_Avoid_: the flat byte registry (`0x01 NOT_FOUND`, …), `tr::<layer>::<module>` (module-keyed), a `0x80–0xFF` user-error range.
+
+**Registered code / string identity**:
+An error's on-wire identity is either a compact **registered code** (a `u16` the frozen registry assigns to a built-in `tr::…` path) or the literal **string** path (for unbounded third-party stack extensions). Optional structured detail may attach to either. The split *is* the built-in-vs-extensible split.
+
+**Severity / disposition**:
+Per-error properties of the **registry entry**, never on the wire: `severity` ∈ `warn|error|critical`; `disposition` ∈ `transient` (retry) | `permanent` (don't retry this request) | `fatal` (tear down the peer). Derived at L4 on receipt.
+
+**Closed error boundary**:
+Applications **never** emit a protocol error; there is no user error range. An application failure is ordinary **data**, self-described by the application's schema — the same way the protocol defines no application data *types* ([ADR-0010](docs/adr/0010-closed-protocol-error-boundary.md)).
 
 **`ERROR` (`0x08`)**:
-A structured TLV (`opt.PL=1`); the error code is its **first child TLV** (a 1-byte VALUE), not a raw prefix byte — so the universal "`PL=1` ⇒ pure concatenated child TLVs" rule holds. Optional DESCRIPTION / VALUE children follow.
+The TLV that carries a `tr::` error identity (registered code or string) plus optional detail. Always `opt.PL=1`; the first child is the identity — a `VALUE` for a registered code, a `NAME` for a string. Byte layout in [RFC-0002 §C](docs/spec/rfcs/0002-protocol-error-model.md). Supersedes the withdrawn "code as a leading child `VALUE`" shape (RFC-0001 §C.1).
 
-**`VERSION_MISMATCH` (`0x06`)**:
+**`tr::version::mismatch`** (was `VERSION_MISMATCH 0x06`):
 A discovery/bridge-level error — "peer advertised an incompatible protocol version." Not a frame-parse outcome (there is no per-frame version field to read).
-_Avoid_: "`opt.VR` set higher than receiver supports".
+_Avoid_: "`opt.VR` set higher than receiver supports", the old `0x06` byte code.
 
 ### Modules & memory substrate
 
@@ -92,6 +106,8 @@ _Avoid_: using bare "segment" for a path component; prefer "NAME segment" there 
 - **"Core"** — not a privileged unit; it means the **required modules** (profile P0).
 - **"segment"** — overloaded; pin **view** (L1 window) vs **NAME segment** (path component).
 - **`io_dir_t`** — `DEVICE_TO_CPU` / `CPU_TO_DEVICE` is canonical across reference 08/09/10.
+- **"error identity"** — was a flat byte registry (`0x01 NOT_FOUND`, …); now the `tr::<concept>::<error>` namespace, registered-code-or-string, **protocol-only** (RFC-0002 proposed; ADR-0009/0010).
+- **"array indexing"** — array-ness is an **L4 schema** property (fixed-stride ⇒ O(1) on contiguous backing), never a wire bit (ADR-0008).
 
 ## Example dialogue
 
