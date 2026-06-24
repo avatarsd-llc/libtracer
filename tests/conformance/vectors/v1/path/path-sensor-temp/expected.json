@@ -1,0 +1,38 @@
+{
+  "name": "path-sensor-temp",
+  "category": "path",
+  "hex": "064012000200060073656E736F720200040074656D70",
+  "total_bytes": 22,
+  "decoded": {
+    "type": "0x06 PATH",
+    "opt": {
+      "raw": "0x40",
+      "PL": 1,
+      "TS": 0,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 18,
+    "children": [
+      {
+        "type": "0x02 NAME",
+        "length": 6,
+        "payload_utf8": "sensor"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 4,
+        "payload_utf8": "temp"
+      }
+    ],
+    "trailer": {
+      "ts": null,
+      "crc": null
+    },
+    "meaning": "/sensor/temp"
+  }
+}

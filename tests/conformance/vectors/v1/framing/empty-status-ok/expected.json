@@ -1,0 +1,27 @@
+{
+  "name": "empty-status-ok",
+  "category": "framing",
+  "hex": "09000000",
+  "total_bytes": 4,
+  "decoded": {
+    "type": "0x09 STATUS",
+    "opt": {
+      "raw": "0x00",
+      "PL": 0,
+      "TS": 0,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 0,
+    "payload": "",
+    "trailer": {
+      "ts": null,
+      "crc": null
+    },
+    "meaning": "OK"
+  }
+}

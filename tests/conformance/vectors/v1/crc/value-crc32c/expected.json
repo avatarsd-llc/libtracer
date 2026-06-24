@@ -1,0 +1,31 @@
+{
+  "name": "value-crc32c",
+  "category": "crc",
+  "hex": "01100500AABBCCDDEEB6C91223",
+  "total_bytes": 13,
+  "decoded": {
+    "type": "0x01 VALUE",
+    "opt": {
+      "raw": "0x10",
+      "PL": 0,
+      "TS": 0,
+      "CR": 1,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 5,
+    "payload": "AABBCCDDEE",
+    "trailer": {
+      "ts": null,
+      "crc": {
+        "width": "CRC-32C",
+        "value": "0x2312C9B6",
+        "bytes_le": "B6C91223"
+      }
+    },
+    "meaning": "opaque 5-byte VALUE with CRC-32C frame check"
+  }
+}
