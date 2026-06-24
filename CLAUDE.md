@@ -16,7 +16,7 @@ libtracer is a spec-first protocol project. See [GOVERNANCE.md](GOVERNANCE.md) f
 - **Normative spec:** [docs/spec/v1.md](docs/spec/v1.md) — the wire protocol; immutable once released.
 - **Reference (descriptive):** [docs/reference/](docs/reference/) — start at [00-overview.md](docs/reference/00-overview.md). The "what it is" alongside the normative spec. When reference and planning docs disagree, reference wins.
 - **Design rationale and history:** [docs/plans/](docs/plans/) — predates the current spec; explains "why it looks the way it does."
-- **Glossary (de-facto domain vocabulary):** [docs/plans/99-glossary.md](docs/plans/99-glossary.md) — read this before naming any domain concept (vertex, edge, path, view, segment, TLV, bridge, address-shift slicing, etc.).
+- **Glossary (canonical domain vocabulary):** [CONTEXT.md](CONTEXT.md) — the root context glossary; read this before naming any domain concept (vertex, edge, path, view, segment, TLV, bridge, address-shift slicing, etc.). [docs/plans/99-glossary.md](docs/plans/99-glossary.md) is **superseded** (pre-spec v0.0 vocabulary).
 - **Implementation analysis:** [docs/analisys/](docs/analisys/) — five-cycle iterative reviews and the decisions they raise.
 
 ## Repo layout
@@ -64,13 +64,13 @@ When a skill mentions a triage role, apply the matching label string. Labels wil
 
 ### Domain docs
 
-**Multi-context layout.** No formal `CONTEXT.md` / `CONTEXT-MAP.md` exists yet — they'll be created lazily by `/grill-with-docs` as per-binding / per-integration vocabulary actually diverges from the project-wide glossary.
+**Multi-context layout.** A root [CONTEXT.md](CONTEXT.md) holds the canonical project-wide vocabulary. No `CONTEXT-MAP.md` exists yet — per-binding / per-integration context files will be created lazily by `/grill-with-docs` if and when their vocabulary diverges from the root.
 
 Until then, when exploring or producing output:
 
-1. Read **[docs/plans/99-glossary.md](docs/plans/99-glossary.md)** first — it's the de-facto root glossary. Use its vocabulary; don't drift to synonyms.
+1. Read **[CONTEXT.md](CONTEXT.md)** first — the canonical root glossary. Use its vocabulary; don't drift to synonyms. (The old [docs/plans/99-glossary.md](docs/plans/99-glossary.md) is superseded.)
 2. Read **[docs/reference/00-overview.md](docs/reference/00-overview.md)** for the six-layer model and load-bearing architectural commitments.
 3. Read **[docs/spec/v1.md](docs/spec/v1.md)** for normative behavior. When the spec and any other doc disagree, the spec wins.
-4. ADRs (when written) will live under `docs/adr/`. Not yet present — proceed silently if absent. Until then, design rationale lives in [docs/plans/](docs/plans/).
+4. ADRs live under [docs/adr/](docs/adr/) — read them; `0001`–`0007` record the strawberry-fw extraction and the protocol-v1 wire/API commitments (versioning, retire-LIST, trailer-CRC, fixed-width length, read/write/await, normative-by-incorporation). Design *rationale* (the "why") also lives in [docs/plans/](docs/plans/).
 
 If your output contradicts an existing ADR or a load-bearing reference doc, surface the contradiction explicitly rather than silently overriding.
