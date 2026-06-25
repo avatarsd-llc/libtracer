@@ -23,6 +23,7 @@ add_library(libtracer STATIC
     src/loopback.cpp
     src/router.cpp
     src/bridge.cpp
+    src/transport_udp.cpp
 )
 find_package(Threads REQUIRED)
 target_link_libraries(libtracer PUBLIC Threads::Threads)

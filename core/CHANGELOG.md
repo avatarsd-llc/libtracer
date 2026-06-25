@@ -15,6 +15,20 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **M5 — UDP socket transport.** The first transport that crosses the kernel
+  network stack; the bridge/router/graph above it are unchanged.
+  - `<libtracer/transport_udp.hpp>` — `UdpTransport(bind_port, peer_host,
+    peer_port) : Transport` over POSIX UDP. `send` = `sendto`; an internal receive
+    thread (`SO_RCVTIMEO` for clean shutdown) drains the socket into the receiver.
+    One datagram = one whole frame (no stream reassembly), so it pairs with the
+    flat decoder. `ok()`, `local_port()`. Validated raw + end-to-end through the
+    full Graph+Bridge+ROUTER stack over localhost UDP (`tests/udp_test.cpp`);
+    TSan/ASan/UBSan clean.
+  - **`Bridge` perf/correctness:** the mount target is now resolved to a `Vertex*`
+    once at `set_mount` (atomic) instead of a per-frame key copy + map lookup —
+    faster, and data-race-free against the transport's receive thread (the mount
+    vertex must be registered before `set_mount`).
+
 - **M4 — first transport + bridge.** Two nodes talk over a "wire" (P2 bridge
   conformance); no sockets yet — an in-process loopback transport.
   - `<libtracer/transport.hpp>` — the `Transport` seam (`send` + `set_receiver`)

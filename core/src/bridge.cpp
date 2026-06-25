@@ -45,22 +45,24 @@ graph::Result<void> Bridge::export_vertex(const graph::Path& src) {
 }
 
 void Bridge::set_mount(const graph::Path& mount) {
-    mount_key_.assign(mount.key().begin(), mount.key().end());
-    have_mount_ = true;
+    // Resolve the vertex handle once (the mount vertex must already be registered);
+    // the receive thread then writes through it with no string/lookup per frame.
+    mount_vertex_.store(graph_.find(mount.key()));
 }
 
-void Bridge::set_recent_set_capacity(std::size_t capacity) { recent_cap_ = capacity; }
+void Bridge::set_recent_set_capacity(std::size_t capacity) { recent_cap_.store(capacity); }
 
-void Bridge::set_reforward(bool on) { reforward_ = on; }
+void Bridge::set_reforward(bool on) { reforward_.store(on); }
 
 bool Bridge::seen(const RouterMeta& meta) {
-    if (recent_cap_ == 0) return false;  // dedup disabled — hop_count alone terminates
+    const std::size_t cap = recent_cap_.load(std::memory_order_relaxed);
+    if (cap == 0) return false;  // dedup disabled — hop_count alone terminates
     std::string key = recent_key(meta);
     const std::lock_guard lock(m_);
     if (recent_set_.contains(key)) return true;
     recent_set_.insert(key);
     recent_order_.push_back(std::move(key));
-    while (recent_order_.size() > recent_cap_) {
+    while (recent_order_.size() > cap) {
         recent_set_.erase(recent_order_.front());
         recent_order_.pop_front();
     }
@@ -80,7 +82,7 @@ void Bridge::on_frame(std::span<const std::byte> frame) {
         return;
     }
 
-    if (have_mount_) {
+    if (graph::Vertex* mount = mount_vertex_.load(std::memory_order_relaxed)) {
         // Materialize the data TLV into an owned heap segment — the frame buffer
         // dies when on_frame returns, but the graph stores the View past then.
         // (One copy at the bridge boundary; reference/08 §cross-substrate.)
@@ -88,14 +90,12 @@ void Bridge::on_frame(std::span<const std::byte> frame) {
         SegmentPtr seg = mem::heap_alloc(data.size());
         if (seg) {
             std::memcpy(seg->bytes.data(), data.data(), data.size());
-            if (graph::Vertex* mount = graph_.find(mount_key_)) {
-                (void)graph_.write(mount, View::over(std::move(seg)));
-                delivered_.fetch_add(1);
-            }
+            (void)graph_.write(mount, View::over(std::move(seg)));
+            delivered_.fetch_add(1);
         }
     }
 
-    if (reforward_) {  // re-emit with hop+1 (cycle-termination test)
+    if (reforward_.load(std::memory_order_relaxed)) {  // re-emit with hop+1 (cycle test)
         RouterMeta meta = unwrapped->meta;
         meta.hop = static_cast<std::uint8_t>(meta.hop + 1);
         transport_.send(router_wrap(unwrapped->data, meta));

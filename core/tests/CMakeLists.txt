@@ -43,6 +43,14 @@ target_compile_definitions(bridge_test PRIVATE
     LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME bridge COMMAND bridge_test)
 
+# M5 — UDP transport harness (raw frame + two-node end-to-end over localhost UDP).
+add_executable(udp_test udp_test.cpp)
+target_link_libraries(udp_test PRIVATE libtracer)
+libtracer_test_warnings(udp_test)
+target_compile_definitions(udp_test PRIVATE
+    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
+add_test(NAME udp COMMAND udp_test)
+
 # M2 — substrate harness in single-threaded mode. LIBTRACER_NO_ATOMIC changes the
 # Segment refcount layout, so this variant compiles the library sources directly
 # (rather than linking the atomic-built libtracer.a) to keep one consistent ABI.

@@ -22,5 +22,6 @@
 #include "libtracer/status.hpp"
 #include "libtracer/tlv.hpp"
 #include "libtracer/transport.hpp"
+#include "libtracer/transport_udp.hpp"
 #include "libtracer/vertex.hpp"
 #include "libtracer/view.hpp"

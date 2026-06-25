@@ -62,10 +62,11 @@ class Bridge {
     Transport& transport_;
     PeerId peer_;
 
-    std::vector<std::byte> mount_key_;  // canonical PATH key of the mount vertex
-    bool have_mount_ = false;
-    bool reforward_ = false;
-    std::size_t recent_cap_ = 64;
+    // Resolved once at set_mount (no per-frame string/lookup); atomic because the
+    // transport's receive thread reads these while setup writes them.
+    std::atomic<graph::Vertex*> mount_vertex_{nullptr};
+    std::atomic<bool> reforward_{false};
+    std::atomic<std::size_t> recent_cap_{64};
 
     std::mutex m_;  // guards the recent-set
     std::unordered_set<std::string> recent_set_;
