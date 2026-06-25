@@ -158,6 +158,11 @@ Result<void> Graph::write_impl(Vertex* v, View value, int depth) {
 
 Result<void> Graph::write(Vertex* v, View value) { return write_impl(v, std::move(value), 0); }
 
+Result<void> Graph::write(Vertex* v, const FieldPath& field, View value) {
+    if (field.empty()) return write_impl(v, std::move(value), 0);
+    return field_write(v, field, value);
+}
+
 Result<View> Graph::await(Vertex* v, std::chrono::nanoseconds timeout) {
     std::unique_lock lock(v->m_);
     const std::uint64_t seq0 = v->write_seq_;
@@ -294,8 +299,7 @@ Result<View> Graph::read(const Path& path) const {
 Result<void> Graph::write(const Path& path, View value) {
     Vertex* v = find(path.key());
     if (!v) return std::unexpected(Status::NotFound);
-    if (path.field().empty()) return write_impl(v, std::move(value), 0);
-    return field_write(v, path.field(), value);
+    return write(v, path.field(), std::move(value));  // handle-based; see the Vertex* overload
 }
 
 Result<View> Graph::await(const Path& path, std::chrono::nanoseconds timeout) {

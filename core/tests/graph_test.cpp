@@ -282,6 +282,22 @@ void test_field_write_settings() {
           "unknown settings field => SchemaNotFound");
 }
 
+void test_field_write_handle() {
+    std::printf("Handle-based field-write (no strings on the hot path):\n");
+    Graph g;
+    auto* v = *g.register_vertex(*Path::parse("/sensor/temp"), Role::StoredValue);
+    // Parse the field path ONCE; reuse the Vertex* handle + FieldPath thereafter
+    // (no per-call string parse, no map lookup).
+    const auto fp = Path::parse("/sensor/temp:settings.deadline_ns");
+    const std::array<std::byte, 8> le{std::byte{0x10}, std::byte{0x27}};  // 10000 LE
+    check(g.write(v, fp->field(), value_tlv(le)).has_value(),
+          "write(Vertex*, FieldPath, View) returns OK");
+    check(v->settings().deadline_ns == 10000,
+          "deadline_ns updated via the handle (no string parse, no map lookup)");
+    check(g.write(v, tracer::graph::FieldPath{}, make_value({0x55})).has_value(),
+          "an empty FieldPath is an ordinary value write");
+}
+
 void test_subscribe_via_field_write_and_unsubscribe() {
     std::printf("field-write :subscribers[] (wire-faithful) + unsubscribe:\n");
     Graph g;
@@ -350,6 +366,7 @@ int main() {
     test_subscribe_callback();
     test_subscribe_target();
     test_field_write_settings();
+    test_field_write_handle();
     test_subscribe_via_field_write_and_unsubscribe();
     test_schema_read();
     test_dispatch_cycle_cap();
