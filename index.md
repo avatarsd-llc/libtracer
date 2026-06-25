@@ -8,6 +8,8 @@ hand-off moves **zero bytes**.
 
 This site is the public documentation:
 
+- **[Getting started](docs/getting-started.md)** — build the C++ node and write your
+  first vertex, pub/sub, and a two-node exchange in ~10 minutes.
 - **[Modules](docs/modules/index.md)** — a module-by-module guide to the reference
   C++ implementation, the [interface map](docs/modules/interface-map.md), and a
   hands-on [bit-level wire walkthrough](docs/modules/wire-format-bits.md).
@@ -20,6 +22,13 @@ This site is the public documentation:
 When the spec and any other document disagree, the spec wins. The reference suite
 is descriptive; the design rationale (ADRs) and proposals (RFCs) live in the
 [repository](https://github.com/avatarsd-llc/libtracer), not this site.
+```
+
+```{toctree}
+:caption: Getting started
+:maxdepth: 1
+
+/docs/getting-started
 ```
 
 ```{toctree}
