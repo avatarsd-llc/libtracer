@@ -586,7 +586,7 @@ This trace is the working specification for what "zero-copy" means in libtracer:
 
 These were the design's identified-but-unresolved hard integrations; they now resolve under one principle. **Memory binding is a modular spectrum, and libtracer is a transparent byte router** — it imposes no snapshot/copy/CRC semantics on a backend. Each entry below has a **recommended-safe** default, but a backend module MAY offer any point on the spectrum (snapshot · shadow vertex · live/raw direct-register, lock-free, no-CRC). The protocol does not limit the user from "dangerous" access; instead **each backend module owns and declares its per-architecture contract** — allocation, cache-coherency hooks, ISR-safety, atomicity granularity, memory ordering (x86 TSO vs weak ARM/MIPS), and `destroy` thread-affinity. CRC is an optional higher-layer concern ([01-data-format.md](01-data-format.md) `opt.CR`); a live/no-copy binding simply carries no CRC (or snapshots at CRC-compute time).
 
-### OPEN — Boost asio streambuf integration
+### Boost asio streambuf integration
 
 A `boost::asio::streambuf` is a read-write buffer with **consume-on-read** semantics. A view pinning some of its bytes is in conflict with `streambuf::consume()`:
 
@@ -606,7 +606,7 @@ A view over an MMIO register is a view onto bytes that change asynchronously. Al
 
 **Resolved**: ship all three. Snapshot is the recommended-safe default and *publish-a-moment* the recommended mental model, but live/raw/lock-free bindings are first-class for users who own the hazard ([ADR-0012](../adr/0012-modular-memory-binding-transparent-router.md)).
 
-### OPEN — Cross-process refcount on `mem_shared`
+### Cross-process refcount on `mem_shared`
 
 A POSIX SHM region mapped into multiple processes has independent libtracer refcounts in each. They cannot decrement each other.
 
@@ -616,19 +616,19 @@ A POSIX SHM region mapped into multiple processes has independent libtracer refc
 
 **Default**: single-publisher, multi-reader. v1's `mem_shared` documents this constraint. Robust shared refcount lives in a future `mem_iceoryx2` module.
 
-### OPEN — lwIP pbuf: aliasing libtracer refcount with `pbuf_ref/pbuf_free`
+### lwIP pbuf: aliasing libtracer refcount with `pbuf_ref/pbuf_free`
 
 Two libtracer subscribers cloning a `view_pbuf` over the same `pbuf*` create two libtracer-side refcount holds; lwIP-side, libtracer holds **one** `pbuf_ref` for the segment's lifetime. The risk is calling `pbuf_free` from a non-lwIP-thread context (e.g., from an interrupt or another thread's `view_release`).
 
 **Default**: a pbuf segment's `destroy` callback schedules `pbuf_free` via `tcpip_callback` (or equivalent), never frees synchronously from outside lwIP's thread context. Document explicitly.
 
-### OPEN — Rope walk vs flatten
+### Rope walk vs flatten
 
 A scatter-gather-capable transport walks the rope at egress (zero-copy). A flat-buffer-only transport must materialize via `view_flatten()` (one copy).
 
 **Default**: each transport declares `wants_flat` capability. Bridges and fan-out walk the rope into scatter-gather transports; call `view_flatten()` once at egress for flat-buffer transports.
 
-### OPEN — DMA cache coherency races
+### DMA cache coherency races
 
 On non-coherent SoCs, the `prepare_for_io` / `finalize_after_io` hooks must be called at exactly the right moment. Missing them yields stale CPU reads or clobbered DMA writes.
 

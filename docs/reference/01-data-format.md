@@ -1,7 +1,7 @@
 # Reference 01 — Data Format
 
 > **Status**: draft, v1, 2026-05-03 (revised twice in design review same day). Byte-precise definition of every libtracer frame on the wire. A second-implementer SHOULD be able to write an interoperable parser/sender from this section alone.
-> **See also**: design rationale (CRC choice, atomic ordering, MCU stack safety) is in [01-data-format.md](01-data-format.md). That document predates this revision; the byte layout there is superseded.
+> **See also**: design rationale (CRC choice, atomic ordering, MCU stack safety) is in the ADRs ([../adr/](../adr/)) and git history.
 
 ---
 

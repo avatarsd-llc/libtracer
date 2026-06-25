@@ -15,7 +15,7 @@
 
 Currently assigned: `0x01`–`0x04`, `0x06`–`0x0D` (12 types). `0x05` is **retired** (was generic LIST in earlier drafts; see §`0x05`). The remaining `0x0E` – `0x1F` are reserved for v1 fast-track additions; `0x20` – `0x7F` is the long-term registry.
 
-The names below match the C enum in [`libtracer/tlv.h`](../../libtracer/tlv.h) (which is being updated to drop LIST and reflect this revision).
+The names below are the canonical type-code names; the reference implementation's C enum (header under `core/include/libtracer/`, pending the protocol-v1 rebuild — [ADR-0001](../adr/0001-extract-reference-implementation-from-strawberry-fw.md)) matches them.
 
 ### Structured TLVs
 

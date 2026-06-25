@@ -328,11 +328,11 @@ A bridge between two pairings (e.g., lwIP TCP → CAN) is **not free**: at the b
 
 ---
 
-## Hard integrations and OPEN QUESTIONS
+## Hard integrations — resolved (ADR-0012)
 
-These are integrations the design explicitly identifies as **hard** — not blocked, but with multiple plausible approaches. The user has not chosen between them; this section names the tradeoff so future implementers know they must.
+These L0/L1 integrations were once OPEN; they are now resolved as the **modular memory-binding contract** ([08-views-and-ownership.md](08-views-and-ownership.md) §memory-binding contract, [ADR-0012](../adr/0012-modular-memory-binding-transparent-router.md)): libtracer is a transparent byte router, safety is recommended but not mandated, and each backend owns its per-architecture contract. The **Recommendation** under each item below is the v1 decision, not an open choice.
 
-### OPEN — `mem_asio_streambuf`: do we wrap, or do we copy?
+### `mem_asio_streambuf`: do we wrap, or do we copy?
 
 `boost::asio::streambuf` is a read-write buffer with **consume-on-read** semantics — bytes the application reads are then logically removed from the buffer (advance of the get-area). Pinning the bytes via a libtracer view conflicts with this:
 
@@ -342,16 +342,16 @@ These are integrations the design explicitly identifies as **hard** — not bloc
 
 **Recommendation**: Option C for v1, revisit in v1.0 if there is real demand. Option A is the clean integration but requires either upstream cooperation or a forked streambuf; Option B is correct but defeats the zero-copy claim.
 
-### OPEN — `mem_mmio` reads: TOCTOU on a live register
+### `mem_mmio` reads: TOCTOU on a live register
 
 A view over an MMIO register's bytes is a view onto **bytes that change asynchronously**. If a CRC is computed over those bytes during egress, the bytes may differ from what the receiver later reads if they re-fetch the same view — the value is volatile.
 
 - **Option A — snapshot at view creation**: When `view_create_over_mmio()` is called, immediately copy the current register value into a small heap segment. The view points at the snapshot, not the live register. CRC is stable; subscribers see a consistent value.
 - **Option B — explicit "live view" type**: A separate view kind whose CRC is computed at egress time, accepting that two egresses may produce different bytes. Disallow as graph-stored value (must be explicitly read with side effect).
 
-**Recommendation**: Option A. The "register-as-view" abstraction is for a peripheral whose value is to be **published at a moment**; semantics like "subscribe to the live register" are misleading — they should be polled writes, not subscriptions to a live MMIO view. We make this explicit in the L0 spec and avoid the live-view footgun.
+**Recommendation**: ship both (ADR-0012). Snapshot-at-view-create is the recommended-safe default (*publish-a-moment*); a live/raw binding is **first-class** for users who own the hazard, the backend declaring its atomicity granularity and ordering. See [08-views-and-ownership.md](08-views-and-ownership.md) §MMIO register-as-view.
 
-### OPEN — Cross-process refcount on `mem_shared`
+### Cross-process refcount on `mem_shared`
 
 A POSIX SHM region can be mapped into multiple processes. Each process's libtracer instance has its own atomic refcount on segments. Two processes both holding views of the same SHM-backed segment cannot coordinate decrement — process B's `view_release()` doesn't see process A's count.
 
@@ -361,7 +361,7 @@ A POSIX SHM region can be mapped into multiple processes. Each process's libtrac
 
 **Recommendation**: Option A for v1 — it's what most pub/sub usage actually needs. Option B in a future `mem_iceoryx2` module that uses iceoryx2's existing robust-bookkeeping. Option C is the fallback when neither is available.
 
-### OPEN — lwIP `pbuf` aliasing
+### lwIP `pbuf` aliasing
 
 Two libtracer subscribers receiving the same pbuf-backed TLV both clone a `view_pbuf` over the same `pbuf*`. lwIP's `pbuf_ref / pbuf_free` is the lwIP-side refcount. Libtracer's `segment->refcount` is libtracer-side. The two refcounts are independent: libtracer holds `pbuf_ref` once for the whole segment lifetime; libtracer's segment refcount tracks fan-out.
 
@@ -369,7 +369,7 @@ Two libtracer subscribers receiving the same pbuf-backed TLV both clone a `view_
 
 **Recommendation**: A pbuf segment's `destroy` schedules a deferred `pbuf_free` via lwIP's `tcpip_callback` or equivalent — never frees synchronously from a non-lwIP-thread context. Document this explicitly in `mem_lwip_pbuf`'s spec.
 
-### OPEN — Rope walk cost vs flat materialization
+### Rope walk cost vs flat materialization
 
 A rope of N views walked at egress is N pointer chases. For a transport that does scatter-gather (`writev`, lwIP `pbuf` chain, RDMA scatter list), this is fine. For a transport that wants a single contiguous buffer (some MCU drivers, some legacy protocols), the rope is materialized via `view_flatten()` — one alloc + one copy.
 
@@ -377,7 +377,7 @@ A rope of N views walked at egress is N pointer chases. For a transport that doe
 
 **Recommendation**: Each transport declares `mtu_hint()` and an optional `wants_flat()` capability bit. The bridge / fan-out code walks the rope as-is into transports that don't set `wants_flat`; for those that do, calls `view_flatten()` once at egress. Document the rule in the transport ABI.
 
-### OPEN — DMA cache coherency on heterogeneous SoCs
+### DMA cache coherency on heterogeneous SoCs
 
 Cortex-M with non-cache-coherent DMA: the device fills a buffer in main memory, but the CPU's cache may hold stale lines. `prepare_for_io` (invalidate cache before DMA fills) and `finalize_after_io` (invalidate cache before CPU reads) are the hooks. On a coherent SoC (most Cortex-A) these are no-ops.
 
@@ -386,7 +386,7 @@ Cortex-M with non-cache-coherent DMA: the device fills a buffer in main memory, 
 
 **Recommendation**: The `mem_dma_buffer` backend's IRQ handler is the canonical place to call `finalize_after_io`. Application code never calls these directly; they are backend-internal. Document the expected interleaving as part of `mem_dma_buffer`'s spec.
 
-### OPEN — Reference-to-a-value vs reference-to-bytes
+### Reference-to-a-value vs reference-to-bytes
 
 A common pattern: the user wants an endpoint whose value is "the contents of variable X". X may be:
 
@@ -399,7 +399,7 @@ Two ways to model this:
 - **Option A — view over the live address**: A `mem_mmio`-style segment pointing at the live address. Reads always re-snapshot (per the MMIO discussion above). No ownership of the underlying memory; libtracer does not free it.
 - **Option B — register a "shadow" vertex**: The graph stores a value; the publisher writes the value when X changes. Subscribers read the shadow.
 
-**Recommendation**: Option B is the protocol-clean answer (the graph stores values; the protocol is about graph state, not direct memory probes). Option A is a quick-and-dirty path for prototyping (`tracer_attach_register(&my_var)`) that we may ship as a developer-convenience helper but not as the canonical pattern. Document this clearly so users don't accidentally rely on Option A's TOCTOU surface.
+**Recommendation**: ship both (ADR-0012). Option B (shadow vertex) is the recommended-safe default; Option A (live binding, `tracer_attach_register(&my_var)`) is **fully supported** — not a footgun helper — for users who own the hazard. See [08-views-and-ownership.md](08-views-and-ownership.md) §reference-to-a-value.
 
 ---
 
