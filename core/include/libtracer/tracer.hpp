@@ -6,6 +6,13 @@
 // L4 in-process graph runtime follow (see core/README.md).
 #pragma once
 
+#include "libtracer/backend.hpp"
 #include "libtracer/crc.hpp"
 #include "libtracer/frame.hpp"
+#include "libtracer/mem_borrowed.hpp"
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_pool.hpp"
+#include "libtracer/rope.hpp"
+#include "libtracer/segment.hpp"
 #include "libtracer/tlv.hpp"
+#include "libtracer/view.hpp"
