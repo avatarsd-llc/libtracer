@@ -50,3 +50,8 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+# CMake build directories, generated compile DB, editor caches
+build/
+*/build/
+compile_commands.json
+.cache/
