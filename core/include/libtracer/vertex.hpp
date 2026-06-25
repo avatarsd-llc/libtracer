@@ -18,6 +18,7 @@
 #include <memory>
 #include <mutex>
 #include <utility>
+#include <vector>
 
 #include "libtracer/path.hpp"
 #include "libtracer/status.hpp"
@@ -47,6 +48,16 @@ struct Handlers {
     std::function<Result<void>(const View&)> on_write;
 };
 
+// One subscription edge (M3b). A write to this vertex fans out to a target vertex
+// (target_key — spec-faithful re-dispatch) and/or an in-process callback (sugar).
+// docs/reference/02 §dispatch + 04 §write fanout. Inactive slots model an
+// unsubscribe (a cleared :subscribers[N]).
+struct Subscriber {
+    std::vector<std::byte> target_key;          // canonical PATH key (empty => callback-only)
+    std::function<void(const View&)> callback;  // null => target-only
+    bool active = true;
+};
+
 class Vertex {
    public:
     Vertex(Role role, PathKey key, Settings settings, Handlers handlers)
@@ -69,6 +80,7 @@ class Vertex {
 
     std::atomic<std::shared_ptr<const View>> lkv_{};   // lock-free read/write hot path
     std::deque<std::shared_ptr<const View>> history_;  // Stream ring; guarded by m_
+    std::vector<Subscriber> subs_;                     // fan-out edges; guarded by m_
     std::mutex m_;
     std::condition_variable cv_;
     std::uint64_t write_seq_ = 0;  // bumped per write; await waits for an increment (guarded by m_)

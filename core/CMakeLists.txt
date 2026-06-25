@@ -35,3 +35,10 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR
     enable_testing()
     add_subdirectory(tests)
 endif()
+
+# M3: the in-process pub/sub example (the P0 node end to end). Built by default
+# when libtracer is the top-level project; runs as a smoke test under CTest.
+option(LIBTRACER_BUILD_EXAMPLES "Build the core examples" ${PROJECT_IS_TOP_LEVEL})
+if(LIBTRACER_BUILD_EXAMPLES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/CMakeLists.txt")
+    add_subdirectory(examples)
+endif()
