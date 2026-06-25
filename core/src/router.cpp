@@ -8,6 +8,7 @@
 #include <optional>
 #include <string_view>
 
+#include "libtracer/byteorder.hpp"
 #include "libtracer/tlv.hpp"
 
 namespace tracer {
@@ -26,13 +27,7 @@ void emit_tlv(std::vector<std::byte>& out, std::uint8_t type, bool pl,
     const bool ll = body.size() > 0xFFFFu;
     out.push_back(static_cast<std::byte>(type));
     out.push_back(static_cast<std::byte>((pl ? 0x40 : 0x00) | (ll ? 0x08 : 0x00)));
-    const std::uint32_t len = static_cast<std::uint32_t>(body.size());
-    out.push_back(static_cast<std::byte>(len & 0xFF));
-    out.push_back(static_cast<std::byte>((len >> 8) & 0xFF));
-    if (ll) {
-        out.push_back(static_cast<std::byte>((len >> 16) & 0xFF));
-        out.push_back(static_cast<std::byte>((len >> 24) & 0xFF));
-    }
+    detail::append_le(out, static_cast<std::uint32_t>(body.size()), ll ? 4u : 2u);
     out.insert(out.end(), body.begin(), body.end());
 }
 
@@ -66,13 +61,6 @@ std::optional<Head> read_head(std::span<const std::byte> buf, std::size_t at) {
     return Head{type, at + hdr, len, hdr + len};
 }
 
-std::uint64_t read_le(std::span<const std::byte> p) {
-    std::uint64_t v = 0;
-    for (std::size_t i = 0; i < p.size() && i < 8; ++i)
-        v |= static_cast<std::uint64_t>(u8(p[i])) << (8 * i);
-    return v;
-}
-
 }  // namespace
 
 std::vector<std::byte> router_wrap(std::span<const std::byte> data, const RouterMeta& meta) {
@@ -83,8 +71,7 @@ std::vector<std::byte> router_wrap(std::span<const std::byte> data, const Router
 
     emit_name(body, "origin_timestamp");
     std::array<std::byte, 8> ts{};
-    for (int i = 0; i < 8; ++i)
-        ts[static_cast<std::size_t>(i)] = static_cast<std::byte>((meta.ts >> (8 * i)) & 0xFF);
+    detail::store_le(ts, meta.ts);
     emit_tlv(body, kTime, false, ts);
 
     emit_name(body, "hop_count");
@@ -130,7 +117,7 @@ std::expected<Unwrapped, Error> router_unwrap(std::span<const std::byte> frame) 
                 return std::unexpected(Error::FrameInvalid);
             std::memcpy(out.meta.origin.data(), payload.data(), payload.size());
         } else if (name == "origin_timestamp") {
-            out.meta.ts = read_le(payload);
+            out.meta.ts = detail::load_le(payload);
         } else if (name == "hop_count") {
             out.meta.hop = payload.empty() ? 0 : u8(payload[0]);
         }

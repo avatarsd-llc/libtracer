@@ -15,6 +15,12 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **Internal — `<libtracer/byteorder.hpp>`:** one `constexpr` little-endian
+  (de)serialization primitive (`detail::load_le` / `store_le` / `append_le`). The
+  frame codec, router, graph, and path canonicalizer now funnel through it instead
+  of each hand-rolling shift/mask loops — byte order lives in exactly one tested
+  place. No wire change (conformance vectors unchanged; output byte-identical).
+
 - **`graph::Graph::write(Vertex*, const FieldPath&, View)`** — a handle-based
   field-write so the control surface (`:settings.*`, `:subscribers[]`) is also
   string-free on the hot path: parse the path once (`Path::parse`), resolve the

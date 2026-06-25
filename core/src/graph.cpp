@@ -8,6 +8,7 @@
 #include <string_view>
 #include <utility>
 
+#include "libtracer/byteorder.hpp"
 #include "libtracer/frame.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/tlv.hpp"
@@ -19,11 +20,9 @@ namespace {
 // --- small TLV byte emitters for building a :schema POINT (no Tlv-model needed) -
 void emit_tlv(std::vector<std::byte>& out, std::uint8_t type, bool pl,
               std::span<const std::byte> body) {
-    const auto len = static_cast<std::uint16_t>(body.size());
     out.push_back(static_cast<std::byte>(type));
     out.push_back(static_cast<std::byte>(pl ? 0x40 : 0x00));
-    out.push_back(static_cast<std::byte>(len & 0xFF));
-    out.push_back(static_cast<std::byte>((len >> 8) & 0xFF));
+    detail::append_le(out, static_cast<std::uint16_t>(body.size()), 2);
     out.insert(out.end(), body.begin(), body.end());
 }
 
@@ -40,17 +39,8 @@ void emit_name(std::vector<std::byte>& out, std::string_view name) {
 
 void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
     std::vector<std::byte> payload(static_cast<std::size_t>(width));
-    for (int i = 0; i < width; ++i)
-        payload[static_cast<std::size_t>(i)] = static_cast<std::byte>((value >> (8 * i)) & 0xFF);
+    detail::store_le(payload, value, static_cast<std::size_t>(width));
     emit_tlv(out, 0x01, false, payload);  // VALUE
-}
-
-// Read a little-endian unsigned of up to 8 bytes from a payload span.
-[[nodiscard]] std::uint64_t read_le(std::span<const std::byte> p) {
-    std::uint64_t v = 0;
-    for (std::size_t i = 0; i < p.size() && i < 8; ++i)
-        v |= static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(p[i])) << (8 * i);
-    return v;
 }
 
 // The last NAME segment within a canonical PATH-payload key (the vertex's name).
@@ -234,7 +224,7 @@ Result<void> Graph::field_write(Vertex* v, const FieldPath& field, const View& v
     if (step0.name == "settings" && field.steps.size() >= 2) {
         const auto tlv = view_as_tlv(value);
         if (!tlv || tlv->type != Type::Value) return std::unexpected(Status::TypeMismatch);
-        const std::uint64_t n = read_le(tlv->payload);
+        const std::uint64_t n = detail::load_le(tlv->payload);
         const std::string& f = field.steps[1].name;
         const std::lock_guard lock(v->m_);
         if (f == "reliability") {
