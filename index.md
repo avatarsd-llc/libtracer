@@ -3,17 +3,32 @@
 **libtracer** is a spec-first protocol for tracing, telemetry, and pub/sub over a
 single zero-copy wire format — from Cortex-M microcontrollers to Linux gateways.
 A node is a graph of addressable **vertices**; the same TLV bytes are the wire
-encoding, the in-memory representation, and the graph node.
+encoding, the in-memory representation, and the graph node — so an in-process
+hand-off moves **zero bytes**.
 
-This site renders the canonical project material. The **normative wire protocol**
-is [the v1 spec](docs/spec/v1.md); the **descriptive** companion is the
-[reference suite](docs/reference/00-overview.md); the **why** lives in the
-[ADRs](docs/adr/0001-extract-reference-implementation-from-strawberry-fw.md); and
-the canonical vocabulary is the [glossary](CONTEXT.md).
+This site is the public documentation:
+
+- **[Modules](docs/modules/index.md)** — a module-by-module guide to the reference
+  C++ implementation, the [interface map](docs/modules/interface-map.md), and a
+  hands-on [bit-level wire walkthrough](docs/modules/wire-format-bits.md).
+- **[Reference](docs/reference/00-overview.md)** — the descriptive six-layer model
+  and architecture (the "what it is").
+- **[Specification](docs/spec/v1.md)** — the normative v1 wire protocol.
+- **[Glossary](CONTEXT.md)** — the canonical vocabulary.
 
 ```{note}
 When the spec and any other document disagree, the spec wins. The reference suite
-is descriptive; the ADRs record decisions and rationale.
+is descriptive; the design rationale (ADRs) and proposals (RFCs) live in the
+[repository](https://github.com/avatarsd-llc/libtracer), not this site.
+```
+
+```{toctree}
+:caption: Modules
+:maxdepth: 2
+
+/docs/modules/index
+/docs/modules/interface-map
+/docs/modules/wire-format-bits
 ```
 
 ```{toctree}
@@ -41,41 +56,11 @@ is descriptive; the ADRs record decisions and rationale.
 
 /docs/spec/v1
 /docs/spec/README
-/docs/spec/rfcs/0000-template
-/docs/spec/rfcs/0001-v01-consistency-consolidation
-/docs/spec/rfcs/0002-protocol-error-model
-/docs/spec/rfcs/0003-bridged-wildcard-delivery-path
 ```
 
 ```{toctree}
-:caption: Architecture Decisions
+:caption: Glossary
 :maxdepth: 1
 
-/docs/adr/0001-extract-reference-implementation-from-strawberry-fw
-/docs/adr/0002-versioning-protocol-vs-release-no-per-frame-version
-/docs/adr/0003-retire-list-type-code-0x05
-/docs/adr/0004-crc-in-optional-trailer
-/docs/adr/0005-fixed-width-length-opt-ll
-/docs/adr/0006-read-write-await-api-no-connect
-/docs/adr/0007-normative-wire-format-by-incorporation
-/docs/adr/0008-schema-driven-array-indexing
-/docs/adr/0009-built-in-error-model-tr-concept-namespace
-/docs/adr/0010-closed-protocol-error-boundary
-/docs/adr/0011-address-shift-totality-opt-in
-/docs/adr/0012-modular-memory-binding-transparent-router
-/docs/adr/0013-v1-scope-boundaries
-/docs/adr/0014-router-cycle-termination-hop-count
-/docs/adr/0015-graph-runtime-concurrency-and-in-process-cycle-cap
-```
-
-```{toctree}
-:caption: Project
-:maxdepth: 1
-
-/README
 /CONTEXT
-/GOVERNANCE
-/CONTRIBUTING
-/MAINTAINERS
-/TRADEMARKS
 ```
