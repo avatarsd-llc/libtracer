@@ -15,6 +15,21 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **M3a — L4 in-process graph runtime (core).** The data API per ADR-0006:
+  `read` / `write` / `await`, keyed on canonical PATH-TLV payload bytes.
+  - `<libtracer/status.hpp>` — `graph::Status` (the documented protocol error
+    codes) and `graph::Result<T> = std::expected<T, Status>`.
+  - `<libtracer/path.hpp>` — `graph::Path::parse` (canonical PATH payload bytes +
+    `:field.sub[N]` tail, validated/canonicalized per `docs/reference/03`) and the
+    `PathKey`/`PathKeyHash` vertex-map key.
+  - `<libtracer/vertex.hpp>` — `graph::Vertex` with `Role` {stored-value, stream,
+    handler}, `Settings` (core QoS), and the `Handlers` (`on_read`/`on_write`) seam.
+  - `<libtracer/graph.hpp>` — `graph::Graph`: `register_vertex`, `read`/`write`/
+    `await` (lock-free LKV read/write via an atomic `shared_ptr` swap; per-vertex
+    condvar for blocking `await`), and `history` for streams. Validated race-free
+    under TSan, leak/UB-free under ASan+UBSan (`tests/graph_test.cpp`). Subscriber
+    fan-out + field-write follow in M3b.
+
 - **M2 — L0/L1 memory substrate.** The layer that owns the lifetime of the bytes
   M1's borrowed `Tlv` points at; makes the zero-copy claim safe, not just fast.
   - `<libtracer/backend.hpp>` — `MemBackend`, the small user-implementable
