@@ -106,7 +106,7 @@ The path fronts multiple physical sources or sinks. A read aggregates; a write f
 
 A view onto live memory whose value changes asynchronously to libtracer. Reads snapshot the current bytes; writes (if accepted) poke the memory.
 
-- **Behavior**: `read` → snapshot now (per the OPEN QUESTION in [10-module-catalog.md](10-module-catalog.md) §MMIO TOCTOU, recommended pattern is snapshot at view-create). `write` → poke. `subscribe` → polled at `:settings.poll_hz`.
+- **Behavior**: `read` → snapshot now (per the resolved memory-binding contract — [08-views-and-ownership.md](08-views-and-ownership.md) §MMIO register-as-view and [ADR-0012](../adr/0012-modular-memory-binding-transparent-router.md): snapshot is the recommended-safe default, a live binding is supported). `write` → poke. `subscribe` → polled at `:settings.poll_hz`.
 - **State size**: zero (the bytes live in MMIO).
 - **Used for**: GPIO registers, peripheral status, anything memory-mapped.
 

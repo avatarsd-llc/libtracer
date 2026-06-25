@@ -21,7 +21,7 @@
 
 ## Purpose
 
-This directory describes **the libtracer protocol as a standard**, independent of any implementation. The C reference implementation under [../../libtracer/](../../libtracer/) is one conforming implementation; a TypeScript core, a Rust core, a hardware FPGA implementation are all admissible if they conform to what is written here.
+This directory describes **the libtracer protocol as a standard**, independent of any implementation. The C reference implementation under [../../core/](../../core/) is one conforming implementation; a TypeScript core, a Rust core, a hardware FPGA implementation are all admissible if they conform to what is written here.
 
 Design rationale is recorded in [../../docs/adr/](../../docs/adr/) and git history — they explain *why* the protocol looks the way it does. Reference documents here describe *what it is*, and are canonical.
 
