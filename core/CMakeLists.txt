@@ -4,18 +4,25 @@
 cmake_minimum_required(VERSION 3.16)
 project(libtracer CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-add_library(libtracer INTERFACE)
-target_include_directories(libtracer INTERFACE
+# M1: the L2/L3 wire codec (frame + CRC + TLV model). The L0/L1 substrate and
+# the L4 in-process graph runtime follow (see README.md).
+add_library(libtracer STATIC src/frame.cpp)
+target_include_directories(libtracer PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
-target_compile_features(libtracer INTERFACE cxx_std_17)
+target_compile_features(libtracer PUBLIC cxx_std_23)
+if(MSVC)
+    target_compile_options(libtracer PRIVATE /W4)
+else()
+    target_compile_options(libtracer PRIVATE -Wall -Wextra)
+endif()
 
-# Tests return with the protocol-v1 rebuild (core/tests/ does not exist yet).
 if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
     enable_testing()
     add_subdirectory(tests)
