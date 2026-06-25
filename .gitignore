@@ -55,3 +55,8 @@ build/
 */build/
 compile_commands.json
 .cache/
+
+# Sphinx documentation build output + Python venv
+docs/_build/
+_build/
+.venv/
