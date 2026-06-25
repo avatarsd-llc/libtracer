@@ -9,34 +9,12 @@
 #include <string_view>
 
 #include "libtracer/byteorder.hpp"
-#include "libtracer/tlv.hpp"
+#include "libtracer/tlv_emit.hpp"
 
 namespace tracer {
 namespace {
 
-constexpr std::uint8_t kValue = 0x01;
-constexpr std::uint8_t kName = 0x02;
-constexpr std::uint8_t kTime = 0x0C;
-constexpr std::uint8_t kRouter = 0x0D;
-
 std::uint8_t u8(std::byte b) { return std::to_integer<std::uint8_t>(b); }
-
-// Emit one TLV (LL-aware: 6-byte header + u32 length when body exceeds u16).
-void emit_tlv(std::vector<std::byte>& out, std::uint8_t type, bool pl,
-              std::span<const std::byte> body) {
-    const bool ll = body.size() > 0xFFFFu;
-    out.push_back(static_cast<std::byte>(type));
-    out.push_back(static_cast<std::byte>((pl ? 0x40 : 0x00) | (ll ? 0x08 : 0x00)));
-    detail::append_le(out, static_cast<std::uint32_t>(body.size()), ll ? 4u : 2u);
-    out.insert(out.end(), body.begin(), body.end());
-}
-
-void emit_name(std::vector<std::byte>& out, std::string_view s) {
-    std::vector<std::byte> b(s.size());
-    for (std::size_t i = 0; i < s.size(); ++i)
-        b[i] = static_cast<std::byte>(static_cast<unsigned char>(s[i]));
-    emit_tlv(out, kName, false, b);
-}
 
 // One parsed TLV header within a buffer.
 struct Head {
@@ -66,29 +44,30 @@ std::optional<Head> read_head(std::span<const std::byte> buf, std::size_t at) {
 std::vector<std::byte> router_wrap(std::span<const std::byte> data, const RouterMeta& meta) {
     std::vector<std::byte> body;
 
-    emit_name(body, "origin_peer_id");
-    emit_tlv(body, kValue, false, meta.origin);
+    detail::emit_name(body, "origin_peer_id");
+    detail::emit_tlv(body, Type::Value, Opt{}, meta.origin);
 
-    emit_name(body, "origin_timestamp");
+    detail::emit_name(body, "origin_timestamp");
     std::array<std::byte, 8> ts{};
     detail::store_le(ts, meta.ts);
-    emit_tlv(body, kTime, false, ts);
+    detail::emit_tlv(body, Type::Time, Opt{}, ts);
 
-    emit_name(body, "hop_count");
+    detail::emit_name(body, "hop_count");
     const std::array<std::byte, 1> hop{static_cast<std::byte>(meta.hop)};
-    emit_tlv(body, kValue, false, hop);
+    detail::emit_tlv(body, Type::Value, Opt{}, hop);
 
-    emit_name(body, "data");
+    detail::emit_name(body, "data");
     body.insert(body.end(), data.begin(), data.end());  // wrapped data TLV, verbatim, last
 
     std::vector<std::byte> out;
-    emit_tlv(out, kRouter, true, body);
+    detail::emit_tlv(out, Type::Router, Opt{.pl = true}, body);
     return out;
 }
 
 std::expected<Unwrapped, Error> router_unwrap(std::span<const std::byte> frame) {
     const auto router = read_head(frame, 0);
-    if (!router || router->type != kRouter || router->total != frame.size()) {
+    if (!router || router->type != static_cast<std::uint8_t>(Type::Router) ||
+        router->total != frame.size()) {
         return std::unexpected(Error::FrameInvalid);
     }
 
@@ -98,7 +77,8 @@ std::expected<Unwrapped, Error> router_unwrap(std::span<const std::byte> frame) 
 
     while (cur < end) {
         const auto tag = read_head(frame, cur);
-        if (!tag || tag->type != kName) return std::unexpected(Error::FrameInvalid);
+        if (!tag || tag->type != static_cast<std::uint8_t>(Type::Name))
+            return std::unexpected(Error::FrameInvalid);
         const std::string_view name(reinterpret_cast<const char*>(frame.data() + tag->payload_off),
                                     tag->payload_len);
         cur += tag->total;
