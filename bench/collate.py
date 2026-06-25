@@ -16,7 +16,7 @@ for line in sys.stdin:
             dict(sys=f[1], mode=f[2], size=int(f[3]), mps=float(f[4]),
                  mbps=float(f[5]), p50=int(f[6]), p99=int(f[7]), mean=int(f[8])))
 
-order = ["libtracer/inproc", "libtracer/loopback", "zenoh/inproc"]
+order = ["libtracer/inproc", "libtracer/loopback", "libtracer/net", "zenoh/inproc", "zenoh/net"]
 sizes = sorted({r["size"] for r in rows})
 
 

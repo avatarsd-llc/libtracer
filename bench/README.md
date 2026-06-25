@@ -3,14 +3,18 @@
 A side-by-side **speed and latency** comparison of libtracer and
 [Eclipse Zenoh](https://zenoh.io) for a 1-publisher / 1-subscriber workload.
 
+Two harnesses:
+
+- **`run.sh`** — *in-process* (one process): dispatch + serialization cost, **not**
+  network throughput. See [in-process results](#in-process-results).
+- **`run_net.sh`** — *network* (two processes over real localhost **UDP**, since
+  M5): the kernel network path. See [network results](#network-results).
+
 > [!IMPORTANT]
-> **This is an _in-process_ benchmark, not a network benchmark.** libtracer's
-> socket transport isn't built yet (it lands in **M5** — today the only transport
-> is an in-process loopback). So these numbers compare **dispatch + serialization
-> overhead inside one process** — they do **not** measure wire/network throughput,
-> which is Zenoh's whole domain. Read the [interpretation](#interpretation) before
-> quoting any figure. The harness is structured so the *same* benchmark re-runs
-> over a real socket once M5 exists (a `socket` mode drops in next to `loopback`).
+> Each figure measures a specific thing — read the interpretation before quoting
+> it. The in-process numbers are "dispatch cost"; the network numbers are over UDP
+> (best-effort, so drops shrink the message count). A reliable-stream (TCP/QUIC)
+> comparison — Zenoh's default — is **M6**.
 
 ## What is measured
 
@@ -31,12 +35,13 @@ Three in-process paths, same payload sizes (8 B → 8 KiB), same message counts:
 
 ```sh
 ./fetch_zenoh.sh   # vendors prebuilt zenoh-c 1.9.0 + zenoh-cpp (x86_64 linux)
-./run.sh           # builds both at -O3 and prints the table
+./run.sh           # in-process (one process)
+./run_net.sh       # network (two processes over localhost UDP)
 ```
 
 Without `fetch_zenoh.sh`, only the libtracer numbers print.
 
-## Results
+## In-process results
 
 `AMD EPYC 9115 · g++ 13.3 -O3 · zenoh-c 1.9.0 · 100k msgs throughput / 10k latency`
 
@@ -79,6 +84,44 @@ encoding *and* the in-memory value, so an in-process hand-off moves **zero bytes
 — ideal for high-rate on-node tracing on MCUs and gateways. Where it does **not**
 yet compete: networked pub/sub at scale (no transport, discovery, QoS, or security
 yet — see the [module roadmap](../docs/reference/10-module-catalog.md)).
+
+## Network results
+
+Two processes over real localhost **UDP** (`run_net.sh`); one-way latency via
+`CLOCK_MONOTONIC` (system-wide on Linux). `AMD EPYC 9115 · g++ 13.3 -O3 · zenoh-c
+1.9.0 · 50k throughput / 5k latency per size`.
+
+```
+ payload path                         msgs/s       MB/s        p50        p99       mean
+----------------------------------------------------------------------------------------
+     16B libtracer/net               351,558        5.6     14.13µ     37.61µ     15.00µ
+     16B zenoh/net                 3,330,328       53.3     65.03µ    150.66µ     74.14µ
+    256B libtracer/net               547,938      140.3     14.41µ     45.04µ     15.93µ
+    256B zenoh/net                 2,585,001      661.8     66.29µ    123.93µ     69.84µ
+   1024B libtracer/net               486,615      498.3     12.49µ     40.33µ     14.53µ
+   1024B zenoh/net                 2,874,575     2943.6     64.10µ    128.08µ     68.85µ
+   8192B libtracer/net               194,588     1594.1     11.74µ     37.46µ     13.35µ
+   8192B zenoh/net                   198,138     1623.1     69.91µ    158.04µ     77.75µ
+```
+
+The two systems split the win — a textbook **latency vs. throughput** trade:
+
+- **libtracer has ~4–5× lower latency** (p50 ~12–15 µs vs Zenoh ~65 µs; p99 too).
+  Its per-message path is thin: encode a VALUE TLV → ROUTER-wrap → one `sendto`;
+  recv → unwrap → graph write. Nothing sits between the write and the wire.
+- **Zenoh has ~6–9× higher small-message throughput** (millions/s vs hundreds of
+  thousands). The reason is **batching**: Zenoh coalesces many messages into fewer
+  datagrams, amortizing the syscall — at the cost of the latency you see above.
+  libtracer currently does **one `sendto` per message**, so its network throughput
+  is **syscall-bound** (~350–550k/s ≈ the `sendto` ceiling).
+- At **8 KB** they converge (~195k/s, ~1.6 GB/s) — each message ≈ one datagram, so
+  batching no longer helps and both are bandwidth-bound.
+
+**What this surfaces:** a real, nameable libtracer optimization — **egress batching**
+(coalesce frames per datagram, or `sendmmsg`) would close most of the throughput
+gap while keeping the latency edge. It is *not* built yet; today libtracer trades
+throughput for latency on the wire. (Caveat: localhost UDP, best-effort; Zenoh's
+default is reliable TCP, so M6 will give the apples-to-apples reliable comparison.)
 
 ## Reproducibility / caveats
 
