@@ -15,6 +15,24 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **M4 — first transport + bridge.** Two nodes talk over a "wire" (P2 bridge
+  conformance); no sockets yet — an in-process loopback transport.
+  - `<libtracer/transport.hpp>` — the `Transport` seam (`send` + `set_receiver`)
+    and `PeerId` (the 16-byte ROUTER `origin_peer_id`).
+  - `<libtracer/loopback.hpp>` — `LoopbackChannel`/`LoopbackEndpoint`, a dev/test
+    transport over an in-memory channel with per-endpoint receive threads.
+  - `<libtracer/router.hpp>` — `RouterMeta`, `router_wrap`/`router_unwrap` for the
+    ROUTER envelope (docs/reference/05 §0x0D): NAME-tagged origin/ts/hop_count +
+    the wrapped data TLV last; LL-aware emit, zero-copy unwrap.
+  - `<libtracer/bridge.hpp>` — `Bridge`: `export_vertex` (egress — subscribe →
+    ROUTER-wrap → send), ingress (unwrap → recent-set dedup on `(origin, ts)` →
+    `hop_count`/`kMaxHops` termination → write the bare TLV to the mount vertex),
+    `set_mount`/`set_recent_set_capacity`/`set_reforward`.
+  - `examples/two_node_loopback.cpp` — node A publishes, node B receives over the
+    loopback wire (encode→ROUTER→decode roundtrip). `tests/bridge_test.cpp` covers
+    golden ROUTER, two-node delivery, dedup, and `hop_count` cycle termination.
+    TSan/ASan/UBSan clean.
+
 - **M3b — L4 subscriptions, dispatch, and the in-process P0 node.** Completes the
   in-process graph: pub/sub fan-out + field-write control surface.
   - `graph::Graph::subscribe(src, target)` and `subscribe(src, callback)` — a write
