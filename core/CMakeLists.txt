@@ -9,9 +9,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# M1: the L2/L3 wire codec (frame + CRC + TLV model). The L0/L1 substrate and
-# the L4 in-process graph runtime follow (see README.md).
-add_library(libtracer STATIC src/frame.cpp)
+# M1: the L2/L3 wire codec (frame + CRC + TLV model).
+# M2: the L0/L1 substrate (segment refcount + backends + view/rope). The L4
+# in-process graph runtime follows (see README.md).
+add_library(libtracer STATIC
+    src/frame.cpp
+    src/mem_heap.cpp
+    src/mem_pool.cpp
+    src/rope.cpp
+)
 target_include_directories(libtracer PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
