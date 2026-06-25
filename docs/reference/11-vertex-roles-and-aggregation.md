@@ -1,6 +1,6 @@
 # Reference 11 — Vertex Roles, Address Grouping, and the Facade Principle
 
-> **Status**: draft, v0.1, 2026-05-03. New material — generalizes the "vertex is unspecified beyond its API contract" remark from [02-graph-model.md](02-graph-model.md) §what the protocol does NOT specify into a worked-out taxonomy of the **kinds of things a path can name**, plus the rules for fronting multiple physical sources or sinks behind one logical address.
+> **Status**: draft, v1, 2026-05-03. New material — generalizes the "vertex is unspecified beyond its API contract" remark from [02-graph-model.md](02-graph-model.md) §what the protocol does NOT specify into a worked-out taxonomy of the **kinds of things a path can name**, plus the rules for fronting multiple physical sources or sinks behind one logical address.
 > **Audience**: anyone designing a non-trivial graph topology; anyone wondering whether a "shared canvas" should be modeled as streamed bytes, a state-mirror, or both at once; anyone implementing a router that joins several transports behind one path.
 > **Prerequisites**: [02-graph-model.md](02-graph-model.md), [03-addressing.md](03-addressing.md), [04-communication-flows.md](04-communication-flows.md), [07-host-embedding.md](07-host-embedding.md).
 

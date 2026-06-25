@@ -63,6 +63,10 @@ _Avoid_: "returns a LIST", "write a single LIST TLV".
 An array-typed vertex field whose elements are all the same size, so `:field[N]` resolves by direct offset (`base + N × stride`, O(1)) on **contiguous** backing. Variable-size arrays — and arrays whose in-memory rope scatters elements across segments — resolve by **walking** children (O(n)). Array-ness is a **schema (L4)** property, never a wire bit; on the wire an array is just a `PL=1` TLV with homogeneous children (ADR-0008).
 _Avoid_: "array type code", "`opt.ARRAY` bit", a wire-level array marker — none exist.
 
+**Address-shift slicing**:
+The application-level replacement for wire-level fragmentation: a logically large payload is split across N child endpoints `ep[0..N]` sharing one timestamp; the receiver reassembles. A **group** is identified by **`(origin_peer_id, ts)`** — the same in-flight identity as the cycle-dedup recent-set — with each slice's `[index]` giving its position. **Totality is opt-in** (`expected_count` or a `:manifest`): a dropped *trailing* slice is not guaranteed-detectable ([ADR-0011](docs/adr/0011-address-shift-totality-opt-in.md)), while a missing *interior* slice surfaces `tr::flow::address_shift_gap`.
+_Avoid_: grouping by `ts` alone (collides across publishers); "fragmentation", "FRAGMENT type code".
+
 ### Errors
 
 **`tr::` error namespace**:
@@ -94,6 +98,10 @@ _Avoid_: "Core" as a noun for a fixed privileged build (the `core/` *directory* 
 **`io_dir_t`**:
 The L0 backend cache-coherency hook direction enum: `IO_DIR_DEVICE_TO_CPU` (DMA-in / RX ⇒ invalidate cache before the CPU reads HW-written bytes) and `IO_DIR_CPU_TO_DEVICE` (DMA-out / TX ⇒ clean cache so HW reads the CPU's last writes).
 _Avoid_: the `IO_DIR_READ`/`IO_DIR_WRITE` spelling and any other integer-value set — one canonical spelling only.
+
+**Memory-binding spectrum / transparent byte router**:
+The L0/L1 substrate is a modular binding layer: an endpoint's bytes may be bound as a heap snapshot, a shadow vertex, or a live/raw view (MMIO register, program variable — no copy, no CRC, lock-free). In the live case libtracer is a **transparent byte router** — it imposes no snapshot/copy/CRC. Each **backend module** (`mem_backend_t`) owns and declares its per-architecture contract: allocation, cache hooks, ISR-safety, atomicity granularity, memory ordering, `destroy` thread-affinity. Safety (snapshot/shadow) is recommended, never mandated ([ADR-0012](docs/adr/0012-modular-memory-binding-transparent-router.md)).
+_Avoid_: "the protocol forbids live/raw memory binding", "endpoints must snapshot/copy".
 
 **Segment / view**:
 A **view** is a `{owner, offset, length}` window over a refcounted **segment** of backing memory (`segment_t` in the C ABI). Distinct from a **NAME segment** — a single `/`-separated path component, encoded as one NAME TLV (`0x02`).

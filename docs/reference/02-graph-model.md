@@ -1,6 +1,6 @@
 # Reference 02 — Graph Model and Same-Substrate Insight
 
-> **Status**: draft, v0.1, 2026-05-03. Defines what a graph IS in libtracer and the load-bearing claim that the in-memory graph and the wire bytes are the same substrate.
+> **Status**: draft, v1, 2026-05-03. Defines what a graph IS in libtracer and the load-bearing claim that the in-memory graph and the wire bytes are the same substrate.
 > **Audience**: implementers writing the router/dispatcher; anyone reasoning about zero-copy semantics.
 > **See also**: [04-communication-flows.md](04-communication-flows.md) for API rationale; [01-data-format.md](01-data-format.md) for the byte layout this section interprets structurally.
 
@@ -331,7 +331,7 @@ A subscriber that wants the application-domain timestamp reads it from a sibling
 
 A vertex exposes a **schema** describing every writable field. The schema lives at `<vertex>:schema` as a read-only structured TLV (typically a `POINT` whose children describe each field, or a `SETTINGS`-shaped record).
 
-### Core writable fields (frozen for v0.1)
+### Core writable fields (frozen for v1)
 
 | Field path | Type | Writable | Meaning |
 | ---- | ---- | ---- | ---- |

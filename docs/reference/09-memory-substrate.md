@@ -1,6 +1,6 @@
 # Reference 09 — Memory Substrate (L0)
 
-> **Status**: draft, v0.1, 2026-05-03. The memory layer beneath the wire format. Specifies the real-buffer / register / pool substrates that the view layer ([08-views-and-ownership.md](08-views-and-ownership.md)) refcounts and the TLV layer ([01-data-format.md](01-data-format.md)) is cast over.
+> **Status**: draft, v1, 2026-05-03. The memory layer beneath the wire format. Specifies the real-buffer / register / pool substrates that the view layer ([08-views-and-ownership.md](08-views-and-ownership.md)) refcounts and the TLV layer ([01-data-format.md](01-data-format.md)) is cast over.
 > **Audience**: anyone implementing a memory backend for a new host or integrating libtracer with an existing buffer ecosystem (lwIP, Linux kernel skbuff, iceoryx2, RDMA-registered memory, peripheral DMA descriptors).
 
 ---
@@ -149,8 +149,8 @@ typedef struct mem_backend mem_backend_t;
 typedef struct segment     segment_t;
 
 typedef enum {
-    IO_DIR_READ  = 1,   // CPU will read these bytes (after DMA-in completion)
-    IO_DIR_WRITE = 2,   // CPU has written; HW will DMA-out
+    IO_DIR_DEVICE_TO_CPU  = 1,   // CPU will read these bytes (after DMA-in completion)
+    IO_DIR_CPU_TO_DEVICE = 2,   // CPU has written; HW will DMA-out
 } io_dir_t;
 
 struct mem_backend {
@@ -166,8 +166,8 @@ struct mem_backend {
     void (*release)(segment_t *seg);
 
     // Optional: prepare CPU-visible memory for a DMA transfer.
-    //   IO_DIR_WRITE: clean cache so HW reads CPU's last writes.
-    //   IO_DIR_READ:  invalidate cache so CPU reads HW's last writes.
+    //   IO_DIR_CPU_TO_DEVICE: clean cache so HW reads CPU's last writes.
+    //   IO_DIR_DEVICE_TO_CPU:  invalidate cache so CPU reads HW's last writes.
     void (*prepare_for_io)(segment_t *seg, io_dir_t);
     void (*finalize_after_io)(segment_t *seg, io_dir_t);
 
@@ -207,7 +207,7 @@ Each entry: status, what it wraps, allocation supported, footprint, when to use,
 
 ### `mem_heap` — week 1 MVP
 
-- **Status**: ships in v0.1.
+- **Status**: ships in v1.
 - **Wraps**: `malloc` / `free`.
 - **Allocation**: yes.
 - **Footprint**: ~200 bytes plus per-segment overhead.
@@ -216,7 +216,7 @@ Each entry: status, what it wraps, allocation supported, footprint, when to use,
 
 ### `mem_pool_static` — week 1 MVP
 
-- **Status**: ships in v0.1.
+- **Status**: ships in v1.
 - **Wraps**: a single preallocated slab carved into fixed-size slots.
 - **Allocation**: yes (from free list).
 - **Footprint**: pool size + ~32 bytes per slot for header.
@@ -225,7 +225,7 @@ Each entry: status, what it wraps, allocation supported, footprint, when to use,
 
 ### `mem_pool_class` — week 2 likely
 
-- **Status**: planned for v0.1.
+- **Status**: planned for v1.
 - **Wraps**: multiple `mem_pool_static` instances at different size classes (e.g. 64, 256, 1024, 4096 bytes).
 - **Allocation**: yes (chooses smallest class that fits).
 - **Footprint**: sum of class pools.
@@ -242,7 +242,7 @@ Each entry: status, what it wraps, allocation supported, footprint, when to use,
 
 ### `mem_skbuff` — post-MVP
 
-- **Status**: not in v0.1 (kernel-only; libtracer's MVP is userspace).
+- **Status**: not in v1 (kernel-only; libtracer's MVP is userspace).
 - **Wraps**: Linux kernel `sk_buff`. Used only if libtracer is ever built as a kernel module.
 - **When to use**: a kernel-side libtracer ingestion path.
 
@@ -257,7 +257,7 @@ Each entry: status, what it wraps, allocation supported, footprint, when to use,
 
 ### `mem_mmio` — week 1 / pulled in by need
 
-- **Status**: ships in v0.1.
+- **Status**: ships in v1.
 - **Wraps**: a static segment descriptor pointing at a fixed MMIO address. The `destroy` callback is a no-op; refcount is permanently held by an initial reference that's never released.
 - **Allocation**: no.
 - **Footprint**: ~40 bytes per registered region.
@@ -346,7 +346,7 @@ The L0 backend's job is just "manage the static segment and the cursor." The L1 
 ```
 HW writes into mem_dma_buffer's preallocated segment (HW owns).
 On DMA-complete IRQ:
-  backend.finalize_after_io(seg, IO_DIR_READ)   // invalidates cache
+  backend.finalize_after_io(seg, IO_DIR_DEVICE_TO_CPU)   // invalidates cache
   framer scans for TLV boundaries in seg
   for each complete TLV: create view, hand off
 HW continues filling next segment (double-buffer or ring).
@@ -400,8 +400,8 @@ The "segment" is fictional — there's no real buffer — but the abstraction ho
 
 On Cortex-M7 / -M33 / Cortex-A class CPUs with data caches, DMA buffers need explicit cache management:
 
-- **Before HW reads a CPU-written buffer** (TX): clean the cache so HW sees the writes. `prepare_for_io(seg, IO_DIR_WRITE)`.
-- **Before CPU reads a HW-written buffer** (RX): invalidate the cache so CPU doesn't see stale lines. `finalize_after_io(seg, IO_DIR_READ)`.
+- **Before HW reads a CPU-written buffer** (TX): clean the cache so HW sees the writes. `prepare_for_io(seg, IO_DIR_CPU_TO_DEVICE)`.
+- **Before CPU reads a HW-written buffer** (RX): invalidate the cache so CPU doesn't see stale lines. `finalize_after_io(seg, IO_DIR_DEVICE_TO_CPU)`.
 
 The `mem_dma_buffer` backend implements these; the rest of libtracer (L1, L2+) doesn't see cache concerns.
 

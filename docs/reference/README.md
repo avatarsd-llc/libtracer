@@ -1,4 +1,4 @@
-# libtracer Protocol Reference (v0.1-draft)
+# libtracer Protocol Reference (protocol v1, draft)
 
 > **Status**: draft suite. All sections written; promotion to "frozen" gated by the conformance milestone tracked in the issue tracker.
 > **Last revision**: 2026-05-03. Notable architectural commitments:
@@ -41,7 +41,7 @@ The reference is ordered with most-significant concerns first (graph mental mode
 | [05-protocol-tlvs.md](05-protocol-tlvs.md) | L3 | Per-TLV byte spec for `0x01`–`0x0D` (with `0x05` retired): VALUE, NAME, DESCRIPTION, SUBSCRIBER, PATH, POINT, ERROR, STATUS, ACL, SETTINGS, TIME, ROUTER. Error code registry. Reserved-range policy. |
 | [06-user-data-packing.md](06-user-data-packing.md) | L4/L5 | Worked examples spanning eight orders of magnitude: 1-byte boolean, GPIO register as MMIO view, IMU record, 1 GB/s ADC streaming with DMA, camera+LIDAR temporal join, shared-variable pattern. Mix/split/concat invariants. |
 | [07-host-embedding.md](07-host-embedding.md) | L4 | Per-host DAG (own vertices + bridge proxies); global topology (any shape, cycles allowed); cycle handling via `(origin_peer_id, origin_timestamp)` recent-set; bridge identity; embedding examples (RC car, robot, fleet, mesh, WAN). |
-| [08-views-and-ownership.md](08-views-and-ownership.md) | L1 | Refcounted-view layer. Canonical view struct; rope (chain of views) semantics; refcount memory ordering; the TLV-as-cast operation; two parser contexts (wire-receive vs in-memory walk); view-module catalog; cross-substrate transitions; **end-to-end DMA→ADC→network trace** across all six layers. **OPEN QUESTION callouts** for hard-to-implement integrations (boost streambuf, MMIO TOCTOU, cross-process refcount, lwIP pbuf aliasing, rope walk cost). |
+| [08-views-and-ownership.md](08-views-and-ownership.md) | L1 | Refcounted-view layer. Canonical view struct; rope (chain of views) semantics; refcount memory ordering; the TLV-as-cast operation; two parser contexts (wire-receive vs in-memory walk); view-module catalog; cross-substrate transitions; **end-to-end DMA→ADC→network trace** across all six layers. The **resolved modular memory-binding contract** (ADR-0012) for the hard integrations: MMIO TOCTOU, cross-process refcount + grace/epoch, lwIP pbuf, rope-flatten, DMA coherency, register binding. |
 | [09-memory-substrate.md](09-memory-substrate.md) | L0 | Categories of memory (heap, pool, MMIO, DMA, network-stack buffers, shared memory, peripheral FIFOs); backend interface (`mem_backend_t`); backend catalog; ownership rules; cache coherency; pressure handling. |
 | [10-module-catalog.md](10-module-catalog.md) | all | Every module across all layers, in one place. Required vs optional. Pairing table: which L0 backend pairs with which L1 view module pairs with which transport. Inter-module interfaces. Per-profile build manifests. |
 | [11-vertex-roles-and-aggregation.md](11-vertex-roles-and-aggregation.md) | L4 | The vertex-facade principle: a path names a contract, not an implementation. Seven vertex roles (stored, stream, sink-with-model, computed, proxy, aggregate, live MMIO). The canvas worked through both transferred and mirror modes. Address grouping (multi-source fan-in, multi-sink fan-out, compound vertices, per-transport split). |
@@ -91,7 +91,7 @@ Higher profiles are strict supersets. See [10-module-catalog.md](10-module-catal
 
 ## Promotion rule
 
-A reference section is promoted from "draft" to "frozen for v0.1" when:
+A reference section is promoted from "draft" to "frozen for v1" when:
 
 1. The corresponding plan-doc section is implemented and tested in the C reference.
 2. A second-implementer review confirms the spec is sufficient to write an interoperable parser/sender/bridge from the spec alone (not from the C source).
@@ -99,7 +99,7 @@ A reference section is promoted from "draft" to "frozen for v0.1" when:
 
 Until all three are satisfied, the reference doc is the operating reference for second-implementer questions.
 
-The wire format does not version per-frame. v0.1 is committed once; future incompatible changes are versioned at the discovery layer (different mDNS service name, port, etc.). See [01-data-format.md](01-data-format.md) §versioning and compatibility.
+The wire format does not version per-frame. v1 is committed once; future incompatible changes are versioned at the discovery layer (different mDNS service name, port, etc.). See [01-data-format.md](01-data-format.md) §versioning and compatibility.
 
 ---
 

@@ -1,6 +1,6 @@
 # Reference 07 — Host Graph Embedded in the Larger System
 
-> **Status**: draft, v0.1, 2026-05-03. New material — this section synthesizes [04-communication-flows.md](04-communication-flows.md) (graph model, bridges) and [10-module-catalog.md](10-module-catalog.md) (bridges, discovery) and is the canonical home for the per-host-DAG ↔ global-topology distinction.
+> **Status**: draft, v1, 2026-05-03. New material — this section synthesizes [04-communication-flows.md](04-communication-flows.md) (graph model, bridges) and [10-module-catalog.md](10-module-catalog.md) (bridges, discovery) and is the canonical home for the per-host-DAG ↔ global-topology distinction.
 > **Audience**: anyone designing a multi-host deployment; anyone implementing the bridge / dedup logic.
 
 ---

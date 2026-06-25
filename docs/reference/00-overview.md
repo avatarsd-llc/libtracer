@@ -1,6 +1,6 @@
 # Reference 00 — Core Overview (the libtracer Standard)
 
-> **Status**: draft, v0.1, 2026-05-03. This is the standard. This document describes what *any* conforming implementation must do; design rationale is recorded in [../../docs/adr/](../../docs/adr/) and git history.
+> **Status**: draft, v1, 2026-05-03. This is the standard. This document describes what *any* conforming implementation must do; design rationale is recorded in [../../docs/adr/](../../docs/adr/) and git history.
 
 ---
 
@@ -190,17 +190,17 @@ The protocol itself is implementable in **any language** with:
 
 A pure-C++ port would be a thin layer (the C reference implementation already uses C++ headers in `tlv_vector.hpp` / `tlv_string.hpp` for the wrapper view types). A pure-Rust port is straightforward — `Bytes` from the `bytes` crate maps directly to libtracer's view + refcount; `tokio` or `mio` provides the run loop. A pure-Go port would lose the explicit refcount (Go has GC) but could use the same wire format and addressing.
 
-**The wire format and the addressing scheme — not the C ABI — are the standard.** A future spec audit at the end of the v0.1 milestones is the gate to declaring this reference suite "frozen for v0.1," at which point a second implementation in C++ or Rust becomes the conformance test.
+**The wire format and the addressing scheme — not the C ABI — are the standard.** A future spec audit at the end of the v1 milestones is the gate to declaring this reference suite "frozen for v1," at which point a second implementation in C++ or Rust becomes the conformance test.
 
 ---
 
 ## Versioning
 
-**libtracer v0.1 is the wire format. It does not version per-frame.** There is no version bit in `opt`. The wire format is a one-shot commitment: get it right, ship it, don't bump.
+**libtracer v1 is the wire format. It does not version per-frame.** There is no version bit in `opt`. The wire format is a one-shot commitment: get it right, ship it, don't bump.
 
 Future incompatible changes — should they ever be needed — are versioned at the **discovery layer**: a different mDNS service name (`_libtracer-v2._tcp` vs `_libtracer._tcp`), a different default TCP port, a different CAN-ID prefix, etc. Peers learn each other's wire-format identity at discovery time.
 
-The forward-extension path within v0.1 is the type-code registry: new core type codes can be added in `0x0E – 0x7F` without breaking existing receivers, who gracefully ignore unknown codes per [01-data-format.md](01-data-format.md) §handling unknown type codes.
+The forward-extension path within v1 is the type-code registry: new core type codes can be added in `0x0E – 0x7F` without breaking existing receivers, who gracefully ignore unknown codes per [01-data-format.md](01-data-format.md) §handling unknown type codes.
 
 ---
 
