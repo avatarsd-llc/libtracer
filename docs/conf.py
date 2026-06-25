@@ -31,6 +31,7 @@ root_doc = "index"
 # repository for contributors.
 include_patterns = [
     "index.md",
+    "docs/getting-started.md",
     "docs/reference/**",
     "docs/modules/**",
     "docs/spec/v1.md",
