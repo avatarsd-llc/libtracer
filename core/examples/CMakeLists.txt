@@ -11,7 +11,16 @@ else()
     target_compile_options(in_process_pubsub PRIVATE -Wall -Wextra)
 endif()
 
-# Run the example as a smoke test when testing is enabled (it exits 0).
+add_executable(two_node_loopback two_node_loopback.cpp)
+target_link_libraries(two_node_loopback PRIVATE libtracer Threads::Threads)
+if(MSVC)
+    target_compile_options(two_node_loopback PRIVATE /W4)
+else()
+    target_compile_options(two_node_loopback PRIVATE -Wall -Wextra)
+endif()
+
+# Run the examples as smoke tests when testing is enabled (they exit 0).
 if(BUILD_TESTING)
     add_test(NAME example_in_process_pubsub COMMAND in_process_pubsub)
+    add_test(NAME example_two_node_loopback COMMAND two_node_loopback)
 endif()

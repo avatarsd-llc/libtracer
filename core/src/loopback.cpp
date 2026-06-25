@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+
+#include "libtracer/loopback.hpp"
+
+#include <utility>
+
+namespace tracer {
+
+void LoopbackEndpoint::set_receiver(Receiver receiver) {
+    const std::lock_guard lock(m_);
+    receiver_ = std::move(receiver);
+}
+
+void LoopbackEndpoint::send(std::span<const std::byte> frame) {
+    if (peer_) peer_->enqueue(std::vector<std::byte>(frame.begin(), frame.end()));
+}
+
+void LoopbackEndpoint::enqueue(std::vector<std::byte> frame) {
+    {
+        const std::lock_guard lock(m_);
+        inbox_.push_back(std::move(frame));
+    }
+    cv_.notify_one();
+}
+
+void LoopbackEndpoint::start() {
+    thread_ = std::thread([this] { run(); });
+}
+
+void LoopbackEndpoint::stop() {
+    {
+        const std::lock_guard lock(m_);
+        stop_ = true;
+    }
+    cv_.notify_all();
+    if (thread_.joinable()) thread_.join();
+}
+
+void LoopbackEndpoint::run() {
+    for (;;) {
+        std::vector<std::byte> frame;
+        Receiver receiver;
+        {
+            std::unique_lock lock(m_);
+            cv_.wait(lock, [this] { return stop_ || !inbox_.empty(); });
+            if (inbox_.empty()) return;  // woken to stop with nothing left to drain
+            frame = std::move(inbox_.front());
+            inbox_.pop_front();
+            receiver = receiver_;  // copy under the lock (TSan-safe vs set_receiver)
+        }
+        if (receiver) receiver(frame);
+    }
+}
+
+LoopbackChannel::LoopbackChannel() {
+    a_.peer_ = &b_;
+    b_.peer_ = &a_;
+    a_.start();
+    b_.start();
+}
+
+LoopbackChannel::~LoopbackChannel() { shutdown(); }
+
+void LoopbackChannel::shutdown() {
+    a_.stop();
+    b_.stop();
+}
+
+}  // namespace tracer
