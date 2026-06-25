@@ -24,27 +24,24 @@ extensions = [
 source_suffix = {".md": "markdown"}
 root_doc = "index"
 
-# Only build the documentation material (paths are relative to the source root).
+# Publish only the public protocol material (allowlist, relative to the source
+# root): the descriptive reference suite, the module guide, the normative v1 spec,
+# and the glossary. Dev/process docs — ADRs (docs/adr), RFCs (docs/spec/rfcs), and
+# the governance pages — are intentionally NOT published here; they live in the
+# repository for contributors.
 include_patterns = [
     "index.md",
-    "docs/**",
-    "README.md",
+    "docs/reference/**",
+    "docs/modules/**",
+    "docs/spec/v1.md",
+    "docs/spec/README.md",
     "CONTEXT.md",
-    "GOVERNANCE.md",
-    "CONTRIBUTING.md",
-    "MAINTAINERS.md",
-    "TRADEMARKS.md",
 ]
 exclude_patterns = [
     "_build",
     "**/_build/**",
-    "CLAUDE.md",
-    "core/**",
-    "bindings/**",
-    "integrations/**",
-    "implementations/**",
-    "examples/**",
-    "tests/**",
+    "docs/adr/**",
+    "docs/spec/rfcs/**",
     "**/LICENSE",
 ]
 
