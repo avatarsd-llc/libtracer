@@ -1,6 +1,6 @@
 # Reference 03 — Addressing
 
-> **Status**: draft, v0.1, 2026-05-03. Defines how vertices and fields are named, how subscriptions match paths, and how application-level slicing replaces wire-level fragmentation.
+> **Status**: draft, v1, 2026-05-03. Defines how vertices and fields are named, how subscriptions match paths, and how application-level slicing replaces wire-level fragmentation.
 > **See also**: [04-communication-flows.md](04-communication-flows.md) for API rationale; [02-graph-model.md](02-graph-model.md) for the schema discipline that gives field names meaning.
 
 ---
@@ -54,14 +54,16 @@ A path that violates any limit MUST be rejected with `ERROR=INVALID_PATH`.
 ### Index forms
 
 - `[N]` (decimal integer 0..65535): a specific slot.
-- `[]` (empty index): the array as a whole. Reads return a LIST; writes append to the next free slot.
+- `[]` (empty index): the array as a whole. A read returns a `PL=1` reply whose children are the element TLVs; a write appends to the next free slot.
 - `[*]` (wildcard, **subscribe-only**): match any index. Valid only inside SUBSCRIBER PATHs.
+
+Indexing is resolved at **L4 from the field schema**, not from a wire marker: a **fixed-stride** array (uniform element size) resolves `[N]` by direct offset (O(1)) on contiguous backing; otherwise the children are walked (ADR-0008).
 
 ### Reserved characters
 
 The five characters `/ : . [ ]` plus the wildcards `*` and `?` cannot appear inside a NAME segment. Implementations MUST reject any NAME containing them with `ERROR=INVALID_PATH`.
 
-(`?` is reserved for future single-character wildcard semantics; it is not in use in v0.1 but is reserved to keep the door open.)
+(`?` is reserved for future single-character wildcard semantics; it is not in use in v1 but is reserved to keep the door open.)
 
 ---
 
@@ -85,13 +87,13 @@ If stage 1 fails: `ERROR=NOT_FOUND`. If stage 2 fails: `ERROR=SCHEMA_NOT_FOUND` 
 ### Reading vs writing array slots
 
 - `read("/x:subscribers[0]")` returns the SUBSCRIBER TLV at slot 0, or `STATUS=ERROR(NOT_FOUND)` if empty.
-- `read("/x:subscribers[]")` returns a LIST of all populated SUBSCRIBER slots, in slot-order.
+- `read("/x:subscribers[]")` returns a `PL=1` reply whose children are all populated SUBSCRIBER slots, in slot-order.
 - `write("/x:subscribers[3]", tlv)` places the TLV at slot 3, replacing any existing entry.
 - `write("/x:subscribers[]", tlv)` allocates the next free slot and places the TLV there. The caller can recover the chosen index by reading `:subscribers[]` and looking for their TLV (typically by including a unique subscriber-id NAME in the SUBSCRIBER record).
 
 ### Atomicity of multi-field writes
 
-A single `write(path, tlv)` is atomic: a concurrent reader sees either the full prior state or the full new state at that path, not a partial mixture. To update multiple fields atomically, write a single LIST TLV containing all the fields to a parent path; the router applies the LIST as one operation.
+A single `write(path, tlv)` is atomic: a concurrent reader sees either the full prior state or the full new state at that path, not a partial mixture. To update multiple fields atomically, write a single SETTINGS TLV (`0x0B`) containing all the fields to a parent path; the router applies the SETTINGS as one operation.
 
 ```c
 // Non-atomic (reader between calls sees inconsistent state):
@@ -99,7 +101,7 @@ tracer_write("/x:settings.reliability", tlv1);
 tracer_write("/x:settings.deadline_ns", tlv2);
 
 // Atomic (reader sees both fields update together):
-tracer_write("/x:settings", list_tlv_containing(tlv1, tlv2));
+tracer_write("/x:settings", settings_tlv(tlv1, tlv2));   // SETTINGS (0x0B), not a generic container
 ```
 
 ---
@@ -135,7 +137,7 @@ A subscription with a wildcard requires the router to walk the wildcard table on
 
 ### Subscriber identity in wildcard subscriptions
 
-A wildcard subscriber receives a stream of TLVs from many concrete paths. The dispatcher SHOULD provide the matched concrete path as metadata when delivering — typically by encoding it in the SUBSCRIBER's target path or by attaching a NAME TLV in the delivery LIST. The exact mechanism is implementation-defined; the spec only requires that a subscriber can determine which concrete path produced each delivered TLV.
+A wildcard subscriber receives a stream of TLVs from many concrete paths. The dispatcher SHOULD provide the matched concrete path as metadata when delivering — typically by encoding it in the SUBSCRIBER's target path or by attaching a NAME TLV alongside the delivered TLV. The exact mechanism is implementation-defined; the spec only requires that a subscriber can determine which concrete path produced each delivered TLV.
 
 ---
 
@@ -167,16 +169,17 @@ write("/camera/frame[*]:subscribers[]", SUBSCRIBER{path=/local/handler, settings
 
 Each subsequent `write("/camera/frame[i]", ...)` matches the wildcard and produces a delivery to `/local/handler` with the slice index recoverable from the matched path.
 
-The subscriber assembles the slices into a coherent group by **`(timestamp, index)`** pairing:
+The subscriber assembles the slices into a coherent group keyed by **`(origin_peer_id, ts)`**, with each slice's `index` giving its position:
 
-- All slices with the same `ts` belong to the same logical message.
+- All slices with the same **`(origin_peer_id, ts)`** belong to the same logical message. This is the **same in-flight identity** the cycle-dedup recent-set uses ([02-graph-model.md](02-graph-model.md), [07-host-embedding.md](07-host-embedding.md)); grouping by `ts` alone would merge slices from two publishers that happen to emit at the same timestamp.
+- `origin_peer_id` is the **originating** publisher, not the immediate hop. The assembler MUST retain it across a bridge that sheds the ROUTER envelope — the slice arrives with the bridge as its immediate sender, but the ROUTER carried the origin.
 - The slice's `index` (from the `[N]` in its address) gives its position within the logical message.
 - A slice may arrive at any time within the deadline window.
-- Loss of a slice is detected as a missing index in the timestamp group at deadline time.
+- Loss of an **interior** slice is detected as a missing index at deadline; loss of **trailing** slice(s) is detectable only when the group total is known (see §loss detection).
 
 ### Subscriber assembly policies
 
-The subscriber's QoS at `:settings.address_shift.*` controls assembly behavior. (Field names are defined here as the v0.1 design.)
+The subscriber's QoS at `:settings.address_shift.*` controls assembly behavior. (Field names are defined here as the v1 design.)
 
 | Field | Type | Default | Effect |
 | ---- | ---- | ---- | ---- |
@@ -189,7 +192,7 @@ The subscriber's QoS at `:settings.address_shift.*` controls assembly behavior. 
 
 Missing index `k` in a group with `expected_count = N` and observed indices `{0..N-1} \ {k}`: at deadline, the assembler emits `STATUS=ADDRESS_SHIFT_GAP` with `ERROR.detail = k`.
 
-For groups without `expected_count`, the assembler treats the largest-observed-index + 1 as the implicit `N` at deadline (so a 100-slice group missing index 99 looks complete at slice 98). If this is unacceptable, the publisher MUST emit `expected_count` out-of-band or use the LIST-with-index-list pattern (declare the index set in a leading `/camera/frame:manifest` write).
+**Group totality is opt-in.** For groups without `expected_count`, the assembler treats the largest-observed-index + 1 as the implicit `N` at deadline — so a dropped **trailing** slice is invisible (a 100-slice group missing index 99 looks complete at slice 98). v1 does not force a count: open-ended streams cannot always supply one. If guaranteed tail-loss detection is required, the publisher MUST declare totality — either set `expected_count`, or precede the group with a `:manifest` write carrying the index set as a structured (`opt.PL=1`) TLV. (An end-of-group marker on the final slice is a possible future mechanism — see [ADR-0011](../adr/0011-address-shift-totality-opt-in.md).)
 
 ### Why this is good
 

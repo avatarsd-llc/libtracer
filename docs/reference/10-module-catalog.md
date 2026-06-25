@@ -1,6 +1,6 @@
 # Reference 10 — Module Catalog and Composition
 
-> **Status**: draft, v0.1, 2026-05-03. New material — this is the cross-cutting index of every module mentioned anywhere in the reference suite, with their layer assignment, required-vs-optional status, dependencies, and pairings.
+> **Status**: draft, v1, 2026-05-03. New material — this is the cross-cutting index of every module mentioned anywhere in the reference suite, with their layer assignment, required-vs-optional status, dependencies, and pairings.
 > **Audience**: anyone deciding what to compile in / out of a build; anyone porting libtracer to a new platform; anyone implementing a new module and needing to know what interface to satisfy.
 
 ---
@@ -25,7 +25,7 @@ This catalog is the source of truth for **what gets built and how it composes**.
 | `mem-backend` | L0 memory substrate — owns real bytes, exposes them as `segment_t`. |
 | `view-module` | L1 view + rope + cast layer — owns no bytes, owns the ownership semantics. |
 | `tool` | Out-of-process utility (CLI introspection, GUI, recorder). |
-| `future` | Named, not built for v0.1. Listed so the design space is explicit. |
+| `future` | Named, not built for v1. Listed so the design space is explicit. |
 
 ---
 
@@ -37,17 +37,17 @@ Backends that own real bytes. Each implements the `mem_backend_t` interface.
 
 | Module | Tag | What it wraps | Status |
 | ---- | ---- | ---- | ---- |
-| `mem_heap` | mem-backend | malloc/free, jemalloc, mimalloc — any general-purpose heap | v0.1 |
-| `mem_pool_static` | mem-backend | A statically-allocated fixed-size slot pool | v0.1 |
-| `mem_pool_class` | mem-backend | A small set of fixed-size slot pools partitioned by size class | v0.1 |
-| `mem_lwip_pbuf` | mem-backend | An lwIP `struct pbuf` chain (network-stack buffer) | v0.1 |
+| `mem_heap` | mem-backend | malloc/free, jemalloc, mimalloc — any general-purpose heap | v1 |
+| `mem_pool_static` | mem-backend | A statically-allocated fixed-size slot pool | v1 |
+| `mem_pool_class` | mem-backend | A small set of fixed-size slot pools partitioned by size class | v1 |
+| `mem_lwip_pbuf` | mem-backend | An lwIP `struct pbuf` chain (network-stack buffer) | v1 |
 | `mem_skbuff` | mem-backend | A Linux kernel `sk_buff` (for in-kernel libtracer ports) | future |
-| `mem_dma_buffer` | mem-backend | A peripheral DMA buffer (preallocated, recycled, with cache hooks) | v0.1 |
-| `mem_mmio` | mem-backend | An MMIO range — bytes never moved; segment is a permanent fixture | v0.1 |
-| `mem_shared` | mem-backend | A POSIX SHM region (single-process refcounted, multi-process treats as MMIO) | v0.1 |
-| `mem_uart_rx_simple` | mem-backend | A circular UART RX buffer with byte-by-byte cursor | v0.1 |
-| `mem_uart_rx_dma` | mem-backend | A double-buffered DMA UART RX ring (half-complete and complete IRQs) | v0.1 |
-| `mem_can_reassembly` | mem-backend | A reassembly slab for multi-frame CAN/CAN-FD messages | v0.1 |
+| `mem_dma_buffer` | mem-backend | A peripheral DMA buffer (preallocated, recycled, with cache hooks) | v1 |
+| `mem_mmio` | mem-backend | An MMIO range — bytes never moved; segment is a permanent fixture | v1 |
+| `mem_shared` | mem-backend | A POSIX SHM region (single-process refcounted, multi-process treats as MMIO) | v1 |
+| `mem_uart_rx_simple` | mem-backend | A circular UART RX buffer with byte-by-byte cursor | v1 |
+| `mem_uart_rx_dma` | mem-backend | A double-buffered DMA UART RX ring (half-complete and complete IRQs) | v1 |
+| `mem_can_reassembly` | mem-backend | A reassembly slab for multi-frame CAN/CAN-FD messages | v1 |
 | `mem_iceoryx2` | mem-backend | An iceoryx2 publish-side block | future |
 | `mem_rdma` | mem-backend | An RDMA-registered memory region with ibv tags | future |
 | `mem_asio_streambuf` | mem-backend | A `boost::asio::streambuf` (consume-on-read semantics) | **OPEN — see §hard integrations** |
@@ -58,15 +58,15 @@ The view + rope + cast machinery itself is one `required` module; integrations w
 
 | Module | Tag | Pairs with (L0) | Status |
 | ---- | ---- | ---- | ---- |
-| `view_core` | required | any backend | v0.1 |
-| `view_basic` | view-module | `mem_heap`, `mem_pool_*`, `mem_mmio`, `mem_dma_buffer` | v0.1 |
-| `view_pbuf` | view-module | `mem_lwip_pbuf` | v0.1 |
-| `view_iovec` | view-module | any backend exposing scatter-gather | v0.1 |
-| `view_dma_descriptor` | view-module | `mem_dma_buffer` | v0.1 |
-| `view_uart_simple` | view-module | `mem_uart_rx_simple` | v0.1 |
-| `view_uart_dma` | view-module | `mem_uart_rx_dma` | v0.1 |
-| `view_can_frames` | view-module | `mem_can_reassembly` | v0.1 |
-| `view_shm` | view-module | `mem_shared` | v0.1 |
+| `view_core` | required | any backend | v1 |
+| `view_basic` | view-module | `mem_heap`, `mem_pool_*`, `mem_mmio`, `mem_dma_buffer` | v1 |
+| `view_pbuf` | view-module | `mem_lwip_pbuf` | v1 |
+| `view_iovec` | view-module | any backend exposing scatter-gather | v1 |
+| `view_dma_descriptor` | view-module | `mem_dma_buffer` | v1 |
+| `view_uart_simple` | view-module | `mem_uart_rx_simple` | v1 |
+| `view_uart_dma` | view-module | `mem_uart_rx_dma` | v1 |
+| `view_can_frames` | view-module | `mem_can_reassembly` | v1 |
+| `view_shm` | view-module | `mem_shared` | v1 |
 | `view_iceoryx2` | view-module | `mem_iceoryx2` | future |
 | `view_rdma` | view-module | `mem_rdma` | future |
 
@@ -101,16 +101,16 @@ These six are required even at profile P0 (in-process build). "Required" does no
 
 | Module | Tag | Wraps | Status |
 | ---- | ---- | ---- | ---- |
-| `transport_tcp` | transport | TCP socket | v0.1, week 2 |
-| `transport_udp` | transport | UDP socket (unicast and multicast) | v0.1 |
+| `transport_tcp` | transport | TCP socket | v1, week 2 |
+| `transport_udp` | transport | UDP socket (unicast and multicast) | v1 |
 | `transport_quic` | transport | QUIC | post-MVP |
-| `transport_ws` | transport | WebSocket (browser / WASM) | v0.1, week 5 |
-| `transport_unix` | transport | Unix domain socket | v0.1 |
+| `transport_ws` | transport | WebSocket (browser / WASM) | v1, week 5 |
+| `transport_unix` | transport | Unix domain socket | v1 |
 | `transport_shm` | transport | Iceoryx-style shared-memory ring | post-MVP |
-| `transport_uart` | transport | UART (simple + DMA modes) | v0.1, week 6 |
-| `transport_can` | transport | CAN classic + CAN-FD with reassembly | v0.1, week 6 |
-| `transport_i2c` | transport | I²C bus | v0.1 |
-| `transport_spi` | transport | SPI bus | v0.1 |
+| `transport_uart` | transport | UART (simple + DMA modes) | v1, week 6 |
+| `transport_can` | transport | CAN classic + CAN-FD with reassembly | v1, week 6 |
+| `transport_i2c` | transport | I²C bus | v1 |
+| `transport_spi` | transport | SPI bus | v1 |
 | `transport_ble_gatt` | transport | BLE GATT characteristics | future |
 | `transport_rdma` | transport | RDMA (ibverbs) | future |
 
@@ -118,8 +118,8 @@ These six are required even at profile P0 (in-process build). "Required" does no
 
 | Module | Tag | What it does | Status |
 | ---- | ---- | ---- | ---- |
-| `discovery_mdns` | discovery | mDNS / DNS-SD over local LAN | v0.1, week 3 |
-| `discovery_static` | discovery | TOML config file with explicit peer endpoints | v0.1 |
+| `discovery_mdns` | discovery | mDNS / DNS-SD over local LAN | v1, week 3 |
+| `discovery_static` | discovery | TOML config file with explicit peer endpoints | v1 |
 | `discovery_gossip` | discovery | Gossip protocol over WAN-friendly transports | post-MVP |
 
 ### Security ([10-module-catalog.md](10-module-catalog.md))
@@ -136,7 +136,7 @@ These six are required even at profile P0 (in-process build). "Required" does no
 
 | Module | Tag | What it runs | Status |
 | ---- | ---- | ---- | ---- |
-| `executor_c` | executor | C callbacks bound by name to a vertex | v0.1, week 7 |
+| `executor_c` | executor | C callbacks bound by name to a vertex | v1, week 7 |
 | `executor_micropython` | executor | MicroPython on MCU class hardware | post-MVP |
 | `executor_python` | executor | CPython on Linux | post-MVP |
 | `executor_lua` | executor | Lua | post-MVP |
@@ -148,7 +148,7 @@ These six are required even at profile P0 (in-process build). "Required" does no
 
 | Module | Tag | What it is | Status |
 | ---- | ---- | ---- | ---- |
-| `tracer-top` | tool | CLI — vertex / edge / sample-rate live view | v0.1, week 8 |
+| `tracer-top` | tool | CLI — vertex / edge / sample-rate live view | v1, week 8 |
 | `diag-gui` | tool | Web UI introspector via `transport_ws` | post-MVP |
 | `recorder` | tool | TLV stream-to-disk recorder | post-MVP |
 
@@ -338,9 +338,9 @@ These are integrations the design explicitly identifies as **hard** — not bloc
 
 - **Option A — wrap and pin**: A `view_t` over a streambuf prevents `streambuf::consume()` until the view's refcount drops to zero. Implementation: when libtracer creates a view, it bumps a per-streambuf "pinned bytes" counter; `consume()` becomes a no-op until the counter drops. This requires modifying or wrapping the streambuf — boost-side cooperation.
 - **Option B — copy on import**: At the boost-asio↔libtracer boundary, we copy the bytes into a `mem_heap` segment. Streambuf reverts to its normal consume behavior. Cost: one copy per ingress.
-- **Option C — don't integrate**: Boost-asio is a C++ ecosystem; libtracer is C-first. Provide a documented C-API shim that the user writes themselves; do not ship `mem_asio_streambuf` in v0.1.
+- **Option C — don't integrate**: Boost-asio is a C++ ecosystem; libtracer is C-first. Provide a documented C-API shim that the user writes themselves; do not ship `mem_asio_streambuf` in v1.
 
-**Recommendation**: Option C for v0.1, revisit in v1.0 if there is real demand. Option A is the clean integration but requires either upstream cooperation or a forked streambuf; Option B is correct but defeats the zero-copy claim.
+**Recommendation**: Option C for v1, revisit in v1.0 if there is real demand. Option A is the clean integration but requires either upstream cooperation or a forked streambuf; Option B is correct but defeats the zero-copy claim.
 
 ### OPEN — `mem_mmio` reads: TOCTOU on a live register
 
@@ -359,7 +359,7 @@ A POSIX SHM region can be mapped into multiple processes. Each process's libtrac
 - **Option B — robust shared refcount**: Use a robust mutex + atomic in the SHM region itself; every process participates. Complex; failure modes (process death holding the count) require a watchdog. Iceoryx2 essentially does this.
 - **Option C — copy at process boundary**: Each process treats the other's SHM as a foreign substrate; the boundary copies. No zero-copy across process; same cost as a fast loopback transport.
 
-**Recommendation**: Option A for v0.1 — it's what most pub/sub usage actually needs. Option B in a future `mem_iceoryx2` module that uses iceoryx2's existing robust-bookkeeping. Option C is the fallback when neither is available.
+**Recommendation**: Option A for v1 — it's what most pub/sub usage actually needs. Option B in a future `mem_iceoryx2` module that uses iceoryx2's existing robust-bookkeeping. Option C is the fallback when neither is available.
 
 ### OPEN — lwIP `pbuf` aliasing
 

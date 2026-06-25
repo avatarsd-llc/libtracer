@@ -1,6 +1,6 @@
 # Reference 06 — User Data Packing into the Graph
 
-> **Status**: draft, v0.1, 2026-05-03. How application-level data of any size — from a single boolean to a streaming GB/s feed — gets put into the graph and delivered with appropriate copy semantics.
+> **Status**: draft, v1, 2026-05-03. How application-level data of any size — from a single boolean to a streaming GB/s feed — gets put into the graph and delivered with appropriate copy semantics.
 > **Audience**: anyone designing the data layout for their application.
 > **See also**: [02-graph-model.md](02-graph-model.md) §read-vs-write copy semantics; [03-addressing.md](03-addressing.md) §address-shift slicing; [05-protocol-tlvs.md](05-protocol-tlvs.md) §VALUE.
 
@@ -459,7 +459,7 @@ The proof obligation is the contract that makes mix/split/concat **safe to compo
 ## What this section is NOT
 
 - A serialization framework. libtracer doesn't replace Cap'n Proto / FlatBuffers / Protobuf for **typed**, **schema-evolving**, **reflection-rich** payloads. If you need that, embed those formats inside VALUE TLVs.
-- A compression layer. libtracer doesn't compress; if your payload benefits from compression, do it in the publisher and document the encoding (NAME field "encoding" = "zstd-3" inside a LIST).
+- A compression layer. libtracer doesn't compress; if your payload benefits from compression, do it in the publisher and document the encoding (NAME field "encoding" = "zstd-3" inside a structured (`PL=1`) TLV).
 - A type system. libtracer's "TLV type" is a transport routing concern, not a data type. The user-range `0x80..0xFF` is for *protocol* tagging, not for substituting a real schema language.
 
 ---

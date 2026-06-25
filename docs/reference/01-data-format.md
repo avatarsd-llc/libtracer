@@ -1,6 +1,6 @@
 # Reference 01 — Data Format
 
-> **Status**: draft, v0.1, 2026-05-03 (revised twice in design review same day). Byte-precise definition of every libtracer frame on the wire. A second-implementer SHOULD be able to write an interoperable parser/sender from this section alone.
+> **Status**: draft, v1, 2026-05-03 (revised twice in design review same day). Byte-precise definition of every libtracer frame on the wire. A second-implementer SHOULD be able to write an interoperable parser/sender from this section alone.
 > **See also**: design rationale (CRC choice, atomic ordering, MCU stack safety) is in [01-data-format.md](01-data-format.md). That document predates this revision; the byte layout there is superseded.
 
 ---
@@ -83,7 +83,7 @@ R   Reserved (bit 0). MUST be zero. Receivers MUST reject non-zero as INVALID.
 
 Two reserved bits remain (bits 7 and 0) for unforeseen L2 needs.
 
-**Reserved bits are committed for the lifetime of v0.1.** They are not "reserved for v0.1-minor evolution"; they are forever-frozen. A v0.1 receiver that observes a reserved bit set MUST reject the TLV as `INVALID`, and the spec MUST NOT allocate them in any v0.1.x. Forward-compatible extensions live exclusively in the type-code registry (`0x0E – 0x7F`); incompatible changes live at the discovery layer per §versioning. This makes it safe for receivers to harden the reserved-bit check at compile time without anticipating future thaw.
+**Reserved bits are committed for the lifetime of v1.** They are not "reserved for later minor evolution"; protocol v1 is immutable, so they are forever-frozen. A protocol-v1 receiver that observes a reserved bit set MUST reject the TLV as `INVALID`, and the spec MUST NOT allocate them within v1. Forward-compatible extensions live exclusively in the type-code registry (`0x0E – 0x7F`); incompatible changes live at the discovery layer per §versioning. This makes it safe for receivers to harden the reserved-bit check at compile time without anticipating future thaw.
 
 ### Default vs extended forms
 
@@ -232,7 +232,7 @@ The `type` byte lives at offset 0 of the wire header (L2) but its meaning is L3.
 
 ### Versioning and compatibility
 
-**libtracer v0.1 is the wire format. It does not evolve.** There is no version bit in the header. Future incompatible changes — should they ever be needed — are versioned at the **discovery layer**: a different mDNS service name (`_libtracer-v2._tcp` vs `_libtracer._tcp`), a different default TCP port, a different CAN-ID prefix, etc. Peers learn each other's wire-format identity at discovery time; per-frame versioning is unnecessary and absent.
+**libtracer v1 is the wire format. It does not evolve.** There is no version bit in the header. Future incompatible changes — should they ever be needed — are versioned at the **discovery layer**: a different mDNS service name (`_libtracer-v2._tcp` vs `_libtracer._tcp`), a different default TCP port, a different CAN-ID prefix, etc. Peers learn each other's wire-format identity at discovery time; per-frame versioning is unnecessary and absent.
 
 This is a deliberate design commitment: get the wire format right once. The wire is the most expensive thing to evolve; minimizing its evolution surface forces design rigor here and pushes flexibility into modules, schemas, and the type-code-extension path below.
 
@@ -270,7 +270,7 @@ The same iterative pattern applies in two distinct contexts; implementations nee
 | **Wire-receive** | Single contiguous transport buffer | `offset += child_size` within one buffer |
 | **In-memory walk** | Rope of views (a chain of refcounted segments) | May step across view boundaries; payload of a single TLV may live in one or several adjacent views |
 
-The wire-receive context applies when a transport module reconstitutes a TLV from a stream. The in-memory walk applies when the router, a subscriber, or a recorder traverses a TLV that was assembled in memory (possibly via mix/split/concat operations) and is no longer flat. See [02-graph-model.md](02-graph-model.md) §LIST as abstraction, memory as rope.
+The wire-receive context applies when a transport module reconstitutes a TLV from a stream. The in-memory walk applies when the router, a subscriber, or a recorder traverses a TLV that was assembled in memory (possibly via mix/split/concat operations) and is no longer flat. See [02-graph-model.md](02-graph-model.md) §Structured TLV as abstraction, memory as rope.
 
 ---
 

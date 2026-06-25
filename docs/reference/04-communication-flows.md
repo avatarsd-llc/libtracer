@@ -1,6 +1,6 @@
 # Reference 04 — Communication Flows
 
-> **Status**: draft, v0.1, 2026-05-03. Sequence-diagram catalog for every protocol-level flow. ASCII diagrams; the wire bytes for each TLV referenced here are byte-precise in [05-protocol-tlvs.md](05-protocol-tlvs.md).
+> **Status**: draft, v1, 2026-05-03. Sequence-diagram catalog for every protocol-level flow. ASCII diagrams; the wire bytes for each TLV referenced here are byte-precise in [05-protocol-tlvs.md](05-protocol-tlvs.md).
 > **See also**: [04-communication-flows.md](04-communication-flows.md) for API surface design rationale.
 
 ---
@@ -338,7 +338,7 @@ Bridge                Transport module      External peer
 
 There is no automatic graph-state-merge logic. Last-write-wins by timestamp is the conflict-resolution policy. If both sides wrote during the partition, the higher timestamp wins; the lower timestamp is silently superseded.
 
-Cluster consensus / CRDT / vector-clock causality are explicitly **out of scope** for v0.1. Layer them above libtracer if needed.
+Cluster consensus / CRDT / vector-clock causality are explicitly **out of scope** for v1. Layer them above libtracer if needed.
 
 ---
 

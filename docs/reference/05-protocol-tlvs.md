@@ -1,6 +1,6 @@
 # Reference 05 — Protocol-Defined TLVs
 
-> **Status**: draft, v0.1, 2026-05-03 (revised same day). Per-TLV byte-precise specification for every type code in the core-reserved range. The header layout, options bits, fixed-width length, and trailer (TS + CRC) are in [01-data-format.md](01-data-format.md); this document specifies what each type code's payload looks like.
+> **Status**: draft, v1, 2026-05-03 (revised same day). Per-TLV byte-precise specification for every type code in the core-reserved range. The header layout, options bits, fixed-width length, and trailer (TS + CRC) are in [01-data-format.md](01-data-format.md); this document specifies what each type code's payload looks like.
 
 ---
 
@@ -13,7 +13,7 @@
 | `0x20` – `0x7F` | Reserved for future core extensions |
 | `0x80` – `0xFF` | User-defined application payload types |
 
-Currently assigned: `0x01`–`0x04`, `0x06`–`0x0D` (12 types). `0x05` is **retired** (was generic LIST in earlier drafts; see §`0x05`). The remaining `0x0E` – `0x1F` are reserved for v0.1 fast-track additions; `0x20` – `0x7F` is the long-term registry.
+Currently assigned: `0x01`–`0x04`, `0x06`–`0x0D` (12 types). `0x05` is **retired** (was generic LIST in earlier drafts; see §`0x05`). The remaining `0x0E` – `0x1F` are reserved for v1 fast-track additions; `0x20` – `0x7F` is the long-term registry.
 
 The names below match the C enum in [`libtracer/tlv.h`](../../libtracer/tlv.h) (which is being updated to drop LIST and reflect this revision).
 
@@ -376,7 +376,7 @@ The error code is always the first byte. Optional follow-on TLVs (DESCRIPTION, V
 0x03  INVALID_PATH         Malformed PATH or non-UTF-8 NAME
 0x04  TYPE_MISMATCH        Payload type incompatible with endpoint schema
 0x05  CRC_FAIL             Wire CRC did not match
-0x06  VERSION_MISMATCH     opt.VR set higher than receiver supports
+0x06  VERSION_MISMATCH     Peer advertised an incompatible protocol version (discovery/bridge-level)
 0x07  BACKPRESSURE         Subscriber queue full; sample dropped per QoS
 0x08  TIMEOUT              No response within deadline
 0x09  TRANSPORT_DOWN       Underlying transport disconnected
@@ -388,6 +388,8 @@ The error code is always the first byte. Optional follow-on TLVs (DESCRIPTION, V
 0x0F  – 0x7F  reserved for future core
 0x80  – 0xFF  user-defined
 ```
+
+> **⚠ Superseded by RFC-0002 (draft):** this flat byte registry is replaced by the `tr::<concept>::<error>` namespace (registered-code-or-string identity; severity/disposition in the registry). Retained until RFC-0002 lands; the `0x06` row is corrected in the interim.
 
 ### Where it appears
 
@@ -463,7 +465,7 @@ ACL (PL=1) {                                ; outer = collection
 }
 ```
 
-This shape may be revised when the `security_acl` module ships post-MVP; the v0.1 TLV layout is structurally defined but enforcement is deferred.
+This shape may be revised when the `security_acl` module ships post-MVP; the v1 TLV layout is structurally defined but enforcement is deferred.
 
 ### Header settings
 
@@ -472,7 +474,7 @@ This shape may be revised when the `security_acl` module ships post-MVP; the v0.
 ### Where it appears
 
 - `<vertex>:acl` field.
-- ACL enforcement is performed by the `security_acl` module (post-MVP per [10-module-catalog.md](10-module-catalog.md)). The TLV layout is **structurally defined** in v0.1 even though enforcement is deferred.
+- ACL enforcement is performed by the `security_acl` module (post-MVP per [10-module-catalog.md](10-module-catalog.md)). The TLV layout is **structurally defined** in v1 even though enforcement is deferred.
 
 ### Constraints
 
@@ -620,7 +622,7 @@ The `(origin_peer_id, origin_timestamp)` pair is the dedup key. A receiving brid
 
 ## Reserved range (`0x0E` – `0x1F`)
 
-Currently unassigned. Allocated on a fast-track basis during v0.1 if a clear need emerges. Candidate uses:
+Currently unassigned. Allocated on a fast-track basis during v1 if a clear need emerges. Candidate uses:
 
 - `MANIFEST` — explicit declaration of an `expected_count` for an address-shift group.
 - `CAPABILITY` — opaque capability token (lighter than full ACL).
@@ -632,7 +634,7 @@ Receivers MUST handle unknown codes in this range per the forward-compatibility 
 
 ## Reserved range (`0x20` – `0x7F`)
 
-Long-term registry for future core extensions, post-v0.1. Allocation procedure: PR against this document with rationale + byte spec; implementer review; assignment.
+Long-term registry for future core extensions, post-v1. Allocation procedure: PR against this document with rationale + byte spec; implementer review; assignment.
 
 ---
 

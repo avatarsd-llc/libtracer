@@ -1,6 +1,6 @@
 # Reference 08 — Views and Ownership (L1)
 
-> **Status**: draft, v0.1, 2026-05-03. The view layer between raw memory ([09-memory-substrate.md](09-memory-substrate.md)) and the wire format ([01-data-format.md](01-data-format.md)). Specifies the canonical view struct, refcount semantics, rope structure, the TLV-as-cast operation, and the catalog of view-modules that integrate with specific I/O capabilities.
+> **Status**: draft, v1, 2026-05-03. The view layer between raw memory ([09-memory-substrate.md](09-memory-substrate.md)) and the wire format ([01-data-format.md](01-data-format.md)). Specifies the canonical view struct, refcount semantics, rope structure, the TLV-as-cast operation, and the catalog of view-modules that integrate with specific I/O capabilities.
 > **Audience**: anyone implementing the view layer; anyone integrating libtracer with a specific I/O subsystem (UART simple, UART DMA, lwIP, CAN, SHM); anyone reasoning about zero-copy semantics or rope traversal.
 
 ---
@@ -259,7 +259,7 @@ L1 is core (the view + refcount machinery) **plus** module-style integrations wi
 
 ### `view_basic` — week 1 MVP
 
-- **Status**: ships in v0.1.
+- **Status**: ships in v1.
 - **Pairs with**: any L0 backend that exposes contiguous segments (`mem_heap`, `mem_pool_*`, `mem_mmio`, `mem_dma_buffer`).
 - **What it provides**: the canonical view ops (clone, release, subview, concat, walk).
 - **Footprint**: ~1 KB code.
@@ -443,7 +443,7 @@ No userspace copy from receive to delivery. The pbufs stay alive exactly as long
 
 ```
 1. ADC fills a 4 KiB DMA buffer (segment from mem_dma_buffer).
-2. On DMA-half-complete: backend.finalize_after_io(seg, IO_DIR_READ) → cache invalidate.
+2. On DMA-half-complete: backend.finalize_after_io(seg, IO_DIR_DEVICE_TO_CPU) → cache invalidate.
 3. Framer wraps the just-filled half as a view; emits address-shift slices
    ([06-user-data-packing.md] §streaming a high-speed ADC).
 4. Each slice is a sub-view (offset, length) into the DMA segment.
@@ -582,9 +582,9 @@ This trace is the working specification for what "zero-copy" means in libtracer:
 
 ---
 
-## OPEN QUESTIONS — hard integrations, alternatives marked
+## Memory-binding contract — modular (resolved, [ADR-0012](../adr/0012-modular-memory-binding-transparent-router.md))
 
-These are points the design has **identified but not resolved**. The user reads these and decides; until then, the implementation defaults to the recommendation.
+These were the design's identified-but-unresolved hard integrations; they now resolve under one principle. **Memory binding is a modular spectrum, and libtracer is a transparent byte router** — it imposes no snapshot/copy/CRC semantics on a backend. Each entry below has a **recommended-safe** default, but a backend module MAY offer any point on the spectrum (snapshot · shadow vertex · live/raw direct-register, lock-free, no-CRC). The protocol does not limit the user from "dangerous" access; instead **each backend module owns and declares its per-architecture contract** — allocation, cache-coherency hooks, ISR-safety, atomicity granularity, memory ordering (x86 TSO vs weak ARM/MIPS), and `destroy` thread-affinity. CRC is an optional higher-layer concern ([01-data-format.md](01-data-format.md) `opt.CR`); a live/no-copy binding simply carries no CRC (or snapshots at CRC-compute time).
 
 ### OPEN — Boost asio streambuf integration
 
@@ -594,26 +594,27 @@ A `boost::asio::streambuf` is a read-write buffer with **consume-on-read** seman
 - **Copy on import** — at the boost-asio↔libtracer boundary, copy bytes into a `mem_heap` segment. One copy per ingress.
 - **Don't integrate** — provide a documented C-API shim users can write themselves; boost-asio is C++, libtracer is C-first.
 
-**Default**: don't integrate in v0.1. Revisit if real demand surfaces. Documented in [10-module-catalog.md](10-module-catalog.md) §hard integrations.
+**Default**: don't integrate in v1. Revisit if real demand surfaces. Documented in [10-module-catalog.md](10-module-catalog.md) §hard integrations.
 
-### OPEN — MMIO register-as-view: TOCTOU on volatile bytes
+### MMIO register-as-view: volatile bytes (modular)
 
-A view over an MMIO register's bytes is a view onto bytes that change asynchronously. Subscribers reading the view at different times see different bytes; CRC computed at egress may not match a re-read.
+A view over an MMIO register is a view onto bytes that change asynchronously. All three bindings ship — the user picks per backend:
 
-- **Snapshot at view creation** — copy register value into a small heap segment at view-create time. Stable bytes; CRC consistent.
-- **Live view as a separate kind** — explicitly document that this view kind has TOCTOU semantics; disallow as graph-stored value.
+- **Snapshot at view creation** (recommended-safe) — copy the register value into a small segment; stable bytes, any CRC consistent. Use for *publish-a-moment*.
+- **Live view** — a `mem_mmio` segment pointing at the live register; the byte router stays transparent (no copy, typically no CRC). The backend declares its **atomicity granularity** (an aligned `u32` is torn-read-free on ARM/MIPS/x86; a multi-word register block is not) and MAY offer a **lock-free consistent read** (e.g. a seqlock: the reader retries on a writer version bump) for multi-word live data. ISR/SMP safety and any memory barriers are the backend's declared contract.
+- **No-CRC raw** — a live binding with `opt.CR=0` is a pure transparent conduit; CRC over volatile bytes is meaningless, so a live binding either omits CRC or snapshots at compute time.
 
-**Default**: snapshot at view creation. Document that the "register as view" abstraction is for publishing-a-moment, not subscribing-to-a-live-register. The latter is misleading and a footgun.
+**Resolved**: ship all three. Snapshot is the recommended-safe default and *publish-a-moment* the recommended mental model, but live/raw/lock-free bindings are first-class for users who own the hazard ([ADR-0012](../adr/0012-modular-memory-binding-transparent-router.md)).
 
 ### OPEN — Cross-process refcount on `mem_shared`
 
 A POSIX SHM region mapped into multiple processes has independent libtracer refcounts in each. They cannot decrement each other.
 
-- **Single-publisher, multi-reader** — only the publisher owns the segment; readers' views are reaped by the publisher's heartbeat-GC. Acceptable for unidirectional pub/sub.
+- **Single-publisher, multi-reader** — only the publisher owns the segment; readers' views are reaped by the publisher's heartbeat-GC. Acceptable for unidirectional pub/sub. **The publisher MUST NOT reclaim a segment until readers have observably released it, or a generation counter has invalidated stale views** — otherwise a reader mid-read races the reap. The grace/epoch is required, not optional.
 - **Robust shared refcount** — atomic + robust mutex in the SHM region; every process participates. Complex.
 - **Copy at process boundary** — each process treats the other's SHM as foreign; the boundary copies. No zero-copy across process.
 
-**Default**: single-publisher, multi-reader. v0.1's `mem_shared` documents this constraint. Robust shared refcount lives in a future `mem_iceoryx2` module.
+**Default**: single-publisher, multi-reader. v1's `mem_shared` documents this constraint. Robust shared refcount lives in a future `mem_iceoryx2` module.
 
 ### OPEN — lwIP pbuf: aliasing libtracer refcount with `pbuf_ref/pbuf_free`
 
@@ -633,14 +634,14 @@ On non-coherent SoCs, the `prepare_for_io` / `finalize_after_io` hooks must be c
 
 **Default**: `mem_dma_buffer`'s ISR is the only place that calls `finalize_after_io`. Application code never calls these. Document the required interleaving in the backend's spec.
 
-### OPEN — Reference-to-a-value (live variable / register)
+### Reference-to-a-value (live variable / register) (modular)
 
-The "I want an endpoint backed by `&my_uint32` directly" pattern:
+The "I want an endpoint backed by `&my_uint32` directly" pattern — both bindings are first-class:
 
-- **View over the live address** (Option A): `mem_mmio`-style segment pointing at the live address; reads snapshot. Quick prototyping. TOCTOU surface.
-- **Shadow vertex** (Option B): graph stores values; publisher writes the value when the variable changes. Subscribers read the shadow. Protocol-clean.
+- **Shadow vertex** (Option B, recommended) — the graph stores values; the publisher writes the value when the variable changes; subscribers read the shadow. Protocol-clean; no aliasing hazard.
+- **Live view** (Option A) — a `mem_mmio`-style segment over the live address; the byte router stays transparent. A real binding, not merely a footgun helper: the backend declares its atomicity/ordering/ISR contract per [§MMIO register-as-view](#mmio-register-as-view-volatile-bytes-modular), and atomic/lock-free access is the backend's to provide. Exposed as `tracer_attach_register(&my_var)`.
 
-**Default**: Option B is the canonical pattern. Option A is shipped as a developer-convenience helper (`tracer_attach_register(&my_var)`) marked as such — not the recommended path.
+**Resolved**: shadow vertex is the recommended-safe default; live binding is fully supported for users who own the hazard ([ADR-0012](../adr/0012-modular-memory-binding-transparent-router.md)).
 
 ---
 
