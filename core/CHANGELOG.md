@@ -21,6 +21,12 @@ reference implementation is pre-1.0; everything currently lives under
   of each hand-rolling shift/mask loops — byte order lives in exactly one tested
   place. No wire change (conformance vectors unchanged; output byte-identical).
 
+- **Internal — `<libtracer/tlv_emit.hpp>`:** one raw-bytes TLV header emitter
+  (`detail::emit_tlv` / `emit_name`, built on `byteorder`). The ROUTER wrap, PATH
+  canonicalizer, and `:schema` POINT builder now share it — with named `Type`/`Opt`
+  constants instead of magic bytes — instead of each hand-rolling the
+  type/opt/length header. No wire change (conformance vectors unchanged).
+
 - **`graph::Graph::write(Vertex*, const FieldPath&, View)`** — a handle-based
   field-write so the control surface (`:settings.*`, `:subscribers[]`) is also
   string-free on the hot path: parse the path once (`Path::parse`), resolve the

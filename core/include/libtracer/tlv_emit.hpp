@@ -1,0 +1,45 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+//
+// Emit one TLV as raw wire bytes — header (type, opt, little-endian length) plus
+// body — without building a `Tlv` model object. The structural byte-builders
+// (PATH canonical keys, ROUTER envelopes, :schema POINT descriptors) all share
+// this instead of each hand-rolling the header. For decoding, and for emitting a
+// full `Tlv` value (payload/children/trailers), use frame.hpp's encode/decode.
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <string_view>
+#include <vector>
+
+#include "libtracer/byteorder.hpp"
+#include "libtracer/tlv.hpp"
+
+namespace tracer::detail {
+
+// Append one TLV: <type> <opt> <length> <body>, where length is u16 LE, widening
+// to u32 LE (with the LL bit set) when the body exceeds 0xFFFF. `opt` carries the
+// structural bits — pass `Opt{.pl = true}` for a structured (list) payload.
+inline void emit_tlv(std::vector<std::byte>& out, Type type, Opt opt,
+                     std::span<const std::byte> body) {
+    if (body.size() > 0xFFFFu) opt.ll = true;
+    out.push_back(static_cast<std::byte>(static_cast<std::uint8_t>(type)));
+    out.push_back(static_cast<std::byte>(opt.encode()));
+    append_le(out, static_cast<std::uint32_t>(body.size()), opt.ll ? 4u : 2u);
+    out.insert(out.end(), body.begin(), body.end());
+}
+
+// Append a NAME TLV over opaque bytes — the PATH-segment / metadata-tag workhorse.
+inline void emit_name(std::vector<std::byte>& out, std::span<const std::byte> name) {
+    emit_tlv(out, Type::Name, Opt{}, name);
+}
+
+// Append a NAME TLV over a text segment (no temporary buffer).
+inline void emit_name(std::vector<std::byte>& out, std::string_view name) {
+    emit_name(out, std::span<const std::byte>(reinterpret_cast<const std::byte*>(name.data()),
+                                              name.size()));
+}
+
+}  // namespace tracer::detail

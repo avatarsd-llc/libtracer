@@ -12,35 +12,18 @@
 #include "libtracer/frame.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/tlv.hpp"
+#include "libtracer/tlv_emit.hpp"
 #include "libtracer/view.hpp"
 
 namespace tracer::graph {
 namespace {
 
-// --- small TLV byte emitters for building a :schema POINT (no Tlv-model needed) -
-void emit_tlv(std::vector<std::byte>& out, std::uint8_t type, bool pl,
-              std::span<const std::byte> body) {
-    out.push_back(static_cast<std::byte>(type));
-    out.push_back(static_cast<std::byte>(pl ? 0x40 : 0x00));
-    detail::append_le(out, static_cast<std::uint16_t>(body.size()), 2);
-    out.insert(out.end(), body.begin(), body.end());
-}
-
-void emit_name(std::vector<std::byte>& out, std::span<const std::byte> name) {
-    emit_tlv(out, 0x02, false, name);  // NAME
-}
-
-void emit_name(std::vector<std::byte>& out, std::string_view name) {
-    std::vector<std::byte> b(name.size());
-    for (std::size_t i = 0; i < name.size(); ++i)
-        b[i] = static_cast<std::byte>(static_cast<unsigned char>(name[i]));
-    emit_name(out, b);
-}
-
+// Emit a VALUE TLV holding a `width`-byte little-endian integer — the one bespoke
+// emitter for building a :schema POINT; NAME/SETTINGS/POINT use detail::emit_*.
 void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
     std::vector<std::byte> payload(static_cast<std::size_t>(width));
     detail::store_le(payload, value, static_cast<std::size_t>(width));
-    emit_tlv(out, 0x01, false, payload);  // VALUE
+    detail::emit_tlv(out, Type::Value, Opt{}, payload);
 }
 
 // The last NAME segment within a canonical PATH-payload key (the vertex's name).
@@ -257,17 +240,17 @@ Result<View> Graph::read_schema(Vertex* v) const {
     // POINT { NAME <vertex name>, SETTINGS { NAME "deadline_ns" VALUE u64,
     //                                        NAME "history_keep_last" VALUE u32 } }
     std::vector<std::byte> settings_children;
-    emit_name(settings_children, "deadline_ns");
+    detail::emit_name(settings_children, "deadline_ns");
     emit_value(settings_children, s.deadline_ns, 8);
-    emit_name(settings_children, "history_keep_last");
+    detail::emit_name(settings_children, "history_keep_last");
     emit_value(settings_children, s.history_keep_last, 4);
 
     std::vector<std::byte> point_body;
-    emit_name(point_body, last_segment(v->key_.bytes));
-    emit_tlv(point_body, 0x0B, true, settings_children);  // SETTINGS
+    detail::emit_name(point_body, last_segment(v->key_.bytes));
+    detail::emit_tlv(point_body, Type::Settings, Opt{.pl = true}, settings_children);  // SETTINGS
 
     std::vector<std::byte> point;
-    emit_tlv(point, 0x07, true, point_body);  // POINT
+    detail::emit_tlv(point, Type::Point, Opt{.pl = true}, point_body);  // POINT
 
     SegmentPtr seg = mem::heap_alloc(point.size());
     if (!seg) return std::unexpected(Status::Backpressure);
