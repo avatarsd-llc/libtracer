@@ -137,7 +137,7 @@ A subscription with a wildcard requires the router to walk the wildcard table on
 
 ### Subscriber identity in wildcard subscriptions
 
-A wildcard subscriber receives a stream of TLVs from many concrete paths. The dispatcher SHOULD provide the matched concrete path as metadata when delivering — typically by encoding it in the SUBSCRIBER's target path or by attaching a NAME TLV alongside the delivered TLV. The exact mechanism is implementation-defined; the spec only requires that a subscriber can determine which concrete path produced each delivered TLV.
+A wildcard subscriber receives a stream of TLVs from many concrete paths and MUST be able to determine which concrete path produced each. For **local** delivery (subscriber and dispatcher in one node) the mechanism is implementation-defined — typically the matched path is passed out-of-band (a callback argument). For **bridged/remote** delivery it must travel on the wire: the matched concrete `PATH` (`0x06`) accompanies the delivered TLV. *(The on-wire form is proposed under [RFC-0003](../spec/rfcs/0003-bridged-wildcard-delivery-path.md); until it lands, cross-implementation bridged wildcard delivery is not guaranteed interoperable.)*
 
 ---
 

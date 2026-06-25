@@ -112,7 +112,7 @@ For typical deployments:
 - A small mesh (≤8 hosts, ≤100 Hz typical, ≤1s delivery window): 800 entries — a few KB of memory.
 - A large fleet (≤256 hosts, ≤1 kHz, ≤2s window): 512000 entries — a few MB.
 
-The recent-set is **per-bridge**, not global. A bridge that runs out of recent-set capacity SHOULD evict the oldest entries (LRU); a duplicate that arrives after eviction will pass through and may briefly cause a redundant local dispatch, but the cycle terminates because the next bridge will dedup it (if it has not also evicted).
+The recent-set is **per-bridge**, not global, and is a **bounded best-effort optimization — not the termination guarantee**. A bridge MAY evict (LRU) or run a tiny/zero set; a duplicate that arrives after eviction passes through and may cause a redundant local dispatch. **Cycle termination is guaranteed by `hop_count`/`MAX_HOPS` (step 4 above), independent of the recent-set** — even if every bridge evicts, a looping TLV dies at `MAX_HOPS`, after at most `MAX_HOPS` × fanout duplicate dispatches. See [ADR-0014](../adr/0014-router-cycle-termination-hop-count.md).
 
 ### Source attribution
 
