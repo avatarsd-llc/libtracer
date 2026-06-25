@@ -5,6 +5,8 @@
 
 #include <charconv>
 
+#include "libtracer/byteorder.hpp"
+
 namespace tracer::graph {
 namespace {
 

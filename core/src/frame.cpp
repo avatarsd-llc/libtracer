@@ -5,6 +5,7 @@
 
 #include <algorithm>
 
+#include "libtracer/byteorder.hpp"
 #include "libtracer/crc.hpp"
 
 namespace tracer {
@@ -12,18 +13,13 @@ namespace {
 
 constexpr std::uint8_t u8(std::byte b) noexcept { return std::to_integer<std::uint8_t>(b); }
 
+// Read `n` little-endian bytes at `off` (a thin span adaptor over detail::load_le).
 std::uint64_t read_le(std::span<const std::byte> b, std::size_t off, std::size_t n) noexcept {
-    std::uint64_t v = 0;
-    for (std::size_t i = 0; i < n; ++i) {
-        v |= static_cast<std::uint64_t>(u8(b[off + i])) << (8 * i);
-    }
-    return v;
+    return detail::load_le(b.subspan(off, n));
 }
 
 void write_le(std::vector<std::byte>& out, std::uint64_t v, std::size_t n) {
-    for (std::size_t i = 0; i < n; ++i) {
-        out.push_back(static_cast<std::byte>((v >> (8 * i)) & 0xFFu));
-    }
+    detail::append_le(out, v, n);
 }
 
 struct Decoded {
