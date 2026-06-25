@@ -2,7 +2,7 @@
 
 The reference implementation of the libtracer protocol. Targets ESP32, STM32, and bare-metal alongside hosted Linux/macOS.
 
-## Status: protocol-v1 rebuild in progress — M1 (codec) + M2 (substrate) + M3 (L4 graph) + M4 (transport + bridge) landed
+## Status: protocol-v1 rebuild in progress — M1 (codec) + M2 (substrate) + M3 (L4 graph) + M4 (loopback) + M5 (UDP transport) landed
 
 > **2026-06-24.** The original headers under `include/libtracer/` were a pre-spec snapshot extracted from strawberry-fw (see [ADR-0001](../docs/adr/0001-extract-reference-implementation-from-strawberry-fw.md)). They did not compile and encoded the retired v0.0 wire model (in-header XOR-16 CRC, no `PL` bit, fixed `uint32` length, `connect`/`disconnect` API, NUL-terminated NAMEs). Per the protocol-v1 consistency consolidation they were **deleted, to be rebuilt fresh against the spec** rather than patched.
 
@@ -20,7 +20,8 @@ The rebuild targets the protocol-v1 wire format and API as fixed in the ADRs:
 - **M3a — L4 graph runtime core (landed).** The vertex map keyed on canonical PATH-TLV payload bytes, the three vertex roles (stored-value, bounded-history stream, user `on_read`/`on_write` handler seam), and the `read`/`write`/`await` data API ([ADR-0006](../docs/adr/0006-read-write-await-api-no-connect.md)). The LKV read/write hot path is lock-free (an atomic `shared_ptr` swap); `await` blocks on a per-vertex condvar. Validated race-free under TSan, leak/UB-free under ASan+UBSan (`tests/graph_test.cpp`).
 - **M3b — subscriptions + dispatch (landed).** SUBSCRIBER target-path fan-out on `SegmentPtr` clone + a `subscribe(src, callback)` helper, field-write (`:subscribers[]`, `:settings.*`) + unsubscribe, a dispatch-depth cycle cap ([ADR-0015](../docs/adr/0015-graph-runtime-concurrency-and-in-process-cycle-cap.md)), a minimal `:schema` POINT, and the in-process pub/sub example (`examples/in_process_pubsub.cpp`) — the P0 node, end to end. TSan/ASan/UBSan clean.
 - **M4 — first transport + bridge (landed).** The `Transport` seam + an in-process loopback transport (dev/test); the `Bridge` that ROUTER-wraps a data TLV on egress and, on ingress, dedups (recent-set on `(origin_peer_id, ts)`) + terminates cycles (`hop_count`/MAX_HOPS, [ADR-0014](../docs/adr/0014-router-cycle-termination-hop-count.md)) before shedding the envelope and re-injecting the bare TLV. Two nodes talk over the wire end to end (`examples/two_node_loopback.cpp`) — the full encode→ROUTER→decode roundtrip. P2 (bridge) conformance. TSan/ASan/UBSan clean.
-- **M5 — a real socket transport (next).** Swap the loopback channel for a UDS/UDP fd behind the same `Transport` seam; partial-read framing for streams; rope-aware (link-walking) zero-copy decode lands here if streaming needs it.
+- **M5 — UDP socket transport (landed).** `UdpTransport` — a real POSIX UDP socket behind the same `Transport` seam, so two nodes talk over the kernel network stack with the bridge/router/graph unchanged. One datagram = one frame (no stream reassembly), pairing with the flat decoder. Validated raw and end-to-end through the full stack over localhost UDP (`tests/udp_test.cpp`), TSan/ASan/UBSan clean. The two-process **network benchmark** vs Zenoh-over-UDP lives in `bench/`.
+- **M6 — a reliable stream transport (next).** TCP/QUIC behind the seam: length-prefix framing + partial-read reassembly, which is the consumer that finally builds **rope-aware (link-walking) zero-copy decode**.
 
 ## Layout
 
@@ -33,6 +34,7 @@ core/
 │   ├── view.hpp rope.hpp             M2 — L1 zero-copy view/rope + cast
 │   ├── status.hpp path.hpp vertex.hpp graph.hpp     M3 — L4 graph runtime
 │   ├── transport.hpp loopback.hpp router.hpp bridge.hpp   M4 — transport + bridge
+│   ├── transport_udp.hpp             M5 — real UDP socket transport
 │   └── tracer.hpp                    umbrella include
 ├── src/                  M1–M4 codec, substrate, graph, loopback/router/bridge
 ├── tests/                conformance_runner + substrate_test + graph_test + bridge_test + CMake
