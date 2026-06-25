@@ -44,6 +44,11 @@ class Graph {
     // Hot path — operate on a resolved handle; lock-free in the LKV slot.
     [[nodiscard]] Result<View> read(Vertex* v) const;
     [[nodiscard]] Result<void> write(Vertex* v, View value);
+    // Field-write by handle: resolve the Vertex* and FieldPath once (e.g. from a
+    // Path::parse("/x:settings.reliability") kept around), then reuse them on the
+    // hot path — no string parse, no map lookup per call. An empty `field` is an
+    // ordinary value write. Pass `path.field()` for the field selector.
+    [[nodiscard]] Result<void> write(Vertex* v, const FieldPath& field, View value);
     [[nodiscard]] Result<View> await(Vertex* v, std::chrono::nanoseconds timeout);
     // Stream history, newest last (Stream role only).
     [[nodiscard]] Result<std::vector<View>> history(Vertex* v) const;

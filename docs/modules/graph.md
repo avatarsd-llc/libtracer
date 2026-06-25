@@ -45,9 +45,26 @@ class Graph {
     Result<void> subscribe(const Path& src, const Path& target);          // re-dispatch
     Result<void> subscribe(const Path& src, std::function<void(const View&)>);  // callback
 
+    Result<void> write(Vertex*, const FieldPath&, View);  // handle-based field-write
     Result<View> read (const Path&) const;           // field tail → :schema, …
     Result<void> write(const Path&, View);           // field tail → :subscribers[]/:settings.*
 };
+```
+
+```{admonition} No strings on the hot path
+:class: important
+The hot path is **handle-typed** (the spec's rule, `reference/10` §path-handle).
+`Path::parse` encodes the canonical PATH bytes **once**; `register_vertex` /
+`find` resolve a **`Vertex*`** once; then `write(v, value)` and
+`write(v, fieldpath, value)` reuse those handles — **no string crafting, no parse,
+no map lookup per call**. The string/`Path` overloads are init-time conveniences.
+```
+
+```cpp
+// idiomatic: encode the path once, reuse the handle
+auto p = Path::parse("/x:settings.reliability");        // once
+auto* v = g.find(p->key());                             // once
+for (...) g.write(v, p->field(), reliable_tlv);          // hot loop — zero strings
 ```
 
 ## Write → fan-out

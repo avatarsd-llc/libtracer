@@ -15,6 +15,12 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **`graph::Graph::write(Vertex*, const FieldPath&, View)`** — a handle-based
+  field-write so the control surface (`:settings.*`, `:subscribers[]`) is also
+  string-free on the hot path: parse the path once (`Path::parse`), resolve the
+  `Vertex*` + `FieldPath` once, then reuse them — no string parse, no map lookup
+  per call. The string/`Path` overloads now route through it.
+
 - **M5 — UDP socket transport.** The first transport that crosses the kernel
   network stack; the bridge/router/graph above it are unchanged.
   - `<libtracer/transport_udp.hpp>` — `UdpTransport(bind_port, peer_host,
