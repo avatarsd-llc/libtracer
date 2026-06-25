@@ -19,12 +19,14 @@ extensions = [
     "sphinx.ext.githubpages",  # emit .nojekyll so underscore dirs (_static) serve
 ]
 
-# Markdown-only sources; docs/index.md is the landing page.
+# Markdown-only sources; index.md (at the source root) is the landing page, so the
+# site root URL lands on it directly.
 source_suffix = {".md": "markdown"}
-root_doc = "docs/index"
+root_doc = "index"
 
 # Only build the documentation material (paths are relative to the source root).
 include_patterns = [
+    "index.md",
     "docs/**",
     "README.md",
     "CONTEXT.md",

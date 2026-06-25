@@ -6,10 +6,10 @@ A node is a graph of addressable **vertices**; the same TLV bytes are the wire
 encoding, the in-memory representation, and the graph node.
 
 This site renders the canonical project material. The **normative wire protocol**
-is [the v1 spec](spec/v1.md); the **descriptive** companion is the
-[reference suite](reference/00-overview.md); the **why** lives in the
-[ADRs](adr/0001-extract-reference-implementation-from-strawberry-fw.md); and the
-canonical vocabulary is the [glossary](../CONTEXT.md).
+is [the v1 spec](docs/spec/v1.md); the **descriptive** companion is the
+[reference suite](docs/reference/00-overview.md); the **why** lives in the
+[ADRs](docs/adr/0001-extract-reference-implementation-from-strawberry-fw.md); and
+the canonical vocabulary is the [glossary](CONTEXT.md).
 
 ```{note}
 When the spec and any other document disagree, the spec wins. The reference suite
