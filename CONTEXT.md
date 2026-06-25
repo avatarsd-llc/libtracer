@@ -21,6 +21,10 @@ The mechanism that keeps incompatible protocol versions apart — a distinct ser
 Does not exist. The wire format carries no per-frame version field; `opt` bit 7 is a forever-reserved MUST-be-zero bit (a `VR` version-bump bit was a rejected design, `01` §rejected designs).
 _Avoid_: "`VR` bit", "version bit in `opt`", "`opt.VR`".
 
+**Capability negotiation**:
+Does not exist. Receivers MUST accept every `LL`/`CW`/`TF` variant, so senders just default to compact and there is nothing to negotiate; protocol v1 has no other negotiable wire features ([ADR-0013](docs/adr/0013-v1-scope-boundaries.md)).
+_Avoid_: "per-peer capability discovery", "feature negotiation handshake".
+
 ### Wire format (canonical per `docs/reference/01` + `05`)
 
 **`opt` byte**:
@@ -67,6 +71,13 @@ _Avoid_: "array type code", "`opt.ARRAY` bit", a wire-level array marker — non
 The application-level replacement for wire-level fragmentation: a logically large payload is split across N child endpoints `ep[0..N]` sharing one timestamp; the receiver reassembles. A **group** is identified by **`(origin_peer_id, ts)`** — the same in-flight identity as the cycle-dedup recent-set — with each slice's `[index]` giving its position. **Totality is opt-in** (`expected_count` or a `:manifest`): a dropped *trailing* slice is not guaranteed-detectable ([ADR-0011](docs/adr/0011-address-shift-totality-opt-in.md)), while a missing *interior* slice surfaces `tr::flow::address_shift_gap`.
 _Avoid_: grouping by `ts` alone (collides across publishers); "fragmentation", "FRAGMENT type code".
 
+**Cycle termination (`hop_count`)**:
+A bridged TLV's loop is terminated by `hop_count`/`MAX_HOPS` (recommended 32), **not** by the dedup recent-set — which is a bounded best-effort optimization. A looping TLV dies at `MAX_HOPS` regardless, after at most `MAX_HOPS` × fanout duplicate deliveries ([ADR-0014](docs/adr/0014-router-cycle-termination-hop-count.md)).
+_Avoid_: "the recent-set guarantees termination".
+
+**Wildcard delivery metadata**:
+How a wildcard subscriber learns which concrete path produced each delivered TLV. **Local** delivery passes it out-of-band (implementation-defined); **bridged/remote** delivery carries the matched concrete `PATH` (`0x06`) on the wire (proposed under [RFC-0003](docs/spec/rfcs/0003-bridged-wildcard-delivery-path.md)).
+
 ### Errors
 
 **`tr::` error namespace**:
@@ -102,6 +113,10 @@ _Avoid_: the `IO_DIR_READ`/`IO_DIR_WRITE` spelling and any other integer-value s
 **Memory-binding spectrum / transparent byte router**:
 The L0/L1 substrate is a modular binding layer: an endpoint's bytes may be bound as a heap snapshot, a shadow vertex, or a live/raw view (MMIO register, program variable — no copy, no CRC, lock-free). In the live case libtracer is a **transparent byte router** — it imposes no snapshot/copy/CRC. Each **backend module** (`mem_backend_t`) owns and declares its per-architecture contract: allocation, cache hooks, ISR-safety, atomicity granularity, memory ordering, `destroy` thread-affinity. Safety (snapshot/shadow) is recommended, never mandated ([ADR-0012](docs/adr/0012-modular-memory-binding-transparent-router.md)).
 _Avoid_: "the protocol forbids live/raw memory binding", "endpoints must snapshot/copy".
+
+**Module ABI**:
+The C contracts between modules (`mem_backend_t`, `transport_vtable_t`, `abi_version`) — **implementation-defined by design**, not a protocol property; semver-stable within one implementation. Two conforming nodes interoperate over the **wire**, never via a shared ABI ([ADR-0013](docs/adr/0013-v1-scope-boundaries.md)).
+_Avoid_: "the protocol defines the module ABI", "modules are binary-portable across implementations".
 
 **Segment / view**:
 A **view** is a `{owner, offset, length}` window over a refcounted **segment** of backing memory (`segment_t` in the C ABI). Distinct from a **NAME segment** — a single `/`-separated path component, encoded as one NAME TLV (`0x02`).

@@ -173,7 +173,7 @@ Each adjacent layer pair has a small contract. The interfaces are uniform — a 
 
 ### Module ABI (implementation-defined)
 
-The module ABI — the C contracts below (`transport_vtable_t`, `mem_backend_t`, and the `transport_meta_t.abi_version` field) — is an **implementation** concern, not a protocol property. Two conforming implementations need not share it; what they share is the wire format ([01-data-format.md](01-data-format.md)) and addressing ([03-addressing.md](03-addressing.md)). A node assembled from one toolchain's modules interoperates over the wire with any other node, regardless of ABI.
+The module ABI — the C contracts below (`transport_vtable_t`, `mem_backend_t`, and the `transport_meta_t.abi_version` field) — is **deliberately** an **implementation** concern, not a protocol property ([ADR-0013](../adr/0013-v1-scope-boundaries.md)). Two conforming implementations need not share it; what they share is the wire format ([01-data-format.md](01-data-format.md)) and addressing ([03-addressing.md](03-addressing.md)). A node assembled from one toolchain's modules interoperates over the wire with any other node, regardless of ABI.
 
 Within a single implementation the ABI is declared **semver-stable**: the library exports a `tracer_abi_version` symbol, and every breaking change to a vtable layout or `abi_version` field bumps it. Loaders refuse modules whose `abi_version` does not match.
 
