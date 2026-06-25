@@ -15,6 +15,20 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **M3b — L4 subscriptions, dispatch, and the in-process P0 node.** Completes the
+  in-process graph: pub/sub fan-out + field-write control surface.
+  - `graph::Graph::subscribe(src, target)` and `subscribe(src, callback)` — a write
+    to `src` fans out (a `SegmentPtr`-clone, no byte copy) to each target vertex
+    (spec-faithful SUBSCRIBER re-dispatch) and/or in-process callback.
+  - Field-write via `Graph::write(Path, View)` when the path has a field tail:
+    `:subscribers[]` (append a SUBSCRIBER TLV target), `:subscribers[N]`
+    (unsubscribe), `:settings.<field>` (QoS scalar update). `:schema` read returns
+    a `POINT` descriptor.
+  - `graph::Subscriber` and `kMaxDispatchDepth` (the in-process cycle bound,
+    [ADR-0015](../docs/adr/0015-graph-runtime-concurrency-and-in-process-cycle-cap.md)).
+  - `examples/in_process_pubsub.cpp` — the P0 node end to end (callback + target +
+    `await` delivery), built and run as a CTest smoke test. TSan/ASan/UBSan clean.
+
 - **M3a — L4 in-process graph runtime (core).** The data API per ADR-0006:
   `read` / `write` / `await`, keyed on canonical PATH-TLV payload bytes.
   - `<libtracer/status.hpp>` — `graph::Status` (the documented protocol error
