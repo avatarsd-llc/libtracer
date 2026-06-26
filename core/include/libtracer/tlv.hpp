@@ -8,22 +8,22 @@
 
 #include <cstdint>
 
-namespace tracer {
+namespace tr {
 
 // Core type-code registry (0x01-0x0D). 0x05 is retired (was LIST, ADR-0003).
 enum class Type : std::uint8_t {
-    Value       = 0x01,
-    Name        = 0x02,
+    Value = 0x01,
+    Name = 0x02,
     Description = 0x03,
-    Subscriber  = 0x04,
-    Path        = 0x06,
-    Point       = 0x07,
-    Error       = 0x08,
-    Status      = 0x09,
-    Acl         = 0x0A,
-    Settings    = 0x0B,
-    Time        = 0x0C,
-    Router      = 0x0D,
+    Subscriber = 0x04,
+    Path = 0x06,
+    Point = 0x07,
+    Error = 0x08,
+    Status = 0x09,
+    Acl = 0x0A,
+    Settings = 0x0B,
+    Time = 0x0C,
+    Router = 0x0D,
 };
 
 // The 1-byte `opt` field. Bits, MSB->LSB: R | PL | TS | CR | LL | CW | TF | R.
@@ -54,12 +54,11 @@ struct Opt {
     }
 
     [[nodiscard]] constexpr std::uint8_t encode() const noexcept {
-        return static_cast<std::uint8_t>(
-            (pl ? 0x40 : 0) | (ts ? 0x20 : 0) | (cr ? 0x10 : 0) |
-            (ll ? 0x08 : 0) | (cw ? 0x04 : 0) | (tf ? 0x02 : 0));
+        return static_cast<std::uint8_t>((pl ? 0x40 : 0) | (ts ? 0x20 : 0) | (cr ? 0x10 : 0) |
+                                         (ll ? 0x08 : 0) | (cw ? 0x04 : 0) | (tf ? 0x02 : 0));
     }
 
     constexpr bool operator==(const Opt&) const noexcept = default;
 };
 
-}  // namespace tracer
+}  // namespace tr

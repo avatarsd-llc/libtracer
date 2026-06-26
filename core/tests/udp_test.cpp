@@ -22,9 +22,9 @@
 namespace {
 
 using namespace std::chrono_literals;
-using tracer::graph::Graph;
-using tracer::graph::Path;
-using tracer::graph::Role;
+using tr::graph::Graph;
+using tr::graph::Path;
+using tr::graph::Role;
 
 int g_failures = 0;
 void check(bool ok, std::string_view what) {
@@ -32,27 +32,27 @@ void check(bool ok, std::string_view what) {
     if (!ok) ++g_failures;
 }
 
-tracer::PeerId peer_of(std::uint8_t f) {
-    tracer::PeerId p{};
+tr::PeerId peer_of(std::uint8_t f) {
+    tr::PeerId p{};
     p.fill(static_cast<std::byte>(f));
     return p;
 }
 std::vector<std::byte> value_tlv(std::initializer_list<std::uint8_t> bytes) {
     std::vector<std::byte> payload;
     for (std::uint8_t b : bytes) payload.push_back(std::byte{b});
-    tracer::Tlv t{.type = tracer::Type::Value, .payload = payload};
-    return tracer::encode(t);
+    tr::Tlv t{.type = tr::Type::Value, .payload = payload};
+    return tr::encode(t);
 }
-tracer::View owned_view(std::span<const std::byte> bytes) {
-    tracer::SegmentPtr seg = tracer::mem::heap_alloc(bytes.size());
+tr::view::view_t owned_view(std::span<const std::byte> bytes) {
+    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
     std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tracer::View::over(std::move(seg));
+    return tr::view::view_t::over(std::move(seg));
 }
 
 void test_raw_frame() {
     std::printf("UDP transport — raw frame over localhost:\n");
-    tracer::UdpTransport a(47100, "127.0.0.1", 47101);
-    tracer::UdpTransport b(47101, "127.0.0.1", 47100);
+    tr::UdpTransport a(47100, "127.0.0.1", 47101);
+    tr::UdpTransport b(47101, "127.0.0.1", 47100);
     check(a.ok() && b.ok(), "both UDP sockets bound");
 
     std::promise<std::vector<std::byte>> got;
@@ -77,10 +77,10 @@ void test_raw_frame() {
 void test_two_nodes_over_udp() {
     std::printf("Two nodes over UDP — full Graph+Bridge+ROUTER stack:\n");
     Graph node_a, node_b;
-    tracer::UdpTransport ta(47102, "127.0.0.1", 47103);
-    tracer::UdpTransport tb(47103, "127.0.0.1", 47102);
-    tracer::Bridge ba(node_a, ta, peer_of(0xA1));
-    tracer::Bridge bb(node_b, tb, peer_of(0xB2));
+    tr::UdpTransport ta(47102, "127.0.0.1", 47103);
+    tr::UdpTransport tb(47103, "127.0.0.1", 47102);
+    tr::Bridge ba(node_a, ta, peer_of(0xA1));
+    tr::Bridge bb(node_b, tb, peer_of(0xB2));
 
     (void)node_a.register_vertex(*Path::parse("/sensor/temp"), Role::StoredValue);
     (void)node_b.register_vertex(*Path::parse("/remote/temp"), Role::StoredValue);
@@ -88,7 +88,7 @@ void test_two_nodes_over_udp() {
 
     std::promise<std::vector<std::byte>> got;
     auto fut = got.get_future();
-    (void)node_b.subscribe(*Path::parse("/remote/temp"), [&got](const tracer::View& v) {
+    (void)node_b.subscribe(*Path::parse("/remote/temp"), [&got](const tr::view::view_t& v) {
         const auto b = v.bytes();
         got.set_value(std::vector<std::byte>(b.begin(), b.end()));
     });

@@ -13,6 +13,34 @@ reference implementation is pre-1.0; everything currently lives under
 
 ## [Unreleased]
 
+### Changed
+
+- **Substrate hardening — `tr::` namespaces, snake_case `_t` naming, strict docs**
+  ([ADR-0016](../docs/adr/0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md),
+  [core/STYLE.md](STYLE.md)). A **breaking** rename of the L0/L1 memory substrate;
+  the wire format and protocol are unaffected (still **protocol v1**; conformance
+  vectors unchanged).
+  - **Root namespace `tracer::` → `tr::`.** Sub-namespaces mirror the layer model:
+    L0 substrate in **`tr::mem`**, L1 views/ownership in **`tr::view`**.
+  - **Types are now snake_case with a `_t` suffix** (std-lib/kernel style):
+    `MemBackend`→`tr::mem::mem_backend_t`, `Segment`→`tr::view::segment_t`,
+    `SegmentPtr`→`tr::view::segment_ptr_t`, `View`→`tr::view::view_t`,
+    `Rope`→`tr::view::rope_t`, `IoDir`→`tr::mem::io_dir_t`, and the concrete
+    backends `heap_backend_t` / `pool_t` / `borrowed_backend_t`.
+  - **Enums are scoped `SCREAMING_SNAKE`:** `io_dir_t::DEVICE_TO_CPU` /
+    `io_dir_t::CPU_TO_DEVICE` (were `IoDir::DeviceToCpu` / `…CpuToDevice`).
+  - **Cache hooks renamed** `prepare_for_io`/`finalize_after_io` →
+    **`before_io`/`after_io`** (method = timing, `io_dir_t` = direction).
+  - **`mem_backend_t::alloc` now takes `alloc_hint_t`** (an opaque, backend-private
+    strong typedef; `NONE` default) instead of a raw `std::uint32_t` hint.
+  - **Handle-producing helpers moved L0→L1:** `heap_alloc`, `borrow`,
+    `borrow_const` are now in **`tr::view`** (they return a `segment_ptr_t`);
+    `tr::mem::heap_backend()` (returns `mem_backend_t&`) stays at L0. `segment_t`
+    is the one sanctioned L0↔L1 boundary type the backend interface may name.
+  - **Doxygen `@brief` discipline, CI-enforced** (`core/Doxyfile`,
+    `WARN_AS_ERROR`) and rendered into the Sphinx site as source references via
+    Breathe; conventions in `core/STYLE.md`.
+
 ### Added
 
 - **Internal — `<libtracer/byteorder.hpp>`:** one `constexpr` little-endian

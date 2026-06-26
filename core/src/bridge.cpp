@@ -10,7 +10,11 @@
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/view.hpp"
 
-namespace tracer {
+namespace tr {
+
+// L1 types this layer consumes (upward dependency on tr::view, docs/adr/0016 §2).
+using view::segment_ptr_t;
+using view::view_t;
 namespace {
 
 std::uint64_t now_ns() {
@@ -37,7 +41,7 @@ Bridge::Bridge(graph::Graph& graph, Transport& transport, PeerId peer)
 }
 
 graph::Result<void> Bridge::export_vertex(const graph::Path& src) {
-    return graph_.subscribe(src, [this](const View& value) {
+    return graph_.subscribe(src, [this](const view_t& value) {
         const RouterMeta meta{.origin = peer_, .ts = now_ns(), .hop = 0};
         const auto frame = router_wrap(value.bytes(), meta);
         transport_.send(frame);
@@ -84,13 +88,13 @@ void Bridge::on_frame(std::span<const std::byte> frame) {
 
     if (graph::Vertex* mount = mount_vertex_.load(std::memory_order_relaxed)) {
         // Materialize the data TLV into an owned heap segment — the frame buffer
-        // dies when on_frame returns, but the graph stores the View past then.
+        // dies when on_frame returns, but the graph stores the view_t past then.
         // (One copy at the bridge boundary; reference/08 §cross-substrate.)
         const auto data = unwrapped->data;
-        SegmentPtr seg = mem::heap_alloc(data.size());
+        segment_ptr_t seg = view::heap_alloc(data.size());
         if (seg) {
             std::memcpy(seg->bytes.data(), data.data(), data.size());
-            (void)graph_.write(mount, View::over(std::move(seg)));
+            (void)graph_.write(mount, view_t::over(std::move(seg)));
             delivered_.fetch_add(1);
         }
     }
@@ -102,4 +106,4 @@ void Bridge::on_frame(std::span<const std::byte> frame) {
     }
 }
 
-}  // namespace tracer
+}  // namespace tr

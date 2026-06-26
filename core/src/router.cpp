@@ -11,7 +11,7 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/tlv_emit.hpp"
 
-namespace tracer {
+namespace tr {
 namespace {
 
 std::uint8_t u8(std::byte b) { return std::to_integer<std::uint8_t>(b); }
@@ -108,4 +108,4 @@ std::expected<Unwrapped, Error> router_unwrap(std::span<const std::byte> frame) 
     return std::unexpected(Error::FrameInvalid);  // no "data" child
 }
 
-}  // namespace tracer
+}  // namespace tr

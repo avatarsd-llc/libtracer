@@ -10,7 +10,7 @@
 
 #include <expected>
 
-namespace tracer::graph {
+namespace tr::graph {
 
 enum class Status {
     NotFound,          // path doesn't resolve / no last-known-value
@@ -50,4 +50,4 @@ using Result = std::expected<T, Status>;
     return "unknown";
 }
 
-}  // namespace tracer::graph
+}  // namespace tr::graph

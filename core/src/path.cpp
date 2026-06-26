@@ -7,7 +7,7 @@
 
 #include "libtracer/tlv_emit.hpp"
 
-namespace tracer::graph {
+namespace tr::graph {
 namespace {
 
 // Parse one field step: "name", "name[3]", or "name[]".
@@ -101,4 +101,4 @@ std::size_t PathKeyHash::operator()(const PathKey& k) const noexcept {
     return h;
 }
 
-}  // namespace tracer::graph
+}  // namespace tr::graph

@@ -11,7 +11,7 @@
 #include <cstdint>
 #include <span>
 
-namespace tracer::crc {
+namespace tr::crc {
 
 namespace detail {
 
@@ -65,4 +65,4 @@ inline constexpr auto kCrc16 = crc16_table();
     return c;
 }
 
-}  // namespace tracer::crc
+}  // namespace tr::crc

@@ -27,11 +27,11 @@
 namespace {
 
 using namespace std::chrono_literals;
-using tracer::graph::Graph;
-using tracer::graph::Path;
-using tracer::graph::Role;
-using tracer::graph::Settings;
-using tracer::graph::Status;
+using tr::graph::Graph;
+using tr::graph::Path;
+using tr::graph::Role;
+using tr::graph::Settings;
+using tr::graph::Status;
 
 int g_failures = 0;
 
@@ -40,14 +40,14 @@ void check(bool ok, std::string_view what) {
     if (!ok) ++g_failures;
 }
 
-// A View over a fresh, owned heap segment holding `bytes`.
-tracer::View make_value(std::span<const std::byte> bytes) {
-    tracer::SegmentPtr seg = tracer::mem::heap_alloc(bytes.size());
+// A view_t over a fresh, owned heap segment holding `bytes`.
+tr::view::view_t make_value(std::span<const std::byte> bytes) {
+    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
     if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tracer::View::over(std::move(seg));
+    return tr::view::view_t::over(std::move(seg));
 }
 
-tracer::View make_value(std::initializer_list<std::uint8_t> bytes) {
+tr::view::view_t make_value(std::initializer_list<std::uint8_t> bytes) {
     std::vector<std::byte> v;
     v.reserve(bytes.size());
     for (std::uint8_t b : bytes) v.push_back(std::byte{b});
@@ -92,7 +92,7 @@ void test_stored_value() {
     const auto path = Path::parse("/sensor/temp");
     auto reg = g.register_vertex(*path, Role::StoredValue);
     check(reg.has_value(), "register stored-value vertex");
-    tracer::graph::Vertex* v = *reg;
+    tr::graph::Vertex* v = *reg;
 
     check(!g.read(v).has_value() && g.read(v).error() == Status::NotFound,
           "read before any write => NotFound");
@@ -117,7 +117,7 @@ void test_stream() {
     const auto path = Path::parse("/log/events");
     Settings s;
     s.history_keep_last = 3;
-    tracer::graph::Vertex* v = *g.register_vertex(*path, Role::Stream, {}, s);
+    tr::graph::Vertex* v = *g.register_vertex(*path, Role::Stream, {}, s);
 
     for (std::uint8_t i = 1; i <= 5; ++i) (void)g.write(v, make_value({i}));
 
@@ -134,14 +134,14 @@ void test_handler() {
     Graph g;
     const auto path = Path::parse("/compute/answer");
     auto written = std::make_shared<std::vector<std::byte>>();
-    tracer::graph::Handlers h;
+    tr::graph::Handlers h;
     h.on_read = [] { return make_value({0x2A}); };  // always 42
-    h.on_write = [written](const tracer::View& in) -> tracer::graph::Result<void> {
+    h.on_write = [written](const tr::view::view_t& in) -> tr::graph::Result<void> {
         const auto b = in.bytes();
         written->assign(b.begin(), b.end());
         return {};
     };
-    tracer::graph::Vertex* v = *g.register_vertex(*path, Role::Handler, std::move(h));
+    tr::graph::Vertex* v = *g.register_vertex(*path, Role::Handler, std::move(h));
 
     auto r = g.read(v);
     check(r && std::to_integer<int>(r->bytes()[0]) == 0x2A, "on_read supplies the value (42)");
@@ -153,7 +153,7 @@ void test_handler() {
 void test_await() {
     std::printf("await (blocks until next write; times out otherwise):\n");
     Graph g;
-    tracer::graph::Vertex* v = *g.register_vertex(*Path::parse("/sensor/temp"), Role::StoredValue);
+    tr::graph::Vertex* v = *g.register_vertex(*Path::parse("/sensor/temp"), Role::StoredValue);
 
     // A writer publishes shortly after we begin awaiting.
     std::thread writer([&] {
@@ -165,8 +165,7 @@ void test_await() {
     check(r.has_value() && std::to_integer<int>(r->bytes()[0]) == 0x7E,
           "await wakes on a concurrent write and delivers it");
 
-    tracer::graph::Vertex* idle =
-        *g.register_vertex(*Path::parse("/sensor/idle"), Role::StoredValue);
+    tr::graph::Vertex* idle = *g.register_vertex(*Path::parse("/sensor/idle"), Role::StoredValue);
     auto t = g.await(idle, 20ms);
     check(!t.has_value() && t.error() == Status::Timeout, "await times out with no write");
 }
@@ -174,7 +173,7 @@ void test_await() {
 void test_concurrent_stress() {
     std::printf("Concurrent stress (lock-free LKV under contention):\n");
     Graph g;
-    tracer::graph::Vertex* v = *g.register_vertex(*Path::parse("/stress/v"), Role::StoredValue);
+    tr::graph::Vertex* v = *g.register_vertex(*Path::parse("/stress/v"), Role::StoredValue);
 
     constexpr int kWriters = 4;
     constexpr int kReaders = 4;
@@ -219,34 +218,33 @@ void test_concurrent_stress() {
     check(fin.has_value() && fin->bytes().size() == 8, "final read returns a valid 8-byte value");
 }
 
-// A VALUE TLV wrapping `payload` (01 00 <len> <payload>), as an owned View.
-tracer::View value_tlv(std::span<const std::byte> payload) {
-    tracer::Tlv t{.type = tracer::Type::Value, .payload = payload};
-    return make_value(tracer::encode(t));
+// A VALUE TLV wrapping `payload` (01 00 <len> <payload>), as an owned view_t.
+tr::view::view_t value_tlv(std::span<const std::byte> payload) {
+    tr::Tlv t{.type = tr::Type::Value, .payload = payload};
+    return make_value(tr::encode(t));
 }
 
-// A SUBSCRIBER TLV naming a single-segment target path, as an owned View.
-tracer::View subscriber_tlv(std::string_view target_segment) {
+// A SUBSCRIBER TLV naming a single-segment target path, as an owned view_t.
+tr::view::view_t subscriber_tlv(std::string_view target_segment) {
     std::vector<std::byte> name_bytes;
     for (char c : target_segment)
         name_bytes.push_back(static_cast<std::byte>(static_cast<unsigned char>(c)));
-    tracer::Tlv name{.type = tracer::Type::Name, .payload = name_bytes};
-    tracer::Tlv path{.type = tracer::Type::Path};
+    tr::Tlv name{.type = tr::Type::Name, .payload = name_bytes};
+    tr::Tlv path{.type = tr::Type::Path};
     path.opt.pl = true;
     path.children.push_back(name);
-    tracer::Tlv sub{.type = tracer::Type::Subscriber};
+    tr::Tlv sub{.type = tr::Type::Subscriber};
     sub.opt.pl = true;
     sub.children.push_back(path);
-    return make_value(tracer::encode(sub));
+    return make_value(tr::encode(sub));
 }
 
 void test_subscribe_callback() {
     std::printf("subscribe(src, callback) — direct in-process delivery:\n");
     Graph g;
     auto seen = std::make_shared<int>(-1);
-    tracer::graph::Vertex* src =
-        *g.register_vertex(*Path::parse("/sensor/temp"), Role::StoredValue);
-    (void)g.subscribe(*Path::parse("/sensor/temp"), [seen](const tracer::View& v) {
+    tr::graph::Vertex* src = *g.register_vertex(*Path::parse("/sensor/temp"), Role::StoredValue);
+    (void)g.subscribe(*Path::parse("/sensor/temp"), [seen](const tr::view::view_t& v) {
         *seen = std::to_integer<int>(v.bytes()[0]);
     });
     (void)g.write(src, make_value({0x42}));
@@ -257,14 +255,13 @@ void test_subscribe_target() {
     std::printf("subscribe(src, target) — spec-faithful re-dispatch to a vertex:\n");
     Graph g;
     auto sink_seen = std::make_shared<int>(-1);
-    tracer::graph::Handlers h;
-    h.on_write = [sink_seen](const tracer::View& in) -> tracer::graph::Result<void> {
+    tr::graph::Handlers h;
+    h.on_write = [sink_seen](const tr::view::view_t& in) -> tr::graph::Result<void> {
         *sink_seen = std::to_integer<int>(in.bytes()[0]);
         return {};
     };
     (void)g.register_vertex(*Path::parse("/log/temp"), Role::Handler, std::move(h));
-    tracer::graph::Vertex* src =
-        *g.register_vertex(*Path::parse("/sensor/temp"), Role::StoredValue);
+    tr::graph::Vertex* src = *g.register_vertex(*Path::parse("/sensor/temp"), Role::StoredValue);
     (void)g.subscribe(*Path::parse("/sensor/temp"), *Path::parse("/log/temp"));
     (void)g.write(src, make_value({0x55}));
     check(*sink_seen == 0x55, "write re-dispatches to the target vertex's on_write");
@@ -273,7 +270,7 @@ void test_subscribe_target() {
 void test_field_write_settings() {
     std::printf("field-write :settings.<field>:\n");
     Graph g;
-    tracer::graph::Vertex* v = *g.register_vertex(*Path::parse("/sensor/temp"), Role::StoredValue);
+    tr::graph::Vertex* v = *g.register_vertex(*Path::parse("/sensor/temp"), Role::StoredValue);
     const auto payload = std::array<std::byte, 8>{std::byte{0x88}, std::byte{0x13}};  // 5000 LE
     auto w = g.write(*Path::parse("/sensor/temp:settings.deadline_ns"), value_tlv(payload));
     check(w.has_value(), "field-write returns OK");
@@ -291,10 +288,10 @@ void test_field_write_handle() {
     const auto fp = Path::parse("/sensor/temp:settings.deadline_ns");
     const std::array<std::byte, 8> le{std::byte{0x10}, std::byte{0x27}};  // 10000 LE
     check(g.write(v, fp->field(), value_tlv(le)).has_value(),
-          "write(Vertex*, FieldPath, View) returns OK");
+          "write(Vertex*, FieldPath, view_t) returns OK");
     check(v->settings().deadline_ns == 10000,
           "deadline_ns updated via the handle (no string parse, no map lookup)");
-    check(g.write(v, tracer::graph::FieldPath{}, make_value({0x55})).has_value(),
+    check(g.write(v, tr::graph::FieldPath{}, make_value({0x55})).has_value(),
           "an empty FieldPath is an ordinary value write");
 }
 
@@ -302,14 +299,13 @@ void test_subscribe_via_field_write_and_unsubscribe() {
     std::printf("field-write :subscribers[] (wire-faithful) + unsubscribe:\n");
     Graph g;
     auto sink_seen = std::make_shared<int>(0);
-    tracer::graph::Handlers h;
-    h.on_write = [sink_seen](const tracer::View& in) -> tracer::graph::Result<void> {
+    tr::graph::Handlers h;
+    h.on_write = [sink_seen](const tr::view::view_t& in) -> tr::graph::Result<void> {
         *sink_seen += std::to_integer<int>(in.bytes()[0]);
         return {};
     };
     (void)g.register_vertex(*Path::parse("/sink"), Role::Handler, std::move(h));
-    tracer::graph::Vertex* src =
-        *g.register_vertex(*Path::parse("/sensor/temp"), Role::StoredValue);
+    tr::graph::Vertex* src = *g.register_vertex(*Path::parse("/sensor/temp"), Role::StoredValue);
 
     auto sub = g.write(*Path::parse("/sensor/temp:subscribers[]"), subscriber_tlv("sink"));
     check(sub.has_value(), "subscribe via field-write a SUBSCRIBER TLV");
@@ -329,10 +325,10 @@ void test_schema_read() {
     (void)g.register_vertex(*Path::parse("/sensor/temp"), Role::StoredValue);
     auto schema = g.read(*Path::parse("/sensor/temp:schema"));
     check(schema.has_value(), ":schema read returns a value");
-    auto point = tracer::view_as_tlv(*schema);
-    check(point && point->type == tracer::Type::Point, ":schema decodes to a POINT");
+    auto point = tr::view::view_as_tlv(*schema);
+    check(point && point->type == tr::Type::Point, ":schema decodes to a POINT");
     check(point && point->children.size() == 2, "POINT has a NAME and a SETTINGS child");
-    check(point && point->children[0].type == tracer::Type::Name &&
+    check(point && point->children[0].type == tr::Type::Name &&
               std::memcmp(point->children[0].payload.data(), "temp", 4) == 0,
           "POINT's NAME child is the vertex name 'temp'");
 }
@@ -341,18 +337,17 @@ void test_dispatch_cycle_cap() {
     std::printf("dispatch-depth cycle cap (in-process A->B->A terminates):\n");
     Graph g;
     auto count = std::make_shared<int>(0);
-    tracer::graph::Vertex* a = *g.register_vertex(*Path::parse("/a"), Role::StoredValue);
+    tr::graph::Vertex* a = *g.register_vertex(*Path::parse("/a"), Role::StoredValue);
     (void)g.register_vertex(*Path::parse("/b"), Role::StoredValue);
     // Mutual target subscriptions form a cycle; a counter callback on each level.
     (void)g.subscribe(*Path::parse("/a"), *Path::parse("/b"));
     (void)g.subscribe(*Path::parse("/b"), *Path::parse("/a"));
-    (void)g.subscribe(*Path::parse("/a"), [count](const tracer::View&) { ++*count; });
-    (void)g.subscribe(*Path::parse("/b"), [count](const tracer::View&) { ++*count; });
+    (void)g.subscribe(*Path::parse("/a"), [count](const tr::view::view_t&) { ++*count; });
+    (void)g.subscribe(*Path::parse("/b"), [count](const tr::view::view_t&) { ++*count; });
 
     (void)g.write(a, make_value({0x01}));  // must terminate, not infinite-loop / stack-overflow
     check(*count > 1, "the cycle did dispatch (callbacks fired both ways)");
-    check(*count <= tracer::graph::kMaxDispatchDepth + 4,
-          "re-dispatch is bounded by the depth cap");
+    check(*count <= tr::graph::kMaxDispatchDepth + 4, "re-dispatch is bounded by the depth cap");
 }
 
 }  // namespace

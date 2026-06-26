@@ -7,7 +7,7 @@
 //   1. a direct in-process callback     (subscribe(src, callback) sugar)
 //   2. a spec-faithful target vertex     (subscribe(src, target) -> a handler sink)
 //   3. a thread blocking in await()      (the single-shot primitive)
-// Delivery to (1) and (2) is a refcount-bump clone of the same View — no byte copy.
+// Delivery to (1) and (2) is a refcount-bump clone of the same view_t — no byte copy.
 
 #include <chrono>
 #include <cstddef>
@@ -20,17 +20,17 @@
 namespace {
 
 using namespace std::chrono_literals;
-using tracer::graph::Path;
-using tracer::graph::Role;
+using tr::graph::Path;
+using tr::graph::Role;
 
-tracer::View value_u32(std::uint32_t v) {
-    tracer::SegmentPtr seg = tracer::mem::heap_alloc(4);
+tr::view::view_t value_u32(std::uint32_t v) {
+    tr::view::segment_ptr_t seg = tr::view::heap_alloc(4);
     for (int i = 0; i < 4; ++i)
         seg->bytes[static_cast<std::size_t>(i)] = static_cast<std::byte>((v >> (8 * i)) & 0xFF);
-    return tracer::View::over(std::move(seg));
+    return tr::view::view_t::over(std::move(seg));
 }
 
-std::uint32_t as_u32(const tracer::View& view) {
+std::uint32_t as_u32(const tr::view::view_t& view) {
     const auto b = view.bytes();
     std::uint32_t v = 0;
     for (std::size_t i = 0; i < b.size() && i < 4; ++i)
@@ -41,22 +41,21 @@ std::uint32_t as_u32(const tracer::View& view) {
 }  // namespace
 
 int main() {
-    tracer::graph::Graph g;
+    tr::graph::Graph g;
 
-    tracer::graph::Vertex* temp =
-        *g.register_vertex(*Path::parse("/sensor/temp"), Role::StoredValue);
+    tr::graph::Vertex* temp = *g.register_vertex(*Path::parse("/sensor/temp"), Role::StoredValue);
 
     // A "sink" vertex backed by a callback handler — the target of a spec-faithful
     // SUBSCRIBER (subscriber 2 below re-dispatches to it).
-    tracer::graph::Handlers sink;
-    sink.on_write = [](const tracer::View& in) -> tracer::graph::Result<void> {
+    tr::graph::Handlers sink;
+    sink.on_write = [](const tr::view::view_t& in) -> tr::graph::Result<void> {
         std::printf("  [sink vertex /log/temp] received %u\n", as_u32(in));
         return {};
     };
     (void)g.register_vertex(*Path::parse("/log/temp"), Role::Handler, std::move(sink));
 
     // Subscriber 1 — direct in-process callback.
-    (void)g.subscribe(*Path::parse("/sensor/temp"), [](const tracer::View& v) {
+    (void)g.subscribe(*Path::parse("/sensor/temp"), [](const tr::view::view_t& v) {
         std::printf("  [callback sub] received %u\n", as_u32(v));
     });
     // Subscriber 2 — spec-faithful target-path subscription -> /log/temp.
@@ -81,7 +80,7 @@ int main() {
     (void)g.write(*Path::parse("/sensor/temp:settings.deadline_ns"), value_u32(5000));
     auto schema = g.read(*Path::parse("/sensor/temp:schema"));
     if (schema) {
-        auto point = tracer::view_as_tlv(*schema);
+        auto point = tr::view::view_as_tlv(*schema);
         std::printf(":schema is a POINT with %zu children\n", point ? point->children.size() : 0u);
     }
     return 0;

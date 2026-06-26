@@ -5,7 +5,7 @@
 
 #include <utility>
 
-namespace tracer {
+namespace tr {
 
 void LoopbackEndpoint::set_receiver(Receiver receiver) {
     const std::lock_guard lock(m_);
@@ -67,4 +67,4 @@ void LoopbackChannel::shutdown() {
     b_.stop();
 }
 
-}  // namespace tracer
+}  // namespace tr

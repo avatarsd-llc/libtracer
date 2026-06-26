@@ -24,10 +24,15 @@
 #include "libtracer/status.hpp"
 #include "libtracer/view.hpp"
 
-namespace tracer::graph {
+namespace tr::graph {
+
+// L1 types this layer consumes (upward dependency on tr::view, docs/adr/0016 §2).
+using view::segment_ptr_t;
+using view::view_as_tlv;
+using view::view_t;
 
 enum class Role {
-    StoredValue,  // role 1: last-writer-wins; holds the last-written View
+    StoredValue,  // role 1: last-writer-wins; holds the last-written view_t
     Stream,       // role 2: bounded history ring sized by settings.history_keep_last
     Handler,      // roles 3-7: user on_read / on_write supplies the behavior
 };
@@ -44,8 +49,8 @@ struct Settings {
 
 // User behavior for a Handler-role vertex.
 struct Handlers {
-    std::function<Result<View>()> on_read;
-    std::function<Result<void>(const View&)> on_write;
+    std::function<Result<view_t>()> on_read;
+    std::function<Result<void>(const view_t&)> on_write;
 };
 
 // One subscription edge (M3b). A write to this vertex fans out to a target vertex
@@ -53,8 +58,8 @@ struct Handlers {
 // docs/reference/02 §dispatch + 04 §write fanout. Inactive slots model an
 // unsubscribe (a cleared :subscribers[N]).
 struct Subscriber {
-    std::vector<std::byte> target_key;          // canonical PATH key (empty => callback-only)
-    std::function<void(const View&)> callback;  // null => target-only
+    std::vector<std::byte> target_key;            // canonical PATH key (empty => callback-only)
+    std::function<void(const view_t&)> callback;  // null => target-only
     bool active = true;
 };
 
@@ -78,12 +83,12 @@ class Vertex {
     Settings settings_;
     Handlers handlers_;
 
-    std::atomic<std::shared_ptr<const View>> lkv_{};   // lock-free read/write hot path
-    std::deque<std::shared_ptr<const View>> history_;  // Stream ring; guarded by m_
-    std::vector<Subscriber> subs_;                     // fan-out edges; guarded by m_
+    std::atomic<std::shared_ptr<const view_t>> lkv_{};   // lock-free read/write hot path
+    std::deque<std::shared_ptr<const view_t>> history_;  // Stream ring; guarded by m_
+    std::vector<Subscriber> subs_;                       // fan-out edges; guarded by m_
     std::mutex m_;
     std::condition_variable cv_;
     std::uint64_t write_seq_ = 0;  // bumped per write; await waits for an increment (guarded by m_)
 };
 
-}  // namespace tracer::graph
+}  // namespace tr::graph

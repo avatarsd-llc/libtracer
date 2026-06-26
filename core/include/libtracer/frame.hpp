@@ -16,7 +16,7 @@
 
 #include "libtracer/tlv.hpp"
 
-namespace tracer {
+namespace tr {
 
 // Decode failures, named after the tr:: built-in error concepts (RFC-0002).
 // The full ERROR *wire* shape is RFC-0002 (gated); this is the local reason.
@@ -35,7 +35,7 @@ struct Crc {
 };
 
 struct Timestamp {
-    bool relative = false;     // false = absolute u64 ns; true = relative i32 ns
+    bool relative = false;  // false = absolute u64 ns; true = relative i32 ns
     std::int64_t value = 0;
     constexpr bool operator==(const Timestamp&) const noexcept = default;
 };
@@ -69,4 +69,4 @@ inline constexpr std::size_t kMaxDepth = 32;
 // Encode a TLV (recomputing the trailer CRC from the body when opt.CR is set).
 [[nodiscard]] std::vector<std::byte> encode(const Tlv& tlv);
 
-}  // namespace tracer
+}  // namespace tr

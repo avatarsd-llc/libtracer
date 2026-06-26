@@ -84,6 +84,10 @@ How a wildcard subscriber learns which concrete path produced each delivered TLV
 The identity space for **protocol/stack** errors — `tr::<concept>::<error>`, keyed by stable protocol **concept** (`frame`, `tlv`, `path`, `schema`, `flow`, `access`, `transport`, `version`), never by an implementation module. Prefix-filterable like a path (`tr::flow::*`). Specified in [RFC-0002](docs/spec/rfcs/0002-protocol-error-model.md) (proposed; ratification pending) + [ADR-0009](docs/adr/0009-built-in-error-model-tr-concept-namespace.md).
 _Avoid_: the flat byte registry (`0x01 NOT_FOUND`, …), `tr::<layer>::<module>` (module-keyed), a `0x80–0xFF` user-error range.
 
+**`tr::` (two registers — error identities vs. C++ symbols)**:
+`tr::` names **two disjoint things** that must never be conflated. (1) On the wire / in logs it is the **error-identity** namespace above, keyed by the eight protocol **concepts**. (2) In the C reference implementation it is the **root C++ namespace** for code symbols, whose sub-namespaces mirror the **layer model** (`tr::mem` = L0, `tr::view` = L1, … — never the concept words). The two never collide because error identities are concept-keyed string paths, never C++ symbols, and code sub-namespaces are layer-keyed, never concept-keyed. Seeing `tr::frame::*` ⇒ an error identity; seeing `tr::mem::pool_t` ⇒ a C++ symbol.
+_Avoid_: a C++ sub-namespace named for an error concept (`tr::frame`, `tr::flow` as code) — that re-introduces exactly the concept-vs-module conflation the error model forbids.
+
 **Registered code / string identity**:
 An error's on-wire identity is either a compact **registered code** (a `u16` the frozen registry assigns to a built-in `tr::…` path) or the literal **string** path (for unbounded third-party stack extensions). Optional structured detail may attach to either. The split *is* the built-in-vs-extensible split.
 
@@ -107,8 +111,8 @@ The modules every conforming node links (frame codec, path resolver, view/refcou
 _Avoid_: "Core" as a noun for a fixed privileged build (the `core/` *directory* and "core type codes `0x01–0x1F`" are unaffected).
 
 **`io_dir_t`**:
-The L0 backend cache-coherency hook direction enum: `IO_DIR_DEVICE_TO_CPU` (DMA-in / RX ⇒ invalidate cache before the CPU reads HW-written bytes) and `IO_DIR_CPU_TO_DEVICE` (DMA-out / TX ⇒ clean cache so HW reads the CPU's last writes).
-_Avoid_: the `IO_DIR_READ`/`IO_DIR_WRITE` spelling and any other integer-value set — one canonical spelling only.
+The L0 backend cache-coherency hook direction enum (`enum class`, `SCREAMING_SNAKE` scoped enumerators): `io_dir_t::DEVICE_TO_CPU` (DMA-in / RX ⇒ invalidate cache before the CPU reads HW-written bytes) and `io_dir_t::CPU_TO_DEVICE` (DMA-out / TX ⇒ clean cache so HW reads the CPU's last writes). Consumed by the two `mem_backend_t` cache hooks **`before_io`** (prep the cache for the device, pre-transfer) and **`after_io`** (reconcile the cache for the next reader, post-transfer); the method carries *timing*, the enum carries *direction*, the backend maps the pair to clean/invalidate. No-ops on cacheless cores (Cortex-M0/M3/M4).
+_Avoid_: the `IO_DIR_READ`/`IO_DIR_WRITE` spelling, the unscoped `IO_DIR_DEVICE_TO_CPU` form (now scoped), and any other integer-value set — one canonical spelling only.
 
 **Memory-binding spectrum / transparent byte router**:
 The L0/L1 substrate is a modular binding layer: an endpoint's bytes may be bound as a heap snapshot, a shadow vertex, or a live/raw view (MMIO register, program variable — no copy, no CRC, lock-free). In the live case libtracer is a **transparent byte router** — it imposes no snapshot/copy/CRC. Each **backend module** (`mem_backend_t`) owns and declares its per-architecture contract: allocation, cache hooks, ISR-safety, atomicity granularity, memory ordering, `destroy` thread-affinity. Safety (snapshot/shadow) is recommended, never mandated ([ADR-0012](docs/adr/0012-modular-memory-binding-transparent-router.md)).
@@ -119,8 +123,12 @@ The C contracts between modules (`mem_backend_t`, `transport_vtable_t`, `abi_ver
 _Avoid_: "the protocol defines the module ABI", "modules are binary-portable across implementations".
 
 **Segment / view**:
-A **view** is a `{owner, offset, length}` window over a refcounted **segment** of backing memory (`segment_t` in the C ABI). Distinct from a **NAME segment** — a single `/`-separated path component, encoded as one NAME TLV (`0x02`).
+A **view** is a `{owner, offset, length}` window over a refcounted **segment** of backing memory (`tr::view::segment` in the reference impl). Distinct from a **NAME segment** — a single `/`-separated path component, encoded as one NAME TLV (`0x02`).
 _Avoid_: using bare "segment" for a path component; prefer "NAME segment" there and "view" for the L1 window.
+
+**Rope / assembly (reassembly)**:
+A **rope** is an ordered chain of **views** over (possibly different) segments — the L1 representation of a logically-contiguous payload that physically lives in scattered backing memory. **Assembly** and **reassembly** mean *constructing a rope by chaining views* — pointer-linking, **zero-copy, never `memcpy`**. The rope is also the **transport-agnostic scatter-gather representation**: each transport *lowers* it to its native DMA (`iovec`/`sendmsg`, CAN descriptor chains, RDMA verbs). A contiguous **copy** occurs at exactly one place — a substrate boundary a transport's DMA cannot span (e.g. lwIP pbuf → CAN region), flattened by the bridge/transport at **egress**, never per-fanout and never as "reassembly."
+_Avoid_: "reassemble = copy the slices into a contiguous buffer"; "the substrate chooses the DMA" (the *transport* does); calling a per-fanout or per-hop copy "reassembly."
 
 ## Flagged ambiguities (resolved)
 

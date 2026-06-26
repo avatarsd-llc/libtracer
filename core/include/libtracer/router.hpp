@@ -19,7 +19,7 @@
 #include "libtracer/frame.hpp"      // Error
 #include "libtracer/transport.hpp"  // PeerId
 
-namespace tracer {
+namespace tr {
 
 struct RouterMeta {
     PeerId origin{};       // origin_peer_id (16 bytes)
@@ -41,4 +41,4 @@ struct Unwrapped {
 // `frame`). FrameInvalid if it is not a well-formed ROUTER envelope.
 [[nodiscard]] std::expected<Unwrapped, Error> router_unwrap(std::span<const std::byte> frame);
 
-}  // namespace tracer
+}  // namespace tr

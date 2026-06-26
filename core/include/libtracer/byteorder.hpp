@@ -15,7 +15,7 @@
 #include <span>
 #include <vector>
 
-namespace tracer::detail {
+namespace tr::detail {
 
 // Load a little-endian unsigned from the low `min(in.size(), sizeof(T))` bytes of
 // `in`; any bytes beyond `in` read as zero. Tolerant by design — a payload may be
@@ -45,4 +45,4 @@ void append_le(std::vector<std::byte>& out, T value, std::size_t width = sizeof(
         out.push_back(static_cast<std::byte>(static_cast<std::uint8_t>(value >> (8 * i))));
 }
 
-}  // namespace tracer::detail
+}  // namespace tr::detail

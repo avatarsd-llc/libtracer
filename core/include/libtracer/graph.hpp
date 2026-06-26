@@ -22,7 +22,7 @@
 #include "libtracer/vertex.hpp"
 #include "libtracer/view.hpp"
 
-namespace tracer::graph {
+namespace tr::graph {
 
 // In-process fan-out cycle bound: a re-dispatch chain deeper than this is dropped
 // (Backpressure). This is the in-process analogue of the wire hop_count/MAX_HOPS
@@ -42,16 +42,16 @@ class Graph {
                                                   Handlers handlers = {}, Settings settings = {});
 
     // Hot path — operate on a resolved handle; lock-free in the LKV slot.
-    [[nodiscard]] Result<View> read(Vertex* v) const;
-    [[nodiscard]] Result<void> write(Vertex* v, View value);
+    [[nodiscard]] Result<view_t> read(Vertex* v) const;
+    [[nodiscard]] Result<void> write(Vertex* v, view_t value);
     // Field-write by handle: resolve the Vertex* and FieldPath once (e.g. from a
     // Path::parse("/x:settings.reliability") kept around), then reuse them on the
     // hot path — no string parse, no map lookup per call. An empty `field` is an
     // ordinary value write. Pass `path.field()` for the field selector.
-    [[nodiscard]] Result<void> write(Vertex* v, const FieldPath& field, View value);
-    [[nodiscard]] Result<View> await(Vertex* v, std::chrono::nanoseconds timeout);
+    [[nodiscard]] Result<void> write(Vertex* v, const FieldPath& field, view_t value);
+    [[nodiscard]] Result<view_t> await(Vertex* v, std::chrono::nanoseconds timeout);
     // Stream history, newest last (Stream role only).
-    [[nodiscard]] Result<std::vector<View>> history(Vertex* v) const;
+    [[nodiscard]] Result<std::vector<view_t>> history(Vertex* v) const;
 
     // Subscribe `src` to a target vertex (spec-faithful: a write to src re-dispatches
     // the cloned value to `target`). NotFound if src is unknown.
@@ -59,14 +59,14 @@ class Graph {
     // Subscribe `src` to an in-process callback (sugar; the callback fires inline on
     // each write to src with a cloned view).
     [[nodiscard]] Result<void> subscribe(const Path& src,
-                                         std::function<void(const View&)> callback);
+                                         std::function<void(const view_t&)> callback);
 
     // Convenience — resolve the path key once (guarded map lookup), then hot path.
     // A write/read whose path has a field tail (e.g. ":settings.deadline_ns",
     // ":subscribers[]", ":schema") is routed to the field surface.
-    [[nodiscard]] Result<View> read(const Path& path) const;
-    [[nodiscard]] Result<void> write(const Path& path, View value);
-    [[nodiscard]] Result<View> await(const Path& path, std::chrono::nanoseconds timeout);
+    [[nodiscard]] Result<view_t> read(const Path& path) const;
+    [[nodiscard]] Result<void> write(const Path& path, view_t value);
+    [[nodiscard]] Result<view_t> await(const Path& path, std::chrono::nanoseconds timeout);
 
     // Resolve a canonical PATH-payload key to its vertex (nullptr if unknown).
     [[nodiscard]] Vertex* find(std::span<const std::byte> key) const;
@@ -74,15 +74,15 @@ class Graph {
    private:
     // Update the vertex value (LKV/history/handler), then fan out to subscribers.
     // `depth` bounds in-process re-dispatch cycles (kMaxDispatchDepth).
-    Result<void> write_impl(Vertex* v, View value, int depth);
-    void fan_out(Vertex* v, const View& value, int depth);
+    Result<void> write_impl(Vertex* v, view_t value, int depth);
+    void fan_out(Vertex* v, const view_t& value, int depth);
     // Field surface: ":settings.<f>", ":subscribers[]" / "[N]".
-    Result<void> field_write(Vertex* v, const FieldPath& field, const View& value);
+    Result<void> field_write(Vertex* v, const FieldPath& field, const view_t& value);
     // ":schema" read => a POINT descriptor (name + settings).
-    [[nodiscard]] Result<View> read_schema(Vertex* v) const;
+    [[nodiscard]] Result<view_t> read_schema(Vertex* v) const;
 
     mutable std::shared_mutex map_mutex_;
     std::unordered_map<PathKey, std::unique_ptr<Vertex>, PathKeyHash> vertices_;
 };
 
-}  // namespace tracer::graph
+}  // namespace tr::graph

@@ -24,7 +24,7 @@
 
 #include "libtracer/transport.hpp"
 
-namespace tracer {
+namespace tr {
 
 class LoopbackChannel;
 
@@ -68,4 +68,4 @@ class LoopbackChannel {
     LoopbackEndpoint b_;
 };
 
-}  // namespace tracer
+}  // namespace tr

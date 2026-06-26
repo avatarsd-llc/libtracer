@@ -12,7 +12,7 @@
 #include <array>
 #include <utility>
 
-namespace tracer {
+namespace tr {
 
 UdpTransport::UdpTransport(std::uint16_t bind_port, const std::string& peer_host,
                            std::uint16_t peer_port)
@@ -81,4 +81,4 @@ void UdpTransport::run() {
     }
 }
 
-}  // namespace tracer
+}  // namespace tr

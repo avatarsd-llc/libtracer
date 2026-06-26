@@ -18,7 +18,7 @@
 
 #include "libtracer/status.hpp"
 
-namespace tracer::graph {
+namespace tr::graph {
 
 // Addressing limits (docs/reference/03 §limits).
 inline constexpr std::size_t kMaxSegmentBytes = 64;
@@ -73,4 +73,4 @@ struct PathKeyHash {
     [[nodiscard]] std::size_t operator()(const PathKey& k) const noexcept;
 };
 
-}  // namespace tracer::graph
+}  // namespace tr::graph

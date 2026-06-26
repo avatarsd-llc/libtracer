@@ -8,7 +8,7 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/crc.hpp"
 
-namespace tracer {
+namespace tr {
 namespace {
 
 constexpr std::uint8_t u8(std::byte b) noexcept { return std::to_integer<std::uint8_t>(b); }
@@ -170,4 +170,4 @@ bool equal(const Tlv& a, const Tlv& b) noexcept {
     return true;
 }
 
-}  // namespace tracer
+}  // namespace tr

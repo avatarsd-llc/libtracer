@@ -17,7 +17,7 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/tlv.hpp"
 
-namespace tracer::detail {
+namespace tr::detail {
 
 // Append one TLV: <type> <opt> <length> <body>, where length is u16 LE, widening
 // to u32 LE (with the LL bit set) when the body exceeds 0xFFFF. `opt` carries the
@@ -42,4 +42,4 @@ inline void emit_name(std::vector<std::byte>& out, std::string_view name) {
                                               name.size()));
 }
 
-}  // namespace tracer::detail
+}  // namespace tr::detail
