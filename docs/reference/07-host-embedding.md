@@ -81,7 +81,7 @@ The protocol does not require a spanning tree, a designated root, or a routing e
 Every TLV that crosses a bridge SHALL carry, in a `ROUTER` TLV (type `0x0D`, see [05-protocol-tlvs.md](05-protocol-tlvs.md) §ROUTER):
 
 - `origin_peer_id` — the UUIDv4 or device-derived ID of the host that first published the TLV.
-- `origin_timestamp` — the wall-clock time (ns since epoch) at which the TLV was first published.
+- `origin_timestamp` — a **per-producer monotonic** value (a hybrid logical clock; wall-clock-seeded where available, but strictly increasing per `origin_peer_id` and never regressing or colliding). It is an *identity*, not a synchronized clock: cross-producer timestamps are not comparable, and wall-clock meaning is advisory. See [ADR-0019](../adr/0019-per-producer-monotonic-origin-timestamp.md).
 - `hop_count` — number of bridges traversed so far.
 
 A bridge receiving a TLV SHALL:

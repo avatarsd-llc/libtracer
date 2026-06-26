@@ -368,10 +368,11 @@ The schema cannot enumerate the role exhaustively; an implementer is free to inv
 
 ---
 
+> **Amended by [ADR-0017](../adr/0017-in-band-vertex-creation-controller-orchestration.md).** This document originally treated vertex registration as a purely out-of-band, local act. Creation is now also an **in-band, ACL-gated field-write**: an orchestrator writes a *controller-spec* `{type, path, config}` into a device's creation field (`:children[]`/`:controllers[]`), and the device instantiates one of its **own known controller types** (the creation field's schema is the device's **controller-type catalog**). Creation and **binding** are separate steps — creation exposes the controller's **port vertices**; binding wires them with SUBSCRIBER edges. *Roles* (the implementation pattern below) stay invisible; only the device's *type catalog* becomes visible. The list below is updated accordingly.
+
 ## What this document does NOT specify
 
-- The **C-API** for declaring a vertex's role at registration time. Implementation-specific; see the reference C core's `tracer_register_vertex(...)` once it lands.
-- A **role-discovery wire format**. Roles are intentionally invisible. Schemas describe what a vertex *does*; they do not name how it does it.
+- A **role-discovery wire format**. **Roles** (the seven implementation patterns below) are intentionally invisible — a peer cannot interrogate *how* a vertex is implemented. (This is distinct from a device's **controller-type catalog**, which *is* visible, per [ADR-0017](../adr/0017-in-band-vertex-creation-controller-orchestration.md): the catalog names *types the device can instantiate*, not the internal role of any existing vertex.) Schemas describe what a vertex *does*; they do not name how it does it.
 - A **CRDT or consistency protocol** for sink-with-model vertices. Out of scope; if your model needs convergence guarantees across replicas, lift them into the application layer (per [04-communication-flows.md](04-communication-flows.md) §coherency notes).
 - The **fan-in and fan-out scheduling** beyond "first-arrived-wins-by-timestamp." Implementations may add policies (`prefer_low_latency`, `quorum_n_of_m`); this document just observes the structural patterns.
 
