@@ -63,11 +63,11 @@ struct view_t {
 /**
  * @brief Cast a flat view to a TLV (the M1 decoder, zero-copy).
  *
- * The returned `Tlv` borrows the view's bytes, so keep the view — and thus its
- * segment — alive while using the `Tlv`. This is the lifetime guarantee M1 left
+ * The returned `tlv_t` borrows the view's bytes, so keep the view — and thus its
+ * segment — alive while using the `tlv_t`. This is the lifetime guarantee M1 left
  * to the caller.
  */
-[[nodiscard]] inline std::expected<Tlv, Error> view_as_tlv(const view_t& v) {
+[[nodiscard]] inline std::expected<tlv_t, error_t> view_as_tlv(const view_t& v) {
     return decode(v.bytes());
 }
 

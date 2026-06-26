@@ -20,14 +20,14 @@
 namespace {
 
 using namespace std::chrono_literals;
-using tr::graph::Path;
-using tr::graph::Role;
+using tr::graph::path_t;
+using tr::graph::role_t;
 
 tr::view::view_t value_u32_tlv(std::uint32_t v) {
     std::array<std::byte, 4> payload{};
     for (int i = 0; i < 4; ++i)
         payload[static_cast<std::size_t>(i)] = static_cast<std::byte>((v >> (8 * i)) & 0xFF);
-    tr::Tlv t{.type = tr::Type::Value, .payload = payload};
+    tr::tlv_t t{.type = tr::type_t::VALUE, .payload = payload};
     const auto bytes = tr::encode(t);
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
     std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
@@ -45,8 +45,8 @@ std::uint32_t as_u32(const tr::view::view_t& v) {
     return r;
 }
 
-tr::PeerId peer_of(std::uint8_t fill) {
-    tr::PeerId p{};
+tr::peer_id_t peer_of(std::uint8_t fill) {
+    tr::peer_id_t p{};
     p.fill(static_cast<std::byte>(fill));
     return p;
 }
@@ -54,24 +54,24 @@ tr::PeerId peer_of(std::uint8_t fill) {
 }  // namespace
 
 int main() {
-    tr::LoopbackChannel channel;
-    tr::graph::Graph node_a;
-    tr::graph::Graph node_b;
-    tr::Bridge bridge_a(node_a, channel.a(), peer_of(0xA1));
-    tr::Bridge bridge_b(node_b, channel.b(), peer_of(0xB2));
+    tr::loopback_channel_t channel;
+    tr::graph::graph_t node_a;
+    tr::graph::graph_t node_b;
+    tr::bridge_t bridge_a(node_a, channel.a(), peer_of(0xA1));
+    tr::bridge_t bridge_b(node_b, channel.b(), peer_of(0xB2));
 
-    (void)node_a.register_vertex(*Path::parse("/sensor/temp"), Role::StoredValue);
-    (void)node_b.register_vertex(*Path::parse("/remote/temp"), Role::StoredValue);
-    bridge_b.set_mount(*Path::parse("/remote/temp"));
+    (void)node_a.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+    (void)node_b.register_vertex(*path_t::parse("/remote/temp"), role_t::STORED_VALUE);
+    bridge_b.set_mount(*path_t::parse("/remote/temp"));
 
     std::promise<std::uint32_t> got;
     auto fut = got.get_future();
-    (void)node_b.subscribe(*Path::parse("/remote/temp"),
+    (void)node_b.subscribe(*path_t::parse("/remote/temp"),
                            [&got](const tr::view::view_t& v) { got.set_value(as_u32(v)); });
-    (void)bridge_a.export_vertex(*Path::parse("/sensor/temp"));
+    (void)bridge_a.export_vertex(*path_t::parse("/sensor/temp"));
 
     std::printf("node A: write /sensor/temp = 23  (peer A1 -> ROUTER -> wire -> peer B2)\n");
-    (void)node_a.write(*Path::parse("/sensor/temp"), value_u32_tlv(23));
+    (void)node_a.write(*path_t::parse("/sensor/temp"), value_u32_tlv(23));
 
     if (fut.wait_for(2s) == std::future_status::ready) {
         std::printf("node B: /remote/temp received %u over the loopback wire\n", fut.get());

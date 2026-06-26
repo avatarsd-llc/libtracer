@@ -20,20 +20,20 @@ namespace tr {
 
 // A 16-byte node/peer identity — the ROUTER `origin_peer_id` (docs/reference/05
 // §0x0D ROUTER).
-using PeerId = std::array<std::byte, 16>;
+using peer_id_t = std::array<std::byte, 16>;
 
-class Transport {
+class transport_t {
    public:
-    using Receiver = std::function<void(std::span<const std::byte>)>;
+    using receiver_t = std::function<void(std::span<const std::byte>)>;
 
-    virtual ~Transport() = default;
+    virtual ~transport_t() = default;
 
     // Emit one frame (a complete TLV's bytes) onto the wire.
     virtual void send(std::span<const std::byte> frame) = 0;
 
     // Register the sink for inbound frames (the bridge's ingest). Must be set
     // before frames flow; delivery may occur on an internal transport thread.
-    virtual void set_receiver(Receiver receiver) = 0;
+    virtual void set_receiver(receiver_t receiver) = 0;
 };
 
 }  // namespace tr

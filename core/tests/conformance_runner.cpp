@@ -26,9 +26,8 @@
 namespace {
 
 namespace fs = std::filesystem;
-using tr::Error;
-using tr::Tlv;
-using tr::Type;
+using tr::tlv_t;
+using tr::type_t;
 
 int g_failures = 0;
 
@@ -49,24 +48,24 @@ std::vector<std::byte> read_file(const fs::path& p) {
 }
 
 // --- golden builders (construct each seed TLV programmatically) -------------
-Tlv status_ok() { return Tlv{.type = Type::Status}; }
-Tlv value(std::span<const std::byte> p) { return Tlv{.type = Type::Value, .payload = p}; }
-Tlv name(std::span<const std::byte> p) { return Tlv{.type = Type::Name, .payload = p}; }
+tlv_t status_ok() { return tlv_t{.type = type_t::STATUS}; }
+tlv_t value(std::span<const std::byte> p) { return tlv_t{.type = type_t::VALUE, .payload = p}; }
+tlv_t name(std::span<const std::byte> p) { return tlv_t{.type = type_t::NAME, .payload = p}; }
 
-Tlv path2(std::span<const std::byte> a, std::span<const std::byte> b) {
-    Tlv t{.type = Type::Path};
+tlv_t path2(std::span<const std::byte> a, std::span<const std::byte> b) {
+    tlv_t t{.type = type_t::PATH};
     t.opt.pl = true;
     t.children.push_back(name(a));
     t.children.push_back(name(b));
     return t;
 }
 
-Tlv value_crc(std::span<const std::byte> p) {
-    Tlv t{.type = Type::Value, .payload = p};
+tlv_t value_crc(std::span<const std::byte> p) {
+    tlv_t t{.type = type_t::VALUE, .payload = p};
     t.opt.cr = true;
-    t.trailer =
-        tr::Trailer{.ts = std::nullopt,
-                    .crc = tr::Crc{.width = tr::Crc::Width::Crc32c, .value = tr::crc::crc32c(p)}};
+    t.trailer = tr::trailer_t{
+        .ts = std::nullopt,
+        .crc = tr::crc_t{.width = tr::crc_t::width_t::Crc32c, .value = tr::crc::crc32c(p)}};
     return t;
 }
 
@@ -97,7 +96,7 @@ int main() {
     static constexpr std::array s_temp{std::byte{'t'}, std::byte{'e'}, std::byte{'m'},
                                        std::byte{'p'}};
 
-    const auto golden = [&](const std::string& sub, const Tlv& built) {
+    const auto golden = [&](const std::string& sub, const tlv_t& built) {
         const std::vector<std::byte> input = read_file(vroot / sub / "input.bin");
         check(tr::encode(built) == input, sub + " encode");
         const auto dec = tr::decode(input);
@@ -123,7 +122,7 @@ int main() {
         const std::vector<std::byte> bad{std::byte{0x09}, std::byte{0x01}, std::byte{0},
                                          std::byte{0}};
         const auto dec = tr::decode(bad);
-        check(!dec.has_value() && dec.error() == Error::FrameInvalid,
+        check(!dec.has_value() && dec.error() == tr::error_t::FRAME_INVALID,
               "reserved-bit input rejected as frame::invalid");
     }
 

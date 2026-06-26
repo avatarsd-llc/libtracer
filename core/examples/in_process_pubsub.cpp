@@ -20,8 +20,8 @@
 namespace {
 
 using namespace std::chrono_literals;
-using tr::graph::Path;
-using tr::graph::Role;
+using tr::graph::path_t;
+using tr::graph::role_t;
 
 tr::view::view_t value_u32(std::uint32_t v) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(4);
@@ -41,27 +41,28 @@ std::uint32_t as_u32(const tr::view::view_t& view) {
 }  // namespace
 
 int main() {
-    tr::graph::Graph g;
+    tr::graph::graph_t g;
 
-    tr::graph::Vertex* temp = *g.register_vertex(*Path::parse("/sensor/temp"), Role::StoredValue);
+    tr::graph::vertex_t* temp =
+        *g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
 
     // A "sink" vertex backed by a callback handler — the target of a spec-faithful
     // SUBSCRIBER (subscriber 2 below re-dispatches to it).
-    tr::graph::Handlers sink;
-    sink.on_write = [](const tr::view::view_t& in) -> tr::graph::Result<void> {
+    tr::graph::handlers_t sink;
+    sink.on_write = [](const tr::view::view_t& in) -> tr::graph::result_t<void> {
         std::printf("  [sink vertex /log/temp] received %u\n", as_u32(in));
         return {};
     };
-    (void)g.register_vertex(*Path::parse("/log/temp"), Role::Handler, std::move(sink));
+    (void)g.register_vertex(*path_t::parse("/log/temp"), role_t::HANDLER, std::move(sink));
 
-    // Subscriber 1 — direct in-process callback.
-    (void)g.subscribe(*Path::parse("/sensor/temp"), [](const tr::view::view_t& v) {
+    // subscriber_t 1 — direct in-process callback.
+    (void)g.subscribe(*path_t::parse("/sensor/temp"), [](const tr::view::view_t& v) {
         std::printf("  [callback sub] received %u\n", as_u32(v));
     });
-    // Subscriber 2 — spec-faithful target-path subscription -> /log/temp.
-    (void)g.subscribe(*Path::parse("/sensor/temp"), *Path::parse("/log/temp"));
+    // subscriber_t 2 — spec-faithful target-path subscription -> /log/temp.
+    (void)g.subscribe(*path_t::parse("/sensor/temp"), *path_t::parse("/log/temp"));
 
-    // Subscriber 3 — a thread blocking in await().
+    // subscriber_t 3 — a thread blocking in await().
     std::thread waiter([&] {
         auto r = g.await(temp, 2s);
         if (r) std::printf("  [await sub] received %u\n", as_u32(*r));
@@ -77,8 +78,8 @@ int main() {
     std::printf("read-back /sensor/temp = %u\n", rb ? as_u32(*rb) : 0u);
 
     // Field-write a QoS setting, then discover it via :schema.
-    (void)g.write(*Path::parse("/sensor/temp:settings.deadline_ns"), value_u32(5000));
-    auto schema = g.read(*Path::parse("/sensor/temp:schema"));
+    (void)g.write(*path_t::parse("/sensor/temp:settings.deadline_ns"), value_u32(5000));
+    auto schema = g.read(*path_t::parse("/sensor/temp:schema"));
     if (schema) {
         auto point = tr::view::view_as_tlv(*schema);
         std::printf(":schema is a POINT with %zu children\n", point ? point->children.size() : 0u);

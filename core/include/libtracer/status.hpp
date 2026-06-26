@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
 //
 // L4 graph result + status. The read/write/await control surface returns
-// std::expected<T, Status> (the same shape as M1's frame::Error). The Status
+// std::expected<T, status_t> (the same shape as M1's frame::error_t). The status_t
 // names mirror the documented protocol error codes (docs/reference/05 §error
 // codes); they reconcile with the tr:: error namespace when RFC-0002 lands
 // (gated). Protocol-only, closed set — not for user error codes (ADR-0010).
@@ -12,39 +12,39 @@
 
 namespace tr::graph {
 
-enum class Status {
-    NotFound,          // path doesn't resolve / no last-known-value
-    InvalidPath,       // malformed path or non-UTF-8 NAME segment
-    TypeMismatch,      // payload type incompatible with the vertex/field
-    Backpressure,      // queue full / dispatch-depth cap hit
-    Timeout,           // await deadline expired
-    SchemaNotFound,    // field read/write on a vertex that doesn't expose it
-    PermissionDenied,  // ACL rejected (enforcement deferred; reserved)
-    PathInUse,         // registration collided with an existing vertex
+enum class status_t {
+    NOT_FOUND,          // path doesn't resolve / no last-known-value
+    INVALID_PATH,       // malformed path or non-UTF-8 NAME segment
+    TYPE_MISMATCH,      // payload type incompatible with the vertex/field
+    BACKPRESSURE,       // queue full / dispatch-depth cap hit
+    TIMEOUT,            // await deadline expired
+    SCHEMA_NOT_FOUND,   // field read/write on a vertex that doesn't expose it
+    PERMISSION_DENIED,  // ACL rejected (enforcement deferred; reserved)
+    PATH_IN_USE,        // registration collided with an existing vertex
 };
 
 // Success is the value side of the expected; an empty STATUS=OK on the wire maps
-// to a Result with a value (or Result<void> success).
+// to a result_t with a value (or result_t<void> success).
 template <class T>
-using Result = std::expected<T, Status>;
+using result_t = std::expected<T, status_t>;
 
-[[nodiscard]] constexpr const char* to_string(Status s) noexcept {
+[[nodiscard]] constexpr const char* to_string(status_t s) noexcept {
     switch (s) {
-        case Status::NotFound:
+        case status_t::NOT_FOUND:
             return "not_found";
-        case Status::InvalidPath:
+        case status_t::INVALID_PATH:
             return "invalid_path";
-        case Status::TypeMismatch:
+        case status_t::TYPE_MISMATCH:
             return "type_mismatch";
-        case Status::Backpressure:
+        case status_t::BACKPRESSURE:
             return "backpressure";
-        case Status::Timeout:
+        case status_t::TIMEOUT:
             return "timeout";
-        case Status::SchemaNotFound:
+        case status_t::SCHEMA_NOT_FOUND:
             return "schema_not_found";
-        case Status::PermissionDenied:
+        case status_t::PERMISSION_DENIED:
             return "permission_denied";
-        case Status::PathInUse:
+        case status_t::PATH_IN_USE:
             return "path_in_use";
     }
     return "unknown";

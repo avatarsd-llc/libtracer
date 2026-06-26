@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
 //
-// Type codes and the `opt` options bitfield — the L2/L3 surface of the wire
+// type_t codes and the `opt` options bitfield — the L2/L3 surface of the wire
 // format. See docs/reference/01-data-format.md (header + opt) and
 // docs/reference/05-protocol-tlvs.md (per-type layout).
 #pragma once
@@ -11,24 +11,24 @@
 namespace tr {
 
 // Core type-code registry (0x01-0x0D). 0x05 is retired (was LIST, ADR-0003).
-enum class Type : std::uint8_t {
-    Value = 0x01,
-    Name = 0x02,
-    Description = 0x03,
-    Subscriber = 0x04,
-    Path = 0x06,
-    Point = 0x07,
-    Error = 0x08,
-    Status = 0x09,
-    Acl = 0x0A,
-    Settings = 0x0B,
-    Time = 0x0C,
-    Router = 0x0D,
+enum class type_t : std::uint8_t {
+    VALUE = 0x01,
+    NAME = 0x02,
+    DESCRIPTION = 0x03,
+    SUBSCRIBER = 0x04,
+    PATH = 0x06,
+    POINT = 0x07,
+    ERROR = 0x08,
+    STATUS = 0x09,
+    ACL = 0x0A,
+    SETTINGS = 0x0B,
+    TIME = 0x0C,
+    ROUTER = 0x0D,
 };
 
 // The 1-byte `opt` field. Bits, MSB->LSB: R | PL | TS | CR | LL | CW | TF | R.
 // Bits 7 and 0 are reserved-MUST-be-zero (non-zero => frame::invalid).
-struct Opt {
+struct opt_t {
     bool pl = false;  // bit 6: payload-is-structured (children, not opaque)
     bool ts = false;  // bit 5: trailer carries a timestamp
     bool cr = false;  // bit 4: trailer carries a CRC
@@ -42,8 +42,8 @@ struct Opt {
         return (b & kReservedMask) != 0;
     }
 
-    [[nodiscard]] static constexpr Opt decode(std::uint8_t b) noexcept {
-        return Opt{
+    [[nodiscard]] static constexpr opt_t decode(std::uint8_t b) noexcept {
+        return opt_t{
             .pl = (b & 0x40) != 0,
             .ts = (b & 0x20) != 0,
             .cr = (b & 0x10) != 0,
@@ -58,7 +58,7 @@ struct Opt {
                                          (ll ? 0x08 : 0) | (cw ? 0x04 : 0) | (tf ? 0x02 : 0));
     }
 
-    constexpr bool operator==(const Opt&) const noexcept = default;
+    constexpr bool operator==(const opt_t&) const noexcept = default;
 };
 
 }  // namespace tr

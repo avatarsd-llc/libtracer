@@ -16,29 +16,29 @@
 #include <span>
 #include <vector>
 
-#include "libtracer/frame.hpp"      // Error
-#include "libtracer/transport.hpp"  // PeerId
+#include "libtracer/frame.hpp"      // error_t
+#include "libtracer/transport.hpp"  // peer_id_t
 
 namespace tr {
 
-struct RouterMeta {
-    PeerId origin{};       // origin_peer_id (16 bytes)
+struct router_meta_t {
+    peer_id_t origin{};    // origin_peer_id (16 bytes)
     std::uint64_t ts = 0;  // origin_timestamp (u64 ns) — dedup key together with origin
     std::uint8_t hop = 0;  // hop_count
-    constexpr bool operator==(const RouterMeta&) const noexcept = default;
+    constexpr bool operator==(const router_meta_t&) const noexcept = default;
 };
 
-struct Unwrapped {
-    RouterMeta meta;
+struct unwrapped_t {
+    router_meta_t meta;
     std::span<const std::byte> data;  // the wrapped data TLV (borrows the input frame)
 };
 
 // Build a ROUTER frame wrapping `data` (a complete data TLV) with `meta`.
 [[nodiscard]] std::vector<std::byte> router_wrap(std::span<const std::byte> data,
-                                                 const RouterMeta& meta);
+                                                 const router_meta_t& meta);
 
 // Parse a ROUTER frame → metadata + a span over the wrapped data TLV (borrowing
 // `frame`). FrameInvalid if it is not a well-formed ROUTER envelope.
-[[nodiscard]] std::expected<Unwrapped, Error> router_unwrap(std::span<const std::byte> frame);
+[[nodiscard]] std::expected<unwrapped_t, error_t> router_unwrap(std::span<const std::byte> frame);
 
 }  // namespace tr

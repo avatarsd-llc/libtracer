@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
 //
-// Trailer frame checks. CRC-32C (Castagnoli) is the default; CRC-16-CCITT is
+// trailer_t frame checks. CRC-32C (Castagnoli) is the default; CRC-16-CCITT is
 // the opt.CW=1 variant. Header-only, constexpr tables (built at compile time).
 // See docs/reference/01-data-format.md and ADR-0004.
 #pragma once

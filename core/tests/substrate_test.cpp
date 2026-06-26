@@ -142,7 +142,7 @@ void test_rope_equivalence(const fs::path& vroot) {
 }
 
 void test_cast_claim_outlives_source(const fs::path& vroot) {
-    std::printf("Cast claim — Tlv outlives its source buffer via the segment refcount:\n");
+    std::printf("Cast claim — tlv_t outlives its source buffer via the segment refcount:\n");
     tr::view::view_t v;
     {
         // Copy a seed vector into an OWNED heap segment, build a view, then let
@@ -156,7 +156,7 @@ void test_cast_claim_outlives_source(const fs::path& vroot) {
 
     const auto tlv = tr::view::view_as_tlv(v);
     check(tlv.has_value(), "view_as_tlv decodes after the source buffer was freed");
-    check(tlv.has_value() && tlv->type == tr::Type::Value, "decoded type is VALUE");
+    check(tlv.has_value() && tlv->type == tr::type_t::VALUE, "decoded type is VALUE");
     check(tlv.has_value() && tlv->trailer && tlv->trailer->crc.has_value(),
           "CRC trailer present and verified (decode would have failed otherwise)");
 }

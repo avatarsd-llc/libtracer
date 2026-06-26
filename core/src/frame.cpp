@@ -22,39 +22,39 @@ void write_le(std::vector<std::byte>& out, std::uint64_t v, std::size_t n) {
     detail::append_le(out, v, n);
 }
 
-struct Decoded {
-    Tlv tlv;
+struct decoded_t {
+    tlv_t tlv;
     std::size_t consumed;
 };
 
-std::expected<Decoded, Error> decode_at(std::span<const std::byte> buf, std::size_t depth) {
-    if (depth >= kMaxDepth) return std::unexpected(Error::TlvNestingTooDeep);
-    if (buf.size() < 4) return std::unexpected(Error::FrameTruncated);
+std::expected<decoded_t, error_t> decode_at(std::span<const std::byte> buf, std::size_t depth) {
+    if (depth >= kMaxDepth) return std::unexpected(error_t::TLV_NESTING_TOO_DEEP);
+    if (buf.size() < 4) return std::unexpected(error_t::FRAME_TRUNCATED);
 
     const std::uint8_t type_b = u8(buf[0]);
     const std::uint8_t opt_b = u8(buf[1]);
-    if (type_b == 0x00) return std::unexpected(Error::FrameInvalid);
-    if (Opt::reserved_set(opt_b)) return std::unexpected(Error::FrameInvalid);
+    if (type_b == 0x00) return std::unexpected(error_t::FRAME_INVALID);
+    if (opt_t::reserved_set(opt_b)) return std::unexpected(error_t::FRAME_INVALID);
 
-    const Opt opt = Opt::decode(opt_b);
+    const opt_t opt = opt_t::decode(opt_b);
     const std::size_t header = opt.ll ? 6u : 4u;
-    if (buf.size() < header) return std::unexpected(Error::FrameTruncated);
+    if (buf.size() < header) return std::unexpected(error_t::FRAME_TRUNCATED);
 
     const std::uint64_t length = read_le(buf, 2, opt.ll ? 4u : 2u);
     const std::size_t ts_size = opt.ts ? (opt.tf ? 4u : 8u) : 0u;
     const std::size_t crc_size = opt.cr ? (opt.cw ? 2u : 4u) : 0u;
     const std::size_t total = header + length + ts_size + crc_size;
-    if (buf.size() < total) return std::unexpected(Error::FrameTruncated);
+    if (buf.size() < total) return std::unexpected(error_t::FRAME_TRUNCATED);
 
-    Tlv tlv;
-    tlv.type = static_cast<Type>(type_b);
+    tlv_t tlv;
+    tlv.type = static_cast<type_t>(type_b);
     tlv.opt = opt;
     const std::span<const std::byte> payload = buf.subspan(header, length);
 
     if (opt.ts || opt.cr) {
-        Trailer trailer;
+        trailer_t trailer;
         if (opt.ts) {
-            Timestamp t;
+            timestamp_t t;
             t.relative = opt.tf;
             if (opt.tf) {
                 t.value = static_cast<std::int32_t>(
@@ -73,18 +73,18 @@ std::expected<Decoded, Error> decode_at(std::span<const std::byte> buf, std::siz
             covered.insert(covered.end(), payload.begin(), payload.end());
             covered.insert(covered.end(), ts_bytes.begin(), ts_bytes.end());
 
-            Crc c;
+            crc_t c;
             if (opt.cw) {
-                c.width = Crc::Width::Crc16Ccitt;
+                c.width = crc_t::width_t::Crc16Ccitt;
                 c.value = static_cast<std::uint32_t>(read_le(buf, crc_off, 2));
                 if (crc::crc16_ccitt(covered) != static_cast<std::uint16_t>(c.value)) {
-                    return std::unexpected(Error::FrameCrcFail);
+                    return std::unexpected(error_t::FRAME_CRC_FAIL);
                 }
             } else {
-                c.width = Crc::Width::Crc32c;
+                c.width = crc_t::width_t::Crc32c;
                 c.value = static_cast<std::uint32_t>(read_le(buf, crc_off, 4));
                 if (crc::crc32c(covered) != c.value) {
-                    return std::unexpected(Error::FrameCrcFail);
+                    return std::unexpected(error_t::FRAME_CRC_FAIL);
                 }
             }
             trailer.crc = c;
@@ -100,27 +100,28 @@ std::expected<Decoded, Error> decode_at(std::span<const std::byte> buf, std::siz
             pos += child->consumed;
             tlv.children.push_back(std::move(child->tlv));
         }
-        if (pos != payload.size()) return std::unexpected(Error::FrameInvalid);
+        if (pos != payload.size()) return std::unexpected(error_t::FRAME_INVALID);
     } else {
         tlv.payload = payload;
     }
 
-    return Decoded{std::move(tlv), total};
+    return decoded_t{std::move(tlv), total};
 }
 
 }  // namespace
 
-std::expected<Tlv, Error> decode(std::span<const std::byte> input) {
+std::expected<tlv_t, error_t> decode(std::span<const std::byte> input) {
     auto r = decode_at(input, 0);
     if (!r) return std::unexpected(r.error());
-    if (r->consumed != input.size()) return std::unexpected(Error::FrameInvalid);  // trailing bytes
+    if (r->consumed != input.size())
+        return std::unexpected(error_t::FRAME_INVALID);  // trailing bytes
     return std::move(r->tlv);
 }
 
-std::vector<std::byte> encode(const Tlv& tlv) {
+std::vector<std::byte> encode(const tlv_t& tlv) {
     std::vector<std::byte> body;
     if (tlv.opt.pl) {
-        for (const Tlv& child : tlv.children) {
+        for (const tlv_t& child : tlv.children) {
             const std::vector<std::byte> cb = encode(child);
             body.insert(body.end(), cb.begin(), cb.end());
         }
@@ -136,9 +137,9 @@ std::vector<std::byte> encode(const Tlv& tlv) {
 
     std::vector<std::byte> ts_bytes;
     if (tlv.opt.ts) {
-        const Timestamp t = (tlv.trailer && tlv.trailer->ts)
-                                ? *tlv.trailer->ts
-                                : Timestamp{.relative = tlv.opt.tf, .value = 0};
+        const timestamp_t t = (tlv.trailer && tlv.trailer->ts)
+                                  ? *tlv.trailer->ts
+                                  : timestamp_t{.relative = tlv.opt.tf, .value = 0};
         if (tlv.opt.tf) {
             write_le(ts_bytes, static_cast<std::uint32_t>(static_cast<std::int32_t>(t.value)), 4);
         } else {
@@ -160,7 +161,7 @@ std::vector<std::byte> encode(const Tlv& tlv) {
     return out;
 }
 
-bool equal(const Tlv& a, const Tlv& b) noexcept {
+bool equal(const tlv_t& a, const tlv_t& b) noexcept {
     if (a.type != b.type || a.opt != b.opt || a.trailer != b.trailer) return false;
     if (!std::ranges::equal(a.payload, b.payload)) return false;
     if (a.children.size() != b.children.size()) return false;

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
 //
 // An in-process loopback transport (dev/test only — docs/reference/10's
-// transports are all real wire tech). A LoopbackChannel owns two endpoints; a
+// transports are all real wire tech). A loopback_channel_t owns two endpoints; a
 // frame sent on one endpoint is delivered to the OTHER endpoint's receiver, on
 // that endpoint's receive thread (modeling async cross-"wire" delivery, so a
 // bridge cycle terminates by hop_count rather than stack recursion). No sockets;
@@ -26,46 +26,46 @@
 
 namespace tr {
 
-class LoopbackChannel;
+class loopback_channel_t;
 
-class LoopbackEndpoint final : public Transport {
+class loopback_endpoint_t final : public transport_t {
    public:
     void send(std::span<const std::byte> frame) override;
-    void set_receiver(Receiver receiver) override;
+    void set_receiver(receiver_t receiver) override;
 
    private:
-    friend class LoopbackChannel;
-    LoopbackEndpoint() = default;
+    friend class loopback_channel_t;
+    loopback_endpoint_t() = default;
 
     void start();
     void stop();                                 // idempotent: join the recv thread
     void enqueue(std::vector<std::byte> frame);  // called by the peer's send()
     void run();                                  // receive thread
 
-    LoopbackEndpoint* peer_ = nullptr;
+    loopback_endpoint_t* peer_ = nullptr;
     std::deque<std::vector<std::byte>> inbox_;
-    Receiver receiver_;  // guarded by m_
+    receiver_t receiver_;  // guarded by m_
     std::mutex m_;
     std::condition_variable cv_;
     bool stop_ = false;
     std::thread thread_;
 };
 
-class LoopbackChannel {
+class loopback_channel_t {
    public:
-    LoopbackChannel();
-    ~LoopbackChannel();
-    LoopbackChannel(const LoopbackChannel&) = delete;
-    LoopbackChannel& operator=(const LoopbackChannel&) = delete;
+    loopback_channel_t();
+    ~loopback_channel_t();
+    loopback_channel_t(const loopback_channel_t&) = delete;
+    loopback_channel_t& operator=(const loopback_channel_t&) = delete;
 
-    [[nodiscard]] LoopbackEndpoint& a() noexcept { return a_; }
-    [[nodiscard]] LoopbackEndpoint& b() noexcept { return b_; }
+    [[nodiscard]] loopback_endpoint_t& a() noexcept { return a_; }
+    [[nodiscard]] loopback_endpoint_t& b() noexcept { return b_; }
 
     void shutdown();  // join both receive threads (idempotent)
 
    private:
-    LoopbackEndpoint a_;
-    LoopbackEndpoint b_;
+    loopback_endpoint_t a_;
+    loopback_endpoint_t b_;
 };
 
 }  // namespace tr

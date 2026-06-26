@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
 //
 // M5 UDP transport tests: raw frame delivery over a real localhost UDP socket,
-// and an end-to-end two-node exchange through the full Graph + Bridge + ROUTER
+// and an end-to-end two-node exchange through the full graph_t + bridge_t + ROUTER
 // stack over UDP. Built under TSan (the recv thread + receiver handoff) and
 // ASan+UBSan. Uses fixed loopback ports; SO_REUSEADDR is set on the sockets.
 
@@ -22,9 +22,9 @@
 namespace {
 
 using namespace std::chrono_literals;
-using tr::graph::Graph;
-using tr::graph::Path;
-using tr::graph::Role;
+using tr::graph::graph_t;
+using tr::graph::path_t;
+using tr::graph::role_t;
 
 int g_failures = 0;
 void check(bool ok, std::string_view what) {
@@ -32,15 +32,15 @@ void check(bool ok, std::string_view what) {
     if (!ok) ++g_failures;
 }
 
-tr::PeerId peer_of(std::uint8_t f) {
-    tr::PeerId p{};
+tr::peer_id_t peer_of(std::uint8_t f) {
+    tr::peer_id_t p{};
     p.fill(static_cast<std::byte>(f));
     return p;
 }
 std::vector<std::byte> value_tlv(std::initializer_list<std::uint8_t> bytes) {
     std::vector<std::byte> payload;
     for (std::uint8_t b : bytes) payload.push_back(std::byte{b});
-    tr::Tlv t{.type = tr::Type::Value, .payload = payload};
+    tr::tlv_t t{.type = tr::type_t::VALUE, .payload = payload};
     return tr::encode(t);
 }
 tr::view::view_t owned_view(std::span<const std::byte> bytes) {
@@ -51,8 +51,8 @@ tr::view::view_t owned_view(std::span<const std::byte> bytes) {
 
 void test_raw_frame() {
     std::printf("UDP transport — raw frame over localhost:\n");
-    tr::UdpTransport a(47100, "127.0.0.1", 47101);
-    tr::UdpTransport b(47101, "127.0.0.1", 47100);
+    tr::udp_transport_t a(47100, "127.0.0.1", 47101);
+    tr::udp_transport_t b(47101, "127.0.0.1", 47100);
     check(a.ok() && b.ok(), "both UDP sockets bound");
 
     std::promise<std::vector<std::byte>> got;
@@ -75,27 +75,27 @@ void test_raw_frame() {
 }
 
 void test_two_nodes_over_udp() {
-    std::printf("Two nodes over UDP — full Graph+Bridge+ROUTER stack:\n");
-    Graph node_a, node_b;
-    tr::UdpTransport ta(47102, "127.0.0.1", 47103);
-    tr::UdpTransport tb(47103, "127.0.0.1", 47102);
-    tr::Bridge ba(node_a, ta, peer_of(0xA1));
-    tr::Bridge bb(node_b, tb, peer_of(0xB2));
+    std::printf("Two nodes over UDP — full graph_t+bridge_t+ROUTER stack:\n");
+    graph_t node_a, node_b;
+    tr::udp_transport_t ta(47102, "127.0.0.1", 47103);
+    tr::udp_transport_t tb(47103, "127.0.0.1", 47102);
+    tr::bridge_t ba(node_a, ta, peer_of(0xA1));
+    tr::bridge_t bb(node_b, tb, peer_of(0xB2));
 
-    (void)node_a.register_vertex(*Path::parse("/sensor/temp"), Role::StoredValue);
-    (void)node_b.register_vertex(*Path::parse("/remote/temp"), Role::StoredValue);
-    bb.set_mount(*Path::parse("/remote/temp"));
+    (void)node_a.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+    (void)node_b.register_vertex(*path_t::parse("/remote/temp"), role_t::STORED_VALUE);
+    bb.set_mount(*path_t::parse("/remote/temp"));
 
     std::promise<std::vector<std::byte>> got;
     auto fut = got.get_future();
-    (void)node_b.subscribe(*Path::parse("/remote/temp"), [&got](const tr::view::view_t& v) {
+    (void)node_b.subscribe(*path_t::parse("/remote/temp"), [&got](const tr::view::view_t& v) {
         const auto b = v.bytes();
         got.set_value(std::vector<std::byte>(b.begin(), b.end()));
     });
-    check(ba.export_vertex(*Path::parse("/sensor/temp")).has_value(), "node A exports over UDP");
+    check(ba.export_vertex(*path_t::parse("/sensor/temp")).has_value(), "node A exports over UDP");
 
     const auto payload = value_tlv({0x2A, 0x2B});
-    auto* va = node_a.find(Path::parse("/sensor/temp")->key());
+    auto* va = node_a.find(path_t::parse("/sensor/temp")->key());
     (void)node_a.write(va, owned_view(payload));
 
     const bool arrived = fut.wait_for(3s) == std::future_status::ready;
