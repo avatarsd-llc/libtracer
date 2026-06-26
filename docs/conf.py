@@ -9,6 +9,10 @@
 # with working relative cross-links. `include_patterns` scopes the build to the
 # documentation material — the code directories and CLAUDE.md are excluded.
 
+import os
+import shutil
+import subprocess
+
 project = "libtracer"
 project_copyright = "2026, Avatar LLC"
 author = "Avatar LLC"
@@ -16,8 +20,26 @@ author = "Avatar LLC"
 extensions = [
     "myst_parser",
     "sphinxcontrib.mermaid",
+    "breathe",  # render Doxygen XML as in-page C++ source references
     "sphinx.ext.githubpages",  # emit .nojekyll so underscore dirs (_static) serve
 ]
+
+# Doxygen → Breathe: generate the C++ API XML from the documented core/ headers
+# (core/Doxyfile) so `{doxygenclass}` directives can pull the reference impl's
+# own declarations into the module docs. The repo root is the Doxygen working
+# dir (its INPUT paths are repo-root-relative); the XML lands in docs/_doxygen/xml.
+_repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if shutil.which("doxygen"):
+    # check=False: a strict (WARN_AS_ERROR) Doxygen failure is the API-doc CI
+    # gate (docs.yml), not a reason to abort the whole site build — the XML is
+    # still emitted for Breathe either way.
+    subprocess.run(["doxygen", "core/Doxyfile"], cwd=_repo_root, check=False)
+else:
+    print("conf.py: doxygen not found — skipping C++ API source refs (Breathe)")
+
+breathe_projects = {"libtracer": "_doxygen/xml"}
+breathe_default_project = "libtracer"
+breathe_default_members = ()  # docs opt in per-directive with :members:
 
 # Markdown-only sources; index.md (at the source root) is the landing page, so the
 # site root URL lands on it directly.
@@ -42,6 +64,7 @@ include_patterns = [
 exclude_patterns = [
     "_build",
     "**/_build/**",
+    "docs/_doxygen/**",  # Breathe consumes this XML; it is not a Sphinx source doc
     "docs/adr/**",
     "docs/spec/rfcs/**",
     "**/LICENSE",

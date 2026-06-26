@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+#
+# Doxygen config for the libtracer reference implementation. Emits XML only —
+# Breathe (docs/conf.py) renders it into the Sphinx site as source references.
+# Run from the repo root: `doxygen core/Doxyfile`.
+#
+# Scope is the *documented* public surface: the L0/L1 memory substrate headers,
+# which carry the @brief discipline of core/STYLE.md. WARN_AS_ERROR makes an
+# undocumented public symbol a hard failure — the CI gate (docs.yml). Add headers
+# to INPUT as they gain Doxygen coverage.
+
+PROJECT_NAME           = libtracer
+PROJECT_BRIEF          = "Decentralized graph-of-endpoints protocol — reference implementation"
+
+OUTPUT_DIRECTORY       = docs/_doxygen
+GENERATE_HTML          = NO
+GENERATE_LATEX         = NO
+GENERATE_XML           = YES
+XML_OUTPUT             = xml
+XML_PROGRAMLISTING     = NO
+
+INPUT                  = core/include/libtracer/backend.hpp \
+                         core/include/libtracer/segment.hpp \
+                         core/include/libtracer/view.hpp \
+                         core/include/libtracer/rope.hpp \
+                         core/include/libtracer/mem_heap.hpp \
+                         core/include/libtracer/mem_pool.hpp \
+                         core/include/libtracer/mem_borrowed.hpp
+RECURSIVE              = NO
+
+# Document only what is explicitly commented; internal `detail` helpers are not
+# part of the public surface.
+EXTRACT_ALL            = NO
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = NO
+HIDE_UNDOC_MEMBERS     = NO
+EXCLUDE_SYMBOLS        = *::detail *::detail::*
+
+# C++23 reference impl: lean on the STL-aware parser, no C optimizations.
+OPTIMIZE_OUTPUT_FOR_C  = NO
+BUILTIN_STL_SUPPORT    = YES
+JAVADOC_AUTOBRIEF      = NO
+MARKDOWN_SUPPORT       = YES
+
+# The gate: every public symbol in INPUT must be documented (core/STYLE.md).
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = YES
+WARN_IF_DOC_ERROR      = YES
+# NO, deliberately: core/STYLE.md documents @param only when informative, so an
+# obvious param (e.g. `size`) is intentionally left undocumented. WARN_NO_PARAMDOC
+# governs the "no params documented at all" case; WARN_IF_INCOMPLETE_DOC governs
+# the "documented some, not all" case (our `@param hint` but not `size`). Both off
+# so partial, informative-only parameter docs are allowed — but a fully
+# undocumented public symbol still fails via WARN_IF_UNDOCUMENTED.
+WARN_NO_PARAMDOC       = NO
+WARN_IF_INCOMPLETE_DOC = NO
+WARN_AS_ERROR          = FAIL_ON_WARNINGS

@@ -14,11 +14,15 @@ on:
     paths:
       - "docs/**"
       - "*.md"
+      - "core/include/**" # public headers feed the Doxygen source refs
+      - "core/Doxyfile"
       - ".github/workflows/docs.yml"
   pull_request:
     paths:
       - "docs/**"
       - "*.md"
+      - "core/include/**"
+      - "core/Doxyfile"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -43,7 +47,11 @@ jobs:
           cache: pip
           cache-dependency-path: docs/requirements.txt
       - name: Install dependencies
-        run: pip install -r docs/requirements.txt
+        run: |
+          sudo apt-get update && sudo apt-get install -y doxygen
+          pip install -r docs/requirements.txt
+      - name: API docs gate (Doxygen, strict — undocumented public symbol fails)
+        run: doxygen core/Doxyfile
       - name: Build (sphinx-build, config in docs/, source = repo root)
         run: sphinx-build -b html -c docs . docs/_build/html
       - name: Upload Pages artifact
