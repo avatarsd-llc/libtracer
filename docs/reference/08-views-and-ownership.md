@@ -13,6 +13,8 @@ L1 is the layer between **real memory** (L0) and **TLV bytes** (L2). It provides
 2. **Shared ownership** — refcounting on segments, so multiple views can outlive each other while keeping the underlying memory alive.
 3. **Ropes** — chains of views, so a logical sequence of bytes can span multiple non-contiguous segments without copying.
 
+A rope is **storage** composition, not meaning: it is the L1 axis of the *two orthogonal compositions* described in [02-graph-model.md §the two compositions](02-graph-model.md#the-two-compositions-storage-and-meaning) — a rope chains *bytes*, a structured TLV (L3) nests *meaning*, and the two are independent (a view boundary may fall mid-TLV-header).
+
 The load-bearing claim of L1:
 
 > **A TLV at L2 is a cast from an L1 view.**
