@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+#
+# Core C++23 reference implementation CI: build + ctest, clang-format, and the
+# strict Doxygen documentation gate. Keeps `main` green on every change to core/.
+name: core-ci
+
+on:
+  push:
+    branches: [main]
+    paths: ["core/**", ".github/workflows/core-ci.yml"]
+  pull_request:
+    paths: ["core/**", ".github/workflows/core-ci.yml"]
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure + build (C++23) + ctest
+        run: |
+          cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build core/build -j
+          ctest --test-dir core/build --output-on-failure
+
+  sanitizers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: ASan + UBSan build + ctest
+        run: |
+          cmake -S core -B core/build-asan -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -g"
+          cmake --build core/build-asan -j
+          # ASLR can make ASan/TSan abort in this runner; pin it off.
+          setarch "$(uname -m)" -R ctest --test-dir core/build-asan --output-on-failure
+
+  format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: clang-format (dry-run, error on diff)
+        run: |
+          sudo apt-get update && sudo apt-get install -y clang-format
+          mapfile -t files < <(find core/include core/src core/tests core/examples \
+            -name '*.hpp' -o -name '*.cpp')
+          clang-format --dry-run --Werror "${files[@]}"
+
+  doxygen-gate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Doxygen strict gate (undocumented public symbol = failure)
+        run: |
+          sudo apt-get update && sudo apt-get install -y doxygen
+          doxygen core/Doxyfile
