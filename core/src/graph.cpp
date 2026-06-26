@@ -3,6 +3,7 @@
 
 #include "libtracer/graph.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <mutex>
 #include <string_view>
@@ -87,17 +88,31 @@ result_t<view_t> graph_t::read(vertex_t* v) const {
 }
 
 void graph_t::fan_out(vertex_t* v, const view_t& value, int depth) {
-    std::vector<subscriber_t> snapshot;
+    // Evaluate the per-subscriber delivery policy UNDER the lock (ON_CHANGE compares
+    // and updates last_delivered, which lives on the real subscriber), then dispatch
+    // the survivors OUTSIDE the lock (callbacks / re-dispatch may re-enter the graph).
+    std::vector<subscriber_t> to_dispatch;
     {
         const std::lock_guard lock(v->m_);
-        snapshot = v->subs_;  // copy, then dispatch outside the lock (callbacks may re-enter)
+        const std::span<const std::byte> bytes = value.bytes();
+        for (subscriber_t& s : v->subs_) {
+            if (!s.active) continue;
+            if (s.mode == delivery_mode_t::ON_CHANGE) {
+                if (std::equal(s.last_delivered.begin(), s.last_delivered.end(), bytes.begin(),
+                               bytes.end())) {
+                    continue;  // suppressed: value unchanged since last delivery
+                }
+                s.last_delivered.assign(bytes.begin(), bytes.end());
+            }
+            // Copy only the dispatch-relevant fields (not last_delivered).
+            to_dispatch.push_back(subscriber_t{s.target_key, s.callback, s.mode, {}, true});
+        }
     }
-    for (const auto& s : snapshot) {
-        if (!s.active) continue;
-        if (s.callback) s.callback(value);  // callbacks always fire (cloned view)
+    for (const subscriber_t& s : to_dispatch) {
+        if (s.callback) s.callback(value);  // cloned view
         if (!s.target_key.empty() && depth + 1 < kMaxDispatchDepth) {
             if (vertex_t* target = find(s.target_key)) {
-                (void)write_impl(target, value, depth + 1);  // value copied (clone) into the param
+                (void)write_impl(target, value, depth + 1);  // value cloned into the param
             }
         }
     }
@@ -165,21 +180,24 @@ result_t<std::vector<view_t>> graph_t::history(vertex_t* v) const {
     return out;
 }
 
-result_t<void> graph_t::subscribe(const path_t& src, const path_t& target) {
+result_t<void> graph_t::subscribe(const path_t& src, const path_t& target, delivery_mode_t mode) {
     vertex_t* v = find(src.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
     subscriber_t s;
     s.target_key.assign(target.key().begin(), target.key().end());
+    s.mode = mode;
     const std::lock_guard lock(v->m_);
     v->subs_.push_back(std::move(s));
     return {};
 }
 
-result_t<void> graph_t::subscribe(const path_t& src, std::function<void(const view_t&)> callback) {
+result_t<void> graph_t::subscribe(const path_t& src, std::function<void(const view_t&)> callback,
+                                  delivery_mode_t mode) {
     vertex_t* v = find(src.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
     subscriber_t s;
     s.callback = std::move(callback);
+    s.mode = mode;
     const std::lock_guard lock(v->m_);
     v->subs_.push_back(std::move(s));
     return {};

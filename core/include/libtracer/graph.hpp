@@ -56,11 +56,13 @@ class graph_t {
 
     // Subscribe `src` to a target vertex (spec-faithful: a write to src re-dispatches
     // the cloned value to `target`). NotFound if src is unknown.
-    [[nodiscard]] result_t<void> subscribe(const path_t& src, const path_t& target);
+    [[nodiscard]] result_t<void> subscribe(const path_t& src, const path_t& target,
+                                           delivery_mode_t mode = delivery_mode_t::EVERY);
     // Subscribe `src` to an in-process callback (sugar; the callback fires inline on
-    // each write to src with a cloned view).
+    // each write to src with a cloned view). `mode` gates delivery producer-side.
     [[nodiscard]] result_t<void> subscribe(const path_t& src,
-                                           std::function<void(const view_t&)> callback);
+                                           std::function<void(const view_t&)> callback,
+                                           delivery_mode_t mode = delivery_mode_t::EVERY);
 
     // Convenience — resolve the path key once (guarded map lookup), then hot path.
     // A write/read whose path has a field tail (e.g. ":settings.deadline_ns",

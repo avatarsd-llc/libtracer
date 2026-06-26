@@ -52,6 +52,15 @@ struct handlers_t {
     std::function<result_t<void>(const view_t&)> on_write;
 };
 
+// Per-subscriber delivery policy (byte-agnostic; SUBSCRIBER.qos_settings.delivery_mode
+// in docs/reference/05). Numeric filtering (deadband) is NOT here — it is an
+// application filter vertex (ADR-0021 sibling). Wire values match reference 05.
+enum class delivery_mode_t : std::uint8_t {
+    EVERY = 0,      // deliver every write
+    THROTTLED = 1,  // reserved (min_interval_ns) — not yet enforced
+    ON_CHANGE = 2,  // deliver only when the value bytes differ from the last delivered
+};
+
 // One subscription edge (M3b). A write to this vertex fans out to a target vertex
 // (target_key — spec-faithful re-dispatch) and/or an in-process callback (sugar).
 // docs/reference/02 §dispatch + 04 §write fanout. Inactive slots model an
@@ -59,6 +68,8 @@ struct handlers_t {
 struct subscriber_t {
     std::vector<std::byte> target_key;            // canonical PATH key (empty => callback-only)
     std::function<void(const view_t&)> callback;  // null => target-only
+    delivery_mode_t mode = delivery_mode_t::EVERY;
+    std::vector<std::byte> last_delivered;  // ON_CHANGE: bytes last sent (producer-side, under m_)
     bool active = true;
 };
 

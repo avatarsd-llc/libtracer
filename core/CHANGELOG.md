@@ -68,6 +68,17 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **`graph::delivery_mode_t` + per-subscriber delivery policy (first slice of the
+  L4/L5 control-surface implementation).** `subscribe(...)` gains a defaulted
+  `delivery_mode_t mode` (`EVERY` | `THROTTLED` reserved | `ON_CHANGE`). `ON_CHANGE`
+  is enforced **producer-side** in `fan_out` (a subscriber is skipped when the new
+  value bytes equal the bytes last delivered to it) — byte-agnostic, exactly the
+  `SUBSCRIBER.qos_settings.delivery_mode` of [reference 05](../docs/reference/05-protocol-tlvs.md)
+  ([ADR-0021](../docs/adr/0021-colon-field-plane-is-the-vertex-ioctl.md)). The
+  `ON_CHANGE` compare/update happens under the vertex mutex (TSan-clean); dispatch
+  stays outside it. Numeric filtering (deadband) remains an application filter
+  vertex, not a field.
+
 - **Internal — `<libtracer/byteorder.hpp>`:** one `constexpr` little-endian
   (de)serialization primitive (`detail::load_le` / `store_le` / `append_le`). The
   frame codec, router, graph, and path canonicalizer now funnel through it instead
