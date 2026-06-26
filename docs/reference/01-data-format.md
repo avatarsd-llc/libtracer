@@ -1,7 +1,7 @@
 # Reference 01 — Data Format
 
 > **Status**: draft, v1, 2026-05-03 (revised twice in design review same day). Byte-precise definition of every libtracer frame on the wire. A second-implementer SHOULD be able to write an interoperable parser/sender from this section alone.
-> **See also**: design rationale (CRC choice, atomic ordering, MCU stack safety) is in the ADRs ([../adr/](../adr/)) and git history.
+> **See also**: design rationale (CRC choice, atomic ordering, MCU stack safety) is in the ADRs ([../adr/](https://github.com/avatarsd-llc/libtracer/tree/main/docs/adr/)) and git history.
 
 ---
 
@@ -406,7 +406,7 @@ For comparison: the previous fixed-u32-length-only revision had 6-byte header mi
 
 **Every conforming receiver MUST accept all combinations of `LL`, `CW`, `TF`.** Selection is per-TLV; senders may mix variants freely.
 
-A minimal-feature implementation MAY emit only the smaller variants (`LL=0`, `CW=1`, `TF=1` where applicable) for its outgoing TLVs. Because **every receiver MUST accept every variant** (above) and can pre-allocate worst-case, **no per-peer capability negotiation is needed or defined**: a sender simply SHOULD default to the smaller variants and use a larger one only when the smaller would not fit. There are no other negotiable wire features in protocol v1 — reserved bits are frozen, and any wire-incompatible change is a different protocol version selected at the discovery layer. See [ADR-0013](../adr/0013-v1-scope-boundaries.md).
+A minimal-feature implementation MAY emit only the smaller variants (`LL=0`, `CW=1`, `TF=1` where applicable) for its outgoing TLVs. Because **every receiver MUST accept every variant** (above) and can pre-allocate worst-case, **no per-peer capability negotiation is needed or defined**: a sender simply SHOULD default to the smaller variants and use a larger one only when the smaller would not fit. There are no other negotiable wire features in protocol v1 — reserved bits are frozen, and any wire-incompatible change is a different protocol version selected at the discovery layer. See [ADR-0013](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0013-v1-scope-boundaries.md).
 
 The protocol guarantees: no conforming TLV exceeds the declared bounds (`u32` length, `CRC-32`, `u64` absolute TS). A minimum-feature implementation can pre-allocate worst-case buffers and CRC tables and never encounter a peer that exceeds them.
 

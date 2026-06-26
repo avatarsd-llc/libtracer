@@ -1,7 +1,7 @@
 # Reference 04 — Communication Flows
 
 > **Status**: draft, v1, 2026-05-03. Sequence-diagram catalog for every protocol-level flow. ASCII diagrams; the wire bytes for each TLV referenced here are byte-precise in [05-protocol-tlvs.md](05-protocol-tlvs.md).
-> **See also**: [../adr/0006-read-write-await-api-no-connect.md](../adr/0006-read-write-await-api-no-connect.md) for the API-surface rationale.
+> **See also**: [../adr/0006-read-write-await-api-no-connect.md](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0006-read-write-await-api-no-connect.md) for the API-surface rationale.
 
 ---
 

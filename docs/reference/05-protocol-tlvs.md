@@ -15,7 +15,7 @@
 
 Currently assigned: `0x01`–`0x04`, `0x06`–`0x0D` (12 types). `0x05` is **retired** (was generic LIST in earlier drafts; see §`0x05`). The remaining `0x0E` – `0x1F` are reserved for v1 fast-track additions; `0x20` – `0x7F` is the long-term registry.
 
-The names below are the canonical type-code names; the reference implementation's C enum (header under `core/include/libtracer/`, pending the protocol-v1 rebuild — [ADR-0001](../adr/0001-extract-reference-implementation-from-strawberry-fw.md)) matches them.
+The names below are the canonical type-code names; the reference implementation's C enum (header under `core/include/libtracer/`, pending the protocol-v1 rebuild — [ADR-0001](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0001-extract-reference-implementation-from-strawberry-fw.md)) matches them.
 
 ### Structured TLVs
 
@@ -611,7 +611,7 @@ The `NAME "data"` marker tags the wrapped data TLV so that future metadata exten
 
 ### Cycle handling
 
-The `(origin_peer_id, origin_timestamp)` pair is the dedup key. A receiving bridge maintains a recent-set of seen pairs; already-seen TLVs are dropped silently. **The recent-set is a bounded, evictable best-effort optimization, not the termination guarantee** — `hop_count`/`MAX_HOPS` (below) guarantees termination, so a bridge MAY size the recent-set freely (even zero) and accept bounded duplicate delivery (≤ `MAX_HOPS` × fanout) on eviction. Size it for your topology to minimize redundant forwarding — `deepest_expected_route_fanout × longest_expected_delivery_window` is a good target (per [07-host-embedding.md](07-host-embedding.md) §cycle handling). See [ADR-0014](../adr/0014-router-cycle-termination-hop-count.md).
+The `(origin_peer_id, origin_timestamp)` pair is the dedup key. A receiving bridge maintains a recent-set of seen pairs; already-seen TLVs are dropped silently. **The recent-set is a bounded, evictable best-effort optimization, not the termination guarantee** — `hop_count`/`MAX_HOPS` (below) guarantees termination, so a bridge MAY size the recent-set freely (even zero) and accept bounded duplicate delivery (≤ `MAX_HOPS` × fanout) on eviction. Size it for your topology to minimize redundant forwarding — `deepest_expected_route_fanout × longest_expected_delivery_window` is a good target (per [07-host-embedding.md](07-host-embedding.md) §cycle handling). See [ADR-0014](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0014-router-cycle-termination-hop-count.md).
 
 ### Constraints
 

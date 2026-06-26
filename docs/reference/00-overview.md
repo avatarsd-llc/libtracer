@@ -1,6 +1,6 @@
 # Reference 00 — Core Overview (the libtracer Standard)
 
-> **Status**: draft, v1, 2026-05-03. This is the standard. This document describes what *any* conforming implementation must do; design rationale is recorded in [../../docs/adr/](../../docs/adr/) and git history.
+> **Status**: draft, v1, 2026-05-03. This is the standard. This document describes what *any* conforming implementation must do; design rationale is recorded in [../../docs/adr/](https://github.com/avatarsd-llc/libtracer/tree/main/docs/adr/) and git history.
 
 ---
 

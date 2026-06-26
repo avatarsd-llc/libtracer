@@ -173,7 +173,7 @@ Each adjacent layer pair has a small contract. The interfaces are uniform — a 
 
 ### Module ABI (implementation-defined)
 
-The module ABI — the C contracts below (`transport_vtable_t`, `mem_backend_t`, and the `transport_meta_t.abi_version` field) — is **deliberately** an **implementation** concern, not a protocol property ([ADR-0013](../adr/0013-v1-scope-boundaries.md)). Two conforming implementations need not share it; what they share is the wire format ([01-data-format.md](01-data-format.md)) and addressing ([03-addressing.md](03-addressing.md)). A node assembled from one toolchain's modules interoperates over the wire with any other node, regardless of ABI.
+The module ABI — the C contracts below (`transport_vtable_t`, `mem_backend_t`, and the `transport_meta_t.abi_version` field) — is **deliberately** an **implementation** concern, not a protocol property ([ADR-0013](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0013-v1-scope-boundaries.md)). Two conforming implementations need not share it; what they share is the wire format ([01-data-format.md](01-data-format.md)) and addressing ([03-addressing.md](03-addressing.md)). A node assembled from one toolchain's modules interoperates over the wire with any other node, regardless of ABI.
 
 Within a single implementation the ABI is declared **semver-stable**: the library exports a `tracer_abi_version` symbol, and every breaking change to a vtable layout or `abi_version` field bumps it. Loaders refuse modules whose `abi_version` does not match.
 
@@ -330,7 +330,7 @@ A bridge between two pairings (e.g., lwIP TCP → CAN) is **not free**: at the b
 
 ## Hard integrations — resolved (ADR-0012)
 
-These L0/L1 integrations were once OPEN; they are now resolved as the **modular memory-binding contract** ([08-views-and-ownership.md](08-views-and-ownership.md) §memory-binding contract, [ADR-0012](../adr/0012-modular-memory-binding-transparent-router.md)): libtracer is a transparent byte router, safety is recommended but not mandated, and each backend owns its per-architecture contract. The **Recommendation** under each item below is the v1 decision, not an open choice.
+These L0/L1 integrations were once OPEN; they are now resolved as the **modular memory-binding contract** ([08-views-and-ownership.md](08-views-and-ownership.md) §memory-binding contract, [ADR-0012](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0012-modular-memory-binding-transparent-router.md)): libtracer is a transparent byte router, safety is recommended but not mandated, and each backend owns its per-architecture contract. The **Recommendation** under each item below is the v1 decision, not an open choice.
 
 ### `mem_asio_streambuf`: do we wrap, or do we copy?
 
