@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 cmake_minimum_required(VERSION 3.16)
 project(libtracer CXX)
@@ -36,6 +36,18 @@ if(MSVC)
     target_compile_options(libtracer PRIVATE /W4)
 else()
     target_compile_options(libtracer PRIVATE -Wall -Wextra)
+endif()
+
+# mem_cuda — the GPU device backend (docs/adr/0024). OFF by default: it needs the
+# CUDA toolkit and is built/tested locally (e.g. scripts/test-cuda.sh), never in
+# CI (no GPU). The .cpp uses only the CUDA runtime API (no kernels), so a host
+# compiler + libcudart suffices — no nvcc required.
+option(LIBTRACER_WITH_CUDA "Build the mem_cuda GPU backend (needs CUDA toolkit)" OFF)
+if(LIBTRACER_WITH_CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    target_sources(libtracer PRIVATE src/mem_cuda.cpp)
+    target_link_libraries(libtracer PUBLIC CUDA::cudart)
+    target_compile_definitions(libtracer PUBLIC LIBTRACER_WITH_CUDA)
 endif()
 
 if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")

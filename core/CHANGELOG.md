@@ -68,6 +68,14 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **`mem_cuda` GPU backend ([ADR-0024](../docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)) — gated, GPU-tested.**
+  `tr::mem::cuda_backend()` (DEVICE space; `cudaMalloc`/`cudaFree`) plus
+  `tr::view::cuda_alloc` / `cuda_copy_from_host` / `cuda_copy_to_host`. A GPU-backed
+  value is a **heterogeneous host(header)+device(payload) rope**. Built only with
+  `-DLIBTRACER_WITH_CUDA=ON` (off by default; **never in CI** — no GPU). Built and
+  **run on a real GPU locally** via `scripts/test-cuda.sh` (Docker + CDI;
+  `cuda_test` passed alloc, H2D/D2H round-trip, and the heterogeneous-rope checks).
+
 - **Memory-space tag (`tr::mem::mem_space_t` HOST/DEVICE) — the L1/L2 groundwork
   for `mem_cuda` and heterogeneous host+device ropes ([ADR-0024](../docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)).**
   `mem_backend_t::space()` (default `HOST`) is inherited by each `segment_t.space`;

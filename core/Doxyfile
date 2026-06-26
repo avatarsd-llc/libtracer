@@ -26,7 +26,8 @@ INPUT                  = core/include/libtracer/backend.hpp \
                          core/include/libtracer/rope.hpp \
                          core/include/libtracer/mem_heap.hpp \
                          core/include/libtracer/mem_pool.hpp \
-                         core/include/libtracer/mem_borrowed.hpp
+                         core/include/libtracer/mem_borrowed.hpp \
+                         core/include/libtracer/mem_cuda.hpp
 RECURSIVE              = NO
 
 # Document only what is explicitly commented; internal `detail` helpers are not

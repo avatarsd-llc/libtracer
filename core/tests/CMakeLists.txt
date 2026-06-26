@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 set(LIBTRACER_VECTORS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../tests/conformance/vectors/v1")
 
@@ -74,3 +74,12 @@ target_compile_definitions(substrate_test_no_atomic PRIVATE
     LIBTRACER_NO_ATOMIC
     LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME substrate_no_atomic COMMAND substrate_test_no_atomic)
+
+# mem_cuda GPU test — only with LIBTRACER_WITH_CUDA; run on a real GPU locally
+# (scripts/test-cuda.sh), never in CI.
+if(LIBTRACER_WITH_CUDA)
+    add_executable(cuda_test cuda_test.cpp)
+    target_link_libraries(cuda_test PRIVATE libtracer)
+    libtracer_test_warnings(cuda_test)
+    add_test(NAME cuda COMMAND cuda_test)
+endif()
