@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 #
 # Sphinx configuration for the libtracer documentation site.
 #
@@ -14,8 +14,8 @@ import shutil
 import subprocess
 
 project = "libtracer"
-project_copyright = "2026, Avatar LLC"
-author = "Avatar LLC"
+project_copyright = "2026, avatarsd LLC"
+author = "avatarsd LLC"
 
 extensions = [
     "myst_parser",

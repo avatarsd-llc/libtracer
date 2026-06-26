@@ -2,7 +2,7 @@
 name = "libtracer"
 version = "0.0.1"
 edition = "2021"
-authors = ["Avatar LLC"]
+authors = ["avatarsd LLC"]
 description = "Rust binding for libtracer — a lightweight decentralized graph-based networking protocol."
 license = "Apache-2.0"
 repository = "https://github.com/avatarsd/libtracer"

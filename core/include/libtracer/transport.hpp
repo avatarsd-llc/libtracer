@@ -1,14 +1,16 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// The transport seam: one wire technology behind a uniform interface. A bridge
-// sends framed bytes (a complete TLV, ROUTER-wrapped) via send(), and receives
-// inbound frames through a registered receiver callback (which may fire on an
-// internal transport thread). The reference `transport_vtable` is poll-based
-// (docs/reference/10 §transport_vtable); this C++ seam is callback + recv-thread,
-// an implementation choice (ADR-0013) that matches how a real socket transport's
-// receive loop would feed a bridge. A transport never sees TLV semantics — only
-// framed bytes.
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * The transport seam: one wire technology behind a uniform interface. A bridge
+ * sends framed bytes (a complete TLV, ROUTER-wrapped) via send(), and receives
+ * inbound frames through a registered receiver callback (which may fire on an
+ * internal transport thread). The reference `transport_vtable` is poll-based
+ * (docs/reference/10 §transport_vtable); this C++ seam is callback + recv-thread,
+ * an implementation choice (ADR-0013) that matches how a real socket transport's
+ * receive loop would feed a bridge. A transport never sees TLV semantics — only
+ * framed bytes.
+ */
 #pragma once
 
 #include <array>

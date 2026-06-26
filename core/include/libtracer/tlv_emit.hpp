@@ -1,11 +1,13 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// Emit one TLV as raw wire bytes — header (type, opt, little-endian length) plus
-// body — without building a `tlv_t` model object. The structural byte-builders
-// (PATH canonical keys, ROUTER envelopes, :schema POINT descriptors) all share
-// this instead of each hand-rolling the header. For decoding, and for emitting a
-// full `tlv_t` value (payload/children/trailers), use frame.hpp's encode/decode.
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * Emit one TLV as raw wire bytes — header (type, opt, little-endian length) plus
+ * body — without building a `tlv_t` model object. The structural byte-builders
+ * (PATH canonical keys, ROUTER envelopes, :schema POINT descriptors) all share
+ * this instead of each hand-rolling the header. For decoding, and for emitting a
+ * full `tlv_t` value (payload/children/trailers), use frame.hpp's encode/decode.
+ */
 #pragma once
 
 #include <cstddef>

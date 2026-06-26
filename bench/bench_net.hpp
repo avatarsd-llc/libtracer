@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+// SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 //
 // Shared scaffolding for the TWO-PROCESS network benchmark (libtracer-UDP vs
 // Zenoh-UDP). The publisher and subscriber are separate processes on localhost;

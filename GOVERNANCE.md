@@ -4,10 +4,10 @@ libtracer is an open protocol with an open reference implementation. This docume
 
 ## Stewardship
 
-The libtracer project is stewarded by **Avatar LLC**. The company:
+The libtracer project is stewarded by **avatarsd LLC**. The company:
 
 - Holds the **"libtracer" trademark** and enforces the [trademark policy](TRADEMARKS.md).
-- Holds **copyright** in contributions made by Avatar LLC employees and contractors. Outside contributions remain copyright of their authors, licensed under Apache 2.0 (code) or CC BY 4.0 (spec) per the Developer Certificate of Origin.
+- Holds **copyright** in contributions made by avatarsd LLC employees and contractors. Outside contributions remain copyright of their authors, licensed under Apache 2.0 (code) or CC BY 4.0 (spec) per the Developer Certificate of Origin.
 - **Funds and prioritizes** development of the reference implementation.
 - **May build proprietary products and services on top of libtracer** (Layer 3 in the [README](README.md)) and reserves the right to do so without obligation to open-source those products.
 
@@ -18,7 +18,7 @@ The company explicitly does **not**:
 - Restrict or revoke the open licenses on already-published code or spec versions. Once published, both are irrevocable under their respective licenses.
 - Charge fees for trademark use by compatible implementations (see [TRADEMARKS.md](TRADEMARKS.md)).
 
-If the project moves to a foundation or independent steering body in the future, Avatar LLC will document the transfer publicly. Until then, this section is the honest description of who holds what.
+If the project moves to a foundation or independent steering body in the future, avatarsd LLC will document the transfer publicly. Until then, this section is the honest description of who holds what.
 
 ## Scope
 

@@ -1,12 +1,14 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// L4 addressing. A path_t is the canonical PATH-TLV payload bytes (a sequence of
-// NAME children) that key a vertex in the graph map — docs/reference/02 §dispatch
-// keys on the PATH payload bytes, never on the string form. path_t::parse builds
-// and validates those bytes once (at registration); the hot path compares bytes.
-// A field tail after ':' (e.g. ":settings.deadline_ns", ":subscribers[]") parses
-// into a field_path_t for field-write/read. See docs/reference/03-addressing.md.
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * L4 addressing. A path_t is the canonical PATH-TLV payload bytes (a sequence of
+ * NAME children) that key a vertex in the graph map — docs/reference/02 §dispatch
+ * keys on the PATH payload bytes, never on the string form. path_t::parse builds
+ * and validates those bytes once (at registration); the hot path compares bytes.
+ * A field tail after ':' (e.g. ":settings.deadline_ns", ":subscribers[]") parses
+ * into a field_path_t for field-write/read. See docs/reference/03-addressing.md.
+ */
 #pragma once
 
 #include <cstddef>

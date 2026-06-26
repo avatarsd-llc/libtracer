@@ -1,13 +1,15 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// In-process publish/subscribe over the L4 graph — the M3 P0 node, end to end,
-// with no transport and no wire bytes leaving the process. A publisher writes
-// /sensor/temp; three subscribers receive the value three different ways:
-//   1. a direct in-process callback     (subscribe(src, callback) sugar)
-//   2. a spec-faithful target vertex     (subscribe(src, target) -> a handler sink)
-//   3. a thread blocking in await()      (the single-shot primitive)
-// Delivery to (1) and (2) is a refcount-bump clone of the same view_t — no byte copy.
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * In-process publish/subscribe over the L4 graph — the M3 P0 node, end to end,
+ * with no transport and no wire bytes leaving the process. A publisher writes
+ * /sensor/temp; three subscribers receive the value three different ways:
+ *   1. a direct in-process callback     (subscribe(src, callback) sugar)
+ *   2. a spec-faithful target vertex     (subscribe(src, target) -> a handler sink)
+ *   3. a thread blocking in await()      (the single-shot primitive)
+ * Delivery to (1) and (2) is a refcount-bump clone of the same view_t — no byte copy.
+ */
 
 #include <chrono>
 #include <cstddef>

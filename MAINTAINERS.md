@@ -2,7 +2,7 @@
 
 Current maintainers of libtracer. See [GOVERNANCE.md](GOVERNANCE.md) for what this role entails.
 
-The libtracer project is stewarded by **Avatar LLC**. The trademark and copyright are held by the company; the code is open under Apache 2.0 and the spec under CC BY 4.0.
+The libtracer project is stewarded by **avatarsd LLC**. The trademark and copyright are held by the company; the code is open under Apache 2.0 and the spec under CC BY 4.0.
 
 | Name      | GitHub      | Areas                                |
 |-----------|-------------|--------------------------------------|

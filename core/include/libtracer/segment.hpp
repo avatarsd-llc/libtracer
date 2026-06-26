@@ -1,13 +1,15 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// L1 segment: a refcounted span of real bytes owned by a tr::mem::mem_backend_t,
-// plus the intrusive segment_ptr_t handle that threads a segment's lifetime
-// through view fan-out. The refcount uses the canonical intrusive_ptr orderings
-// required by docs/reference/02-graph-model.md §required atomic operations
-// (increment = relaxed, decrement = acq_rel, inspect = acquire). Define
-// LIBTRACER_NO_ATOMIC for single-threaded / Cortex-M0 builds (no cross-thread
-// segment sharing).
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * L1 segment: a refcounted span of real bytes owned by a tr::mem::mem_backend_t,
+ * plus the intrusive segment_ptr_t handle that threads a segment's lifetime
+ * through view fan-out. The refcount uses the canonical intrusive_ptr orderings
+ * required by docs/reference/02-graph-model.md §required atomic operations
+ * (increment = relaxed, decrement = acq_rel, inspect = acquire). Define
+ * LIBTRACER_NO_ATOMIC for single-threaded / Cortex-M0 builds (no cross-thread
+ * segment sharing).
+ */
 #pragma once
 
 #include <cstdint>

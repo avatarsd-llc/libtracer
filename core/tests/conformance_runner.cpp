@@ -1,12 +1,14 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// Conformance harness for the seed vectors under tests/conformance/vectors/v1/.
-// No JSON parser: input.bin is self-describing, so the codec is validated by
-//   (1) generic roundtrip  — encode(decode(input.bin)) == input.bin, for every vector;
-//   (2) golden builders     — encode(built) == input.bin && decode(input.bin) == built;
-//   (3) targeted asserts     — the CRC value, the PATH child count, reserved-bit rejection.
-// expected.json stays as the human-readable / cross-language spec.
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * Conformance harness for the seed vectors under tests/conformance/vectors/v1/.
+ * No JSON parser: input.bin is self-describing, so the codec is validated by
+ *   (1) generic roundtrip  — encode(decode(input.bin)) == input.bin, for every vector;
+ *   (2) golden builders     — encode(built) == input.bin && decode(input.bin) == built;
+ *   (3) targeted asserts     — the CRC value, the PATH child count, reserved-bit rejection.
+ * expected.json stays as the human-readable / cross-language spec.
+ */
 
 #include <algorithm>
 #include <array>

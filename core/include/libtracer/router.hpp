@@ -1,13 +1,15 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// The ROUTER envelope (docs/reference/05 §0x0D ROUTER). A bridge wraps a data TLV
-// with routing metadata on egress and sheds it on ingress. A ROUTER is a
-// structured TLV whose NAME-tagged children carry origin_peer_id / origin_timestamp
-// / hop_count, followed by `NAME "data"` and the wrapped data TLV as the LAST
-// child. `(origin_peer_id, origin_timestamp)` is the cycle-dedup key; hop_count is
-// the termination guarantee
-// ([ADR-0014](../../docs/adr/0014-router-cycle-termination-hop-count.md)).
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * The ROUTER envelope (docs/reference/05 §0x0D ROUTER). A bridge wraps a data TLV
+ * with routing metadata on egress and sheds it on ingress. A ROUTER is a
+ * structured TLV whose NAME-tagged children carry origin_peer_id / origin_timestamp
+ * / hop_count, followed by `NAME "data"` and the wrapped data TLV as the LAST
+ * child. `(origin_peer_id, origin_timestamp)` is the cycle-dedup key; hop_count is
+ * the termination guarantee
+ * ([ADR-0014](../../docs/adr/0014-router-cycle-termination-hop-count.md)).
+ */
 #pragma once
 
 #include <cstddef>

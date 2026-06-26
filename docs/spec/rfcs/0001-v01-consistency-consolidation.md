@@ -1,6 +1,6 @@
 <!--
 SPDX-License-Identifier: CC-BY-4.0
-SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 -->
 
 # RFC 0001 — Protocol-v1 wire-format consistency consolidation

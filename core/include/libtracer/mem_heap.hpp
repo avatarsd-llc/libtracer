@@ -1,9 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// mem_heap — the host allocator backend. Owns malloc'd bytes; frees them and
-// the segment_t control block on destroy. The week-1 MVP backend for hosted
-// targets (docs/reference/09-memory-substrate.md §mem_heap).
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * mem_heap — the host allocator backend. Owns malloc'd bytes; frees them and
+ * the segment_t control block on destroy. The week-1 MVP backend for hosted
+ * targets (docs/reference/09-memory-substrate.md §mem_heap).
+ */
 #pragma once
 
 #include <cstddef>

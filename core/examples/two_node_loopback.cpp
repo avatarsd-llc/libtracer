@@ -1,11 +1,13 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// Two libtracer nodes talking over the in-process loopback "wire" — the M4 path
-// end to end, no sockets. Node A publishes /sensor/temp; its bridge ROUTER-wraps
-// the value and sends it across; node B's bridge sheds the envelope (after dedup
-// + hop_count checks) and writes the bare TLV to /remote/temp, where B's
-// subscriber receives it. The bytes make a full encode -> ROUTER -> decode trip.
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * Two libtracer nodes talking over the in-process loopback "wire" — the M4 path
+ * end to end, no sockets. Node A publishes /sensor/temp; its bridge ROUTER-wraps
+ * the value and sends it across; node B's bridge sheds the envelope (after dedup
+ * + hop_count checks) and writes the bare TLV to /remote/temp, where B's
+ * subscriber receives it. The bytes make a full encode -> ROUTER -> decode trip.
+ */
 
 #include <array>
 #include <chrono>

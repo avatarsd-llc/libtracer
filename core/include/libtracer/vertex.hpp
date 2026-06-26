@@ -1,13 +1,15 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// An L4 graph vertex: a named, addressable position holding a value, a bounded
-// history, or a user handler (docs/reference/11 §roles). Pinned in place (the
-// atomic LKV slot + mutex + condvar are non-movable); always handled via a
-// vertex_t* returned by graph_t::register_vertex. The read/write LKV hot path is
-// lock-free (an atomic shared_ptr swap, the orderings M2 already pays for); the
-// mutex guards only the history ring, the subscriber list (M3b), and the await
-// waiter accounting.
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * An L4 graph vertex: a named, addressable position holding a value, a bounded
+ * history, or a user handler (docs/reference/11 §roles). Pinned in place (the
+ * atomic LKV slot + mutex + condvar are non-movable); always handled via a
+ * vertex_t* returned by graph_t::register_vertex. The read/write LKV hot path is
+ * lock-free (an atomic shared_ptr swap, the orderings M2 already pays for); the
+ * mutex guards only the history ring, the subscriber list (M3b), and the await
+ * waiter accounting.
+ */
 #pragma once
 
 #include <atomic>

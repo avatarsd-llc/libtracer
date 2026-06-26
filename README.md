@@ -128,8 +128,8 @@ The libtracer project uses three licenses, matched to what each part is:
 | Protocol specification (`docs/spec/`)                            | **CC BY 4.0**               | [docs/spec/LICENSE](docs/spec/LICENSE) |
 | Example code (`examples/`)                                       | **CC0 1.0 (public domain)** | [examples/LICENSE](examples/LICENSE)   |
 
-Copyright is held by **Avatar LLC** for company-authored work; outside contributions remain copyright of their authors, licensed in accordance with the scope above. See [NOTICE](NOTICE) and [GOVERNANCE.md](GOVERNANCE.md#stewardship) for stewardship details.
+Copyright is held by **avatarsd LLC** for company-authored work; outside contributions remain copyright of their authors, licensed in accordance with the scope above. See [NOTICE](NOTICE) and [GOVERNANCE.md](GOVERNANCE.md#stewardship) for stewardship details.
 
 Contributions are accepted under the [Developer Certificate of Origin](https://developercertificate.org/) — sign your commits with `git commit -s`.
 
-The **"libtracer" name** is a trademark of Avatar LLC and is not granted by the licenses above. See [TRADEMARKS.md](TRADEMARKS.md).
+The **"libtracer" name** is a trademark of avatarsd LLC and is not granted by the licenses above. See [TRADEMARKS.md](TRADEMARKS.md).

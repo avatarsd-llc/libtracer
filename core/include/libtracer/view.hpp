@@ -1,12 +1,14 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// L1 view: a zero-copy (segment, offset, length) window onto real bytes. A view
-// borrows its segment via segment_ptr_t, so copying a view is a clone (refcount
-// bump) and the bytes stay alive as long as any view references them. The
-// load-bearing claim of L1 (docs/reference/08 §what L1 is): "a TLV is a cast
-// from a view" — the cast itself (view_as_tlv) lives at L2 (frame.hpp /
-// tr::wire), since it produces a tlv_t; L1 must not depend upward on L2.
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * L1 view: a zero-copy (segment, offset, length) window onto real bytes. A view
+ * borrows its segment via segment_ptr_t, so copying a view is a clone (refcount
+ * bump) and the bytes stay alive as long as any view references them. The
+ * load-bearing claim of L1 (docs/reference/08 §what L1 is): "a TLV is a cast
+ * from a view" — the cast itself (view_as_tlv) lives at L2 (frame.hpp /
+ * tr::wire), since it produces a tlv_t; L1 must not depend upward on L2.
+ */
 #pragma once
 
 #include <cstddef>

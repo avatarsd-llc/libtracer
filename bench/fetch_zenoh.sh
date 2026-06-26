@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 #
 # Vendor the prebuilt zenoh-c (lib + C headers) and zenoh-cpp (header-only) into
 # bench/vendor/ for the comparison build. Not committed — these are third-party

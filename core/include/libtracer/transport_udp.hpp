@@ -1,12 +1,14 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// transport_udp — a real UDP socket transport_t (M5). The first transport that
-// actually crosses the kernel network stack; the bridge / router / graph above
-// it are unchanged. One datagram carries one whole frame (no stream reassembly),
-// so it pairs with the flat decoder. POSIX sockets; a receive thread drains the
-// socket into the registered receiver. Datagram payloads are bounded by the UDP
-// limit (~65507 bytes) — large TLVs need a streaming transport (future).
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * transport_udp — a real UDP socket transport_t (M5). The first transport that
+ * actually crosses the kernel network stack; the bridge / router / graph above
+ * it are unchanged. One datagram carries one whole frame (no stream reassembly),
+ * so it pairs with the flat decoder. POSIX sockets; a receive thread drains the
+ * socket into the registered receiver. Datagram payloads are bounded by the UDP
+ * limit (~65507 bytes) — large TLVs need a streaming transport (future).
+ */
 #pragma once
 
 #include <atomic>

@@ -1,10 +1,12 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// Unit tests for the little-endian (de)serialization primitive (byteorder.hpp).
-// The codec/runtime sites that funnel through it are covered end-to-end by the
-// conformance vectors; this pins the helper's own contract (LE order, the
-// short-span zero-extension tolerance, width truncation, constexpr-ness).
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * Unit tests for the little-endian (de)serialization primitive (byteorder.hpp).
+ * The codec/runtime sites that funnel through it are covered end-to-end by the
+ * conformance vectors; this pins the helper's own contract (LE order, the
+ * short-span zero-extension tolerance, width truncation, constexpr-ness).
+ */
 
 #include "libtracer/byteorder.hpp"
 

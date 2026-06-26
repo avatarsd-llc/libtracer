@@ -1,14 +1,16 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// The L0 memory-backend seam: the small, user-implementable interface every
-// substrate implements (heap, borrowed/live, fixed pool — and, later, DMA,
-// lwIP pbuf, SHM). libtracer never allocates on its own; it receives memory
-// from a backend, refcounts it (segment.hpp), and casts the bytes to TLVs.
-// Each backend owns and declares its own per-architecture concurrency/coherency
-// contract — the protocol mandates none. See docs/reference/09-memory-substrate.md,
-// docs/adr/0012 (modular memory binding; transparent byte router) and
-// docs/adr/0016 (layer namespaces; no templates through the seam).
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * The L0 memory-backend seam: the small, user-implementable interface every
+ * substrate implements (heap, borrowed/live, fixed pool — and, later, DMA,
+ * lwIP pbuf, SHM). libtracer never allocates on its own; it receives memory
+ * from a backend, refcounts it (segment.hpp), and casts the bytes to TLVs.
+ * Each backend owns and declares its own per-architecture concurrency/coherency
+ * contract — the protocol mandates none. See docs/reference/09-memory-substrate.md,
+ * docs/adr/0012 (modular memory binding; transparent byte router) and
+ * docs/adr/0016 (layer namespaces; no templates through the seam).
+ */
 #pragma once
 
 #include <cstddef>

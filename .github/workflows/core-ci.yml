@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 #
 # Core C++23 reference implementation CI: build + ctest, clang-format, and the
 # strict Doxygen documentation gate. Keeps `main` green on every change to core/.

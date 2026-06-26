@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+// SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 //
 // libtracer side of the libtracer-vs-Zenoh comparison. Two in-process paths:
 //   inproc   — graph pub/sub (M3): publisher write -> subscriber callback. The

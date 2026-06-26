@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+// SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 //
 // Zenoh network bench (two processes, real UDP). The subscriber listens on a UDP
 // endpoint; the publisher connects to it; multicast scouting is disabled so they

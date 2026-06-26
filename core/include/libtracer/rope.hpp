@@ -1,17 +1,19 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// L1 rope: an ordered chain of views forming one logical byte sequence that may
-// span multiple segments without copying (docs/reference/08 §ropes). A rope is
-// how one TLV can be assembled from, say, a static header segment + a live DMA
-// payload segment. Assembly is chaining views — never a memcpy. Walk it or
-// scatter-gather it at egress with zero copies; flatten it to one contiguous
-// segment only when a flat-buffer consumer demands it (the single
-// bridge-boundary copy). See docs/adr/0016 §1.
-//
-// A single-link view_t is the hot path and allocates nothing; only a multi-link
-// rope_t allocates (one vector for the chain). A bounded/embedded small-buffer
-// rope is a follow-on optimization that does not change this API.
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * L1 rope: an ordered chain of views forming one logical byte sequence that may
+ * span multiple segments without copying (docs/reference/08 §ropes). A rope is
+ * how one TLV can be assembled from, say, a static header segment + a live DMA
+ * payload segment. Assembly is chaining views — never a memcpy. Walk it or
+ * scatter-gather it at egress with zero copies; flatten it to one contiguous
+ * segment only when a flat-buffer consumer demands it (the single
+ * bridge-boundary copy). See docs/adr/0016 §1.
+ *
+ * A single-link view_t is the hot path and allocates nothing; only a multi-link
+ * rope_t allocates (one vector for the chain). A bounded/embedded small-buffer
+ * rope is a follow-on optimization that does not change this API.
+ */
 #pragma once
 
 #include <cstddef>

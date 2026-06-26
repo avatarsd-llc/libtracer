@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-<!-- SPDX-FileCopyrightText: Copyright 2026 Avatar LLC -->
+<!-- SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC -->
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>rmw_tracer</name>
@@ -9,7 +9,7 @@
     A ROS 2 RMW (middleware) implementation backed by the libtracer graph.
     Select with RMW_IMPLEMENTATION=rmw_tracer. See ADR-0023.
   </description>
-  <maintainer email="avatarsd2@gmail.com">Avatar LLC</maintainer>
+  <maintainer email="avatarsd2@gmail.com">avatarsd LLC</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
