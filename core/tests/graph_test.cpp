@@ -27,6 +27,7 @@
 namespace {
 
 using namespace std::chrono_literals;
+using tr::graph::delivery_mode_t;
 using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
@@ -359,6 +360,28 @@ void test_dispatch_cycle_cap() {
 
 }  // namespace
 
+void test_subscribe_on_change() {
+    std::printf("per-subscriber delivery_mode (ON_CHANGE vs EVERY):\n");
+    graph_t g;
+    auto* v = *g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+
+    auto on_change = std::make_shared<int>(0);
+    (void)g.subscribe(
+        *path_t::parse("/sensor/temp"), [on_change](const tr::view::view_t&) { ++*on_change; },
+        delivery_mode_t::ON_CHANGE);
+    auto every = std::make_shared<int>(0);
+    (void)g.subscribe(*path_t::parse("/sensor/temp"),
+                      [every](const tr::view::view_t&) { ++*every; });  // default = EVERY
+
+    (void)g.write(v, make_value({0x55}));  // change   -> both fire
+    (void)g.write(v, make_value({0x55}));  // unchanged-> only EVERY fires
+    (void)g.write(v, make_value({0x66}));  // change   -> both fire
+    (void)g.write(v, make_value({0x66}));  // unchanged-> only EVERY fires
+
+    check(*on_change == 2, "ON_CHANGE delivers only on a byte-change (2 of 4 writes)");
+    check(*every == 4, "EVERY (default) delivers on every write (4 of 4)");
+}
+
 int main() {
     test_path_parse();
     test_stored_value();
@@ -367,6 +390,7 @@ int main() {
     test_await();
     test_subscribe_callback();
     test_subscribe_target();
+    test_subscribe_on_change();
     test_field_write_settings();
     test_field_write_handle();
     test_subscribe_via_field_write_and_unsubscribe();
