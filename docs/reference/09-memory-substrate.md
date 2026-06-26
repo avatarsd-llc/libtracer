@@ -136,68 +136,93 @@ flowchart TB
     style SHARED fill:#fce7f3,stroke:#9f1239
 ```
 
-All four families implement the same `mem_backend_t` interface ([§the backend abstraction](#the-backend-abstraction) below); the differences are in how they honor `destroy`, whether they need cache hooks, and what their per-segment lifetime story is.
+All four families implement the same `tr::mem::mem_backend_t` interface ([§the backend abstraction](#the-backend-abstraction) below); the differences are in how they honor `destroy`, whether they need cache hooks, and what their per-segment lifetime story is.
 
 ---
 
 ## The backend abstraction
 
-Each L0 substrate is wrapped behind a small C interface. The interface intentionally does NOT expose allocation as a first-class operation — many substrates can't allocate (MMIO, hardware FIFOs). It exposes:
+Each L0 substrate is wrapped behind a small seam. The reference implementation expresses it as a C++23 base class — `tr::mem::mem_backend_t` — that a backend subclasses; this is the **reference implementation's** seam, not a normative cross-language ABI (implementations interoperate over the wire, never via a shared ABI — [ADR-0013](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0013-v1-scope-boundaries.md)). The seam intentionally does NOT make allocation mandatory — many substrates can't allocate (MMIO, hardware FIFOs):
 
-```c
-typedef struct mem_backend mem_backend_t;
-typedef struct segment     segment_t;
+```cpp
+namespace tr::mem {
 
-typedef enum {
-    IO_DIR_DEVICE_TO_CPU  = 1,   // CPU will read these bytes (after DMA-in completion)
-    IO_DIR_CPU_TO_DEVICE = 2,   // CPU has written; HW will DMA-out
-} io_dir_t;
-
-struct mem_backend {
-    const char *name;             // e.g. "mem_heap", "mem_lwip_pbuf"
-    uint32_t    abi_version;
-
-    // Optional: allocate a fresh segment, if the backend supports it.
-    // Returns NULL if allocation is not supported (MMIO, hardware FIFOs).
-    segment_t *(*alloc)(const mem_backend_t *self, size_t size, uint32_t hint);
-
-    // Required: release one refcount on a segment.
-    // The segment's destroy callback fires when refcount drops to zero.
-    void (*release)(segment_t *seg);
-
-    // Optional: prepare CPU-visible memory for a DMA transfer.
-    //   IO_DIR_CPU_TO_DEVICE: clean cache so HW reads CPU's last writes.
-    //   IO_DIR_DEVICE_TO_CPU:  invalidate cache so CPU reads HW's last writes.
-    void (*prepare_for_io)(segment_t *seg, io_dir_t);
-    void (*finalize_after_io)(segment_t *seg, io_dir_t);
-
-    // Static limits.
-    size_t (*max_segment_size)(const mem_backend_t *self);
-    size_t (*alignment)(const mem_backend_t *self);
+// Direction of a DMA / cache-coherency transfer. The hook METHOD carries the
+// timing; this enum carries only the DIRECTION; the backend maps the pair.
+enum class io_dir_t : std::uint8_t {
+    DEVICE_TO_CPU = 1,   // CPU will read bytes a device just wrote (invalidate)
+    CPU_TO_DEVICE = 2,   // a device will read bytes the CPU just wrote (clean)
 };
+
+// An OPAQUE, backend-private allocation hint (a strong typedef). Its meaning is
+// defined by — and private to — the backend that interprets it; there is NO
+// cross-backend hint vocabulary or registry. A backend that ignores hints MUST
+// accept any value. This is the anti-bloat fence.
+enum class alloc_hint_t : std::uint32_t { NONE = 0 };
+
+// The L0 substrate seam. Subclass to bind libtracer to any allocator — a heap,
+// a fixed caller-owned arena, live registers, lwIP pbufs, DMA descriptors.
+class mem_backend_t {
+   public:
+    explicit mem_backend_t(const char* name) noexcept;
+    virtual ~mem_backend_t() = default;
+
+    // Allocate a fresh segment of at least `size` bytes (refcount = 1, for the
+    // caller to adopt). Returns nullptr on backpressure / OOM / unsupported
+    // (MMIO, hardware FIFOs). Note the return is a raw segment_t*, NOT a
+    // segment_ptr_t: if alloc returned the L1 owning handle, tr::mem would
+    // depend on tr::view (an upward layering violation). The caller adopts it
+    // via tr::view::segment_ptr_t::adopt(seg).
+    [[nodiscard]] virtual tr::view::segment_t* alloc(
+        std::size_t size, alloc_hint_t hint = alloc_hint_t::NONE) {
+        return nullptr;
+    }
+
+    // Reclaim a segment whose refcount has reached zero — the ONLY reclaim
+    // hook. There is NO release() method: the L1 owning handle (segment_ptr_t)
+    // does the acq_rel refcount decrement in its destructor/reset and calls
+    // backend->destroy(seg) only when the count hits zero. Never called on a
+    // live segment.
+    virtual void destroy(tr::view::segment_t* seg) noexcept = 0;
+
+    // Optional cache-coherency hooks for non-coherent DMA paths. `before_io`
+    // preps the cache before the buffer is handed to a transfer; `after_io`
+    // reconciles the cache after the transfer completes. No-ops by default and
+    // on cacheless cores (Cortex-M0/M3/M4); only DMA-class backends override.
+    virtual void before_io(tr::view::segment_t* seg, io_dir_t dir) noexcept {}
+    virtual void after_io (tr::view::segment_t* seg, io_dir_t dir) noexcept {}
+
+    [[nodiscard]] virtual std::size_t alignment()        const noexcept;
+    [[nodiscard]] virtual std::size_t max_segment_size() const noexcept;
+
+    [[nodiscard]] const char* name() const noexcept;
+};
+
+}  // namespace tr::mem
 ```
 
-The `segment_t` struct carries the refcount and a pointer back to its backend:
+The `tr::view::segment_t` carries the refcount and a pointer back to its backend. It is an L1 (`tr::view`) type — not an L0 (`tr::mem`) one — precisely *because* it carries the refcount, the L1 ownership concern:
 
-```c
-struct segment {
-    atomic_uint_least32_t refcount;
-    const mem_backend_t  *backend;
-    void                 *base;          // pointer to the bytes
-    size_t                size;          // capacity
-    void                 (*destroy)(segment_t *);
-    // backend-specific fields follow as a tail allocation
+```cpp
+namespace tr::view {
+
+struct segment_t {
+    detail::ref_count       refcount;   // intrusive: inc relaxed, dec acq_rel
+    tr::mem::mem_backend_t* backend;    // who reclaims these bytes
+    std::span<std::byte>    bytes;      // the real bytes (data + capacity)
 };
+
+}  // namespace tr::view
 ```
 
-When a view's refcount drops to zero (L1 machinery, [08-views-and-ownership.md](08-views-and-ownership.md)), the view layer invokes `destroy(segment)`. The destroy implementation is **backend-specific**:
+When a segment's refcount drops to zero (L1 machinery, [08-views-and-ownership.md](08-views-and-ownership.md): the `segment_ptr_t` owning handle's destructor/reset does the acq_rel decrement), the handle invokes `backend->destroy(seg)`. The `destroy` override is **backend-specific**:
 
-- heap-backend: `free(seg->base)`, then `free(seg)`.
-- pool-backend: return slot to pool free list; `seg` itself is part of a static array.
-- lwIP-backend: `pbuf_free(pbuf)`, then `free(seg)`.
+- heap-backend: `free` the bytes, then the segment control block.
+- pool-backend: return the slot to the pool free list; the segment is part of a static array.
+- lwIP-backend: `pbuf_free(pbuf)`, then the segment block.
 - MMIO-backend: no-op (refcount is permanently held by a static segment descriptor).
 
-L0 is ignorant of L1 view semantics; L1 is ignorant of how L0 honors `destroy`. The protocol's zero-copy story is the contract that they cooperate via this interface.
+L0 is ignorant of L1 view semantics; L1 is ignorant of how L0 honors `destroy`. The protocol's zero-copy story is the contract that they cooperate via this seam.
 
 ---
 
@@ -234,7 +259,7 @@ Each entry: status, what it wraps, allocation supported, footprint, when to use,
 ### `mem_lwip_pbuf` — week 3 / week 5
 
 - **Status**: planned with the `transport_tcp` LAN demo.
-- **Wraps**: lwIP `pbuf` chains. The segment_t holds a pointer to a pbuf head; `release` calls `pbuf_free`.
+- **Wraps**: lwIP `pbuf` chains. The segment holds a pointer to a pbuf head; its `destroy` calls `pbuf_free`.
 - **Allocation**: yes (`pbuf_alloc`).
 - **Footprint**: dependent on lwIP's pool config; ~300 B code on top of lwIP itself.
 - **When to use**: ESP-IDF and lwIP-using MCUs; the natural backend for `transport_tcp` and `transport_udp` on those targets.
@@ -249,7 +274,7 @@ Each entry: status, what it wraps, allocation supported, footprint, when to use,
 ### `mem_dma_buffer` — week 6 with `transport_can`
 
 - **Status**: planned with the CAN demo.
-- **Wraps**: a statically-allocated buffer registered with the SoC's DMA controller. Adds cache-coherency hooks via `prepare_for_io` / `finalize_after_io`.
+- **Wraps**: a statically-allocated buffer registered with the SoC's DMA controller. Adds cache-coherency hooks via `before_io` / `after_io`.
 - **Allocation**: yes (from a small DMA-capable pool — `heap_caps_malloc(MALLOC_CAP_DMA)` on ESP32, manual-region on STM32).
 - **Footprint**: ~600 bytes code plus pool size.
 - **When to use**: peripheral I/O on Cortex-M7 / -M33 with cache; ESP32 SPI/I²S DMA flows; CAN with HW FIFO.
@@ -273,7 +298,7 @@ Each entry: status, what it wraps, allocation supported, footprint, when to use,
 ### `mem_iceoryx2` — future
 
 - **Status**: future, sketched.
-- **Wraps**: iceoryx2 `Sample<T>` loans. The segment_t holds the loan; `release` returns the sample to the publisher.
+- **Wraps**: iceoryx2 `Sample<T>` loans. The segment holds the loan; its `destroy` returns the sample to the publisher.
 - **When to use**: `transport_iceoryx2` future module; safety-cert intra-host zero-copy.
 - **When to avoid**: any MCU target.
 
@@ -346,7 +371,7 @@ The L0 backend's job is just "manage the static segment and the cursor." The L1 
 ```
 HW writes into mem_dma_buffer's preallocated segment (HW owns).
 On DMA-complete IRQ:
-  backend.finalize_after_io(seg, IO_DIR_DEVICE_TO_CPU)   // invalidates cache
+  backend.after_io(seg, io_dir_t::DEVICE_TO_CPU)   // invalidates cache
   framer scans for TLV boundaries in seg
   for each complete TLV: create view, hand off
 HW continues filling next segment (double-buffer or ring).
@@ -358,12 +383,13 @@ The cache-coherency hooks live in the backend; framers and L1 don't see them.
 
 ```
 lwIP delivers a pbuf via netif input callback.
-  segment_t *seg = mem_lwip_pbuf_wrap(pbuf);  // refcount=1, destroy=pbuf_free
+  segment_t* seg = wrap_pbuf(pbuf);            // refcount=1; destroy = pbuf_free
+  auto owner = tr::view::segment_ptr_t::adopt(seg);  // L1 takes ownership
   framer parses TLVs out of the pbuf chain (may be a rope across pbuf links)
   for each complete TLV:
-      view = view_subview(seg, off, len)      // bumps seg refcount
+      view_t v = view_t::over(owner).subview(off, len)  // shares ownership, no copy
       hand to recv callback
-  release seg  // initial refcount; views hold their own
+  // owner drops here; the views the subscribers hold keep the segment alive
 ```
 
 If the TLV spans multiple `pbuf` links (typical for large frames), the resulting view is a **rope** with one link per `pbuf` segment. See [08-views-and-ownership.md](08-views-and-ownership.md) §rope semantics.
@@ -386,7 +412,7 @@ The view tree's structure determines whether egress is true zero-copy (iovec sca
 ### Hardware-FIFO direct emit
 
 ```
-Transport calls backend.alloc(size, hint=FIFO).
+Transport calls backend.alloc(size, hint).   // hint is a backend-private alloc_hint_t
   → returns a pseudo-segment whose base is the FIFO's MMIO data register
   → writes to base[0] enqueue into the FIFO
 TLV is serialized one byte at a time into the FIFO.
@@ -400,10 +426,10 @@ The "segment" is fictional — there's no real buffer — but the abstraction ho
 
 On Cortex-M7 / -M33 / Cortex-A class CPUs with data caches, DMA buffers need explicit cache management:
 
-- **Before HW reads a CPU-written buffer** (TX): clean the cache so HW sees the writes. `prepare_for_io(seg, IO_DIR_CPU_TO_DEVICE)`.
-- **Before CPU reads a HW-written buffer** (RX): invalidate the cache so CPU doesn't see stale lines. `finalize_after_io(seg, IO_DIR_DEVICE_TO_CPU)`.
+- **Before HW reads a CPU-written buffer** (TX): clean the cache so HW sees the writes. `before_io(seg, io_dir_t::CPU_TO_DEVICE)`.
+- **After HW has written a buffer the CPU will read** (RX): invalidate the cache so CPU doesn't see stale lines. `after_io(seg, io_dir_t::DEVICE_TO_CPU)`.
 
-The `mem_dma_buffer` backend implements these; the rest of libtracer (L1, L2+) doesn't see cache concerns.
+The method carries the *timing* (before vs. after the transfer); the `io_dir_t` carries the *direction*; the backend maps the pair to clean/invalidate. The `mem_dma_buffer` backend implements these; the rest of libtracer (L1, L2+) doesn't see cache concerns.
 
 Cortex-M0 / -M3 / -M4 without cache: the hooks are no-ops.
 
@@ -419,7 +445,7 @@ Each backend declares its alignment guarantee via `alignment()`. Typical values:
 - `mem_mmio`: declared per-region (a u32 register is 4-aligned; an 8-byte FIFO mailbox might be 8-aligned).
 - `mem_lwip_pbuf`: 4 (lwIP's default).
 
-L2 frame parsing tolerates unaligned access (per [01-data-format.md](01-data-format.md) §alignment), so this is informational rather than required. A higher-performance application that wants aligned access can request specific alignment when allocating; the backend may decline (return NULL) if it can't satisfy.
+L2 frame parsing tolerates unaligned access (per [01-data-format.md](01-data-format.md) §alignment), so this is informational rather than required. A higher-performance application that wants aligned access can request specific alignment when allocating; the backend may decline (return `nullptr`) if it can't satisfy.
 
 ---
 

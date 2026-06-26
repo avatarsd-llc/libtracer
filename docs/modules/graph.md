@@ -3,10 +3,10 @@
 ```{admonition} In one paragraph
 :class: tip
 The graph is the node. A **`Vertex`** is a named, addressable slot holding a value
-(a `View`), a bounded history, or a user handler. The entire data API is three
+(a `view_t`), a bounded history, or a user handler. The entire data API is three
 calls — **`read` / `write` / `await`** — and every control surface (subscriptions,
 QoS) is a **field-write** to a `:`-addressed field. `write` fans out to
-subscribers by **cloning the View** (a refcount bump, no copy). Reads/writes of the
+subscribers by **cloning the view_t** (a refcount bump, no copy). Reads/writes of the
 last-known-value are **lock-free**.
 ```
 
@@ -16,7 +16,7 @@ last-known-value are **lock-free**.
 has a **role**: *stored-value* (last-writer-wins), *stream* (a bounded ring sized by
 `:settings.history_keep_last`), or *handler* (your `on_read`/`on_write` — covering
 computed, proxy, sink, live-MMIO patterns). The last-known-value slot is an
-`atomic<shared_ptr<const View>>` swap, so `read`/`write` never take the per-vertex
+`atomic<shared_ptr<const view_t>>` swap, so `read`/`write` never take the per-vertex
 mutex; that mutex guards only the subscriber list, history, and the `await` waiter
 accounting; a per-vertex condvar makes `await` block until the next write
 ([ADR-0015] in the repo).
@@ -32,22 +32,22 @@ return a `POINT` descriptor.
 ```cpp
 enum class Role { StoredValue, Stream, Handler };
 struct Settings { /* reliability, durability, history_keep_last, deadline_ns, … */ };
-struct Handlers { std::function<Result<View>()> on_read;
-                  std::function<Result<void>(const View&)> on_write; };
+struct Handlers { std::function<Result<view_t>()> on_read;
+                  std::function<Result<void>(const view_t&)> on_write; };
 
 class Graph {
     Result<Vertex*> register_vertex(const Path&, Role, Handlers={}, Settings={});
-    Result<View>    read (Vertex*) const;            // atomic LKV load = a clone
-    Result<void>    write(Vertex*, View);            // store + fan-out
-    Result<View>    await(Vertex*, std::chrono::nanoseconds);   // blocks for next write
-    Result<std::vector<View>> history(Vertex*) const;          // stream window
+    Result<view_t>    read (Vertex*) const;            // atomic LKV load = a clone
+    Result<void>    write(Vertex*, view_t);            // store + fan-out
+    Result<view_t>    await(Vertex*, std::chrono::nanoseconds);   // blocks for next write
+    Result<std::vector<view_t>> history(Vertex*) const;          // stream window
 
     Result<void> subscribe(const Path& src, const Path& target);          // re-dispatch
-    Result<void> subscribe(const Path& src, std::function<void(const View&)>);  // callback
+    Result<void> subscribe(const Path& src, std::function<void(const view_t&)>);  // callback
 
-    Result<void> write(Vertex*, const FieldPath&, View);  // handle-based field-write
-    Result<View> read (const Path&) const;           // field tail → :schema, …
-    Result<void> write(const Path&, View);           // field tail → :subscribers[]/:settings.*
+    Result<void> write(Vertex*, const FieldPath&, view_t);  // handle-based field-write
+    Result<view_t> read (const Path&) const;           // field tail → :schema, …
+    Result<void> write(const Path&, view_t);           // field tail → :subscribers[]/:settings.*
 };
 ```
 
@@ -76,7 +76,7 @@ sequenceDiagram
     participant V as /sensor/temp
     participant S1 as subscriber (callback)
     participant S2 as subscriber (target vertex)
-    P->>G: write(/sensor/temp, View)
+    P->>G: write(/sensor/temp, view_t)
     G->>V: atomic LKV store (lock-free)
     G->>V: snapshot subscribers (brief lock)
     G-->>S1: callback(clone)  %% refcount bump
@@ -91,8 +91,8 @@ sequenceDiagram
   QoS, and discovery; no `connect`/`subscribe` API to mismatch.
 - **Lock-free reads** — the LKV is an atomic pointer swap; readers never block on
   writers (validated race-free under TSan).
-- **Zero-copy fan-out** — N subscribers get N clones of one `View`, not N copies.
-- **The value is the bytes** — a vertex stores a `View`, so what it holds is exactly
+- **Zero-copy fan-out** — N subscribers get N clones of one `view_t`, not N copies.
+- **The value is the bytes** — a vertex stores a `view_t`, so what it holds is exactly
   what goes on the wire.
 
 See: [path](path.md), [views](views.md), [bridge](bridge.md).

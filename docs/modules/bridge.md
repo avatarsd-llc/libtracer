@@ -46,7 +46,7 @@ flowchart LR
     H -- yes --> D1["drop (termination)"]:::x
     H -- no --> S{"(origin,ts) seen?"}
     S -- yes --> D2["drop (dedup)"]:::x
-    S -- no --> C["copy data → heap View"]
+    S -- no --> C["copy data → heap view_t"]
     C --> W["graph.write(mount)"] --> SUB["local subscribers (zero-copy)"]
     classDef x fill:#fee2e2,stroke:#991b1b;
 ```

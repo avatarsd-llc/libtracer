@@ -25,10 +25,10 @@ flowchart TB
         FRAME["frame-codec — TLV decode/encode + CRC"]
     end
     subgraph L1["L1 · views"]
-        VIEWS["views — View / Rope / cast"]
+        VIEWS["views — view_t / rope_t / cast"]
     end
     subgraph L0["L0 · substrate"]
-        SEG["segment — refcounted bytes + SegmentPtr"]
+        SEG["segment — refcounted bytes + segment_ptr_t"]
         BACK["backends — heap / borrowed / pool"]
     end
 
@@ -36,7 +36,7 @@ flowchart TB
     GRAPH --> DISP --> BRIDGE
     BRIDGE --> ROUTER --> FRAME
     BRIDGE --> TRANSPORT
-    GRAPH -. "value IS a View" .-> VIEWS
+    GRAPH -. "value IS a view_t" .-> VIEWS
     FRAME -- "cast, no copy" --> VIEWS
     VIEWS --> SEG --> BACK
     classDef done fill:#dcfce7,stroke:#166534;
@@ -45,7 +45,7 @@ flowchart TB
     class TRANSPORT next;
 ```
 
-The load-bearing idea: a **TLV at L2 is a cast from an L1 View**, and an L1 View is
+The load-bearing idea: a **TLV at L2 is a cast from an L1 `view_t`**, and an L1 `view_t` is
 a refcounted window onto L0 bytes. So the wire encoding, the in-memory value, and
 the graph node are **the same bytes** — moving data in-process is a refcount bump,
 not a copy.
