@@ -36,6 +36,17 @@ jobs:
           # ASLR can make ASan/TSan abort in this runner; pin it off.
           setarch "$(uname -m)" -R ctest --test-dir core/build-asan --output-on-failure
 
+  tsan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: ThreadSanitizer build + ctest (graph concurrency)
+        run: |
+          cmake -S core -B core/build-tsan -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"
+          cmake --build core/build-tsan -j
+          setarch "$(uname -m)" -R ctest --test-dir core/build-tsan --output-on-failure
+
   format:
     runs-on: ubuntu-24.04
     steps:
