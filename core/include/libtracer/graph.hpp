@@ -1,12 +1,14 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// The L4 in-process graph runtime. Holds the vertex map (keyed on canonical
-// PATH-TLV payload bytes, docs/reference/02 §dispatch) and exposes the entire
-// data API: read / write / await (ADR-0006). The hot path resolves a vertex_t*
-// once (at registration or via one guarded lookup), then read/write/await on
-// that handle are lock-free in the LKV slot. subscriber_t fan-out + field-write
-// land in M3b; M3a delivers values via the LKV and the blocking await.
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * The L4 in-process graph runtime. Holds the vertex map (keyed on canonical
+ * PATH-TLV payload bytes, docs/reference/02 §dispatch) and exposes the entire
+ * data API: read / write / await (ADR-0006). The hot path resolves a vertex_t*
+ * once (at registration or via one guarded lookup), then read/write/await on
+ * that handle are lock-free in the LKV slot. subscriber_t fan-out + field-write
+ * land in M3b; M3a delivers values via the LKV and the blocking await.
+ */
 #pragma once
 
 #include <chrono>

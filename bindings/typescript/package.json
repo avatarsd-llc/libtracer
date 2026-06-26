@@ -2,7 +2,7 @@
   "name": "libtracer",
   "version": "0.0.1",
   "description": "TypeScript binding for libtracer — a lightweight decentralized graph-based networking protocol.",
-  "author": "Avatar LLC",
+  "author": "avatarsd LLC",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

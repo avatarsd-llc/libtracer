@@ -1,12 +1,14 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// Two libtracer nodes talking over a real localhost UDP socket — the M5 path,
-// the same program as two_node_loopback.cpp with the in-process loopback_channel_t
-// swapped for udp_transport_t (the "one-line swap" the getting-started guide promises;
-// everything above the transport_t seam — bridge, router, graph — is unchanged).
-// Node A publishes /sensor/temp; the bytes ROUTER-wrap, cross the kernel UDP stack,
-// and land on node B's /remote/temp, where B's subscriber receives them.
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * Two libtracer nodes talking over a real localhost UDP socket — the M5 path,
+ * the same program as two_node_loopback.cpp with the in-process loopback_channel_t
+ * swapped for udp_transport_t (the "one-line swap" the getting-started guide promises;
+ * everything above the transport_t seam — bridge, router, graph — is unchanged).
+ * Node A publishes /sensor/temp; the bytes ROUTER-wrap, cross the kernel UDP stack,
+ * and land on node B's /remote/temp, where B's subscriber receives them.
+ */
 
 #include <array>
 #include <chrono>

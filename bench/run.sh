@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 #
 # Build and run the libtracer-vs-Zenoh in-process benchmark, printing a
 # side-by-side table. Vendor Zenoh first with ./fetch_zenoh.sh (otherwise only

@@ -1,17 +1,19 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// mem_borrowed — wrap caller-owned bytes in a segment WITHOUT taking ownership
-// of them. destroy frees only the small segment_t control block libtracer
-// allocated; the user's bytes are never touched. This is the transparent
-// byte-router / live-raw MVP (ADR-0012): point a segment at a register, a
-// program variable, a const ROM table, or any externally-owned buffer, and
-// libtracer routes those bytes — no copy, no CRC imposed. The caller guarantees
-// the bytes stay valid while any view holds them.
-//
-// (A truly zero-allocation static descriptor — the permanent MMIO segment whose
-// refcount is never released — is the deferred mem_mmio backend; this dynamic
-// borrow heap-allocates only the ~32-byte control block.)
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * mem_borrowed — wrap caller-owned bytes in a segment WITHOUT taking ownership
+ * of them. destroy frees only the small segment_t control block libtracer
+ * allocated; the user's bytes are never touched. This is the transparent
+ * byte-router / live-raw MVP (ADR-0012): point a segment at a register, a
+ * program variable, a const ROM table, or any externally-owned buffer, and
+ * libtracer routes those bytes — no copy, no CRC imposed. The caller guarantees
+ * the bytes stay valid while any view holds them.
+ *
+ * (A truly zero-allocation static descriptor — the permanent MMIO segment whose
+ * refcount is never released — is the deferred mem_mmio backend; this dynamic
+ * borrow heap-allocates only the ~32-byte control block.)
+ */
 #pragma once
 
 #include <new>

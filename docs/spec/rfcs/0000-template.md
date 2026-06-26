@@ -1,6 +1,6 @@
 <!--
 SPDX-License-Identifier: CC-BY-4.0
-SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 Copy this file to docs/spec/rfcs/NNNN-short-title.md (NNNN = the RFC number,
 sequential and zero-padded; record the tracking issue in the table below).

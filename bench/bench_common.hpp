@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+// SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 //
 // Shared benchmark scaffolding: a steady-clock timer, a latency-percentile
 // accumulator, and a machine-parseable RESULT line that run.sh collates into a

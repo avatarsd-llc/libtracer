@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 #
 # ament package for rmw_tracer — a ROS 2 middleware backed by libtracer.
 # Build with colcon (needs a ROS 2 distro on the AMENT_PREFIX_PATH); NOT built by

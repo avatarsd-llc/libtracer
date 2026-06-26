@@ -1,10 +1,12 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// The frame codec: decode wire bytes into a borrowed (zero-copy) TLV tree, and
-// encode a TLV tree back to bytes. Decoding never copies payload bytes — they
-// are std::span views into the caller's input buffer, which must outlive the
-// returned tlv_t. See docs/reference/01-data-format.md + 05-protocol-tlvs.md.
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * The frame codec: decode wire bytes into a borrowed (zero-copy) TLV tree, and
+ * encode a TLV tree back to bytes. Decoding never copies payload bytes — they
+ * are std::span views into the caller's input buffer, which must outlive the
+ * returned tlv_t. See docs/reference/01-data-format.md + 05-protocol-tlvs.md.
+ */
 #pragma once
 
 #include <cstddef>

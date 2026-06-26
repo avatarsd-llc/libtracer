@@ -1,6 +1,6 @@
 # Trademark Policy
 
-The name **libtracer** and any associated logos are trademarks of **Avatar LLC**. The Apache 2.0 license covers the source code; **it does not grant trademark rights.**
+The name **libtracer** and any associated logos are trademarks of **avatarsd LLC**. The Apache 2.0 license covers the source code; **it does not grant trademark rights.**
 
 This policy exists to keep the name meaningful: when a user sees "libtracer-compatible" on a product, it should mean something verifiable.
 
@@ -34,7 +34,7 @@ False claims of compatibility (badge displayed without passing vectors) are a mi
 
 ## Contact
 
-For trademark questions, open an issue tagged `trademark` or contact Avatar LLC via the maintainers listed in [MAINTAINERS.md](MAINTAINERS.md).
+For trademark questions, open an issue tagged `trademark` or contact avatarsd LLC via the maintainers listed in [MAINTAINERS.md](MAINTAINERS.md).
 
 ## Inspiration
 

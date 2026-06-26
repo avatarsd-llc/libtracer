@@ -1,12 +1,14 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// L0/L1 substrate tests: refcount lifetime (the canonical intrusive_ptr
-// orderings), zero-copy subview/concat, rope serialization equivalence (the
-// docs/reference/02 proof obligation), the view->TLV cast claim with the
-// lifetime gap M1 left open now closed, and the bounded pool backend. Reuses the
-// seed vectors as real TLV bytes; no JSON parser. Builds twice — once with
-// atomic refcounts, once with -DLIBTRACER_NO_ATOMIC (single-threaded mode).
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * L0/L1 substrate tests: refcount lifetime (the canonical intrusive_ptr
+ * orderings), zero-copy subview/concat, rope serialization equivalence (the
+ * docs/reference/02 proof obligation), the view->TLV cast claim with the
+ * lifetime gap M1 left open now closed, and the bounded pool backend. Reuses the
+ * seed vectors as real TLV bytes; no JSON parser. Builds twice — once with
+ * atomic refcounts, once with -DLIBTRACER_NO_ATOMIC (single-threaded mode).
+ */
 
 #include <algorithm>
 #include <array>

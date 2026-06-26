@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 #
 # Doxygen config for the libtracer reference implementation. Emits XML only —
 # Breathe (docs/conf.py) renders it into the Sphinx site as source references.
@@ -26,7 +26,8 @@ INPUT                  = core/include/libtracer/backend.hpp \
                          core/include/libtracer/rope.hpp \
                          core/include/libtracer/mem_heap.hpp \
                          core/include/libtracer/mem_pool.hpp \
-                         core/include/libtracer/mem_borrowed.hpp
+                         core/include/libtracer/mem_borrowed.hpp \
+                         core/include/libtracer/mem_cuda.hpp
 RECURSIVE              = NO
 
 # Document only what is explicitly commented; internal `detail` helpers are not

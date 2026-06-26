@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 #
 # Two-process NETWORK benchmark: libtracer-UDP vs Zenoh-UDP over localhost. Each
 # system runs a separate publisher and subscriber process that cross the kernel

@@ -1,10 +1,12 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// M4 transport + bridge tests: ROUTER wrap/unwrap (golden), two-node delivery
-// over the in-process loopback, recent-set dedup, and hop_count cycle
-// termination (ADR-0014). The loopback runs receive threads, so this is built
-// under TSan (cross-thread frame handoff + recent-set) and ASan+UBSan.
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * M4 transport + bridge tests: ROUTER wrap/unwrap (golden), two-node delivery
+ * over the in-process loopback, recent-set dedup, and hop_count cycle
+ * termination (ADR-0014). The loopback runs receive threads, so this is built
+ * under TSan (cross-thread frame handoff + recent-set) and ASan+UBSan.
+ */
 
 #include <array>
 #include <chrono>

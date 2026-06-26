@@ -1,13 +1,15 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// The bridge: connects a local graph_t to a transport_t, attaching/shedding the
-// ROUTER envelope and terminating cycles (docs/reference/10 §bridge, 07 §cycle
-// handling). Egress: export_vertex subscribes a local vertex and forwards each
-// write as a ROUTER-wrapped frame. Ingress: the transport receiver unwraps,
-// dedups (recent-set on (origin, ts)), enforces hop_count/MAX_HOPS (the
-// termination guarantee, ADR-0014), then writes the bare data TLV to the mount
-// vertex so local subscribers receive it (one copy at the bridge boundary).
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * The bridge: connects a local graph_t to a transport_t, attaching/shedding the
+ * ROUTER envelope and terminating cycles (docs/reference/10 §bridge, 07 §cycle
+ * handling). Egress: export_vertex subscribes a local vertex and forwards each
+ * write as a ROUTER-wrapped frame. Ingress: the transport receiver unwraps,
+ * dedups (recent-set on (origin, ts)), enforces hop_count/MAX_HOPS (the
+ * termination guarantee, ADR-0014), then writes the bare data TLV to the mount
+ * vertex so local subscribers receive it (one copy at the bridge boundary).
+ */
 #pragma once
 
 #include <atomic>

@@ -1,16 +1,18 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// mem_pool — a fixed, caller-owned slab carved into equal slots. The bounded
-// "custom allocator" reference backend: alloc returns nullptr when the pool is
-// exhausted (the BACKPRESSURE signal, docs/reference/09 §pressure), making it
-// the deterministic choice for MCUs and bounded-memory targets (= mem_pool_static
-// in reference/09). The free list is threaded through the slab itself — there is
-// NO auxiliary heap allocation, so total memory use is exactly the caller's slab.
-//
-// Not internally synchronized: alloc/destroy on a shared pool are the
-// application's to serialize. Per ADR-0012 each backend declares its own
-// concurrency contract; this one's is "single-threaded reclamation."
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * mem_pool — a fixed, caller-owned slab carved into equal slots. The bounded
+ * "custom allocator" reference backend: alloc returns nullptr when the pool is
+ * exhausted (the BACKPRESSURE signal, docs/reference/09 §pressure), making it
+ * the deterministic choice for MCUs and bounded-memory targets (= mem_pool_static
+ * in reference/09). The free list is threaded through the slab itself — there is
+ * NO auxiliary heap allocation, so total memory use is exactly the caller's slab.
+ *
+ * Not internally synchronized: alloc/destroy on a shared pool are the
+ * application's to serialize. Per ADR-0012 each backend declares its own
+ * concurrency contract; this one's is "single-threaded reclamation."
+ */
 #pragma once
 
 #include <cstddef>

@@ -1,7 +1,7 @@
 Example code in this directory is dedicated to the public domain under
 Creative Commons Zero v1.0 Universal (CC0 1.0).
 
-To the extent possible under law, Avatar LLC and the libtracer
+To the extent possible under law, avatarsd LLC and the libtracer
 contributors have waived all copyright and related or neighboring
 rights to the example code in this directory.
 
@@ -21,5 +21,5 @@ specification under docs/spec/ is licensed under CC BY 4.0 (see
 docs/spec/LICENSE). Only the contents of examples/ are released under
 CC0.
 
-The "libtracer" name is a trademark of Avatar LLC. See TRADEMARKS.md
+The "libtracer" name is a trademark of avatarsd LLC. See TRADEMARKS.md
 at the project root.

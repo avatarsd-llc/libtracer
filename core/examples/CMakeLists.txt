@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 add_executable(in_process_pubsub in_process_pubsub.cpp)
 target_link_libraries(in_process_pubsub PRIVATE libtracer)

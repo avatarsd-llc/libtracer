@@ -1,12 +1,14 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// Little-endian integer (de)serialization — the one place bytes become integers
-// and back. The v1 wire format is little-endian throughout (TLV lengths, VALUE /
-// TIME payloads, ROUTER metadata; docs/spec/v1.md). Every codec and runtime site
-// funnels through here instead of hand-rolling shift/mask loops, so the byte order
-// lives in exactly one tested place. Header-only and `constexpr`; `detail` =
-// internal (not a public API surface).
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * Little-endian integer (de)serialization — the one place bytes become integers
+ * and back. The v1 wire format is little-endian throughout (TLV lengths, VALUE /
+ * TIME payloads, ROUTER metadata; docs/spec/v1.md). Every codec and runtime site
+ * funnels through here instead of hand-rolling shift/mask loops, so the byte order
+ * lives in exactly one tested place. Header-only and `constexpr`; `detail` =
+ * internal (not a public API surface).
+ */
 #pragma once
 
 #include <concepts>

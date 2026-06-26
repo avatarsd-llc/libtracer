@@ -1,10 +1,12 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// M5 UDP transport tests: raw frame delivery over a real localhost UDP socket,
-// and an end-to-end two-node exchange through the full graph_t + bridge_t + ROUTER
-// stack over UDP. Built under TSan (the recv thread + receiver handoff) and
-// ASan+UBSan. Uses fixed loopback ports; SO_REUSEADDR is set on the sockets.
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * M5 UDP transport tests: raw frame delivery over a real localhost UDP socket,
+ * and an end-to-end two-node exchange through the full graph_t + bridge_t + ROUTER
+ * stack over UDP. Built under TSan (the recv thread + receiver handoff) and
+ * ASan+UBSan. Uses fixed loopback ports; SO_REUSEADDR is set on the sockets.
+ */
 
 #include <array>
 #include <chrono>

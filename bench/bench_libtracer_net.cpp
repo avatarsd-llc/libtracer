@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+// SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 //
 // libtracer network bench (two processes, real UDP). The full stack over the
 // kernel: graph write -> bridge ROUTER-wrap -> UdpTransport sendto -> [UDP] ->

@@ -2,7 +2,7 @@
 
 - **Date:** 2026-06-24
 - **Status:** Proposed
-- **Deciders:** Avatar LLC (spec + reference-impl domains, see [GOVERNANCE.md](../../GOVERNANCE.md))
+- **Deciders:** avatarsd LLC (spec + reference-impl domains, see [GOVERNANCE.md](../../GOVERNANCE.md))
 - **Related:** the original design plans (`00-vision-and-reality-check`, `02-roadmap-weeks-1-to-8`; removed — see git history),
   [docs/reference/02-graph-model.md](../reference/02-graph-model.md),
   [docs/reference/08-views-and-ownership.md](../reference/08-views-and-ownership.md)

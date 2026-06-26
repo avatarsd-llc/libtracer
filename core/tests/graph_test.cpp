@@ -1,13 +1,15 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// L4 graph-runtime tests. M3a: path parse/canonicalize, the three vertex roles
-// (stored-value, stream, handler), read/write/await, lock-free LKV clone-on-read,
-// and a multithreaded stress over a shared vertex. M3b: subscribe (callback +
-// spec-faithful target), field-write (:settings.*, :subscribers[]) + unsubscribe,
-// :schema, and the in-process dispatch-depth cycle cap. The stress is the
-// verification M2 deferred: under TSan it proves the lock-free LKV + atomic
-// segment refcounts race-free, and under ASan+UBSan leak/UB-free.
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * L4 graph-runtime tests. M3a: path parse/canonicalize, the three vertex roles
+ * (stored-value, stream, handler), read/write/await, lock-free LKV clone-on-read,
+ * and a multithreaded stress over a shared vertex. M3b: subscribe (callback +
+ * spec-faithful target), field-write (:settings.*, :subscribers[]) + unsubscribe,
+ * :schema, and the in-process dispatch-depth cycle cap. The stress is the
+ * verification M2 deferred: under TSan it proves the lock-free LKV + atomic
+ * segment refcounts race-free, and under ASan+UBSan leak/UB-free.
+ */
 
 #include <array>
 #include <atomic>

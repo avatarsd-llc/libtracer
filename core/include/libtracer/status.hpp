@@ -1,11 +1,13 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// L4 graph result + status. The read/write/await control surface returns
-// std::expected<T, status_t> (the same shape as M1's frame::error_t). The status_t
-// names mirror the documented protocol error codes (docs/reference/05 §error
-// codes); they reconcile with the tr:: error namespace when RFC-0002 lands
-// (gated). Protocol-only, closed set — not for user error codes (ADR-0010).
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * L4 graph result + status. The read/write/await control surface returns
+ * std::expected<T, status_t> (the same shape as M1's frame::error_t). The status_t
+ * names mirror the documented protocol error codes (docs/reference/05 §error
+ * codes); they reconcile with the tr:: error namespace when RFC-0002 lands
+ * (gated). Protocol-only, closed set — not for user error codes (ADR-0010).
+ */
 #pragma once
 
 #include <expected>

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
+// SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 //
 // Zenoh side of the comparison: in-process (peer) pub/sub via zenoh-cpp over
 // zenoh-c. A single Session with a publisher and subscriber on the same key

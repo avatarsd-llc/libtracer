@@ -1,9 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
-//
-// type_t codes and the `opt` options bitfield — the L2/L3 surface of the wire
-// format. See docs/reference/01-data-format.md (header + opt) and
-// docs/reference/05-protocol-tlvs.md (per-type layout).
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * type_t codes and the `opt` options bitfield — the L2/L3 surface of the wire
+ * format. See docs/reference/01-data-format.md (header + opt) and
+ * docs/reference/05-protocol-tlvs.md (per-type layout).
+ */
 #pragma once
 
 #include <cstdint>
