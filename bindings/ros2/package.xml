@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- SPDX-FileCopyrightText: Copyright 2026 Avatar LLC -->
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>rmw_tracer</name>
+  <version>0.0.0</version>
+  <description>
+    A ROS 2 RMW (middleware) implementation backed by the libtracer graph.
+    Select with RMW_IMPLEMENTATION=rmw_tracer. See ADR-0023.
+  </description>
+  <maintainer email="avatarsd2@gmail.com">Avatar LLC</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rmw</depend>
+  <depend>rcutils</depend>
+  <depend>rcpputils</depend>
+  <depend>rosidl_runtime_c</depend>
+  <depend>rosidl_typesupport_introspection_c</depend>
+  <depend>rosidl_typesupport_introspection_cpp</depend>
+
+  <!-- The libtracer reference core (core/) is pulled in via CMake (see CMakeLists.txt);
+       it is not an ament package, so it is not listed as a ROS dependency here. -->
+
+  <export>
+    <build_type>ament_cmake</build_type>
+    <rmw_implementation_packages>rmw_tracer</rmw_implementation_packages>
+  </export>
+</package>
