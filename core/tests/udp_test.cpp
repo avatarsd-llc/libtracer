@@ -32,16 +32,16 @@ void check(bool ok, std::string_view what) {
     if (!ok) ++g_failures;
 }
 
-tr::peer_id_t peer_of(std::uint8_t f) {
-    tr::peer_id_t p{};
+tr::net::peer_id_t peer_of(std::uint8_t f) {
+    tr::net::peer_id_t p{};
     p.fill(static_cast<std::byte>(f));
     return p;
 }
 std::vector<std::byte> value_tlv(std::initializer_list<std::uint8_t> bytes) {
     std::vector<std::byte> payload;
     for (std::uint8_t b : bytes) payload.push_back(std::byte{b});
-    tr::tlv_t t{.type = tr::type_t::VALUE, .payload = payload};
-    return tr::encode(t);
+    tr::wire::tlv_t t{.type = tr::wire::type_t::VALUE, .payload = payload};
+    return tr::wire::encode(t);
 }
 tr::view::view_t owned_view(std::span<const std::byte> bytes) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
@@ -51,8 +51,8 @@ tr::view::view_t owned_view(std::span<const std::byte> bytes) {
 
 void test_raw_frame() {
     std::printf("UDP transport — raw frame over localhost:\n");
-    tr::udp_transport_t a(47100, "127.0.0.1", 47101);
-    tr::udp_transport_t b(47101, "127.0.0.1", 47100);
+    tr::net::udp_transport_t a(47100, "127.0.0.1", 47101);
+    tr::net::udp_transport_t b(47101, "127.0.0.1", 47100);
     check(a.ok() && b.ok(), "both UDP sockets bound");
 
     std::promise<std::vector<std::byte>> got;
@@ -77,10 +77,10 @@ void test_raw_frame() {
 void test_two_nodes_over_udp() {
     std::printf("Two nodes over UDP — full graph_t+bridge_t+ROUTER stack:\n");
     graph_t node_a, node_b;
-    tr::udp_transport_t ta(47102, "127.0.0.1", 47103);
-    tr::udp_transport_t tb(47103, "127.0.0.1", 47102);
-    tr::bridge_t ba(node_a, ta, peer_of(0xA1));
-    tr::bridge_t bb(node_b, tb, peer_of(0xB2));
+    tr::net::udp_transport_t ta(47102, "127.0.0.1", 47103);
+    tr::net::udp_transport_t tb(47103, "127.0.0.1", 47102);
+    tr::net::bridge_t ba(node_a, ta, peer_of(0xA1));
+    tr::net::bridge_t bb(node_b, tb, peer_of(0xB2));
 
     (void)node_a.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
     (void)node_b.register_vertex(*path_t::parse("/remote/temp"), role_t::STORED_VALUE);

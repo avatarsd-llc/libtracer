@@ -8,6 +8,9 @@
 #include "libtracer/tlv_emit.hpp"
 
 namespace tr::graph {
+
+using wire::opt_t;
+using wire::type_t;
 namespace {
 
 // Parse one field step: "name", "name[3]", or "name[]".

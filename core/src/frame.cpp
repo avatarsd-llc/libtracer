@@ -8,7 +8,7 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/crc.hpp"
 
-namespace tr {
+namespace tr::wire {
 namespace {
 
 constexpr std::uint8_t u8(std::byte b) noexcept { return std::to_integer<std::uint8_t>(b); }
@@ -75,13 +75,13 @@ std::expected<decoded_t, error_t> decode_at(std::span<const std::byte> buf, std:
 
             crc_t c;
             if (opt.cw) {
-                c.width = crc_t::width_t::Crc16Ccitt;
+                c.width = crc_t::width_t::CRC16_CCITT;
                 c.value = static_cast<std::uint32_t>(read_le(buf, crc_off, 2));
                 if (crc::crc16_ccitt(covered) != static_cast<std::uint16_t>(c.value)) {
                     return std::unexpected(error_t::FRAME_CRC_FAIL);
                 }
             } else {
-                c.width = crc_t::width_t::Crc32c;
+                c.width = crc_t::width_t::CRC32C;
                 c.value = static_cast<std::uint32_t>(read_le(buf, crc_off, 4));
                 if (crc::crc32c(covered) != c.value) {
                     return std::unexpected(error_t::FRAME_CRC_FAIL);
@@ -171,4 +171,4 @@ bool equal(const tlv_t& a, const tlv_t& b) noexcept {
     return true;
 }
 
-}  // namespace tr
+}  // namespace tr::wire

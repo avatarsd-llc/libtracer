@@ -28,7 +28,6 @@ namespace tr::graph {
 
 // L1 types this layer consumes (upward dependency on tr::view, docs/adr/0016 §2).
 using view::segment_ptr_t;
-using view::view_as_tlv;
 using view::view_t;
 
 enum class role_t {

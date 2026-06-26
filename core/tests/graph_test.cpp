@@ -223,8 +223,8 @@ void test_concurrent_stress() {
 
 // A VALUE TLV wrapping `payload` (01 00 <len> <payload>), as an owned view_t.
 tr::view::view_t value_tlv(std::span<const std::byte> payload) {
-    tr::tlv_t t{.type = tr::type_t::VALUE, .payload = payload};
-    return make_value(tr::encode(t));
+    tr::wire::tlv_t t{.type = tr::wire::type_t::VALUE, .payload = payload};
+    return make_value(tr::wire::encode(t));
 }
 
 // A SUBSCRIBER TLV naming a single-segment target path, as an owned view_t.
@@ -232,14 +232,14 @@ tr::view::view_t subscriber_tlv(std::string_view target_segment) {
     std::vector<std::byte> name_bytes;
     for (char c : target_segment)
         name_bytes.push_back(static_cast<std::byte>(static_cast<unsigned char>(c)));
-    tr::tlv_t name{.type = tr::type_t::NAME, .payload = name_bytes};
-    tr::tlv_t path{.type = tr::type_t::PATH};
+    tr::wire::tlv_t name{.type = tr::wire::type_t::NAME, .payload = name_bytes};
+    tr::wire::tlv_t path{.type = tr::wire::type_t::PATH};
     path.opt.pl = true;
     path.children.push_back(name);
-    tr::tlv_t sub{.type = tr::type_t::SUBSCRIBER};
+    tr::wire::tlv_t sub{.type = tr::wire::type_t::SUBSCRIBER};
     sub.opt.pl = true;
     sub.children.push_back(path);
-    return make_value(tr::encode(sub));
+    return make_value(tr::wire::encode(sub));
 }
 
 void test_subscribe_callback() {
@@ -332,10 +332,10 @@ void test_schema_read() {
     (void)g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
     auto schema = g.read(*path_t::parse("/sensor/temp:schema"));
     check(schema.has_value(), ":schema read returns a value");
-    auto point = tr::view::view_as_tlv(*schema);
-    check(point && point->type == tr::type_t::POINT, ":schema decodes to a POINT");
+    auto point = tr::wire::view_as_tlv(*schema);
+    check(point && point->type == tr::wire::type_t::POINT, ":schema decodes to a POINT");
     check(point && point->children.size() == 2, "POINT has a NAME and a SETTINGS child");
-    check(point && point->children[0].type == tr::type_t::NAME &&
+    check(point && point->children[0].type == tr::wire::type_t::NAME &&
               std::memcmp(point->children[0].payload.data(), "temp", 4) == 0,
           "POINT's NAME child is the vertex name 'temp'");
 }

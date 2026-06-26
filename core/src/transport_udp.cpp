@@ -12,7 +12,7 @@
 #include <array>
 #include <utility>
 
-namespace tr {
+namespace tr::net {
 
 udp_transport_t::udp_transport_t(std::uint16_t bind_port, const std::string& peer_host,
                                  std::uint16_t peer_port)
@@ -81,4 +81,4 @@ void udp_transport_t::run() {
     }
 }
 
-}  // namespace tr
+}  // namespace tr::net

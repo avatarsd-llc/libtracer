@@ -88,7 +88,8 @@ class rope_t {
      * @brief Materialize the rope into one contiguous segment from @p backend (one copy).
      *
      * The single bridge-boundary copy — taken only when a flat-buffer consumer
-     * demands it. The flattened view can then be cast with @ref view_as_tlv.
+     * demands it. The flattened view can then be cast with `view_as_tlv`
+     * (frame.hpp, `tr::wire`).
      * @retval {} An empty view if the backend cannot allocate.
      */
     [[nodiscard]] view_t flatten(mem::mem_backend_t& backend = mem::heap_backend()) const;

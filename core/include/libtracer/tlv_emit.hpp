@@ -19,6 +19,9 @@
 
 namespace tr::detail {
 
+using wire::opt_t;
+using wire::type_t;
+
 // Append one TLV: <type> <opt> <length> <body>, where length is u16 LE, widening
 // to u32 LE (with the LL bit set) when the body exceeds 0xFFFF. `opt` carries the
 // structural bits — pass `opt_t{.pl = true}` for a structured (list) payload.

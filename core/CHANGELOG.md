@@ -56,9 +56,15 @@ reference implementation is pre-1.0; everything currently lives under
   - **Enum values are scoped `SCREAMING_SNAKE`:** `type_t::VALUE`/`NAME`/`PATH`/…,
     `status_t::NOT_FOUND`/`INVALID_PATH`/…, `role_t::STORED_VALUE`/`STREAM`/`HANDLER`,
     `error_t::FRAME_INVALID`/`FRAME_TRUNCATED`/…
-  - These types stay in their current namespaces (`tr`, `tr::graph`); the
-    `tr::wire` (L2/L3) and `tr::net` (transport) layer split is a planned
-    follow-up.
+  - **Layer namespaces.** The codec moves to **`tr::wire`** (L2/L3:
+    `tlv_t`/`opt_t`/`type_t`/`error_t`/`decode`/`encode`), the transport plane to
+    **`tr::net`** (`transport_t`/`bridge_t`/`router_meta_t`/`udp_transport_t`/…);
+    L4 stays `tr::graph`. The full namespace tree now mirrors the six-layer model
+    (`tr::mem`→`tr::view`→`tr::wire`→`tr::graph`/`tr::net`).
+  - **`view_as_tlv` moved L1→L2.** The TLV-as-cast now lives in `frame.hpp`
+    (`tr::wire`), taking a `view::view_t`, so `view.hpp` (L1) no longer depends
+    upward on the codec (L2). Two nested CRC enum values also normalized
+    (`width_t::CRC32C`/`CRC16_CCITT`).
 
 ### Added
 

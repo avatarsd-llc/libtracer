@@ -19,7 +19,7 @@
 
 #include "libtracer/transport.hpp"
 
-namespace tr {
+namespace tr::net {
 
 class udp_transport_t : public transport_t {
    public:
@@ -51,4 +51,4 @@ class udp_transport_t : public transport_t {
     std::thread thread_;
 };
 
-}  // namespace tr
+}  // namespace tr::net

@@ -16,6 +16,12 @@
 #include "libtracer/view.hpp"
 
 namespace tr::graph {
+
+using wire::encode;
+using wire::opt_t;
+using wire::tlv_t;
+using wire::type_t;
+using wire::view_as_tlv;
 namespace {
 
 // Emit a VALUE TLV holding a `width`-byte little-endian integer — the one bespoke

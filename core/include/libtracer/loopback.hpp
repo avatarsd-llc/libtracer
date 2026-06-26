@@ -24,7 +24,7 @@
 
 #include "libtracer/transport.hpp"
 
-namespace tr {
+namespace tr::net {
 
 class loopback_channel_t;
 
@@ -68,4 +68,4 @@ class loopback_channel_t {
     loopback_endpoint_t b_;
 };
 
-}  // namespace tr
+}  // namespace tr::net
