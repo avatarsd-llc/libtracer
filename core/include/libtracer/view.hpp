@@ -5,20 +5,19 @@
 // borrows its segment via segment_ptr_t, so copying a view is a clone (refcount
 // bump) and the bytes stay alive as long as any view references them. The
 // load-bearing claim of L1 (docs/reference/08 §what L1 is): "a TLV is a cast
-// from a view" — view_as_tlv runs the M1 decoder over a view's bytes, no copy.
+// from a view" — the cast itself (view_as_tlv) lives at L2 (frame.hpp /
+// tr::wire), since it produces a tlv_t; L1 must not depend upward on L2.
 #pragma once
 
 #include <cstddef>
-#include <expected>
 #include <span>
 #include <utility>
 
-#include "libtracer/frame.hpp"
 #include "libtracer/segment.hpp"
 
 /**
  * @file
- * @brief L1 (`tr::view`) zero-copy window `view_t` and the TLV-as-cast helper.
+ * @brief L1 (`tr::view`) zero-copy window `view_t`.
  */
 
 namespace tr::view {
@@ -59,16 +58,5 @@ struct view_t {
         return view_t{owner, offset + sub_offset, sub_length};
     }
 };
-
-/**
- * @brief Cast a flat view to a TLV (the M1 decoder, zero-copy).
- *
- * The returned `tlv_t` borrows the view's bytes, so keep the view — and thus its
- * segment — alive while using the `tlv_t`. This is the lifetime guarantee M1 left
- * to the caller.
- */
-[[nodiscard]] inline std::expected<tlv_t, error_t> view_as_tlv(const view_t& v) {
-    return decode(v.bytes());
-}
 
 }  // namespace tr::view

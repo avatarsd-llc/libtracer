@@ -25,7 +25,7 @@
 #include "libtracer/router.hpp"
 #include "libtracer/transport.hpp"
 
-namespace tr {
+namespace tr::net {
 
 // The hop_count termination cap (docs/reference/05 §0x0D, ADR-0014). 32 mirrors
 // the in-process kMaxDispatchDepth.
@@ -77,4 +77,4 @@ class bridge_t {
     std::atomic<std::uint64_t> hop_dropped_{0};
 };
 
-}  // namespace tr
+}  // namespace tr::net

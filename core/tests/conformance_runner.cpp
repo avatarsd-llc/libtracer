@@ -26,8 +26,8 @@
 namespace {
 
 namespace fs = std::filesystem;
-using tr::tlv_t;
-using tr::type_t;
+using tr::wire::tlv_t;
+using tr::wire::type_t;
 
 int g_failures = 0;
 
@@ -63,9 +63,10 @@ tlv_t path2(std::span<const std::byte> a, std::span<const std::byte> b) {
 tlv_t value_crc(std::span<const std::byte> p) {
     tlv_t t{.type = type_t::VALUE, .payload = p};
     t.opt.cr = true;
-    t.trailer = tr::trailer_t{
-        .ts = std::nullopt,
-        .crc = tr::crc_t{.width = tr::crc_t::width_t::Crc32c, .value = tr::crc::crc32c(p)}};
+    t.trailer =
+        tr::wire::trailer_t{.ts = std::nullopt,
+                            .crc = tr::wire::crc_t{.width = tr::wire::crc_t::width_t::CRC32C,
+                                                   .value = tr::crc::crc32c(p)}};
     return t;
 }
 
@@ -79,12 +80,12 @@ int main() {
         if (e.path().filename() != "input.bin") continue;
         const std::string label = e.path().parent_path().filename().string();
         const std::vector<std::byte> bytes = read_file(e.path());
-        const auto dec = tr::decode(bytes);
+        const auto dec = tr::wire::decode(bytes);
         if (!dec) {
             check(false, label + " (decode failed)");
             continue;
         }
-        check(tr::encode(*dec) == bytes, label);
+        check(tr::wire::encode(*dec) == bytes, label);
     }
 
     std::printf("Golden builders (encode == input.bin && decode == built):\n");
@@ -98,9 +99,9 @@ int main() {
 
     const auto golden = [&](const std::string& sub, const tlv_t& built) {
         const std::vector<std::byte> input = read_file(vroot / sub / "input.bin");
-        check(tr::encode(built) == input, sub + " encode");
-        const auto dec = tr::decode(input);
-        check(dec.has_value() && tr::equal(*dec, built), sub + " decode");
+        check(tr::wire::encode(built) == input, sub + " encode");
+        const auto dec = tr::wire::decode(input);
+        check(dec.has_value() && tr::wire::equal(*dec, built), sub + " decode");
     };
     golden("framing/empty-status-ok", status_ok());
     golden("tlv-types/value-bool-true", value(b_true));
@@ -111,18 +112,18 @@ int main() {
     check(tr::crc::crc32c(b_val) == 0x2312C9B6u, "crc32c(AABBCCDDEE) == 0x2312C9B6");
     {
         static constexpr std::array want{std::byte{0x09}, std::byte{0}, std::byte{0}, std::byte{0}};
-        check(std::ranges::equal(tr::encode(status_ok()), want),
+        check(std::ranges::equal(tr::wire::encode(status_ok()), want),
               "empty STATUS encodes to 09 00 00 00");
     }
     {
-        const auto dec = tr::decode(read_file(vroot / "path/path-sensor-temp" / "input.bin"));
+        const auto dec = tr::wire::decode(read_file(vroot / "path/path-sensor-temp" / "input.bin"));
         check(dec.has_value() && dec->children.size() == 2, "PATH decodes to 2 NAME children");
     }
     {
         const std::vector<std::byte> bad{std::byte{0x09}, std::byte{0x01}, std::byte{0},
                                          std::byte{0}};
-        const auto dec = tr::decode(bad);
-        check(!dec.has_value() && dec.error() == tr::error_t::FRAME_INVALID,
+        const auto dec = tr::wire::decode(bad);
+        check(!dec.has_value() && dec.error() == tr::wire::error_t::FRAME_INVALID,
               "reserved-bit input rejected as frame::invalid");
     }
 

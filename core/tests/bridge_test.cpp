@@ -35,8 +35,8 @@ void check(bool ok, std::string_view what) {
     if (!ok) ++g_failures;
 }
 
-tr::peer_id_t peer_of(std::uint8_t fill) {
-    tr::peer_id_t p{};
+tr::net::peer_id_t peer_of(std::uint8_t fill) {
+    tr::net::peer_id_t p{};
     p.fill(static_cast<std::byte>(fill));
     return p;
 }
@@ -45,8 +45,8 @@ tr::peer_id_t peer_of(std::uint8_t fill) {
 std::vector<std::byte> value_tlv(std::initializer_list<std::uint8_t> bytes) {
     std::vector<std::byte> payload;
     for (std::uint8_t b : bytes) payload.push_back(std::byte{b});
-    tr::tlv_t t{.type = tr::type_t::VALUE, .payload = payload};
-    return tr::encode(t);
+    tr::wire::tlv_t t{.type = tr::wire::type_t::VALUE, .payload = payload};
+    return tr::wire::encode(t);
 }
 
 tr::view::view_t owned_view(std::span<const std::byte> bytes) {
@@ -69,17 +69,18 @@ bool wait_until(Fn cond, std::chrono::milliseconds timeout) {
 void test_router_golden() {
     std::printf("ROUTER wrap/unwrap (golden):\n");
     const auto data = value_tlv({0xAB, 0xCD});
-    const tr::router_meta_t meta{.origin = peer_of(0x42), .ts = 0x0102030405060708ull, .hop = 3};
-    const auto frame = tr::router_wrap(data, meta);
+    const tr::net::router_meta_t meta{
+        .origin = peer_of(0x42), .ts = 0x0102030405060708ull, .hop = 3};
+    const auto frame = tr::net::router_wrap(data, meta);
 
     // It decodes as a structured ROUTER TLV.
-    const auto decoded = tr::decode(frame);
-    check(decoded.has_value() && decoded->type == tr::type_t::ROUTER,
+    const auto decoded = tr::wire::decode(frame);
+    check(decoded.has_value() && decoded->type == tr::wire::type_t::ROUTER,
           "wrapped frame decodes to a ROUTER TLV");
     check(decoded.has_value() && decoded->opt.pl, "ROUTER is structured (PL=1)");
 
     // unwrap round-trips the metadata and recovers the exact data TLV bytes.
-    const auto un = tr::router_unwrap(frame);
+    const auto un = tr::net::router_unwrap(frame);
     check(un.has_value(), "router_unwrap succeeds");
     check(un.has_value() && un->meta == meta, "metadata (origin, ts, hop) round-trips");
     check(un.has_value() && un->data.size() == data.size() &&
@@ -87,16 +88,16 @@ void test_router_golden() {
           "wrapped data TLV bytes recovered verbatim");
 
     // A non-ROUTER frame is rejected.
-    check(!tr::router_unwrap(data).has_value(), "a bare VALUE is not a ROUTER (rejected)");
+    check(!tr::net::router_unwrap(data).has_value(), "a bare VALUE is not a ROUTER (rejected)");
 }
 
 void test_two_node_delivery() {
     std::printf("Two-node delivery over the loopback wire:\n");
-    tr::loopback_channel_t channel;
+    tr::net::loopback_channel_t channel;
     graph_t node_a;
     graph_t node_b;
-    tr::bridge_t bridge_a(node_a, channel.a(), peer_of(0xA1));
-    tr::bridge_t bridge_b(node_b, channel.b(), peer_of(0xB2));
+    tr::net::bridge_t bridge_a(node_a, channel.a(), peer_of(0xA1));
+    tr::net::bridge_t bridge_b(node_b, channel.b(), peer_of(0xB2));
 
     (void)node_a.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
     (void)node_b.register_vertex(*path_t::parse("/remote/temp"), role_t::STORED_VALUE);
@@ -129,17 +130,17 @@ void test_two_node_delivery() {
 
 void test_dedup() {
     std::printf("Recent-set dedup (same frame twice => one delivery):\n");
-    tr::loopback_channel_t channel;
+    tr::net::loopback_channel_t channel;
     graph_t node_a;
     graph_t node_b;
-    tr::bridge_t bridge_a(node_a, channel.a(), peer_of(0xA1));
-    tr::bridge_t bridge_b(node_b, channel.b(), peer_of(0xB2));
+    tr::net::bridge_t bridge_a(node_a, channel.a(), peer_of(0xA1));
+    tr::net::bridge_t bridge_b(node_b, channel.b(), peer_of(0xB2));
     (void)node_b.register_vertex(*path_t::parse("/remote/temp"), role_t::STORED_VALUE);
     bridge_b.set_mount(*path_t::parse("/remote/temp"));
 
     // Inject the identical ROUTER frame twice (same origin+ts => same dedup key).
     const auto frame =
-        tr::router_wrap(value_tlv({0x07}), {.origin = peer_of(0xCC), .ts = 999, .hop = 0});
+        tr::net::router_wrap(value_tlv({0x07}), {.origin = peer_of(0xCC), .ts = 999, .hop = 0});
     channel.a().send(frame);
     channel.a().send(frame);
 
@@ -153,11 +154,11 @@ void test_dedup() {
 
 void test_cycle_termination() {
     std::printf("Cycle termination by hop_count (recent-set disabled):\n");
-    tr::loopback_channel_t channel;
+    tr::net::loopback_channel_t channel;
     graph_t node_a;
     graph_t node_b;
-    tr::bridge_t bridge_a(node_a, channel.a(), peer_of(0xA1));
-    tr::bridge_t bridge_b(node_b, channel.b(), peer_of(0xB2));
+    tr::net::bridge_t bridge_a(node_a, channel.a(), peer_of(0xA1));
+    tr::net::bridge_t bridge_b(node_b, channel.b(), peer_of(0xB2));
 
     // Both re-forward and both have dedup OFF: only hop_count can stop the loop.
     bridge_a.set_recent_set_capacity(0);
@@ -167,7 +168,7 @@ void test_cycle_termination() {
 
     // Inject one frame at hop 0; it bounces A<->B incrementing hop until MAX_HOPS.
     const auto frame =
-        tr::router_wrap(value_tlv({0x01}), {.origin = peer_of(0xEE), .ts = 7, .hop = 0});
+        tr::net::router_wrap(value_tlv({0x01}), {.origin = peer_of(0xEE), .ts = 7, .hop = 0});
     channel.a().send(frame);  // -> node B
 
     const bool terminated =

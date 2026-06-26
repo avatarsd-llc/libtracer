@@ -81,7 +81,7 @@ int main() {
     (void)g.write(*path_t::parse("/sensor/temp:settings.deadline_ns"), value_u32(5000));
     auto schema = g.read(*path_t::parse("/sensor/temp:schema"));
     if (schema) {
-        auto point = tr::view::view_as_tlv(*schema);
+        auto point = tr::wire::view_as_tlv(*schema);
         std::printf(":schema is a POINT with %zu children\n", point ? point->children.size() : 0u);
     }
     return 0;

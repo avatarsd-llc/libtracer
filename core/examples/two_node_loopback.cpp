@@ -27,15 +27,15 @@ tr::view::view_t value_u32_tlv(std::uint32_t v) {
     std::array<std::byte, 4> payload{};
     for (int i = 0; i < 4; ++i)
         payload[static_cast<std::size_t>(i)] = static_cast<std::byte>((v >> (8 * i)) & 0xFF);
-    tr::tlv_t t{.type = tr::type_t::VALUE, .payload = payload};
-    const auto bytes = tr::encode(t);
+    tr::wire::tlv_t t{.type = tr::wire::type_t::VALUE, .payload = payload};
+    const auto bytes = tr::wire::encode(t);
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
     std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
     return tr::view::view_t::over(std::move(seg));
 }
 
 std::uint32_t as_u32(const tr::view::view_t& v) {
-    const auto tlv = tr::view::view_as_tlv(v);
+    const auto tlv = tr::wire::view_as_tlv(v);
     std::uint32_t r = 0;
     if (tlv) {
         const auto p = tlv->payload;
@@ -45,8 +45,8 @@ std::uint32_t as_u32(const tr::view::view_t& v) {
     return r;
 }
 
-tr::peer_id_t peer_of(std::uint8_t fill) {
-    tr::peer_id_t p{};
+tr::net::peer_id_t peer_of(std::uint8_t fill) {
+    tr::net::peer_id_t p{};
     p.fill(static_cast<std::byte>(fill));
     return p;
 }
@@ -54,11 +54,11 @@ tr::peer_id_t peer_of(std::uint8_t fill) {
 }  // namespace
 
 int main() {
-    tr::loopback_channel_t channel;
+    tr::net::loopback_channel_t channel;
     tr::graph::graph_t node_a;
     tr::graph::graph_t node_b;
-    tr::bridge_t bridge_a(node_a, channel.a(), peer_of(0xA1));
-    tr::bridge_t bridge_b(node_b, channel.b(), peer_of(0xB2));
+    tr::net::bridge_t bridge_a(node_a, channel.a(), peer_of(0xA1));
+    tr::net::bridge_t bridge_b(node_b, channel.b(), peer_of(0xB2));
 
     (void)node_a.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
     (void)node_b.register_vertex(*path_t::parse("/remote/temp"), role_t::STORED_VALUE);

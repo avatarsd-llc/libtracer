@@ -16,7 +16,7 @@
 #include <functional>
 #include <span>
 
-namespace tr {
+namespace tr::net {
 
 // A 16-byte node/peer identity — the ROUTER `origin_peer_id` (docs/reference/05
 // §0x0D ROUTER).
@@ -36,4 +36,4 @@ class transport_t {
     virtual void set_receiver(receiver_t receiver) = 0;
 };
 
-}  // namespace tr
+}  // namespace tr::net

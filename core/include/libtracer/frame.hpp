@@ -15,8 +15,9 @@
 #include <vector>
 
 #include "libtracer/tlv.hpp"
+#include "libtracer/view.hpp"
 
-namespace tr {
+namespace tr::wire {
 
 // Decode failures, named after the tr:: built-in error concepts (RFC-0002).
 // The full ERROR *wire* shape is RFC-0002 (gated); this is the local reason.
@@ -28,7 +29,7 @@ enum class error_t {
 };
 
 struct crc_t {
-    enum class width_t { Crc32c, Crc16Ccitt };
+    enum class width_t { CRC32C, CRC16_CCITT };
     width_t width{};
     std::uint32_t value{};  // 16-bit values are zero-extended
     constexpr bool operator==(const crc_t&) const noexcept = default;
@@ -69,4 +70,16 @@ inline constexpr std::size_t kMaxDepth = 32;
 // Encode a TLV (recomputing the trailer CRC from the body when opt.CR is set).
 [[nodiscard]] std::vector<std::byte> encode(const tlv_t& tlv);
 
-}  // namespace tr
+/**
+ * @brief Cast a flat view to a TLV (the M1 decoder, zero-copy).
+ *
+ * The L1↔L2 cast — "a TLV is a cast from a view." It lives at L2 (it produces a
+ * @ref tlv_t) and consumes an L1 @ref view::view_t. The returned `tlv_t` borrows
+ * the view's bytes, so keep the view — and thus its segment — alive while using
+ * it.
+ */
+[[nodiscard]] inline std::expected<tlv_t, error_t> view_as_tlv(const view::view_t& v) {
+    return decode(v.bytes());
+}
+
+}  // namespace tr::wire

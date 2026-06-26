@@ -5,7 +5,7 @@
 
 #include <utility>
 
-namespace tr {
+namespace tr::net {
 
 void loopback_endpoint_t::set_receiver(receiver_t receiver) {
     const std::lock_guard lock(m_);
@@ -67,4 +67,4 @@ void loopback_channel_t::shutdown() {
     b_.stop();
 }
 
-}  // namespace tr
+}  // namespace tr::net

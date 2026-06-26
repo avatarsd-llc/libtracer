@@ -10,7 +10,12 @@
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/view.hpp"
 
-namespace tr {
+namespace tr::net {
+
+using wire::decode;
+using wire::encode;
+using wire::tlv_t;
+using wire::type_t;
 
 // L1 types this layer consumes (upward dependency on tr::view, docs/adr/0016 §2).
 using view::segment_ptr_t;
@@ -106,4 +111,4 @@ void bridge_t::on_frame(std::span<const std::byte> frame) {
     }
 }
 
-}  // namespace tr
+}  // namespace tr::net

@@ -11,7 +11,14 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/tlv_emit.hpp"
 
-namespace tr {
+namespace tr::net {
+
+using wire::decode;
+using wire::encode;
+using wire::error_t;
+using wire::opt_t;
+using wire::tlv_t;
+using wire::type_t;
 namespace {
 
 std::uint8_t u8(std::byte b) { return std::to_integer<std::uint8_t>(b); }
@@ -108,4 +115,4 @@ std::expected<unwrapped_t, error_t> router_unwrap(std::span<const std::byte> fra
     return std::unexpected(error_t::FRAME_INVALID);  // no "data" child
 }
 
-}  // namespace tr
+}  // namespace tr::net

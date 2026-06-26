@@ -19,7 +19,7 @@
 #include "libtracer/frame.hpp"      // error_t
 #include "libtracer/transport.hpp"  // peer_id_t
 
-namespace tr {
+namespace tr::net {
 
 struct router_meta_t {
     peer_id_t origin{};    // origin_peer_id (16 bytes)
@@ -39,6 +39,7 @@ struct unwrapped_t {
 
 // Parse a ROUTER frame → metadata + a span over the wrapped data TLV (borrowing
 // `frame`). FrameInvalid if it is not a well-formed ROUTER envelope.
-[[nodiscard]] std::expected<unwrapped_t, error_t> router_unwrap(std::span<const std::byte> frame);
+[[nodiscard]] std::expected<unwrapped_t, wire::error_t> router_unwrap(
+    std::span<const std::byte> frame);
 
-}  // namespace tr
+}  // namespace tr::net

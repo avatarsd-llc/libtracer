@@ -8,7 +8,7 @@
 
 #include <cstdint>
 
-namespace tr {
+namespace tr::wire {
 
 // Core type-code registry (0x01-0x0D). 0x05 is retired (was LIST, ADR-0003).
 enum class type_t : std::uint8_t {
@@ -61,4 +61,4 @@ struct opt_t {
     constexpr bool operator==(const opt_t&) const noexcept = default;
 };
 
-}  // namespace tr
+}  // namespace tr::wire

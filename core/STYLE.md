@@ -10,7 +10,9 @@ The root namespace is `tr::`. Sub-namespaces mirror the [six-layer model](../doc
 | --- | --- | --- |
 | `tr::mem` | L0 — memory substrate | `mem_backend_t`, `heap_backend_t`, `pool_t`, `borrowed_backend_t`, `io_dir_t`, `alloc_hint_t` |
 | `tr::view` | L1 — views & ownership | `segment_t`, `segment_ptr_t`, `view_t`, `rope_t` |
-| `tr::` (root) | L2–L4 (until split) | wire codec, graph, transport, bridge — not yet sub-namespaced |
+| `tr::wire` | L2/L3 — frame + TLV codec | `tlv_t`, `opt_t`, `type_t`, `error_t`, `trailer_t`, `crc_t`, `decode`/`encode`, `view_as_tlv` |
+| `tr::graph` | L4 — graph runtime | `graph_t`, `vertex_t`, `path_t`, `status_t`, `result_t`, `settings_t`, `handlers_t`, `role_t`, `subscriber_t` |
+| `tr::net` | transport plane | `transport_t`, `bridge_t`, `router_meta_t`, `peer_id_t`, `udp_transport_t`, `loopback_channel_t`/`loopback_endpoint_t` |
 
 Two hard rules:
 

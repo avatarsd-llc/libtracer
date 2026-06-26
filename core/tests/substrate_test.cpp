@@ -133,9 +133,9 @@ void test_rope_equivalence(const fs::path& vroot) {
     const auto mb = materialized.bytes();
     check(std::ranges::equal(mb, flat), "flatten(rope) reproduces the flat bytes exactly");
 
-    const auto t_flat = tr::decode(flat);
-    const auto t_rope = tr::view::view_as_tlv(materialized);
-    check(t_flat.has_value() && t_rope.has_value() && tr::equal(*t_flat, *t_rope),
+    const auto t_flat = tr::wire::decode(flat);
+    const auto t_rope = tr::wire::view_as_tlv(materialized);
+    check(t_flat.has_value() && t_rope.has_value() && tr::wire::equal(*t_flat, *t_rope),
           "decode(flatten(rope)) == decode(flat)");
     check(t_rope.has_value() && t_rope->children.size() == 2,
           "the rope-decoded PATH has its 2 NAME children");
@@ -154,9 +154,9 @@ void test_cast_claim_outlives_source(const fs::path& vroot) {
         v = tr::view::view_t::over(std::move(seg));
     }  // `src` freed here; `v` (and its segment copy) survives
 
-    const auto tlv = tr::view::view_as_tlv(v);
+    const auto tlv = tr::wire::view_as_tlv(v);
     check(tlv.has_value(), "view_as_tlv decodes after the source buffer was freed");
-    check(tlv.has_value() && tlv->type == tr::type_t::VALUE, "decoded type is VALUE");
+    check(tlv.has_value() && tlv->type == tr::wire::type_t::VALUE, "decoded type is VALUE");
     check(tlv.has_value() && tlv->trailer && tlv->trailer->crc.has_value(),
           "CRC trailer present and verified (decode would have failed otherwise)");
 }
