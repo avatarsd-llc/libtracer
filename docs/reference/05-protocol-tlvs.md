@@ -13,13 +13,13 @@
 | `0x20` – `0x7F` | Reserved for future core extensions |
 | `0x80` – `0xFF` | User-defined application payload types |
 
-Currently assigned: `0x01`–`0x04`, `0x06`–`0x0D` (12 types). `0x05` is **retired** (was generic LIST in earlier drafts; see §`0x05`). The remaining `0x0E` – `0x1F` are reserved for v1 fast-track additions; `0x20` – `0x7F` is the long-term registry.
+Currently assigned: `0x01`–`0x04`, `0x06`–`0x0E` (13 types). `0x05` is **retired** (was generic LIST in earlier drafts; see §`0x05`). `0x0E` is **SPEC** (vertex-creation spec, [ADR-0017](../adr/0017-in-band-vertex-creation-controller-orchestration.md)). The remaining `0x0F` – `0x1F` are reserved for v1 fast-track additions; `0x20` – `0x7F` is the long-term registry.
 
 The names below are the canonical type-code names; the reference implementation's C enum (header under `core/include/libtracer/`, pending the protocol-v1 rebuild — [ADR-0001](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0001-extract-reference-implementation-from-strawberry-fw.md)) matches them.
 
 ### Structured TLVs
 
-Several core type codes are **structured** — they carry `opt.PL=1` and their payload is a concatenation of child TLVs. The structured types are: `0x04` SUBSCRIBER, `0x06` PATH, `0x07` POINT, `0x09` STATUS (when non-empty), `0x0A` ACL, `0x0B` SETTINGS, `0x0D` ROUTER. Each entry below specifies its own children layout.
+Several core type codes are **structured** — they carry `opt.PL=1` and their payload is a concatenation of child TLVs. The structured types are: `0x04` SUBSCRIBER, `0x06` PATH, `0x07` POINT, `0x09` STATUS (when non-empty), `0x0A` ACL, `0x0B` SETTINGS, `0x0D` ROUTER, `0x0E` SPEC. Each entry below specifies its own children layout.
 
 Earlier drafts had a generic `0x05` LIST type that any structured container could use; that's gone. Every structured container declares its purpose via its type code. User-range type codes (`0x80–0xFF`) MAY also be structured (set `opt.PL=1`) for application-defined records.
 
@@ -162,6 +162,19 @@ SUBSCRIBER (PL=1) {
   NAME        subscriber_id   ; optional — opaque ID for self-identification
 }
 ```
+
+The `qos_settings` SETTINGS carries the **per-subscriber delivery policy** (byte-agnostic; numeric filtering like deadband is an application *filter vertex*, never a field — ADR-0019's sibling decision):
+
+```
+qos_settings = SETTINGS {
+  NAME "delivery_mode"   VALUE <u8: EVERY=0, THROTTLED=1, ON_CHANGE=2>  ; on-change = byte-diff
+  NAME "min_interval_ns" VALUE <u64>     ; throttle floor (THROTTLED)
+  NAME "keepalive_ns"    VALUE <u64>     ; force re-deliver if unchanged
+  NAME "delivery_scope"  VALUE <u8: DELTA=0, SNAPSHOT=1>   ; composite delivery
+}
+```
+
+Policy is **enforced producer-side** (before fan-out). For a **composite** subscription, `delivery_scope` selects DELTA (the changed child + its concrete path, RFC-0003) or SNAPSHOT (the aggregate's `:[]` structured TLV); no wildcard `target_path` is needed — subscribing to the composite vertex *is* the subtree subscription. The `capability` child carries the subscriber's **subject-token** ([ADR-0018](../adr/0018-access-control-authorization-pluggable-subject-token.md)); subscribe-authorization is gated by the *source's* `:acl`.
 
 ### Where it appears
 
@@ -450,22 +463,24 @@ Access control list — a collection of capabilities granting permissions on a v
 
 ### Payload layout
 
-ACL is structured (`opt.PL=1`). Its children are themselves ACL TLVs, each representing one capability. (The recursion is deliberate: the outer ACL is the capability collection; each inner ACL is one capability with NAME-tagged fields.)
+ACL is structured (`opt.PL=1`). Its children are themselves ACL TLVs, each one an **ACE** (access control entry, NFSv4-style — [ADR-0020](../adr/0020-acl-nfsv4-style-aces-with-inheritance.md)). (The recursion is deliberate: the outer ACL is the ACE collection; each inner ACL is one ACE with NAME-tagged fields.)
 
 ```
-ACL (PL=1) {                                ; outer = collection
-  ACL (PL=1) {                              ; inner = one capability
-    NAME "subject"      <UTF-8 holder>
-    NAME "permissions"  VALUE <u8 bitfield: READ=0x1 WRITE=0x2 SUBSCRIBE=0x4>
+ACL (PL=1) {                                ; outer = ACE collection
+  ACL (PL=1) {                              ; inner = one ACE
+    NAME "type"         VALUE <u8: ALLOW=0, DENY=1>
+    NAME "flags"        VALUE <u8: INHERIT=0x1 INHERIT_ONLY=0x2 NO_PROPAGATE=0x4 GROUP=0x8> ; optional, default 0
+    NAME "subject"      <subject-token (ADR-0018); special: "OWNER@" / "EVERYONE@">
+    NAME "access_mask"  VALUE <u16 bitfield, below>
     NAME "expires_ns"   VALUE <u64>          ; optional
   }
-  ACL (PL=1) {
-    ...                                       ; next capability
-  }
+  ACL (PL=1) { ... }                         ; next ACE
 }
 ```
 
-This shape may be revised when the `security_acl` module ships post-MVP; the v1 TLV layout is structurally defined but enforcement is deferred.
+`access_mask` bits: `READ=0x01 WRITE=0x02 SUBSCRIBE=0x04 CREATE=0x08 DELETE=0x10 READ_ACL=0x20 WRITE_ACL=0x40 WRITE_OWNER=0x80` (`0x100`+ reserved). The **`admin`** right is `WRITE_ACL` (modify the ACL / delegate); `CREATE` gates the `:children[]` creation field-write ([ADR-0017](../adr/0017-in-band-vertex-creation-controller-orchestration.md)).
+
+**Inheritance:** an ACE with `INHERIT` on a composite vertex applies to its whole subtree; a vertex's *effective* ACL is its own ACEs + inherited ancestor ACEs ([ADR-0020](../adr/0020-acl-nfsv4-style-aces-with-inheritance.md)). **Evaluation:** ALLOW/DENY, ordered, first-match-per-bit. The **wire layout is the full NFSv4 model**; the required-modules MCU profile enforces a subset (ALLOW-only, single `INHERIT` flag); full DENY/ordered evaluation is the `security_acl` host module. Enforcement is otherwise deferred per below.
 
 ### Header settings
 
@@ -620,7 +635,35 @@ The `(origin_peer_id, origin_timestamp)` pair is the dedup key. A receiving brid
 
 ---
 
-## Reserved range (`0x0E` – `0x1F`)
+## `0x0E` — SPEC
+
+Vertex-creation spec. Writing a SPEC into a parent's `:children[]` field requests the device **instantiate a child vertex of a device-known type** ([ADR-0017](../adr/0017-in-band-vertex-creation-controller-orchestration.md)). It is one *optional, standard* control field (the vertex-`ioctl` model of [ADR-0021](../adr/0021-colon-field-plane-is-the-vertex-ioctl.md)); a device that does not support dynamic creation has no `:children[]` write capability (`SCHEMA_NOT_FOUND`).
+
+### Payload layout
+
+Structured (`opt.PL=1`):
+
+```
+SPEC (0x0E, PL=1) {
+  NAME "type"     <catalog selector — a type from the device's controller-type catalog>
+  NAME "name"     <the new child's path component>
+  SETTINGS "config"   ; optional — instantiation params
+}
+```
+
+### Where it appears
+
+- Written into `<parent>:children[]` to create a child. The device validates `type` against its **catalog** (the `:children` field's `:schema`); an unknown type returns `ERROR=SCHEMA_NOT_FOUND`. Reading `<parent>:children[]` returns the subtree **members**, not SPECs (write-spec / read-members asymmetry).
+- Creation requires the `CREATE` right in the parent's `:acl` ([ADR-0020](../adr/0020-acl-nfsv4-style-aces-with-inheritance.md)). The created controller exposes its own **port vertices**; wiring them is a *separate* binding step (SUBSCRIBER edges).
+
+### Validation
+
+- `type` MUST name a type in the device's catalog, else `SCHEMA_NOT_FOUND`.
+- `name` MUST be a valid single path component (per [03-addressing.md](03-addressing.md)).
+
+---
+
+## Reserved range (`0x0F` – `0x1F`)
 
 Currently unassigned. Allocated on a fast-track basis during v1 if a clear need emerges. Candidate uses:
 
