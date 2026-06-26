@@ -68,6 +68,16 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **Memory-space tag (`tr::mem::mem_space_t` HOST/DEVICE) — the L1/L2 groundwork
+  for `mem_cuda` and heterogeneous host+device ropes ([ADR-0024](../docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)).**
+  `mem_backend_t::space()` (default `HOST`) is inherited by each `segment_t.space`;
+  `view_t::is_host()`/`is_device()` expose it; `rope_t::all_host()` reports whether
+  a rope is CPU-walkable; `rope_t::flatten()` now **refuses a heterogeneous rope**
+  (returns an empty view rather than CPU-`memcpy`'ing a DEVICE link). A
+  `tr::view::borrow_device()` helper tags caller memory `DEVICE` (a CUDA-free
+  stand-in for tests / custom bindings). No behaviour change for existing all-HOST
+  code. Tested in `substrate_test` (`test_memory_space`).
+
 - **`graph::delivery_mode_t` + per-subscriber delivery policy (first slice of the
   L4/L5 control-surface implementation).** `subscribe(...)` gains a defaulted
   `delivery_mode_t mode` (`EVERY` | `THROTTLED` reserved | `ON_CHANGE`). `ON_CHANGE`

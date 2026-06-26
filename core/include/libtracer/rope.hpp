@@ -66,6 +66,19 @@ class rope_t {
         return n;
     }
 
+    /** @brief True when every link is CPU-addressable (HOST).
+     *
+     * A `false` rope is **heterogeneous** — it has a DEVICE link (e.g. a GPU
+     * payload, docs/adr/0024) that the CPU must not dereference, so host-side
+     * operations (`flatten`, CRC) cannot touch it.
+     */
+    [[nodiscard]] bool all_host() const noexcept {
+        for (const auto& l : links_) {
+            if (l.is_device()) return false;
+        }
+        return true;
+    }
+
     /** @brief Visit each link's contiguous bytes in order (parsers, serializers, CRC). */
     template <class Fn>
     void walk(Fn&& fn) const {
@@ -90,7 +103,9 @@ class rope_t {
      * The single bridge-boundary copy — taken only when a flat-buffer consumer
      * demands it. The flattened view can then be cast with `view_as_tlv`
      * (frame.hpp, `tr::wire`).
-     * @retval {} An empty view if the backend cannot allocate.
+     * @retval {} An empty view if the backend cannot allocate, **or if the rope
+     *            is not @ref all_host** (a DEVICE link cannot be CPU-memcpy'd —
+     *            docs/adr/0024; lower such a payload via its device transport).
      */
     [[nodiscard]] view_t flatten(mem::mem_backend_t& backend = mem::heap_backend()) const;
 

@@ -52,6 +52,19 @@ enum class alloc_hint_t : std::uint32_t {
 };
 
 /**
+ * @brief The address space a backend's bytes live in.
+ *
+ * `HOST` bytes are CPU-addressable; `DEVICE` bytes are not (e.g. CUDA device
+ * memory — docs/adr/0024). The codec must never CPU-dereference a `DEVICE` link:
+ * such a segment may back only an opaque VALUE payload, with the header/trailer
+ * kept in a `HOST` segment (a heterogeneous host+device rope).
+ */
+enum class mem_space_t : std::uint8_t {
+    HOST = 0,   /**< @brief CPU-addressable bytes. */
+    DEVICE = 1, /**< @brief Non-CPU-addressable bytes (GPU/accelerator); codec must not deref. */
+};
+
+/**
  * @brief A memory backend: the L0 seam libtracer binds any substrate behind.
  *
  * Subclass this to bind libtracer to any allocator — a heap, a fixed
@@ -122,6 +135,14 @@ class mem_backend_t {
     }
     /** @brief The largest single segment this backend can produce. */
     [[nodiscard]] virtual std::size_t max_segment_size() const noexcept { return ~std::size_t{0}; }
+
+    /**
+     * @brief The address space this backend's segments live in (default `HOST`).
+     *
+     * A `DEVICE` backend (e.g. `mem_cuda`) must override this; segments inherit
+     * it (segment.hpp), and the codec uses it to skip CPU access to device links.
+     */
+    [[nodiscard]] virtual mem_space_t space() const noexcept { return mem_space_t::HOST; }
 
     /** @brief The backend's stable identifier (e.g. for introspection / metrics). */
     [[nodiscard]] const char* name() const noexcept { return name_; }
