@@ -121,6 +121,18 @@ _Avoid_: "the recent-set guarantees termination".
 **Wildcard delivery metadata**:
 How a wildcard subscriber learns which concrete path produced each delivered TLV. **Local** delivery passes it out-of-band (implementation-defined); **bridged/remote** delivery carries the matched concrete `PATH` (`0x06`) on the wire (proposed under [RFC-0003](docs/spec/rfcs/0003-bridged-wildcard-delivery-path.md)).
 
+**Framing modes: full-TLV (full caps) vs header-elided (non-interactive bindings)**:
+Two **complementary** on-wire framing modes, chosen per-transport (and mixable per-frame); the bridge/router is **uniform across both** and never does an identity↔path lookup ("does not feel the difference" — load-bearing claim 4).
+- **Full-TLV ("full caps")**: self-describing frames carry the full PATH + control surface — enabling discovery, dynamic paths, in-band creation/ACL (the full feature set). Used on capable transports (IP/WS) where a 4-byte header is negligible, and for occasional control frames everywhere.
+- **Header-elided ("non-interactive bindings" / transport-native addressing)**: the transport keys on its **native frame identity** (CAN ID, WS channel) via a **static identity↔path map held by the transport adapter**; the TLV header is synthesized on ingress / elided on egress, so it **never hits the constrained bus** (zero added overhead — existing CAN/WS frames unchanged). For high-rate data on constrained buses (e.g. 100 ksps over CAN).
+
+They coexist (a) **per-deployment** — an elided CAN leaf bridged to a full-TLV IP backbone, the **bridge being the stateless translation point**; and (b) **per-transport** — an occasional **full-TLV control frame *establishes* the elided binding** ("full caps" sets up "non-interactive bindings"), which *is* the **`discovery_static` (pre-config) vs `discovery_mdns` (dynamic announce)** split. *(Zero-copy for large elided payloads needs the M6 rope-delivering transport seam; small samples cost a negligible ingress-synthesis copy.)*
+_Avoid_: "elided vs full-TLV is an either/or" (they coexist); "the bridge maps CAN IDs" (the *adapter* does, as static config); "the TLV header rides the CAN bus" (synthesized host-side); "header elision makes the router transport-aware" (the adapter uniforms first).
+
+**Advertise + id-match → dynamic rope groups**:
+The advertise+id-match mechanism generalizes from a **single-value** binding (`id ↔ path`; lean frames are values) to a **rope/group** binding (`group-id ↔ (path, slice structure)`): a full-TLV **advertise** frame carries a runtime **manifest** (N slices, layout, total), and the lean id-matched **slice** frames that follow are **chained into a rope** by id+index at the reassembly layer. This is **[ADR-0011](docs/adr/0011-address-shift-totality-opt-in.md) address-shift slicing made dynamic** — the advertise frame is the manifest the ADR otherwise carries as a static `expected_count`/`:manifest`. The *same* mechanism thus spans a 9-byte elided CAN sample → a GB advertised rope group. **Zero-copy of the assembled rope requires the transport to deliver each slice as an owning/borrowable `view_t` (the M6 view-delivering seam)** — so advertise+id-match (graph protocol) and M6 (transport capability) **compose**; the flat-span seam alone forces a per-slice copy.
+_Avoid_: "advertise+id-match obviates the M6 rope seam" (it composes with it for zero-copy); "dynamic slicing is a different mechanism from elided binding" (same advertise+id-match, with a structure in the advertise).
+
 ### Errors
 
 **`tr::` error namespace**:
