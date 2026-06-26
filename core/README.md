@@ -20,7 +20,7 @@ The rebuild targets the protocol-v1 wire format and API as fixed in the ADRs:
 - **M3a — L4 graph runtime core (landed).** The vertex map keyed on canonical PATH-TLV payload bytes, the three vertex roles (stored-value, bounded-history stream, user `on_read`/`on_write` handler seam), and the `read`/`write`/`await` data API ([ADR-0006](../docs/adr/0006-read-write-await-api-no-connect.md)). The LKV read/write hot path is lock-free (an atomic `shared_ptr` swap); `await` blocks on a per-vertex condvar. Validated race-free under TSan, leak/UB-free under ASan+UBSan (`tests/graph_test.cpp`).
 - **M3b — subscriptions + dispatch (landed).** SUBSCRIBER target-path fan-out on `SegmentPtr` clone + a `subscribe(src, callback)` helper, field-write (`:subscribers[]`, `:settings.*`) + unsubscribe, a dispatch-depth cycle cap ([ADR-0015](../docs/adr/0015-graph-runtime-concurrency-and-in-process-cycle-cap.md)), a minimal `:schema` POINT, and the in-process pub/sub example (`examples/in_process_pubsub.cpp`) — the P0 node, end to end. TSan/ASan/UBSan clean.
 - **M4 — first transport + bridge (landed).** The `Transport` seam + an in-process loopback transport (dev/test); the `Bridge` that ROUTER-wraps a data TLV on egress and, on ingress, dedups (recent-set on `(origin_peer_id, ts)`) + terminates cycles (`hop_count`/MAX_HOPS, [ADR-0014](../docs/adr/0014-router-cycle-termination-hop-count.md)) before shedding the envelope and re-injecting the bare TLV. Two nodes talk over the wire end to end (`examples/two_node_loopback.cpp`) — the full encode→ROUTER→decode roundtrip. P2 (bridge) conformance. TSan/ASan/UBSan clean.
-- **M5 — UDP socket transport (landed).** `UdpTransport` — a real POSIX UDP socket behind the same `Transport` seam, so two nodes talk over the kernel network stack with the bridge/router/graph unchanged. One datagram = one frame (no stream reassembly), pairing with the flat decoder. Validated raw and end-to-end through the full stack over localhost UDP (`tests/udp_test.cpp`), TSan/ASan/UBSan clean. The two-process **network benchmark** vs Zenoh-over-UDP lives in `bench/`.
+- **M5 — UDP socket transport (landed).** `UdpTransport` — a real POSIX UDP socket behind the same `Transport` seam, so two nodes talk over the kernel network stack with the bridge/router/graph unchanged. One datagram = one frame (no stream reassembly), pairing with the flat decoder. Validated raw and end-to-end through the full stack over localhost UDP (`tests/udp_test.cpp`), and demonstrated by `examples/udp_two_node.cpp` — the same program as the loopback example with only the transport swapped. TSan/ASan/UBSan clean. The two-process **network benchmark** vs Zenoh-over-UDP lives in `bench/`.
 - **M6 — a reliable stream transport (next).** TCP/QUIC behind the seam: length-prefix framing + partial-read reassembly, which is the consumer that finally builds **rope-aware (link-walking) zero-copy decode**.
 
 ## Layout
@@ -38,7 +38,7 @@ core/
 │   └── tracer.hpp                    umbrella include
 ├── src/                  M1–M4 codec, substrate, graph, loopback/router/bridge
 ├── tests/                conformance_runner + substrate_test + graph_test + bridge_test + CMake
-├── examples/             in_process_pubsub.cpp + two_node_loopback.cpp + CMake
+├── examples/             in_process_pubsub.cpp + two_node_loopback.cpp + udp_two_node.cpp
 ├── CHANGELOG.md          public-API change log
 └── CMakeLists.txt
 ```

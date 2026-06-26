@@ -128,9 +128,13 @@ decode them structurally; in-process you can store any opaque bytes. See
 
 **Going to a real socket is a one-line swap:** replace `LoopbackChannel` with the
 **`UdpTransport`** (M5) — `UdpTransport(bind_port, "127.0.0.1", peer_port)` — and the
-bridge/graph above it are unchanged. Full program:
-[`two_node_loopback.cpp`](https://github.com/avatarsd-llc/libtracer/blob/main/core/examples/two_node_loopback.cpp);
-the two-process UDP version powers the [network benchmark](https://github.com/avatarsd-llc/libtracer/tree/main/bench).
+bridge/graph above it are unchanged. The two programs are line-for-line the same but
+for that swap:
+[`two_node_loopback.cpp`](https://github.com/avatarsd-llc/libtracer/blob/main/core/examples/two_node_loopback.cpp)
+(in-process) and
+[`udp_two_node.cpp`](https://github.com/avatarsd-llc/libtracer/blob/main/core/examples/udp_two_node.cpp)
+(real localhost UDP). The two-*process* UDP version powers the
+[network benchmark](https://github.com/avatarsd-llc/libtracer/tree/main/bench).
 
 ## Where to go next
 
