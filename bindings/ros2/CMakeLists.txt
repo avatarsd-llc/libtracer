@@ -31,7 +31,9 @@ file(GLOB RMW_TRACER_SRC CONFIGURE_DEPENDS src/rmw_tracer/*.c src/rmw_tracer/*.c
 add_library(rmw_tracer ${RMW_TRACER_SRC})
 target_include_directories(rmw_tracer PUBLIC
   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
-target_link_libraries(rmw_tracer PUBLIC libtracer)
+# Plain signature (no PUBLIC keyword) to match ament_target_dependencies, which
+# uses the plain target_link_libraries internally — CMake forbids mixing the two.
+target_link_libraries(rmw_tracer libtracer)
 ament_target_dependencies(rmw_tracer
   rmw rcutils rcpputils rosidl_runtime_c
   rosidl_typesupport_introspection_c rosidl_typesupport_introspection_cpp)
