@@ -63,7 +63,7 @@ sequenceDiagram
 
 - **Zero-copy fan-out** — N subscribers share one buffer; delivery is N relaxed
   increments, no `memcpy`.
-- **Closes M1's lifetime gap** — a decoded `Tlv` borrows segment bytes via spans;
+- **Closes M1's lifetime gap** — a decoded `tlv_t` borrows segment bytes via spans;
   the `segment_ptr_t` keeps them alive exactly as long as some view needs them.
 - **No hidden allocation** — the count is in the segment, so MMIO/pool/borrowed
   segments need no separate control block.

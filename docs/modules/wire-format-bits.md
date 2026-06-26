@@ -142,7 +142,7 @@ step. The wire bytes, the in-memory value, and the graph node are one buffer.
 flowchart LR
     B["bytes:<br/>06 40 12 00 02 00 …"]:::b
     B --> W["on the wire<br/>(a frame)"]
-    B --> M["in memory<br/>(a View → Tlv, borrowed)"]
+    B --> M["in memory<br/>(a view_t → tlv_t, borrowed)"]
     B --> G["in the graph<br/>(the vertex's value / key)"]
     classDef b fill:#dbeafe,stroke:#1e40af;
 ```
