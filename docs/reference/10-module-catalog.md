@@ -50,6 +50,7 @@ Backends that own real bytes. Each implements the `tr::mem::mem_backend_t` inter
 | `mem_can_reassembly` | mem-backend | A reassembly slab for multi-frame CAN/CAN-FD messages | v1 |
 | `mem_iceoryx2` | mem-backend | An iceoryx2 publish-side block | future |
 | `mem_rdma` | mem-backend | An RDMA-registered memory region with ibv tags | future |
+| `mem_cuda` | mem-backend | CUDA device memory (`DEVICE` space — the codec must not CPU-deref it; backs a VALUE payload in a heterogeneous host+device rope, [ADR-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)) | v1, opt-in `LIBTRACER_WITH_CUDA` |
 | `mem_asio_streambuf` | mem-backend | A `boost::asio::streambuf` (consume-on-read semantics) | **OPEN — see §hard integrations** |
 
 ### L1 — Views and ownership ([08-views-and-ownership.md](08-views-and-ownership.md))
