@@ -5,19 +5,19 @@
 
 #include <cstring>
 
-namespace tracer {
+namespace tr::view {
 
-View Rope::flatten(MemBackend& backend) const {
+view_t rope_t::flatten(mem::mem_backend_t& backend) const {
     const std::size_t n = total_length();
-    Segment* seg = backend.alloc(n, 0);
-    if (seg == nullptr) return View{};
+    segment_t* seg = backend.alloc(n, mem::alloc_hint_t::NONE);
+    if (seg == nullptr) return view_t{};
     std::size_t pos = 0;
     for (const auto& l : links_) {
         const auto b = l.bytes();
         if (!b.empty()) std::memcpy(seg->bytes.data() + pos, b.data(), b.size());
         pos += b.size();
     }
-    return View{SegmentPtr::adopt(seg), 0, n};
+    return view_t{segment_ptr_t::adopt(seg), 0, n};
 }
 
-}  // namespace tracer
+}  // namespace tr::view

@@ -3,23 +3,22 @@
 
 #include "libtracer/mem_heap.hpp"
 
-#include <cstdint>
 #include <new>
 #include <span>
 
-namespace tracer::mem {
+namespace tr::mem {
 namespace {
 
-class HeapBackend final : public MemBackend {
+class heap_backend_t final : public mem_backend_t {
    public:
-    HeapBackend() noexcept : MemBackend("mem_heap") {}
+    heap_backend_t() noexcept : mem_backend_t("mem_heap") {}
 
-    Segment* alloc(std::size_t size, std::uint32_t /*hint*/) override {
+    view::segment_t* alloc(std::size_t size, alloc_hint_t /*hint*/) override {
         const std::align_val_t al{alignof(std::max_align_t)};
         void* raw = size ? ::operator new(size, al, std::nothrow) : nullptr;
         if (size && raw == nullptr) return nullptr;
         auto* seg = new (std::nothrow)
-            Segment(this, std::span<std::byte>(static_cast<std::byte*>(raw), size));
+            view::segment_t(this, std::span<std::byte>(static_cast<std::byte*>(raw), size));
         if (seg == nullptr) {
             if (raw) ::operator delete(raw, al);
             return nullptr;
@@ -27,7 +26,7 @@ class HeapBackend final : public MemBackend {
         return seg;
     }
 
-    void destroy(Segment* seg) noexcept override {
+    void destroy(view::segment_t* seg) noexcept override {
         if (!seg->bytes.empty()) {
             ::operator delete(seg->bytes.data(), std::align_val_t{alignof(std::max_align_t)});
         }
@@ -37,11 +36,17 @@ class HeapBackend final : public MemBackend {
 
 }  // namespace
 
-MemBackend& heap_backend() noexcept {
-    static HeapBackend backend;
+mem_backend_t& heap_backend() noexcept {
+    static heap_backend_t backend;
     return backend;
 }
 
-SegmentPtr heap_alloc(std::size_t size) { return SegmentPtr::adopt(heap_backend().alloc(size, 0)); }
+}  // namespace tr::mem
 
-}  // namespace tracer::mem
+namespace tr::view {
+
+segment_ptr_t heap_alloc(std::size_t size) {
+    return segment_ptr_t::adopt(mem::heap_backend().alloc(size, mem::alloc_hint_t::NONE));
+}
+
+}  // namespace tr::view

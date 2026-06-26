@@ -11,7 +11,7 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/tlv_emit.hpp"
 
-namespace tracer {
+namespace tr {
 namespace {
 
 std::uint8_t u8(std::byte b) { return std::to_integer<std::uint8_t>(b); }
@@ -41,60 +41,60 @@ std::optional<Head> read_head(std::span<const std::byte> buf, std::size_t at) {
 
 }  // namespace
 
-std::vector<std::byte> router_wrap(std::span<const std::byte> data, const RouterMeta& meta) {
+std::vector<std::byte> router_wrap(std::span<const std::byte> data, const router_meta_t& meta) {
     std::vector<std::byte> body;
 
     detail::emit_name(body, "origin_peer_id");
-    detail::emit_tlv(body, Type::Value, Opt{}, meta.origin);
+    detail::emit_tlv(body, type_t::VALUE, opt_t{}, meta.origin);
 
     detail::emit_name(body, "origin_timestamp");
     std::array<std::byte, 8> ts{};
     detail::store_le(ts, meta.ts);
-    detail::emit_tlv(body, Type::Time, Opt{}, ts);
+    detail::emit_tlv(body, type_t::TIME, opt_t{}, ts);
 
     detail::emit_name(body, "hop_count");
     const std::array<std::byte, 1> hop{static_cast<std::byte>(meta.hop)};
-    detail::emit_tlv(body, Type::Value, Opt{}, hop);
+    detail::emit_tlv(body, type_t::VALUE, opt_t{}, hop);
 
     detail::emit_name(body, "data");
     body.insert(body.end(), data.begin(), data.end());  // wrapped data TLV, verbatim, last
 
     std::vector<std::byte> out;
-    detail::emit_tlv(out, Type::Router, Opt{.pl = true}, body);
+    detail::emit_tlv(out, type_t::ROUTER, opt_t{.pl = true}, body);
     return out;
 }
 
-std::expected<Unwrapped, Error> router_unwrap(std::span<const std::byte> frame) {
+std::expected<unwrapped_t, error_t> router_unwrap(std::span<const std::byte> frame) {
     const auto router = read_head(frame, 0);
-    if (!router || router->type != static_cast<std::uint8_t>(Type::Router) ||
+    if (!router || router->type != static_cast<std::uint8_t>(type_t::ROUTER) ||
         router->total != frame.size()) {
-        return std::unexpected(Error::FrameInvalid);
+        return std::unexpected(error_t::FRAME_INVALID);
     }
 
-    Unwrapped out;
+    unwrapped_t out;
     const std::size_t end = router->payload_off + router->payload_len;
     std::size_t cur = router->payload_off;
 
     while (cur < end) {
         const auto tag = read_head(frame, cur);
-        if (!tag || tag->type != static_cast<std::uint8_t>(Type::Name))
-            return std::unexpected(Error::FrameInvalid);
+        if (!tag || tag->type != static_cast<std::uint8_t>(type_t::NAME))
+            return std::unexpected(error_t::FRAME_INVALID);
         const std::string_view name(reinterpret_cast<const char*>(frame.data() + tag->payload_off),
                                     tag->payload_len);
         cur += tag->total;
 
         if (name == "data") {  // the rest of the ROUTER payload is the wrapped TLV
-            if (cur >= end) return std::unexpected(Error::FrameInvalid);
+            if (cur >= end) return std::unexpected(error_t::FRAME_INVALID);
             out.data = frame.subspan(cur, end - cur);
             return out;
         }
 
         const auto val = read_head(frame, cur);
-        if (!val) return std::unexpected(Error::FrameInvalid);
+        if (!val) return std::unexpected(error_t::FRAME_INVALID);
         const auto payload = frame.subspan(val->payload_off, val->payload_len);
         if (name == "origin_peer_id") {
             if (payload.size() != out.meta.origin.size())
-                return std::unexpected(Error::FrameInvalid);
+                return std::unexpected(error_t::FRAME_INVALID);
             std::memcpy(out.meta.origin.data(), payload.data(), payload.size());
         } else if (name == "origin_timestamp") {
             out.meta.ts = detail::load_le(payload);
@@ -105,7 +105,7 @@ std::expected<Unwrapped, Error> router_unwrap(std::span<const std::byte> frame) 
         cur += val->total;
     }
 
-    return std::unexpected(Error::FrameInvalid);  // no "data" child
+    return std::unexpected(error_t::FRAME_INVALID);  // no "data" child
 }
 
-}  // namespace tracer
+}  // namespace tr

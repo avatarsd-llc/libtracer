@@ -6,7 +6,12 @@
 #include <cstring>
 #include <new>
 
-namespace tracer::mem {
+namespace tr::mem {
+
+// The sanctioned L0↔L1 boundary type (docs/adr/0016 §2): a backend constructs
+// and reclaims segments, so it names this one `tr::view` symbol.
+using view::segment_t;
+
 namespace {
 
 constexpr std::size_t align_up(std::size_t n, std::size_t a) noexcept {
@@ -21,20 +26,20 @@ std::byte* align_ptr_up(std::byte* p, std::size_t a) noexcept {
 
 }  // namespace
 
-Pool::Pool(std::span<std::byte> slab, std::size_t slot_payload, std::size_t align) noexcept
-    : MemBackend("mem_pool") {
+pool_t::pool_t(std::span<std::byte> slab, std::size_t slot_payload, std::size_t align) noexcept
+    : mem_backend_t("mem_pool") {
     slot_payload_ = slot_payload;
     align_ = align;
 
-    // The slot start must satisfy both the payload alignment and Segment's own
-    // alignment (a Segment is placement-constructed at each slot start).
-    const std::size_t a = align < alignof(Segment) ? alignof(Segment) : align;
+    // The slot start must satisfy both the payload alignment and segment_t's own
+    // alignment (a segment_t is placement-constructed at each slot start).
+    const std::size_t a = align < alignof(segment_t) ? alignof(segment_t) : align;
     std::byte* base = align_ptr_up(slab.data(), a);
     const std::size_t lost = static_cast<std::size_t>(base - slab.data());
     slab_ = (lost < slab.size()) ? std::span<std::byte>(base, slab.size() - lost)
                                  : std::span<std::byte>{};
 
-    header_ = align_up(sizeof(Segment), a);
+    header_ = align_up(sizeof(segment_t), a);
     stride_ = align_up(header_ + slot_payload, a);
     slot_count_ = stride_ ? slab_.size() / stride_ : 0;
     free_count_ = slot_count_;
@@ -46,32 +51,32 @@ Pool::Pool(std::span<std::byte> slab, std::size_t slot_payload, std::size_t alig
     }
 }
 
-void Pool::store_next(std::size_t slot, std::size_t next) noexcept {
+void pool_t::store_next(std::size_t slot, std::size_t next) noexcept {
     std::memcpy(slot_at(slot), &next, sizeof(next));
 }
 
-std::size_t Pool::load_next(std::size_t slot) const noexcept {
+std::size_t pool_t::load_next(std::size_t slot) const noexcept {
     std::size_t next = kNil;
     std::memcpy(&next, slot_at(slot), sizeof(next));
     return next;
 }
 
-Segment* Pool::alloc(std::size_t size, std::uint32_t /*hint*/) {
+segment_t* pool_t::alloc(std::size_t size, alloc_hint_t /*hint*/) {
     if (size > slot_payload_ || free_head_ == kNil) return nullptr;
     const std::size_t idx = free_head_;
     free_head_ = load_next(idx);
     --free_count_;
     std::byte* payload = slot_at(idx) + header_;
-    return new (slot_at(idx)) Segment(this, std::span<std::byte>(payload, size));
+    return new (slot_at(idx)) segment_t(this, std::span<std::byte>(payload, size));
 }
 
-void Pool::destroy(Segment* seg) noexcept {
+void pool_t::destroy(segment_t* seg) noexcept {
     const std::size_t idx =
         static_cast<std::size_t>(reinterpret_cast<std::byte*>(seg) - slab_.data()) / stride_;
-    seg->~Segment();
+    seg->~segment_t();
     store_next(idx, free_head_);
     free_head_ = idx;
     ++free_count_;
 }
 
-}  // namespace tracer::mem
+}  // namespace tr::mem

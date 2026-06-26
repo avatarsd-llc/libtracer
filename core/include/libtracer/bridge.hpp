@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
 //
-// The bridge: connects a local Graph to a Transport, attaching/shedding the
+// The bridge: connects a local graph_t to a transport_t, attaching/shedding the
 // ROUTER envelope and terminating cycles (docs/reference/10 §bridge, 07 §cycle
 // handling). Egress: export_vertex subscribes a local vertex and forwards each
 // write as a ROUTER-wrapped frame. Ingress: the transport receiver unwraps,
@@ -25,28 +25,28 @@
 #include "libtracer/router.hpp"
 #include "libtracer/transport.hpp"
 
-namespace tracer {
+namespace tr {
 
 // The hop_count termination cap (docs/reference/05 §0x0D, ADR-0014). 32 mirrors
 // the in-process kMaxDispatchDepth.
 inline constexpr std::uint8_t kMaxHops = 32;
 
-class Bridge {
+class bridge_t {
    public:
-    Bridge(graph::Graph& graph, Transport& transport, PeerId peer);
+    bridge_t(graph::graph_t& graph, transport_t& transport, peer_id_t peer);
 
-    Bridge(const Bridge&) = delete;
-    Bridge& operator=(const Bridge&) = delete;
+    bridge_t(const bridge_t&) = delete;
+    bridge_t& operator=(const bridge_t&) = delete;
 
     // Forward every write to `src` (a local vertex) onto the transport, ROUTER-
     // wrapped (origin = this peer, ts = now, hop = 0). NotFound if src is unknown.
-    [[nodiscard]] graph::Result<void> export_vertex(const graph::Path& src);
+    [[nodiscard]] graph::result_t<void> export_vertex(const graph::path_t& src);
 
     // Where ingested data lands (the proxy vertex; must be registered before frames
     // arrive). set_recent_set_capacity(0) disables dedup (pure hop_count
     // termination). set_reforward(true) re-emits ingested frames with hop+1 (used to
     // build a cycle for the termination test).
-    void set_mount(const graph::Path& mount);
+    void set_mount(const graph::path_t& mount);
     void set_recent_set_capacity(std::size_t capacity);
     void set_reforward(bool on);
 
@@ -55,16 +55,16 @@ class Bridge {
     [[nodiscard]] std::uint64_t hop_dropped() const noexcept { return hop_dropped_.load(); }
 
    private:
-    void on_frame(std::span<const std::byte> frame);  // the transport receiver
-    [[nodiscard]] bool seen(const RouterMeta& meta);  // recent-set check + insert
+    void on_frame(std::span<const std::byte> frame);     // the transport receiver
+    [[nodiscard]] bool seen(const router_meta_t& meta);  // recent-set check + insert
 
-    graph::Graph& graph_;
-    Transport& transport_;
-    PeerId peer_;
+    graph::graph_t& graph_;
+    transport_t& transport_;
+    peer_id_t peer_;
 
     // Resolved once at set_mount (no per-frame string/lookup); atomic because the
     // transport's receive thread reads these while setup writes them.
-    std::atomic<graph::Vertex*> mount_vertex_{nullptr};
+    std::atomic<graph::vertex_t*> mount_vertex_{nullptr};
     std::atomic<bool> reforward_{false};
     std::atomic<std::size_t> recent_cap_{64};
 
@@ -77,4 +77,4 @@ class Bridge {
     std::atomic<std::uint64_t> hop_dropped_{0};
 };
 
-}  // namespace tracer
+}  // namespace tr

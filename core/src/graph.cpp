@@ -15,7 +15,7 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/view.hpp"
 
-namespace tracer::graph {
+namespace tr::graph {
 namespace {
 
 // Emit a VALUE TLV holding a `width`-byte little-endian integer — the one bespoke
@@ -23,7 +23,7 @@ namespace {
 void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
     std::vector<std::byte> payload(static_cast<std::size_t>(width));
     detail::store_le(payload, value, static_cast<std::size_t>(width));
-    detail::emit_tlv(out, Type::Value, Opt{}, payload);
+    detail::emit_tlv(out, type_t::VALUE, opt_t{}, payload);
 }
 
 // The last NAME segment within a canonical PATH-payload key (the vertex's name).
@@ -41,7 +41,7 @@ void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
 }
 
 // Reconstruct a canonical PATH key from a decoded PATH TLV's NAME children.
-[[nodiscard]] std::vector<std::byte> path_child_key(const Tlv& path) {
+[[nodiscard]] std::vector<std::byte> path_child_key(const tlv_t& path) {
     std::vector<std::byte> key;
     for (const auto& name : path.children) {
         const auto enc = encode(name);  // a NAME TLV: 02 00 <len> <bytes>
@@ -52,36 +52,36 @@ void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
 
 }  // namespace
 
-Result<Vertex*> Graph::register_vertex(const Path& path, Role role, Handlers handlers,
-                                       Settings settings) {
-    PathKey key{std::vector<std::byte>(path.key().begin(), path.key().end())};
+result_t<vertex_t*> graph_t::register_vertex(const path_t& path, role_t role, handlers_t handlers,
+                                             settings_t settings) {
+    path_key_t key{std::vector<std::byte>(path.key().begin(), path.key().end())};
     const std::unique_lock lock(map_mutex_);
-    if (vertices_.find(key) != vertices_.end()) return std::unexpected(Status::PathInUse);
-    auto vertex = std::make_unique<Vertex>(role, key, settings, std::move(handlers));
-    Vertex* ptr = vertex.get();
+    if (vertices_.find(key) != vertices_.end()) return std::unexpected(status_t::PATH_IN_USE);
+    auto vertex = std::make_unique<vertex_t>(role, key, settings, std::move(handlers));
+    vertex_t* ptr = vertex.get();
     vertices_.emplace(std::move(key), std::move(vertex));
     return ptr;
 }
 
-Vertex* Graph::find(std::span<const std::byte> key) const {
-    PathKey k{std::vector<std::byte>(key.begin(), key.end())};
+vertex_t* graph_t::find(std::span<const std::byte> key) const {
+    path_key_t k{std::vector<std::byte>(key.begin(), key.end())};
     const std::shared_lock lock(map_mutex_);
     const auto it = vertices_.find(k);
     return it == vertices_.end() ? nullptr : it->second.get();
 }
 
-Result<View> Graph::read(Vertex* v) const {
-    if (v->role_ == Role::Handler) {
+result_t<view_t> graph_t::read(vertex_t* v) const {
+    if (v->role_ == role_t::HANDLER) {
         if (v->handlers_.on_read) return v->handlers_.on_read();
-        return std::unexpected(Status::NotFound);
+        return std::unexpected(status_t::NOT_FOUND);
     }
-    const std::shared_ptr<const View> sp = v->lkv_.load();  // lock-free
-    if (!sp) return std::unexpected(Status::NotFound);
-    return *sp;  // copies the View => clones the SegmentPtr (refcount bump, no byte copy)
+    const std::shared_ptr<const view_t> sp = v->lkv_.load();  // lock-free
+    if (!sp) return std::unexpected(status_t::NOT_FOUND);
+    return *sp;  // copies the view_t => clones the segment_ptr_t (refcount bump, no byte copy)
 }
 
-void Graph::fan_out(Vertex* v, const View& value, int depth) {
-    std::vector<Subscriber> snapshot;
+void graph_t::fan_out(vertex_t* v, const view_t& value, int depth) {
+    std::vector<subscriber_t> snapshot;
     {
         const std::lock_guard lock(v->m_);
         snapshot = v->subs_;  // copy, then dispatch outside the lock (callbacks may re-enter)
@@ -90,17 +90,17 @@ void Graph::fan_out(Vertex* v, const View& value, int depth) {
         if (!s.active) continue;
         if (s.callback) s.callback(value);  // callbacks always fire (cloned view)
         if (!s.target_key.empty() && depth + 1 < kMaxDispatchDepth) {
-            if (Vertex* target = find(s.target_key)) {
+            if (vertex_t* target = find(s.target_key)) {
                 (void)write_impl(target, value, depth + 1);  // value copied (clone) into the param
             }
         }
     }
 }
 
-Result<void> Graph::write_impl(Vertex* v, View value, int depth) {
-    if (v->role_ == Role::Handler) {
-        if (!v->handlers_.on_write) return std::unexpected(Status::NotFound);
-        Result<void> r = v->handlers_.on_write(value);
+result_t<void> graph_t::write_impl(vertex_t* v, view_t value, int depth) {
+    if (v->role_ == role_t::HANDLER) {
+        if (!v->handlers_.on_write) return std::unexpected(status_t::NOT_FOUND);
+        result_t<void> r = v->handlers_.on_write(value);
         if (!r) return r;
         {
             const std::lock_guard lock(v->m_);
@@ -111,12 +111,12 @@ Result<void> Graph::write_impl(Vertex* v, View value, int depth) {
         return {};
     }
 
-    auto sp = std::make_shared<const View>(std::move(value));
+    auto sp = std::make_shared<const view_t>(std::move(value));
     v->lkv_.store(sp);  // lock-free publish of the new last-known-value
 
     {
         const std::lock_guard lock(v->m_);
-        if (v->role_ == Role::Stream) {
+        if (v->role_ == role_t::STREAM) {
             v->history_.push_back(sp);
             const std::size_t keep =
                 v->settings_.history_keep_last ? v->settings_.history_keep_last : 1;
@@ -129,69 +129,72 @@ Result<void> Graph::write_impl(Vertex* v, View value, int depth) {
     return {};
 }
 
-Result<void> Graph::write(Vertex* v, View value) { return write_impl(v, std::move(value), 0); }
+result_t<void> graph_t::write(vertex_t* v, view_t value) {
+    return write_impl(v, std::move(value), 0);
+}
 
-Result<void> Graph::write(Vertex* v, const FieldPath& field, View value) {
+result_t<void> graph_t::write(vertex_t* v, const field_path_t& field, view_t value) {
     if (field.empty()) return write_impl(v, std::move(value), 0);
     return field_write(v, field, value);
 }
 
-Result<View> Graph::await(Vertex* v, std::chrono::nanoseconds timeout) {
+result_t<view_t> graph_t::await(vertex_t* v, std::chrono::nanoseconds timeout) {
     std::unique_lock lock(v->m_);
     const std::uint64_t seq0 = v->write_seq_;
     if (!v->cv_.wait_for(lock, timeout, [&] { return v->write_seq_ != seq0; })) {
-        return std::unexpected(Status::Timeout);
+        return std::unexpected(status_t::TIMEOUT);
     }
     lock.unlock();
-    const std::shared_ptr<const View> sp = v->lkv_.load();
-    if (!sp) return std::unexpected(Status::NotFound);  // e.g. a Handler-role write
+    const std::shared_ptr<const view_t> sp = v->lkv_.load();
+    if (!sp) return std::unexpected(status_t::NOT_FOUND);  // e.g. a Handler-role write
     return *sp;
 }
 
-Result<std::vector<View>> Graph::history(Vertex* v) const {
-    if (v->role_ != Role::Stream) return std::unexpected(Status::SchemaNotFound);
+result_t<std::vector<view_t>> graph_t::history(vertex_t* v) const {
+    if (v->role_ != role_t::STREAM) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     const std::lock_guard lock(v->m_);
-    std::vector<View> out;
+    std::vector<view_t> out;
     out.reserve(v->history_.size());
     for (const auto& sp : v->history_) out.push_back(*sp);  // clone each (refcount bump)
     return out;
 }
 
-Result<void> Graph::subscribe(const Path& src, const Path& target) {
-    Vertex* v = find(src.key());
-    if (!v) return std::unexpected(Status::NotFound);
-    Subscriber s;
+result_t<void> graph_t::subscribe(const path_t& src, const path_t& target) {
+    vertex_t* v = find(src.key());
+    if (!v) return std::unexpected(status_t::NOT_FOUND);
+    subscriber_t s;
     s.target_key.assign(target.key().begin(), target.key().end());
     const std::lock_guard lock(v->m_);
     v->subs_.push_back(std::move(s));
     return {};
 }
 
-Result<void> Graph::subscribe(const Path& src, std::function<void(const View&)> callback) {
-    Vertex* v = find(src.key());
-    if (!v) return std::unexpected(Status::NotFound);
-    Subscriber s;
+result_t<void> graph_t::subscribe(const path_t& src, std::function<void(const view_t&)> callback) {
+    vertex_t* v = find(src.key());
+    if (!v) return std::unexpected(status_t::NOT_FOUND);
+    subscriber_t s;
     s.callback = std::move(callback);
     const std::lock_guard lock(v->m_);
     v->subs_.push_back(std::move(s));
     return {};
 }
 
-Result<void> Graph::field_write(Vertex* v, const FieldPath& field, const View& value) {
-    const FieldStep& step0 = field.steps[0];
+result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, const view_t& value) {
+    const field_step_t& step0 = field.steps[0];
 
     if (step0.name == "subscribers") {
         if (step0.append) {
             const auto sub = view_as_tlv(value);
-            if (!sub || sub->type != Type::Subscriber) return std::unexpected(Status::TypeMismatch);
-            Subscriber s;
+            if (!sub || sub->type != type_t::SUBSCRIBER)
+                return std::unexpected(status_t::TYPE_MISMATCH);
+            subscriber_t s;
             for (const auto& child : sub->children) {
-                if (child.type == Type::Path) {
+                if (child.type == type_t::PATH) {
                     s.target_key = path_child_key(child);
                     break;
                 }
             }
-            if (s.target_key.empty()) return std::unexpected(Status::TypeMismatch);
+            if (s.target_key.empty()) return std::unexpected(status_t::TYPE_MISMATCH);
             const std::lock_guard lock(v->m_);
             v->subs_.push_back(std::move(s));
             return {};
@@ -201,12 +204,12 @@ Result<void> Graph::field_write(Vertex* v, const FieldPath& field, const View& v
             if (step0.index < v->subs_.size()) v->subs_[step0.index].active = false;
             return {};
         }
-        return std::unexpected(Status::SchemaNotFound);
+        return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     }
 
     if (step0.name == "settings" && field.steps.size() >= 2) {
         const auto tlv = view_as_tlv(value);
-        if (!tlv || tlv->type != Type::Value) return std::unexpected(Status::TypeMismatch);
+        if (!tlv || tlv->type != type_t::VALUE) return std::unexpected(status_t::TYPE_MISMATCH);
         const std::uint64_t n = detail::load_le(tlv->payload);
         const std::string& f = field.steps[1].name;
         const std::lock_guard lock(v->m_);
@@ -223,16 +226,16 @@ Result<void> Graph::field_write(Vertex* v, const FieldPath& field, const View& v
         } else if (f == "deadline_ns") {
             v->settings_.deadline_ns = n;
         } else {
-            return std::unexpected(Status::SchemaNotFound);
+            return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         }
         return {};
     }
 
-    return std::unexpected(Status::SchemaNotFound);
+    return std::unexpected(status_t::SCHEMA_NOT_FOUND);
 }
 
-Result<View> Graph::read_schema(Vertex* v) const {
-    Settings s;
+result_t<view_t> graph_t::read_schema(vertex_t* v) const {
+    settings_t s;
     {
         const std::lock_guard lock(v->m_);
         s = v->settings_;
@@ -247,38 +250,39 @@ Result<View> Graph::read_schema(Vertex* v) const {
 
     std::vector<std::byte> point_body;
     detail::emit_name(point_body, last_segment(v->key_.bytes));
-    detail::emit_tlv(point_body, Type::Settings, Opt{.pl = true}, settings_children);  // SETTINGS
+    detail::emit_tlv(point_body, type_t::SETTINGS, opt_t{.pl = true},
+                     settings_children);  // SETTINGS
 
     std::vector<std::byte> point;
-    detail::emit_tlv(point, Type::Point, Opt{.pl = true}, point_body);  // POINT
+    detail::emit_tlv(point, type_t::POINT, opt_t{.pl = true}, point_body);  // POINT
 
-    SegmentPtr seg = mem::heap_alloc(point.size());
-    if (!seg) return std::unexpected(Status::Backpressure);
+    segment_ptr_t seg = view::heap_alloc(point.size());
+    if (!seg) return std::unexpected(status_t::BACKPRESSURE);
     std::memcpy(seg->bytes.data(), point.data(), point.size());
-    return View::over(std::move(seg));
+    return view_t::over(std::move(seg));
 }
 
-Result<View> Graph::read(const Path& path) const {
-    Vertex* v = find(path.key());
-    if (!v) return std::unexpected(Status::NotFound);
+result_t<view_t> graph_t::read(const path_t& path) const {
+    vertex_t* v = find(path.key());
+    if (!v) return std::unexpected(status_t::NOT_FOUND);
     if (!path.field().empty()) {
-        const FieldPath& f = path.field();
+        const field_path_t& f = path.field();
         if (f.steps.size() == 1 && f.steps[0].name == "schema") return read_schema(v);
-        return std::unexpected(Status::SchemaNotFound);
+        return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     }
     return read(v);
 }
 
-Result<void> Graph::write(const Path& path, View value) {
-    Vertex* v = find(path.key());
-    if (!v) return std::unexpected(Status::NotFound);
-    return write(v, path.field(), std::move(value));  // handle-based; see the Vertex* overload
+result_t<void> graph_t::write(const path_t& path, view_t value) {
+    vertex_t* v = find(path.key());
+    if (!v) return std::unexpected(status_t::NOT_FOUND);
+    return write(v, path.field(), std::move(value));  // handle-based; see the vertex_t* overload
 }
 
-Result<View> Graph::await(const Path& path, std::chrono::nanoseconds timeout) {
-    Vertex* v = find(path.key());
-    if (!v) return std::unexpected(Status::NotFound);
+result_t<view_t> graph_t::await(const path_t& path, std::chrono::nanoseconds timeout) {
+    vertex_t* v = find(path.key());
+    if (!v) return std::unexpected(status_t::NOT_FOUND);
     return await(v, timeout);
 }
 
-}  // namespace tracer::graph
+}  // namespace tr::graph

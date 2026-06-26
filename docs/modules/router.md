@@ -15,18 +15,18 @@ ROUTER (`0x0D`) is a structured TLV whose `NAME`-tagged children carry the routi
 metadata, with `NAME "data"` followed by the wrapped data TLV as the **last** child.
 `router_wrap` emits it via the [frame-codec](frame-codec.md) byte emitters
 (LL-aware, so large payloads still fit); `router_unwrap` walks the children to fill
-`RouterMeta` and returns a `span` over the data — no copy. To downstream
+`router_meta_t` and returns a `span` over the data — no copy. To downstream
 subscribers the ROUTER is invisible (the [bridge](bridge.md) strips it); to other
 bridges it carries the dedup key and `hop_count`.
 
 ## Interface
 
 ```cpp
-struct RouterMeta { PeerId origin; std::uint64_t ts; std::uint8_t hop; };
-struct Unwrapped  { RouterMeta meta; std::span<const std::byte> data; };  // borrows the frame
+struct router_meta_t { peer_id_t origin; std::uint64_t ts; std::uint8_t hop; };
+struct unwrapped_t  { router_meta_t meta; std::span<const std::byte> data; };  // borrows the frame
 
-std::vector<std::byte> router_wrap(std::span<const std::byte> data, const RouterMeta&);
-std::expected<Unwrapped, Error> router_unwrap(std::span<const std::byte> frame);
+std::vector<std::byte> router_wrap(std::span<const std::byte> data, const router_meta_t&);
+std::expected<unwrapped_t, error_t> router_unwrap(std::span<const std::byte> frame);
 ```
 
 ## Envelope layout

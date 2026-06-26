@@ -8,8 +8,6 @@
 //   (3) targeted asserts     — the CRC value, the PATH child count, reserved-bit rejection.
 // expected.json stays as the human-readable / cross-language spec.
 
-#include "libtracer/tracer.hpp"
-
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -23,12 +21,13 @@
 #include <string_view>
 #include <vector>
 
+#include "libtracer/tracer.hpp"
+
 namespace {
 
 namespace fs = std::filesystem;
-using tracer::Error;
-using tracer::Tlv;
-using tracer::Type;
+using tr::tlv_t;
+using tr::type_t;
 
 int g_failures = 0;
 
@@ -49,24 +48,24 @@ std::vector<std::byte> read_file(const fs::path& p) {
 }
 
 // --- golden builders (construct each seed TLV programmatically) -------------
-Tlv status_ok() { return Tlv{.type = Type::Status}; }
-Tlv value(std::span<const std::byte> p) { return Tlv{.type = Type::Value, .payload = p}; }
-Tlv name(std::span<const std::byte> p) { return Tlv{.type = Type::Name, .payload = p}; }
+tlv_t status_ok() { return tlv_t{.type = type_t::STATUS}; }
+tlv_t value(std::span<const std::byte> p) { return tlv_t{.type = type_t::VALUE, .payload = p}; }
+tlv_t name(std::span<const std::byte> p) { return tlv_t{.type = type_t::NAME, .payload = p}; }
 
-Tlv path2(std::span<const std::byte> a, std::span<const std::byte> b) {
-    Tlv t{.type = Type::Path};
+tlv_t path2(std::span<const std::byte> a, std::span<const std::byte> b) {
+    tlv_t t{.type = type_t::PATH};
     t.opt.pl = true;
     t.children.push_back(name(a));
     t.children.push_back(name(b));
     return t;
 }
 
-Tlv value_crc(std::span<const std::byte> p) {
-    Tlv t{.type = Type::Value, .payload = p};
+tlv_t value_crc(std::span<const std::byte> p) {
+    tlv_t t{.type = type_t::VALUE, .payload = p};
     t.opt.cr = true;
-    t.trailer = tracer::Trailer{
+    t.trailer = tr::trailer_t{
         .ts = std::nullopt,
-        .crc = tracer::Crc{.width = tracer::Crc::Width::Crc32c, .value = tracer::crc::crc32c(p)}};
+        .crc = tr::crc_t{.width = tr::crc_t::width_t::Crc32c, .value = tr::crc::crc32c(p)}};
     return t;
 }
 
@@ -80,12 +79,12 @@ int main() {
         if (e.path().filename() != "input.bin") continue;
         const std::string label = e.path().parent_path().filename().string();
         const std::vector<std::byte> bytes = read_file(e.path());
-        const auto dec = tracer::decode(bytes);
+        const auto dec = tr::decode(bytes);
         if (!dec) {
             check(false, label + " (decode failed)");
             continue;
         }
-        check(tracer::encode(*dec) == bytes, label);
+        check(tr::encode(*dec) == bytes, label);
     }
 
     std::printf("Golden builders (encode == input.bin && decode == built):\n");
@@ -97,11 +96,11 @@ int main() {
     static constexpr std::array s_temp{std::byte{'t'}, std::byte{'e'}, std::byte{'m'},
                                        std::byte{'p'}};
 
-    const auto golden = [&](const std::string& sub, const Tlv& built) {
+    const auto golden = [&](const std::string& sub, const tlv_t& built) {
         const std::vector<std::byte> input = read_file(vroot / sub / "input.bin");
-        check(tracer::encode(built) == input, sub + " encode");
-        const auto dec = tracer::decode(input);
-        check(dec.has_value() && tracer::equal(*dec, built), sub + " decode");
+        check(tr::encode(built) == input, sub + " encode");
+        const auto dec = tr::decode(input);
+        check(dec.has_value() && tr::equal(*dec, built), sub + " decode");
     };
     golden("framing/empty-status-ok", status_ok());
     golden("tlv-types/value-bool-true", value(b_true));
@@ -109,20 +108,21 @@ int main() {
     golden("crc/value-crc32c", value_crc(b_val));
 
     std::printf("Targeted asserts:\n");
-    check(tracer::crc::crc32c(b_val) == 0x2312C9B6u, "crc32c(AABBCCDDEE) == 0x2312C9B6");
+    check(tr::crc::crc32c(b_val) == 0x2312C9B6u, "crc32c(AABBCCDDEE) == 0x2312C9B6");
     {
         static constexpr std::array want{std::byte{0x09}, std::byte{0}, std::byte{0}, std::byte{0}};
-        check(std::ranges::equal(tracer::encode(status_ok()), want),
+        check(std::ranges::equal(tr::encode(status_ok()), want),
               "empty STATUS encodes to 09 00 00 00");
     }
     {
-        const auto dec = tracer::decode(read_file(vroot / "path/path-sensor-temp" / "input.bin"));
+        const auto dec = tr::decode(read_file(vroot / "path/path-sensor-temp" / "input.bin"));
         check(dec.has_value() && dec->children.size() == 2, "PATH decodes to 2 NAME children");
     }
     {
-        const std::vector<std::byte> bad{std::byte{0x09}, std::byte{0x01}, std::byte{0}, std::byte{0}};
-        const auto dec = tracer::decode(bad);
-        check(!dec.has_value() && dec.error() == Error::FrameInvalid,
+        const std::vector<std::byte> bad{std::byte{0x09}, std::byte{0x01}, std::byte{0},
+                                         std::byte{0}};
+        const auto dec = tr::decode(bad);
+        check(!dec.has_value() && dec.error() == tr::error_t::FRAME_INVALID,
               "reserved-bit input rejected as frame::invalid");
     }
 

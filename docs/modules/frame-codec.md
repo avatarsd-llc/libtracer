@@ -2,16 +2,16 @@
 
 ```{admonition} In one paragraph
 :class: tip
-The codec turns wire bytes into a borrowed `Tlv` tree and back. A TLV is a 4- or
+The codec turns wire bytes into a borrowed `tlv_t` tree and back. A TLV is a 4- or
 6-byte header (type, an `opt` bitfield, a length) + payload + an optional trailer
 (timestamp, CRC). **`decode`** never copies payloads — they are `std::span`s into
-the input buffer; **`encode`** serializes a `Tlv` and recomputes the CRC. The
+the input buffer; **`encode`** serializes a `tlv_t` and recomputes the CRC. The
 [bit-level walkthrough](wire-format-bits.md) shows every bit.
 ```
 
 ## What it does
 
-`decode(bytes) → std::expected<Tlv, Error>` parses exactly one TLV that fills the
+`decode(bytes) → std::expected<tlv_t, error_t>` parses exactly one TLV that fills the
 input: it reads the header, rejects reserved bits and bad structure, verifies the
 trailer CRC, and — when `opt.PL=1` (payload-is-structured) — walks child TLVs
 **iteratively** with a depth cap of 32 (no recursion blow-ups). The result borrows
@@ -27,19 +27,19 @@ bytes** of header. CRCs are **CRC-32C** (default) or CRC-16-CCITT, both
 ## Interface
 
 ```cpp
-enum class Type : std::uint8_t { Value=0x01, Name=0x02, /*…*/ Status=0x09, Router=0x0D };
-struct Opt { bool pl, ts, cr, ll, cw, tf;              // the 6 option bits
-             std::uint8_t encode() const; static Opt decode(std::uint8_t); };
+enum class type_t : std::uint8_t { VALUE=0x01, NAME=0x02, /*…*/ STATUS=0x09, ROUTER=0x0D };
+struct opt_t { bool pl, ts, cr, ll, cw, tf;            // the 6 option bits
+             std::uint8_t encode() const; static opt_t decode(std::uint8_t); };
 
-struct Tlv {
-    Type type;  Opt opt;
+struct tlv_t {
+    type_t type;  opt_t opt;
     std::span<const std::byte> payload;                // opaque TLVs (borrowed)
-    std::vector<Tlv> children;                         // structured TLVs (opt.PL=1)
-    std::optional<Trailer> trailer;                    // {Timestamp?, Crc?}
+    std::vector<tlv_t> children;                       // structured TLVs (opt.PL=1)
+    std::optional<trailer_t> trailer;                  // {timestamp_t?, crc_t?}
 };
 
-std::expected<Tlv, Error> decode(std::span<const std::byte>);   // borrowed, depth-capped
-std::vector<std::byte>    encode(const Tlv&);                   // recomputes CRC
+std::expected<tlv_t, error_t> decode(std::span<const std::byte>);   // borrowed, depth-capped
+std::vector<std::byte>    encode(const tlv_t&);                 // recomputes CRC
 
 namespace crc { std::uint32_t crc32c(...); std::uint16_t crc16_ccitt(...); }   // constexpr
 ```

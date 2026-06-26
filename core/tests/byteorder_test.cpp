@@ -15,7 +15,7 @@
 
 namespace {
 
-using namespace tracer::detail;
+using namespace tr::detail;
 
 int g_failures = 0;
 void check(bool ok, const char* what) {

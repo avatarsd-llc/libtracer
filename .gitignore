@@ -60,3 +60,6 @@ compile_commands.json
 docs/_build/
 _build/
 .venv/
+
+# Doxygen XML generated for the Sphinx (Breathe) build
+docs/_doxygen/

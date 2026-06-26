@@ -14,30 +14,53 @@
 #pragma once
 
 #include <cstddef>
-#include <cstdint>
 #include <span>
 
 #include "libtracer/backend.hpp"
 #include "libtracer/segment.hpp"
 
-namespace tracer::mem {
+/**
+ * @file
+ * @brief The bounded `mem_pool` L0 backend (`tr::mem`) over a caller-owned slab.
+ */
 
-class Pool final : public MemBackend {
+namespace tr::mem {
+
+/**
+ * @brief A fixed-slot allocator over a caller-owned slab; `alloc`-or-`nullptr`.
+ *
+ * Carves the slab into equal slots with the free list threaded through the slab
+ * (no auxiliary heap), so memory use is exactly the caller's slab and
+ * exhaustion is a return value, not an OOM. The deterministic MCU choice.
+ */
+class pool_t final : public mem_backend_t {
    public:
-    // Carve `slab` (caller-owned; must outlive the pool) into slots each able to
-    // hold a Segment control block plus `slot_payload` usable bytes, with the
-    // payload aligned to `align` (a power of two). The slot count is whatever
-    // fits after aligning the slab base.
-    Pool(std::span<std::byte> slab, std::size_t slot_payload,
-         std::size_t align = alignof(std::max_align_t)) noexcept;
+    /**
+     * @brief Carve @p slab (caller-owned; must outlive the pool) into slots.
+     *
+     * Each slot holds a `segment_t` control block plus @p slot_payload usable
+     * bytes, payload aligned to @p align (a power of two). The slot count is
+     * whatever fits after aligning the slab base.
+     */
+    pool_t(std::span<std::byte> slab, std::size_t slot_payload,
+           std::size_t align = alignof(std::max_align_t)) noexcept;
 
-    Segment* alloc(std::size_t size, std::uint32_t hint) override;
-    void destroy(Segment* seg) noexcept override;
+    /**
+     * @brief Hand out the next free slot as a `segment_t` of @p size bytes.
+     * @retval nullptr `size` exceeds the slot payload, or the pool is exhausted.
+     */
+    view::segment_t* alloc(std::size_t size, alloc_hint_t hint = alloc_hint_t::NONE) override;
+    /** @brief Return @p seg's slot to the free list (placement-destroying it). */
+    void destroy(view::segment_t* seg) noexcept override;
     [[nodiscard]] std::size_t alignment() const noexcept override { return align_; }
     [[nodiscard]] std::size_t max_segment_size() const noexcept override { return slot_payload_; }
 
-    [[nodiscard]] std::size_t capacity() const noexcept { return slot_count_; }   // total slots
-    [[nodiscard]] std::size_t available() const noexcept { return free_count_; }  // free slots
+    [[nodiscard]] std::size_t capacity() const noexcept {
+        return slot_count_;
+    } /**< @brief Total slots. */
+    [[nodiscard]] std::size_t available() const noexcept {
+        return free_count_;
+    } /**< @brief Free slots. */
 
    private:
     static constexpr std::size_t kNil = ~std::size_t{0};
@@ -50,11 +73,11 @@ class Pool final : public MemBackend {
     std::span<std::byte> slab_;     // aligned, usable region of the caller's slab
     std::size_t slot_payload_ = 0;  // usable bytes per slot
     std::size_t align_ = 0;         // payload alignment reported via alignment()
-    std::size_t header_ = 0;        // aligned sizeof(Segment) prefixing each slot
+    std::size_t header_ = 0;        // aligned sizeof(segment_t) prefixing each slot
     std::size_t stride_ = 0;        // header_ + aligned slot_payload_
     std::size_t slot_count_ = 0;
     std::size_t free_count_ = 0;
     std::size_t free_head_ = kNil;  // index of first free slot (intrusive free list)
 };
 
-}  // namespace tracer::mem
+}  // namespace tr::mem

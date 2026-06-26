@@ -2,10 +2,10 @@
 // SPDX-FileCopyrightText: Copyright 2026 Avatar LLC
 //
 // Emit one TLV as raw wire bytes — header (type, opt, little-endian length) plus
-// body — without building a `Tlv` model object. The structural byte-builders
+// body — without building a `tlv_t` model object. The structural byte-builders
 // (PATH canonical keys, ROUTER envelopes, :schema POINT descriptors) all share
 // this instead of each hand-rolling the header. For decoding, and for emitting a
-// full `Tlv` value (payload/children/trailers), use frame.hpp's encode/decode.
+// full `tlv_t` value (payload/children/trailers), use frame.hpp's encode/decode.
 #pragma once
 
 #include <cstddef>
@@ -17,12 +17,12 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/tlv.hpp"
 
-namespace tracer::detail {
+namespace tr::detail {
 
 // Append one TLV: <type> <opt> <length> <body>, where length is u16 LE, widening
 // to u32 LE (with the LL bit set) when the body exceeds 0xFFFF. `opt` carries the
-// structural bits — pass `Opt{.pl = true}` for a structured (list) payload.
-inline void emit_tlv(std::vector<std::byte>& out, Type type, Opt opt,
+// structural bits — pass `opt_t{.pl = true}` for a structured (list) payload.
+inline void emit_tlv(std::vector<std::byte>& out, type_t type, opt_t opt,
                      std::span<const std::byte> body) {
     if (body.size() > 0xFFFFu) opt.ll = true;
     out.push_back(static_cast<std::byte>(static_cast<std::uint8_t>(type)));
@@ -33,7 +33,7 @@ inline void emit_tlv(std::vector<std::byte>& out, Type type, Opt opt,
 
 // Append a NAME TLV over opaque bytes — the PATH-segment / metadata-tag workhorse.
 inline void emit_name(std::vector<std::byte>& out, std::span<const std::byte> name) {
-    emit_tlv(out, Type::Name, Opt{}, name);
+    emit_tlv(out, type_t::NAME, opt_t{}, name);
 }
 
 // Append a NAME TLV over a text segment (no temporary buffer).
@@ -42,4 +42,4 @@ inline void emit_name(std::vector<std::byte>& out, std::string_view name) {
                                               name.size()));
 }
 
-}  // namespace tracer::detail
+}  // namespace tr::detail

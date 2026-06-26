@@ -3,9 +3,9 @@
 //
 // The L4 in-process graph runtime. Holds the vertex map (keyed on canonical
 // PATH-TLV payload bytes, docs/reference/02 §dispatch) and exposes the entire
-// data API: read / write / await (ADR-0006). The hot path resolves a Vertex*
+// data API: read / write / await (ADR-0006). The hot path resolves a vertex_t*
 // once (at registration or via one guarded lookup), then read/write/await on
-// that handle are lock-free in the LKV slot. Subscriber fan-out + field-write
+// that handle are lock-free in the LKV slot. subscriber_t fan-out + field-write
 // land in M3b; M3a delivers values via the LKV and the blocking await.
 #pragma once
 
@@ -22,7 +22,7 @@
 #include "libtracer/vertex.hpp"
 #include "libtracer/view.hpp"
 
-namespace tracer::graph {
+namespace tr::graph {
 
 // In-process fan-out cycle bound: a re-dispatch chain deeper than this is dropped
 // (Backpressure). This is the in-process analogue of the wire hop_count/MAX_HOPS
@@ -30,59 +30,60 @@ namespace tracer::graph {
 // forever. See ADR-0015.
 inline constexpr int kMaxDispatchDepth = 32;
 
-class Graph {
+class graph_t {
    public:
-    Graph() = default;
-    Graph(const Graph&) = delete;
-    Graph& operator=(const Graph&) = delete;
+    graph_t() = default;
+    graph_t(const graph_t&) = delete;
+    graph_t& operator=(const graph_t&) = delete;
 
     // Register a vertex at `path` (any field tail is ignored). Returns the pinned
     // handle, or PathInUse if the path is already registered.
-    [[nodiscard]] Result<Vertex*> register_vertex(const Path& path, Role role,
-                                                  Handlers handlers = {}, Settings settings = {});
+    [[nodiscard]] result_t<vertex_t*> register_vertex(const path_t& path, role_t role,
+                                                      handlers_t handlers = {},
+                                                      settings_t settings = {});
 
     // Hot path — operate on a resolved handle; lock-free in the LKV slot.
-    [[nodiscard]] Result<View> read(Vertex* v) const;
-    [[nodiscard]] Result<void> write(Vertex* v, View value);
-    // Field-write by handle: resolve the Vertex* and FieldPath once (e.g. from a
-    // Path::parse("/x:settings.reliability") kept around), then reuse them on the
+    [[nodiscard]] result_t<view_t> read(vertex_t* v) const;
+    [[nodiscard]] result_t<void> write(vertex_t* v, view_t value);
+    // Field-write by handle: resolve the vertex_t* and field_path_t once (e.g. from a
+    // path_t::parse("/x:settings.reliability") kept around), then reuse them on the
     // hot path — no string parse, no map lookup per call. An empty `field` is an
     // ordinary value write. Pass `path.field()` for the field selector.
-    [[nodiscard]] Result<void> write(Vertex* v, const FieldPath& field, View value);
-    [[nodiscard]] Result<View> await(Vertex* v, std::chrono::nanoseconds timeout);
+    [[nodiscard]] result_t<void> write(vertex_t* v, const field_path_t& field, view_t value);
+    [[nodiscard]] result_t<view_t> await(vertex_t* v, std::chrono::nanoseconds timeout);
     // Stream history, newest last (Stream role only).
-    [[nodiscard]] Result<std::vector<View>> history(Vertex* v) const;
+    [[nodiscard]] result_t<std::vector<view_t>> history(vertex_t* v) const;
 
     // Subscribe `src` to a target vertex (spec-faithful: a write to src re-dispatches
     // the cloned value to `target`). NotFound if src is unknown.
-    [[nodiscard]] Result<void> subscribe(const Path& src, const Path& target);
+    [[nodiscard]] result_t<void> subscribe(const path_t& src, const path_t& target);
     // Subscribe `src` to an in-process callback (sugar; the callback fires inline on
     // each write to src with a cloned view).
-    [[nodiscard]] Result<void> subscribe(const Path& src,
-                                         std::function<void(const View&)> callback);
+    [[nodiscard]] result_t<void> subscribe(const path_t& src,
+                                           std::function<void(const view_t&)> callback);
 
     // Convenience — resolve the path key once (guarded map lookup), then hot path.
     // A write/read whose path has a field tail (e.g. ":settings.deadline_ns",
     // ":subscribers[]", ":schema") is routed to the field surface.
-    [[nodiscard]] Result<View> read(const Path& path) const;
-    [[nodiscard]] Result<void> write(const Path& path, View value);
-    [[nodiscard]] Result<View> await(const Path& path, std::chrono::nanoseconds timeout);
+    [[nodiscard]] result_t<view_t> read(const path_t& path) const;
+    [[nodiscard]] result_t<void> write(const path_t& path, view_t value);
+    [[nodiscard]] result_t<view_t> await(const path_t& path, std::chrono::nanoseconds timeout);
 
     // Resolve a canonical PATH-payload key to its vertex (nullptr if unknown).
-    [[nodiscard]] Vertex* find(std::span<const std::byte> key) const;
+    [[nodiscard]] vertex_t* find(std::span<const std::byte> key) const;
 
    private:
     // Update the vertex value (LKV/history/handler), then fan out to subscribers.
     // `depth` bounds in-process re-dispatch cycles (kMaxDispatchDepth).
-    Result<void> write_impl(Vertex* v, View value, int depth);
-    void fan_out(Vertex* v, const View& value, int depth);
+    result_t<void> write_impl(vertex_t* v, view_t value, int depth);
+    void fan_out(vertex_t* v, const view_t& value, int depth);
     // Field surface: ":settings.<f>", ":subscribers[]" / "[N]".
-    Result<void> field_write(Vertex* v, const FieldPath& field, const View& value);
+    result_t<void> field_write(vertex_t* v, const field_path_t& field, const view_t& value);
     // ":schema" read => a POINT descriptor (name + settings).
-    [[nodiscard]] Result<View> read_schema(Vertex* v) const;
+    [[nodiscard]] result_t<view_t> read_schema(vertex_t* v) const;
 
     mutable std::shared_mutex map_mutex_;
-    std::unordered_map<PathKey, std::unique_ptr<Vertex>, PathKeyHash> vertices_;
+    std::unordered_map<path_key_t, std::unique_ptr<vertex_t>, path_key_hash_t> vertices_;
 };
 
-}  // namespace tracer::graph
+}  // namespace tr::graph

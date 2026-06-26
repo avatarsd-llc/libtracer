@@ -12,10 +12,10 @@
 #include <array>
 #include <utility>
 
-namespace tracer {
+namespace tr {
 
-UdpTransport::UdpTransport(std::uint16_t bind_port, const std::string& peer_host,
-                           std::uint16_t peer_port)
+udp_transport_t::udp_transport_t(std::uint16_t bind_port, const std::string& peer_host,
+                                 std::uint16_t peer_port)
     : peer_port_(peer_port) {
     in_addr addr{};
     if (::inet_pton(AF_INET, peer_host.c_str(), &addr) == 1) peer_ip_ = addr.s_addr;
@@ -47,18 +47,18 @@ UdpTransport::UdpTransport(std::uint16_t bind_port, const std::string& peer_host
     thread_ = std::thread([this] { run(); });
 }
 
-UdpTransport::~UdpTransport() {
+udp_transport_t::~udp_transport_t() {
     stop_.store(true, std::memory_order_relaxed);
     if (thread_.joinable()) thread_.join();
     if (fd_ >= 0) ::close(fd_);
 }
 
-void UdpTransport::set_receiver(Receiver receiver) {
+void udp_transport_t::set_receiver(receiver_t receiver) {
     const std::lock_guard lock(m_);
     receiver_ = std::move(receiver);
 }
 
-void UdpTransport::send(std::span<const std::byte> frame) {
+void udp_transport_t::send(std::span<const std::byte> frame) {
     if (fd_ < 0) return;
     sockaddr_in peer{};
     peer.sin_family = AF_INET;
@@ -67,12 +67,12 @@ void UdpTransport::send(std::span<const std::byte> frame) {
     ::sendto(fd_, frame.data(), frame.size(), 0, reinterpret_cast<sockaddr*>(&peer), sizeof(peer));
 }
 
-void UdpTransport::run() {
+void udp_transport_t::run() {
     std::array<std::byte, 65536> buf;
     while (!stop_.load(std::memory_order_relaxed)) {
         const ssize_t n = ::recvfrom(fd_, buf.data(), buf.size(), 0, nullptr, nullptr);
         if (n <= 0) continue;  // timeout / EAGAIN / error → re-check stop_
-        Receiver receiver;
+        receiver_t receiver;
         {
             const std::lock_guard lock(m_);
             receiver = receiver_;
@@ -81,4 +81,4 @@ void UdpTransport::run() {
     }
 }
 
-}  // namespace tracer
+}  // namespace tr

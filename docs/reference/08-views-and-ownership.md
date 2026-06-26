@@ -289,7 +289,7 @@ L1 is core (the view + refcount machinery) **plus** module-style integrations wi
 - **Status**: with the CAN demo.
 - **Pairs with**: `mem_dma_buffer`.
 - **What it provides**: wraps DMA scatter-gather descriptor lists as ropes. Cooperates with the DMA controller's scatter-gather engine when present (ESP32 GDMA, STM32 BDMA SG mode).
-- **Special semantics**: cache-coherency hooks (`prepare_for_io` / `finalize_after_io`) fire automatically at view egress / ingress boundaries.
+- **Special semantics**: cache-coherency hooks (`before_io` / `after_io`) fire automatically at view egress / ingress boundaries.
 
 ### `view_uart_simple` — pulled in by need
 
@@ -443,7 +443,7 @@ No userspace copy from receive to delivery. The pbufs stay alive exactly as long
 
 ```
 1. ADC fills a 4 KiB DMA buffer (segment from mem_dma_buffer).
-2. On DMA-half-complete: backend.finalize_after_io(seg, IO_DIR_DEVICE_TO_CPU) → cache invalidate.
+2. On DMA-half-complete: backend.after_io(seg, io_dir_t::DEVICE_TO_CPU) → cache invalidate.
 3. Framer wraps the just-filled half as a view; emits address-shift slices
    ([06-user-data-packing.md] §streaming a high-speed ADC).
 4. Each slice is a sub-view (offset, length) into the DMA segment.
@@ -494,7 +494,7 @@ Step 2 — DMA-half-complete IRQ fires.
    The ISR enters mem_dma_buffer.on_half_complete(half = A).
 
 Step 3 — Cache invalidate (L0 → L1 hand-off).
-   mem_dma_buffer calls finalize_after_io(seg = A, IO_DIR_DEVICE_TO_CPU).
+   mem_dma_buffer calls after_io(seg = A, io_dir_t::DEVICE_TO_CPU).
    On a non-coherent SoC: invalidates cache lines covering [0..2047].
    On a coherent SoC: no-op.
    At this point, CPU reads of [0..2047] see the just-DMA'd bytes.
@@ -630,9 +630,9 @@ A scatter-gather-capable transport walks the rope at egress (zero-copy). A flat-
 
 ### DMA cache coherency races
 
-On non-coherent SoCs, the `prepare_for_io` / `finalize_after_io` hooks must be called at exactly the right moment. Missing them yields stale CPU reads or clobbered DMA writes.
+On non-coherent SoCs, the `before_io` / `after_io` hooks must be called at exactly the right moment. Missing them yields stale CPU reads or clobbered DMA writes.
 
-**Default**: `mem_dma_buffer`'s ISR is the only place that calls `finalize_after_io`. Application code never calls these. Document the required interleaving in the backend's spec.
+**Default**: `mem_dma_buffer`'s ISR is the only place that calls `after_io`. Application code never calls these. Document the required interleaving in the backend's spec.
 
 ### Reference-to-a-value (live variable / register) (modular)
 
