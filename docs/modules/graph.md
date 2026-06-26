@@ -2,7 +2,7 @@
 
 ```{admonition} In one paragraph
 :class: tip
-The graph is the node. A **`Vertex`** is a named, addressable slot holding a value
+The graph is the node. A **`vertex_t`** is a named, addressable slot holding a value
 (a `view_t`), a bounded history, or a user handler. The entire data API is three
 calls — **`read` / `write` / `await`** — and every control surface (subscriptions,
 QoS) is a **field-write** to a `:`-addressed field. `write` fans out to
@@ -12,7 +12,7 @@ last-known-value are **lock-free**.
 
 ## What it does
 
-`Graph` owns the vertex map (keyed on canonical [path](path.md) bytes). Each vertex
+`graph_t` owns the vertex map (keyed on canonical [path](path.md) bytes). Each vertex
 has a **role**: *stored-value* (last-writer-wins), *stream* (a bounded ring sized by
 `:settings.history_keep_last`), or *handler* (your `on_read`/`on_write` — covering
 computed, proxy, sink, live-MMIO patterns). The last-known-value slot is an
@@ -30,39 +30,39 @@ return a `POINT` descriptor.
 ## Interface
 
 ```cpp
-enum class Role { StoredValue, Stream, Handler };
-struct Settings { /* reliability, durability, history_keep_last, deadline_ns, … */ };
-struct Handlers { std::function<Result<view_t>()> on_read;
-                  std::function<Result<void>(const view_t&)> on_write; };
+enum class role_t { STORED_VALUE, STREAM, HANDLER };
+struct settings_t { /* reliability, durability, history_keep_last, deadline_ns, … */ };
+struct handlers_t { std::function<result_t<view_t>()> on_read;
+                  std::function<result_t<void>(const view_t&)> on_write; };
 
-class Graph {
-    Result<Vertex*> register_vertex(const Path&, Role, Handlers={}, Settings={});
-    Result<view_t>    read (Vertex*) const;            // atomic LKV load = a clone
-    Result<void>    write(Vertex*, view_t);            // store + fan-out
-    Result<view_t>    await(Vertex*, std::chrono::nanoseconds);   // blocks for next write
-    Result<std::vector<view_t>> history(Vertex*) const;          // stream window
+class graph_t {
+    result_t<vertex_t*> register_vertex(const path_t&, role_t, handlers_t={}, settings_t={});
+    result_t<view_t>    read (vertex_t*) const;        // atomic LKV load = a clone
+    result_t<void>    write(vertex_t*, view_t);        // store + fan-out
+    result_t<view_t>    await(vertex_t*, std::chrono::nanoseconds);   // blocks for next write
+    result_t<std::vector<view_t>> history(vertex_t*) const;          // stream window
 
-    Result<void> subscribe(const Path& src, const Path& target);          // re-dispatch
-    Result<void> subscribe(const Path& src, std::function<void(const view_t&)>);  // callback
+    result_t<void> subscribe(const path_t& src, const path_t& target);    // re-dispatch
+    result_t<void> subscribe(const path_t& src, std::function<void(const view_t&)>);  // callback
 
-    Result<void> write(Vertex*, const FieldPath&, view_t);  // handle-based field-write
-    Result<view_t> read (const Path&) const;           // field tail → :schema, …
-    Result<void> write(const Path&, view_t);           // field tail → :subscribers[]/:settings.*
+    result_t<void> write(vertex_t*, const field_path_t&, view_t);  // handle-based field-write
+    result_t<view_t> read (const path_t&) const;       // field tail → :schema, …
+    result_t<void> write(const path_t&, view_t);       // field tail → :subscribers[]/:settings.*
 };
 ```
 
 ```{admonition} No strings on the hot path
 :class: important
 The hot path is **handle-typed** (the spec's rule, `reference/10` §path-handle).
-`Path::parse` encodes the canonical PATH bytes **once**; `register_vertex` /
-`find` resolve a **`Vertex*`** once; then `write(v, value)` and
+`path_t::parse` encodes the canonical PATH bytes **once**; `register_vertex` /
+`find` resolve a **`vertex_t*`** once; then `write(v, value)` and
 `write(v, fieldpath, value)` reuse those handles — **no string crafting, no parse,
-no map lookup per call**. The string/`Path` overloads are init-time conveniences.
+no map lookup per call**. The string/`path_t` overloads are init-time conveniences.
 ```
 
 ```cpp
 // idiomatic: encode the path once, reuse the handle
-auto p = Path::parse("/x:settings.reliability");        // once
+auto p = path_t::parse("/x:settings.reliability");      // once
 auto* v = g.find(p->key());                             // once
 for (...) g.write(v, p->field(), reliable_tlv);          // hot loop — zero strings
 ```

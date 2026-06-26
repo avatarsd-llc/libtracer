@@ -2,7 +2,7 @@
 
 ```{admonition} In one paragraph
 :class: tip
-A **`Bridge`** connects a local graph to a transport. On **egress** it subscribes a
+A **`bridge_t`** connects a local graph to a transport. On **egress** it subscribes a
 local vertex and forwards each write ROUTER-wrapped. On **ingress** it unwraps,
 **dedups** (recent-set on `(origin, ts)`), enforces **`hop_count`** termination,
 then writes the bare TLV to a *mount* vertex — where local subscribers receive it
@@ -27,10 +27,10 @@ Knobs: `set_mount`, `set_recent_set_capacity(0)` to disable dedup (proving
 ## Interface
 
 ```cpp
-class Bridge {
-    Bridge(graph::Graph&, Transport&, PeerId);
-    Result<void> export_vertex(const graph::Path& src);   // egress: subscribe → wrap → send
-    void set_mount(const graph::Path&);                   // where ingested data lands
+class bridge_t {
+    bridge_t(graph::graph_t&, transport_t&, peer_id_t);
+    result_t<void> export_vertex(const graph::path_t& src);   // egress: subscribe → wrap → send
+    void set_mount(const graph::path_t&);                 // where ingested data lands
     void set_recent_set_capacity(std::size_t);            // 0 = dedup off
     void set_reforward(bool);
     std::uint64_t delivered() const, deduped() const, hop_dropped() const;   // counters

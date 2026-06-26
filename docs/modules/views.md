@@ -21,7 +21,7 @@ demands it (the single bridge-boundary copy). Assembling a multi-buffer message 
 **chaining views into a `rope_t`, never a memcpy** — a contiguous copy happens only
 when `flatten()` runs at a substrate boundary that cannot scatter-gather.
 
-`view_as_tlv(v)` is just `decode(v.bytes())` — the decoded `Tlv`'s payload spans
+`view_as_tlv(v)` is just `decode(v.bytes())` — the decoded `tlv_t`'s payload spans
 point *into* the view's segment, and the view's `segment_ptr_t` keeps them alive. No
 decode-into-a-struct step: the wire bytes **are** the in-memory value.
 
@@ -43,7 +43,7 @@ class rope_t {                                          // ordered chain of view
     view_t flatten(mem_backend_t& = mem::heap_backend()) const;   // one-copy materialize
 };
 
-std::expected<Tlv, Error> view_as_tlv(const view_t&);   // the L1 -> L2 cast
+std::expected<tlv_t, error_t> view_as_tlv(const view_t&);   // the L1 -> L2 cast
 ```
 
 ## Rope = one message, many buffers

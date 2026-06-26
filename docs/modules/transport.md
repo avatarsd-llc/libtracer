@@ -2,9 +2,9 @@
 
 ```{admonition} In one paragraph
 :class: tip
-**`Transport`** is the seam between the bridge and one wire technology: `send`
-framed bytes, register a `Receiver` for inbound frames. It never sees TLV
-semantics — only bytes. Today the only implementation is **`LoopbackChannel`**, an
+**`transport_t`** is the seam between the bridge and one wire technology: `send`
+framed bytes, register a `receiver_t` for inbound frames. It never sees TLV
+semantics — only bytes. Today the only implementation is **`loopback_channel_t`**, an
 in-process dev/test transport (two endpoints, an in-memory queue, a receive
 thread). A real socket transport (UDS/UDP) is **M5** behind the same interface.
 ```
@@ -17,7 +17,7 @@ internal transport thread). The reference catalog defines a poll-based
 `transport_vtable`; the C++ seam is callback + recv-thread — an implementation
 choice that matches how a real socket's receive loop feeds the bridge.
 
-`LoopbackChannel` wires two endpoints: a frame sent on one is delivered to the
+`loopback_channel_t` wires two endpoints: a frame sent on one is delivered to the
 *other's* receiver on that endpoint's thread (modeling async cross-"wire"
 delivery, so a bridge cycle terminates by `hop_count` rather than stack recursion).
 `shutdown()` joins the receive threads before the receivers are destroyed.
@@ -25,16 +25,16 @@ delivery, so a bridge cycle terminates by `hop_count` rather than stack recursio
 ## Interface
 
 ```cpp
-using PeerId = std::array<std::byte, 16>;          // ROUTER origin_peer_id
+using peer_id_t = std::array<std::byte, 16>;       // ROUTER origin_peer_id
 
-class Transport {
+class transport_t {
     virtual void send(std::span<const std::byte> frame) = 0;
-    using Receiver = std::function<void(std::span<const std::byte>)>;
-    virtual void set_receiver(Receiver) = 0;
+    using receiver_t = std::function<void(std::span<const std::byte>)>;
+    virtual void set_receiver(receiver_t) = 0;
 };
 
-class LoopbackChannel {                             // dev/test transport
-    LoopbackEndpoint& a();  LoopbackEndpoint& b();  // each a Transport
+class loopback_channel_t {                          // dev/test transport
+    loopback_endpoint_t& a();  loopback_endpoint_t& b();  // each a transport_t
     void shutdown();                                // join recv threads
 };
 ```
