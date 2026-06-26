@@ -22,10 +22,10 @@ Spec versions are integers (v1, v2, …). Once a version is published, it is **i
 An implementation is "libtracer vN compatible" if and only if it:
 
 1. Honors every MUST clause in `vN.md`.
-2. Passes every test vector under [`tests/conformance/`](../../tests/conformance/) tagged for vN.
+2. Passes every test vector under [`tests/conformance/`](https://github.com/avatarsd-llc/libtracer/tree/main/tests/conformance/) tagged for vN.
 
 That is the entire compatibility contract. There is no certification authority.
 
 ## Proposing a change
 
-See [GOVERNANCE.md](../../GOVERNANCE.md) for the RFC process.
+See [GOVERNANCE.md](https://github.com/avatarsd-llc/libtracer/blob/main/GOVERNANCE.md) for the RFC process.
