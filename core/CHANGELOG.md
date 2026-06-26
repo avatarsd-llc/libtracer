@@ -41,6 +41,25 @@ reference implementation is pre-1.0; everything currently lives under
     `WARN_AS_ERROR`) and rendered into the Sphinx site as source references via
     Breathe; conventions in `core/STYLE.md`.
 
+- **Phase 2 — snake_case `_t` across the rest of the API (breaking).** The L2/L3
+  codec, L4 graph, and transport plane lose their PascalCase, matching the
+  substrate convention. Wire format unchanged.
+  - **Types:** `Tlv`→`tlv_t`, `Opt`→`opt_t`, `Type`→`type_t`, `Error`→`error_t`,
+    `Trailer`/`Crc`/`Timestamp`/`Width`→`*_t` (codec); `Graph`→`graph_t`,
+    `Vertex`→`vertex_t`, `Path`→`path_t`, `Status`→`status_t`, `Result`→`result_t`,
+    `Settings`→`settings_t`, `Handlers`→`handlers_t`, `Role`→`role_t`,
+    `Subscriber`→`subscriber_t`, `FieldPath`→`field_path_t`, `PathKey`→`path_key_t`
+    (graph); `Transport`→`transport_t`, `Bridge`→`bridge_t`,
+    `RouterMeta`→`router_meta_t`, `PeerId`→`peer_id_t`,
+    `UdpTransport`→`udp_transport_t`, `LoopbackChannel`/`LoopbackEndpoint`→`*_t`
+    (transport plane).
+  - **Enum values are scoped `SCREAMING_SNAKE`:** `type_t::VALUE`/`NAME`/`PATH`/…,
+    `status_t::NOT_FOUND`/`INVALID_PATH`/…, `role_t::STORED_VALUE`/`STREAM`/`HANDLER`,
+    `error_t::FRAME_INVALID`/`FRAME_TRUNCATED`/…
+  - These types stay in their current namespaces (`tr`, `tr::graph`); the
+    `tr::wire` (L2/L3) and `tr::net` (transport) layer split is a planned
+    follow-up.
+
 ### Added
 
 - **Internal — `<libtracer/byteorder.hpp>`:** one `constexpr` little-endian
