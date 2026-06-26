@@ -582,7 +582,7 @@ This trace is the working specification for what "zero-copy" means in libtracer:
 
 ---
 
-## Memory-binding contract — modular (resolved, [ADR-0012](../adr/0012-modular-memory-binding-transparent-router.md))
+## Memory-binding contract — modular (resolved, [ADR-0012](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0012-modular-memory-binding-transparent-router.md))
 
 These were the design's identified-but-unresolved hard integrations; they now resolve under one principle. **Memory binding is a modular spectrum, and libtracer is a transparent byte router** — it imposes no snapshot/copy/CRC semantics on a backend. Each entry below has a **recommended-safe** default, but a backend module MAY offer any point on the spectrum (snapshot · shadow vertex · live/raw direct-register, lock-free, no-CRC). The protocol does not limit the user from "dangerous" access; instead **each backend module owns and declares its per-architecture contract** — allocation, cache-coherency hooks, ISR-safety, atomicity granularity, memory ordering (x86 TSO vs weak ARM/MIPS), and `destroy` thread-affinity. CRC is an optional higher-layer concern ([01-data-format.md](01-data-format.md) `opt.CR`); a live/no-copy binding simply carries no CRC (or snapshots at CRC-compute time).
 
@@ -604,7 +604,7 @@ A view over an MMIO register is a view onto bytes that change asynchronously. Al
 - **Live view** — a `mem_mmio` segment pointing at the live register; the byte router stays transparent (no copy, typically no CRC). The backend declares its **atomicity granularity** (an aligned `u32` is torn-read-free on ARM/MIPS/x86; a multi-word register block is not) and MAY offer a **lock-free consistent read** (e.g. a seqlock: the reader retries on a writer version bump) for multi-word live data. ISR/SMP safety and any memory barriers are the backend's declared contract.
 - **No-CRC raw** — a live binding with `opt.CR=0` is a pure transparent conduit; CRC over volatile bytes is meaningless, so a live binding either omits CRC or snapshots at compute time.
 
-**Resolved**: ship all three. Snapshot is the recommended-safe default and *publish-a-moment* the recommended mental model, but live/raw/lock-free bindings are first-class for users who own the hazard ([ADR-0012](../adr/0012-modular-memory-binding-transparent-router.md)).
+**Resolved**: ship all three. Snapshot is the recommended-safe default and *publish-a-moment* the recommended mental model, but live/raw/lock-free bindings are first-class for users who own the hazard ([ADR-0012](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0012-modular-memory-binding-transparent-router.md)).
 
 ### Cross-process refcount on `mem_shared`
 
@@ -641,7 +641,7 @@ The "I want an endpoint backed by `&my_uint32` directly" pattern — both bindin
 - **Shadow vertex** (Option B, recommended) — the graph stores values; the publisher writes the value when the variable changes; subscribers read the shadow. Protocol-clean; no aliasing hazard.
 - **Live view** (Option A) — a `mem_mmio`-style segment over the live address; the byte router stays transparent. A real binding, not merely a footgun helper: the backend declares its atomicity/ordering/ISR contract per [§MMIO register-as-view](#mmio-register-as-view-volatile-bytes-modular), and atomic/lock-free access is the backend's to provide. Exposed as `tracer_attach_register(&my_var)`.
 
-**Resolved**: shadow vertex is the recommended-safe default; live binding is fully supported for users who own the hazard ([ADR-0012](../adr/0012-modular-memory-binding-transparent-router.md)).
+**Resolved**: shadow vertex is the recommended-safe default; live binding is fully supported for users who own the hazard ([ADR-0012](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0012-modular-memory-binding-transparent-router.md)).
 
 ---
 

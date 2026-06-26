@@ -137,7 +137,7 @@ A subscription with a wildcard requires the router to walk the wildcard table on
 
 ### Subscriber identity in wildcard subscriptions
 
-A wildcard subscriber receives a stream of TLVs from many concrete paths and MUST be able to determine which concrete path produced each. For **local** delivery (subscriber and dispatcher in one node) the mechanism is implementation-defined — typically the matched path is passed out-of-band (a callback argument). For **bridged/remote** delivery it must travel on the wire: the matched concrete `PATH` (`0x06`) accompanies the delivered TLV. *(The on-wire form is proposed under [RFC-0003](../spec/rfcs/0003-bridged-wildcard-delivery-path.md); until it lands, cross-implementation bridged wildcard delivery is not guaranteed interoperable.)*
+A wildcard subscriber receives a stream of TLVs from many concrete paths and MUST be able to determine which concrete path produced each. For **local** delivery (subscriber and dispatcher in one node) the mechanism is implementation-defined — typically the matched path is passed out-of-band (a callback argument). For **bridged/remote** delivery it must travel on the wire: the matched concrete `PATH` (`0x06`) accompanies the delivered TLV. *(The on-wire form is proposed under [RFC-0003](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0003-bridged-wildcard-delivery-path.md); until it lands, cross-implementation bridged wildcard delivery is not guaranteed interoperable.)*
 
 ---
 
@@ -192,7 +192,7 @@ The subscriber's QoS at `:settings.address_shift.*` controls assembly behavior. 
 
 Missing index `k` in a group with `expected_count = N` and observed indices `{0..N-1} \ {k}`: at deadline, the assembler emits `STATUS=ADDRESS_SHIFT_GAP` with `ERROR.detail = k`.
 
-**Group totality is opt-in.** For groups without `expected_count`, the assembler treats the largest-observed-index + 1 as the implicit `N` at deadline — so a dropped **trailing** slice is invisible (a 100-slice group missing index 99 looks complete at slice 98). v1 does not force a count: open-ended streams cannot always supply one. If guaranteed tail-loss detection is required, the publisher MUST declare totality — either set `expected_count`, or precede the group with a `:manifest` write carrying the index set as a structured (`opt.PL=1`) TLV. (An end-of-group marker on the final slice is a possible future mechanism — see [ADR-0011](../adr/0011-address-shift-totality-opt-in.md).)
+**Group totality is opt-in.** For groups without `expected_count`, the assembler treats the largest-observed-index + 1 as the implicit `N` at deadline — so a dropped **trailing** slice is invisible (a 100-slice group missing index 99 looks complete at slice 98). v1 does not force a count: open-ended streams cannot always supply one. If guaranteed tail-loss detection is required, the publisher MUST declare totality — either set `expected_count`, or precede the group with a `:manifest` write carrying the index set as a structured (`opt.PL=1`) TLV. (An end-of-group marker on the final slice is a possible future mechanism — see [ADR-0011](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0011-address-shift-totality-opt-in.md).)
 
 ### Why this is good
 

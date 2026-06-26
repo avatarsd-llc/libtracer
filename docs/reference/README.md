@@ -13,7 +13,7 @@
 > 8. **No fragmentation in the wire format.** Logically large messages are addressed across `ep[0..N]` slices with shared timestamp.
 > 9. **Path handles, encoded once.** Every vertex address used more than once is encoded into a PATH TLV at build time (`.rodata` literal) or at node init (one allocation), not at every write. Hot-path APIs accept handles, never strings; `snprintf` is a code-size luxury, not a protocol requirement. Normative in [../spec/v1.md](../spec/v1.md) §3.1; design in [03-addressing.md](03-addressing.md), [05-protocol-tlvs.md](05-protocol-tlvs.md), [04-communication-flows.md](04-communication-flows.md), [06-user-data-packing.md](06-user-data-packing.md).
 >
-> Design rationale is recorded in [../../docs/adr/](../../docs/adr/) and git history; this suite is the byte-level spec.
+> Design rationale is recorded in [../../docs/adr/](https://github.com/avatarsd-llc/libtracer/tree/main/docs/adr/) and git history; this suite is the byte-level spec.
 > **Audience**: a second implementer writing an interoperable libtracer in any language, on any platform, without reading the C reference implementation.
 > **Reading time**: full suite ~2.5 h.
 
@@ -23,7 +23,7 @@
 
 This directory describes **the libtracer protocol as a standard**, independent of any implementation. The C reference implementation under [../../core/](../../core/) is one conforming implementation; a TypeScript core, a Rust core, a hardware FPGA implementation are all admissible if they conform to what is written here.
 
-Design rationale is recorded in [../../docs/adr/](../../docs/adr/) and git history — they explain *why* the protocol looks the way it does. Reference documents here describe *what it is*, and are canonical.
+Design rationale is recorded in [../../docs/adr/](https://github.com/avatarsd-llc/libtracer/tree/main/docs/adr/) and git history — they explain *why* the protocol looks the way it does. Reference documents here describe *what it is*, and are canonical.
 
 ---
 
