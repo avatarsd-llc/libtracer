@@ -32,6 +32,7 @@ root_doc = "index"
 include_patterns = [
     "index.md",
     "docs/getting-started.md",
+    "docs/performance.md",
     "docs/reference/**",
     "docs/modules/**",
     "docs/spec/v1.md",
