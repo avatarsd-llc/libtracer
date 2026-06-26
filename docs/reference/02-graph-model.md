@@ -84,6 +84,33 @@ In most middleware:
 
 In libtracer, all three collapse into one. The mechanism: **buffer chains of views over real memory.**
 
+### The two compositions: storage and meaning
+
+The same-substrate collapse hides one subtlety worth making explicit, because conflating it is the most common design error here: the same bytes participate in **two orthogonal composite trees**, on different axes.
+
+| | **Memory composition** | **TLV composition** |
+| --- | --- | --- |
+| Composes | **storage** — *where* bytes physically live | **meaning** — *what* bytes are |
+| Leaf | a **view** (`{owner, offset, length}` over one segment) | an **opaque TLV** (`opt.PL=0`) |
+| Composite | a **rope** — a chain of views across segments | a **structured TLV** (`opt.PL=1`); its type code says what the children mean |
+| Layer | L1 ([08-views-and-ownership.md](08-views-and-ownership.md)) | L3 ([01-data-format.md](01-data-format.md), [05-protocol-tlvs.md](05-protocol-tlvs.md)) |
+| Grows by | `append` / `concat` — pointer-linking, zero-copy | nesting children end-to-end |
+
+Both are the **Composite pattern**, but they compose *different things* and are **decoupled**. That decoupling is precisely what makes zero-copy possible: a node's *meaning* (its TLV tree) is independent of how its *bytes* are physically chunked (its rope). Three consequences fall out, each a load-bearing rule:
+
+- **A rope is not a TLV list.** A "list" (a structured TLV with homogeneous children) is *meaning*; a rope is *storage*. A rope may hold the bytes of a TLV list, but it is blind to TLV structure.
+- **A view boundary may fall anywhere — including mid-TLV-header.** Because the axes are independent, a frame's 4-byte header can straddle two segments (an lwIP `pbuf` chain, a DMA ring wrap). A conforming decoder must therefore **link-walk the rope**, not assume a contiguous buffer:
+
+  ```
+  meaning  →   [ one TLV: header(4) | payload(6) ]          (one logical node)
+  storage  →   [ segment A: 06 40 12 ] [ segment B: 00 | 02 00 02 00 ]
+                                    ^ the header splits across the A/B boundary
+  ```
+
+- **A `ROUTER` uses a rope but is not one.** The bridge envelope ([07-host-embedding.md](07-host-embedding.md)) composes *meaning* (metadata + the wrapped TLV); the bytes it forwards stay a rope. Pass-through is "wrap meaning around a rope, re-emit via scatter-gather, never copy" — the router never inherits or becomes a rope.
+
+The two sections below are this same point made concrete: **How nested TLVs work** is the *meaning* axis; **How that structured TLV exists in memory** is the *storage* axis.
+
 ### How nested TLVs work structurally
 
 When the `PL` (payload-is-structured) bit is set in the header `opt` byte, the payload is interpreted as a sequence of child TLVs concatenated end-to-end. Each child has its own header (4 or 6 bytes per [01-data-format.md](01-data-format.md), depending on `opt.LL`) and optional trailer; any child may itself have `PL=1` for further nesting.
