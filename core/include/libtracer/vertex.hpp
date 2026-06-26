@@ -37,9 +37,9 @@ struct Settings {
     std::uint8_t reliability = 0;         // 0=best-effort, 1=reliable
     std::uint8_t durability = 0;          // 0=volatile, 1=transient-local
     std::uint32_t history_keep_last = 1;  // Stream ring depth (>=1)
-    std::uint64_t deadline_ns = 0;
-    std::uint8_t priority = 0;
-    std::uint32_t queue_max_bytes = 0;
+    std::uint64_t deadline_ns = 0;        // 0=off; max ns between writes before a liveness fault
+    std::uint8_t priority = 0;            // 0=low .. 255=critical (transport hint, not a wire bit)
+    std::uint32_t queue_max_bytes = 0;    // 0=unbounded; per-subscriber back-pressure cap
 };
 
 // User behavior for a Handler-role vertex.
