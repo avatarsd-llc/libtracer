@@ -19,8 +19,18 @@ else()
     target_compile_options(two_node_loopback PRIVATE -Wall -Wextra)
 endif()
 
+# The same two-node program as two_node_loopback, over a real localhost UDP socket.
+add_executable(udp_two_node udp_two_node.cpp)
+target_link_libraries(udp_two_node PRIVATE libtracer Threads::Threads)
+if(MSVC)
+    target_compile_options(udp_two_node PRIVATE /W4)
+else()
+    target_compile_options(udp_two_node PRIVATE -Wall -Wextra)
+endif()
+
 # Run the examples as smoke tests when testing is enabled (they exit 0).
 if(BUILD_TESTING)
     add_test(NAME example_in_process_pubsub COMMAND in_process_pubsub)
     add_test(NAME example_two_node_loopback COMMAND two_node_loopback)
+    add_test(NAME example_udp_two_node COMMAND udp_two_node)
 endif()
