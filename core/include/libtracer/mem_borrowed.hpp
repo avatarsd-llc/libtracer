@@ -20,14 +20,16 @@
 #include "libtracer/backend.hpp"
 #include "libtracer/segment.hpp"
 
-/// @file
-/// @brief The `mem_borrowed` L0 backend (`tr::mem`) and its L1 borrow helpers (`tr::view`).
+/**
+ * @file
+ * @brief The `mem_borrowed` L0 backend (`tr::mem`) and its L1 borrow helpers (`tr::view`).
+ */
 
 namespace tr::mem {
 
 namespace detail {
 
-/// @brief Backend for borrowed bytes: reclaims only the `segment_t` control block.
+/** @brief Backend for borrowed bytes: reclaims only the `segment_t` control block. */
 class borrowed_backend_t final : public mem_backend_t {
    public:
     borrowed_backend_t() noexcept : mem_backend_t("mem_borrowed") {}
@@ -35,7 +37,7 @@ class borrowed_backend_t final : public mem_backend_t {
     void destroy(view::segment_t* seg) noexcept override { delete seg; }  // control block only
 };
 
-/// @brief The process-wide borrowed backend (function-local static).
+/** @brief The process-wide borrowed backend (function-local static). */
 [[nodiscard]] inline mem_backend_t& borrowed_backend() noexcept {
     static borrowed_backend_t backend;
     return backend;
@@ -47,20 +49,24 @@ class borrowed_backend_t final : public mem_backend_t {
 
 namespace tr::view {
 
-/// @brief Wrap writable caller-owned @p bytes in a segment without owning them.
-///
-/// An L1 handle producer (docs/adr/0016 §2). The caller guarantees the bytes
-/// outlive every view that holds them.
+/**
+ * @brief Wrap writable caller-owned @p bytes in a segment without owning them.
+ *
+ * An L1 handle producer (docs/adr/0016 §2). The caller guarantees the bytes
+ * outlive every view that holds them.
+ */
 [[nodiscard]] inline segment_ptr_t borrow(std::span<std::byte> bytes) {
     return segment_ptr_t::adopt(new (std::nothrow)
                                     segment_t(&mem::detail::borrowed_backend(), bytes));
 }
 
-/// @brief Wrap read-only caller-owned @p bytes (ROM, a const table, an MMIO read view).
-///
-/// The span is const; libtracer never writes through a borrowed-const segment,
-/// so the `const_cast` only restores the segment's uniform writable-at-the-type-
-/// level base.
+/**
+ * @brief Wrap read-only caller-owned @p bytes (ROM, a const table, an MMIO read view).
+ *
+ * The span is const; libtracer never writes through a borrowed-const segment,
+ * so the `const_cast` only restores the segment's uniform writable-at-the-type-
+ * level base.
+ */
 [[nodiscard]] inline segment_ptr_t borrow_const(std::span<const std::byte> bytes) {
     std::span<std::byte> writable(const_cast<std::byte*>(bytes.data()), bytes.size());
     return segment_ptr_t::adopt(new (std::nothrow)

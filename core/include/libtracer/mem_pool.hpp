@@ -19,40 +19,48 @@
 #include "libtracer/backend.hpp"
 #include "libtracer/segment.hpp"
 
-/// @file
-/// @brief The bounded `mem_pool` L0 backend (`tr::mem`) over a caller-owned slab.
+/**
+ * @file
+ * @brief The bounded `mem_pool` L0 backend (`tr::mem`) over a caller-owned slab.
+ */
 
 namespace tr::mem {
 
-/// @brief A fixed-slot allocator over a caller-owned slab; `alloc`-or-`nullptr`.
-///
-/// Carves the slab into equal slots with the free list threaded through the slab
-/// (no auxiliary heap), so memory use is exactly the caller's slab and
-/// exhaustion is a return value, not an OOM. The deterministic MCU choice.
+/**
+ * @brief A fixed-slot allocator over a caller-owned slab; `alloc`-or-`nullptr`.
+ *
+ * Carves the slab into equal slots with the free list threaded through the slab
+ * (no auxiliary heap), so memory use is exactly the caller's slab and
+ * exhaustion is a return value, not an OOM. The deterministic MCU choice.
+ */
 class pool_t final : public mem_backend_t {
    public:
-    /// @brief Carve @p slab (caller-owned; must outlive the pool) into slots.
-    ///
-    /// Each slot holds a `segment_t` control block plus @p slot_payload usable
-    /// bytes, payload aligned to @p align (a power of two). The slot count is
-    /// whatever fits after aligning the slab base.
+    /**
+     * @brief Carve @p slab (caller-owned; must outlive the pool) into slots.
+     *
+     * Each slot holds a `segment_t` control block plus @p slot_payload usable
+     * bytes, payload aligned to @p align (a power of two). The slot count is
+     * whatever fits after aligning the slab base.
+     */
     pool_t(std::span<std::byte> slab, std::size_t slot_payload,
            std::size_t align = alignof(std::max_align_t)) noexcept;
 
-    /// @brief Hand out the next free slot as a `segment_t` of @p size bytes.
-    /// @retval nullptr `size` exceeds the slot payload, or the pool is exhausted.
+    /**
+     * @brief Hand out the next free slot as a `segment_t` of @p size bytes.
+     * @retval nullptr `size` exceeds the slot payload, or the pool is exhausted.
+     */
     view::segment_t* alloc(std::size_t size, alloc_hint_t hint = alloc_hint_t::NONE) override;
-    /// @brief Return @p seg's slot to the free list (placement-destroying it).
+    /** @brief Return @p seg's slot to the free list (placement-destroying it). */
     void destroy(view::segment_t* seg) noexcept override;
     [[nodiscard]] std::size_t alignment() const noexcept override { return align_; }
     [[nodiscard]] std::size_t max_segment_size() const noexcept override { return slot_payload_; }
 
     [[nodiscard]] std::size_t capacity() const noexcept {
         return slot_count_;
-    }  ///< @brief Total slots.
+    } /**< @brief Total slots. */
     [[nodiscard]] std::size_t available() const noexcept {
         return free_count_;
-    }  ///< @brief Free slots.
+    } /**< @brief Free slots. */
 
    private:
     static constexpr std::size_t kNil = ~std::size_t{0};

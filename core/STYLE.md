@@ -48,7 +48,7 @@ The trailing `_t` is safe under `tr::`: C/POSIX reserves global trailing-`_t`, b
 
 ## Documentation — Doxygen, CI-enforced
 
-Every **public** declaration carries a `/** … */` Doxygen block. The rule balances strictness against boilerplate: `@brief` is mandatory; the argument/return tags appear **only when they add information** the name and type don't already give.
+Every **public** declaration carries a `/** … */` Doxygen block. Use `/** … */` block comments **exclusively** — never `///` line comments; trailing member docs use the `/**< … */` form. The rule balances strictness against boilerplate: `@brief` is mandatory; the argument/return tags appear **only when they add information** the name and type don't already give.
 
 ```cpp
 /**

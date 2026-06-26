@@ -8,6 +8,7 @@ libtracer is a spec-first protocol project. See [GOVERNANCE.md](GOVERNANCE.md) f
 - **Sign commits** with `-s` (DCO required per [CONTRIBUTING.md](CONTRIBUTING.md)). Unsigned commits will be asked to be amended.
 - **Do not add `Co-Authored-By` trailers** to commit messages.
 - **C/C++ changes** must pass `clang-format` (config at `.clang-format`).
+- **C++ naming & comments** (full rules in [core/STYLE.md](core/STYLE.md)): types are `snake_case` with a `_t` suffix (`mem_backend_t`, `view_t`) — **never PascalCase**; enums are `enum class` with `SCREAMING_SNAKE` scoped values (`io_dir_t::DEVICE_TO_CPU`); namespaces mirror the layer model (`tr::mem` L0, `tr::view` L1, `tr::wire` L2/L3, `tr::graph` L4) and never reuse an error-concept word. Doxygen on every public symbol using **`/** … */` block comments only** (never `///`; trailing docs use `/**< … */`), `@brief` mandatory — CI-gated by `core/Doxyfile` (`WARN_AS_ERROR`).
 - **Spec changes** (anything under [docs/spec/](docs/spec/)) require an RFC under [docs/spec/rfcs/](docs/spec/) per [GOVERNANCE.md](GOVERNANCE.md). A 14-day comment window applies before acceptance.
 - **Public API changes** require a note in the relevant `CHANGELOG.md`.
 

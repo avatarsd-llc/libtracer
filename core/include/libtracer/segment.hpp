@@ -20,8 +20,10 @@
 #include <atomic>
 #endif
 
-/// @file
-/// @brief L1 (`tr::view`) refcounted `segment_t` and its owning `segment_ptr_t`.
+/**
+ * @file
+ * @brief L1 (`tr::view`) refcounted `segment_t` and its owning `segment_ptr_t`.
+ */
 
 namespace tr::view {
 
@@ -60,21 +62,23 @@ class ref_count_t {
 
 }  // namespace detail
 
-/// @brief A refcounted span of real bytes: the L0↔L1 boundary object.
-///
-/// Real bytes + the backend that reclaims them + an intrusive refcount. Never
-/// copied or moved (the atomic refcount pins it in place); always handled
-/// through @ref segment_ptr_t.
-///
-/// @note `bytes` is writable at the type level, but whether writes are *legal*
-///       is the backend's contract — a const/ROM borrow must not be written
-///       through (see mem_borrowed.hpp).
+/**
+ * @brief A refcounted span of real bytes: the L0↔L1 boundary object.
+ *
+ * Real bytes + the backend that reclaims them + an intrusive refcount. Never
+ * copied or moved (the atomic refcount pins it in place); always handled
+ * through @ref segment_ptr_t.
+ *
+ * @note `bytes` is writable at the type level, but whether writes are *legal*
+ *       is the backend's contract — a const/ROM borrow must not be written
+ *       through (see mem_borrowed.hpp).
+ */
 struct segment_t {
-    detail::ref_count_t refcount;  ///< @brief Intrusive refcount (spec orderings).
-    mem::mem_backend_t* backend;   ///< @brief Reclaimer; non-const (cache hooks mutate it).
-    std::span<std::byte> bytes;    ///< @brief The backing bytes this segment holds a reference to.
+    detail::ref_count_t refcount; /**< @brief Intrusive refcount (spec orderings). */
+    mem::mem_backend_t* backend;  /**< @brief Reclaimer; non-const (cache hooks mutate it). */
+    std::span<std::byte> bytes; /**< @brief The backing bytes this segment holds a reference to. */
 
-    /// @brief Construct a segment over @p by, reclaimed by @p b, with @p initial refcount.
+    /** @brief Construct a segment over @p by, reclaimed by @p b, with @p initial refcount. */
     segment_t(mem::mem_backend_t* b, std::span<std::byte> by,
               std::uint_least32_t initial = 1) noexcept
         : refcount(initial), backend(b), bytes(by) {}
@@ -83,39 +87,41 @@ struct segment_t {
     segment_t& operator=(const segment_t&) = delete;
 };
 
-/// @brief Intrusive owning handle for a @ref segment_t.
-///
-/// Copy = clone (refcount bump, relaxed); destruction = release (acq_rel); the
-/// backend's `destroy` fires when the last handle drops. This is what makes a
-/// borrowed (zero-copy) view safe to hold: the spans in a decoded TLV stay
-/// valid as long as the view — and thus this handle — lives.
+/**
+ * @brief Intrusive owning handle for a @ref segment_t.
+ *
+ * Copy = clone (refcount bump, relaxed); destruction = release (acq_rel); the
+ * backend's `destroy` fires when the last handle drops. This is what makes a
+ * borrowed (zero-copy) view safe to hold: the spans in a decoded TLV stay
+ * valid as long as the view — and thus this handle — lives.
+ */
 class segment_ptr_t {
    public:
     segment_ptr_t() noexcept = default;
 
-    /// @brief Adopt an existing reference (e.g. from `alloc`, refcount = 1) WITHOUT bumping.
+    /** @brief Adopt an existing reference (e.g. from `alloc`, refcount = 1) WITHOUT bumping. */
     [[nodiscard]] static segment_ptr_t adopt(segment_t* seg) noexcept {
         return segment_ptr_t(seg, false);
     }
-    /// @brief Take a NEW shared reference to an already-live segment (bumps the count).
+    /** @brief Take a NEW shared reference to an already-live segment (bumps the count). */
     [[nodiscard]] static segment_ptr_t retain(segment_t* seg) noexcept {
         return segment_ptr_t(seg, true);
     }
 
-    /// @brief Clone — a new shared reference to the same segment (relaxed increment).
+    /** @brief Clone — a new shared reference to the same segment (relaxed increment). */
     segment_ptr_t(const segment_ptr_t& other) noexcept : seg_(other.seg_) {
         if (seg_) seg_->refcount.inc_relaxed();
     }
-    /// @brief Transfer ownership of @p other's reference, leaving it empty.
+    /** @brief Transfer ownership of @p other's reference, leaving it empty. */
     segment_ptr_t(segment_ptr_t&& other) noexcept : seg_(other.seg_) { other.seg_ = nullptr; }
-    /// @brief Copy-and-swap assignment — one operator covers copy- and move-assign.
+    /** @brief Copy-and-swap assignment — one operator covers copy- and move-assign. */
     segment_ptr_t& operator=(segment_ptr_t other) noexcept {
         std::swap(seg_, other.seg_);
         return *this;
     }
     ~segment_ptr_t() { reset(); }
 
-    /// @brief Drop this reference (acq_rel); fires the backend's `destroy` at zero.
+    /** @brief Drop this reference (acq_rel); fires the backend's `destroy` at zero. */
     void reset() noexcept {
         if (seg_ && seg_->refcount.dec_acq_rel() == 1) {
             seg_->backend->destroy(seg_);
@@ -123,16 +129,16 @@ class segment_ptr_t {
         seg_ = nullptr;
     }
 
-    /// @brief The raw segment pointer (borrowed — no ownership transfer).
+    /** @brief The raw segment pointer (borrowed — no ownership transfer). */
     [[nodiscard]] segment_t* get() const noexcept { return seg_; }
-    /// @brief Dereference to the owned segment.
+    /** @brief Dereference to the owned segment. */
     [[nodiscard]] segment_t& operator*() const noexcept { return *seg_; }
-    /// @brief Member access on the owned segment.
+    /** @brief Member access on the owned segment. */
     [[nodiscard]] segment_t* operator->() const noexcept { return seg_; }
-    /// @brief True when this handle owns a segment.
+    /** @brief True when this handle owns a segment. */
     [[nodiscard]] explicit operator bool() const noexcept { return seg_ != nullptr; }
 
-    /// @brief Current refcount — debug / metrics only (acquire load), NOT a sync primitive.
+    /** @brief Current refcount — debug / metrics only (acquire load), NOT a sync primitive. */
     [[nodiscard]] std::uint_least32_t use_count() const noexcept {
         return seg_ ? seg_->refcount.load_acquire() : 0;
     }
