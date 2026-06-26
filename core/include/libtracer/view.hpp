@@ -43,11 +43,21 @@ struct view_t {
     /** @brief True when the window is empty. */
     [[nodiscard]] bool empty() const noexcept { return length == 0; }
 
-    /** @brief The window's bytes as a read-only span (empty if unowned). */
+    /** @brief The window's bytes as a read-only span (empty if unowned).
+     * @warning For a @ref is_device window the span addresses non-CPU memory —
+     *          do not dereference it on the CPU (docs/adr/0024).
+     */
     [[nodiscard]] std::span<const std::byte> bytes() const noexcept {
         if (!owner) return {};
         return std::span<const std::byte>(owner->bytes.data() + offset, length);
     }
+
+    /** @brief True when this window's bytes are CPU-addressable (HOST). Unowned ⇒ host. */
+    [[nodiscard]] bool is_host() const noexcept {
+        return !owner || owner->space == mem::mem_space_t::HOST;
+    }
+    /** @brief True when this window's bytes are non-CPU (DEVICE, e.g. GPU memory). */
+    [[nodiscard]] bool is_device() const noexcept { return !is_host(); }
 
     /**
      * @brief A narrower window into the same segment (shares ownership — a

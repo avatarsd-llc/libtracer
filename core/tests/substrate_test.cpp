@@ -186,6 +186,37 @@ void test_bounded_pool() {
 
 }  // namespace
 
+void test_memory_space() {
+    std::printf("memory-space tag — host vs device (docs/adr/0024):\n");
+    std::array<std::byte, 8> host_bytes{};
+    std::array<std::byte, 8> dev_bytes{};
+
+    const tr::view::view_t hv = tr::view::view_t::over(tr::view::borrow(host_bytes));
+    check(hv.is_host() && !hv.is_device(), "borrow() yields a HOST view");
+    check(hv.owner->space == tr::mem::mem_space_t::HOST, "host segment.space == HOST");
+
+    const tr::view::view_t dv = tr::view::view_t::over(tr::view::borrow_device(dev_bytes));
+    check(dv.is_device() && !dv.is_host(), "borrow_device() yields a DEVICE view");
+    check(dv.owner->space == tr::mem::mem_space_t::DEVICE, "device segment.space == DEVICE");
+
+    check(tr::mem::heap_backend().space() == tr::mem::mem_space_t::HOST,
+          "heap backend defaults to HOST");
+
+    tr::view::rope_t host_rope(hv);
+    host_rope.append(tr::view::view_t::over(tr::view::borrow(host_bytes)));
+    check(host_rope.all_host(), "host+host rope is all_host");
+
+    tr::view::rope_t hetero(hv);
+    hetero.append(dv);  // a heterogeneous host(header)+device(payload) rope (the mem_cuda shape)
+    check(!hetero.all_host(), "host+device rope is NOT all_host");
+
+    // flatten must refuse the heterogeneous rope WITHOUT touching the device link.
+    check(hetero.flatten().empty(), "flatten() refuses a heterogeneous rope (no device deref)");
+
+    const tr::view::view_t hflat = host_rope.flatten();
+    check(!hflat.empty() && hflat.length == 16, "flatten() of an all-host rope still works");
+}
+
 int main() {
     const fs::path vroot{LIBTRACER_VECTORS_DIR};
 
@@ -195,6 +226,7 @@ int main() {
     test_rope_equivalence(vroot);
     test_cast_claim_outlives_source(vroot);
     test_bounded_pool();
+    test_memory_space();
 
 #ifdef LIBTRACER_NO_ATOMIC
     std::printf("\n(built with LIBTRACER_NO_ATOMIC — single-threaded refcount)\n");

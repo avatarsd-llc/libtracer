@@ -43,6 +43,21 @@ class borrowed_backend_t final : public mem_backend_t {
     return backend;
 }
 
+/** @brief A borrowed backend that reports `DEVICE` space — for non-CPU memory
+ *         (and as a CUDA-free stand-in to test the codec's device-link handling). */
+class borrowed_device_backend_t final : public mem_backend_t {
+   public:
+    borrowed_device_backend_t() noexcept : mem_backend_t("mem_borrowed_device") {}
+    void destroy(view::segment_t* seg) noexcept override { delete seg; }
+    [[nodiscard]] mem_space_t space() const noexcept override { return mem_space_t::DEVICE; }
+};
+
+/** @brief The process-wide device-borrowed backend (function-local static). */
+[[nodiscard]] inline mem_backend_t& borrowed_device_backend() noexcept {
+    static borrowed_device_backend_t backend;
+    return backend;
+}
+
 }  // namespace detail
 
 }  // namespace tr::mem
@@ -71,6 +86,18 @@ namespace tr::view {
     std::span<std::byte> writable(const_cast<std::byte*>(bytes.data()), bytes.size());
     return segment_ptr_t::adopt(new (std::nothrow)
                                     segment_t(&mem::detail::borrowed_backend(), writable));
+}
+
+/**
+ * @brief Wrap caller-owned @p bytes as a `DEVICE`-space (non-CPU) segment.
+ *
+ * The resulting view reports @ref view_t::is_device; the codec must not
+ * CPU-dereference it (docs/adr/0024). The real device backend is `mem_cuda`;
+ * this borrow tags existing memory `DEVICE` (e.g. for tests or a custom binding).
+ */
+[[nodiscard]] inline segment_ptr_t borrow_device(std::span<std::byte> bytes) {
+    return segment_ptr_t::adopt(new (std::nothrow)
+                                    segment_t(&mem::detail::borrowed_device_backend(), bytes));
 }
 
 }  // namespace tr::view

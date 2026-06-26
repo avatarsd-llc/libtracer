@@ -77,11 +77,19 @@ struct segment_t {
     detail::ref_count_t refcount; /**< @brief Intrusive refcount (spec orderings). */
     mem::mem_backend_t* backend;  /**< @brief Reclaimer; non-const (cache hooks mutate it). */
     std::span<std::byte> bytes; /**< @brief The backing bytes this segment holds a reference to. */
+    mem::mem_space_t space; /**< @brief Address space (HOST/DEVICE), inherited from @ref backend. */
 
-    /** @brief Construct a segment over @p by, reclaimed by @p b, with @p initial refcount. */
+    /** @brief Construct a segment over @p by, reclaimed by @p b, with @p initial refcount.
+     *
+     * The address space is taken from the backend (`b->space()`); a `DEVICE`
+     * segment must not be CPU-dereferenced (docs/adr/0024).
+     */
     segment_t(mem::mem_backend_t* b, std::span<std::byte> by,
               std::uint_least32_t initial = 1) noexcept
-        : refcount(initial), backend(b), bytes(by) {}
+        : refcount(initial),
+          backend(b),
+          bytes(by),
+          space(b ? b->space() : mem::mem_space_t::HOST) {}
 
     segment_t(const segment_t&) = delete;
     segment_t& operator=(const segment_t&) = delete;
