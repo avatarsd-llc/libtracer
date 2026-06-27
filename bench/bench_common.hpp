@@ -1,10 +1,13 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-//
-// Shared benchmark scaffolding: a steady-clock timer, a latency-percentile
-// accumulator, and a machine-parseable RESULT line that run.sh collates into a
-// side-by-side table. Kept tiny and dependency-free so the libtracer and Zenoh
-// benchmarks emit identical, comparable output.
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * Shared benchmark scaffolding: a steady-clock timer, a latency-percentile
+ * accumulator, the swept dimensions (payload size, subscriber fan-out, endpoint
+ * count), and a machine-parseable RESULT line that collate.py renders into a
+ * side-by-side table. Kept tiny and dependency-free so the libtracer and Zenoh
+ * harnesses emit identical, comparable output.
+ */
 #pragma once
 
 #include <algorithm>
@@ -25,10 +28,26 @@ using Clock = std::chrono::steady_clock;
             .count());
 }
 
-// Payload sizes (application bytes) and message counts, shared by both harnesses.
-inline constexpr std::size_t kSizes[] = {8, 64, 1024, 8192};
-inline constexpr std::size_t kThroughputMsgs = 100000;
-inline constexpr std::size_t kLatencyMsgs = 10000;
+// The three swept axes (the user's matrix). Each sweep holds two fixed while
+// varying the third; the mixed workload combines them.
+inline constexpr std::size_t kSizes[] = {1, 8, 64, 1024, 8192};       // payload bytes
+inline constexpr std::size_t kFanouts[] = {1, 8, 128, 1024, 8192};    // subscribers / endpoint
+inline constexpr std::size_t kEndpoints[] = {1, 8, 128, 1024, 8192};  // distinct topics
+
+// Fixed points used while sweeping a different axis.
+inline constexpr std::size_t kRefSize = 64;
+inline constexpr std::size_t kRefFanout = 1;
+inline constexpr std::size_t kRefEndpoints = 1;
+
+// Keep wall-clock bounded + the comparison fair: target a roughly constant number
+// of *deliveries* per run, so high fan-out does proportionally fewer publishes.
+inline constexpr std::uint64_t kDeliveryBudget = 2'000'000;
+inline constexpr std::uint64_t kLatencyDeliveryBudget = 200'000;
+
+[[nodiscard]] inline std::size_t publishes_for(std::size_t fanout, std::uint64_t budget) {
+    const std::uint64_t n = budget / std::max<std::uint64_t>(1, fanout);
+    return static_cast<std::size_t>(std::clamp<std::uint64_t>(n, 2000, 200000));
+}
 
 class Latency {
    public:
@@ -55,13 +74,18 @@ class Latency {
     std::vector<std::uint64_t> samples_;
 };
 
-// One comparable measurement. `mode` distinguishes libtracer's two paths
-// (inproc graph vs loopback bridge) from Zenoh's in-process path.
-inline void emit(const char* system, const char* mode, std::size_t size_bytes, double msgs_per_s,
-                 double mb_per_s, const Latency::Summary& lat) {
-    std::printf("RESULT\t%s\t%s\t%zu\t%.0f\t%.1f\t%llu\t%llu\t%llu\n", system, mode, size_bytes,
-                msgs_per_s, mb_per_s, static_cast<unsigned long long>(lat.p50),
-                static_cast<unsigned long long>(lat.p99),
+/*
+ * One comparable measurement. `mode` distinguishes the path / module composition
+ * (libtracer inproc / inproc-borrow / loopback; zenoh inproc / net). pub_per_s is
+ * the publish rate; deliv_per_s = pub_per_s * fanout (the work done); latency is
+ * per-publish wall time (for inproc, includes all fan-out callbacks inline).
+ */
+inline void emit(const char* system, const char* mode, std::size_t size_bytes, std::size_t fanout,
+                 std::size_t endpoints, double pub_per_s, double deliv_per_s, double mb_per_s,
+                 const Latency::Summary& lat) {
+    std::printf("RESULT\t%s\t%s\t%zu\t%zu\t%zu\t%.0f\t%.0f\t%.1f\t%llu\t%llu\t%llu\n", system, mode,
+                size_bytes, fanout, endpoints, pub_per_s, deliv_per_s, mb_per_s,
+                static_cast<unsigned long long>(lat.p50), static_cast<unsigned long long>(lat.p99),
                 static_cast<unsigned long long>(lat.mean));
     std::fflush(stdout);
 }

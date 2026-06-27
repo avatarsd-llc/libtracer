@@ -65,7 +65,7 @@ struct SubState {
             if (cur_size && thru_count) {
                 const double secs = (thru_last - thru_first) / 1e9;
                 const double mps = secs > 0 ? thru_count / secs : 0;
-                emit(system, "net", cur_size, mps,
+                emit(system, "net", cur_size, 1, 1, mps, mps,
                      thru_count * static_cast<double>(cur_size) / (secs > 0 ? secs : 1) / 1e6,
                      lat.summarize());
             }
