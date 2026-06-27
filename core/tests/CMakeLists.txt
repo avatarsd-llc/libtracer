@@ -29,6 +29,12 @@ target_link_libraries(frame_test PRIVATE libtracer)
 libtracer_test_warnings(frame_test)
 add_test(NAME frame COMMAND frame_test)
 
+# #54 — transport_ws RFC 6455 protocol layer (handshake key + frame codec; header-only).
+add_executable(ws_test ws_test.cpp)
+target_link_libraries(ws_test PRIVATE libtracer)
+libtracer_test_warnings(ws_test)
+add_test(NAME ws COMMAND ws_test)
+
 # #81-A — per-endpoint :acl structural storage (store/serve raw ACL TLV; no enforcement).
 add_executable(acl_test acl_test.cpp)
 target_link_libraries(acl_test PRIVATE libtracer)
