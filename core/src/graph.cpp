@@ -6,6 +6,7 @@
 #include "libtracer/graph.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <mutex>
 #include <string_view>
@@ -91,12 +92,27 @@ result_t<view_t> graph_t::read(vertex_t* v) const {
 
 void graph_t::fan_out(vertex_t* v, const view_t& value, int depth) {
     // Evaluate the per-subscriber delivery policy UNDER the lock (ON_CHANGE compares
-    // and updates last_delivered, which lives on the real subscriber), then dispatch
-    // the survivors OUTSIDE the lock (callbacks / re-dispatch may re-enter the graph).
-    std::vector<subscriber_t> to_dispatch;
+    // and updates last_delivered, which lives on the real subscriber), snapshotting
+    // the survivors, then dispatch them OUTSIDE the lock (callbacks / re-dispatch may
+    // re-enter the graph). The snapshot carries only the dispatch-relevant fields;
+    // small fan-out (the common case) uses a stack buffer — no per-publish heap
+    // allocation — and large fan-out reserves the heap vector exactly once.
+    struct disp_t {
+        std::function<void(const view_t&)> callback;
+        std::vector<std::byte> target_key;
+    };
+    constexpr std::size_t kInlineFanout = 8;
+    std::array<disp_t, kInlineFanout> inline_buf;
+    std::vector<disp_t> heap_buf;
+    std::size_t inline_n = 0;
+    bool use_heap = false;
     {
         const std::lock_guard lock(v->m_);
         const std::span<const std::byte> bytes = value.bytes();
+        if (v->subs_.size() > kInlineFanout) {
+            use_heap = true;
+            heap_buf.reserve(v->subs_.size());
+        }
         for (subscriber_t& s : v->subs_) {
             if (!s.active) continue;
             if (s.mode == delivery_mode_t::ON_CHANGE) {
@@ -106,18 +122,24 @@ void graph_t::fan_out(vertex_t* v, const view_t& value, int depth) {
                 }
                 s.last_delivered.assign(bytes.begin(), bytes.end());
             }
-            // Copy only the dispatch-relevant fields (not last_delivered).
-            to_dispatch.push_back(subscriber_t{s.target_key, s.callback, s.mode, {}, true});
+            if (use_heap)
+                heap_buf.push_back(disp_t{s.callback, s.target_key});
+            else
+                inline_buf[inline_n++] = disp_t{s.callback, s.target_key};
         }
     }
-    for (const subscriber_t& s : to_dispatch) {
-        if (s.callback) s.callback(value);  // cloned view
-        if (!s.target_key.empty() && depth + 1 < kMaxDispatchDepth) {
-            if (vertex_t* target = find(s.target_key)) {
+    const auto dispatch = [&](const disp_t& d) {
+        if (d.callback) d.callback(value);  // cloned view
+        if (!d.target_key.empty() && depth + 1 < kMaxDispatchDepth) {
+            if (vertex_t* target = find(d.target_key)) {
                 (void)write_impl(target, value, depth + 1);  // value cloned into the param
             }
         }
-    }
+    };
+    if (use_heap)
+        for (const disp_t& d : heap_buf) dispatch(d);
+    else
+        for (std::size_t i = 0; i < inline_n; ++i) dispatch(inline_buf[i]);
 }
 
 result_t<void> graph_t::write_impl(vertex_t* v, view_t value, int depth) {
