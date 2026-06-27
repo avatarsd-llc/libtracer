@@ -17,6 +17,12 @@ target_link_libraries(byteorder_test PRIVATE libtracer)
 libtracer_test_warnings(byteorder_test)
 add_test(NAME byteorder COMMAND byteorder_test)
 
+# Path parsing / validation — reserved chars, limits, field tail (reference/03).
+add_executable(path_test path_test.cpp)
+target_link_libraries(path_test PRIVATE libtracer)
+libtracer_test_warnings(path_test)
+add_test(NAME path COMMAND path_test)
+
 # Frame codec — nesting depth cap / iterative-parse contract (reference/01).
 add_executable(frame_test frame_test.cpp)
 target_link_libraries(frame_test PRIVATE libtracer)
