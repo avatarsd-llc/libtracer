@@ -21,6 +21,7 @@
   "scripts": {
     "build": "tsc",
     "conformance": "node conformance/harness.mjs ../../tests/conformance/vectors/v1",
+    "bench": "node bench/perf.mjs",
     "test": "npm run conformance"
   },
   "devDependencies": {
