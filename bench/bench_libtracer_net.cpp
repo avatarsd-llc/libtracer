@@ -1,22 +1,23 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-//
-// libtracer network bench (two processes, real UDP). The full stack over the
-// kernel: graph write -> bridge ROUTER-wrap -> UdpTransport sendto -> [UDP] ->
-// peer UdpTransport recv -> bridge unwrap/dedup -> graph write -> subscriber.
-//
-//   bench_libtracer_net pub <my_port> <peer_port>
-//   bench_libtracer_net sub <my_port> <peer_port>
-//
-// Note the hot path crafts NO strings: the path is parsed ONCE to resolve a
-// Vertex* handle, which is reused on every send (and the bridge's mount is a
-// resolved Vertex* too) — "encode the path once, reuse the handle".
-
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * libtracer network bench (two processes, real UDP). The full stack over the
+ * kernel: graph write -> bridge ROUTER-wrap -> udp_transport_t sendto -> [UDP] ->
+ * peer udp_transport_t recv -> bridge unwrap/dedup -> graph write -> subscriber.
+ *
+ *   bench_libtracer_net pub <my_port> <peer_port>
+ *   bench_libtracer_net sub <my_port> <peer_port>
+ *
+ * The hot path crafts NO strings: the path is parsed ONCE to resolve a vertex_t*
+ * handle, reused on every send (the bridge's mount is a resolved vertex_t* too).
+ */
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <span>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -26,37 +27,40 @@
 
 using namespace bench;
 using namespace std::chrono_literals;
-using tracer::graph::Graph;
-using tracer::graph::Path;
-using tracer::graph::Role;
+using tr::graph::graph_t;
+using tr::graph::path_t;
+using tr::graph::role_t;
+using tr::graph::vertex_t;
 
 namespace {
 
-tracer::PeerId peer_of(std::uint8_t f) {
-    tracer::PeerId p{};
+tr::net::peer_id_t peer_of(std::uint8_t f) {
+    tr::net::peer_id_t p{};
     p.fill(static_cast<std::byte>(f));
     return p;
 }
 
 void run_pub(std::uint16_t my_port, std::uint16_t peer_port) {
-    Graph g;
-    tracer::UdpTransport transport(my_port, "127.0.0.1", peer_port);
-    tracer::Bridge bridge(g, transport, peer_of(0xA1));
-    const auto path = Path::parse("/data");  // parsed ONCE
-    (void)g.register_vertex(*path, Role::StoredValue);
+    graph_t g;
+    tr::net::udp_transport_t transport(my_port, "127.0.0.1", peer_port);
+    tr::net::bridge_t bridge(g, transport, peer_of(0xA1));
+    const auto path = path_t::parse("/data");  // parsed ONCE
+    (void)g.register_vertex(*path, role_t::STORED_VALUE);
     (void)bridge.export_vertex(*path);
-    tracer::graph::Vertex* va = g.find(path->key());  // the handle, resolved once
+    vertex_t* va = g.find(path->key());  // the handle, resolved once
 
     std::vector<std::uint8_t> payload;
     const auto send = [&](std::size_t S, net::Phase ph) {
         net::make_payload(payload, S, ph);
         const std::span<const std::byte> pb(reinterpret_cast<const std::byte*>(payload.data()),
                                             payload.size());
-        tracer::Tlv t{.type = tracer::Type::Value, .payload = pb};
-        const auto bytes = tracer::encode(t);
-        tracer::SegmentPtr seg = tracer::mem::heap_alloc(bytes.size());
+        tr::wire::tlv_t t{};
+        t.type = tr::wire::type_t::VALUE;
+        t.payload = pb;
+        const auto bytes = tr::wire::encode(t);
+        tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
         std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-        (void)g.write(va, tracer::View::over(std::move(seg)));  // hot path: handle, no string
+        (void)g.write(va, tr::view::view_t::over(std::move(seg)));  // hot path: handle, no string
     };
 
     std::this_thread::sleep_for(std::chrono::milliseconds(300));  // let the sub bind
@@ -74,17 +78,17 @@ void run_pub(std::uint16_t my_port, std::uint16_t peer_port) {
 }
 
 void run_sub(std::uint16_t my_port, std::uint16_t peer_port) {
-    Graph g;
-    tracer::UdpTransport transport(my_port, "127.0.0.1", peer_port);
-    tracer::Bridge bridge(g, transport, peer_of(0xB2));
-    (void)g.register_vertex(*Path::parse("/in"), Role::StoredValue);
-    bridge.set_mount(*Path::parse("/in"));
+    graph_t g;
+    tr::net::udp_transport_t transport(my_port, "127.0.0.1", peer_port);
+    tr::net::bridge_t bridge(g, transport, peer_of(0xB2));
+    (void)g.register_vertex(*path_t::parse("/in"), role_t::STORED_VALUE);
+    bridge.set_mount(*path_t::parse("/in"));
     bridge.set_recent_set_capacity(0);  // no dedup; measure the data path
 
     net::SubState state("libtracer");
     std::atomic<std::uint64_t> last_recv{0};
-    (void)g.subscribe(*Path::parse("/in"), [&](const tracer::View& v) {
-        const auto tlv = tracer::view_as_tlv(v);
+    (void)g.subscribe(*path_t::parse("/in"), [&](const tr::view::view_t& v) {
+        const auto tlv = tr::wire::view_as_tlv(v);
         if (tlv) state.on_payload(tlv->payload);
         last_recv.store(now_ns(), std::memory_order_relaxed);
     });

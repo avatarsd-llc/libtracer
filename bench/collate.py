@@ -2,47 +2,84 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 #
-# Collate RESULT lines from bench_libtracer / bench_zenoh into a side-by-side
-# table grouped by payload size.
+# Collate RESULT lines from bench_libtracer / bench_zenoh into focused, side-by-side
+# tables: fan-out scaling, payload scaling, endpoint (topic) scaling, and the
+# transport/mixed paths — plus a libtracer-vs-zenoh relative summary.
 #
-# RESULT<TAB>system<TAB>mode<TAB>size<TAB>msgs_per_s<TAB>mb_per_s<TAB>p50ns<TAB>p99ns<TAB>meanns
+# RESULT \t system \t mode \t size \t fanout \t endpoints \t pub_s \t deliv_s \t
+#        mb_s \t p50ns \t p99ns \t meanns
 import sys
 
 rows = []
 for line in sys.stdin:
     f = line.rstrip("\n").split("\t")
-    if len(f) == 9 and f[0] == "RESULT":
-        rows.append(
-            dict(sys=f[1], mode=f[2], size=int(f[3]), mps=float(f[4]),
-                 mbps=float(f[5]), p50=int(f[6]), p99=int(f[7]), mean=int(f[8])))
-
-order = ["libtracer/inproc", "libtracer/loopback", "libtracer/net", "zenoh/inproc", "zenoh/net"]
-sizes = sorted({r["size"] for r in rows})
+    if len(f) == 12 and f[0] == "RESULT":
+        rows.append(dict(sys=f[1], mode=f[2], size=int(f[3]), fan=int(f[4]), ep=int(f[5]),
+                         pub=float(f[6]), deliv=float(f[7]), mbps=float(f[8]),
+                         p50=int(f[9]), p99=int(f[10]), mean=int(f[11])))
 
 
-def fmt_int(n):
-    return f"{n:,}"
+def pick(**kw):
+    return [r for r in rows if all(r[k] == v for k, v in kw.items())]
 
 
-hdr = f"{'payload':>8} {'path':<20} {'msgs/s':>14} {'MB/s':>10} {'p50':>10} {'p99':>10} {'mean':>10}"
-print(hdr)
-print("-" * len(hdr))
+def n(x):
+    return f"{round(x):,}"
+
+
+def us(ns):
+    return f"{ns / 1000:.2f}µs" if ns >= 1000 else f"{ns}ns"
+
+
+def table(title, items, label):
+    print(f"\n## {title}")
+    print(f"{label:>12} {'system/mode':<22} {'pub/s':>13} {'deliv/s':>14} {'p50':>10} {'p99':>10}")
+    print("-" * 84)
+    for val, sel in items:
+        for r in sel:
+            print(f"{val:>12} {r['sys'] + '/' + r['mode']:<22} {n(r['pub']):>13} "
+                  f"{n(r['deliv']):>14} {us(r['p50']):>10} {us(r['p99']):>10}")
+        if sel:
+            print()
+
+
+# 1. Fan-out scaling: size=64, endpoints=1, mode inproc (both systems).
+fans = sorted({r["fan"] for r in rows if r["mode"] == "inproc" and r["size"] == 64 and r["ep"] == 1})
+table("Fan-out scaling (64B, 1 endpoint)",
+      [(f, pick(size=64, fan=f, ep=1, mode="inproc")) for f in fans], "subs")
+
+# 2. Payload scaling: fanout=1, endpoints=1.
+sizes = sorted({r["size"] for r in rows if r["fan"] == 1 and r["ep"] == 1 and r["size"] > 0})
+print("\n## Payload scaling (1 sub, 1 endpoint)")
+print(f"{'size':>12} {'system/mode':<22} {'pub/s':>13} {'MB/s':>12} {'p50':>10} {'p99':>10}")
+print("-" * 84)
 for s in sizes:
-    for key in order:
-        sysn, mode = key.split("/")
-        m = next((r for r in rows if r["size"] == s and r["sys"] == sysn and r["mode"] == mode), None)
-        if not m:
-            continue
-        print(f"{str(s) + 'B':>8} {key:<20} {fmt_int(round(m['mps'])):>14} "
-              f"{m['mbps']:>10.1f} {m['p50'] / 1000:>9.2f}µ {m['p99'] / 1000:>9.2f}µ "
-              f"{m['mean'] / 1000:>9.2f}µ")
+    for r in pick(size=s, fan=1, ep=1):
+        if r["mode"] in ("inproc", "inproc-borrow", "loopback") or r["sys"] == "zenoh":
+            print(f"{str(s) + 'B':>12} {r['sys'] + '/' + r['mode']:<22} {n(r['pub']):>13} "
+                  f"{r['mbps']:>12.1f} {us(r['p50']):>10} {us(r['p99']):>10}")
     print()
 
-# Speed-up summary (libtracer/inproc vs zenoh/inproc), where both exist.
-print("relative (libtracer/inproc vs zenoh/inproc), same payload:")
-for s in sizes:
-    lt = next((r for r in rows if r["size"] == s and r["sys"] == "libtracer" and r["mode"] == "inproc"), None)
-    zn = next((r for r in rows if r["size"] == s and r["sys"] == "zenoh"), None)
-    if lt and zn and zn["mps"] > 0 and lt["mean"] > 0:
-        print(f"  {str(s) + 'B':>6}: throughput x{lt['mps'] / zn['mps']:.1f}, "
-              f"latency(mean) x{zn['mean'] / lt['mean']:.1f} lower")
+# 3. Endpoint (topic) scaling: fanout=1, size=64, write-by-path.
+eps = sorted({r["ep"] for r in rows if r["mode"] == "inproc-path"})
+table("Endpoint/topic scaling (64B, 1 sub, write-by-path)",
+      [(e, pick(size=64, fan=1, ep=e, mode="inproc-path")) for e in eps], "topics")
+
+# 4. Mixed workload.
+table("Mixed workload (128 topics, varied fan-out + payload)",
+      [("mixed", pick(mode="mixed"))], "")
+
+# 5. Relative summary: libtracer/inproc vs zenoh/inproc at matched (size, fan, ep).
+print("\n## libtracer vs zenoh (matched size/fanout/endpoints)")
+printed = False
+for r in rows:
+    if r["sys"] != "libtracer" or r["mode"] != "inproc":
+        continue
+    z = next((q for q in rows if q["sys"] == "zenoh" and q["size"] == r["size"]
+              and q["fan"] == r["fan"] and q["ep"] == r["ep"]), None)
+    if z and z["deliv"] > 0 and z["p50"] > 0:
+        printed = True
+        print(f"  size={r['size']}B fan={r['fan']} ep={r['ep']}: "
+              f"throughput x{r['deliv'] / z['deliv']:.1f}, p50 latency x{z['p50'] / r['p50']:.1f} lower")
+if not printed:
+    print("  (no zenoh rows — run ./fetch_zenoh.sh and rebuild for the comparison)")

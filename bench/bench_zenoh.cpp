@@ -1,16 +1,18 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-//
-// Zenoh side of the comparison: in-process (peer) pub/sub via zenoh-cpp over
-// zenoh-c. A single Session with a publisher and subscriber on the same key
-// expression (intra-session local delivery) — the closest Zenoh analogue to
-// libtracer's in-process path. Same payload sizes and message counts as
-// bench_libtracer.cpp, same RESULT line format. See bench/README.md.
-
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * Zenoh side of the comparison: in-process (peer) pub/sub via zenoh-cpp over
+ * zenoh-c. Sweeps the same matrix as bench_libtracer — fan-out (F subscribers on
+ * one key expression), payload size, and endpoint count (E key expressions) —
+ * and emits the same RESULT line. Intra-session local delivery is the closest
+ * Zenoh analogue to libtracer's in-process path. See bench/README.md.
+ */
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -22,40 +24,54 @@ using namespace bench;
 
 namespace {
 
-void run_size(Session& session, std::size_t S) {
+void run(Session& session, std::size_t S, std::size_t F, std::size_t E, const char* mode) {
     std::atomic<std::uint64_t> recv{0};
-    auto sub = session.declare_subscriber(
-        KeyExpr("bench/zenoh"),
-        [&](const Sample&) { recv.fetch_add(1, std::memory_order_relaxed); }, closures::none);
-    auto pub = session.declare_publisher(KeyExpr("bench/zenoh"));
+    std::vector<Subscriber<void>> subs;
+    std::vector<Publisher> pubs;
+    subs.reserve(F * E);
+    pubs.reserve(E);
+    for (std::size_t e = 0; e < E; ++e) {
+        const std::string ke = "bench/zenoh/" + std::to_string(e);
+        for (std::size_t f = 0; f < F; ++f) {
+            subs.push_back(session.declare_subscriber(
+                KeyExpr(ke), [&](const Sample&) { recv.fetch_add(1, std::memory_order_relaxed); },
+                closures::none));
+        }
+        pubs.push_back(session.declare_publisher(KeyExpr(ke)));
+    }
     const std::vector<std::uint8_t> payload(S, 0xAB);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));  // let pub<->sub match
 
-    // throughput
+    const std::size_t MSGS = publishes_for(F, kDeliveryBudget);
+    const std::uint64_t want = static_cast<std::uint64_t>(MSGS) * F;
+
     recv.store(0);
     const auto t0 = now_ns();
-    for (std::size_t i = 0; i < kThroughputMsgs; ++i) pub.put(Bytes(payload));
+    for (std::size_t i = 0; i < MSGS; ++i) pubs[i % E].put(Bytes(payload));
     const auto deadline = Clock::now() + std::chrono::seconds(30);
-    while (recv.load(std::memory_order_relaxed) < kThroughputMsgs && Clock::now() < deadline)
+    while (recv.load(std::memory_order_relaxed) < want && Clock::now() < deadline)
         std::this_thread::yield();
     const double secs = (now_ns() - t0) / 1e9;
     const std::uint64_t got = recv.load(std::memory_order_relaxed);
-    if (got < kThroughputMsgs)
-        std::fprintf(stderr, "[zenoh] size=%zu delivered %llu/%zu (best-effort drops)\n", S,
-                     static_cast<unsigned long long>(got), kThroughputMsgs);
+    if (got < want)
+        std::fprintf(stderr, "[zenoh] S=%zu F=%zu E=%zu delivered %llu/%llu (best-effort drops)\n",
+                     S, F, E, static_cast<unsigned long long>(got),
+                     static_cast<unsigned long long>(want));
 
-    // latency, one message at a time (no pipelining)
     Latency lat;
-    for (std::size_t i = 0; i < kLatencyMsgs; ++i) {
+    const std::size_t LATN = publishes_for(F, kLatencyDeliveryBudget);
+    for (std::size_t i = 0; i < LATN; ++i) {
         const std::uint64_t before = recv.load(std::memory_order_relaxed);
         const auto start = now_ns();
-        pub.put(Bytes(payload));
-        const auto ld = Clock::now() + std::chrono::milliseconds(200);
-        while (recv.load(std::memory_order_relaxed) == before && Clock::now() < ld)
+        pubs[i % E].put(Bytes(payload));
+        const auto ld = Clock::now() + std::chrono::milliseconds(500);
+        while (recv.load(std::memory_order_relaxed) < before + F && Clock::now() < ld)
             std::this_thread::yield();
         lat.add(now_ns() - start);
     }
-    emit("zenoh", "inproc", S, got / secs, got * static_cast<double>(S) / secs / 1e6,
+    const double pub_s = MSGS / secs;
+    const double deliv_s = got / secs;
+    emit("zenoh", mode, S, F, E, pub_s, deliv_s, deliv_s * static_cast<double>(S) / 1e6,
          lat.summarize());
 }
 
@@ -64,6 +80,8 @@ void run_size(Session& session, std::size_t S) {
 int main() {
     init_log_from_env_or("error");
     auto session = Session::open(Config::create_default());
-    for (std::size_t S : kSizes) run_size(session, S);
+    for (std::size_t F : kFanouts) run(session, kRefSize, F, kRefEndpoints, "inproc");
+    for (std::size_t S : kSizes) run(session, S, kRefFanout, kRefEndpoints, "inproc");
+    for (std::size_t E : kEndpoints) run(session, kRefSize, kRefFanout, E, "inproc-path");
     return 0;
 }

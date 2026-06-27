@@ -9,10 +9,12 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #include <array>
 #include <utility>
+#include <vector>
 
 namespace tr::net {
 
@@ -67,6 +69,25 @@ void udp_transport_t::send(std::span<const std::byte> frame) {
     peer.sin_addr.s_addr = peer_ip_;
     peer.sin_port = htons(peer_port_);
     ::sendto(fd_, frame.data(), frame.size(), 0, reinterpret_cast<sockaddr*>(&peer), sizeof(peer));
+}
+
+void udp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
+    if (fd_ < 0 || iov.empty()) return;
+    // Gather the rope's segments into one datagram with a single syscall — no
+    // userspace flatten copy (the "rope we put into tx", lowered to sendmsg).
+    std::vector<::iovec> vec;
+    vec.reserve(iov.size());
+    for (const auto& s : iov) vec.push_back(::iovec{const_cast<std::byte*>(s.data()), s.size()});
+    sockaddr_in peer{};
+    peer.sin_family = AF_INET;
+    peer.sin_addr.s_addr = peer_ip_;
+    peer.sin_port = htons(peer_port_);
+    msghdr msg{};
+    msg.msg_name = &peer;
+    msg.msg_namelen = sizeof(peer);
+    msg.msg_iov = vec.data();
+    msg.msg_iovlen = vec.size();
+    ::sendmsg(fd_, &msg, 0);
 }
 
 void udp_transport_t::run() {

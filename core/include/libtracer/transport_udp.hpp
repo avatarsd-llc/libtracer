@@ -33,7 +33,8 @@ class udp_transport_t : public transport_t {
     udp_transport_t(const udp_transport_t&) = delete;
     udp_transport_t& operator=(const udp_transport_t&) = delete;
 
-    void send(std::span<const std::byte> frame) override;  // sendto(peer)
+    void send(std::span<const std::byte> frame) override;                 // sendto(peer)
+    void send(std::span<const std::span<const std::byte>> iov) override;  // sendmsg(iovec)
     void set_receiver(receiver_t receiver) override;
 
     [[nodiscard]] bool ok() const noexcept { return fd_ >= 0; }

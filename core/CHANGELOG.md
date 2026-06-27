@@ -68,6 +68,16 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **`transport_t::send(iov)` — scatter-gather egress (the "rope we put into tx").**
+  Ship a rope's `to_iovec()` as one frame with no flatten copy; `udp_transport_t`
+  lowers it to a single `sendmsg(iovec)` syscall. Structural batching (the
+  composition *is* the batch) rather than a Nagle-style timer: one syscall per
+  composite, so network throughput scales with composition size while p50 latency
+  stays flat. Measured (`bench/bench_scatter`): 5.1M values/s @ ~3µs (K=8) up to
+  46.6M values/s @ ~12µs (K=256) — beating zenoh-c (3.5M/s @ 62µs) on **both**
+  throughput and latency. Default impl gathers + calls `send(span)` (other
+  transports unchanged). Tested in `udp_test` (`test_scatter_gather`).
+
 - **`mem_cuda` GPU backend ([ADR-0024](../docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)) — gated, GPU-tested.**
   `tr::mem::cuda_backend()` (DEVICE space; `cudaMalloc`/`cudaFree`) plus
   `tr::view::cuda_alloc` / `cuda_copy_from_host` / `cuda_copy_to_host`. A GPU-backed
