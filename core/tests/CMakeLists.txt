@@ -17,6 +17,12 @@ target_link_libraries(byteorder_test PRIVATE libtracer)
 libtracer_test_warnings(byteorder_test)
 add_test(NAME byteorder COMMAND byteorder_test)
 
+# Frame codec — nesting depth cap / iterative-parse contract (reference/01).
+add_executable(frame_test frame_test.cpp)
+target_link_libraries(frame_test PRIVATE libtracer)
+libtracer_test_warnings(frame_test)
+add_test(NAME frame COMMAND frame_test)
+
 # M1 — conformance harness (links the built library).
 add_executable(conformance_runner conformance_runner.cpp)
 target_link_libraries(conformance_runner PRIVATE libtracer)
