@@ -29,6 +29,7 @@ using namespace bench;
 using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
+using tr::graph::settings_t;
 using tr::graph::vertex_t;
 using tr::view::view_t;
 
@@ -301,6 +302,69 @@ void run_inproc_mt(std::size_t T) {
     emit("libtracer", mode.c_str(), S, 1, T, pub_s, deliv_s, mb_s, lat.summarize());
 }
 
+// ep-type (endpoint-dispatch-class) axis (#96 / ADR-0032). On ONE fixed workload
+// (size=64, fan=1, ep=1) we compare the three dispatch CLASSES a write can take to
+// an endpoint, emitting one RESULT line per class with `mode` tagging the class:
+//
+//   eptype-lean        minimal sink: a plain in-process write+deliver to a
+//                      STORED_VALUE vertex, heap-allocated view per publish.
+//                      Same path as the existing `inproc` mode.
+//   eptype-lean-cached the zero-alloc loaned / out_cache read path: a borrowed view
+//                      (zero alloc, zero copy — a refcount handoff). Same path as
+//                      the existing `inproc-borrow` mode.
+//   eptype-stream      a STREAM-role vertex: each write appends to the bounded
+//                      history ring (retention work) *then* fans out — strictly more
+//                      work than lean. Allocation parity with lean (heap view) so the
+//                      delta isolates the history-retention cost.
+//
+// (Naming is provisional — see bench/README.md "ep-type axis" for the map; the class
+// boundaries are what matter, the labels can be refined later.)
+//
+// lean / lean-cached reuse the existing inproc paths via run_inproc(), re-emitted
+// under the eptype-* tag (the original inproc / inproc-borrow lines still print too).
+
+// The STREAM-role class: time write+deliver where each write retains history.
+void run_eptype_stream() {
+    constexpr std::size_t S = 64;
+    graph_t g;
+    settings_t st{};
+    st.history_keep_last = 16;  // a real bounded ring: retention work on every write
+    const path_t path = *path_t::parse("/bench/stream");
+    vertex_t* v = *g.register_vertex(path, role_t::STREAM, {}, st);
+    std::atomic<std::uint64_t> recv{0};
+    (void)g.subscribe(path, [&](const view_t&) { recv.fetch_add(1, std::memory_order_relaxed); });
+
+    const std::vector<std::byte> tlv = value_tlv(S);
+    const auto put = [&]() { (void)g.write(v, owned_view(tlv)); };  // heap view: lean parity
+
+    const std::size_t MSGS = publishes_for(1, kDeliveryBudget);
+    const std::size_t LATN = publishes_for(1, kLatencyDeliveryBudget);
+    for (std::size_t i = 0; i < 1000; ++i) put();  // warmup
+
+    recv.store(0);
+    const auto t0 = now_ns();
+    for (std::size_t i = 0; i < MSGS; ++i) put();
+    const double secs = (now_ns() - t0) / 1e9;
+    const double pub_s = MSGS / secs;
+    const double deliv_s = pub_s;  // fan=1 => one delivery per publish
+    const double mb_s = deliv_s * static_cast<double>(S) / 1e6;
+
+    Latency lat;
+    for (std::size_t i = 0; i < LATN; ++i) {
+        const auto a = now_ns();
+        put();
+        lat.add(now_ns() - a);
+    }
+    emit("libtracer", "eptype-stream", S, 1, 1, pub_s, deliv_s, mb_s, lat.summarize());
+}
+
+// The full ep-type sweep: lean, lean-cached, stream — all at size=64 fan=1 ep=1.
+void run_eptype() {
+    run_inproc(kRefSize, 1, 1, alloc_t::HEAP, false, "eptype-lean");
+    run_inproc(kRefSize, 1, 1, alloc_t::BORROW, false, "eptype-lean-cached");
+    run_eptype_stream();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -322,5 +386,7 @@ int main(int argc, char** argv) {
     const std::size_t hw = std::max<std::size_t>(1, std::thread::hardware_concurrency());
     for (std::size_t T : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}})
         if (T <= hw) run_inproc_mt(T);
+    // ep-type (endpoint-dispatch-class) axis: lean / lean-cached / stream.
+    run_eptype();
     return 0;
 }

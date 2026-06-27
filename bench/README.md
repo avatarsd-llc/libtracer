@@ -46,6 +46,28 @@ craft libtracer":
 | `mixed` | 128 topics, varied fan-out + payloads. |
 | `net` | two processes over real UDP (`run_net.sh`). |
 | `scatter` | composite rope shipped in one `sendmsg(iovec)` (`bench_scatter`). |
+| `eptype-lean` | ep-type axis: minimal sink (see below). |
+| `eptype-lean-cached` | ep-type axis: loaned / `out_cache` read (see below). |
+| `eptype-stream` | ep-type axis: `STREAM`-role vertex (see below). |
+
+### ep-type (endpoint-dispatch-class) axis (#96 / ADR-0032)
+
+A fourth axis over the *dispatch class* a write takes to an endpoint, measured on one
+fixed workload (**64 B, fan-out 1, 1 endpoint**) so the three classes are directly
+comparable. Each emits a `RESULT` line whose `mode` names the class (same 12-field
+shape, so `collate.py` / `perf_gate.py` still parse). **The names are provisional**
+(the class boundaries are what matter); the map to the underlying paths is:
+
+| ep-type | maps to | what it exercises |
+| --- | --- | --- |
+| `eptype-lean` | minimal sink (`inproc`) | plain write+deliver to a `STORED_VALUE` vertex, heap view per publish. |
+| `eptype-lean-cached` | loaned / `out_cache` (`inproc-borrow`) | the zero-alloc loaned read path — a borrowed view (zero alloc, zero copy). |
+| `eptype-stream` | `STREAM` role | each write appends to the bounded history ring (retention work) *then* fans out — strictly more work than lean. |
+
+Expected cost ordering: **lean-cached** (fastest / zero-alloc) < **lean** < **stream**
+(heaviest — pays history retention on every write). lean / lean-cached reuse the
+existing `inproc` / `inproc-borrow` code paths, re-emitted under the `eptype-*` tag (the
+original lines still print).
 
 - **Throughput** — back-to-back publishes; `deliveries / elapsed`.
 - **Latency** — one publish at a time (publish, wait for receipt, repeat); p50/p99/mean.
