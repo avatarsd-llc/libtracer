@@ -12,10 +12,11 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release >/dev/null
 cmake --build build -j >/dev/null
 
 echo "================================================================"
-echo " libtracer vs Zenoh — IN-PROCESS pub/sub (1 publisher, 1 subscriber)"
-echo " Not a network benchmark: libtracer has no socket transport yet (M5)."
-echo " libtracer/inproc = zero-copy graph dispatch; libtracer/loopback ="
-echo " encode+ROUTER+decode over an in-memory queue; zenoh/inproc = peer mode."
+echo " libtracer vs Zenoh — IN-PROCESS sweep (fan-out / payload / topics / mixed)"
+echo " inproc = zero-copy graph dispatch; inproc-borrow = zero-alloc loaned path;"
+echo " inproc-path = write-by-path (registry lookup); loopback = encode+ROUTER+"
+echo " decode over an in-memory queue; zenoh/inproc = peer mode."
+echo " Network: ./run_net.sh (UDP, 2 proc).  Response surfaces: ./grid.sh."
 echo "================================================================"
 
 res="$(mktemp)"

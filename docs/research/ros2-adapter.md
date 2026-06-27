@@ -5,6 +5,21 @@
 > Zenoh-ROS?" — interfaces are **declared and documented here before any
 > implementation**, per the project's interface-first rule.
 
+```{admonition} Superseded in part — see ADR-0023 and the bench
+:class: important
+This note's *recommendation* ("bridge first, native rmw maybe never") is
+**superseded** by the decision to build a native RMW: **[ADR-0023](../adr/0023-ros2-binding-via-rmw-tracer.md)**
+(`rmw_tracer`) and **[ADR-0025](../adr/0025-rmw-tracer-end-to-end-zero-copy-rcl-over-rdma.md)**
+(end-to-end zero-copy + rcl-over-RDMA); the phased build is in
+[`bindings/ros2/README.md`](https://github.com/avatarsd-llc/libtracer/blob/main/bindings/ros2/README.md).
+Two premises below are also now **out of date**: (1) the "needs egress batching to
+be throughput-competitive" prerequisite is **resolved** — scatter-gather composition
+(`transport_t::send(iov)`) makes libtracer beat zenoh-c on throughput *and* latency
+(see [Performance](../performance.md)); (2) "Zenoh wins small-msg throughput" no
+longer holds. The "reliable stream = M6" prerequisite still stands. The architecture
+analysis below remains useful background.
+```
+
 ## TL;DR — how far are we?
 
 There are **two integration models**, mirroring exactly how Zenoh integrates with
