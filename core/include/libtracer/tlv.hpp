@@ -12,7 +12,9 @@
 
 namespace tr::wire {
 
-// Core type-code registry (0x01-0x0D). 0x05 is retired (was LIST, ADR-0003).
+// Core type-code registry (0x01-0x0E). 0x05 is retired (was LIST, ADR-0003).
+// 0x0E SPEC is the in-band vertex-creation spec (ADR-0017); it is structured
+// (opt.PL=1) and handled generically by the codec — see docs/reference/05 §SPEC.
 enum class type_t : std::uint8_t {
     VALUE = 0x01,
     NAME = 0x02,
@@ -26,6 +28,7 @@ enum class type_t : std::uint8_t {
     SETTINGS = 0x0B,
     TIME = 0x0C,
     ROUTER = 0x0D,
+    SPEC = 0x0E,
 };
 
 // The 1-byte `opt` field. Bits, MSB->LSB: R | PL | TS | CR | LL | CW | TF | R.
