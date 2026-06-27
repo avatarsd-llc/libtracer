@@ -1,10 +1,25 @@
 # libtracer (Rust binding)
 
-Rust binding for the libtracer reference implementation. Published to crates.io as `libtracer`.
+Rust binding for libtracer. Published to crates.io as `libtracer`.
 
 ## Status
 
-Stub — not yet implemented.
+Stub — not yet implemented. Tracked in [#57](https://github.com/avatarsd-llc/libtracer/issues/57).
+
+## Strategy
+
+The original plan (decision **Q2.3**) was a **two-crate FFI** layout: `libtracer-sys`
+(raw `bindgen` bindings to the C++ core) plus a safe `libtracer` wrapper.
+
+**This was superseded by [ADR-0028](../../docs/adr/0028-native-cores-kept-consistent-by-conformance-vectors.md).**
+Rust gets a **native, pure-Rust core** — not an FFI shim over C++ — kept in lock-step
+with the C++ and TypeScript cores by the shared conformance vectors and the CI gate
+(`tests/conformance/run-all.py`). The published crate is `libtracer` (single crate; no
+`-sys` crate, because there is no native library to link).
+
+Rationale: a native core compiles to WASM and `no_std` targets without dragging a C++
+toolchain through the FFI seam, and the conformance gate makes "three independent
+implementations" cheaper to keep consistent than one impl behind two language wrappers.
 
 ## Use
 
@@ -12,6 +27,12 @@ Stub — not yet implemented.
 [dependencies]
 libtracer = "0.1"
 ```
+
+## Security posture
+
+**Unsafe by default in v0.1** — no `security_*` modules exist yet (TLS/DTLS/PSK/ACL
+enforcement are post-MVP per the [module catalog](../../docs/reference/10-module-catalog.md)).
+Run on a trusted link or tunnel the transport until `security_*` lands.
 
 ## Releasing
 
