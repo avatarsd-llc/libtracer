@@ -22,6 +22,11 @@ add_executable(bench_libtracer_net bench_libtracer_net.cpp)
 target_link_libraries(bench_libtracer_net PRIVATE libtracer)
 target_compile_options(bench_libtracer_net PRIVATE -Wall -Wextra)
 
+# Scatter-gather egress demo: one sendmsg(iovec) ships a K-value composite rope.
+add_executable(bench_scatter bench_scatter.cpp)
+target_link_libraries(bench_scatter PRIVATE libtracer)
+target_compile_options(bench_scatter PRIVATE -Wall -Wextra)
+
 # Zenoh side — built only when the prebuilt is vendored (run bench/fetch_zenoh.sh).
 set(ZC ${CMAKE_CURRENT_SOURCE_DIR}/vendor/zenoh-c)
 set(ZCPP ${CMAKE_CURRENT_SOURCE_DIR}/vendor/zenoh-cpp-1.9.0)

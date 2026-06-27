@@ -109,11 +109,44 @@ void test_two_nodes_over_udp() {
     }
 }
 
+void test_scatter_gather() {
+    std::printf("UDP transport — scatter-gather send (rope -> one datagram, no flatten):\n");
+    tr::net::udp_transport_t a(47104, "127.0.0.1", 47105);
+    tr::net::udp_transport_t b(47105, "127.0.0.1", 47104);
+    check(a.ok() && b.ok(), "both UDP sockets bound");
+
+    std::promise<std::vector<std::byte>> got;
+    auto fut = got.get_future();
+    b.set_receiver([&](std::span<const std::byte> f) {
+        got.set_value(std::vector<std::byte>(f.begin(), f.end()));
+    });
+
+    // A 3-segment rope (the "rope we put into tx"), sent via one sendmsg(iovec).
+    const std::array<std::byte, 2> s0{std::byte{0x01}, std::byte{0x02}};
+    const std::array<std::byte, 3> s1{std::byte{0x03}, std::byte{0x04}, std::byte{0x05}};
+    const std::array<std::byte, 1> s2{std::byte{0x06}};
+    const std::array<std::span<const std::byte>, 3> iov{std::span<const std::byte>(s0),
+                                                        std::span<const std::byte>(s1),
+                                                        std::span<const std::byte>(s2)};
+    a.send(std::span<const std::span<const std::byte>>(iov));
+
+    const std::array<std::byte, 6> expect{std::byte{0x01}, std::byte{0x02}, std::byte{0x03},
+                                          std::byte{0x04}, std::byte{0x05}, std::byte{0x06}};
+    const bool arrived = fut.wait_for(2s) == std::future_status::ready;
+    check(arrived, "scatter-gather frame received");
+    if (arrived) {
+        const auto r = fut.get();
+        check(r.size() == 6 && std::memcmp(r.data(), expect.data(), 6) == 0,
+              "gathered segments arrive concatenated as one datagram");
+    }
+}
+
 }  // namespace
 
 int main() {
     test_raw_frame();
     test_two_nodes_over_udp();
+    test_scatter_gather();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

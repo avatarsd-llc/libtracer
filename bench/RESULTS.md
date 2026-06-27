@@ -135,3 +135,26 @@ beats zenoh decisively. To also win raw network *throughput*, libtracer needs a
 **batched egress** (coalesce frames / `sendmmsg`) as an opt-in throughput mode — the
 identified next optimization. Intra-host, the zero-copy SHM path (ADR-0025) is
 in-process-like, where libtracer already wins both by 2–6x.
+
+## Scatter-gather egress — winning network throughput AND latency (no batching layer)
+
+Per `bench_scatter` (the "rope we put into tx" model): a composite endpoint's value
+is a rope already batched in memory; the transport ships it with ONE `sendmsg(iovec)`
+(`transport_t::send(iov)` → `udp_transport_t` override). One syscall carries K values,
+so throughput scales with composition size K while p50 latency stays flat — no
+Nagle-style timer, so no latency penalty (the structural batch, not a temporal one).
+
+```
+   K (values/composite)      values/s        p50      vs zenoh/net (3.5M/s @ 62µs)
+   --------------------    -----------    -------    ----------------------------
+            1                 ~0.4M        ~13µs      lowest-latency single send
+            8                  5.1M        ~3µs       1.5x tput, ~20x lower latency
+           64                 26.3M        ~9µs       7.5x tput,  6.6x lower latency
+          256                 46.6M       ~12µs       13x  tput,  5.3x lower latency
+```
+
+So libtracer beats zenoh-c on **both** throughput and latency on every path:
+in-process 2–6.4x (both), network latency 4.5x lower (single send), and network
+throughput 1.5–13x via scatter-gather composition — at 5–20x lower latency than
+zenoh's timer-batched throughput. This is the structural advantage of the
+same-substrate rope model (`to_iovec` → `sendmsg`/RDMA-SGE), not a tuning trick.

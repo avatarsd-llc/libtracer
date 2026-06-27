@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <functional>
 #include <span>
+#include <vector>
 
 namespace tr::net {
 
@@ -32,6 +33,19 @@ class transport_t {
 
     // Emit one frame (a complete TLV's bytes) onto the wire.
     virtual void send(std::span<const std::byte> frame) = 0;
+
+    // Scatter-gather send: emit the gathered spans as ONE frame, without a flatten
+    // copy — hand a rope's `to_iovec()` straight to the wire (the "rope we put into
+    // tx"). The default gathers into a temporary and calls send(); transports with
+    // native scatter-gather (sendmsg/writev/RDMA SGE) override this to avoid the copy.
+    virtual void send(std::span<const std::span<const std::byte>> iov) {
+        std::size_t total = 0;
+        for (const auto& s : iov) total += s.size();
+        std::vector<std::byte> tmp;
+        tmp.reserve(total);
+        for (const auto& s : iov) tmp.insert(tmp.end(), s.begin(), s.end());
+        send(std::span<const std::byte>(tmp));
+    }
 
     // Register the sink for inbound frames (the bridge's ingest). Must be set
     // before frames flow; delivery may occur on an internal transport thread.
