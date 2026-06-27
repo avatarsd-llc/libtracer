@@ -4,6 +4,7 @@ Each subfolder packages the libtracer reference implementation for a specific pl
 
 | Integration | Distribution | Status |
 |-------------|--------------|--------|
+| [esp-idf/](esp-idf/) | ESP Component Registry (`idf_component.yml`) | component written, untested on-target |
 | [platformio/](platformio/) | `registry.platformio.org` (`pio pkg publish`) | stub |
 | [esphome/](esphome/) | `external_components:` git URL — no central registry | stub |
 | [arduino/](arduino/) | Arduino Library Manager | stub |
