@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -24,7 +25,9 @@ using namespace bench;
 
 namespace {
 
-void run(Session& session, std::size_t S, std::size_t F, std::size_t E, const char* mode) {
+void run(Session& session, std::size_t S, std::size_t F, std::size_t E, const char* mode,
+         bool csv = false, std::uint64_t budget = kDeliveryBudget,
+         std::uint64_t latbudget = kLatencyDeliveryBudget) {
     std::atomic<std::uint64_t> recv{0};
     std::vector<Subscriber<void>> subs;
     std::vector<Publisher> pubs;
@@ -42,7 +45,7 @@ void run(Session& session, std::size_t S, std::size_t F, std::size_t E, const ch
     const std::vector<std::uint8_t> payload(S, 0xAB);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));  // let pub<->sub match
 
-    const std::size_t MSGS = publishes_for(F, kDeliveryBudget);
+    const std::size_t MSGS = publishes_for(F, budget);
     const std::uint64_t want = static_cast<std::uint64_t>(MSGS) * F;
 
     recv.store(0);
@@ -59,7 +62,7 @@ void run(Session& session, std::size_t S, std::size_t F, std::size_t E, const ch
                      static_cast<unsigned long long>(want));
 
     Latency lat;
-    const std::size_t LATN = publishes_for(F, kLatencyDeliveryBudget);
+    const std::size_t LATN = publishes_for(F, latbudget);
     for (std::size_t i = 0; i < LATN; ++i) {
         const std::uint64_t before = recv.load(std::memory_order_relaxed);
         const auto start = now_ns();
@@ -71,15 +74,33 @@ void run(Session& session, std::size_t S, std::size_t F, std::size_t E, const ch
     }
     const double pub_s = MSGS / secs;
     const double deliv_s = got / secs;
-    emit("zenoh", mode, S, F, E, pub_s, deliv_s, deliv_s * static_cast<double>(S) / 1e6,
-         lat.summarize());
+    if (csv)
+        emit_csv("zenoh", S, F, E, pub_s, deliv_s, lat.summarize());
+    else
+        emit("zenoh", mode, S, F, E, pub_s, deliv_s, deliv_s * static_cast<double>(S) / 1e6,
+             lat.summarize());
+}
+
+// Response-surface grid matching bench_libtracer's grid mode (CSV for plot.py).
+void run_grid(Session& session) {
+    emit_csv_header();
+    for (std::size_t S : kGridSizes)
+        for (std::size_t F : kGridFanouts)
+            run(session, S, F, 1, "grid", true, kGridBudget, kGridLatBudget);
+    for (std::size_t S : kGridSizes)
+        for (std::size_t E : kGridEndpoints)
+            run(session, S, 1, E, "grid", true, kGridBudget, kGridLatBudget);
 }
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     init_log_from_env_or("error");
     auto session = Session::open(Config::create_default());
+    if (argc > 1 && std::string_view(argv[1]) == "grid") {
+        run_grid(session);
+        return 0;
+    }
     for (std::size_t F : kFanouts) run(session, kRefSize, F, kRefEndpoints, "inproc");
     for (std::size_t S : kSizes) run(session, S, kRefFanout, kRefEndpoints, "inproc");
     for (std::size_t E : kEndpoints) run(session, kRefSize, kRefFanout, E, "inproc-path");

@@ -90,4 +90,28 @@ inline void emit(const char* system, const char* mode, std::size_t size_bytes, s
     std::fflush(stdout);
 }
 
+// --- Response-surface grid (system dynamics; consumed by plot.py) ---------------
+// Log-spaced axes: a 7x7 grid is dense enough for a readable 3D surface yet keeps
+// the (zenoh-bound) wall-clock sane. Two slices: size x fanout (endpoints=1) and
+// size x endpoints (fanout=1).
+inline constexpr std::size_t kGridSizes[] = {1, 16, 64, 256, 1024, 4096, 8192};
+inline constexpr std::size_t kGridFanouts[] = {1, 4, 16, 64, 256, 1024, 4096};
+inline constexpr std::size_t kGridEndpoints[] = {1, 4, 16, 64, 256, 1024, 4096};
+inline constexpr std::uint64_t kGridBudget = 500'000;
+inline constexpr std::uint64_t kGridLatBudget = 40'000;
+
+inline void emit_csv_header() {
+    std::printf("system,size,fanout,endpoints,pub_s,deliv_s,p50_ns,p99_ns,mean_ns\n");
+    std::fflush(stdout);
+}
+
+inline void emit_csv(const char* system, std::size_t size, std::size_t fanout,
+                     std::size_t endpoints, double pub_s, double deliv_s,
+                     const Latency::Summary& lat) {
+    std::printf("%s,%zu,%zu,%zu,%.0f,%.0f,%llu,%llu,%llu\n", system, size, fanout, endpoints, pub_s,
+                deliv_s, static_cast<unsigned long long>(lat.p50),
+                static_cast<unsigned long long>(lat.p99), static_cast<unsigned long long>(lat.mean));
+    std::fflush(stdout);
+}
+
 }  // namespace bench

@@ -7,6 +7,22 @@
 > (libtracer is `sendto`-syscall-bound) and the
 > [ROS note](./ros2-adapter.md) (a bridge needs reliable QoS = M6).
 
+```{admonition} Update — the throughput gap is closed (the batching half is resolved)
+:class: important
+The egress-batching gap below has been **resolved differently and better** than the
+`BatchingTransport` timer-decorator proposed here. Instead of a *temporal* batch (a
+Nagle-style timer that costs latency), libtracer batches **structurally**: a
+composite endpoint's value is a rope already batched in memory, shipped in **one
+`sendmsg(iovec)`** via `transport_t::send(iov)` (the scatter-gather seam, shipped in
+the perf work — see [Performance](../performance.md) and `bench/bench_scatter`). One
+syscall carries K values, so throughput scales with composition size *at flat
+latency* — libtracer now beats zenoh-c on **both** throughput and latency. The
+`BatchingTransport` timer-decorator is therefore **superseded** (kept below only as
+the considered-and-rejected alternative). The remaining M6 work is purely the
+**reliable byte-stream transport** (TCP/QUIC + `FrameReassembler`) for ROS
+`RELIABLE` QoS and WAN — that part stands.
+```
+
 ## The two gaps M6 closes
 
 The M5 UDP transport is **datagram = frame** (flat decode, best-effort). The bench

@@ -3,10 +3,11 @@
 ```{admonition} In one paragraph
 :class: tip
 **`transport_t`** is the seam between the bridge and one wire technology: `send`
-framed bytes, register a `receiver_t` for inbound frames. It never sees TLV
-semantics — only bytes. Today the only implementation is **`loopback_channel_t`**, an
-in-process dev/test transport (two endpoints, an in-memory queue, a receive
-thread). A real socket transport (UDS/UDP) is **M5** behind the same interface.
+framed bytes (single buffer **or** a scatter-gather `iovec`), register a
+`receiver_t` for inbound frames. It never sees TLV semantics — only bytes.
+Implementations: **`loopback_channel_t`** (in-process dev/test) and
+**`udp_transport_t`** (real localhost/LAN UDP, M5). A reliable byte-stream
+transport (TCP/QUIC) is the remaining M6 work.
 ```
 
 ## What it does
@@ -29,6 +30,9 @@ using peer_id_t = std::array<std::byte, 16>;       // ROUTER origin_peer_id
 
 class transport_t {
     virtual void send(std::span<const std::byte> frame) = 0;
+    // Scatter-gather: ship a rope's to_iovec() as one frame, no flatten copy.
+    // Default gathers+send(); native transports override (sendmsg/writev/RDMA-SGE).
+    virtual void send(std::span<const std::span<const std::byte>> iov);
     using receiver_t = std::function<void(std::span<const std::byte>)>;
     virtual void set_receiver(receiver_t) = 0;
 };
@@ -36,6 +40,12 @@ class transport_t {
 class loopback_channel_t {                          // dev/test transport
     loopback_endpoint_t& a();  loopback_endpoint_t& b();  // each a transport_t
     void shutdown();                                // join recv threads
+};
+
+class udp_transport_t : public transport_t {        // real UDP (M5)
+    udp_transport_t(uint16_t bind_port, const std::string& peer_host, uint16_t peer_port);
+    // send(span) = one sendto; send(iov) = one sendmsg(iovec) — the structural
+    // batch (a composite rope in one syscall; see Performance).
 };
 ```
 
