@@ -29,6 +29,12 @@ target_link_libraries(frame_test PRIVATE libtracer)
 libtracer_test_warnings(frame_test)
 add_test(NAME frame COMMAND frame_test)
 
+# #81-A — per-endpoint :acl structural storage (store/serve raw ACL TLV; no enforcement).
+add_executable(acl_test acl_test.cpp)
+target_link_libraries(acl_test PRIVATE libtracer)
+libtracer_test_warnings(acl_test)
+add_test(NAME acl COMMAND acl_test)
+
 # M1 — conformance harness (links the built library).
 add_executable(conformance_runner conformance_runner.cpp)
 target_link_libraries(conformance_runner PRIVATE libtracer)

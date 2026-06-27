@@ -92,6 +92,9 @@ class graph_t {
     result_t<void> field_write(vertex_t* v, const field_path_t& field, const view_t& value);
     // ":schema" read => a POINT descriptor (name + settings).
     [[nodiscard]] result_t<view_t> read_schema(vertex_t* v) const;
+    // ":acl" read => the raw stored ACL TLV bytes (structural; #81-A, ADR-0018/0020). Storage
+    // only — enforcement is the deferred security_acl module, not this layer.
+    [[nodiscard]] result_t<view_t> read_acl(vertex_t* v) const;
 
     mutable std::shared_mutex map_mutex_;
     std::unordered_map<path_key_t, std::unique_ptr<vertex_t>, path_key_hash_t> vertices_;

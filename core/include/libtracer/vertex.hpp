@@ -98,6 +98,9 @@ class vertex_t {
     std::atomic<std::shared_ptr<const view_t>> lkv_{};   // lock-free read/write hot path
     std::deque<std::shared_ptr<const view_t>> history_;  // Stream ring; guarded by m_
     std::vector<subscriber_t> subs_;                     // fan-out edges; guarded by m_
+    std::vector<std::byte> acl_;  // raw :acl TLV bytes, stored opaquely; guarded by m_ (#81-A,
+                                  // ADR-0018/0020). Empty => no :acl set. Enforcement is NOT here:
+                                  // the security_acl module gates reads/writes/subscribes.
     std::mutex m_;
     std::condition_variable cv_;
     std::uint64_t write_seq_ = 0;  // bumped per write; await waits for an increment (guarded by m_)

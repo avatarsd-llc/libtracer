@@ -255,6 +255,18 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
         return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     }
 
+    if (step0.name == "acl") {
+        // STRUCTURAL STORAGE ONLY (#81-A, ADR-0018/0020): validate the value is an ACL TLV and
+        // stash its raw bytes opaquely — we do NOT parse the NFSv4 ACE children or enforce them.
+        // Enforcement (read/write/subscribe gating) is the deferred security_acl module.
+        const auto acl = view_as_tlv(value);
+        if (!acl || acl->type != type_t::ACL) return std::unexpected(status_t::TYPE_MISMATCH);
+        const std::span<const std::byte> bytes = value.bytes();
+        const std::lock_guard lock(v->m_);
+        v->acl_.assign(bytes.begin(), bytes.end());  // storing replaces; empty => no restrictions
+        return {};
+    }
+
     if (step0.name == "settings" && field.steps.size() >= 2) {
         const auto tlv = view_as_tlv(value);
         if (!tlv || tlv->type != type_t::VALUE) return std::unexpected(status_t::TYPE_MISMATCH);
@@ -310,12 +322,28 @@ result_t<view_t> graph_t::read_schema(vertex_t* v) const {
     return view_t::over(std::move(seg));
 }
 
+result_t<view_t> graph_t::read_acl(vertex_t* v) const {
+    // Serve back the raw :acl TLV bytes stored by field_write (heap-alloc + copy, like
+    // read_schema), or NOT_FOUND when none was set. Opaque: no ACE parsing, no enforcement.
+    std::vector<std::byte> acl;
+    {
+        const std::lock_guard lock(v->m_);
+        if (v->acl_.empty()) return std::unexpected(status_t::NOT_FOUND);
+        acl = v->acl_;
+    }
+    segment_ptr_t seg = view::heap_alloc(acl.size());
+    if (!seg) return std::unexpected(status_t::BACKPRESSURE);
+    std::memcpy(seg->bytes.data(), acl.data(), acl.size());
+    return view_t::over(std::move(seg));
+}
+
 result_t<view_t> graph_t::read(const path_t& path) const {
     vertex_t* v = find(path.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
     if (!path.field().empty()) {
         const field_path_t& f = path.field();
         if (f.steps.size() == 1 && f.steps[0].name == "schema") return read_schema(v);
+        if (f.steps.size() == 1 && f.steps[0].name == "acl") return read_acl(v);
         return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     }
     return read(v);
