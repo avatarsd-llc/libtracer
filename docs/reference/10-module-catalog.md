@@ -27,6 +27,8 @@ This catalog is the source of truth for **what gets built and how it composes**.
 | `tool` | Out-of-process utility (CLI introspection, GUI, recorder). |
 | `future` | Named, not built for v1. Listed so the design space is explicit. |
 
+> **Status column:** `v1` / `v1, week N` mean *in v1 scope* — planned **or** built. This catalog is the design index, not a build report: several `v1` modules are still roadmap. The reference source tree (`core/`, `bindings/`, `integrations/`) is the source of truth for what is *currently* implemented. `post-MVP` = after the v1 MVP; `future` = named but not in v1.
+
 ---
 
 ## Module catalog by layer
@@ -38,6 +40,7 @@ Backends that own real bytes. Each implements the `tr::mem::mem_backend_t` inter
 | Module | Tag | What it wraps | Status |
 | ---- | ---- | ---- | ---- |
 | `mem_heap` | mem-backend | malloc/free, jemalloc, mimalloc — any general-purpose heap | v1 |
+| `mem_borrowed` | mem-backend | Caller-owned bytes wrapped as a non-owning segment (borrowed lifetime; the transparent byte-routing vehicle of [ADR-0012](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0012-modular-memory-binding-transparent-router.md)) | v1 |
 | `mem_pool_static` | mem-backend | A statically-allocated fixed-size slot pool | v1 |
 | `mem_pool_class` | mem-backend | A small set of fixed-size slot pools partitioned by size class | v1 |
 | `mem_lwip_pbuf` | mem-backend | An lwIP `struct pbuf` chain (network-stack buffer) | v1 |
