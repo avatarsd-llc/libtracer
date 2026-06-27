@@ -1,3 +1,4 @@
 # Third-party Zenoh binaries (fetched by fetch_zenoh.sh) and build output.
 vendor/
 build/
+.venv/
