@@ -1,0 +1,12 @@
+{
+  "name": "settings-reliability",
+  "category": "tlv-types",
+  "hex": "0B40140002000B0072656C696162696C6974790100010001",
+  "total_bytes": 24,
+  "decoded": {
+    "type": "0x0B SETTINGS",
+    "structured": true,
+    "meaning": "SETTINGS{NAME \"reliability\", VALUE u8=1} \u2014 emitted by the library encoder (read_schema pattern)",
+    "note": "bytes emitted by the libtracer reference encoder; structurally faithful"
+  }
+}

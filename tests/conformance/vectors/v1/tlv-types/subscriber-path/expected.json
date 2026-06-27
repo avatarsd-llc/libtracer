@@ -1,0 +1,12 @@
+{
+  "name": "subscriber-path",
+  "category": "tlv-types",
+  "hex": "04401600064012000200060073656E736F720200040074656D70",
+  "total_bytes": 26,
+  "decoded": {
+    "type": "0x04 SUBSCRIBER",
+    "structured": true,
+    "meaning": "SUBSCRIBER{PATH{NAME \"sensor\", NAME \"temp\"}} \u2014 emitted by the library encoder (field_write pattern)",
+    "note": "bytes emitted by the libtracer reference encoder; structurally faithful"
+  }
+}
