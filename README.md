@@ -1,6 +1,6 @@
 # libtracer
 
-**A decentralized, zero-copy, graph-based protocol for telemetry and pub/sub over one wire format — from a 16 KB Cortex-M0 to a GPU, across vendors and transports.**
+**A decentralized, zero-copy, graph-based pub/sub protocol that supersedes DDS — one wire format from a 16 KB Cortex-M0 to a GPU, across vendors and transports.**
 
 A libtracer node is a graph of addressable **vertices**. The load-bearing idea: **the same TLV bytes are the wire encoding, the in-memory value, *and* the graph node** — so publishing moves **zero bytes** (a refcount bump), and any node can route, translate, or relay any other node's state without understanding it. Big things connect to small things; small things connect to each other through whatever transport is available (UART, CAN, BLE, Wi-Fi, WebSocket, UDP, LoRa) or through any node acting as a bridge to something incompatible.
 
