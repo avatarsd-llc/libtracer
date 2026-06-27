@@ -2,3 +2,4 @@
 vendor/
 build/
 .venv/
+perf_baseline.json
