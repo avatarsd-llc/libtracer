@@ -283,6 +283,38 @@ Every `tracer_read` / `tracer_write` / `tracer_await` call resolves against the 
 - Distinguish "is this path local or remote?" (it MAY introspect via `:transport` field in the proxy's schema, but isn't required to).
 - Format strings to dispatch to a bridge proxy. The proxy's PATH TLV is encoded once when the bridge mount is created; subsequent writes pass the handle.
 
+### Runtime vertex registration
+
+A path handle does **not** have to be known at init. Registration is a normal
+runtime operation: the graph holds its vertices in a map keyed on the canonical
+PATH-payload bytes, and registering a new vertex returns a pinned handle that is
+valid for the lifetime of the vertex. This is what lets a scanner register a
+1-Wire / Modbus device, or a transport accept a hot-plugged CAN / Zigbee node,
+**after** the device has booted — the discovered path is registered when the
+device appears, and reads/writes use the returned handle thereafter. (In-band
+`:children[]` creation, [ADR-0017](../adr/0017-in-band-vertex-creation-controller-orchestration.md),
+is the wire-side form of the same operation.)
+
+The contract:
+
+- **Post-init / runtime**: registration is not init-only; it MAY be called at any
+  time after startup.
+- **Handle stability**: the returned handle stays valid across later
+  registrations (the reference implementation stores each vertex behind a stable
+  address, so growing the map never moves an existing vertex). Hold the handle;
+  do not re-resolve per call.
+- **Thread-safety**: registration takes the graph's writer lock and is safe to
+  call concurrently with reads/writes/awaits on other handles (those stay
+  lock-free on their own LKV slot).
+- **NOT ISR-safe**: registration acquires a mutex, so it must run from a task /
+  thread context, never from an interrupt. Register on the discovery task, not in
+  the bus ISR.
+- **Capacity**: the protocol imposes no vertex-count cap; the map is bounded only
+  by available memory. A constrained host MAY pre-size or cap it (e.g. a fixed
+  arena) — that is a host policy, not a wire constraint. (A small numeric handle
+  space, such as strawberry-fw's 511-slot `io_layer` handle, is likewise a host
+  detail, not a libtracer limit — libtracer handles are pointers.)
+
 ### Failure surfaces locally
 
 When a remote bridge fails (transport disconnect, peer crash, network partition):
