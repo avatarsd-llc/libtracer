@@ -15,6 +15,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -85,8 +86,10 @@ void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool
     const std::vector<std::byte> tlv = value_tlv(S);
     const auto mk = [&]() { return alloc == alloc_t::HEAP ? owned_view(tlv) : borrowed_view(tlv); };
     const auto put = [&](std::size_t i) {
-        if (by_path) (void)g.write(paths[i % E], mk());
-        else (void)g.write(verts[i % E], mk());
+        if (by_path)
+            (void)g.write(paths[i % E], mk());
+        else
+            (void)g.write(verts[i % E], mk());
     };
 
     const std::size_t MSGS = publishes_for(F, budget);
@@ -107,8 +110,10 @@ void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool
         put(i);
         lat.add(now_ns() - a);
     }
-    if (csv) emit_csv("libtracer", S, F, E, pub_s, deliv_s, lat.summarize());
-    else emit("libtracer", mode, S, F, E, pub_s, deliv_s, mb_s, lat.summarize());
+    if (csv)
+        emit_csv("libtracer", S, F, E, pub_s, deliv_s, lat.summarize());
+    else
+        emit("libtracer", mode, S, F, E, pub_s, deliv_s, mb_s, lat.summarize());
 }
 
 // Response-surface grid (system dynamics): size x fanout (endpoints=1) and
@@ -202,6 +207,100 @@ void run_mixed() {
          lat.summarize());
 }
 
+// n-cores (parallel-dispatch) axis (#96 / ADR-0032). T independent publisher
+// threads, each driving its OWN graph + endpoint with the zero-copy in-process
+// path, measured for AGGREGATE throughput + per-op latency under load. Each
+// thread reuses one borrowed view over a stable per-thread buffer, so the timed
+// loop allocates nothing (no cross-thread allocator contention) — what scales is
+// dispatch itself. Fixed per-thread work, so more cores => more aggregate work.
+void run_inproc_mt(std::size_t T) {
+    constexpr std::size_t S = 64;
+    constexpr std::size_t MSGS = 2'000'000;  // per-thread fixed work (throughput phase)
+    constexpr std::size_t LATN = 200'000;    // per-thread samples (latency phase)
+
+    // Each thread owns everything it touches: its own graph, vertex, subscriber
+    // counter, payload buffer, and the single reused borrowed view.
+    struct worker_t {
+        graph_t g;
+        vertex_t* v = nullptr;
+        std::vector<std::byte> buf;
+        view_t view;
+        std::atomic<std::uint64_t> recv{0};
+        std::vector<std::uint64_t> lat;
+    };
+    std::vector<std::unique_ptr<worker_t>> ws;
+    ws.reserve(T);
+    const std::vector<std::byte> tlv = value_tlv(S);
+    for (std::size_t t = 0; t < T; ++t) {
+        auto w = std::make_unique<worker_t>();
+        w->buf = tlv;  // per-thread copy => per-thread segment, no shared refcount
+        w->v = *w->g.register_vertex(*path_t::parse("/bench/mt"), role_t::STORED_VALUE);
+        (void)w->g.subscribe(*path_t::parse("/bench/mt"), [p = w.get()](const view_t&) {
+            p->recv.fetch_add(1, std::memory_order_relaxed);
+        });
+        w->view = borrowed_view(w->buf);
+        ws.push_back(std::move(w));
+    }
+
+    // --- Throughput phase: all threads start together, run fixed work, join. ---
+    std::atomic<std::size_t> ready{0};
+    std::atomic<bool> go{false};
+    std::vector<std::thread> threads;
+    threads.reserve(T);
+    for (std::size_t t = 0; t < T; ++t) {
+        worker_t* w = ws[t].get();
+        threads.emplace_back([w, &ready, &go]() {
+            for (std::size_t i = 0; i < 1000; ++i) (void)w->g.write(w->v, w->view);  // warmup
+            w->recv.store(0, std::memory_order_relaxed);
+            ready.fetch_add(1, std::memory_order_acq_rel);
+            while (!go.load(std::memory_order_acquire)) { /* spin until released */
+            }
+            for (std::size_t i = 0; i < MSGS; ++i) (void)w->g.write(w->v, w->view);
+        });
+    }
+    while (ready.load(std::memory_order_acquire) < T) { /* wait for all warmed up */
+    }
+    const auto t0 = now_ns();
+    go.store(true, std::memory_order_release);
+    for (auto& th : threads) th.join();
+    const double secs = (now_ns() - t0) / 1e9;
+
+    const double pub_s = static_cast<double>(T) * MSGS / secs;  // F=1 => deliv==pub
+    const double deliv_s = pub_s;
+    const double mb_s = deliv_s * static_cast<double>(S) / 1e6;
+
+    // --- Latency phase: per-op timing under the same parallel load. ---
+    std::atomic<std::size_t> ready2{0};
+    std::atomic<bool> go2{false};
+    std::vector<std::thread> lthreads;
+    lthreads.reserve(T);
+    for (std::size_t t = 0; t < T; ++t) {
+        worker_t* w = ws[t].get();
+        lthreads.emplace_back([w, &ready2, &go2]() {
+            w->lat.reserve(LATN);
+            ready2.fetch_add(1, std::memory_order_acq_rel);
+            while (!go2.load(std::memory_order_acquire)) { /* spin */
+            }
+            for (std::size_t i = 0; i < LATN; ++i) {
+                const auto a = now_ns();
+                (void)w->g.write(w->v, w->view);
+                w->lat.push_back(now_ns() - a);
+            }
+        });
+    }
+    while (ready2.load(std::memory_order_acquire) < T) { /* wait */
+    }
+    go2.store(true, std::memory_order_release);
+    for (auto& th : lthreads) th.join();
+
+    Latency lat;
+    for (auto& w : ws)
+        for (std::uint64_t ns : w->lat) lat.add(ns);
+
+    const std::string mode = "inproc-mt" + std::to_string(T);
+    emit("libtracer", mode.c_str(), S, 1, T, pub_s, deliv_s, mb_s, lat.summarize());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -219,5 +318,9 @@ int main(int argc, char** argv) {
         run_inproc(kRefSize, kRefFanout, E, alloc_t::HEAP, true, "inproc-path");
     for (std::size_t S : kSizes) run_loopback(S);
     run_mixed();
+    // n-cores (parallel-dispatch) axis: thread counts clamped to the host CPU.
+    const std::size_t hw = std::max<std::size_t>(1, std::thread::hardware_concurrency());
+    for (std::size_t T : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}})
+        if (T <= hw) run_inproc_mt(T);
     return 0;
 }
