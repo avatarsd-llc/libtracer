@@ -1,0 +1,46 @@
+{
+  "name": "relative-ts-nested",
+  "category": "framing",
+  "hex": "0760090001220100AA640000000807060504030201",
+  "total_bytes": 21,
+  "decoded": {
+    "type": "0x07 POINT",
+    "opt": {
+      "raw": "0x60",
+      "PL": 1,
+      "TS": 1,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0
+    },
+    "trailer": {
+      "ts": {
+        "form": "absolute u64 ns",
+        "value": 72623859790382856
+      }
+    },
+    "children": [
+      {
+        "type": "0x01 VALUE",
+        "opt": {
+          "raw": "0x22",
+          "PL": 0,
+          "TS": 1,
+          "CR": 0,
+          "LL": 0,
+          "CW": 0,
+          "TF": 1
+        },
+        "payload": "AA",
+        "trailer": {
+          "ts": {
+            "form": "relative i32 ns",
+            "value": 100
+          }
+        }
+      }
+    ],
+    "meaning": "parent absolute-ts POINT with a child carrying a relative i32 ts (opt.TF=1)"
+  }
+}

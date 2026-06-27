@@ -1,0 +1,21 @@
+{
+  "name": "description-utf8",
+  "category": "tlv-types",
+  "hex": "030002006869",
+  "total_bytes": 6,
+  "decoded": {
+    "type": "0x03 DESCRIPTION",
+    "opt": {
+      "raw": "0x00",
+      "PL": 0,
+      "TS": 0,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0
+    },
+    "length": 2,
+    "payload": "6869",
+    "meaning": "opaque UTF-8 DESCRIPTION ('hi')"
+  }
+}
