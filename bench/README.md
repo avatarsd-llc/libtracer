@@ -49,6 +49,7 @@ craft libtracer":
 | `eptype-lean` | ep-type axis: minimal sink (see below). |
 | `eptype-lean-cached` | ep-type axis: loaned / `out_cache` read (see below). |
 | `eptype-stream` | ep-type axis: `STREAM`-role vertex (see below). |
+| `routers-h{1,2,4,8}` | n-routers axis: end-to-end delivery across `H` bridge/ROUTER hops (see below). |
 | `fold-n1` … `fold-n8` | n-layer-folded axis: same total bytes folded across N segments (see below). |
 
 ### ep-type (endpoint-dispatch-class) axis (#96 / ADR-0032)
@@ -70,6 +71,37 @@ Expected cost ordering: **lean-cached** (fastest / zero-alloc) < **lean** < **st
 existing `inproc` / `inproc-borrow` code paths, re-emitted under the `eptype-*` tag (the
 original lines still print).
 
+### n-routers (bridge-hop) axis (#96 / ADR-0032)
+
+A fifth axis over **how far a frame travels**: the cross-node fan cost as a frame
+traverses `H` bridge/ROUTER **hops**. Where the others stay in one process's graph, this
+sweep builds a real **chain of `H` bridges** wired by the in-process loopback transport
+(`bench_libtracer.cpp::run_routers`) and measures end-to-end delivery (publish at the
+head, receive at the tail):
+
+```
+node[0] --ch[0]--> node[1] --ch[1]--> ... --ch[H-1]--> node[H]
+```
+
+`H+1` nodes (each its own `graph_t` with one `/bench/chain` vertex), `H` loopback
+channels, `2H` `bridge_t`s. node[k]'s **egress** bridge `export_vertex`-es `/bench/chain`
+onto `ch[k].a()`; node[k+1]'s **ingress** bridge `set_mount`s `ch[k].b()` back onto its
+own `/bench/chain`. So an intermediate node **re-wraps on egress what it just unwrapped
+on ingress** — a fresh hop per channel. **Every hop pays the full cross-node cost**:
+`router_wrap` (egress) + `router_unwrap` + **recent-set dedup** (left enabled, default
+capacity) + ROUTER strip (ingress), plus one cross-`wire` thread handoff. `H ∈ {1, 2, 4,
+8}`, all well under `kMaxHops` (32). One `RESULT` line per `H`, `mode = routers-h<H>`,
+`size=64`, `fan=1`, `ep=H` (the hop count) — same 12-field shape, so `collate.py` /
+`perf_gate.py` still parse.
+
+**Expectation: end-to-end latency rises roughly *linearly* with hop count** — each added
+hop is one more `wrap` + `unwrap` + dedup-probe + cross-thread wakeup on the critical
+path — and aggregate throughput falls as the pipeline lengthens. This is an in-process
+loopback chain (deterministic, no socket flakiness); it isolates the **per-hop
+bridge/ROUTER cost**, not network latency (that is the `net` harness). Because each
+loopback channel runs a receive thread, the chain is built + torn down with the
+`bridge_test.cpp` lifecycle discipline — `channel.shutdown()` joins every receive thread
+before the bridges it dispatches into are destroyed (clean under the CI TSan / ASan jobs).
 ### n-layer-folded (fold-depth) axis (#96 / ADR-0032)
 
 The **last** axis, over the L0/L1 zero-copy *composition* itself (ADR-0016): how does
