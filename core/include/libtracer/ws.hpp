@@ -257,7 +257,13 @@ struct frame_t {
         pos += 4;
     }
 
-    if (buf.size() < pos + len) return std::nullopt;
+    // Overflow-safe length check: `pos + len` can wrap (a 64-bit-length frame of
+    // 0xFFFF...FF), bypassing `buf.size() < pos + len` and causing an OOB read in the
+    // unmask loop. `pos <= buf.size()` is guaranteed by the header/mask checks above, so
+    // `buf.size() - pos` is non-negative and `len > buf.size() - pos` cannot overflow.
+    // This also bounds `len` by the bytes available, so the resize() below cannot
+    // over-allocate.
+    if (len > buf.size() - pos) return std::nullopt;
 
     frame_t frame;
     frame.op = op;

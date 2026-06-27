@@ -122,6 +122,17 @@ int main() {
         }
     }
 
+    // Malformed: a 64-bit-length frame (len marker 127) claiming ~2^64 bytes but with a
+    // short buffer. The bounds check must be overflow-safe — `pos + len` would wrap and
+    // bypass a naive `buf.size() < pos + len`, causing an OOB read. Must return nullopt,
+    // never crash / read past the buffer.
+    {
+        const std::vector<std::byte> evil =
+            bytes_of({0x82, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xAA, 0xBB});
+        check(!decode_frame(evil).has_value(),
+              "64-bit over-long length is rejected (nullopt), no overflow/OOB read");
+    }
+
     std::printf(g_failures == 0 ? "\nWS: PASS\n" : "\nWS: FAIL (%d)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
