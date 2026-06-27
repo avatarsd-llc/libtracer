@@ -14,6 +14,8 @@ on:
     paths:
       - "docs/**"
       - "*.md"
+      - "bench/**"
+      - "tests/conformance/**"
       - "core/include/**" # public headers feed the Doxygen source refs
       - "core/Doxyfile"
       - ".github/workflows/docs.yml"
@@ -21,6 +23,8 @@ on:
     paths:
       - "docs/**"
       - "*.md"
+      - "bench/**"
+      - "tests/conformance/**"
       - "core/include/**"
       - "core/Doxyfile"
       - ".github/workflows/docs.yml"
@@ -50,8 +54,25 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y doxygen
           pip install -r docs/requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: API docs gate (Doxygen, strict — undocumented public symbol fails)
         run: doxygen core/Doxyfile
+      # Auto-generate the Performance & Conformance page from the LIVE harnesses
+      # (cross-core matrix + perf bench + coverage), replacing the static snapshot
+      # (ADR-0032 §auto-published). Regenerated in-place each build; the artifact
+      # that deploys carries the fresh page.
+      - name: Build harnesses for the results page
+        run: |
+          cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build core/build --target conformance_runner -j
+          cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build bench/build --target bench_libtracer -j
+      - name: Generate live performance + conformance page
+        env:
+          LIBTRACER_CXX_HARNESS: ${{ github.workspace }}/core/build/tests/conformance_runner
+        run: python3 bench/gen_results_page.py
       - name: Build (sphinx-build, config in docs/, source = repo root)
         run: sphinx-build -b html -c docs . docs/_build/html
       - name: Upload Pages artifact
