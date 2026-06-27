@@ -58,6 +58,13 @@ class graph_t {
 
     // Subscribe `src` to a target vertex (spec-faithful: a write to src re-dispatches
     // the cloned value to `target`). NotFound if src is unknown.
+    //
+    // These subscribe(...) overloads are *host SDK sugar*, not new wire primitives:
+    // the wire data API stays read/write/await (ADR-0006). On the wire, subscription
+    // is a consumer-initiated SUBSCRIBER write into the producer's `:subscribers[]`
+    // field (ADR-0026), exactly as connect() is sugar over that field-write. Routing
+    // these helpers through the `:subscribers[]` field-write surface (rather than the
+    // current direct path) is tracked in #59.
     [[nodiscard]] result_t<void> subscribe(const path_t& src, const path_t& target,
                                            delivery_mode_t mode = delivery_mode_t::EVERY);
     // Subscribe `src` to an in-process callback (sugar; the callback fires inline on
