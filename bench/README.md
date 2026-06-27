@@ -49,6 +49,7 @@ craft libtracer":
 | `eptype-lean` | ep-type axis: minimal sink (see below). |
 | `eptype-lean-cached` | ep-type axis: loaned / `out_cache` read (see below). |
 | `eptype-stream` | ep-type axis: `STREAM`-role vertex (see below). |
+| `fold-n1` … `fold-n8` | n-layer-folded axis: same total bytes folded across N segments (see below). |
 
 ### ep-type (endpoint-dispatch-class) axis (#96 / ADR-0032)
 
@@ -68,6 +69,34 @@ Expected cost ordering: **lean-cached** (fastest / zero-alloc) < **lean** < **st
 (heaviest — pays history retention on every write). lean / lean-cached reuse the
 existing `inproc` / `inproc-borrow` code paths, re-emitted under the `eptype-*` tag (the
 original lines still print).
+
+### n-layer-folded (fold-depth) axis (#96 / ADR-0032)
+
+The **last** axis, over the L0/L1 zero-copy *composition* itself (ADR-0016): how does
+the cost scale with the **fold depth** — how many memory layers / segments a value is
+**folded across**? A `rope_t` is a chain of views over segments, so the "same" value
+can live as one flat segment or as a rope of N links. We sweep the fold depth
+**N ∈ {1, 2, 4, 8}** while holding the **total bytes constant (512 B)**: at N=1 the value
+is one flat 512 B segment, at N=8 it is an 8-link rope of 64 B segments — identical
+bytes, different fold depth. Per op we serialize the folded value for egress the way a
+transport does — build the scatter-gather descriptor (`rope_t::to_iovec`, spans into the
+N segments, no copy) and walk it. Because only the fold depth varies, the delta isolates
+the **view-chain walk / scatter-gather** cost.
+
+| mode | fold depth | what it exercises |
+| --- | --- | --- |
+| `fold-n1` | 1 (flat) | a single contiguous segment — one link to walk. |
+| `fold-n2` | 2 | a 2-link rope of the same total bytes. |
+| `fold-n4` | 4 | a 4-link rope of the same total bytes. |
+| `fold-n8` | 8 | an 8-link rope of the same total bytes — most scatter-gather work. |
+
+Expected trend: cost **rises** with fold depth — more folds ⇒ more links to gather/walk
+⇒ higher per-op time and lower throughput, even though the byte count is fixed. (This is
+the cost the rope *trades for* zero-copy composition; the win is that those bytes are
+never copied — see `scatter` for the egress payoff.) **The naming "n-layer-folded" /
+"fold depth" is provisional** (the depth sweep is what matters); each line keeps the
+12-field shape so `collate.py` / `perf_gate.py` still parse. `size` carries the constant
+total bytes (512); `fan` and `ep` are 1.
 
 - **Throughput** — back-to-back publishes; `deliveries / elapsed`.
 - **Latency** — one publish at a time (publish, wait for receipt, repeat); p50/p99/mean.

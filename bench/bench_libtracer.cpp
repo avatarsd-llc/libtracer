@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "bench_common.hpp"
+#include "libtracer/rope.hpp"
 #include "libtracer/tracer.hpp"
 
 using namespace bench;
@@ -365,6 +366,60 @@ void run_eptype() {
     run_eptype_stream();
 }
 
+// n-layer-folded (fold-depth) axis (#96 / ADR-0032) — the LAST axis. How does the
+// L0/L1 zero-copy COMPOSITION cost scale with how many memory layers a value is
+// FOLDED across? We hold the TOTAL bytes CONSTANT (kFoldTotal) and sweep the fold
+// depth N: the same value is built as a rope of N borrowed views over N segments —
+// N=1 is one flat segment, N=8 is an 8-link rope of identical total bytes. Per op we
+// serialize the folded value for egress the way a transport does: build the
+// scatter-gather descriptor (rope_t::to_iovec — spans into the N segments, no copy)
+// and walk it. Because the bytes are fixed and only the fold depth changes, the delta
+// isolates the view-chain walk / scatter-gather cost: more folds => more links to
+// gather => higher per-op cost (and lower throughput). (The naming "n-layer-folded" /
+// "fold depth" is provisional — see bench/README.md "n-layer-folded axis".)
+void run_fold(std::size_t N) {
+    constexpr std::size_t kFoldTotal = 512;  // total bytes, CONSTANT across N (isolate fold)
+    const std::size_t seg_bytes = kFoldTotal / N;
+
+    // Stable per-segment buffers; the rope BORROWS them, so the timed loop allocates
+    // nothing for the value — what it pays is purely the fold-depth walk/gather.
+    std::vector<std::vector<std::byte>> bufs(N, std::vector<std::byte>(seg_bytes, std::byte{0xAB}));
+    tr::view::rope_t rope;
+    for (auto& b : bufs) rope.append(borrowed_view(b));
+
+    // One egress-serialize op: gather the rope into a scatter-gather iovec, then walk
+    // the links (the view-chain walk a transport / codec performs to ship the rope).
+    const auto serialize = [&]() -> std::size_t {
+        const auto iov = rope.to_iovec();
+        std::size_t acc = 0;
+        for (const auto& s : iov)
+            acc += s.size() + (s.empty() ? 0u : std::to_integer<std::size_t>(s[0]));
+        return acc;
+    };
+
+    volatile std::size_t sink = 0;
+    constexpr std::size_t MSGS = 2'000'000;                      // throughput phase
+    constexpr std::size_t LATN = 200'000;                        // latency phase
+    for (std::size_t i = 0; i < 1000; ++i) sink += serialize();  // warmup
+
+    const auto t0 = now_ns();
+    for (std::size_t i = 0; i < MSGS; ++i) sink += serialize();
+    const double secs = (now_ns() - t0) / 1e9;
+    const double pub_s = MSGS / secs;
+    const double deliv_s = pub_s;  // fan=1 => one egress per publish
+    const double mb_s = deliv_s * static_cast<double>(kFoldTotal) / 1e6;
+
+    Latency lat;
+    for (std::size_t i = 0; i < LATN; ++i) {
+        const auto a = now_ns();
+        sink += serialize();
+        lat.add(now_ns() - a);
+    }
+    (void)sink;
+    const std::string mode = "fold-n" + std::to_string(N);
+    emit("libtracer", mode.c_str(), kFoldTotal, 1, 1, pub_s, deliv_s, mb_s, lat.summarize());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -388,5 +443,9 @@ int main(int argc, char** argv) {
         if (T <= hw) run_inproc_mt(T);
     // ep-type (endpoint-dispatch-class) axis: lean / lean-cached / stream.
     run_eptype();
+    // n-layer-folded (fold-depth) axis — the LAST axis: same total bytes folded
+    // across N segments (N=1 flat .. N=8 rope); cost rises with the view-chain walk.
+    for (std::size_t N : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}})
+        run_fold(N);
     return 0;
 }
