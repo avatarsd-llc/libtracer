@@ -14,12 +14,14 @@
     "url": "https://github.com/avatarsd-llc/libtracer/issues"
   },
   "keywords": ["protocol", "iot", "sensor", "graph", "tlv"],
+  "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": ["dist", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsc",
-    "test": "echo \"no tests yet\""
+    "conformance": "node conformance/harness.mjs ../../tests/conformance/vectors/v1",
+    "test": "npm run conformance"
   },
   "devDependencies": {
     "typescript": "^5.4.0"
