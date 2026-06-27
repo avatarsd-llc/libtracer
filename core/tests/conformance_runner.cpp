@@ -17,7 +17,9 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <iterator>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -37,6 +39,80 @@ int g_failures = 0;
 void check(bool ok, std::string_view what) {
     std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
     if (!ok) ++g_failures;
+}
+
+// --- hex + error helpers (used by the --roundtrip differential-fuzz mode) ----
+const char* error_name(tr::wire::error_t e) noexcept {
+    switch (e) {
+        case tr::wire::error_t::FRAME_TRUNCATED:
+            return "FRAME_TRUNCATED";
+        case tr::wire::error_t::FRAME_INVALID:
+            return "FRAME_INVALID";
+        case tr::wire::error_t::FRAME_CRC_FAIL:
+            return "FRAME_CRC_FAIL";
+        case tr::wire::error_t::TLV_NESTING_TOO_DEEP:
+            return "TLV_NESTING_TOO_DEEP";
+    }
+    return "UNKNOWN";
+}
+
+std::optional<std::vector<std::byte>> from_hex(std::string_view s) {
+    if (s.size() % 2 != 0) return std::nullopt;
+    const auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    std::vector<std::byte> out;
+    out.reserve(s.size() / 2);
+    for (std::size_t i = 0; i < s.size(); i += 2) {
+        const int hi = nibble(s[i]);
+        const int lo = nibble(s[i + 1]);
+        if (hi < 0 || lo < 0) return std::nullopt;
+        out.push_back(static_cast<std::byte>((hi << 4) | lo));
+    }
+    return out;
+}
+
+std::string to_hex(std::span<const std::byte> b) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(b.size() * 2);
+    for (const std::byte by : b) {
+        const auto v = std::to_integer<std::uint8_t>(by);
+        out.push_back(kHex[v >> 4]);
+        out.push_back(kHex[v & 0x0F]);
+    }
+    return out;
+}
+
+// Read one hex frame per stdin line; for each, print decode->encode re-encoded as
+// hex, or `ERR:<reason>` if it fails to decode. One output line per input line —
+// the differential-fuzz driver (tests/conformance/diff_fuzz.py) compares these
+// against the TS core and the canonical generator output, byte-for-byte.
+int run_roundtrip() {
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+        if (line.empty()) {
+            std::printf("ERR:EMPTY_LINE\n");
+            continue;
+        }
+        const auto bytes = from_hex(line);
+        if (!bytes) {
+            std::printf("ERR:BAD_HEX\n");
+            continue;
+        }
+        const auto dec = tr::wire::decode(*bytes);
+        if (!dec) {
+            std::printf("ERR:%s\n", error_name(dec.error()));
+            continue;
+        }
+        const std::vector<std::byte> re = tr::wire::encode(*dec);
+        std::printf("%s\n", to_hex(re).c_str());
+    }
+    return 0;
 }
 
 std::vector<std::byte> read_file(const fs::path& p) {
@@ -77,6 +153,11 @@ tlv_t value_crc(std::span<const std::byte> p) {
 
 int main(int argc, char** argv) {
     const fs::path vroot{LIBTRACER_VECTORS_DIR};
+
+    // `--roundtrip`: differential-fuzz batch mode (no vectors dir). See run_roundtrip.
+    if (argc > 1 && std::string_view(argv[1]) == "--roundtrip") {
+        return run_roundtrip();
+    }
 
     // `--tap`: emit the portable cross-core contract (encode(decode(input)) == input,
     // per vector) as TAP for the polyglot driver (tests/conformance/HARNESS.md).

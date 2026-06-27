@@ -14,6 +14,54 @@ import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { decode, encode } from '../src/codec.mjs';
 
+/** @param {string} hex @returns {Uint8Array} */
+function fromHex(hex) {
+  if (hex.length % 2 !== 0) throw new Error('BAD_HEX');
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    const byte = Number.parseInt(hex.substr(i * 2, 2), 16);
+    if (Number.isNaN(byte)) throw new Error('BAD_HEX');
+    out[i] = byte;
+  }
+  return out;
+}
+
+/** @param {Uint8Array} bytes @returns {string} */
+function toHex(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i++) s += bytes[i].toString(16).padStart(2, '0');
+  return s;
+}
+
+/**
+ * `--roundtrip`: differential-fuzz batch mode. Read one hex frame per stdin line;
+ * for each, print decode->encode re-encoded as hex, or `ERR:<reason>` on a decode
+ * failure. One output line per input line. The driver (tests/conformance/diff_fuzz.py)
+ * compares these against the C++ core + the canonical generator, byte-for-byte.
+ */
+function runRoundtrip() {
+  const text = readFileSync(0, 'utf8');
+  const lines = text.split('\n');
+  // A trailing newline yields a final empty element — drop only that one.
+  if (lines.length && lines[lines.length - 1] === '') lines.pop();
+  const out = [];
+  for (const raw of lines) {
+    const line = raw.replace(/[\r\n]+$/, '');
+    if (line === '') {
+      out.push('ERR:EMPTY_LINE');
+      continue;
+    }
+    try {
+      out.push(toHex(encode(decode(fromHex(line)))));
+    } catch (err) {
+      out.push(`ERR:${err && err.code ? err.code : err && err.message ? err.message : err}`);
+    }
+  }
+  // Do NOT process.exit() here: a large write to a pipe is async and exit() would
+  // truncate it. Returning lets the event loop drain stdout, then exit 0 naturally.
+  process.stdout.write(out.join('\n') + '\n');
+}
+
 /** @param {string} dir @returns {string[]} absolute paths to every input.bin under dir */
 function findInputs(dir) {
   /** @type {string[]} */
@@ -34,6 +82,11 @@ function bytesEqual(a, b) {
 }
 
 function main() {
+  if (process.argv[2] === '--roundtrip') {
+    runRoundtrip();
+    return;
+  }
+
   const vectorsDir = process.argv[2];
   if (!vectorsDir) {
     const self = fileURLToPath(import.meta.url);
