@@ -1,0 +1,23 @@
+{
+  "vectors_dir": "tests/conformance/vectors/v1",
+  "harnesses": [
+    {
+      "name": "cpp",
+      "enabled": true,
+      "cmd": ["${LIBTRACER_CXX_HARNESS}", "--tap"],
+      "note": "golden reference; binary built by core/ CMake. Set $LIBTRACER_CXX_HARNESS, or the driver searches common build paths."
+    },
+    {
+      "name": "ts",
+      "enabled": false,
+      "cmd": ["node", "bindings/typescript/conformance/harness.mjs"],
+      "note": "pending: pure-TS core (@avatarsd-llc/libtracer)"
+    },
+    {
+      "name": "rust",
+      "enabled": false,
+      "cmd": ["cargo", "run", "--quiet", "--manifest-path", "bindings/rust/Cargo.toml", "--example", "conformance", "--"],
+      "note": "pending: native Rust core"
+    }
+  ]
+}

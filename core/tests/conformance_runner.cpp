@@ -21,6 +21,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "libtracer/tracer.hpp"
@@ -74,8 +75,29 @@ tlv_t value_crc(std::span<const std::byte> p) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     const fs::path vroot{LIBTRACER_VECTORS_DIR};
+
+    // `--tap`: emit the portable cross-core contract (encode(decode(input)) == input,
+    // per vector) as TAP for the polyglot driver (tests/conformance/HARNESS.md).
+    if (argc > 1 && std::string_view(argv[1]) == "--tap") {
+        std::vector<std::pair<std::string, bool>> tap;
+        for (const auto& e : fs::recursive_directory_iterator(vroot)) {
+            if (e.path().filename() != "input.bin") continue;
+            const std::string rel = fs::relative(e.path().parent_path(), vroot).generic_string();
+            const std::vector<std::byte> bytes = read_file(e.path());
+            const auto dec = tr::wire::decode(bytes);
+            tap.emplace_back(rel, dec.has_value() && tr::wire::encode(*dec) == bytes);
+        }
+        std::sort(tap.begin(), tap.end());
+        std::printf("TAP version 13\n1..%zu\n", tap.size());
+        int n = 0, fails = 0;
+        for (const auto& [rel, ok] : tap) {
+            std::printf("%s %d - %s\n", ok ? "ok" : "not ok", ++n, rel.c_str());
+            if (!ok) ++fails;
+        }
+        return fails == 0 ? 0 : 1;
+    }
 
     std::printf("Generic roundtrip (decode -> encode == input.bin):\n");
     for (const auto& e : fs::recursive_directory_iterator(vroot)) {

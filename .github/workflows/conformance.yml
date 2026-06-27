@@ -1,0 +1,23 @@
+# Cross-core conformance gate: every enabled native core runs the shared vectors and
+# must agree byte-for-byte (ADR-0028). Today only the C++ reference is enabled; TS/Rust
+# join via tests/conformance/harnesses.json when their cores land.
+name: conformance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  conformance:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the C++ conformance harness (C++23)
+        run: |
+          cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build core/build --target conformance_runner -j
+      - name: Run polyglot conformance driver
+        env:
+          LIBTRACER_CXX_HARNESS: ${{ github.workspace }}/core/build/tests/conformance_runner
+        run: python3 tests/conformance/run-all.py

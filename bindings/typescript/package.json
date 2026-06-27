@@ -1,17 +1,17 @@
 {
-  "name": "libtracer",
+  "name": "@avatarsd-llc/libtracer",
   "version": "0.0.1",
-  "description": "TypeScript binding for libtracer — a lightweight decentralized graph-based networking protocol.",
+  "description": "TypeScript core for libtracer — a lightweight decentralized graph-based networking protocol. Native pure-TS implementation, conformance-gated against the shared vectors.",
   "author": "avatarsd LLC",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/avatarsd/libtracer.git",
+    "url": "https://github.com/avatarsd-llc/libtracer.git",
     "directory": "bindings/typescript"
   },
-  "homepage": "https://github.com/avatarsd/libtracer#readme",
+  "homepage": "https://github.com/avatarsd-llc/libtracer#readme",
   "bugs": {
-    "url": "https://github.com/avatarsd/libtracer/issues"
+    "url": "https://github.com/avatarsd-llc/libtracer/issues"
   },
   "keywords": ["protocol", "iot", "sensor", "graph", "tlv"],
   "main": "dist/index.js",
