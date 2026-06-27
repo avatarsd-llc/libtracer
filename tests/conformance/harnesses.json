@@ -9,9 +9,9 @@
     },
     {
       "name": "ts",
-      "enabled": false,
+      "enabled": true,
       "cmd": ["node", "bindings/typescript/conformance/harness.mjs"],
-      "note": "pending: pure-TS core (@avatarsd-llc/libtracer)"
+      "note": "pure-TS core (@avatarsd-llc/libtracer); runs directly under node, no build step"
     },
     {
       "name": "rust",
