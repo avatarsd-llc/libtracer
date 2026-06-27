@@ -69,3 +69,24 @@ still a stub — it then shows as *pending* and does not gate.
 
 - **C++** (golden): `core/tests/conformance_runner --tap <vectors-dir>`.
 - **TypeScript / Rust**: pending — implement this contract when the native core lands.
+
+## Differential fuzzing (cross-core drift, beyond the curated vectors)
+
+The curated vectors pin a dozen hand-picked wire shapes. To catch drift those
+points *miss*, [`diff_fuzz.py`](diff_fuzz.py) generates random **valid** frames
+from an explicit seed and round-trips each through **both** cores, asserting
+byte-for-byte agreement (ADR-0028 / ADR-0032 extended from curated points to a
+fuzzed corpus). A mismatch is a genuine cross-core bug; the failing seed + bytes
+are printed so the frame can be promoted to a curated vector.
+
+```
+# build the C++ core first (or set $LIBTRACER_CXX_HARNESS), then:
+python3 tests/conformance/diff_fuzz.py            # 1000 seeds (default)
+python3 tests/conformance/diff_fuzz.py --seeds 5000
+python3 tests/conformance/diff_fuzz.py --start 4242 --seeds 1   # reproduce one seed
+```
+
+It drives a small **`--roundtrip`** batch hook each harness implements alongside
+`--tap`: read one hex frame per stdin line, print the `decode`→`encode`
+re-encoding as hex (or `ERR:<reason>` on a decode failure), one line per input.
+A new core joins the differential gate by implementing that hook.
