@@ -30,6 +30,10 @@ jobs:
         env:
           LIBTRACER_CXX_HARNESS: ${{ github.workspace }}/core/build/tests/conformance_runner
         run: python3 tests/conformance/run-all.py
+      - name: Cross-core differential fuzzer (random valid frames must agree)
+        env:
+          LIBTRACER_CXX_HARNESS: ${{ github.workspace }}/core/build/tests/conformance_runner
+        run: python3 tests/conformance/diff_fuzz.py -n 2000
 
   perf:
     runs-on: ubuntu-24.04
