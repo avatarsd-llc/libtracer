@@ -12,10 +12,11 @@
  * CLOSE tears the connection down. send(frame) ws::encode_frame(BINARY, …)s and
  * writes the whole frame to the client.
  *
- * This is the SERVER half only — a WebSocket CLIENT (a board dialing out) is a
- * separate later increment. POSIX sockets; mirrors transport_udp's lifecycle (a
- * recv thread polled for a clean shutdown). The framing itself is never
- * reimplemented here — it all goes through tr::net::ws.
+ * Both roles live here: transport_ws_server (accept an inbound peer) and
+ * transport_ws_client (dial out to a ws:// peer — device-to-device / NAT egress),
+ * the latter sending MASKED client frames per RFC 6455 §5.1. POSIX sockets;
+ * mirrors transport_udp's lifecycle (a recv thread polled for a clean shutdown).
+ * The framing itself is never reimplemented here — it all goes through tr::net::ws.
  */
 #pragma once
 
@@ -24,6 +25,7 @@
 #include <cstdint>
 #include <mutex>
 #include <span>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -36,8 +38,8 @@ namespace tr::net {
  *
  * Binds and listens on a TCP port (localhost is fine for tests), accepts a
  * single client, performs the opening handshake, then runs a receive loop that
- * delivers each inbound BINARY message's unmasked payload to the receiver. Only
- * the server role lives here; the client role is a later increment.
+ * delivers each inbound BINARY message's unmasked payload to the receiver. The
+ * dial-out counterpart is transport_ws_client below.
  */
 class transport_ws_server : public transport_t {
    public:
@@ -94,6 +96,76 @@ class transport_ws_server : public transport_t {
     std::mutex m_;                    // guards receiver_
     std::mutex write_m_;              // serializes writes to client_fd_
     std::atomic<int> client_fd_{-1};  // the connected client (-1 = none)
+    std::atomic<bool> stop_{false};
+    std::thread thread_;
+};
+
+/**
+ * @brief A WebSocket (RFC 6455) client transport_t — dials out to one peer.
+ *
+ * The mirror of transport_ws_server: a board that DIALS OUT to a ws:// peer
+ * (device-to-device, or egress through a NAT). The constructor TCP-connects to
+ * @p host:@p port, runs the opening handshake from the client side (sends an
+ * HTTP GET Upgrade with a fresh Sec-WebSocket-Key, then verifies the 101
+ * response's Sec-WebSocket-Accept against ws::accept_key), and on success spawns
+ * a receive loop. Per RFC 6455 §5.1 every client→server frame is MASKED
+ * (ws::encode_client_frame); inbound server frames are unmasked and decode the
+ * same way the server's do. ok() confirms the handshake completed.
+ */
+class transport_ws_client : public transport_t {
+   public:
+    /**
+     * @brief Connect to @p host:@p port and run the client opening handshake.
+     *
+     * TCP-connects, sends the HTTP Upgrade request, and verifies the server's
+     * 101 Sec-WebSocket-Accept. On success the receive loop thread is spawned;
+     * confirm with ok(). On any failure the connection is closed and ok() is
+     * false.
+     *
+     * @param host Dotted-quad IPv4 address of the peer (e.g. "127.0.0.1").
+     * @param port TCP port of the peer (host byte order).
+     */
+    transport_ws_client(const std::string& host, std::uint16_t port);
+
+    /** @brief Stop the recv thread and close the socket. */
+    ~transport_ws_client() override;
+
+    transport_ws_client(const transport_ws_client&) = delete;
+    transport_ws_client& operator=(const transport_ws_client&) = delete;
+
+    /**
+     * @brief Send @p frame as one client→server MASKED BINARY WebSocket message.
+     *
+     * Encodes via ws::encode_client_frame(BINARY, frame, key) (FIN=1, MASK=1,
+     * fresh per-frame key) and writes the whole frame to the peer. No-op once the
+     * connection has been torn down. Thread-safe (the socket write is guarded).
+     *
+     * @param frame A complete TLV's bytes.
+     */
+    void send(std::span<const std::byte> frame) override;
+
+    /**
+     * @brief Register the sink for inbound frames (one per BINARY message).
+     *
+     * @param receiver Callback invoked on the recv thread with unmasked payloads.
+     */
+    void set_receiver(receiver_t receiver) override;
+
+    /** @brief True if the connection handshake succeeded and the link is up. */
+    [[nodiscard]] bool ok() const noexcept { return connected_; }
+
+   private:
+    bool handshake(int fd, const std::string& host, std::uint16_t port);  // GET Upgrade, verify 101
+    void serve(int fd);                                                   // frame recv loop
+    void write_all(int fd, std::span<const std::byte> bytes);
+    std::uint32_t next_mask_key();  // per-frame masking key (varied, not crypto)
+
+    receiver_t receiver_;           // guarded by m_
+    std::mutex m_;                  // guards receiver_
+    std::mutex write_m_;            // serializes writes to conn_fd_
+    std::atomic<int> conn_fd_{-1};  // the live connection (-1 = torn down)
+    std::atomic<std::uint64_t> mask_state_{0};
+    bool connected_ = false;
     std::atomic<bool> stop_{false};
     std::thread thread_;
 };
