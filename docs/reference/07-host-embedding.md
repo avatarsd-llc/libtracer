@@ -91,6 +91,8 @@ A bridge receiving a TLV SHALL:
 3. If not present, add to the recent-set, increment `hop_count`, **strip the ROUTER**, and proceed to local-graph dispatch using the bare data TLV (the [02-graph-model.md](02-graph-model.md) §the ROUTER shedding rule).
 4. If `hop_count >= MAX_HOPS` (recommended 32), drop and emit `STATUS=ERROR(NESTING_TOO_DEEP)` to the local subscribers of the bridge's status path.
 
+> **Reference-impl status (step 4):** the drop and a local drop-counter are in place; the `STATUS=ERROR` emission on the bridge's status path is **not yet wired** (tracked in [#77](https://github.com/avatarsd-llc/libtracer/issues/77)). Cycle termination is already guaranteed regardless — a looping TLV dies at `MAX_HOPS` (the counter is observable); only the error *notification* is pending.
+
 When the same bridge later re-emits this data on another transport (e.g., the local subscriber that received it is itself a remote subscriber over a second transport), the bridge:
 
 1. Looks up the saved `(origin_peer_id, origin_timestamp, hop_count)` in its per-proxy metadata table.
