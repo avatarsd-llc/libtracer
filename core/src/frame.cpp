@@ -24,13 +24,17 @@ void write_le(std::vector<std::byte>& out, std::uint64_t v, std::size_t n) {
     detail::append_le(out, v, n);
 }
 
-struct decoded_t {
+// One TLV parsed in isolation — NO recursion into children. For a structured TLV
+// (opt.pl) `children` is the PL payload region, left for decode() to walk with an
+// explicit stack; for an opaque TLV `tlv.payload` holds the bytes. `total` is the
+// full encoded size (header + length + trailer).
+struct parsed_t {
     tlv_t tlv;
-    std::size_t consumed;
+    std::size_t total = 0;
+    std::span<const std::byte> children{};
 };
 
-std::expected<decoded_t, error_t> decode_at(std::span<const std::byte> buf, std::size_t depth) {
-    if (depth >= kMaxDepth) return std::unexpected(error_t::TLV_NESTING_TOO_DEEP);
+std::expected<parsed_t, error_t> parse_one(std::span<const std::byte> buf) {
     if (buf.size() < 4) return std::unexpected(error_t::FRAME_TRUNCATED);
 
     const std::uint8_t type_b = u8(buf[0]);
@@ -94,30 +98,64 @@ std::expected<decoded_t, error_t> decode_at(std::span<const std::byte> buf, std:
         tlv.trailer = trailer;
     }
 
+    parsed_t out;
+    out.total = total;
     if (opt.pl) {
-        std::size_t pos = 0;
-        while (pos < payload.size()) {
-            auto child = decode_at(payload.subspan(pos), depth + 1);
-            if (!child) return std::unexpected(child.error());
-            pos += child->consumed;
-            tlv.children.push_back(std::move(child->tlv));
-        }
-        if (pos != payload.size()) return std::unexpected(error_t::FRAME_INVALID);
+        out.children = payload;  // walked iteratively by decode(), not here
     } else {
         tlv.payload = payload;
     }
-
-    return decoded_t{std::move(tlv), total};
+    out.tlv = std::move(tlv);
+    return out;
 }
 
 }  // namespace
 
 std::expected<tlv_t, error_t> decode(std::span<const std::byte> input) {
-    auto r = decode_at(input, 0);
-    if (!r) return std::unexpected(r.error());
-    if (r->consumed != input.size())
+    // Iterative parse with an explicit work stack — recursion is forbidden so a
+    // maliciously deep frame cannot overflow a small MCU call stack
+    // (docs/reference/01-data-format.md §Iterative parsing requirement).
+    auto root = parse_one(input);
+    if (!root) return std::unexpected(root.error());
+    if (root->total != input.size())
         return std::unexpected(error_t::FRAME_INVALID);  // trailing bytes
-    return std::move(r->tlv);
+    if (!root->tlv.opt.pl) return std::move(root->tlv);  // opaque root: done
+
+    // An open structured node whose children are still being parsed. `pos` is the
+    // cursor within `payload`; `total` is the node's full size, used to advance the
+    // parent's cursor when this node closes.
+    struct open_t {
+        tlv_t node;
+        std::span<const std::byte> payload;
+        std::size_t pos = 0;
+        std::size_t total = 0;
+    };
+    std::vector<open_t> stack;
+    stack.push_back(open_t{std::move(root->tlv), root->children, 0, root->total});
+
+    while (true) {
+        if (stack.back().pos == stack.back().payload.size()) {
+            // Node complete — pop it and graft it onto its parent (or return if root).
+            open_t done = std::move(stack.back());
+            stack.pop_back();
+            if (stack.empty()) return std::move(done.node);
+            stack.back().node.children.push_back(std::move(done.node));
+            stack.back().pos += done.total;
+            continue;
+        }
+        // A child of stack.back() sits at depth == stack.size(); reject at the cap.
+        if (stack.size() >= kMaxDepth) return std::unexpected(error_t::TLV_NESTING_TOO_DEEP);
+        auto child = parse_one(stack.back().payload.subspan(stack.back().pos));
+        if (!child) return std::unexpected(child.error());
+        if (child->tlv.opt.pl) {
+            // Structured child: push and descend (invalidates the reference above,
+            // so the loop re-fetches stack.back()).
+            stack.push_back(open_t{std::move(child->tlv), child->children, 0, child->total});
+        } else {
+            stack.back().node.children.push_back(std::move(child->tlv));
+            stack.back().pos += child->total;
+        }
+    }
 }
 
 std::vector<std::byte> encode(const tlv_t& tlv) {
