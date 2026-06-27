@@ -1,0 +1,14 @@
+version: "0.0.1"
+description: "libtracer — decentralized, zero-copy, graph-based pub/sub protocol (C++ reference core, P0 in-process profile)"
+url: "https://github.com/avatarsd-llc/libtracer"
+repository: "https://github.com/avatarsd-llc/libtracer.git"
+documentation: "https://avatarsd-llc.github.io/libtracer/"
+issues: "https://github.com/avatarsd-llc/libtracer/issues"
+license: "Apache-2.0"
+targets:
+  - esp32
+  - esp32s3
+  - esp32c3
+  - esp32c6
+dependencies:
+  idf: ">=5.3"
