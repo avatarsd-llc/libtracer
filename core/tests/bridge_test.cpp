@@ -182,6 +182,43 @@ void test_cycle_termination() {
     check(drops == 1, "exactly one terminal drop (bounded, not an infinite loop)");
 }
 
+// A transport that records every frame it is asked to send (single-threaded:
+// export fan-out fires inline on write).
+struct capture_transport_t : tr::net::transport_t {
+    std::vector<std::vector<std::byte>> frames;
+    using tr::net::transport_t::send;  // keep the base scatter-gather send() visible
+    void send(std::span<const std::byte> f) override { frames.emplace_back(f.begin(), f.end()); }
+    void set_receiver(receiver_t) override {}
+};
+
+void test_monotonic_origin_ts() {
+    std::printf("origin_timestamp is per-origin monotonic (HLC, ADR-0019):\n");
+    capture_transport_t cap;
+    graph_t node;
+    tr::net::bridge_t bridge(node, cap, peer_of(0x55));
+    (void)node.register_vertex(*path_t::parse("/s/x"), role_t::STORED_VALUE);
+    check(bridge.export_vertex(*path_t::parse("/s/x")).has_value(), "export /s/x");
+
+    // Many rapid exports — faster than a coarse clock tick, so a wall-clock ts would
+    // collide; the HLC max(now, last+1) must keep them strictly increasing.
+    const auto payload = value_tlv({0x01});
+    constexpr int kN = 1000;
+    for (int i = 0; i < kN; ++i) (void)node.write(*path_t::parse("/s/x"), owned_view(payload));
+
+    check(static_cast<int>(cap.frames.size()) == kN, "one frame emitted per write");
+    std::uint64_t prev = 0;
+    bool strictly_increasing = true;
+    for (const auto& f : cap.frames) {
+        const auto un = tr::net::router_unwrap(f);
+        if (!un || un->meta.ts <= prev) {
+            strictly_increasing = false;
+            break;
+        }
+        prev = un->meta.ts;
+    }
+    check(strictly_increasing, "1000 rapid exports: strictly increasing, non-colliding ts");
+}
+
 }  // namespace
 
 int main() {
@@ -189,6 +226,7 @@ int main() {
     test_two_node_delivery();
     test_dedup();
     test_cycle_termination();
+    test_monotonic_origin_ts();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
