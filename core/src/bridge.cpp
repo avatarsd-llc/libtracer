@@ -30,6 +30,24 @@ std::uint64_t now_ns() {
                                           .count());
 }
 
+// Per-origin monotonic origin_timestamp — a hybrid logical clock (ADR-0019).
+// `origin_timestamp` is the in-flight *identity* (with origin_peer_id), so it must
+// be strictly increasing and never collide, even when the wall clock is too coarse
+// to separate two writes or steps backward (NTP). HLC rule: max(now, last+1). The
+// counter is a process-wide function-local static, so every bridge on this node
+// (which all share one origin peer-id) draws from one monotonic source. The CAS
+// loop keeps it correct under concurrent exports from multiple transport threads.
+std::uint64_t next_origin_ts() {
+    static std::atomic<std::uint64_t> last{0};
+    const std::uint64_t now = now_ns();
+    std::uint64_t prev = last.load(std::memory_order_relaxed);
+    std::uint64_t next;
+    do {
+        next = now > prev ? now : prev + 1;
+    } while (!last.compare_exchange_weak(prev, next, std::memory_order_relaxed));
+    return next;
+}
+
 // A 24-byte recent-set key: origin (16) || ts (8 LE).
 std::string recent_key(const router_meta_t& meta) {
     std::string k(meta.origin.size() + 8, '\0');
@@ -49,7 +67,7 @@ bridge_t::bridge_t(graph::graph_t& graph, transport_t& transport, peer_id_t peer
 
 graph::result_t<void> bridge_t::export_vertex(const graph::path_t& src) {
     return graph_.subscribe(src, [this](const view_t& value) {
-        const router_meta_t meta{.origin = peer_, .ts = now_ns(), .hop = 0};
+        const router_meta_t meta{.origin = peer_, .ts = next_origin_ts(), .hop = 0};
         const auto frame = router_wrap(value.bytes(), meta);
         transport_.send(frame);
     });
