@@ -11,26 +11,37 @@ data flows by issuing **consumer-initiated subscribe-writes** into producers'
 `:subscribers[]` ([ADR-0026](../adr/0026-consumer-initiated-subscription-client-write.md)).
 It then **disconnects, leaving the wired devices talking to each other.** A node is
 one path tree — data endpoints, controllers, and transports — all addressed,
-created, ACL'd, `await`'d, and reconciled uniformly.
+created, ACL'd, `await`'d, and reconciled uniformly. **There are no privileged
+roles**: "orchestrator" and "router" below are *transient situations any peer can be
+in*, never fixed roles. The network is **pure-decentralized and self-healing** — it
+depends on no central authority, and bindings re-establish themselves on reconnect.
 ```
 
-This document consolidates the orchestration flow that the rest of the suite
-describes only in pieces ([04-communication-flows](04-communication-flows.md) covers
-the *data* plane; this is the *formation* plane). Nothing here is new wire
-behavior — it composes already-specified mechanisms.
+This document consolidates the formation flow that the rest of the suite describes
+only in pieces ([04-communication-flows](04-communication-flows.md) covers the *data*
+plane; this is the *formation* plane). Nothing here is new wire behavior — it
+composes already-specified mechanisms.
 
-## The actors
+## The hats a peer can wear (not roles)
 
-| Actor | Role |
+None of these is a fixed role or a privileged node — they are **hats any peer wears
+transiently**. The same peer is a producer on one edge and a consumer on another;
+"orchestrator" just means *a peer currently holding admin and issuing formation
+writes*; "router" (below) just means *a peer that happens to have ≥2 transports*. The
+network has **no central authority** and is **self-healing**.
+
+| Hat | What it means (transient) |
 | --- | --- |
-| **Owner peer** | The provisioned root that bootstraps a device's ACL and **delegates admin** ([CONTEXT.md](../../CONTEXT.md) *ACL / subject-token*). |
-| **Orchestrator** | Any peer the owner granted `WRITE_ACL` (admin). Usually a **web UI**, joining **temporarily**. Not architecturally special — just a peer doing vertex writes. |
-| **Producer** | The vertex that holds an edge and fans out (e.g. `/A/sensor`). |
-| **Consumer** | The vertex that receives delivery (e.g. `/B/in`). **Control-passive, data-rich.** |
+| **Owner** | A peer holding the provisioned root token that bootstraps a device's ACL and **delegates admin** ([CONTEXT.md](../../CONTEXT.md) *ACL / subject-token*). |
+| **Orchestrating** | A peer the owner granted `WRITE_ACL` (admin) that is *currently* issuing formation writes. Usually a **web UI**, joining **temporarily**. Not architecturally special — just a peer doing vertex writes, then leaving. |
+| **Producing** | A vertex that holds an edge and fans out (e.g. `/A/sensor`). |
+| **Consuming** | A vertex that receives delivery (e.g. `/B/in`). **Control-passive, data-rich.** |
 
-The orchestrator is an **edge that exists temporarily → modifies bindings →
-departs**, leaving producer and consumer wired. Because formation is just vertex
-writes, the cables it patches outlive the hand that plugged them.
+A peer that is *orchestrating* is an **edge that exists temporarily → modifies
+bindings → departs**, leaving producer and consumer wired. Because formation is just
+vertex writes, the cables it patches outlive the hand that plugged them — and because
+nothing privileged holds the graph together, a rebooted or reconnected peer re-forms
+its own bindings (§self-healing) with no coordinator present.
 
 ## The five steps
 
@@ -128,13 +139,15 @@ The default that pairs with consumer-initiated subscription is **the consumer di
 the producer pushes** (SSE / server-streaming shape) — it also lets a constrained
 leaf dial *out* through NAT. `role` is an explicit per-connection `:setting`, so it
 **overrides**: a constrained producer with many consumers, or NAT on both sides,
-flips to dialing out to a **router**.
+flips to dialing out to **any peer that has ≥2 transports** (a forwarding hop — *not*
+a "router" role).
 
-**Any node with ≥2 transports is a gateway** (bridge logic is a required module the
+**Any node with ≥2 transports forwards** (bridge logic is a required module the
 moment a node has two wires; [ADR-0014](../adr/0014-router-cycle-termination-hop-count.md),
-[07-host-embedding](07-host-embedding.md)). So the network **folds arbitrarily** —
-elided-CAN leaf → full-TLV QUIC backbone → another fold — with the bridge stateless
-and uniform across framing modes. The bounds to design within:
+[07-host-embedding](07-host-embedding.md)) — there is no privileged "router" node, so
+the network **folds arbitrarily** — elided-CAN leaf → full-TLV QUIC backbone →
+another fold — with the bridge stateless and uniform across framing modes. The bounds
+to design within:
 
 - **Depth is capped by `MAX_HOPS`** (recommended 32): a delivery path longer than
   that is cut. Fine for ordinary topologies; the limit is pathologically deep
@@ -143,6 +156,21 @@ and uniform across framing modes. The bounds to design within:
   recent-set), worst case ≈ `MAX_HOPS × fanout` before a loop dies.
 - **No global ordering across folds** — per-producer `(peer_id, ts)` only; cross-node
   coherence needs a coordinated trigger.
+
+## Self-healing (no coordinator)
+
+Because nothing privileged holds the graph together, recovery is **local and
+automatic**, with no coordinator present:
+
+- **Subscriptions re-form themselves.** On reconnect a consumer re-issues its
+  subscribe-write from firmware/NVS config ([ADR-0026](../adr/0026-consumer-initiated-subscription-client-write.md))
+  — the binding repairs without anyone re-provisioning it.
+- **Transport-native bindings re-learn in-band.** Elided/lean bindings (e.g. a CAN
+  `id↔path` map held *inside* the transport) re-establish from **advertise frames**
+  (advertise+id-match), so a rejoining node re-announces its own mappings.
+- **No central authority to lose.** Any peer can wear any hat; a departed
+  "orchestrating" peer or a downed forwarding hop costs only the paths through it,
+  and the rest of the mesh is unaffected.
 
 ## What is *not* here yet
 
