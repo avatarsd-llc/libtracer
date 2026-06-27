@@ -14,6 +14,8 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -223,6 +225,193 @@ void transport_ws_server::run() {
         }
         ::close(fd);
     }
+}
+
+// ---------------------------------------------------------------------------
+// transport_ws_client — the dial-out half.
+// ---------------------------------------------------------------------------
+
+transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t port) {
+    // Seed the per-frame masking-key stream with something that varies between
+    // connections (steady_clock + this address). Not crypto-strong — RFC 6455
+    // masking exists for proxy/cache safety, not to defend against a peer.
+    std::uint64_t seed =
+        static_cast<std::uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+    seed ^= reinterpret_cast<std::uintptr_t>(this);
+    mask_state_.store(seed, std::memory_order_relaxed);
+
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return;
+
+    sockaddr_in peer{};
+    peer.sin_family = AF_INET;
+    peer.sin_port = htons(port);
+    if (::inet_pton(AF_INET, host.c_str(), &peer.sin_addr) != 1 ||
+        ::connect(fd, reinterpret_cast<sockaddr*>(&peer), sizeof(peer)) < 0) {
+        ::close(fd);
+        return;
+    }
+
+    if (!handshake(fd, host, port)) {
+        ::close(fd);
+        return;
+    }
+
+    conn_fd_.store(fd, std::memory_order_relaxed);
+    connected_ = true;
+    thread_ = std::thread([this, fd] { serve(fd); });
+}
+
+transport_ws_client::~transport_ws_client() {
+    stop_.store(true, std::memory_order_relaxed);
+    if (thread_.joinable()) thread_.join();
+    // serve() tears the socket down on exit; this only catches a never-spawned
+    // thread (handshake failed) where conn_fd_ is already -1, so it never
+    // double-closes.
+    const int leftover = conn_fd_.exchange(-1, std::memory_order_relaxed);
+    if (leftover >= 0) ::close(leftover);
+}
+
+void transport_ws_client::set_receiver(receiver_t receiver) {
+    const std::lock_guard lock(m_);
+    receiver_ = std::move(receiver);
+}
+
+std::uint32_t transport_ws_client::next_mask_key() {
+    // SplitMix64 step → a varied (non-crypto) 32-bit masking key per frame.
+    std::uint64_t z = mask_state_.fetch_add(0x9E3779B97F4A7C15ull, std::memory_order_relaxed) +
+                      0x9E3779B97F4A7C15ull;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    z ^= z >> 31;
+    return static_cast<std::uint32_t>(z);
+}
+
+void transport_ws_client::write_all(int fd, std::span<const std::byte> bytes) {
+    if (fd < 0) return;
+    std::size_t off = 0;
+    while (off < bytes.size()) {
+        const ssize_t n = ::send(fd, bytes.data() + off, bytes.size() - off, MSG_NOSIGNAL);
+        if (n <= 0) return;  // peer gone / error → drop the rest
+        off += static_cast<std::size_t>(n);
+    }
+}
+
+void transport_ws_client::send(std::span<const std::byte> frame) {
+    const std::vector<std::byte> encoded =
+        ws::encode_client_frame(ws::opcode_t::BINARY, frame, next_mask_key());
+    // Same discipline as the server: hold write_m_ across the whole write so the
+    // recv thread cannot tear down and reset conn_fd_ underneath us; read the fd
+    // inside the lock to pair with that teardown.
+    const std::lock_guard lock(write_m_);
+    write_all(conn_fd_.load(std::memory_order_relaxed), encoded);
+}
+
+bool transport_ws_client::handshake(int fd, const std::string& host, std::uint16_t port) {
+    // A fresh 16-byte nonce (RFC 6455 §4.1) base64'd into Sec-WebSocket-Key.
+    std::array<std::byte, 16> nonce{};
+    std::uint64_t s = mask_state_.load(std::memory_order_relaxed) ^ 0xD1B54A32D192ED03ull;
+    for (auto& b : nonce) {
+        s = s * 6364136223846793005ull + 1442695040888963407ull;
+        b = static_cast<std::byte>((s >> 56) & 0xFFu);
+    }
+    const std::string key = ws::base64(nonce);
+
+    std::string req = "GET / HTTP/1.1\r\nHost: ";
+    req += host;
+    req += ':';
+    req += std::to_string(port);
+    req +=
+        "\r\nUpgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Key: ";
+    req += key;
+    req += "\r\nSec-WebSocket-Version: 13\r\n\r\n";
+
+    std::vector<std::byte> bytes(req.size());
+    for (std::size_t i = 0; i < req.size(); ++i) bytes[i] = static_cast<std::byte>(req[i]);
+    {
+        const std::lock_guard lock(write_m_);
+        write_all(fd, bytes);
+    }
+
+    // Read the response header block (CRLFCRLF), bounded so a stuck peer cannot
+    // hang construction forever.
+    std::string resp;
+    std::array<char, 1024> chunk;
+    while (resp.find("\r\n\r\n") == std::string::npos) {
+        if (stop_.load(std::memory_order_relaxed)) return false;
+        pollfd pfd{.fd = fd, .events = POLLIN, .revents = 0};
+        const int pr = ::poll(&pfd, 1, 100);
+        if (pr < 0) return false;
+        if (pr == 0) continue;  // timeout → re-check stop_
+        const ssize_t n = ::recv(fd, chunk.data(), chunk.size(), 0);
+        if (n <= 0) return false;  // peer closed / error
+        resp.append(chunk.data(), static_cast<std::size_t>(n));
+        if (resp.size() > 16384) return false;  // runaway response guard
+    }
+
+    if (resp.find("101") == std::string::npos) return false;
+    const std::string accept = header_value(resp, "sec-websocket-accept");
+    return !accept.empty() && accept == ws::accept_key(key);
+}
+
+void transport_ws_client::serve(int fd) {
+    std::vector<std::byte> buf;
+    std::array<std::byte, 4096> chunk;
+
+    while (!stop_.load(std::memory_order_relaxed)) {
+        pollfd pfd{.fd = fd, .events = POLLIN, .revents = 0};
+        const int pr = ::poll(&pfd, 1, 100);
+        if (pr < 0) break;
+        if (pr == 0) continue;  // timeout → re-check stop_
+
+        const ssize_t n = ::recv(fd, chunk.data(), chunk.size(), 0);
+        if (n <= 0) break;  // peer closed / error
+        buf.insert(buf.end(), chunk.data(), chunk.data() + n);
+
+        // Drain every complete frame; leftover partial bytes stay for next read.
+        while (true) {
+            auto decoded = ws::decode_frame(buf);
+            if (!decoded) break;
+            ws::frame_t frame = std::move(decoded->first);
+            const std::size_t consumed = decoded->second;
+            buf.erase(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(consumed));
+
+            switch (frame.op) {
+                case ws::opcode_t::BINARY: {
+                    receiver_t receiver;
+                    {
+                        const std::lock_guard lock(m_);
+                        receiver = receiver_;
+                    }
+                    if (receiver) receiver(std::span<const std::byte>(frame.payload));
+                    break;
+                }
+                case ws::opcode_t::PING: {
+                    // A client PONG must be masked, just like client data frames.
+                    const std::vector<std::byte> pong =
+                        ws::encode_client_frame(ws::opcode_t::PONG, frame.payload, next_mask_key());
+                    const std::lock_guard lock(write_m_);
+                    write_all(fd, pong);
+                    break;
+                }
+                case ws::opcode_t::CLOSE:
+                    goto teardown;  // peer asked to close
+                default:
+                    break;  // TEXT / PONG / CONT: ignored
+            }
+        }
+    }
+
+teardown:
+    // Tear down under write_m_ so a concurrent send() never writes to (or reads)
+    // a closed/reused fd.
+    {
+        const std::lock_guard lock(write_m_);
+        conn_fd_.store(-1, std::memory_order_relaxed);
+    }
+    ::close(fd);
 }
 
 }  // namespace tr::net

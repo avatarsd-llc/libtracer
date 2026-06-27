@@ -9,7 +9,11 @@
  * MASKED client BINARY frame and assert the transport_t receiver got exactly the
  * payload, and (b) call server.send() and assert the client reads back a server
  * BINARY frame ws::decode_frame()s to those bytes. Built under TSan (recv thread
- * + receiver handoff) and ASan+UBSan. The client role is a later increment.
+ * + receiver handoff) and ASan+UBSan.
+ *
+ * A second test wires a transport_ws_client into a transport_ws_server and
+ * asserts a full round trip (client.send → server receiver, server.send → client
+ * receiver) — the real integration test for the dial-out (client) half (#54).
  */
 
 #include <arpa/inet.h>
@@ -190,10 +194,65 @@ void test_handshake_and_frames() {
     ::close(cfd);
 }
 
+// Two real transport_t endpoints over a live WS connection: a transport_ws_server
+// and a transport_ws_client dialing into it. Asserts a FULL round trip — the
+// client's MASKED BINARY frame surfaces at the server's receiver as exact bytes,
+// and the server's UNMASKED BINARY frame surfaces at the client's receiver as
+// exact bytes. Deterministic via futures with a deadline. This is the real
+// integration test for the dial-out (client) half (#54).
+void test_client_server_roundtrip() {
+    std::printf("transport_ws client <-> server — full round trip:\n");
+
+    tr::net::transport_ws_server server(0);
+    check(server.ok(), "server listen socket bound");
+    const std::uint16_t port = server.local_port();
+    check(port != 0, "ephemeral port resolved");
+
+    std::promise<std::vector<std::byte>> srv_got;
+    auto srv_fut = srv_got.get_future();
+    server.set_receiver([&](std::span<const std::byte> f) {
+        srv_got.set_value(std::vector<std::byte>(f.begin(), f.end()));
+    });
+
+    tr::net::transport_ws_client client("127.0.0.1", port);
+    check(client.ok(), "client connected + 101 Sec-WebSocket-Accept verified");
+
+    std::promise<std::vector<std::byte>> cli_got;
+    auto cli_fut = cli_got.get_future();
+    client.set_receiver([&](std::span<const std::byte> f) {
+        cli_got.set_value(std::vector<std::byte>(f.begin(), f.end()));
+    });
+
+    // --- client → server: client.send() emits a MASKED BINARY frame ---
+    const std::array<std::byte, 5> c2s{std::byte{0x01}, std::byte{0x07}, std::byte{0xDE},
+                                       std::byte{0xAD}, std::byte{0xBE}};
+    client.send(c2s);
+    const bool got_at_server = srv_fut.wait_for(2s) == std::future_status::ready;
+    check(got_at_server, "server receiver fired on client.send()");
+    if (got_at_server) {
+        const auto r = srv_fut.get();
+        check(r.size() == c2s.size() && std::memcmp(r.data(), c2s.data(), c2s.size()) == 0,
+              "server got the exact bytes client.send() emitted");
+    }
+
+    // --- server → client: server.send() emits an UNMASKED BINARY frame ---
+    const std::array<std::byte, 4> s2c{std::byte{0x01}, std::byte{0x02}, std::byte{0xCA},
+                                       std::byte{0xFE}};
+    server.send(s2c);
+    const bool got_at_client = cli_fut.wait_for(2s) == std::future_status::ready;
+    check(got_at_client, "client receiver fired on server.send()");
+    if (got_at_client) {
+        const auto r = cli_fut.get();
+        check(r.size() == s2c.size() && std::memcmp(r.data(), s2c.data(), s2c.size()) == 0,
+              "client got the exact bytes server.send() emitted");
+    }
+}
+
 }  // namespace
 
 int main() {
     test_handshake_and_frames();
+    test_client_server_roundtrip();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

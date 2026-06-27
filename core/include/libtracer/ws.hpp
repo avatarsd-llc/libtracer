@@ -313,4 +313,53 @@ struct frame_t {
     return out;
 }
 
+/**
+ * @brief Encode one client→server RFC 6455 frame: FIN=1, given opcode, MASKED.
+ *
+ * Client frames MUST be masked (RFC 6455 §5.1): the MASK bit is set, a 4-byte
+ * masking key is emitted big-endian after the length, and every payload byte is
+ * XOR'd with `mask_key[i % 4]`. The caller supplies @p mask_key per frame; it
+ * need not be cryptographically strong (libtracer is not defending against a
+ * same-process attacker), only varied — a counter-derived value is fine. The
+ * length uses the smallest legal encoding (7-bit, then 126 + 2 bytes, then
+ * 127 + 8 bytes). The server-side encode_frame() above is unaffected.
+ *
+ * @param op       The frame opcode.
+ * @param payload  The application payload to send.
+ * @param mask_key The 32-bit masking key (its 4 bytes form the RFC 6455 key).
+ * @return The fully serialized masked frame bytes, ready to write to the socket.
+ */
+[[nodiscard]] inline std::vector<std::byte> encode_client_frame(opcode_t op,
+                                                                std::span<const std::byte> payload,
+                                                                std::uint32_t mask_key) {
+    std::vector<std::byte> out;
+    out.push_back(static_cast<std::byte>(0x80u | static_cast<std::uint8_t>(op)));  // FIN=1
+
+    const std::size_t len = payload.size();
+    if (len < 126) {
+        out.push_back(static_cast<std::byte>(0x80u | static_cast<std::uint8_t>(len)));  // MASK=1
+    } else if (len <= 0xFFFF) {
+        out.push_back(static_cast<std::byte>(0x80u | 126u));
+        out.push_back(static_cast<std::byte>((len >> 8) & 0xFFu));
+        out.push_back(static_cast<std::byte>(len & 0xFFu));
+    } else {
+        out.push_back(static_cast<std::byte>(0x80u | 127u));
+        for (int i = 7; i >= 0; --i) {
+            out.push_back(
+                static_cast<std::byte>((static_cast<std::uint64_t>(len) >> (i * 8)) & 0xFFu));
+        }
+    }
+
+    const std::array<std::uint8_t, 4> mk{static_cast<std::uint8_t>((mask_key >> 24) & 0xFFu),
+                                         static_cast<std::uint8_t>((mask_key >> 16) & 0xFFu),
+                                         static_cast<std::uint8_t>((mask_key >> 8) & 0xFFu),
+                                         static_cast<std::uint8_t>(mask_key & 0xFFu)};
+    for (std::uint8_t m : mk) out.push_back(static_cast<std::byte>(m));
+    for (std::size_t i = 0; i < len; ++i) {
+        out.push_back(
+            static_cast<std::byte>(std::to_integer<std::uint8_t>(payload[i]) ^ mk[i % 4]));
+    }
+    return out;
+}
+
 }  // namespace tr::net::ws
