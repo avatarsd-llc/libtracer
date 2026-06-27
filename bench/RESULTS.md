@@ -105,3 +105,33 @@ libtracer's lead widens with fan-out.
   size=1024B fan=1 ep=1: throughput x2.4, p50 latency x2.4 lower
   size=8192B fan=1 ep=1: throughput x2.1, p50 latency x2.1 lower
 ```
+
+## Network path (two processes over localhost UDP)
+
+Fair serialized comparison — both cross the kernel UDP stack. One-way p50 latency
+(CLOCK_MONOTONIC, shared across processes).
+
+```
+        size  system/mode        msgs/s        p50         p99
+       ----   -----------     ---------     -------     -------
+        16B   libtracer/net     351,986    13.97µs     41.40µs
+       256B   libtracer/net     529,373    14.08µs     33.80µs
+      1024B   libtracer/net     484,109    13.76µs     40.48µs
+      8192B   libtracer/net     259,194    13.54µs     49.50µs
+        16B   zenoh/net       3,554,558    61.97µs    132.36µs
+       256B   zenoh/net       2,083,487    63.88µs    130.61µs
+      1024B   zenoh/net       2,407,908    64.91µs    130.62µs
+      8192B   zenoh/net         303,939    63.83µs    138.26µs
+```
+
+**Latency: libtracer wins ~4.5x** (≈14µs vs ≈64µs p50) on every size — it sends one
+datagram per message immediately. **Throughput: zenoh wins** at small sizes because
+it *batches* many messages per transmission (the same batching is why its latency is
+4.5x worse); at 8KB the two converge (libtracer 259K vs zenoh 304K msg/s).
+
+This is the classic latency-vs-throughput operating point. libtracer is tuned for
+**lowest latency** (its mission: e.g. 100 ksps STM32→GPU), where 14µs at 350K+ msg/s
+beats zenoh decisively. To also win raw network *throughput*, libtracer needs a
+**batched egress** (coalesce frames / `sendmmsg`) as an opt-in throughput mode — the
+identified next optimization. Intra-host, the zero-copy SHM path (ADR-0025) is
+in-process-like, where libtracer already wins both by 2–6x.
