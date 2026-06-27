@@ -377,6 +377,26 @@ A vertex exposes a **schema** describing every writable field. The schema lives 
 | `:description` | UTF-8 | yes (with permission) | Human-readable description |
 | `:acl` | ACL | yes (with permission) | Access control list |
 
+### Stale and invalid values
+
+A producer that has no good value to publish — a sensor that faulted, a reading not yet taken — does **not** need a dedicated "invalid" wire field. The two distinct concerns map onto mechanisms that already exist:
+
+- **Stale** (the value is old, or the producer went quiet) is **consumer-derived**, never a flag the producer sets:
+  - *Sample age*: the optional wire timestamp (`opt.TS`, [01-data-format.md](01-data-format.md)) carries when the sample was taken; a consumer treats `now − ts > tolerance` as stale.
+  - *Producer liveness*: `:settings.deadline_ns` plus the read-only `:liveness.last_seen_ns` / `:liveness.missed_deadlines` fields (above) say whether the producer is still writing within its contract. A missed deadline is the canonical "this vertex went stale" signal, and it is observable without the producer doing anything.
+- **Invalid / fault** (the producer is alive but its value is meaningless right now) is a **`STATUS=ERROR(<reason>)` delivered in place of a VALUE** — the same pattern a bridge uses to surface `STATUS=ERROR(TRANSPORT_DOWN)` ([07-host-embedding.md](07-host-embedding.md)). Delivery is an ordinary write ([CONTEXT.md](../../CONTEXT.md) §delivery *is* a write), so a fault reaches subscribers through the same edge as a value; a type-aware consumer distinguishes a `STATUS` (type `0x09`) from a `VALUE` (type `0x01`) by its type code and reacts (hold last-good, alarm, fail over) exactly as it would for a liveness fault.
+
+This keeps the data plane byte-agnostic: L4 never interprets a payload to decide "is this valid." Validity is either a property of *time* (stale, derived from `ts`/liveness) or an explicit *typed record* (`STATUS`/`ERROR`), never a magic value or a per-VALUE flag bit.
+
+### Observing structural change
+
+Watching a parent's child set change (devices appearing, a scanner discovering a 1-Wire/Modbus node) needs **no dedicated event type** — it falls out of composite subscription:
+
+- **Subscribe to the composite parent.** Subscribing to a composite vertex *is* the subtree subscription ([05-protocol-tlvs.md](05-protocol-tlvs.md) §delivery_scope). With `delivery_scope = DELTA` the subscriber receives each **changed child tagged with its concrete path** ([RFC-0003](../spec/rfcs/0003-bridged-wildcard-delivery-path.md)); with `SNAPSHOT` it receives the aggregate `:[]` structured TLV. A newly **appeared** child surfaces as its first delta (or in the next snapshot); a child's **value change** surfaces the same way. There is no separate `:children_changed` facet — that would duplicate what composite delivery already does.
+- **Enumerate the current members** with `read(<parent>:children[])`, which returns the subtree members (not SPECs — the write-spec / read-members asymmetry, [05 §SPEC](05-protocol-tlvs.md)). The common pattern is read-snapshot-once on join, then subscribe-DELTA for the tail.
+
+**Open — child removal.** Appearance and value-change are covered above, but how a child *removal* is delivered to a composite subscriber (a tombstone delta? a `STATUS=ERROR(NOT_FOUND)` at the child's path? snapshot-diff only?) is **not yet specified**. Because it is wire-observable behavior it is an RFC/ADR-level decision, tracked in [#66](https://github.com/avatarsd-llc/libtracer/issues/66); the `DELETE` access-mask bit ([05 §ACL](05-protocol-tlvs.md)) gates the *right* to remove but does not define the *notification*.
+
 ### Module-namespaced extension fields
 
 A transport module like `transport_tcp` MAY add per-subscriber settings such as `:subscribers[N].settings.transport_tcp.send_buf_kb`. Rules:
