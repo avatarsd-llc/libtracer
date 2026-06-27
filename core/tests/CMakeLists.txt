@@ -81,6 +81,12 @@ target_compile_definitions(udp_test PRIVATE
     LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME udp COMMAND udp_test)
 
+# #54 — transport_ws server socket layer (TCP accept + RFC6455 handshake + transport_t).
+add_executable(ws_transport_test ws_transport_test.cpp)
+target_link_libraries(ws_transport_test PRIVATE libtracer)
+libtracer_test_warnings(ws_transport_test)
+add_test(NAME ws_transport COMMAND ws_transport_test)
+
 # M2 — substrate harness in single-threaded mode. LIBTRACER_NO_ATOMIC changes the
 # Segment refcount layout, so this variant compiles the library sources directly
 # (rather than linking the atomic-built libtracer.a) to keep one consistent ABI.
