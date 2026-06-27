@@ -1,0 +1,31 @@
+{
+  "name": "value-ts-abs",
+  "category": "tlv-types",
+  "hex": "01200300AABBCC0807060504030201",
+  "total_bytes": 15,
+  "decoded": {
+    "type": "0x01 VALUE",
+    "opt": {
+      "raw": "0x20",
+      "PL": 0,
+      "TS": 1,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 3,
+    "payload": "AABBCC",
+    "trailer": {
+      "ts": {
+        "form": "absolute u64 ns",
+        "value": 72623859790382856,
+        "bytes_le": "0807060504030201"
+      },
+      "crc": null
+    },
+    "meaning": "opaque 3-byte VALUE with an absolute u64 wire timestamp (opt.TS=1, TF=0)"
+  }
+}

@@ -131,6 +131,18 @@ def main() -> int:
     for n, note in pending:
         print(f"  {n}: pending (disabled) — {note}")
 
+    # --- coverage audit (non-gating report; ADR-0028 / #60 coverage half) ---
+    audit = HERE / "coverage_audit.py"
+    if audit.exists():
+        print()
+        try:
+            out = subprocess.run([sys.executable, str(audit)], capture_output=True, text=True)
+            for ln in out.stdout.splitlines():
+                if ln.startswith(("Type codes:", "Opt bits:", "COVERAGE:")):
+                    print(f"  {ln}")
+        except OSError as e:  # pragma: no cover
+            print(f"  coverage audit skipped: {e}")
+
     print()
     print("CONFORMANCE: PASS" if gate_ok else "CONFORMANCE: FAIL")
     return 0 if gate_ok else 1
