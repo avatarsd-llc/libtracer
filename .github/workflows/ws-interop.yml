@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# C++ <-> TypeScript transport_ws INTEROP end-to-end job (#54). Builds the C++
+# `ws_interop_server` helper binary (a real `tr::net::transport_ws_server`) and
+# runs the TypeScript transport-ws interop test against it over a live socket: a
+# genuine RFC 6455 101 handshake, a MASKED TS client frame in, an UNMASKED C++
+# server frame back. This proves the published @avatarsd-llc/libtracer-ws client
+# actually interoperates with the C++ server, beyond the codec-vector agreement.
+#
+# This is a SEPARATE, standalone workflow (mirroring can-vcan-e2e.yml / ts.yml):
+# the required core gates (build-test / sanitizers / tsan / format / doxygen) must
+# never depend on a Node toolchain, and the TS gates must never depend on a C++
+# build. Path-filtered to the C++ transport, the TypeScript workspace, and this
+# file, so it only runs when one of those changes.
+name: ws-interop
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "core/**"
+      - "bindings/typescript/**"
+      - ".github/workflows/ws-interop.yml"
+  pull_request:
+    paths:
+      - "core/**"
+      - "bindings/typescript/**"
+      - ".github/workflows/ws-interop.yml"
+  workflow_dispatch:
+
+jobs:
+  ws-interop:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the C++ ws_interop_server helper binary
+        run: |
+          cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build core/build --target ws_interop_server -j
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: bindings/typescript/package-lock.json
+
+      - name: Install + build the TypeScript workspace
+        working-directory: bindings/typescript
+        run: |
+          npm ci
+          npm run build
+
+      - name: Run the TS <-> C++ transport_ws interop test over a real socket
+        working-directory: bindings/typescript/packages/transport-ws
+        env:
+          LIBTRACER_WS_INTEROP_SERVER: ${{ github.workspace }}/core/build/tests/ws_interop_server
+        run: npm test
