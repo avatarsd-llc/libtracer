@@ -29,6 +29,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <span>
 #include <string>
@@ -38,6 +39,7 @@
 #include "libtracer/frame.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/op_resolve.hpp"
+#include "libtracer/route_handle.hpp"
 #include "libtracer/transport.hpp"
 
 namespace tr::net {
@@ -98,6 +100,75 @@ class fwd_router_t {
     void on_inbound(std::function<void(std::string_view, const wire::tlv_t&)> cb);
 
     /**
+     * @brief Set a read-only observer of every inbound frame's RAW bytes (any type).
+     *
+     * Fires before dispatch with the inbound link name and the complete frame span —
+     * used by tests to measure the on-wire byte-delta between a lean COMPACT delivery
+     * and the equivalent full-route FWD{WRITE} (the point of the route-handle).
+     * @param cb Callback invoked on a transport receive thread.
+     */
+    void on_raw(std::function<void(std::string_view, std::span<const std::byte>)> cb);
+
+    /**
+     * @brief Set the sink for a label-compacted delivery that terminates at this node.
+     *
+     * Invoked when a COMPACT's label resolves to a LOCAL terminus binding (the
+     * established route names a vertex here): the payload has already been written to
+     * that vertex (delivery-is-a-write, RFC-0004 §D). Carries the bound local route
+     * PATH bytes and the delivered payload TLV bytes (both borrowed for the call).
+     * @param cb Callback invoked on a transport receive thread; keep it cheap.
+     */
+    void on_compact_delivery(
+        std::function<void(std::span<const std::byte>, std::span<const std::byte>)> cb);
+
+    /**
+     * @brief Set the observer for a dropped stale/unknown-label COMPACT (RFC-0004 §E.1).
+     *
+     * Invoked when a COMPACT bears a label with no ingress binding on its link — the
+     * frame is dropped and a HANDLE_NACK is sent back to prompt a re-advertise (never
+     * a crash). Carries the inbound link name and the stale label.
+     * @param cb Callback invoked on a transport receive thread.
+     */
+    void on_stale_label(std::function<void(std::string_view, std::uint16_t)> cb);
+
+    /**
+     * @brief Advertise a `label ↔ route` binding over link @p link_name (producer side).
+     *
+     * Allocates a fresh per-link label, sends an ADVERTISE carrying it and @p route,
+     * and records the egress binding (so a NACK can re-advertise). Call when a
+     * compact-flagged flow starts or on (re)connect — re-advertising is the self-heal.
+     * @param link_name  This node's NAME for the downstream link to advertise over.
+     * @param route_path A complete PATH TLV's bytes — the delivery route to alias.
+     * @return The allocated label (to stamp on subsequent @ref send_compact), or 0 if
+     *         @p link_name names no child.
+     */
+    std::uint16_t advertise(std::string_view link_name, std::span<const std::byte> route_path);
+
+    /**
+     * @brief Send a label-compacted delivery over link @p link_name (producer side).
+     *
+     * Emits `COMPACT{ label, payload }` — the route does NOT ride, only the label
+     * bound by a prior @ref advertise. No-op if @p link_name names no child.
+     * @param link_name This node's NAME for the downstream link.
+     * @param label     A label returned by @ref advertise for that link.
+     * @param payload   A complete payload TLV's bytes (the delivered VALUE).
+     */
+    void send_compact(std::string_view link_name, std::uint16_t label,
+                      std::span<const std::byte> payload);
+
+    /**
+     * @brief Forget all route-handle label state for link @p link_name (self-heal hook).
+     *
+     * A transport calls this on (re)connect/disconnect; a subsequent re-advertise
+     * rebinds cleanly and a delivery on a now-cleared label is NACK'd, not misrouted.
+     * @param link_name This node's NAME for the link whose label state to drop.
+     */
+    void clear_link(std::string_view link_name);
+
+    /** @brief The route-handle label store (test introspection — assert statelessness). */
+    [[nodiscard]] const route_handle_t& handles() const noexcept { return handles_; }
+
+    /**
      * @brief Route one inbound FWD frame that arrived on child @p inbound_name.
      *
      * Forwards (dst-shrink + src-grow) toward a transport child, resolves+replies
@@ -122,11 +193,28 @@ class fwd_router_t {
     /** @brief The link a frame arrived on, by this node's NAME for it (nullptr if unknown). */
     [[nodiscard]] transport_t* link_by_name(std::string_view name) const;
 
+    /** @brief The slice-3 stateless FWD forward/terminus/reply step (decoded @p dec). */
+    void route_fwd(std::string_view inbound_name, std::span<const std::byte> frame,
+                   const wire::tlv_t& dec);
+    /** @brief Learn (or re-advertise downstream) a `label ↔ route` binding (RFC-0004 §E.1). */
+    void on_advertise(std::string_view inbound_name, const wire::tlv_t& adv);
+    /** @brief Forward (swap label) or locally deliver a label-compacted COMPACT. */
+    void on_compact(std::string_view inbound_name, const wire::tlv_t& comp);
+    /** @brief Re-advertise an egress binding in response to a downstream HANDLE_NACK. */
+    void on_nack(std::string_view inbound_name, const wire::tlv_t& nack);
+    /** @brief Resolve a bound local route and apply the delivered write (delivery-is-a-write). */
+    [[nodiscard]] bool deliver_local(std::span<const std::byte> route_path,
+                                     std::span<const std::byte> payload);
+
     graph::graph_t& graph_;
     graph::op_resolver_t resolver_;
     std::vector<child_t> children_;  // immutable after setup — no lock on the hot path
+    route_handle_t handles_;         // per-link label tables (compact flows only)
     std::function<void(const wire::tlv_t&)> reply_cb_;
     std::function<void(std::string_view, const wire::tlv_t&)> inbound_cb_;
+    std::function<void(std::string_view, std::span<const std::byte>)> raw_cb_;
+    std::function<void(std::span<const std::byte>, std::span<const std::byte>)> delivery_cb_;
+    std::function<void(std::string_view, std::uint16_t)> stale_cb_;
 };
 
 }  // namespace tr::net

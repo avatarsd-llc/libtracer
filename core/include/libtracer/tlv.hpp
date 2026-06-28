@@ -33,6 +33,16 @@ enum class type_t : std::uint8_t {
     SPEC = 0x0E,
     FWD = 0x0F,
     FIELD = 0x10,
+    // Transport-plane route-handle control frames (RFC-0004 §E.1, ADR-0035 slice
+    // 4). These ride a full-TLV link (ws/UDP) ALONGSIDE FWD to compact an
+    // established, `delivery_compact`-flagged delivery flow into a per-link label
+    // (header-elision generalized, ADR-0022). They are NOT part of the FWD frame
+    // and NOT cross-core conformance TLVs — a peer that ignores them simply keeps
+    // the full-route delivery path. Self-describing (opt.PL=1) so the codec parses
+    // them generically. See docs/reference/05 §route-handle and RFC-0004 §E.1.
+    ADVERTISE = 0x11,    // VALUE label(u16) + PATH route — bind label -> route, swapped per hop
+    COMPACT = 0x12,      // VALUE label(u16) + payload TLV — a label-compacted delivery
+    HANDLE_NACK = 0x13,  // VALUE label(u16) — stale/unknown label seen; prompts re-advertise
 };
 
 // The 1-byte `opt` field. Bits, MSB->LSB: R | PL | TS | CR | LL | CW | TF | R.

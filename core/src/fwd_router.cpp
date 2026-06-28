@@ -8,13 +8,18 @@
 #include <cstring>
 #include <optional>
 #include <utility>
+#include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/tlv_emit.hpp"
+#include "libtracer/view.hpp"
 
 namespace tr::net {
 
 using graph::fwd_op_t;
+using view::segment_ptr_t;
+using view::view_t;
 using wire::opt_t;
 using wire::tlv_t;
 using wire::type_t;
@@ -78,6 +83,41 @@ void fwd_router_t::on_inbound(std::function<void(std::string_view, const tlv_t&)
     inbound_cb_ = std::move(cb);
 }
 
+void fwd_router_t::on_raw(std::function<void(std::string_view, std::span<const std::byte>)> cb) {
+    raw_cb_ = std::move(cb);
+}
+
+void fwd_router_t::on_compact_delivery(
+    std::function<void(std::span<const std::byte>, std::span<const std::byte>)> cb) {
+    delivery_cb_ = std::move(cb);
+}
+
+void fwd_router_t::on_stale_label(std::function<void(std::string_view, std::uint16_t)> cb) {
+    stale_cb_ = std::move(cb);
+}
+
+void fwd_router_t::clear_link(std::string_view link_name) { handles_.clear_link(link_name); }
+
+std::uint16_t fwd_router_t::advertise(std::string_view link_name,
+                                      std::span<const std::byte> route_path) {
+    transport_t* const link = link_by_name(link_name);
+    if (link == nullptr) return 0;
+    const std::uint16_t label = handles_.alloc_label(link_name);
+    handles_.record_egress(link_name, label,
+                           std::vector<std::byte>(route_path.begin(), route_path.end()));
+    const std::vector<std::byte> adv = encode_advertise(label, route_path);
+    link->send(std::span<const std::byte>(adv));
+    return label;
+}
+
+void fwd_router_t::send_compact(std::string_view link_name, std::uint16_t label,
+                                std::span<const std::byte> payload) {
+    if (transport_t* const link = link_by_name(link_name)) {
+        const std::vector<std::byte> out = encode_compact(label, payload);
+        link->send(std::span<const std::byte>(out));
+    }
+}
+
 transport_t* fwd_router_t::child_by_segment(std::span<const std::byte> seg) const {
     for (const child_t& c : children_) {
         if (c.name.size() == seg.size() && std::memcmp(c.name.data(), seg.data(), seg.size()) == 0)
@@ -94,13 +134,35 @@ transport_t* fwd_router_t::link_by_name(std::string_view name) const {
 }
 
 void fwd_router_t::on_frame(std::string_view inbound_name, std::span<const std::byte> frame) {
-    // Decode for the routing decision, the observer, and (at a terminus) the
-    // op_resolver / reply sink. The zero-copy forward rebuild re-walks the same
-    // bytes for offsets (read_header) rather than re-encoding the decoded tree.
+    if (raw_cb_) raw_cb_(inbound_name, frame);
     const auto dec = wire::decode(frame);
-    if (!dec || dec->type != type_t::FWD || !dec->opt.pl) return;  // drop malformed / non-FWD
-    if (inbound_cb_) inbound_cb_(inbound_name, *dec);
+    if (!dec || !dec->opt.pl) return;  // drop malformed / non-structured
 
+    // Dispatch on frame type. FWD is the slice-3 one-shot/full-route plane; the
+    // route-handle control frames (ADVERTISE/COMPACT/HANDLE_NACK) are the slice-4
+    // ws delivery-compaction plane that rides the same link (RFC-0004 §E.1).
+    switch (dec->type) {
+        case type_t::FWD:
+            if (inbound_cb_) inbound_cb_(inbound_name, *dec);
+            route_fwd(inbound_name, frame, *dec);
+            return;
+        case type_t::ADVERTISE:
+            on_advertise(inbound_name, *dec);
+            return;
+        case type_t::COMPACT:
+            on_compact(inbound_name, *dec);
+            return;
+        case type_t::HANDLE_NACK:
+            on_nack(inbound_name, *dec);
+            return;
+        default:
+            return;  // drop anything else
+    }
+}
+
+void fwd_router_t::route_fwd(std::string_view inbound_name, std::span<const std::byte> frame,
+                             const tlv_t& decoded) {
+    const tlv_t* const dec = &decoded;     // keep the original body's `dec->...`/`*dec` shape
     if (dec->children.size() < 2) return;  // need at least op + dst
     const tlv_t& op_tlv = dec->children[0];
     const tlv_t& dst = dec->children[1];
@@ -210,6 +272,114 @@ void fwd_router_t::on_frame(std::string_view inbound_name, std::span<const std::
         const std::vector<std::span<const std::byte>> iov = reply->to_iovec();
         in->send(std::span<const std::span<const std::byte>>(iov));
     }
+}
+
+// --- route-handle (ws delivery-compaction, RFC-0004 §E.1) --------------------
+
+void fwd_router_t::on_advertise(std::string_view inbound_name, const tlv_t& adv) {
+    if (adv.children.size() < 2) return;
+    const tlv_t& label_tlv = adv.children[0];
+    const tlv_t& route = adv.children[1];
+    if (label_tlv.type != type_t::VALUE || route.type != type_t::PATH) return;
+    const auto label = detail::load_le<std::uint16_t>(label_tlv.payload);
+
+    // Resolve the first route segment against this node's transport children — the
+    // SAME rule the FWD forward step uses, so the label tracks the delivery route.
+    transport_t* const down =
+        route.children.empty() ? nullptr : child_by_segment(route.children[0].payload);
+
+    if (down != nullptr) {
+        // Forwarding hop: strip the leading segment, allocate OUR own out-label,
+        // record the swap, retain the stripped egress route (for NACK re-advertise),
+        // and re-advertise downstream with the new label (MPLS-style swap).
+        const std::span<const std::byte> seg = route.children[0].payload;
+        const std::string down_name(reinterpret_cast<const char*>(seg.data()), seg.size());
+        tlv_t stripped = route;
+        stripped.children.erase(stripped.children.begin());
+        const std::vector<std::byte> stripped_bytes = wire::encode(stripped);
+
+        const std::uint16_t out_label = handles_.alloc_label(down_name);
+        handles_.bind_ingress(inbound_name, label,
+                              handle_binding_t{.terminus = false,
+                                               .down_link = down_name,
+                                               .out_label = out_label,
+                                               .local_route = {}});
+        handles_.record_egress(down_name, out_label, stripped_bytes);
+        const std::vector<std::byte> adv2 = encode_advertise(out_label, stripped_bytes);
+        down->send(std::span<const std::byte>(adv2));
+        return;
+    }
+
+    // Terminus: the route resolves locally here — bind the label to the local route.
+    handles_.bind_ingress(
+        inbound_name, label,
+        handle_binding_t{
+            .terminus = true, .down_link = {}, .out_label = 0, .local_route = wire::encode(route)});
+}
+
+void fwd_router_t::on_compact(std::string_view inbound_name, const tlv_t& comp) {
+    if (comp.children.size() < 2 || comp.children[0].type != type_t::VALUE) return;
+    const auto label = detail::load_le<std::uint16_t>(comp.children[0].payload);
+    const tlv_t& payload = comp.children[1];
+
+    const std::optional<handle_binding_t> binding = handles_.lookup_ingress(inbound_name, label);
+    if (!binding) {
+        // Stale/unknown label: drop, observe, and NACK back to prompt a re-advertise
+        // (self-heal). Never a crash — the route is simply re-learned (RFC-0004 §E.1).
+        if (stale_cb_) stale_cb_(inbound_name, label);
+        if (transport_t* const up = link_by_name(inbound_name)) {
+            const std::vector<std::byte> nack = encode_handle_nack(label);
+            up->send(std::span<const std::byte>(nack));
+        }
+        return;
+    }
+
+    const std::vector<std::byte> payload_bytes = wire::encode(payload);
+    if (binding->terminus) {
+        // Local delivery — expand the label to the bound route and apply the write
+        // (a delivery IS a write, RFC-0004 §D), then notify the delivery sink.
+        if (deliver_local(binding->local_route, payload_bytes) && delivery_cb_)
+            delivery_cb_(binding->local_route, payload_bytes);
+        return;
+    }
+    // Forwarding hop: swap to our out-label and re-emit the COMPACT downstream — the
+    // route still does NOT ride, only the (swapped) label.
+    if (transport_t* const down = link_by_name(binding->down_link)) {
+        const std::vector<std::byte> out = encode_compact(binding->out_label, payload_bytes);
+        down->send(std::span<const std::byte>(out));
+    }
+}
+
+void fwd_router_t::on_nack(std::string_view inbound_name, const tlv_t& nack) {
+    if (nack.children.empty() || nack.children[0].type != type_t::VALUE) return;
+    const auto label = detail::load_le<std::uint16_t>(nack.children[0].payload);
+    // A downstream peer lost the binding for `label` on this link — re-advertise the
+    // route we hold for it so the flow self-heals without a setup handshake.
+    const std::optional<std::vector<std::byte>> route = handles_.egress_route(inbound_name, label);
+    if (!route) return;
+    if (transport_t* const link = link_by_name(inbound_name)) {
+        const std::vector<std::byte> adv = encode_advertise(label, *route);
+        link->send(std::span<const std::byte>(adv));
+    }
+}
+
+bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
+                                 std::span<const std::byte> payload) {
+    const auto route = wire::decode(route_path);
+    if (!route || route->type != type_t::PATH) return false;
+    // The canonical PATH key (concatenated NAME encodings) — the graph vertex-map
+    // key, mirroring op_resolve.cpp's path_tlv_key.
+    std::vector<std::byte> key;
+    for (const tlv_t& name : route->children) {
+        const std::vector<std::byte> enc = wire::encode(name);
+        key.insert(key.end(), enc.begin(), enc.end());
+    }
+    graph::vertex_t* const v = graph_.find(key);
+    if (v == nullptr) return false;
+    segment_ptr_t seg = view::heap_alloc(payload.size());
+    if (!seg) return false;
+    std::memcpy(seg->bytes.data(), payload.data(), payload.size());
+    return graph_.write(v, view_t::over(std::move(seg))).has_value();
 }
 
 }  // namespace tr::net

@@ -65,7 +65,14 @@ conformance-validated slices.**
    `ws_interop_server` harness to a graph-backed *forwarding* node; assert `dst` shrinks / `src`
    grows byte-exactly and the reply source-routes home. Integration-tested.
 4. **Route-handle: advertise + label swap.** CAN: reuse the existing map. ws: the label table +
-   `delivery_compact` + advertise-on-(re)connect self-heal.
+   `delivery_compact` + advertise-on-(re)connect self-heal. Implemented as `tr::net::route_handle_t`
+   (the per-link `label ↔ route` tables) owned by `fwd_router_t`, with transport-plane
+   `ADVERTISE`/`COMPACT`/`HANDLE_NACK` frames (`0x11`–`0x13`) riding the link alongside `FWD`; the
+   per-link **u16 label** is swapped each hop. A `delivery_compact`-flagged stream amortizes its
+   full return route to the label; one-shot/cold flows stay stateless. Integration-tested over live
+   `transport_ws` (`core/tests/fwd_compact_test.cpp`): byte-delta vs full-route `FWD{WRITE}`,
+   byte-exact ordered delivery, stale-label drop + `HANDLE_NACK`, re-advertise self-heal, and
+   zero label state for a parallel non-compact flow.
 
 ### Cross-cutting
 

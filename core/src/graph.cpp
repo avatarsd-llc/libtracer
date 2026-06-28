@@ -243,6 +243,22 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
                 }
             }
             if (s.target_key.empty()) return std::unexpected(status_t::TYPE_MISMATCH);
+            // Parse the optional qos_settings SETTINGS for the route-handle opt-in
+            // (NAME "delivery_compact" VALUE u8, RFC-0004 §E.1 / docs/reference/05).
+            // Back-compat: a SUBSCRIBER without it (or an older parser) just keeps
+            // the full-route delivery path — existing conformance vectors unaffected.
+            for (const auto& child : sub->children) {
+                if (child.type != type_t::SETTINGS) continue;
+                const std::vector<tlv_t>& q = child.children;
+                for (std::size_t i = 0; i + 1 < q.size(); ++i) {
+                    if (q[i].type != type_t::NAME || q[i + 1].type != type_t::VALUE) continue;
+                    const std::span<const std::byte> nm = q[i].payload;
+                    const std::string_view name(reinterpret_cast<const char*>(nm.data()),
+                                                nm.size());
+                    if (name == "delivery_compact")
+                        s.delivery_compact = detail::load_le<std::uint8_t>(q[i + 1].payload) != 0;
+                }
+            }
             s.source_view = value;  // retain the SUBSCRIBER TLV zero-copy (refcount clone) so a
                                     // later :subscribers[] read ropes it into the REPLY (ADR-0035).
             const std::lock_guard lock(v->m_);

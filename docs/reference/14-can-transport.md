@@ -215,6 +215,22 @@ rejoining leaf or a downed forwarding hop costs only the paths through it. There
 node holds another node's wiring. A constrained CAN leaf stays dumb (a compile-time
 CAN-ID scheme); the map machinery runs in `transport_can` on whatever node hosts it.
 
+### The ws/UDP generalization — the route-handle
+
+CAN's `identity↔path` map is **mandatory** because the ID *is* the path. On a
+**full-TLV** transport (ws/UDP) the same idea is **opt-in compaction**: the
+**route-handle** ([05-protocol-tlvs.md](05-protocol-tlvs.md) §route-handle, RFC-0004
+§E.1, ADR-0035 slice 4) is a per-link **u16 label** that aliases an established
+delivery route, advertised in-band exactly as a CAN binding is — but with the label
+**swapped each hop** (MPLS-style), since a ws label is meaningful only on its link.
+The mechanics mirror this section one-for-one: an `ADVERTISE` frame establishes
+`label ↔ route`, lean `COMPACT` frames then carry only the label + value, a stale
+label is dropped with a `HANDLE_NACK`, and **re-advertise on (re)connect is the
+self-heal**. The difference is policy, not mechanism: CAN always labels (no route
+fits in 8 bytes); ws labels **only** flows whose `SUBSCRIBER.qos_settings.delivery_compact`
+is set, so a ws node forwarding one-shot/cold traffic holds zero label state. The ws
+table lives in `tr::net::route_handle_t`, owned by `fwd_router_t`.
+
 ## The SocketCAN binding (`transport_can`)
 
 Increment 2 realizes the binding: `tr::net::transport_can` is a `transport_t` that
