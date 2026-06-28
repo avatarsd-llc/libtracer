@@ -15,6 +15,25 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **`tr::net::route_handle_t` + `fwd_router_t` route-handle — ws delivery-compaction**
+  ([RFC-0004](../docs/spec/rfcs/0004-remote-operation-addressing.md) §E.1 /
+  [ADR-0035](../docs/adr/0035-implementing-rfc-0004-remote-operation-addressing.md),
+  slice 4). A new `route_handle.hpp` (`tr::net::route_handle_t`) holds per-link
+  `label ↔ route` tables; `fwd_router_t` gains the producer-side `advertise(link,
+  route) → u16 label` and `send_compact(link, label, payload)`, the inbound
+  `ADVERTISE`/`COMPACT`/`HANDLE_NACK` handlers, `clear_link(link)` (the reconnect
+  self-heal hook), `handles()` (introspection), and the `on_raw` / `on_compact_delivery`
+  / `on_stale_label` observers. An established, `delivery_compact`-flagged delivery
+  flow is compacted to a per-link **u16 label** (swapped each hop, MPLS-style)
+  advertised in-band; lean `COMPACT` frames then carry only the label + value instead
+  of a full-route `FWD{WRITE}`. One-shot / cold / non-compact flows allocate **no**
+  label state (the slice-3 stateless property holds). New transport-plane type codes
+  `ADVERTISE=0x11`, `COMPACT=0x12`, `HANDLE_NACK=0x13` (`tr::wire::type_t`) — these
+  ride a link alongside `FWD`, are not core conformance TLVs, and carry no vectors.
+- **`SUBSCRIBER.qos_settings.delivery_compact`** (`graph::subscriber_t::delivery_compact`)
+  — the consumer's opt-in to label-compacted deliveries, decoded from the SUBSCRIBER's
+  `qos_settings` SETTINGS (`NAME "delivery_compact" VALUE u8`). Optional / NAME-tagged
+  ⇒ back-compatible; absent leaves the full-route delivery path unchanged.
 - **`tr::net::fwd_router_t` — stateless multi-hop `FWD` forwarding + zero-copy
   `src` accumulation across transports** ([RFC-0004](../docs/spec/rfcs/0004-remote-operation-addressing.md)
   §A/§B / [ADR-0035](../docs/adr/0035-implementing-rfc-0004-remote-operation-addressing.md),

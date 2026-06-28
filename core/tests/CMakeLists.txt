@@ -102,6 +102,15 @@ target_link_libraries(fwd_multihop_test PRIVATE libtracer)
 libtracer_test_warnings(fwd_multihop_test)
 add_test(NAME fwd_multihop COMMAND fwd_multihop_test)
 
+# RFC-0004 / ADR-0035 slice 4 — the route-handle: ws delivery-compaction over LIVE
+# transport_ws (producer B -> A forwarder -> consumer C). Proves the byte-delta of a
+# label-compacted COMPACT vs a full-route FWD, byte-exact ordered delivery, the
+# stale-label drop + re-advertise self-heal, and that a non-compact flow stays stateless.
+add_executable(fwd_compact_test fwd_compact_test.cpp)
+target_link_libraries(fwd_compact_test PRIVATE libtracer)
+libtracer_test_warnings(fwd_compact_test)
+add_test(NAME fwd_compact COMMAND fwd_compact_test)
+
 # M4 — transport + bridge harness (loopback delivery, ROUTER, dedup, hop_count).
 add_executable(bridge_test bridge_test.cpp)
 target_link_libraries(bridge_test PRIVATE libtracer)

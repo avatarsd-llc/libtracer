@@ -167,12 +167,15 @@ The `qos_settings` SETTINGS carries the **per-subscriber delivery policy** (byte
 
 ```
 qos_settings = SETTINGS {
-  NAME "delivery_mode"   VALUE <u8: EVERY=0, THROTTLED=1, ON_CHANGE=2>  ; on-change = byte-diff
-  NAME "min_interval_ns" VALUE <u64>     ; throttle floor (THROTTLED)
-  NAME "keepalive_ns"    VALUE <u64>     ; force re-deliver if unchanged
-  NAME "delivery_scope"  VALUE <u8: DELTA=0, SNAPSHOT=1>   ; composite delivery
+  NAME "delivery_mode"     VALUE <u8: EVERY=0, THROTTLED=1, ON_CHANGE=2>  ; on-change = byte-diff
+  NAME "min_interval_ns"   VALUE <u64>     ; throttle floor (THROTTLED)
+  NAME "keepalive_ns"      VALUE <u64>     ; force re-deliver if unchanged
+  NAME "delivery_scope"    VALUE <u8: DELTA=0, SNAPSHOT=1>   ; composite delivery
+  NAME "delivery_compact"  VALUE <u8: 0=off, 1=on>  ; opt into route-handle compaction (§route-handle)
 }
 ```
+
+`delivery_compact` (RFC-0004 §E.1, ADR-0035 slice 4) is the consumer's **opt-in to label-compacted deliveries**: on a full-TLV transport (ws/UDP, default *full-route* deliveries) a producer MAY, for a subscriber that set it, advertise a per-link **label** aliasing that subscriber's return route and thereafter stream lean `COMPACT` frames instead of full-route `FWD{WRITE}` (see §route-handle). It is **optional and NAME-tagged**: an older parser (or a producer that does not honor it) simply keeps the full-route delivery path, so it does not perturb any existing conformance vector. Header-elided transports (CAN) always label and ignore the hint.
 
 Policy is **enforced producer-side** (before fan-out). For a **composite** subscription, `delivery_scope` selects DELTA (the changed child + its concrete path, RFC-0003) or SNAPSHOT (the aggregate's `:[]` structured TLV); no wildcard `target_path` is needed — subscribing to the composite vertex *is* the subtree subscription. The `capability` child carries the subscriber's **subject-token** ([ADR-0018](../adr/0018-access-control-authorization-pluggable-subject-token.md)); subscribe-authorization is gated by the *source's* `:acl`.
 
@@ -665,13 +668,33 @@ SPEC (0x0E, PL=1) {
 
 ## Reserved range (`0x0F` – `0x1F`)
 
-Currently unassigned. Allocated on a fast-track basis during v1 if a clear need emerges. Candidate uses:
+Allocated on a fast-track basis during v1. Assigned so far:
 
-- `MANIFEST` — explicit declaration of an `expected_count` for an address-shift group.
-- `CAPABILITY` — opaque capability token (lighter than full ACL).
-- `HEARTBEAT` — explicit liveness ping (currently subsumed by writes to `:liveness.last_seen_ns`).
+- `0x0F` **FWD** and `0x10` **FIELD** — the remote-operation frames ([RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md) §B/§C, ADR-0035).
+- `0x11`–`0x13` — the **route-handle transport-plane control frames** (below).
 
-Receivers MUST handle unknown codes in this range per the forward-compatibility rules of [01-data-format.md](01-data-format.md) §forward / backward compatibility.
+Still unassigned: `0x14`–`0x1F`. Candidate uses: `CAPABILITY` (opaque token, lighter than full ACL), `HEARTBEAT` (explicit liveness ping, currently subsumed by writes to `:liveness.last_seen_ns`). Receivers MUST handle unknown codes in this range per the forward-compatibility rules of [01-data-format.md](01-data-format.md) §forward / backward compatibility.
+
+### Route-handle frames — `0x11` ADVERTISE, `0x12` COMPACT, `0x13` HANDLE_NACK
+
+The route-handle (RFC-0004 §E.1, ADR-0035 slice 4) is **ws/UDP delivery-compaction** — the full-TLV counterpart of `transport_can`'s `identity↔path` map ([14-can-transport.md](14-can-transport.md)). These three frames are **transport-plane control**, not core conformance TLVs: they ride a link *alongside* `FWD`, are emitted only for a `delivery_compact`-flagged flow, and a peer that ignores them simply keeps the full-route delivery path — so they carry **no conformance vectors** and do not perturb the cross-core machine. All are structured (`opt.PL=1`); the `label` is a per-link **u16** (`VALUE`, little-endian — 65 536 labels/link), allocated monotonically per link and **swapped each hop** (MPLS-style).
+
+```
+ADVERTISE (0x11, PL=1) {            ; bind a label to a delivery route, in-band
+  VALUE  label   ; u16, FIRST child — the (per downstream-link) label being bound
+  PATH   route   ; the dst route the label aliases; each hop strips its leading
+                 ; segment, allocates its OWN out-label, and re-advertises downstream
+}
+COMPACT (0x12, PL=1) {             ; a label-compacted delivery (no route rides)
+  VALUE  label   ; u16, FIRST child — names the established route on THIS link
+  <payload TLV>  ; the delivered value (a VALUE), expanded to a write at the terminus
+}
+HANDLE_NACK (0x13, PL=1) {         ; "I have no binding for this label" — prompts re-advertise
+  VALUE  label   ; u16 — the stale/unknown label seen; sent back over the inbound link
+}
+```
+
+A `COMPACT` whose `label` has no binding on its inbound link is **dropped** and a `HANDLE_NACK` is returned (never a crash); re-advertising on (re)connect — the same producer-holds reconnect trigger — **rebinds** the flow ([ADR-0030](../adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md) self-heal). A node holds label state **only** for the compact flows crossing it (bounded by the number of such subscriptions); one-shot / cold / non-compact traffic allocates none — the slice-3 stateless-forwarder property is preserved. Per-hop multiplexing of a reply to a specific request remains the transport's concern (RFC-0004 §D), so no end-to-end handle exists.
 
 ---
 

@@ -152,6 +152,14 @@ Taken literally, "a delivery *is* a `FWD WRITE`" (§D) makes *every* streamed sa
 
 With a 2–4 B label, the 1 kHz example drops from ~16× to **~1.5×** overhead. Net rule: **one-shot ops pay the full route; high-rate established streams amortize it to a label, by the transport's framing mode.**
 
+**Implementation pins (ADR-0035 slice 4, ws side — descriptive, see [reference/05](../../reference/05-protocol-tlvs.md) §route-handle).** The C++ reference fixes the ws (full-TLV) encodings as **transport-plane control frames** that ride a link alongside `FWD` (not part of the `FWD` frame, no conformance vectors, so the cross-core machine is unperturbed):
+
+- **Label** — a per-link **u16** (`VALUE`, little-endian; 65 536 labels/link), allocated monotonically per link and **swapped each hop**.
+- **`ADVERTISE` (`0x11`)** — `{ VALUE label, PATH route }`: binds `label ↔ route`; each forwarding hop strips `route`'s leading segment, allocates its own out-label, re-advertises downstream.
+- **`COMPACT` (`0x12`)** — `{ VALUE label, <payload TLV> }`: the lean delivery; the terminus expands the label to the bound route and applies the write (delivery-is-a-write, §D).
+- **`HANDLE_NACK` (`0x13`)** — `{ VALUE label }`: returned for an unknown/stale label (drop, never crash); prompts a re-advertise. **Re-advertise on (re)connect is the self-heal** (the same producer-holds reconnect trigger).
+- **Opt-in** — `SUBSCRIBER.qos_settings.delivery_compact` (`NAME "delivery_compact" VALUE u8`, optional/NAME-tagged ⇒ back-compatible). On CAN this advertise *is* the existing `identity↔path` id-assignment (#55), so the CAN half is unchanged.
+
 ### F. ACL across hops
 
 A `FWD` is gated **twice**, by the existing ACL machinery ([ADR-0018](../../adr/0018-access-control-authorization-pluggable-subject-token.md)/[ADR-0020](../../adr/0020-acl-nfsv4-style-aces-with-inheritance.md)):

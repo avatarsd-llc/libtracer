@@ -73,6 +73,13 @@ struct subscriber_t {
     delivery_mode_t mode = delivery_mode_t::EVERY;
     std::vector<std::byte> last_delivered;  // ON_CHANGE: bytes last sent (producer-side, under m_)
     bool active = true;
+    // The route-handle opt-in (SUBSCRIBER.qos_settings.delivery_compact, RFC-0004
+    // §E.1 / ADR-0035 slice 4). When true the consumer requests label-compacted
+    // deliveries: the producer MAY advertise a per-link label aliasing this
+    // subscriber's return route and thereafter stream lean COMPACT frames instead
+    // of full-route FWD{WRITE} deliveries. Default false ⇒ stateless full-route
+    // delivery (the slice-3 path), so a cold/one-shot flow allocates no label state.
+    bool delivery_compact = false;
     // The original SUBSCRIBER TLV view this slot was written from, retained zero-copy
     // (a refcount clone of the field-write payload). Empty for in-process callback/target
     // sugar that carries no TLV. A :subscribers[] read ropes these slot views into the
