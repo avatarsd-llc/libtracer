@@ -1,0 +1,69 @@
+# In-process latency/throughput gate (bench/perf_gate.py) — split out of conformance.yml.
+#
+# Two fixes over the old cross-build/Actions-cache gate (which false-failed packaging-,
+# docs- and TS-only PRs, e.g. #121):
+#
+#  1. Path filter — perf only runs when performance can actually change: C++ core, the
+#     bench harness, CMake, or this workflow. A PR touching only bindings/typescript/**,
+#     docs/**, packaging, etc. does NOT run perf.
+#  2. Same-runner baseline — on a PR, main's bench_libtracer and the PR's bench_libtracer
+#     are BOTH built and timed on the SAME runner in this one job. main's numbers are
+#     recorded as the baseline; the PR's are gated against it. GitHub-hosted runners vary
+#     ~2x in speed, so a baseline recorded on a fast runner vs a slow PR runner used to
+#     false-fail; measuring both here makes absolute-ns speed cancel — only a real
+#     relative regression (p50 up >50% / throughput down >34%) fails. perf_gate.py keeps
+#     its absolute-floor backstop. No Actions cache feeds the gate any more.
+name: perf
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'core/**'
+      - 'bench/**'
+      - '**/CMakeLists.txt'
+      - '**/*.cmake'
+      - '.github/workflows/perf.yml'
+  pull_request:
+    paths:
+      - 'core/**'
+      - 'bench/**'
+      - '**/CMakeLists.txt'
+      - '**/*.cmake'
+      - '.github/workflows/perf.yml'
+
+jobs:
+  perf:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need origin/main history to build the same-runner baseline
+      - name: Build the PR (candidate) benchmark (Release)
+        run: |
+          cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build bench/build --target bench_libtracer -j
+
+      # --- PR gate: same-runner baseline ------------------------------------------
+      # Build main's bench_libtracer in a worktree on THIS runner, then record its
+      # numbers as the baseline and gate the PR's numbers against it. Same hardware,
+      # same job -> absolute-ns runner speed cancels; only a real regression fails.
+      - name: Build main's benchmark on this runner (baseline)
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags origin main
+          git worktree add --detach ../main-baseline origin/main
+          cmake -S ../main-baseline/bench -B ../main-baseline/bench/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build ../main-baseline/bench/build --target bench_libtracer -j
+      - name: Performance gate (same-runner main baseline)
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "== record main (baseline) on this runner =="
+          python3 bench/perf_gate.py --bench ../main-baseline/bench/build/bench_libtracer --update-baseline
+          echo "== gate PR candidate against the same-runner baseline =="
+          python3 bench/perf_gate.py
+
+      # --- main push: refresh the absolute-floor backstop -------------------------
+      - name: Performance gate (absolute floors)
+        if: github.event_name == 'push'
+        run: python3 bench/perf_gate.py --update-baseline

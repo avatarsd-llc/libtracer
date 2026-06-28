@@ -1,12 +1,13 @@
-# Cross-core conformance + performance gates (ADR-0028).
+# Cross-core conformance gate (ADR-0028).
 #
 # conformance: every enabled native core runs the shared vectors and must agree
 #   byte-for-byte. The C++ reference, the TypeScript core (#56) and the native Rust
 #   core (#57) are all enabled (tests/conformance/harnesses.json), so this is a real
 #   three-core cross-match — a DISAGREE fails CI.
-# perf: the in-process latency/throughput gate (bench/perf_gate.py). No committed
-#   baseline (it is host-specific), so CI validates against absolute floors — a real
-#   regression (far past the canonical ~100 ns / ~13 M deliveries per second) fails CI.
+#
+# The in-process latency/throughput gate moved to perf.yml: it is path-filtered to
+# core/bench/CMake changes and compares against a baseline measured on the SAME runner
+# (no cross-runner jitter), so it no longer false-fails docs/TS/packaging-only PRs.
 name: conformance
 
 on:
@@ -46,32 +47,3 @@ jobs:
         env:
           LIBTRACER_CXX_HARNESS: ${{ github.workspace }}/core/build/tests/conformance_runner
         run: python3 tests/conformance/diff_fuzz.py -n 2000
-
-  perf:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      # Track the perf baseline ACROSS builds via the Actions cache: restore the most
-      # recent one (restore-keys prefix match), gate against it on PRs, refresh it on
-      # main. First-ever run has no cache -> perf_gate falls back to absolute floors and
-      # records a baseline. (perf_baseline.json is gitignored; the cache persists it.)
-      - name: Restore perf baseline
-        uses: actions/cache/restore@v4
-        with:
-          path: bench/perf_baseline.json
-          key: perf-baseline-${{ github.run_id }}
-          restore-keys: perf-baseline-
-      - name: Build the in-process benchmark (Release)
-        run: |
-          cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build bench/build --target bench_libtracer -j
-      - name: Performance gate (latency + throughput)
-        run: python3 bench/perf_gate.py ${{ github.ref == 'refs/heads/main' && '--update-baseline' || '' }}
-      # Persist the refreshed baseline only from main, under a unique key so later runs
-      # restore the latest via the prefix above.
-      - name: Save perf baseline (main only)
-        if: github.ref == 'refs/heads/main'
-        uses: actions/cache/save@v4
-        with:
-          path: bench/perf_baseline.json
-          key: perf-baseline-${{ github.run_id }}
