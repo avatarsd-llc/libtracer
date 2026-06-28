@@ -25,7 +25,8 @@ HERE = Path(__file__).resolve().parent
 VECTORS = HERE / "vectors" / "v1"
 
 # The v1 core type-code registry (docs/reference/05-protocol-tlvs.md). 0x05 is
-# retired (LIST, ADR-0003) and intentionally absent.
+# retired (LIST, ADR-0003) and intentionally absent. 0x0F FWD / 0x10 FIELD are
+# the remote-operation frames (RFC-0004 / ADR-0035, the v1 fast-track range).
 TYPE_NAMES = {
     0x01: "VALUE",
     0x02: "NAME",
@@ -40,6 +41,8 @@ TYPE_NAMES = {
     0x0C: "TIME",
     0x0D: "ROUTER",
     0x0E: "SPEC",
+    0x0F: "FWD",
+    0x10: "FIELD",
 }
 
 # opt bit -> (mask, name). Bits 7 and 0 are reserved-must-be-zero (not coverage

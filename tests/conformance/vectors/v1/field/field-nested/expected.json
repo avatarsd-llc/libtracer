@@ -1,0 +1,12 @@
+{
+  "name": "field-nested",
+  "category": "field",
+  "hex": "10401B000200080073657474696E677302000B00646561646C696E655F6E73",
+  "total_bytes": 31,
+  "decoded": {
+    "type": "0x10 FIELD",
+    "structured": true,
+    "meaning": "FIELD{ NAME \"settings\", NAME \"deadline_ns\" } \u2014 :settings.deadline_ns (two scalar levels)",
+    "note": "RFC-0004 \u00a7B/\u00a7C canonical bytes; structured TLV, opt.PL=1, no trailers (at-rest form)"
+  }
+}

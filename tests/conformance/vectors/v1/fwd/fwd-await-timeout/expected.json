@@ -1,0 +1,12 @@
+{
+  "name": "fwd-await-timeout",
+  "category": "fwd",
+  "hex": "0F4037000100010002064012000200060073656E736F720200040074656D7006400C00020008007265706C792D65700100080000CA9A3B00000000",
+  "total_bytes": 59,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=AWAIT, dst=/sensor/temp, src=/reply-ep, await_timeout=1e9 ns }",
+    "note": "RFC-0004 \u00a7B/\u00a7C canonical bytes; structured TLV, opt.PL=1, no trailers (at-rest form)"
+  }
+}

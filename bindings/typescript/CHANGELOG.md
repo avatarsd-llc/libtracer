@@ -7,6 +7,14 @@ versioning/publish strategy.
 
 ## Unreleased
 
+### Added
+
+- **`TYPE.FWD` (`0x0f`) and `TYPE.FIELD` (`0x10`)** in the wire codec's type-code
+  registry (RFC-0004 / ADR-0035, slice 1). Both are structured TLVs handled by the
+  existing generic codec; no codec logic changed. Cross-core conformance vectors
+  under `tests/conformance/vectors/v1/{fwd,field}/` round-trip byte-for-byte
+  against the C++ and Rust cores.
+
 ### Changed
 
 - **`bindings/typescript/` is now an npm workspace monorepo** (ADR-0033). The

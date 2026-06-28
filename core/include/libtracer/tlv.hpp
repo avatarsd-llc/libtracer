@@ -12,9 +12,11 @@
 
 namespace tr::wire {
 
-// Core type-code registry (0x01-0x0E). 0x05 is retired (was LIST, ADR-0003).
-// 0x0E SPEC is the in-band vertex-creation spec (ADR-0017); it is structured
-// (opt.PL=1) and handled generically by the codec — see docs/reference/05 §SPEC.
+// Core type-code registry (0x01-0x10). 0x05 is retired (was LIST, ADR-0003).
+// 0x0E SPEC is the in-band vertex-creation spec (ADR-0017). 0x0F FWD and 0x10
+// FIELD are the remote-operation frames (RFC-0004 / ADR-0035, the v1 fast-track
+// range 0x0F-0x1F). All structured (opt.PL=1) and handled generically by the
+// codec — see docs/reference/05 §SPEC and RFC-0004 §B/§C.
 enum class type_t : std::uint8_t {
     VALUE = 0x01,
     NAME = 0x02,
@@ -29,6 +31,8 @@ enum class type_t : std::uint8_t {
     TIME = 0x0C,
     ROUTER = 0x0D,
     SPEC = 0x0E,
+    FWD = 0x0F,
+    FIELD = 0x10,
 };
 
 // The 1-byte `opt` field. Bits, MSB->LSB: R | PL | TS | CR | LL | CW | TF | R.

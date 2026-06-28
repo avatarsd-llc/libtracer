@@ -65,7 +65,10 @@ CXX_FALLBACKS = [
 
 # Valid core type codes (0x05 retired). The codec accepts any nonzero type
 # generically, so the generator also emits the occasional unknown/user code.
-REGISTRY_TYPES = [0x01, 0x02, 0x03, 0x04, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E]
+# 0x0F FWD / 0x10 FIELD are the RFC-0004 remote-operation frames; they are
+# structured TLVs the codec round-trips like any other, so adding them here fuzzes
+# all three cores on FWD/FIELD-shaped frames (ADR-0035 slice 1).
+REGISTRY_TYPES = [0x01, 0x02, 0x03, 0x04, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10]
 MAX_DEPTH = 32  # codec depth cap; generated nesting stays well under it.
 MAX_GEN_DEPTH = 6  # how deep this generator nests (must be < MAX_DEPTH).
 

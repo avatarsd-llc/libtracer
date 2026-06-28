@@ -1,0 +1,12 @@
+{
+  "name": "fwd-src-accumulated",
+  "category": "fwd",
+  "hex": "0F4049000100010000064018000200040063616E30020002006F770200060073656E736F7206402400020009007669615F626F617264020007007669615F6E6574020008007265706C792D6570",
+  "total_bytes": 77,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=READ, dst=/can0/ow/sensor, src=/via_board/via_net/reply-ep } \u2014 the multihop op after two hops: dst shrunk by two, src grown by two (zero-copy prepend invariant, \u00a7B)",
+    "note": "RFC-0004 \u00a7B/\u00a7C canonical bytes; structured TLV, opt.PL=1, no trailers (at-rest form)"
+  }
+}

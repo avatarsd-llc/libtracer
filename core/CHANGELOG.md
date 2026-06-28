@@ -13,6 +13,18 @@ reference implementation is pre-1.0; everything currently lives under
 
 ## [Unreleased]
 
+### Added
+
+- **`FWD` (`0x0F`) and `FIELD` (`0x10`) type codes registered in `tr::wire::type_t`**
+  ([RFC-0004](../docs/spec/rfcs/0004-remote-operation-addressing.md) /
+  [ADR-0035](../docs/adr/0035-implementing-rfc-0004-remote-operation-addressing.md),
+  slice 1). The two remote-operation frames are **structured** (`opt.PL=1`) and
+  decode/encode through the existing generic structured-TLV codec — no codec
+  change. New cross-core conformance vectors under
+  `tests/conformance/vectors/v1/{fwd,field}/` pin the canonical bytes (RFC-0004
+  §B/§C) and round-trip byte-for-byte across the C++/TS/Rust cores. Op-resolution,
+  forwarding, and `:field` selector validation are later slices (codec only here).
+
 ### Changed
 
 - **Substrate hardening — `tr::` namespaces, snake_case `_t` naming, strict docs**

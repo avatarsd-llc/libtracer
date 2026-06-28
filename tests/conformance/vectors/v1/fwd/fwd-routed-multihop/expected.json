@@ -1,0 +1,12 @@
+{
+  "name": "fwd-routed-multihop",
+  "category": "fwd",
+  "hex": "0F404100010001000006402800020003006E657402000500626F6172640200040063616E30020002006F770200060073656E736F7206400C00020008007265706C792D6570",
+  "total_bytes": 69,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=READ, dst=/net/board/can0/ow/sensor, src=/reply-ep } \u2014 un-stripped multi-hop dst (route through transport vertices)",
+    "note": "RFC-0004 \u00a7B/\u00a7C canonical bytes; structured TLV, opt.PL=1, no trailers (at-rest form)"
+  }
+}

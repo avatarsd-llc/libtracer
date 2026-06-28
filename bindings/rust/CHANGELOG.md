@@ -10,6 +10,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`type_code::FWD` (`0x0F`) and `type_code::FIELD` (`0x10`)** registered in the
+  type-code registry (RFC-0004 / ADR-0035, slice 1). The two remote-operation
+  frames are structured TLVs the generic codec already round-trips; no codec change.
+  New cross-core conformance vectors under `tests/conformance/vectors/v1/{fwd,field}/`
+  match the C++ and TypeScript cores byte-for-byte and are exercised by `diff_fuzz.py`.
+
 - **Native, pure-Rust wire codec — a third independent core**
   ([#57](https://github.com/avatarsd-llc/libtracer/issues/57),
   [ADR-0028](../../docs/adr/0028-native-cores-kept-consistent-by-conformance-vectors.md)).
