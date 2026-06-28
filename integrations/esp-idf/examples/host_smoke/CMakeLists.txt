@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# ESP-IDF project that builds the libtracer P0 (in-process) component for the
+# `linux` (POSIX host) target and exercises the in-process mirror surface
+# (register / write / read) with NO FreeRTOS and NO esp_log. This is the
+# host-target build gate for the integrations/esp-idf component — it proves a
+# downstream host_test consumer can depend on the real `libtracer` component
+# (manifest target `linux`) rather than a local wrapper. See
+# .github/workflows/esp-idf.yml.
+
+cmake_minimum_required(VERSION 3.16)
+
+# Pull in the in-tree libtracer component (integrations/esp-idf/libtracer/). A
+# single-component directory is registered under its basename, so this makes the
+# component resolvable as `libtracer` (what main/ does `REQUIRES libtracer` on).
+set(EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../../libtracer")
+
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(host_smoke)

@@ -13,10 +13,11 @@
 # Requires the GCC 13 toolchain (C++23: std::expected, std::span) shipped with
 # ESP-IDF >= 5.3.
 
-# This component dir is integrations/esp-idf/; the repo root (which holds core/)
-# is two levels up. The example consumes it via an `override_path` dependency
-# (main/idf_component.yml), which uses this directory in place — so this relative
-# path resolves against the real checkout and core/ is reachable.
+# This component dir is integrations/esp-idf/libtracer/; the repo root (which
+# holds core/) is three levels up. An ESP-IDF project consumes this component in
+# place by pointing `EXTRA_COMPONENT_DIRS` at it (see the bundled examples'
+# top-level CMakeLists.txt) — so this relative path resolves against the real
+# checkout and core/ is reachable.
 set(LIBTRACER_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../..")
 
 idf_component_register(
