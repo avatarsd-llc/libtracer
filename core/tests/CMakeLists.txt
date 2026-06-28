@@ -109,6 +109,15 @@ target_link_libraries(ws_transport_test PRIVATE libtracer)
 libtracer_test_warnings(ws_transport_test)
 add_test(NAME ws_transport COMMAND ws_transport_test)
 
+# #54 (interop) — standalone transport_ws_server harness driven by the TypeScript
+# transport-ws interop test (a real TS TransportWs client over a live socket).
+# Deliberately NOT an add_test(): it is a helper binary the TS test spawns (see
+# bindings/typescript/packages/transport-ws/test/interop.test.mjs and the
+# ws-interop CI job), so it must not run as part of the C++ ctest suite.
+add_executable(ws_interop_server ws_interop_server.cpp)
+target_link_libraries(ws_interop_server PRIVATE libtracer)
+libtracer_test_warnings(ws_interop_server)
+
 # M2 — substrate harness in single-threaded mode. LIBTRACER_NO_ATOMIC changes the
 # Segment refcount layout, so this variant compiles the library sources directly
 # (rather than linking the atomic-built libtracer.a) to keep one consistent ABI.
