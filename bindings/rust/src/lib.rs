@@ -23,7 +23,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-/// Core type-code registry (0x01-0x0E). 0x05 is retired (was LIST, ADR-0003).
+/// Core type-code registry (0x01-0x10). 0x05 is retired (was LIST, ADR-0003).
 /// The codec treats every nonzero type generically, so these constants are a
 /// convenience, not an exhaustive set.
 pub mod type_code {
@@ -53,6 +53,10 @@ pub mod type_code {
     pub const ROUTER: u8 = 0x0d;
     /// In-band vertex-creation spec (structured; opt.PL=1).
     pub const SPEC: u8 = 0x0e;
+    /// Remote-operation forward frame (structured; RFC-0004 §B / ADR-0035).
+    pub const FWD: u8 = 0x0f;
+    /// Control-plane `:field` selector (structured; RFC-0004 §C / ADR-0035).
+    pub const FIELD: u8 = 0x10;
 }
 
 /// The iterative-parser depth cap (docs/reference/01 §iterative parsing). A frame

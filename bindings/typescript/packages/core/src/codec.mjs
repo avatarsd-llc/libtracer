@@ -17,9 +17,10 @@
  */
 
 /**
- * Core type-code registry (0x01-0x0E). 0x05 is retired (was LIST, ADR-0003).
- * 0x0E SPEC is the in-band vertex-creation spec; it is structured (opt.PL=1) and
- * handled generically by the codec.
+ * Core type-code registry (0x01-0x10). 0x05 is retired (was LIST, ADR-0003).
+ * 0x0E SPEC is the in-band vertex-creation spec. 0x0F FWD and 0x10 FIELD are the
+ * remote-operation frames (RFC-0004 / ADR-0035, the v1 fast-track range
+ * 0x0F-0x1F). All are structured (opt.PL=1) and handled generically by the codec.
  *
  * @readonly
  * @enum {number}
@@ -38,6 +39,8 @@ export const TYPE = Object.freeze({
   TIME: 0x0c,
   ROUTER: 0x0d,
   SPEC: 0x0e,
+  FWD: 0x0f,
+  FIELD: 0x10,
 });
 
 /**

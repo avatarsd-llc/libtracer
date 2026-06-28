@@ -1,0 +1,12 @@
+{
+  "name": "fwd-reply-result",
+  "category": "fwd",
+  "hex": "0F404800010001000306402400020009007669615F626F617264020007007669615F6E6574020008007265706C792D657006400A000200060073656E736F72010001000001000400D2040000",
+  "total_bytes": 76,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=REPLY, dst=/via_board/via_net/reply-ep, src=/sensor, kind=RESULT, payload=VALUE u32=1234 } \u2014 source-routed back via the accumulated route",
+    "note": "RFC-0004 \u00a7B/\u00a7C canonical bytes; structured TLV, opt.PL=1, no trailers (at-rest form)"
+  }
+}

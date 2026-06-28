@@ -1,0 +1,7 @@
+# fwd/fwd-read
+
+FWD{ op=READ, dst=/sensor/temp, src=/reply-ep } — seeded src
+
+```
+0f402b000100010000064012000200060073656e736f720200040074656d7006400c00020008007265706c792d6570
+```
