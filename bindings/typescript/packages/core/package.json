@@ -32,12 +32,16 @@
     },
     "./package.json": "./package.json"
   },
-  "files": ["dist", "README.md"],
+  "files": ["dist", "README.md", "LICENSE"],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc",
     "conformance": "node conformance/harness.mjs ../../../../tests/conformance/vectors/v1",
     "bench": "node bench/perf.mjs",
-    "test": "npm run conformance"
+    "test": "npm run conformance",
+    "prepublishOnly": "npm run build"
   },
   "devDependencies": {
     "typescript": "^5.4.0"
