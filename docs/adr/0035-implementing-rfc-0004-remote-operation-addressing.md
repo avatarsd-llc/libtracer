@@ -47,6 +47,20 @@ conformance-validated slices.**
 2. **Local op resolution + the `FWD`-`REPLY`.** A node resolves a `FWD` to a *local* vertex, applies
    `READ`/`WRITE`/`AWAIT` (+ `FIELD`), and builds `REPLY{ kind∈{RESULT,ERROR} }`. Host-testable, no
    transport.
+   - **Zero-copy reply rule — the read result is a nested sub-TLV, never flattened.** The reply payload
+     (a `VALUE` for data; or a `PL=1` structured TLV of the field's child TLVs for a `:field` — e.g.
+     `:subscribers[]` → the populated `SUBSCRIBER` slot TLVs in order, `:settings` → `SETTINGS`,
+     `:schema` → `POINT`) is the read result **nested as a child** of `FWD{REPLY}`. The builder MUST
+     compose it as a **rope**: a small *freshly built head* (`FWD{REPLY}` header + `op` + `dst` route +
+     `kind`) **prepended to refcount-clones of the vertex's stored payload view(s)** — `read` returns a
+     view (refcount += 1, reference/04), so **no bytes are copied**. For `:subscribers[]` this is a rope
+     of the N slot views under a fresh `PL=1` wrapper header (the same scatter-gather that ships a GB
+     RTSP frame-group). Nesting is clean because stored TLVs are **trailer-less** (the wire trailer is an
+     egress/ingress artifact), so the nested child needs no trailer-strip copy and the `FWD{REPLY}`'s own
+     egress trailer covers the whole rope. The reply therefore rides the existing scatter-gather send
+     (`transport_t::send(iov)` / `rope::to_iovec()`) with **zero flatten**. A data read and a `:field`
+     read are identical here — only the child TLV type differs. **Do not** build the reply by serializing
+     the payload into a fresh buffer.
 3. **Multi-hop forwarding + `src` accumulation over `transport_ws`.** Extend the existing
    `ws_interop_server` harness to a graph-backed *forwarding* node; assert `dst` shrinks / `src`
    grows byte-exactly and the reply source-routes home. Integration-tested.
