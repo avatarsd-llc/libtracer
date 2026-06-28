@@ -80,7 +80,7 @@ FWD (0x0F, PL=1) {
   VALUE   kind          ; REPLY only — u8: RESULT=0, ERROR=1
   <payload TLV>         ; WRITE: value/SUBSCRIBER/SETTINGS/… to write. READ/AWAIT: absent.
                         ; REPLY: the result (VALUE for a READ result; STATUS for WRITE-ack/ERROR).
-  VALUE   await_timeout ; optional, AWAIT only — u64 ns; absent ⇒ implementation default
+  VALUE   await_timeout ; optional, AWAIT only — u64 ns; absent ⇒ 1 s default (reference impl)
 }
 ```
 
@@ -123,6 +123,8 @@ where each level =
 | `AWAIT=2` | none (+ optional `await_timeout`) | `kind=RESULT` + the next write's TLV, or `kind=ERROR` + `STATUS=ERROR(TIMEOUT)` |
 
 `subscribe` is a `WRITE` of a `SUBSCRIBER` to a `:subscribers[]` field — **no new op** ([ADR-0006](../../adr/0006-read-write-await-api-no-connect.md)). QoS is a `WRITE` of `SETTINGS` to `:settings…`.
+
+A `READ` of an **array `:field`** (e.g. `:subscribers[]`) returns its members wrapped in a **`POINT` (`0x07`)** — the established structured introspection-result container (the `:schema` `POINT` already carries `SUBSCRIBER` children) — whose children are the populated slot TLVs in slot order, each a zero-copy view (§E / ADR-0035 reply rule). A `READ` of a single slot (`:subscribers[3]`) or scalar field returns that TLV directly.
 
 **Replies are stateless, source-routed back.** A one-shot reply is a `FWD{ op=REPLY }` whose `dst` is the `src` that was **accumulated on the way in** (§B). Forwarders hold **no per-hop request state** — the return route lives in the frame, so a hop may even reboot mid-operation and the reply still routes. The reply works over **unidirectional** transports (it does not need the inbound link to be bidirectional). The reply-`kind` is just **`{RESULT, ERROR}`**; there is **no `DELIVERY`/`KEEPALIVE`/`DIGEST` reply-kind** — those are not replies (see §E). A `kind=ERROR` reply's **payload is a `STATUS` TLV carrying one `ERROR` (`0x08`) child** ([RFC-0002](0002-protocol-error-model.md) error model); the concrete `ERROR` code set is pinned by the ERROR registry (RFC-0001 §C/E, [#8](https://github.com/avatarsd-llc/libtracer/issues/8)), so until #8 lands the `fwd-reply-error` vector uses a provisional `STATUS{ ERROR u8 }` shape and the codes finalize with #8.
 
@@ -203,7 +205,7 @@ Add to `tests/conformance/vectors/v1/`, so the 3-core machine (C++/TS/Rust) vali
 
 ## Open questions (for the comment window)
 
-1. **`await_timeout` default + cap** — implementation-default vs a normative bound.
+1. **`await_timeout` cap** — the *default* is pinned (1 s, reference impl) when no child is present; whether a *normative upper bound* should exist is still open.
 2. **Forward-right delegation** — does an intermediate hop forward under the *original* `origin_peer_id` (end-to-end identity) or re-originate as itself at each hop? (Affects §F's first ACL check; leaning end-to-end identity preserved, each hop authorizes by it — note `src` already records the per-hop forwarder chain.)
 3. **`src` exposure / privacy** — the accumulated return route reveals the topology to the destination (and the full source route to the consumer — usually desirable as provenance). Is a redacted/opaque-segment mode ever needed for an untrusted intermediate, or is per-hop ACL sufficient?
 4. **Stream-tag interop** — each transport defines its own request↔reply matching tag; do we want a *recommended* (non-normative) tag shape so independent transport implementations converge?
