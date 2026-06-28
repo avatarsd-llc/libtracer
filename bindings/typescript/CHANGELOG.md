@@ -22,6 +22,21 @@ versioning/publish strategy.
 
 ### Added
 
+- **`@avatarsd-llc/libtracer-client` — EXPERIMENTAL client SDK (`private`,
+  `0.0.0`, #56, ADR-0034).** A payload-builder + frame-I/O client over the
+  cross-validated codec (`@avatarsd-llc/libtracer`, a `peerDependency`) and an
+  injected transport seam (`@avatarsd-llc/libtracer-ws`'s `TransportWs` satisfies
+  it structurally; it is an optional peer). Implements only the wire byte-products
+  v1 pins: `encodeValue` / `encodePath` / `encodeSubscriber` (matching the
+  `value-*`, `path-sensor-temp`, and `subscriber-path` conformance vectors
+  byte-for-byte), a `LibtracerClient` with `write` (VALUE frame) / `subscribe`
+  (SUBSCRIBER frame + handler) / `onValue` (inbound VALUE delivery, shedding one
+  ROUTER wrapper) / `onError`. The path-addressed request envelope
+  (`write(path,…)` / `read` / `await` / `subscribe(producerPath,…)`) is **deferred**
+  because the v1 wire format for an addressed remote operation is unspecified
+  (`spec/v1.md` §3). Not published. The workspace root `build` script now builds
+  `@avatarsd-llc/libtracer` first so the dependent packages always see fresh
+  core `dist/`.
 - **Both packages are now cleanly publishable to npm (ADR-0033, #98).** Each of
   `@avatarsd-llc/libtracer` and `@avatarsd-llc/libtracer-ws` gained
   `publishConfig.access: "public"` (scoped packages default to restricted), a

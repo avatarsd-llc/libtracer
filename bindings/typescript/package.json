@@ -21,7 +21,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
+    "build": "npm run build -w @avatarsd-llc/libtracer && npm run build --workspaces --if-present",
     "conformance": "npm run conformance --workspace @avatarsd-llc/libtracer",
     "bench": "npm run bench --workspace @avatarsd-llc/libtracer",
     "test": "npm run test --workspaces --if-present"

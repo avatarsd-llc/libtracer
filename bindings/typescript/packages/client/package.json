@@ -1,0 +1,53 @@
+{
+  "name": "@avatarsd-llc/libtracer-client",
+  "version": "0.0.0",
+  "private": true,
+  "description": "EXPERIMENTAL libtracer client SDK (#56, ADR-0034) — a payload-builder + frame-I/O client over the cross-validated codec (@avatarsd-llc/libtracer) and an injected transport seam (e.g. @avatarsd-llc/libtracer-ws). Implements only the wire byte-products v1 pins (VALUE/SUBSCRIBER/PATH build, frame decode + VALUE delivery); the path-addressed request envelope is deferred. Not published.",
+  "author": "avatarsd LLC",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avatarsd-llc/libtracer.git",
+    "directory": "bindings/typescript/packages/client"
+  },
+  "homepage": "https://github.com/avatarsd-llc/libtracer#readme",
+  "bugs": {
+    "url": "https://github.com/avatarsd-llc/libtracer/issues"
+  },
+  "keywords": ["protocol", "iot", "graph", "tlv", "client", "sdk", "websocket"],
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "peerDependencies": {
+    "@avatarsd-llc/libtracer": "^0.0.1",
+    "@avatarsd-llc/libtracer-ws": "^0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@avatarsd-llc/libtracer-ws": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@avatarsd-llc/libtracer": "*",
+    "@avatarsd-llc/libtracer-ws": "*",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0",
+    "ws": "^8.16.0"
+  }
+}
