@@ -42,6 +42,21 @@ target_link_libraries(can_frames_test PRIVATE libtracer)
 libtracer_test_warnings(can_frames_test)
 add_test(NAME can_frames COMMAND can_frames_test)
 
+# #55 (increment 2) — transport_can SocketCAN binding, exercised over an in-memory
+# fake link (no kernel CAN needed; the real vcan path runs in the can-vcan-e2e CI job).
+add_executable(transport_can_test transport_can_test.cpp)
+target_link_libraries(transport_can_test PRIVATE libtracer)
+libtracer_test_warnings(transport_can_test)
+add_test(NAME transport_can COMMAND transport_can_test)
+
+# #55 (increment 2) — real-bus smoke test over a kernel vcan0 device. Self-skips
+# (clean exit) when vcan0 cannot bind, so it is harmless in the normal suite; the
+# dedicated can-vcan-e2e CI job sets vcan0 up so the SocketCAN path runs for real.
+add_executable(transport_can_vcan_test transport_can_vcan_test.cpp)
+target_link_libraries(transport_can_vcan_test PRIVATE libtracer)
+libtracer_test_warnings(transport_can_vcan_test)
+add_test(NAME transport_can_vcan COMMAND transport_can_vcan_test)
+
 # #81-A — per-endpoint :acl structural storage (store/serve raw ACL TLV; no enforcement).
 add_executable(acl_test acl_test.cpp)
 target_link_libraries(acl_test PRIVATE libtracer)
