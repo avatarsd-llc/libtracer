@@ -10,8 +10,8 @@
     {
       "name": "ts",
       "enabled": true,
-      "cmd": ["node", "bindings/typescript/conformance/harness.mjs"],
-      "note": "pure-TS core (@avatarsd-llc/libtracer); runs directly under node, no build step"
+      "cmd": ["node", "bindings/typescript/packages/core/conformance/harness.mjs"],
+      "note": "pure-TS core (@avatarsd-llc/libtracer); runs directly under node, no build step. Lives in the npm workspace at bindings/typescript/packages/core (ADR-0033)."
     },
     {
       "name": "rust",

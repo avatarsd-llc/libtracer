@@ -1,0 +1,42 @@
+{
+  "name": "@avatarsd-llc/libtracer-ws",
+  "version": "0.0.0",
+  "private": true,
+  "description": "WebSocket transport for libtracer (ADR-0029) — SCAFFOLD ONLY. The package boundary, name, and exports shape are fixed here; no functional transport code yet. private:true blocks publish until implemented (#54). See docs/adr/0033-npm-subpackage-monorepo.md.",
+  "author": "avatarsd LLC",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avatarsd-llc/libtracer.git",
+    "directory": "bindings/typescript/packages/transport-ws"
+  },
+  "homepage": "https://github.com/avatarsd-llc/libtracer#readme",
+  "bugs": {
+    "url": "https://github.com/avatarsd-llc/libtracer/issues"
+  },
+  "keywords": ["protocol", "iot", "graph", "tlv", "websocket", "transport"],
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": ["dist", "README.md"],
+  "peerDependencies": {
+    "@avatarsd-llc/libtracer": "^0.0.1"
+  },
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}
