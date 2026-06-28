@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# Unit-test gate for the TypeScript workspace (bindings/typescript): the
+# cross-validated core (@avatarsd-llc/libtracer) plus the transport-ws package
+# (@avatarsd-llc/libtracer-ws). `npm test` runs the per-package suites — the core
+# conformance TAP and the transport-ws RFC 6455 vector / round-trip tests — which
+# until now ran locally only. conformance.yml exercises the TS *conformance
+# harness* via run-all.py, but never `npm test`, so a codec/transport regression
+# in the published packages would slip through.
+#
+# This is a SEPARATE, standalone workflow (mirroring can-vcan-e2e.yml /
+# esp-idf.yml): the required core gates (build-test / sanitizers / tsan / format /
+# doxygen) must never depend on a Node toolchain. It is path-filtered to the
+# TypeScript workspace, so it only runs when those packages (or this file) change.
+name: ts
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "bindings/typescript/**"
+      - ".github/workflows/ts.yml"
+  pull_request:
+    paths:
+      - "bindings/typescript/**"
+      - ".github/workflows/ts.yml"
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: bindings/typescript
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: bindings/typescript/package-lock.json
+
+      - name: Install (clean, from the committed lockfile)
+        run: npm ci
+
+      - name: Build the workspace (tsc)
+        run: npm run build
+
+      - name: Run the package test suites (core conformance TAP + transport-ws)
+        run: npm test
