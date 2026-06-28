@@ -71,6 +71,36 @@ endpoint, and a lower version prefix outranks everything in a higher one. So the
 path→ID assignment the map performs is also a **real-time priority assignment** — a
 CAN-specific knob exposed through the identity↔path map, with no side channel.
 
+### Two or more CAN buses on one node
+
+The 29-bit ID deliberately carries **no bus field** — the bus is implicit (it is the
+wire the frame arrived on). A node with several CAN controllers (e.g. `can0`, `can1`)
+therefore distinguishes them **in the path, not in the ID**: under the path-as-route
+model ([RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md), [ADR-0027](../adr/0027-transport-and-connections-are-vertices.md))
+**each bus is a named child vertex of the CAN transport**:
+
+```
+/net/can/
+   ├─ 0/   :settings{ bitrate }  :stats{ bus_off, err_count }  :acl   ← controller can0
+   │   └─ <node>/<endpoint…>      ← devices on bus 0, resolved by the 29-bit ID
+   └─ 1/   :settings{ … }  :stats{ … }  :acl                          ← controller can1
+       └─ <node>/<endpoint…>
+```
+
+- The bus identifier (`0`, `1`) is a **`NAME` segment**, not a `[N]` index — `NAME`
+  excludes `[` `]`, and the bus is a distinct *identity*, not a slice (segment-`[N]`
+  indices stay reserved for address-shift data slicing below, never for bus
+  addressing). The default name is the controller index (à la SocketCAN), but it MAY
+  be semantic (`/net/can/powertrain`).
+- Each bus is its own vertex with independent `:settings` (bitrate), `:stats`
+  (bus-off / error counters), and `:acl` — two controllers are two hardware
+  identities, exactly the "distinct lifecycle ⇒ `/` vertex" rule of ADR-0027.
+- The `identity↔path` map keys on **(which controller the frame arrived on) + (`node`
+  | `endpoint`)** → `/net/can/<bus>/…`, so two buses carrying the **same `node` id
+  never collide** — the bus segment disambiguates them while the ID stays compact.
+- `read("/net/can")` enumerates the buses (vertex enumeration, [reference/04](04-communication-flows.md)),
+  so an orchestrator discovers a node's bus count with no special API.
+
 ### Address-shift slice IDs
 
 A multi-frame payload is spread across **consecutive endpoint slots** of the same
