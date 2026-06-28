@@ -171,7 +171,14 @@ cheap and reversible — rather than the API being designed around profiles now.
 
 ### Deferred to follow-up (maintainer review)
 
-- WebSocket transport **internals** (`@avatarsd-llc/libtracer-ws`) — #54.
+- ~~WebSocket transport **internals** (`@avatarsd-llc/libtracer-ws`) — #54.~~
+  **Implemented (#54).** `@avatarsd-llc/libtracer-ws` is now functional (`0.1.0`,
+  no longer `private`): an RFC 6455 frame codec at the `/ws` subpath
+  (cross-validated byte-for-byte against the C++ `tr::net::ws` codec) plus a
+  `TransportWs` client that carries a libtracer TLV as one BINARY frame,
+  wire-compatible with the C++ `tr::net::transport_ws`. The core remains a
+  `peerDependency`; the per-transport package boundary fixed by this ADR is
+  unchanged.
 - Any **per-layer TS code** behind `./mem` / `./view` / `./graph` — those
   subpaths are reserved, not implemented.
 - The **`publish-npm.yml`** release workflow and npm-org publish access.

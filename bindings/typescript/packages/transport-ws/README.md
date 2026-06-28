@@ -1,31 +1,59 @@
 # @avatarsd-llc/libtracer-ws
 
-WebSocket transport for [libtracer](https://github.com/avatarsd-llc/libtracer).
-
-> **Status: scaffold only — not implemented.** This package exists to fix the
-> package boundary, name, and `exports` shape decided in
-> [ADR-0033](../../../../docs/adr/0033-npm-subpackage-monorepo.md). It carries no
-> functional transport code and is marked `private: true`, so it cannot be
-> published until the implementation lands (tracked by
-> [#54](https://github.com/avatarsd-llc/libtracer/issues/54)).
-
-## Why a separate package
+WebSocket transport for [libtracer](https://github.com/avatarsd-llc/libtracer) —
+an RFC 6455 frame codec plus a `TransportWs` client that carries libtracer TLV
+frames over WebSocket. It is **wire-compatible with the C++
+`tr::net::transport_ws`** (`core/include/libtracer/ws.hpp`,
+`core/src/transport_ws.cpp`): a TS client interoperates with a C++ server and
+vice versa.
 
 A transport is a vertex behind a swappable seam
 ([ADR-0027](../../../../docs/adr/0027-transport-and-connections-are-vertices.md)),
 and WebSocket is the first reliable transport
 ([ADR-0029](../../../../docs/adr/0029-websocket-first-transport-quic-deferred-per-link.md)).
-Keeping it out of the core package means a consumer that only needs the
-in-process codec (`@avatarsd-llc/libtracer`) never pulls a WebSocket dependency.
-Future transports (`@avatarsd-llc/libtracer-webtransport`, …) follow the same
-one-package-per-transport boundary.
+The core (`@avatarsd-llc/libtracer`) is a `peerDependency`
+([ADR-0033](../../../../docs/adr/0033-npm-subpackage-monorepo.md)), so this
+package never pulls a WebSocket dependency into a consumer that only needs the
+in-process codec.
 
-## Planned shape
+## Two entry points
 
 ```ts
-import { decode, encode } from '@avatarsd-llc/libtracer/wire';
-// import { wsTransport } from '@avatarsd-llc/libtracer-ws'; // when implemented
+// 1) The pure, socket-free RFC 6455 frame codec (cross-validated byte-for-byte
+//    against the C++ codec). Use it where you frame bytes yourself.
+import { acceptKey, encodeClientFrame, decodeFrame, Opcode } from '@avatarsd-llc/libtracer-ws/ws';
+
+// 2) The TransportWs client (delegates framing to the runtime's WebSocket).
+import { TransportWs } from '@avatarsd-llc/libtracer-ws';
+import { encode, TYPE } from '@avatarsd-llc/libtracer';
 ```
 
-The core is a `peerDependency`, so the transport binds against whatever
-cross-validated core version the consumer installs.
+## Carrying a TLV
+
+A libtracer TLV is carried as **one RFC 6455 BINARY frame** (opcode `0x2`),
+exactly as the C++ transport does. The client masks its frames (RFC 6455 §5.1);
+the server's frames are unmasked. `TransportWs.send()` puts the whole TLV on the
+wire as a single BINARY frame, and `onFrame()` delivers each inbound frame's
+payload.
+
+```ts
+const transport = new TransportWs('ws://host:9000');
+transport.onFrame((bytes) => {
+  /* bytes is one inbound TLV */
+});
+await transport.connect();
+transport.send(encode({ type: TYPE.NAME, opt: { pl: false }, payload, children: [], trailer: null }));
+```
+
+### WebSocket implementation
+
+Framing is delegated to the runtime's `WebSocket` — native in the browser and in
+Node >= 22. On older Node, pass an implementation explicitly:
+
+```ts
+import { WebSocket } from 'ws';
+const transport = new TransportWs('ws://host:9000', { WebSocket });
+```
+
+The hand-rolled codec at the `/ws` subpath is what guarantees cross-implementation
+agreement and is available for environments without a `WebSocket`.
