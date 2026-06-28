@@ -68,6 +68,22 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **CAN transport — pure framing layer (increment 1 of [#55](https://github.com/avatarsd-llc/libtracer/issues/55); [ADR-0022](../docs/adr/0022-transport-framing-modes-elided-full-tlv-advertise.md), [ADR-0030](../docs/adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md)).**
+  The host-testable, socket-free part of header-elided CAN. No SocketCAN / `vcan` /
+  real socket — the `transport_can : transport_t` binding is a deferred increment.
+  - `tr::net::can` (`can.hpp`): the structured **29-bit extended-CAN-ID codec**
+    (`[version:4 | node:13 | endpoint:12]`; lower ID = higher bus priority), the
+    `slice_can_id` address-shift helper, and the in-band **`advertise`** frame codec
+    (`encode_advertise` / `decode_advertise`) — the identity↔path manifest.
+  - `tr::view::view_can_frames_t` (`view_can.hpp`): L1 header-elided framing of one
+    payload onto classic (≤8B) / CAN-FD (≤64B) data fields — zero-copy subviews,
+    `to_rope()` reassembly, plus the `can_fd_dlc_round_up` DLC-lattice helper.
+  - `tr::mem::mem_can_reassembly_t` (`mem_can_reassembly.hpp`): L0 multi-frame
+    reassembly via `(origin, ts) + index → rope` (address-shift / advertise+id-match,
+    **not** ISO-TP) with out-of-order, interior-gap, and totality-opt-in handling.
+  - Documented in [docs/reference/14-can-transport.md](../docs/reference/14-can-transport.md);
+    tested host-side in `core/tests/can_frames_test.cpp`.
+
 - **`transport_t::send(iov)` — scatter-gather egress (the "rope we put into tx").**
   Ship a rope's `to_iovec()` as one frame with no flatten copy; `udp_transport_t`
   lowers it to a single `sendmsg(iovec)` syscall. Structural batching (the
