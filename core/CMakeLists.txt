@@ -25,6 +25,7 @@ add_library(libtracer STATIC
     src/bridge.cpp
     src/transport_udp.cpp
     src/transport_ws.cpp
+    src/transport_can.cpp
 )
 find_package(Threads REQUIRED)
 target_link_libraries(libtracer PUBLIC Threads::Threads)

@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# Dedicated end-to-end job for the transport_can SocketCAN binding (#55, increment
+# 2): set up a kernel `vcan0` virtual CAN device and run the real-socket smoke test
+# (transport_can_vcan_test) over it. This is SEPARATE from core-ci on purpose — the
+# required core gates (build-test / sanitizers / tsan / format / doxygen) must never
+# depend on kernel CAN, which an unprivileged container cannot load. If vcan cannot
+# be set up on the runner the test self-skips (clean exit), so this job stays green;
+# when vcan IS present it genuinely exercises the PF_CAN / SOCK_RAW path.
+name: can-vcan-e2e
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "core/src/transport_can.cpp"
+      - "core/include/libtracer/transport_can.hpp"
+      - "core/tests/transport_can_vcan_test.cpp"
+      - ".github/workflows/can-vcan-e2e.yml"
+  pull_request:
+    paths:
+      - "core/src/transport_can.cpp"
+      - "core/include/libtracer/transport_can.hpp"
+      - "core/tests/transport_can_vcan_test.cpp"
+      - ".github/workflows/can-vcan-e2e.yml"
+  workflow_dispatch:
+
+jobs:
+  vcan-e2e:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up vcan0 (best-effort; the test self-skips if it fails)
+        run: |
+          sudo modprobe vcan || echo "::warning::could not load the vcan kernel module"
+          sudo ip link add dev vcan0 type vcan || echo "::warning::could not add vcan0"
+          sudo ip link set up vcan0 || echo "::warning::could not bring vcan0 up"
+          ip -details -br link show vcan0 || echo "::warning::vcan0 not present — the E2E test will SKIP"
+
+      - name: Build core (C++23)
+        run: |
+          cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build core/build -j
+
+      - name: Run the real-vcan transport_can E2E smoke test
+        run: |
+          ctest --test-dir core/build --output-on-failure -R '^transport_can_vcan$'

@@ -17,11 +17,12 @@ there is no gateway or orchestrator role ([ADR-0030](../adr/0030-can-transport-d
 [13-network-formation](13-network-formation.md) §self-healing).
 ```
 
-This document describes the CAN transport's **pure framing layer** — the part that
-is host-testable with no syscalls. The SocketCAN binding (the
-`transport_can : transport_t` that drives a real `PF_CAN` socket) is a separate
-increment and is **not** described here; nothing below opens a socket or touches
-the kernel `vcan` device.
+This document describes both the CAN transport's **pure framing layer** (the
+host-testable, syscall-free codecs) and — as of increment 2 of
+[#55](https://github.com/avatarsd-llc/libtracer/issues/55) — the **SocketCAN
+binding** that wires that framing to a live Linux CAN bus (the `transport_can :
+transport_t` driving a real `PF_CAN` socket). The §[SocketCAN binding](#the-socketcan-binding-transport_can)
+section below covers the binding; everything before it is the pure layer it builds on.
 
 The reference-implementation symbols are:
 
@@ -30,6 +31,7 @@ The reference-implementation symbols are:
 | 29-bit ID + advertise codec | `tr::net::can` | `can.hpp` | transport plane |
 | header-elided framing | `tr::view::view_can_frames_t` | `view_can.hpp` | L1 |
 | multi-frame reassembly | `tr::mem::mem_can_reassembly_t` | `mem_can_reassembly.hpp` | L0 |
+| **SocketCAN binding + raw-frame seam** | **`tr::net::transport_can`, `can_link_t`, `socketcan_link_t`** | **`transport_can.hpp`** | **transport plane** |
 
 ## The structured 29-bit extended ID
 
@@ -183,11 +185,77 @@ rejoining leaf or a downed forwarding hop costs only the paths through it. There
 node holds another node's wiring. A constrained CAN leaf stays dumb (a compile-time
 CAN-ID scheme); the map machinery runs in `transport_can` on whatever node hosts it.
 
-## What is *not* here yet
+## The SocketCAN binding (`transport_can`)
 
-- **The SocketCAN binding.** The `transport_can : transport_t` that opens a
-  `PF_CAN` socket, drives `send()`/the receiver loop, applies CAN-FD DLC padding,
-  and wires the advertise codec to a live bus is a deferred increment. Everything
-  above is the pure, host-testable framing layer it will build on.
-- **Live-bus integration tests.** Tested host-side only (`core/tests/can_frames_test.cpp`);
-  a `vcan`-backed end-to-end test arrives with the binding.
+Increment 2 realizes the binding: `tr::net::transport_can` is a `transport_t` that
+drives the framing above over a real Linux CAN bus. A bridge hands it a complete
+libtracer frame via `send()`; the byte-exact frame surfaces at the peer's receiver.
+
+### The `can_link_t` seam (testable without kernel CAN)
+
+The raw frame I/O sits behind a small seam, `can_link_t` (`write_raw(frame)` + an
+`on_receive` callback), so the transport never touches a socket directly:
+
+- **`socketcan_link_t`** — the production impl: `socket(PF_CAN, SOCK_RAW, CAN_RAW)`,
+  `CAN_RAW_FD_FRAMES` enabled best-effort (a classic-only controller still works),
+  bound to a named interface (`vcan0`/`can0`), with a receive thread that translates
+  each kernel `can_frame`/`canfd_frame` into a mode-agnostic `can_frame_data_t`. It is
+  compiled only under `#ifdef __linux__` (a no-op stub elsewhere) so sanitizer and
+  non-Linux builds stay clean. Concurrency mirrors `transport_ws`: serialized writes,
+  the fd reset under the write lock before close, a bounded receive timeout polling the
+  stop flag, destructor does stop→join→close.
+- An **in-memory fake link** (in `core/tests/transport_can_test.cpp`) pairs two
+  transports on one bus with no syscalls — this is what makes the binding fully
+  testable in a plain container with no `vcan` module.
+
+### Egress: advertise-then-data, with CAN-FD DLC padding
+
+`send(frame)` is emitted as one **group** under a single lock (so concurrent sends
+never interleave on the bus):
+
+1. The frame is split by `view_can_frames_t` into data-field windows.
+2. An **advertise manifest** is emitted first on the node's **control ID**
+   (`[version|node|0]` — the lowest endpoint, hence highest bus priority, so the
+   manifest out-arbitrates the data it governs). It is sliced into **classic ≤8-byte
+   windows** even on an FD bus, so no DLC padding can perturb the far-side stream
+   decoder. The manifest carries the **exact total length** and **slice count**.
+3. The lean **data frames** follow, one per window, on consecutive endpoint slots
+   (`slice_can_id` address-shift). In CAN-FD mode a short tail window is **padded up
+   the DLC lattice** (`can_fd_dlc_round_up`) to a legal frame length.
+
+### Ingress: learn, reassemble, trim
+
+The receive thread decodes each frame's CAN ID. A **control-slot** frame feeds the
+per-node advertise byte stream (`decode_advertise` pops each complete manifest),
+which **learns the `id ↔ path` binding** and sets the group's expected slice count.
+A **data-slot** frame is reassembled by `mem_can_reassembly_t`, keyed by
+`(node, base-endpoint) + (endpoint − base) index` — all derived from the CAN ID, so
+no per-frame origin/ts ever rides the bus. On completion the slices are flattened and
+**trimmed back to the advertised total length**, which is what undoes CAN-FD tail
+padding so the delivered frame is byte-exact. A data frame that races ahead of its
+manifest (cross-ID arbitration) is held pending and re-driven when the manifest lands.
+
+```{admonition} Increment-2 modeling choices
+:class: note
+- **Advertise-per-send.** This binding emits a fresh manifest for every `send()`. It
+  keeps the data plane correct and uniform (single value and multi-frame group are the
+  same path) and makes DLC-padding trim unconditional. The steady-state
+  *advertise-once-then-reuse* optimization (one binding, many lean values) is a future
+  refinement; the learned bindings already persist and self-heal by overwrite on
+  re-advertise.
+- **Ordering.** Correctness relies on per-bus in-order delivery of a group's frames
+  (which a single producer gets on CAN); the pending-data buffer covers control/data
+  cross-ID reordering.
+```
+
+### Tested two ways
+
+- **Docker-local, no kernel CAN** — `core/tests/transport_can_test.cpp` pairs two
+  transports over the in-memory fake link and asserts a multi-CAN-frame TLV round-trips
+  byte-exact (classic **and** CAN-FD), advertise/map learning works, FD DLC padding is
+  correct yet trimmed away, and the lifecycle is clean. Runs under ASan/UBSan and TSan.
+- **Real `vcan0`** — `core/tests/transport_can_vcan_test.cpp` drives two
+  `socketcan_link_t` over a kernel virtual-CAN device and asserts a byte-exact frame
+  each way. It **self-skips** when `vcan0` cannot bind, so the required gates never
+  depend on kernel CAN; the dedicated **`can-vcan-e2e`** workflow sets `vcan0` up so the
+  socket path runs for real.

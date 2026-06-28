@@ -68,6 +68,25 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **CAN transport — SocketCAN binding (increment 2 of [#55](https://github.com/avatarsd-llc/libtracer/issues/55); [ADR-0030](../docs/adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md)).**
+  `tr::net::transport_can` (`transport_can.hpp`): a `transport_t` over Linux
+  **SocketCAN** that wires the increment-1 framing to a live bus.
+  - **Egress** fragments the frame via `view_can_frames_t`, emits an in-band
+    `advertise` manifest (exact total length + slice count) on the node's control ID,
+    then the lean id-matched data frames — CAN-FD tail windows DLC-padded
+    (`can_fd_dlc_round_up`). **Ingress** learns the `id ↔ path` map from advertise
+    frames, reassembles data slices via `mem_can_reassembly_t` keyed off the CAN ID
+    alone, and trims back to the advertised total (undoing FD padding) → byte-exact.
+  - **`can_link_t` seam** decouples the transport from the socket: `socketcan_link_t`
+    is the production `PF_CAN`/`SOCK_RAW` impl (Linux-only via `#ifdef __linux__`,
+    classic + CAN-FD, `transport_ws`-style concurrency hardening); tests pair two
+    transports over an in-memory fake link, so the binding is fully testable with no
+    kernel `vcan`.
+  - Tested two ways: `core/tests/transport_can_test.cpp` (fake link — multi-frame
+    byte-exact round trip classic + FD, advertise learning, DLC padding, lifecycle;
+    under ASan/UBSan + TSan) and `core/tests/transport_can_vcan_test.cpp` (real `vcan0`,
+    self-skipping; the dedicated `can-vcan-e2e` CI job sets `vcan0` up).
+
 - **CAN transport — pure framing layer (increment 1 of [#55](https://github.com/avatarsd-llc/libtracer/issues/55); [ADR-0022](../docs/adr/0022-transport-framing-modes-elided-full-tlv-advertise.md), [ADR-0030](../docs/adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md)).**
   The host-testable, socket-free part of header-elided CAN. No SocketCAN / `vcan` /
   real socket — the `transport_can : transport_t` binding is a deferred increment.
