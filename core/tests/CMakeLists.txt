@@ -118,6 +118,15 @@ add_executable(ws_interop_server ws_interop_server.cpp)
 target_link_libraries(ws_interop_server PRIVATE libtracer)
 libtracer_test_warnings(ws_interop_server)
 
+# #60 (hardening) — ws frame-decoder differential-fuzz harness. Reads one hex
+# frame per stdin line and prints a canonical decode result (OK/NEED_MORE/ERR),
+# byte-identical to the TS twin (transport-ws/fuzz/decode_harness.mjs), so
+# tests/conformance/ws_diff_fuzz.py can diff the two decoders. Like
+# ws_interop_server it is a helper binary the driver spawns, NOT an add_test().
+add_executable(ws_fuzz_harness ws_fuzz_harness.cpp)
+target_link_libraries(ws_fuzz_harness PRIVATE libtracer)
+libtracer_test_warnings(ws_fuzz_harness)
+
 # M2 — substrate harness in single-threaded mode. LIBTRACER_NO_ATOMIC changes the
 # Segment refcount layout, so this variant compiles the library sources directly
 # (rather than linking the atomic-built libtracer.a) to keep one consistent ABI.

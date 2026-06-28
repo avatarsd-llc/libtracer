@@ -68,6 +68,21 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **Differential fuzzer for the RFC 6455 WebSocket frame decoder**
+  ([#60](https://github.com/avatarsd-llc/libtracer/issues/60), hardening). The ws
+  frame layer (`tr::net::ws::decode_frame`) is network-facing attack surface — it
+  parses untrusted bytes (FIN/opcode, the 7/16/64-bit length encodings, the client
+  mask, and the overflow-safe 64-bit-over-long path) *before* the TLV layer. A new
+  decode harness (`core/tests/ws_fuzz_harness.cpp`, the `ws_fuzz_harness` helper
+  binary — like `ws_interop_server`, not an `add_test()`) emits a canonical decode
+  result per hex frame; its TS twin
+  (`bindings/typescript/packages/transport-ws/fuzz/decode_harness.mjs`) emits the
+  byte-identical contract, and `tests/conformance/ws_diff_fuzz.py` feeds thousands
+  of seed-derived well-formed + adversarial frames (truncated at every boundary,
+  64-bit over-long lengths, missing mask keys, reserved bits, multi-frame buffers)
+  to both, asserting the C++ and TS decoders agree and neither crashes. Gated by a
+  standalone `ws-diff-fuzz` job in `.github/workflows/ws-interop.yml`. No core API
+  change.
 - **ESP-IDF managed component — on-silicon build gate** ([#64](https://github.com/avatarsd-llc/libtracer/issues/64)).
   The `integrations/esp-idf/` component now genuinely builds the **P0 in-process
   profile** (L0/L1 substrate, L2/L3 wire codec, L4 graph runtime) as an ESP-IDF
