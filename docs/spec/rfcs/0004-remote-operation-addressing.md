@@ -23,11 +23,12 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 This RFC fills §3 with the smallest design consistent with the accepted model:
 
 - **Path-as-route.** A remote endpoint is addressed by its *full path from the caller's own root, walking through transport vertices*. A transport/connection vertex ([ADR-0027](../../adr/0027-transport-and-connections-are-vertices.md)) **mounts its peer's graph under itself**: its `:`-facets are the link's own control, its `/`-subtree is the peer's tree. Routing is **hop-by-hop source-routing** — each transport vertex strips its own leading segment and forwards the unresolved remainder to its peer.
-- **`FWD` (`0x0F`)** — a self-describing frame `FWD{ op∈{READ,WRITE,AWAIT}, PATH suffix, FIELD? selector, payload? }` that carries the remaining route + the operation. Source-routed, so it needs **none** of `ROUTER`'s dedup/`MAX_HOPS` machinery.
+- **`FWD` (`0x0F`)** — a self-describing frame `FWD{ op∈{READ,WRITE,AWAIT,REPLY}, PATH dst, FIELD? selector, PATH src, payload? }`. `dst` (forward route) **shrinks** per hop; `src` (return route) **grows** per hop by a **zero-copy prepend** of the inbound-link `NAME`, so forwarders stay **stateless** and the reply self-routes home via `src`. Loop-free by construction → needs **none** of `ROUTER`'s dedup/`MAX_HOPS`.
 - **`FIELD` (`0x10`)** — encodes the `:field` tail (`:subscribers[]`, `:settings.x`) that `PATH` (NAME-segments only) cannot.
-- **Replies are connection-oriented** — a `READ`/`AWAIT` result (or a `WRITE` status) retraces the *same bidirectional link*, hop-by-hop. There is **no end-to-end correlation-id** in the protocol; request/reply matching on a link is the **transport's** concern.
+- **Replies are stateless and source-routed back** — a `FWD{ op=REPLY, kind∈{RESULT,ERROR} }` whose `dst` is the accumulated `src`. **No end-to-end correlation-id** (matching a reply to a specific concurrent request *at* an endpoint is the **transport's** concern); works over unidirectional links; survives a hop reboot.
+- **Two planes.** `READ`/`WRITE`/`AWAIT` are the **one-shot** plane (works on data *and* `:field` control). **Streaming never per-sample-remote-writes**: a consumer wires one `SUBSCRIBER`, then the producer **produces locally + flushes**, fanning out. A **delivery *is* a `FWD WRITE`** to the subscriber's data vertex (delivery-is-a-write, [ADR-0026](../../adr/0026-consumer-initiated-subscription-client-write.md)), so a subscription delivery and a one-shot command are the same frame.
 
-`subscribe` remains a `WRITE` to `:subscribers[]` ([ADR-0006](../../adr/0006-read-write-await-api-no-connect.md)/[ADR-0026](../../adr/0026-consumer-initiated-subscription-client-write.md)); `ROUTER` (`0x0D`) is **unchanged** and keeps its role on the fanout/delivery side.
+`subscribe` remains a `WRITE` to `:subscribers[]` ([ADR-0006](../../adr/0006-read-write-await-api-no-connect.md)/[ADR-0026](../../adr/0026-consumer-initiated-subscription-client-write.md)); `ROUTER` (`0x0D`) is **unchanged** and earns its keep only on the *cyclic/multi-path* delivery side. The consumer-stored `SUBSCRIBER.target` *is* the `src` route its subscribe accumulated — producer-holds and this RFC are one mechanism.
 
 ## Motivation
 
@@ -68,22 +69,26 @@ Segments already carry the identifiers — `can[0]` is the bus number; `<temp_se
 
 ### B. `FWD` — `0x0F` (forward / remote-operation frame)
 
-`FWD` is the frame a transport vertex emits to its peer to carry an operation one hop onward. **Structured** (`opt.PL=1`), source-routed, children in order:
+`FWD` is the frame a transport vertex emits to its peer to carry an operation one hop onward. **Structured** (`opt.PL=1`); **source-routed forward**, **return-route-accumulated backward**; children in order:
 
 ```
 FWD (0x0F, PL=1) {
-  VALUE   op            ; required, FIRST child — u8: READ=0, WRITE=1, AWAIT=2
-  PATH    suffix        ; required — the UNRESOLVED remaining route (segments only)
-  FIELD   selector      ; optional — the :field tail (§C); absent ⇒ the vertex itself
-  <payload TLV>         ; required for WRITE (the value/SUBSCRIBER/SETTINGS/… to write);
-                        ; MUST be absent for READ; for AWAIT see §D
+  VALUE   op            ; required, FIRST child — u8: READ=0, WRITE=1, AWAIT=2, REPLY=3
+  PATH    dst           ; required — UNRESOLVED forward route (segments only); SHRINKS per hop
+  FIELD   selector      ; optional — the :field tail (§C), resolved at the final hop
+  PATH    src           ; required — accumulated RETURN route; GROWS per hop (§D)
+  VALUE   kind          ; REPLY only — u8: RESULT=0, ERROR=1
+  <payload TLV>         ; WRITE: value/SUBSCRIBER/SETTINGS/… to write. READ/AWAIT: absent.
+                        ; REPLY: the result (VALUE for a READ result; STATUS for WRITE-ack/ERROR).
   VALUE   await_timeout ; optional, AWAIT only — u64 ns; absent ⇒ implementation default
 }
 ```
 
-- The receiving transport vertex resolves the **first** segment of `suffix`. If that segment names one of *its own* transport children, it strips it and re-emits a `FWD` carrying the shortened `suffix` over that link (the next hop). When `suffix` resolves to a **local** vertex on this node, the op is applied there.
+- **Forward (source-routed).** The receiving transport vertex resolves the **first** segment of `dst`. If it names one of *its own* transport children, it strips that segment from `dst` and re-emits `FWD` over that link. When `dst` empties, it resolves to a **local** vertex here, and the op (+ `selector`) is applied.
+- **Return-route accumulation (zero-copy prepend).** On *every* forwarding hop, the vertex **prepends to `src`** the one `NAME` that — in *this node's own* address space — names the link the `FWD` arrived on (the way back). Since `src` is a structured `PATH` (concatenated `NAME` children), the prepend is a **rope head-insert: existing bytes never move** — only the outer `PATH`/`FWD` `length` is rewritten (and the trailer is recomputed at egress per hop regardless, so no extra CRC cost). The originator **seeds `src` with its own reply endpoint**; when `dst` empties, `src` is the **complete reverse route** in per-node-local segments. The consumer therefore also receives the full source route — exactly the provenance [RFC-0003](0003-bridged-wildcard-delivery-path.md) wanted, now inherent.
+- **REPLY** is itself a `FWD` routed *back*: `dst = src` (the accumulated return route), `kind ∈ {RESULT, ERROR}`, payload = the result. A reply expects no reply, so it does not accumulate `src`.
 - `op` is the first child so a forwarder can dispatch without parsing the whole frame.
-- `FWD` is **source-routed and loop-free by construction** (the path is explicit; a suffix that revisits a node is malformed → `ERROR=INVALID_PATH`). It therefore carries **no** `origin`/`hop_count`/dedup — those stay in `ROUTER` on the delivery side (§E).
+- `FWD` is **loop-free by construction** (the forward `dst` is explicit; a `dst` revisiting a node is malformed → `ERROR=INVALID_PATH`). It carries **no** `origin`/`hop_count`/dedup — those stay in `ROUTER` on the multi-path delivery side (§E).
 
 ### C. `FIELD` — `0x10` (control-plane selector)
 
@@ -111,21 +116,25 @@ where each level =
 
 ### D. Operation semantics + replies
 
-| `op` | Payload | Reply (retraces the link) |
+| `op` | Payload | One-shot `REPLY` (`op=REPLY`, routed back via `src`) |
 | ---- | ---- | ---- |
-| `READ=0` | none | the addressed value as a TLV view, or `STATUS=ERROR(NOT_FOUND)` |
-| `WRITE=1` | the TLV to write | `STATUS` (empty = OK) or `STATUS=ERROR(...)` |
-| `AWAIT=2` | none (+ optional `await_timeout`) | the next write's TLV, or `STATUS=ERROR(TIMEOUT)` |
+| `READ=0` | none | `kind=RESULT` + the value TLV, or `kind=ERROR` + `STATUS=ERROR(NOT_FOUND)` |
+| `WRITE=1` | the TLV to write | `kind=RESULT` (empty/OK) or `kind=ERROR` + `STATUS=ERROR(...)` |
+| `AWAIT=2` | none (+ optional `await_timeout`) | `kind=RESULT` + the next write's TLV, or `kind=ERROR` + `STATUS=ERROR(TIMEOUT)` |
 
 `subscribe` is a `WRITE` of a `SUBSCRIBER` to a `:subscribers[]` field — **no new op** ([ADR-0006](../../adr/0006-read-write-await-api-no-connect.md)). QoS is a `WRITE` of `SETTINGS` to `:settings…`.
 
-**Replies are connection-oriented.** A reply retraces the *same bidirectional link* the request arrived on, hop-by-hop; each transport vertex holds the per-hop request state needed to route the reply back down the link it came from. There is **no end-to-end correlation-id** in any core TLV.
+**Replies are stateless, source-routed back.** A one-shot reply is a `FWD{ op=REPLY }` whose `dst` is the `src` that was **accumulated on the way in** (§B). Forwarders hold **no per-hop request state** — the return route lives in the frame, so a hop may even reboot mid-operation and the reply still routes. The reply works over **unidirectional** transports (it does not need the inbound link to be bidirectional). The reply-`kind` is just **`{RESULT, ERROR}`**; there is **no `DELIVERY`/`KEEPALIVE`/`DIGEST` reply-kind** — those are not replies (see §E).
 
-**Concurrency / request-reply matching is the transport's concern.** When a link carries multiple in-flight `FWD`s, matching replies to requests is defined by **that transport's** framing (e.g. a transport-level stream tag for WebSocket; pipelining/ID-matching for CAN), *not* by a field in `FWD`. The core frame stays `{op, path, field, payload}`.
+**There is no end-to-end correlation-id.** The `src` route delivers a reply to the right *endpoint*; matching it to a *specific* outstanding request *at* that endpoint (e.g. a consumer with many concurrent `READ`s) is the **transport's** concern — a transport-level stream tag for WebSocket, pipelining/ID-matching for CAN — never a field in `FWD`. Route = inter-hop; tag = intra-endpoint; a route is not an id.
+
+**Two planes — direct (one-shot) vs standing (streaming).** `FWD` `READ`/`WRITE`/`AWAIT` are the **one-shot/synchronous** plane: read a snapshot, write once, block for one. **Streaming data does *not* per-sample remote-write.** A consumer creates a local receiving endpoint and `WRITE`s one `SUBSCRIBER` into the producer's `:subscribers[]` (a control write, §C); thereafter the **producer produces locally and fans out** — fills its own endpoint's segment memory (rope-chaining slices for large/scatter data) and **flushes**, which delivers to each subscriber. The flush, not a client, drives every delivery.
+
+**A delivery *is* a `FWD WRITE` (load-bearing).** When a producer fans out to a *remote* subscriber, that delivery **is** a `FWD{ op=WRITE, payload=VALUE }` routed to the subscriber's data vertex via the stored return-route. So a **subscription delivery and a one-shot command are the identical wire frame** — the only difference is whether a standing `SUBSCRIBER` produced it or a client issued it once; the target cannot (and per ADR-0026 claim 2 must not) tell them apart. Likewise **keepalive / digest / liveness / async-write-ack are ordinary `VALUE`/`STATUS` writes on the standing channel**, not reply-kinds.
 
 ### E. Delivery / fanout is unchanged
 
-Producer-holds fan-out ([ADR-0026](../../adr/0026-consumer-initiated-subscription-client-write.md)) is unaffected: a stored `SUBSCRIBER`'s `target`, when it points across a transport, is the producer's **local connection-vertex path** that leads back to the consumer; delivering to it forwards over the link (the reverse of §A). Cyclic/multi-path *delivery* keeps using **`ROUTER` (`0x0D`)** dedup + `MAX_HOPS` ([ADR-0014](../../adr/0014-router-cycle-termination-hop-count.md)) and the [RFC-0003](0003-bridged-wildcard-delivery-path.md) concrete-path child. `FWD` (forward requests) and `ROUTER` (delivery) are different directions and stay separate frames.
+Producer-holds fan-out ([ADR-0026](../../adr/0026-consumer-initiated-subscription-client-write.md)) is **unified** with this RFC, not changed by it: the `src` route a consumer's `subscribe`-`FWD` **accumulated on the way in** (§B) is exactly what the producer stores as the `SUBSCRIBER`'s `target`. Each later delivery is a `FWD{ op=WRITE, payload=VALUE }` source-routed back along that stored route — i.e. a delivery *is* the same primitive as a one-shot write (§D). For a delivery that crosses a **cyclic / multi-path** region of the mesh (where the same data could arrive two ways), the delivery `FWD` is wrapped in **`ROUTER` (`0x0D`)** for `(origin, ts)` dedup + `MAX_HOPS` ([ADR-0014](../../adr/0014-router-cycle-termination-hop-count.md)), carrying the [RFC-0003](0003-bridged-wildcard-delivery-path.md) concrete-path child. Strict source-routed deliveries (a single accumulated route) need no `ROUTER`; `ROUTER` earns its keep only where the topology folds.
 
 ### F. ACL across hops
 
@@ -144,11 +153,13 @@ No new ACL machinery; `FWD` is subject to the same subject-token model as a loca
 
 Add to `tests/conformance/vectors/v1/`, so the 3-core machine (C++/TS/Rust) validates `FWD`/`FIELD` like every other TLV:
 
-- `fwd-read-path` — `FWD{ op=READ, PATH /sensor/temp }`.
-- `fwd-write-value` — `FWD{ op=WRITE, PATH /sensor/temp, VALUE u32 }`.
-- `fwd-await-timeout` — `FWD{ op=AWAIT, PATH /sensor/temp, await_timeout=1e9 }`.
-- `fwd-write-subscriber-field` — `FWD{ op=WRITE, PATH /sensor/temp, FIELD :subscribers[], SUBSCRIBER{...} }`.
-- `fwd-routed-multihop` — `FWD{ op=READ, PATH /net/<peer>/can[0]/ow/x }` (the un-stripped suffix).
+- `fwd-read` — `FWD{ op=READ, dst=/sensor/temp, src=/reply-ep }` (seeded `src`).
+- `fwd-write-value` — `FWD{ op=WRITE, dst=/sensor/temp, src=…, VALUE u32 }`.
+- `fwd-await-timeout` — `FWD{ op=AWAIT, dst=/sensor/temp, src=…, await_timeout=1e9 }`.
+- `fwd-write-subscriber-field` — `FWD{ op=WRITE, dst=/sensor/temp, FIELD :subscribers[], src=…, SUBSCRIBER{...} }`.
+- `fwd-routed-multihop` — `FWD{ op=READ, dst=/net/<peer>/can[0]/ow/x, src=/reply-ep }` (un-stripped `dst`).
+- `fwd-src-accumulated` — the same op **after two hops**: `dst` shrunk by two segments, `src` grown by two (the prepend invariant).
+- `fwd-reply-result` / `fwd-reply-error` — `FWD{ op=REPLY, kind=RESULT, dst=<accumulated route>, VALUE }` and `kind=ERROR, STATUS=ERROR(...)`.
 - `field-indexed`, `field-nested`, `field-append` — the three `FIELD` index-modes.
 - `fwd-wildcard-reject` — `[*]` outside subscriber-path ⇒ `INVALID_PATH`.
 
@@ -169,12 +180,19 @@ Add to `tests/conformance/vectors/v1/`, so the 3-core machine (C++/TS/Rust) vali
 - **Each transport spec must define its own request/reply matching** (the one cost of keeping `FWD` pure) — `transport_ws` and `transport_can` reference docs gain a "remote-op multiplexing" section.
 - **`PATH` parsers are untouched** — `:field` lives only in the new `FIELD` selector.
 
+## Resolved during design (see §B/§D/§E)
+
+- **Reply framing** → a thin **`FWD{ op=REPLY, kind∈{RESULT,ERROR} }`** routed back via the accumulated `src`. Not a bare TLV (we need the route) and not a rich reply-kind (deliveries are `WRITE`s, not replies).
+- **Return route** → **accumulated in the frame** (zero-copy `src` prepend), *not* per-hop connection state — so forwarders are stateless and replies survive a hop reboot.
+- **Unidirectional transport** → handled: the reply self-routes via `src`; it does **not** need the inbound link to be bidirectional.
+- **Streaming vs one-shot** → two planes; streaming never per-sample-remote-writes (producer local-produce + flush + fan-out); a delivery *is* a `FWD WRITE`.
+
 ## Open questions (for the comment window)
 
-1. **Reply framing.** Is a reply a bare result TLV (`VALUE`/`STATUS`) with the per-hop state supplying "which request," or a thin `FWD`-reply wrapper? (Leaning bare TLV — the link state already identifies the pending request.)
-2. **`await_timeout` default + cap** — implementation-default vs a normative bound.
-3. **Forward-right delegation** — does an intermediate hop forward under the *original* `origin_peer_id` (end-to-end identity) or re-originate as itself at each hop? (Affects §F's first ACL check; leaning end-to-end identity preserved, hop authorizes by it.)
-4. **`FWD` over a non-connection transport** (e.g. a one-shot datagram) — does path-as-route require a bidirectional link, or can a `READ` reply use a caller-named reply path as a fallback when the link is unidirectional?
+1. **`await_timeout` default + cap** — implementation-default vs a normative bound.
+2. **Forward-right delegation** — does an intermediate hop forward under the *original* `origin_peer_id` (end-to-end identity) or re-originate as itself at each hop? (Affects §F's first ACL check; leaning end-to-end identity preserved, each hop authorizes by it — note `src` already records the per-hop forwarder chain.)
+3. **`src` exposure / privacy** — the accumulated return route reveals the topology to the destination (and the full source route to the consumer — usually desirable as provenance). Is a redacted/opaque-segment mode ever needed for an untrusted intermediate, or is per-hop ACL sufficient?
+4. **Stream-tag interop** — each transport defines its own request↔reply matching tag; do we want a *recommended* (non-normative) tag shape so independent transport implementations converge?
 
 ## Relates
 
