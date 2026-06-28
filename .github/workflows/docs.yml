@@ -57,18 +57,25 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      # rust-core's codec perf bench (`cargo run --release --example perf`) feeds the
+      # cross-core matrix in gen_results_page.py; without a toolchain that row would
+      # degrade to an "unavailable" note on the live page (ADR-0032 §auto-published).
+      - uses: dtolnay/rust-toolchain@stable
       - name: API docs gate (Doxygen, strict — undocumented public symbol fails)
         run: doxygen core/Doxyfile
       # Auto-generate the Performance & Conformance page from the LIVE harnesses
       # (cross-core matrix + perf bench + coverage), replacing the static snapshot
       # (ADR-0032 §auto-published). Regenerated in-place each build; the artifact
-      # that deploys carries the fresh page.
+      # that deploys carries the fresh page. All three codec cores must render live:
+      # cpp-core (bench_codec), ts-core (node perf.mjs — runs directly under node 22,
+      # no install/build needed; it imports src/*.mjs, not the dist build), and
+      # rust-core (cargo --example perf, via the rust-toolchain step above).
       - name: Build harnesses for the results page
         run: |
           cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
           cmake --build core/build --target conformance_runner -j
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build bench/build --target bench_libtracer -j
+          cmake --build bench/build --target bench_libtracer bench_codec -j
       - name: Generate live performance + conformance page
         env:
           LIBTRACER_CXX_HARNESS: ${{ github.workspace }}/core/build/tests/conformance_runner
