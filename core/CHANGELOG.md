@@ -15,6 +15,26 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **`tr::net::fwd_router_t` — stateless multi-hop `FWD` forwarding + zero-copy
+  `src` accumulation across transports** ([RFC-0004](../docs/spec/rfcs/0004-remote-operation-addressing.md)
+  §A/§B / [ADR-0035](../docs/adr/0035-implementing-rfc-0004-remote-operation-addressing.md),
+  slice 3). Wires a local `graph::graph_t` (terminus op resolution via the slice-2
+  `op_resolver_t`) to a set of NAMED transport children (ADR-0027). On an inbound
+  `FWD` (`add_child(name, link)` installs the receiver): if the first `dst` segment
+  names a local non-transport vertex, the op is applied and the `FWD{REPLY}` is sent
+  back over the link the request arrived on; if it names a transport child, the
+  segment is **stripped from `dst`** and the inbound-link `NAME` is **prepended to
+  `src`** as a rope head-insert (the original accumulated route and the payload ride
+  on as zero-copy views — no byte of the route or payload is moved) before the
+  shortened `FWD` is sent onward. A `FWD{op=REPLY}` routes by the same step but does
+  **not** accumulate `src`; when its `dst` is fully consumed it is delivered to the
+  `on_reply` sink. Forwarders are **stateless** — the forward route (`dst`) and the
+  return route (`src`) live in the frame, so there is no per-request table and a hop
+  may reboot mid-operation. New public API: `fwd_router_t` with `add_child`,
+  `on_reply`, `on_inbound` (an observability/ACL-seam hook), and `on_frame`. Proven
+  over live `transport_ws` by the `fwd_multihop` integration test (byte-exact
+  `dst`-shrink / `src`-grow + round-tripped value; ThreadSanitizer-clean). The
+  route-handle (per-link label compaction) is slice 4.
 - **`tr::graph::op_resolver_t` — local FWD operation resolution + the zero-copy
   `FWD{REPLY}` builder** ([RFC-0004](../docs/spec/rfcs/0004-remote-operation-addressing.md) /
   [ADR-0035](../docs/adr/0035-implementing-rfc-0004-remote-operation-addressing.md),
