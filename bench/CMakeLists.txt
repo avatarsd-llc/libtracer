@@ -17,6 +17,15 @@ add_executable(bench_libtracer bench_libtracer.cpp)
 target_link_libraries(bench_libtracer PRIVATE libtracer)
 target_compile_options(bench_libtracer PRIVATE -Wall -Wextra)
 
+# Per-vector codec roundtrip bench — the `lang` axis (cpp-core) of the cross-core
+# perf matrix (ADR-0032 / #96). Emits the same 12-field RESULT contract as the TS
+# / Rust codec benches; defaults to the in-repo v1 conformance vectors.
+add_executable(bench_codec bench_codec.cpp)
+target_link_libraries(bench_codec PRIVATE libtracer)
+target_compile_options(bench_codec PRIVATE -Wall -Wextra)
+target_compile_definitions(bench_codec PRIVATE
+    LIBTRACER_BENCH_DEFAULT_VECTORS="${CMAKE_CURRENT_SOURCE_DIR}/../tests/conformance/vectors/v1")
+
 # Two-process network bench (real UDP). pub/sub roles; see run_net.sh.
 add_executable(bench_libtracer_net bench_libtracer_net.cpp)
 target_link_libraries(bench_libtracer_net PRIVATE libtracer)
