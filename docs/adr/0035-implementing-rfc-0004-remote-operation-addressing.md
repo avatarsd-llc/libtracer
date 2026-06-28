@@ -1,0 +1,92 @@
+# Implementing RFC-0004 (remote operation addressing): `FWD`/`FIELD` in `tr::wire`, hop-by-hop forwarding in the router, zero-copy `src` accumulation, the route-handle inside the transport
+
+Status: accepted. Records *how* the reference cores (C++/TS/Rust) implement the now-accepted
+[RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md) (path-as-route, `FWD` `0x0F` /
+`FIELD` `0x10`, accumulated return-route, the route-handle). RFC-0004 fixes the *wire* (the
+cross-implementer contract); this ADR fixes the *reference-impl* shape and the incremental
+slicing, so the cross-core conformance machine ([ADR-0028](0028-native-cores-kept-consistent-by-conformance-vectors.md)/
+[ADR-0032](0032-continuous-cross-core-perf-conformance-matrix.md)) validates each step.
+
+## Context
+
+RFC-0004 is accepted but unimplemented. It is the keystone "remote" wire surface and unblocks
+the core orchestration (#59), in-band remote `:children[]` (#82/#83), the reconciler (#58), and
+browser↔robot (#92). It must land in all three cores **without** reshaping any existing TLV, and
+it leans on machinery that already exists (the rope substrate; `transport_can`'s `identity↔path`
+map). The risk is doing it big-bang; the mitigation is to slice it so each piece is cross-validated.
+
+## Decision
+
+**Place each part at its natural layer (six-layer model, CLAUDE.md namespaces) and land it in
+conformance-validated slices.**
+
+### Layer placement
+
+- **`FWD`/`FIELD` encode + decode → `tr::wire` (L2/L3).** Two new structured type codes in the
+  registry, parsed by the *same* iterative depth-capped parser as every other TLV. No new codec
+  engine; `FWD`/`FIELD` are TLVs. This is what the conformance vectors gate.
+- **Forward resolution → the L4 router (`tr::graph`) + the `tr::net` transport seam.** On a `FWD`,
+  resolve the first `dst` segment against the existing **PATH-keyed dispatch table**. If it names a
+  local vertex, apply the op (`READ`/`WRITE`/`AWAIT`) + `FIELD` selector and build the `REPLY`. If
+  it names a **transport** child vertex ([ADR-0027](0027-transport-and-connections-are-vertices.md)),
+  strip it and hand the shortened `FWD` to that transport for the next hop. dst-resolution is the
+  router's existing dispatch, made transport-aware.
+- **`src` accumulation → zero-copy rope head-prepend (`rope.hpp`, `tr::view` L1).** Each forwarding
+  hop prepends its inbound-link `NAME` to `src` as a rope head segment; existing bytes never move,
+  only the outer `PATH`/`FWD` length is rewritten (the trailer is recomputed at egress regardless).
+- **Route-handle (the per-link label map) → inside each transport.** `transport_can` **already** holds
+  the `identity↔path` map + advertise (#55, [ADR-0030](0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md))
+  — that *is* the CAN route-handle; **no new code there**. `transport_ws` gains a per-link label
+  table + the advertise annotation + the `SUBSCRIBER.qos_settings.delivery_compact` opt-in.
+
+### Incremental slices (each gated by the 3-core machine + diff-fuzz)
+
+1. **`FWD`/`FIELD` codec + conformance vectors** (the `fwd-*` / `field-*` / `fwd-reply-*` cases in
+   RFC-0004 §H). Encode/decode in C++/TS/Rust, cross-validated like every TLV, and added to
+   `diff_fuzz.py`. *This is the first slice — low risk, immediately validated.*
+2. **Local op resolution + the `FWD`-`REPLY`.** A node resolves a `FWD` to a *local* vertex, applies
+   `READ`/`WRITE`/`AWAIT` (+ `FIELD`), and builds `REPLY{ kind∈{RESULT,ERROR} }`. Host-testable, no
+   transport.
+3. **Multi-hop forwarding + `src` accumulation over `transport_ws`.** Extend the existing
+   `ws_interop_server` harness to a graph-backed *forwarding* node; assert `dst` shrinks / `src`
+   grows byte-exactly and the reply source-routes home. Integration-tested.
+4. **Route-handle: advertise + label swap.** CAN: reuse the existing map. ws: the label table +
+   `delivery_compact` + advertise-on-(re)connect self-heal.
+
+### Cross-cutting
+
+- **No `ROUTER` change.** `FWD` is a sibling frame; `ROUTER`'s dedup/`MAX_HOPS` stay on the
+  multi-path delivery side (RFC-0004 §E).
+- **Error-reply codes depend on the ERROR registry.** `REPLY{ kind=ERROR }` carries
+  `STATUS=ERROR(...)`, whose code set is being pinned by **RFC-0001 §C/E (#8)**. Until #8 lands, use a
+  provisional `STATUS` payload; finalize the codes when #8 does. (The only cross-RFC dependency.)
+
+## Considered options
+
+- **A standalone forwarding module vs. reuse the router dispatch.** Reuse — `dst` resolution *is* a
+  path-dispatch lookup the router already does; a transport-child segment is the only new branch.
+- **Copy-prepend `src` vs. rope head-prepend.** Rope — zero-copy is RFC-mandated and the whole reason
+  the accumulated-route model is cheap; a copy-prepend would reintroduce per-hop O(route) copies.
+- **Big-bang vs. incremental.** Incremental — the cross-core machine validates each slice exactly as it
+  did for the transports and the third core; big-bang would land an unvalidated keystone.
+- **A new CAN map for the route-handle vs. reuse `transport_can`'s.** Reuse — RFC-0004's route-handle
+  *is* header-elision generalized; CAN already implements it.
+
+## Consequences
+
+- The codec slice lands first and is cross-validated immediately — the keystone enters through the
+  lowest-risk door.
+- The router becomes transport-aware (a `dst` segment may name a transport vertex) — a defined
+  extension of [ADR-0027](0027-transport-and-connections-are-vertices.md)'s dispatch model, not a new plane.
+- `transport_can`'s map is reused as the CAN route-handle — no duplication; `transport_ws` gains the
+  label table.
+- Error-reply codes wait on #8; everything else proceeds.
+- Unblocks #59 (implement ADR-0026/0027), #82/#83 (remote `:children[]`), #58 (reconciler), #92.
+
+## Relates
+
+- [RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md) — the accepted wire spec this implements.
+- [ADR-0006](0006-read-write-await-api-no-connect.md)/[ADR-0026](0026-consumer-initiated-subscription-client-write.md)/[ADR-0027](0027-transport-and-connections-are-vertices.md) — the model RFC-0004 realizes.
+- [ADR-0022](0022-transport-framing-modes-elided-full-tlv-advertise.md)/[ADR-0030](0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md) — header-elision / advertise (the route-handle's basis).
+- [ADR-0028](0028-native-cores-kept-consistent-by-conformance-vectors.md)/[ADR-0032](0032-continuous-cross-core-perf-conformance-matrix.md) — the cross-core machine that gates each slice.
+- Issues #59, #82, #83, #58, #92 (unblocked); #8 (ERROR registry — error-reply code dependency).

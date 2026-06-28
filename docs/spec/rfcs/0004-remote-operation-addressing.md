@@ -9,10 +9,10 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0004 |
 | **Title** | Remote operation addressing: path-as-route + the `FWD`/`FIELD` frames |
-| **Status** | draft |
+| **Status** | **accepted** (2026-06-28) |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-06-28 |
-| **Comment window closes** | 2026-07-12 (≥ 14 days) |
+| **Accepted** | 2026-06-28 — maintainer/BDFL; no registered second-implementer to object, so the 14-day window is nominal (GOVERNANCE.md §Roles). Implementation tracked by ADR-0035. |
 | **Tracking issue** | [#125](https://github.com/avatarsd-llc/libtracer/issues/125) |
 | **Target spec version** | v1 (draft refinement — no released v1 yet, so no v2 needed) |
 
