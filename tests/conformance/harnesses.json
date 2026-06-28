@@ -15,9 +15,9 @@
     },
     {
       "name": "rust",
-      "enabled": false,
+      "enabled": true,
       "cmd": ["cargo", "run", "--quiet", "--manifest-path", "bindings/rust/Cargo.toml", "--example", "conformance", "--"],
-      "note": "pending: native Rust core"
+      "note": "native pure-Rust core (no_std + alloc); built on demand by cargo, no external deps (#57)"
     }
   ]
 }
