@@ -22,6 +22,16 @@ versioning/publish strategy.
 
 ### Added
 
+- **`@avatarsd-llc/libtracer-ws` is now a functional package (`0.1.0`, #54).**
+  The WebSocket transport scaffold is implemented: an RFC 6455 frame codec at the
+  `/ws` subpath (`acceptKey`, `encodeFrame`, `encodeClientFrame`, `decodeFrame`,
+  overflow-safe) cross-validated byte-for-byte against the C++ `tr::net::ws`
+  codec, plus a `TransportWs` client (barrel entry) that carries a libtracer TLV
+  as one BINARY frame, wire-compatible with the C++ `tr::net::transport_ws`. The
+  package is no longer `private`; the core stays a `peerDependency`. Tests cover
+  the RFC 6455 known vectors and a Node `ws` round-trip.
+- The earlier scaffold entry below is superseded by this implementation.
+
 - **`@avatarsd-llc/libtracer-ws`** package scaffold (WebSocket transport,
   ADR-0029) — package boundary, name, and `exports` shape only; `private: true`,
   no functional transport code yet (deferred to #54).
