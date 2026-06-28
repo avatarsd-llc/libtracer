@@ -15,6 +15,25 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **`tr::graph::op_resolver_t` — local FWD operation resolution + the zero-copy
+  `FWD{REPLY}` builder** ([RFC-0004](../docs/spec/rfcs/0004-remote-operation-addressing.md) /
+  [ADR-0035](../docs/adr/0035-implementing-rfc-0004-remote-operation-addressing.md),
+  slice 2). `op_resolver_t::resolve(const tr::wire::tlv_t& fwd)` resolves a decoded
+  `FWD` against a local vertex (the router's PATH-keyed dispatch), applies
+  `READ`/`WRITE`/`AWAIT` plus any `FIELD` `:field` selector, and builds the
+  `FWD{REPLY}` as a `tr::view::rope_t`: a small fresh head (`op=REPLY`, `dst`=the
+  request's `src`, `src`=the responder endpoint, `kind`) **roped onto refcount-clones
+  of the vertex's stored payload view(s)** — never flattened into a fresh buffer
+  (ADR-0035 zero-copy reply rule). A `:subscribers[]` read ropes the populated slot
+  `SUBSCRIBER` views under a fresh `PL=1` wrapper. New supporting public API:
+  `tr::graph::fwd_op_t`, `tr::graph::reply_kind_t`, `tr::graph::kDefaultAwaitTimeout`;
+  the field-read-by-handle overload `graph_t::read(vertex_t*, const field_path_t&)`
+  and `graph_t::read_subscribers(vertex_t*)`; a `wildcard` flag on `field_step_t`
+  and a retained `source_view` on `subscriber_t`. Slice 2 is **local-only**: a
+  non-local `dst` replies `ERROR(NOT_FOUND)`; a `[*]` (`index_mode=WILDCARD`) level
+  on a non-subscriber path replies `ERROR(INVALID_PATH)` (the `fwd-wildcard-reject`
+  conformance vector). Transport/multi-hop forwarding and the route-handle are
+  slices 3–4.
 - **`FWD` (`0x0F`) and `FIELD` (`0x10`) type codes registered in `tr::wire::type_t`**
   ([RFC-0004](../docs/spec/rfcs/0004-remote-operation-addressing.md) /
   [ADR-0035](../docs/adr/0035-implementing-rfc-0004-remote-operation-addressing.md),

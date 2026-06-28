@@ -53,6 +53,15 @@ class graph_t {
     // ordinary value write. Pass `path.field()` for the field selector.
     [[nodiscard]] result_t<void> write(vertex_t* v, const field_path_t& field, view_t value);
     [[nodiscard]] result_t<view_t> await(vertex_t* v, std::chrono::nanoseconds timeout);
+    // Field-read by handle (the read dual of the field-write overload): an empty `field`
+    // is an ordinary value read; otherwise serve ":schema", ":acl", or a single
+    // ":subscribers[N]" slot (the slot's stored SUBSCRIBER view, zero-copy). For the
+    // whole-array ":subscribers[]" read use read_subscribers(). Used by the FWD resolver.
+    [[nodiscard]] result_t<view_t> read(vertex_t* v, const field_path_t& field) const;
+    // Read the ":subscribers[]" array: the populated slot SUBSCRIBER views in slot order
+    // (each a zero-copy refcount clone of the stored source view). The FWD resolver ropes
+    // these under a fresh PL=1 wrapper into the REPLY (RFC-0004 §D, no byte copy).
+    [[nodiscard]] result_t<std::vector<view_t>> read_subscribers(vertex_t* v) const;
     // Stream history, newest last (Stream role only).
     [[nodiscard]] result_t<std::vector<view_t>> history(vertex_t* v) const;
 

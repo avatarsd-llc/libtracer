@@ -243,6 +243,8 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
                 }
             }
             if (s.target_key.empty()) return std::unexpected(status_t::TYPE_MISMATCH);
+            s.source_view = value;  // retain the SUBSCRIBER TLV zero-copy (refcount clone) so a
+                                    // later :subscribers[] read ropes it into the REPLY (ADR-0035).
             const std::lock_guard lock(v->m_);
             v->subs_.push_back(std::move(s));
             return {};
@@ -335,6 +337,31 @@ result_t<view_t> graph_t::read_acl(vertex_t* v) const {
     if (!seg) return std::unexpected(status_t::BACKPRESSURE);
     std::memcpy(seg->bytes.data(), acl.data(), acl.size());
     return view_t::over(std::move(seg));
+}
+
+result_t<view_t> graph_t::read(vertex_t* v, const field_path_t& field) const {
+    if (field.empty()) return read(v);
+    if (field.steps.size() == 1 && field.steps[0].name == "schema") return read_schema(v);
+    if (field.steps.size() == 1 && field.steps[0].name == "acl") return read_acl(v);
+    // A single subscriber slot ":subscribers[N]" — serve the stored SUBSCRIBER view (clone).
+    if (field.steps.size() == 1 && field.steps[0].name == "subscribers" && field.steps[0].indexed &&
+        !field.steps[0].append && !field.steps[0].wildcard) {
+        const std::lock_guard lock(v->m_);
+        const std::size_t idx = field.steps[0].index;
+        if (idx < v->subs_.size() && v->subs_[idx].active && v->subs_[idx].source_view.owner)
+            return v->subs_[idx].source_view;  // clone (refcount bump, no byte copy)
+        return std::unexpected(status_t::NOT_FOUND);
+    }
+    return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+}
+
+result_t<std::vector<view_t>> graph_t::read_subscribers(vertex_t* v) const {
+    const std::lock_guard lock(v->m_);
+    std::vector<view_t> out;
+    out.reserve(v->subs_.size());
+    for (const subscriber_t& s : v->subs_)
+        if (s.active && s.source_view.owner) out.push_back(s.source_view);  // clone each (refcount)
+    return out;
 }
 
 result_t<view_t> graph_t::read(const path_t& path) const {
