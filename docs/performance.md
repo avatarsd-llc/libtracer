@@ -14,7 +14,7 @@ fails CI (ADR-0028). Live driver summary:
 
 - cpp: 12/12 vectors ok
 - ts: 12/12 vectors ok
-- rust: pending (disabled) — pending: native Rust core
+- rust: 12/12 vectors ok
 - CONFORMANCE: PASS
 
 ## In-process latency & throughput
@@ -23,9 +23,23 @@ Canonical points from `bench_libtracer` (the µs-latency / zero-copy thesis, ADR
 
 | path | p50 latency | mean | throughput |
 | --- | --- | --- | --- |
-| in-process (zero-copy dispatch) | 100 ns | 98 ns | 13.0 M/s |
-| in-process, zero-alloc loaned path | 90 ns | 89 ns | 14.9 M/s |
-| write-by-path (registry lookup) | 140 ns | 140 ns | 8.7 M/s |
+| in-process (zero-copy dispatch) | 90 ns | 97 ns | 13.3 M/s |
+| in-process, zero-alloc loaned path | 90 ns | 91 ns | 14.1 M/s |
+| write-by-path (registry lookup) | 140 ns | 139 ns | 8.4 M/s |
+
+## Cross-core codec performance (decode→encode roundtrip, same v1 vectors)
+
+Every native core (cpp-core / ts-core / rust-core) runs the SAME per-vector
+decode→encode roundtrip over the shared v1 conformance vectors (ADR-0032 `lang`
+axis, #96), so this is a like-for-like codec surface across implementations.
+Figures are the **median across all v1 vectors** (one decode + one encode == one
+roundtrip); a core whose toolchain is absent in this build degrades to a note.
+
+| core | throughput (median) | p50 latency (median) | mean (median) |
+| --- | --- | --- | --- |
+| cpp-core | 9.3 M roundtrips/s | 125 ns | 126 ns |
+| ts-core | 1.3 M roundtrips/s | 775 ns | 896 ns |
+| rust-core | 13.1 M roundtrips/s | 100 ns | 100 ns |
 
 ## Methodology & the zenoh comparison
 
