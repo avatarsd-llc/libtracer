@@ -73,6 +73,11 @@ struct subscriber_t {
     delivery_mode_t mode = delivery_mode_t::EVERY;
     std::vector<std::byte> last_delivered;  // ON_CHANGE: bytes last sent (producer-side, under m_)
     bool active = true;
+    // The original SUBSCRIBER TLV view this slot was written from, retained zero-copy
+    // (a refcount clone of the field-write payload). Empty for in-process callback/target
+    // sugar that carries no TLV. A :subscribers[] read ropes these slot views into the
+    // FWD{REPLY} with no byte copy (RFC-0004 §D / ADR-0035 slice 2 zero-copy reply rule).
+    view_t source_view{};
 };
 
 class vertex_t {

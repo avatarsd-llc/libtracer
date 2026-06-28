@@ -17,6 +17,7 @@
 #include "libtracer/mem_borrowed.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_pool.hpp"
+#include "libtracer/op_resolve.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/router.hpp"

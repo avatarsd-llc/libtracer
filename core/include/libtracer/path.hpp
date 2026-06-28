@@ -28,12 +28,13 @@ inline constexpr std::size_t kMaxPathBytes = 1024;
 inline constexpr std::size_t kMaxSegments = 32;
 inline constexpr std::size_t kMaxFieldDepth = 8;
 
-// One step of a field path: a NAME and an optional [index] / [] append.
+// One step of a field path: a NAME and an optional [index] / [] append / [*] wildcard.
 struct field_step_t {
     std::string name;
     bool indexed = false;     // true if "[...]" was present
     bool append = false;      // true for "[]" (append to a sequence)
-    std::uint16_t index = 0;  // valid when indexed && !append
+    bool wildcard = false;    // true for "[*]" (FIELD index_mode=WILDCARD, RFC-0004 §C)
+    std::uint16_t index = 0;  // valid when indexed && !append && !wildcard
     bool operator==(const field_step_t&) const = default;
 };
 
