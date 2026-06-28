@@ -85,7 +85,7 @@ Every arrow speaks one protocol; the bridge forwards typed state across transpor
 - **A wire-format specification** ([docs/spec/](docs/spec/)) — versioned, normative, conformance-tested. Implement it in any language and you are libtracer-compatible.
 - **A C++ reference implementation** ([core/](core/)) — header-first, no-RTTI, no-exceptions; ESP32 / STM32 / bare-metal capable. Apache 2.0.
 - **Native language cores, kept in lock-step by shared conformance vectors** (not FFI bindings) — [Rust](bindings/rust/) and TypeScript ([`@avatarsd-llc/libtracer`](bindings/typescript/), a pure-TS client SDK). Each ships a conformance harness and is CI-gated against the same vectors, so the cores can't drift.
-- **Platform integrations** — [PlatformIO](integrations/platformio/), [ESPHome](integrations/esphome/), [Arduino](integrations/arduino/).
+- **Platform integrations** — [PlatformIO](integrations/platformio/), [ESPHome](integrations/esphome/), [Arduino](integrations/arduino/), [ESP-IDF](integrations/esp-idf/) (managed component; P0 in-process profile, CI-built for esp32c6).
 - **Conformance test vectors** ([tests/conformance/](tests/conformance/)) — the same vectors every implementation runs. Pass them and you interoperate (`tests/conformance/run-all.py`).
 
 ## Open community + proprietary products — three layers
@@ -110,7 +110,7 @@ libtracer/
 │   ├── rust/              Native Rust core → crates.io
 │   └── typescript/        Native pure-TS core → npm (@avatarsd-llc/libtracer)
 ├── implementations/        Registry of third-party implementations
-├── integrations/           platformio/ · esphome/ · arduino/
+├── integrations/           platformio/ · esphome/ · arduino/ · esp-idf/
 ├── examples/               Runnable examples per platform
 ├── bench/                  libtracer↔zenoh benchmark + figures
 ├── docs/

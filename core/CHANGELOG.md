@@ -68,6 +68,19 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **ESP-IDF managed component — on-silicon build gate** ([#64](https://github.com/avatarsd-llc/libtracer/issues/64)).
+  The `integrations/esp-idf/` component now genuinely builds the **P0 in-process
+  profile** (L0/L1 substrate, L2/L3 wire codec, L4 graph runtime) as an ESP-IDF
+  managed component. A new `inprocess_mirror` example
+  (`integrations/esp-idf/examples/inprocess_mirror/`) links the core and exercises
+  the in-process mirror surface — `register_vertex` / `write` / `read` / `await`,
+  including the `<atomic>` segment-refcount path (`tr::view::segment_ptr_t`). A
+  standalone CI workflow (`.github/workflows/esp-idf.yml`) builds it in the
+  `espressif/idf:release-v5.3` image for **esp32c6** (required) and **esp32c3** on
+  single-core FreeRTOS. The component's `REQUIRES pthread` was corrected to
+  `PRIV_REQUIRES pthread` (pthread is a private link dependency of libstdc++
+  threading, not a public-header dependency). No core API change.
+
 - **CAN transport — SocketCAN binding (increment 2 of [#55](https://github.com/avatarsd-llc/libtracer/issues/55); [ADR-0030](../docs/adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md)).**
   `tr::net::transport_can` (`transport_can.hpp`): a `transport_t` over Linux
   **SocketCAN** that wires the increment-1 framing to a live bus.
