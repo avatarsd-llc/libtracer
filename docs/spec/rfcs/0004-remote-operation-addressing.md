@@ -136,6 +136,19 @@ where each level =
 
 Producer-holds fan-out ([ADR-0026](../../adr/0026-consumer-initiated-subscription-client-write.md)) is **unified** with this RFC, not changed by it: the `src` route a consumer's `subscribe`-`FWD` **accumulated on the way in** (§B) is exactly what the producer stores as the `SUBSCRIBER`'s `target`. Each later delivery is a `FWD{ op=WRITE, payload=VALUE }` source-routed back along that stored route — i.e. a delivery *is* the same primitive as a one-shot write (§D). For a delivery that crosses a **cyclic / multi-path** region of the mesh (where the same data could arrive two ways), the delivery `FWD` is wrapped in **`ROUTER` (`0x0D`)** for `(origin, ts)` dedup + `MAX_HOPS` ([ADR-0014](../../adr/0014-router-cycle-termination-hop-count.md)), carrying the [RFC-0003](0003-bridged-wildcard-delivery-path.md) concrete-path child. Strict source-routed deliveries (a single accumulated route) need no `ROUTER`; `ROUTER` earns its keep only where the topology folds.
 
+### E.1 Delivery compaction — the route-handle (generalized header-elision)
+
+Taken literally, "a delivery *is* a `FWD WRITE`" (§D) makes *every* streamed sample carry its full return route. For a 1 kHz, 4-byte sensor over a 3-hop path that is **~60 B of route on a 4 B payload (~16×)** — fine for one-shots, prohibitive for streams (and impossible on CAN, which has no room for a route at all). The fix is **not** a new mechanism: it is **header-elided framing ([ADR-0022](../../adr/0022-transport-framing-modes-elided-full-tlv-advertise.md)) generalized to every transport** — a compact **per-link label** that aliases an established delivery route.
+
+- **Per-link label-switching.** A label is meaningful only on the link it was bound for; each forwarding hop **swaps** it (label-in → its own label-out / route), exactly as a CAN-ID is re-resolved against each bus's `identity↔path` map. There is **no** end-to-end handle — "matching is the transport's concern" (§D) applied to delivery.
+- **Advertise-driven binding (generalize [ADR-0030](../../adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md)).** The upstream **advertises** the `label ↔ route` binding **in-band** when a flow starts; each hop learns `label → (downstream link, out-label)` and swaps. There is no setup handshake. **Re-advertise on (re)connect *is* the self-heal** (it is also what producer-holds already triggers on reconnect, [ADR-0026](../../adr/0026-consumer-initiated-subscription-client-write.md)); a delivery bearing an unknown/stale label is dropped with an error that prompts re-advertise. On a **header-elided** transport this advertise *is* the existing id-assignment (`transport_can`, #55) — no new code.
+- **Framing-mode decides whether labels are used (no global policy):**
+  - **Header-elided transports (CAN):** **always** labeled — the ID *is* the path; the `identity↔path` map is mandatory; no threshold.
+  - **Full-TLV transports (ws/UDP):** **default full-route** (stateless forwarders, no label table). Labels are **opt-in compaction**, requested **declaratively** by a `SUBSCRIBER` QoS hint (a `delivery_compact` flag in `qos_settings`, alongside `delivery_mode`/`min_interval_ns`). A transport **MAY** *also* promote a hot full-route flow to a label adaptively (SHOULD), but the hint is the contract.
+- **State boundary (the cost, made precise).** One-shot ops and cold/low-rate subscriptions stay **stateless** (route in the frame). A hop holds a `label↔route` binding **only** for the flows explicitly flagged compact that cross it — bounded by *(number of compact subscriptions through this hop)*, and on CAN it is the `identity↔path` map already paid for. So a constrained ws node forwarding 50 cold reads holds **zero** label state.
+
+With a 2–4 B label, the 1 kHz example drops from ~16× to **~1.5×** overhead. Net rule: **one-shot ops pay the full route; high-rate established streams amortize it to a label, by the transport's framing mode.**
+
 ### F. ACL across hops
 
 A `FWD` is gated **twice**, by the existing ACL machinery ([ADR-0018](../../adr/0018-access-control-authorization-pluggable-subject-token.md)/[ADR-0020](../../adr/0020-acl-nfsv4-style-aces-with-inheritance.md)):
@@ -186,6 +199,7 @@ Add to `tests/conformance/vectors/v1/`, so the 3-core machine (C++/TS/Rust) vali
 - **Return route** → **accumulated in the frame** (zero-copy `src` prepend), *not* per-hop connection state — so forwarders are stateless and replies survive a hop reboot.
 - **Unidirectional transport** → handled: the reply self-routes via `src`; it does **not** need the inbound link to be bidirectional.
 - **Streaming vs one-shot** → two planes; streaming never per-sample-remote-writes (producer local-produce + flush + fan-out); a delivery *is* a `FWD WRITE`.
+- **Streaming route overhead** → the **route-handle** (§E.1): a per-link, advertise-driven, framing-mode-gated label (header-elision generalized) amortizes the return route on established high-rate subs, keeping forwarders stateless for the one-shot/cold case. Drops the 1 kHz example from ~16× to ~1.5× overhead.
 
 ## Open questions (for the comment window)
 
