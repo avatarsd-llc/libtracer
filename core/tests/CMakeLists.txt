@@ -95,6 +95,13 @@ target_compile_definitions(op_resolve_test PRIVATE
     LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME op_resolve COMMAND op_resolve_test)
 
+# RFC-0004 / ADR-0035 slice 3 — multi-hop FWD forwarding + zero-copy src
+# accumulation over LIVE transport_ws (client -> A forwarder -> B terminus).
+add_executable(fwd_multihop_test fwd_multihop_test.cpp)
+target_link_libraries(fwd_multihop_test PRIVATE libtracer)
+libtracer_test_warnings(fwd_multihop_test)
+add_test(NAME fwd_multihop COMMAND fwd_multihop_test)
+
 # M4 — transport + bridge harness (loopback delivery, ROUTER, dedup, hop_count).
 add_executable(bridge_test bridge_test.cpp)
 target_link_libraries(bridge_test PRIVATE libtracer)
