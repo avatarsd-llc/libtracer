@@ -4,7 +4,12 @@ Rust binding for libtracer. Published to crates.io as `libtracer`.
 
 ## Status
 
-Stub — not yet implemented. Tracked in [#57](https://github.com/avatarsd-llc/libtracer/issues/57).
+**Native wire codec implemented** ([#57](https://github.com/avatarsd-llc/libtracer/issues/57)).
+A from-scratch `#![no_std]` (`alloc`-only, no external dependencies) implementation of
+the protocol-v1 wire format — `decode` / `encode` plus the CRC-32C / CRC-16-CCITT
+primitives. It is kept in lock-step with the C++ and TypeScript cores by the shared
+conformance vectors and the cross-core CI gate; see the [CHANGELOG](CHANGELOG.md).
+Higher-level graph/transport APIs are still to come.
 
 ## Strategy
 

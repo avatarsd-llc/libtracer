@@ -1,9 +1,9 @@
 # Cross-core conformance + performance gates (ADR-0028).
 #
 # conformance: every enabled native core runs the shared vectors and must agree
-#   byte-for-byte. The C++ reference and the TypeScript core (#56) are both enabled
-#   (tests/conformance/harnesses.json), so this is a real two-core cross-match — a
-#   DISAGREE fails CI. Rust joins when it lands.
+#   byte-for-byte. The C++ reference, the TypeScript core (#56) and the native Rust
+#   core (#57) are all enabled (tests/conformance/harnesses.json), so this is a real
+#   three-core cross-match — a DISAGREE fails CI.
 # perf: the in-process latency/throughput gate (bench/perf_gate.py). No committed
 #   baseline (it is host-specific), so CI validates against absolute floors — a real
 #   regression (far past the canonical ~100 ns / ~13 M deliveries per second) fails CI.
@@ -22,15 +22,27 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      # The native Rust core (#57) runs as a cargo example; the driver builds it on
+      # demand, so the toolchain must be present before run-all.py / diff_fuzz.py.
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo (Rust core build)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            bindings/rust/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('bindings/rust/Cargo.toml', 'bindings/rust/src/**', 'bindings/rust/examples/**') }}
+          restore-keys: cargo-${{ runner.os }}-
       - name: Build the C++ conformance harness (C++23)
         run: |
           cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
           cmake --build core/build --target conformance_runner -j
-      - name: Cross-core conformance driver (C++ + TypeScript must agree)
+      - name: Cross-core conformance driver (C++ + TypeScript + Rust must agree)
         env:
           LIBTRACER_CXX_HARNESS: ${{ github.workspace }}/core/build/tests/conformance_runner
         run: python3 tests/conformance/run-all.py
-      - name: Cross-core differential fuzzer (random valid frames must agree)
+      - name: Cross-core differential fuzzer (random valid frames, all 3 cores agree)
         env:
           LIBTRACER_CXX_HARNESS: ${{ github.workspace }}/core/build/tests/conformance_runner
         run: python3 tests/conformance/diff_fuzz.py -n 2000

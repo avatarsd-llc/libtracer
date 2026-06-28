@@ -5,10 +5,11 @@
 
 The 12 curated vectors under ``vectors/v1/`` pin a handful of hand-picked wire
 shapes. This catches the *drift between cores* those points miss: it generates
-random **valid** frames from a seed, round-trips every frame through BOTH native
-cores (C++ golden + TypeScript), and asserts byte-for-byte agreement. A mismatch
-is a genuine cross-core bug — the failing seed + bytes are printed so the frame
-can be promoted to a curated regression vector (and the run exits non-zero).
+random **valid** frames from a seed, round-trips every frame through ALL THREE
+native cores (C++ golden + TypeScript + Rust), and asserts byte-for-byte
+agreement. A mismatch is a genuine cross-core bug — the failing seed + bytes are
+printed so the frame can be promoted to a curated regression vector (and the run
+exits non-zero).
 
 Design (deterministic + reproducible):
 
@@ -25,14 +26,14 @@ Design (deterministic + reproducible):
      stdin line -> one re-encoded hex line, or ``ERR:<reason>``). For frame F the
      check is a three-way byte equality::
 
-         F  ==  cpp(decode->encode F)  ==  ts(decode->encode F)
+         F  ==  cpp(decode->encode F)  ==  ts(decode->encode F)  ==  rust(decode->encode F)
 
-     Because F is canonical, ``cpp_out == F`` is the C++->* direction and
-     ``ts_out == F`` is the TS->* direction; their mutual equality is the
-     cross-core gate (ADR-0028 / ADR-0032), now over thousands of shapes.
+     Because F is canonical, each ``<core>_out == F`` is that core's ->*
+     direction; their mutual equality is the cross-core gate (ADR-0028 /
+     ADR-0032), now over thousands of shapes and three independent cores.
 
-  3. N seeds (default 1000, ``--seeds``). On ANY mismatch the seed + all three
-     hex frames are printed and the run exits 1; otherwise a summary + exit 0.
+  3. N seeds (default 1000, ``--seeds``). On ANY mismatch the seed + every
+     core's hex frame is printed and the run exits 1; otherwise a summary + exit 0.
 
 Stdlib only. Reuses the harness-discovery convention of run-all.py (the C++
 binary is found via $LIBTRACER_CXX_HARNESS or the common build paths).
@@ -56,6 +57,18 @@ CXX_FALLBACKS = [
     Path("/tmp/lt-build/tests/conformance_runner"),
 ]
 TS_HARNESS = REPO / "bindings" / "typescript" / "conformance" / "harness.mjs"
+RUST_MANIFEST = REPO / "bindings" / "rust" / "Cargo.toml"
+# The native Rust core runs as a cargo example (built on demand; no external deps).
+RUST_CMD = [
+    "cargo",
+    "run",
+    "--quiet",
+    "--manifest-path",
+    str(RUST_MANIFEST),
+    "--example",
+    "conformance",
+    "--",
+]
 
 # Valid core type codes (0x05 retired). The codec accepts any nonzero type
 # generically, so the generator also emits the occasional unknown/user code.
@@ -203,6 +216,9 @@ def main() -> int:
     if not TS_HARNESS.exists():
         print(f"TS harness not found at {TS_HARNESS}", file=sys.stderr)
         return 2
+    if not RUST_MANIFEST.exists():
+        print(f"Rust core manifest not found at {RUST_MANIFEST}", file=sys.stderr)
+        return 2
 
     seeds = list(range(args.start, args.start + args.seeds))
     frames = [gen_frame(s) for s in seeds]
@@ -210,10 +226,11 @@ def main() -> int:
 
     cpp_out = run_core([cxx, "--roundtrip"], frames_hex)
     ts_out = run_core(["node", str(TS_HARNESS), "--roundtrip"], frames_hex)
+    rust_out = run_core(RUST_CMD + ["--roundtrip"], frames_hex)
 
     mismatches = 0
-    for seed, want, cpp, ts in zip(seeds, frames_hex, cpp_out, ts_out):
-        if want == cpp and want == ts:
+    for seed, want, cpp, ts, rust in zip(seeds, frames_hex, cpp_out, ts_out, rust_out):
+        if want == cpp and want == ts and want == rust:
             continue
         mismatches += 1
         if mismatches <= args.max_fails:
@@ -221,6 +238,7 @@ def main() -> int:
             print(f"  input : {want}")
             print(f"  cpp   : {cpp}{'' if cpp == want else '   <- DIVERGES'}")
             print(f"  ts    : {ts}{'' if ts == want else '   <- DIVERGES'}")
+            print(f"  rust  : {rust}{'' if rust == want else '   <- DIVERGES'}")
             print(
                 f"  reproduce: python3 tests/conformance/diff_fuzz.py --start {seed} --seeds 1"
             )

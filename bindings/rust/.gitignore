@@ -1,0 +1,5 @@
+# Rust build artifacts
+/target
+
+# Library crate: the lockfile is not committed (zero external deps).
+Cargo.lock
