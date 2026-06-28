@@ -27,3 +27,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     iteratively and capped at `MAX_DEPTH` (32).
   - `examples/conformance.rs` implements the shared harness contract (`--tap` /
     default TAP mode and `--roundtrip` differential-fuzz mode).
+  - `examples/perf.rs` is the Rust core's codec perf bench — the **core-impl-lang**
+    axis (Rust) of the cross-core perf matrix ([#96](https://github.com/avatarsd-llc/libtracer/issues/96),
+    [ADR-0032](../../docs/adr/0032-continuous-cross-core-perf-conformance-matrix.md)).
+    It times decode→encode roundtrips over the shared conformance vectors and emits
+    the same 12-field `RESULT` line per vector as the C++ (`bench/bench_libtracer.cpp`)
+    and TypeScript (`perf.mjs`) benches, with `system="rust-core"`, `mode="codec"`.
+    Run with `cargo run --release --example perf -- tests/conformance/vectors/v1`.

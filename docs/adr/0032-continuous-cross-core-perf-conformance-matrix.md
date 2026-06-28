@@ -71,6 +71,11 @@ the existing docs site.
 - The conformance gate becomes a **perf+correctness matrix**; the two-core cross-match + a
   perf floor, baseline-tracked, is live (#94). The full ranged surface + per-core perf
   (incl. a TS perf bench for the lang axis) + Pages publishing land incrementally.
+  *Status (#96): the **core-impl-lang** axis now covers all three cores — a codec
+  decode→encode roundtrip perf bench over the shared vectors exists for C++
+  (`bench/bench_libtracer.cpp`), TypeScript (`bindings/typescript/packages/core/bench/perf.mjs`,
+  `system="ts-core"`), and Rust (`bindings/rust/examples/perf.rs`, `system="rust-core"`),
+  all emitting the same 12-field `RESULT` contract.*
 - Adding a core (Rust) or a dimension (n-routers, n-layer-folded) is "add a harness/axis,"
   not a redesign — same shape as ADR-0028's "add a core."
 - Honest by construction: 100% is a tracked target with named spec blockers, not a claim;
