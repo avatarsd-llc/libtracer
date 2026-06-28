@@ -32,13 +32,17 @@
     },
     "./package.json": "./package.json"
   },
-  "files": ["dist", "README.md"],
+  "files": ["dist", "README.md", "LICENSE"],
+  "publishConfig": {
+    "access": "public"
+  },
   "peerDependencies": {
     "@avatarsd-llc/libtracer": "^0.0.1"
   },
   "scripts": {
     "build": "tsc",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "prepublishOnly": "npm run build"
   },
   "devDependencies": {
     "@avatarsd-llc/libtracer": "*",
