@@ -1,17 +1,33 @@
-# libtracer (TypeScript binding)
+# libtracer — TypeScript packages (npm workspace)
 
-TypeScript / Node.js binding for the libtracer reference implementation. Published to npm as `libtracer`.
+This directory is an [npm workspace](https://docs.npmjs.com/cli/v10/using-npm/workspaces)
+monorepo holding the TypeScript side of libtracer: one cross-validated **core**
+package plus **per-transport** packages. The packaging architecture is decided in
+[ADR-0033](../../docs/adr/0033-npm-subpackage-monorepo.md).
 
-## Status
+## Packages
 
-Stub — not yet implemented. Likely a WASM build of the C core plus a typed JS API.
+| Package                     | Path                     | Publishes as                  | Status      |
+| --------------------------- | ------------------------ | ----------------------------- | ----------- |
+| core (in-process codec)     | `packages/core`          | `@avatarsd-llc/libtracer`     | published   |
+| WebSocket transport         | `packages/transport-ws`  | `@avatarsd-llc/libtracer-ws`  | scaffold    |
 
-## Use
+The **core** carries no transports, so a consumer that only needs the codec
+never pulls a transport dependency. Per-layer slicing (L0/L1/L2/L4) is done with
+**subpath `exports`** inside the core (`@avatarsd-llc/libtracer/wire`), not by
+exploding into many packages — see the ADR for the trade-off.
+
+## Develop
 
 ```sh
-npm install libtracer
+# from this directory (bindings/typescript)
+npm install            # installs + links all workspace packages
+npm run build          # builds every package (tsc)
+npm test               # runs the core conformance harness
+npm run conformance    # same, explicit
+npm run bench          # core perf bench over the shared vectors
 ```
 
-## Releasing
-
-Tag the repo with `ts-vX.Y.Z` to trigger publish (see `.github/workflows/publish-npm.yml` once added).
+The single lockfile lives here at the workspace root. The conformance harness
+and perf bench run under plain `node` with **no build step**, which is what the
+polyglot conformance driver (`tests/conformance/run-all.py`) invokes.

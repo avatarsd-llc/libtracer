@@ -3,7 +3,7 @@
 //
 // Conformance harness for the shared vectors under tests/conformance/vectors/v1/.
 // Mirrors core/tests/conformance_runner.cpp and
-// bindings/typescript/conformance/harness.mjs byte-for-byte, so the polyglot
+// bindings/typescript/packages/core/conformance/harness.mjs byte-for-byte, so the polyglot
 // driver (tests/conformance/run-all.py) and the differential fuzzer
 // (tests/conformance/diff_fuzz.py) can treat all three cores identically.
 //

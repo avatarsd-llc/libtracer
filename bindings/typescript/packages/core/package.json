@@ -1,0 +1,45 @@
+{
+  "name": "@avatarsd-llc/libtracer",
+  "version": "0.0.1",
+  "description": "TypeScript core for libtracer — a lightweight decentralized graph-based networking protocol. Native pure-TS implementation (in-process codec; no transports), conformance-gated against the shared vectors.",
+  "author": "avatarsd LLC",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avatarsd-llc/libtracer.git",
+    "directory": "bindings/typescript/packages/core"
+  },
+  "homepage": "https://github.com/avatarsd-llc/libtracer#readme",
+  "bugs": {
+    "url": "https://github.com/avatarsd-llc/libtracer/issues"
+  },
+  "keywords": ["protocol", "iot", "sensor", "graph", "tlv"],
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./wire": {
+      "types": "./dist/wire.d.ts",
+      "default": "./dist/wire.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc",
+    "conformance": "node conformance/harness.mjs ../../../../tests/conformance/vectors/v1",
+    "bench": "node bench/perf.mjs",
+    "test": "npm run conformance"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}

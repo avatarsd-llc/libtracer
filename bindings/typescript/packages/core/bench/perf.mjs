@@ -105,7 +105,7 @@ function measure(input) {
 
 function main() {
   const self = fileURLToPath(import.meta.url);
-  const defaultDir = join(dirname(self), '..', '..', '..', 'tests', 'conformance', 'vectors', 'v1');
+  const defaultDir = join(dirname(self), '..', '..', '..', '..', '..', 'tests', 'conformance', 'vectors', 'v1');
   const vectorsDir = process.argv[2] || defaultDir;
 
   // Sort by POSIX relative path so the row order matches the C++ harness.
