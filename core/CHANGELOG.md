@@ -80,6 +80,19 @@ reference implementation is pre-1.0; everything currently lives under
   single-core FreeRTOS. The component's `REQUIRES pthread` was corrected to
   `PRIV_REQUIRES pthread` (pthread is a private link dependency of libstdc++
   threading, not a public-header dependency). No core API change.
+  - **Host (`linux`) target support** ([#64](https://github.com/avatarsd-llc/libtracer/issues/64)
+    follow-up). The component manifest (`idf_component.yml`) now lists the ESP-IDF
+    `linux` (POSIX host) target alongside the esp32 family, so a downstream
+    **host_test** suite can depend on the real `libtracer` component instead of a
+    local wrapper. A new `host_smoke` example
+    (`integrations/esp-idf/examples/host_smoke/`) drives the same in-process
+    surface (`register_vertex` / `write` / `read`) with **no FreeRTOS and no
+    `esp_log`** and is built + run for the `linux` target in CI. The host build
+    needs a C++23 `<expected>` compiler: the `espressif/idf:release-v5.3` image's
+    default g++-11 lacks it, so the example documents / CI selects **g++-12**. The
+    stale `override_path`/`main/idf_component.yml` comment in the component
+    `CMakeLists.txt` was corrected to describe the actual `EXTRA_COMPONENT_DIRS`
+    wiring. No core API change.
 
 - **CAN transport — SocketCAN binding (increment 2 of [#55](https://github.com/avatarsd-llc/libtracer/issues/55); [ADR-0030](../docs/adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md)).**
   `tr::net::transport_can` (`transport_can.hpp`): a `transport_t` over Linux

@@ -47,6 +47,24 @@ docker run --rm -v "$PWD:/p" -w /p/integrations/esp-idf/examples/inprocess_mirro
   espressif/idf:release-v5.3 bash -c "idf.py set-target esp32c6 build"
 ```
 
+### Host (linux) target
+
+The manifest also lists the ESP-IDF [`linux`](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-guides/host-apps.html) (POSIX host) target, so a **host_test** suite can depend on the real `libtracer` component instead of a local wrapper. [`examples/host_smoke/`](examples/host_smoke/) is the host-target counterpart of `inprocess_mirror`: it drives the same in-process surface (register / write / read) but with **no FreeRTOS tasks and no `esp_log`** — only plain C++ and `printf` — so it links and runs as a native host executable.
+
+The ESP-IDF `linux` target compiles host sources with the **host** `g++`, not the cross toolchain. The `espressif/idf:release-v5.3` image ships g++-11, which lacks C++23 `<expected>`; libtracer's core needs it, so build with **g++-12** (or any host GCC ≥ 12 / Clang that has `<expected>`):
+
+```bash
+docker run --rm -v "$PWD:/p" -w /p/integrations/esp-idf/examples/host_smoke \
+  espressif/idf:release-v5.3 bash -c '
+    apt-get update -qq && apt-get install -y -qq g++-12 gcc-12
+    . "$IDF_PATH/export.sh"
+    idf.py -D CMAKE_C_COMPILER=gcc-12 -D CMAKE_CXX_COMPILER=g++-12 \
+      --preview set-target linux build
+    ./build/host_smoke.elf'
+```
+
+This produces `build/host_smoke.elf` and prints `read-back: /sensor/temp = 23` then `host smoke complete`.
+
 ## Requirements
 
 - **ESP-IDF ≥ 5.3** — libtracer's core is **C++23** (`std::expected`, `std::span`), which needs the GCC 13 toolchain shipped with ESP-IDF 5.3+.
@@ -59,10 +77,11 @@ docker run --rm -v "$PWD:/p" -w /p/integrations/esp-idf/examples/inprocess_mirro
 
 ## Status
 
-**Built in CI.** The `inprocess_mirror` example compiles and links the P0 in-process core as a managed component in the `espressif/idf:release-v5.3` image, for **esp32c6** (the required single-core RISC-V target) and **esp32c3** — see [`.github/workflows/esp-idf.yml`](../../.github/workflows/esp-idf.yml) and [#64](https://github.com/avatarsd-llc/libtracer/issues/64). A clean `idf.py build` (a produced `.elf`/`.bin`) is the gate. Transports (`transport_ws` #54, `transport_can` #55) are still later-phase and not in this component. Report build issues on [#64](https://github.com/avatarsd-llc/libtracer/issues/64).
+**Built in CI.** The `inprocess_mirror` example compiles and links the P0 in-process core as a managed component in the `espressif/idf:release-v5.3` image, for **esp32c6** (the required single-core RISC-V target) and **esp32c3** — see [`.github/workflows/esp-idf.yml`](../../.github/workflows/esp-idf.yml) and [#64](https://github.com/avatarsd-llc/libtracer/issues/64). A clean `idf.py build` (a produced `.elf`/`.bin`) is the gate. The same workflow also builds and **runs** `host_smoke` for the **`linux`** (POSIX host) target (g++-12 selected for C++23 `<expected>`), gating the host_test path. Transports (`transport_ws` #54, `transport_can` #55) are still later-phase and not in this component. Report build issues on [#64](https://github.com/avatarsd-llc/libtracer/issues/64).
 
 ## Files
 
 - `libtracer/CMakeLists.txt` — the ESP-IDF component definition (`idf_component_register`); its folder basename is the component name.
-- `libtracer/idf_component.yml` — component manifest for the ESP Component Registry.
-- `examples/inprocess_mirror/` — the CI-built smoke app (register / write / read / await).
+- `libtracer/idf_component.yml` — component manifest for the ESP Component Registry (targets: esp32 / esp32s3 / esp32c3 / esp32c6 / linux).
+- `examples/inprocess_mirror/` — the CI-built esp32 smoke app (register / write / read / await on FreeRTOS).
+- `examples/host_smoke/` — the CI-built **linux**-target smoke app (register / write / read; no FreeRTOS / no `esp_log`), for host_test consumers.
