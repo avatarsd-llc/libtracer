@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# Defaults for the libtracer P0 in-process smoke app.
+#
+# C++ exceptions and RTTI are intentionally left at the ESP-IDF default (OFF):
+# the libtracer reference core is exception-free and RTTI-free in its data path
+# (it returns std::expected, never throws; uses no typeid/dynamic_cast), so the
+# P0 profile links clean under -fno-exceptions -fno-rtti. Do not enable them on
+# the core's account.
+
+# Give app_main a little extra stack — the in-process graph touches std::
+# containers (unordered_map / vector) during register/write.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

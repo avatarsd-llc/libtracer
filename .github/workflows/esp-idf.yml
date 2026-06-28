@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# On-silicon build gate for the integrations/esp-idf component. Builds the
+# inprocess_mirror example (the libtracer P0 in-process profile) for a real
+# RISC-V target inside the official espressif/idf Docker image. A clean
+# `idf.py build` (a produced .bin/.elf, no errors) IS the gate — it proves
+# libtracer's L0/L1/L2/L4 core compiles and links as an ESP-IDF managed
+# component on single-core FreeRTOS, including the <atomic> segment-refcount path.
+#
+# This is a SEPARATE, standalone workflow (mirroring can-vcan-e2e.yml): the
+# required core gates (build-test / sanitizers / format / doxygen) must never
+# depend on the multi-GB ESP-IDF toolchain image. esp32c6 is the required
+# target; esp32c3 is matrixed as a second RISC-V single-core check.
+name: esp-idf
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "integrations/esp-idf/**"
+      - "core/src/**"
+      - "core/include/**"
+      - ".github/workflows/esp-idf.yml"
+  pull_request:
+    paths:
+      - "integrations/esp-idf/**"
+      - "core/src/**"
+      - "core/include/**"
+      - ".github/workflows/esp-idf.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    # Pinned ESP-IDF release (GCC 13 toolchain — C++23: std::expected, std::span).
+    container: espressif/idf:release-v5.3
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32c6, esp32c3]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build inprocess_mirror (P0 in-process component) for ${{ matrix.target }}
+        shell: bash
+        working-directory: integrations/esp-idf/examples/inprocess_mirror
+        # The container ships the IDF tools; source the export script, then build.
+        run: |
+          . "${IDF_PATH}/export.sh"
+          idf.py set-target ${{ matrix.target }}
+          idf.py build
+
+      - name: Show build artifacts
+        if: always()
+        shell: bash
+        working-directory: integrations/esp-idf/examples/inprocess_mirror
+        run: |
+          ls -la build/*.bin build/*.elf 2>/dev/null || true
