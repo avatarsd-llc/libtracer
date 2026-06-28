@@ -35,6 +35,13 @@ target_link_libraries(ws_test PRIVATE libtracer)
 libtracer_test_warnings(ws_test)
 add_test(NAME ws COMMAND ws_test)
 
+# #55 — transport_can pure framing layer (29-bit ID codec, view_can_frames,
+# mem_can_reassembly, advertise codec; no SocketCAN). Links libtracer for heap_alloc.
+add_executable(can_frames_test can_frames_test.cpp)
+target_link_libraries(can_frames_test PRIVATE libtracer)
+libtracer_test_warnings(can_frames_test)
+add_test(NAME can_frames COMMAND can_frames_test)
+
 # #81-A — per-endpoint :acl structural storage (store/serve raw ACL TLV; no enforcement).
 add_executable(acl_test acl_test.cpp)
 target_link_libraries(acl_test PRIVATE libtracer)
