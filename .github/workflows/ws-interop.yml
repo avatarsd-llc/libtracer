@@ -57,3 +57,38 @@ jobs:
         env:
           LIBTRACER_WS_INTEROP_SERVER: ${{ github.workspace }}/core/build/tests/ws_interop_server
         run: npm test
+
+  # Differential fuzzer for the RFC 6455 frame DECODER — the network-facing attack
+  # surface that parses untrusted bytes (FIN/opcode, 7/16/64-bit length, client
+  # mask, the overflow-safe 64-bit-over-long path) BEFORE the TLV layer. Builds the
+  # C++ ws_fuzz_harness, builds the TS codec, and feeds thousands of well-formed +
+  # adversarial frames to BOTH decoders, asserting they agree and neither crashes
+  # (tests/conformance/ws_diff_fuzz.py). Standalone, like the interop job above — it
+  # must never gate the required core jobs (build-test / sanitizers / format /
+  # doxygen) on a Node toolchain.
+  ws-diff-fuzz:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the C++ ws_fuzz_harness
+        run: |
+          cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build core/build --target ws_fuzz_harness -j
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: bindings/typescript/package-lock.json
+
+      - name: Install + build the TypeScript workspace
+        working-directory: bindings/typescript
+        run: |
+          npm ci
+          npm run build
+
+      - name: Differential-fuzz the C++ and TS ws frame decoders
+        env:
+          LIBTRACER_WS_FUZZ_HARNESS: ${{ github.workspace }}/core/build/tests/ws_fuzz_harness
+        run: python3 tests/conformance/ws_diff_fuzz.py -n 2000
