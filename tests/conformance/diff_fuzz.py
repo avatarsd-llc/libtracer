@@ -35,13 +35,18 @@ Design (deterministic + reproducible):
   3. N seeds (default 1000, ``--seeds``). On ANY mismatch the seed + every
      core's hex frame is printed and the run exits 1; otherwise a summary + exit 0.
 
-Stdlib only. Reuses the harness-discovery convention of run-all.py (the C++
-binary is found via $LIBTRACER_CXX_HARNESS or the common build paths).
+Stdlib only. The per-core harness invocations are sourced from the SAME
+``harnesses.json`` registry that run-all.py uses (the single source of truth), so
+the two drivers can never drift on a harness path again. The registry pins each
+core's TAP invocation; diff-fuzz swaps that core's mode to ``--roundtrip`` (the C++
+harness is still located via $LIBTRACER_CXX_HARNESS or the common build paths).
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -49,25 +54,13 @@ from random import Random
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent  # tests/conformance -> repo root
+REGISTRY = HERE / "harnesses.json"  # shared with run-all.py — single source of truth.
 
 # Same fallbacks run-all.py uses to locate the built C++ harness.
 CXX_FALLBACKS = [
     REPO / "build" / "tests" / "conformance_runner",
     REPO / "core" / "build" / "tests" / "conformance_runner",
     Path("/tmp/lt-build/tests/conformance_runner"),
-]
-TS_HARNESS = REPO / "bindings" / "typescript" / "conformance" / "harness.mjs"
-RUST_MANIFEST = REPO / "bindings" / "rust" / "Cargo.toml"
-# The native Rust core runs as a cargo example (built on demand; no external deps).
-RUST_CMD = [
-    "cargo",
-    "run",
-    "--quiet",
-    "--manifest-path",
-    str(RUST_MANIFEST),
-    "--example",
-    "conformance",
-    "--",
 ]
 
 # Valid core type codes (0x05 retired). The codec accepts any nonzero type
@@ -173,11 +166,57 @@ def gen_frame(seed: int) -> bytes:
 
 
 # --------------------------------------------------------------- driver ---
-def find_cxx_harness() -> str | None:
-    env = os.environ.get("LIBTRACER_CXX_HARNESS")
-    if env and Path(env).exists():
-        return env
-    return next((str(p) for p in CXX_FALLBACKS if p.exists()), None)
+def _expand(cmd: list[str]) -> list[str] | None:
+    """Expand ``${ENV}`` tokens (same convention as run-all.py); resolve the C++
+    harness from $LIBTRACER_CXX_HARNESS or the common build fallbacks. Returns None
+    if a required token cannot be resolved (harness unavailable)."""
+    out = []
+    for tok in cmd:
+        m = re.fullmatch(r"\$\{([A-Z_][A-Z0-9_]*)\}", tok)
+        if m:
+            val = os.environ.get(m.group(1))
+            if not val and m.group(1) == "LIBTRACER_CXX_HARNESS":
+                val = next((str(p) for p in CXX_FALLBACKS if p.exists()), None)
+            if not val:
+                return None
+            out.append(val)
+        else:
+            out.append(tok)
+    return out
+
+
+def roundtrip_cmds() -> dict[str, list[str] | None]:
+    """Per-core ``--roundtrip`` invocations, derived from harnesses.json — the
+    single registry run-all.py also reads, so the harness path (the bit that
+    drifted) lives in exactly one place. The registry stores each core's TAP
+    invocation; for diff-fuzz we swap the mode to ``--roundtrip``: replace a
+    trailing ``--tap`` flag, or append when TAP mode is positional (ts/rust read a
+    vectors dir there). A value of None means that core is unavailable."""
+    reg = json.loads(REGISTRY.read_text())
+    cmds: dict[str, list[str] | None] = {}
+    for h in reg["harnesses"]:
+        if not h.get("enabled", False):
+            continue
+        base = _expand(h["cmd"])
+        if base is None:
+            cmds[h["name"]] = None
+            continue
+        if base and base[-1] == "--tap":
+            base = base[:-1]
+        cmds[h["name"]] = base + ["--roundtrip"]
+    return cmds
+
+
+def _missing_registry_paths(cmd: list[str]) -> list[str]:
+    """Registry-listed harness file paths (``.mjs`` / ``Cargo.toml``) in cmd that
+    don't exist on disk — resolved against the repo root, matching run_core's cwd."""
+    missing = []
+    for tok in cmd:
+        if tok.endswith((".mjs", ".toml")):
+            p = Path(tok) if Path(tok).is_absolute() else REPO / tok
+            if not p.exists():
+                missing.append(str(p))
+    return missing
 
 
 def run_core(cmd: list[str], frames_hex: list[str]) -> list[str]:
@@ -205,28 +244,32 @@ def main() -> int:
     ap.add_argument("--max-fails", type=int, default=10, help="stop reporting after this many mismatches")
     args = ap.parse_args()
 
-    cxx = find_cxx_harness()
-    if cxx is None:
+    cmds = roundtrip_cmds()
+    cpp_cmd, ts_cmd, rust_cmd = cmds.get("cpp"), cmds.get("ts"), cmds.get("rust")
+    if cpp_cmd is None:
         print(
             "C++ harness not found. Build core/ (conformance_runner) or set "
             "$LIBTRACER_CXX_HARNESS.",
             file=sys.stderr,
         )
         return 2
-    if not TS_HARNESS.exists():
-        print(f"TS harness not found at {TS_HARNESS}", file=sys.stderr)
-        return 2
-    if not RUST_MANIFEST.exists():
-        print(f"Rust core manifest not found at {RUST_MANIFEST}", file=sys.stderr)
-        return 2
+    for name, cmd in (("ts", ts_cmd), ("rust", rust_cmd)):
+        if cmd is None:
+            print(f"{name} core unavailable (unresolved harness command)", file=sys.stderr)
+            return 2
+        missing = _missing_registry_paths(cmd)
+        if missing:
+            print(f"{name} harness not found at {', '.join(missing)}", file=sys.stderr)
+            return 2
+    cxx = cpp_cmd[0]  # resolved C++ binary, for the summary line.
 
     seeds = list(range(args.start, args.start + args.seeds))
     frames = [gen_frame(s) for s in seeds]
     frames_hex = [f.hex() for f in frames]
 
-    cpp_out = run_core([cxx, "--roundtrip"], frames_hex)
-    ts_out = run_core(["node", str(TS_HARNESS), "--roundtrip"], frames_hex)
-    rust_out = run_core(RUST_CMD + ["--roundtrip"], frames_hex)
+    cpp_out = run_core(cpp_cmd, frames_hex)
+    ts_out = run_core(ts_cmd, frames_hex)
+    rust_out = run_core(rust_cmd, frames_hex)
 
     mismatches = 0
     for seed, want, cpp, ts, rust in zip(seeds, frames_hex, cpp_out, ts_out, rust_out):
