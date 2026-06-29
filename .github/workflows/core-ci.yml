@@ -24,6 +24,30 @@ jobs:
           cmake --build core/build -j
           ctest --test-dir core/build --output-on-failure
 
+  # GCC-15 host gate: build the core + ctest with GCC 15 (the same major the
+  # ESP-IDF v6.0 RISC-V toolchain ships), so the core is gated on the compiler
+  # the MCU actually uses — catches toolchain-version-specific issues (e.g. the
+  # FNV-1a 64-bit-constant overflow on 32-bit size_t GCC 15 newly -Werror's).
+  # GCC 15 is not in ubuntu-24.04's default repos; the toolchain test PPA carries it.
+  build-test-gcc15:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install g++-15
+        run: |
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++-15 gcc-15
+      - name: Configure + build (C++23, GCC 15) + ctest
+        env:
+          CC: gcc-15
+          CXX: g++-15
+        run: |
+          cmake -S core -B core/build-gcc15 -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=gcc-15 -DCMAKE_CXX_COMPILER=g++-15
+          cmake --build core/build-gcc15 -j
+          ctest --test-dir core/build-gcc15 --output-on-failure
+
   sanitizers:
     runs-on: ubuntu-24.04
     steps:
