@@ -271,9 +271,9 @@ Section walked through with the canvas as the running example.
 
 ### Step 1 — Configuration
 
-A host hosts the canvas. Its config selects a vertex role and the transports that should carry traffic to/from it:
+A host hosts the canvas. Its config selects a vertex role and the transports that should carry traffic to/from it (illustrative config, TOML-like):
 
-```toml
+```ini
 [[vertex]]
 path = "/canvas"
 role = "sink_with_model"

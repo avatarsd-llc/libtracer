@@ -5,9 +5,11 @@
 **`transport_t`** is the seam between the bridge and one wire technology: `send`
 framed bytes (single buffer **or** a scatter-gather `iovec`), register a
 `receiver_t` for inbound frames. It never sees TLV semantics — only bytes.
-Implementations: **`loopback_channel_t`** (in-process dev/test) and
-**`udp_transport_t`** (real localhost/LAN UDP, M5). A reliable byte-stream
-transport (TCP/QUIC) is the remaining M6 work.
+Implementations: **`loopback_channel_t`** (in-process dev/test),
+**`udp_transport_t`** (localhost/LAN UDP), **`transport_ws_client` /
+`transport_ws_server`** (the browser↔robot WebSocket keystone, RFC 6455), and
+**`transport_can`** (SocketCAN, classic + CAN-FD). A reliable byte-stream
+transport (TCP/QUIC) remains future work.
 ```
 
 ## What it does
