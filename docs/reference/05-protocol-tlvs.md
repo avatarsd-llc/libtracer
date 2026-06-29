@@ -185,6 +185,26 @@ When a SUBSCRIBER is written into `<vertex>:subscribers[N]` over a transport (an
 
 A **transient-local** producer (`:settings.durability == 1`, [02-graph-model.md](02-graph-model.md)) additionally **latches** its current value to a *fresh* subscriber: the subscribe itself emits one immediate delivery of the vertex's last-known value, so a late joiner paints the current state without waiting for the next write. A `volatile` producer (the default, `durability == 0`) delivers only writes that happen after the subscribe. The latch reuses the same delivery path (full-route or `COMPACT`); it carries no new wire bytes, so it is observable only as delivery *timing* and adds no conformance vector.
 
+The producer fan-out, end to end — the subscribe binds a remote subscriber, the transient-local latch fires immediately, and later writes stream out (auto-promoted to lean `COMPACT` when the subscriber opted in):
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant Cons as Consumer
+    participant Prod as Producer node
+    participant V as Vertex (transient-local)
+    Cons->>Prod: FWD{WRITE, dst=/V, :subscribers[], src=/cons,<br/>SUBSCRIBER{ delivery_compact=1 }}
+    Prod->>V: add_remote_subscriber<br/>(retain return_route=/cons + inbound link)
+    Note over Prod,V: durability==1 ⇒ latch the current LKV
+    Prod-->>Cons: FWD{WRITE, dst=/cons, VALUE}  (delivery #1 — the latch)
+    Prod-->>Cons: FWD{REPLY} (subscribe ack)
+    Note over V,Prod: later — a local write fans out via the injected sink
+    V->>Prod: write(new VALUE) → fan_out → remote sink
+    Prod-->>Cons: ADVERTISE{ label, route=/cons }  (once per flow)
+    Prod-->>Cons: COMPACT{ label, VALUE }          (then lean frames…)
+    Prod-->>Cons: COMPACT{ label, VALUE }
+```
+
 ### Where it appears
 
 - `<vertex>:subscribers[N]` slot, one per subscription.
@@ -680,6 +700,37 @@ Allocated on a fast-track basis during v1. Assigned so far:
 - `0x11`–`0x13` — the **route-handle transport-plane control frames** (below).
 
 Still unassigned: `0x14`–`0x1F`. Candidate uses: `CAPABILITY` (opaque token, lighter than full ACL), `HEARTBEAT` (explicit liveness ping, currently subsumed by writes to `:liveness.last_seen_ns`). Receivers MUST handle unknown codes in this range per the forward-compatibility rules of [01-data-format.md](01-data-format.md) §forward / backward compatibility.
+
+A single-hop `FWD` request → reply round-trip (the consumer reaches a terminus node directly). The reply's `dst` is the request's `src`; a failure comes back as `kind=ERROR` carrying `STATUS{ ERROR }`:
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant C as Consumer (client)
+    participant N as Node (op_resolver_t)
+    participant V as Vertex
+    C->>N: FWD{ op=READ, dst=/sensor/temp, src=/client }
+    N->>V: resolve dst → local vertex; read LKV
+    V-->>N: view_t (zero-copy refcount clone)
+    N-->>C: FWD{ op=REPLY, dst=/client, kind=RESULT, VALUE }
+    Note over C,N: WRITE/AWAIT/subscribe ride the same shape;<br/>an error returns kind=ERROR + STATUS{ERROR}
+```
+
+Across hops, `FWD` is **source-routed and stateless**: each forwarder strips the leading `dst` segment (the next link) and prepends its name for the inbound link to `src` (a zero-copy rope head-prepend), so `dst` shrinks toward the target while `src` grows into the return route. A `REPLY` retraces that accumulated `src` and does **not** itself accumulate:
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant C as Consumer
+    participant A as Forwarder A
+    participant B as Producer B
+    C->>A: FWD{ dst=A·B·temp, src=C }
+    Note over A: strip leading dst (A); prepend inbound link to src
+    A->>B: FWD{ dst=B·temp, src=A·C }
+    Note over B: first dst segment is local ⇒ terminus
+    B-->>A: FWD{ op=REPLY, dst=A·C }
+    A-->>C: FWD{ op=REPLY, dst=C, VALUE }
+```
 
 ### Route-handle frames — `0x11` ADVERTISE, `0x12` COMPACT, `0x13` HANDLE_NACK
 
