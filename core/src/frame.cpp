@@ -10,6 +10,7 @@
 
 #include "libtracer/byteorder.hpp"
 #include "libtracer/crc.hpp"
+#include "libtracer/tlv_emit.hpp"
 
 namespace tr::wire {
 namespace {
@@ -203,11 +204,17 @@ std::vector<std::byte> encode(const tlv_t& tlv) {
 }
 
 std::vector<std::byte> path_key(const tlv_t& path) {
+    // The canonical PATH-payload key = the concatenated NAME-child encodings. Emit each
+    // NAME TLV in place (detail::emit_name appends `02 00 <len> <bytes>` directly) instead
+    // of encode()-per-child into a temporary vector — one reserve + N appends, no per-
+    // segment allocation. A PATH's children are plain NAMEs (opt 0, no trailer), so this
+    // is byte-identical to encode(name); and it matches what path_t/register_vertex store
+    // (which also use emit_name), so the vertex-map key round-trips exactly.
     std::vector<std::byte> key;
-    for (const tlv_t& name : path.children) {
-        const std::vector<std::byte> enc = encode(name);  // a NAME TLV: 02 00 <len> <bytes>
-        key.insert(key.end(), enc.begin(), enc.end());
-    }
+    std::size_t total = 0;
+    for (const tlv_t& name : path.children) total += 4 + name.payload.size();
+    key.reserve(total);
+    for (const tlv_t& name : path.children) detail::emit_name(key, name.payload);
     return key;
 }
 
