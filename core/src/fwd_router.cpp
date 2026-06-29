@@ -137,11 +137,8 @@ void fwd_router_t::send_compact(std::string_view link_name, std::uint16_t label,
 }
 
 transport_t* fwd_router_t::child_by_segment(std::span<const std::byte> seg) const {
-    for (const child_t& c : children_) {
-        if (c.name.size() == seg.size() && std::memcmp(c.name.data(), seg.data(), seg.size()) == 0)
-            return c.link;
-    }
-    return nullptr;
+    // A child NAME is matched by its bytes — defer to the one scan in link_by_name.
+    return link_by_name(std::string_view(reinterpret_cast<const char*>(seg.data()), seg.size()));
 }
 
 transport_t* fwd_router_t::link_by_name(std::string_view name) const {
@@ -387,14 +384,8 @@ bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
                                  std::span<const std::byte> payload) {
     const auto route = wire::decode(route_path);
     if (!route || route->type != type_t::PATH) return false;
-    // The canonical PATH key (concatenated NAME encodings) — the graph vertex-map
-    // key, mirroring op_resolve.cpp's path_tlv_key.
-    std::vector<std::byte> key;
-    for (const tlv_t& name : route->children) {
-        const std::vector<std::byte> enc = wire::encode(name);
-        key.insert(key.end(), enc.begin(), enc.end());
-    }
-    graph::vertex_t* const v = graph_.find(key);
+    // The canonical PATH key (concatenated NAME encodings) — the graph vertex-map key.
+    graph::vertex_t* const v = graph_.find(wire::path_key(*route));
     if (v == nullptr) return false;
     segment_ptr_t seg = view::heap_alloc(payload.size());
     if (!seg) return false;

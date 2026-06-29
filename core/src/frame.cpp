@@ -201,6 +201,15 @@ std::vector<std::byte> encode(const tlv_t& tlv) {
     return out;
 }
 
+std::vector<std::byte> path_key(const tlv_t& path) {
+    std::vector<std::byte> key;
+    for (const tlv_t& name : path.children) {
+        const std::vector<std::byte> enc = encode(name);  // a NAME TLV: 02 00 <len> <bytes>
+        key.insert(key.end(), enc.begin(), enc.end());
+    }
+    return key;
+}
+
 bool equal(const tlv_t& a, const tlv_t& b) noexcept {
     if (a.type != b.type || a.opt != b.opt || a.trailer != b.trailer) return false;
     if (!std::ranges::equal(a.payload, b.payload)) return false;
