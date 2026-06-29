@@ -6,6 +6,7 @@
 #include "libtracer/frame.hpp"
 
 #include <algorithm>
+#include <utility>
 
 #include "libtracer/byteorder.hpp"
 #include "libtracer/crc.hpp"
@@ -170,7 +171,7 @@ std::vector<std::byte> encode(const tlv_t& tlv) {
     }
 
     std::vector<std::byte> out;
-    out.push_back(static_cast<std::byte>(static_cast<std::uint8_t>(tlv.type)));
+    out.push_back(static_cast<std::byte>(std::to_underlying(tlv.type)));
     out.push_back(static_cast<std::byte>(tlv.opt.encode()));
     write_le(out, body.size(), tlv.opt.ll ? 4u : 2u);
     out.insert(out.end(), body.begin(), body.end());

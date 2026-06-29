@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <span>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
@@ -30,7 +31,7 @@ using wire::type_t;
 inline void emit_tlv(std::vector<std::byte>& out, type_t type, opt_t opt,
                      std::span<const std::byte> body) {
     if (body.size() > 0xFFFFu) opt.ll = true;
-    out.push_back(static_cast<std::byte>(static_cast<std::uint8_t>(type)));
+    out.push_back(static_cast<std::byte>(std::to_underlying(type)));
     out.push_back(static_cast<std::byte>(opt.encode()));
     append_le(out, static_cast<std::uint32_t>(body.size()), opt.ll ? 4u : 2u);
     out.insert(out.end(), body.begin(), body.end());
