@@ -141,6 +141,21 @@ Effects after the subscribe write returns:
 
 The SUBSCRIBER TLV layout is defined in [05-protocol-tlvs.md](05-protocol-tlvs.md) §`SUBSCRIBER`.
 
+There is no `subscribe()` verb — a subscription **is** a control-plane field-write of a `SUBSCRIBER` into `:subscribers[]`. Over a transport the same write arrives as a `FWD{WRITE}` and binds a *remote* subscriber, after which the producer fan-out streams deliveries back (see [05 §Producer fan-out](05-protocol-tlvs.md#producer-fan-out-to-remote-subscribers)):
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant App as Subscriber
+    participant N as Producer node
+    participant V as /sensor/temp
+    App->>N: write("/sensor/temp:subscribers[]",<br/>SUBSCRIBER{ target, qos })
+    N->>V: field_write → store SUBSCRIBER at slot N
+    V-->>N: ok
+    N-->>App: ack (FWD{REPLY} when remote)
+    Note over App,V: future writes to /sensor/temp fan out to the slot —<br/>local re-dispatch, or FWD{WRITE}/COMPACT to a remote subscriber
+```
+
 ---
 
 ## Unsubscribe (via field-write)
