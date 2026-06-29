@@ -76,22 +76,20 @@ std::expected<parsed_t, error_t> parse_one(std::span<const std::byte> buf) {
             const std::span<const std::byte> ts_bytes = buf.subspan(header + length, ts_size);
             const std::size_t crc_off = header + length + ts_size;
 
-            std::vector<std::byte> covered;
-            covered.reserve(payload.size() + ts_bytes.size());
-            covered.insert(covered.end(), payload.begin(), payload.end());
-            covered.insert(covered.end(), ts_bytes.begin(), ts_bytes.end());
-
+            // CRC over payload ++ ts_bytes — the two-span overloads feed the CRC
+            // state across both spans without concatenating them into a fresh
+            // `covered` buffer (no per-frame heap allocation + payload copy).
             crc_t c;
             if (opt.cw) {
                 c.width = crc_t::width_t::CRC16_CCITT;
                 c.value = static_cast<std::uint32_t>(read_le(buf, crc_off, 2));
-                if (crc::crc16_ccitt(covered) != static_cast<std::uint16_t>(c.value)) {
+                if (crc::crc16_ccitt(payload, ts_bytes) != static_cast<std::uint16_t>(c.value)) {
                     return std::unexpected(error_t::FRAME_CRC_FAIL);
                 }
             } else {
                 c.width = crc_t::width_t::CRC32C;
                 c.value = static_cast<std::uint32_t>(read_le(buf, crc_off, 4));
-                if (crc::crc32c(covered) != c.value) {
+                if (crc::crc32c(payload, ts_bytes) != c.value) {
                     return std::unexpected(error_t::FRAME_CRC_FAIL);
                 }
             }
@@ -190,14 +188,12 @@ std::vector<std::byte> encode(const tlv_t& tlv) {
         out.insert(out.end(), ts_bytes.begin(), ts_bytes.end());
     }
     if (tlv.opt.cr) {
-        std::vector<std::byte> covered;
-        covered.reserve(body.size() + ts_bytes.size());
-        covered.insert(covered.end(), body.begin(), body.end());
-        covered.insert(covered.end(), ts_bytes.begin(), ts_bytes.end());
+        // CRC over body ++ ts_bytes via the two-span overloads — no `covered`
+        // concatenation buffer (byte-identical: CRC is associative over the feed).
         if (tlv.opt.cw) {
-            write_le(out, crc::crc16_ccitt(covered), 2);
+            write_le(out, crc::crc16_ccitt(body, ts_bytes), 2);
         } else {
-            write_le(out, crc::crc32c(covered), 4);
+            write_le(out, crc::crc32c(body, ts_bytes), 4);
         }
     }
     return out;
