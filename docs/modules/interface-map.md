@@ -95,6 +95,10 @@ role slots in without touching the others.
 
 ## What is implemented vs. planned
 
-See the [module roadmap](../reference/10-module-catalog.md) — the green nodes above
-are built (M1–M4); `transport`'s socket implementation is **M5**, and the wider
-backend/view/transport catalog (pbuf, DMA, TCP, CAN, discovery, security) follows.
+See the [module roadmap](../reference/10-module-catalog.md). The graph + bridge core
+(M1–M4) is built; the socket transports landed too — **WebSocket** (`transport_ws`,
+the browser↔robot keystone), **UDP** (`udp_transport_t`), and **CAN** (`transport_can`,
+SocketCAN). The RFC-0004 remote-operation plane (`op_resolver_t`, `fwd_router_t`,
+`route_handle_t` — path-addressed `read`/`write`/`await`/`subscribe` over `FWD`) is
+built on top of those. Still ahead: a reliable byte-stream transport (TCP/QUIC), and
+the wider backend/discovery/security catalog (pbuf, DMA, mDNS, TLS).

@@ -61,6 +61,7 @@ is descriptive; the design rationale (ADRs) and proposals (RFCs) live in the
 /docs/reference/11-vertex-roles-and-aggregation
 /docs/reference/12-deployment-profiles
 /docs/reference/13-network-formation
+/docs/reference/14-can-transport
 /docs/reference/README
 ```
 

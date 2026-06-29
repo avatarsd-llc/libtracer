@@ -18,7 +18,7 @@ This catalog is the source of truth for **what gets built and how it composes**.
 | Tag | Meaning |
 | ---- | ---- |
 | `required` | Every conforming node loads this. Loaded even at conformance profile P0. |
-| `transport` | Implements `tr::Transport` — one wire technology (TCP, CAN, …). |
+| `transport` | Implements `tr::net::transport_t` — one wire technology (WebSocket, UDP, CAN, …). |
 | `discovery` | Provides a `discovery_vtable_t` — peer announcement and resolution. |
 | `security` | Wraps a transport with confidentiality / integrity / auth. |
 | `executor` | Hosts vertex-side compute (C callbacks, scripting, WASM). |
@@ -177,7 +177,7 @@ Each adjacent layer pair has a small contract. The interfaces are uniform — a 
 
 ### Module ABI (implementation-defined)
 
-The module ABI — the reference C++23 seams below (`tr::Transport`, `tr::mem::mem_backend_t`, and the implementation's `abi_version`) — is **deliberately** an **implementation** concern, not a protocol property ([ADR-0013](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0013-v1-scope-boundaries.md)). The seams shown here are the **reference implementation's**, not a normative cross-language ABI. Two conforming implementations need not share it; what they share is the wire format ([01-data-format.md](01-data-format.md)) and addressing ([03-addressing.md](03-addressing.md)). A node assembled from one toolchain's modules interoperates over the wire with any other node, regardless of ABI.
+The module ABI — the reference C++23 seams below (`tr::net::transport_t`, `tr::mem::mem_backend_t`, and the implementation's `abi_version`) — is **deliberately** an **implementation** concern, not a protocol property ([ADR-0013](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0013-v1-scope-boundaries.md)). The seams shown here are the **reference implementation's**, not a normative cross-language ABI. Two conforming implementations need not share it; what they share is the wire format ([01-data-format.md](01-data-format.md)) and addressing ([03-addressing.md](03-addressing.md)). A node assembled from one toolchain's modules interoperates over the wire with any other node, regardless of ABI.
 
 Within a single implementation the ABI is declared **semver-stable**: the library exports a `tracer_abi_version` symbol, and every breaking change to a vtable layout or `abi_version` field bumps it. Loaders refuse modules whose `abi_version` does not match.
 
@@ -286,33 +286,38 @@ When a TLV arrives at the dispatcher, the registry tells the graph runtime what 
 - `ROUTER` arriving via a transport → bridge's responsibility (shed envelope, dedup).
 - Unknown user-range types with `PL=1` → store as opaque structured data; subscribers see what they handle.
 
-### Transport ↔ L4: `tr::Transport`
+### Transport ↔ L4: `tr::net::transport_t`
 
 The transport seam is a small callback-based C++23 base class — one frame in, one frame out. A transport is **byte-level**: a frame is the contiguous bytes of one complete TLV. It never sees the ROUTER envelope or any TLV semantics — wrapping/stripping ROUTER is the bridge's job.
 
 ```cpp
-namespace tr {
+namespace tr::net {
 
 // A 16-byte node/peer identity — the ROUTER origin_peer_id (05 §0x0D ROUTER).
 using peer_id_t = std::array<std::byte, 16>;
 
-class Transport {
+class transport_t {
    public:
-    using Receiver = std::function<void(std::span<const std::byte>)>;
-    virtual ~Transport() = default;
+    using receiver_t = std::function<void(std::span<const std::byte>)>;
+    virtual ~transport_t() = default;
 
     // Emit one frame (a complete TLV's bytes) onto the wire.
     virtual void send(std::span<const std::byte> frame) = 0;
 
+    // Scatter-gather send: emit the gathered spans as ONE frame, no flatten copy
+    // (a rope's to_iovec() goes straight to the wire). The default gathers into a
+    // temporary; transports with native sendmsg/writev override it.
+    virtual void send(std::span<const std::span<const std::byte>> iov);
+
     // Register the sink for inbound frames (the bridge's ingest). Must be set
     // before frames flow; delivery may occur on an internal transport thread.
-    virtual void set_receiver(Receiver receiver) = 0;
+    virtual void set_receiver(receiver_t receiver) = 0;
 };
 
-}  // namespace tr
+}  // namespace tr::net
 ```
 
-`send` takes one frame — the contiguous bytes of a complete TLV, already ROUTER-wrapped by the bridge. Inbound frames are delivered to the `Receiver` the bridge registered via `set_receiver` (possibly on an internal transport thread). Where a payload physically lives as a `rope_t` scattered across segments, the bridge lowers it to this seam at the egress boundary: a scatter-gather-capable transport consumes the rope's `to_iovec()` directly, while a contiguous-only transport receives a single frame the bridge produced via `rope_t::flatten()` (one copy at egress). The transport itself sees only framed bytes.
+`send` takes one frame — the contiguous bytes of a complete TLV, already ROUTER-wrapped by the bridge. Inbound frames are delivered to the `receiver_t` the bridge registered via `set_receiver` (possibly on an internal transport thread). Where a payload physically lives as a `rope_t` scattered across segments, the bridge lowers it to this seam at the egress boundary: a scatter-gather-capable transport consumes the rope's `to_iovec()` directly, while a contiguous-only transport receives a single frame the bridge produced via `rope_t::flatten()` (one copy at egress). The transport itself sees only framed bytes.
 
 ### Application ↔ L4: path-handle entry points
 

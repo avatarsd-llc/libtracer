@@ -6,7 +6,7 @@
 
 ## What this document is
 
-libtracer is a wire and addressing protocol for a **decentralized graph of endpoints**. Hosts publish and subscribe to **paths**; the underlying transport is whatever is loaded as a module (TCP, UDP, CAN, I²C, SHM, RDMA — all opt-in). The protocol is **language-agnostic**: the reference implementation is in C23, but any C++17, Rust, Zig, or Go implementation that honors this spec interoperates byte-for-byte.
+libtracer is a wire and addressing protocol for a **decentralized graph of endpoints**. Hosts publish and subscribe to **paths**; the underlying transport is whatever is loaded as a module (TCP, UDP, CAN, I²C, SHM, RDMA — all opt-in). The protocol is **language-agnostic**: the reference implementation is in C++23, but any C++17, Rust, Zig, or Go implementation that honors this spec interoperates byte-for-byte.
 
 The remaining sections of this reference suite specify byte format, graph semantics, addressing, communication flows, protocol-defined TLVs, user-data packing, and how a host's local view embeds into the global network.
 
@@ -167,7 +167,7 @@ This framing matters because the so-called "core" itself is a bundle of modules 
 
 The full module catalog — everything across L0..L5 — is in [10-module-catalog.md](10-module-catalog.md), with a pairing table that says which L0 backends pair with which L1 view modules pair with which transports.
 
-A node's footprint is the sum of its loaded modules. The reference implementation targets ≤ 16 KB stripped (required modules only) on `arm-none-eabi-gcc -std=c23 -Os`. (A build-size sentinel test to enforce this bound in CI is planned, not yet wired.) Adding `transport_tcp` brings ~5 KB on Linux / ~8 KB on Cortex-M (lwIP-dependent). A robot-fleet build pulling in TCP, UDP, mDNS, CAN, TLS lands in the 30–50 KB range; an RC-car build with only one UART transport stays under 25 KB.
+A node's footprint is the sum of its loaded modules. The reference implementation targets ≤ 16 KB stripped (required modules only) on `arm-none-eabi-g++ -std=c++23 -Os -fno-exceptions -fno-rtti`. (A build-size sentinel test to enforce this bound in CI is planned, not yet wired.) Adding `transport_tcp` brings ~5 KB on Linux / ~8 KB on Cortex-M (lwIP-dependent). A robot-fleet build pulling in TCP, UDP, mDNS, CAN, TLS lands in the 30–50 KB range; an RC-car build with only one UART transport stays under 25 KB.
 
 The module ABI itself is an **implementation** concern, not a protocol property — two implementations need not share a module ABI; they need to share the wire format, addressing scheme, and flows. See [10-module-catalog.md](10-module-catalog.md) §module ABI for the reference C ABI.
 
@@ -175,7 +175,7 @@ The module ABI itself is an **implementation** concern, not a protocol property 
 
 ## Implementation-language portability
 
-The reference implementation is C23 (chosen for `_BitInt`, `<stdbit.h>`, `<stdckdint.h>`, `nullptr`, `constexpr`, `[[nodiscard]]`, `[[gnu::packed]]`; atomics still through C11 `<stdatomic.h>` carried into C23 unchanged). The choice is pragmatic: C23 produces the smallest portable binary, has the widest MCU toolchain coverage (GCC 13+, Clang 18+, ESP-IDF 5.3+, arm-none-eabi-gcc 14.x), and exposes the cleanest FFI surface for higher-level wrappers.
+The reference implementation is C++23 (chosen for `std::expected`, `std::span`, `std::byte`, designated initializers, `constexpr`, three-way comparison, `[[nodiscard]]`, and `<atomic>`; built `-fno-exceptions -fno-rtti` for the constrained profile). The choice is pragmatic: a freestanding-friendly C++23 subset produces a small portable binary, has broad MCU toolchain coverage (GCC 13+, Clang 18+, ESP-IDF 5.3+, arm-none-eabi-g++ 14.x), and still exposes a clean `extern "C"` FFI surface for higher-level wrappers. The wire format itself is language-neutral, so a C, Rust, or Zig node interoperates byte-for-byte.
 
 The protocol itself is implementable in **any language** with:
 
