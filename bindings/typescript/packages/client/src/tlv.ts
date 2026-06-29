@@ -10,9 +10,9 @@
 //   - encodePath       -> PATH TLV (0x06, PL=1)   : path-sensor-temp + spec/v1.md §3.1
 //   - encodeSubscriber -> SUBSCRIBER TLV (0x04)   : subscriber-path  (the subscribe-write payload)
 //
-// These are the only client byte-products v1 pins. The path-ADDRESSED request
-// envelope (verb + destination vertex:field) is unspecified (spec/v1.md §3 is
-// "to be written") and is deferred per ADR-0034 — it is NOT built here.
+// These are the payload TLVs. The path-ADDRESSED request envelope (verb +
+// destination vertex:field) is the FWD/FIELD frame RFC-0004 (spec §3) fixes — it
+// is built in `./fwd.ts`, not here; these payloads ride inside it.
 
 import { TYPE, encode } from '@avatarsd-llc/libtracer';
 import type { Opt, Tlv } from '@avatarsd-llc/libtracer';
@@ -24,8 +24,14 @@ const RESERVED_SEGMENT_CHARS = /[/:.[\]*?]/;
 
 const utf8 = new TextEncoder();
 
-/** A fully-cleared option byte (all flags false). */
-function opt(over: Partial<Opt> = {}): Opt {
+/**
+ * A fully-cleared option byte (all flags false), with selected flags overridden.
+ * Shared by the payload builders here and the FWD/FIELD builders in `./fwd.ts`.
+ *
+ * @param over flags to set true (e.g. `{ pl: true }` for a structured TLV)
+ * @returns a complete {@link Opt}
+ */
+export function opt(over: Partial<Opt> = {}): Opt {
   return { pl: false, ts: false, cr: false, ll: false, cw: false, tf: false, ...over };
 }
 
@@ -81,7 +87,7 @@ export function encodeValue(value: Uint8Array, opts: ValueOptions = {}): Uint8Ar
  * @returns a NAME TLV node (no trailer)
  * @throws {RangeError} if the segment is empty, over 64 bytes, or holds a reserved char
  */
-function nameTlv(segment: string): Tlv {
+export function nameTlv(segment: string): Tlv {
   if (RESERVED_SEGMENT_CHARS.test(segment)) {
     throw new RangeError(`path segment ${JSON.stringify(segment)} contains a reserved character (/ : . [ ] * ?)`);
   }
@@ -104,8 +110,8 @@ export function encodePath(segments: string[]): Uint8Array {
   return encode(pathTlv(segments));
 }
 
-/** The PATH TLV node (shared by {@link encodePath} and {@link encodeSubscriber}). */
-function pathTlv(segments: string[]): Tlv {
+/** The PATH TLV node (shared by {@link encodePath}, {@link encodeSubscriber}, and `./fwd.ts`). */
+export function pathTlv(segments: string[]): Tlv {
   if (segments.length < 1) throw new RangeError('a path must have at least one segment');
   if (segments.length > 32) throw new RangeError(`a path may have at most 32 segments (got ${segments.length})`);
   return {

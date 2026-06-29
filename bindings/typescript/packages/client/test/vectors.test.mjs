@@ -12,7 +12,19 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { decode, TYPE } from '@avatarsd-llc/libtracer';
-import { LibtracerClient, encodeValue, encodePath, encodeSubscriber } from '../dist/index.js';
+import {
+  LibtracerClient,
+  encodeValue,
+  encodePath,
+  encodeSubscriber,
+  encodeFwd,
+  encodeField,
+  decodeFwd,
+  replyErrorCode,
+  FWD_OP,
+  FWD_KIND,
+  FWD_ERROR,
+} from '../dist/index.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // test/ -> client -> packages -> typescript -> bindings -> repo root
@@ -66,4 +78,66 @@ test('invalid path segments are rejected before any bytes are emitted', () => {
   assert.throws(() => encodePath(['a/b']), /reserved character/);
   assert.throws(() => encodePath(['']), /1\.\.64/);
   assert.throws(() => encodePath(['x'.repeat(65)]), /1\.\.64/);
+});
+
+/* ----------------------------------------------------- RFC-0004 FWD / FIELD --- */
+
+const hex = (b) => Buffer.from(b).toString('hex');
+
+test('encodeFwd matches the fwd-read vector byte-for-byte', () => {
+  const built = encodeFwd({ op: FWD_OP.READ, dst: ['sensor', 'temp'], src: ['reply-ep'] });
+  const expected = vector('fwd/fwd-read');
+  assert.ok(sameBytes(built, expected), `${hex(built)} != ${hex(expected)}`);
+});
+
+test('encodeFwd matches the fwd-write-value vector byte-for-byte', () => {
+  const built = encodeFwd({
+    op: FWD_OP.WRITE,
+    dst: ['sensor', 'temp'],
+    src: ['reply-ep'],
+    payload: encodeValue(new Uint8Array([0xd2, 0x04, 0x00, 0x00])), // VALUE u32 LE 1234
+  });
+  assert.ok(sameBytes(built, vector('fwd/fwd-write-value')), hex(built));
+});
+
+test('encodeFwd matches the fwd-await-timeout vector byte-for-byte (1 s)', () => {
+  const built = encodeFwd({
+    op: FWD_OP.AWAIT,
+    dst: ['sensor', 'temp'],
+    src: ['reply-ep'],
+    awaitTimeoutNs: 1_000_000_000n,
+  });
+  assert.ok(sameBytes(built, vector('fwd/fwd-await-timeout')), hex(built));
+});
+
+test('encodeFwd matches the fwd-write-subscriber-field vector byte-for-byte (subscribe)', () => {
+  const built = encodeFwd({
+    op: FWD_OP.WRITE,
+    dst: ['sensor', 'temp'],
+    field: ':subscribers[]',
+    src: ['reply-ep'],
+    payload: encodeSubscriber(['reply-ep']),
+  });
+  assert.ok(sameBytes(built, vector('fwd/fwd-write-subscriber-field')), hex(built));
+});
+
+test('encodeField matches the field-indexed / field-nested / field-append vectors', () => {
+  assert.ok(sameBytes(encodeField(':subscribers[3]'), vector('field/field-indexed')), 'field-indexed');
+  assert.ok(sameBytes(encodeField(':settings.deadline_ns'), vector('field/field-nested')), 'field-nested');
+  assert.ok(sameBytes(encodeField(':subscribers[]'), vector('field/field-append')), 'field-append');
+});
+
+test('decodeFwd parses the fwd-reply-result vector into op=REPLY, kind=RESULT, VALUE payload', () => {
+  const parsed = decodeFwd(vector('fwd/fwd-reply-result'));
+  assert.equal(parsed.op, FWD_OP.REPLY);
+  assert.equal(parsed.kind, FWD_KIND.RESULT);
+  assert.equal(parsed.payload.type, TYPE.VALUE);
+  assert.ok(sameBytes(parsed.payload.payload, new Uint8Array([0xd2, 0x04, 0x00, 0x00])));
+});
+
+test('decodeFwd parses the fwd-reply-error vector and replyErrorCode reads NOT_FOUND', () => {
+  const parsed = decodeFwd(vector('fwd/fwd-reply-error'));
+  assert.equal(parsed.op, FWD_OP.REPLY);
+  assert.equal(parsed.kind, FWD_KIND.ERROR);
+  assert.equal(replyErrorCode(parsed), FWD_ERROR.NOT_FOUND);
 });

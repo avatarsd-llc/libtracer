@@ -1,8 +1,7 @@
 {
   "name": "@avatarsd-llc/libtracer-client",
-  "version": "0.0.0",
-  "private": true,
-  "description": "EXPERIMENTAL libtracer client SDK (#56, ADR-0034) — a payload-builder + frame-I/O client over the cross-validated codec (@avatarsd-llc/libtracer) and an injected transport seam (e.g. @avatarsd-llc/libtracer-ws). Implements only the wire byte-products v1 pins (VALUE/SUBSCRIBER/PATH build, frame decode + VALUE delivery); the path-addressed request envelope is deferred. Not published.",
+  "version": "0.1.0",
+  "description": "EXPERIMENTAL libtracer client SDK (#56, ADR-0034/0035) — a path-addressed client over the cross-validated codec (@avatarsd-llc/libtracer) and an injected transport seam (e.g. @avatarsd-llc/libtracer-ws). Speaks the RFC-0004 remote operations over FWD: read / write / await / readField / subscribe, each a FWD frame whose source-routed FWD{REPLY} is decoded back. Pre-1.0 and experimental.",
   "author": "avatarsd LLC",
   "license": "Apache-2.0",
   "repository": {
@@ -30,6 +29,9 @@
     "./package.json": "./package.json"
   },
   "files": ["dist", "README.md", "LICENSE"],
+  "publishConfig": {
+    "access": "public"
+  },
   "peerDependencies": {
     "@avatarsd-llc/libtracer": "^0.0.1",
     "@avatarsd-llc/libtracer-ws": "^0.1.0"
@@ -41,7 +43,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "prepublishOnly": "npm run build"
   },
   "devDependencies": {
     "@avatarsd-llc/libtracer": "*",

@@ -2,56 +2,66 @@
 
 The libtracer **client SDK** the strawberry web-UI builds against
 ([#56](https://github.com/avatarsd-llc/libtracer/issues/56),
-[ADR-0034](../../../../docs/adr/0034-typescript-client-sdk.md)). It composes the
-cross-validated wire codec (`@avatarsd-llc/libtracer`) over an **injected**
-transport seam (`@avatarsd-llc/libtracer-ws`'s `TransportWs` satisfies it
-structurally), so it runs in the browser or Node and is testable against an
+[ADR-0034](../../../../docs/adr/0034-typescript-client-sdk.md) /
+[ADR-0035](../../../../docs/adr/0035-implementing-rfc-0004-remote-operation-addressing.md)).
+It composes the cross-validated wire codec (`@avatarsd-llc/libtracer`) over an
+**injected** transport seam (`@avatarsd-llc/libtracer-ws`'s `TransportWs` satisfies
+it structurally), so it runs in the browser or Node and is testable against an
 in-memory fake with no socket.
 
-> **Experimental — `private`, `0.0.0`, not published.** This package implements
-> only the wire byte-products libtracer v1 **pins** byte-for-byte. The
-> path-addressed request envelope (`write(path,…)` / `read` / `await` /
-> `subscribe(producerPath,…)`) is **deferred** because the v1 spec leaves the
-> wire format for an addressed remote operation unspecified (`spec/v1.md` §3 is
-> "to be written"). See the ADR for the full rationale and the open question.
+> **Experimental — `0.1.0`, pre-1.0.** The client speaks the
+> [RFC-0004](../../../../docs/spec/rfcs/0004-remote-operation-addressing.md)
+> remote-operation envelope (`FWD` / `FIELD`) the v1 spec §3 fast-tracks: a
+> path-addressed `read` / `write` / `await` / `readField` / `subscribe`, each a
+> `FWD` frame whose source-routed `FWD{REPLY}` is decoded back. Error-reply codes
+> are **provisional** until the ERROR registry
+> ([#8](https://github.com/avatarsd-llc/libtracer/issues/8)) pins them.
 
-## What it does (the pinned slice)
+## What it does
 
 ```ts
-import { LibtracerClient } from '@avatarsd-llc/libtracer-client';
+import { LibtracerClient, encodeValue } from '@avatarsd-llc/libtracer-client';
 import { TransportWs } from '@avatarsd-llc/libtracer-ws';
 
 const transport = new TransportWs('ws://robot.local:9000');
 await transport.connect();
 const client = new LibtracerClient(transport);
 
-// Inbound: decode each frame (a single ROUTER wrapper is shed) and deliver VALUE payloads.
-client.onValue((value) => console.log('delivery', value));
-client.onError((err) => console.error('decode error', err));
+// Path-addressed remote operations over RFC-0004 FWD — each resolves its FWD{REPLY}:
+const temp = await client.read('/sensor/temp');                  // -> VALUE TLV
+await client.write('/sensor/temp', encodeValue(new Uint8Array([0x01])));
+const next = await client.await_('/sensor/temp', 1_000_000_000n); // block for the next write (1 s)
+const subs = await client.readField('/sensor/temp', ':subscribers[]'); // -> POINT of SUBSCRIBER slots
 
-// Outbound (pinned payload TLVs, emitted as one frame each):
-client.write(new Uint8Array([0x01]));            // VALUE TLV
-const sub = client.subscribe(['sensor', 'temp'], (value) => render(value)); // SUBSCRIBER TLV
-sub.close();                                      // local detach (no unsubscribe frame yet)
+// subscribe = a field-write of a SUBSCRIBER into :subscribers[]; deliveries fire the handler.
+const unsubscribe = await client.subscribe('/sensor/temp', (value) => render(value));
+unsubscribe(); // local detach
+
+// A kind=ERROR reply rejects with a typed FwdError (.code / .codeName, e.g. "NOT_FOUND").
+client.onError((err) => console.error('inbound decode error', err));
 ```
 
-Pure builders (the exact bytes, transport-free) are also exported and available as
-static methods:
+The pure builders (the exact bytes, transport-free) are also exported — the FWD /
+FIELD envelope builders and the payload builders, each pinned to a conformance
+vector:
 
 ```ts
-import { encodeValue, encodePath, encodeSubscriber } from '@avatarsd-llc/libtracer-client';
-encodeSubscriber(['sensor', 'temp']); // === the `subscriber-path` conformance vector, byte-for-byte
+import { encodeFwd, encodeField, FWD_OP, encodeSubscriber } from '@avatarsd-llc/libtracer-client';
+
+encodeSubscriber(['sensor', 'temp']);                          // === subscriber-path vector
+encodeFwd({ op: FWD_OP.READ, dst: ['sensor', 'temp'], src: ['client'] }); // === fwd-read vector
+encodeField(':subscribers[]');                                 // === field-append vector
 ```
 
-## Pinned vs deferred
+## Surfaces
 
 | Surface | Status | Pinned by |
 | --- | --- | --- |
-| `encodeValue` / `write` (VALUE) | **implemented** | `value-bool-true`, `value-ll-u32`, `value-ts-abs` |
-| `encodeSubscriber` / `subscribe` (SUBSCRIBER) | **implemented** | `subscriber-path` |
-| `encodePath` (PATH) | **implemented** | `path-sensor-temp`, spec §3.1 |
-| inbound VALUE delivery + ROUTER shed | **implemented** | `router-wrapped` + all vectors |
-| `write(path,…)` / `subscribe(producerPath,…)` / `read` / `await` / `connect` | **deferred** | unspecified — `spec/v1.md` §3 ("to be written"), no request-envelope vector |
+| `read` / `write` / `await_` / `readField` / `subscribe` over `FWD` | **implemented** (RFC-0004) | `fwd-read`, `fwd-write-value`, `fwd-await-timeout`, `fwd-write-subscriber-field` |
+| `encodeFwd` / `encodeField` builders + `decodeFwd` | **implemented** | `fwd-*`, `field-*`, `fwd-reply-*` |
+| `encodeValue` / `encodeSubscriber` / `encodePath` payload builders | **implemented** | `value-bool-true`, `value-ll-u32`, `value-ts-abs`, `subscriber-path`, `path-sensor-temp` |
+| inbound VALUE delivery (FWD{WRITE} / bare / ROUTER-shed) | **implemented** | `router-wrapped` + all vectors |
+| typed `FwdError` on `kind=ERROR` reply | **implemented** (codes provisional) | `fwd-reply-error`; ERROR registry (#8) pins the code set |
 
 ## Dependencies
 
@@ -66,8 +76,12 @@ client never imports it — inject any `{ send, onFrame }`). ESM-only, `node >= 
 npm run build && npm test   # from bindings/typescript/
 ```
 
-- `test/vectors.test.mjs` — outbound builders match the conformance vectors
-  byte-for-byte; inbound VALUE vectors decode to the right payload.
-- `test/roundtrip.test.mjs` — mock-transport round-trip (`write`/`subscribe`
-  bytes, injected VALUE + ROUTER-wrapped delivery, decode-error routing) plus a
-  real `TransportWs` echo round-trip.
+- `test/vectors.test.mjs` — every outbound builder (`encodeValue`/`encodeSubscriber`/
+  `encodePath`/`encodeFwd`/`encodeField`) matches its conformance vector
+  byte-for-byte; `decodeFwd` parses the `fwd-reply-*` vectors.
+- `test/roundtrip.test.mjs` — mock-transport round-trip: the exact `FWD` bytes each
+  op emits, REPLY-resolves-the-op / ERROR-rejects, injected deliveries, and a real
+  `TransportWs` echo.
+- `test/interop.test.mjs` — **end-to-end** against a live C++ `fwd_node_server` over
+  a real socket (all five ops, incl. a live subscribe delivery). Guarded on
+  `LIBTRACER_FWD_NODE_SERVER`; the CI `fwd-interop` job builds the binary and runs it.

@@ -142,6 +142,15 @@ add_executable(ws_interop_server ws_interop_server.cpp)
 target_link_libraries(ws_interop_server PRIVATE libtracer)
 libtracer_test_warnings(ws_interop_server)
 
+# #56 / RFC-0004 (interop) — standalone FWD-serving node harness driven by the
+# TypeScript client SDK interop test (the web-UI<->device consumer proof). A
+# graph_t seeded with /sensor/temp behind a fwd_router_t + op_resolver_t, served
+# over a live transport_ws_server. Like ws_interop_server it is a helper binary
+# the TS test spawns, NOT an add_test() (it would otherwise block on its deadline).
+add_executable(fwd_node_server fwd_node_server.cpp)
+target_link_libraries(fwd_node_server PRIVATE libtracer)
+libtracer_test_warnings(fwd_node_server)
+
 # #60 (hardening) — ws frame-decoder differential-fuzz harness. Reads one hex
 # frame per stdin line and prints a canonical decode result (OK/NEED_MORE/ERR),
 # byte-identical to the TS twin (transport-ws/fuzz/decode_harness.mjs), so

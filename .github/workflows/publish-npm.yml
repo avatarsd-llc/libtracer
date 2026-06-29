@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 #
 # Publish the libtracer npm packages (ADR-0033, #98). The TypeScript workspace
-# (bindings/typescript) ships two publishable, independently-versioned packages:
-# the cross-validated core (@avatarsd-llc/libtracer) and the WebSocket transport
-# (@avatarsd-llc/libtracer-ws). Both are ESM, scoped, and publish with public
-# access; the private workspace root is skipped by `npm publish --workspaces`.
+# (bindings/typescript) ships three publishable, independently-versioned packages:
+# the cross-validated core (@avatarsd-llc/libtracer), the WebSocket transport
+# (@avatarsd-llc/libtracer-ws), and the experimental client SDK
+# (@avatarsd-llc/libtracer-client, #56). All are ESM, scoped, and publish with
+# public access; the private workspace root is skipped by `npm publish --workspaces`.
 #
 # This is a SEPARATE, standalone workflow: it does NOT alter the required core
 # gates (build-test / sanitizers / tsan / format / doxygen) nor the ts.yml unit
