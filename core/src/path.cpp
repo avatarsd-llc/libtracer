@@ -111,13 +111,17 @@ result_t<path_t> path_t::parse(std::string_view text) {
 }
 
 std::size_t path_key_hash_t::operator()(const path_key_t& k) const noexcept {
-    // FNV-1a over the canonical payload bytes.
-    std::size_t h = 1469598103934665603ull;
+    // FNV-1a 64-bit over the canonical payload bytes. The 64-bit offset basis and
+    // prime can't live in a std::size_t on a 32-bit target (std::size_t is unsigned
+    // int on RISC-V MCUs), so accumulate in std::uint64_t and narrow to std::size_t
+    // for the bucket index via an explicit cast — the 64-bit state keeps the
+    // avalanche, and the cast avoids -Woverflow (GCC 15, newly strict) on 32-bit.
+    std::uint64_t h = 1469598103934665603ull;
     for (std::byte b : k.bytes) {
         h ^= std::to_integer<std::uint8_t>(b);
         h *= 1099511628211ull;
     }
-    return h;
+    return static_cast<std::size_t>(h);
 }
 
 }  // namespace tr::graph

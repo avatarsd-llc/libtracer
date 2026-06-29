@@ -33,8 +33,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    # Pinned ESP-IDF release (GCC 13 toolchain — C++23: std::expected, std::span).
-    container: espressif/idf:release-v5.3
+    # Pinned ESP-IDF v6.0 release (GCC 15 RISC-V toolchain — C++23: std::expected,
+    # std::span; matches strawberry-fw's IDF v6.0-dev toolchain). Bumped from v5.3/GCC13.
+    container: espressif/idf:release-v6.0
     strategy:
       fail-fast: false
       matrix:
@@ -59,11 +60,18 @@ jobs:
           ls -la build/*.bin build/*.elf 2>/dev/null || true
 
   # Host-target gate: build the host_smoke example for the ESP-IDF `linux`
-  # (POSIX host) target. This proves a downstream host_test consumer can depend
-  # on the real `libtracer` component (manifest target `linux`) instead of a
-  # local wrapper. The container's default g++ is g++-11, which lacks <expected>;
-  # libtracer's core is C++23, so we install and select g++-12 for the host
-  # toolchain. A produced ELF that runs register/write/read IS the gate.
+  # (POSIX host) target — proves the ESP-IDF *component* packages the core for a
+  # host consumer (manifest target `linux`), distinct from core-ci.yml's plain
+  # host build of the core. The host/linux target uses the container's native g++;
+  # we pin g++-12 (C++23 <expected>) so the build is independent of the image's
+  # default. A produced ELF that runs register/write/read IS the gate.
+  #
+  # NOTE: still on release-v5.3. The v6.0 `linux` target fails component
+  # resolution (esp_driver_ana_cmpr → esp_hal_ana_cmpr, a chip-specific HAL not
+  # registered for linux) — an IDF v6.0 linux-target issue, not libtracer. The
+  # GCC-15 host gate now lives in core-ci.yml (build-test-gcc15), where a plain
+  # host build of the core belongs; migrate this IDF-component example to v6.0
+  # once an IDF patch fixes the linux component graph.
   host-build:
     runs-on: ubuntu-24.04
     container: espressif/idf:release-v5.3
@@ -100,3 +108,4 @@ jobs:
         working-directory: integrations/esp-idf/examples/host_smoke
         run: |
           ls -la build/*.elf 2>/dev/null || true
+
