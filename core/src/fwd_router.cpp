@@ -60,6 +60,24 @@ struct hdr_t {
                  .total = total};
 }
 
+// Build a full-route producer delivery: `FWD{ op=WRITE, dst=<return route>, src=<empty
+// PATH>, payload=<VALUE> }` (delivery-is-a-write, RFC-0004 §D / #136). @p dst_path is a
+// complete PATH TLV's bytes (the subscriber's accumulated return route); @p payload is a
+// complete VALUE TLV's bytes (the producer's stored value). src starts empty — each
+// forwarding hop grows it (the way back), exactly as route_fwd's WRITE forward step does.
+[[nodiscard]] std::vector<std::byte> build_delivery(std::span<const std::byte> dst_path,
+                                                    std::span<const std::byte> payload) {
+    std::vector<std::byte> body;
+    const std::byte op{static_cast<std::uint8_t>(fwd_op_t::WRITE)};
+    detail::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
+    body.insert(body.end(), dst_path.begin(), dst_path.end());  // dst = return route
+    detail::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, std::span<const std::byte>{});  // src
+    body.insert(body.end(), payload.begin(), payload.end());  // payload = VALUE
+    std::vector<std::byte> out;
+    detail::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
+    return out;
+}
+
 // Append a structured-TLV header (type, opt.PL [+LL], little-endian length) for a
 // body of `body_len` bytes. Identical to op_resolve.cpp's emit_struct_header.
 void push_header(std::vector<std::byte>& out, type_t type, std::size_t body_len) {
@@ -265,8 +283,10 @@ void fwd_router_t::route_fwd(std::string_view inbound_name, std::span<const std:
     }
 
     // Local request terminus: apply the op and route the FWD{REPLY} back over the
-    // link the request arrived on (its dst is the request's accumulated src).
-    auto reply = resolver_.resolve(*dec);
+    // link the request arrived on (its dst is the request's accumulated src). Pass the
+    // inbound link so a `:subscribers[]` WRITE binds a REMOTE subscriber whose deliveries
+    // route back over it (#136); the latch (transient-local) fires inside resolve.
+    auto reply = resolver_.resolve(*dec, inbound_name);
     if (!reply) return;
     if (transport_t* in = link_by_name(inbound_name)) {
         const std::vector<std::span<const std::byte>> iov = reply->to_iovec();
@@ -380,6 +400,29 @@ bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
     if (!seg) return false;
     std::memcpy(seg->bytes.data(), payload.data(), payload.size());
     return graph_.write(v, view_t::over(std::move(seg))).has_value();
+}
+
+void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const view_t& value) {
+    transport_t* const link = link_by_name(sub.link);
+    if (link == nullptr) return;  // link torn down between subscribe and this write
+    const std::span<const std::byte> payload = value.bytes();  // the stored VALUE TLV bytes
+
+    if (sub.delivery_compact) {
+        // Auto-promote (Q5 / RFC-0004 §E.1): advertise the label once per flow, then stream
+        // lean COMPACT. ensure_egress is idempotent per (link,route); clear_link on a
+        // reconnect drops the binding so the next delivery re-advertises (self-heal).
+        const auto [label, fresh] = handles_.ensure_egress(sub.link, sub.return_route);
+        if (fresh) {
+            const std::vector<std::byte> adv = encode_advertise(label, sub.return_route);
+            link->send(std::span<const std::byte>(adv));
+        }
+        const std::vector<std::byte> out = encode_compact(label, payload);
+        link->send(std::span<const std::byte>(out));
+        return;
+    }
+    // Default: full-route FWD{WRITE} delivery (the slice-3 stateless path).
+    const std::vector<std::byte> out = build_delivery(sub.return_route, payload);
+    link->send(std::span<const std::byte>(out));
 }
 
 }  // namespace tr::net

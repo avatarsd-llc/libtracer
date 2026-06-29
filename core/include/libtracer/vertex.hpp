@@ -19,6 +19,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -80,6 +81,16 @@ struct subscriber_t {
     // of full-route FWD{WRITE} deliveries. Default false ⇒ stateless full-route
     // delivery (the slice-3 path), so a cold/one-shot flow allocates no label state.
     bool delivery_compact = false;
+    // The consumer's accumulated return route (a complete PATH TLV's bytes — the FWD
+    // `src` the subscribe arrived with) and this node's NAME for the link it arrived
+    // on. Both empty ⇒ an in-process slot (callback/target sugar); the producer fan-out
+    // ignores it for remote delivery. Both populated ⇒ a REMOTE subscriber: a write to
+    // this vertex hands (link, return_route, delivery_compact, value) to the graph's
+    // injected remote-delivery sink, which emits the FWD{WRITE} (or auto-promoted
+    // COMPACT) back over the link (RFC-0004 §D/§E.1, ADR-0035 slice 4 / #136). Stored
+    // as opaque bytes + an opaque NAME so this L4 struct never depends on tr::net.
+    std::vector<std::byte> return_route;
+    std::string link;
     // The original SUBSCRIBER TLV view this slot was written from, retained zero-copy
     // (a refcount clone of the field-write payload). Empty for in-process callback/target
     // sugar that carries no TLV. A :subscribers[] read ropes these slot views into the

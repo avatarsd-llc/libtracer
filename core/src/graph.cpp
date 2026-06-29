@@ -100,6 +100,12 @@ void graph_t::fan_out(vertex_t* v, const view_t& value, int depth) {
     struct disp_t {
         std::function<void(const view_t&)> callback;
         std::vector<std::byte> target_key;
+        // Remote fan-out (#136): a non-empty `link` ⇒ hand this delivery to remote_sink_.
+        // Copied under the lock (like target_key) so the slot may be cleared concurrently
+        // once we dispatch outside it; an in-process slot leaves both empty.
+        std::string link;
+        std::vector<std::byte> return_route;
+        bool delivery_compact = false;
     };
     constexpr std::size_t kInlineFanout = 8;
     std::array<disp_t, kInlineFanout> inline_buf;
@@ -122,10 +128,11 @@ void graph_t::fan_out(vertex_t* v, const view_t& value, int depth) {
                 }
                 s.last_delivered.assign(bytes.begin(), bytes.end());
             }
+            disp_t d{s.callback, s.target_key, s.link, s.return_route, s.delivery_compact};
             if (use_heap)
-                heap_buf.push_back(disp_t{s.callback, s.target_key});
+                heap_buf.push_back(std::move(d));
             else
-                inline_buf[inline_n++] = disp_t{s.callback, s.target_key};
+                inline_buf[inline_n++] = std::move(d);
         }
     }
     const auto dispatch = [&](const disp_t& d) {
@@ -134,6 +141,15 @@ void graph_t::fan_out(vertex_t* v, const view_t& value, int depth) {
             if (vertex_t* target = find(d.target_key)) {
                 (void)write_impl(target, value, depth + 1);  // value cloned into the param
             }
+        }
+        // Remote delivery (#136): a write fans out to a remote subscriber as a
+        // FWD{WRITE} (or auto-promoted COMPACT) via the injected sink — outside the
+        // vertex lock, like every other dispatch leg, since the sink does transport I/O.
+        if (!d.link.empty() && remote_sink_) {
+            remote_sink_(remote_delivery_t{.link = d.link,
+                                           .return_route = d.return_route,
+                                           .delivery_compact = d.delivery_compact},
+                         value);
         }
     };
     if (use_heap)
@@ -224,6 +240,51 @@ result_t<void> graph_t::subscribe(const path_t& src, std::function<void(const vi
     s.mode = mode;
     const std::lock_guard lock(v->m_);
     v->subs_.push_back(std::move(s));
+    return {};
+}
+
+void graph_t::set_remote_delivery_sink(
+    std::function<void(const remote_delivery_t&, const view_t&)> sink) {
+    remote_sink_ = std::move(sink);
+}
+
+result_t<void> graph_t::add_remote_subscriber(vertex_t* v, view_t source_view,
+                                              std::vector<std::byte> return_route, std::string link,
+                                              bool delivery_compact, delivery_mode_t mode) {
+    subscriber_t s;
+    s.mode = mode;
+    s.delivery_compact = delivery_compact;
+    s.return_route = std::move(return_route);
+    s.link = std::move(link);
+    s.source_view = std::move(source_view);
+
+    // Latch the current value to the new subscriber iff the producer is transient-local
+    // (durability == 1) and already holds an LKV (RFC-0004 §D / Q4). Snapshot the slot's
+    // remote fields + the LKV under the lock, then deliver OUTSIDE it (the sink does
+    // transport I/O), mirroring fan_out's lock discipline.
+    std::shared_ptr<const view_t> latch;
+    std::string latch_link;              // owning copies — the snapshot below outlives the lock,
+    std::vector<std::byte> latch_route;  // so remote_delivery_t's view/span can't dangle on subs_.
+    bool latch_compact = false;
+    {
+        const std::lock_guard lock(v->m_);
+        v->subs_.push_back(std::move(s));
+        if (v->settings_.durability == 1) {
+            if (std::shared_ptr<const view_t> lkv = v->lkv_.load()) {
+                const subscriber_t& stored = v->subs_.back();
+                latch = std::move(lkv);
+                latch_link = stored.link;
+                latch_route = stored.return_route;
+                latch_compact = stored.delivery_compact;
+            }
+        }
+    }
+    if (latch && remote_sink_) {
+        remote_sink_(
+            remote_delivery_t{
+                .link = latch_link, .return_route = latch_route, .delivery_compact = latch_compact},
+            *latch);
+    }
     return {};
 }
 

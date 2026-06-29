@@ -74,6 +74,24 @@ conformance-validated slices.**
    byte-exact ordered delivery, stale-label drop + `HANDLE_NACK`, re-advertise self-heal, and
    zero label state for a parallel non-compact flow.
 
+   **Slice-4 completion — the producer fan-out (#136).** Slice 4 landed the route-handle *mechanism*
+   (`advertise`/`send_compact`/NACK) but left it driven explicitly by the test; nothing read a
+   subscriber's `delivery_compact` to *originate* deliveries. The completion wires the producer side:
+   an inbound `:subscribers[]` `FWD{WRITE}` now binds a **remote subscriber** carrying the request's
+   accumulated return route (`src`) + inbound link (`graph_t::add_remote_subscriber`, fed by
+   `op_resolver_t::resolve(fwd, inbound_link)`), and `graph_t::fan_out` hands each delivery to an
+   **injected sink** the `fwd_router_t` registers (`set_remote_delivery_sink`). The sink emits a
+   full-route `FWD{WRITE}` by default, or — for a `delivery_compact` subscriber — **auto-promotes**:
+   `route_handle_t::ensure_egress` advertises a label once per `(link, route)` flow, then streams
+   `COMPACT`; `clear_link` on reconnect drops the binding so the next delivery re-advertises (lazy
+   self-heal, no transport "up" event). The sink is an opaque `std::function`, so L4 (`graph`) gains
+   no dependency on `tr::net`. A **transient-local** producer (`durability == 1`) latches its LKV to a
+   fresh subscriber on subscribe. Tested in `core/tests/fwd_fanout_test.cpp` (full-route routing, the
+   latch, the auto-promote byte-delta, reconnect re-advertise, a TSan writer×`clear_link` race) and
+   end-to-end against the TS client over a live socket (`fwd_node_server.cpp` no longer hand-rolls a
+   delivery — the real fan-out drives it). Delivery semantics are described in
+   [reference/05 §SUBSCRIBER](../reference/05-protocol-tlvs.md); no new wire bytes, so no new vector.
+
 ### Cross-cutting
 
 - **No `ROUTER` change.** `FWD` is a sibling frame; `ROUTER`'s dedup/`MAX_HOPS` stay on the

@@ -111,6 +111,15 @@ target_link_libraries(fwd_compact_test PRIVATE libtracer)
 libtracer_test_warnings(fwd_compact_test)
 add_test(NAME fwd_compact COMMAND fwd_compact_test)
 
+# RFC-0004 / ADR-0035 slice 4 (#136) — the PRODUCER auto fan-out: a plain graph.write to a
+# vertex with a remote subscriber delivers a full-route FWD{WRITE} (or auto-promoted COMPACT)
+# with no explicit advertise/send. Covers the transient-local latch, the compact byte-delta,
+# reconnect self-heal, and a concurrent writer x clear_link race (the TSan gate).
+add_executable(fwd_fanout_test fwd_fanout_test.cpp)
+target_link_libraries(fwd_fanout_test PRIVATE libtracer)
+libtracer_test_warnings(fwd_fanout_test)
+add_test(NAME fwd_fanout COMMAND fwd_fanout_test)
+
 # M4 — transport + bridge harness (loopback delivery, ROUTER, dedup, hop_count).
 add_executable(bridge_test bridge_test.cpp)
 target_link_libraries(bridge_test PRIVATE libtracer)

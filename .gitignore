@@ -53,6 +53,8 @@ dkms.conf
 # CMake build directories, generated compile DB, editor caches
 build/
 */build/
+build-*/
+*/build-*/
 compile_commands.json
 .cache/
 

@@ -179,6 +179,12 @@ qos_settings = SETTINGS {
 
 Policy is **enforced producer-side** (before fan-out). For a **composite** subscription, `delivery_scope` selects DELTA (the changed child + its concrete path, RFC-0003) or SNAPSHOT (the aggregate's `:[]` structured TLV); no wildcard `target_path` is needed — subscribing to the composite vertex *is* the subtree subscription. The `capability` child carries the subscriber's **subject-token** ([ADR-0018](../adr/0018-access-control-authorization-pluggable-subject-token.md)); subscribe-authorization is gated by the *source's* `:acl`.
 
+### Producer fan-out to remote subscribers
+
+When a SUBSCRIBER is written into `<vertex>:subscribers[N]` over a transport (an inbound `FWD{WRITE}` to `:subscribers[]`, RFC-0004 §D), the slot retains the request's **accumulated return route** (the FWD `src`) and the inbound link. Thereafter a write to that vertex fans out a delivery back to the consumer along that return route — a `FWD{WRITE, dst=<return route>, payload=<VALUE>}` (delivery-is-a-write), or, when the subscriber set `delivery_compact`, an auto-promoted `COMPACT` (advertised once per flow, then streamed; re-advertised after a reconnect — §route-handle). This is the producer half of consumer-initiated subscription; it composes the existing field-writes and adds no wire verb (RFC-0004 / ADR-0035 slice 4, #136).
+
+A **transient-local** producer (`:settings.durability == 1`, [02-graph-model.md](02-graph-model.md)) additionally **latches** its current value to a *fresh* subscriber: the subscribe itself emits one immediate delivery of the vertex's last-known value, so a late joiner paints the current state without waiting for the next write. A `volatile` producer (the default, `durability == 0`) delivers only writes that happen after the subscribe. The latch reuses the same delivery path (full-route or `COMPACT`); it carries no new wire bytes, so it is observable only as delivery *timing* and adds no conformance vector.
+
 ### Where it appears
 
 - `<vertex>:subscribers[N]` slot, one per subscription.

@@ -7,7 +7,9 @@
 // the source-routed `FWD{REPLY}` / delivery. This is the web-UI<->device proof:
 //   - read           -> RESULT carries the seeded VALUE
 //   - write + read    -> the value is stored and reads back
-//   - subscribe       -> the node pushes a producer VALUE the handler delivers
+//   - subscribe       -> the REAL producer fan-out (#136): the transient-local LATCH
+//                        delivers the current value, then a fresh producer WRITE fans
+//                        out a live delivery — both via fwd_router's sink, no fake
 //   - readField :subscribers[] -> a POINT wrapper of the registered SUBSCRIBER
 //   - await (timeout) -> a typed FwdError(TIMEOUT) when the deadline elapses
 //
@@ -30,8 +32,11 @@ const skip = !SERVER || !existsSync(SERVER);
 
 // Constants the C++ harness pins (keep in sync with fwd_node_server.cpp).
 const SEEDED_TEMP = 0x1234abcd;
-const PUSHED_SAMPLE = 0xcafebabe;
 const WRITTEN = 0x00c0ffee;
+// The producer's current sample (latched on subscribe) and a later sample (write-driven
+// fan-out). These are written by the client; the server only seeds SEEDED_TEMP.
+const PUSHED_SAMPLE = 0xcafebabe;
+const SECOND_SAMPLE = 0xfeed0bad;
 
 /** Little-endian u32 bytes. */
 function le32(v) {
@@ -126,19 +131,30 @@ test(
       const read2 = await client.read('/sensor/temp');
       assert.ok(sameBytes(read2.payload, le32(WRITTEN)), 'written value reads back');
 
-      // 3) subscribe — the node pushes ONE producer VALUE the handler delivers.
-      //    (handler registered before the ack, so the push is never dropped.)
-      let resolveDelivery;
-      const delivered = new Promise((res, rej) => {
-        const timer = setTimeout(() => rej(new Error('no producer delivery within deadline')), 5000);
-        resolveDelivery = (v) => {
+      // 3) subscribe — the REAL #136 producer fan-out. /sensor/temp is transient-local,
+      //    so the subscribe LATCHES the producer's current value (delivery #1); a later
+      //    producer WRITE then fans out a live delivery (#2). Both arrive via the handler
+      //    (registered before the ack, so neither is dropped). We set the current sample
+      //    just before subscribing so delivery #1 is a known, distinct value.
+      await client.write('/sensor/temp', encodeValue(le32(PUSHED_SAMPLE)));
+      const deliveries = [];
+      let resolveTwo;
+      const gotTwo = new Promise((res, rej) => {
+        const timer = setTimeout(() => rej(new Error('expected 2 deliveries within deadline')), 5000);
+        resolveTwo = () => {
           clearTimeout(timer);
-          res(v);
+          res();
         };
       });
-      const unsubscribe = await client.subscribe('/sensor/temp', (value) => resolveDelivery(value));
-      const sample = await delivered;
-      assert.ok(sameBytes(sample, le32(PUSHED_SAMPLE)), 'live subscribe delivery');
+      const unsubscribe = await client.subscribe('/sensor/temp', (value) => {
+        deliveries.push(value);
+        if (deliveries.length === 2) resolveTwo();
+      });
+      // A fresh producer write — fans out a live delivery to the subscribed client.
+      await client.write('/sensor/temp', encodeValue(le32(SECOND_SAMPLE)));
+      await gotTwo;
+      assert.ok(sameBytes(deliveries[0], le32(PUSHED_SAMPLE)), 'transient-local latch on subscribe');
+      assert.ok(sameBytes(deliveries[1], le32(SECOND_SAMPLE)), 'live write-driven fan-out delivery');
       unsubscribe();
 
       // 4) readField :subscribers[] — a POINT wrapper holding the registered SUBSCRIBER.

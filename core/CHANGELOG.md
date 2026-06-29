@@ -15,6 +15,27 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **Producer remote fan-out + `delivery_compact` auto-promotion**
+  ([RFC-0004](../docs/spec/rfcs/0004-remote-operation-addressing.md) §D/§E.1 /
+  [ADR-0035](../docs/adr/0035-implementing-rfc-0004-remote-operation-addressing.md)
+  slice-4 completion, [#136](https://github.com/avatarsd-llc/libtracer/issues/136)). A
+  write to a vertex that has a remote subscriber now
+  fans out a delivery back over the subscriber's link with no explicit
+  advertise/send. New public API: `graph_t::set_remote_delivery_sink(...)` and
+  `graph_t::add_remote_subscriber(v, source_view, return_route, link, delivery_compact,
+  mode)`; the `graph::remote_delivery_t` sink contract; `subscriber_t` gains
+  `return_route` + `link`; `op_resolver_t::resolve(fwd, inbound_link)` (an overload —
+  the no-arg form is unchanged); and `route_handle_t::ensure_egress(link, route) →
+  {label, fresh}` (the lazy advertise-once primitive). `fwd_router_t` registers the
+  graph sink in its constructor and emits a full-route `FWD{WRITE}` by default, or —
+  for a `delivery_compact` subscriber — auto-advertises a label once then streams
+  `COMPACT` (re-advertising after `clear_link`). A **transient-local** producer
+  (`durability == 1`) latches its current value to a fresh subscriber on subscribe.
+  No wire-format change (the codec and all conformance vectors are unaffected). Tested
+  in `fwd_fanout_test.cpp` (incl. a TSan writer × `clear_link` race) and end-to-end
+  against the TS client over a live socket (`fwd_node_server` no longer hand-rolls the
+  delivery).
+
 - **`tr::net::route_handle_t` + `fwd_router_t` route-handle — ws delivery-compaction**
   ([RFC-0004](../docs/spec/rfcs/0004-remote-operation-addressing.md) §E.1 /
   [ADR-0035](../docs/adr/0035-implementing-rfc-0004-remote-operation-addressing.md),
