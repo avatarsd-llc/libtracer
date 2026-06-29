@@ -50,16 +50,6 @@ void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
     return last;
 }
 
-// Reconstruct a canonical PATH key from a decoded PATH TLV's NAME children.
-[[nodiscard]] std::vector<std::byte> path_child_key(const tlv_t& path) {
-    std::vector<std::byte> key;
-    for (const auto& name : path.children) {
-        const auto enc = encode(name);  // a NAME TLV: 02 00 <len> <bytes>
-        key.insert(key.end(), enc.begin(), enc.end());
-    }
-    return key;
-}
-
 }  // namespace
 
 result_t<vertex_t*> graph_t::register_vertex(const path_t& path, role_t role, handlers_t handlers,
@@ -299,7 +289,7 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
             subscriber_t s;
             for (const auto& child : sub->children) {
                 if (child.type == type_t::PATH) {
-                    s.target_key = path_child_key(child);
+                    s.target_key = wire::path_key(child);
                     break;
                 }
             }

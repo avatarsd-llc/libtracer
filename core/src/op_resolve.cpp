@@ -51,17 +51,6 @@ namespace {
     return 0x01;
 }
 
-// The canonical PATH-payload key (concatenated NAME children) of a decoded PATH TLV
-// — the graph vertex-map key. Mirrors graph.cpp's path_child_key.
-[[nodiscard]] std::vector<std::byte> path_tlv_key(const tlv_t& path) {
-    std::vector<std::byte> key;
-    for (const tlv_t& name : path.children) {
-        const std::vector<std::byte> enc = wire::encode(name);  // 02 00 <len> <bytes>
-        key.insert(key.end(), enc.begin(), enc.end());
-    }
-    return key;
-}
-
 // Append a structured-TLV header (type, opt.PL [+LL], little-endian length) for a
 // body of `body_len` bytes — the body itself is appended by the caller or roped on.
 void emit_struct_header(std::vector<std::byte>& out, type_t type, std::size_t body_len) {
@@ -280,7 +269,7 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_t& fwd, std::string_view inbou
 
     // dst resolution is the router's PATH-keyed dispatch. Slice 2 is local-only: a
     // dst naming a transport child / unknown path is not local => ERROR(NOT_FOUND).
-    vertex_t* v = graph_.find(path_tlv_key(*req.dst));
+    vertex_t* v = graph_.find(wire::path_key(*req.dst));
     if (!v) return assemble_error(req, status_t::NOT_FOUND);
 
     switch (req.op) {

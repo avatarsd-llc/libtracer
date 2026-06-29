@@ -72,6 +72,11 @@ inline constexpr std::size_t kMaxDepth = 32;
 // Encode a TLV (recomputing the trailer CRC from the body when opt.CR is set).
 [[nodiscard]] std::vector<std::byte> encode(const tlv_t& tlv);
 
+// The canonical PATH-payload key (the concatenated NAME-child encodings) of a
+// decoded PATH TLV — the graph vertex-map key. One locus for what graph_t,
+// op_resolver_t, and fwd_router_t each previously rebuilt inline.
+[[nodiscard]] std::vector<std::byte> path_key(const tlv_t& path);
+
 /**
  * @brief Cast a flat view to a TLV (the M1 decoder, zero-copy).
  *
