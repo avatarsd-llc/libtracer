@@ -9,6 +9,7 @@
 #include <cstring>
 #include <optional>
 #include <string_view>
+#include <utility>
 
 #include "libtracer/byteorder.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -75,7 +76,7 @@ std::vector<std::byte> router_wrap(std::span<const std::byte> data, const router
 
 std::expected<unwrapped_t, error_t> router_unwrap(std::span<const std::byte> frame) {
     const auto router = read_head(frame, 0);
-    if (!router || router->type != static_cast<std::uint8_t>(type_t::ROUTER) ||
+    if (!router || router->type != std::to_underlying(type_t::ROUTER) ||
         router->total != frame.size()) {
         return std::unexpected(error_t::FRAME_INVALID);
     }
@@ -86,7 +87,7 @@ std::expected<unwrapped_t, error_t> router_unwrap(std::span<const std::byte> fra
 
     while (cur < end) {
         const auto tag = read_head(frame, cur);
-        if (!tag || tag->type != static_cast<std::uint8_t>(type_t::NAME))
+        if (!tag || tag->type != std::to_underlying(type_t::NAME))
             return std::unexpected(error_t::FRAME_INVALID);
         const std::string_view name(reinterpret_cast<const char*>(frame.data() + tag->payload_off),
                                     tag->payload_len);

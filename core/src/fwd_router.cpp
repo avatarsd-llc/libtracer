@@ -68,7 +68,7 @@ struct hdr_t {
 [[nodiscard]] std::vector<std::byte> build_delivery(std::span<const std::byte> dst_path,
                                                     std::span<const std::byte> payload) {
     std::vector<std::byte> body;
-    const std::byte op{static_cast<std::uint8_t>(fwd_op_t::WRITE)};
+    const std::byte op{std::to_underlying(fwd_op_t::WRITE)};
     detail::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
     body.insert(body.end(), dst_path.begin(), dst_path.end());  // dst = return route
     detail::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, std::span<const std::byte>{});  // src
@@ -83,7 +83,7 @@ struct hdr_t {
 void push_header(std::vector<std::byte>& out, type_t type, std::size_t body_len) {
     opt_t opt{.pl = true};
     if (body_len > 0xFFFFu) opt.ll = true;
-    out.push_back(static_cast<std::byte>(static_cast<std::uint8_t>(type)));
+    out.push_back(static_cast<std::byte>(std::to_underlying(type)));
     out.push_back(static_cast<std::byte>(opt.encode()));
     detail::append_le(out, static_cast<std::uint32_t>(body_len), opt.ll ? 4u : 2u);
 }

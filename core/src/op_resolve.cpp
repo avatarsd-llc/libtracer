@@ -56,7 +56,7 @@ namespace {
 void emit_struct_header(std::vector<std::byte>& out, type_t type, std::size_t body_len) {
     opt_t opt{.pl = true};
     if (body_len > 0xFFFFu) opt.ll = true;
-    out.push_back(static_cast<std::byte>(static_cast<std::uint8_t>(type)));
+    out.push_back(static_cast<std::byte>(std::to_underlying(type)));
     out.push_back(static_cast<std::byte>(opt.encode()));
     detail::append_le(out, static_cast<std::uint32_t>(body_len), opt.ll ? 4u : 2u);
 }
@@ -203,7 +203,7 @@ enum class index_mode_t : std::uint8_t { SCALAR = 0, ELEMENT = 1, WILDCARD = 2 }
                               std::span<const std::byte> inline_tail,
                               const std::vector<view_t>& shared, std::size_t shared_len) {
     std::vector<std::byte> head_children;
-    emit_u8_value(head_children, static_cast<std::uint8_t>(fwd_op_t::REPLY));
+    emit_u8_value(head_children, std::to_underlying(fwd_op_t::REPLY));
     {
         const std::vector<std::byte> dst = wire::encode(*req.src);  // reply dst = request src
         head_children.insert(head_children.end(), dst.begin(), dst.end());
@@ -212,7 +212,7 @@ enum class index_mode_t : std::uint8_t { SCALAR = 0, ELEMENT = 1, WILDCARD = 2 }
         const std::vector<std::byte> src = wire::encode(*req.dst);  // reply src = responder ep
         head_children.insert(head_children.end(), src.begin(), src.end());
     }
-    emit_u8_value(head_children, static_cast<std::uint8_t>(kind));
+    emit_u8_value(head_children, std::to_underlying(kind));
     head_children.insert(head_children.end(), inline_tail.begin(), inline_tail.end());
 
     const std::size_t body_len = head_children.size() + shared_len;
