@@ -58,6 +58,42 @@ jobs:
           LIBTRACER_WS_INTEROP_SERVER: ${{ github.workspace }}/core/build/tests/ws_interop_server
         run: npm test
 
+  # RFC-0004 client interop (#56): the TypeScript LibtracerClient drives all five
+  # path-addressed operations (read / write / await / readField / subscribe) over
+  # real FWD frames against a live C++ graph-backed node (fwd_node_server) over a
+  # genuine ws socket, and decodes the source-routed FWD{REPLY} / producer delivery
+  # — the web-UI<->device proof, one layer above the transport_ws interop above.
+  # A SEPARATE, standalone job for the same reason: the required core gates must
+  # never depend on a Node toolchain, and a client-FWD failure must read distinctly
+  # from a transport-ws failure. Same path-filter as this whole workflow.
+  fwd-interop:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the C++ fwd_node_server helper binary
+        run: |
+          cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build core/build --target fwd_node_server -j
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: bindings/typescript/package-lock.json
+
+      - name: Install + build the TypeScript workspace
+        working-directory: bindings/typescript
+        run: |
+          npm ci
+          npm run build
+
+      - name: Run the TS client <-> C++ FWD node interop test over a real socket
+        working-directory: bindings/typescript/packages/client
+        env:
+          LIBTRACER_FWD_NODE_SERVER: ${{ github.workspace }}/core/build/tests/fwd_node_server
+        run: npm test
+
   # Differential fuzzer for the RFC 6455 frame DECODER — the network-facing attack
   # surface that parses untrusted bytes (FIN/opcode, 7/16/64-bit length, client
   # mask, the overflow-safe 64-bit-over-long path) BEFORE the TLV layer. Builds the

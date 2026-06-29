@@ -14,6 +14,16 @@ versioning/publish strategy.
   existing generic codec; no codec logic changed. Cross-core conformance vectors
   under `tests/conformance/vectors/v1/{fwd,field}/` round-trip byte-for-byte
   against the C++ and Rust cores.
+- **`@avatarsd-llc/libtracer-client` now speaks the RFC-0004 remote operations over
+  `FWD`** (#56, ADR-0035): `read` / `write` / `await_` / `readField` / `subscribe`,
+  each a path-addressed `FWD` frame whose source-routed `FWD{REPLY}` is decoded back
+  (a `kind=ERROR` reply surfaces as a typed `FwdError`). Adds the `encodeFwd` /
+  `encodeField` / `decodeFwd` builders (pinned to the `fwd-*` / `field-*` /
+  `fwd-reply-*` vectors byte-for-byte) and an end-to-end interop test against a live
+  C++ `fwd_node_server` over a real ws socket (all five ops, incl. a live subscribe
+  delivery), CI-gated by the new `fwd-interop` job. The package is **promoted from
+  `private` / `0.0.0` to a public `0.1.0`** (still experimental, pre-1.0);
+  error-reply codes are provisional pending the ERROR registry (#8).
 
 ### Changed
 

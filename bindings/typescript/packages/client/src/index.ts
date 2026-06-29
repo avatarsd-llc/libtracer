@@ -6,16 +6,36 @@
 // (@avatarsd-llc/libtracer, a peerDependency) and an injected transport seam
 // (@avatarsd-llc/libtracer-ws's TransportWs satisfies it structurally).
 //
-// EXPERIMENTAL / `private` 0.0.0: only the wire byte-products v1 pins are
-// implemented (VALUE / SUBSCRIBER / PATH build, frame decode + ROUTER shed +
-// VALUE delivery). The path-addressed request envelope that `write(path,…)` /
-// `read` / `await` / `subscribe(producer,…)` need is UNSPECIFIED in v1 and is
-// deferred — see docs/adr/0034-typescript-client-sdk.md.
+// EXPERIMENTAL / pre-1.0 (0.1.0). With RFC-0004 (spec §3, the remote-operation
+// envelope) implemented, the client now speaks the path-addressed higher
+// operations over `FWD`: read / write / await / readField / subscribe, each a
+// FWD frame whose FWD{REPLY} is source-routed back. The pure payload builders
+// (VALUE / SUBSCRIBER / PATH) and the FWD / FIELD builders are independently
+// exported and vector-pinned — see docs/spec/rfcs/0004-remote-operation-addressing.md.
 
 export const CLIENT_EXPERIMENTAL = true as const;
 
-export { LibtracerClient } from './client.js';
-export type { ClientTransport, ValueHandler, Subscription } from './client.js';
+export { LibtracerClient, FwdError } from './client.js';
+export type {
+  ClientTransport,
+  ValueHandler,
+  Unsubscribe,
+  ClientOptions,
+} from './client.js';
 
 export { encodeValue, encodePath, encodeSubscriber } from './tlv.js';
 export type { ValueOptions, SubscriberOptions } from './tlv.js';
+
+export {
+  FWD_OP,
+  FWD_KIND,
+  FWD_ERROR,
+  fwdErrorName,
+  encodeFwd,
+  encodeField,
+  parseField,
+  decodeFwd,
+  parseFwdTlv,
+  replyErrorCode,
+} from './fwd.js';
+export type { FwdRequest, ParsedFwd, FieldLevel } from './fwd.js';
