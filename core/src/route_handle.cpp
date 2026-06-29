@@ -46,6 +46,23 @@ std::optional<std::vector<std::byte>> route_handle_t::egress_route(std::string_v
     return it->second;
 }
 
+std::pair<std::uint16_t, bool> route_handle_t::ensure_egress(std::string_view out_link,
+                                                             std::span<const std::byte> route) {
+    const std::lock_guard lock(m_);
+    std::string link(out_link);
+    route_key_t rk{link, std::vector<std::byte>(route.begin(), route.end())};
+    if (const auto it = egress_label_.find(rk); it != egress_label_.end())
+        return {it->second, false};  // already advertised on this link — reuse the label
+    // Fresh flow: mint a per-link label (inline alloc — m_ is held, non-recursive), record
+    // it both directions (forward egress for NACK re-advertise + the reverse route index).
+    std::uint16_t& next = next_label_[link];
+    if (next == 0) next = 1;
+    const std::uint16_t label = next++;
+    egress_[key_t{link, label}] = rk.second;
+    egress_label_[std::move(rk)] = label;
+    return {label, true};
+}
+
 std::uint16_t route_handle_t::alloc_label(std::string_view link) {
     const std::lock_guard lock(m_);
     // Monotonic per link; 0 is reserved as "none" so a fresh link starts at 1.
@@ -61,6 +78,8 @@ void route_handle_t::clear_link(std::string_view link) {
         it = (it->first.first == l) ? ingress_.erase(it) : std::next(it);
     for (auto it = egress_.begin(); it != egress_.end();)
         it = (it->first.first == l) ? egress_.erase(it) : std::next(it);
+    for (auto it = egress_label_.begin(); it != egress_label_.end();)
+        it = (it->first.first == l) ? egress_label_.erase(it) : std::next(it);
     next_label_.erase(l);
 }
 

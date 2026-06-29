@@ -100,6 +100,25 @@ class route_handle_t {
                        std::vector<std::byte> route);
 
     /**
+     * @brief Find this link's label for @p route, or allocate + record a fresh one (#136).
+     *
+     * The producer-origin lazy-advertise primitive (RFC-0004 §E.1, Q5): the first compact
+     * delivery on a `(out_link, route)` flow has no binding, so a new label is allocated,
+     * recorded as egress, and returned with `fresh == true` (the caller must send the
+     * ADVERTISE once); subsequent deliveries find the same label and return `fresh ==
+     * false` (send only the COMPACT). @ref clear_link drops the binding so a post-reconnect
+     * delivery re-advertises — the self-heal, with no transport "up" event. Distinct from
+     * @ref alloc_label + @ref record_egress (which always mint a new label, used by the
+     * forwarding-hop swap).
+     *
+     * @param out_link This node's NAME for the downstream link.
+     * @param route    A complete PATH TLV's bytes — the delivery route the label aliases.
+     * @return `{label, fresh}` — the (reused or new) label, and whether it was just created.
+     */
+    [[nodiscard]] std::pair<std::uint16_t, bool> ensure_egress(std::string_view out_link,
+                                                               std::span<const std::byte> route);
+
+    /**
      * @brief The route this node advertised over @p out_link under @p label (for re-advertise).
      * @param out_link This node's NAME for the downstream link.
      * @param label    The downstream label.
@@ -134,9 +153,12 @@ class route_handle_t {
    private:
     using key_t = std::pair<std::string, std::uint16_t>;
 
+    using route_key_t = std::pair<std::string, std::vector<std::byte>>;
+
     mutable std::mutex m_;
-    std::map<key_t, handle_binding_t> ingress_;       // (link,label) -> meaning
-    std::map<key_t, std::vector<std::byte>> egress_;  // (link,label) -> advertised route
+    std::map<key_t, handle_binding_t> ingress_;          // (link,label) -> meaning
+    std::map<key_t, std::vector<std::byte>> egress_;     // (link,label) -> advertised route
+    std::map<route_key_t, std::uint16_t> egress_label_;  // (link,route) -> label (ensure_egress)
     std::map<std::string, std::uint16_t, std::less<>> next_label_;  // per-link allocator
 };
 

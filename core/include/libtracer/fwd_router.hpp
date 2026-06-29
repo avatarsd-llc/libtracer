@@ -55,8 +55,20 @@ namespace tr::net {
  */
 class fwd_router_t {
    public:
-    /** @brief Bind to the local @p graph; terminus ops resolve against it. */
-    explicit fwd_router_t(graph::graph_t& graph) : graph_(graph), resolver_(graph) {}
+    /**
+     * @brief Bind to the local @p graph; terminus ops resolve against it.
+     *
+     * Also installs the graph's remote-delivery sink (#136): a write to a vertex with a
+     * remote subscriber fans out a `FWD{WRITE}` (or auto-promoted `COMPACT`) back over the
+     * subscriber's link. The sink captures `this`, so the router must outlive @p graph's
+     * use — the same lifetime the held `graph_` reference already requires.
+     */
+    explicit fwd_router_t(graph::graph_t& graph) : graph_(graph), resolver_(graph) {
+        graph_.set_remote_delivery_sink(
+            [this](const graph::remote_delivery_t& sub, const view::view_t& value) {
+                deliver_remote(sub, value);
+            });
+    }
 
     fwd_router_t(const fwd_router_t&) = delete;
     fwd_router_t& operator=(const fwd_router_t&) = delete;
@@ -205,6 +217,15 @@ class fwd_router_t {
     /** @brief Resolve a bound local route and apply the delivered write (delivery-is-a-write). */
     [[nodiscard]] bool deliver_local(std::span<const std::byte> route_path,
                                      std::span<const std::byte> payload);
+    /**
+     * @brief The graph remote-delivery sink (#136): emit one producer delivery to @p sub.
+     *
+     * Sends a full-route `FWD{WRITE, dst=return_route, payload}` by default, or — when
+     * `sub.delivery_compact` — lazily advertises a label once for the flow then streams a
+     * lean `COMPACT` (RFC-0004 §D/§E.1). Fires on the writer thread (outside the vertex
+     * lock); all label state is in the mutex-guarded @ref route_handle_t.
+     */
+    void deliver_remote(const graph::remote_delivery_t& sub, const view::view_t& value);
 
     graph::graph_t& graph_;
     graph::op_resolver_t resolver_;

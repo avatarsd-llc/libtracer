@@ -19,6 +19,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <string_view>
 
 #include "libtracer/frame.hpp"
 #include "libtracer/graph.hpp"
@@ -69,7 +70,26 @@ class op_resolver_t {
      * @return The reply as a @ref view::rope_t (head segment + roped payload views),
      *         or a @ref status_t on a malformed/non-request frame.
      */
-    [[nodiscard]] result_t<view::rope_t> resolve(const wire::tlv_t& fwd);
+    [[nodiscard]] result_t<view::rope_t> resolve(const wire::tlv_t& fwd) {
+        return resolve(fwd, std::string_view{});
+    }
+
+    /**
+     * @brief Resolve as @ref resolve, with the inbound link for remote-subscriber binding.
+     *
+     * Identical to the single-argument overload except that an inbound `:subscribers[]`
+     * WRITE binds a REMOTE subscriber (#136): the slot retains this request's accumulated
+     * return route (`src`) and @p inbound_link, so the producer fan-out delivers a
+     * `FWD{WRITE}` / auto-promoted `COMPACT` back over that link (RFC-0004 §D/§E.1). An
+     * empty @p inbound_link reproduces the local-only field-write (the slice-2 path) — so
+     * `fwd_router_t`, which knows the link, passes it; a bare local resolve does not.
+     *
+     * @param fwd          A decoded request FWD TLV.
+     * @param inbound_link This node's NAME for the link the request arrived on (empty ⇒
+     *                     local resolution, no remote-subscriber binding).
+     */
+    [[nodiscard]] result_t<view::rope_t> resolve(const wire::tlv_t& fwd,
+                                                 std::string_view inbound_link);
 
    private:
     graph_t& graph_;

@@ -181,6 +181,31 @@ enum class index_mode_t : std::uint8_t { SCALAR = 0, ELEMENT = 1, WILDCARD = 2 }
            (fp.steps[0].append || (!fp.steps[0].indexed && !fp.steps[0].wildcard));
 }
 
+// True for the subscribe form specifically — a ":subscribers[]" APPEND (a new edge),
+// distinct from a ":subscribers[N]" clear (unsubscribe) or the whole-array read.
+[[nodiscard]] bool is_subscribe_append(const field_path_t& fp) noexcept {
+    return fp.steps.size() == 1 && fp.steps[0].name == "subscribers" && fp.steps[0].append;
+}
+
+// Extract the SUBSCRIBER.qos_settings `delivery_compact` opt-in (RFC-0004 §E.1) from an
+// already-decoded SUBSCRIBER TLV; false when absent. Mirrors graph.cpp field_write's parse
+// (one locus per layer — graph stores the local slot's flag, the resolver reads it for the
+// remote-subscriber binding) so the two never drift.
+[[nodiscard]] bool subscriber_compact(const tlv_t& sub) noexcept {
+    for (const tlv_t& child : sub.children) {
+        if (child.type != type_t::SETTINGS) continue;
+        const std::vector<tlv_t>& q = child.children;
+        for (std::size_t i = 0; i + 1 < q.size(); ++i) {
+            if (q[i].type != type_t::NAME || q[i + 1].type != type_t::VALUE) continue;
+            const std::span<const std::byte> nm = q[i].payload;
+            const std::string_view name(reinterpret_cast<const char*>(nm.data()), nm.size());
+            if (name == "delivery_compact")
+                return detail::load_le<std::uint8_t>(q[i + 1].payload) != 0;
+        }
+    }
+    return false;
+}
+
 // Assemble the FWD{REPLY} rope: a fresh head (FWD header + op=REPLY + dst=req.src +
 // src=req.dst + kind + `inline_tail`) prepended to `shared` (refcount clones of the
 // stored payload view(s)). The head is the only allocation; `shared` is never copied
@@ -234,7 +259,7 @@ enum class index_mode_t : std::uint8_t { SCALAR = 0, ELEMENT = 1, WILDCARD = 2 }
 
 }  // namespace
 
-result_t<rope_t> op_resolver_t::resolve(const tlv_t& fwd) {
+result_t<rope_t> op_resolver_t::resolve(const tlv_t& fwd, std::string_view inbound_link) {
     result_t<parsed_fwd_t> parsed = parse_fwd(fwd);
     if (!parsed) return std::unexpected(parsed.error());
     const parsed_fwd_t& req = *parsed;
@@ -286,6 +311,23 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_t& fwd) {
             if (!seg) return assemble_error(req, status_t::BACKPRESSURE);
             std::memcpy(seg->bytes.data(), enc.data(), enc.size());
             const view_t value = view_t::over(std::move(seg));
+
+            // A remote subscribe — a `:subscribers[]` APPEND that arrived over a transport
+            // (inbound_link set) carrying a SUBSCRIBER — binds a REMOTE subscriber instead
+            // of a local fan-out edge (#136). The slot retains this request's accumulated
+            // return route (`src`, the hop-by-hop way back) + the inbound link, so the
+            // producer fan-out delivers FWD{WRITE}/COMPACT home. A bare local resolve
+            // (no inbound_link) keeps the slice-2 field-write path unchanged.
+            if (!inbound_link.empty() && has_field && is_subscribe_append(field) &&
+                req.payload->type == type_t::SUBSCRIBER) {
+                std::vector<std::byte> return_route = wire::encode(*req.src);
+                result_t<void> w = graph_.add_remote_subscriber(v, value, std::move(return_route),
+                                                                std::string(inbound_link),
+                                                                subscriber_compact(*req.payload));
+                if (!w) return assemble_error(req, w.error());
+                return assemble(req, reply_kind_t::RESULT, {}, {}, 0);  // OK, empty payload
+            }
+
             result_t<void> w = graph_.write(v, has_field ? field : field_path_t{}, value);
             if (!w) return assemble_error(req, w.error());
             return assemble(req, reply_kind_t::RESULT, {}, {}, 0);  // OK, empty payload

@@ -16,6 +16,8 @@
 #include <memory>
 #include <shared_mutex>
 #include <span>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -31,6 +33,23 @@ namespace tr::graph {
 // (ADR-0014); an A->B->A subscriber loop terminates here instead of recursing
 // forever. See ADR-0015.
 inline constexpr int kMaxDispatchDepth = 32;
+
+/**
+ * @brief What the producer fan-out hands a remote subscriber's delivery sink (#136).
+ *
+ * A pure description of one remote subscription edge: the consumer's accumulated
+ * return route and this node's NAME for the link it arrived on, both opaque to L4,
+ * plus the @ref vertex_t::subscriber_t delivery_compact opt-in. The injected sink
+ * (a `tr::net` concern — @ref graph_t::set_remote_delivery_sink) interprets these:
+ * it maps @ref link to a transport child and emits a full-route `FWD{WRITE}` or,
+ * when @ref delivery_compact, an auto-promoted label `COMPACT` (RFC-0004 §D/§E.1).
+ * Borrowed for the sink call only — the sink must not retain the spans.
+ */
+struct remote_delivery_t {
+    std::string_view link;                   /**< @brief This node's NAME for the consumer link. */
+    std::span<const std::byte> return_route; /**< @brief Consumer return route (PATH TLV bytes). */
+    bool delivery_compact = false;           /**< @brief Opt-in to label-compacted delivery. */
+};
 
 class graph_t {
    public:
@@ -82,6 +101,28 @@ class graph_t {
                                            std::function<void(const view_t&)> callback,
                                            delivery_mode_t mode = delivery_mode_t::EVERY);
 
+    // Install the sink the producer fan-out hands each REMOTE subscriber's delivery to
+    // (#136, RFC-0004 §D/§E.1). Set once at wiring time by the transport plane
+    // (tr::net::fwd_router_t) before frames flow; the sink fires on whatever thread
+    // calls write() (outside the vertex lock), and on subscribe for a transient-local
+    // latch. L4 keeps it as an opaque std::function, so the graph never depends on a
+    // transport. A null sink (the default) ⇒ remote slots are stored but never deliver.
+    void set_remote_delivery_sink(
+        std::function<void(const remote_delivery_t&, const view_t&)> sink);
+
+    // Store a REMOTE subscriber on `v`: a SUBSCRIBER slot carrying the consumer's
+    // `return_route` + this node's NAME for its `link` + the `delivery_compact` opt-in,
+    // so a later write fans out a FWD{WRITE}/COMPACT delivery via the remote sink. The
+    // wire dual of the local subscribe(...) sugar, driven by the FWD resolver on an
+    // inbound `:subscribers[]` WRITE (#59/#136). If `v` is transient-local
+    // (settings.durability == 1) and already holds a value, the current LKV is latched
+    // to this subscriber immediately (one synchronous sink call, RFC-0004 §D). The
+    // `source_view` (the SUBSCRIBER TLV) is retained zero-copy so a `:subscribers[]`
+    // read serves it back. NotFound is impossible (the caller holds `v`).
+    [[nodiscard]] result_t<void> add_remote_subscriber(
+        vertex_t* v, view_t source_view, std::vector<std::byte> return_route, std::string link,
+        bool delivery_compact, delivery_mode_t mode = delivery_mode_t::EVERY);
+
     // Convenience — resolve the path key once (guarded map lookup), then hot path.
     // A write/read whose path has a field tail (e.g. ":settings.deadline_ns",
     // ":subscribers[]", ":schema") is routed to the field surface.
@@ -107,6 +148,10 @@ class graph_t {
 
     mutable std::shared_mutex map_mutex_;
     std::unordered_map<path_key_t, std::unique_ptr<vertex_t>, path_key_hash_t> vertices_;
+    // The remote-delivery sink (#136). Set once before frames flow, then read-only on
+    // the write hot path — no lock needed (a benign data race with a late setup write
+    // is excluded by the "configure before frames flow" contract, mirroring fwd_router).
+    std::function<void(const remote_delivery_t&, const view_t&)> remote_sink_;
 };
 
 }  // namespace tr::graph
