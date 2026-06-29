@@ -74,10 +74,24 @@ void udp_transport_t::send(std::span<const std::byte> frame) {
 void udp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
     if (fd_ < 0 || iov.empty()) return;
     // Gather the rope's segments into one datagram with a single syscall — no
-    // userspace flatten copy (the "rope we put into tx", lowered to sendmsg).
-    std::vector<::iovec> vec;
-    vec.reserve(iov.size());
-    for (const auto& s : iov) vec.push_back(::iovec{const_cast<std::byte*>(s.data()), s.size()});
+    // userspace flatten copy (the "rope we put into tx", lowered to sendmsg). The iovec
+    // count is small and bounded (a FWD forward/reply is ≤ ~6 spans), so the common case
+    // uses a fixed stack array — no per-datagram heap allocation. Only an unusually large
+    // gather (more than kMaxInlineIov spans) falls back to the heap vector.
+    constexpr std::size_t kMaxInlineIov = 16;
+    std::array<::iovec, kMaxInlineIov> inline_vec;
+    std::vector<::iovec> heap_vec;
+    ::iovec* vec = inline_vec.data();
+    std::size_t n = iov.size();
+    if (n > kMaxInlineIov) {
+        heap_vec.reserve(n);
+        for (const auto& s : iov)
+            heap_vec.push_back(::iovec{const_cast<std::byte*>(s.data()), s.size()});
+        vec = heap_vec.data();
+    } else {
+        for (std::size_t i = 0; i < n; ++i)
+            inline_vec[i] = ::iovec{const_cast<std::byte*>(iov[i].data()), iov[i].size()};
+    }
     sockaddr_in peer{};
     peer.sin_family = AF_INET;
     peer.sin_addr.s_addr = peer_ip_;
@@ -85,8 +99,8 @@ void udp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
     msghdr msg{};
     msg.msg_name = &peer;
     msg.msg_namelen = sizeof(peer);
-    msg.msg_iov = vec.data();
-    msg.msg_iovlen = vec.size();
+    msg.msg_iov = vec;
+    msg.msg_iovlen = n;
     ::sendmsg(fd_, &msg, 0);
 }
 
