@@ -116,10 +116,11 @@ void bridge_t::on_frame(std::span<const std::byte> frame) {
         // dies when on_frame returns, but the graph stores the view_t past then.
         // (One copy at the bridge boundary; reference/08 §cross-substrate.)
         const auto data = unwrapped->data;
-        segment_ptr_t seg = view::heap_alloc(data.size());
-        if (seg) {
-            std::memcpy(seg->bytes.data(), data.data(), data.size());
-            (void)graph_.write(mount, view_t::over(std::move(seg)));
+        // One audited locus for the alloc/copy/over triplet (view::over_bytes). A
+        // well-formed ROUTER carries a non-empty data TLV; an empty result is an
+        // allocation failure (or a malformed empty-data frame) — skip, don't crash.
+        if (view_t v = view::over_bytes(data); !v.empty()) {
+            (void)graph_.write(mount, std::move(v));
             delivered_.fetch_add(1);
         }
     }

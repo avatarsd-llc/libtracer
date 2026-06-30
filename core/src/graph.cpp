@@ -41,8 +41,7 @@ void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
     std::span<const std::byte> last;
     std::size_t i = 0;
     while (i + 4 <= key.size()) {
-        const std::size_t len = std::to_integer<std::uint8_t>(key[i + 2]) |
-                                (std::to_integer<std::uint8_t>(key[i + 3]) << 8);
+        const std::size_t len = detail::load_le<std::uint16_t>(key.subspan(i + 2, 2));
         if (i + 4 + len > key.size()) break;
         last = key.subspan(i + 4, len);
         i += 4 + len;
@@ -304,8 +303,7 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
                 for (std::size_t i = 0; i + 1 < q.size(); ++i) {
                     if (q[i].type != type_t::NAME || q[i + 1].type != type_t::VALUE) continue;
                     const std::span<const std::byte> nm = q[i].payload;
-                    const std::string_view name(reinterpret_cast<const char*>(nm.data()),
-                                                nm.size());
+                    const std::string_view name(detail::as_string_view(nm));
                     if (name == "delivery_compact")
                         s.delivery_compact = detail::load_le<std::uint8_t>(q[i + 1].payload) != 0;
                 }
@@ -385,10 +383,11 @@ result_t<view_t> graph_t::read_schema(vertex_t* v) const {
     std::vector<std::byte> point;
     detail::emit_tlv(point, type_t::POINT, opt_t{.pl = true}, point_body);  // POINT
 
-    segment_ptr_t seg = view::heap_alloc(point.size());
-    if (!seg) return std::unexpected(status_t::BACKPRESSURE);
-    std::memcpy(seg->bytes.data(), point.data(), point.size());
-    return view_t::over(std::move(seg));
+    // `point` is a POINT TLV (never empty); an empty result is exactly an alloc
+    // failure → BACKPRESSURE. One audited locus for the alloc/copy/over triplet.
+    const view_t out = view::over_bytes(point);
+    if (out.empty()) return std::unexpected(status_t::BACKPRESSURE);
+    return out;
 }
 
 result_t<view_t> graph_t::read_acl(vertex_t* v) const {
@@ -400,10 +399,11 @@ result_t<view_t> graph_t::read_acl(vertex_t* v) const {
         if (v->acl_.empty()) return std::unexpected(status_t::NOT_FOUND);
         acl = v->acl_;
     }
-    segment_ptr_t seg = view::heap_alloc(acl.size());
-    if (!seg) return std::unexpected(status_t::BACKPRESSURE);
-    std::memcpy(seg->bytes.data(), acl.data(), acl.size());
-    return view_t::over(std::move(seg));
+    // `acl` is non-empty (guarded above); an empty result is exactly an alloc
+    // failure → BACKPRESSURE. One audited locus for the alloc/copy/over triplet.
+    const view_t out = view::over_bytes(acl);
+    if (out.empty()) return std::unexpected(status_t::BACKPRESSURE);
+    return out;
 }
 
 result_t<view_t> graph_t::read(vertex_t* v, const field_path_t& field) const {

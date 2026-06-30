@@ -138,7 +138,7 @@ void fwd_router_t::send_compact(std::string_view link_name, std::uint16_t label,
 
 transport_t* fwd_router_t::child_by_segment(std::span<const std::byte> seg) const {
     // A child NAME is matched by its bytes — defer to the one scan in link_by_name.
-    return link_by_name(std::string_view(reinterpret_cast<const char*>(seg.data()), seg.size()));
+    return link_by_name(detail::as_string_view(seg));
 }
 
 transport_t* fwd_router_t::link_by_name(std::string_view name) const {
@@ -310,7 +310,7 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, const tlv_t& adv)
         // record the swap, retain the stripped egress route (for NACK re-advertise),
         // and re-advertise downstream with the new label (MPLS-style swap).
         const std::span<const std::byte> seg = route.children[0].payload;
-        const std::string down_name(reinterpret_cast<const char*>(seg.data()), seg.size());
+        const std::string down_name(detail::as_string_view(seg));
         tlv_t stripped = route;
         stripped.children.erase(stripped.children.begin());
         const std::vector<std::byte> stripped_bytes = wire::encode(stripped);
@@ -387,10 +387,11 @@ bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
     // The canonical PATH key (concatenated NAME encodings) — the graph vertex-map key.
     graph::vertex_t* const v = graph_.find(wire::path_key(*route));
     if (v == nullptr) return false;
-    segment_ptr_t seg = view::heap_alloc(payload.size());
-    if (!seg) return false;
-    std::memcpy(seg->bytes.data(), payload.data(), payload.size());
-    return graph_.write(v, view_t::over(std::move(seg))).has_value();
+    // `payload` is a wire-encoded TLV (never empty); an empty result is exactly
+    // an alloc failure → drop the delivery (one audited alloc/copy/over locus).
+    const view_t payload_view = view::over_bytes(payload);
+    if (payload_view.empty()) return false;
+    return graph_.write(v, payload_view).has_value();
 }
 
 void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const view_t& value) {

@@ -89,8 +89,8 @@ std::expected<unwrapped_t, error_t> router_unwrap(std::span<const std::byte> fra
         const auto tag = read_head(frame, cur);
         if (!tag || tag->type != std::to_underlying(type_t::NAME))
             return std::unexpected(error_t::FRAME_INVALID);
-        const std::string_view name(reinterpret_cast<const char*>(frame.data() + tag->payload_off),
-                                    tag->payload_len);
+        const std::string_view name(
+            detail::as_string_view(frame.subspan(tag->payload_off, tag->payload_len)));
         cur += tag->total;
 
         if (name == "data") {  // the rest of the ROUTER payload is the wrapped TLV
