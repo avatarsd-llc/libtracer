@@ -42,14 +42,8 @@ tr::mem::reassembly_key_t key_of(std::uint16_t node, std::uint16_t base_endpoint
     return tr::mem::reassembly_key_t{origin_of(node), static_cast<std::uint64_t>(base_endpoint)};
 }
 
-// Copy `bytes` into a fresh heap segment and return a view over the whole copy.
-// The seam hands the transport a transient frame; reassembly borrows views that
-// must outlive the callback, so each slice owns its bytes.
-tr::view::view_t own_copy(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    if (seg && !bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tr::view::view_t::over(std::move(seg));
-}
+// (removed) own_copy — the alloc/copy/over triplet now lives in one audited
+// locus, tr::view::over_bytes (mem_heap.hpp). Call sites use it directly.
 
 }  // namespace
 
@@ -234,7 +228,7 @@ void transport_can::send(std::span<const std::byte> frame) {
     const std::lock_guard lock(tx_m_);
 
     // Own the bytes so view_can_frames_t can carve zero-copy subviews out of them.
-    const tr::view::view_t payload = own_copy(frame);
+    const tr::view::view_t payload = tr::view::over_bytes(frame);
     const tr::view::view_can_frames_t frames =
         tr::view::view_can_frames_t::split(payload, cfg_.mode);
     const std::size_t count = frames.frame_count();
@@ -344,7 +338,7 @@ void transport_can::process_data(const can_frame_data_t& frame) {
 
     const tr::mem::reassembly_key_t key = key_of(fields->node, base_ep);
     const std::uint32_t index = static_cast<std::uint32_t>(fields->endpoint - base_ep);
-    reasm_.add_slice(key, index, own_copy(frame.bytes()));
+    reasm_.add_slice(key, index, tr::view::over_bytes(frame.bytes()));
 
     if (!reasm_.is_complete(key)) return;
     const auto rope = reasm_.assemble(key);

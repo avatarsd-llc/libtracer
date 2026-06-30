@@ -15,6 +15,16 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **Two consolidated byte-idiom helpers** (one audited locus each, used across the
+  codec/router/graph). `view::over_bytes(span) → view_t` collapses the repeated
+  `heap_alloc` + `memcpy` + `view_t::over` triplet (graph `read_schema`/`read_acl`,
+  the FWD resolver's reply-head and WRITE-payload, `fwd_router`'s local delivery, the
+  bridge's ingress materialize, the CAN reassembly slice) into one place — and skips
+  the allocation entirely for an empty span. `detail::as_string_view(span) →
+  std::string_view` is the byte↔char-string counterpart, replacing the
+  `reinterpret_cast<const char*>` idiom repeated across the codec/router (NAME
+  payloads, link names). Pure refactor — no behavior change on the hot path (verified:
+  22/22 ctest, perf-gate PASS, ASan/UBSan/TSan clean).
 - **Producer remote fan-out + `delivery_compact` auto-promotion**
   ([RFC-0004](../docs/spec/rfcs/0004-remote-operation-addressing.md) §D/§E.1 /
   [ADR-0035](../docs/adr/0035-implementing-rfc-0004-remote-operation-addressing.md)

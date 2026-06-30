@@ -9,9 +9,13 @@
 #pragma once
 
 #include <cstddef>
+#include <cstring>
+#include <span>
+#include <utility>
 
 #include "libtracer/backend.hpp"
 #include "libtracer/segment.hpp"
+#include "libtracer/view.hpp"
 
 /**
  * @file
@@ -36,5 +40,25 @@ namespace tr::view {
  * @retval {} An empty handle on allocation failure.
  */
 [[nodiscard]] segment_ptr_t heap_alloc(std::size_t size);
+
+/**
+ * @brief Allocate a fresh heap segment, copy @p bytes into it, and return a view
+ *        over it — the canonical "own a copy of these bytes as a view_t" idiom
+ *        (heap_alloc + memcpy + view_t::over) in one place.
+ *
+ * Collapses the repeated alloc/copy/over triplet across the codec and runtime
+ * (graph read_schema/read_acl, the FWD resolver's WRITE-payload and reply head,
+ * fwd_router's local delivery) into one audited locus.
+ * @retval A view with a null @ref view_t::owner on allocation failure (the caller
+ *         maps that to BACKPRESSURE); an empty @p bytes span yields an unowned
+ *         empty view (heap_alloc(0) is not called).
+ */
+[[nodiscard]] inline view_t over_bytes(std::span<const std::byte> bytes) noexcept {
+    if (bytes.empty()) return view_t{};
+    segment_ptr_t seg = heap_alloc(bytes.size());
+    if (!seg) return view_t{};
+    std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
+    return view_t::over(std::move(seg));
+}
 
 }  // namespace tr::view

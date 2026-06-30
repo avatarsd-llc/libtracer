@@ -124,7 +124,7 @@ enum class index_mode_t : std::uint8_t { SCALAR = 0, ELEMENT = 1, WILDCARD = 2 }
         if (ch[i].type != type_t::NAME) return std::unexpected(status_t::INVALID_PATH);
         field_step_t step;
         const std::span<const std::byte> nb = ch[i].payload;
-        step.name.assign(reinterpret_cast<const char*>(nb.data()), nb.size());
+        step.name.assign(detail::as_string_view(nb));
         ++i;
         const tlv_t* v0 = nullptr;
         const tlv_t* v1 = nullptr;
@@ -187,7 +187,7 @@ enum class index_mode_t : std::uint8_t { SCALAR = 0, ELEMENT = 1, WILDCARD = 2 }
         for (std::size_t i = 0; i + 1 < q.size(); ++i) {
             if (q[i].type != type_t::NAME || q[i + 1].type != type_t::VALUE) continue;
             const std::span<const std::byte> nm = q[i].payload;
-            const std::string_view name(reinterpret_cast<const char*>(nm.data()), nm.size());
+            const std::string_view name(detail::as_string_view(nm));
             if (name == "delivery_compact")
                 return detail::load_le<std::uint8_t>(q[i + 1].payload) != 0;
         }
@@ -220,11 +220,12 @@ enum class index_mode_t : std::uint8_t { SCALAR = 0, ELEMENT = 1, WILDCARD = 2 }
     emit_struct_header(head, type_t::FWD, body_len);
     head.insert(head.end(), head_children.begin(), head_children.end());
 
-    segment_ptr_t seg = view::heap_alloc(head.size());
     rope_t rope;
-    if (seg) {
-        std::memcpy(seg->bytes.data(), head.data(), head.size());
-        rope.append(view_t::over(std::move(seg)));
+    // `head` is never empty (always carries the FWD struct header), so an empty
+    // result here is exactly an allocation failure — skip the head, fall back to
+    // the shared payload views (the reply degrades, never crashes).
+    if (view_t head_view = view::over_bytes(head); !head_view.empty()) {
+        rope.append(std::move(head_view));
     }
     for (const view_t& v : shared) rope.append(v);  // refcount clone — no byte copy
     return rope;
@@ -295,11 +296,12 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_t& fwd, std::string_view inbou
             // The reply for a WRITE carries no shared payload, so re-encoding the
             // value into a fresh segment to write it is fine (the zero-copy rule
             // governs the REPLY payload, which here is an empty OK).
+            // A wire-encoded TLV is never empty, so an empty result is exactly an
+            // allocation failure → BACKPRESSURE (one audited locus for the
+            // alloc/copy/over triplet, view::over_bytes).
             const std::vector<std::byte> enc = wire::encode(*req.payload);
-            segment_ptr_t seg = view::heap_alloc(enc.size());
-            if (!seg) return assemble_error(req, status_t::BACKPRESSURE);
-            std::memcpy(seg->bytes.data(), enc.data(), enc.size());
-            const view_t value = view_t::over(std::move(seg));
+            const view_t value = view::over_bytes(enc);
+            if (value.empty()) return assemble_error(req, status_t::BACKPRESSURE);
 
             // A remote subscribe — a `:subscribers[]` APPEND that arrived over a transport
             // (inbound_link set) carrying a SUBSCRIBER — binds a REMOTE subscriber instead
