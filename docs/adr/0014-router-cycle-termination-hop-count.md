@@ -11,6 +11,7 @@ A bridge has two independent loop defenses ([05-protocol-tlvs.md](../reference/0
 ## Consequences
 
 - **Conformance:** a bridge MUST honor `MAX_HOPS` (termination); maintaining a recent-set is SHOULD (optimization).
+- **Reference-impl status:** the `hop_count >= MAX_HOPS` drop **and** the `STATUS=ERROR(NESTING_TOO_DEEP)` local-error emission are implemented — the latter via `bridge_t::set_status_path(...)` ([#77](https://github.com/avatarsd-llc/libtracer/issues/77); see [reference/07](../reference/07-host-embedding.md) §cycle handling step 4).
 - Embedded bridges can bound dedup memory hard; the trade is **bounded, transient duplicate delivery**, never a loop.
 - `05` §cycle handling and `07` §cycle handling are reworded to state which mechanism is load-bearing.
 - The recent-set's eviction policy (time-window + size-cap; LRU or ring) is implementation-defined ([ADR-0013](0013-v1-scope-boundaries.md)) — only its *bounded best-effort* role is normative.

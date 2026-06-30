@@ -10,12 +10,14 @@
 #include <utility>
 
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/tlv_emit.hpp"
 #include "libtracer/view.hpp"
 
 namespace tr::net {
 
 using wire::decode;
 using wire::encode;
+using wire::opt_t;
 using wire::tlv_t;
 using wire::type_t;
 
@@ -79,6 +81,32 @@ void bridge_t::set_mount(const graph::path_t& mount) {
     mount_vertex_.store(graph_.find(mount.key()));
 }
 
+void bridge_t::set_status_path(const graph::path_t& status) {
+    // Resolve the status vertex once (must already be registered), exactly as
+    // set_mount resolves the mount. The receive thread emits through it on a hop-cap
+    // drop with no per-frame lookup.
+    status_vertex_.store(graph_.find(status.key()));
+}
+
+// Build STATUS{ERROR u8=0x0D (NESTING_TOO_DEEP)} and write it to the status path,
+// fanned out to that vertex's subscribers — the ADR-0014 "MUST emit a local error"
+// on a hop_count cap drop (docs/reference/05 §0x0D, 07 §cycle handling). One owned
+// copy at emit time (view::over_bytes), then zero-copy to subscribers. The spec
+// reuses NESTING_TOO_DEEP for hop exhaustion; a distinct HOP_LIMIT code is a spec
+// change (RFC), not done here (issue #77).
+void bridge_t::emit_hop_limit_status() {
+    graph::vertex_t* const status = status_vertex_.load(std::memory_order_relaxed);
+    if (status == nullptr) return;  // no status path wired — silent drop (counter only)
+    std::vector<std::byte> err;
+    const std::byte code{0x0D};  // NESTING_TOO_DEEP
+    detail::emit_tlv(err, type_t::ERROR, opt_t{}, std::span<const std::byte>(&code, 1));
+    std::vector<std::byte> status_tlv;
+    detail::emit_tlv(status_tlv, type_t::STATUS, opt_t{.pl = true}, err);
+    if (const view_t v = view::over_bytes(status_tlv); !v.empty()) {
+        (void)graph_.write(status, v);  // fan-out to status subscribers (zero-copy)
+    }
+}
+
 void bridge_t::set_recent_set_capacity(std::size_t capacity) { recent_cap_.store(capacity); }
 
 void bridge_t::set_reforward(bool on) { reforward_.store(on); }
@@ -104,6 +132,7 @@ void bridge_t::on_frame(std::span<const std::byte> frame) {
 
     if (unwrapped->meta.hop >= kMaxHops) {  // the termination guarantee (ADR-0014)
         hop_dropped_.fetch_add(1);
+        emit_hop_limit_status();  // ADR-0014: MUST emit a local error to the status path
         return;
     }
     if (seen(unwrapped->meta)) {
