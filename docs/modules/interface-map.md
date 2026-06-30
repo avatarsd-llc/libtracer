@@ -78,7 +78,7 @@ flowchart LR
 | [graph](graph.md) | `class graph_t{ register_vertex; read; write; await; history; subscribe }` · `enum class role_t` · `struct settings_t` · `struct handlers_t` |
 | [transport](transport.md) | `using peer_id_t = array<byte,16>` · `class transport_t{ send(); set_receiver() }` · `class loopback_channel_t` |
 | [router](router.md) | `struct router_meta_t{ origin; ts; hop }` · `router_wrap()` · `router_unwrap()→result_t<unwrapped_t>` |
-| [bridge](bridge.md) | `class bridge_t{ export_vertex; set_mount; set_recent_set_capacity; counters }` |
+| [bridge](bridge.md) | `class bridge_t{ export_vertex; set_mount; set_recent_set_capacity; counters }` · _slated for [ADR-0037](../adr/0037-net-side-channels-dissolve-into-vertex-tree-compositor.md) dissolution (egress deleted, ingress guard absorbed into the connection-vertex); `fwd_router_t`'s children-table dissolves too_ |
 
 ## Two contracts hold the stack together
 
@@ -102,3 +102,13 @@ SocketCAN). The RFC-0004 remote-operation plane (`op_resolver_t`, `fwd_router_t`
 `route_handle_t` — path-addressed `read`/`write`/`await`/`subscribe` over `FWD`) is
 built on top of those. Still ahead: a reliable byte-stream transport (TCP/QUIC), and
 the wider backend/discovery/security catalog (pbuf, DMA, mDNS, TLS).
+
+**Next architectural trajectory** —
+[ADR-0026](../adr/0026-consumer-initiated-subscription-client-write.md)/[0027](../adr/0027-transport-and-connections-are-vertices.md)
+make every transport and connection a first-class `/` vertex ("one path tree"), so
+`bridge_t` *and* `fwd_router_t`'s children-table — both pre-0027 side-channels for the
+routing the vertex tree now owns — **dissolve** into the vertex tree per
+[ADR-0037](../adr/0037-net-side-channels-dissolve-into-vertex-tree-compositor.md)
+(transport-vertex = composite, connection-vertex = leaf, root = terminus resolver).
+Stage-2 is gated on a 16KB-RAM zero-heap forwarding bench; until then the two classes
+above remain the live data path.
