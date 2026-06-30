@@ -15,6 +15,16 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **Bridge hop-limit local error** ([ADR-0014](../docs/adr/0014-router-cycle-termination-hop-count.md)
+  "MUST emit a local error", [#77](https://github.com/avatarsd-llc/libtracer/issues/77)).
+  A `hop_count >= MAX_HOPS` drop now emits `STATUS=ERROR(NESTING_TOO_DEEP)` (wire code
+  `0x0D`) to the subscribers of the bridge's status path — new public API
+  `bridge_t::set_status_path(const path_t&)` (mirrors `set_mount`: resolves the vertex
+  once; the receive thread emits through it with no per-frame lookup). Unset status
+  path ⇒ silent drop (counter-only), as before. The spec reuses `NESTING_TOO_DEEP` for
+  hop exhaustion; a distinct `HOP_LIMIT` code would be a spec change (RFC), not done
+  here. Verified: new `bridge_test` hop-limit case asserts the emission (not just the
+  `hop_dropped()` counter); 22/22 ctest, ASan/UBSan/TSan clean, perf-gate PASS.
 - **Two consolidated byte-idiom helpers** (one audited locus each, used across the
   codec/router/graph). `view::over_bytes(span) → view_t` collapses the repeated
   `heap_alloc` + `memcpy` + `view_t::over` triplet (graph `read_schema`/`read_acl`,

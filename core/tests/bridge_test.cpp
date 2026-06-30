@@ -219,6 +219,44 @@ void test_monotonic_origin_ts() {
     check(strictly_increasing, "1000 rapid exports: strictly increasing, non-colliding ts");
 }
 
+// ADR-0014: a hop_count cap drop MUST emit a local STATUS=ERROR(NESTING_TOO_DEEP)
+// to the bridge's status path — not just increment the drop counter (#77).
+void test_hop_limit_error() {
+    std::printf("Hop-cap drop emits STATUS=ERROR(NESTING_TOO_DEEP) (ADR-0014):\n");
+    tr::net::loopback_channel_t channel;
+    graph_t node_b;
+    tr::net::bridge_t bridge_b(node_b, channel.b(), peer_of(0xB2));
+    (void)node_b.register_vertex(*path_t::parse("/status"), role_t::STORED_VALUE);
+    bridge_b.set_status_path(*path_t::parse("/status"));
+
+    std::promise<std::vector<std::byte>> got;
+    auto fut = got.get_future();
+    (void)node_b.subscribe(*path_t::parse("/status"), [&got](const tr::view::view_t& v) {
+        const auto b = v.bytes();
+        got.set_value(std::vector<std::byte>(b.begin(), b.end()));
+    });
+
+    // Inject a frame already at the hop cap -> bridge_b drops it and emits the error.
+    const auto frame = tr::net::router_wrap(
+        value_tlv({0x01}), {.origin = peer_of(0xEE), .ts = 7, .hop = tr::net::kMaxHops});
+    channel.a().send(frame);  // -> node B (bridge_b's transport is channel.b())
+
+    const bool emitted = fut.wait_for(2s) == std::future_status::ready;
+    check(emitted, "status subscriber receives the hop-limit error");
+    check(bridge_b.hop_dropped() == 1, "exactly one hop-cap drop");
+    if (emitted) {
+        const auto bytes = fut.get();
+        const auto dec = tr::wire::decode(bytes);
+        const bool ok = dec.has_value() && dec->type == tr::wire::type_t::STATUS && dec->opt.pl &&
+                        dec->children.size() >= 1 &&
+                        dec->children[0].type == tr::wire::type_t::ERROR &&
+                        !dec->children[0].payload.empty() &&
+                        std::to_integer<std::uint8_t>(dec->children[0].payload[0]) == 0x0D;
+        check(ok, "emitted frame is STATUS{ERROR 0x0D (NESTING_TOO_DEEP)}");
+    }
+    channel.shutdown();
+}
+
 }  // namespace
 
 int main() {
@@ -226,6 +264,7 @@ int main() {
     test_two_node_delivery();
     test_dedup();
     test_cycle_termination();
+    test_hop_limit_error();
     test_monotonic_origin_ts();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,

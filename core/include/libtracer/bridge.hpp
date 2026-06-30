@@ -52,6 +52,14 @@ class bridge_t {
     void set_recent_set_capacity(std::size_t capacity);
     void set_reforward(bool on);
 
+    // The bridge's local status path: a vertex whose subscribers receive
+    // `STATUS=ERROR(NESTING_TOO_DEEP)` when an inbound frame hits the `hop_count`
+    // cap (ADR-0014 "MUST emit a local error"; docs/reference/05 §0x0D, 07 §cycle).
+    // Must be registered before frames arrive. Unset ⇒ hop-cap drops are silent
+    // (counter-only), as before. The spec reuses NESTING_TOO_DEEP for hop exhaustion;
+    // a distinct HOP_LIMIT code would be a spec change (RFC) — see issue #77.
+    void set_status_path(const graph::path_t& status);
+
     [[nodiscard]] std::uint64_t delivered() const noexcept { return delivered_.load(); }
     [[nodiscard]] std::uint64_t deduped() const noexcept { return deduped_.load(); }
     [[nodiscard]] std::uint64_t hop_dropped() const noexcept { return hop_dropped_.load(); }
@@ -59,6 +67,8 @@ class bridge_t {
    private:
     void on_frame(std::span<const std::byte> frame);     // the transport receiver
     [[nodiscard]] bool seen(const router_meta_t& meta);  // recent-set check + insert
+    // Emit STATUS=ERROR(NESTING_TOO_DEEP) to the status path (ADR-0014 hop-cap error).
+    void emit_hop_limit_status();
 
     graph::graph_t& graph_;
     transport_t& transport_;
@@ -67,6 +77,7 @@ class bridge_t {
     // Resolved once at set_mount (no per-frame string/lookup); atomic because the
     // transport's receive thread reads these while setup writes them.
     std::atomic<graph::vertex_t*> mount_vertex_{nullptr};
+    std::atomic<graph::vertex_t*> status_vertex_{nullptr};  // set via set_status_path
     std::atomic<bool> reforward_{false};
     std::atomic<std::size_t> recent_cap_{64};
 
