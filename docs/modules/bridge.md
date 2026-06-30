@@ -1,5 +1,21 @@
 # bridge — cross-node forwarding (L4)
 
+```{admonition} Trajectory — this class dissolves (ADR-0037)
+:class: warning
+`bridge_t` is a **pre-[ADR-0027](../adr/0027-transport-and-connections-are-vertices.md)
+side-channel** for exactly the routing the vertex tree now owns, so it is **slated for
+Stage-2 dissolution** per
+[ADR-0037](../adr/0037-net-side-channels-dissolve-into-vertex-tree-compositor.md):
+its **egress** (`export_vertex` + ROUTER-wrap) is **deleted** — source-routing has no
+"subscribe-and-mirror-to-one-transport"; its **ingress** guard (dedup `(origin, ts)` +
+`hop_count`/`MAX_HOPS`) is **absorbed** as a per-connection defense-in-depth layer. The
+routing model that survives is `fwd_router_t`'s FWD source-routing
+([ADR-0035](../adr/0035-implementing-rfc-0004-remote-operation-addressing.md)), carried
+by the connection-vertex. The body below describes the **current** class — still the
+way two nodes bridge today — until Stage-2 lands (gated on the 16KB-RAM zero-heap
+bench). Read ADR-0037 for the operative target.
+```
+
 ```{admonition} In one paragraph
 :class: tip
 A **`bridge_t`** connects a local graph to a transport. On **egress** it subscribes a
@@ -60,4 +76,6 @@ flowchart LR
 - **One copy per hop, not per fan-out** — materialize once at ingress; every local
   subscriber after that is zero-copy.
 
-See: [transport](transport.md), [router](router.md), [graph](graph.md).
+See: [transport](transport.md), [router](router.md), [graph](graph.md),
+[ADR-0037](../adr/0037-net-side-channels-dissolve-into-vertex-tree-compositor.md)
+(the dissolution trajectory).
