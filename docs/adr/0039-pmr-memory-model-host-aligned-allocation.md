@@ -1,0 +1,55 @@
+# Transparent PMR: the node draws every non-hot-path allocation from an injected `std::pmr::memory_resource`, unifying with the L0 `mem_backend_t` seam — and "zero-heap" means the *steady-state forward hop*, not init
+
+Status: accepted. **Refines [ADR-0038](0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md)** (sharpens what invariants #2/#5 mean) and **generalizes [ADR-0016](0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md)** (the `mem_backend_t` injection seam) to the container/tree layer. Brick 0 of the #83 Stage-2 flip: the memory-ownership contract the forward-path rewrite builds against.
+
+## Context
+
+Two clarifications surfaced while scoping Stage-2, and both are load-bearing enough to pin before code.
+
+**1. "Zero-heap" was under-specified — it means the *steady-state forward hop*, not "never allocate."** [ADR-0038](0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md) invariant #2 says "zero heap on the forward path." That was always meant as: a node that has *finished setup* forwards a frame with zero allocations. **Init / deinit / setup allocate freely** — pool construction, `:children[]` connection creation ([#82](https://github.com/avatarsd-llc/libtracer/issues/82)), catalog registration, the graph vertex map. So does the *host application* and the *user*; none of that is on libtracer's forward path and none of it counts. The `bench_forward_heap` gate ([ADR-0038](0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md)) already encodes this precisely — it warms once *outside* the counter window, then arms the allocation counter around exactly one steady-state `on_frame`. The invariant is a property of *when* the counter is armed (steady state), not a claim that the process never mallocs.
+
+**2. The memory-injection seam stops at L1.** [ADR-0016](0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md)'s `mem_backend_t` already makes the zero-copy *byte* substrate host-owned: `pool_t` takes a caller slab, a device backend hands up GPU/pbuf memory, "libtracer never allocates on its own; it receives memory." But that seam covers only **L0 segments**. The **container/tree layer above it** — `wire::decode`'s `std::vector<tlv_t>` spine, `fwd_router_t`'s per-hop rebuild vectors, `route_handle_t`'s label `std::map`s, the graph's transient buffers — allocates from the **global heap** via plain STL, entirely outside the injection seam. So a 16KB ESP node can host-own its packet bytes but *not* the structures that parse and route them. That is the inconsistency: the stack is half-injectable.
+
+## Decision
+
+**Adopt `std::pmr` as the standard spelling of the container/tree injection seam, mirroring `mem_backend_t` for segments, so the *entire* stack draws from memory the host chooses — and unify the two into one model, not two.**
+
+### 1. The node takes a `std::pmr::memory_resource*`, defaulting to the standard resource
+
+`graph_t`, `fwd_router_t` (and the Stage-2 connection-vertex / terminus arena) take a `std::pmr::memory_resource*` at construction, **defaulting to `std::pmr::get_default_resource()`**. Explicit at the seam, transparent below: a 16KB node installs a `std::pmr::monotonic_buffer_resource` (or a pool resource) over a **static arena**; a server passes nothing and gets the standard heap; a NUMA / pinned-memory host passes its own. One code path; the host picks the memory.
+
+**Not** a global `std::pmr::set_default_resource()`. That is process-global and breaks the instant two nodes share a process (the conformance tests, `bench_forward_heap`, two 16KB sims in one binary). Per-node explicit resource is the only choice that composes — and defaulting to the standard resource is **zero churn for every existing caller** (the parameter is added last, defaulted).
+
+### 2. `mem_backend_t` (L0 segments) and `memory_resource` (L2+ containers) are ONE model, bridged
+
+They are the same principle at two layers, not two competing seams:
+
+- **`mem_backend_t`** stays the **L0 segment** seam — DMA-aware, device-memory-capable, the zero-copy byte substrate ([ADR-0016](0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md)/[ADR-0024](0024-mem-cuda-gpu-backend-heterogeneous-rope.md)). Unchanged.
+- **`std::pmr::memory_resource`** is the **L2+ container/tree** seam — the `tlv_t` spine at the terminus, the per-connection label tables, transient control structures.
+- **A `pool_t`-backed `memory_resource` adapter** (a thin `tr::mem` shim: `memory_resource::do_allocate` → the pool's slab) lets a 16KB node feed **both** seams from **one static slab**. "The entire stack aligns to the host's memory" = one caller-owned arena supplies the segment pool *and* the pmr resource. The adapter is the single point where the two vocabularies meet; everywhere else each layer speaks its native seam.
+
+### 3. Non-viral — `wire::tlv_t` is untouched; PMR bites only where a tree is actually built
+
+The elegant consequence of [ADR-0038](0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md) invariant #1 (**the forward hop builds no `tlv_t` at all** — it offset-dispatches on the first ~3 headers): making `tlv_t::children` a `pmr::vector` would not help the hot path, because the hot path constructs no `tlv_t`. So **`wire::tlv_t` stays exactly as it is** (heap-defaulted `std::vector<tlv_t>`, the shared cross-core codec type — no `pmr::` virality across the codebase, no conformance-vector churn). PMR appears at exactly two loci, both off the forward hot path:
+
+- **The terminus arena** (invariant #5): a new `wire::decode_into(span, std::pmr::memory_resource&)` builds the `tlv_t` tree from the node's resource. The existing `wire::decode(span)` stays as the convenience form over the default resource. The terminus is where the resolver *must* read the tree; it draws that tree from host memory.
+- **The per-connection label tables** (invariant #3): the Stage-2 open-addressed `label → route` table is a `pmr`-allocated fixed-capacity structure sized by `:settings`, drawn from the connection's resource.
+
+### 4. What the forward hot path allocates: nothing, from anywhere
+
+The steady-state forward hop takes **neither** seam: no `tlv_t` (offset-dispatch), no container growth (stack `std::array` iov), and its fresh header bytes come from the **M2 `mem_pool_t`** (segment seam, fixed slab) — so even the "allocation" it does is a pool slot hand-out, not a `memory_resource::allocate`. Pool exhaustion is backpressure (drop / await), never OOM. The `memory_resource` is consulted only at the terminus and at flow-setup, both of which are allowed to allocate (§Context 1). **The gate is: `bench_forward_heap` reports 0 with the counter armed around a steady-state hop — from the global heap *and* from any injected resource** (the bench's `operator new` counter already catches both, since a `pmr` resource that falls through to the heap allocates through the counted `operator new`).
+
+## Considered options
+
+- **Global `std::pmr::set_default_resource()`.** Rejected: process-global, so two nodes in one process (tests, bench, multi-node sims) can't have different memory, and a stray library call could repoint the whole process's allocation. Per-node explicit resource composes; the global does not.
+- **Make `wire::tlv_t::children` a `pmr::vector` (viral PMR through the codec).** Rejected: it changes the shared cross-core codec type (conformance-vector and TS/Rust-parity churn) to help a path that — post-invariant-#1 — builds no `tlv_t`. PMR belongs at the terminus arena and the label tables, not smeared through the codec.
+- **Extend `mem_backend_t` to cover the container layer instead of adopting `std::pmr`.** Rejected: `std::pmr` is the *standard* container-allocator model every C++ dev and every STL container already speaks (the "modern C++ standard" the project targets); reinventing it on `mem_backend_t` would be a bespoke seam where a standard one exists. Keep `mem_backend_t` for what it is uniquely good at (DMA/device segments) and use `std::pmr` for containers — bridged by one adapter.
+- **Leave the container layer on the global heap (do nothing).** Rejected: it is the exact half-injectable inconsistency this ADR exists to close — a 16KB node that host-owns its bytes but heap-allocates the structures that route them cannot bound its memory, which is the whole point of the 16KB target.
+
+## Consequences
+
+- **`bench_forward_heap`'s "0" is now precise**: zero allocations from the global heap *or* the node's `memory_resource` on the steady-state forward hop. Init/setup/terminus/host allocations are explicitly out of scope, measured by the armed window.
+- **Stage-2 signatures gain a defaulted `std::pmr::memory_resource*`** on `graph_t`/`fwd_router_t`/the connection-vertex/the terminus arena — additive, defaulted to `get_default_resource()`, so no existing caller changes. Public API note in `core/CHANGELOG.md` when it lands.
+- **New surface**: `wire::decode_into(span, memory_resource&)` (arena decode) and a `pool_t`-backed `memory_resource` adapter in `tr::mem`. `wire::decode(span)` and `mem_backend_t` are unchanged.
+- **One slab, whole stack**: a 16KB node constructs one static arena → feeds the segment pool and a `monotonic_buffer_resource` → every libtracer allocation (segments, terminus trees, label tables) comes from it. Host-aligned by construction, boundable, no global heap dependency.
+- **The Stage-2 bricks are unchanged in order; this fixes their memory contract**: Brick 1 (kill the forward-path full-decode) and Brick 2 (pooled header rebuild) drive the bench to 0 *from any resource*; Brick 3 (the structural split + label tables) draws its per-connection state from the node's `memory_resource`.
