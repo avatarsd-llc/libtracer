@@ -211,6 +211,10 @@ write("/sensor/temp:settings",
 
 ## Bridge republish
 
+```{note}
+**Trajectory (post-RFC-0004).** This §describes the M4 **ROUTER**-envelope republish — the flood/mirror model. It is retained for **cyclic / multi-path** delivery but is **no longer the primary remote mechanism**: a remote operation now source-routes as an **`FWD`** frame ([RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md) / [ADR-0035](../adr/0035-implementing-rfc-0004-remote-operation-addressing.md)) — the receive-side **mount** below is the `FWD` terminus write, addressed by path-suffix through a transport-vertex ([ADR-0027](../adr/0027-transport-and-connections-are-vertices.md)), **not** a ROUTER re-wrap. The ROUTER-wrap **egress** is deleted and `bridge_t` dissolves into the transport-vertex tree ([ADR-0037](../adr/0037-net-side-channels-dissolve-into-vertex-tree-compositor.md)/[0038](../adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md), Stage-2). Current model: [reference/13](13-network-formation.md) + [CONTEXT.md §Path-as-route](../../CONTEXT.md).
+```
+
 A bridge is a vertex that ingests TLVs from one transport and republishes them into the local graph under a mount point. From a local subscriber's view, bridged data is indistinguishable from local-source data.
 
 ```

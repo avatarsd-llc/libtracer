@@ -222,6 +222,10 @@ A path resolves within the host's own graph. No bridge prefix. Applies to:
 
 ### Bridged scope
 
+```{note}
+**Trajectory (post-RFC-0004).** The `mount = "…"` / `source = "…"` **bridge republish** prefixing below is the M4 model. The current addressing is **path-as-route** ([ADR-0027](../adr/0027-transport-and-connections-are-vertices.md) / [CONTEXT.md §Path-as-route](../../CONTEXT.md)): a remote vertex is reached by walking *through* a transport-vertex — `/net/<conn>/<remote path>` — where the mount prefix **is** the transport-vertex's own path, not a configured string. The send-side suffix and this receive-side mount prefix are the same address ([ADR-0038](../adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md)). See [reference/13](13-network-formation.md).
+```
+
 A path is **prefixed** with the bridge's mount point when the bridge republishes incoming TLVs. A bridge configured with `mount = "/can-bridge"` and `source = "transport_can"` republishes a CAN-borne write to `/sensor/wheel/left` as `/can-bridge/sensor/wheel/left` on the local graph.
 
 Subscribers on the local graph see the prefixed path. The original path on the source side is not visible past the bridge unless the bridge is configured to publish a manifest.

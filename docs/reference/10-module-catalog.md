@@ -95,7 +95,7 @@ The view + rope + cast machinery itself is one `required` module; integrations w
 | `path_handle` | required | Build-time and init-time PATH TLV encoder; `.rodata` literal helpers; init-time path registration. Hot-path API takes handles only. ([03-addressing.md](03-addressing.md) §static path handles, [../spec/v1.md](../spec/v1.md) §3.1) |
 | `path_resolver` | required | Path EBNF parsing, wildcard match, field-chain resolution. Slow path only — string-form entry point used at init or for ergonomics. P0 builds MAY omit the string-form entry. |
 | `dispatcher` | required | Fan-out to subscribers, per-subscriber QoS / ACL gating. Vertex map is keyed on canonical PATH TLV bytes ([02-graph-model.md](02-graph-model.md) §dispatch keyed on canonical PATH TLV bytes). |
-| `bridge` | required | Cross-transport forwarding; ROUTER attach/strip; cycle dedup recent-set |
+| `bridge` | required | Cross-transport forwarding; ROUTER attach/strip; cycle dedup recent-set. _Post-RFC-0004: forwarding is the source-routed **`FWD`** plane ([ADR-0035](../adr/0035-implementing-rfc-0004-remote-operation-addressing.md)); ROUTER attach/strip narrows to the **cyclic** delivery side; the `bridge_t` class dissolves into the transport-vertex tree ([ADR-0037](../adr/0037-net-side-channels-dissolve-into-vertex-tree-compositor.md)/[0038](../adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md), Stage-2). The **capability** stays required; the class goes._ |
 | `subscriber_mux` | required | Per-subscriber state slots, rate limit, deadline / liveness watchdog |
 | `schema_registry` | required | Per-vertex `:schema` storage and lookup |
 

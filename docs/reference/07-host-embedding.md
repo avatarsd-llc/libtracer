@@ -11,6 +11,10 @@
 
 Conforming implementations MUST handle this without livelocks or duplicate delivery, and they MUST do it transparently to application code. From the application's read/write API view, the local DAG IS the world; the bridge layer is invisible.
 
+```{note}
+**Trajectory (post-RFC-0004) — applies to this whole document.** 07 describes the M4 **ROUTER**-envelope bridge with `[[bridges]]` **mount points** and `(origin, ts)` recent-set dedup. That model is retained for **cyclic / multi-path** delivery (the "any shape including cycles" case this doc is about — where dedup genuinely earns its keep), but the **primary** remote mechanism is now source-routed **`FWD`** ([RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md) / [ADR-0035](../adr/0035-implementing-rfc-0004-remote-operation-addressing.md)), transports/connections are **`/` vertices** ([ADR-0027](../adr/0027-transport-and-connections-are-vertices.md)) addressed by path-suffix rather than a configured `mount` string, and `bridge_t` dissolves into that vertex tree ([ADR-0037](../adr/0037-net-side-channels-dissolve-into-vertex-tree-compositor.md)/[0038](../adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md), Stage-2). Read the mount/ROUTER mechanics below as the cyclic-delivery layer; the current addressing model is [reference/13](13-network-formation.md) + [CONTEXT.md §Path-as-route](../../CONTEXT.md). Tracked as [#86](https://github.com/avatarsd-llc/libtracer/issues/86).
+```
+
 ---
 
 ## Per-host view: a DAG of own vertices and bridge proxies
