@@ -101,6 +101,12 @@ void test_create_connection_vertex() {
     const auto* s = net.settings_of("up");
     check(s != nullptr && s->role == conn_role_t::DIAL && s->port == 8080,
           "its transport-private :settings (role, port) parsed from the SPEC config");
+
+    // Brick 3a: the NAME→link demux table has ONE owner — the router's child_registry_t.
+    // The connection resolves there by the same NAME a `dst` routes through; the vertex
+    // shell no longer duplicates the link.
+    check(router.registry().size() == 1 && router.registry().by_name("up") == &channel.a(),
+          "the connection is in the router's single child_registry_t (no duplicate table)");
     channel.shutdown();
 }
 
