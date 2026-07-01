@@ -31,6 +31,17 @@ conformance-validated slices.**
   it names a **transport** child vertex ([ADR-0027](0027-transport-and-connections-are-vertices.md)),
   strip it and hand the shortened `FWD` to that transport for the next hop. dst-resolution is the
   router's existing dispatch, made transport-aware.
+
+  > **Impl note (forward-looking, added post-merge).** This bullet describes the *intended* end state
+  > (transport children resolved through the graph's PATH-keyed dispatch). The reference impl as landed
+  > took a shortcut: `fwd_router_t` keeps its **own** `std::vector<child_t{name, transport*}>` (`children_`)
+  > and resolves a dst transport segment by a NAME scan (`link_by_name`) **disjoint from the graph vertex
+  > map** — transports are not yet graph vertices (no `TRANSPORT`/`CONNECTION` role; `:children[]` creation
+  > is unbuilt). So "reuse the existing dispatch" is the target, not the current code. That parallel
+  > `children_` table is precisely the second side-channel [ADR-0037](0037-net-side-channels-dissolve-into-vertex-tree-compositor.md)
+  > names for dissolution, and its dissolution into `graph.find(child)` is the ADR-0037/0038 Stage-2 flip
+  > ([#83](https://github.com/avatarsd-llc/libtracer/issues/83)). Until then, ADR-0027's `:children[]`
+  > transport creation and this graph-dispatch reuse are both future work.
 - **`src` accumulation → zero-copy rope head-prepend (`rope.hpp`, `tr::view` L1).** Each forwarding
   hop prepends its inbound-link `NAME` to `src` as a rope head segment; existing bytes never move,
   only the outer `PATH`/`FWD` length is rewritten (the trailer is recomputed at egress regardless).
