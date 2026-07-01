@@ -249,6 +249,10 @@ A subscriber that wants the live composite reads `/canvas:image`. A subscriber t
 
 ### Per-transport split behind one path
 
+```{note}
+**Trajectory (post-RFC-0004).** The `bridge:` / `mount = …` / `sources = […]` TOML below is the M4 config model. The current mechanism expresses this as **transport-vertices** in the path tree ([ADR-0027](../adr/0027-transport-and-connections-are-vertices.md)); the `(origin, ts)` dedup applies where a delivery is **ROUTER**-wrapped for a cyclic/multi-path region ([ADR-0035](../adr/0035-implementing-rfc-0004-remote-operation-addressing.md)/[0038](../adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md)). The "bridges are core" claim still holds — any node with ≥2 transports forwards — but the forwarder is the FWD source-router, not a mount-configured `bridge_t`. See [reference/13](13-network-formation.md).
+```
+
 A bridge that connects two transports MAY mount a single path that *combines* both:
 
 ```

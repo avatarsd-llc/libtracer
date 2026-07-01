@@ -150,6 +150,10 @@ The trailer is **append-only at egress, strip-only at ingress**. A bridge or rec
 
 ### Graph-data vs in-flight-message: the ROUTER shedding rule
 
+```{note}
+**Trajectory (post-RFC-0004).** This §describes the M4 **ROUTER**-envelope bridge — still the mechanism for **cyclic / multi-path** delivery (where the same data can arrive two ways). It is **no longer the primary remote mechanism**: a remote `read`/`write`/`await`/`subscribe` now source-routes as an **`FWD`** frame ([RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md) / [ADR-0035](../adr/0035-implementing-rfc-0004-remote-operation-addressing.md)), which is loop-free by construction and needs no ROUTER dedup. `ROUTER` earns its keep only where the topology folds. The `bridge_t` class itself is slated to dissolve into the transport-vertex tree ([ADR-0037](../adr/0037-net-side-channels-dissolve-into-vertex-tree-compositor.md)/[0038](../adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md), Stage-2). Current addressing model: [reference/13](13-network-formation.md) + [CONTEXT.md §Path-as-route](../../CONTEXT.md).
+```
+
 The TLV substrate plays two distinct roles structurally distinguished by the `ROUTER` TLV (type `0x0D`):
 
 - **Graph data** at a vertex: just the payload, no `ROUTER`. Identity = vertex path.

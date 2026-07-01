@@ -625,6 +625,10 @@ type = 0x80 (user-range record, sender and receiver agree on shape)
 
 ## `0x0D` — ROUTER
 
+```{note}
+**Scope (post-RFC-0004).** `ROUTER` is **live and unchanged**, but its scope narrowed: it wraps a delivery only on the **cyclic / multi-path** side (where the same data can arrive two ways and `(origin, ts)` dedup is needed). The **primary** remote mechanism is now the source-routed **`FWD`** (`0x0F`) frame below ([RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md) / [ADR-0035](../adr/0035-implementing-rfc-0004-remote-operation-addressing.md)), which is loop-free by construction and carries no ROUTER metadata. The ROUTER-wrap **egress** of the M4 `bridge_t` is deleted as `bridge_t` dissolves into the transport-vertex tree ([ADR-0037](../adr/0037-net-side-channels-dissolve-into-vertex-tree-compositor.md)/[0038](../adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md), Stage-2); the `0x0D` wire type stays.
+```
+
 Bridge envelope. ROUTER **wraps** a data TLV with routing metadata when the data crosses a bridge. To downstream subscribers, ROUTER is invisible (the bridge sheds it on ingest); to other bridges, ROUTER carries the dedup key and routing telemetry.
 
 ### Payload layout
