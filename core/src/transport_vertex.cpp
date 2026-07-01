@@ -116,11 +116,12 @@ result_t<vertex_t*> transport_vertex_t::make_connection(std::vector<std::byte> c
     settings.role = role;  // the type default; config may override
     parse_config(config, settings);
 
-    conns_.insert_or_assign(name, conn_t{.vertex = *v, .link = link, .settings = settings});
+    conns_.insert_or_assign(name, conn_t{.vertex = *v, .settings = settings});
     pending_links_.erase(pl);
 
-    // Stage-1: wire the link into the router so bytes still flow the tested FWD path.
-    // The `/net/<name>` NAME is exactly the router child name a `dst` routes through.
+    // Wire the link into the router's child_registry_t — the single owner of the
+    // NAME→link demux table (Brick 3a). The `/net/<name>` NAME is exactly the router
+    // child name a `dst` routes through; the router still carries the bytes (Stage-1).
     router_.add_child(name, *link);
     return v;
 }

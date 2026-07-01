@@ -15,6 +15,18 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **`tr::net::child_registry_t`** — the connection demux table (`NAME → transport
+  link`, `by_name`/`by_segment`), extracted from `fwd_router_t`'s private `children_`
+  field into one named, shareable owner (Brick 3a of the #83 Stage-2 flip;
+  [ADR-0037](../docs/adr/0037-net-side-channels-dissolve-into-vertex-tree-compositor.md)
+  compositor demux, [ADR-0038](../docs/adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md)
+  §3b). The `NAME → link` table is no longer duplicated between `fwd_router_t` and
+  `transport_vertex_t` — the router owns the single registry (exposed read-only via
+  `fwd_router_t::registry()`), and `transport_vertex_t` populates it. Layering-safe:
+  the registry is `tr::net` (L5) and holds `transport_t*`, *not* a `graph.find` against
+  an L4 vertex (which must never know a transport). Pure dedup — byte-identical routing,
+  zero-heap forward gate still PASSES, no behavior change. `fwd_router_t::add_child` is
+  unchanged; the private `child_by_segment`/`link_by_name` are gone.
 - **Transport / connection as a `/` vertex — Stage-1 shell** ([ADR-0027](../docs/adr/0027-transport-and-connections-are-vertices.md)
   / [ADR-0037](../docs/adr/0037-net-side-channels-dissolve-into-vertex-tree-compositor.md)
   Stage-1; [#83](https://github.com/avatarsd-llc/libtracer/issues/83)). New

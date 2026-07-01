@@ -10,6 +10,7 @@
 
 #include "libtracer/backend.hpp"
 #include "libtracer/bridge.hpp"
+#include "libtracer/child_registry.hpp"
 #include "libtracer/crc.hpp"
 #include "libtracer/frame.hpp"
 #include "libtracer/fwd_router.hpp"

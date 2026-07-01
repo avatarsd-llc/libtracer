@@ -36,6 +36,7 @@
 #include <string_view>
 #include <vector>
 
+#include "libtracer/child_registry.hpp"
 #include "libtracer/frame.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/op_resolve.hpp"
@@ -194,17 +195,10 @@ class fwd_router_t {
      */
     void on_frame(std::string_view inbound_name, std::span<const std::byte> frame);
 
+    /** @brief The connection registry (test introspection — the shared demux table). */
+    [[nodiscard]] const child_registry_t& registry() const noexcept { return registry_; }
+
    private:
-    struct child_t {
-        std::string name;
-        transport_t* link;
-    };
-
-    /** @brief The child whose NAME equals the raw segment bytes @p seg (nullptr if none). */
-    [[nodiscard]] transport_t* child_by_segment(std::span<const std::byte> seg) const;
-    /** @brief The link a frame arrived on, by this node's NAME for it (nullptr if unknown). */
-    [[nodiscard]] transport_t* link_by_name(std::string_view name) const;
-
     /** @brief The slice-3 stateless FWD forward/terminus/reply step (decoded @p dec). */
     void route_fwd(std::string_view inbound_name, std::span<const std::byte> frame,
                    const wire::tlv_t& dec);
@@ -239,8 +233,8 @@ class fwd_router_t {
 
     graph::graph_t& graph_;
     graph::op_resolver_t resolver_;
-    std::vector<child_t> children_;  // immutable after setup — no lock on the hot path
-    route_handle_t handles_;         // per-link label tables (compact flows only)
+    child_registry_t registry_;  // the one NAME→link demux table (Brick 3a, ADR-0037)
+    route_handle_t handles_;     // per-link label tables (compact flows only)
     std::function<void(const wire::tlv_t&)> reply_cb_;
     std::function<void(std::string_view, const wire::tlv_t&)> inbound_cb_;
     std::function<void(std::string_view, std::span<const std::byte>)> raw_cb_;

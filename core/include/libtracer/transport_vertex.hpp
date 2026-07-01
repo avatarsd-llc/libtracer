@@ -107,10 +107,11 @@ class transport_vertex_t {
     [[nodiscard]] const conn_settings_t* settings_of(std::string_view name) const;
 
    private:
-    // One connection leaf: the graph identity vertex, the wired link, and its config.
+    // One connection leaf: the graph identity vertex + its transport-private config. The
+    // NAME→link routing table is NOT duplicated here — it has one owner, the router's
+    // child_registry_t (Brick 3a); make_connection registers the link there.
     struct conn_t {
         graph::vertex_t* vertex = nullptr;  // the /net/<name> identity vertex
-        transport_t* link = nullptr;        // the pre-built transport (Stage-1: supplied)
         conn_settings_t settings;
     };
 

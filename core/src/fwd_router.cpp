@@ -157,8 +157,8 @@ class stack_writer {
 }  // namespace
 
 void fwd_router_t::add_child(std::string name, transport_t& link) {
-    children_.push_back(child_t{name, &link});
     link.set_receiver([this, name](std::span<const std::byte> frame) { on_frame(name, frame); });
+    registry_.add(std::move(name), link);
 }
 
 void fwd_router_t::on_reply(std::function<void(const tlv_t&)> cb) { reply_cb_ = std::move(cb); }
@@ -184,7 +184,7 @@ void fwd_router_t::clear_link(std::string_view link_name) { handles_.clear_link(
 
 std::uint16_t fwd_router_t::advertise(std::string_view link_name,
                                       std::span<const std::byte> route_path) {
-    transport_t* const link = link_by_name(link_name);
+    transport_t* const link = registry_.by_name(link_name);
     if (link == nullptr) return 0;
     const std::uint16_t label = handles_.alloc_label(link_name);
     handles_.record_egress(link_name, label,
@@ -196,22 +196,10 @@ std::uint16_t fwd_router_t::advertise(std::string_view link_name,
 
 void fwd_router_t::send_compact(std::string_view link_name, std::uint16_t label,
                                 std::span<const std::byte> payload) {
-    if (transport_t* const link = link_by_name(link_name)) {
+    if (transport_t* const link = registry_.by_name(link_name)) {
         const std::vector<std::byte> out = encode_compact(label, payload);
         link->send(std::span<const std::byte>(out));
     }
-}
-
-transport_t* fwd_router_t::child_by_segment(std::span<const std::byte> seg) const {
-    // A child NAME is matched by its bytes — defer to the one scan in link_by_name.
-    return link_by_name(detail::as_string_view(seg));
-}
-
-transport_t* fwd_router_t::link_by_name(std::string_view name) const {
-    for (const child_t& c : children_) {
-        if (c.name == name) return c.link;
-    }
-    return nullptr;
 }
 
 void fwd_router_t::on_frame(std::string_view inbound_name, std::span<const std::byte> frame) {
@@ -225,7 +213,7 @@ void fwd_router_t::on_frame(std::string_view inbound_name, std::span<const std::
     // decoded FWD; production forwards decode-free.
     if (!inbound_cb_) {
         if (const auto seg = peek_fwd_first_dst_seg(frame)) {
-            if (transport_t* const child = child_by_segment(*seg)) {
+            if (transport_t* const child = registry_.by_segment(*seg)) {
                 route_fwd_forward(inbound_name, frame, *child);
                 return;
             }
@@ -354,7 +342,7 @@ void fwd_router_t::route_fwd(std::string_view inbound_name, std::span<const std:
 
     // Resolve the FIRST dst segment against this node's transport children.
     transport_t* const child =
-        dst.children.empty() ? nullptr : child_by_segment(dst.children[0].payload);
+        dst.children.empty() ? nullptr : registry_.by_segment(dst.children[0].payload);
 
     if (child != nullptr) {
         // FORWARD: the offset-based rebuild needs no decoded tree — share it with the
@@ -377,7 +365,7 @@ void fwd_router_t::route_fwd(std::string_view inbound_name, std::span<const std:
     // route back over it (#136); the latch (transient-local) fires inside resolve.
     auto reply = resolver_.resolve(*dec, inbound_name);
     if (!reply) return;
-    if (transport_t* in = link_by_name(inbound_name)) {
+    if (transport_t* in = registry_.by_name(inbound_name)) {
         const std::vector<std::span<const std::byte>> iov = reply->to_iovec();
         in->send(std::span<const std::span<const std::byte>>(iov));
     }
@@ -395,7 +383,7 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, const tlv_t& adv)
     // Resolve the first route segment against this node's transport children — the
     // SAME rule the FWD forward step uses, so the label tracks the delivery route.
     transport_t* const down =
-        route.children.empty() ? nullptr : child_by_segment(route.children[0].payload);
+        route.children.empty() ? nullptr : registry_.by_segment(route.children[0].payload);
 
     if (down != nullptr) {
         // Forwarding hop: strip the leading segment, allocate OUR own out-label,
@@ -436,7 +424,7 @@ void fwd_router_t::on_compact(std::string_view inbound_name, const tlv_t& comp) 
         // Stale/unknown label: drop, observe, and NACK back to prompt a re-advertise
         // (self-heal). Never a crash — the route is simply re-learned (RFC-0004 §E.1).
         if (stale_cb_) stale_cb_(inbound_name, label);
-        if (transport_t* const up = link_by_name(inbound_name)) {
+        if (transport_t* const up = registry_.by_name(inbound_name)) {
             const std::vector<std::byte> nack = encode_handle_nack(label);
             up->send(std::span<const std::byte>(nack));
         }
@@ -453,7 +441,7 @@ void fwd_router_t::on_compact(std::string_view inbound_name, const tlv_t& comp) 
     }
     // Forwarding hop: swap to our out-label and re-emit the COMPACT downstream — the
     // route still does NOT ride, only the (swapped) label.
-    if (transport_t* const down = link_by_name(binding->down_link)) {
+    if (transport_t* const down = registry_.by_name(binding->down_link)) {
         const std::vector<std::byte> out = encode_compact(binding->out_label, payload_bytes);
         down->send(std::span<const std::byte>(out));
     }
@@ -466,7 +454,7 @@ void fwd_router_t::on_nack(std::string_view inbound_name, const tlv_t& nack) {
     // route we hold for it so the flow self-heals without a setup handshake.
     const std::optional<std::vector<std::byte>> route = handles_.egress_route(inbound_name, label);
     if (!route) return;
-    if (transport_t* const link = link_by_name(inbound_name)) {
+    if (transport_t* const link = registry_.by_name(inbound_name)) {
         const std::vector<std::byte> adv = encode_advertise(label, *route);
         link->send(std::span<const std::byte>(adv));
     }
@@ -487,7 +475,7 @@ bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
 }
 
 void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const view_t& value) {
-    transport_t* const link = link_by_name(sub.link);
+    transport_t* const link = registry_.by_name(sub.link);
     if (link == nullptr) return;  // link torn down between subscribe and this write
     const std::span<const std::byte> payload = value.bytes();  // the stored VALUE TLV bytes
 
