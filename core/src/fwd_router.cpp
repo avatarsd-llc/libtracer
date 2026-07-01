@@ -157,8 +157,14 @@ class stack_writer {
 }  // namespace
 
 void fwd_router_t::add_child(std::string name, transport_t& link) {
+    // Populate the registry BEFORE wiring the receiver: an async transport (UDP/ws) may
+    // already have a live recv thread, so `set_receiver` is the publish point — once the
+    // callback is installed, on_frame can read the registry on that thread. Adding the
+    // child first ensures the entry is visible before any inbound frame can resolve it
+    // (the set_receiver mutex provides the release/acquire fence). Registry is otherwise
+    // immutable after setup — no lock on the read hot path.
+    registry_.add(name, link);
     link.set_receiver([this, name](std::span<const std::byte> frame) { on_frame(name, frame); });
-    registry_.add(std::move(name), link);
 }
 
 void fwd_router_t::on_reply(std::function<void(const tlv_t&)> cb) { reply_cb_ = std::move(cb); }

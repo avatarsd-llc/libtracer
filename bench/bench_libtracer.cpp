@@ -8,9 +8,10 @@
  *   - endpoints 1..8192 distinct topics, write BY PATH (registry/lookup scaling)
  *   - mixed     128 topics, varied fan-out + payloads
  * Module compositions are surfaced as distinct `mode`s (inproc / inproc-borrow /
- * inproc-path / loopback / mixed) — "different approaches to craft libtracer".
- * inproc is the zero-copy graph dispatch; loopback exercises encode/ROUTER/decode
- * across a thread. See bench/README.md for the (important) caveats.
+ * inproc-path / mixed / eptype-* / fold-* / inproc-mt*) — "different approaches to
+ * craft libtracer". inproc is the zero-copy graph dispatch. (The `loopback` /
+ * `routers-hN` ROUTER-flood modes were retired with bridge_t — ADR-0040; FWD forward
+ * cost is measured by bench_forward_heap.) See bench/README.md for the caveats.
  */
 #include <atomic>
 #include <cstdint>
@@ -55,12 +56,6 @@ view_t owned_view(std::span<const std::byte> bytes) {
 // Borrowed view over a stable buffer — zero alloc, zero copy (refcount handoff).
 view_t borrowed_view(std::span<const std::byte> bytes) {
     return view_t::over(tr::view::borrow_const(bytes));
-}
-
-tr::net::peer_id_t peer(std::uint8_t f) {
-    tr::net::peer_id_t p{};
-    p.fill(static_cast<std::byte>(f));
-    return p;
 }
 
 enum class alloc_t { HEAP, BORROW };
@@ -128,42 +123,6 @@ void run_grid() {
     for (std::size_t S : kGridSizes)
         for (std::size_t E : kGridEndpoints)
             run_inproc(S, 1, E, alloc_t::HEAP, true, "grid", true, kGridBudget, kGridLatBudget);
-}
-
-// Loopback: two nodes + bridge; encode/ROUTER/decode + cross-thread handoff.
-void run_loopback(std::size_t S) {
-    tr::net::loopback_channel_t ch;
-    graph_t a, b;
-    tr::net::bridge_t ba(a, ch.a(), peer(0xA1));
-    tr::net::bridge_t bb(b, ch.b(), peer(0xB2));
-    vertex_t* va = *a.register_vertex(*path_t::parse("/bench/v"), role_t::STORED_VALUE);
-    (void)b.register_vertex(*path_t::parse("/bench/remote"), role_t::STORED_VALUE);
-    bb.set_mount(*path_t::parse("/bench/remote"));
-    bb.set_recent_set_capacity(0);  // disable dedup: measure the data path
-    std::atomic<std::uint64_t> recv{0};
-    (void)b.subscribe(*path_t::parse("/bench/remote"),
-                      [&](const view_t&) { recv.fetch_add(1, std::memory_order_relaxed); });
-    (void)ba.export_vertex(*path_t::parse("/bench/v"));
-    const std::vector<std::byte> tlv = value_tlv(S);
-
-    const std::size_t MSGS = 100000;
-    recv.store(0);
-    const auto t0 = now_ns();
-    for (std::size_t i = 0; i < MSGS; ++i) (void)a.write(va, owned_view(tlv));
-    while (recv.load(std::memory_order_relaxed) < MSGS) std::this_thread::yield();
-    const double secs = (now_ns() - t0) / 1e9;
-
-    Latency lat;
-    for (std::size_t i = 0; i < 5000; ++i) {
-        const std::uint64_t before = recv.load(std::memory_order_relaxed);
-        const auto start = now_ns();
-        (void)a.write(va, owned_view(tlv));
-        while (recv.load(std::memory_order_relaxed) == before) std::this_thread::yield();
-        lat.add(now_ns() - start);
-    }
-    emit("libtracer", "loopback", S, 1, 1, MSGS / secs, MSGS / secs,
-         MSGS * static_cast<double>(S) / secs / 1e6, lat.summarize());
-    ch.shutdown();
 }
 
 // Mixed workload: 128 topics with varied fan-out (1..16) and payloads (1..8192).
@@ -303,96 +262,6 @@ void run_inproc_mt(std::size_t T) {
     emit("libtracer", mode.c_str(), S, 1, T, pub_s, deliv_s, mb_s, lat.summarize());
 }
 
-// n-routers (bridge-hop) axis (#96 / ADR-0032). Build an H-hop CHAIN of bridges
-// over in-process loopback channels: bridge_0 -> bridge_1 -> ... -> bridge_{H-1}.
-// Publish at the head, deliver at the tail; every hop pays the full cross-node
-// cost — router_wrap (egress) + router_unwrap + recent-set dedup + ROUTER strip
-// (ingress) — plus one cross-"wire" thread handoff. Measures how end-to-end
-// delivery LATENCY and aggregate THROUGHPUT degrade as a frame traverses N hops:
-// the cross-node fan cost. Dedup stays ENABLED (default recent-set) so every hop
-// pays the dedup probe; H stays well under kMaxHops (32).
-//
-// Topology for H hops (H+1 nodes, H loopback channels, 2H bridges):
-//   node[0] --ch[0]--> node[1] --ch[1]--> ... --ch[H-1]--> node[H]
-// Each node owns a graph with one /bench/chain vertex. node[k]'s EGRESS bridge
-// exports /bench/chain onto ch[k].a(); node[k+1]'s INGRESS bridge mounts ch[k].b()
-// back onto its own /bench/chain. So an intermediate node re-wraps on egress what
-// it just unwrapped on ingress — a fresh hop per channel. Publishing at node[0]
-// reaches node[H]'s subscriber after exactly H hops.
-void run_routers(std::size_t H) {
-    constexpr std::size_t S = 64;
-    const path_t path = *path_t::parse("/bench/chain");
-
-    std::vector<std::unique_ptr<graph_t>> nodes;                      // H+1 graphs
-    std::vector<std::unique_ptr<tr::net::loopback_channel_t>> chans;  // H channels
-    std::vector<std::unique_ptr<tr::net::bridge_t>> bridges;          // 2H bridges
-    nodes.reserve(H + 1);
-    chans.reserve(H);
-    bridges.reserve(2 * H);
-    std::atomic<std::uint64_t> recv{0};
-
-    vertex_t* head = nullptr;
-    for (std::size_t i = 0; i <= H; ++i) {
-        auto g = std::make_unique<graph_t>();
-        vertex_t* v = *g->register_vertex(path, role_t::STORED_VALUE);
-        if (i == 0) head = v;  // resolved handle for the hot publish at the head
-        nodes.push_back(std::move(g));
-    }
-    for (std::size_t k = 0; k < H; ++k)
-        chans.push_back(std::make_unique<tr::net::loopback_channel_t>());
-
-    // Wire each hop: egress on node[k] -> ch[k] -> ingress on node[k+1].
-    for (std::size_t k = 0; k < H; ++k) {
-        auto eg = std::make_unique<tr::net::bridge_t>(*nodes[k], chans[k]->a(),
-                                                      peer(static_cast<std::uint8_t>(k + 1)));
-        auto in = std::make_unique<tr::net::bridge_t>(*nodes[k + 1], chans[k]->b(),
-                                                      peer(static_cast<std::uint8_t>(0x80 + k)));
-        in->set_mount(path);            // ingress lands the unwrapped TLV at node[k+1]
-        (void)eg->export_vertex(path);  // egress re-wraps every write to node[k]'s vertex
-        bridges.push_back(std::move(eg));
-        bridges.push_back(std::move(in));
-    }
-
-    // The tail subscriber counts end-to-end deliveries.
-    (void)nodes[H]->subscribe(path,
-                              [&](const view_t&) { recv.fetch_add(1, std::memory_order_relaxed); });
-
-    const std::vector<std::byte> tlv = value_tlv(S);
-    const auto publish = [&]() { (void)nodes[0]->write(head, owned_view(tlv)); };
-
-    // Warmup: prime each hop's recent-set + thread wakeups, then wait for drain.
-    constexpr std::size_t WARM = 1000;
-    for (std::size_t i = 0; i < WARM; ++i) publish();
-    while (recv.load(std::memory_order_relaxed) < WARM) std::this_thread::yield();
-
-    // Throughput: blast MSGS, wait for the tail to drain the whole H-hop pipeline.
-    constexpr std::size_t MSGS = 50000;
-    recv.store(0, std::memory_order_relaxed);
-    const auto t0 = now_ns();
-    for (std::size_t i = 0; i < MSGS; ++i) publish();
-    while (recv.load(std::memory_order_relaxed) < MSGS) std::this_thread::yield();
-    const double secs = (now_ns() - t0) / 1e9;
-    const double pub_s = MSGS / secs;
-    const double deliv_s = pub_s;  // fan=1: one tail delivery per publish
-    const double mb_s = deliv_s * static_cast<double>(S) / 1e6;
-
-    // Latency: one frame at a time, end-to-end across all H hops (empty pipeline
-    // between samples, so each sample is the pure H-hop traversal).
-    Latency lat;
-    for (std::size_t i = 0; i < 5000; ++i) {
-        const std::uint64_t before = recv.load(std::memory_order_relaxed);
-        const auto start = now_ns();
-        publish();
-        while (recv.load(std::memory_order_relaxed) == before) std::this_thread::yield();
-        lat.add(now_ns() - start);
-    }
-
-    const std::string mode = "routers-h" + std::to_string(H);
-    emit("libtracer", mode.c_str(), S, 1, H, pub_s, deliv_s, mb_s, lat.summarize());
-
-    for (auto& ch : chans) ch->shutdown();  // join recv threads before teardown (UAF-safe)
-}
-
 // ep-type (endpoint-dispatch-class) axis (#96 / ADR-0032). On ONE fixed workload
 // (size=64, fan=1, ep=1) we compare the three dispatch CLASSES a write can take to
 // an endpoint, emitting one RESULT line per class with `mode` tagging the class:
@@ -525,7 +394,6 @@ int main(int argc, char** argv) {
         run_inproc(S, kRefFanout, kRefEndpoints, alloc_t::BORROW, false, "inproc-borrow");
     for (std::size_t E : kEndpoints)
         run_inproc(kRefSize, kRefFanout, E, alloc_t::HEAP, true, "inproc-path");
-    for (std::size_t S : kSizes) run_loopback(S);
     run_mixed();
     // n-cores (parallel-dispatch) axis: thread counts clamped to the host CPU.
     const std::size_t hw = std::max<std::size_t>(1, std::thread::hardware_concurrency());
@@ -533,9 +401,9 @@ int main(int argc, char** argv) {
         if (T <= hw) run_inproc_mt(T);
     // ep-type (endpoint-dispatch-class) axis: lean / lean-cached / stream.
     run_eptype();
-    // n-routers (bridge-hop) axis: end-to-end cost across H bridge/ROUTER hops.
-    for (std::size_t H : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}})
-        run_routers(H);
+    // (The `loopback` and n-routers `routers-hN` modes benchmarked the ROUTER-flood
+    // bridge, retired in ADR-0040 — the net plane is explicit-source-routed FWD only.
+    // FWD forward cost is measured by bench_forward_heap + the fwd_* tests.)
     // n-layer-folded (fold-depth) axis — the LAST axis: same total bytes folded
     // across N segments (N=1 flat .. N=8 rope); cost rises with the view-chain walk.
     for (std::size_t N : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}})

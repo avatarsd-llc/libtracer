@@ -27,9 +27,9 @@ target_compile_definitions(bench_codec PRIVATE
     LIBTRACER_BENCH_DEFAULT_VECTORS="${CMAKE_CURRENT_SOURCE_DIR}/../tests/conformance/vectors/v1")
 
 # Two-process network bench (real UDP). pub/sub roles; see run_net.sh.
-add_executable(bench_libtracer_net bench_libtracer_net.cpp)
-target_link_libraries(bench_libtracer_net PRIVATE libtracer)
-target_compile_options(bench_libtracer_net PRIVATE -Wall -Wextra)
+# bench_libtracer_net (two-process ROUTER-flood bench) was retired with bridge_t
+# (ADR-0040 — the net plane is explicit-source-routed FWD only). Two-node FWD delivery
+# over a real transport is covered by core/tests/udp_test.
 
 # Scatter-gather egress demo: one sendmsg(iovec) ships a K-value composite rope.
 add_executable(bench_scatter bench_scatter.cpp)
