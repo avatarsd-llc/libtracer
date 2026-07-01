@@ -15,6 +15,26 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **Transport / connection as a `/` vertex — Stage-1 shell** ([ADR-0027](../docs/adr/0027-transport-and-connections-are-vertices.md)
+  / [ADR-0037](../docs/adr/0037-net-side-channels-dissolve-into-vertex-tree-compositor.md)
+  Stage-1; [#83](https://github.com/avatarsd-llc/libtracer/issues/83)). New
+  `tr::net::transport_vertex_t` registers `client`/`listener` child types on a `graph_t`
+  (via the #82 `register_child_type` seam), so an in-band `write /net:children[] +=
+  SPEC{type, name, config{addr,port,role,keepalive}}` instantiates a connection at
+  `/net/<name>` — a first-class `/` vertex that carries its transport-private
+  `:settings`, is `await`-able for link up/down (`set_link_state`), and — Stage-1 — wires
+  its pre-supplied `transport_t&` (`provide_link`) into `fwd_router_t` so **bytes still
+  flow the tested FWD path unchanged**. This is the (A) shell over the live path
+  (ADR-0037 Stage-1): the vertex/compositor model is proven with zero regression; the
+  dissolution of `fwd_router_t::children_` into `graph.find` is the Stage-2 flip, and
+  real per-transport socket construction from the config replaces `provide_link` as a
+  follow-on that plugs into the same catalog seam. New public API:
+  `transport_vertex_t`, `conn_role_t`, `conn_settings_t`. Verified: new
+  `transport_vertex_test` (in-band create + resolve, `:settings` parse, `await` link
+  up/down, FWD-still-routes zero-regression, and the intra-device-path-untouched
+  invariant); 24/24 ctest, ASan/UBSan/TSan clean, perf-gate PASS — the local
+  write→subscriber path is unchanged (ADR-0038 §3a: a same-device edge is a direct
+  call + deref, the net plane off its hot path by construction).
 - **In-band `:children[]` SPEC vertex creation** ([ADR-0017](../docs/adr/0017-in-band-vertex-creation-controller-orchestration.md)
   / [ADR-0021](../docs/adr/0021-colon-field-plane-is-the-vertex-ioctl.md); [#82](https://github.com/avatarsd-llc/libtracer/issues/82),
   the ADR-0037/0038 Stage-1 prerequisite). A `write` of a `SPEC{ type, name, config? }`

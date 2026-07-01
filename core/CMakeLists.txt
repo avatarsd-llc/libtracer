@@ -23,6 +23,7 @@ add_library(libtracer STATIC
     src/op_resolve.cpp
     src/route_handle.cpp
     src/fwd_router.cpp
+    src/transport_vertex.cpp
     src/loopback.cpp
     src/router.cpp
     src/bridge.cpp
