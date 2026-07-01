@@ -118,7 +118,7 @@ bytes.
 
 ### 5 · a `ROUTER` frame (the bridge envelope)
 
-A data TLV wrapped for the wire ([router](router.md)). `NAME`-tagged metadata, then
+A data TLV wrapped for the wire ([reference/05 §0x0D](../reference/05-protocol-tlvs.md)). `NAME`-tagged metadata, then
 the wrapped TLV last:
 
 ```text

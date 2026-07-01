@@ -12,9 +12,9 @@ flowchart TD
     APP["application / bench"]:::app
     GRAPH["graph<br/><small>graph_t · vertex_t · role_t</small>"]
     PATH["path<br/><small>path_t · path_key_t</small>"]
-    BRIDGE["bridge<br/><small>bridge_t</small>"]
-    ROUTER["router<br/><small>router_wrap/unwrap</small>"]
-    TRANSPORT["transport<br/><small>transport_t · loopback_channel_t</small>"]
+    FWD["fwd-router<br/><small>fwd_router_t · child_registry_t</small>"]
+    TVERT["transport-vertex<br/><small>transport_vertex_t (/net)</small>"]
+    TRANSPORT["transport<br/><small>transport_t · loopback/UDP/WS/CAN</small>"]
     FRAME["frame-codec<br/><small>tlv_t · decode/encode · crc</small>"]
     VIEWS["views<br/><small>view_t · rope_t · view_as_tlv</small>"]
     SEG["segment<br/><small>segment_t · segment_ptr_t</small>"]
@@ -22,15 +22,15 @@ flowchart TD
     STATUS["status<br/><small>status_t · result_t&lt;T&gt;</small>"]
 
     APP --> GRAPH
-    APP --> BRIDGE
+    APP --> FWD
     GRAPH --> PATH
     GRAPH --> VIEWS
     GRAPH --> STATUS
-    BRIDGE --> GRAPH
-    BRIDGE --> ROUTER
-    BRIDGE --> TRANSPORT
-    BRIDGE --> VIEWS
-    ROUTER --> FRAME
+    FWD --> GRAPH
+    FWD --> FRAME
+    FWD --> TRANSPORT
+    TVERT --> FWD
+    TVERT --> GRAPH
     VIEWS --> FRAME
     VIEWS --> SEG
     FRAME --> STATUS
@@ -40,29 +40,26 @@ flowchart TD
 
     classDef app fill:#fce7f3,stroke:#9f1239;
     classDef done fill:#dcfce7,stroke:#166534;
-    classDef next fill:#fef9c3,stroke:#92400e;
-    class GRAPH,PATH,BRIDGE,ROUTER,FRAME,VIEWS,SEG,BACK,STATUS done;
-    class TRANSPORT next;
+    class GRAPH,PATH,FWD,TVERT,TRANSPORT,FRAME,VIEWS,SEG,BACK,STATUS done;
 ```
 
 ## The seams (who hands what to whom)
 
 ```{mermaid}
 flowchart LR
-    subgraph egress["write path (egress)"]
+    subgraph fwd["remote op (FWD source-routing, RFC-0004)"]
         direction TB
-        W1["app: graph_t::write(path_t, view_t)"] --> W2["dispatch: clone view_t per subscriber"]
-        W2 --> W3["bridge cb: router_wrap(view.bytes())"]
-        W3 --> W4["transport_t::send(bytes)"]
+        W1["client: FWD{op, dst=/net/&lt;conn&gt;/&lt;path&gt;, src, payload?}"] --> W2["fwd_router: peek first dst seg (offset, no decode)"]
+        W2 --> W3["child_registry_t::by_segment → transport"]
+        W3 --> W4["strip dst seg · grow src (pooled head) · scatter-gather send"]
     end
-    subgraph ingress["receive path (ingress)"]
+    subgraph term["terminus (dst empty → this node)"]
         direction TB
-        R1["transport_t receiver(bytes)"] --> R2["router_unwrap → meta + data span"]
-        R2 --> R3["dedup + hop_count"]
-        R3 --> R4["copy → segment_ptr_t → view_t"]
-        R4 --> R5["graph_t::write(mount, view_t) → subscribers"]
+        R1["transport receiver(bytes)"] --> R2["op_resolver_t::resolve"]
+        R2 --> R3["read/write/await the local vertex"]
+        R3 --> R4["FWD{REPLY} source-routed back via src"]
     end
-    egress -. "the wire" .-> ingress
+    fwd -. "each hop over the wire" .-> term
 ```
 
 ## Consolidated interface reference
@@ -77,8 +74,8 @@ flowchart LR
 | [path](path.md) | `class path_t{ parse(); key(); field() }` · `struct path_key_t` + `path_key_hash_t` |
 | [graph](graph.md) | `class graph_t{ register_vertex; read; write; await; history; subscribe }` · `enum class role_t` · `struct settings_t` · `struct handlers_t` |
 | [transport](transport.md) | `using peer_id_t = array<byte,16>` · `class transport_t{ send(); set_receiver() }` · `class loopback_channel_t` |
-| [router](router.md) | `struct router_meta_t{ origin; ts; hop }` · `router_wrap()` · `router_unwrap()→result_t<unwrapped_t>` |
-| [bridge](bridge.md) | `class bridge_t{ export_vertex; set_mount; set_recent_set_capacity; counters }` · _slated for [ADR-0037](../adr/0037-net-side-channels-dissolve-into-vertex-tree-compositor.md) dissolution (egress deleted, ingress guard absorbed into the connection-vertex); `fwd_router_t`'s children-table dissolves too_ |
+| fwd-router | `class fwd_router_t{ add_child; on_frame; on_reply; advertise; send_compact; registry() }` · `class child_registry_t{ add; by_name; by_segment }` · `struct op_resolver_t` — FWD source-routing (RFC-0004) |
+| transport-vertex | `class transport_vertex_t{ provide_link; set_link_state; settings_of }` · `enum class conn_role_t` · `struct conn_settings_t` — a connection as a `/net/<conn>` vertex (ADR-0027) |
 
 ## Two contracts hold the stack together
 
@@ -89,26 +86,25 @@ flowchart LR
    is `destroy`, fired by `segment_ptr_t` at refcount zero. So L0 (allocation) and L1
    (lifetime) meet with no policy baked into the core.
 
-Everything above L1 (`graph`, `bridge`, transports) traffics in **`view_t`s and
+Everything above L1 (`graph`, `fwd-router`, transports) traffics in **`view_t`s and
 `tlv_t`s**, never raw allocation — which is why a new backend, transport, or vertex
 role slots in without touching the others.
 
 ## What is implemented vs. planned
 
-See the [module roadmap](../reference/10-module-catalog.md). The graph + bridge core
-(M1–M4) is built; the socket transports landed too — **WebSocket** (`transport_ws`,
-the browser↔robot keystone), **UDP** (`udp_transport_t`), and **CAN** (`transport_can`,
-SocketCAN). The RFC-0004 remote-operation plane (`op_resolver_t`, `fwd_router_t`,
-`route_handle_t` — path-addressed `read`/`write`/`await`/`subscribe` over `FWD`) is
-built on top of those. Still ahead: a reliable byte-stream transport (TCP/QUIC), and
-the wider backend/discovery/security catalog (pbuf, DMA, mDNS, TLS).
+See the [module roadmap](../reference/10-module-catalog.md). The graph core (M1–M4) is
+built; the socket transports landed too — **WebSocket** (`transport_ws`, the
+browser↔robot keystone), **UDP** (`udp_transport_t`), and **CAN** (`transport_can`,
+SocketCAN). The **RFC-0004 remote-operation plane** (`fwd_router_t` + `child_registry_t`,
+`op_resolver_t`, `route_handle_t` — path-addressed `read`/`write`/`await`/`subscribe`
+over `FWD`) is the net plane, with connections exposed as `/net/<conn>` vertices
+(`transport_vertex_t`, ADR-0027). Still ahead: a reliable byte-stream transport
+(TCP/QUIC), and the wider backend/discovery/security catalog (pbuf, DMA, mDNS, TLS).
 
-**Next architectural trajectory** —
-[ADR-0026](../adr/0026-consumer-initiated-subscription-client-write.md)/[0027](../adr/0027-transport-and-connections-are-vertices.md)
-make every transport and connection a first-class `/` vertex ("one path tree"), so
-`bridge_t` *and* `fwd_router_t`'s children-table — both pre-0027 side-channels for the
-routing the vertex tree now owns — **dissolve** into the vertex tree per
-[ADR-0037](../adr/0037-net-side-channels-dissolve-into-vertex-tree-compositor.md)
-(transport-vertex = composite, connection-vertex = leaf, root = terminus resolver).
-Stage-2 is gated on a 16KB-RAM zero-heap forwarding bench; until then the two classes
-above remain the live data path.
+**The net plane is explicit-source-routed `FWD` only**
+([ADR-0040](../adr/0040-net-plane-is-explicit-source-routed-only.md)): a remote endpoint
+is addressed by its full path through transport-vertices (`/net/<conn>/<peer path>`),
+each hop stripping its `dst` segment. There is no flooding and no `(origin, ts)` dedup —
+parallel links to one peer are *different explicit addresses* (deliberate redundancy),
+not auto-multipath. The M4 `bridge_t` + ROUTER-flood model was **retired** with ADR-0040;
+the `0x0D ROUTER` wire code stays reserved for a possible future flooding profile.

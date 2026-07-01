@@ -95,4 +95,4 @@ sequenceDiagram
 - **The value is the bytes** — a vertex stores a `view_t`, so what it holds is exactly
   what goes on the wire.
 
-See: [path](path.md), [views](views.md), [bridge](bridge.md).
+See: [path](path.md), [views](views.md), [interface-map](interface-map.md).

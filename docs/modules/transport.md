@@ -2,7 +2,7 @@
 
 ```{admonition} In one paragraph
 :class: tip
-**`transport_t`** is the seam between the bridge and one wire technology: `send`
+**`transport_t`** is the seam between the FWD router and one wire technology: `send`
 framed bytes (single buffer **or** a scatter-gather `iovec`), register a
 `receiver_t` for inbound frames. It never sees TLV semantics — only bytes.
 Implementations: **`loopback_channel_t`** (in-process dev/test),
@@ -18,11 +18,10 @@ A transport accepts a complete frame's bytes (a TLV, usually ROUTER-wrapped) and
 emits them; inbound frames arrive on the registered receiver (which may fire on an
 internal transport thread). The reference catalog defines a poll-based
 `transport_vtable`; the C++ seam is callback + recv-thread — an implementation
-choice that matches how a real socket's receive loop feeds the bridge.
+choice that matches how a real socket's receive loop feeds the FWD router.
 
 `loopback_channel_t` wires two endpoints: a frame sent on one is delivered to the
-*other's* receiver on that endpoint's thread (modeling async cross-"wire"
-delivery, so a bridge cycle terminates by `hop_count` rather than stack recursion).
+*other's* receiver on that endpoint's thread (modeling async cross-"wire" delivery).
 `shutdown()` joins the receive threads before the receivers are destroyed.
 
 ## Interface
@@ -55,24 +54,24 @@ class udp_transport_t : public transport_t {        // real UDP (M5)
 
 ```{mermaid}
 flowchart LR
-    BA["bridge A"] -->|send| EA["endpoint a"]
+    FA["fwd_router A"] -->|send| EA["endpoint a"]
     EA -->|enqueue| QB[("inbox B")]
     QB -->|recv thread| EB["endpoint b"]
-    EB -->|receiver| BB["bridge B"]
-    BB -->|send| EB2["endpoint b"]
+    EB -->|receiver| FB["fwd_router B"]
+    FB -->|FWD REPLY send| EB2["endpoint b"]
     EB2 -->|enqueue| QA[("inbox A")]
     QA -->|recv thread| EA2["endpoint a"]
-    EA2 -->|receiver| BA
+    EA2 -->|receiver| FA
     classDef m fill:#fef9c3,stroke:#92400e; class EA,EB,EA2,EB2 m;
 ```
 
 ## Benefits
 
-- **One seam, many wires** — the bridge and the whole stack above are transport-
-  agnostic; M5's socket transport plugs in with no changes upstream.
-- **Deterministic testing** — the loopback exercises the full encode→ROUTER→decode
-  path with no sockets, so bridge/dedup/cycle behavior is unit-testable (and the
+- **One seam, many wires** — the FWD router and the whole stack above are transport-
+  agnostic; a new socket transport plugs in with no changes upstream.
+- **Deterministic testing** — the loopback exercises the full encode→FWD-route→decode
+  path with no sockets, so forward/reply behavior is unit-testable (and the
   [benchmark](../../bench/README.md) measures it).
 - **Bytes only** — a transport can't accidentally depend on graph semantics.
 
-See: [router](router.md), [bridge](bridge.md).
+See: [interface-map](interface-map.md), [reference §communication-flows](../reference/04-communication-flows.md).

@@ -17,9 +17,8 @@ flowchart TB
     subgraph L4["L4 · graph + transport"]
         GRAPH["graph — vertices, read/write/await"]
         DISP["dispatcher — fan-out + field-write"]
-        BRIDGE["bridge — ROUTER + dedup + hop_count"]
-        TRANSPORT["transport — loopback (M4) · socket (M5)"]
-        ROUTER["router — ROUTER envelope"]
+        FWD["fwd-router — FWD source-routing (RFC-0004)"]
+        TRANSPORT["transport — loopback · UDP · WS · CAN"]
     end
     subgraph L23["L2/L3 · wire codec"]
         FRAME["frame-codec — TLV decode/encode + CRC"]
@@ -33,16 +32,14 @@ flowchart TB
     end
 
     APP --> GRAPH
-    GRAPH --> DISP --> BRIDGE
-    BRIDGE --> ROUTER --> FRAME
-    BRIDGE --> TRANSPORT
+    GRAPH --> DISP --> FWD
+    FWD --> FRAME
+    FWD --> TRANSPORT
     GRAPH -. "value IS a view_t" .-> VIEWS
     FRAME -- "cast, no copy" --> VIEWS
     VIEWS --> SEG --> BACK
     classDef done fill:#dcfce7,stroke:#166534;
-    classDef next fill:#fef9c3,stroke:#92400e;
-    class FRAME,VIEWS,SEG,BACK,GRAPH,DISP,BRIDGE,ROUTER done;
-    class TRANSPORT next;
+    class FRAME,VIEWS,SEG,BACK,GRAPH,DISP,FWD,TRANSPORT done;
 ```
 
 The load-bearing idea: a **TLV at L2 is a cast from an L1 `view_t`**, and an L1 `view_t` is
@@ -75,10 +72,8 @@ not a copy.
 ```
 
 ```{toctree}
-:caption: L4 — transport + bridge
+:caption: L4 — transport
 :maxdepth: 1
 
 /docs/modules/transport
-/docs/modules/router
-/docs/modules/bridge
 ```
