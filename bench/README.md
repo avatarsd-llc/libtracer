@@ -16,6 +16,28 @@ The current numbers and figures are in **[RESULTS.md](RESULTS.md)** (snapshot) a
 | `run_net.sh` | **network**: two processes over real localhost **UDP** (the kernel path). |
 | `grid.sh` | **response-surface grid** → `grid.csv` → 2D/3D figures via `plot.py`. |
 | `bench_scatter` | **scatter-gather egress**: one `sendmsg(iovec)` ships a K-value composite rope. |
+| `bench_forward_heap` | **16KB-RAM zero-heap gate**: a global `operator new` counter measures how many heap allocations one FWD *forward hop* costs (ADR-0038). |
+
+### `bench_forward_heap` — the 16KB-RAM zero-heap forward gate (ADR-0038)
+
+A minimal node has ~16KB of RAM: the FWD *forward path* must allocate **zero** heap per
+hop (offset-dispatch + pooled segment heads + stack iov — [ADR-0038](../docs/adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md)
+invariants #1/#2/#5). The gate is **measured, not asserted**: this bench replaces the
+global `operator new`/`delete` (all variants — the aligned-nothrow form `heap_alloc`
+uses *and* the plain form STL uses) with a counting wrapper, brackets exactly one
+forward hop, and reports `allocs` / `frees` / `bytes`. Single-threaded by construction
+(the synchronous-substrate model: a 16KB CAN node forwards inline on its receive).
+
+```sh
+./build/bench_forward_heap              # report-only: prints the current per-hop alloc count
+ZEROHEAP_MAX=0 ./build/bench_forward_heap   # hard gate: exit 1 if allocs > 0 (CI at Stage-2)
+```
+
+**Stage-1 baseline: 24 allocs / 2044 B per hop** — today's `fwd_router_t` full-decodes
+every frame (`wire::decode` → `vector<tlv_t>`) and rebuilds the shrunk/grown headers
+with `std::vector`, so a non-zero count is **expected pre-Stage-2**. The gate's job is to
+drive that number to **0** as the ADR-0038 Stage-2 flip lands; CI flips `ZEROHEAP_MAX=0`
+to make it a hard regression gate at that point.
 
 ```sh
 ./fetch_zenoh.sh   # vendors prebuilt zenoh-c 1.9.0 + zenoh-cpp (x86_64 linux; not committed)
