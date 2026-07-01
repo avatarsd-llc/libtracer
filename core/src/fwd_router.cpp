@@ -60,6 +60,30 @@ struct hdr_t {
                  .total = total};
 }
 
+// The forward dispatch decision, read by OFFSET with no allocation (ADR-0038 inv. #1,
+// ADR-0039): a FWD whose first `dst` segment names a transport child is a forward hop
+// that never needs the decoded tree. Returns the first-dst-segment NAME bytes iff the
+// frame is a structured FWD with an op VALUE + a non-empty dst PATH; nullopt otherwise
+// (malformed, non-FWD, or empty dst ⇒ fall back to the full-decode terminus path).
+[[nodiscard]] std::optional<std::span<const std::byte>> peek_fwd_first_dst_seg(
+    std::span<const std::byte> frame) {
+    const auto fwd_h = read_header(frame, 0);
+    if (!fwd_h || fwd_h->type != type_t::FWD || !fwd_h->opt.pl) return std::nullopt;
+    const std::size_t body_end = fwd_h->body_off + fwd_h->body_len;
+    // child[0] = op VALUE
+    const auto op_h = read_header(frame, fwd_h->body_off);
+    if (!op_h || op_h->type != type_t::VALUE) return std::nullopt;
+    // child[1] = dst PATH
+    const std::size_t dst_pos = fwd_h->body_off + op_h->total;
+    if (dst_pos >= body_end) return std::nullopt;
+    const auto dst_h = read_header(frame, dst_pos);
+    if (!dst_h || dst_h->type != type_t::PATH || dst_h->body_len == 0) return std::nullopt;
+    // dst.child[0] = first segment NAME
+    const auto seg_h = read_header(frame, dst_h->body_off);
+    if (!seg_h || seg_h->type != type_t::NAME) return std::nullopt;
+    return frame.subspan(seg_h->body_off, seg_h->body_len);
+}
+
 // Build a full-route producer delivery: `FWD{ op=WRITE, dst=<return route>, src=<empty
 // PATH>, payload=<VALUE> }` (delivery-is-a-write, RFC-0004 §D / #136). @p dst_path is a
 // complete PATH TLV's bytes (the subscriber's accumulated return route); @p payload is a
@@ -150,12 +174,29 @@ transport_t* fwd_router_t::link_by_name(std::string_view name) const {
 
 void fwd_router_t::on_frame(std::string_view inbound_name, std::span<const std::byte> frame) {
     if (raw_cb_) raw_cb_(inbound_name, frame);
+
+    // Forward fast path (ADR-0038 inv. #1 / ADR-0039): decide forward-vs-terminus by
+    // OFFSET — no wire::decode, no tlv_t tree — and if the first dst segment names a
+    // transport child, forward with zero heap on the hot path. The forward rebuild
+    // already re-parses by offset, so it never needed the tree. Skipped when an
+    // inbound observer (`inbound_cb_`, tests only) is installed, since it wants the
+    // decoded FWD; production forwards decode-free.
+    if (!inbound_cb_) {
+        if (const auto seg = peek_fwd_first_dst_seg(frame)) {
+            if (transport_t* const child = child_by_segment(*seg)) {
+                route_fwd_forward(inbound_name, frame, *child);
+                return;
+            }
+            // First dst segment names no child ⇒ a FWD terminus; fall through to decode.
+        }
+    }
+
+    // Terminus / control / observed path: the resolver and the control handlers need
+    // the decoded tree, so full-decode here (a terminus is allowed to allocate —
+    // ADR-0039 §steady-state; the arena-decode variant is invariant #5, a later brick).
     const auto dec = wire::decode(frame);
     if (!dec || !dec->opt.pl) return;  // drop malformed / non-structured
 
-    // Dispatch on frame type. FWD is the slice-3 one-shot/full-route plane; the
-    // route-handle control frames (ADVERTISE/COMPACT/HANDLE_NACK) are the slice-4
-    // ws delivery-compaction plane that rides the same link (RFC-0004 §E.1).
     switch (dec->type) {
         case type_t::FWD:
             if (inbound_cb_) inbound_cb_(inbound_name, *dec);
@@ -175,6 +216,85 @@ void fwd_router_t::on_frame(std::string_view inbound_name, std::span<const std::
     }
 }
 
+void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
+                                     std::span<const std::byte> frame, transport_t& child) {
+    // All offsets, no decoded tree. Layout: FWD{ op VALUE, dst PATH, FIELD? sel, src
+    // PATH, tail } — strip dst's leading segment, grow src by the inbound NAME (unless
+    // REPLY), scatter-gather the fresh heads + views into the untouched inbound frame.
+    const auto fwd_h = read_header(frame, 0);
+    if (!fwd_h || fwd_h->type != type_t::FWD) return;
+    const std::size_t body_end = fwd_h->body_off + fwd_h->body_len;
+
+    std::size_t cur = fwd_h->body_off;
+    const auto op_h = read_header(frame, cur);
+    if (!op_h || op_h->type != type_t::VALUE || op_h->body_len == 0) return;
+    const std::size_t op_pos = cur;
+    const bool is_reply = static_cast<fwd_op_t>(u8(frame[op_h->body_off])) == fwd_op_t::REPLY;
+    cur += op_h->total;
+
+    const auto dst_h = read_header(frame, cur);
+    if (!dst_h || dst_h->type != type_t::PATH) return;
+    cur += dst_h->total;
+
+    std::size_t sel_pos = 0;
+    std::size_t sel_total = 0;
+    if (cur < body_end) {
+        const auto peek = read_header(frame, cur);
+        if (peek && peek->type == type_t::FIELD) {
+            sel_pos = cur;
+            sel_total = peek->total;
+            cur += peek->total;
+        }
+    }
+
+    const auto src_h = read_header(frame, cur);
+    if (!src_h || src_h->type != type_t::PATH) return;
+    cur += src_h->total;
+
+    const std::size_t tail_off = cur;
+    const std::size_t tail_len = body_end > cur ? body_end - cur : 0;
+
+    // The leading dst segment (a NAME) to strip.
+    const auto seg_h = read_header(frame, dst_h->body_off);
+    if (!seg_h || seg_h->type != type_t::NAME) return;
+    const std::size_t rem_dst_off = dst_h->body_off + seg_h->total;
+    const std::size_t rem_dst_len = dst_h->body_len - seg_h->total;
+
+    // The NAME prepended to src — this node's name for the inbound link. Empty for a REPLY.
+    std::vector<std::byte> inbound_name_tlv;
+    if (!is_reply) detail::emit_name(inbound_name_tlv, inbound_name);
+
+    const std::size_t new_dst_body = rem_dst_len;
+    const std::size_t new_src_body = src_h->body_len + inbound_name_tlv.size();
+    const std::size_t new_dst_total = (new_dst_body > 0xFFFFu ? 6u : 4u) + new_dst_body;
+    const std::size_t new_src_total = (new_src_body > 0xFFFFu ? 6u : 4u) + new_src_body;
+    const std::size_t new_fwd_body =
+        op_h->total + new_dst_total + sel_total + new_src_total + tail_len;
+
+    // head1: FWD header + op (copied) + new (shrunk) dst header.
+    std::vector<std::byte> head1;
+    push_header(head1, type_t::FWD, new_fwd_body);
+    head1.insert(head1.end(), frame.data() + op_pos, frame.data() + op_pos + op_h->total);
+    push_header(head1, type_t::PATH, new_dst_body);
+
+    // head2: new (grown) src header + the prepended inbound NAME (zero bytes for a REPLY).
+    std::vector<std::byte> head2;
+    push_header(head2, type_t::PATH, new_src_body);
+    head2.insert(head2.end(), inbound_name_tlv.begin(), inbound_name_tlv.end());
+
+    // Scatter-gather egress: small fresh heads interleaved with views straight into the
+    // inbound frame (remaining dst, selector, original src bytes, payload) — no copy.
+    std::vector<std::span<const std::byte>> iov;
+    iov.reserve(6);
+    iov.emplace_back(head1);
+    if (rem_dst_len > 0) iov.push_back(frame.subspan(rem_dst_off, rem_dst_len));
+    if (sel_total > 0) iov.push_back(frame.subspan(sel_pos, sel_total));
+    iov.emplace_back(head2);
+    if (src_h->body_len > 0) iov.push_back(frame.subspan(src_h->body_off, src_h->body_len));
+    if (tail_len > 0) iov.push_back(frame.subspan(tail_off, tail_len));
+    child.send(std::span<const std::span<const std::byte>>(iov));
+}
+
 void fwd_router_t::route_fwd(std::string_view inbound_name, std::span<const std::byte> frame,
                              const tlv_t& decoded) {
     const tlv_t* const dec = &decoded;     // keep the original body's `dec->...`/`*dec` shape
@@ -189,85 +309,9 @@ void fwd_router_t::route_fwd(std::string_view inbound_name, std::span<const std:
         dst.children.empty() ? nullptr : child_by_segment(dst.children[0].payload);
 
     if (child != nullptr) {
-        // FORWARD: strip the leading dst segment; for a request also prepend the
-        // inbound-link NAME to src (the way back); send onward. A REPLY does not
-        // accumulate src (RFC-0004 §B).
-        const bool is_reply = (op == fwd_op_t::REPLY);
-
-        const auto fwd_h = read_header(frame, 0);
-        if (!fwd_h || fwd_h->type != type_t::FWD) return;
-        const std::size_t body_end = fwd_h->body_off + fwd_h->body_len;
-
-        std::size_t cur = fwd_h->body_off;
-        const auto op_h = read_header(frame, cur);
-        if (!op_h) return;
-        const std::size_t op_pos = cur;
-        cur += op_h->total;
-
-        const auto dst_h = read_header(frame, cur);
-        if (!dst_h || dst_h->type != type_t::PATH) return;
-        cur += dst_h->total;
-
-        std::size_t sel_pos = 0;
-        std::size_t sel_total = 0;
-        if (cur < body_end) {
-            const auto peek = read_header(frame, cur);
-            if (peek && peek->type == type_t::FIELD) {
-                sel_pos = cur;
-                sel_total = peek->total;
-                cur += peek->total;
-            }
-        }
-
-        const auto src_h = read_header(frame, cur);
-        if (!src_h || src_h->type != type_t::PATH) return;
-        cur += src_h->total;
-
-        const std::size_t tail_off = cur;
-        const std::size_t tail_len = body_end > cur ? body_end - cur : 0;
-
-        // The leading dst segment (a NAME) to strip.
-        const auto seg_h = read_header(frame, dst_h->body_off);
-        if (!seg_h || seg_h->type != type_t::NAME) return;
-        const std::size_t rem_dst_off = dst_h->body_off + seg_h->total;
-        const std::size_t rem_dst_len = dst_h->body_len - seg_h->total;
-
-        // The NAME prepended to src — this node's name for the inbound link. Empty
-        // for a REPLY (no accumulation).
-        std::vector<std::byte> inbound_name_tlv;
-        if (!is_reply) detail::emit_name(inbound_name_tlv, inbound_name);
-
-        const std::size_t new_dst_body = rem_dst_len;
-        const std::size_t new_src_body = src_h->body_len + inbound_name_tlv.size();
-        const std::size_t new_dst_total = (new_dst_body > 0xFFFFu ? 6u : 4u) + new_dst_body;
-        const std::size_t new_src_total = (new_src_body > 0xFFFFu ? 6u : 4u) + new_src_body;
-        const std::size_t new_fwd_body =
-            op_h->total + new_dst_total + sel_total + new_src_total + tail_len;
-
-        // head1: FWD header + op (copied) + new (shrunk) dst header.
-        std::vector<std::byte> head1;
-        push_header(head1, type_t::FWD, new_fwd_body);
-        head1.insert(head1.end(), frame.data() + op_pos, frame.data() + op_pos + op_h->total);
-        push_header(head1, type_t::PATH, new_dst_body);
-
-        // head2: new (grown) src header + the prepended inbound NAME (zero bytes for
-        // a REPLY) — the rope head-insert ahead of the untouched original src bytes.
-        std::vector<std::byte> head2;
-        push_header(head2, type_t::PATH, new_src_body);
-        head2.insert(head2.end(), inbound_name_tlv.begin(), inbound_name_tlv.end());
-
-        // Scatter-gather egress: small fresh heads interleaved with views straight
-        // into the inbound frame (remaining dst, selector, original src bytes,
-        // payload) — no copy of the accumulated route or the payload.
-        std::vector<std::span<const std::byte>> iov;
-        iov.reserve(6);
-        iov.emplace_back(head1);
-        if (rem_dst_len > 0) iov.push_back(frame.subspan(rem_dst_off, rem_dst_len));
-        if (sel_total > 0) iov.push_back(frame.subspan(sel_pos, sel_total));
-        iov.emplace_back(head2);
-        if (src_h->body_len > 0) iov.push_back(frame.subspan(src_h->body_off, src_h->body_len));
-        if (tail_len > 0) iov.push_back(frame.subspan(tail_off, tail_len));
-        child->send(std::span<const std::span<const std::byte>>(iov));
+        // FORWARD: the offset-based rebuild needs no decoded tree — share it with the
+        // decode-free on_frame fast path (ADR-0038 inv. #1).
+        route_fwd_forward(inbound_name, frame, *child);
         return;
     }
 

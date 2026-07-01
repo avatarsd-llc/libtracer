@@ -208,6 +208,16 @@ class fwd_router_t {
     /** @brief The slice-3 stateless FWD forward/terminus/reply step (decoded @p dec). */
     void route_fwd(std::string_view inbound_name, std::span<const std::byte> frame,
                    const wire::tlv_t& dec);
+    /**
+     * @brief The forward hop, read entirely by OFFSET — no decoded tree (ADR-0038 inv. #1).
+     *
+     * Strips the leading `dst` segment, prepends the inbound-link NAME to `src` (unless a
+     * REPLY), and scatter-gather-sends onward via @p child. @p child is the transport the
+     * first `dst` segment already resolved to. Shared by the decode-free `on_frame` fast
+     * path and the decoded `route_fwd`'s forward branch.
+     */
+    void route_fwd_forward(std::string_view inbound_name, std::span<const std::byte> frame,
+                           transport_t& child);
     /** @brief Learn (or re-advertise downstream) a `label ↔ route` binding (RFC-0004 §E.1). */
     void on_advertise(std::string_view inbound_name, const wire::tlv_t& adv);
     /** @brief Forward (swap label) or locally deliver a label-compacted COMPACT. */
