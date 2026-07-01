@@ -36,6 +36,13 @@ add_executable(bench_scatter bench_scatter.cpp)
 target_link_libraries(bench_scatter PRIVATE libtracer)
 target_compile_options(bench_scatter PRIVATE -Wall -Wextra)
 
+# The 16KB-RAM zero-heap forward-path gate (ADR-0038): a global operator-new counter
+# measures how many heap allocations one FWD forward hop costs. Report-only now (the
+# Stage-1 baseline is non-zero); CI flips it to a hard gate (ZEROHEAP_MAX=0) at Stage-2.
+add_executable(bench_forward_heap bench_forward_heap.cpp)
+target_link_libraries(bench_forward_heap PRIVATE libtracer)
+target_compile_options(bench_forward_heap PRIVATE -Wall -Wextra)
+
 # Zenoh side — built only when the prebuilt is vendored (run bench/fetch_zenoh.sh).
 set(ZC ${CMAKE_CURRENT_SOURCE_DIR}/vendor/zenoh-c)
 set(ZCPP ${CMAKE_CURRENT_SOURCE_DIR}/vendor/zenoh-cpp-1.9.0)
