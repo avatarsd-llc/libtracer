@@ -63,6 +63,12 @@ target_link_libraries(acl_test PRIVATE libtracer)
 libtracer_test_warnings(acl_test)
 add_test(NAME acl COMMAND acl_test)
 
+# #82 — in-band :children[] SPEC vertex creation (ADR-0017).
+add_executable(children_test children_test.cpp)
+target_link_libraries(children_test PRIVATE libtracer)
+libtracer_test_warnings(children_test)
+add_test(NAME children COMMAND children_test)
+
 # M1 — conformance harness (links the built library).
 add_executable(conformance_runner conformance_runner.cpp)
 target_link_libraries(conformance_runner PRIVATE libtracer)

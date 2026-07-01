@@ -13,6 +13,7 @@
 
 #include <chrono>
 #include <functional>
+#include <map>
 #include <memory>
 #include <shared_mutex>
 #include <span>
@@ -25,6 +26,10 @@
 #include "libtracer/status.hpp"
 #include "libtracer/vertex.hpp"
 #include "libtracer/view.hpp"
+
+namespace tr::wire {
+struct tlv_t;  // fwd-decl: the child factory takes a `const tlv_t*` config (no L2 pull-in).
+}
 
 namespace tr::graph {
 
@@ -53,7 +58,7 @@ struct remote_delivery_t {
 
 class graph_t {
    public:
-    graph_t() = default;
+    graph_t();
     graph_t(const graph_t&) = delete;
     graph_t& operator=(const graph_t&) = delete;
 
@@ -62,6 +67,28 @@ class graph_t {
     [[nodiscard]] result_t<vertex_t*> register_vertex(const path_t& path, role_t role,
                                                       handlers_t handlers = {},
                                                       settings_t settings = {});
+
+    // Register a vertex by its canonical PATH-payload key directly (the in-band
+    // `:children[]` path — the key is composed parent-key + NAME(child), not parsed
+    // from a string). PathInUse if the key is already registered.
+    [[nodiscard]] result_t<vertex_t*> register_vertex_key(std::vector<std::byte> key, role_t role,
+                                                          handlers_t handlers = {},
+                                                          settings_t settings = {});
+
+    // A child-vertex factory: the device-catalog entry ADR-0017 makes concrete. Given
+    // the composed child key (parent key + the SPEC's `name` NAME) and the optional
+    // SPEC `config` SETTINGS, it registers the child vertex(es) and returns the primary
+    // handle (or a status — e.g. PATH_IN_USE). The graph owns the *addressing* (the key
+    // is composed for it); the factory owns the *catalog* (what a `type` instantiates).
+    using child_factory_t = std::function<result_t<vertex_t*>(
+        graph_t&, std::vector<std::byte> child_key, const wire::tlv_t* config)>;
+
+    // Populate the device's creation catalog (ADR-0017): map a SPEC `type` selector to a
+    // factory. A `:children[]` SPEC write whose `type` is unregistered returns
+    // SCHEMA_NOT_FOUND (the ENOTTY of an unsupported creation). Not thread-safe against
+    // concurrent creation — call at setup, before frames flow (mirrors the delivery sink).
+    // The built-in `stored_value` type is registered by the constructor.
+    void register_child_type(std::string type, child_factory_t factory);
 
     // Hot path — operate on a resolved handle; lock-free in the LKV slot.
     [[nodiscard]] result_t<view_t> read(vertex_t* v) const;
@@ -138,8 +165,12 @@ class graph_t {
     // `depth` bounds in-process re-dispatch cycles (kMaxDispatchDepth).
     result_t<void> write_impl(vertex_t* v, view_t value, int depth);
     void fan_out(vertex_t* v, const view_t& value, int depth);
-    // Field surface: ":settings.<f>", ":subscribers[]" / "[N]".
+    // Field surface: ":settings.<f>", ":subscribers[]" / "[N]", ":children[]".
     result_t<void> field_write(vertex_t* v, const field_path_t& field, const view_t& value);
+    // ":children[]" append: instantiate a child from a SPEC via the type catalog (#82,
+    // ADR-0017). Composes the child key (parent key + the SPEC `name` NAME), dispatches
+    // on the SPEC `type`. Unknown type => SCHEMA_NOT_FOUND; duplicate name => PATH_IN_USE.
+    result_t<void> create_child(vertex_t* parent, const view_t& spec_value);
     // ":schema" read => a POINT descriptor (name + settings).
     [[nodiscard]] result_t<view_t> read_schema(vertex_t* v) const;
     // ":acl" read => the raw stored ACL TLV bytes (structural; #81-A, ADR-0018/0020). Storage
@@ -148,6 +179,10 @@ class graph_t {
 
     mutable std::shared_mutex map_mutex_;
     std::unordered_map<path_key_t, std::unique_ptr<vertex_t>, path_key_hash_t> vertices_;
+    // The device creation catalog (#82, ADR-0017): SPEC `type` -> factory. Populated at
+    // setup (register_child_type), read-only once frames flow, so no lock (same contract
+    // as remote_sink_). `std::less<>` enables heterogeneous string_view lookup.
+    std::map<std::string, child_factory_t, std::less<>> child_types_;
     // The remote-delivery sink (#136). Set once before frames flow, then read-only on
     // the write hot path — no lock needed (a benign data race with a late setup write
     // is excluded by the "configure before frames flow" contract, mirroring fwd_router).

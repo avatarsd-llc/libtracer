@@ -51,14 +51,37 @@ void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
 
 }  // namespace
 
+graph_t::graph_t() {
+    // The one built-in creation-catalog type (#82, ADR-0017): `stored_value` makes a
+    // plain last-writer-wins vertex at the composed child key. Its optional SPEC
+    // `config` SETTINGS is ignored for now (a stored-value has no instantiation params
+    // beyond the standard `:settings` field, written separately). Devices add richer
+    // types (controllers, transport connections — #83) via register_child_type.
+    register_child_type(
+        "stored_value",
+        [](graph_t& g, std::vector<std::byte> child_key, const tlv_t*) -> result_t<vertex_t*> {
+            return g.register_vertex_key(std::move(child_key), role_t::STORED_VALUE);
+        });
+}
+
+void graph_t::register_child_type(std::string type, child_factory_t factory) {
+    child_types_.insert_or_assign(std::move(type), std::move(factory));
+}
+
 result_t<vertex_t*> graph_t::register_vertex(const path_t& path, role_t role, handlers_t handlers,
                                              settings_t settings) {
-    path_key_t key{std::vector<std::byte>(path.key().begin(), path.key().end())};
+    return register_vertex_key(std::vector<std::byte>(path.key().begin(), path.key().end()), role,
+                               std::move(handlers), settings);
+}
+
+result_t<vertex_t*> graph_t::register_vertex_key(std::vector<std::byte> key, role_t role,
+                                                 handlers_t handlers, settings_t settings) {
+    path_key_t k{std::move(key)};
     const std::unique_lock lock(map_mutex_);
-    if (vertices_.find(key) != vertices_.end()) return std::unexpected(status_t::PATH_IN_USE);
-    auto vertex = std::make_unique<vertex_t>(role, key, settings, std::move(handlers));
+    if (vertices_.find(k) != vertices_.end()) return std::unexpected(status_t::PATH_IN_USE);
+    auto vertex = std::make_unique<vertex_t>(role, k, settings, std::move(handlers));
     vertex_t* ptr = vertex.get();
-    vertices_.emplace(std::move(key), std::move(vertex));
+    vertices_.emplace(std::move(k), std::move(vertex));
     return ptr;
 }
 
@@ -334,6 +357,14 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
         return {};
     }
 
+    if (step0.name == "children") {
+        // In-band vertex creation (#82, ADR-0017): a `:children[]` APPEND of a SPEC
+        // instantiates a child of a device-catalog type. A `[N]` clear (child removal)
+        // is deferred (#66). Read-back (members, not SPECs) is the field-read surface.
+        if (step0.append) return create_child(v, value);
+        return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    }
+
     if (step0.name == "settings" && field.steps.size() >= 2) {
         const auto tlv = view_as_tlv(value);
         if (!tlv || tlv->type != type_t::VALUE) return std::unexpected(status_t::TYPE_MISMATCH);
@@ -359,6 +390,45 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
     }
 
     return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+}
+
+result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value) {
+    // Parse SPEC{ NAME "type" <sel>, NAME "name" <seg>, SETTINGS "config"? } — the
+    // creation spec of docs/reference/05 §0x0E. The two NAMEs are positional pairs
+    // (NAME key, NAME/SETTINGS value), same shape as the qos_settings parse above.
+    const auto spec = view_as_tlv(spec_value);
+    if (!spec || spec->type != type_t::SPEC) return std::unexpected(status_t::TYPE_MISMATCH);
+
+    std::string_view type_sel;
+    std::span<const std::byte> child_name;
+    const tlv_t* config = nullptr;
+    const std::vector<tlv_t>& ch = spec->children;
+    for (std::size_t i = 0; i + 1 < ch.size(); ++i) {
+        if (ch[i].type != type_t::NAME) continue;
+        const std::string_view key = detail::as_string_view(ch[i].payload);
+        if (key == "type" && ch[i + 1].type == type_t::NAME) {
+            type_sel = detail::as_string_view(ch[i + 1].payload);
+        } else if (key == "name" && ch[i + 1].type == type_t::NAME) {
+            child_name = ch[i + 1].payload;
+        } else if (key == "config" && ch[i + 1].type == type_t::SETTINGS) {
+            config = &ch[i + 1];
+        }
+    }
+    if (type_sel.empty() || child_name.empty()) return std::unexpected(status_t::INVALID_PATH);
+
+    // Look up the catalog type (ADR-0017): unknown => SCHEMA_NOT_FOUND (ENOTTY). The
+    // map is read-only once frames flow (populated at setup), so no lock here.
+    const auto it = child_types_.find(type_sel);
+    if (it == child_types_.end()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+
+    // Compose the child key = parent's canonical PATH-payload + one NAME(child_name).
+    // The graph owns this addressing; the factory only sees the finished key.
+    std::vector<std::byte> child_key = parent->key_.bytes;
+    detail::emit_name(child_key, child_name);
+
+    result_t<vertex_t*> made = it->second(*this, std::move(child_key), config);
+    if (!made) return std::unexpected(made.error());  // PATH_IN_USE on a duplicate name
+    return {};
 }
 
 result_t<view_t> graph_t::read_schema(vertex_t* v) const {
