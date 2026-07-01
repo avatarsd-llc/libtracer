@@ -132,13 +132,6 @@ target_link_libraries(transport_vertex_test PRIVATE libtracer)
 libtracer_test_warnings(transport_vertex_test)
 add_test(NAME transport_vertex COMMAND transport_vertex_test)
 
-# M4 — transport + bridge harness (loopback delivery, ROUTER, dedup, hop_count).
-add_executable(bridge_test bridge_test.cpp)
-target_link_libraries(bridge_test PRIVATE libtracer)
-libtracer_test_warnings(bridge_test)
-target_compile_definitions(bridge_test PRIVATE
-    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
-add_test(NAME bridge COMMAND bridge_test)
 
 # M5 — UDP transport harness (raw frame + two-node end-to-end over localhost UDP).
 add_executable(udp_test udp_test.cpp)

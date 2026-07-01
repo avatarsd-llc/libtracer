@@ -9,7 +9,6 @@
 #pragma once
 
 #include "libtracer/backend.hpp"
-#include "libtracer/bridge.hpp"
 #include "libtracer/child_registry.hpp"
 #include "libtracer/crc.hpp"
 #include "libtracer/frame.hpp"
@@ -22,7 +21,6 @@
 #include "libtracer/op_resolve.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/rope.hpp"
-#include "libtracer/router.hpp"
 #include "libtracer/segment.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/tlv.hpp"

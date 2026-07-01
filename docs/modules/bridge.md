@@ -1,4 +1,16 @@
-# bridge — cross-node forwarding (L4)
+# bridge — cross-node forwarding (L4) — **RETIRED**
+
+```{admonition} Retired (ADR-0040) — this module no longer exists
+:class: error
+`bridge_t` and the ROUTER-flood mechanism were **removed** in
+[ADR-0040](../adr/0040-net-plane-is-explicit-source-routed-only.md): the net plane is
+**explicit-source-routed `FWD` only** (see [interface-map](interface-map.md) and the
+[reference §communication-flows](../reference/04-communication-flows.md)). Parallel links
+to one peer are *different explicit addresses* (`/net/ws/…` vs `/net/can/…`), never
+auto-multipath that needs `(origin, ts)` dedup — so the flood/dedup model this page
+described is gone. The `0x0D ROUTER` wire code stays reserved-but-unimplemented. The page
+below is retained as historical context only.
+```
 
 ```{admonition} Trajectory — this class dissolves (ADR-0037)
 :class: warning

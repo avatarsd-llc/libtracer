@@ -13,6 +13,25 @@ reference implementation is pre-1.0; everything currently lives under
 
 ## [Unreleased]
 
+### Removed
+
+- **`bridge_t` and the ROUTER-flood mechanism are retired**
+  ([ADR-0040](../docs/adr/0040-net-plane-is-explicit-source-routed-only.md); Brick 3b of the
+  #83 Stage-2 flip). The net plane is now **`FWD` explicit-source-routed only** — every remote
+  endpoint is addressed by an explicit path (`/net/ws/<peer>/…` vs `/net/can/<peer>/…` are
+  *different* addresses, so parallel links are deliberate redundancy, never auto-multipath that
+  needs `(origin, ts)` dedup). Removed public API: `bridge_t` (with `export_vertex`, `set_mount`,
+  `set_status_path` and its recent-set/`hop_count`/HLC-clock machinery) and the ROUTER codec
+  helpers `router_wrap`/`router_unwrap`/`router_meta_t` (`router.hpp`/`router.cpp`) — they served
+  only `bridge_t`. The `0x0D ROUTER` **wire codepoint stays reserved and decodable** (the
+  `router-wrapped` conformance vector is unchanged; retiring a codepoint would be a needless spec
+  change) for a possible future flooding profile. FWD is loop-free by construction
+  (`dst`-monotonicity + `INVALID_PATH` on revisit), so no loop safety is lost; provenance is the
+  accumulated `src` route (RFC-0004 §B). `peer_id_t` stays (the node identity). Two-node delivery
+  over a real transport is now covered by `udp_test`'s FWD path. This resolves ADR-0037/0038's
+  "the two side-channels dissolve": `fwd_router_t::children_` → `child_registry_t` (Brick 3a),
+  `bridge_t` → *retired*, not relocated.
+
 ### Added
 
 - **`tr::net::child_registry_t`** — the connection demux table (`NAME → transport

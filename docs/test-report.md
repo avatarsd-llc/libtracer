@@ -8,7 +8,7 @@ Auto-generated from a live `ctest` run by `bench/gen_test_report.py` (regenerate
 
 | suites | passing | conformance vectors | wall time | verdict |
 | --- | --- | --- | --- | --- |
-| 24 | 24/24 | 24 | 2.21s | ✅ all green |
+| 21 | 21/21 | 24 | 1.86s | ✅ all green |
 
 ## By subsystem
 
@@ -18,9 +18,8 @@ Auto-generated from a live `ctest` run by `bench/gen_test_report.py` (regenerate
 | Substrate (L0/L1) | 3 | ✅ 3/3 |
 | Graph (L4) | 3 | ✅ 3/3 |
 | Net (FWD plane) | 5 | ✅ 5/5 |
-| Net (ROUTER plane) | 1 | ✅ 1/1 |
 | Transport | 4 | ✅ 4/4 |
-| Examples | 3 | ✅ 3/3 |
+| Examples | 1 | ✅ 1/1 |
 
 ## Suites
 
@@ -48,7 +47,7 @@ Auto-generated from a live `ctest` run by `bench/gen_test_report.py` (regenerate
 | --- | --- | --- | --- |
 | `acl` | ✅ pass | 0.00s | :acl structural storage (ADR-0018/0020) |
 | `children` | ✅ pass | 0.00s | :children[] SPEC vertex creation (ADR-0017/#82) |
-| `graph` | ✅ pass | 0.10s | roles, lock-free LKV, read/write/await, fan-out, field-write |
+| `graph` | ✅ pass | 0.09s | roles, lock-free LKV, read/write/await, fan-out, field-write |
 
 ### Net (FWD plane)
 
@@ -60,19 +59,13 @@ Auto-generated from a live `ctest` run by `bench/gen_test_report.py` (regenerate
 | `op_resolve` | ✅ pass | 0.04s | terminus op resolution + zero-copy FWD{REPLY} (RFC-0004) |
 | `transport_vertex` | ✅ pass | 0.02s | transport/connection as a / vertex (ADR-0027/#83) |
 
-### Net (ROUTER plane)
-
-| suite | result | time | covers |
-| --- | --- | --- | --- |
-| `bridge` | ✅ pass | 0.03s | ROUTER wrap/unwrap, dedup, hop_count, status (M4/#77) |
-
 ### Transport
 
 | suite | result | time | covers |
 | --- | --- | --- | --- |
-| `transport_can` | ✅ pass | 0.00s | CAN classic + CAN-FD framing |
+| `transport_can` | ✅ pass | 0.01s | CAN classic + CAN-FD framing |
 | `transport_can_vcan` | ✅ pass | 0.21s | SocketCAN over a vcan loopback (E2E) |
-| `udp` | ✅ pass | 0.62s | UDP socket transport, two-node E2E |
+| `udp` | ✅ pass | 0.52s | UDP socket transport, two-node E2E |
 | `ws_transport` | ✅ pass | 0.20s | WebSocket RFC 6455 codec + transport |
 
 ### Examples
@@ -80,8 +73,6 @@ Auto-generated from a live `ctest` run by `bench/gen_test_report.py` (regenerate
 | suite | result | time | covers |
 | --- | --- | --- | --- |
 | `example_in_process_pubsub` | ✅ pass | 0.05s | the in-process pub/sub example |
-| `example_two_node_loopback` | ✅ pass | 0.00s | the two-node loopback example |
-| `example_udp_two_node` | ✅ pass | 0.21s | the two-node UDP example |
 
 ## How every suite is verified
 

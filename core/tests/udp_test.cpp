@@ -3,9 +3,10 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * M5 UDP transport tests: raw frame delivery over a real localhost UDP socket,
- * and an end-to-end two-node exchange through the full graph_t + bridge_t + ROUTER
- * stack over UDP. Built under TSan (the recv thread + receiver handoff) and
- * ASan+UBSan. Uses fixed loopback ports; SO_REUSEADDR is set on the sockets.
+ * and an end-to-end two-node FWD delivery through graph_t + fwd_router_t over UDP
+ * (the explicit-source-routed net plane, ADR-0040 — no bridge_t/ROUTER). Built
+ * under TSan (the recv thread + receiver handoff) and ASan+UBSan. Uses fixed
+ * loopback ports; SO_REUSEADDR is set on the sockets.
  */
 
 #include <array>
@@ -19,6 +20,7 @@
 #include <string_view>
 #include <vector>
 
+#include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 
 namespace {
@@ -34,21 +36,11 @@ void check(bool ok, std::string_view what) {
     if (!ok) ++g_failures;
 }
 
-tr::net::peer_id_t peer_of(std::uint8_t f) {
-    tr::net::peer_id_t p{};
-    p.fill(static_cast<std::byte>(f));
-    return p;
-}
 std::vector<std::byte> value_tlv(std::initializer_list<std::uint8_t> bytes) {
     std::vector<std::byte> payload;
     for (std::uint8_t b : bytes) payload.push_back(std::byte{b});
     tr::wire::tlv_t t{.type = tr::wire::type_t::VALUE, .payload = payload};
     return tr::wire::encode(t);
-}
-tr::view::view_t owned_view(std::span<const std::byte> bytes) {
-    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
-    std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
-    return tr::view::view_t::over(std::move(seg));
 }
 
 void test_raw_frame() {
@@ -76,36 +68,60 @@ void test_raw_frame() {
     }
 }
 
+// Build FWD{ op=WRITE, dst=<segs...>, src=<empty PATH>, payload=<VALUE> } — a remote
+// write routed by explicit source route (RFC-0004 §D, ADR-0040).
+std::vector<std::byte> fwd_write(std::initializer_list<std::string_view> dst,
+                                 std::span<const std::byte> payload_value_tlv) {
+    std::vector<std::byte> body;
+    const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE)};
+    tr::detail::emit_tlv(body, tr::wire::type_t::VALUE, tr::wire::opt_t{},
+                         std::span<const std::byte>(&op, 1));
+    std::vector<std::byte> dst_segs;
+    for (std::string_view s : dst) tr::detail::emit_name(dst_segs, s);
+    tr::detail::emit_tlv(body, tr::wire::type_t::PATH, tr::wire::opt_t{.pl = true}, dst_segs);
+    tr::detail::emit_tlv(body, tr::wire::type_t::PATH, tr::wire::opt_t{.pl = true},
+                         std::span<const std::byte>{});  // src: empty, grows per hop
+    body.insert(body.end(), payload_value_tlv.begin(), payload_value_tlv.end());
+    std::vector<std::byte> frame;
+    tr::detail::emit_tlv(frame, tr::wire::type_t::FWD, tr::wire::opt_t{.pl = true}, body);
+    return frame;
+}
+
 void test_two_nodes_over_udp() {
-    std::printf("Two nodes over UDP — full graph_t+bridge_t+ROUTER stack:\n");
+    std::printf("Two nodes over UDP — FWD delivery through fwd_router_t (ADR-0040):\n");
+    // Declaration order matters: the transports are declared AFTER the routers so they
+    // destruct FIRST — ~udp_transport_t joins its recv thread, so no inbound frame can
+    // reach a router's child_registry_t after the router is gone (ASan use-after-free).
     graph_t node_a, node_b;
+    tr::net::fwd_router_t router_a(node_a);
+    tr::net::fwd_router_t router_b(node_b);
     tr::net::udp_transport_t ta(47102, "127.0.0.1", 47103);
     tr::net::udp_transport_t tb(47103, "127.0.0.1", 47102);
-    tr::net::bridge_t ba(node_a, ta, peer_of(0xA1));
-    tr::net::bridge_t bb(node_b, tb, peer_of(0xB2));
 
-    (void)node_a.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
-    (void)node_b.register_vertex(*path_t::parse("/remote/temp"), role_t::STORED_VALUE);
-    bb.set_mount(*path_t::parse("/remote/temp"));
+    // B holds the target vertex and a subscriber; A knows the link to B as "b".
+    (void)node_b.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+    router_a.add_child("b", ta);  // A routes a `dst` starting with "b" out over UDP to B
+    router_b.add_child("a", tb);  // B's name for the inbound link (src accumulation)
 
     std::promise<std::vector<std::byte>> got;
     auto fut = got.get_future();
-    (void)node_b.subscribe(*path_t::parse("/remote/temp"), [&got](const tr::view::view_t& v) {
+    (void)node_b.subscribe(*path_t::parse("/sensor/temp"), [&got](const tr::view::view_t& v) {
         const auto b = v.bytes();
         got.set_value(std::vector<std::byte>(b.begin(), b.end()));
     });
-    check(ba.export_vertex(*path_t::parse("/sensor/temp")).has_value(), "node A exports over UDP");
 
+    // A client FWD{WRITE dst=/b/sensor/temp} handed to A's router: A strips "b" and
+    // forwards /sensor/temp over real UDP to B, whose terminus writes it locally.
     const auto payload = value_tlv({0x2A, 0x2B});
-    auto* va = node_a.find(path_t::parse("/sensor/temp")->key());
-    (void)node_a.write(va, owned_view(payload));
+    const auto frame = fwd_write({"b", "sensor", "temp"}, payload);
+    router_a.on_frame("client", frame);
 
     const bool arrived = fut.wait_for(3s) == std::future_status::ready;
-    check(arrived, "node B receives the value over real UDP");
+    check(arrived, "node B receives the FWD-delivered value over real UDP");
     if (arrived) {
         const auto r = fut.get();
         check(r.size() == payload.size() && std::memcmp(r.data(), payload.data(), r.size()) == 0,
-              "delivered TLV bytes match across the wire");
+              "delivered TLV bytes match across the wire (explicit source route)");
     }
 }
 

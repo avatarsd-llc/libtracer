@@ -1,4 +1,14 @@
-# router — the ROUTER envelope (L4)
+# router — the ROUTER envelope (L4) — **RETIRED**
+
+```{admonition} Retired (ADR-0040) — this module no longer exists
+:class: error
+`router_wrap`/`router_unwrap`/`router_meta_t` were **removed** with `bridge_t` in
+[ADR-0040](../adr/0040-net-plane-is-explicit-source-routed-only.md) — they served only the
+retired ROUTER-flood bridge. The net plane is **explicit-source-routed `FWD` only**. The
+`0x0D ROUTER` **wire codepoint** stays reserved and decodable (for a possible future
+flooding profile), but there is no `router_wrap` helper. Page retained as historical
+context only.
+```
 
 ```{admonition} In one paragraph
 :class: tip
