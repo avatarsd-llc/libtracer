@@ -15,6 +15,21 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **In-band `:children[]` SPEC vertex creation** ([ADR-0017](../docs/adr/0017-in-band-vertex-creation-controller-orchestration.md)
+  / [ADR-0021](../docs/adr/0021-colon-field-plane-is-the-vertex-ioctl.md); [#82](https://github.com/avatarsd-llc/libtracer/issues/82),
+  the ADR-0037/0038 Stage-1 prerequisite). A `write` of a `SPEC{ type, name, config? }`
+  (`0x0E`) into a parent's `:children[]` field now instantiates a child vertex of a
+  **device-catalog type** — the graph composes the child's canonical key (parent key +
+  the SPEC `name` NAME) and dispatches on `type`; unknown type ⇒ `SCHEMA_NOT_FOUND`
+  (the ENOTTY of creation), duplicate name ⇒ `PATH_IN_USE`, non-SPEC value ⇒
+  `TYPE_MISMATCH`. New public API: `graph_t::register_child_type(type, factory)` (the
+  device populates its creation catalog; the built-in `stored_value` type is registered
+  by the constructor) and `graph_t::register_vertex_key(key, role, …)` (register by a
+  pre-composed key, the in-band creation dual of the string-parsed `register_vertex`).
+  The `graph_t::child_factory_t` seam is where #83 plugs transport-connection types.
+  Verified: new `children_test` (create+resolve / built-in / unknown / duplicate /
+  non-SPEC / custom factory); 23/23 ctest, ASan/UBSan/TSan clean, perf-gate PASS (the
+  catalog is off the read/write hot path).
 - **Bridge hop-limit local error** ([ADR-0014](../docs/adr/0014-router-cycle-termination-hop-count.md)
   "MUST emit a local error", [#77](https://github.com/avatarsd-llc/libtracer/issues/77)).
   A `hop_count >= MAX_HOPS` drop now emits `STATUS=ERROR(NESTING_TOO_DEEP)` (wire code
