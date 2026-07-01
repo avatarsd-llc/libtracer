@@ -42,7 +42,14 @@ jobs:
       - name: Build the PR (candidate) benchmark (Release)
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build bench/build --target bench_libtracer -j
+          cmake --build bench/build --target bench_libtracer bench_forward_heap -j
+
+      # --- 16KB-RAM zero-heap forward gate (ADR-0038/0039) ------------------------
+      # A hard, absolute gate (no baseline needed): the FWD forward hop MUST allocate
+      # zero heap. Measured by a global operator-new counter armed around one steady-
+      # state on_frame. Fails the build if the forward path ever allocates again.
+      - name: Zero-heap forward gate (ADR-0038 §16KB-RAM)
+        run: ZEROHEAP_MAX=0 ./bench/build/bench_forward_heap
 
       # --- PR gate: same-runner baseline ------------------------------------------
       # Build main's bench_libtracer in a worktree on THIS runner, then record its

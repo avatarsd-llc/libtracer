@@ -84,9 +84,7 @@ void operator delete[](void* p, std::size_t) noexcept { counted_free(p); }
 void operator delete(void* p, std::align_val_t) noexcept { counted_free(p); }
 void operator delete(void* p, std::size_t, std::align_val_t) noexcept { counted_free(p); }
 void operator delete(void* p, const std::nothrow_t&) noexcept { counted_free(p); }
-void operator delete(void* p, std::align_val_t, const std::nothrow_t&) noexcept {
-    counted_free(p);
-}
+void operator delete(void* p, std::align_val_t, const std::nothrow_t&) noexcept { counted_free(p); }
 
 // --- the forward-hop fixture -------------------------------------------------
 
@@ -103,10 +101,19 @@ using tr::wire::type_t;
 struct capture_transport_t : transport_t {
     std::size_t sends = 0;
     std::size_t last_len = 0;
-    using transport_t::send;
     void send(std::span<const std::byte> f) override {
         ++sends;
         last_len = f.size();
+    }
+    // Override the scatter-gather send so the measured window sees the ROUTER's cost,
+    // not the base class's flatten-into-a-temp-vector (which would add a measurement
+    // artifact alloc). A real zero-copy transport (sendmsg/writev/RDMA) overrides this
+    // exactly this way — sum the spans, no copy, no heap.
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        std::size_t total = 0;
+        for (const auto& s : iov) total += s.size();
+        ++sends;
+        last_len = total;
     }
     void set_receiver(receiver_t) override {}
 };
@@ -147,7 +154,8 @@ int main() {
     router.add_child("in", in_link);
     router.add_child("out", out_link);
 
-    const std::byte payload[4] = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE}, std::byte{0xEF}};
+    const std::byte payload[4] = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE},
+                                  std::byte{0xEF}};
     const std::vector<std::byte> frame =
         make_fwd({"out", "sensor", "temp"}, {"reply"}, std::span<const std::byte>(payload, 4));
 
@@ -161,11 +169,13 @@ int main() {
     const probe::counts_t c = win.result();
 
     const bool forwarded = out_link.sends == warm_sends + 1;
-    std::printf("RESULT zeroheap forward allocs=%zu frees=%zu bytes=%zu egress_len=%zu forwarded=%d\n",
-                c.allocs, c.frees, c.bytes, out_link.last_len, forwarded ? 1 : 0);
+    std::printf(
+        "RESULT zeroheap forward allocs=%zu frees=%zu bytes=%zu egress_len=%zu forwarded=%d\n",
+        c.allocs, c.frees, c.bytes, out_link.last_len, forwarded ? 1 : 0);
     std::printf(
         "  (baseline: today's fwd_router full-decodes + rebuilds with std::vector, so allocs>0 is\n"
-        "   EXPECTED pre-Stage-2; ADR-0038 gate = allocs==0 on the forward path after the flip.)\n");
+        "   EXPECTED pre-Stage-2; ADR-0038 gate = allocs==0 on the forward path after the "
+        "flip.)\n");
 
     if (!forwarded) {
         std::printf("FAIL: the frame did not forward — fixture broken, not a heap result\n");

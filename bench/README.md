@@ -30,14 +30,25 @@ forward hop, and reports `allocs` / `frees` / `bytes`. Single-threaded by constr
 
 ```sh
 ./build/bench_forward_heap              # report-only: prints the current per-hop alloc count
-ZEROHEAP_MAX=0 ./build/bench_forward_heap   # hard gate: exit 1 if allocs > 0 (CI at Stage-2)
+ZEROHEAP_MAX=0 ./build/bench_forward_heap   # hard gate: exit 1 if allocs > 0 (LIVE in perf.yml)
 ```
 
-**Stage-1 baseline: 24 allocs / 2044 B per hop** — today's `fwd_router_t` full-decodes
-every frame (`wire::decode` → `vector<tlv_t>`) and rebuilds the shrunk/grown headers
-with `std::vector`, so a non-zero count is **expected pre-Stage-2**. The gate's job is to
-drive that number to **0** as the ADR-0038 Stage-2 flip lands; CI flips `ZEROHEAP_MAX=0`
-to make it a hard regression gate at that point.
+**Current: 0 allocs / 0 B per forward hop — the gate PASSES and is enforced in CI**
+(`perf.yml`, `ZEROHEAP_MAX=0`). The forward hop is heap-free by construction: offset
+dispatch (no `wire::decode`), fixed stack header buffers + a stack `iov` array (no
+`std::vector`), views straight into the untouched inbound frame.
+
+| Stage | allocs / hop | bytes / hop | how |
+| --- | --- | --- | --- |
+| Stage-1 baseline | 24 | 2044 | full-decode every frame + rebuild headers with `std::vector` |
+| Brick 1 (offset dispatch) | 15 | 220 | forward hop stops decoding — the tree it discarded is gone |
+| **Brick 2 (stack heads + iov)** | **0** | **0** | the four per-hop `std::vector`s → stack buffers |
+
+The counter overrides **every** `operator new` variant (the aligned-nothrow form
+`heap_alloc` uses *and* the plain STL form), so a `pmr` resource that falls through to
+the heap is caught too ([ADR-0039](../docs/adr/0039-pmr-memory-model-host-aligned-allocation.md)).
+"Zero" is the *steady-state* hop — init / terminus / the host application allocate
+freely, out of the armed window.
 
 ```sh
 ./fetch_zenoh.sh   # vendors prebuilt zenoh-c 1.9.0 + zenoh-cpp (x86_64 linux; not committed)
