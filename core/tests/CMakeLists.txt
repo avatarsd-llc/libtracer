@@ -126,6 +126,12 @@ target_link_libraries(fwd_fanout_test PRIVATE libtracer)
 libtracer_test_warnings(fwd_fanout_test)
 add_test(NAME fwd_fanout COMMAND fwd_fanout_test)
 
+# #83 Stage-1 — transport/connection as a / vertex (shell over the live fwd path).
+add_executable(transport_vertex_test transport_vertex_test.cpp)
+target_link_libraries(transport_vertex_test PRIVATE libtracer)
+libtracer_test_warnings(transport_vertex_test)
+add_test(NAME transport_vertex COMMAND transport_vertex_test)
+
 # M4 — transport + bridge harness (loopback delivery, ROUTER, dedup, hop_count).
 add_executable(bridge_test bridge_test.cpp)
 target_link_libraries(bridge_test PRIVATE libtracer)
