@@ -5,6 +5,7 @@
 
 #include "libtracer/fwd_router.hpp"
 
+#include <array>
 #include <cstring>
 #include <optional>
 #include <utility>
@@ -102,15 +103,56 @@ struct hdr_t {
     return out;
 }
 
-// Append a structured-TLV header (type, opt.PL [+LL], little-endian length) for a
-// body of `body_len` bytes. Identical to op_resolve.cpp's emit_struct_header.
-void push_header(std::vector<std::byte>& out, type_t type, std::size_t body_len) {
-    opt_t opt{.pl = true};
-    if (body_len > 0xFFFFu) opt.ll = true;
-    out.push_back(static_cast<std::byte>(std::to_underlying(type)));
-    out.push_back(static_cast<std::byte>(opt.encode()));
-    detail::append_le(out, static_cast<std::uint32_t>(body_len), opt.ll ? 4u : 2u);
-}
+// A fixed-capacity stack byte-writer — the zero-heap counterpart of the old
+// vector-based header builder for the forward hop (ADR-0038 inv. #2: "the fresh header bytes ... a
+// stack std::array, not a std::vector"). Bounded by the wire header widths + one NAME
+// (kMaxSegmentBytes), so `N` is a small compile-time constant; a write past capacity
+// clamps to empty (the caller treats an empty head as a drop — never a buffer overrun).
+template <std::size_t N>
+class stack_writer {
+   public:
+    void header(type_t type, std::size_t body_len) {
+        opt_t opt{.pl = true};
+        if (body_len > 0xFFFFu) opt.ll = true;
+        const std::size_t width = opt.ll ? 4u : 2u;
+        if (len_ + 2 + width > N) {
+            overflow_ = true;
+            return;
+        }
+        buf_[len_++] = static_cast<std::byte>(std::to_underlying(type));
+        buf_[len_++] = static_cast<std::byte>(opt.encode());
+        for (std::size_t i = 0; i < width; ++i)
+            buf_[len_++] = static_cast<std::byte>((body_len >> (8 * i)) & 0xFF);
+    }
+    void name(std::string_view s) {  // a NAME TLV over `s` (type, opt=0, u16 len, bytes)
+        if (len_ + 4 + s.size() > N || s.size() > 0xFFFFu) {
+            overflow_ = true;
+            return;
+        }
+        buf_[len_++] = static_cast<std::byte>(std::to_underlying(type_t::NAME));
+        buf_[len_++] = std::byte{0};
+        buf_[len_++] = static_cast<std::byte>(s.size() & 0xFF);
+        buf_[len_++] = static_cast<std::byte>((s.size() >> 8) & 0xFF);
+        for (char c : s) buf_[len_++] = static_cast<std::byte>(c);
+    }
+    void raw(std::span<const std::byte> bytes) {  // copy opaque bytes (the op TLV)
+        if (len_ + bytes.size() > N) {
+            overflow_ = true;
+            return;
+        }
+        for (std::byte b : bytes) buf_[len_++] = b;
+    }
+    [[nodiscard]] std::span<const std::byte> span() const {
+        return overflow_ ? std::span<const std::byte>{}
+                         : std::span<const std::byte>(buf_.data(), len_);
+    }
+    [[nodiscard]] bool ok() const noexcept { return !overflow_; }
+
+   private:
+    std::array<std::byte, N> buf_{};
+    std::size_t len_ = 0;
+    bool overflow_ = false;
+};
 
 }  // namespace
 
@@ -260,39 +302,45 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     const std::size_t rem_dst_off = dst_h->body_off + seg_h->total;
     const std::size_t rem_dst_len = dst_h->body_len - seg_h->total;
 
-    // The NAME prepended to src — this node's name for the inbound link. Empty for a REPLY.
-    std::vector<std::byte> inbound_name_tlv;
-    if (!is_reply) detail::emit_name(inbound_name_tlv, inbound_name);
+    // The inbound NAME appended to src (grow) — empty for a REPLY (no accumulation).
+    const std::size_t inbound_name_len = is_reply ? 0u : (4u + inbound_name.size());
 
     const std::size_t new_dst_body = rem_dst_len;
-    const std::size_t new_src_body = src_h->body_len + inbound_name_tlv.size();
+    const std::size_t new_src_body = src_h->body_len + inbound_name_len;
     const std::size_t new_dst_total = (new_dst_body > 0xFFFFu ? 6u : 4u) + new_dst_body;
     const std::size_t new_src_total = (new_src_body > 0xFFFFu ? 6u : 4u) + new_src_body;
     const std::size_t new_fwd_body =
         op_h->total + new_dst_total + sel_total + new_src_total + tail_len;
 
-    // head1: FWD header + op (copied) + new (shrunk) dst header.
-    std::vector<std::byte> head1;
-    push_header(head1, type_t::FWD, new_fwd_body);
-    head1.insert(head1.end(), frame.data() + op_pos, frame.data() + op_pos + op_h->total);
-    push_header(head1, type_t::PATH, new_dst_body);
+    // head1: FWD header + op (copied) + new (shrunk) dst header. head2: new (grown) src
+    // header + the prepended inbound NAME. Both fixed stack buffers — ZERO heap on the
+    // forward hop (ADR-0038 inv. #2). Bounds: head1 = FWD hdr(≤6) + op TLV(small) + PATH
+    // hdr(≤6); head2 = PATH hdr(≤6) + one NAME(≤4+kMaxSegmentBytes). An overflow (a
+    // malformed op TLV larger than the buffer) yields an empty span ⇒ drop, never a
+    // buffer overrun.
+    stack_writer<64> head1;
+    head1.header(type_t::FWD, new_fwd_body);
+    head1.raw(frame.subspan(op_pos, op_h->total));
+    head1.header(type_t::PATH, new_dst_body);
 
-    // head2: new (grown) src header + the prepended inbound NAME (zero bytes for a REPLY).
-    std::vector<std::byte> head2;
-    push_header(head2, type_t::PATH, new_src_body);
-    head2.insert(head2.end(), inbound_name_tlv.begin(), inbound_name_tlv.end());
+    stack_writer<96> head2;
+    head2.header(type_t::PATH, new_src_body);
+    if (!is_reply) head2.name(inbound_name);
 
-    // Scatter-gather egress: small fresh heads interleaved with views straight into the
-    // inbound frame (remaining dst, selector, original src bytes, payload) — no copy.
-    std::vector<std::span<const std::byte>> iov;
-    iov.reserve(6);
-    iov.emplace_back(head1);
-    if (rem_dst_len > 0) iov.push_back(frame.subspan(rem_dst_off, rem_dst_len));
-    if (sel_total > 0) iov.push_back(frame.subspan(sel_pos, sel_total));
-    iov.emplace_back(head2);
-    if (src_h->body_len > 0) iov.push_back(frame.subspan(src_h->body_off, src_h->body_len));
-    if (tail_len > 0) iov.push_back(frame.subspan(tail_off, tail_len));
-    child.send(std::span<const std::span<const std::byte>>(iov));
+    if (!head1.ok() || !head2.ok()) return;  // malformed oversized op ⇒ drop, no overrun
+
+    // Scatter-gather egress: small stack heads interleaved with views straight into the
+    // inbound frame (remaining dst, selector, original src bytes, payload) — no copy, no
+    // heap. `iov` is a stack std::array, not a std::vector (ADR-0038 inv. #2).
+    std::array<std::span<const std::byte>, 6> iov;
+    std::size_t n = 0;
+    iov[n++] = head1.span();
+    if (rem_dst_len > 0) iov[n++] = frame.subspan(rem_dst_off, rem_dst_len);
+    if (sel_total > 0) iov[n++] = frame.subspan(sel_pos, sel_total);
+    iov[n++] = head2.span();
+    if (src_h->body_len > 0) iov[n++] = frame.subspan(src_h->body_off, src_h->body_len);
+    if (tail_len > 0) iov[n++] = frame.subspan(tail_off, tail_len);
+    child.send(std::span<const std::span<const std::byte>>(iov.data(), n));
 }
 
 void fwd_router_t::route_fwd(std::string_view inbound_name, std::span<const std::byte> frame,
