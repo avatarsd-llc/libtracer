@@ -12,6 +12,8 @@ This site is the public documentation:
   first vertex, pub/sub, and a two-node exchange in ~10 minutes.
 - **[Performance](docs/performance.md)** — honest, reproducible numbers vs Eclipse
   Zenoh (in-process zero-copy, and the network latency/throughput trade).
+- **[Test report](docs/test-report.md)** — a live, auto-generated view of every test
+  suite by subsystem, plus the sanitizer matrix and the 16KB zero-heap forward gate.
 - **[Modules](docs/modules/index.md)** — a module-by-module guide to the reference
   C++ implementation, the [interface map](docs/modules/interface-map.md), and a
   hands-on [bit-level wire walkthrough](docs/modules/wire-format-bits.md).
@@ -32,6 +34,7 @@ is descriptive; the design rationale (ADRs) and proposals (RFCs) live in the
 
 /docs/getting-started
 /docs/performance
+/docs/test-report
 ```
 
 ```{toctree}
