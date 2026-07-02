@@ -19,7 +19,7 @@ you everything, and a structured value is just **more TLVs concatenated**.
 ```
 
 - **type** — one byte. `0x01` VALUE, `0x02` NAME, `0x06` PATH, `0x07` POINT, `0x09`
-  STATUS, `0x0B` SETTINGS, `0x0C` TIME, `0x0D` ROUTER … (`0x80–0xFF` is yours).
+  STATUS, `0x0B` SETTINGS, `0x0C` TIME, `0x0F` FWD … (`0x80–0xFF` is yours).
 - **opt** — eight flag bits (below).
 - **length** — payload size, **fixed-width** little-endian: `u16` normally, `u32`
   when `opt.LL=1`. Fixed width means a parser jumps `header + length` to the next
@@ -93,7 +93,7 @@ Same VALUE, payload `AA BB CC DD EE`, integrity-checked with CRC-32C.
 ```
 
 The CRC lives in the **trailer**, after the payload — not the header. That is what
-lets a recorder or bridge *attach* integrity at egress and *strip* it at ingress
+lets a recorder or forwarder *attach* integrity at egress and *strip* it at ingress
 **without touching the payload bytes**: at rest a value is `header+payload`; in
 transit it grows a trailer; the payload is byte-identical through both.
 
@@ -116,22 +116,30 @@ concatenation. And those 18 payload bytes are **exactly** the vertex-map key
 ([path](path.md)): the address on the wire and the address in memory are the same
 bytes.
 
-### 5 · a `ROUTER` frame (the bridge envelope)
+### 5 · a `FWD` frame (the remote-operation envelope)
 
-A data TLV wrapped for the wire ([reference/05 §0x0D](../reference/05-protocol-tlvs.md)). `NAME`-tagged metadata, then
-the wrapped TLV last:
+A remote write carried by the source-routed `FWD` (`0x0F`,
+[reference/05 §reserved range](../reference/05-protocol-tlvs.md)): the op code, the
+explicit route to the target (`dst`), the accumulated way back (`src`), then the
+payload TLV — `FWD{ op=WRITE, dst=/b/temp, src=(empty), VALUE 0x2A }`, 35 bytes:
 
 ```text
- 0D 40 LL LL │ <NAME "origin_peer_id"> <VALUE 16B>
-             │ <NAME "origin_timestamp"> <TIME u64>     ← dedup key = (origin, ts)
-             │ <NAME "hop_count"> <VALUE u8>            ← termination = hop_count
-             │ <NAME "data"> <… the wrapped data TLV, verbatim …>
-   type=0x0D ROUTER · opt=0x40 (PL=1)
+ 0F 40 1F 00                              ← FWD · opt=0x40 (PL=1) · length=0x001F=31
+ │ 01 00 01 00 01                         ← VALUE op: 1 byte, WRITE=0x01
+ │ 06 40 0D 00                            ← PATH dst (PL=1), 13 child bytes
+ │   02 00 01 00 62                       ←   NAME "b"    (the next-hop link)
+ │   02 00 04 00 74 65 6D 70              ←   NAME "temp" (the target on the peer)
+ │ 06 40 00 00                            ← PATH src (PL=1), empty — grows per hop
+ │ 01 00 01 00 2A                         ← VALUE payload: the byte 0x2A
 ```
 
-The wrapped TLV (example 2, 3, or 4) is copied in **verbatim, trailer and all** — so
-`router_unwrap` hands it back as a zero-copy span and the bridge re-injects the
-exact original bytes.
+Every child is one of the shapes above — the frame is examples 2 and 4,
+concatenated. A forwarding hop reads just the three leading headers **by offset**:
+it strips `NAME "b"` from `dst` (shrinking it toward the target), prepends its own
+name for the inbound link to `src` (the return route), and sends the rest of the
+frame onward **untouched** — the payload bytes are never copied or re-encoded. When
+`dst` no longer starts with a link name, the frame has arrived: the terminus decodes
+it and applies the op. (`0x0D` is a reserved codepoint with no assigned mechanism.)
 
 ## The same bytes, three ways
 

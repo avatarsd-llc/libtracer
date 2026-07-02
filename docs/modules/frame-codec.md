@@ -19,6 +19,20 @@ the input, so holding it requires keeping the bytes alive (that is what
 [views](views.md) provide). `encode(tlv)` does the reverse, recomputing the CRC
 over the body when `opt.CR` is set.
 
+```{mermaid}
+flowchart TD
+    H["read header:<br/>type · opt · length"] --> V{"bounds ok?<br/>reserved bits zero?"}
+    V -->|no| E["error_t"]
+    V -->|yes| P{"opt.PL?"}
+    P -->|"1 — structured"| C["push children region<br/>(depth cap 32)"]
+    P -->|"0 — opaque"| O["payload = span into input"]
+    C --> T["verify trailer CRC"]
+    O --> T
+    T --> N{"more bytes<br/>in region?"}
+    N -->|yes| H
+    N -->|no| D["tlv_t tree (borrowed)"]
+```
+
 The `opt` byte is the protocol's compactness lever: six 1-bit flags select
 structure, trailer contents, and field widths, so the common frame is just **4
 bytes** of header. CRCs are **CRC-32C** (default) or CRC-16-CCITT, both
@@ -57,6 +71,18 @@ namespace crc { std::uint32_t crc32c(...); std::uint16_t crc16_ccitt(...); }   /
         opt bits (MSB→LSB):  R · PL · TS · CR · LL · CW · TF · R
                              (bits 7 and 0 are reserved-must-be-zero)
 ```
+
+## The terminus arena sibling
+
+Alongside the owning `tlv_t` model, the codec ships a second decoder for the FWD
+terminus: **`wire::decode_into(span, std::pmr::memory_resource&) → tlv_arena_t`**
+(public header `tlv_arena.hpp`). It parses the same frames with the same
+validation (bounds, reserved bits, depth cap, trailer CRC), but the result is a
+**flat, pre-order array of `arena_tlv_t` span-nodes** — `{type, opt, wire
+(trailer-excluded), body, end, canonical_path}` — every span borrowing the input
+frame, every node drawn from the injected pmr resource. Zero-copy, no owning
+vectors; a resolve-scoped view, never stored. The codec's `tlv_t` model,
+`decode`, and `encode` are unchanged alongside it.
 
 ## Benefits
 

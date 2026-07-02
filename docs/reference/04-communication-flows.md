@@ -209,49 +209,37 @@ write("/sensor/temp:settings",
 
 ---
 
-## Bridge republish
+## Multi-hop FWD forwarding
 
-```{note}
-**Trajectory (post-RFC-0004).** This §describes the M4 **ROUTER**-envelope republish — the flood/mirror model. It is retained for **cyclic / multi-path** delivery but is **no longer the primary remote mechanism**: a remote operation now source-routes as an **`FWD`** frame ([RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md) / [ADR-0035](../adr/0035-implementing-rfc-0004-remote-operation-addressing.md)) — the receive-side **mount** below is the `FWD` terminus write, addressed by path-suffix through a transport-vertex ([ADR-0027](../adr/0027-transport-and-connections-are-vertices.md)), **not** a ROUTER re-wrap. The ROUTER-wrap **egress** is deleted and `bridge_t` dissolves into the transport-vertex tree ([ADR-0037](../adr/0037-net-side-channels-dissolve-into-vertex-tree-compositor.md)/[0038](../adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md), Stage-2). Current model: [reference/13](13-network-formation.md) + [CONTEXT.md §Path-as-route](../../CONTEXT.md).
+A remote operation rides an **`FWD`** frame that carries its own route ([RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md) / [ADR-0035](../adr/0035-implementing-rfc-0004-remote-operation-addressing.md)): `dst` holds the remaining hops and shrinks by one NAME per hop; `src` accumulates the way back. A remote endpoint is addressed by path-suffix through a transport-vertex ([ADR-0027](../adr/0027-transport-and-connections-are-vertices.md)) — see [reference/13](13-network-formation.md) and [CONTEXT.md §Path-as-route](../../CONTEXT.md). Each node plays one of two roles per frame, decided by the first `dst` segment:
+
+- **Forward hop** — the first `dst` segment names a transport-child vertex. The hop reads roughly three TLV headers **by offset** (no decoded tree — **zero heap allocations**, CI-gated), strips that leading `dst` NAME, prepends the inbound-link NAME to `src`, and scatter-gather-sends the result: stack-built replacement heads plus untouched views over the original frame bytes.
+- **Terminus** — the first `dst` segment names a local, non-transport vertex. The frame is arena-decoded (`wire::decode_into` → `tlv_arena_t`, a flat pre-order array of span nodes over the frame bytes, drawn from an injected `std::pmr::memory_resource`), `op_resolver_t::resolve` applies the operation to the local graph, and the `FWD{REPLY}` head is direct-emitted into one exactly-sized segment.
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant C as Client node
+    participant H as Forward hop
+    participant T as Terminus node
+    C->>H: FWD{op, dst=/h/sensor/temp, src=[], payload}
+    Note over H: offset dispatch — read ~3 headers by offset,<br/>no decoded tree, zero heap allocations
+    H->>H: first dst segment → transport child<br/>(child-registry demux)
+    H->>T: strip leading dst NAME · prepend inbound-link NAME to src<br/>scatter-gather send: stack heads + untouched frame views
+    Note over T: first dst segment names a local vertex → terminus
+    T->>T: wire::decode_into(frame, mr) → tlv_arena_t<br/>(flat pre-order span nodes)
+    T->>T: op_resolver_t::resolve — read/write/await<br/>the local vertex
+    T->>H: FWD{REPLY, dst = accumulated src}<br/>direct-emitted into one exactly-sized segment
+    Note over H: a REPLY routes by the same per-hop step<br/>but does not accumulate src
+    H->>C: FWD{REPLY} delivered to the originator's reply sink
 ```
 
-A bridge is a vertex that ingests TLVs from one transport and republishes them into the local graph under a mount point. From a local subscriber's view, bridged data is indistinguishable from local-source data.
+Invariants:
 
-```
-External peer        Transport module       Bridge vertex          Local router         Local subscriber
-   |                       |                      |                      |                      |
-   | (CAN frame)──────────>|                      |                      |                      |
-   |                       |── reassemble bytes  |                      |                      |
-   |                       |── construct TLV view|                      |                      |
-   |                       |── validate trailer   |                      |                      |
-   |                       |   (CRC + wire-time)  |                      |                      |
-   |                       |── strip trailer      |                      |                      |
-   |                       |── recv_cb(tlv,      |                      |                      |
-   |                       |          peer_id)──>|                      |                      |
-   |                       |                      |── dedupe check       |                      |
-   |                       |                      |   (origin, ts) from   |                      |
-   |                       |                      |   ROUTER TLV          |                      |
-   |                       |                      |── shed ROUTER        |                      |
-   |                       |                      |   (save metadata for  |                      |
-   |                       |                      |    re-emit table)     |                      |
-   |                       |                      |── prepend mount      |                      |
-   |                       |                      |   "/can-bridge/" +   |                      |
-   |                       |                      |   incoming path      |                      |
-   |                       |                      |── write bare data   |                      |
-   |                       |                      |   to local graph ───>|                      |
-   |                       |                      |                      |── normal write flow  |
-   |                       |                      |                      |   (fanout)           |
-   |                       |                      |                      |─────────────────────>|
-```
-
-Two strips happen in this flow, and they are at different layers:
-
-- **L2 trailer strip**: the transport module validates `trailer_crc` (and optionally `trailer_ts`), then the trailer is consumed — the bare `header + payload` is what the bridge sees. This is universal across all transports.
-- **L4 ROUTER shed**: the bridge unwraps the `ROUTER` envelope, saves `(origin_peer_id, origin_timestamp, hop_count)` from ROUTER's metadata children to its per-proxy metadata table, and stores only the wrapped data TLV (ROUTER's last child, tagged by `NAME "data"`) at the proxy vertex. This applies only when the incoming TLV is itself a ROUTER.
-
-When a local subscriber that is itself reachable via another transport pulls this data, the bridge re-emits in mirror order: re-wrap into a `ROUTER` envelope with `hop_count` incremented and the data TLV as the last child, attach a fresh outbound trailer (new wire-time, new CRC), send. The payload bytes never move.
-
-Dedup is essential because the global topology may have cycles (see [07-host-embedding.md](07-host-embedding.md) §cycle handling). The bridge maintains a **recent-set** of `(origin_peer_id, origin_timestamp)` pairs and silently drops TLVs already seen.
+- **Forwarders are stateless.** There is no per-request table: the forward route is the shrinking `dst` and the return route is the growing `src`, both carried in the frame. A hop may reboot mid-operation and the reply still routes.
+- **Loop-free by construction.** `dst` is consumed monotonically per hop; a `dst` that revisits a node is malformed (`ERROR=INVALID_PATH`). No dedup state exists anywhere on the path — parallel links to one peer are *different explicit addresses* (deliberate redundancy), not auto-multipath.
+- **The payload bytes never move on a forward hop.** Only the two route PATHs are rewritten; the rest of the frame is sent as views over the inbound bytes.
+- **A REPLY expects no reply** (RFC-0004 §B): it routes hop-by-hop along the return route without growing `src`, and terminates at the originator's reply sink.
 
 ---
 
@@ -332,7 +320,7 @@ A subscriber with `:liveness.heartbeat_hz = 0` opts out of liveness checking. Be
 ## Network partition and recovery
 
 ```
-Bridge                Transport module      External peer
+Forwarder             Transport module      External peer
    |                       |                      |
    | (steady-state)        |                      |
    | <── data ─────────────|<───────── data ──────|
@@ -340,7 +328,7 @@ Bridge                Transport module      External peer
    |                       | (peer disconnects: TCP RST, mDNS expiry, CAN-error-frame, etc.)
    |                       |── notify_disconnect(peer_id)
    |                       |─────────────────────>|
-   |── for each path bridged from this peer:     |
+   |── for each path routed via this link:       |
    |   emit STATUS=ERROR(TRANSPORT_DOWN) write   |
    |   to local subscribers                      |
    |                                              |
@@ -351,11 +339,11 @@ Bridge                Transport module      External peer
    |                       |── notify_connect(peer_id)
    |                       |─────────────────────>|
    |── re-emit any transient-local cached data    |
-   |   for paths the peer was bridging            |
+   |   for paths routed via this link             |
    |── normal traffic resumes                     |
 ```
 
-There is no automatic graph-state-merge logic. Last-write-wins by timestamp is the conflict-resolution policy. If both sides wrote during the partition, the higher timestamp wins; the lower timestamp is silently superseded.
+There is no automatic graph-state-merge logic. Last-write-wins by timestamp is the conflict-resolution policy. If both sides wrote during the partition, the higher timestamp wins; the lower timestamp is silently discarded.
 
 Cluster consensus / CRDT / vector-clock causality are explicitly **out of scope** for v1. Layer them above libtracer if needed.
 

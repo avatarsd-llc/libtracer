@@ -15,7 +15,7 @@ graph_runtime + frame_codec + tlv_registry        (required)
 mem_pool_static | mem_heap   (L0)   →   view_basic (L1)
 ```
 
-`read`/`write`/`await` + `:subscribers[]` fan-out, all in-process, zero-copy via refcounted views. No transport, no bridge.
+`read`/`write`/`await` + `:subscribers[]` fan-out, all in-process, zero-copy via refcounted views. No transport, no forwarder.
 
 ## Rung 1 — Single-transport leaf (P1)
 
@@ -34,7 +34,7 @@ The leaf publishes a few paths; a host subscribes. Framing is **header-elided** 
 The milestone: **drop-in replacement for the strawberry-fw io_layer over its existing CAN + WebSocket buses, zero overhead.**
 
 ```
-Rung 0  +  bridge (P2)
+Rung 0  +  forwarder (P2)
   transport_can  (header-elided)   ── strawberry's remote boards / sensors
   transport_ws   (full-TLV)        ── strawberry's web-ui
   mem_borrowed (live IO values) · mem_can_reassembly · mem_pool_class
@@ -43,7 +43,7 @@ Rung 0  +  bridge (P2)
 ```
 
 - **Zero overhead** because the CAN/WS frames are byte-unchanged and the value bytes are *borrowed* (no copy); fan-out is a refcount bump — *less* overhead than the io_layer's dispatch deep-copy.
-- The **bridge** joins CAN ↔ WS ↔ in-process; it stays stateless/uniform (the adapters uniform addressing, [ADR-0022](../adr/0022-transport-framing-modes-elided-full-tlv-advertise.md)).
+- The **forwarder** joins CAN ↔ WS ↔ in-process; it stays stateless/uniform (the adapters uniform addressing, [ADR-0022](../adr/0022-transport-framing-modes-elided-full-tlv-advertise.md)).
 - **Deferred to later rungs:** NFSv4 ACL enforcement, in-band `SPEC` creation, controllers, discovery.
 
 ## Rung 3 — RTSP source (P2+)
@@ -77,7 +77,7 @@ The differentiator: **ROS 2 over CAN/UART (header-elided)** — ROS on a 16 KB M
 ```
 [STM32]  transport_can (elided, advertise+id-match)  ── 100 ksps, 9-byte samples
    │  CAN-FD bus
-[Host]   transport_can RX → host frame/CRC → bridge (uniform TLV)
+[Host]   transport_can RX → host frame/CRC → forwarder (uniform TLV)
    │
    │  batch N samples host-side  (one advertised rope group = one tensor)
    ▼
@@ -97,7 +97,7 @@ The differentiator: **ROS 2 over CAN/UART (header-elided)** — ROS on a 16 KB M
 | --- | --- | --- | --- |
 | 0 in-process | P0 | required only | — |
 | 1 leaf | P1 | one transport + paired L0/L1 | elided |
-| 2 **strawberry** | P2 | `transport_can`, `transport_ws`, `bridge`, dispatcher QoS, `:schema` | elided + full-TLV |
+| 2 **strawberry** | P2 | `transport_can`, `transport_ws`, `fwd_router`, dispatcher QoS, `:schema` | elided + full-TLV |
 | 3 RTSP | P2+ | `rtsp` source, `mem_dma_buffer`, rope groups | + advertise |
 | 4 ROS | P3 | `rmw_tracer`, `discovery_mdns`, `executor_c` | + discovery |
 | 5 flagship | P3 | `mem_cuda` (+ `transport_rdma` for GPUDirect) | elided + advertise |

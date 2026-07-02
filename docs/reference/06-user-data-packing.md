@@ -132,7 +132,7 @@ A single API substrate (`tracer_read` / `tracer_write`) covers:
 
 - Logical software-defined endpoints (sensor readings, control state).
 - Hardware-defined endpoints (GPIO registers, peripheral SFRs).
-- Bridged remote endpoints (a register on another MCU, accessible via CAN bridge).
+- Remote endpoints (a register on another MCU, reached by its source route over CAN).
 
 To a subscriber, all three look identical. Tooling like `tracer-top` enumerates the entire address space — software and hardware — through one walk.
 

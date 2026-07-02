@@ -7,7 +7,7 @@
 
 ## Framing
 
-There is **no "core" carved out from "modules"**. A libtracer node is a chosen set of modules linked together. Some modules are required for any conforming node (frame codec, dispatcher, refcount/view machinery, router/bridge logic) — they are tagged `required` below. Everything else is optional; you load it if you need its capability.
+There is **no "core" carved out from "modules"**. A libtracer node is a chosen set of modules linked together. Some modules are required for any conforming node (frame codec, dispatcher, refcount/view machinery, forwarder logic) — they are tagged `required` below. Everything else is optional; you load it if you need its capability.
 
 This catalog is the source of truth for **what gets built and how it composes**. The byte-level wire spec is in [01-data-format.md](01-data-format.md); the graph spec is in [02-graph-model.md](02-graph-model.md); this doc names the implementation pieces and their interfaces.
 
@@ -95,11 +95,11 @@ The view + rope + cast machinery itself is one `required` module; integrations w
 | `path_handle` | required | Build-time and init-time PATH TLV encoder; `.rodata` literal helpers; init-time path registration. Hot-path API takes handles only. ([03-addressing.md](03-addressing.md) §static path handles, [../spec/v1.md](../spec/v1.md) §3.1) |
 | `path_resolver` | required | Path EBNF parsing, wildcard match, field-chain resolution. Slow path only — string-form entry point used at init or for ergonomics. P0 builds MAY omit the string-form entry. |
 | `dispatcher` | required | Fan-out to subscribers, per-subscriber QoS / ACL gating. Vertex map is keyed on canonical PATH TLV bytes ([02-graph-model.md](02-graph-model.md) §dispatch keyed on canonical PATH TLV bytes). |
-| `bridge` | required | Cross-transport forwarding; ROUTER attach/strip; cycle dedup recent-set. _Post-RFC-0004: forwarding is the source-routed **`FWD`** plane ([ADR-0035](../adr/0035-implementing-rfc-0004-remote-operation-addressing.md)); ROUTER attach/strip narrows to the **cyclic** delivery side; the `bridge_t` class dissolves into the transport-vertex tree ([ADR-0037](../adr/0037-net-side-channels-dissolve-into-vertex-tree-compositor.md)/[0038](../adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md), Stage-2). The **capability** stays required; the class goes._ |
+| `fwd_router` | required | The stateless source-routed forwarder ([ADR-0035](../adr/0035-implementing-rfc-0004-remote-operation-addressing.md)): offset-dispatch forward hop (`dst`-shrink / `src`-grow, zero heap allocations), arena-decoded terminus (`wire::decode_into` → `tlv_arena_t` → `op_resolver_t`), route-handle compaction (ADVERTISE / COMPACT / NACK). |
 | `subscriber_mux` | required | Per-subscriber state slots, rate limit, deadline / liveness watchdog |
 | `schema_registry` | required | Per-vertex `:schema` storage and lookup |
 
-These six are required even at profile P0 (in-process build). "Required" does not imply "monolithic" — they are six distinct modules with clean interfaces between them. An implementer may swap any one of them for an alternative implementation as long as the protocol behavior is preserved.
+These are required even at profile P0 (in-process build). "Required" does not imply "monolithic" — they are distinct modules with clean interfaces between them. An implementer may swap any one of them for an alternative implementation as long as the protocol behavior is preserved.
 
 ### Transports (L4 ↔ network) ([10-module-catalog.md](10-module-catalog.md))
 
@@ -162,9 +162,9 @@ These six are required even at profile P0 (in-process build). "Required" does no
 
 | Profile | Modules loaded |
 | ---- | ---- |
-| **P0** (in-process) | `view_core`, `view_basic`, `mem_heap` (or any L0 backend), `frame_codec`, `frame_iter`, `tlv_registry`, `graph_runtime`, `path_resolver`, `dispatcher`, `bridge`, `subscriber_mux`, `schema_registry` |
+| **P0** (in-process) | `view_core`, `view_basic`, `mem_heap` (or any L0 backend), `frame_codec`, `frame_iter`, `tlv_registry`, `graph_runtime`, `path_resolver`, `dispatcher`, `fwd_router`, `subscriber_mux`, `schema_registry` |
 | **P1** (single-transport leaf) | P0 + one transport (e.g., `transport_tcp` or `transport_uart`) + the L0 backend and L1 view module the transport pairs with |
-| **P2** (bridge) | P1 + ≥1 additional transport + dedup recent-set is mandatory (already in `bridge` from P0, but exercised) |
+| **P2** (forwarder) | P1 + ≥1 additional transport — the forwarder routes `FWD` frames between them |
 | **P3** (full) | P2 + one discovery module + one executor module + one security module |
 
 A profile P0 build with `mem_heap` + `view_basic` is the minimum sentinel for the ≤ 16 KB stripped target on Cortex-M.
@@ -283,17 +283,17 @@ When a TLV arrives at the dispatcher, the registry tells the graph runtime what 
 - `VALUE` at a vertex path → store, then fan out to subscribers.
 - `PATH` → resolve and read.
 - `SUBSCRIBER` written to `:subscribers[N]` → register a fan-out target.
-- `ROUTER` arriving via a transport → bridge's responsibility (shed envelope, dedup).
+- `FWD` arriving via a transport → the forwarder's responsibility (forward onward, or terminus-resolve when the leading `dst` segment is local). `0x0D ROUTER` is a reserved code — it decodes generically; no mechanism consumes it.
 - Unknown user-range types with `PL=1` → store as opaque structured data; subscribers see what they handle.
 
 ### Transport ↔ L4: `tr::net::transport_t`
 
-The transport seam is a small callback-based C++23 base class — one frame in, one frame out. A transport is **byte-level**: a frame is the contiguous bytes of one complete TLV. It never sees the ROUTER envelope or any TLV semantics — wrapping/stripping ROUTER is the bridge's job.
+The transport seam is a small callback-based C++23 base class — one frame in, one frame out. A transport is **byte-level**: a frame is the contiguous bytes of one complete TLV. It never sees any TLV semantics — routing is the forwarder's job.
 
 ```cpp
 namespace tr::net {
 
-// A 16-byte node/peer identity — the ROUTER origin_peer_id (05 §0x0D ROUTER).
+// A 16-byte node/peer identity.
 using peer_id_t = std::array<std::byte, 16>;
 
 class transport_t {
@@ -309,7 +309,7 @@ class transport_t {
     // temporary; transports with native sendmsg/writev override it.
     virtual void send(std::span<const std::span<const std::byte>> iov);
 
-    // Register the sink for inbound frames (the bridge's ingest). Must be set
+    // Register the sink for inbound frames (the forwarder's ingest). Must be set
     // before frames flow; delivery may occur on an internal transport thread.
     virtual void set_receiver(receiver_t receiver) = 0;
 };
@@ -317,7 +317,7 @@ class transport_t {
 }  // namespace tr::net
 ```
 
-`send` takes one frame — the contiguous bytes of a complete TLV, already ROUTER-wrapped by the bridge. Inbound frames are delivered to the `receiver_t` the bridge registered via `set_receiver` (possibly on an internal transport thread). Where a payload physically lives as a `rope_t` scattered across segments, the bridge lowers it to this seam at the egress boundary: a scatter-gather-capable transport consumes the rope's `to_iovec()` directly, while a contiguous-only transport receives a single frame the bridge produced via `rope_t::flatten()` (one copy at egress). The transport itself sees only framed bytes.
+`send` takes one frame — the contiguous bytes of a complete TLV (typically an `FWD`). Inbound frames are delivered to the `receiver_t` the forwarder registered via `set_receiver` (possibly on an internal transport thread). Where a payload physically lives as a `rope_t` scattered across segments, the forwarder lowers it to this seam at the egress boundary: a scatter-gather-capable transport consumes the rope's `to_iovec()` directly, while a contiguous-only transport receives a single frame the forwarder produced via `rope_t::flatten()` (one copy at egress). The transport itself sees only framed bytes.
 
 ### Application ↔ L4: path-handle entry points
 
@@ -344,22 +344,22 @@ flowchart LR
     PH[path_handle module<br/>.rodata + register]
     DISP[dispatcher<br/>PATH-TLV-keyed map]
     SUBM[subscriber_mux]
-    BR[bridge]
+    FR[fwd_router]
     TXA[transport A]
     TXB[transport B]
 
     APP -- "tracer_write(h, view)" --> DISP
     PH -. "handle bytes" .-> DISP
     DISP --> SUBM
-    SUBM --> BR
-    BR --> TXA
-    BR --> TXB
+    SUBM --> FR
+    FR --> TXA
+    FR --> TXB
     style APP fill:#fce7f3,stroke:#9f1239
     style PH fill:#dcfce7,stroke:#166534
     style DISP fill:#dbeafe,stroke:#1e40af
 ```
 
-The handle module supplies bytes; the dispatcher uses them; the subscriber multiplexer fans out; the bridge picks transports per outbound subscriber. No module on this path takes a string.
+The handle module supplies bytes; the dispatcher uses them; the subscriber multiplexer fans out; the forwarder picks the transport per outbound (remote) subscriber's link. No module on this path takes a string.
 
 ---
 
@@ -370,21 +370,21 @@ The natural pairings of L0 backend / L1 view module / transport. Other combinati
 | Use case | L0 backend | L1 view module | Transport | Notes |
 | ---- | ---- | ---- | ---- | ---- |
 | RC car over USB-CDC | `mem_uart_rx_simple` | `view_uart_simple` | `transport_uart` | Polling RX; tiny footprint |
-| ESP32 over Wi-Fi (TCP) | `mem_lwip_pbuf` | `view_pbuf` | `transport_tcp` | Pbuf chain becomes a rope; zero-copy through bridge |
-| Linux router | `mem_heap` + `mem_lwip_pbuf` | `view_basic` + `view_pbuf` | `transport_tcp` + `transport_quic` | Two backends, two view modules, two transports — bridge wires them |
+| ESP32 over Wi-Fi (TCP) | `mem_lwip_pbuf` | `view_pbuf` | `transport_tcp` | Pbuf chain becomes a rope; zero-copy through the forwarder |
+| Linux router | `mem_heap` + `mem_lwip_pbuf` | `view_basic` + `view_pbuf` | `transport_tcp` + `transport_quic` | Two backends, two view modules, two transports — the forwarder wires them |
 | ADC streaming | `mem_dma_buffer` | `view_dma_descriptor` (rope-capable) | `transport_udp` (multicast) | DMA-half-complete IRQ produces views; egress walks the rope |
-| MMIO sensor (GPIO, ADC raw register) | `mem_mmio` | `view_basic` | (in-process only, or via copy at bridge) | Segment lifetime is permanent; reads always TOCTOU-snapshot at view-create — see §hard integrations |
-| CAN-bridged peripheral | `mem_can_reassembly` | `view_can_frames` | `transport_can` | Reassembly into a multi-frame view at L0; egress fragments back into CAN frames |
+| MMIO sensor (GPIO, ADC raw register) | `mem_mmio` | `view_basic` | (in-process only, or via copy at transport egress) | Segment lifetime is permanent; reads always TOCTOU-snapshot at view-create — see §hard integrations |
+| CAN-linked peripheral | `mem_can_reassembly` | `view_can_frames` | `transport_can` | Reassembly into a multi-frame view at L0; egress fragments back into CAN frames |
 | Cross-process intra-host | `mem_shared` | `view_shm` | (no transport — shared memory) | Single-process refcount; cross-process treats as MMIO and copies — see §hard integrations |
 | Browser WASM | `mem_heap` | `view_basic` | `transport_ws` | Standard heap; WS framing |
 
-A bridge between two pairings (e.g., lwIP TCP → CAN) is **not free**: at the bridge boundary the egress side walks the source rope and constructs egress segments according to the target backend's rules. The cost is "one copy at the bridge boundary, not per-fanout." See [08-views-and-ownership.md](08-views-and-ownership.md) §cross-substrate transitions for the two patterns (re-chain vs materialize).
+Forwarding between two pairings (e.g., lwIP TCP → CAN) is **not free**: at the transport-egress boundary the egress side walks the source rope and constructs egress segments according to the target backend's rules. The cost is "one copy at the egress boundary, not per-fanout." See [08-views-and-ownership.md](08-views-and-ownership.md) §cross-substrate transitions for the two patterns (re-chain vs materialize).
 
 ---
 
 ## Hard integrations — resolved (ADR-0012)
 
-These L0/L1 integrations were once OPEN; they are now resolved as the **modular memory-binding contract** ([08-views-and-ownership.md](08-views-and-ownership.md) §memory-binding contract, [ADR-0012](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0012-modular-memory-binding-transparent-router.md)): libtracer is a transparent byte router, safety is recommended but not mandated, and each backend owns its per-architecture contract. The **Recommendation** under each item below is the v1 decision, not an open choice.
+These L0/L1 integrations are resolved as the **modular memory-binding contract** ([08-views-and-ownership.md](08-views-and-ownership.md) §memory-binding contract, [ADR-0012](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0012-modular-memory-binding-transparent-router.md)): libtracer is a transparent byte router, safety is recommended but not mandated, and each backend owns its per-architecture contract. The **Recommendation** under each item below is the v1 decision, not an open choice.
 
 ### `mem_asio_streambuf`: do we wrap, or do we copy?
 
@@ -429,7 +429,7 @@ A rope of N views walked at egress is N pointer chases. For a transport that doe
 
 - **Where does flatten live?**: At the egress boundary, just before `send`. Not at fan-out time (would defeat zero-copy). Not at the L4 dispatcher (it doesn't know transport capabilities).
 
-**Recommendation**: The bridge picks per-transport: it hands a scatter-gather-capable transport the rope's `to_iovec()` as-is, and for a contiguous-only transport calls `rope_t::flatten()` once at egress. Document the rule in the transport ABI.
+**Recommendation**: The forwarder picks per-transport: it hands a scatter-gather-capable transport the rope's `to_iovec()` as-is, and for a contiguous-only transport calls `rope_t::flatten()` once at egress. Document the rule in the transport ABI.
 
 ### DMA cache coherency on heterogeneous SoCs
 
@@ -471,7 +471,7 @@ The full path of a single DMA-driven ADC sample, naming each module that touches
                                             — L2: tlv_t header construction (rope: [header_view, dma_payload_view])
 6. graph_runtime dispatch                   — L4: locate /adc/raw vertex
 7. dispatcher fan-out                       — L4: each subscriber gets a refcount-incremented view
-8. transport_udp.send (multicast)           — transport: emits framed bytes (bridge lowered the rope to the socket's scatter-gather)
+8. transport_udp.send (multicast)           — transport: emits framed bytes (the egress lowered the rope to the socket's scatter-gather)
 9. NIC DMAs out the bytes                   — hardware
 10. transport_udp done with the frame → segment_ptr_t reset  — L1: refcount-- on dma segment
 11. When all subscribers + transport done, mem_dma_buffer recycles segment back to pool — L0
@@ -487,7 +487,7 @@ This trace exists because the DMA→ADC→network path is the **acid test** for 
 
 - The exact ABI signatures of each module's exported symbols. See [10-module-catalog.md](10-module-catalog.md) §module ABI.
 - Build-system mechanics (CMake `add_library` patterns, separate compile units) — defined with the `core/` rebuild.
-- Configuration syntax for selecting which modules a binary loads. See [10-module-catalog.md](10-module-catalog.md) §bridging configuration.
+- Configuration syntax for selecting which modules a binary loads — defined with the `core/` rebuild.
 - Per-module memory footprint estimates. See [00-overview.md](00-overview.md) §everything is a module for the rough numbers.
 
 The catalog is the **inventory of pieces** and **how they compose**. The byte-level wire format and graph behavior are independent of the module structure — you could implement libtracer as one monolithic .c file and still be conforming. The module split is an implementation discipline that keeps the code as small as the deployment warrants.

@@ -234,7 +234,7 @@ table lives in `tr::net::route_handle_t`, owned by `fwd_router_t`.
 ## The SocketCAN binding (`transport_can`)
 
 Increment 2 realizes the binding: `tr::net::transport_can` is a `transport_t` that
-drives the framing above over a real Linux CAN bus. A bridge hands it a complete
+drives the framing above over a real Linux CAN bus. A forwarder hands it a complete
 libtracer frame via `send()`; the byte-exact frame surfaces at the peer's receiver.
 
 ### The `can_link_t` seam (testable without kernel CAN)

@@ -14,7 +14,8 @@ transport (TCP/QUIC) remains future work.
 
 ## What it does
 
-A transport accepts a complete frame's bytes (a TLV, usually ROUTER-wrapped) and
+A transport accepts a complete frame's bytes (a `FWD` frame, or a route-handle
+control frame — ADVERTISE/COMPACT/HANDLE_NACK) and
 emits them; inbound frames arrive on the registered receiver (which may fire on an
 internal transport thread). The reference catalog defines a poll-based
 `transport_vtable`; the C++ seam is callback + recv-thread — an implementation
@@ -27,7 +28,7 @@ choice that matches how a real socket's receive loop feeds the FWD router.
 ## Interface
 
 ```cpp
-using peer_id_t = std::array<std::byte, 16>;       // ROUTER origin_peer_id
+using peer_id_t = std::array<std::byte, 16>;       // the node identity
 
 class transport_t {
     virtual void send(std::span<const std::byte> frame) = 0;
@@ -48,6 +49,22 @@ class udp_transport_t : public transport_t {        // real UDP (M5)
     // send(span) = one sendto; send(iov) = one sendmsg(iovec) — the structural
     // batch (a composite rope in one syscall; see Performance).
 };
+```
+
+## The forward hop that feeds a transport (zero-heap)
+
+What the FWD router hands `send(iov)` on a forward hop is not a re-encoded frame:
+the hop reads a few headers of the inbound frame by offset, builds the shortened
+headers in small stack buffers, and scatter-gathers those heads with untouched
+views of the inbound frame — **zero heap allocations**, CI-gated
+(`bench_forward_heap`, `ZEROHEAP_MAX=0`).
+
+```{mermaid}
+flowchart LR
+    IN["inbound frame bytes"] --> PEEK["offset peek:<br/>first dst NAME"]
+    PEEK --> DEMUX["child_registry_t<br/>NAME → transport"]
+    DEMUX --> SG["stack-built heads<br/>+ untouched frame views"]
+    SG -->|"send(iov) — one syscall"| T(["transport_t"])
 ```
 
 ## Two nodes over a wire

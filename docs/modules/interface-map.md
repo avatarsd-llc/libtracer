@@ -55,9 +55,11 @@ flowchart LR
     end
     subgraph term["terminus (dst empty → this node)"]
         direction TB
-        R1["transport receiver(bytes)"] --> R2["op_resolver_t::resolve"]
+        R1["transport receiver(bytes)"] --> R1a["wire::decode_into(frame, mr)"]
+        R1a --> R1b["tlv_arena_t (span nodes)"]
+        R1b --> R2["op_resolver_t::resolve"]
         R2 --> R3["read/write/await the local vertex"]
-        R3 --> R4["FWD{REPLY} source-routed back via src"]
+        R3 --> R4["FWD{REPLY} direct-emitted, source-routed back via src"]
     end
     fwd -. "each hop over the wire" .-> term
 ```
@@ -70,11 +72,11 @@ flowchart LR
 | [backends](backends.md) | `class mem_backend_t { alloc(); destroy(); alignment(); … }` · `view::heap_alloc()` · `view::borrow()` · `mem::pool_t` |
 | [segment](segment.md) | `struct segment_t{ ref_count_t; mem_backend_t*; span<byte> }` · `class segment_ptr_t{ adopt/retain; copy=clone; reset() }` |
 | [views](views.md) | `struct view_t{ owner; offset; length; bytes(); subview() }` · `class rope_t{ append; concat; to_iovec; flatten }` · `view_as_tlv(view_t)→result_t<tlv_t>` |
-| [frame-codec](frame-codec.md) | `enum class type_t` · `struct opt_t` · `struct tlv_t{ type; opt; payload; children; trailer }` · `decode()` · `encode()` · `crc::crc32c/crc16_ccitt` |
+| [frame-codec](frame-codec.md) | `enum class type_t` · `struct opt_t` · `struct tlv_t{ type; opt; payload; children; trailer }` · `decode()` · `encode()` · `decode_into(span, pmr)→tlv_arena_t` · `struct arena_tlv_t` · `crc::crc32c/crc16_ccitt` |
 | [path](path.md) | `class path_t{ parse(); key(); field() }` · `struct path_key_t` + `path_key_hash_t` |
-| [graph](graph.md) | `class graph_t{ register_vertex; read; write; await; history; subscribe }` · `enum class role_t` · `struct settings_t` · `struct handlers_t` |
+| [graph](graph.md) | `class graph_t{ register_vertex; read; write; await; history; subscribe; add_remote_subscriber(vertex_t*, view_t source_view, …) }` · `enum class role_t` · `struct settings_t` · `struct handlers_t` |
 | [transport](transport.md) | `using peer_id_t = array<byte,16>` · `class transport_t{ send(); set_receiver() }` · `class loopback_channel_t` |
-| fwd-router | `class fwd_router_t{ add_child; on_frame; on_reply; advertise; send_compact; registry() }` · `class child_registry_t{ add; by_name; by_segment }` · `struct op_resolver_t` — FWD source-routing (RFC-0004) |
+| fwd-router | `class fwd_router_t{ fwd_router_t(graph_t&, std::pmr::memory_resource* = default); add_child; on_frame; on_reply; advertise; send_compact; registry() }` — the terminus arena draws from the injected resource directly · `class child_registry_t{ add; by_name; by_segment }` · `struct op_resolver_t` — FWD source-routing (RFC-0004) |
 | transport-vertex | `class transport_vertex_t{ provide_link; set_link_state; settings_of }` · `enum class conn_role_t` · `struct conn_settings_t` — a connection as a `/net/<conn>` vertex (ADR-0027) |
 
 ## Two contracts hold the stack together
@@ -106,5 +108,5 @@ over `FWD`) is the net plane, with connections exposed as `/net/<conn>` vertices
 is addressed by its full path through transport-vertices (`/net/<conn>/<peer path>`),
 each hop stripping its `dst` segment. There is no flooding and no `(origin, ts)` dedup —
 parallel links to one peer are *different explicit addresses* (deliberate redundancy),
-not auto-multipath. The M4 `bridge_t` + ROUTER-flood model was **retired** with ADR-0040;
-the `0x0D ROUTER` wire code stays reserved for a possible future flooding profile.
+not auto-multipath. `0x0D ROUTER` is a reserved, decodable wire code with no implemented
+mechanism; FWD source-routing needs no dedup.

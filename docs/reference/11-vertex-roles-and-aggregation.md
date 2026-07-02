@@ -1,7 +1,7 @@
 # Reference 11 — Vertex Roles, Address Grouping, and the Facade Principle
 
 > **Status**: draft, v1, 2026-05-03. New material — generalizes the "vertex is unspecified beyond its API contract" remark from [02-graph-model.md](02-graph-model.md) §what the protocol does NOT specify into a worked-out taxonomy of the **kinds of things a path can name**, plus the rules for fronting multiple physical sources or sinks behind one logical address.
-> **Audience**: anyone designing a non-trivial graph topology; anyone wondering whether a "shared canvas" should be modeled as streamed bytes, a state-mirror, or both at once; anyone implementing a router that joins several transports behind one path.
+> **Audience**: anyone designing a non-trivial graph topology; anyone wondering whether a "shared canvas" should be modeled as streamed bytes, a state-mirror, or both at once; anyone implementing a forwarder that joins several transports behind one path.
 > **Prerequisites**: [02-graph-model.md](02-graph-model.md), [03-addressing.md](03-addressing.md), [04-communication-flows.md](04-communication-flows.md), [07-host-embedding.md](07-host-embedding.md).
 
 ---
@@ -30,7 +30,7 @@ flowchart LR
     BACK1[("RAM segment")]
     BACK2[("MMIO register")]
     BACK3[("function-on-read")]
-    BACK4[("remote vertex<br/>via bridge")]
+    BACK4[("remote vertex<br/>via source route")]
     H --> API
     API --> R
     R --> BACK1
@@ -92,7 +92,7 @@ The path is a redirect; reads/writes pass through to a target path that can be l
 
 - **Behavior**: every operation is forwarded to `target_path`. Schema is the target's schema. Subscriptions register against the target.
 - **State size**: zero (a forwarding rule).
-- **Used for**: bridge proxies (the canonical form, see [07-host-embedding.md](07-host-embedding.md)); per-host aliases; renaming for ergonomics.
+- **Used for**: route proxies (the canonical form, see [07-host-embedding.md](07-host-embedding.md)); per-host aliases; renaming for ergonomics.
 
 ### 6. Aggregate (fan-in or fan-out front)
 
@@ -247,29 +247,22 @@ A vertex's children are themselves vertices. The parent path is a *grouping* of 
 
 A subscriber that wants the live composite reads `/canvas:image`. A subscriber that wants only one layer subscribes to that child. The router behind `/canvas:image` is a computed-role vertex whose function joins its children.
 
-### Per-transport split behind one path
+### Redundant links are distinct explicit routes
 
-```{note}
-**Trajectory (post-RFC-0004).** The `bridge:` / `mount = …` / `sources = […]` TOML below is the M4 config model. The current mechanism expresses this as **transport-vertices** in the path tree ([ADR-0027](../adr/0027-transport-and-connections-are-vertices.md)); the `(origin, ts)` dedup applies where a delivery is **ROUTER**-wrapped for a cyclic/multi-path region ([ADR-0035](../adr/0035-implementing-rfc-0004-remote-operation-addressing.md)/[0038](../adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md)). The "bridges are core" claim still holds — any node with ≥2 transports forwards — but the forwarder is the FWD source-router, not a mount-configured `bridge_t`. See [reference/13](13-network-formation.md).
-```
-
-A bridge that connects two transports MAY mount a single path that *combines* both:
+Two links to the same peer are two transport-vertices ([ADR-0027](../adr/0027-transport-and-connections-are-vertices.md)), hence two routed addresses for the same remote vertex:
 
 ```
-Configuration:
-  bridge:
-    mount = "/sensor/wheel/left"
-    sources = [ "transport_can:0xABC", "transport_tcp:peer-A" ]
-    policy = "first-arrived-wins-by-timestamp"
+/net/can0/sensor/wheel/left    ← route #1 (over CAN)
+/net/tcp0/sensor/wheel/left    ← route #2 (over TCP), the same sensor
 ```
 
-A write arriving via either transport ends up at the same local path; duplicates are deduped by `(origin_peer_id, origin_timestamp)` per [07-host-embedding.md](07-host-embedding.md) §cycle handling. Subscribers see one path; the redundant transport is invisible.
+A consumer that wants redundancy subscribes to **both** routes and receives both deliveries — that is the point: an `await` timeout on one route detects the dead link, so failover is a visible signal, not a hidden merge. There is no duplicate detection anywhere in the net plane, and none is needed — every arrival travels a route the consumer deliberately named. See [reference/13](13-network-formation.md).
 
-This is the practical realization of the earlier load-bearing claim ([00-overview.md](00-overview.md) §the five load-bearing claims #4): **bridges are core**. A vertex's actual byte source can be one transport now, another transport on failover, both transports redundantly — the path is unchanged.
+This is the practical realization of the earlier load-bearing claim ([00-overview.md](00-overview.md) §the six load-bearing claims #4): **forwarding is core**. A consumer can hold one route now, switch to another on failover, or hold both redundantly — the vertex's own path on its home node is unchanged throughout.
 
 ---
 
-## How the router combines transports + endpoints
+## How the forwarder combines transports + endpoints
 
 Section walked through with the canvas as the running example.
 
@@ -287,52 +280,54 @@ model = "raster_2d_renderer"
 [[vertex.subscribers]]
 target = "/local/snapshot_recorder"      # in-process subscriber for backups
 
-[[vertex.bridges]]
-# Inbound :ops can arrive over either transport, dedup by origin tuple.
-inbound = ["transport_tcp", "transport_udp_multicast"]
-outbound_ops    = ["transport_udp_multicast"]    # ops broadcast at low-latency
-outbound_image  = ["transport_tcp"]              # snapshots reliable
+[[connection]]
+# Each link is a transport-vertex in the path tree: /net/tcp0, /net/udp0 (ADR-0027).
+name = "tcp0"
+transport = "transport_tcp"
+
+[[connection]]
+name = "udp0"
+transport = "transport_udp_multicast"
 ```
 
-The vertex is one path. The router is the implementation that dispatches per-write according to this config.
+The vertex is one path. The node's forwarder dispatches each inbound `FWD` frame to it; each remote subscriber's deliveries leave over the link its stored return route names.
 
 ### Step 2 — A write arrives
 
-A peer writes `/canvas:ops` over TCP. The router:
+A peer writes `/canvas:ops` over TCP. The node:
 
-1. Receives the TLV via `transport_tcp.poll_recv()`.
+1. Receives the frame via the `tcp0` link's receiver.
 2. Validates the trailer (CRC, timestamp), strips it. (L2 → L3.)
-3. The TLV is a `ROUTER` envelope (per [05-protocol-tlvs.md](05-protocol-tlvs.md) §ROUTER); the bridge sheds it and consults the dedup recent-set.
-4. The bare data TLV is dispatched to `/canvas:ops` (L3 → L4).
+3. The frame is an `FWD{WRITE}` ([RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md)) whose `dst` names a local vertex — a terminus request: the forwarder decodes it and applies the op.
+4. The bare payload TLV is dispatched to `/canvas:ops` (L3 → L4).
 5. The vertex's sink-with-model handler runs the renderer, mutating `:image`.
-6. The vertex's outbound-ops bridge re-publishes the same data TLV onto `transport_udp_multicast` to peers that subscribed via UDP.
+6. Peers that subscribed via UDP hold remote-subscriber slots on the vertex; the fan-out emits each one an `FWD{WRITE}` delivery along its stored return route, out over `udp0`.
 7. The local subscriber `/local/snapshot_recorder` receives it via fan-out.
 
-Every transport boundary is a router-internal concern. The application only sees `/canvas:ops` change.
+Every transport boundary is a forwarder-internal concern. The application only sees `/canvas:ops` change.
 
 ### Step 3 — A read arrives
 
-A peer reads `/canvas:image`. The router:
+A peer reads `/canvas:image`. The node:
 
-1. Receives the read request via `transport_tcp`.
+1. Receives the `FWD{READ}` request via the `tcp0` link.
 2. Resolves the path against the local graph; finds the sink-with-model vertex.
 3. Calls the vertex's `:image` accessor, which serializes the model into a 4 MiB TLV.
-4. Sends the TLV back on `transport_tcp` (per the response-routing convention of [04-communication-flows.md](04-communication-flows.md) §read flow).
+4. Sends an `FWD{REPLY}` back over the link the request arrived on, routed by the request's accumulated `src` (per [04-communication-flows.md](04-communication-flows.md) §read flow).
 
 The reader does not know the bytes were synthesized on the fly from a model rather than copied out of a stored buffer. They look identical. *That* is the facade principle in action.
 
-### Step 4 — A bridge appears in front of the canvas
+### Step 4 — A screen addresses the canvas through a route
 
-A second host (a screen) wants to display the canvas without participating in the model. It bridges its local `/peer/canvas-host/canvas` to the canvas-host's `/canvas`:
+A second host (a screen) wants to display the canvas without participating in the model. It names its TCP link to the canvas host (say `canvas-host`) and addresses the canvas **through** it — the path is the route:
 
 ```toml
-[[bridge]]
-mount = "/peer/canvas-host"
-peer_id = "<canvas host's peer id>"
-transports = ["transport_tcp"]
+[[connection]]
+name = "canvas-host"           # the screen's transport-vertex: /net/canvas-host
+transport = "transport_tcp"
 ```
 
-The screen subscribes to `/peer/canvas-host/canvas:image` and gets snapshots; or to `/peer/canvas-host/canvas:ops` and runs its own renderer to apply ops locally. *Same single canvas* — just two views of it.
+The screen subscribes to `/net/canvas-host/canvas:image` and gets snapshots; or to `/net/canvas-host/canvas:ops` and runs its own renderer to apply ops locally. *Same single canvas* — just two views of it.
 
 If the screen later goes offline, the canvas-host doesn't notice (other than the TCP socket closing). When the screen reconnects, it reads `:image` once for resync, then resumes `:ops`. The canvas-host's vertex is unchanged across all of this.
 
@@ -340,7 +335,7 @@ This works because:
 
 - The path is the contract; the transport is invisible.
 - The vertex role determines what reads/writes/subscriptions *do*; the protocol doesn't second-guess.
-- Bridges are routing; they don't synthesize role.
+- Forwarders are routing; they don't synthesize role.
 - Aggregation rules (fan-in / fan-out / compound) are configuration, not protocol surface.
 
 ---
@@ -372,7 +367,7 @@ The schema cannot enumerate the role exhaustively; an implementer is free to inv
 
 ---
 
-> **Amended by [ADR-0017](../adr/0017-in-band-vertex-creation-controller-orchestration.md).** This document originally treated vertex registration as a purely out-of-band, local act. Creation is now also an **in-band, ACL-gated field-write**: an orchestrator writes a *controller-spec* `{type, path, config}` into a device's creation field (`:children[]`/`:controllers[]`), and the device instantiates one of its **own known controller types** (the creation field's schema is the device's **controller-type catalog**). Creation and **binding** are separate steps — creation exposes the controller's **port vertices**; binding wires them with SUBSCRIBER edges. *Roles* (the implementation pattern below) stay invisible; only the device's *type catalog* becomes visible. The list below is updated accordingly.
+> **In-band creation ([ADR-0017](../adr/0017-in-band-vertex-creation-controller-orchestration.md)).** Vertex registration is not only an out-of-band, local act — creation is also an **in-band, ACL-gated field-write**: an orchestrator writes a *controller-spec* `{type, path, config}` into a device's creation field (`:children[]`/`:controllers[]`), and the device instantiates one of its **own known controller types** (the creation field's schema is the device's **controller-type catalog**). Creation and **binding** are separate steps — creation exposes the controller's **port vertices**; binding wires them with SUBSCRIBER edges. *Roles* (the implementation pattern below) stay invisible; only the device's *type catalog* becomes visible.
 
 ## What this document does NOT specify
 
@@ -388,11 +383,11 @@ The schema cannot enumerate the role exhaustively; an implementer is free to inv
 | ---- | ---- | ---- |
 | Vertex backing is unspecified (RAM, MMIO, file, function-on-read) | [02-graph-model.md](02-graph-model.md) §what the protocol does NOT specify | Existed; this doc develops the taxonomy |
 | Shared variable pattern as `subscribe + transient_local` | [06-user-data-packing.md](06-user-data-packing.md) §the shared variable pattern | Existed; here it becomes role 1 (stored value) |
-| Bridge proxy as a vertex that re-publishes | [07-host-embedding.md](07-host-embedding.md) §per-host view | Existed; here it becomes role 5 (proxy) |
+| Route proxy as a vertex that forwards | [07-host-embedding.md](07-host-embedding.md) §per-host view | Existed; here it becomes role 5 (proxy) |
 | Wildcard subscription mechanics | [03-addressing.md](03-addressing.md) §wildcards | Existed; here used to build aggregate-role vertices |
 | Address-shift slicing for big payloads | [03-addressing.md](03-addressing.md) §address-shift slicing | Existed; here it composes with role 2 (stream) and Mode A canvas |
 | Schema as the visible contract | [02-graph-model.md](02-graph-model.md) §schema discipline | Existed; here promoted to "the only role-discovery surface" |
-| Cycle dedup for redundant transports under one path | [07-host-embedding.md](07-host-embedding.md) §cycle handling | Existed; here used in §per-transport split |
+| Redundant links as distinct explicit routes | [07-host-embedding.md](07-host-embedding.md) | Existed; here used in §redundant links |
 | MMIO snapshot semantics | [10-module-catalog.md](10-module-catalog.md) §MMIO TOCTOU OPEN QUESTION | Existed; here it becomes role 7 |
 
 **Genuinely new** in this document:

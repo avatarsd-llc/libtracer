@@ -144,7 +144,7 @@ Underlying rope:
 - **MMIO + dynamic header**: a header in static memory plus a payload that points at an MMIO register. Rope makes this a single TLV without copy.
 - **Multi-pbuf TCP receive**: lwIP delivers a 4 KiB TLV across three 1.5 KiB pbufs. The TLV is a 3-link rope.
 - **Aggregated transmit**: a publisher composes a TLV from a static header buffer + a runtime payload buffer + a fixed tail buffer. Three segments, one rope, one TLV on the wire.
-- **Bridge unwrap**: the bridge receives a `ROUTER`-wrapped TLV, sheds ROUTER (a sub-view of the original segment), keeps the data TLV (another sub-view) — both views share the original segment via refcount.
+- **Forward hop**: the forwarder receives a `FWD` frame and sub-views the pieces that survive the hop — the `dst` tail after the stripped segment, the untouched payload region — off the original segment; every sub-view shares the inbound frame's segment via refcount, no bytes move.
 
 **Walking a rope**: parsers and serializers use `view_walk` or equivalent. The iterative TLV parser ([01-data-format.md](01-data-format.md) §iterative parsing requirement) treats a rope-cursor specially when traversing children: advancing the cursor across a link boundary is one extra branch in the iteration, but otherwise the parser logic is identical.
 
@@ -313,7 +313,7 @@ L1 is core (the view + refcount machinery) **plus** module-style integrations wi
 - **Status**: with the CAN demo.
 - **Pairs with**: `mem_can_reassembly`.
 - **What it provides**: per-peer reassembly buffer surfaced as a view once a complete TLV's frames have arrived. The reassembly pool is per-`(peer × inflight)`; on RX-frame, bytes accumulate; on completion, a view is handed off and the slot is reclaimed when the view releases.
-- **Special semantics**: timeout reclamation if a reassembly never completes; emits `STATUS=ERROR(TIMEOUT)` on the bridge.
+- **Special semantics**: timeout reclamation if a reassembly never completes; emits `STATUS=ERROR(TIMEOUT)` at the transport ingress.
 
 ### `view_shm` — post-MVP with `transport_shm`
 
@@ -372,11 +372,11 @@ Example: TLV received over lwIP (pbuf rope) forwarded to a Linux raw-socket tran
 
 ### Pattern B: materialize (single-copy, when target needs a flat buffer)
 
-If the target transport needs a contiguous buffer (CAN with limited DMA descriptors, UART with byte-by-byte FIFO, a transport without iovec support), the bridge materializes the rope into a flat segment in the target's substrate.
+If the target transport needs a contiguous buffer (CAN with limited DMA descriptors, UART with byte-by-byte FIFO, a transport without iovec support), the transport egress materializes the rope into a flat segment in the target's substrate.
 
-Example: TLV received over lwIP (pbuf rope) forwarded to CAN — bridge allocates a CAN-capable segment from `mem_can_reassembly`'s TX pool, walks the pbuf rope, and copies bytes into the CAN segment. One copy at the bridge boundary; no further copies during CAN egress.
+Example: TLV received over lwIP (pbuf rope) forwarded to CAN — the egress allocates a CAN-capable segment from `mem_can_reassembly`'s TX pool, walks the pbuf rope, and copies bytes into the CAN segment. One copy at the transport boundary; no further copies during CAN egress.
 
-The transition cost is **per bridge hop**, not per fanout. Subscribers on the lwIP side still see zero-copy delivery; only the cross-substrate traffic pays.
+The transition cost is **per cross-substrate hop**, not per fanout. Subscribers on the lwIP side still see zero-copy delivery; only the cross-substrate traffic pays.
 
 ---
 
@@ -576,8 +576,8 @@ NIC work:                The kernel constructs UDP/IP/Eth headers; the NIC
 
 ### When this breaks
 
-- **Bridge to a transport that doesn't support scatter-gather** (e.g., some embedded UART drivers): the bridge calls `view_flatten()` once at egress. One copy at the bridge boundary, paid only on that path; subscribers on scatter-gather-capable paths still see zero copies.
-- **Cross-process bridge**: the SHM open-question (see below); the byte-flow leaves the publisher's address space and one copy is always paid.
+- **Egress to a transport that doesn't support scatter-gather** (e.g., some embedded UART drivers): the forwarder calls `view_flatten()` once at egress. One copy at the transport boundary, paid only on that path; subscribers on scatter-gather-capable paths still see zero copies.
+- **Cross-process transport**: the SHM open-question (see below); the byte-flow leaves the publisher's address space and one copy is always paid.
 - **Slow subscriber stalls the DMA cycle**: if subscribers don't release fast enough, the back-pressure manifests as `segment_A.refcount` not dropping; the next half-complete IRQ finds the half busy. Per QoS, this is either a drop or a stall. The data path itself is still zero-copy; the failure mode is throughput, not integrity.
 
 This trace is the working specification for what "zero-copy" means in libtracer: the *bytes the application produced* (the ADC samples) are the *exact bytes the NIC sees*, with refcounted views threading them through every layer in between.
@@ -628,7 +628,7 @@ Two libtracer subscribers cloning a `view_pbuf` over the same `pbuf*` create two
 
 A scatter-gather-capable transport walks the rope at egress (zero-copy). A flat-buffer-only transport must materialize via `view_flatten()` (one copy).
 
-**Default**: each transport declares `wants_flat` capability. Bridges and fan-out walk the rope into scatter-gather transports; call `view_flatten()` once at egress for flat-buffer transports.
+**Default**: each transport declares `wants_flat` capability. Forwarders and fan-out walk the rope into scatter-gather transports; call `view_flatten()` once at egress for flat-buffer transports.
 
 ### DMA cache coherency races
 
