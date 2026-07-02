@@ -28,8 +28,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory_resource>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <span>
 #include <string>
 #include <string_view>
@@ -53,19 +55,31 @@ struct handle_binding_t {
 };
 
 /**
- * @brief A per-link `label ↔ route` table for ws delivery-compaction (RFC-0004 §E.1).
+ * @brief Per-connection `label ↔ route` tables for ws delivery-compaction (RFC-0004 §E.1).
  *
- * Holds two maps keyed by `(link-name, label)`: an INGRESS map (a label arriving on
- * a link → its @ref handle_binding_t) and an EGRESS map (a label this node
- * advertised over a link → the route it aliases, retained so a NACK can
- * re-advertise). Labels are allocated per link from a monotonic counter. Every
- * accessor is mutex-guarded — advertise/deliver run on transport receive threads.
- * State exists only for flows that opted into compaction, so @ref ingress_count on
- * a node forwarding only one-shot/cold traffic is zero.
+ * The label state lives PER LINK (ADR-0038 §3 / ADR-0039): each connection owns
+ * its own small tables — an INGRESS table (a label arriving on the link → its
+ * @ref handle_binding_t), an EGRESS table (a label this node advertised over the
+ * link → the route it aliases, retained so a NACK can re-advertise), and a
+ * monotonic label allocator — drawn from the injected memory resource and guarded
+ * by the LINK'S OWN mutex, so label traffic on one connection never contends with
+ * another. The only cross-link lock is a `shared_mutex` over the link registry,
+ * taken exclusively only when a link's tables are first created or cleared
+ * (setup/reconnect frequency, never per delivery). State exists only for flows
+ * that opted into compaction, so @ref ingress_count on a node forwarding only
+ * one-shot/cold traffic is zero.
  */
 class route_handle_t {
    public:
-    route_handle_t() = default;
+    /**
+     * @brief Draw all label state from @p mr (ADR-0039 §1).
+     *
+     * A bounded node passes a pool resource over its slab and the label tables
+     * live entirely in host-chosen memory; the default is the standard heap.
+     * @p mr must outlive this object.
+     */
+    explicit route_handle_t(std::pmr::memory_resource* mr = std::pmr::get_default_resource())
+        : mr_(mr), links_(mr) {}
 
     route_handle_t(const route_handle_t&) = delete;
     route_handle_t& operator=(const route_handle_t&) = delete;
@@ -151,15 +165,34 @@ class route_handle_t {
     [[nodiscard]] std::size_t egress_count() const;
 
    private:
-    using key_t = std::pair<std::string, std::uint16_t>;
+    // One connection's label state (ADR-0038 §3): flat pmr entry arrays (a link
+    // carries FEW compact flows, so a linear label scan beats a node-based map —
+    // no per-entry allocation, cache-linear) + the link's own mutex. Non-movable
+    // (the mutex), constructed in place in the node-based registry map below.
+    struct ingress_entry_t {
+        std::uint16_t label = 0;
+        handle_binding_t binding;
+    };
+    struct egress_entry_t {
+        std::uint16_t label = 0;
+        std::pmr::vector<std::byte> route;
+    };
+    struct link_tables_t {
+        explicit link_tables_t(std::pmr::memory_resource* mr) : ingress(mr), egress(mr) {}
+        std::mutex m;
+        std::pmr::vector<ingress_entry_t> ingress;
+        std::pmr::vector<egress_entry_t> egress;
+        std::uint16_t next_label = 1;  // 0 is reserved "none"
+    };
 
-    using route_key_t = std::pair<std::string, std::vector<std::byte>>;
+    /** @brief The link's tables, created on first use (exclusive registry lock). */
+    [[nodiscard]] link_tables_t& tables(std::string_view link);
+    /** @brief The link's tables if they exist (shared registry lock), else nullptr. */
+    [[nodiscard]] link_tables_t* find_tables(std::string_view link) const;
 
-    mutable std::mutex m_;
-    std::map<key_t, handle_binding_t> ingress_;          // (link,label) -> meaning
-    std::map<key_t, std::vector<std::byte>> egress_;     // (link,label) -> advertised route
-    std::map<route_key_t, std::uint16_t> egress_label_;  // (link,route) -> label (ensure_egress)
-    std::map<std::string, std::uint16_t, std::less<>> next_label_;  // per-link allocator
+    std::pmr::memory_resource* mr_;
+    mutable std::shared_mutex links_m_;  // registry only: create/clear, never per delivery
+    std::pmr::map<std::pmr::string, link_tables_t, std::less<>> links_;
 };
 
 /**

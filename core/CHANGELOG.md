@@ -31,6 +31,21 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Changed
 
+- **`route_handle_t` label state is per-connection and pmr-backed** (Brick 4 of the #83
+  Stage-2 flip; [ADR-0038](../docs/adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md)
+  §3 / [ADR-0039](../docs/adr/0039-pmr-memory-model-host-aligned-allocation.md)). The
+  node-global `std::mutex` + four node-global `std::map`s are gone: each link owns its
+  own flat pmr entry tables (ingress bindings, egress routes — which double as the
+  `route → label` index — and the label allocator) guarded by **its own mutex**, so
+  label traffic on one connection never contends with another; the only cross-link lock
+  is a `shared_mutex` over the link registry, taken exclusively at create/clear
+  (setup/reconnect frequency). New ctor
+  `route_handle_t(std::pmr::memory_resource* = get_default_resource())`; `fwd_router_t`
+  passes its injected resource through, so a bounded node's label state lives entirely
+  in the host slab (proven by the new `route_handle_test`, which runs the whole
+  lifecycle over a slab resource with a `null_memory_resource` upstream). Public
+  accessor API unchanged.
+
 - **The remote-subscriber `return_route` is a refcounted segment view**
   ([ADR-0041](../docs/adr/0041-terminus-arena-decode-span-contract.md) §2; Brick 5
   part 3). `graph_t::add_remote_subscriber` takes `view_t return_route` (was
