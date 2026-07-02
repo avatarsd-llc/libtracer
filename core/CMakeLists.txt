@@ -15,6 +15,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # M4: the first transport + bridge (loopback transport, ROUTER envelope, dedup).
 add_library(libtracer STATIC
     src/frame.cpp
+    src/tlv_arena.cpp
     src/mem_heap.cpp
     src/mem_pool.cpp
     src/rope.cpp
