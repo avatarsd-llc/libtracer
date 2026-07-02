@@ -77,7 +77,7 @@ class fwd_router_t {
      */
     explicit fwd_router_t(graph::graph_t& graph,
                           std::pmr::memory_resource* mr = std::pmr::get_default_resource())
-        : graph_(graph), resolver_(graph), mr_(mr) {
+        : graph_(graph), resolver_(graph), mr_(mr), handles_(mr) {
         graph_.set_remote_delivery_sink(
             [this](const graph::remote_delivery_t& sub, const view::view_t& value) {
                 deliver_remote(sub, value);

@@ -78,6 +78,13 @@ target_compile_definitions(tlv_arena_test PRIVATE
     LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME tlv_arena COMMAND tlv_arena_test)
 
+# Brick 4 (ADR-0038 §3 / ADR-0039) — per-connection pmr label tables incl. a
+# zero-global-heap lifecycle over a slab resource with a null upstream.
+add_executable(route_handle_test route_handle_test.cpp)
+target_link_libraries(route_handle_test PRIVATE libtracer)
+libtracer_test_warnings(route_handle_test)
+add_test(NAME route_handle COMMAND route_handle_test)
+
 # M1 — conformance harness (links the built library).
 add_executable(conformance_runner conformance_runner.cpp)
 target_link_libraries(conformance_runner PRIVATE libtracer)

@@ -5,8 +5,8 @@
 
 #include "libtracer/route_handle.hpp"
 
+#include <algorithm>
 #include <array>
-#include <iterator>
 #include <utility>
 
 #include "libtracer/byteorder.hpp"
@@ -18,79 +18,118 @@ namespace tr::net {
 using wire::opt_t;
 using wire::type_t;
 
+route_handle_t::link_tables_t& route_handle_t::tables(std::string_view link) {
+    {
+        const std::shared_lock lock(links_m_);
+        if (const auto it = links_.find(link); it != links_.end()) return it->second;
+    }
+    const std::unique_lock lock(links_m_);
+    // try_emplace: another thread may have created it between the two locks.
+    return links_.try_emplace(std::pmr::string(link, mr_), mr_).first->second;
+}
+
+route_handle_t::link_tables_t* route_handle_t::find_tables(std::string_view link) const {
+    const std::shared_lock lock(links_m_);
+    const auto it = links_.find(link);
+    return it == links_.end() ? nullptr
+                              : const_cast<link_tables_t*>(&it->second);  // per-link mutex inside
+}
+
 void route_handle_t::bind_ingress(std::string_view in_link, std::uint16_t label,
                                   handle_binding_t binding) {
-    const std::lock_guard lock(m_);
-    ingress_[key_t{std::string(in_link), label}] = std::move(binding);
+    link_tables_t& t = tables(in_link);
+    const std::lock_guard lock(t.m);
+    for (ingress_entry_t& e : t.ingress) {
+        if (e.label == label) {
+            e.binding = std::move(binding);
+            return;
+        }
+    }
+    t.ingress.push_back(ingress_entry_t{.label = label, .binding = std::move(binding)});
 }
 
 std::optional<handle_binding_t> route_handle_t::lookup_ingress(std::string_view in_link,
                                                                std::uint16_t label) const {
-    const std::lock_guard lock(m_);
-    const auto it = ingress_.find(key_t{std::string(in_link), label});
-    if (it == ingress_.end()) return std::nullopt;
-    return it->second;
+    link_tables_t* const t = find_tables(in_link);
+    if (t == nullptr) return std::nullopt;
+    const std::lock_guard lock(t->m);
+    for (const ingress_entry_t& e : t->ingress)
+        if (e.label == label) return e.binding;
+    return std::nullopt;
 }
 
 void route_handle_t::record_egress(std::string_view out_link, std::uint16_t label,
                                    std::vector<std::byte> route) {
-    const std::lock_guard lock(m_);
-    egress_[key_t{std::string(out_link), label}] = std::move(route);
+    link_tables_t& t = tables(out_link);
+    const std::lock_guard lock(t.m);
+    for (egress_entry_t& e : t.egress) {
+        if (e.label == label) {
+            e.route.assign(route.begin(), route.end());
+            return;
+        }
+    }
+    t.egress.push_back(egress_entry_t{
+        .label = label, .route = std::pmr::vector<std::byte>(route.begin(), route.end(), mr_)});
 }
 
 std::optional<std::vector<std::byte>> route_handle_t::egress_route(std::string_view out_link,
                                                                    std::uint16_t label) const {
-    const std::lock_guard lock(m_);
-    const auto it = egress_.find(key_t{std::string(out_link), label});
-    if (it == egress_.end()) return std::nullopt;
-    return it->second;
+    link_tables_t* const t = find_tables(out_link);
+    if (t == nullptr) return std::nullopt;
+    const std::lock_guard lock(t->m);
+    for (const egress_entry_t& e : t->egress)
+        if (e.label == label) return std::vector<std::byte>(e.route.begin(), e.route.end());
+    return std::nullopt;
 }
 
 std::pair<std::uint16_t, bool> route_handle_t::ensure_egress(std::string_view out_link,
                                                              std::span<const std::byte> route) {
-    const std::lock_guard lock(m_);
-    std::string link(out_link);
-    route_key_t rk{link, std::vector<std::byte>(route.begin(), route.end())};
-    if (const auto it = egress_label_.find(rk); it != egress_label_.end())
-        return {it->second, false};  // already advertised on this link — reuse the label
-    // Fresh flow: mint a per-link label (inline alloc — m_ is held, non-recursive), record
-    // it both directions (forward egress for NACK re-advertise + the reverse route index).
-    std::uint16_t& next = next_label_[link];
-    if (next == 0) next = 1;
-    const std::uint16_t label = next++;
-    egress_[key_t{link, label}] = rk.second;
-    egress_label_[std::move(rk)] = label;
+    link_tables_t& t = tables(out_link);
+    const std::lock_guard lock(t.m);
+    // Reuse: the egress table doubles as the route -> label index (a link carries
+    // few compact flows; a linear route compare beats a third keyed-by-bytes map).
+    for (const egress_entry_t& e : t.egress) {
+        if (e.route.size() == route.size() &&
+            std::equal(e.route.begin(), e.route.end(), route.begin()))
+            return {e.label, false};  // already advertised on this link - reuse the label
+    }
+    const std::uint16_t label = t.next_label++;
+    t.egress.push_back(egress_entry_t{
+        .label = label, .route = std::pmr::vector<std::byte>(route.begin(), route.end(), mr_)});
     return {label, true};
 }
 
 std::uint16_t route_handle_t::alloc_label(std::string_view link) {
-    const std::lock_guard lock(m_);
-    // Monotonic per link; 0 is reserved as "none" so a fresh link starts at 1.
-    std::uint16_t& next = next_label_[std::string(link)];
-    if (next == 0) next = 1;
-    return next++;
+    link_tables_t& t = tables(link);
+    const std::lock_guard lock(t.m);
+    return t.next_label++;
 }
 
 void route_handle_t::clear_link(std::string_view link) {
-    const std::lock_guard lock(m_);
-    const std::string l(link);
-    for (auto it = ingress_.begin(); it != ingress_.end();)
-        it = (it->first.first == l) ? ingress_.erase(it) : std::next(it);
-    for (auto it = egress_.begin(); it != egress_.end();)
-        it = (it->first.first == l) ? egress_.erase(it) : std::next(it);
-    for (auto it = egress_label_.begin(); it != egress_label_.end();)
-        it = (it->first.first == l) ? egress_label_.erase(it) : std::next(it);
-    next_label_.erase(l);
+    // Drop the link's whole table (allocator state included) - the self-heal hook,
+    // reconnect frequency, so the exclusive registry lock is fine here.
+    const std::unique_lock lock(links_m_);
+    if (const auto it = links_.find(link); it != links_.end()) links_.erase(it);
 }
 
 std::size_t route_handle_t::ingress_count() const {
-    const std::lock_guard lock(m_);
-    return ingress_.size();
+    const std::shared_lock lock(links_m_);
+    std::size_t n = 0;
+    for (const auto& [name, t] : links_) {
+        const std::lock_guard tl(const_cast<link_tables_t&>(t).m);
+        n += t.ingress.size();
+    }
+    return n;
 }
 
 std::size_t route_handle_t::egress_count() const {
-    const std::lock_guard lock(m_);
-    return egress_.size();
+    const std::shared_lock lock(links_m_);
+    std::size_t n = 0;
+    for (const auto& [name, t] : links_) {
+        const std::lock_guard tl(const_cast<link_tables_t&>(t).m);
+        n += t.egress.size();
+    }
+    return n;
 }
 
 // --- transport-plane frame codec ---------------------------------------------
