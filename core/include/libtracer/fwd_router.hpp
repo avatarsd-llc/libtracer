@@ -23,14 +23,16 @@
  * Forwarders are STATELESS: there is no per-request table — the forward route is
  * the shrinking `dst` and the return route is the growing `src`, both carried in
  * the frame (RFC-0004 §B/§D). A hop may reboot mid-operation and the reply still
- * routes. This places "forward resolution at the L4 router + the tr::net transport
- * seam" (ADR-0035), mirroring bridge_t's graph<->transport wiring.
+ * routes. Forward resolution lives at the L4 router + the tr::net transport seam
+ * (ADR-0035). The FWD plane builds no tlv_t: forward hops offset-dispatch with
+ * zero heap (ADR-0038), terminus requests decode into the pmr arena (ADR-0041).
  */
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory_resource>
 #include <span>
 #include <string>
 #include <string_view>
@@ -63,8 +65,19 @@ class fwd_router_t {
      * remote subscriber fans out a `FWD{WRITE}` (or auto-promoted `COMPACT`) back over the
      * subscriber's link. The sink captures `this`, so the router must outlive @p graph's
      * use — the same lifetime the held `graph_` reference already requires.
+     *
+     * @param graph The node's local graph.
+     * @param mr    The node's container memory resource (ADR-0039 §1) — the terminus
+     *              arena draws from it directly; the library holds no buffer of its
+     *              own. A bounded node injects a pool resource over its static slab
+     *              (one slab, whole stack — ADR-0039 §2) and the terminus then
+     *              allocates nothing from the global heap; the default is the
+     *              standard heap (a terminus may allocate, ADR-0039). Must outlive
+     *              the router.
      */
-    explicit fwd_router_t(graph::graph_t& graph) : graph_(graph), resolver_(graph) {
+    explicit fwd_router_t(graph::graph_t& graph,
+                          std::pmr::memory_resource* mr = std::pmr::get_default_resource())
+        : graph_(graph), resolver_(graph), mr_(mr) {
         graph_.set_remote_delivery_sink(
             [this](const graph::remote_delivery_t& sub, const view::view_t& value) {
                 deliver_remote(sub, value);
@@ -199,9 +212,14 @@ class fwd_router_t {
     [[nodiscard]] const child_registry_t& registry() const noexcept { return registry_; }
 
    private:
-    /** @brief The slice-3 stateless FWD forward/terminus/reply step (decoded @p dec). */
-    void route_fwd(std::string_view inbound_name, std::span<const std::byte> frame,
-                   const wire::tlv_t& dec);
+    /**
+     * @brief Terminus: arena-decode @p frame (ADR-0041) and resolve + reply.
+     *
+     * The arena draws directly from the injected @ref mr_ (ADR-0039 §1) and is
+     * released before returning — the memory policy is entirely the host's. The
+     * FWD{REPLY} is sent back over the link the request arrived on.
+     */
+    void resolve_terminus(std::string_view inbound_name, std::span<const std::byte> frame);
     /**
      * @brief The forward hop, read entirely by OFFSET — no decoded tree (ADR-0038 inv. #1).
      *
@@ -233,8 +251,9 @@ class fwd_router_t {
 
     graph::graph_t& graph_;
     graph::op_resolver_t resolver_;
-    child_registry_t registry_;  // the one NAME→link demux table (Brick 3a, ADR-0037)
-    route_handle_t handles_;     // per-link label tables (compact flows only)
+    std::pmr::memory_resource* mr_;  // terminus-arena spill resource (ADR-0039 §1)
+    child_registry_t registry_;      // the one NAME→link demux table (Brick 3a, ADR-0037)
+    route_handle_t handles_;         // per-link label tables (compact flows only)
     std::function<void(const wire::tlv_t&)> reply_cb_;
     std::function<void(std::string_view, const wire::tlv_t&)> inbound_cb_;
     std::function<void(std::string_view, std::span<const std::byte>)> raw_cb_;

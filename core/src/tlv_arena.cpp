@@ -116,7 +116,10 @@ std::expected<tlv_arena_t, error_t> decode_into(std::span<const std::byte> input
         bool names_only = true;
     };
     std::pmr::vector<open_t> stack(&mr);
-    stack.reserve(kMaxDepth);  // bounded by the depth cap: never reallocates
+    // Reserve for the typical FWD nesting (~3-4), not kMaxDepth: a full-depth
+    // reserve would draw ~1.3 KiB from the resource on EVERY decode, which a
+    // 16 KB-slab node cannot spare; deeper frames grow (bounded by the cap).
+    stack.reserve(8);
     stack.push_back(open_t{.index = 0, .payload = root->body});
 
     while (!stack.empty()) {
