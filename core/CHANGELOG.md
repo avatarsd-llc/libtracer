@@ -34,6 +34,26 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **`wire::decode_into` + `tlv_arena_t`/`arena_tlv_t` — the terminus arena decoder**
+  ([ADR-0041](../docs/adr/0041-terminus-arena-decode-span-contract.md), implementing
+  [ADR-0038](../docs/adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md)
+  invariant #5 / [ADR-0039](../docs/adr/0039-pmr-memory-model-host-aligned-allocation.md) §3;
+  Brick 5 of the #83 Stage-2 flip, part 1). New header `tlv_arena.hpp`:
+  `wire::decode_into(span, std::pmr::memory_resource&) → std::expected<tlv_arena_t, error_t>`
+  parses a frame into a **flat, pre-order arena of `arena_tlv_t` nodes** drawn from the
+  injected resource — each node `{type, opt, wire (header+body span, trailer excluded),
+  body, end (one-past-last-descendant), canonical_path}`, every span zero-copy into the
+  input. Identical validation to `decode` (bounds, reserved bits, type `0x00`, `kMaxDepth`,
+  two-span trailer CRC, trailing-byte rejection), iterative, no recursion. `canonical_path`
+  marks a PATH whose body is byte-identical to its `path_key` form, enabling the ADR-0041 §3
+  span-aliased vertex lookup. `frame.hpp` (`tlv_t`/`decode`/`encode`) is byte-for-byte
+  untouched — the arena is a distinct terminus-local representation, not a codec change.
+  Verified by the new `tlv_arena_test`: `decode` ↔ `decode_into` equivalence over **every**
+  conformance vector, all four trailer shapes trailer-sliced, pre-order/`end`/sibling
+  iteration, canonical + all non-canonical PATH fallbacks, the depth cap, 11 rejection
+  branches error-for-error, and a zero-spill decode inside a 4 KiB stack
+  `monotonic_buffer_resource` with a `null_memory_resource` upstream. The resolver rewrite
+  over the arena (deleting the `resolve(const tlv_t&)` overloads) is part 2.
 - **`tr::net::child_registry_t`** — the connection demux table (`NAME → transport
   link`, `by_name`/`by_segment`), extracted from `fwd_router_t`'s private `children_`
   field into one named, shareable owner (Brick 3a of the #83 Stage-2 flip;

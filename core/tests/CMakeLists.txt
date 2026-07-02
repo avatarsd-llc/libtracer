@@ -69,6 +69,15 @@ target_link_libraries(children_test PRIVATE libtracer)
 libtracer_test_warnings(children_test)
 add_test(NAME children COMMAND children_test)
 
+# ADR-0041 — terminus arena decoder: decode<->decode_into equivalence over every
+# conformance vector + the span/canonical/zero-spill contract.
+add_executable(tlv_arena_test tlv_arena_test.cpp)
+target_link_libraries(tlv_arena_test PRIVATE libtracer)
+libtracer_test_warnings(tlv_arena_test)
+target_compile_definitions(tlv_arena_test PRIVATE
+    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
+add_test(NAME tlv_arena COMMAND tlv_arena_test)
+
 # M1 — conformance harness (links the built library).
 add_executable(conformance_runner conformance_runner.cpp)
 target_link_libraries(conformance_runner PRIVATE libtracer)
