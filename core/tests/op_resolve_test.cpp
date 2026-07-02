@@ -2,16 +2,19 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * RFC-0004 / ADR-0035 slice 2 — op_resolver_t host tests. A node resolves a
- * decoded FWD against a LOCAL vertex, applies READ / WRITE / AWAIT (+ a FIELD
- * :field selector), and builds the FWD{REPLY} as a zero-copy rope. The load-
- * bearing check (like graph_test's "read is a clone") is that the reply payload
- * SHARES the vertex's stored segment — proven via use_count + segment-pointer
- * identity on the rope links, before any flatten. The AWAIT cases exercise the
- * waiter/condvar path under TSan. Input FWDs are built via the codec (round-trip-
- * safe) and the replies decoded back.
+ * RFC-0004 / ADR-0035 — op_resolver_t host tests, over the ADR-0041 terminus
+ * arena. A node arena-decodes a FWD, resolves it against a LOCAL vertex, applies
+ * READ / WRITE / AWAIT (+ a FIELD :field selector), and builds the FWD{REPLY} as
+ * a zero-copy rope. The load-bearing check (like graph_test's "read is a clone")
+ * is that the reply payload SHARES the vertex's stored segment — proven via
+ * use_count + segment-pointer identity on the rope links, before any flatten.
+ * The AWAIT cases exercise the waiter/condvar path under TSan. New ADR-0041
+ * cases: a CRC-carrying WRITE stores trailer-LESS bytes (§4), and a
+ * non-canonical dst PATH still resolves via the path_key re-emit fallback (§3).
+ * Input FWDs are built via the codec (round-trip-safe), replies decoded back.
  */
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -20,6 +23,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory_resource>
 #include <span>
 #include <string_view>
 #include <thread>
@@ -102,6 +106,16 @@ std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
     return out;
 }
 
+// Arena-decode + resolve (ADR-0041): mirrors fwd_router_t's terminus wiring —
+// decode_into from the (default) resource, resolve over the arena.
+tr::graph::result_t<tr::view::rope_t> resolve_bytes(op_resolver_t& resolver,
+                                                    std::span<const std::byte> fwd,
+                                                    std::string_view inbound_link = {}) {
+    const auto arena = tr::wire::decode_into(fwd, *std::pmr::get_default_resource());
+    if (!arena) return std::unexpected(tr::graph::status_t::INVALID_PATH);
+    return resolver.resolve(*arena, inbound_link);
+}
+
 // A view_t over a fresh owned heap segment holding `bytes` (graph_test idiom).
 tr::view::view_t make_value(std::span<const std::byte> bytes) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
@@ -141,8 +155,7 @@ void test_read_zero_copy() {
     check(stored.has_value() && stored->owner.use_count() == 2, "stored LKV use_count == 2");
 
     const auto fwd = b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), b_path({"reply-ep"}));
-    const auto dec = tr::wire::decode(fwd);
-    auto reply = resolver.resolve(*dec);
+    auto reply = resolve_bytes(resolver, fwd);
     check(reply.has_value(), "resolve READ produced a reply");
 
     const auto& links = reply->links();
@@ -179,7 +192,7 @@ void test_write() {
 
     const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"reply-ep"}), {},
                            b_value({0x2A}));
-    auto reply = resolver.resolve(*tr::wire::decode(fwd));
+    auto reply = resolve_bytes(resolver, fwd);
     check(reply.has_value(), "resolve WRITE produced a reply");
     const auto dr = decode_reply(*reply);
     const tlv_t& r = dr.tlv;
@@ -210,7 +223,7 @@ void test_await() {
         std::this_thread::sleep_for(40ms);
         (void)g.write(v, make_value(b_value({0x7B})));  // VALUE u8=123
     });
-    auto reply = resolver.resolve(*tr::wire::decode(fwd));
+    auto reply = resolve_bytes(resolver, fwd);
     writer.join();
     check(reply.has_value(), "resolve AWAIT returned");
     const auto dr = decode_reply(*reply);
@@ -226,7 +239,7 @@ void test_await() {
     tr::detail::store_le<std::uint64_t>(tbuf, 1'000'000ull);  // 1ms
     const auto fwd_to =
         b_fwd(fwd_op_t::AWAIT, b_path({"sensor", "temp"}), b_path({"reply-ep"}), {}, b_value(tbuf));
-    auto reply_to = resolver.resolve(*tr::wire::decode(fwd_to));
+    auto reply_to = resolve_bytes(resolver, fwd_to);
     const auto drto = decode_reply(*reply_to);
     const tlv_t& rto = drto.tlv;
     check(value_u8(rto.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR),
@@ -255,7 +268,7 @@ void test_subscribers_field() {
     for (const char* tgt : {"sub-a", "sub-b"}) {
         const auto wfwd = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"reply-ep"}),
                                 field_append, b_subscriber({tgt}));
-        auto wr = resolver.resolve(*tr::wire::decode(wfwd));
+        auto wr = resolve_bytes(resolver, wfwd);
         const auto dwr = decode_reply(*wr);
         const tlv_t& r = dwr.tlv;
         check(value_u8(r.children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
@@ -268,7 +281,7 @@ void test_subscribers_field() {
 
     const auto rfwd =
         b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), b_path({"reply-ep"}), field_append);
-    auto reply = resolver.resolve(*tr::wire::decode(rfwd));
+    auto reply = resolve_bytes(resolver, rfwd);
     check(reply.has_value(), "resolve READ :subscribers[] produced a reply");
 
     // Rope: [head (incl. POINT wrapper header)] + [slot0 view] + [slot1 view].
@@ -291,6 +304,74 @@ void test_subscribers_field() {
     check(tr::wire::equal(wrapper.children[0], *tr::wire::decode(b_subscriber({"sub-a"}))) &&
               tr::wire::equal(wrapper.children[1], *tr::wire::decode(b_subscriber({"sub-b"}))),
           "slot order preserved: sub-a then sub-b");
+}
+
+void test_write_trailer_sliced() {
+    std::printf("WRITE with a CRC trailer -> stored bytes are trailer-LESS (ADR-0041 §4):\n");
+    graph_t g;
+    op_resolver_t resolver(g);
+    const auto path = path_t::parse("/sensor/temp");
+    tr::graph::vertex_t* v = *g.register_vertex(*path, role_t::STORED_VALUE);
+
+    // A VALUE carrying a CRC-32C trailer, as a foreign producer might send it.
+    tlv_t val;
+    val.type = type_t::VALUE;
+    val.opt.cr = true;
+    const std::array<std::byte, 2> pb{std::byte{0xBE}, std::byte{0xEF}};
+    val.payload = pb;
+    const std::vector<std::byte> val_bytes = tr::wire::encode(val);
+    check(val_bytes.size() == 4 + 2 + 4, "input VALUE carries a 4-byte CRC trailer");
+
+    const auto fwd =
+        b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"reply-ep"}), {}, val_bytes);
+    auto reply = resolve_bytes(resolver, fwd);
+    check(reply.has_value(), "resolve WRITE(trailered VALUE) produced a reply");
+    const auto dr = decode_reply(*reply);
+    check(value_u8(dr.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
+          "trailered WRITE reply kind == RESULT");
+
+    // Stored-at-rest: header + body only (6 bytes), opt trailer bits cleared,
+    // and the stored TLV is self-consistent (decodes with no trailer).
+    const auto rd = g.read(v);
+    check(rd.has_value() && rd->bytes().size() == 6,
+          "stored LKV excludes the trailer (6 bytes, not 10)");
+    const auto inner = tr::wire::view_as_tlv(*rd);
+    check(inner.has_value() && inner->type == type_t::VALUE && !inner->opt.cr &&
+              !inner->trailer.has_value() && inner->payload.size() == 2,
+          "stored value decodes trailer-less with the CR bit cleared");
+}
+
+void test_non_canonical_dst() {
+    std::printf("non-canonical dst PATH (LL-widened NAME) -> path_key fallback resolves:\n");
+    graph_t g;
+    op_resolver_t resolver(g);
+    const auto path = path_t::parse("/sensor/temp");
+    (void)g.register_vertex(*path, role_t::STORED_VALUE);
+    const std::vector<std::byte> val = b_value({0x2A});
+    (void)g.write(g.find(path->key()), make_value(val));
+
+    // A dst PATH whose NAMEs use a widened (LL) length — legal wire, but NOT
+    // byte-identical to the canonical vertex key, so the span-aliased lookup
+    // (ADR-0041 §3) must fall back to the re-emit and still find the vertex.
+    tlv_t dst;
+    dst.type = type_t::PATH;
+    dst.opt.pl = true;
+    for (const std::string_view seg : {std::string_view("sensor"), std::string_view("temp")}) {
+        tlv_t n;
+        n.type = type_t::NAME;
+        n.opt.ll = true;  // widened length ⇒ non-canonical header
+        n.payload =
+            std::span<const std::byte>(reinterpret_cast<const std::byte*>(seg.data()), seg.size());
+        dst.children.push_back(n);
+    }
+    const auto fwd = b_fwd(fwd_op_t::READ, tr::wire::encode(dst), b_path({"reply-ep"}));
+    auto reply = resolve_bytes(resolver, fwd);
+    check(reply.has_value(), "resolve READ with LL-widened dst produced a reply");
+    const auto dr = decode_reply(*reply);
+    check(value_u8(dr.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
+          "non-canonical dst resolves via the re-emit fallback (kind == RESULT)");
+    check(dr.tlv.children.size() == 5 && value_u8(dr.tlv.children[4]) == 0x2A,
+          "reply payload is the stored value (0x2A)");
 }
 
 std::vector<std::byte> read_file(const std::filesystem::path& p) {
@@ -317,7 +398,7 @@ void test_wildcard_and_not_local() {
     const auto wdec = tr::wire::decode(wild);
     check(wdec.has_value(), "fwd-wildcard-reject vector decodes (codec round-trip-safe)");
     check(tr::wire::encode(*wdec) == wild, "vector re-encodes byte-exactly (3-core machine green)");
-    auto wreply = resolver.resolve(*wdec);
+    auto wreply = resolve_bytes(resolver, wild);
     check(wreply.has_value(), "wildcard resolve produced a reply (not a hard error)");
     const auto dwild = decode_reply(*wreply);
     const tlv_t& wr = dwild.tlv;
@@ -329,7 +410,7 @@ void test_wildcard_and_not_local() {
 
     // dst not local: an unregistered path => NOT_FOUND.
     const auto nfwd = b_fwd(fwd_op_t::READ, b_path({"nope", "missing"}), b_path({"reply-ep"}));
-    auto nreply = resolver.resolve(*tr::wire::decode(nfwd));
+    auto nreply = resolve_bytes(resolver, nfwd);
     const auto dnr = decode_reply(*nreply);
     const tlv_t& nr = dnr.tlv;
     check(value_u8(nr.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR),
@@ -346,6 +427,8 @@ int main() {
     test_write();
     test_await();
     test_subscribers_field();
+    test_write_trailer_sliced();
+    test_non_canonical_dst();
     test_wildcard_and_not_local();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");

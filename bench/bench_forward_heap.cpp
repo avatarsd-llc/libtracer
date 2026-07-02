@@ -4,14 +4,11 @@
  *
  * The 16KB-RAM zero-heap forward-path bench (ADR-0038 §16KB-RAM feasibility gate).
  *
- * Measures — not asserts — how many heap allocations one FWD *forward hop* costs on
- * the current reference path, so the Stage-2 flip (heap-free forward: offset-dispatch
- * + pooled segment heads + stack iov, ADR-0038 invariants #1/#2/#5) is driven to zero
- * against a real baseline. Today's `fwd_router_t` forward branch full-decodes every
- * frame (`wire::decode` -> `vector<tlv_t>`) and rebuilds the shrunk/grown headers with
- * `std::vector`, so this run is EXPECTED to report a non-zero count now; the gate is
- * that count reaching 0 after Stage-2. A per-run threshold (env `ZEROHEAP_MAX`, default
- * off = report-only) lets CI flip it to a hard gate when Stage-2 lands.
+ * Two armed windows: (1) one FWD *forward hop* — offset-dispatch + stack heads +
+ * stack iov (ADR-0038 invariants #1/#2), hard-gated at ZERO allocations by CI
+ * (`ZEROHEAP_MAX=0`); (2) one *terminus* resolve (ADR-0041) — REPORT-ONLY, since a
+ * terminus may allocate (ADR-0039): the arena draws from the router's injected
+ * memory_resource (the default heap here, so every draw is counted and visible).
  *
  * This TU owns the global operator-new/delete override (probe/heap_probe.hpp): all
  * allocation variants — plain, sized, aligned (what `heap_alloc`'s `operator new(size,
@@ -172,18 +169,60 @@ int main() {
     std::printf(
         "RESULT zeroheap forward allocs=%zu frees=%zu bytes=%zu egress_len=%zu forwarded=%d\n",
         c.allocs, c.frees, c.bytes, out_link.last_len, forwarded ? 1 : 0);
-    std::printf(
-        "  (baseline: today's fwd_router full-decodes + rebuilds with std::vector, so allocs>0 is\n"
-        "   EXPECTED pre-Stage-2; ADR-0038 gate = allocs==0 on the forward path after the "
-        "flip.)\n");
 
     if (!forwarded) {
         std::printf("FAIL: the frame did not forward — fixture broken, not a heap result\n");
         return 2;
     }
 
-    // Optional hard gate: `ZEROHEAP_MAX=N` fails the run if allocs>N. Default: report-only
-    // (Stage-1 baseline). CI flips this to `ZEROHEAP_MAX=0` when Stage-2 lands.
+    // --- terminus mode (ADR-0041, REPORT-ONLY) --------------------------------
+    // A terminus is ALLOWED to allocate (ADR-0039 §context-1); this window makes
+    // the cost visible and bounded, not zero-gated: arena decode draws from the
+    // router's injected memory_resource (default = heap here, so every draw is
+    // counted), the reply head is ONE exactly-sized segment, the ownership
+    // copies are one each. A host that injects a pool resource over its slab
+    // moves the arena draws off the global heap entirely.
+    tr::graph::vertex_t* v = nullptr;
+    if (const auto path = tr::graph::path_t::parse("/sensor/temp")) {
+        if (auto reg = graph.register_vertex(*path, tr::graph::role_t::STORED_VALUE)) v = *reg;
+    }
+    std::size_t term_allocs = 0;
+    bool replied = false;
+    if (v != nullptr) {
+        std::vector<std::byte> stored;
+        tr::detail::emit_tlv(stored, type_t::VALUE, opt_t{},
+                             std::span<const std::byte>(payload, 4));
+        tr::view::view_t sv = tr::view::over_bytes(stored);
+        (void)graph.write(v, sv);
+
+        std::vector<std::byte> read_body;
+        const std::byte rop{static_cast<std::uint8_t>(tr::graph::fwd_op_t::READ)};
+        tr::detail::emit_tlv(read_body, type_t::VALUE, opt_t{},
+                             std::span<const std::byte>(&rop, 1));
+        emit_path(read_body, {"sensor", "temp"});
+        emit_path(read_body, {"reply"});
+        std::vector<std::byte> read_frame;
+        tr::detail::emit_tlv(read_frame, type_t::FWD, opt_t{.pl = true}, read_body);
+
+        router.on_frame("in", read_frame);  // warm outside the window
+        const std::size_t warm_in = in_link.sends;
+        probe::window_t twin;
+        router.on_frame("in", read_frame);
+        const probe::counts_t tc = twin.result();
+        term_allocs = tc.allocs;
+        replied = in_link.sends == warm_in + 1;
+        std::printf(
+            "RESULT terminus allocs=%zu frees=%zu bytes=%zu reply_len=%zu replied=%d "
+            "(report-only — a terminus may allocate, ADR-0039)\n",
+            tc.allocs, tc.frees, tc.bytes, in_link.last_len, replied ? 1 : 0);
+        if (!replied) {
+            std::printf("FAIL: the READ terminus did not reply — fixture broken\n");
+            return 2;
+        }
+    }
+
+    // Optional hard gate: `ZEROHEAP_MAX=N` fails the run if FORWARD allocs>N (the
+    // terminus window above stays report-only). CI runs `ZEROHEAP_MAX=0`.
     if (const char* cap = std::getenv("ZEROHEAP_MAX")) {
         const auto max_allocs = static_cast<std::size_t>(std::strtoul(cap, nullptr, 10));
         if (c.allocs > max_allocs) {
@@ -192,5 +231,6 @@ int main() {
         }
         std::printf("ZEROHEAP: PASS (allocs=%zu <= max=%zu)\n", c.allocs, max_allocs);
     }
+    (void)term_allocs;
     return 0;
 }

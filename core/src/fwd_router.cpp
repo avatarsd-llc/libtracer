@@ -85,6 +85,16 @@ struct hdr_t {
     return frame.subspan(seg_h->body_off, seg_h->body_len);
 }
 
+// Read the FWD op discriminant (child[0], a VALUE u8) by OFFSET — the terminus
+// split (REPLY → originator sink vs request → arena resolve) without a decode.
+[[nodiscard]] std::optional<graph::fwd_op_t> peek_fwd_op(std::span<const std::byte> frame) {
+    const auto fwd_h = read_header(frame, 0);
+    if (!fwd_h || fwd_h->type != type_t::FWD || !fwd_h->opt.pl) return std::nullopt;
+    const auto op_h = read_header(frame, fwd_h->body_off);
+    if (!op_h || op_h->type != type_t::VALUE || op_h->body_len == 0) return std::nullopt;
+    return static_cast<fwd_op_t>(u8(frame[op_h->body_off]));
+}
+
 // Build a full-route producer delivery: `FWD{ op=WRITE, dst=<return route>, src=<empty
 // PATH>, payload=<VALUE> }` (delivery-is-a-write, RFC-0004 §D / #136). @p dst_path is a
 // complete PATH TLV's bytes (the subscriber's accumulated return route); @p payload is a
@@ -210,34 +220,42 @@ void fwd_router_t::send_compact(std::string_view link_name, std::uint16_t label,
 
 void fwd_router_t::on_frame(std::string_view inbound_name, std::span<const std::byte> frame) {
     if (raw_cb_) raw_cb_(inbound_name, frame);
+    if (frame.size() < 4) return;
 
-    // Forward fast path (ADR-0038 inv. #1 / ADR-0039): decide forward-vs-terminus by
-    // OFFSET — no wire::decode, no tlv_t tree — and if the first dst segment names a
-    // transport child, forward with zero heap on the hot path. The forward rebuild
-    // already re-parses by offset, so it never needed the tree. Skipped when an
-    // inbound observer (`inbound_cb_`, tests only) is installed, since it wants the
-    // decoded FWD; production forwards decode-free.
-    if (!inbound_cb_) {
+    // The FWD plane never builds a tlv_t (ADR-0038 inv. #1 / ADR-0041 §5): the
+    // forward-vs-terminus split and the op discriminant are read by OFFSET; a
+    // forward hop scatter-gathers with zero heap; a terminus request decodes into
+    // the pmr arena. Only the originator REPLY sink and the control frames below
+    // keep the owning wire::decode (test/SDK-facing and flow-setup paths, allowed
+    // to allocate per ADR-0039).
+    if (static_cast<type_t>(u8(frame[0])) == type_t::FWD) {
+        if (inbound_cb_) {  // read-only observer (tests/ACL seam) — wants the tree
+            if (const auto dec = wire::decode(frame); dec && dec->opt.pl)
+                inbound_cb_(inbound_name, *dec);
+        }
         if (const auto seg = peek_fwd_first_dst_seg(frame)) {
             if (transport_t* const child = registry_.by_segment(*seg)) {
                 route_fwd_forward(inbound_name, frame, *child);
                 return;
             }
-            // First dst segment names no child ⇒ a FWD terminus; fall through to decode.
+            // First dst segment names no child ⇒ this node is the terminus.
         }
+        if (peek_fwd_op(frame) == fwd_op_t::REPLY) {
+            // The accumulated return route is fully consumed — this node is the
+            // originator. Deliver the decoded FWD{REPLY} to the reply sink.
+            if (reply_cb_) {
+                if (const auto dec = wire::decode(frame); dec && dec->opt.pl) reply_cb_(*dec);
+            }
+            return;
+        }
+        resolve_terminus(inbound_name, frame);
+        return;
     }
 
-    // Terminus / control / observed path: the resolver and the control handlers need
-    // the decoded tree, so full-decode here (a terminus is allowed to allocate —
-    // ADR-0039 §steady-state; the arena-decode variant is invariant #5, a later brick).
+    // Control frames (route-handle flow setup) keep the owning decode.
     const auto dec = wire::decode(frame);
     if (!dec || !dec->opt.pl) return;  // drop malformed / non-structured
-
     switch (dec->type) {
-        case type_t::FWD:
-            if (inbound_cb_) inbound_cb_(inbound_name, *dec);
-            route_fwd(inbound_name, frame, *dec);
-            return;
         case type_t::ADVERTISE:
             on_advertise(inbound_name, *dec);
             return;
@@ -337,40 +355,21 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     child.send(std::span<const std::span<const std::byte>>(iov.data(), n));
 }
 
-void fwd_router_t::route_fwd(std::string_view inbound_name, std::span<const std::byte> frame,
-                             const tlv_t& decoded) {
-    const tlv_t* const dec = &decoded;     // keep the original body's `dec->...`/`*dec` shape
-    if (dec->children.size() < 2) return;  // need at least op + dst
-    const tlv_t& op_tlv = dec->children[0];
-    const tlv_t& dst = dec->children[1];
-    if (op_tlv.type != type_t::VALUE || op_tlv.payload.empty() || dst.type != type_t::PATH) return;
-    const auto op = static_cast<fwd_op_t>(u8(op_tlv.payload[0]));
-
-    // Resolve the FIRST dst segment against this node's transport children.
-    transport_t* const child =
-        dst.children.empty() ? nullptr : registry_.by_segment(dst.children[0].payload);
-
-    if (child != nullptr) {
-        // FORWARD: the offset-based rebuild needs no decoded tree — share it with the
-        // decode-free on_frame fast path (ADR-0038 inv. #1).
-        route_fwd_forward(inbound_name, frame, *child);
-        return;
-    }
-
-    // TERMINUS (the first dst segment names no transport child).
-    if (op == fwd_op_t::REPLY) {
-        // The accumulated return route is fully consumed — this node is the
-        // originator. Deliver to the reply sink.
-        if (reply_cb_) reply_cb_(*dec);
-        return;
-    }
-
-    // Local request terminus: apply the op and route the FWD{REPLY} back over the
-    // link the request arrived on (its dst is the request's accumulated src). Pass the
-    // inbound link so a `:subscribers[]` WRITE binds a REMOTE subscriber whose deliveries
-    // route back over it (#136); the latch (transient-local) fires inside resolve.
-    auto reply = resolver_.resolve(*dec, inbound_name);
-    if (!reply) return;
+void fwd_router_t::resolve_terminus(std::string_view inbound_name,
+                                    std::span<const std::byte> frame) {
+    // Local request terminus (ADR-0041 §5): arena-decode straight from the
+    // node's injected resource (ADR-0039 §1) — the library keeps no buffer of
+    // its own; a bounded host injects a pool resource over its slab and the
+    // terminus allocates nothing from the global heap. The arena is released
+    // before this call returns. Apply the op and route the FWD{REPLY} back over
+    // the link the request arrived on (its dst is the request's accumulated
+    // src). The inbound link makes a `:subscribers[]` WRITE bind a REMOTE
+    // subscriber whose deliveries route back over it (#136); the latch
+    // (transient-local) fires inside resolve.
+    const auto arena = wire::decode_into(frame, *mr_);
+    if (!arena) return;  // malformed frame ⇒ drop
+    auto reply = resolver_.resolve(*arena, inbound_name);
+    if (!reply) return;  // structurally non-request ⇒ drop
     if (transport_t* in = registry_.by_name(inbound_name)) {
         const std::vector<std::span<const std::byte>> iov = reply->to_iovec();
         in->send(std::span<const std::span<const std::byte>>(iov));

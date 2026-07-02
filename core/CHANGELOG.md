@@ -15,6 +15,36 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Removed
 
+- **`op_resolver_t::resolve(const wire::tlv_t&, …)` — the `tlv_t` resolver overloads are
+  deleted** ([ADR-0041](../docs/adr/0041-terminus-arena-decode-span-contract.md) §5; Brick 5
+  part 2). `op_resolver_t::resolve` is rewritten over the **terminus arena**:
+  `resolve(const wire::tlv_arena_t&, std::string_view inbound_link = {})`. Callers migrate
+  to `wire::decode_into` (the terminus never builds a `tlv_t` anymore). Behavior fixes
+  riding the rewrite: **trailer-sliced stores** (§4 — a CRC/TS-carrying WRITE stores
+  header+body only, with the copied opt byte's trailer bits cleared; fixes the
+  trailer-less-at-rest violation where `encode()` re-emitted arriving trailers into stored
+  values), **span-aliased vertex lookup** (§3 — a canonical PATH body IS the vertex-map
+  key: zero key materialization; non-canonical PATHs fall back to a re-emit), and the
+  **direct-emitted reply head** (one exactly-sized segment replaces the 4-stage
+  encode→children→head→segment staging: route bytes copied once). The remote-subscriber
+  `return_route` is likewise a single trailer-sliced copy of the `src` span.
+
+### Changed
+
+- **`fwd_router_t` gains a defaulted `std::pmr::memory_resource*` constructor parameter**
+  ([ADR-0039](../docs/adr/0039-pmr-memory-model-host-aligned-allocation.md) §1 /
+  [ADR-0041](../docs/adr/0041-terminus-arena-decode-span-contract.md) §5):
+  `fwd_router_t(graph, mr = std::pmr::get_default_resource())`. The terminus arena draws
+  from it **directly — the library holds no internal buffer**: a bounded node injects a
+  pool resource over its static slab (one slab, whole stack) and the terminus then
+  allocates nothing from the global heap; the default is the standard heap (a terminus may
+  allocate). The FWD plane no longer builds a `tlv_t` anywhere: forward hops offset-dispatch
+  (unchanged, zero-heap, CI-gated), terminus requests arena-decode, and only the originator
+  `on_reply` sink and the ADVERTISE/COMPACT/NACK control frames keep the owning
+  `wire::decode`. `bench_forward_heap` gains a report-only **terminus mode** (armed window
+  around one local READ resolve) making the terminus allocation count visible; the
+  `ZEROHEAP_MAX=0` forward gate is unchanged and still passes.
+
 - **`bridge_t` and the ROUTER-flood mechanism are retired**
   ([ADR-0040](../docs/adr/0040-net-plane-is-explicit-source-routed-only.md); Brick 3b of the
   #83 Stage-2 flip). The net plane is now **`FWD` explicit-source-routed only** — every remote
