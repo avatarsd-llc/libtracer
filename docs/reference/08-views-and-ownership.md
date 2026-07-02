@@ -28,24 +28,27 @@ This is what separates libtracer from middleware that decodes wire bytes into in
 ## The view struct
 
 ```c
-typedef struct view view_t;
-
 struct view {
     segment_t *owner;     // refcounted L0 segment
     size_t     offset;    // bytes from segment->base
     size_t     length;    // bytes covered
-    view_t    *next;      // optional next link in a rope (NULL = single-link view)
 };
 ```
+
+A **rope** is a separate composite type — an ordered chain of views (`rope_t` in the
+reference implementation, holding its links in a contiguous sequence) — not an
+intrusive `next` pointer inside the view. A view is always exactly one window over
+one segment; the rope composes several of them into one logical payload.
 
 Invariants:
 
 - `offset + length <= owner->size`. A view never escapes its segment.
-- `owner` holds at least one refcount (created by `view_clone` or by initial wrap of a fresh segment).
-- `next` is NULL for a flat (single-segment) view; non-NULL for ropes.
+- `owner` holds at least one refcount (copying a view clones it — a refcount bump,
+  never a byte copy).
 - A view does not own any bytes — it borrows them via the segment refcount.
 
-Sub-views are cheap: `view_subview(parent, off, len)` produces a new view with the same `owner` (refcount bumped), narrower offset/length. Useful for zero-copy slicing.
+Sub-views are cheap: `subview(off, len)` produces a new view with the same `owner`
+(refcount bumped), narrower offset/length. Useful for zero-copy slicing.
 
 ---
 
@@ -232,8 +235,9 @@ Cursor advance is `offset += total`. No segment-boundary crossings; the buffer i
 The parser sees a rope and steps across link boundaries:
 
 ```c
-view_t *link    = rope;
-size_t  in_link = 0;
+size_t        link_idx = 0;
+const view_t *link     = first_link(rope);  /* the rope owns the link order */
+size_t        in_link  = 0;
 while (link) {
     while (in_link < link->length) {
         const tlv_t *t = (const tlv_t *)(link->owner->base + link->offset + in_link);
@@ -243,10 +247,10 @@ while (link) {
             in_link += total;
         } else {
             /* TLV spans link boundary; need rope-aware accessor */
-            rope_advance(&link, &in_link, total);
+            rope_advance(&rope, &link_idx, &in_link, total);
         }
     }
-    link    = link->next;
+    link    = next_link(rope, &link_idx);  /* the rope owns the chain order */
     in_link = 0;
 }
 ```
