@@ -142,19 +142,20 @@ leaf dial *out* through NAT. `role` is an explicit per-connection `:setting`, so
 flips to dialing out to **any peer that has ≥2 transports** (a forwarding hop — *not*
 a "router" role).
 
-**Any node with ≥2 transports forwards** (bridge logic is a required module the
-moment a node has two wires; [ADR-0014](../adr/0014-router-cycle-termination-hop-count.md),
-[07-host-embedding](07-host-embedding.md)) — there is no privileged "router" node, so
-the network **folds arbitrarily** — elided-CAN leaf → full-TLV QUIC backbone →
-another fold — with the bridge stateless and uniform across framing modes. The bounds
-to design within:
+**Any node with ≥2 transports forwards** (forwarding is a required capability the
+moment a node has two wires; [07-host-embedding](07-host-embedding.md)) — there is no
+privileged "router" node, so the network **folds arbitrarily** — elided-CAN leaf →
+full-TLV QUIC backbone → another fold — with the forwarder stateless and uniform
+across framing modes. The bounds to design within:
 
-- **Depth is capped by `MAX_HOPS`** (recommended 32): a delivery path longer than
-  that is cut. Fine for ordinary topologies; the limit is pathologically deep
-  gateway nesting.
-- **Dense meshes cost duplicate deliveries** — dedup is best-effort (a bounded
-  recent-set), worst case ≈ `MAX_HOPS × fanout` before a loop dies.
-- **No global ordering across folds** — per-producer `(peer_id, ts)` only; cross-node
+- **Depth is capped by the route** — a `FWD` frame's `dst` names every hop and is
+  consumed monotonically, so a delivery can travel exactly as far as its explicit
+  source route (segment count ≤ the PATH cap of 32).
+- **Loops cannot form** — a `dst` that revisits a node is malformed
+  (`ERROR=INVALID_PATH`); there is no flooding, so no duplicate deliveries and no
+  dedup state anywhere. Parallel links to one peer are distinct explicit addresses —
+  deliberate redundancy a consumer subscribes to knowingly.
+- **No global ordering across folds** — per-producer ordering only; cross-node
   coherence needs a coordinated trigger.
 
 ## Self-healing (no coordinator)

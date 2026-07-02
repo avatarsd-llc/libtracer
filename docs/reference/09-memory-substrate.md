@@ -343,9 +343,9 @@ Heap segments can be freed in any order. lwIP pbufs MUST be freed via `pbuf_free
 
 ### 3. Cross-substrate moves require copies (sometimes)
 
-If a TLV arrives via lwIP pbuf and is forwarded to a CAN transport, the CAN transport's egress can't directly DMA out of the pbuf (CAN's DMA expects a different region). The bridge layer materializes the rope of pbuf-views into a contiguous CAN-DMA buffer (one copy at the bridge boundary).
+If a TLV arrives via lwIP pbuf and is forwarded to a CAN transport, the CAN transport's egress can't directly DMA out of the pbuf (CAN's DMA expects a different region). The transport egress materializes the rope of pbuf-views into a contiguous CAN-DMA buffer (one copy at the transport boundary).
 
-This is a **bridge-time** copy, not a per-fanout copy. Subscribers on the lwIP side still see zero-copy fanout; only the cross-substrate hop pays. See [02-graph-model.md](02-graph-model.md) §read-vs-write copy semantics for the per-transport copy table.
+This is an **egress-time** copy, not a per-fanout copy. Subscribers on the lwIP side still see zero-copy fanout; only the cross-substrate hop pays. See [02-graph-model.md](02-graph-model.md) §read-vs-write copy semantics for the per-transport copy table.
 
 ---
 
@@ -454,7 +454,7 @@ L2 frame parsing tolerates unaligned access (per [01-data-format.md](01-data-for
 - The protocol's wire bytes — see [01-data-format.md](01-data-format.md).
 - The view abstraction or refcount semantics — see [08-views-and-ownership.md](08-views-and-ownership.md).
 - Allocation policy (which backend a given vertex uses, fallback strategy on pool exhaustion) — application or framework concern.
-- Cross-substrate routing decisions — bridge layer concern.
+- Cross-substrate routing decisions — forwarder / transport-egress concern.
 - Garbage collection — there is none; lifetime is explicit per backend's destroy callback.
 
 ---

@@ -17,7 +17,7 @@ semantics*, not the bytes. A single-link `view_t` is the hot path and allocates
 nothing; a multi-link `rope_t` models scatter-gather. `rope_t::to_iovec()` hands the
 chain to `writev`/`sendmsg`-style egress with **zero copies**; `rope_t::flatten()`
 materializes it into one contiguous segment only when a flat-buffer consumer
-demands it (the single bridge-boundary copy). Assembling a multi-buffer message is
+demands it (the single transport-boundary copy). Assembling a multi-buffer message is
 **chaining views into a `rope_t`, never a memcpy** — a contiguous copy happens only
 when `flatten()` runs at a substrate boundary that cannot scatter-gather.
 

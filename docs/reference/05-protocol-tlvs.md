@@ -13,15 +13,15 @@
 | `0x20` – `0x7F` | Reserved for future core extensions |
 | `0x80` – `0xFF` | User-defined application payload types |
 
-Currently assigned: `0x01`–`0x04`, `0x06`–`0x0E` (13 types). `0x05` is **retired** (was generic LIST in earlier drafts; see §`0x05`). `0x0E` is **SPEC** (vertex-creation spec, [ADR-0017](../adr/0017-in-band-vertex-creation-controller-orchestration.md)). The remaining `0x0F` – `0x1F` are reserved for v1 fast-track additions; `0x20` – `0x7F` is the long-term registry.
+Currently assigned: `0x01`–`0x04`, `0x06`–`0x0C`, `0x0E` (12 types). `0x05` is a **reserved code with no assigned meaning** in v1 (see §`0x05`); `0x0D` ROUTER is a **reserved, decodable codepoint with no implemented mechanism** (see §`0x0D`). `0x0E` is **SPEC** (vertex-creation spec, [ADR-0017](../adr/0017-in-band-vertex-creation-controller-orchestration.md)). The remaining `0x0F` – `0x1F` are reserved for v1 fast-track additions; `0x20` – `0x7F` is the long-term registry.
 
 The names below are the canonical type-code names; the reference implementation's C enum (header under `core/include/libtracer/`, pending the protocol-v1 rebuild — [ADR-0001](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0001-extract-reference-implementation-from-strawberry-fw.md)) matches them.
 
 ### Structured TLVs
 
-Several core type codes are **structured** — they carry `opt.PL=1` and their payload is a concatenation of child TLVs. The structured types are: `0x04` SUBSCRIBER, `0x06` PATH, `0x07` POINT, `0x09` STATUS (when non-empty), `0x0A` ACL, `0x0B` SETTINGS, `0x0D` ROUTER, `0x0E` SPEC. Each entry below specifies its own children layout.
+Several core type codes are **structured** — they carry `opt.PL=1` and their payload is a concatenation of child TLVs. The structured types are: `0x04` SUBSCRIBER, `0x06` PATH, `0x07` POINT, `0x09` STATUS (when non-empty), `0x0A` ACL, `0x0B` SETTINGS, `0x0E` SPEC. Each entry below specifies its own children layout.
 
-Earlier drafts had a generic `0x05` LIST type that any structured container could use; that's gone. Every structured container declares its purpose via its type code. User-range type codes (`0x80–0xFF`) MAY also be structured (set `opt.PL=1`) for application-defined records.
+There is no generic container type: every structured container declares its purpose via its type code. User-range type codes (`0x80–0xFF`) MAY also be structured (set `opt.PL=1`) for application-defined records.
 
 ---
 
@@ -181,7 +181,7 @@ Policy is **enforced producer-side** (before fan-out). For a **composite** subsc
 
 ### Producer fan-out to remote subscribers
 
-When a SUBSCRIBER is written into `<vertex>:subscribers[N]` over a transport (an inbound `FWD{WRITE}` to `:subscribers[]`, RFC-0004 §D), the slot retains the request's **accumulated return route** (the FWD `src`) and the inbound link. Thereafter a write to that vertex fans out a delivery back to the consumer along that return route — a `FWD{WRITE, dst=<return route>, payload=<VALUE>}` (delivery-is-a-write), or, when the subscriber set `delivery_compact`, an auto-promoted `COMPACT` (advertised once per flow, then streamed; re-advertised after a reconnect — §route-handle). This is the producer half of consumer-initiated subscription; it composes the existing field-writes and adds no wire verb (RFC-0004 / ADR-0035 slice 4, #136).
+When a SUBSCRIBER is written into `<vertex>:subscribers[N]` over a transport (an inbound `FWD{WRITE}` to `:subscribers[]`, RFC-0004 §D), the slot retains the request's **accumulated return route** (the FWD `src`) and the inbound link. The route bytes are copied **once**, at subscribe time, into a refcounted segment; the slot holds a `view_t` over it. Thereafter a write to that vertex fans out a delivery back to the consumer along that return route — a `FWD{WRITE, dst=<return route>, payload=<VALUE>}` (delivery-is-a-write), or, when the subscriber set `delivery_compact`, an auto-promoted `COMPACT` (advertised once per flow, then streamed; re-advertised after a reconnect — §route-handle). Each full-route delivery **refcount-clones** the stored route and scatter-gathers the frame from stack-built heads + the roped route + the roped value — no route or payload bytes are copied per delivery, and an in-flight rope keeps the route segment alive across a concurrent unsubscribe. This is the producer half of consumer-initiated subscription; it composes the existing field-writes and adds no wire verb (RFC-0004 / ADR-0035 slice 4, #136).
 
 A **transient-local** producer (`:settings.durability == 1`, [02-graph-model.md](02-graph-model.md)) additionally **latches** its current value to a *fresh* subscriber: the subscribe itself emits one immediate delivery of the vertex's last-known value, so a late joiner paints the current state without waiting for the next write. A `volatile` producer (the default, `durability == 0`) delivers only writes that happen after the subscribe. The latch reuses the same delivery path (full-route or `COMPACT`); it carries no new wire bytes, so it is observable only as delivery *timing* and adds no conformance vector.
 
@@ -221,19 +221,19 @@ The optional fields after `target_path` may grow. New optional sub-fields MUST a
 
 ---
 
-## `0x05` — RETIRED (formerly LIST)
+## `0x05` — RESERVED
 
-Type code `0x05` was a generic structured container in earlier drafts. **Retired.** Every structured TLV in the registry now has a specific purpose declared by its type code; the generic-container concept is gone.
+Type code `0x05` is a **reserved code with no assigned meaning** in v1. Structured payloads are expressed by `opt.PL`, not by a dedicated container type: every structured TLV in the registry has a specific purpose declared by its type code.
 
 - Senders MUST NOT emit `type=0x05`.
 - Receivers MUST treat `type=0x05` as a reserved-but-unassigned code per [01-data-format.md](01-data-format.md) §handling unknown type codes (skip safely, do not crash).
-- The code is permanently retired; collision-prevention prevents reuse.
+- The code is not available for reuse; collision-prevention keeps it unassigned.
 
-The structural concept survives: any TLV with `opt.PL=1` is a structured container holding concatenated child TLVs. The protocol's structured types are SUBSCRIBER (0x04), PATH (0x06), POINT (0x07), STATUS (0x09), ACL (0x0A), SETTINGS (0x0B), ROUTER (0x0D). User-defined structured records use user-range type codes (`0x80–0xFF`) with `PL=1`.
+The structural concept lives in the options bits: any TLV with `opt.PL=1` is a structured container holding concatenated child TLVs. The protocol's structured types are SUBSCRIBER (0x04), PATH (0x06), POINT (0x07), STATUS (0x09), ACL (0x0A), SETTINGS (0x0B), SPEC (0x0E). User-defined structured records use user-range type codes (`0x80–0xFF`) with `PL=1`.
 
-### Why retired
+### Why no generic container
 
-Generic LIST had no semantic meaning of its own — it was the un-named default whose role was always "structured stuff goes here." Real uses always have a specific purpose. Forcing every container to declare its purpose via type code is what makes the type byte a proper L3 concern.
+A generic list would have no semantic meaning of its own — an un-named default whose role is always "structured stuff goes here." Real uses always have a specific purpose. Forcing every container to declare its purpose via type code is what makes the type byte a proper L3 concern.
 
 ---
 
@@ -266,14 +266,14 @@ PATH (PL=1) {
 
 - Inside SUBSCRIBER as `target_path`.
 - As the PATH form of `tracer_read`/`write`/`await` arguments when the path is constructed programmatically (the C API also accepts string form for ergonomics).
-- Inside ROUTER for bridged-source path metadata.
+- As the `dst`/`src` routes of a `FWD` frame (§reserved range) and the `route` of an ADVERTISE (§route-handle frames).
 
 ### Note on string form vs PATH-TLV form
 
 A path may be expressed two ways:
 
 - **String form**: `"/sensor/temp"` — a UTF-8 byte string with `/` separators. Used at the API surface for ergonomics. Stored as a single VALUE TLV when transported as data.
-- **PATH-TLV form**: a PATH TLV (structured, NAME children). Used inside structured TLVs (SUBSCRIBER, ROUTER) where the parser needs to validate segments individually.
+- **PATH-TLV form**: a PATH TLV (structured, NAME children). Used inside structured TLVs (SUBSCRIBER, FWD) where the parser needs to validate segments individually.
 
 Both forms canonicalize to the same internal representation. Implementations MUST accept either form where a path is expected.
 
@@ -308,7 +308,7 @@ flowchart LR
 
 The encoder's invariants:
 
-- **Outer header** (4 bytes, default `LL=0`): `06 40 LL_lo LL_hi`. `0x40` = `PL=1` (bit 6) only, no TS, no CR, `LL=0`. (Earlier drafts of this section showed `0x50` for "PL only" — that was a bug; `0x50` = PL+CR per [01-data-format.md](01-data-format.md) §options bitfield.)
+- **Outer header** (4 bytes, default `LL=0`): `06 40 LL_lo LL_hi`. `0x40` = `PL=1` (bit 6) only, no TS, no CR, `LL=0`. (Note the distinction: `0x50` = PL+CR per [01-data-format.md](01-data-format.md) §options bitfield — "PL only" is `0x40`.)
 - **`length`** = sum of child NAME TLV total sizes. With no inner trailers, each NAME costs `4 + len(segment_bytes)`.
 - **Each NAME child**: `02 00 SS_lo SS_hi <segment_bytes>`, where `SS` is the segment's UTF-8 byte length (`1..64`).
 - **No inner trailers.** Children inside a PATH carry no TS and no CRC; the outer (when in transit) covers everything.
@@ -418,7 +418,7 @@ The error code is always the first byte. Optional follow-on TLVs (DESCRIPTION, V
 0x03  INVALID_PATH         Malformed PATH or non-UTF-8 NAME
 0x04  TYPE_MISMATCH        Payload type incompatible with endpoint schema
 0x05  CRC_FAIL             Wire CRC did not match
-0x06  VERSION_MISMATCH     Peer advertised an incompatible protocol version (discovery/bridge-level)
+0x06  VERSION_MISMATCH     Peer advertised an incompatible protocol version (discovery-level)
 0x07  BACKPRESSURE         Subscriber queue full; sample dropped per QoS
 0x08  TIMEOUT              No response within deadline
 0x09  TRANSPORT_DOWN       Underlying transport disconnected
@@ -431,7 +431,7 @@ The error code is always the first byte. Optional follow-on TLVs (DESCRIPTION, V
 0x80  – 0xFF  user-defined
 ```
 
-> **⚠ Superseded by RFC-0002 (draft):** this flat byte registry is replaced by the `tr::<concept>::<error>` namespace (registered-code-or-string identity; severity/disposition in the registry). Retained until RFC-0002 lands; the `0x06` row is corrected in the interim.
+> **Registry status:** this flat byte registry is the v1 registry. [RFC-0002](../spec/rfcs/0002-protocol-error-model.md) (draft) proposes a `tr::<concept>::<error>` namespace (registered-code-or-string identity; severity/disposition carried in the registry); the byte table above remains authoritative until that RFC is accepted.
 
 ### Where it appears
 
@@ -619,52 +619,20 @@ type = 0x80 (user-range record, sender and receiver agree on shape)
 
 `4 (outer header) + 20 (children) + 4 (outer CRC) = 28 bytes total`.
 
-(Earlier drafts wrapped TIME + VALUE in a generic `0x05 LIST`. With LIST retired, the application uses a specific user-range type code to declare what the wrapper means.)
+(The application uses a specific user-range type code to declare what the wrapper means — there is no generic container type; see §`0x05`.)
 
 ---
 
-## `0x0D` — ROUTER
+## `0x0D` — ROUTER (reserved)
 
-```{note}
-**Scope (post-RFC-0004).** `ROUTER` is **live and unchanged**, but its scope narrowed: it wraps a delivery only on the **cyclic / multi-path** side (where the same data can arrive two ways and `(origin, ts)` dedup is needed). The **primary** remote mechanism is now the source-routed **`FWD`** (`0x0F`) frame below ([RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md) / [ADR-0035](../adr/0035-implementing-rfc-0004-remote-operation-addressing.md)), which is loop-free by construction and carries no ROUTER metadata. The ROUTER-wrap **egress** of the M4 `bridge_t` is deleted as `bridge_t` dissolves into the transport-vertex tree ([ADR-0037](../adr/0037-net-side-channels-dissolve-into-vertex-tree-compositor.md)/[0038](../adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md), Stage-2); the `0x0D` wire type stays.
-```
+`0x0D` is a **reserved, decodable codepoint with no implemented mechanism** ([ADR-0040](../adr/0040-net-plane-is-explicit-source-routed-only.md)). The frame codec parses a `0x0D` TLV generically (a structured container when `opt.PL=1`, per the rules of [01-data-format.md](01-data-format.md)); no protocol mechanism emits or interprets it.
 
-Bridge envelope. ROUTER **wraps** a data TLV with routing metadata when the data crosses a bridge. To downstream subscribers, ROUTER is invisible (the bridge sheds it on ingest); to other bridges, ROUTER carries the dedup key and routing telemetry.
+The remote-operation plane is the source-routed **`FWD`** (`0x0F`, below): every remote endpoint is addressed by an explicit source route, `dst` shrinks monotonically per hop, and a `dst` revisiting a node is malformed (`ERROR=INVALID_PATH`) — loop-free by construction, so **FWD source-routing needs no duplicate suppression**. Parallel links to one peer are different explicit addresses (deliberate redundancy), not auto-multipath, so no "same value arrived two ways" case exists to dedup.
 
-### Payload layout
+The codepoint is held in reserve for a possible future *flooding profile* (an auto-multipath deployment class outside the current topology scope). Until such a profile assigns it a payload layout:
 
-ROUTER is structured (`opt.PL=1`). Its children are NAME-tagged metadata fields followed by the wrapped data TLV:
-
-```
-ROUTER (PL=1) {
-  NAME "origin_peer_id"   VALUE <16 bytes peer id>     ; required
-  NAME "origin_timestamp" TIME  <u64 ns>                ; required, cycle dedup key
-  NAME "hop_count"        VALUE <u8>                    ; required, incremented per bridge
-  NAME "transport_label"  NAME  <utf-8>                 ; optional, e.g. "transport_can"
-  NAME "route_cost"       VALUE <u16>                   ; optional, application metric
-  NAME "original_path"    PATH  <segments>              ; optional, source-side path before mount-prefix
-  NAME "data"             <wrapped TLV of any type>     ; required, MUST be the last child
-}
-```
-
-The `NAME "data"` marker tags the wrapped data TLV so that future metadata extensions (more `NAME "foo" + value` pairs) can be inserted before it without breaking parsers. **The wrapped data TLV MUST be the last child of ROUTER.**
-
-### Header settings
-
-- `opt.PL = 1`.
-
-### Where it appears
-
-- Wrapping a TLV at the moment a bridge re-emits it on a transport. The wrapping is shed on ingest at the next bridge and the bare data TLV is stored at the proxy vertex (see [02-graph-model.md](02-graph-model.md) §the ROUTER shedding rule).
-
-### Cycle handling
-
-The `(origin_peer_id, origin_timestamp)` pair is the dedup key. A receiving bridge maintains a recent-set of seen pairs; already-seen TLVs are dropped silently. **The recent-set is a bounded, evictable best-effort optimization, not the termination guarantee** — `hop_count`/`MAX_HOPS` (below) guarantees termination, so a bridge MAY size the recent-set freely (even zero) and accept bounded duplicate delivery (≤ `MAX_HOPS` × fanout) on eviction. Size it for your topology to minimize redundant forwarding — `deepest_expected_route_fanout × longest_expected_delivery_window` is a good target (per [07-host-embedding.md](07-host-embedding.md) §cycle handling). See [ADR-0014](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0014-router-cycle-termination-hop-count.md).
-
-### Constraints
-
-- `hop_count` SHOULD start at 0 at the source bridge and be incremented by each subsequent bridge. A bridge encountering `hop_count >= MAX_HOPS` (recommended 32) MUST drop the TLV and emit a local `STATUS=ERROR(NESTING_TOO_DEEP)`.
-- The wrapped data TLV's own `opt.PL`, type, and trailer are independent of ROUTER's. ROUTER's outer trailer (if present) covers the entire concatenated children including the wrapped data TLV; the wrapped TLV's own trailer is preserved verbatim through the wrap/unwrap cycle.
+- Senders MUST NOT emit `type=0x0D`.
+- Receivers MUST handle `type=0x0D` per the unknown-code rules of [01-data-format.md](01-data-format.md) (decode structurally, skip safely, do not crash).
 
 ---
 
@@ -719,6 +687,24 @@ sequenceDiagram
     N-->>C: FWD{ op=REPLY, dst=/client, kind=RESULT, VALUE }
     Note over C,N: WRITE/AWAIT/subscribe ride the same shape;<br/>an error returns kind=ERROR + STATUS{ERROR}
 ```
+
+At the terminus — the one place a node reads the whole FWD tree — the frame is decoded into a flat **arena** rather than an owning tree ([ADR-0041](../adr/0041-terminus-arena-decode-span-contract.md)): `wire::decode_into(frame, mr)` parses it into a `tlv_arena_t` of pre-order span-nodes (`{type, opt, wire — trailer-excluded, body, end, canonical_path}`), every span pointing into the inbound frame; `op_resolver_t::resolve` runs over that arena. The nodes are drawn from an injected `std::pmr::memory_resource` — a host that supplies a pool resource over its own slab gets a terminus that allocates nothing from the global heap.
+
+```{mermaid}
+flowchart LR
+    F["inbound FWD frame<br/>(bytes)"] --> D["wire::decode_into(frame, mr)"]
+    D --> A["tlv_arena_t<br/>flat pre-order span-nodes"]
+    A --> R["op_resolver_t::resolve"]
+    R --> K["vertex lookup:<br/>span-aliased path key<br/>(canonical PATH body IS the map key)"]
+    R --> S["WRITE store:<br/>one trailer-sliced copy<br/>(header+body, trailer-less at rest)"]
+    R --> E["FWD{REPLY} head direct-emitted<br/>into ONE exactly-sized segment;<br/>payload refcount-roped, zero-copy"]
+```
+
+Three properties of the arena resolve:
+
+- **Span-aliased vertex lookup** — a canonical PATH body is byte-identical to the graph's vertex-map key, so dispatch uses the frame's own bytes as the key with zero materialization (a non-canonical PATH from a foreign encoder falls back to a re-emit).
+- **Trailer-sliced stores** — a stored WRITE value copies the node's header+body span exactly once; the trailer never lands at rest.
+- **Direct-emitted reply** — every reply-head length is known from the node spans, so the `FWD{REPLY}` head (including the route bytes, copied once) is emitted straight into one exactly-sized segment, and a READ's reply payload rides as a zero-copy refcounted rope.
 
 Across hops, `FWD` is **source-routed and stateless**: each forwarder strips the leading `dst` segment (the next link) and prepends its name for the inbound link to `src` (a zero-copy rope head-prepend), so `dst` shrinks toward the target while `src` grows into the return route. A `REPLY` retraces that accumulated `src` and does **not** itself accumulate:
 

@@ -44,7 +44,7 @@ A path that violates any limit MUST be rejected with `ERROR=INVALID_PATH`.
 /sensor/temp:subscribers[]             — append-or-list view of subscribers
 /sensor/temp:settings.reliability      — a nested control field
 /sensor/temp:settings.transport_tcp.send_buf_kb  — module-namespaced field
-/can-bridge/wheel-encoder/left         — a vertex behind a bridge
+/net/can0/wheel-encoder/left           — a remote vertex, routed through a transport-vertex
 /camera/frame[7]                       — element 7 of an indexed-children vertex
 /camera/frame[]                        — append target (publisher) or list (reader)
 /i2c-bus/0x68/accel                    — peripheral on I²C bus 0x68
@@ -137,7 +137,7 @@ A subscription with a wildcard requires the router to walk the wildcard table on
 
 ### Subscriber identity in wildcard subscriptions
 
-A wildcard subscriber receives a stream of TLVs from many concrete paths and MUST be able to determine which concrete path produced each. For **local** delivery (subscriber and dispatcher in one node) the mechanism is implementation-defined — typically the matched path is passed out-of-band (a callback argument). For **bridged/remote** delivery it must travel on the wire: the matched concrete `PATH` (`0x06`) accompanies the delivered TLV. *(The on-wire form is proposed under [RFC-0003](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0003-bridged-wildcard-delivery-path.md); until it lands, cross-implementation bridged wildcard delivery is not guaranteed interoperable.)*
+A wildcard subscriber receives a stream of TLVs from many concrete paths and MUST be able to determine which concrete path produced each. For **local** delivery (subscriber and dispatcher in one node) the mechanism is implementation-defined — typically the matched path is passed out-of-band (a callback argument). For **remote** delivery it must travel on the wire: the matched concrete `PATH` (`0x06`) accompanies the delivered TLV. *(The on-wire form is proposed under [RFC-0003](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0003-bridged-wildcard-delivery-path.md); until it lands, cross-implementation remote wildcard delivery is not guaranteed interoperable.)*
 
 ---
 
@@ -171,8 +171,8 @@ Each subsequent `write("/camera/frame[i]", ...)` matches the wildcard and produc
 
 The subscriber assembles the slices into a coherent group keyed by **`(origin_peer_id, ts)`**, with each slice's `index` giving its position:
 
-- All slices with the same **`(origin_peer_id, ts)`** belong to the same logical message. This is the **same in-flight identity** the cycle-dedup recent-set uses ([02-graph-model.md](02-graph-model.md), [07-host-embedding.md](07-host-embedding.md)); grouping by `ts` alone would merge slices from two publishers that happen to emit at the same timestamp.
-- `origin_peer_id` is the **originating** publisher, not the immediate hop. The assembler MUST retain it across a bridge that sheds the ROUTER envelope — the slice arrives with the bridge as its immediate sender, but the ROUTER carried the origin.
+- All slices with the same **`(origin_peer_id, ts)`** belong to the same logical message; grouping by `ts` alone would merge slices from two publishers that happen to emit at the same timestamp.
+- `origin_peer_id` is the **originating** publisher, not the immediate hop. For a remotely-delivered slice the origin is identified by the delivery's source route — the accumulated `src` PATH names the full route back to the producer ([07-host-embedding.md](07-host-embedding.md)).
 - The slice's `index` (from the `[N]` in its address) gives its position within the logical message.
 - A slice may arrive at any time within the deadline window.
 - Loss of an **interior** slice is detected as a missing index at deadline; loss of **trailing** slice(s) is detectable only when the group total is known (see §loss detection).
@@ -208,41 +208,39 @@ Missing index `k` in a group with `expected_count = N` and observed indices `{0.
 
 ---
 
-## Address scopes: local, bridged, global
+## Address scopes: local, routed, global
 
-The same path can resolve differently depending on which transport produced the write. The protocol distinguishes three scopes:
+The same path can resolve differently depending on which node evaluates it. The protocol distinguishes three scopes:
 
 ### Local scope
 
-A path resolves within the host's own graph. No bridge prefix. Applies to:
+A path resolves within the host's own graph. No route prefix. Applies to:
 
 - In-process publishers and subscribers on the same node.
 - Vertex paths created by application code on this node.
 - Module-exported vertex paths (e.g., `transport_i2c` exposing `/i2c-bus/0x68/accel`).
 
-### Bridged scope
+### Routed scope (path-as-route)
 
-```{note}
-**Trajectory (post-RFC-0004).** The `mount = "…"` / `source = "…"` **bridge republish** prefixing below is the M4 model. The current addressing is **path-as-route** ([ADR-0027](../adr/0027-transport-and-connections-are-vertices.md) / [CONTEXT.md §Path-as-route](../../CONTEXT.md)): a remote vertex is reached by walking *through* a transport-vertex — `/net/<conn>/<remote path>` — where the mount prefix **is** the transport-vertex's own path, not a configured string. The send-side suffix and this receive-side mount prefix are the same address ([ADR-0038](../adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md)). See [reference/13](13-network-formation.md).
-```
+A remote vertex is reached by walking *through* a transport-vertex ([ADR-0027](../adr/0027-transport-and-connections-are-vertices.md) / [CONTEXT.md §Path-as-route](../../CONTEXT.md)): the path `/net/<conn>/<remote path>` — e.g. `/net/can0/sensor/wheel/left` — is the local address of the remote vertex, and **the path is the route**. The prefix is the transport-vertex's own path, not a configured string; the send-side suffix and the receive-side prefix are the same address.
 
-A path is **prefixed** with the bridge's mount point when the bridge republishes incoming TLVs. A bridge configured with `mount = "/can-bridge"` and `source = "transport_can"` republishes a CAN-borne write to `/sensor/wheel/left` as `/can-bridge/sensor/wheel/left` on the local graph.
+The operation travels as an `FWD` frame carrying its own route: each forwarder hop strips its leading `dst` segment and prepends the inbound-link NAME to `src`, so `dst` is always the remaining forward route and `src` the accumulated return route. Explicit source routes cannot loop — `dst` shrinks monotonically per hop, and a `dst` that revisits a node is rejected with `ERROR=INVALID_PATH`. Nothing is republished at a fixed prefix; a consumer addresses the routed path directly, and deliveries return along the accumulated route. See [reference/13](13-network-formation.md).
 
-Subscribers on the local graph see the prefixed path. The original path on the source side is not visible past the bridge unless the bridge is configured to publish a manifest.
+Two links to the same peer are two different routed addresses (e.g. `/net/ws0/...` and `/net/can0/...`) — deliberate redundancy the consumer subscribes to explicitly, not auto-multipath.
 
 ### Global scope
 
-The "global" scope is the union of all hosts' local + bridged graphs. There is no single authority that owns it; it is a logical view assembled by traversing peer-id mounts.
+The "global" scope is the union of all hosts' local + routed graphs. There is no single authority that owns it; it is a logical view assembled by composing routes through transport-vertices.
 
-A common convention (not normative): each peer's data lives under `/peer/{peer_id}/...` on every other host. The bridge configuration `mount = "/peer/{peer_id}"` interpolates the connecting peer's announced node name and creates one mount per remote peer. This keeps the global graph navigable without name collisions.
+A common convention (not normative): a peer's data is addressed through the connection that reaches it — `/net/<conn>/...` — and multi-hop reach composes one link segment per hop. This keeps the global graph navigable without name collisions.
 
 ### Collision rules
 
-When two transports / bridges would mount data at the same local path:
+When two registrations would claim the same local path:
 
-- **First-binder wins**: the first transport to bind a vertex name owns it. Subsequent attempts return `ERROR=PATH_IN_USE` (a yet-to-be-assigned error code in the `0x0C..0x7F` reserved range).
-- Configuration MAY use `mount` prefixes to avoid collisions explicitly (`/can-bridge`, `/tcp-bridge`).
-- For peer-id mounts (`/peer/{peer_id}`), uniqueness comes from the peer-id namespace. Conflicting peer-ids on the network are a discovery-layer problem, not an addressing problem.
+- **First-binder wins**: the first registrant to bind a vertex name owns it. Subsequent attempts return `ERROR=PATH_IN_USE` (a yet-to-be-assigned error code in the `0x0C..0x7F` reserved range).
+- Configuration avoids collisions by giving each link a distinct connection NAME (`/net/can0`, `/net/ws0`).
+- For routed addresses, uniqueness comes from the connection-NAME namespace of each node along the route. Conflicting peer identities on the network are a discovery-layer problem, not an addressing problem.
 
 ---
 
@@ -277,7 +275,7 @@ Three modes, in order of preference for embedded targets:
 | ---- | ---- | ---- | ---- |
 | **Build-time literal** | `.rodata` / flash | At compile time (macro or codegen emits the byte literal) | Pointer-load — zero runtime work |
 | **Init-time registration** | RAM (long-lived segment) | Once during `tracer_init` | Pointer-load |
-| **String at hot path** (legacy / convenience) | RAM (short-lived) | On every call | Parse + alloc + canonicalize |
+| **String at hot path** (string-parsed, convenience) | RAM (short-lived) | On every call | Parse + alloc + canonicalize |
 
 The string-at-hot-path mode is **NOT required** of conforming implementations and a minimum-feature (P0) build MAY omit the string entry points entirely.
 
@@ -342,7 +340,7 @@ Since `.rodata` is read-only, the bytes are never modified. The router's dispatc
 
 Some paths are not known at compile time:
 
-- Peer-id-mounted paths (`/peer/{peer_id}/sensor/temp`) — the peer-id is discovered at runtime.
+- Connection-routed paths (`/net/<conn>/sensor/temp`) — the connection name is established at runtime.
 - Address-shift slice paths (`/camera/frame[0]`, `/camera/frame[1]`, …) — the index varies per slice.
 
 For these, the implementation provides:

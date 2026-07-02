@@ -16,7 +16,7 @@
 
 - **Schema**: a structured TLV (typically a `POINT` or a `SETTINGS`-shaped record) returned at `<vertex>:schema`, enumerating the writable fields the vertex exposes. Includes the core fields (`:subscribers[]`, `:settings.*`, `:liveness.*`, `:acl`) plus any module-namespaced fields. Read-only.
 
-- **Router** (also called bridge): a vertex that receives TLVs from one transport and re-publishes them onto the local graph. To downstream subscribers a router is indistinguishable from a local source.
+- **Forwarder** (router): the stateless component (`fwd_router_t`) that routes `FWD` frames between a node's local graph and its named transport links — each hop strips the leading `dst` segment and grows `src` with the way back. To a downstream subscriber a forwarded delivery is indistinguishable from a local write.
 
 - **Buffer segment**: a refcounted region of real memory backing one or more views. The unit of ownership.
 
@@ -36,7 +36,7 @@ The protocol stack has six distinct layers of concern, numbered bottom-up from m
 | **L1 — Views and ownership** | Refcounted memory views, ropes (chains of views), the TLV-as-cast | `segment`, `view`, refcount, rope chain | [08-views-and-ownership.md](08-views-and-ownership.md) |
 | **L2 — Frame envelope** | Slice the byte stream into framed units; verify integrity; carry wire-time | `length`, `payload`, optional `trailer_ts` and `trailer_crc` | [01-data-format.md](01-data-format.md) |
 | **L3 — TLV semantics** | Interpret the type code; recurse into structured (PL=1) containers | `type`, `opt.PL`, payload-as-bytes-or-children | [05-protocol-tlvs.md](05-protocol-tlvs.md) |
-| **L4 — Graph endpoint logic** | Route TLVs to vertices, fan out to subscribers, enforce QoS / ACL, manage liveness, handle bridges | paths, vertices, edges, schemas, settings | [02-graph-model.md](02-graph-model.md) (this doc), [03-addressing.md](03-addressing.md), [04-communication-flows.md](04-communication-flows.md) |
+| **L4 — Graph endpoint logic** | Route TLVs to vertices, fan out to subscribers, enforce QoS / ACL, manage liveness, forward `FWD` frames | paths, vertices, edges, schemas, settings | [02-graph-model.md](02-graph-model.md) (this doc), [03-addressing.md](03-addressing.md), [04-communication-flows.md](04-communication-flows.md) |
 | **L5 — Application semantics** | What the bytes inside a `VALUE` mean; what an endpoint's value represents; control logic over the data | application-defined | application code |
 
 The substrate layers (L0 and L1) are what give libtracer zero-copy reach. A TLV in flight or at rest is **a view tree over real memory**, not a decoded message struct. The wire bytes IS the in-memory representation IS the graph node — across boundaries, the trailer attaches/strips ([01-data-format.md](01-data-format.md)) but the payload bytes are invariant.
@@ -47,12 +47,12 @@ flowchart BT
     L1["L1 — Views and ownership<br/><i>refcounted segments, ropes, TLV-as-cast</i>"]
     L2["L2 — Frame envelope<br/><i>header + payload + optional trailer</i>"]
     L3["L3 — TLV semantics<br/><i>type code, opt.PL recursion</i>"]
-    L4["L4 — Graph endpoint logic<br/><i>vertices, paths, subscriptions, bridges</i>"]
+    L4["L4 — Graph endpoint logic<br/><i>vertices, paths, subscriptions, forwarding</i>"]
     L5["L5 — Application semantics<br/><i>what the bytes mean</i>"]
     L0 -- "alloc / release / cache hooks" --> L1
     L1 -- "view_as_tlv (zero-copy cast)" --> L2
     L2 -- "type byte + opt.PL" --> L3
-    L3 -- "TLV registry: VALUE, PATH, ROUTER…" --> L4
+    L3 -- "TLV registry: VALUE, PATH, FWD…" --> L4
     L4 -- "read / write / await on handle" --> L5
     style L0 fill:#fef3c7,stroke:#92400e
     style L1 fill:#fef3c7,stroke:#92400e
@@ -64,7 +64,7 @@ flowchart BT
 
 The `type` byte sits at the L2 / L3 boundary. It is **carried** in the wire header (so a router can decide whether to recurse without parsing payload) but its **meaning** is L3. A pure-framing parser that just dispatches by `length + CRC` could ignore `type` entirely; a TLV-aware router uses `type` (and `opt.PL`) to decide whether to walk into nested children.
 
-Priority is **NOT** an L2 concern. An earlier design carried priority bits in `opt`; that was wrong — priority is transport-time and per-link, not coherent across the network. A router that wants priority-aware dispatch reads `:settings.priority` once per subscription (L4) and caches it. See [01-data-format.md](01-data-format.md) §why no priority bits.
+Priority is **NOT** an L2 concern. The `opt` byte carries no priority bits — priority is transport-time and per-link, not coherent across the network. A router that wants priority-aware dispatch reads `:settings.priority` once per subscription (L4) and caches it. See [01-data-format.md](01-data-format.md) §why no priority bits.
 
 Implementations MAY refactor `type` out of the wire header (into "first byte of payload") in a future major version without semantic change; this is a layout question internal to L2/L3, not a protocol-level decision.
 
@@ -107,7 +107,7 @@ Both are the **Composite pattern**, but they compose *different things* and are 
                                     ^ the header splits across the A/B boundary
   ```
 
-- **A `ROUTER` uses a rope but is not one.** The bridge envelope ([07-host-embedding.md](07-host-embedding.md)) composes *meaning* (metadata + the wrapped TLV); the bytes it forwards stay a rope. Pass-through is "wrap meaning around a rope, re-emit via scatter-gather, never copy" — the router never inherits or becomes a rope.
+- **A `FWD` uses a rope but is not one.** The remote-operation envelope ([07-host-embedding.md](07-host-embedding.md)) composes *meaning* (op + routes + the payload TLV); the bytes a hop forwards stay a rope. A forward hop is "adjust the route heads, re-emit the rest via scatter-gather, never copy" — the forwarder never inherits or becomes a rope.
 
 The two sections below are this same point made concrete: **How nested TLVs work** is the *meaning* axis; **How that structured TLV exists in memory** is the *storage* axis.
 
@@ -116,7 +116,7 @@ The two sections below are this same point made concrete: **How nested TLVs work
 When the `PL` (payload-is-structured) bit is set in the header `opt` byte, the payload is interpreted as a sequence of child TLVs concatenated end-to-end. Each child has its own header (4 or 6 bytes per [01-data-format.md](01-data-format.md), depending on `opt.LL`) and optional trailer; any child may itself have `PL=1` for further nesting.
 
 ```
-Outer structured TLV (PL=1, e.g. PATH, SETTINGS, ROUTER, or a user-range record):
+Outer structured TLV (PL=1, e.g. PATH, SETTINGS, FWD, or a user-range record):
   +-----------+--------+----------+
   | type=0xXX | opt=PL | length   |  header (4 bytes default; 6 if LL=1)
   +-----------+--------+----------+
@@ -130,7 +130,7 @@ Outer structured TLV (PL=1, e.g. PATH, SETTINGS, ROUTER, or a user-range record)
   +--------------------------------+
 ```
 
-Inner TLVs typically carry no trailer of their own — the outer's CRC (if present) covers the whole concatenated content. A bridge that wants to split children out and re-route them independently MAY emit them with their own trailers, paying the per-child cost.
+Inner TLVs typically carry no trailer of their own — the outer's CRC (if present) covers the whole concatenated content. A forwarder that wants to split children out and re-route them independently MAY emit them with their own trailers, paying the per-child cost.
 
 This structured TLV IS the graph node. To walk a vertex's children: parse the children, iterate them, recurse (iteratively, per [01-data-format.md](01-data-format.md)) into any with `PL=1`.
 
@@ -345,10 +345,10 @@ This means the same payload bytes flow through every state of the TLV's life:
 | Recorded to disk by a recorder module | `header + payload` (trailer dropped at ingress to recorder) |
 | Sent on a transport | `header + payload + trailer` (trailer attached at egress) |
 | Received over a transport | `header + payload` (trailer validated and dropped) |
-| Re-emitted by a bridge to another transport | `header + payload + new_trailer` (fresh wire-time, fresh CRC) |
+| Forwarded to another transport | `header + payload + new_trailer` (fresh wire-time, fresh CRC) |
 | Replayed by a recorder module | `header + payload + new_trailer` |
 
-In every state the **payload bytes are byte-identical** to every other state. A view that names those payload bytes survives unchanged through bridge re-emission, recorder round-trip, and subscriber fan-out. Subscribers can compute hashes / equality / signatures over the payload region without worrying about whether the TLV is currently in flight or at rest.
+In every state the **payload bytes are byte-identical** to every other state. A view that names those payload bytes survives unchanged through forward hops, recorder round-trip, and subscriber fan-out. Subscribers can compute hashes / equality / signatures over the payload region without worrying about whether the TLV is currently in flight or at rest.
 
 A subscriber that wants the application-domain timestamp reads it from a sibling `TIME` TLV inside the payload (if present) — that lives inside the payload bytes and survives every transition. The wire-trailer `TS` is for transport diagnostics only; it does not survive at-rest storage.
 
@@ -384,7 +384,7 @@ A producer that has no good value to publish — a sensor that faulted, a readin
 - **Stale** (the value is old, or the producer went quiet) is **consumer-derived**, never a flag the producer sets:
   - *Sample age*: the optional wire timestamp (`opt.TS`, [01-data-format.md](01-data-format.md)) carries when the sample was taken; a consumer treats `now − ts > tolerance` as stale.
   - *Producer liveness*: `:settings.deadline_ns` plus the read-only `:liveness.last_seen_ns` / `:liveness.missed_deadlines` fields (above) say whether the producer is still writing within its contract. A missed deadline is the canonical "this vertex went stale" signal, and it is observable without the producer doing anything.
-- **Invalid / fault** (the producer is alive but its value is meaningless right now) is a **`STATUS=ERROR(<reason>)` delivered in place of a VALUE** — the same pattern a bridge uses to surface `STATUS=ERROR(TRANSPORT_DOWN)` ([07-host-embedding.md](07-host-embedding.md)). Delivery is an ordinary write ([CONTEXT.md](../../CONTEXT.md) §delivery *is* a write), so a fault reaches subscribers through the same edge as a value; a type-aware consumer distinguishes a `STATUS` (type `0x09`) from a `VALUE` (type `0x01`) by its type code and reacts (hold last-good, alarm, fail over) exactly as it would for a liveness fault.
+- **Invalid / fault** (the producer is alive but its value is meaningless right now) is a **`STATUS=ERROR(<reason>)` delivered in place of a VALUE** — the same pattern the transport plane uses to surface `STATUS=ERROR(TRANSPORT_DOWN)` ([07-host-embedding.md](07-host-embedding.md)). Delivery is an ordinary write ([CONTEXT.md](../../CONTEXT.md) §delivery *is* a write), so a fault reaches subscribers through the same edge as a value; a type-aware consumer distinguishes a `STATUS` (type `0x09`) from a `VALUE` (type `0x01`) by its type code and reacts (hold last-good, alarm, fail over) exactly as it would for a liveness fault.
 
 This keeps the data plane byte-agnostic: L4 never interprets a payload to decide "is this valid." Validity is either a property of *time* (stale, derived from `ts`/liveness) or an explicit *typed record* (`STATUS`/`ERROR`), never a magic value or a per-VALUE flag bit.
 
@@ -433,40 +433,41 @@ For readers familiar with existing systems:
 | Single API for ctrl + data | yes (field-write) | no (separate services) | no (DCPS + RPC) | no (extra packets) | no (separate `z_get` etc.) |
 | Wire format | TLV (this doc) | DDS-CDR | CDR | proprietary | Zenoh proto |
 | Discovery | module (mDNS/static/gossip) | DDS Simple Discovery | RTPS | broker | Zenoh scouting |
-| Bridge | core | rmw bridges (rmw_zenoh) | DDS routing service | bridges | Zenoh routers |
+| Cross-node forwarding | core (stateless `FWD` hop) | rmw bridges (rmw_zenoh) | DDS routing service | bridges | Zenoh routers |
 
 The unifying feature: in libtracer, every cross-walk row is the **same primitive** (a TLV at a path), not a separate API.
 
 ---
 
-## Graph data vs in-flight messages: the ROUTER shedding rule
+## Graph data vs in-flight messages: the FWD envelope
 
 The TLV substrate plays two distinct roles:
 
-- **Graph data** — what's stored at a vertex. Identity = vertex path. Content = the user's payload, possibly a structured TLV with sibling metadata (e.g., `TIME`). No routing metadata.
-- **In-flight message** — what crosses a transport between vertices, especially when bridged. Identity = `(origin_peer_id, origin_timestamp)`. Content = a `ROUTER` TLV (type `0x0D`, [05-protocol-tlvs.md](05-protocol-tlvs.md)) **wrapping** the data TLV: ROUTER is structured (PL=1) with NAME-tagged metadata children followed by `NAME "data"` and the wrapped TLV as its last child.
+- **Graph data** — what's stored at a vertex. Identity = vertex path. Content = the user's payload, possibly a structured TLV with sibling metadata (e.g., `TIME`). No routing metadata, no trailer (trailer-less at rest).
+- **In-flight remote operation** — what crosses a transport between nodes. Content = a `FWD` TLV (type `0x0F`, [05-protocol-tlvs.md](05-protocol-tlvs.md)) **wrapping** the payload: FWD is structured (PL=1) carrying the op code, the `dst` route (the explicit source route to the target), the `src` route (the accumulated way back), and the payload TLV last.
 
-Both roles use the **same TLV substrate** — same wire format, same in-memory view tree. The difference is structural and lives in the `ROUTER` TLV's presence and where it appears.
+Both roles use the **same TLV substrate** — same wire format, same in-memory view tree. The difference is structural and lives in the `FWD` envelope's presence.
 
 ### The shedding rule (mandatory)
 
-When a bridge dispatches an incoming TLV into the local graph:
+At each **forward hop** (the first `dst` segment names a transport link):
 
-1. **Read the ROUTER** for `(origin_peer_id, origin_timestamp)` and check the bridge's recent-set ([07-host-embedding.md](07-host-embedding.md) §cycle handling).
-2. If already seen, drop silently. No further action.
-3. If new, add to recent-set and **strip the ROUTER from the structure** — the local graph stores only the bare data TLV at the proxy vertex.
-4. Keep `(origin_peer_id, origin_timestamp, hop_count)` in the bridge's per-proxy metadata table for re-emission and dedup.
+1. **Strip the leading `dst` segment** — the route shrinks toward the target.
+2. **Prepend the node's NAME for the inbound link to `src`** — the return route grows.
+3. Re-emit the rest of the frame **untouched** over the named link (fresh trailer per the egress transport). The hop keeps no per-request state.
 
-When the bare data TLV is then bridged out again to another transport:
+At the **terminus** (the first `dst` segment names a local vertex):
 
-1. Look up the ROUTER metadata from the bridge's table.
-2. **Attach a fresh `ROUTER {...}, NAME "data", data}` wrapping** at egress, with `hop_count` incremented (ROUTER is the wrapper itself; the data TLV is its last child).
-3. Append the wire trailer (`trailer_ts`, `trailer_crc`) per the egress transport.
+1. Decode the frame and apply the op to the local vertex.
+2. **Shed the `FWD` envelope** — the graph stores only the bare payload TLV, trailer-less at rest. No routing metadata lands in graph data.
+3. Reply with a **fresh `FWD{REPLY}`** whose `dst` is the accumulated `src` — the reply retraces the request's route hop-by-hop.
+
+Forwarding is **loop-free by construction**: `dst` is consumed monotonically per hop, and a `dst` that revisits a node is malformed (`ERROR=INVALID_PATH`). There is no duplicate detection and no hop counter — none is needed, because every remote endpoint is addressed by an explicit source route. (`0x0D` ROUTER is a reserved, decodable wire code with no implemented mechanism.)
 
 ### Why this matters
 
-- **Graph reads are clean.** A subscriber reading `/can-bridge/wheel/left` gets the bare data TLV — same shape regardless of whether the value originated locally or arrived over CAN. No ROUTER pollution; no need for application code to skip routing metadata.
-- **Recorder is simple.** Recording a vertex's value writes the bare data TLV. Replay does NOT replay the original ROUTER (which would alias the original sender's identity); replay is a fresh write from the recorder's identity.
+- **Graph reads are clean.** A subscriber reading `/net/can0/wheel/left` gets the bare data TLV — same shape regardless of whether the value originated locally or arrived over CAN. No envelope pollution; no need for application code to skip routing metadata.
+- **Recorder is simple.** Recording a vertex's value writes the bare data TLV. Replay does NOT replay the original envelope (which would alias the original sender's route); replay is a fresh write from the recorder's identity.
 - **Same substrate, two clean roles.** The protocol does not have separate "wire format" and "graph format" — it has one format with one optional wrapping that distinguishes the two roles.
 
 ### A worked sequence
@@ -474,23 +475,20 @@ When the bare data TLV is then bridged out again to another transport:
 ```mermaid
 sequenceDiagram
     autonumber
-    participant STM as STM32 sender
-    participant CAN as CAN bus
-    participant LB as Linux bridge
-    participant LSub as Linux subscriber
-    participant TCP as TCP link
-    participant ESP as ESP32 bridge
+    participant STM as STM32 client
+    participant LB as Linux forwarder
+    participant ESP as ESP32 terminus
+    participant V as /wheel/left
 
-    STM->>CAN: ROUTER{origin=A, ts=T0, hop=1, data=VALUE}
-    CAN->>LB: deliver wrapped TLV
-    Note over LB: recent-set check<br/>(A, T0) NOT seen<br/>add → strip ROUTER<br/>store VALUE at /can-bridge/X
-    LB->>LSub: deliver bare VALUE (no ROUTER)
-    Note over LB: also subscribed by ESP32 via TCP<br/>look up (A, T0, hop=1)<br/>wrap fresh ROUTER (hop=2)
-    LB->>TCP: ROUTER{origin=A, ts=T0, hop=2, data=VALUE}
-    TCP->>ESP: deliver wrapped TLV
-    Note over ESP: recent-set check<br/>(A, T0) NOT seen<br/>add → strip ROUTER<br/>store VALUE at /peer/linux-brain/can-bridge/X
+    STM->>LB: FWD{ WRITE, dst=/esp/wheel/left, src=/stm, VALUE }
+    Note over LB: strip "esp" from dst<br/>prepend inbound-link NAME to src
+    LB->>ESP: FWD{ WRITE, dst=/wheel/left, src=/can0/stm, VALUE }
+    Note over ESP: first dst segment is local ⇒ terminus<br/>shed the envelope, store bare VALUE
+    ESP->>V: write (trailer-less at rest)
+    ESP-->>LB: FWD{ REPLY, dst=/can0/stm }
+    LB-->>STM: FWD{ REPLY, dst=/stm }
 ```
 
-If the ESP32 then bridges back to a different CAN bus that the original sender STM32 also listens on (cycle), the STM32's bridge would receive the wrapped TLV, look up `(A, T0)` in its recent-set, find it (because A is the STM32 itself), and drop. **Cycle terminates.**
+A `dst` that would route the frame back through a node it already crossed cannot be expressed by a well-formed shrinking route — a revisit is rejected with `ERROR=INVALID_PATH`. **No cycle can persist.**
 
 This shedding rule is what keeps the global topology safe for any shape — see [07-host-embedding.md](07-host-embedding.md).

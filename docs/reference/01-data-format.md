@@ -52,9 +52,9 @@ At rest again (after received, validated, stripped):
   [ header ] [ payload ]                       ← H + L bytes (same payload bytes)
 ```
 
-A bridge re-emitting on another transport: strip incoming trailer, attach outgoing trailer (fresh wire-time, fresh CRC). A recorder writing to disk: strip the trailer, store header+payload. On replay: re-attach a fresh trailer. **Payload bytes are invariant under every transition.**
+A forwarder re-emitting on another transport: strip incoming trailer, attach outgoing trailer (fresh wire-time, fresh CRC). A recorder writing to disk: strip the trailer, store header+payload. On replay: re-attach a fresh trailer. **Payload bytes are invariant under every transition.**
 
-This symmetry is what makes the same-substrate insight extend cleanly across multi-hop bridging and recording. See [02-graph-model.md](02-graph-model.md) §the trailer enables payload-bytes invariance.
+This symmetry is what makes the same-substrate insight extend cleanly across multi-hop forwarding and recording. See [02-graph-model.md](02-graph-model.md) §the trailer enables payload-bytes invariance.
 
 ---
 
@@ -91,7 +91,7 @@ The default header is **4 bytes**. A typical small TLV has no trailer (4-byte to
 
 ### Why no priority bits
 
-An earlier draft put a 2-bit priority field in `opt`. Removed. Priority is a **transport-time, per-link, non-coherent** concern; the L2 header should carry coherent things or things every router must see. Per-TLV priority bits buy nothing that `:settings.priority` cached at the bridge doesn't already cover. See [02-graph-model.md](02-graph-model.md) §the six-layer model — priority lives at L4.
+There are no priority bits in `opt`. Priority is a **transport-time, per-link, non-coherent** concern; the L2 header carries only coherent things or things every forwarder must see. Per-TLV priority bits would buy nothing that `:settings.priority` cached at the egress link doesn't already cover. See [02-graph-model.md](02-graph-model.md) §the six-layer model — priority lives at L4.
 
 ---
 
@@ -116,7 +116,7 @@ This is a deliberate interop ceiling: minimum impls can communicate with feature
 - **Streaming-friendly**: receiver knows the full payload extent immediately and can DMA / mmap the entire payload region without byte-by-byte decoding.
 - **Predictable for SIMD and cycle-bound MCU loops.**
 
-(Earlier drafts used LEB128 + a "finite-pool" mode. Both removed — see §rejected designs at end.)
+(LEB128 and a "finite-pool" mode are rejected designs — see §rejected designs at end.)
 
 ---
 
@@ -224,7 +224,7 @@ Conflating them is a bug; the protocol keeps them separate by construction.
 
 Type code `0x00` indicates either a zeroed buffer or framing corruption. Receivers MUST treat `type=0x00` as INVALID.
 
-Type code `0x05` is **retired** (was `LIST` in earlier drafts; see §rejected designs). Receivers MUST treat `type=0x05` as a reserved-but-unassigned code and apply the rules below; senders MUST NOT emit it.
+Type code `0x05` is **reserved** with no assigned meaning (see §rejected designs). Receivers MUST treat `type=0x05` as a reserved-but-unassigned code and apply the rules below; senders MUST NOT emit it.
 
 ### Type byte layering
 
@@ -238,13 +238,13 @@ This is a deliberate design commitment: get the wire format right once. The wire
 
 ### Handling unknown type codes
 
-A receiver encountering a TLV with a type code in `0x0E – 0x7F` (reserved-but-unassigned, including the retired `0x05`):
+A receiver encountering a TLV with an unassigned type code in `0x0E – 0x7F` (or the reserved `0x05`):
 
 - MUST NOT crash; MUST continue parsing the surrounding stream.
 - MUST validate CRC (if present) and respect `length` when skipping over the unknown TLV.
 - If the unknown TLV is the outer addressed TLV: respond with `ERROR=TYPE_MISMATCH` if a return path exists.
 - If nested inside a structured TLV (parent has `opt.PL=1`): treat as opaque bytes and continue.
-- Routers/bridges MAY pass-through unmodified.
+- Forwarders MAY pass-through unmodified.
 
 This is the **forward extension path**: new core type codes can be added in `0x0E – 0x7F` without breaking existing receivers. Receivers gracefully ignore what they don't understand.
 
@@ -417,12 +417,12 @@ The protocol guarantees: no conforming TLV exceeds the declared bounds (`u32` le
 For future readers wondering about paths not taken:
 
 - **LEB128 / varint length** — branchy parser, unpredictable payload offset, hostile to streaming and SIMD. Rejected in favor of fixed-width with a single LL bit.
-- **Finite-pool length encoding** — was a wire-format mode in an earlier draft. Replaced by the LL bit; the slot-class concept survives only as a receive-buffer pooling convention internal to the runtime, not on the wire.
+- **Finite-pool length encoding** — a fixed set of length slot-classes on the wire. Rejected in favor of the LL bit; the slot-class concept survives only as a receive-buffer pooling convention internal to the runtime, not on the wire.
 - **Variable-width type field / type tree** — would let a router dispatch by content shape without payload parse. Rejected because libtracer routes by **path**, not type; schema is per-vertex (`:schema`); and adding wire-level type-tree encoding fights claim 5 ("the graph imposes no shape on user data"). Self-describing payloads use NAME-tagged children inside a structured TLV (a user-range type code with `PL=1`) instead. Cap'n Proto / FlatBuffers solved the schema-on-the-wire problem already; libtracer is deliberately schema-by-introspection.
 
-- **Generic `LIST` type code (`0x05`)** — earlier drafts had a generic structured-container type code with no specific semantic. Removed. Every structured TLV in the registry has a specific purpose (SUBSCRIBER, PATH, POINT, ROUTER, ACL, SETTINGS, STATUS, ERROR); user-defined structured records use user-range type codes (`0x80–0xFF`) with `PL=1`. The `PL` bit alone signals "has nested children"; the type byte tells what those children mean. Type code `0x05` is permanently retired (collision-prevention) — never reused.
+- **Generic `LIST` type code** — a generic structured-container type code with no specific semantic. Every structured TLV in the registry has a specific purpose (SUBSCRIBER, PATH, POINT, ACL, SETTINGS, STATUS, ERROR); user-defined structured records use user-range type codes (`0x80–0xFF`) with `PL=1`. The `PL` bit alone signals "has nested children"; the type byte tells what those children mean. Type code `0x05` is reserved with no assigned meaning and is not available for reuse (collision-prevention).
 
-- **Per-frame version bit (`VR`)** — earlier drafts had bit 7 of `opt` as a version-bump flag. Removed. The wire format is committed once and not bumped per-frame; future incompatible changes (if ever needed) are versioned at the discovery layer (mDNS service name, port, etc.). The bit becomes one more reserved.
+- **Per-frame version bit (`VR`)** — bit 7 of `opt` as a version-bump flag. Rejected. The wire format is committed once and not bumped per-frame; future incompatible changes (if ever needed) are versioned at the discovery layer (mDNS service name, port, etc.). The bit stays reserved.
 - **Per-TLV priority bits in `opt`** — priority is transport-time and per-link; cached `:settings.priority` at L4 covers it. The bits are reclaimed for `LL`/`CW`/`TF` instead.
 - **Alignment-promise bit** — modern CPUs handle unaligned loads efficiently; promising alignment requires sender padding, which forces variable framing. Net loss. Rejected.
 - **Variable-width TS field beyond {abs-u64, rel-i32}** — exhaustively explored; no third form earns its complexity.
