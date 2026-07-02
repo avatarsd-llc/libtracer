@@ -87,9 +87,12 @@ struct subscriber_t {
     // ignores it for remote delivery. Both populated ⇒ a REMOTE subscriber: a write to
     // this vertex hands (link, return_route, delivery_compact, value) to the graph's
     // injected remote-delivery sink, which emits the FWD{WRITE} (or auto-promoted
-    // COMPACT) back over the link (RFC-0004 §D/§E.1, ADR-0035 slice 4 / #136). Stored
-    // as opaque bytes + an opaque NAME so this L4 struct never depends on tr::net.
-    std::vector<std::byte> return_route;
+    // COMPACT) back over the link (RFC-0004 §D/§E.1, ADR-0035 slice 4 / #136). Held as
+    // a view over a REFCOUNTED segment (ADR-0041 §2): copied once at subscribe, then
+    // every delivery snapshot is a refcount clone — O(1) copies over the subscription's
+    // life, and an in-flight delivery keeps the route alive across a concurrent
+    // unsubscribe. An opaque view + an opaque NAME, so L4 never depends on tr::net.
+    view_t return_route{};
     std::string link;
     // The original SUBSCRIBER TLV view this slot was written from, retained zero-copy
     // (a refcount clone of the field-write payload). Empty for in-process callback/target

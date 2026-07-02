@@ -31,6 +31,19 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Changed
 
+- **The remote-subscriber `return_route` is a refcounted segment view**
+  ([ADR-0041](../docs/adr/0041-terminus-arena-decode-span-contract.md) §2; Brick 5
+  part 3). `graph_t::add_remote_subscriber` takes `view_t return_route` (was
+  `std::vector<std::byte>`), `subscriber_t::return_route` and
+  `remote_delivery_t::return_route` are `view_t` (were vector/span). The route is
+  copied **once** at subscribe (trailer-sliced); every later delivery snapshot is a
+  refcount clone — **O(deliveries) route copies → O(1)** — and an in-flight delivery
+  keeps the route alive across a concurrent unsubscribe. The full-route producer
+  delivery is now **scatter-gathered** (fresh stack heads + the roped stored route and
+  value views — a delivery copies no payload/route byte; `build_delivery`'s
+  per-delivery frame materialization is gone); a transport without native
+  scatter-gather gathers once in the seam's default `send(iov)`.
+
 - **`fwd_router_t` gains a defaulted `std::pmr::memory_resource*` constructor parameter**
   ([ADR-0039](../docs/adr/0039-pmr-memory-model-host-aligned-allocation.md) §1 /
   [ADR-0041](../docs/adr/0041-terminus-arena-decode-span-contract.md) §5):

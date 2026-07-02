@@ -116,7 +116,10 @@ void graph_t::fan_out(vertex_t* v, const view_t& value, int depth) {
         // Copied under the lock (like target_key) so the slot may be cleared concurrently
         // once we dispatch outside it; an in-process slot leaves both empty.
         std::string link;
-        std::vector<std::byte> return_route;
+        // A refcount clone of the stored route segment (ADR-0041 §2) — snapshotting
+        // under the lock is a refcount bump, not a byte copy, and the clone keeps
+        // the route alive across a concurrent unsubscribe while we dispatch.
+        view_t return_route;
         bool delivery_compact = false;
     };
     constexpr std::size_t kInlineFanout = 8;
@@ -260,9 +263,9 @@ void graph_t::set_remote_delivery_sink(
     remote_sink_ = std::move(sink);
 }
 
-result_t<void> graph_t::add_remote_subscriber(vertex_t* v, view_t source_view,
-                                              std::vector<std::byte> return_route, std::string link,
-                                              bool delivery_compact, delivery_mode_t mode) {
+result_t<void> graph_t::add_remote_subscriber(vertex_t* v, view_t source_view, view_t return_route,
+                                              std::string link, bool delivery_compact,
+                                              delivery_mode_t mode) {
     subscriber_t s;
     s.mode = mode;
     s.delivery_compact = delivery_compact;
@@ -275,8 +278,8 @@ result_t<void> graph_t::add_remote_subscriber(vertex_t* v, view_t source_view,
     // remote fields + the LKV under the lock, then deliver OUTSIDE it (the sink does
     // transport I/O), mirroring fan_out's lock discipline.
     std::shared_ptr<const view_t> latch;
-    std::string latch_link;              // owning copies — the snapshot below outlives the lock,
-    std::vector<std::byte> latch_route;  // so remote_delivery_t's view/span can't dangle on subs_.
+    std::string latch_link;  // owning copy — the snapshot below outlives the lock;
+    view_t latch_route;      // the route snapshot is a refcount clone (no byte copy).
     bool latch_compact = false;
     {
         const std::lock_guard lock(v->m_);

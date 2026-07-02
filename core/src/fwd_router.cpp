@@ -95,24 +95,6 @@ struct hdr_t {
     return static_cast<fwd_op_t>(u8(frame[op_h->body_off]));
 }
 
-// Build a full-route producer delivery: `FWD{ op=WRITE, dst=<return route>, src=<empty
-// PATH>, payload=<VALUE> }` (delivery-is-a-write, RFC-0004 §D / #136). @p dst_path is a
-// complete PATH TLV's bytes (the subscriber's accumulated return route); @p payload is a
-// complete VALUE TLV's bytes (the producer's stored value). src starts empty — each
-// forwarding hop grows it (the way back), exactly as route_fwd's WRITE forward step does.
-[[nodiscard]] std::vector<std::byte> build_delivery(std::span<const std::byte> dst_path,
-                                                    std::span<const std::byte> payload) {
-    std::vector<std::byte> body;
-    const std::byte op{std::to_underlying(fwd_op_t::WRITE)};
-    detail::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
-    body.insert(body.end(), dst_path.begin(), dst_path.end());  // dst = return route
-    detail::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, std::span<const std::byte>{});  // src
-    body.insert(body.end(), payload.begin(), payload.end());  // payload = VALUE
-    std::vector<std::byte> out;
-    detail::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
-
 // A fixed-capacity stack byte-writer — the zero-heap counterpart of the old
 // vector-based header builder for the forward hop (ADR-0038 inv. #2: "the fresh header bytes ... a
 // stack std::array, not a std::vector"). Bounded by the wire header widths + one NAME
@@ -483,23 +465,42 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
     transport_t* const link = registry_.by_name(sub.link);
     if (link == nullptr) return;  // link torn down between subscribe and this write
     const std::span<const std::byte> payload = value.bytes();  // the stored VALUE TLV bytes
+    const std::span<const std::byte> route = sub.return_route.bytes();  // the stored PATH TLV
 
     if (sub.delivery_compact) {
         // Auto-promote (Q5 / RFC-0004 §E.1): advertise the label once per flow, then stream
         // lean COMPACT. ensure_egress is idempotent per (link,route); clear_link on a
         // reconnect drops the binding so the next delivery re-advertises (self-heal).
-        const auto [label, fresh] = handles_.ensure_egress(sub.link, sub.return_route);
+        const auto [label, fresh] = handles_.ensure_egress(sub.link, route);
         if (fresh) {
-            const std::vector<std::byte> adv = encode_advertise(label, sub.return_route);
+            const std::vector<std::byte> adv = encode_advertise(label, route);
             link->send(std::span<const std::byte>(adv));
         }
         const std::vector<std::byte> out = encode_compact(label, payload);
         link->send(std::span<const std::byte>(out));
         return;
     }
-    // Default: full-route FWD{WRITE} delivery (the slice-3 stateless path).
-    const std::vector<std::byte> out = build_delivery(sub.return_route, payload);
-    link->send(std::span<const std::byte>(out));
+    // Default: full-route `FWD{ op=WRITE, dst=<return route>, src=<empty PATH>,
+    // payload=<VALUE> }` (delivery-is-a-write, RFC-0004 §D / #136), scatter-gathered:
+    // fresh stack heads + the ROPED stored route and value views — the route bytes
+    // were copied ONCE at subscribe (ADR-0041 §2); a delivery copies nothing. src
+    // starts empty — each forwarding hop grows it (the way back). The refcounted
+    // route view (`sub.return_route`) stays alive for this call even if the slot is
+    // concurrently unsubscribed.
+    constexpr std::array<std::byte, 5> op_tlv{std::byte{0x01}, std::byte{0x00}, std::byte{0x01},
+                                              std::byte{0x00},
+                                              std::byte{std::to_underlying(fwd_op_t::WRITE)}};
+    constexpr std::array<std::byte, 4> empty_src{std::byte{0x06}, std::byte{0x40}, std::byte{0x00},
+                                                 std::byte{0x00}};
+    const std::size_t body_len = op_tlv.size() + route.size() + empty_src.size() + payload.size();
+    stack_writer<16> head;  // FWD header (≤6) + the 5-byte op TLV
+    head.header(type_t::FWD, body_len);
+    head.raw(op_tlv);
+    if (!head.ok()) return;
+
+    std::array<std::span<const std::byte>, 4> iov{head.span(), route,
+                                                  std::span<const std::byte>(empty_src), payload};
+    link->send(std::span<const std::span<const std::byte>>(iov));
 }
 
 }  // namespace tr::net

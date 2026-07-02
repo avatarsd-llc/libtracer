@@ -382,12 +382,13 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
             // (no inbound_link) keeps the local field-write path unchanged.
             if (!inbound_link.empty() && has_field && is_subscribe_append(field) &&
                 payload_node.type == type_t::SUBSCRIBER) {
-                const arena_tlv_t& src_node = fwd[req.src];
-                std::vector<std::byte> return_route(src_node.wire.begin(), src_node.wire.end());
-                return_route[1] &= kStructOptMask;  // trailer-sliced copy (§4)
-                result_t<void> w = graph_.add_remote_subscriber(
-                    v, value, std::move(return_route), std::string(inbound_link),
-                    subscriber_compact(fwd, req.payload));
+                // The ONE route copy of the subscription's life (ADR-0041 §2), into a
+                // refcounted segment — every later delivery clones the refcount.
+                const view_t return_route = own_tlv(fwd[req.src]);
+                if (return_route.empty()) return assemble_error(fwd, req, status_t::BACKPRESSURE);
+                result_t<void> w =
+                    graph_.add_remote_subscriber(v, value, return_route, std::string(inbound_link),
+                                                 subscriber_compact(fwd, req.payload));
                 if (!w) return assemble_error(fwd, req, w.error());
                 return assemble(fwd, req, reply_kind_t::RESULT, {}, {}, 0);  // OK, empty payload
             }

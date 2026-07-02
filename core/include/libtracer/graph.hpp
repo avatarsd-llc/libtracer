@@ -48,12 +48,14 @@ inline constexpr int kMaxDispatchDepth = 32;
  * (a `tr::net` concern — @ref graph_t::set_remote_delivery_sink) interprets these:
  * it maps @ref link to a transport child and emits a full-route `FWD{WRITE}` or,
  * when @ref delivery_compact, an auto-promoted label `COMPACT` (RFC-0004 §D/§E.1).
- * Borrowed for the sink call only — the sink must not retain the spans.
+ * @ref link is borrowed for the sink call only; @ref return_route is a refcount
+ * clone of the stored route segment (ADR-0041 §2) — the sink may rope it into an
+ * egress frame, and it stays alive across a concurrent unsubscribe.
  */
 struct remote_delivery_t {
-    std::string_view link;                   /**< @brief This node's NAME for the consumer link. */
-    std::span<const std::byte> return_route; /**< @brief Consumer return route (PATH TLV bytes). */
-    bool delivery_compact = false;           /**< @brief Opt-in to label-compacted delivery. */
+    std::string_view link; /**< @brief This node's NAME for the consumer link. */
+    view_t return_route;   /**< @brief Consumer return route (PATH TLV view, refcount clone). */
+    bool delivery_compact = false; /**< @brief Opt-in to label-compacted delivery. */
 };
 
 class graph_t {
@@ -138,7 +140,9 @@ class graph_t {
         std::function<void(const remote_delivery_t&, const view_t&)> sink);
 
     // Store a REMOTE subscriber on `v`: a SUBSCRIBER slot carrying the consumer's
-    // `return_route` + this node's NAME for its `link` + the `delivery_compact` opt-in,
+    // `return_route` (a view over a refcounted segment — the ONE copy of the route,
+    // made by the caller at subscribe; every later delivery clones the refcount,
+    // ADR-0041 §2) + this node's NAME for its `link` + the `delivery_compact` opt-in,
     // so a later write fans out a FWD{WRITE}/COMPACT delivery via the remote sink. The
     // wire dual of the local subscribe(...) sugar, driven by the FWD resolver on an
     // inbound `:subscribers[]` WRITE (#59/#136). If `v` is transient-local
@@ -147,7 +151,7 @@ class graph_t {
     // `source_view` (the SUBSCRIBER TLV) is retained zero-copy so a `:subscribers[]`
     // read serves it back. NotFound is impossible (the caller holds `v`).
     [[nodiscard]] result_t<void> add_remote_subscriber(
-        vertex_t* v, view_t source_view, std::vector<std::byte> return_route, std::string link,
+        vertex_t* v, view_t source_view, view_t return_route, std::string link,
         bool delivery_compact, delivery_mode_t mode = delivery_mode_t::EVERY);
 
     // Convenience — resolve the path key once (guarded map lookup), then hot path.
