@@ -9,6 +9,7 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <memory_resource>
 #include <mutex>
 #include <optional>
 #include <string_view>
@@ -18,6 +19,7 @@
 #include "libtracer/frame.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/tlv.hpp"
+#include "libtracer/tlv_arena.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/view.hpp"
 
@@ -134,6 +136,85 @@ void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
     return out;
 }
 
+// True iff the node's opt byte carries no trailer bits. A branch write (RFC-0005)
+// stores refcount subviews of the written frame, so a trailer inside the tree
+// cannot be sliced off without a copy — trailer-carrying nodes are rejected
+// (TYPE_MISMATCH), keeping stored values trailer-less at rest (ADR-0041 §4).
+[[nodiscard]] bool trailer_less(const wire::arena_tlv_t& node) noexcept {
+    const opt_t& o = node.opt;
+    return !o.ts && !o.cr && !o.cw && !o.tf;
+}
+
+// The subview of `frame_view` covering `span` — a refcount bump on the written
+// frame's segment, never a byte copy (RFC-0005 §decomposition). Precondition:
+// `span` points into `frame_view.bytes()` (it is an arena span over that frame).
+[[nodiscard]] view_t slice_of(const view_t& frame_view, std::span<const std::byte> span) {
+    const std::size_t off = static_cast<std::size_t>(span.data() - frame_view.bytes().data());
+    return frame_view.subview(off, span.size());
+}
+
+// One landing site of a branch write (RFC-0005): the vertex key, the VALUE slice
+// that lands there (empty when the node carries no value of its own), and the
+// slice this vertex's subscribers are notified with (the VALUE for a leaf node,
+// the node's whole POINT subtree for an interior node — the smallest subview
+// covering every write at-or-below the subscription point).
+struct branch_node_t {
+    std::vector<std::byte> key;
+    view_t store{};
+    view_t notify{};
+    bool subtree_has_value = false;
+};
+
+// Parse one POINT node of a branch write into `out` (post-order; children precede
+// their parent). `key` is this node's canonical vertex key — the caller already
+// folded the node's leading NAME into it. STRICT (like parse_aces): children are
+// the leading NAME, at most one VALUE (the node's own value), and POINT
+// sub-branches; anything else — or any trailer-carrying node — is TYPE_MISMATCH,
+// so a stored slice never carries semantics the decomposition would silently
+// mangle. Returns whether a VALUE lands at-or-below this node. Recursion depth is
+// bounded by the codec's kMaxDepth (32) — the arena would not have decoded deeper.
+[[nodiscard]] result_t<bool> parse_branch_node(const wire::tlv_arena_t& a, std::uint32_t node,
+                                               const view_t& frame_view, std::vector<std::byte> key,
+                                               std::vector<branch_node_t>& out) {
+    if (!a[node].opt.pl || !trailer_less(a[node])) return std::unexpected(status_t::TYPE_MISMATCH);
+    const std::uint32_t end = a[node].end;
+    std::uint32_t i = wire::tlv_arena_t::first_child(node);
+    if (i >= end || a[i].type != type_t::NAME) return std::unexpected(status_t::TYPE_MISMATCH);
+    view_t store{};
+    bool has_value = false;
+    bool has_point_child = false;
+    bool subtree_value = false;
+    for (i = a.next_sibling(i); i < end; i = a.next_sibling(i)) {
+        const wire::arena_tlv_t& c = a[i];
+        if (c.type == type_t::VALUE) {
+            if (has_value || !trailer_less(c)) return std::unexpected(status_t::TYPE_MISMATCH);
+            has_value = true;
+            store = slice_of(frame_view, c.wire);
+        } else if (c.type == type_t::POINT) {
+            has_point_child = true;
+            const std::uint32_t cn = wire::tlv_arena_t::first_child(i);
+            if (cn >= c.end || a[cn].type != type_t::NAME)
+                return std::unexpected(status_t::TYPE_MISMATCH);
+            std::vector<std::byte> child_key = key;
+            detail::emit_name(child_key, a[cn].body);
+            const result_t<bool> sub =
+                parse_branch_node(a, i, frame_view, std::move(child_key), out);
+            if (!sub) return std::unexpected(sub.error());
+            subtree_value = subtree_value || *sub;
+        } else {
+            return std::unexpected(status_t::TYPE_MISMATCH);
+        }
+    }
+    subtree_value = subtree_value || has_value;
+    branch_node_t bn;
+    bn.notify = has_point_child ? slice_of(frame_view, a[node].wire) : store;
+    bn.store = std::move(store);
+    bn.subtree_has_value = subtree_value;
+    bn.key = std::move(key);
+    out.push_back(std::move(bn));
+    return subtree_value;
+}
+
 }  // namespace
 
 graph_t::graph_t() {
@@ -165,9 +246,105 @@ result_t<vertex_t*> graph_t::register_vertex_key(std::vector<std::byte> key, rol
     const std::unique_lock lock(map_mutex_);
     if (vertices_.find(k) != vertices_.end()) return std::unexpected(status_t::PATH_IN_USE);
     auto vertex = std::make_unique<vertex_t>(role, k, settings, std::move(handlers));
+    // Subtree-subscription init (RFC-0005): a vertex born under a subscribed
+    // ancestor starts with the ancestor-listener count already summed — O(depth)
+    // lookups here (under the same unique lock note_subscriber_* excludes, so the
+    // sum and a concurrent subscribe walk never double-count) keep the write
+    // path's is-anyone-listening check a single relaxed load.
+    std::uint32_t above = 0;
+    std::span<const std::byte> kk = k.bytes;
+    while (!kk.empty()) {
+        kk = parent_key(kk);
+        const auto pit = vertices_.find(path_key_t{std::vector<std::byte>(kk.begin(), kk.end())});
+        if (pit != vertices_.end()) above += pit->second->own_subs_.load(std::memory_order_relaxed);
+        if (kk.empty()) break;
+    }
+    vertex->listeners_above_.store(above, std::memory_order_relaxed);
     vertex_t* ptr = vertex.get();
     vertices_.emplace(std::move(k), std::move(vertex));
     return ptr;
+}
+
+result_t<vertex_t*> graph_t::ensure_vertex(std::span<const std::byte> key,
+                                           std::string_view caller) {
+    if (vertex_t* v = find(key)) return v;
+    // Write-creates (RFC-0005): gate CREATE on the nearest EXISTING ancestor — its
+    // effective ACL is exactly what every vertex of the missing chain would inherit
+    // (the core subset's INHERIT walk, ADR-0020). No ancestor at all ⇒ open, the
+    // ACL-presence opt-in of docs/reference/05 §0x0A.
+    {
+        std::span<const std::byte> k = key;
+        vertex_t* ancestor = nullptr;
+        while (!k.empty()) {
+            k = parent_key(k);
+            ancestor = find(k);
+            if (ancestor != nullptr || k.empty()) break;
+        }
+        if (ancestor != nullptr && !acl_allows(ancestor, caller, acl_right_t::CREATE))
+            return std::unexpected(status_t::PERMISSION_DENIED);
+    }
+    // Validate the key's NAME-encoding framing and collect the per-level prefix
+    // lengths, then create every missing level shallowest-first (`mkdir -p`).
+    std::vector<std::size_t> level_ends;
+    std::size_t i = 0;
+    while (i + 4 <= key.size()) {
+        const std::size_t len = detail::load_le<std::uint16_t>(key.subspan(i + 2, 2));
+        if (i + 4 + len > key.size()) break;
+        i += 4 + len;
+        level_ends.push_back(i);
+    }
+    if (i != key.size() || level_ends.empty()) return std::unexpected(status_t::INVALID_PATH);
+    vertex_t* leaf = nullptr;
+    for (const std::size_t level : level_ends) {
+        const std::span<const std::byte> pk = key.first(level);
+        if (vertex_t* existing = find(pk)) {
+            leaf = existing;
+            continue;
+        }
+        result_t<vertex_t*> made =
+            register_vertex_key(std::vector<std::byte>(pk.begin(), pk.end()), role_t::STORED_VALUE);
+        if (made) {
+            leaf = *made;
+            continue;
+        }
+        if (made.error() == status_t::PATH_IN_USE) {  // lost a benign creation race
+            leaf = find(pk);
+            if (leaf != nullptr) continue;
+        }
+        return std::unexpected(made.error());
+    }
+    return leaf;  // never null: the deepest level was just found or created
+}
+
+std::uint64_t graph_t::ancestor_walks() const noexcept {
+    return ancestor_walks_.load(std::memory_order_relaxed);
+}
+
+void graph_t::note_subscriber_added(vertex_t* v) {
+    // Shared map lock: excludes concurrent vertex creation (unique lock), so a
+    // newborn either sees the bumped own_subs_ in its creation-time sum or is
+    // already enumerable by this walk — never both. Counters are atomics; a
+    // byte-prefix of concatenated NAME encodings can only match on a segment
+    // boundary (the length header differs otherwise), so prefix ⇒ descendant.
+    const std::shared_lock lock(map_mutex_);
+    v->own_subs_.fetch_add(1, std::memory_order_relaxed);
+    const std::span<const std::byte> prefix = v->key().bytes;
+    for (const auto& [key, vert] : vertices_) {
+        if (key.bytes.size() <= prefix.size()) continue;
+        if (std::equal(prefix.begin(), prefix.end(), key.bytes.begin()))
+            vert->listeners_above_.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void graph_t::note_subscriber_removed(vertex_t* v) {
+    const std::shared_lock lock(map_mutex_);
+    v->own_subs_.fetch_sub(1, std::memory_order_relaxed);
+    const std::span<const std::byte> prefix = v->key().bytes;
+    for (const auto& [key, vert] : vertices_) {
+        if (key.bytes.size() <= prefix.size()) continue;
+        if (std::equal(prefix.begin(), prefix.end(), key.bytes.begin()))
+            vert->listeners_above_.fetch_sub(1, std::memory_order_relaxed);
+    }
 }
 
 vertex_t* graph_t::find(std::span<const std::byte> key) const {
@@ -305,37 +482,139 @@ void graph_t::fan_out(vertex_t* v, const view_t& value, int depth) {
         for (std::size_t i = 0; i < inline_n; ++i) dispatch(inline_buf[i]);
 }
 
-result_t<void> graph_t::write_impl(vertex_t* v, view_t value, int depth, std::string_view caller) {
-    if (!acl_allows(v, caller, acl_right_t::WRITE))
-        return std::unexpected(status_t::PERMISSION_DENIED);
+result_t<void> graph_t::store_value(vertex_t* v, view_t value) {
     if (v->role_ == role_t::HANDLER) {
         if (!v->handlers_.on_write) return std::unexpected(status_t::NOT_FOUND);
         result_t<void> r = v->handlers_.on_write(value);
         if (!r) return r;
-        {
-            const std::lock_guard lock(v->m_);
-            ++v->write_seq_;
-            v->cv_.notify_all();
-        }
-        fan_out(v, value, depth);
+        const std::lock_guard lock(v->m_);
+        ++v->write_seq_;
+        v->cv_.notify_all();
         return {};
     }
 
     auto sp = std::make_shared<const view_t>(std::move(value));
     v->lkv_.store(sp);  // lock-free publish of the new last-known-value
 
-    {
-        const std::lock_guard lock(v->m_);
-        if (v->role_ == role_t::STREAM) {
-            v->history_.push_back(sp);
-            const std::size_t keep =
-                v->settings_.history_keep_last ? v->settings_.history_keep_last : 1;
-            while (v->history_.size() > keep) v->history_.pop_front();
-        }
-        ++v->write_seq_;
-        v->cv_.notify_all();
+    const std::lock_guard lock(v->m_);
+    if (v->role_ == role_t::STREAM) {
+        v->history_.push_back(std::move(sp));
+        const std::size_t keep =
+            v->settings_.history_keep_last ? v->settings_.history_keep_last : 1;
+        while (v->history_.size() > keep) v->history_.pop_front();
     }
-    fan_out(v, *sp, depth);
+    ++v->write_seq_;
+    v->cv_.notify_all();
+    return {};
+}
+
+void graph_t::bubble_up(vertex_t* v, const view_t& value, int depth) {
+    // Entered only when v->listeners_above_ says an ancestor subscriber exists —
+    // the idle write path never walks (RFC-0005 §near-free-when-idle; the counter
+    // below is what tests/benches assert on via ancestor_walks()).
+    ancestor_walks_.fetch_add(1, std::memory_order_relaxed);
+    std::span<const std::byte> key = v->key_.bytes;
+    while (!key.empty()) {
+        key = parent_key(key);
+        if (vertex_t* ancestor = find(key)) fan_out(ancestor, value, depth);
+        if (key.empty()) break;  // the root vertex (empty key) was just visited
+    }
+}
+
+result_t<void> graph_t::write_impl(vertex_t* v, view_t value, int depth, std::string_view caller) {
+    if (!acl_allows(v, caller, acl_right_t::WRITE))
+        return std::unexpected(status_t::PERMISSION_DENIED);
+    // Branch-write peek (RFC-0005 §decomposition): a POINT payload (type 0x07,
+    // opt.PL=1) is a branch write and decomposes; anything else — VALUE, user-range
+    // records, other structured TLVs — stores as-is. Two byte loads on the hot
+    // path; a device-memory view is never dereferenced (and never decomposes).
+    if (v->role_ != role_t::HANDLER && value.is_host()) {
+        const std::span<const std::byte> head = value.bytes();
+        if (head.size() >= 4 &&
+            std::to_integer<std::uint8_t>(head[0]) == std::to_underlying(type_t::POINT) &&
+            (std::to_integer<std::uint8_t>(head[1]) & 0x40) != 0)
+            return write_branch(v, value, depth, caller);
+    }
+    const view_t notify = value;  // refcount clone — store_value consumes `value`
+    result_t<void> stored = store_value(v, std::move(value));
+    if (!stored) return stored;
+    fan_out(v, notify, depth);
+    // Vertical bubbling (RFC-0005): every subscription observes its vertex AND all
+    // descendants, so the write also fans out to each ancestor's subscribers —
+    // with the written TLV as-is. Gated on one relaxed load when nobody listens.
+    if (v->listeners_above_.load(std::memory_order_relaxed) > 0) bubble_up(v, notify, depth);
+    return {};
+}
+
+result_t<void> graph_t::write_branch(vertex_t* v, const view_t& value, int depth,
+                                     std::string_view caller) {
+    // Decode the written frame into a resolve-scoped arena (ADR-0041): every node
+    // span points into `value`'s bytes, so each landed slice is value.subview(...)
+    // — a refcount bump on the written frame's segment, never a byte copy.
+    std::array<std::byte, 4096> stack;
+    std::pmr::monotonic_buffer_resource mr(stack.data(), stack.size());
+    const std::expected<wire::tlv_arena_t, wire::error_t> arena =
+        wire::decode_into(value.bytes(), mr);
+    if (!arena) return std::unexpected(status_t::TYPE_MISMATCH);
+    const wire::tlv_arena_t& a = *arena;
+
+    // The root POINT's leading NAME must name this vertex (the written tree is
+    // rooted AT `v`); a mismatch is an addressing error, not a shape error.
+    const std::uint32_t n0 = wire::tlv_arena_t::first_child(0);
+    if (n0 >= a.root().end || a[n0].type != type_t::NAME)
+        return std::unexpected(status_t::TYPE_MISMATCH);
+    if (!std::ranges::equal(a[n0].body, last_segment(v->key_.bytes)))
+        return std::unexpected(status_t::INVALID_PATH);
+
+    std::vector<branch_node_t> plan;  // post-order; plan.back() is the root
+    const result_t<bool> parsed =
+        parse_branch_node(a, 0, value, std::vector<std::byte>(v->key_.bytes), plan);
+    if (!parsed) return std::unexpected(parsed.error());
+    if (!*parsed) return {};  // a value-free branch is a no-op write
+
+    // Admission: resolve-or-create every landing vertex (write-creates, CREATE-
+    // gated) and gate WRITE on each BEFORE any store, so a denial rejects the
+    // whole branch with nothing landed. (Created-but-empty intermediates may
+    // persist past a later denial — the `mkdir -p` analogy; RFC-0005 §ACL.)
+    struct site_t {
+        vertex_t* vx;
+        const branch_node_t* node;
+    };
+    std::vector<site_t> sites;
+    sites.reserve(plan.size());
+    for (const branch_node_t& node : plan) {
+        if (node.store.empty()) continue;
+        vertex_t* vx = nullptr;
+        if (std::ranges::equal(node.key, v->key_.bytes)) {
+            vx = v;  // the root value — `v` itself, already WRITE-gated by write_impl
+        } else {
+            const result_t<vertex_t*> ensured = ensure_vertex(node.key, caller);
+            if (!ensured) return std::unexpected(ensured.error());
+            vx = *ensured;
+            if (!acl_allows(vx, caller, acl_right_t::WRITE))
+                return std::unexpected(status_t::PERMISSION_DENIED);
+        }
+        sites.push_back(site_t{vx, &node});
+    }
+
+    // Apply: land every slice. Admission was atomic; application is per-vertex and
+    // best-effort (a handler-role landing site may refuse its slice without
+    // un-landing the others) — the branch is NOT a transaction (RFC-0005
+    // §atomicity non-promise; each leaf is its own consistent refcounted snapshot).
+    for (const site_t& site : sites) (void)store_value(site.vx, site.node->store);
+
+    // Notify: one delivery per covered subscription point, with its slice — the
+    // VALUE for a leaf landing site, the node's POINT subtree for an interior
+    // node, and the whole written TLV as-is at the root and (via bubbling) above.
+    for (const branch_node_t& node : plan) {
+        const bool is_root = &node == &plan.back();
+        if (!node.subtree_has_value) continue;
+        const view_t& slice = is_root ? value : node.notify;
+        if (slice.empty()) continue;
+        vertex_t* vx = is_root ? v : find(node.key);
+        if (vx != nullptr) fan_out(vx, slice, depth);
+    }
+    if (v->listeners_above_.load(std::memory_order_relaxed) > 0) bubble_up(v, value, depth);
     return {};
 }
 
@@ -388,8 +667,11 @@ result_t<void> graph_t::subscribe(const path_t& src, const path_t& target, deliv
     subscriber_t s;
     s.target_key.assign(target.key().begin(), target.key().end());
     s.mode = mode;
-    const std::lock_guard lock(v->m_);
-    v->subs_.push_back(std::move(s));
+    {
+        const std::lock_guard lock(v->m_);
+        v->subs_.push_back(std::move(s));
+    }
+    note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
     return {};
 }
 
@@ -402,8 +684,11 @@ result_t<void> graph_t::subscribe(const path_t& src, std::function<void(const vi
     subscriber_t s;
     s.callback = std::move(callback);
     s.mode = mode;
-    const std::lock_guard lock(v->m_);
-    v->subs_.push_back(std::move(s));
+    {
+        const std::lock_guard lock(v->m_);
+        v->subs_.push_back(std::move(s));
+    }
+    note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
     return {};
 }
 
@@ -448,6 +733,7 @@ result_t<void> graph_t::add_remote_subscriber(vertex_t* v, view_t source_view, v
             }
         }
     }
+    note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
     if (latch && remote_sink_) {
         remote_sink_(
             remote_delivery_t{
@@ -496,15 +782,25 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
             s.source_view = value;  // retain the SUBSCRIBER TLV zero-copy (refcount clone) so a
                                     // later :subscribers[] read ropes it into the REPLY (ADR-0035).
             s.caller.assign(caller);  // the fan-in gate context for this edge's deliveries (#81)
-            const std::lock_guard lock(v->m_);
-            v->subs_.push_back(std::move(s));
+            {
+                const std::lock_guard lock(v->m_);
+                v->subs_.push_back(std::move(s));
+            }
+            note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
             return {};
         }
         if (step0.indexed) {  // clear a subscriber slot (unsubscribe) — a control write
             if (!acl_allows(v, caller, acl_right_t::WRITE))
                 return std::unexpected(status_t::PERMISSION_DENIED);
-            const std::lock_guard lock(v->m_);
-            if (step0.index < v->subs_.size()) v->subs_[step0.index].active = false;
+            bool removed = false;
+            {
+                const std::lock_guard lock(v->m_);
+                if (step0.index < v->subs_.size() && v->subs_[step0.index].active) {
+                    v->subs_[step0.index].active = false;
+                    removed = true;
+                }
+            }
+            if (removed) note_subscriber_removed(v);  // RFC-0005 counter bookkeeping
             return {};
         }
         return std::unexpected(status_t::SCHEMA_NOT_FOUND);
@@ -703,7 +999,16 @@ result_t<view_t> graph_t::read(const path_t& path) const {
 
 result_t<void> graph_t::write(const path_t& path, view_t value) {
     vertex_t* v = find(path.key());
-    if (!v) return std::unexpected(status_t::NOT_FOUND);
+    if (!v) {
+        // Write-creates (RFC-0005): a DATA write to a nonexistent path creates it,
+        // mkdir-p style, gated by CREATE on the nearest existing ancestor. The
+        // `:field` control surface does not create — a field write to a
+        // nonexistent vertex stays NOT_FOUND (there is no vertex to control).
+        if (!path.field().empty()) return std::unexpected(status_t::NOT_FOUND);
+        const result_t<vertex_t*> made = ensure_vertex(path.key());
+        if (!made) return std::unexpected(made.error());
+        v = *made;
+    }
     return write(v, path.field(), std::move(value));  // handle-based; see the vertex_t* overload
 }
 

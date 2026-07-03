@@ -181,6 +181,18 @@ class vertex_t {
     std::mutex m_;
     std::condition_variable cv_;
     std::uint64_t write_seq_ = 0;  // bumped per write; await waits for an increment (guarded by m_)
+
+    // Subtree-subscription bookkeeping (RFC-0005): every subscription observes its
+    // vertex AND all descendants, so a write must fan out to ancestor subscribers
+    // too ("vertical bubbling"). These lock-free counters keep the idle write path
+    // near-free: `listeners_above_` counts ACTIVE subscriber slots on strict
+    // ancestors (maintained by graph_t at subscribe/unsubscribe — a subtree walk at
+    // control-plane frequency — and summed from ancestors at vertex creation), so
+    // the write hot path pays exactly one relaxed load before deciding whether to
+    // walk ancestors at all. `own_subs_` is this vertex's own active-slot count —
+    // what the subtree walk and the creation-time sum read.
+    std::atomic<std::uint32_t> own_subs_{0};
+    std::atomic<std::uint32_t> listeners_above_{0};
 };
 
 }  // namespace tr::graph

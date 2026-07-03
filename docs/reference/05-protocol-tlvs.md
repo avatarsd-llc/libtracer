@@ -170,14 +170,28 @@ qos_settings = SETTINGS {
   NAME "delivery_mode"     VALUE <u8: EVERY=0, THROTTLED=1, ON_CHANGE=2>  ; on-change = byte-diff
   NAME "min_interval_ns"   VALUE <u64>     ; throttle floor (THROTTLED)
   NAME "keepalive_ns"      VALUE <u64>     ; force re-deliver if unchanged
-  NAME "delivery_scope"    VALUE <u8: DELTA=0, SNAPSHOT=1>   ; composite delivery
+  NAME "delivery_scope"    VALUE <u8: DELTA=0, SNAPSHOT=1>   ; reserved (RFC-0005: as-written is the delivery; SNAPSHOT re-aggregation deferred)
   NAME "delivery_compact"  VALUE <u8: 0=off, 1=on>  ; opt into route-handle compaction (§route-handle)
 }
 ```
 
 `delivery_compact` (RFC-0004 §E.1, ADR-0035 slice 4) is the consumer's **opt-in to label-compacted deliveries**: on a full-TLV transport (ws/UDP, default *full-route* deliveries) a producer MAY, for a subscriber that set it, advertise a per-link **label** aliasing that subscriber's return route and thereafter stream lean `COMPACT` frames instead of full-route `FWD{WRITE}` (see §route-handle). It is **optional and NAME-tagged**: an older parser (or a producer that does not honor it) simply keeps the full-route delivery path, so it does not perturb any existing conformance vector. Header-elided transports (CAN) always label and ignore the hint.
 
-Policy is **enforced producer-side** (before fan-out). For a **composite** subscription, `delivery_scope` selects DELTA (the changed child + its concrete path, RFC-0003) or SNAPSHOT (the aggregate's `:[]` structured TLV); no wildcard `target_path` is needed — subscribing to the composite vertex *is* the subtree subscription. The `capability` child carries the subscriber's **subject-token** ([ADR-0018](../adr/0018-access-control-authorization-pluggable-subject-token.md)); subscribe-authorization is gated by the *source's* `:acl`.
+Policy is **enforced producer-side** (before fan-out), and it applies to bubbled deliveries (below) exactly as to direct ones. The `capability` child carries the subscriber's **subject-token** ([ADR-0018](../adr/0018-access-control-authorization-pluggable-subject-token.md)); subscribe-authorization is gated by the *source's* `:acl`.
+
+### Subtree subscription — vertical bubbling ([RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md))
+
+Every subscription is a **subtree subscription**: a SUBSCRIBER at `<vertex>:subscribers[N]` observes writes to that vertex **and to any descendant of it** (a leaf subscription is the trivial case), so no wildcard `target_path` is needed — subscribing to the composite vertex *is* the subtree subscription. A write at vertex W MUST deliver, once per subscriber, to the subscribers of W and of each ancestor of W ("vertical bubbling"). The delivered payload is the **written TLV as-is** — the exact frame the producer wrote, at the granularity it chose (a leaf `VALUE`, or a whole branch `POINT` per §`0x07`); there is no re-encoding and no delivery-metadata envelope. Local subscribers receive the usual zero-copy view clone; remote subscribers receive the frame over the existing return-route `FWD{WRITE}` delivery path unchanged. Any provenance a consumer needs beyond the frame itself travels **in the data** ([CONTEXT.md](../../CONTEXT.md) §SUBSCRIBER direction); wire-level concrete-path tagging of remote deliveries remains the separate, still-draft [RFC-0003](../spec/rfcs/0003-bridged-wildcard-delivery-path.md) proposal.
+
+The write path MUST stay near-free when nobody listens: an implementation maintains per-vertex listener bookkeeping (updated at subscribe/unsubscribe, at control-plane frequency) so a write performs the ancestor fan-out walk **only when a subscriber exists at or above it** — the reference implementation's idle write pays one relaxed atomic load ([RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md) §A cost model).
+
+```{mermaid}
+flowchart BT
+    C["/a/b/c ← write(VALUE)"] -- "fan_out: own subscribers" --> C
+    C -- "bubble: written TLV as-is" --> B["/a/b (subscriber S2)"]
+    B -- "bubble: written TLV as-is" --> A["/a (subscriber S1, remote via FWD)"]
+    A -.-> R["no subscriber above /a ⇒ walk ends;<br/>with no S1/S2 the write never walks at all"]
+```
 
 ### Producer fan-out to remote subscribers
 
@@ -367,7 +381,8 @@ POINT is structured (`opt.PL=1`). Children, in order:
 
 ```
 POINT (PL=1) {
-  NAME           vertex_name        ; required — the leaf segment
+  NAME           vertex_name        ; required — the leaf segment (first child)
+  VALUE          value              ; optional — the vertex's OWN value (RFC-0005)
   DESCRIPTION    description        ; optional
   SETTINGS       default_settings   ; optional
   SUBSCRIBER     sub_0              ; zero or more, in slot order
@@ -379,18 +394,44 @@ POINT (PL=1) {
 }
 ```
 
-Subscribers and children appear as direct children of POINT, identified by their type code. There is no intermediate "subscribers list" or "children list" wrapper — the type byte of each child tells its role.
+Subscribers and children appear as direct children of POINT, identified by their type code. There is no intermediate "subscribers list" or "children list" wrapper — the type byte of each child tells its role. The optional `VALUE` child ([RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md)) carries the vertex's own value, making a POINT tree a value-bearing snapshot of a subtree — the read-side dual of the branch write below.
 
 ### Where it appears
 
 - Returned by `read("/some/parent")` to enumerate children.
+- **Written to a vertex as a branch write** (below) — the write-side dual of the snapshot.
 - Used by the future recorder/replay module to snapshot vertex state.
 - Used by discovery modules announcing exported vertex trees.
+
+### Branch write — decomposition ([RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md))
+
+A write whose payload TLV is a POINT is a **branch write**: the written tree is rooted **at the target vertex** — the root POINT's `NAME` MUST equal the target's leaf segment (mismatch ⇒ `ERROR{tr::path::invalid}`) — and it **decomposes**:
+
+- Each **value-carrying node** (a POINT with a `VALUE` child) is stored at the corresponding descendant vertex — the target's path extended by the chain of NAMEs — as a refcount-bumped **subview of the written frame** (zero copy, never re-encoded). Values are the truth at the vertices where they land; a branch is a view.
+- A landing vertex that does not exist is **created**, `mkdir -p` style, gated by the `CREATE` access bit on the nearest existing ancestor's effective ACL (§`0x0A`) — this is the same **write-creates** rule that applies to any data write to a nonexistent path.
+- Each covered subscription point is notified **once** with the smallest subview covering every value landed at-or-below it: the `VALUE` slice at a leaf landing site, the node's whole POINT subtree at an interior node, and the written TLV as-is at the root (and, via §`0x04` bubbling, above it).
+- **Strict shape** in a branch write: a node's children are exactly the leading `NAME`, at most one `VALUE`, and zero or more POINT sub-branches; anything else — or any trailer-carrying node in the tree — is rejected with `ERROR{tr::schema::type_mismatch}` and nothing lands (stored values are trailer-less at rest, [ADR-0041](../adr/0041-terminus-arena-decode-span-contract.md) §4). A branch with no `VALUE` anywhere is a valid no-op.
+- **One store per vertex; no branch transaction.** A read of any vertex returns its latest stored value — never behind what a subscriber saw, legitimately newer. Admission (shape + ACL + creation gating) is all-or-nothing, but application is per-leaf: cross-leaf atomicity is **explicitly not promised**; snapshot coherence is the coherent-sampling `(origin, ts)` group ([ADR-0019](../adr/0019-per-producer-monotonic-origin-timestamp.md)).
+
+```{mermaid}
+sequenceDiagram
+    autonumber
+    participant P as Producer
+    participant S as /s
+    participant T as /s/t
+    participant U as /s/u (does not exist yet)
+    P->>S: write POINT{NAME s, POINT{NAME t, VALUE a}, POINT{NAME u, VALUE b}}
+    Note over S: decompose — admit (shape, CREATE/WRITE gates), then land subviews
+    S->>T: store VALUE-a slice (refcount subview, zero copy)
+    S->>U: write-creates /s/u, store VALUE-b slice
+    T-->>P: /s/t subscribers notified with the VALUE-a slice
+    S-->>P: /s subscribers (and ancestors, bubbled) notified with the written POINT as-is
+```
 
 ### Constraints
 
 - `opt.PL` MUST be `1`.
-- The `vertex_name` MUST be the first child.
+- The `vertex_name` MUST be the first child; the optional `VALUE` (the vertex's own value) immediately follows it when present.
 - Children that represent recursive vertex structure MUST themselves be POINT TLVs (type `0x07`).
 
 ---

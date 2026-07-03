@@ -11,7 +11,9 @@
  */
 #pragma once
 
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -210,13 +212,54 @@ class graph_t {
     // Resolve a canonical PATH-payload key to its vertex (nullptr if unknown).
     [[nodiscard]] vertex_t* find(std::span<const std::byte> key) const;
 
+    /**
+     * @brief Find-or-create the vertex at @p key (write-creates, RFC-0005).
+     *
+     * Resolves @p key; when absent, creates the vertex — and every missing
+     * intermediate level, `mkdir -p` style, each a STORED_VALUE vertex — gated by
+     * the CREATE right on the nearest EXISTING ancestor's effective ACL under
+     * @p caller (PERMISSION_DENIED when denied; a graph holding no ancestor at all
+     * is open, matching ACL-presence opt-in). A creation race lost to a concurrent
+     * caller is benign (the winner's vertex is returned). @p key must be a
+     * well-formed, non-empty canonical PATH-payload (else INVALID_PATH).
+     */
+    [[nodiscard]] result_t<vertex_t*> ensure_vertex(std::span<const std::byte> key,
+                                                    std::string_view caller = {});
+
+    /**
+     * @brief How many writes performed the ancestor (bubbling) walk — instrumentation.
+     *
+     * The near-free-when-idle observable (RFC-0005): stays 0 while no subscriber
+     * exists above any written vertex, so tests and benches can assert a write
+     * never walks ancestors unless someone is listening. Relaxed monotonic counter.
+     */
+    [[nodiscard]] std::uint64_t ancestor_walks() const noexcept;
+
    private:
     // Update the vertex value (LKV/history/handler), then fan out to subscribers.
     // `depth` bounds in-process re-dispatch cycles (kMaxDispatchDepth). `caller` is
     // the ACL caller context gating the WRITE right: the API caller's at depth 0,
     // the subscription edge's stored context on a fan-out re-dispatch (fan-in gate).
     result_t<void> write_impl(vertex_t* v, view_t value, int depth, std::string_view caller);
+    // The store half of a write (LKV/history/handler + seq bump + await wake),
+    // WITHOUT fan-out — shared by write_impl and the branch-write apply (RFC-0005).
+    result_t<void> store_value(vertex_t* v, view_t value);
+    // Branch-write decomposition (RFC-0005): a POINT payload written to `v` lands
+    // each value-carrying node at the corresponding descendant vertex as a
+    // refcount SUBVIEW of the written frame (creating missing vertices, CREATE-
+    // gated), then notifies each covered subscription point once with its slice.
+    result_t<void> write_branch(vertex_t* v, const view_t& value, int depth,
+                                std::string_view caller);
     void fan_out(vertex_t* v, const view_t& value, int depth);
+    // Vertical bubbling (RFC-0005): fan `value` out to every registered ancestor's
+    // subscribers. Called only when v->listeners_above_ says someone is listening.
+    void bubble_up(vertex_t* v, const view_t& value, int depth);
+    // Subscribe/unsubscribe bookkeeping (RFC-0005): bump v's own active-slot count
+    // and every descendant's listeners_above_, under the map lock (shared — the
+    // counters are atomics; the lock only excludes concurrent vertex creation so
+    // a newborn's creation-time sum and this walk never double-count).
+    void note_subscriber_added(vertex_t* v);
+    void note_subscriber_removed(vertex_t* v);
     // Field surface: ":settings.<f>", ":subscribers[]" / "[N]", ":children[]".
     result_t<void> field_write(vertex_t* v, const field_path_t& field, const view_t& value,
                                std::string_view caller);
@@ -250,6 +293,8 @@ class graph_t {
     // The pluggable subject resolver (#81, ADR-0018). Null (default) => ACL enforcement
     // disabled. Same set-once-before-frames-flow contract as remote_sink_.
     subject_resolver_t subject_resolver_;
+    // Bubbling-walk instrumentation (RFC-0005) — see ancestor_walks().
+    mutable std::atomic<std::uint64_t> ancestor_walks_{0};
 };
 
 }  // namespace tr::graph

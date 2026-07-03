@@ -69,6 +69,13 @@ target_link_libraries(children_test PRIVATE libtracer)
 libtracer_test_warnings(children_test)
 add_test(NAME children COMMAND children_test)
 
+# RFC-0005 — subtree subscriptions (vertical bubbling), branch-write (POINT)
+# decomposition, and write-creates (mkdir-p, CREATE-gated).
+add_executable(subtree_test subtree_test.cpp)
+target_link_libraries(subtree_test PRIVATE libtracer)
+libtracer_test_warnings(subtree_test)
+add_test(NAME subtree COMMAND subtree_test)
+
 # ADR-0041 — terminus arena decoder: decode<->decode_into equivalence over every
 # conformance vector + the span/canonical/zero-spill contract.
 add_executable(tlv_arena_test tlv_arena_test.cpp)
