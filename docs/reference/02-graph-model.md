@@ -354,6 +354,18 @@ A subscriber that wants the application-domain timestamp reads it from a sibling
 
 ---
 
+## Subtree subscriptions, branch writes, write-creates ([RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md))
+
+Three ratified write/delivery semantics that make the vertex tree observable and writable **at any granularity** with the same three-call API:
+
+- **Every subscription is a subtree subscription (vertical bubbling).** A `SUBSCRIBER` edge on vertex V observes writes to V **and to every descendant** (a leaf subscription is the trivial case). A write at W delivers — once per subscriber — to the subscribers of W and of each ancestor of W, carrying the **written TLV as-is** (the frame at the producer's granularity; no re-encoding, no tagging envelope; provenance beyond that travels in the data). Local delivery is the usual view clone; remote delivery rides the existing return-route `FWD{WRITE}` path unchanged. The write path stays **near-free when nobody listens**: per-vertex listener counters (maintained at subscribe/unsubscribe and summed from ancestors at vertex creation) mean an idle write pays one relaxed atomic load and never walks ancestors.
+- **A branch write decomposes.** A write whose payload is a `POINT` tree ([05 §`0x07`](05-protocol-tlvs.md)) rooted at the target vertex lands each value-carrying node at the corresponding descendant vertex as a **refcount subview of the written frame** (zero copy), creating missing vertices on the way; each covered subscription point is notified once with its slice. Values are the truth at the vertices where they land; a branch is a view. The branch is **not a transaction** — admission (shape + ACL) is all-or-nothing, application is per-leaf; cross-leaf snapshot coherence is the coherent-sampling `(origin, ts)` group ([ADR-0019](../adr/0019-per-producer-monotonic-origin-timestamp.md)), never a write-side lock.
+- **A data write creates its target** (`mkdir -p`) when the vertex does not exist, gated by the existing `CREATE` access bit on the nearest existing ancestor's effective ACL. `:field` writes, `read`, and `await` keep `tr::path::not_found`.
+
+Reads keep the **one-store-per-vertex** invariant: a write at any granularity lands in the same canonical last-known-value a read serves, and a read returns the latest stored value — ≥ what any subscriber of that path last saw, never behind a notification, legitimately newer. The producer owns cadence: rate caps, flush intervals, dirty tracking and timers are application concerns; batching several subtrees is N self-contained frames in one `send(iov)`, never a wire batch container.
+
+---
+
 ## Schema and field discipline
 
 A vertex exposes a **schema** describing every writable field. The schema lives at `<vertex>:schema` as a read-only structured TLV (typically a `POINT` whose children describe each field, or a `SETTINGS`-shaped record).
@@ -392,8 +404,8 @@ This keeps the data plane byte-agnostic: L4 never interprets a payload to decide
 
 Watching a parent's child set change (devices appearing, a scanner discovering a 1-Wire/Modbus node) needs **no dedicated event type** — it falls out of composite subscription:
 
-- **Subscribe to the composite parent.** Subscribing to a composite vertex *is* the subtree subscription ([05-protocol-tlvs.md](05-protocol-tlvs.md) §delivery_scope). With `delivery_scope = DELTA` the subscriber receives each **changed child tagged with its concrete path** ([RFC-0003](../spec/rfcs/0003-bridged-wildcard-delivery-path.md)); with `SNAPSHOT` it receives the aggregate `:[]` structured TLV. A newly **appeared** child surfaces as its first delta (or in the next snapshot); a child's **value change** surfaces the same way. There is no separate `:children_changed` facet — that would duplicate what composite delivery already does.
-- **Enumerate the current members** with `read(<parent>:children[])`, which returns the subtree members (not SPECs — the write-spec / read-members asymmetry, [05 §SPEC](05-protocol-tlvs.md)). The common pattern is read-snapshot-once on join, then subscribe-DELTA for the tail.
+- **Subscribe to the composite parent.** Subscribing to a composite vertex *is* the subtree subscription — every subscription observes its vertex and all descendants ([RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md) vertical bubbling). The subscriber receives each descendant write as the **written TLV as-is** (the producer's own frame — a leaf `VALUE`, or a whole branch `POINT`); the aggregate snapshot remains available as a read. A newly **appeared** child surfaces as its first write bubbling up — and since a data write *creates* its target (write-creates), appearance **is** the first write; a child's **value change** surfaces the same way. There is no separate `:children_changed` facet — that would duplicate what subtree delivery already does. (Wire-level concrete-path tagging of remote deliveries remains the draft [RFC-0003](../spec/rfcs/0003-bridged-wildcard-delivery-path.md) proposal.)
+- **Enumerate the current members** with `read(<parent>:children[])`, which returns the subtree members (not SPECs — the write-spec / read-members asymmetry, [05 §SPEC](05-protocol-tlvs.md)). The common pattern is read-snapshot-once on join, then subscribe (to the parent) for the tail.
 
 **Open — child removal.** Appearance and value-change are covered above, but how a child *removal* is delivered to a composite subscriber (a tombstone delta? a `STATUS=ERROR(NOT_FOUND)` at the child's path? snapshot-diff only?) is **not yet specified**. Because it is wire-observable behavior it is an RFC/ADR-level decision, tracked in [#66](https://github.com/avatarsd-llc/libtracer/issues/66); the `DELETE` access-mask bit ([05 §ACL](05-protocol-tlvs.md)) gates the *right* to remove but does not define the *notification*.
 
