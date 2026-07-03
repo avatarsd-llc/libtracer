@@ -1,0 +1,85 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# Dedicated job for the libtracer_quic transport MODULE (ADR-0043 Phase A) — a
+# separate library target a QUIC-talking host links; the core never compiles
+# these sources. SEPARATE from core-ci on purpose: the required core gates stay
+# dependency-free. This job builds msquic from source (cached by tag),
+# configures the module (-DLIBTRACER_WITH_QUIC=ON), and runs the FULL ctest
+# suite (quic included) plus ASan+UBSan and TSan variants.
+name: quic
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "core/**"
+      - "scripts/gen-dev-cert.sh"
+      - ".github/workflows/quic.yml"
+  pull_request:
+    paths:
+      - "core/src/transport_quic.cpp"
+      - "core/include/libtracer/transport_quic.hpp"
+      - "core/src/transport_vertex.cpp"
+      - "core/include/libtracer/transport_vertex.hpp"
+      - "core/tests/quic_test.cpp"
+      - "core/tests/tsan-msquic.supp"
+      - "core/CMakeLists.txt"
+      - "core/tests/CMakeLists.txt"
+      - "scripts/gen-dev-cert.sh"
+      - ".github/workflows/quic.yml"
+  workflow_dispatch:
+
+env:
+  MSQUIC_TAG: v2.4.18
+
+jobs:
+  quic-build-test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: release
+            cmake_flags: '-DCMAKE_BUILD_TYPE=RelWithDebInfo'
+          - name: asan
+            cmake_flags: >-
+              -DCMAKE_BUILD_TYPE=Debug
+              -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -g"
+          - name: tsan
+            cmake_flags: >-
+              -DCMAKE_BUILD_TYPE=Debug
+              -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"
+    name: quic-${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache the msquic install prefix
+        id: msquic-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/msquic-install
+          key: msquic-${{ env.MSQUIC_TAG }}-${{ runner.os }}-ubuntu24
+
+      - name: Build msquic from source (cache miss only)
+        if: steps.msquic-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$MSQUIC_TAG" --recurse-submodules --shallow-submodules \
+            https://github.com/microsoft/msquic.git ~/msquic-src
+          cmake -S ~/msquic-src -B ~/msquic-src/build -DCMAKE_BUILD_TYPE=Release \
+            -DQUIC_BUILD_TOOLS=OFF -DQUIC_BUILD_TEST=OFF -DQUIC_BUILD_PERF=OFF \
+            -DQUIC_ENABLE_LOGGING=OFF -DCMAKE_INSTALL_PREFIX="$HOME/msquic-install"
+          cmake --build ~/msquic-src/build -j
+          cmake --install ~/msquic-src/build
+
+      - name: Configure + build (LIBTRACER_WITH_QUIC=ON) + full ctest
+        run: |
+          cmake -S core -B core/build-quic-${{ matrix.name }} -DBUILD_TESTING=ON \
+            -DLIBTRACER_WITH_QUIC=ON -DCMAKE_PREFIX_PATH="$HOME/msquic-install" \
+            ${{ matrix.cmake_flags }}
+          cmake --build core/build-quic-${{ matrix.name }} -j
+          # ASLR can make ASan/TSan abort in this runner; pin it off (harmless
+          # for the release leg). LD_LIBRARY_PATH covers the msquic shared lib.
+          export LD_LIBRARY_PATH="$HOME/msquic-install/lib:${LD_LIBRARY_PATH:-}"
+          setarch "$(uname -m)" -R ctest --test-dir core/build-quic-${{ matrix.name }} \
+            --output-on-failure

@@ -25,6 +25,43 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **ADR-0043 Phase A — `quic_transport_t`, the msquic QUIC transport as a SEPARATE
+  MODULE** (new library target `libtracer_quic` + public header
+  `transport_quic.hpp`; NOT in the `tracer.hpp` umbrella). A host that talks QUIC
+  links the module and registers its factory —
+  `net.register_transport_type("quic", quic_transport_factory())` — through the
+  existing catalog extension seam; a host that doesn't simply never compiles these
+  sources: the core library has **no msquic reference, no feature macro, no `quic`
+  builtin** (open/closed — `transport_vertex` is extended, not modified). The
+  `-DLIBTRACER_WITH_QUIC=ON` CMake option only controls whether the module target
+  is configured (msquic must be installed; OFF by default). One QUIC connection
+  carries ONE bidirectional stream with the SAME 4-byte u32-LE length-prefix
+  framing as `tcp_transport_t` (16 MiB cap; an oversize prefix is malformed —
+  `malformed_rx()` ticks and the connection is shut down). DIAL
+  (`quic_transport_t(host, port, quic_dial_tls_t)`, synchronous handshake; trust
+  via a CA bundle or the DEV-ONLY `insecure_no_verify` flag for self-signed certs)
+  and LISTEN (`quic_transport_t(port, cert_pem, key_pem)`, one inbound peer at a
+  time; ephemeral `0` resolved via `local_port()`). RX reassembles msquic RECEIVE
+  chunks into ONE exactly-sized refcounted segment from the injected
+  `mem::mem_backend_t*` — ADR-0042 owning delivery (`delivers_views() == true`);
+  backend exhaustion is backpressure (frame skipped, `dropped_rx()` ticks,
+  framing sync survives). TX copies each frame ONCE into a heap buffer msquic
+  owns until SEND_COMPLETE (the msquic buffer-lifetime contract — the only
+  library-held buffer); `send(iov)` makes that same single gather copy (msquic's
+  multi-buffer send cannot borrow the seam's call-scoped spans). Link state via
+  the QUIC connection events (`link_up()`). The factory consumes `addr` + `port`
+  (DIAL, dev-grade no-verify TLS) or `port` + the new **`cert`/`key` config keys**
+  (LISTEN). `cert`/`key` are quic-PRIVATE config keys the factory parses ITSELF
+  from the raw config SETTINGS TLV — the shared `conn_settings_t` stays lean with
+  only the universal keys (the ADR-0043 §5 leanness ruling); accordingly
+  `transport_vertex_t::transport_factory_t` now receives
+  `(const conn_settings_t&, const wire::tlv_t* raw_config)` (`raw_config` = the
+  SPEC's config SETTINGS TLV, may be null; the built-ins ignore it). A new
+  `scripts/gen-dev-cert.sh` emits a self-signed dev certificate pair. Per-flow
+  streams, RFC 9221 datagrams, and WebTransport are staged follow-ons
+  (ADR-0043 Phase B). CI: a dedicated `quic` workflow builds msquic and runs the
+  full suite + ASan/UBSan + TSan with the module on; default jobs are unchanged.
+
 - **M6 — `tcp_transport_t`, the reliable stream transport** (new public header
   `transport_tcp.hpp`, included by the `tracer.hpp` umbrella). A TCP `transport_t`
   with **4-byte u32-LE length-prefix framing** — the prefix is transport framing, NOT

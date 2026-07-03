@@ -9,8 +9,12 @@ Implementations: **`loopback_channel_t`** (in-process dev/test),
 **`udp_transport_t`** (localhost/LAN UDP), **`tcp_transport_t`** (reliable TCP
 stream, 4-byte u32-LE length-prefix framing — the prefix is transport framing,
 not part of the TLV), **`transport_ws_client` / `transport_ws_server`** (the
-browser↔robot WebSocket keystone, RFC 6455), and **`transport_can`** (SocketCAN,
-classic + CAN-FD). QUIC is not implemented.
+browser↔robot WebSocket keystone, RFC 6455), **`transport_can`** (SocketCAN,
+classic + CAN-FD), and **`quic_transport_t`** (the separate `libtracer_quic`
+module, msquic — TLS 1.3, connection migration; one bidirectional stream
+carrying the same length-prefix framing as TCP; a host that talks QUIC links
+the module and registers `quic_transport_factory()`; ADR-0043 Phase A — the
+hosted, secure link; the MCU class keeps UDP/CAN).
 ```
 
 ## What it does

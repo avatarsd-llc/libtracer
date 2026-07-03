@@ -47,8 +47,10 @@ namespace {
 
 // Parse the optional SPEC `config` SETTINGS: positional NAME-key / value pairs —
 // NAME "addr" NAME <utf8>, NAME "kind" NAME <utf8>, NAME "port" VALUE u16, NAME "role"
-// VALUE u8 (overrides the type default), NAME "keepalive" VALUE u32. Unknown pairs are
-// ignored (forward-compat).
+// VALUE u8 (overrides the type default), NAME "keepalive" VALUE u32. ONLY the universal
+// keys land here (ADR-0043 §5 leanness): kind-private pairs (e.g. quic's `cert`/`key`)
+// are the kind's factory's business — it parses them from the raw config TLV it
+// receives. Unknown pairs are ignored (forward-compat).
 void parse_config(const tlv_t* config, conn_settings_t& s) {
     if (config == nullptr) return;
     const std::vector<tlv_t>& ch = config->children;
@@ -126,8 +128,10 @@ result_t<std::unique_ptr<transport_t>> make_tcp(const conn_settings_t& s,
 // RFC 6455 opening handshake at creation time (the peer's server must be up, or the
 // SPEC write fails NOT_FOUND); LISTEN = transport_ws_server(port), accepting ONE
 // inbound peer (the headline browser↔board link). `keepalive` is ignored by both
-// (PING/PONG is handled at the ws protocol layer).
-result_t<std::unique_ptr<transport_t>> make_ws(const conn_settings_t& s) {
+// (PING/PONG is handled at the ws protocol layer). Like all built-ins, ws has no
+// kind-private config keys, so the raw config TLV is ignored (ADR-0043 §5).
+result_t<std::unique_ptr<transport_t>> make_ws(const conn_settings_t& s,
+                                               const tlv_t* /*raw_config*/) {
     if (s.role == conn_role_t::DIAL) {
         if (s.addr.empty() || s.port == 0) return std::unexpected(status_t::TYPE_MISMATCH);
         auto t = std::make_unique<transport_ws_client>(s.addr, s.port);
@@ -162,11 +166,16 @@ transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& rout
     // The built-in transport-factory catalog entries (config `kind` selectors). The
     // udp and tcp factories close over the injected RX backend (ADR-0042 §2); ws stays
     // span-delivering until its frame assembly is pointed at segments (ADR-0042 §4).
-    register_transport_type("udp",
-                            [this](const conn_settings_t& s) { return make_udp(s, rx_backend_); });
-    register_transport_type("tcp",
-                            [this](const conn_settings_t& s) { return make_tcp(s, rx_backend_); });
+    register_transport_type("udp", [this](const conn_settings_t& s, const tlv_t* /*raw_config*/) {
+        return make_udp(s, rx_backend_);
+    });
+    register_transport_type("tcp", [this](const conn_settings_t& s, const tlv_t* /*raw_config*/) {
+        return make_tcp(s, rx_backend_);
+    });
     register_transport_type("ws", make_ws);
+    // The `quic` kind is NOT a builtin: it lives in the separate libtracer_quic
+    // module (ADR-0043), which extends this catalog through register_transport_type
+    // (quic_transport_factory) — this file never learns about msquic (open/closed).
 }
 
 void transport_vertex_t::register_transport_type(std::string kind, transport_factory_t factory) {
@@ -200,7 +209,9 @@ result_t<vertex_t*> transport_vertex_t::make_connection(std::vector<std::byte> c
         // An unregistered kind is an unsupported catalog entry — same convention as an
         // unknown SPEC `type` (SCHEMA_NOT_FOUND, the ENOTTY of creation).
         if (factory == transport_types_.end()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-        auto built = factory->second(settings);
+        // The raw config TLV rides along so the kind's factory can parse its own
+        // kind-private keys (ADR-0043 §5 leanness: they never land in settings).
+        auto built = factory->second(settings, config);
         if (!built) return std::unexpected(built.error());
         owned = std::move(*built);
         link = owned.get();
