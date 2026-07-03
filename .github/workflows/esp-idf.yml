@@ -30,6 +30,21 @@ on:
       - ".github/workflows/esp-idf.yml"
   workflow_dispatch:
 
+# ── Footprint sentinel thresholds (full-node job) ────────────────────────────
+# ⚠️ PLACEHOLDER VALUES — deliberately generous, NOT measured. No local IDF v6.0
+# toolchain was available when this sentinel was wired, so these bound nothing
+# yet: LIBTRACER_SENTINEL_MODE is "warn" (over-threshold prints a ::warning::
+# annotation, never fails the job). After the first CI run, read the measured
+# component numbers from the full-node job's step summary (or the
+# footprint-<target> artifact), TIGHTEN the two byte limits to measured value
+# + ~10 % headroom, and flip LIBTRACER_SENTINEL_MODE to "fail" so a footprint
+# regression turns the job red. Thresholds gate the libtracer component archive
+# (liblibtracer.a) only, not the whole app image.
+env:
+  LIBTRACER_MAX_FLASH_BYTES: 524288 # 512 KiB — placeholder, tighten from CI
+  LIBTRACER_MAX_STATIC_RAM_BYTES: 65536 # 64 KiB — placeholder, tighten from CI
+  LIBTRACER_SENTINEL_MODE: warn # flip to "fail" once thresholds are measured
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -84,13 +99,51 @@ jobs:
           idf.py set-target ${{ matrix.target }}
           idf.py build
 
-      - name: Report footprint (flash / static RAM)
-        if: always()
+      # Footprint report + sentinel (docs/reference/00-overview.md "build-size
+      # sentinel"; numbers referenced by integrations/esp-idf/README.md). Prints
+      # the per-component breakdown to the log, publishes a markdown table to
+      # the step summary, uploads a JSON artifact, and gates the libtracer
+      # component's flash / static-RAM contribution (thresholds: workflow env).
+      - name: Report footprint (idf.py size / size-components)
         shell: bash
         working-directory: integrations/esp-idf/examples/full_node
         run: |
-          ls -la build/*.bin build/*.elf 2>/dev/null || true
-          idf.py size 2>/dev/null || true
+          ls -la build/*.bin build/*.elf
+          . "${IDF_PATH}/export.sh"
+          idf.py size
+          idf.py size-components
+
+      - name: Extract footprint JSON (esp-idf-size)
+        shell: bash
+        working-directory: integrations/esp-idf/examples/full_node
+        run: |
+          . "${IDF_PATH}/export.sh"
+          MAP=$(find build -maxdepth 1 -name '*.map' | head -n1)
+          # esp-idf-size NG (>= 2.0, IDF v6.0) speaks json2; older images speak
+          # the legacy json — try NG first, fall back.
+          python -m esp_idf_size --format json2 --archives "$MAP" > size_components.json ||
+            python -m esp_idf_size --format json --archives "$MAP" > size_components.json
+          python -m esp_idf_size --format json2 "$MAP" > size_summary.json ||
+            python -m esp_idf_size --format json "$MAP" > size_summary.json
+
+      - name: Footprint sentinel (step summary + component-size gate)
+        shell: bash
+        working-directory: integrations/esp-idf/examples/full_node
+        run: |
+          python3 "${GITHUB_WORKSPACE}/tools/esp_size_gate.py" \
+            --components-json size_components.json \
+            --summary-json size_summary.json \
+            --target "${{ matrix.target }}" \
+            --max-flash-bytes "${LIBTRACER_MAX_FLASH_BYTES}" \
+            --max-static-ram-bytes "${LIBTRACER_MAX_STATIC_RAM_BYTES}" \
+            --mode "${LIBTRACER_SENTINEL_MODE}" \
+            --out-json "footprint-${{ matrix.target }}.json"
+
+      - name: Upload footprint artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: footprint-${{ matrix.target }}
+          path: integrations/esp-idf/examples/full_node/footprint-${{ matrix.target }}.json
 
   # Full-node HOST run (#183): the same full_node example on the ESP-IDF
   # `linux` target, executed — the device node and an in-process host peer talk
