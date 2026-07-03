@@ -37,5 +37,6 @@ export {
   decodeFwd,
   parseFwdTlv,
   replyErrorCode,
+  replyErrorPath,
 } from './fwd.js';
 export type { FwdRequest, ParsedFwd, FieldLevel } from './fwd.js';

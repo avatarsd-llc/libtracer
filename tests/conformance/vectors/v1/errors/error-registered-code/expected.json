@@ -1,0 +1,12 @@
+{
+  "name": "error-registered-code",
+  "category": "errors",
+  "hex": "08400600010002002000",
+  "total_bytes": 10,
+  "decoded": {
+    "type": "0x08 ERROR",
+    "structured": true,
+    "meaning": "ERROR{ VALUE u16=0x0020 (tr::path::not_found) } — registered-code identity, no detail",
+    "note": "RFC-0002 §C worked bytes; ERROR is always structured (opt.PL=1); first child VALUE = registered code, u16 LE"
+  }
+}

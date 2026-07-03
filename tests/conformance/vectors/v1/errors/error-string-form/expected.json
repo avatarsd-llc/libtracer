@@ -1,0 +1,12 @@
+{
+  "name": "error-string-form",
+  "category": "errors",
+  "hex": "08401C000200180074723A3A61636D653A3A7769646765743A3A6A616D6D6564",
+  "total_bytes": 32,
+  "decoded": {
+    "type": "0x08 ERROR",
+    "structured": true,
+    "meaning": "ERROR{ NAME 'tr::acme::widget::jammed' } — string-form identity (unregistered third-party path)",
+    "note": "RFC-0002 §B/§C: a NAME (0x02) first child selects the string identity form — the UTF-8 tr:: path, no NUL"
+  }
+}

@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/error.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/tlv_emit.hpp"
 
@@ -34,29 +35,28 @@ namespace {
 // stays self-consistent and trailer-less at rest.
 constexpr std::byte kStructOptMask{0x48};
 
-// Map an L4 status_t to its wire ERROR code byte (docs/reference/05 §error code
-// registry). Provisional shape pending the ERROR registry (#8 / RFC-0002) — the
-// kind=ERROR reply payload is STATUS{ ERROR u8 } per RFC-0004 §D.
-[[nodiscard]] std::uint8_t error_code(status_t s) noexcept {
+// Map an L4 status_t to its registered tr:: error code (RFC-0002 §D registry,
+// wire::err_t) — the u16 the kind=ERROR reply's ERROR{VALUE} identity carries.
+[[nodiscard]] wire::err_t error_code(status_t s) noexcept {
     switch (s) {
         case status_t::NOT_FOUND:
-            return 0x01;
+            return wire::err_t::PATH_NOT_FOUND;
         case status_t::PERMISSION_DENIED:
-            return 0x02;
+            return wire::err_t::ACCESS_DENIED;
         case status_t::INVALID_PATH:
-            return 0x03;
+            return wire::err_t::PATH_INVALID;
         case status_t::TYPE_MISMATCH:
-            return 0x04;
+            return wire::err_t::SCHEMA_TYPE_MISMATCH;
         case status_t::BACKPRESSURE:
-            return 0x07;
+            return wire::err_t::FLOW_BACKPRESSURE;
         case status_t::TIMEOUT:
-            return 0x08;
+            return wire::err_t::FLOW_TIMEOUT;
         case status_t::SCHEMA_NOT_FOUND:
-            return 0x0A;
+            return wire::err_t::SCHEMA_NOT_FOUND;
         case status_t::PATH_IN_USE:
-            return 0x0E;
+            return wire::err_t::PATH_IN_USE;
     }
-    return 0x01;
+    return wire::err_t::PATH_NOT_FOUND;
 }
 
 // A parsed request FWD — arena node INDICES, no bytes owned (ADR-0041 §2: the
@@ -274,20 +274,27 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
     return rope;
 }
 
-// A kind=ERROR reply carrying STATUS{ ERROR u8=<code> } (RFC-0004 §D, provisional
-// #8) — a fixed 9-byte tail, built on the stack.
+// A kind=ERROR reply carrying STATUS{ ERROR{ VALUE u16 LE code } } (RFC-0004 §D
+// with the RFC-0002 §C registered-code identity) — a fixed 14-byte tail, built
+// on the stack.
 [[nodiscard]] rope_t assemble_error(const tlv_arena_t& a, const parsed_fwd_t& req,
                                     status_t status) {
-    const std::array<std::byte, 9> tail{
+    const std::uint16_t code = std::to_underlying(error_code(status));
+    const std::array<std::byte, 14> tail{
         static_cast<std::byte>(std::to_underlying(type_t::STATUS)),
         static_cast<std::byte>(opt_t{.pl = true}.encode()),
-        std::byte{5},
-        std::byte{0},  // STATUS length = one 5-byte ERROR child
+        std::byte{10},
+        std::byte{0},  // STATUS length = one 10-byte ERROR child
         static_cast<std::byte>(std::to_underlying(type_t::ERROR)),
+        static_cast<std::byte>(opt_t{.pl = true}.encode()),
+        std::byte{6},
+        std::byte{0},  // ERROR length = one 6-byte VALUE identity child
+        static_cast<std::byte>(std::to_underlying(type_t::VALUE)),
         std::byte{0},
-        std::byte{1},
-        std::byte{0},  // ERROR length = 1
-        std::byte{error_code(status)},
+        std::byte{2},
+        std::byte{0},  // VALUE length = 2 (the u16 LE registered code)
+        static_cast<std::byte>(code & 0xFFu),
+        static_cast<std::byte>(code >> 8),
     };
     return assemble(a, req, reply_kind_t::ERROR, tail, {}, 0);
 }
@@ -402,7 +409,7 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
                 req.has_await_timeout ? std::chrono::nanoseconds(req.await_timeout)
                                       : kDefaultAwaitTimeout;
             result_t<view_t> r = graph_.await(v, timeout);
-            if (!r) return assemble_error(fwd, req, r.error());  // TIMEOUT => ERROR(0x08)
+            if (!r) return assemble_error(fwd, req, r.error());  // TIMEOUT => tr::flow::timeout
             return assemble_result_view(fwd, req, *r);
         }
         case fwd_op_t::REPLY:

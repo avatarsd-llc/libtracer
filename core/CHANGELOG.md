@@ -31,6 +31,20 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Changed
 
+- **`kind=ERROR` replies emit the RFC-0002 structured ERROR and a new `error.hpp`
+  registry header ships** ([RFC-0002](../docs/spec/rfcs/0002-protocol-error-model.md),
+  ADR-0009/0010). New header-only `include/libtracer/error.hpp` (`tr::wire`): `err_t`
+  (the frozen u16 registered codes of the `tr::<concept>::<error>` namespace),
+  `err_severity_t` / `err_disposition_t`, and constexpr `err_path` / `err_severity` /
+  `err_disposition` lookups. `op_resolve.cpp` now emits
+  `STATUS{ ERROR{ VALUE u16 LE code } }` (ERROR always structured, first child = the
+  identity) instead of the withdrawn flat `STATUS{ ERROR u8 }` byte codes — breaking
+  for pre-freeze draft consumers only (no released v1). The
+  `fwd/fwd-reply-error` conformance vector is regenerated to the new layout and three
+  `errors/` vectors are seeded (`error-registered-code`, `error-registered-detail`,
+  `error-string-form`); the TypeScript client's `FWD_ERROR` / `replyErrorCode` follow
+  the registry, and a `replyErrorPath` accessor is added for the string-form identity.
+
 - **`route_handle_t` label state is per-connection and pmr-backed** (Brick 4 of the #83
   Stage-2 flip; [ADR-0038](../docs/adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md)
   §3 / [ADR-0039](../docs/adr/0039-pmr-memory-model-host-aligned-allocation.md)). The

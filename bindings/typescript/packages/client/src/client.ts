@@ -61,18 +61,22 @@ export interface ClientOptions {
 }
 
 /**
- * A `kind=ERROR` FWD reply, surfaced as a typed rejection. `.code` is the wire
- * ERROR byte (see {@link FWD_ERROR}); `.codeName` its symbolic name.
+ * A `kind=ERROR` FWD reply, surfaced as a typed rejection. `.code` is the
+ * registered u16 wire ERROR code (see {@link FWD_ERROR}); `.codeName` its
+ * symbolic name.
  */
 export class FwdError extends Error {
-  /** The wire ERROR code (a {@link FWD_ERROR} value). */
+  /** The registered u16 wire ERROR code (a {@link FWD_ERROR} value). */
   readonly code: number;
   /** The symbolic ERROR name (e.g. `"NOT_FOUND"`, `"TIMEOUT"`). */
   readonly codeName: string;
-  /** @param code the wire ERROR code carried in the reply's `STATUS{ ERROR u8 }`. */
+  /**
+   * @param code the registered u16 code carried in the reply's
+   *   `STATUS{ ERROR{ VALUE u16 } }` per RFC-0002
+   */
   constructor(code: number) {
     const name = fwdErrorName(code);
-    super(`FWD reply ERROR ${name} (0x${code.toString(16).padStart(2, '0')})`);
+    super(`FWD reply ERROR ${name} (0x${code.toString(16).padStart(4, '0')})`);
     this.name = 'FwdError';
     this.code = code;
     this.codeName = name;

@@ -1,0 +1,12 @@
+{
+  "name": "error-registered-detail",
+  "category": "errors",
+  "hex": "08401B0001000200410003001100646561646C696E65206578636565646564",
+  "total_bytes": 31,
+  "decoded": {
+    "type": "0x08 ERROR",
+    "structured": true,
+    "meaning": "ERROR{ VALUE u16=0x0041 (tr::flow::timeout), DESCRIPTION 'deadline exceeded' } — registered code + human detail",
+    "note": "RFC-0002 §B/§C: optional detail children follow the identity; DESCRIPTION (0x03) is opaque UTF-8"
+  }
+}
