@@ -273,11 +273,25 @@ void transport_can::on_rx(const can_frame_data_t& frame) {
         std::vector<std::byte>& buf = control_[fields->node];
         const std::span<const std::byte> in = frame.bytes();
         buf.insert(buf.end(), in.begin(), in.end());
-        while (true) {
+        while (!buf.empty()) {
             const auto decoded = can::decode_advertise(buf);
-            if (!decoded) break;  // need more bytes / malformed-but-incomplete
-            learn_advertise(decoded->first);
-            buf.erase(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(decoded->second));
+            if (decoded) {
+                learn_advertise(decoded->first);
+                buf.erase(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(decoded->second));
+                continue;
+            }
+            // Not decodable from the front. A plausible prefix just needs more
+            // bytes; anything else is a fragment (a mid-stream join saw the tail
+            // of an in-flight advertise, or a lost control frame tore one) —
+            // resynchronize by dropping bytes up to the next plausible boundary,
+            // or the stream wedges permanently on the garbage prefix.
+            if (can::advertise_prefix_plausible(buf)) break;
+            std::size_t skip = 1;
+            while (skip < buf.size() &&
+                   std::to_integer<std::uint8_t>(buf[skip]) != can::kAdvertiseMagic) {
+                ++skip;
+            }
+            buf.erase(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(skip));
         }
         return;
     }

@@ -176,6 +176,18 @@ inline constexpr std::uint16_t kCanBroadcastNode = 0xFFFF;
 inline constexpr std::uint8_t kAdvertiseFlagGroup = 0x01;
 
 /**
+ * @brief Largest `path_len` a well-formed advertise may carry.
+ *
+ * A wedge-resistance bound for the control-stream decoder: a desynchronized
+ * stream fragment that happens to start with the magic/version signature could
+ * otherwise claim an absurd path length and stall resynchronization for up to
+ * 64 KiB of control traffic. Real libtracer paths on a CAN bus are far shorter;
+ * encoders MUST NOT exceed this and decoders reject beyond it (which lets
+ * @ref advertise_prefix_plausible classify the prefix as garbage and resync).
+ */
+inline constexpr std::uint16_t kAdvertiseMaxPathLen = 1024;
+
+/**
  * @brief A decoded in-band `advertise` frame — the identity↔path manifest.
  *
  * An advertise frame is a full-TLV control frame that *establishes* a
@@ -299,6 +311,7 @@ struct advertise_t {
     a.target = u16(14);
     const std::uint16_t path_len = u16(16);
 
+    if (path_len > kAdvertiseMaxPathLen) return std::nullopt;  // wedge bound (see constant)
     // Overflow-safe bound: kAdvertiseHeaderSize <= buf.size() is guaranteed above,
     // so buf.size() - kAdvertiseHeaderSize cannot underflow.
     if (path_len > buf.size() - kAdvertiseHeaderSize) return std::nullopt;
@@ -308,6 +321,36 @@ struct advertise_t {
         a.path.push_back(static_cast<char>(u8(kAdvertiseHeaderSize + i)));
     }
     return std::make_pair(std::move(a), kAdvertiseHeaderSize + static_cast<std::size_t>(path_len));
+}
+
+/**
+ * @brief Could the front of @p buf be a (possibly still incomplete) advertise?
+ *
+ * Progressive prefix validation for the control-stream decoder's
+ * resynchronization: checks exactly the bytes that have arrived so far —
+ * magic, format version, reserved-MBZ, and the @ref kAdvertiseMaxPathLen
+ * bound — and never rejects a prefix that more bytes could still complete.
+ *
+ * A `true` on an incomplete buffer means "wait for more bytes"; a `false`
+ * means the stream cannot be decoded from this offset (a mid-stream join or
+ * a lost control frame left a fragment) and the consumer should drop bytes
+ * until the next plausible boundary. @ref decode_advertise stays the single
+ * authority for complete frames.
+ *
+ * @param buf The front of an advertise control byte stream (any length).
+ * @return Whether an advertise could still begin at offset 0 of @p buf.
+ */
+[[nodiscard]] inline bool advertise_prefix_plausible(std::span<const std::byte> buf) {
+    const auto u8 = [&](std::size_t i) { return std::to_integer<std::uint8_t>(buf[i]); };
+    if (!buf.empty() && u8(0) != kAdvertiseMagic) return false;
+    if (buf.size() >= 2 && u8(1) != kAdvertiseFormatVersion) return false;
+    if (buf.size() >= 4 && u8(3) != 0u) return false;  // reserved MBZ
+    if (buf.size() >= kAdvertiseHeaderSize) {
+        const auto path_len =
+            static_cast<std::uint16_t>(u8(16) | (static_cast<std::uint16_t>(u8(17)) << 8));
+        if (path_len > kAdvertiseMaxPathLen) return false;
+    }
+    return true;
 }
 
 }  // namespace tr::net::can
