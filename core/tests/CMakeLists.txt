@@ -216,6 +216,28 @@ target_compile_definitions(substrate_test_no_atomic PRIVATE
     LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME substrate_no_atomic COMMAND substrate_test_no_atomic)
 
+# ADR-0043 Phase A — the libtracer_quic MODULE harness (a consumer that talks QUIC
+# links the module target; nothing quic-related exists in a default configure):
+# raw duplex, split/coalesced chunk reassembly + big-frame chunking, oversize-prefix
+# rejection + teardown, ADR-0042 owning delivery + backpressure drain, two-node FWD
+# end-to-end over localhost QUIC, and a config-created `kind=quic` connection via the
+# register_transport_type extension seam. Only with LIBTRACER_WITH_QUIC (the dedicated
+# quic CI job); the test generates its own self-signed dev cert via
+# scripts/gen-dev-cert.sh at startup.
+if(LIBTRACER_WITH_QUIC)
+    add_executable(quic_test quic_test.cpp)
+    target_link_libraries(quic_test PRIVATE libtracer_quic)
+    libtracer_test_warnings(quic_test)
+    target_compile_definitions(quic_test PRIVATE
+        LIBTRACER_DEV_CERT_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/gen-dev-cert.sh")
+    add_test(NAME quic COMMAND quic_test)
+    # libmsquic.so is not TSan-instrumented — suppress races INSIDE the library
+    # (TSan cannot see its internal synchronization); libtracer's own code stays
+    # fully gated (see tsan-msquic.supp). Harmless for non-TSan builds.
+    set_tests_properties(quic PROPERTIES ENVIRONMENT
+        "TSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tsan-msquic.supp")
+endif()
+
 # mem_cuda GPU test — only with LIBTRACER_WITH_CUDA; run on a real GPU locally
 # (scripts/test-cuda.sh), never in CI.
 if(LIBTRACER_WITH_CUDA)

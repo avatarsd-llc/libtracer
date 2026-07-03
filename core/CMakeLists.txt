@@ -56,6 +56,47 @@ if(LIBTRACER_WITH_CUDA)
     target_compile_definitions(libtracer PUBLIC LIBTRACER_WITH_CUDA)
 endif()
 
+# libtracer_quic — the QUIC transport MODULE (docs/adr/0043 Phase A), a SEPARATE
+# library target: a host that talks QUIC links libtracer_quic; a host that
+# doesn't simply never compiles these sources — no feature #ifdefs, no compile
+# definitions, nothing in libtracer itself references msquic. The module extends
+# the transport catalog through the existing register_transport_type seam
+# (quic_transport_factory), so transport_vertex stays closed for modification.
+# LIBTRACER_WITH_QUIC only controls whether the target is CONFIGURED (msquic
+# must be installed to build it; the dedicated quic CI job builds msquic from
+# source). Lookup is find-first: the msquic CMake package config if installed,
+# else a plain header+library search (point CMAKE_PREFIX_PATH at an msquic
+# install prefix).
+option(LIBTRACER_WITH_QUIC "Configure the libtracer_quic transport module (needs msquic)" OFF)
+if(LIBTRACER_WITH_QUIC)
+    find_package(msquic CONFIG QUIET)
+    if(NOT TARGET msquic)
+        find_library(MSQUIC_LIBRARY NAMES msquic)
+        if(NOT MSQUIC_LIBRARY)
+            message(FATAL_ERROR "LIBTRACER_WITH_QUIC=ON but msquic was not found. "
+                "Install msquic (https://github.com/microsoft/msquic) and/or set "
+                "CMAKE_PREFIX_PATH to its install prefix.")
+        endif()
+        add_library(msquic SHARED IMPORTED)
+        set_target_properties(msquic PROPERTIES IMPORTED_LOCATION "${MSQUIC_LIBRARY}")
+    endif()
+    # msquic's exported target (as of v2.4) carries no include-dir usage
+    # requirement — locate msquic.h ourselves and attach it (PUBLIC: consumers
+    # like quic_test include msquic.h directly for their raw test client).
+    find_path(MSQUIC_INCLUDE_DIR msquic.h)
+    if(NOT MSQUIC_INCLUDE_DIR)
+        message(FATAL_ERROR "msquic.h not found — set CMAKE_PREFIX_PATH to the msquic install prefix.")
+    endif()
+    add_library(libtracer_quic STATIC src/transport_quic.cpp)
+    target_include_directories(libtracer_quic PUBLIC "${MSQUIC_INCLUDE_DIR}")
+    target_link_libraries(libtracer_quic PUBLIC libtracer msquic)
+    if(MSVC)
+        target_compile_options(libtracer_quic PRIVATE /W4)
+    else()
+        target_compile_options(libtracer_quic PRIVATE -Wall -Wextra)
+    endif()
+endif()
+
 if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
     enable_testing()
     add_subdirectory(tests)

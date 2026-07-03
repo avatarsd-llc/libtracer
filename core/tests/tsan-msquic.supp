@@ -1,0 +1,11 @@
+# ThreadSanitizer suppressions for the libtracer_quic module tests.
+#
+# libmsquic.so is a prebuilt, NON-TSan-instrumented third-party library: TSan
+# only sees its pthread calls through interceptors and cannot see the library's
+# own internal synchronization (epoll/eventfd wakeups + C11 atomics), so
+# msquic-internal accesses (QuicLookup*, CxPlatProcessEvents, ...) report as
+# races that are not observable ones. Suppress races whose racy access lives in
+# the library — libtracer's OWN code (transport_quic.cpp, the receivers, the
+# tests) stays fully TSan-gated: any race with a libtracer frame on top still
+# fails the run.
+called_from_lib:libmsquic.so

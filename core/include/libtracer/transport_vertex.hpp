@@ -54,6 +54,11 @@ enum class conn_role_t : std::uint8_t { DIAL = 0, LISTEN = 1 };
  * `kind` selects the transport factory (e.g. `"udp"`, `"ws"`) used to construct the
  * socket when no @ref transport_vertex_t::provide_link was staged; empty = pre-supplied
  * link only.
+ *
+ * This record carries ONLY the universal keys every transport kind shares (the ADR-0043
+ * §5 leanness ruling): a kind's PRIVATE config (e.g. quic's `cert`/`key` PEM paths) never
+ * lands here — the kind's own factory parses it from the raw config SETTINGS TLV it
+ * receives alongside these settings.
  */
 struct conn_settings_t {
     std::string addr;                     /**< @brief Peer IPv4 dotted-quad (DIAL). */
@@ -92,14 +97,20 @@ struct conn_settings_t {
 class transport_vertex_t {
    public:
     /**
-     * @brief Constructs an owning transport from a connection's parsed settings.
+     * @brief Constructs an owning transport from a connection's parsed settings plus
+     *        the raw config TLV.
+     *
+     * The shared @ref conn_settings_t carries ONLY the universal keys (the ADR-0043 §5
+     * leanness ruling); @p raw_config is the SPEC's config SETTINGS TLV as written (may
+     * be null when the SPEC carried none), from which a kind's factory parses its own
+     * kind-private keys (e.g. quic's `cert`/`key`) — the factory's business, module-side.
      *
      * Returns the live transport, or a status: `TYPE_MISMATCH` for a config missing
      * the fields the kind requires (e.g. a DIAL without `addr`/`port`), `NOT_FOUND`
      * for a socket that failed to come up (bind/dial/handshake failure).
      */
-    using transport_factory_t =
-        std::function<graph::result_t<std::unique_ptr<transport_t>>(const conn_settings_t&)>;
+    using transport_factory_t = std::function<graph::result_t<std::unique_ptr<transport_t>>(
+        const conn_settings_t&, const wire::tlv_t* raw_config)>;
 
     /**
      * @brief Bind to @p graph and @p router and register the `client`/`listener` catalog
@@ -135,7 +146,8 @@ class transport_vertex_t {
      * catalog entry" convention as an unknown SPEC `type`). Call at setup, before
      * frames flow (mirrors `register_child_type`'s thread contract).
      * @param kind    The config `kind` selector (e.g. "udp", "quic").
-     * @param factory Builds an owning transport from the parsed settings.
+     * @param factory Builds an owning transport from the parsed universal settings
+     *                plus the raw config TLV (for its kind-private keys).
      */
     void register_transport_type(std::string kind, transport_factory_t factory);
 
