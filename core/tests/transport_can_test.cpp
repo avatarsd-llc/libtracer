@@ -261,20 +261,26 @@ void test_fd_dlc_padding() {
     check(sink.wait_for_count(1, 2s), "FD payload delivered");
     check(equal_bytes(sink.last(), payload), "FD delivered bytes byte-exact (padding trimmed)");
 
-    // The tap drains on its own thread: advertise (3 control frames) + 2 data frames.
-    tap.wait_for_count(5, 2s);
-    // Inspect the data frames the bus actually carried (endpoint != control slot).
+    // The tap drains on its own thread and lags the delivery path; the frame
+    // census (hellos + advertise + data) is a v2 wire detail the test should not
+    // hard-code — wait for the condition itself: the padded tail data frame.
     bool saw_full = false, saw_padded = false, saw_control = false;
-    for (const auto& f : tap.snapshot()) {
-        const auto fields = can::decode_can_id(f.id);
-        if (!fields) continue;
-        if (fields->endpoint == tr::net::kCanControlEndpoint) {
-            saw_control = true;
-            continue;
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    do {
+        saw_full = saw_padded = saw_control = false;
+        for (const auto& f : tap.snapshot()) {
+            const auto fields = can::decode_can_id(f.id);
+            if (!fields) continue;
+            if (fields->endpoint == tr::net::kCanControlEndpoint) {
+                saw_control = true;
+                continue;
+            }
+            if (f.len == 64) saw_full = true;
+            if (f.len == 48) saw_padded = true;  // can_fd_dlc_round_up(36) == 48
         }
-        if (f.len == 64) saw_full = true;
-        if (f.len == 48) saw_padded = true;  // can_fd_dlc_round_up(36) == 48
-    }
+        if (saw_control && saw_full && saw_padded) break;
+        std::this_thread::sleep_for(5ms);
+    } while (std::chrono::steady_clock::now() < deadline);
     check(saw_control, "an advertise rode the control slot");
     check(saw_full, "interior FD slice carried a full 64-byte data field");
     check(saw_padded, "tail FD slice padded up to DLC 48 (can_fd_dlc_round_up(36))");
