@@ -152,7 +152,7 @@ across framing modes. The bounds to design within:
   consumed monotonically, so a delivery can travel exactly as far as its explicit
   source route (segment count ≤ the PATH cap of 32).
 - **Loops cannot form** — a `dst` that revisits a node is malformed
-  (`ERROR=INVALID_PATH`); there is no flooding, so no duplicate deliveries and no
+  (`ERROR{tr::path::invalid}`); there is no flooding, so no duplicate deliveries and no
   dedup state anywhere. Parallel links to one peer are distinct explicit addresses —
   deliberate redundancy a consumer subscribes to knowingly.
 - **No global ordering across folds** — per-producer ordering only; cross-node

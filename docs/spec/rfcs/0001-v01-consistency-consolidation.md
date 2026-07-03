@@ -5,6 +5,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0001 — Protocol-v1 wire-format consistency consolidation
 
+> **Partial supersession (2026-07-03):** §C.1 (leading-child-`VALUE` flat error code) is **withdrawn**; §C.2 (`VERSION_MISMATCH`) and §C.3 (`INVALID`) are **subsumed** — the `ERROR` wire layout and registry are now [RFC-0002](0002-protocol-error-model.md) (`tr::<concept>::<error>`, accepted). All other sections (versioning, `LIST` retirement, address-shift, `io_dir_t`, API) stand.
+
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0001 |

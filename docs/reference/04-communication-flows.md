@@ -237,7 +237,7 @@ sequenceDiagram
 Invariants:
 
 - **Forwarders are stateless.** There is no per-request table: the forward route is the shrinking `dst` and the return route is the growing `src`, both carried in the frame. A hop may reboot mid-operation and the reply still routes.
-- **Loop-free by construction.** `dst` is consumed monotonically per hop; a `dst` that revisits a node is malformed (`ERROR=INVALID_PATH`). No dedup state exists anywhere on the path — parallel links to one peer are *different explicit addresses* (deliberate redundancy), not auto-multipath.
+- **Loop-free by construction.** `dst` is consumed monotonically per hop; a `dst` that revisits a node is malformed (`ERROR{tr::path::invalid}`). No dedup state exists anywhere on the path — parallel links to one peer are *different explicit addresses* (deliberate redundancy), not auto-multipath.
 - **The payload bytes never move on a forward hop.** Only the two route PATHs are rewritten; the rest of the frame is sent as views over the inbound bytes.
 - **A REPLY expects no reply** (RFC-0004 §B): it routes hop-by-hop along the return route without growing `src`, and terminates at the originator's reply sink.
 
@@ -517,7 +517,7 @@ The static-path flow is the only one usable from a hard-real-time ISR. The strin
 
 A static-handle write can return:
 
-- `ERROR=NOT_FOUND` — the handle is well-formed but the target vertex was unbound (e.g., a transport module that owned the vertex was unloaded). The handle's bytes remain valid; only the resolution failed.
-- `ERROR=PATH_IN_USE` — only at init-time `tracer_path_register`, never on the hot path. A handle that survives init has been validated.
+- `ERROR{tr::path::not_found}` — the handle is well-formed but the target vertex was unbound (e.g., a transport module that owned the vertex was unloaded). The handle's bytes remain valid; only the resolution failed.
+- `ERROR{tr::path::in_use}` — only at init-time `tracer_path_register`, never on the hot path. A handle that survives init has been validated.
 
 There is no `INVALID_PATH` error on the hot path: invalidity is detected exclusively at encode time. This is the practical payoff of paying for validation once.

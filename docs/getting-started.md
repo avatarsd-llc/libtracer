@@ -148,7 +148,7 @@ Two properties of this net plane worth knowing from day one:
   builds the shrunk-`dst`/grown-`src` heads on the stack, and scatter-gathers them with
   untouched views of the inbound frame — zero allocations, CI-gated.
 - **Routes cannot loop.** `dst` only ever shrinks; a `dst` that revisits a node is
-  malformed (`ERROR=INVALID_PATH`). No dedup tables, no hop counters — loop-freedom is
+  malformed (`ERROR{tr::path::invalid}`). No dedup tables, no hop counters — loop-freedom is
   by construction.
 
 ## Where to go next
