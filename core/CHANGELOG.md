@@ -25,6 +25,29 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **ADR-0043 Phase B — `webtransport_transport_t`, the WebTransport-over-HTTP/3
+  endpoint in the `libtracer_quic` module** (new public header
+  `transport_webtransport.hpp`; NOT in the `tracer.hpp` umbrella; same module
+  target — one msquic investment serves QUIC and WebTransport, and the core
+  library still has **zero** msquic/H3 references). LISTEN mode serves browsers:
+  H3 SETTINGS advertising extended CONNECT (RFC 9220), H3 datagrams (RFC 9297)
+  and ENABLE_WEBTRANSPORT/WT_MAX_SESSIONS; the extended CONNECT
+  (`:method=CONNECT, :protocol=webtransport`) answered with 200; then ONE
+  WebTransport bidirectional stream (the browser's
+  `createBidirectionalStream()`) carrying the SAME 4-byte u32-LE length-prefix
+  framing as `tcp_transport_t`/`quic_transport_t`, with ADR-0042 owning view
+  delivery and backpressure. DIAL mode implements the client half of the same
+  handshake (self-contained C++ e2e; native clients). The H3/QPACK layer is a
+  deliberately minimal, module-private codec (`src/wt_h3.hpp`: SETTINGS+HEADERS
+  frames, zero-dynamic-table QPACK with the static-table subset, Huffman
+  decode-only — no ls-qpack, nothing vendored; the subset's sufficiency is
+  documented in the header and pinned against RFC vectors). Registered via
+  `webtransport_transport_factory()` as kind `webtransport`, with the
+  kind-PRIVATE `cert`/`key` config keys (the ADR-0043 §5 leanness ruling —
+  `conn_settings_t` unchanged). New `session_up()` observer reports the
+  extended-CONNECT state. Companion TS package:
+  `@avatarsd-llc/libtracer-webtransport` (browser client, identical framing).
+
 - **ADR-0043 Phase A — `quic_transport_t`, the msquic QUIC transport as a SEPARATE
   MODULE** (new library target `libtracer_quic` + public header
   `transport_quic.hpp`; NOT in the `tracer.hpp` umbrella). A host that talks QUIC

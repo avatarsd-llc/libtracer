@@ -62,6 +62,10 @@ endif()
 # definitions, nothing in libtracer itself references msquic. The module extends
 # the transport catalog through the existing register_transport_type seam
 # (quic_transport_factory), so transport_vertex stays closed for modification.
+# ADR-0043 Phase B adds webtransport_transport_t to the SAME target (one msquic
+# investment serves both — QUIC is the substrate WebTransport requires): the
+# WebTransport-over-HTTP/3 endpoint with its module-private minimal H3/QPACK
+# layer (src/wt_h3.hpp — never installed, never referenced by core).
 # LIBTRACER_WITH_QUIC only controls whether the target is CONFIGURED (msquic
 # must be installed to build it; the dedicated quic CI job builds msquic from
 # source). Lookup is find-first: the msquic CMake package config if installed,
@@ -87,7 +91,10 @@ if(LIBTRACER_WITH_QUIC)
     if(NOT MSQUIC_INCLUDE_DIR)
         message(FATAL_ERROR "msquic.h not found — set CMAKE_PREFIX_PATH to the msquic install prefix.")
     endif()
-    add_library(libtracer_quic STATIC src/transport_quic.cpp)
+    add_library(libtracer_quic STATIC
+        src/transport_quic.cpp
+        src/transport_webtransport.cpp
+    )
     target_include_directories(libtracer_quic PUBLIC "${MSQUIC_INCLUDE_DIR}")
     target_link_libraries(libtracer_quic PUBLIC libtracer msquic)
     if(MSVC)

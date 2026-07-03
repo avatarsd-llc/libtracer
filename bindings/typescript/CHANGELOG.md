@@ -9,6 +9,24 @@ versioning/publish strategy.
 
 ### Added
 
+- **New package `@avatarsd-llc/libtracer-webtransport` (0.1.0) — the browser
+  WebTransport transport (ADR-0043 Phase B / ADR-0031, #92).**
+  `TransportWebTransport` drives the runtime's `WebTransport` (HTTP/3 extended
+  CONNECT), opens ONE bidirectional stream as the frame channel, and carries
+  each libtracer TLV as a `u32-LE length ++ frame` record — wire-compatible
+  with the C++ `tr::net::webtransport_transport_t` (`libtracer_quic` module).
+  Satisfies the client SDK's `ClientTransport` seam structurally
+  (send/onFrame/onClose), exactly like `TransportWs`. Dev trust via
+  `serverCertificateHashes` (ECDSA cert valid <= 14 days — the browser rule;
+  see the package README). The pure length-prefix codec is exported at the
+  `./framing` subpath (`encodeRecord`, `FrameReassembler`,
+  `MalformedPrefixError`, `MAX_FRAME`). Node has no native WebTransport
+  client, so unit tests run over a mocked session (web streams); a
+  puppeteer/chrome-headless interop harness against the C++
+  `wt_interop_server` echo binary skips gracefully unless
+  `LIBTRACER_WT_INTEROP_SERVER` is set and puppeteer is installed (the wire is
+  additionally proven end-to-end in C++ by `core/tests/webtransport_test.cpp`).
+
 - **Client session hardening (v0.1 must-fix bundle).**
   `@avatarsd-llc/libtracer-client`: pending one-shot requests now **reject when
   the transport closes** (`ClientTransport` gains an optional `onClose` hook,

@@ -1,0 +1,52 @@
+{
+  "name": "@avatarsd-llc/libtracer-webtransport",
+  "version": "0.1.0",
+  "description": "WebTransport transport for libtracer (ADR-0043 Phase B) — a browser WebTransport client that carries libtracer TLV frames over ONE bidirectional stream with 4-byte u32-LE length-prefix framing, wire-compatible with the C++ tr::net::webtransport_transport_t (the libtracer_quic module). The core (@avatarsd-llc/libtracer) is a peerDependency. See docs/adr/0033-npm-subpackage-monorepo.md.",
+  "author": "avatarsd LLC",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avatarsd-llc/libtracer.git",
+    "directory": "bindings/typescript/packages/transport-webtransport"
+  },
+  "homepage": "https://github.com/avatarsd-llc/libtracer#readme",
+  "bugs": {
+    "url": "https://github.com/avatarsd-llc/libtracer/issues"
+  },
+  "keywords": ["protocol", "iot", "graph", "tlv", "webtransport", "http3", "quic", "transport"],
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./framing": {
+      "types": "./dist/framing.d.ts",
+      "default": "./dist/framing.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@avatarsd-llc/libtracer": ">=0.1.0 <0.2.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test test/*.test.mjs",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@avatarsd-llc/libtracer": "*",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  }
+}

@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 #
-# Dedicated job for the libtracer_quic transport MODULE (ADR-0043 Phase A) — a
-# separate library target a QUIC-talking host links; the core never compiles
-# these sources. SEPARATE from core-ci on purpose: the required core gates stay
-# dependency-free. This job builds msquic from source (cached by tag),
-# configures the module (-DLIBTRACER_WITH_QUIC=ON), and runs the FULL ctest
-# suite (quic included) plus ASan+UBSan and TSan variants.
+# Dedicated job for the libtracer_quic transport MODULE (ADR-0043 Phase A:
+# quic_transport_t; Phase B: webtransport_transport_t + its minimal H3 layer,
+# src/wt_h3.hpp) — a separate library target a QUIC/WebTransport-talking host
+# links; the core never compiles these sources. SEPARATE from core-ci on
+# purpose: the required core gates stay dependency-free. This job builds msquic
+# from source (cached by tag), configures the module (-DLIBTRACER_WITH_QUIC=ON),
+# and runs the FULL ctest suite (quic + webtransport included) plus ASan+UBSan
+# and TSan variants.
 name: quic
 
 on:
@@ -20,9 +22,14 @@ on:
     paths:
       - "core/src/transport_quic.cpp"
       - "core/include/libtracer/transport_quic.hpp"
+      - "core/src/transport_webtransport.cpp"
+      - "core/include/libtracer/transport_webtransport.hpp"
+      - "core/src/wt_h3.hpp"
       - "core/src/transport_vertex.cpp"
       - "core/include/libtracer/transport_vertex.hpp"
       - "core/tests/quic_test.cpp"
+      - "core/tests/webtransport_test.cpp"
+      - "core/tests/wt_interop_server.cpp"
       - "core/tests/tsan-msquic.supp"
       - "core/CMakeLists.txt"
       - "core/tests/CMakeLists.txt"

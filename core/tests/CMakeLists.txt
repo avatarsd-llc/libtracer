@@ -236,6 +236,29 @@ if(LIBTRACER_WITH_QUIC)
     # fully gated (see tsan-msquic.supp). Harmless for non-TSan builds.
     set_tests_properties(quic PROPERTIES ENVIRONMENT
         "TSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tsan-msquic.supp")
+
+    # ADR-0043 Phase B — the WebTransport endpoint harness: the module-private
+    # minimal H3/QPACK layer pinned against RFC vectors, then self-contained
+    # end-to-end coverage (the module's C++ WebTransport CLIENT half against
+    # its server: session establishment, framing over the 0x41 frame channel,
+    # ADR-0042 owning delivery + backpressure, the FWD READ round-trip — the
+    # #92 shape without a browser) and a config-created `kind=webtransport`.
+    add_executable(webtransport_test webtransport_test.cpp)
+    target_link_libraries(webtransport_test PRIVATE libtracer_quic)
+    libtracer_test_warnings(webtransport_test)
+    target_compile_definitions(webtransport_test PRIVATE
+        LIBTRACER_DEV_CERT_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/gen-dev-cert.sh")
+    add_test(NAME webtransport COMMAND webtransport_test)
+    set_tests_properties(webtransport PROPERTIES ENVIRONMENT
+        "TSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tsan-msquic.supp")
+
+    # ADR-0043 Phase B (interop) — standalone WebTransport echo harness driven
+    # by the TS transport-webtransport browser interop test (puppeteer/chrome,
+    # when available). Like ws_interop_server it is a helper binary the TS test
+    # spawns, NOT an add_test().
+    add_executable(wt_interop_server wt_interop_server.cpp)
+    target_link_libraries(wt_interop_server PRIVATE libtracer_quic)
+    libtracer_test_warnings(wt_interop_server)
 endif()
 
 # mem_cuda GPU test — only with LIBTRACER_WITH_CUDA; run on a real GPU locally
