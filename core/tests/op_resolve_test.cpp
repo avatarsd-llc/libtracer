@@ -578,6 +578,42 @@ void test_wildcard_and_not_local() {
           "ERROR payload == STATUS{ ERROR{ VALUE u16=0x0020 tr::path::not_found } }");
 }
 
+void test_write_creates_remote() {
+    std::printf("write-creates over FWD (RFC-0005): a remote data WRITE creates the path:\n");
+    graph_t g;
+    op_resolver_t resolver(g);
+
+    // A remote DATA write to a nonexistent path creates it, mkdir-p style.
+    const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"fresh", "leaf"}), b_path({"reply-ep"}), {},
+                           b_value({0x5A}));
+    auto reply = resolve_bytes(resolver, fwd);
+    check(reply.has_value(), "WRITE to an unregistered path resolves");
+    const auto dec = decode_reply(*reply);
+    check(value_u8(dec.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
+          "write-create replies kind=RESULT (not NOT_FOUND)");
+    check(g.read(*path_t::parse("/fresh/leaf")).has_value(),
+          "the created vertex serves the written value");
+    check(g.find(path_t::parse("/fresh")->key()) != nullptr,
+          "the intermediate level was created too (mkdir-p)");
+
+    // A remote FIELD write to a nonexistent path still does NOT create — there is
+    // no vertex whose control surface it could address.
+    std::vector<std::byte> field_body;
+    tr::detail::emit_name(field_body, "settings");
+    tr::detail::emit_name(field_body, "priority");
+    std::vector<std::byte> field_sel;
+    tr::detail::emit_tlv(field_sel, type_t::FIELD, opt_t{.pl = true}, field_body);
+    const auto ffwd = b_fwd(fwd_op_t::WRITE, b_path({"other", "leaf"}), b_path({"reply-ep"}),
+                            field_sel, b_value({1}));
+    auto freply = resolve_bytes(resolver, ffwd);
+    const auto fdec = decode_reply(*freply);
+    check(value_u8(fdec.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR),
+          "field write to an unregistered path => kind=ERROR");
+    check(status_error_code(fdec.tlv.children[4]) == 0x0020 /*tr::path::not_found*/,
+          "field write keeps tr::path::not_found (no vertex to control)");
+    check(g.find(path_t::parse("/other/leaf")->key()) == nullptr, "field write created nothing");
+}
+
 }  // namespace
 
 int main() {
@@ -590,6 +626,7 @@ int main() {
     test_store_ref_concurrent();
     test_non_canonical_dst();
     test_wildcard_and_not_local();
+    test_write_creates_remote();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

@@ -372,8 +372,21 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
     // canonical PATH (ADR-0041 §3: the frame IS the key). Local-only: a dst
     // naming a transport child / unknown path is not local => ERROR(NOT_FOUND).
     std::vector<std::byte> key_fallback;
-    vertex_t* v = graph_.find(path_lookup_key(fwd, req.dst, key_fallback));
-    if (!v) return assemble_error(fwd, req, status_t::NOT_FOUND);
+    const std::span<const std::byte> dst_key = path_lookup_key(fwd, req.dst, key_fallback);
+    vertex_t* v = graph_.find(dst_key);
+    if (!v) {
+        // Write-creates (RFC-0005): a remote DATA write (no :field selector) to a
+        // nonexistent path creates it, mkdir-p style, CREATE-gated on the nearest
+        // existing ancestor under the inbound link's subject. Field ops and
+        // read/await keep NOT_FOUND — there is no vertex to control or serve.
+        if (req.op == fwd_op_t::WRITE && !has_field) {
+            const result_t<vertex_t*> made = graph_.ensure_vertex(dst_key, inbound_link);
+            if (!made) return assemble_error(fwd, req, made.error());
+            v = *made;
+        } else {
+            return assemble_error(fwd, req, status_t::NOT_FOUND);
+        }
+    }
 
     switch (req.op) {
         case fwd_op_t::READ: {

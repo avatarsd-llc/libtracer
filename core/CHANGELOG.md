@@ -13,8 +13,32 @@ reference implementation is pre-1.0; everything currently lives under
 
 ## [Unreleased]
 
+### Added
+
+- **Subtree subscriptions, branch-write decomposition, write-creates
+  (RFC-0005).** Every subscription now observes writes to its vertex AND to any
+  descendant: a write fans out to subscribers at the vertex and at each ancestor
+  ("vertical bubbling"), delivering the written TLV as-is (local view clone /
+  remote return-route FWD — unchanged machinery). The idle write path stays
+  near-free — per-vertex listener counters gate the ancestor walk on one relaxed
+  atomic load; the new `graph_t::ancestor_walks()` accessor exposes the walk
+  count for tests/benches. A write whose payload is a `POINT` (`0x07`) tree
+  rooted at the target vertex **decomposes**: each value-carrying node lands at
+  the corresponding descendant vertex as a refcount SUBVIEW of the written frame
+  (zero copy), missing vertices are created on the way, and each covered
+  subscription point is notified once with its slice. New
+  `graph_t::ensure_vertex(key, caller)` implements **write-creates** (`mkdir -p`,
+  CREATE-ACL-gated on the nearest existing ancestor).
+
 ### Changed
 
+- **A data write to a nonexistent path now creates it (RFC-0005 write-creates)**
+  instead of returning `NOT_FOUND` — both the local `graph_t::write(path, …)`
+  and the remote `FWD{WRITE}` terminus (`op_resolver_t`). `:field` writes,
+  `read`, and `await` on a nonexistent vertex keep `NOT_FOUND`. A `POINT`
+  payload written to a stored-value/stream vertex is now a branch write
+  (decomposed) rather than an opaque store; handler-role vertices still receive
+  it as-is via `on_write`.
 - **`socketcan_link_t` moved to its own translation units — the last in-source
   platform `#ifdef` is gone** (#183). `core/src/transport_can.cpp` is now 100%
   portable (it talks only to the `can_link_t` seam); the Linux `PF_CAN`
