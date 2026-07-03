@@ -34,19 +34,20 @@ export const FWD_KIND = Object.freeze({
 } as const);
 
 /**
- * Wire ERROR codes for a `kind=ERROR` reply's `STATUS{ ERROR u8 }` payload.
- * Mirrors the C++ reference `op_resolve.cpp` `error_code()` map (provisional
- * pending the ERROR registry, RFC-0001 §C/E / #8).
+ * Registered wire ERROR codes for a `kind=ERROR` reply's
+ * `STATUS{ ERROR{ VALUE u16 } }` payload (RFC-0002 §D registry — the u16 LE
+ * identity of each built-in `tr::…` error path). Mirrors the C++ reference
+ * `error.hpp` registry / `op_resolve.cpp` `error_code()` map.
  */
 export const FWD_ERROR = Object.freeze({
-  NOT_FOUND: 0x01,
-  PERMISSION_DENIED: 0x02,
-  INVALID_PATH: 0x03,
-  TYPE_MISMATCH: 0x04,
-  BACKPRESSURE: 0x07,
-  TIMEOUT: 0x08,
-  SCHEMA_NOT_FOUND: 0x0a,
-  PATH_IN_USE: 0x0e,
+  NOT_FOUND: 0x0020, // tr::path::not_found
+  PERMISSION_DENIED: 0x0050, // tr::access::denied
+  INVALID_PATH: 0x0021, // tr::path::invalid
+  TYPE_MISMATCH: 0x0030, // tr::schema::type_mismatch
+  BACKPRESSURE: 0x0040, // tr::flow::backpressure
+  TIMEOUT: 0x0041, // tr::flow::timeout
+  SCHEMA_NOT_FOUND: 0x0031, // tr::schema::not_found
+  PATH_IN_USE: 0x0022, // tr::path::in_use
 } as const);
 
 const FWD_ERROR_NAME: Readonly<Record<number, string>> = Object.freeze(
@@ -281,13 +282,41 @@ export function decodeFwd(bytes: Uint8Array): ParsedFwd {
   return parseFwdTlv(decode(bytes));
 }
 
-/** The wire ERROR code of a `kind=ERROR` reply's `STATUS{ ERROR u8 }` payload (or 0). */
-export function replyErrorCode(reply: ParsedFwd): number {
+/** The ERROR TLV of a `kind=ERROR` reply's STATUS payload, or `null`. */
+function replyErrorTlv(reply: ParsedFwd): Tlv | null {
   const status = reply.payload;
   if (status && status.type === TYPE.STATUS && status.children[0]?.type === TYPE.ERROR) {
-    return u8(status.children[0]);
+    return status.children[0];
+  }
+  return null;
+}
+
+/**
+ * The registered wire ERROR code of a `kind=ERROR` reply's
+ * `STATUS{ ERROR{ VALUE u16 } }` payload per RFC-0002 (or 0 when absent, or
+ * when the ERROR carries the string-form NAME identity — see
+ * {@link replyErrorPath}).
+ */
+export function replyErrorCode(reply: ParsedFwd): number {
+  const err = replyErrorTlv(reply);
+  const id = err?.children[0];
+  if (id?.type === TYPE.VALUE && id.payload.length >= 2) {
+    return id.payload[0] | (id.payload[1] << 8); // u16 LE registered code
   }
   return 0;
+}
+
+/**
+ * The string-form `tr::…` identity of a `kind=ERROR` reply's
+ * `STATUS{ ERROR{ NAME utf8-path } }` payload per RFC-0002 (or `null` when the
+ * reply carries no ERROR, or a registered-code identity — see
+ * {@link replyErrorCode}).
+ */
+export function replyErrorPath(reply: ParsedFwd): string | null {
+  const err = replyErrorTlv(reply);
+  const id = err?.children[0];
+  if (id?.type === TYPE.NAME) return new TextDecoder().decode(id.payload);
+  return null;
 }
 
 // (re-export Opt so consumers building raw nodes do not need the core import.)

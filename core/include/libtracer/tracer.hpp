@@ -11,6 +11,7 @@
 #include "libtracer/backend.hpp"
 #include "libtracer/child_registry.hpp"
 #include "libtracer/crc.hpp"
+#include "libtracer/error.hpp"
 #include "libtracer/frame.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"

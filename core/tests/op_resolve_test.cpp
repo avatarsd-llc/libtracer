@@ -139,6 +139,17 @@ decoded_reply_t decode_reply(const tr::view::rope_t& reply) {
 
 std::uint8_t value_u8(const tlv_t& v) { return tr::detail::load_le<std::uint8_t>(v.payload); }
 
+// The registered u16 error code of a STATUS{ ERROR{ VALUE u16 LE } } payload
+// (RFC-0002 §C) — 0 when the shape doesn't match.
+std::uint16_t status_error_code(const tlv_t& status) {
+    if (status.type != type_t::STATUS || status.children.size() != 1) return 0;
+    const tlv_t& err = status.children[0];
+    if (err.type != type_t::ERROR || !err.opt.pl || err.children.empty()) return 0;
+    const tlv_t& id = err.children[0];
+    if (id.type != type_t::VALUE || id.payload.size() != 2) return 0;
+    return tr::detail::load_le<std::uint16_t>(id.payload);
+}
+
 // ---------------------------------------------------------------------------
 void test_read_zero_copy() {
     std::printf("READ a STORED_VALUE -> reply payload shares the stored segment (zero-copy):\n");
@@ -244,10 +255,8 @@ void test_await() {
     const tlv_t& rto = drto.tlv;
     check(value_u8(rto.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR),
           "AWAIT timeout reply kind == ERROR");
-    check(rto.children[4].type == type_t::STATUS && rto.children[4].children.size() == 1 &&
-              rto.children[4].children[0].type == type_t::ERROR &&
-              value_u8(rto.children[4].children[0]) == 0x08 /*TIMEOUT*/,
-          "ERROR payload == STATUS{ ERROR(TIMEOUT=0x08) }");
+    check(status_error_code(rto.children[4]) == 0x0041 /*tr::flow::timeout*/,
+          "ERROR payload == STATUS{ ERROR{ VALUE u16=0x0041 tr::flow::timeout } }");
 }
 
 void test_subscribers_field() {
@@ -404,9 +413,8 @@ void test_wildcard_and_not_local() {
     const tlv_t& wr = dwild.tlv;
     check(value_u8(wr.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR),
           "[*] on a data target => kind=ERROR");
-    check(wr.children[4].type == type_t::STATUS && wr.children[4].children.size() == 1 &&
-              value_u8(wr.children[4].children[0]) == 0x03 /*INVALID_PATH*/,
-          "ERROR payload == STATUS{ ERROR(INVALID_PATH=0x03) }");
+    check(status_error_code(wr.children[4]) == 0x0021 /*tr::path::invalid*/,
+          "ERROR payload == STATUS{ ERROR{ VALUE u16=0x0021 tr::path::invalid } }");
 
     // dst not local: an unregistered path => NOT_FOUND.
     const auto nfwd = b_fwd(fwd_op_t::READ, b_path({"nope", "missing"}), b_path({"reply-ep"}));
@@ -415,9 +423,8 @@ void test_wildcard_and_not_local() {
     const tlv_t& nr = dnr.tlv;
     check(value_u8(nr.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR),
           "non-local dst => kind=ERROR");
-    check(nr.children[4].type == type_t::STATUS && nr.children[4].children.size() == 1 &&
-              value_u8(nr.children[4].children[0]) == 0x01 /*NOT_FOUND*/,
-          "ERROR payload == STATUS{ ERROR(NOT_FOUND=0x01) }");
+    check(status_error_code(nr.children[4]) == 0x0020 /*tr::path::not_found*/,
+          "ERROR payload == STATUS{ ERROR{ VALUE u16=0x0020 tr::path::not_found } }");
 }
 
 }  // namespace

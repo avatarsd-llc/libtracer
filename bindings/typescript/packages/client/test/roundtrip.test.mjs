@@ -131,7 +131,8 @@ test('a kind=ERROR reply rejects the pending op as a typed FwdError', async () =
   const client = new LibtracerClient(t);
 
   const p = client.read('/missing');
-  // STATUS{ ERROR=NOT_FOUND(0x01) } — built via the core codec.
+  // STATUS{ ERROR{ VALUE u16=0x0020 tr::path::not_found } } (RFC-0002 §C) —
+  // built via the core codec.
   const status = encode({
     type: TYPE.STATUS,
     opt: { pl: true, ts: false, cr: false, ll: false, cw: false, tf: false },
@@ -139,9 +140,17 @@ test('a kind=ERROR reply rejects the pending op as a typed FwdError', async () =
     children: [
       {
         type: TYPE.ERROR,
-        opt: { pl: false, ts: false, cr: false, ll: false, cw: false, tf: false },
-        payload: Uint8Array.of(0x01),
-        children: [],
+        opt: { pl: true, ts: false, cr: false, ll: false, cw: false, tf: false },
+        payload: new Uint8Array(0),
+        children: [
+          {
+            type: TYPE.VALUE,
+            opt: { pl: false, ts: false, cr: false, ll: false, cw: false, tf: false },
+            payload: Uint8Array.of(0x20, 0x00),
+            children: [],
+            trailer: null,
+          },
+        ],
         trailer: null,
       },
     ],

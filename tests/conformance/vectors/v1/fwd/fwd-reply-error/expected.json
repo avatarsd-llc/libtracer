@@ -1,12 +1,12 @@
 {
   "name": "fwd-reply-error",
   "category": "fwd",
-  "hex": "0F404900010001000306402400020009007669615F626F617264020007007669615F6E6574020008007265706C792D657006400A000200060073656E736F720100010001094005000800010001",
-  "total_bytes": 77,
+  "hex": "0F404E00010001000306402400020009007669615F626F617264020007007669615F6E6574020008007265706C792D657006400A000200060073656E736F72010001000109400A0008400600010002002000",
+  "total_bytes": 82,
   "decoded": {
     "type": "0x0F FWD",
     "structured": true,
-    "meaning": "FWD{ op=REPLY, dst=/via_board/via_net/reply-ep, src=/sensor, kind=ERROR, STATUS{ ERROR(NOT_FOUND) } }",
-    "note": "RFC-0004 \u00a7B/\u00a7C canonical bytes; structured TLV, opt.PL=1, no trailers (at-rest form)"
+    "meaning": "FWD{ op=REPLY, dst=/via_board/via_net/reply-ep, src=/sensor, kind=ERROR, STATUS{ ERROR{ VALUE u16=0x0020 tr::path::not_found } } }",
+    "note": "RFC-0004 §B/§C canonical bytes with the RFC-0002 §C registered-code ERROR identity; structured TLV, opt.PL=1, no trailers (at-rest form)"
   }
 }

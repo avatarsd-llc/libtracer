@@ -277,10 +277,16 @@ int main() {
         const tlv_t& r = *dec;
         check(value_u8(r.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR),
               "REPLY kind == ERROR for an unknown dst");
-        check(r.children[4].type == type_t::STATUS && r.children[4].children.size() == 1 &&
-                  r.children[4].children[0].type == type_t::ERROR &&
-                  value_u8(r.children[4].children[0]) == 0x01 /*NOT_FOUND*/,
-              "ERROR payload == STATUS{ ERROR(NOT_FOUND=0x01) }");
+        // RFC-0002 §C: STATUS{ ERROR{ VALUE u16 LE registered code } }.
+        const bool err_shape = r.children[4].type == type_t::STATUS &&
+                               r.children[4].children.size() == 1 &&
+                               r.children[4].children[0].type == type_t::ERROR &&
+                               !r.children[4].children[0].children.empty() &&
+                               r.children[4].children[0].children[0].type == type_t::VALUE;
+        check(err_shape && tr::detail::load_le<std::uint16_t>(
+                               r.children[4].children[0].children[0].payload) ==
+                               0x0020 /*tr::path::not_found*/,
+              "ERROR payload == STATUS{ ERROR{ VALUE u16=0x0020 tr::path::not_found } }");
     }
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
