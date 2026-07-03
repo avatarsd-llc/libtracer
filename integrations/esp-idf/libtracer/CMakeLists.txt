@@ -58,6 +58,7 @@ set(LIBTRACER_SRCS
 # expose no lwIP types. On the `linux` target the same includes resolve into
 # glibc, so no lwip component is needed (and IDF does not provide one there).
 set(LIBTRACER_PRIV_REQUIRES pthread)
+set(LIBTRACER_PRIV_INCLUDE_DIRS "")
 
 if(IDF_TARGET STREQUAL "linux")
     # POSIX host: the real SocketCAN link (glibc ships <linux/can.h>).
@@ -68,7 +69,12 @@ else()
         "${LIBTRACER_ROOT}/core/src/socketcan_link_stub.cpp"
         "twai_link.cpp"
     )
-    list(APPEND LIBTRACER_PRIV_REQUIRES lwip esp_driver_twai)
+    # esp_driver_gpio: twai_link.cpp names its pins via <driver/gpio.h> types.
+    list(APPEND LIBTRACER_PRIV_REQUIRES lwip esp_driver_twai esp_driver_gpio)
+    # compat/include: POSIX headers IDF's libc spells differently (<poll.h> ->
+    # <sys/poll.h>) — private, so core sources stay pure POSIX and dependents
+    # never see the shim.
+    list(APPEND LIBTRACER_PRIV_INCLUDE_DIRS "compat/include")
 endif()
 
 idf_component_register(
@@ -76,6 +82,7 @@ idf_component_register(
     INCLUDE_DIRS
         "${LIBTRACER_ROOT}/core/include"
         "include"
+    PRIV_INCLUDE_DIRS ${LIBTRACER_PRIV_INCLUDE_DIRS}
     PRIV_REQUIRES ${LIBTRACER_PRIV_REQUIRES}
 )
 
