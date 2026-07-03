@@ -248,14 +248,15 @@ Invariants:
 A publisher splits a logical message across N child endpoints with a shared timestamp; subscribers either process slices independently or assemble per-group.
 
 ```
-Publisher                  Router                  Subscriber w/ wildcard subscription
-   |                          |                       /camera/frame[*]
+Publisher                  Router                  Subscriber on parent vertex
+   |                          |                       /camera/frame  (subtree subscription)
    |                          |                                    |
    | for i in 0..N-1:         |                                    |
    |   write("/camera/frame[i]", VALUE{ts=T, bytes=slice_i})       |
    |─────────────────────────>|                                    |
    |                          |── resolve concrete path             |
-   |                          |── match wildcard subscription       |
+   |                          |── bubble to parent's subscription   |
+   |                          |   (RFC-0005 vertical bubbling)      |
    |                          |── dispatch view ──────────────────>|
    |                          |                                    |── enqueue
    |                          |                                    |   (assemble or stream)
