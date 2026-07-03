@@ -27,45 +27,62 @@ This is what separates libtracer from middleware that decodes wire bytes into in
 
 ## The view struct
 
-```c
-struct view {
-    segment_t *owner;     // refcounted L0 segment
-    size_t     offset;    // bytes from segment->base
-    size_t     length;    // bytes covered
+The view is deliberately POD-simple — one owning handle plus two sizes (reference
+implementation: `tr::view::view_t`, [core/include/libtracer/view.hpp](../../core/include/libtracer/view.hpp)):
+
+```cpp
+namespace tr::view {
+
+struct view_t {
+    segment_ptr_t owner;    // owning handle to the refcounted L0 segment
+    std::size_t   offset;   // bytes from the segment's base
+    std::size_t   length;   // bytes covered
 };
+
+}
 ```
 
-A **rope** is a separate composite type — an ordered chain of views (`rope_t` in the
-reference implementation, holding its links in a contiguous sequence) — not an
-intrusive `next` pointer inside the view. A view is always exactly one window over
-one segment; the rope composes several of them into one logical payload.
+A **rope** is a separate composite type — an ordered chain of views (`rope_t`,
+holding its links in a contiguous `std::vector<view_t>`) — not an intrusive
+`next` pointer inside the view. A view is always exactly one window over one
+segment; the rope composes several of them into one logical payload. Keeping
+the chain out of the view keeps the single-link hot path allocation-free: a
+plain `view_t` allocates nothing, and only a multi-link `rope_t` allocates
+(one vector for the chain).
 
 Invariants:
 
-- `offset + length <= owner->size`. A view never escapes its segment.
-- `owner` holds at least one refcount (copying a view clones it — a refcount bump,
-  never a byte copy).
+- `offset + length <= owner->bytes.size()`. A view never escapes its segment.
+- **Copy IS clone.** Copying a view copies its `segment_ptr_t`, which bumps the
+  segment refcount (relaxed) — never a byte copy.
+- **Destruction IS release.** Ownership is RAII: when a view is destroyed or
+  reassigned, its `segment_ptr_t` does the acq_rel decrement and invokes the
+  backend's `destroy` at zero. There is no manual release call to forget.
 - A view does not own any bytes — it borrows them via the segment refcount.
 
 Sub-views are cheap: `subview(off, len)` produces a new view with the same `owner`
-(refcount bumped), narrower offset/length. Useful for zero-copy slicing.
+(refcount bumped), narrower offset/length. Useful for zero-copy slicing. A view
+also knows whether its bytes are CPU-addressable (`is_host()` / `is_device()`) —
+a DEVICE window (e.g. GPU memory, [ADR-0024](../adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md))
+must not be dereferenced on the CPU.
 
 ---
 
 ## The segment struct (recap from L0)
 
-```c
-struct segment {
-    atomic_uint_least32_t refcount;
-    const mem_backend_t  *backend;
-    void                 *base;          // pointer to bytes
-    size_t                size;          // capacity
-    void                 (*destroy)(segment_t *);
-    // backend-specific fields follow
+```cpp
+namespace tr::view {
+
+struct segment_t {
+    detail::ref_count       refcount;   // intrusive: inc relaxed, dec acq_rel
+    tr::mem::mem_backend_t* backend;    // who reclaims these bytes
+    std::span<std::byte>    bytes;      // the real bytes (data + capacity)
 };
+
+}
 ```
 
-The view layer sees segments as opaque except for `refcount`, `base`, `size`, and `destroy`. The backend-specific fields (lwIP `pbuf*`, DMA descriptor index, MMIO register table, etc.) are L0's concern.
+The view layer sees segments as nothing but a refcount, a backend pointer, and the byte span. Backend-specific state (lwIP `pbuf*`, DMA descriptor index, MMIO register table, etc.) lives behind the backend and is L0's concern; reclamation is `backend->destroy(seg)`, invoked by the owning handle (`segment_ptr_t`) when the count hits zero ([09-memory-substrate.md](09-memory-substrate.md) §the backend abstraction).
 
 ---
 
@@ -82,41 +99,51 @@ The atomic memory orderings for the segment refcount are specified once in [02-g
 
 For Cortex-M0/M0+ (no LDREX/STREX) and bare-metal single-threaded contexts, the refcount can be a plain `uint32_t` under `LIBTRACER_NO_ATOMIC=ON`. The application must guarantee no cross-thread sharing of segments.
 
-When a segment's refcount drops to zero, the view layer invokes `segment->destroy(segment)`. Destruction returns the bytes to whichever L0 backend owns them.
+When a segment's refcount drops to zero, the owning handle invokes `backend->destroy(seg)`. Destruction returns the bytes to whichever L0 backend owns them.
 
 ---
 
-## View operations
+## View and rope operations
 
-### `view_clone(v) -> view_t*`
+The clone/release pair of a manual-refcount design is expressed as ordinary C++ value semantics; everything else is a small set of member operations ([core/include/libtracer/rope.hpp](../../core/include/libtracer/rope.hpp)):
 
-Bumps `v->owner->refcount` (relaxed) and returns a new view struct with the same `(owner, offset, length, next)`. If `v` is a rope (multi-link), every link's owner is bumped.
+### Clone — copy the view
 
-### `view_release(v)`
+Copying a `view_t` bumps its segment's refcount (relaxed) via the copied `segment_ptr_t`. Copying a `rope_t` copies its links — one bump per link's segment.
 
-Decrements `v->owner->refcount` (acq_rel); if it drops to zero, invokes `destroy`. For ropes, walks the chain and releases every link. Frees the view struct itself.
+### Release — destroy the view
 
-### `view_subview(v, sub_offset, sub_length) -> view_t*`
+Destroying (or reassigning) a `view_t` does the acq_rel decrement; at zero, the segment's backend `destroy` fires. Destroying a rope releases every link. RAII: there is no leak-by-forgotten-release failure mode.
 
-Returns a new view into the same segment, with `offset = v->offset + sub_offset` and `length = sub_length`. Refcount on owner is bumped. **Does not handle ropes** — if `v` is a rope, the caller must walk to the appropriate link first or use `view_subview_rope` (catalog below).
+### `view_t::subview(sub_offset, sub_length) -> view_t`
 
-### `view_concat(v1, v2) -> view_t*`
+A narrower window into the same segment: `offset + sub_offset`, length `sub_length`, refcount bumped. A view is single-segment by definition — slicing across segment boundaries is a rope-level concern (walk to the appropriate link first).
 
-Returns a new view whose first link has `v1`'s `(owner, offset, length)` and `next = v2`. If `v2` itself has links, the concatenation extends to the end of `v2`'s chain. Refcounts on every involved segment are bumped. **No bytes are copied.**
+### `rope_t::append(view)` / `rope_t::concat(rope)` / `operator+`
 
-### `view_total_length(v) -> size_t`
+Chain links onto the rope. Appending `rope2` extends the chain with all of `rope2`'s links, in order. **No bytes are copied** — assembly is chaining, never memcpy. A single `view_t` converts implicitly to a one-link rope.
 
-Walks the chain summing `link->length`. O(N) in chain length.
+### `rope_t::total_length() -> size_t`
 
-### `view_walk(v, callback)`
+Sums `length` over the links. O(N) in chain length.
 
-Iterates over each link in order, invoking `callback(link)` with the link's contiguous bytes. Used by parsers, serializers, and CRC accumulators.
+### `rope_t::walk(fn)`
+
+Visits each link's contiguous bytes in order. Used by parsers, serializers, and CRC accumulators.
+
+### `rope_t::to_iovec() -> spans`
+
+Scatter-gather egress: one span per link, pointing into the original segments (no copy). Hand the result to `writev` / `sendmsg`-style I/O for true zero-copy transmit.
+
+### `rope_t::flatten(backend) -> view_t`
+
+Materializes the rope into one contiguous segment allocated from `backend` — the **single bridge-boundary copy**, taken only when a flat-buffer consumer demands it. Fails (returns an empty view) if the backend cannot allocate or if the rope has a DEVICE link the CPU must not touch ([ADR-0024](../adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)).
 
 ---
 
 ## Ropes: chains of views
 
-A **rope** is a single-link or multi-link view chain representing a logical sequence of bytes that may span multiple segments.
+A **rope** (`rope_t`) is an ordered chain of views representing a logical sequence of bytes that may span multiple segments. The chain lives in the rope, not in the views: each link is an ordinary `view_t`, and the rope holds them in order in one contiguous vector.
 
 ```
 Logical TLV bytes:
@@ -149,7 +176,7 @@ Underlying rope:
 - **Aggregated transmit**: a publisher composes a TLV from a static header buffer + a runtime payload buffer + a fixed tail buffer. Three segments, one rope, one TLV on the wire.
 - **Forward hop**: the forwarder receives a `FWD` frame and sub-views the pieces that survive the hop — the `dst` tail after the stripped segment, the untouched payload region — off the original segment; every sub-view shares the inbound frame's segment via refcount, no bytes move.
 
-**Walking a rope**: parsers and serializers use `view_walk` or equivalent. The iterative TLV parser ([01-data-format.md](01-data-format.md) §iterative parsing requirement) treats a rope-cursor specially when traversing children: advancing the cursor across a link boundary is one extra branch in the iteration, but otherwise the parser logic is identical.
+**Walking a rope**: parsers and serializers use `rope_t::walk` or equivalent. The iterative TLV parser ([01-data-format.md](01-data-format.md) §iterative parsing requirement) treats a rope-cursor specially when traversing children: advancing the cursor across a link boundary is one extra branch in the iteration, but otherwise the parser logic is identical.
 
 ### Refcount fan-out and release sequence
 
@@ -174,9 +201,9 @@ sequenceDiagram
     D->>S1: deliver view
     D->>S2: deliver view
     Note over D: dispatcher releases its own hold<br/>(refcount = 2)
-    S1->>V: view_release (refcount = 1)
-    S2->>V: view_release (refcount = 0)
-    V->>L0: segment->destroy(seg)
+    S1->>V: drop view (refcount = 1)
+    S2->>V: drop view (refcount = 0)
+    V->>L0: backend->destroy(seg)
     Note over L0: backend reclaims bytes<br/>(heap free / pool return /<br/>DMA half marked reusable)
 ```
 
@@ -186,10 +213,10 @@ The publisher and the transport never wait for subscribers; back-pressure surfac
 
 ## Casting a view to a TLV
 
-Given a view whose bytes start with a valid L2 TLV header, the cast is a zero-copy reinterpretation:
+Given a view whose bytes start with a valid L2 TLV header, the cast is a zero-copy reinterpretation. Because it produces a `tlv_t`, the cast itself lives at L2 (`tr::wire`, not `tr::view`) — L1 never depends upward:
 
-```c
-const tlv_t *tlv = view_as_tlv(v);
+```cpp
+const tlv_t* tlv = tr::wire::view_as_tlv(v);
 ```
 
 After the cast, `tlv` is a logical pointer (or rope-aware accessor) that:
@@ -200,7 +227,7 @@ After the cast, `tlv` is a logical pointer (or rope-aware accessor) that:
 - Returns `tlv_length(tlv)` by reading bytes 2-3 (or 2-5 if `LL=1`).
 - Provides `tlv_payload_view(tlv)` returning a sub-view (or sub-rope) covering the payload region.
 
-For a flat view (single-link), the cast is literally a pointer cast — `tlv_t* = (tlv_t*)(v->owner->base + v->offset)` — and accessors are byte loads at known offsets.
+For a flat view (single-link), the cast is literally a pointer reinterpretation of `v.bytes().data()`, and accessors are byte loads at known offsets.
 
 For a rope view (multi-link), the cast is a logical accessor that walks the rope as needed. Implementations typically inline the flat case and fall back to rope-aware accessors only when the chain has more than one link.
 
@@ -232,25 +259,25 @@ Cursor advance is `offset += total`. No segment-boundary crossings; the buffer i
 
 ### Context B: in-memory walk (rope)
 
-The parser sees a rope and steps across link boundaries:
+The parser sees a rope and steps across link boundaries (the rope owns the link order — `rope.links()` is the ordered chain):
 
-```c
-size_t        link_idx = 0;
-const view_t *link     = first_link(rope);  /* the rope owns the link order */
-size_t        in_link  = 0;
-while (link) {
-    while (in_link < link->length) {
-        const tlv_t *t = (const tlv_t *)(link->owner->base + link->offset + in_link);
-        size_t total = tlv_total_size(t);
-        if (in_link + total <= link->length) {
+```cpp
+std::size_t link_idx = 0, in_link = 0;
+while (link_idx < rope.link_count()) {
+    const view_t& link  = rope.links()[link_idx];
+    auto          bytes = link.bytes();
+    while (in_link < bytes.size()) {
+        const tlv_t* t     = view_as_tlv(link.subview(in_link, bytes.size() - in_link));
+        std::size_t  total = tlv_total_size(t);
+        if (in_link + total <= bytes.size()) {
             /* TLV fits in this link; process and advance within link */
             in_link += total;
         } else {
-            /* TLV spans link boundary; need rope-aware accessor */
-            rope_advance(&rope, &link_idx, &in_link, total);
+            /* TLV spans a link boundary; need a rope-aware cursor advance */
+            rope_advance(rope, link_idx, in_link, total);
         }
     }
-    link    = next_link(rope, &link_idx);  /* the rope owns the chain order */
+    ++link_idx;
     in_link = 0;
 }
 ```
@@ -267,7 +294,7 @@ L1 is core (the view + refcount machinery) **plus** module-style integrations wi
 
 - **Status**: ships in v1.
 - **Pairs with**: any L0 backend that exposes contiguous segments (`mem_heap`, `mem_pool_*`, `mem_mmio`, `mem_dma_buffer`).
-- **What it provides**: the canonical view ops (clone, release, subview, concat, walk).
+- **What it provides**: the canonical view/rope ops (clone-on-copy, RAII release, `subview`, rope `append`/`concat`/`walk`).
 - **Footprint**: ~1 KB code.
 - **When to use**: every host. The default integration.
 
@@ -283,10 +310,10 @@ L1 is core (the view + refcount machinery) **plus** module-style integrations wi
 ### `view_iovec` — week 2 / week 5 for kernel-syscall transports
 
 - **Status**: planned with the Linux `transport_tcp` epoll path.
-- **Pairs with**: any backend; converts a rope view to/from POSIX `struct iovec` arrays.
+- **Pairs with**: any backend; converts a rope to/from POSIX `struct iovec` arrays.
 - **What it provides**:
-  - `view_to_iovec(v, iov[], n) -> count` — fills an `iov[]` array such that `writev` / `sendmsg` emits the rope's bytes in one syscall.
-  - `view_from_iovec(iov[], n) -> view_t*` — wraps an `iov[]` into a rope view, with each element backed by an externally-owned segment (typical for `recvmsg`).
+  - rope → `iovec[]`: adapts `rope_t::to_iovec()`'s spans into an `iov[]` array so that `writev` / `sendmsg` emits the rope's bytes in one syscall.
+  - `iovec[]` → rope: wraps an `iov[]` into a rope, with each element backed by an externally-owned segment (typical for `recvmsg`).
 - **Footprint**: ~400 bytes.
 - **When to use**: any time the underlying syscall accepts scatter-gather. Avoids one host-side copy per egress.
 
@@ -372,7 +399,7 @@ When a TLV crosses a substrate boundary (e.g., received over lwIP and forwarded 
 
 If the target transport accepts iovec-style scatter-gather, the rope view is handed over as-is. Each segment retains its L0 backend; the target transport's egress walks the rope and emits per-link bytes through whatever its egress facility is.
 
-Example: TLV received over lwIP (pbuf rope) forwarded to a Linux raw-socket transport that uses `sendmsg` — `view_to_iovec(rope, ...)` produces a `struct iovec[]`, the kernel does scatter-gather DMA, no userspace copy.
+Example: TLV received over lwIP (pbuf rope) forwarded to a Linux raw-socket transport that uses `sendmsg` — `rope.to_iovec()` produces the per-link spans (adapted to a `struct iovec[]`), the kernel does scatter-gather DMA, no userspace copy.
 
 ### Pattern B: materialize (single-copy, when target needs a flat buffer)
 
@@ -388,40 +415,25 @@ The transition cost is **per cross-substrate hop**, not per fanout. Subscribers 
 
 ### A. GPIO MMIO register as a TLV vertex
 
-Goal: expose `*(uint32_t *)0x40020010` (STM32F4 GPIOA IDR) as a libtracer vertex returning a `VALUE` TLV whose 4 payload bytes are the live register value.
+Goal: expose `*(uint32_t *)0x40020010` (STM32F4 GPIOA IDR) as a libtracer vertex returning a `VALUE` TLV whose 4 payload bytes are the live register value. The shape (informative sketch, not a header dump):
 
-```c
-// 1. Define a static segment over the MMIO region.
-//    refcount = 1 (permanently held; never destroyed).
-//    destroy = noop.
-static segment_t gpio_a_idr_seg = {
-    .refcount = 1,
-    .backend  = &mem_mmio_backend,
-    .base     = (void *)0x40020010,
-    .size     = 4,
-    .destroy  = noop_destroy,
-};
+```cpp
+// 1. A permanent segment over the MMIO region. Its refcount is held forever by
+//    a static descriptor; mem_mmio's destroy is a no-op (the "memory" is
+//    hardware — see 09-memory-substrate.md §mem_mmio).
+segment_ptr_t idr_seg = mmio_region(/*base=*/0x40020010, /*size=*/4);
 
-// 2. Define a static segment for the TLV header bytes.
-//    Header for type=VALUE, opt=0, length=4 (u16 LE).
-static const uint8_t header_bytes[4] = { 0x01, 0x00, 0x04, 0x00 };
-static segment_t header_seg = {
-    .refcount = 1,
-    .backend  = &mem_static_const_backend,
-    .base     = (void *)header_bytes,
-    .size     = 4,
-    .destroy  = noop_destroy,
-};
+// 2. A permanent segment over the 4 static TLV header bytes
+//    (type=VALUE, opt=0, length=4 u16 LE): { 0x01, 0x00, 0x04, 0x00 }.
+segment_ptr_t header_seg = static_const_region(header_bytes);
 
-// 3. Construct a rope view: [header_seg][gpio_a_idr_seg].
-view_t *header_view = view_from_segment(&header_seg, 0, 4);
-view_t *idr_view    = view_from_segment(&gpio_a_idr_seg, 0, 4);
-view_t *rope        = view_concat(header_view, idr_view);
+// 3. Chain a two-link rope: [header][live register]. No bytes copied.
+rope_t tlv = rope_t{view_t::over(header_seg)} + view_t::over(idr_seg);
 
 // 4. Register the rope as the read-handler for /gpio/A/IDR.
-//    Each read returns view_clone(rope) — refcount bumped on both segments.
+//    Each read returns a copy of the rope — a refcount bump on both segments.
 //    The MMIO segment is read live every time (its bytes ARE the register).
-tracer_register_read_only_vertex("/gpio/A/IDR", read_gpio_idr, rope);
+tracer_register_read_only_vertex("/gpio/A/IDR", read_gpio_idr, tlv);
 ```
 
 Result: every `tracer_read("/gpio/A/IDR")` returns a 2-link rope. The header bytes are static (refcount-permanent); the payload bytes are at the live register address. **Zero copy, ever.** A subscriber reading the TLV's payload bytes literally reads from `0x40020010`.
@@ -434,9 +446,9 @@ Result: every `tracer_read("/gpio/A/IDR")` returns a 2-link rope. The header byt
 3. Framer parses TLV: 4-byte header + 796-byte payload, fits within pbuf chain.
    Constructs a 2-link rope view over the relevant pbuf links.
 4. Router fans out to 2 subscribers:
-     view_clone(rope) for sub 1  (refcounts on both pbufs += 1)
-     view_clone(rope) for sub 2  (refcounts on both pbufs += 1)
-5. Original rope is released (refcounts -= 1).
+     copy of the rope for sub 1  (refcounts on both pbufs += 1)
+     copy of the rope for sub 2  (refcounts on both pbufs += 1)
+5. Original rope is dropped (refcounts -= 1).
    Both pbufs now have refcount = 2 (one per subscriber).
 6. Sub 1 consumes and releases. Refcounts → 1.
 7. Sub 2 consumes and releases. Refcounts → 0.
@@ -506,16 +518,16 @@ Step 3 — Cache invalidate (L0 → L1 hand-off).
    At this point, CPU reads of [0..2047] see the just-DMA'd bytes.
 
 Step 4 — view_dma_descriptor creates a view (L1).
-   view_t *payload_v = view_create(segment = A, offset = 0, length = 2048).
+   view_t payload_v = {segment A, offset = 0, length = 2048}.
    This bumps segment_A.refcount from 1 (the static "DMA owns it" count)
    to 2. No copy.
 
 Step 5 — Frame codec wraps as a TLV (L1 → L2).
    The header bytes (4 bytes for type=0x80, opt=PL|TS=1, length=2048) are
    constructed in a small heap segment H from a tiny header pool:
-     view_t *header_v = view_create(segment = H, offset = 0, length = 4).
+     view_t header_v = {segment H, offset = 0, length = 4}.
    The TLV-as-rope is:
-     header_v -> payload_v -> (optional trailer_v)
+     rope_t{header_v} + payload_v (+ optional trailer_v)
    This is a 2- or 3-link rope. No bulk-payload copy. The header's bytes
    are computed once into segment H; the payload's bytes are still in
    segment A's just-DMA'd half.
@@ -531,29 +543,29 @@ Step 7 — Graph runtime dispatches to /adc/raw (L3 → L4).
 
 Step 8 — Dispatcher fans out to subscribers (L4).
    For each subscriber:
-     - dispatcher calls view_clone(rope-head). This bumps refcounts on
-       every segment in the rope: segment_H.refcount++, segment_A.refcount++.
-     - The subscriber's queue receives the cloned rope-head pointer.
+     - the dispatcher copies the rope. This bumps refcounts on every
+       segment in the chain: segment_H.refcount++, segment_A.refcount++.
+     - The subscriber's queue receives the rope copy.
    After fan-out, segment_A.refcount = 2 (DMA) + 1 (recorder) + 1 (UDP) = 4.
 
 Step 9 — Local recorder consumes (subscriber 1).
    The recorder writes the rope's bytes to a memory-mapped log file via
    sendmsg-style scatter-gather (or by walking the rope and writev'ing).
-   When done, recorder calls view_release(rope) which walks the rope and
-   decrements every segment's refcount: segment_H.refcount--, segment_A--.
+   When done, the recorder drops its rope copy; RAII decrements every
+   segment's refcount: segment_H.refcount--, segment_A--.
    segment_A.refcount = 3.
 
 Step 10 — UDP transport consumes (subscriber 2).
    transport_udp.send_tlv(rope, peer = multicast_group):
      - It checks its capability flag wants_flat = false (UDP supports
        scatter-gather via writev).
-     - It walks the rope, building an iovec[2] from the two views.
+     - It calls rope.to_iovec(), yielding one span per link (two here).
      - It calls the kernel's sendmsg() with that iovec.
      - The kernel's UDP stack constructs UDP/IP/Ethernet headers in
        its own buffer, then DMAs the headers + the iovec payload to the
        NIC. (Modern NICs scatter-gather natively; the iovec is preserved
        all the way down.)
-     - sendmsg returns. transport_udp calls view_release(rope).
+     - sendmsg returns. transport_udp drops its rope copy.
    segment_H.refcount-- = 0  → header pool reclaims segment H.
    segment_A.refcount-- = 2.
 
@@ -576,11 +588,11 @@ NIC work:                The kernel constructs UDP/IP/Eth headers; the NIC
 
 - **Wire-format encoding step**: Naïve encoders allocate a contiguous output buffer and copy header + payload into it. Here, the rope avoids that — the iovec to the kernel walks the rope as-is.
 - **Fan-out step**: A single-buffer scheme would have to copy or arena-share. Here, refcount cloning of the rope hands every subscriber the same view tree.
-- **Transport egress**: A transport that demanded a contiguous buffer would force `view_flatten()`, costing one copy. UDP's scatter-gather avoids this; CAN (which has its own framing model) is the case where flattening or per-frame splitting happens.
+- **Transport egress**: A transport that demanded a contiguous buffer would force `rope_t::flatten()`, costing one copy. UDP's scatter-gather avoids this; CAN (which has its own framing model) is the case where flattening or per-frame splitting happens.
 
 ### When this breaks
 
-- **Egress to a transport that doesn't support scatter-gather** (e.g., some embedded UART drivers): the forwarder calls `view_flatten()` once at egress. One copy at the transport boundary, paid only on that path; subscribers on scatter-gather-capable paths still see zero copies.
+- **Egress to a transport that doesn't support scatter-gather** (e.g., some embedded UART drivers): the forwarder calls `rope_t::flatten()` once at egress. One copy at the transport boundary, paid only on that path; subscribers on scatter-gather-capable paths still see zero copies.
 - **Cross-process transport**: the SHM open-question (see below); the byte-flow leaves the publisher's address space and one copy is always paid.
 - **Slow subscriber stalls the DMA cycle**: if subscribers don't release fast enough, the back-pressure manifests as `segment_A.refcount` not dropping; the next half-complete IRQ finds the half busy. Per QoS, this is either a drop or a stall. The data path itself is still zero-copy; the failure mode is throughput, not integrity.
 
@@ -598,7 +610,7 @@ A `boost::asio::streambuf` is a read-write buffer with **consume-on-read** seman
 
 - **Wrap and pin** — modify or fork streambuf so consume waits on libtracer's view refcount.
 - **Copy on import** — at the boost-asio↔libtracer boundary, copy bytes into a `mem_heap` segment. One copy per ingress.
-- **Don't integrate** — provide a documented C-API shim users can write themselves; boost-asio is C++, libtracer is C-first.
+- **Don't integrate** — leave the boost-asio↔libtracer boundary to user code; a copy-on-import shim is trivial to write against the public API.
 
 **Default**: don't integrate in v1. Revisit if real demand surfaces. Documented in [10-module-catalog.md](10-module-catalog.md) §hard integrations.
 
@@ -624,15 +636,15 @@ A POSIX SHM region mapped into multiple processes has independent libtracer refc
 
 ### lwIP pbuf: aliasing libtracer refcount with `pbuf_ref/pbuf_free`
 
-Two libtracer subscribers cloning a `view_pbuf` over the same `pbuf*` create two libtracer-side refcount holds; lwIP-side, libtracer holds **one** `pbuf_ref` for the segment's lifetime. The risk is calling `pbuf_free` from a non-lwIP-thread context (e.g., from an interrupt or another thread's `view_release`).
+Two libtracer subscribers cloning a `view_pbuf` over the same `pbuf*` create two libtracer-side refcount holds; lwIP-side, libtracer holds **one** `pbuf_ref` for the segment's lifetime. The risk is calling `pbuf_free` from a non-lwIP-thread context (e.g., from an interrupt, or from a view destroyed on another thread).
 
 **Default**: a pbuf segment's `destroy` callback schedules `pbuf_free` via `tcpip_callback` (or equivalent), never frees synchronously from outside lwIP's thread context. Document explicitly.
 
 ### Rope walk vs flatten
 
-A scatter-gather-capable transport walks the rope at egress (zero-copy). A flat-buffer-only transport must materialize via `view_flatten()` (one copy).
+A scatter-gather-capable transport walks the rope at egress (zero-copy). A flat-buffer-only transport must materialize via `rope_t::flatten()` (one copy).
 
-**Default**: each transport declares `wants_flat` capability. Forwarders and fan-out walk the rope into scatter-gather transports; call `view_flatten()` once at egress for flat-buffer transports.
+**Default**: each transport declares `wants_flat` capability. Forwarders and fan-out walk the rope into scatter-gather transports; call `rope_t::flatten()` once at egress for flat-buffer transports.
 
 ### DMA cache coherency races
 
@@ -656,5 +668,5 @@ The "I want an endpoint backed by `&my_uint32` directly" pattern — both bindin
 - The wire format that views are interpreted as — see [01-data-format.md](01-data-format.md).
 - The graph-level meaning of a TLV at a vertex — see [02-graph-model.md](02-graph-model.md).
 - Per-substrate allocation and destruction details — see [09-memory-substrate.md](09-memory-substrate.md).
-- Transport-level framing (when bytes form a complete TLV) — see [05-modules-transport-and-discovery.md](10-module-catalog.md).
+- Transport-level framing (when bytes form a complete TLV) — see [10-module-catalog.md](10-module-catalog.md).
 - Memory-pressure policy — see [09-memory-substrate.md](09-memory-substrate.md) §pressure and pool exhaustion.

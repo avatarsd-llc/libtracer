@@ -1,31 +1,29 @@
 # Reference 03 — Addressing
 
-> **Status**: draft, v1, 2026-05-03. Defines how vertices and fields are named, how subscriptions match paths, and how application-level slicing replaces wire-level fragmentation.
+> **Status**: draft, v1, 2026-05-03. Defines how vertices and fields are named, how subscriptions observe subtrees, and how application-level slicing replaces wire-level fragmentation.
 > **See also**: [04-communication-flows.md](04-communication-flows.md) for API rationale; [02-graph-model.md](02-graph-model.md) for the schema discipline that gives field names meaning.
 
 ---
 
 ## Path syntax
 
-EBNF (using ABNF-like notation). Two non-terminals: `path` is the **concrete** form used as the argument to `read` / `write` / `await`; `subscriber-path` is the **wildcard-admitting** form valid only inside SUBSCRIBER's PATH child.
+EBNF (using ABNF-like notation). There is **one grammar**: the concrete `path` form is used everywhere — as the argument to `read` / `write` / `await` and inside a SUBSCRIBER's PATH child alike.
 
 ```
 path             = root [ segment *( segment-sep segment ) ] [ field-sep field-chain ]
-subscriber-path  = root [ wild-segment *( segment-sep wild-segment ) ] [ field-sep field-chain ]
 root             = "/"
 segment-sep      = "/"
 field-sep        = ":"
 segment          = name [ index ]
-wild-segment     = segment / "*" / "**"
 name             = 1*64 ( UTF8-codepoint - reserved )
-index            = "[" ( 1*5DIGIT / "*" / "" ) "]"
+index            = "[" ( 1*5DIGIT / "" ) "]"
 field-chain      = field *( "." field )
 field            = name [ index ]
 reserved         = "/" / ":" / "." / "[" / "]" / "*" / "?"
 DIGIT            = %x30-39
 ```
 
-Wildcard segments (`*`, `**`) and the wildcard index (`[*]`) appear ONLY inside `subscriber-path`. `read`, `write`, and `await` take the strict `path` form and MUST reject any wildcard with `ERROR{tr::path::invalid}`.
+There is **no wildcard grammar**. Subscriptions do not need one: every subscription is a **subtree subscription** ([RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md)) — subscribing to a vertex observes it and all of its descendants — so "everything under `/sensor`" is expressed by subscribing to `/sensor` itself, with no pattern syntax (see [§subtree subscriptions](#subtree-subscriptions-no-wildcards) below). A path containing `*` or `?` anywhere MUST be rejected with `ERROR{tr::path::invalid}`.
 
 - All names are UTF-8, case-sensitive, **case-folded NOT performed** (Unicode normalization is the application's responsibility — `/Sensor/temp` and `/sensor/temp` are different paths).
 - Maximum **single-name** length: 64 bytes (UTF-8 encoded).
@@ -55,15 +53,14 @@ A path that violates any limit MUST be rejected with `ERROR{tr::path::invalid}`.
 
 - `[N]` (decimal integer 0..65535): a specific slot.
 - `[]` (empty index): the array as a whole. A read returns a `PL=1` reply whose children are the element TLVs; a write appends to the next free slot.
-- `[*]` (wildcard, **subscribe-only**): match any index. Valid only inside SUBSCRIBER PATHs.
 
 Indexing is resolved at **L4 from the field schema**, not from a wire marker: a **fixed-stride** array (uniform element size) resolves `[N]` by direct offset (O(1)) on contiguous backing; otherwise the children are walked (ADR-0008).
 
 ### Reserved characters
 
-The five characters `/ : . [ ]` plus the wildcards `*` and `?` cannot appear inside a NAME segment. Implementations MUST reject any NAME containing them with `ERROR{tr::path::invalid}`.
+The five characters `/ : . [ ]` plus `*` and `?` cannot appear inside a NAME segment. Implementations MUST reject any NAME containing them with `ERROR{tr::path::invalid}`.
 
-(`?` is reserved for future single-character wildcard semantics; it is not in use in v1 but is reserved to keep the door open.)
+(`*` and `?` carry no meaning anywhere in v1; they are reserved to keep the door open for a possible future per-segment wildcard grammar — see the non-normative note under [§subtree subscriptions](#subtree-subscriptions-no-wildcards).)
 
 ---
 
@@ -106,38 +103,19 @@ tracer_write("/x:settings", settings_tlv(tlv1, tlv2));   // SETTINGS (0x0B), not
 
 ---
 
-## Wildcards (subscribe-only)
+## Subtree subscriptions (no wildcards)
 
-Wildcards are valid in two contexts:
+Every subscription is a **subtree subscription** ([RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md), accepted and implemented): a `SUBSCRIBER` edge on vertex V observes writes to V **and to every descendant of V** — a leaf subscription is just the trivial case. A write at vertex W therefore delivers, once per subscriber, to the subscribers of W and of each of W's ancestors ("vertical bubbling"). The delivered payload is the **written TLV as-is** — the exact frame the producer wrote, at the granularity it chose.
 
-- The PATH of a SUBSCRIBER TLV (the publisher's outgoing target).
-- The PATH the subscriber is **listening for** when registering its subscription.
+This covers the dominant "everything under a prefix" use case with **no pattern grammar at all**: subscribing to `/sensor` is what a `/sensor/**` wildcard would have meant, and subscribing to `/camera/frame` observes every indexed child `/camera/frame[0]`, `/camera/frame[1]`, … The full semantics — bubbling, branch-write decomposition, write-creates, and the near-free-when-idle cost model (one relaxed atomic load on an unobserved write) — are specified in [02-graph-model.md](02-graph-model.md) §subtree subscriptions and [05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x04`.
 
-Wildcards are NOT valid in `tracer_read`, `tracer_write`, or `tracer_await` calls. Those resolve a single path.
+### Subscriber identity across a subtree
 
-### Match rules
+A subtree subscriber receives TLVs produced at many concrete paths and may need to know which vertex produced each. Provenance travels **in the data** where the application needs it ([CONTEXT.md](../../CONTEXT.md) §SUBSCRIBER direction); for **local** delivery the concrete path is additionally available out-of-band (implementation-defined — typically a callback argument). Wire-level concrete-path tagging of **remote** deliveries is the separate, still-draft [RFC-0003](../spec/rfcs/0003-bridged-wildcard-delivery-path.md) proposal; until it lands, cross-implementation remote provenance beyond what the data carries is not guaranteed interoperable.
 
-- `*` matches **exactly one** path segment, of any value.
-- `**` matches **zero or more** path segments. `**` MUST be the only wildcard at its position; `**a` and `a**` are invalid.
-- `[*]` (inside an index) matches **any index** at that segment. Equivalent to using `*` for the whole segment if the parent has only indexed children.
+### Future direction: per-segment wildcards (non-normative)
 
-### Examples
-
-```
-/sensor/*/temp                  matches /sensor/A/temp, /sensor/B/temp; not /sensor/A/B/temp
-/sensor/**                      matches /sensor, /sensor/A, /sensor/A/B, /sensor/A/B/temp
-/sensor/**/temp                 matches /sensor/temp, /sensor/A/temp, /sensor/A/B/temp
-/camera/frame[*]                matches /camera/frame[0], /camera/frame[1], ...
-/i2c-bus/*/accel                matches /i2c-bus/0x68/accel, /i2c-bus/0x6A/accel
-```
-
-### Match cost
-
-A subscription with a wildcard requires the router to walk the wildcard table on every relevant `tracer_write`. Implementation guidance (not normative): pre-compute the matching set of wildcard subscriptions per concrete write path, cached, invalidated when subscriptions change. Acceptable cost for the typical fan-in being modest (≤ few dozen wildcard subscribers per topic).
-
-### Subscriber identity in wildcard subscriptions
-
-A wildcard subscriber receives a stream of TLVs from many concrete paths and MUST be able to determine which concrete path produced each. For **local** delivery (subscriber and dispatcher in one node) the mechanism is implementation-defined — typically the matched path is passed out-of-band (a callback argument). For **remote** delivery it must travel on the wire: the matched concrete `PATH` (`0x06`) accompanies the delivered TLV. *(The on-wire form is proposed under [RFC-0003](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0003-bridged-wildcard-delivery-path.md); until it lands, cross-implementation remote wildcard delivery is not guaranteed interoperable.)*
+A per-segment wildcard grammar — `*` matching one segment (`/sensor/*/temp` for *horizontal* matching across siblings), `[*]` matching any index — is an **unratified idea**, not part of v1: no implementation exists, and adopting it would require its own RFC. The characters `*` and `?` are reserved so such a grammar could be added without breaking existing names. Subtree subscription deliberately removes the need for the `**`-style *vertical* wildcard.
 
 ---
 
@@ -161,13 +139,13 @@ Each slice is a complete, valid, independently-routable TLV. The publisher emits
 
 ### Receiver behavior
 
-A subscriber registers once with a wildcard path:
+A subscriber registers once on the **parent** vertex — a subtree subscription ([RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md)) observes every indexed child:
 
 ```
-write("/camera/frame[*]:subscribers[]", SUBSCRIBER{path=/local/handler, settings})
+write("/camera/frame:subscribers[]", SUBSCRIBER{path=/local/handler, settings})
 ```
 
-Each subsequent `write("/camera/frame[i]", ...)` matches the wildcard and produces a delivery to `/local/handler` with the slice index recoverable from the matched path.
+Each subsequent `write("/camera/frame[i]", ...)` bubbles to the parent's subscription and produces a delivery to `/local/handler`, with the slice index recoverable from the producing path (out-of-band for local delivery; on-wire tagging for remote delivery is the draft [RFC-0003](../spec/rfcs/0003-bridged-wildcard-delivery-path.md)).
 
 The subscriber assembles the slices into a coherent group keyed by **`(origin_peer_id, ts)`**, with each slice's `index` giving its position:
 
@@ -204,7 +182,7 @@ Missing index `k` in a group with `expected_count = N` and observed indices `{0.
 ### Why this is hard
 
 - **Index allocation discipline.** The publisher must agree with subscribers on what `[N]` means (byte offset / slice_size? row index? sample index in a window?). This is an application-layer convention; libtracer does not impose semantics.
-- **Wildcard matching cost** (already discussed above).
+- **Bubbling fan-out cost.** Every slice write walks the ancestor chain when a subscriber exists at or above it — near-free when idle, but a hot high-rate slice stream pays one delivery per covering subscription ([RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md) §A cost model).
 
 ---
 
@@ -311,7 +289,7 @@ Both paths land in the same shape: a const region whose bytes are a valid PATH T
 
 ### Build-time encoding via macro
 
-A reference C23 implementation supplies a `TRACER_PATH` macro that expands a literal string to a `static const` PATH TLV byte array. The shape (informative — implementation choice, not normative):
+An implementation supplies a `TRACER_PATH` build-time encoding facility that expands a literal string to a `static const` PATH TLV byte array — a `consteval` function in C++, a macro in a portable C binding. The C-flavored sketch below shows the shape as a C binding would expose it (informative — implementation choice, not normative):
 
 ```c
 // Expands to a static const uint8_t[] containing exactly the PATH TLV bytes.

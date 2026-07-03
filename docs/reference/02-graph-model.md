@@ -284,11 +284,11 @@ Implementations on multi-threaded hosts MUST use atomic refcounts with these mem
 | Read for inspection (debug, metrics) | `acquire` | Pairs with each decrement; gives consistent snapshot |
 | Weak-to-strong upgrade (CAS loop) | `acq_rel` on success, `acquire` on failure | Same logic as inc + sync with last decrementer |
 
-Rationale and reference C23 implementation are in [01-data-format.md](01-data-format.md) §refcount memory ordering. Implementations in C++ (`std::atomic`), Rust (`Arc<T>` / `AtomicUsize`), or any other language MUST implement equivalent semantics.
+Rationale is expanded in [01-data-format.md](01-data-format.md) §refcount memory ordering. The reference implementation uses C++ `std::atomic`; implementations in C (`<stdatomic.h>`), Rust (`Arc<T>` / `AtomicUsize`), or any other language MUST implement equivalent semantics.
 
 ### Single-threaded mode
 
-For Cortex-M0/M0+ (no LDREX/STREX) and bare-metal single-threaded contexts, an implementation MAY substitute plain (non-atomic) integer refcount, provided the application guarantees no cross-thread sharing of segments. The reference C implementation exposes this as `LIBTRACER_NO_ATOMIC=ON`.
+For Cortex-M0/M0+ (no LDREX/STREX) and bare-metal single-threaded contexts, an implementation MAY substitute plain (non-atomic) integer refcount, provided the application guarantees no cross-thread sharing of segments. The reference implementation exposes this as `LIBTRACER_NO_ATOMIC=ON`.
 
 ### Ownership transfer at endpoint delivery
 

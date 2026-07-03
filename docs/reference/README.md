@@ -14,14 +14,14 @@
 > 9. **Path handles, encoded once.** Every vertex address used more than once is encoded into a PATH TLV at build time (`.rodata` literal) or at node init (one allocation), not at every write. Hot-path APIs accept handles, never strings; `snprintf` is a code-size luxury, not a protocol requirement. Normative in [../spec/v1.md](../spec/v1.md) §3.1; design in [03-addressing.md](03-addressing.md), [05-protocol-tlvs.md](05-protocol-tlvs.md), [04-communication-flows.md](04-communication-flows.md), [06-user-data-packing.md](06-user-data-packing.md).
 >
 > Design rationale is recorded in [../../docs/adr/](https://github.com/avatarsd-llc/libtracer/tree/main/docs/adr/) and git history; this suite is the byte-level spec.
-> **Audience**: a second implementer writing an interoperable libtracer in any language, on any platform, without reading the C reference implementation.
+> **Audience**: a second implementer writing an interoperable libtracer in any language, on any platform, without reading the reference implementation.
 > **Reading time**: full suite ~2.5 h.
 
 ---
 
 ## Purpose
 
-This directory describes **the libtracer protocol as a standard**, independent of any implementation. The C reference implementation under [../../core/](../../core/) is one conforming implementation; a TypeScript core, a Rust core, a hardware FPGA implementation are all admissible if they conform to what is written here.
+This directory describes **the libtracer protocol as a standard**, independent of any implementation. The C++23 reference implementation under [../../core/](../../core/) is one conforming implementation; a TypeScript core, a Rust core, a hardware FPGA implementation are all admissible if they conform to what is written here.
 
 Design rationale is recorded in [../../docs/adr/](https://github.com/avatarsd-llc/libtracer/tree/main/docs/adr/) and git history — they explain *why* the protocol looks the way it does. Reference documents here describe *what it is*, and are canonical.
 
@@ -96,8 +96,8 @@ Higher profiles are strict supersets. See [10-module-catalog.md](10-module-catal
 
 A reference section is promoted from "draft" to "frozen for v1" when:
 
-1. The corresponding plan-doc section is implemented and tested in the C reference.
-2. A second-implementer review confirms the spec is sufficient to write an interoperable parser/sender/forwarder from the spec alone (not from the C source).
+1. The corresponding plan-doc section is implemented and tested in the reference implementation.
+2. A second-implementer review confirms the spec is sufficient to write an interoperable parser/sender/forwarder from the spec alone (not from the reference source).
 3. The conformance test suite covers the section's behavior.
 
 Until all three are satisfied, the reference doc is the operating reference for second-implementer questions.
@@ -108,7 +108,7 @@ The wire format does not version per-frame. v1 is committed once; future incompa
 
 ## What this suite is NOT
 
-- Not a C ABI specification. The reference C implementation's headers describe its ABI; this suite is language-agnostic.
+- Not an API/ABI specification. The reference implementation's headers describe its own API; this suite is language-agnostic.
 - Not a build / packaging guide (see the `core/` rebuild).
 - Not a feature comparison vs Zenoh / DDS / MQTT. See [../../README.md](../../README.md).
 - Not a security architecture. The wire format is security-agnostic; security wraps it at the transport layer per [10-module-catalog.md](10-module-catalog.md).

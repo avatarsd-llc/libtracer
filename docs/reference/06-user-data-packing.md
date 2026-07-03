@@ -210,7 +210,7 @@ Each `tracer_write` is a view-clone (refcount bump on the DMA segment) and a rou
 ```c
 // Subscribe with assemble=false (default) — receive each slice as it arrives.
 tlv_t *sub = tlv_new_subscriber("/local/dsp-pipeline", default_settings());
-tracer_write("/adc/raw[*]:subscribers[]", sub);
+tracer_write("/adc/raw:subscribers[]", sub);   // subtree subscription: observes every /adc/raw[i]
 
 // In the dsp-pipeline handler:
 void on_adc_slice(const tlv_t *t, void *ctx) {
@@ -232,7 +232,7 @@ tlv_t *settings = tlv_new_settings_list({
     {"deadline_ns", 200 * 1000 * 1000},                          // 200ms safety
 });
 tlv_t *sub = tlv_new_subscriber("/local/batch-handler", settings);
-tracer_write("/adc/raw[*]:subscribers[]", sub);
+tracer_write("/adc/raw:subscribers[]", sub);   // subtree subscription: observes every /adc/raw[i]
 ```
 
 The router buffers slices per timestamp group; once the group is complete (or deadline expires), it delivers one assembled TLV. This is the right shape for batch DSP that needs N-sample windows.
@@ -298,8 +298,8 @@ void on_scan(const uint8_t *scan, size_t scan_len, uint64_t ts_ns) {
 // Subscribe to both streams.
 tlv_t *cam_sub   = tlv_new_subscriber("/local/fusion/cam",   default_settings());
 tlv_t *lidar_sub = tlv_new_subscriber("/local/fusion/lidar", default_settings());
-tracer_write("/camera/frame[*]:subscribers[]", cam_sub);
-tracer_write("/lidar/scan[*]:subscribers[]",   lidar_sub);
+tracer_write("/camera/frame:subscribers[]", cam_sub);   // subtree: every /camera/frame[i]
+tracer_write("/lidar/scan:subscribers[]",   lidar_sub);   // subtree: every /lidar/scan[i]
 
 // In the fusion handler:
 static frame_buffer_t  pending_frame;   // map: ts_ns → assembled frame

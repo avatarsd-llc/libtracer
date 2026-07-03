@@ -207,18 +207,18 @@ This is the same pattern Kafka, distributed log systems, and CRDT replicas use. 
 
 The aggregate role above is one form of grouping. There are several structural patterns; this section names them.
 
-### Multi-source fan-in via wildcard subscription
+### Multi-source fan-in via subtree subscription
 
 ```
-A fan-in vertex /log/global subscribes to every peer's /peer/*/log:
+A fan-in vertex /log/global subscribes at the peers' common ancestor:
 
-write("/log/global:subscribers[]",
-      SUBSCRIBER{ source_path = "/peer/*/log", target = "/log/global" })
+write("/peer:subscribers[]",
+      SUBSCRIBER{ target = "/log/global" })
 ```
 
-Now any write to any `/peer/{id}/log` lands at `/log/global`. The fan-in vertex becomes the place where every host sends logs *as if* they wrote there directly. Behind the scenes, the wildcard subscription drives the fan-in.
+Every subscription is a subtree subscription ([RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md)), so the edge at `/peer` observes every write to any `/peer/{id}/log` (and anything else under `/peer` — the consumer filters if the subtree carries more than logs; selecting only sibling-pattern paths like `/peer/*/log` would need the unratified per-segment wildcard grammar, [03-addressing.md](03-addressing.md) §future direction). `/log/global` becomes the place where every host's log lands *as if* they wrote there directly.
 
-This is **not** a special primitive — it falls out of wildcards plus the SUBSCRIBER target field. The aggregate-role vertex is just any vertex configured with a wildcard subscription pulling into it.
+This is **not** a special primitive — it falls out of subtree subscription plus the SUBSCRIBER target field. The aggregate-role vertex is just any vertex a subtree subscription pulls into.
 
 ### Multi-sink fan-out
 
@@ -384,7 +384,7 @@ The schema cannot enumerate the role exhaustively; an implementer is free to inv
 | Vertex backing is unspecified (RAM, MMIO, file, function-on-read) | [02-graph-model.md](02-graph-model.md) §what the protocol does NOT specify | Existed; this doc develops the taxonomy |
 | Shared variable pattern as `subscribe + transient_local` | [06-user-data-packing.md](06-user-data-packing.md) §the shared variable pattern | Existed; here it becomes role 1 (stored value) |
 | Route proxy as a vertex that forwards | [07-host-embedding.md](07-host-embedding.md) §per-host view | Existed; here it becomes role 5 (proxy) |
-| Wildcard subscription mechanics | [03-addressing.md](03-addressing.md) §wildcards | Existed; here used to build aggregate-role vertices |
+| Subtree subscription mechanics | [03-addressing.md](03-addressing.md) §subtree subscriptions | Existed; here used to build aggregate-role vertices |
 | Address-shift slicing for big payloads | [03-addressing.md](03-addressing.md) §address-shift slicing | Existed; here it composes with role 2 (stream) and Mode A canvas |
 | Schema as the visible contract | [02-graph-model.md](02-graph-model.md) §schema discipline | Existed; here promoted to "the only role-discovery surface" |
 | Redundant links as distinct explicit routes | [07-host-embedding.md](07-host-embedding.md) | Existed; here used in §redundant links |
