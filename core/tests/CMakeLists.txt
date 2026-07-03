@@ -49,6 +49,15 @@ target_link_libraries(transport_can_test PRIVATE libtracer)
 libtracer_test_warnings(transport_can_test)
 add_test(NAME transport_can COMMAND transport_can_test)
 
+# ADR-0044 — stateless transport-peer enumeration + transparent per-peer FWD over
+# the CAN bus binding: join hellos -> synthesized /net/can0:children[], directed
+# forwarding to an announced peer with the reply routed back, peer expiry, and the
+# per-distinct-node peer-table growth. In-memory fake link, no kernel CAN.
+add_executable(transport_can_peers_test transport_can_peers_test.cpp)
+target_link_libraries(transport_can_peers_test PRIVATE libtracer)
+libtracer_test_warnings(transport_can_peers_test)
+add_test(NAME transport_can_peers COMMAND transport_can_peers_test)
+
 # #55 (increment 2) — real-bus smoke test over a kernel vcan0 device. Self-skips
 # (clean exit) when vcan0 cannot bind, so it is harmless in the normal suite; the
 # dedicated can-vcan-e2e CI job sets vcan0 up so the SocketCAN path runs for real.

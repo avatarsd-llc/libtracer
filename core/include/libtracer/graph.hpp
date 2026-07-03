@@ -276,6 +276,12 @@ class graph_t {
     result_t<void> create_child(vertex_t* parent, const view_t& spec_value);
     // ":schema" read => a POINT descriptor (name + settings).
     [[nodiscard]] result_t<view_t> read_schema(vertex_t* v) const;
+    // ":children[]" read => member enumeration (write-spec / read-members asymmetry,
+    // reference 05 §SPEC): a POINT whose children are POINT{NAME} member descriptors.
+    // A vertex carrying handlers.on_children serves that synthesized listing instead
+    // (ADR-0044 — a transport vertex lists live bus peers, no vertices created);
+    // otherwise the direct child vertices registered under v's key are enumerated.
+    [[nodiscard]] result_t<view_t> read_children(vertex_t* v) const;
     // ":acl" read => the raw stored ACL TLV bytes verbatim (#81-A, ADR-0018/0020). The
     // caller-facing gate (READ_ACL) runs in read(v, field, caller) before reaching here.
     [[nodiscard]] result_t<view_t> read_acl(vertex_t* v) const;

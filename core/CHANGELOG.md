@@ -15,6 +15,31 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **Stateless transport-peer enumeration + transparent per-peer FWD (ADR-0044,
+  Brick C).** New kind-neutral bus capability on the transport seam:
+  `tr::net::bus_link_t` (`enumerate_peers` / `peer_link` / `set_peer_receiver`)
+  and `transport_t::bus()` (default `nullptr`). `child_registry_t::by_name` now
+  falls back to asking each bus child to resolve an unknown segment as a live
+  peer, and `fwd_router_t::add_child` installs a peer-named receiver on a bus
+  link — so an announced bus peer's name is a routable next-hop segment and
+  replies route back per-peer, with zero stored routing state. `transport_can`
+  implements the capability: an insert-only last-heard peer table (one entry per
+  distinct node id; `peer_ttl` silence expiry — new
+  `transport_can_config_t::peer_ttl`, default `kCanDefaultPeerTtl`), peers named
+  `n<node-id>`, a join-time **hello** advertise, and **directed** groups (the
+  module-internal advertise framing is now format `0x02`: an 18-byte header with
+  an explicit `target_node`; `advertise_t` gained `target` and
+  `kCanBroadcastNode`). New `can_transport_factory()` registers a `kind = "can"`
+  connection type (CAN-private config — `ifname`/`node`/`version`/`fd`/`path`/
+  `peer_ttl_ms` — parsed by the factory from the raw config TLV, per the
+  ADR-0043 §5 leanness ruling). On the graph side, `handlers_t` gained
+  `on_children` (a synthesized `:children[]` listing hook honored for any role)
+  and `graph_t` now serves the **`:children[]` field READ** (member enumeration:
+  a `POINT` of `POINT{NAME}` members — the read dual of the SPEC-creating
+  append), locally and through the FWD terminus; `transport_vertex_t` wires
+  `on_children` for any bus-capable connection so `/net/<conn>:children[]`
+  lists the currently-audible peers without creating any vertex.
+
 - **Subtree subscriptions, branch-write decomposition, write-creates
   (RFC-0005).** Every subscription now observes writes to its vertex AND to any
   descendant: a write fans out to subscribers at the vertex and at each ancestor
@@ -31,6 +56,16 @@ reference implementation is pre-1.0; everything currently lives under
   CREATE-ACL-gated on the nearest existing ancestor).
 
 ### Changed
+
+- **`transport_can` ingress now filters by protocol-version prefix and ignores
+  self-echoed frames** (frames whose CAN-ID `version` differs from the
+  transport's, or whose `node` equals its own, are dropped before any map/table
+  processing) — the ADR-0030 discovery-layer-versioning band made explicit.
+  `transport_can::send` is unchanged for callers; broadcast sends stamp
+  `target_node = kCanBroadcastNode`. The CAN advertise frame layout changed
+  incompatibly (format `0x01` → `0x02`); it is transport-internal framing
+  (ADR-0030), not the L2 wire spec — all nodes of one bus run one binding
+  version.
 
 - **A data write to a nonexistent path now creates it (RFC-0005 write-creates)**
   instead of returning `NOT_FOUND` — both the local `graph_t::write(path, …)`

@@ -156,10 +156,18 @@ void fwd_router_t::add_child(std::string name, transport_t& link) {
     // (the set_receiver mutex provides the release/acquire fence). Registry is otherwise
     // immutable after setup — no lock on the read hot path.
     registry_.add(name, link);
-    // Capability-matched receiver (ADR-0042 §1): an owning-delivery link funnels
-    // through the same routing with the frame view alongside; a span link keeps the
-    // borrowed-span path. No adapter wraps a span into a lying view.
-    if (link.delivers_views()) {
+    // Capability-matched receiver (ADR-0042 §1 / ADR-0044): a BUS link delivers
+    // frames tagged with the SENDING peer's name, which becomes the hop's inbound
+    // NAME — so the `src` grown on a forward (and the link a terminus reply goes
+    // back over) names the bus PEER, and the registry's peer fallback turns that
+    // name into a directed send. An owning-delivery link funnels through the same
+    // routing with the frame view alongside; a span link keeps the borrowed-span
+    // path. No adapter wraps a span into a lying view.
+    if (bus_link_t* const bus = link.bus()) {
+        bus->set_peer_receiver([this](std::string_view peer, std::span<const std::byte> frame) {
+            on_frame(peer, frame);
+        });
+    } else if (link.delivers_views()) {
         link.set_view_receiver(
             [this, name](view_t frame) { on_frame_view(name, std::move(frame)); });
     } else {

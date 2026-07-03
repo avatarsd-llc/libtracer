@@ -954,6 +954,40 @@ result_t<view_t> graph_t::read_acl(vertex_t* v) const {
     return out;
 }
 
+result_t<view_t> graph_t::read_children(vertex_t* v) const {
+    // The synthesized listing wins (ADR-0044): a transport/connection vertex serves
+    // its live bus peers here — a snapshot of traffic, never stored graph structure.
+    if (v->handlers_.on_children) return v->handlers_.on_children();
+    // Generic member enumeration (reference 05 §SPEC read-members): the DIRECT
+    // children of v in the vertex map — keys of the form <v.key><one NAME record>.
+    // Each member is a minimal POINT{NAME} descriptor; order is unspecified.
+    std::vector<std::byte> members;
+    {
+        const std::shared_lock lock(map_mutex_);
+        const std::vector<std::byte>& pk = v->key_.bytes;
+        for (const auto& [key, vert] : vertices_) {
+            (void)vert;
+            const std::vector<std::byte>& kb = key.bytes;
+            if (kb.size() <= pk.size() + 4) continue;  // too short for one more NAME
+            if (!std::equal(pk.begin(), pk.end(), kb.begin())) continue;
+            const std::span<const std::byte> rest(kb.data() + pk.size(), kb.size() - pk.size());
+            if (static_cast<type_t>(std::to_integer<std::uint8_t>(rest[0])) != type_t::NAME)
+                continue;
+            const std::size_t len = detail::load_le<std::uint16_t>(rest.subspan(2, 2));
+            if (rest.size() != 4 + len) continue;  // deeper descendant, not a direct child
+            // `rest` IS the child's canonical NAME record — the POINT body verbatim.
+            detail::emit_tlv(members, type_t::POINT, opt_t{.pl = true}, rest);
+        }
+    }
+    std::vector<std::byte> out;
+    detail::emit_tlv(out, type_t::POINT, opt_t{.pl = true}, members);
+    // `out` is non-empty by construction; an empty view is exactly an alloc
+    // failure → BACKPRESSURE (the audited alloc/copy/over locus).
+    const view_t res = view::over_bytes(out);
+    if (res.empty()) return std::unexpected(status_t::BACKPRESSURE);
+    return res;
+}
+
 result_t<view_t> graph_t::read(vertex_t* v, const field_path_t& field,
                                std::string_view caller) const {
     if (field.empty()) return read(v, caller);
@@ -967,6 +1001,13 @@ result_t<view_t> graph_t::read(vertex_t* v, const field_path_t& field,
     if (!acl_allows(v, caller, acl_right_t::READ))
         return std::unexpected(status_t::PERMISSION_DENIED);
     if (field.steps.size() == 1 && field.steps[0].name == "schema") return read_schema(v);
+    // ":children[]" (or bare ":children") — member enumeration, the read dual of
+    // the SPEC-creating append. A single "[N]" slot has no meaning here (members
+    // are named, not indexed) and falls through to SCHEMA_NOT_FOUND.
+    if (field.steps.size() == 1 && field.steps[0].name == "children" && !field.steps[0].wildcard &&
+        (field.steps[0].append || !field.steps[0].indexed)) {
+        return read_children(v);
+    }
     // A single subscriber slot ":subscribers[N]" — serve the stored SUBSCRIBER view (clone).
     if (field.steps.size() == 1 && field.steps[0].name == "subscribers" && field.steps[0].indexed &&
         !field.steps[0].append && !field.steps[0].wildcard) {

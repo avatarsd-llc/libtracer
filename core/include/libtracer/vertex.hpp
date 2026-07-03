@@ -54,10 +54,15 @@ struct settings_t {
     std::uint32_t store_ref_min_bytes = 0;
 };
 
-// User behavior for a Handler-role vertex.
+// User behavior for a Handler-role vertex. `on_children` additionally applies to
+// ANY role: when set, a read of the vertex's `:children[]` field serves this
+// synthesized member listing (a complete POINT TLV view) INSTEAD of enumerating
+// registered child vertices — the ADR-0044 seam by which a transport/connection
+// vertex lists its live bus peers without ever creating a vertex for them.
 struct handlers_t {
     std::function<result_t<view_t>()> on_read;
     std::function<result_t<void>(const view_t&)> on_write;
+    std::function<result_t<view_t>()> on_children;
 };
 
 /**

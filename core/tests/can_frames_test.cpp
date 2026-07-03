@@ -185,10 +185,11 @@ int main() {
 
         const std::vector<std::byte> enc = encode_advertise(a);
         const std::vector<std::byte> expect = bytes_of({
-            0xAD, 0x01, 0x00, 0x00,  // magic, fmt, flags, reserved
+            0xAD, 0x02, 0x00, 0x00,  // magic, fmt v2 (ADR-0044), flags, reserved
             0xBC, 0xAA, 0x15, 0x02,  // can_id LE (0x0215AABC)
             0x00, 0x00, 0x00, 0x00,  // group_total_len LE
             0x01, 0x00,              // slice_count LE
+            0xFF, 0xFF,              // target_node LE (broadcast — undirected)
             0x04, 0x00,              // path_len LE
             0x2F, 0x61, 0x2F, 0x62,  // "/a/b"
         });
@@ -210,6 +211,22 @@ int main() {
         g.path = "/cam/0";
         const auto gdec = decode_advertise(encode_advertise(g));
         check(gdec.has_value() && gdec->first == g, "group/manifest advertise round-trips");
+
+        // Directed form (ADR-0044): a target node id rides the manifest.
+        advertise_t d = g;
+        d.target = 5;
+        const auto ddec = decode_advertise(encode_advertise(d));
+        check(ddec.has_value() && ddec->first == d && ddec->first.target == 5,
+              "directed advertise (target_node) round-trips");
+
+        // Hello/presence form (ADR-0044): slice_count == 0 binds nothing.
+        advertise_t h;
+        h.can_id = encode_can_id({0, 3, 0});
+        h.slice_count = 0;
+        h.path = "/board";
+        const auto hdec = decode_advertise(encode_advertise(h));
+        check(hdec.has_value() && hdec->first == h && hdec->first.slice_count == 0,
+              "hello (slice_count 0) advertise round-trips");
 
         // Need-more: a truncated header returns nullopt.
         check(!decode_advertise(std::span<const std::byte>(enc.data(), 10)).has_value(),
