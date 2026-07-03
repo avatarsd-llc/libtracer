@@ -107,7 +107,7 @@ These are required even at profile P0 (in-process build). "Required" does not im
 | ---- | ---- | ---- | ---- |
 | `transport_tcp` | transport | TCP socket | v1, week 2 |
 | `transport_udp` | transport | UDP socket (unicast and multicast) | v1 |
-| `transport_quic` | transport | QUIC | post-MVP |
+| `transport_quic` | transport | QUIC + WebTransport (implemented — optional `libtracer_quic` target, ADR-0043) | v1 opt-in |
 | `transport_ws` | transport | WebSocket (browser / WASM) | v1, week 5 |
 | `transport_unix` | transport | Unix domain socket | v1 |
 | `transport_shm` | transport | Iceoryx-style shared-memory ring | post-MVP |

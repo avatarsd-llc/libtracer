@@ -21,7 +21,7 @@ enum class status_t {
     BACKPRESSURE,       // queue full / dispatch-depth cap hit
     TIMEOUT,            // await deadline expired
     SCHEMA_NOT_FOUND,   // field read/write on a vertex that doesn't expose it
-    PERMISSION_DENIED,  // ACL rejected (enforcement deferred; reserved)
+    PERMISSION_DENIED,  // ACL rejected (core subset enforced: ALLOW-only ACEs + INHERIT)
     PATH_IN_USE,        // registration collided with an existing vertex
 };
 

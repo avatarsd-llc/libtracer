@@ -74,8 +74,8 @@ Every arrow speaks one protocol; the bridge forwards typed state across transpor
 - **No auto-multipath / mesh failover.** Routing is **explicit source-routing** ([ADR-0040](docs/adr/0040-net-plane-is-explicit-source-routed-only.md)): a peer reachable two ways is *two explicit addresses* (`/net/ws/…` and `/net/can/…`), and a consumer that subscribes both gets both deliveries — deliberate redundancy it chose, not automatic dedup. There is no flooding and no `(origin, ts)` cycle-dedup; a folded auto-multipath mesh would need a future flooding profile (the `0x0D ROUTER` code is reserved for it).
 - **No global clock or cross-producer ordering.** Timestamps are per-producer monotonic (HLC-style); cross-node coherence needs a coordinated trigger.
 - **u32 length ceiling (no u64).** Payloads above 4 GiB use **address-shift slicing** across `ep[0..N]` — the deliberate interop discipline, not a wire-level fragmentation layer.
-- **Reliable stream transport is in progress.** localhost UDP is best-effort; a reliable byte-stream (TCP/QUIC) for `RELIABLE` QoS / WAN is the remaining transport work.
-- **v1 does authorization, not authentication.** ACLs gate operations on a pluggable subject-token (the transport-authenticated `origin_peer_id` in v1); PKI is a deferred module — the ACL model is unchanged when it lands.
+- **Reliable stream transports have landed.** TCP is built in; QUIC/WebTransport ship as the optional `libtracer_quic` module. localhost UDP remains the best-effort default.
+- **v1 does authorization, not authentication.** ACLs gate operations on a pluggable subject-token (the transport-authenticated `origin_peer_id` in v1); raw-key ed25519 TOFU identity is the deferred module (X.509 PKI is rejected, ADR-0045) — the ACL model is unchanged when it lands.
 - **Pre-1.0.** The wire format is being drafted and is not yet frozen; pin to a commit if you depend on this today.
 
 ---
