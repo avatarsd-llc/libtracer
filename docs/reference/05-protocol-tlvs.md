@@ -98,7 +98,7 @@ A single name segment. UTF-8 bytes, **no NUL terminator on the wire**.
 
 - Length: 1..64 bytes (per [03-addressing.md](03-addressing.md) §path syntax).
 - MUST NOT contain reserved characters (`/ : . [ ] * ?`).
-- MUST be valid UTF-8. Invalid byte sequences MUST be rejected with `ERROR=INVALID_PATH`.
+- MUST be valid UTF-8. Invalid byte sequences MUST be rejected with `ERROR{tr::path::invalid}`.
 
 ### Where it appears
 
@@ -399,39 +399,62 @@ Subscribers and children appear as direct children of POINT, identified by their
 
 A single error condition. Used inside STATUS TLVs (which may carry zero or more ERRORs) and as the response payload for failed `read`/`write`/`await` calls.
 
-### Payload layout
+### Payload layout ([RFC-0002](../spec/rfcs/0002-protocol-error-model.md), accepted)
+
+`ERROR` is a **structured TLV (`opt.PL=1`) in all cases** — never special-cased; a
+generic `PL=1` walker handles it. Its **first child is the identity**, selected by
+the child's type alone:
+
+| First child | Identity form | Payload |
+| ---- | ---- | ---- |
+| `VALUE` (`0x01`) | **registered code** | `u16` LE code from the registry below |
+| `NAME` (`0x02`) | **string** | UTF-8 `tr::…` path (no NUL) — third-party extensions |
+
+Subsequent children are optional detail (`DESCRIPTION` `0x03` human text, `VALUE`
+`0x01` binary detail, or concept-specific TLVs).
+
+Worked bytes — `tr::path::not_found` (code `0x0020`), code-only:
 
 ```
-[ u8 error_code ]
-[ optional DESCRIPTION (UTF-8) ]
-[ optional VALUE (binary detail, error-code-specific) ]
+08 40 06 00   01 00 02 00 20 00     ERROR: type=08 opt=40(PL=1) len=6
+└ERROR hdr┘   └── VALUE child ──┘   VALUE payload = 20 00 (u16 LE = 0x0020)
+= 10 bytes    (14 wrapped in STATUS: 09 40 0A 00 + the 10 above)
 ```
 
-The error code is always the first byte. Optional follow-on TLVs (DESCRIPTION, VALUE) are nested by setting `opt.PL=1` and packing them as children after the leading code byte. (For implementers: the leading u8 is treated as a single-byte payload prefix; the rest of the payload is concatenated child TLVs. This packing is deliberately compact for the common case of "code only.")
+### Error registry (`tr::<concept>::<error>`)
 
-### Error code registry
+Identity is a path in a hierarchy keyed by **stable protocol concept** (never an
+implementation module): `frame` · `tlv` · `path` · `schema` · `flow` · `access` ·
+`transport` · `version`. `severity` ∈ `warn|error|critical`; `disposition` ∈
+`transient` (retry) · `permanent` (don't retry this request) · `fatal` (tear down
+the peer) — both live in the registry, **never on the wire**.
 
-```
-0x00  OK                   Operation succeeded (rarely sent — empty STATUS implies OK)
-0x01  NOT_FOUND            Path does not resolve to a vertex
-0x02  PERMISSION_DENIED    ACL rejected the operation
-0x03  INVALID_PATH         Malformed PATH or non-UTF-8 NAME
-0x04  TYPE_MISMATCH        Payload type incompatible with endpoint schema
-0x05  CRC_FAIL             Wire CRC did not match
-0x06  VERSION_MISMATCH     Peer advertised an incompatible protocol version (discovery-level)
-0x07  BACKPRESSURE         Subscriber queue full; sample dropped per QoS
-0x08  TIMEOUT              No response within deadline
-0x09  TRANSPORT_DOWN       Underlying transport disconnected
-0x0A  SCHEMA_NOT_FOUND     Field read on a vertex that does not expose it
-0x0B  ADDRESS_SHIFT_GAP    Missing index in an address-shift group at deadline
-0x0C  TRUNCATED            TLV stream ended mid-frame
-0x0D  NESTING_TOO_DEEP     Structured-TLV nesting exceeded depth cap
-0x0E  PATH_IN_USE          Bind attempted on an already-owned vertex name
-0x0F  – 0x7F  reserved for future core
-0x80  – 0xFF  user-defined
-```
+| Code | Path | Severity | Disposition |
+| ---- | ---- | ---- | ---- |
+| `0x0001` | `tr::frame::truncated` | error | transient |
+| `0x0002` | `tr::frame::invalid` | error | permanent |
+| `0x0003` | `tr::frame::crc_fail` | error | transient |
+| `0x0010` | `tr::tlv::nesting_too_deep` | error | permanent |
+| `0x0020` | `tr::path::not_found` | warn | permanent |
+| `0x0021` | `tr::path::invalid` | warn | permanent |
+| `0x0022` | `tr::path::in_use` | warn | permanent |
+| `0x0030` | `tr::schema::type_mismatch` | error | permanent |
+| `0x0031` | `tr::schema::not_found` | warn | permanent |
+| `0x0040` | `tr::flow::backpressure` | warn | transient |
+| `0x0041` | `tr::flow::timeout` | warn | transient |
+| `0x0042` | `tr::flow::address_shift_gap` | error | permanent |
+| `0x0050` | `tr::access::denied` | error | permanent |
+| `0x0060` | `tr::transport::down` | error | transient |
+| `0x0070` | `tr::version::mismatch` | critical | fatal |
 
-> **Registry status:** this flat byte registry is the v1 registry. [RFC-0002](../spec/rfcs/0002-protocol-error-model.md) (draft) proposes a `tr::<concept>::<error>` namespace (registered-code-or-string identity; severity/disposition carried in the registry); the byte table above remains authoritative until that RFC is accepted.
+There is **no OK code** (an empty `STATUS` means OK) and **no user/application
+error range** ([ADR-0010](../adr/0010-closed-protocol-error-boundary.md)): an
+application failure is ordinary data described by the application's schema. A
+module outside the frozen registry uses the **string form** (`tr::<vendor>::…`) —
+no registry entry, no RFC. `tr::frame::invalid` covers reserved-bit-set /
+`type=0x00` / oversize length; `tr::version::mismatch` is a discovery/link-level
+outcome, not a frame-parse result. The namespace is prefix-filterable
+(`tr::flow::*`). Additions to the registered set are RFC-gated.
 
 ### Where it appears
 
@@ -559,8 +582,8 @@ Nested SETTINGS for module namespacing (instead of an unnamed structured wrapper
 
 ### Validation
 
-- Unknown NAMEs MUST be either (a) ignored if module-namespaced and the module is not loaded, or (b) rejected with `ERROR=SCHEMA_NOT_FOUND` if in the core namespace.
-- Type mismatches (e.g., a u32 where u8 expected) MUST return `ERROR=TYPE_MISMATCH`.
+- Unknown NAMEs MUST be either (a) ignored if module-namespaced and the module is not loaded, or (b) rejected with `ERROR{tr::schema::not_found}` if in the core namespace.
+- Type mismatches (e.g., a u32 where u8 expected) MUST return `ERROR{tr::schema::type_mismatch}`.
 
 ### The five core QoS knobs
 
@@ -594,7 +617,7 @@ Nested SETTINGS for module namespacing (instead of an unnamed structured wrapper
 ### Constraints
 
 - u64 wraparound: year 2554 (584 years from 1970). Acceptable.
-- Negative (pre-epoch) values: not representable; reject with `ERROR=INVALID_PATH` (no dedicated INVALID_TIME code).
+- Negative (pre-epoch) values: not representable; reject with `ERROR{tr::path::invalid}` (no dedicated INVALID_TIME code).
 
 ### Hex example
 
@@ -627,7 +650,7 @@ type = 0x80 (user-range record, sender and receiver agree on shape)
 
 `0x0D` is a **reserved, decodable codepoint with no implemented mechanism** ([ADR-0040](../adr/0040-net-plane-is-explicit-source-routed-only.md)). The frame codec parses a `0x0D` TLV generically (a structured container when `opt.PL=1`, per the rules of [01-data-format.md](01-data-format.md)); no protocol mechanism emits or interprets it.
 
-The remote-operation plane is the source-routed **`FWD`** (`0x0F`, below): every remote endpoint is addressed by an explicit source route, `dst` shrinks monotonically per hop, and a `dst` revisiting a node is malformed (`ERROR=INVALID_PATH`) — loop-free by construction, so **FWD source-routing needs no duplicate suppression**. Parallel links to one peer are different explicit addresses (deliberate redundancy), not auto-multipath, so no "same value arrived two ways" case exists to dedup.
+The remote-operation plane is the source-routed **`FWD`** (`0x0F`, below): every remote endpoint is addressed by an explicit source route, `dst` shrinks monotonically per hop, and a `dst` revisiting a node is malformed (`ERROR{tr::path::invalid}`) — loop-free by construction, so **FWD source-routing needs no duplicate suppression**. Parallel links to one peer are different explicit addresses (deliberate redundancy), not auto-multipath, so no "same value arrived two ways" case exists to dedup.
 
 The codepoint is held in reserve for a possible future *flooding profile* (an auto-multipath deployment class outside the current topology scope). Until such a profile assigns it a payload layout:
 
@@ -654,7 +677,7 @@ SPEC (0x0E, PL=1) {
 
 ### Where it appears
 
-- Written into `<parent>:children[]` to create a child. The device validates `type` against its **catalog** (the `:children` field's `:schema`); an unknown type returns `ERROR=SCHEMA_NOT_FOUND`. Reading `<parent>:children[]` returns the subtree **members**, not SPECs (write-spec / read-members asymmetry).
+- Written into `<parent>:children[]` to create a child. The device validates `type` against its **catalog** (the `:children` field's `:schema`); an unknown type returns `ERROR{tr::schema::not_found}`. Reading `<parent>:children[]` returns the subtree **members**, not SPECs (write-spec / read-members asymmetry).
 - Creation requires the `CREATE` right in the parent's `:acl` ([ADR-0020](../adr/0020-acl-nfsv4-style-aces-with-inheritance.md)). The created controller exposes its own **port vertices**; wiring them is a *separate* binding step (SUBSCRIBER edges).
 
 ### Validation

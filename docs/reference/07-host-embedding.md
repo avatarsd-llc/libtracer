@@ -72,7 +72,7 @@ The protocol does not require a spanning tree, a designated root, or a routing e
 
 ## Loop safety (by construction)
 
-Explicit source routes cannot loop. An `FWD` frame carries its remaining route in `dst`, and every hop **consumes** the leading `dst` segment — `dst` shrinks monotonically, so a frame traverses at most `len(dst)` hops. A `dst` that revisits a node is malformed: the node answers `ERROR=INVALID_PATH` and the frame stops there.
+Explicit source routes cannot loop. An `FWD` frame carries its remaining route in `dst`, and every hop **consumes** the leading `dst` segment — `dst` shrinks monotonically, so a frame traverses at most `len(dst)` hops. A `dst` that revisits a node is malformed: the node answers `ERROR{tr::path::invalid}` and the frame stops there.
 
 Consequences:
 

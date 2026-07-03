@@ -9,11 +9,11 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0002 |
 | **Title** | Protocol error model: the `tr::` concept namespace |
-| **Status** | draft |
+| **Status** | **accepted** (2026-07-03) |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-06-24 |
-| **Comment window closes** | 2026-07-08 (≥ 14 days) |
-| **Tracking issue** | _to be filed_ |
+| **Comment window** | waived by the maintainer (solo-maintainer project, GOVERNANCE.md window dead ceremony) |
+| **Tracking issue** | [#3](https://github.com/avatarsd-llc/libtracer/issues/3) (RFC-0001 umbrella) |
 | **Target spec version** | v1 (draft refinement — no released v1 yet, so no v2 needed) |
 | **Supersedes** | RFC-0001 §C.1; subsumes RFC-0001 §C.2, §C.3 |
 
@@ -54,7 +54,7 @@ An error's identity is carried in exactly one of two forms:
 
 The registered-vs-string choice **is** the built-in-vs-extensible split. Optional **structured detail** (a human `DESCRIPTION`, a concept-specific `VALUE`, …) MAY follow either identity.
 
-### C. Wire layout of `ERROR` (`0x08`) — **Proposed (open for comment)**
+### C. Wire layout of `ERROR` (`0x08`)
 
 `ERROR` is a structured TLV (`opt.PL=1`) in **all** cases — it is never special-cased, and a generic `PL=1` walker handles it. Its **first child is the identity**, distinguished by type:
 
@@ -76,7 +76,7 @@ Worked bytes — `tr::path::not_found` (registered code `0x0020`), code-only:
 
 `ERROR` continues to appear as a `STATUS` (`0x09`) child; a **bare `ERROR`** (no STATUS wrapper) is permitted for protocol-stack reporting where there is no request to answer.
 
-### D. Registry (ADR-0009) — **Proposed codes/severity/disposition, open for comment**
+### D. Registry (ADR-0009)
 
 Normative for protocol v1; the built-in set below is frozen, and additions are RFC-gated. `severity` ∈ `warn | error | critical`; `disposition` ∈ `transient` (retry) · `permanent` (don't retry this request) · `fatal` (tear down the peer).
 
@@ -123,4 +123,4 @@ New vectors under `tests/conformance/vectors/v1/errors/`: a registered code-only
 
 ## Discussion
 
-Per [GOVERNANCE.md](../../../GOVERNANCE.md), the tracking issue stays open ≥ 14 days (until 2026-07-08) for implementer feedback before merge. Open points explicitly invited for comment: the §C `PL=1`-always vs `PL=0`-cheap layout; the §D code assignments and the `severity`/`disposition` scales; whether the string form's `tr::…` path should be one `NAME` or a `/`-style segmented structure for finer prefix matching.
+Accepted 2026-07-03 with the comment window waived (maintainer call — a solo-maintainer window has no commenters). Points that were open for comment, resolved as proposed: the §C `PL=1`-always vs `PL=0`-cheap layout; the §D code assignments and the `severity`/`disposition` scales; whether the string form's `tr::…` path should be one `NAME` or a `/`-style segmented structure for finer prefix matching.

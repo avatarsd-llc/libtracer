@@ -142,7 +142,7 @@ Polynomial `0x1021`, common variant.
 - **Field width on the wire**: 16 bits, little-endian.
 - **Why offer it**: 2-byte savings per TLV with CRC. False-positive rate ~`1/65536` versus ~`1/2^32` for CRC-32C — acceptable for short messages on tightly-bounded buses (CAN, UART) where the L2 medium itself adds another integrity check.
 
-Both variants are mandatory for conforming receivers. A receiver that sees `CR=1` MUST verify whichever variant `CW` selects; mismatches return `ERROR=CRC_FAIL`.
+Both variants are mandatory for conforming receivers. A receiver that sees `CR=1` MUST verify whichever variant `CW` selects; mismatches return `ERROR{tr::frame::crc_fail}`.
 
 ### Coverage
 
@@ -179,7 +179,7 @@ The TLV's wire-time is the **parent's wire-time + offset**. Use for children ins
 
 - Range: ±2.147 seconds. Plenty for intra-frame sample timing.
 - "Parent" means the wrapping structured TLV's `trailer_ts` (if present), or — if the wrapping structured TLV has no `trailer_ts` — the next outermost ancestor that does.
-- A TLV with `TF=1` whose ancestor chain has no `trailer_ts` MUST be rejected with `ERROR=INVALID_PATH` (the relative timestamp is meaningless without an anchor).
+- A TLV with `TF=1` whose ancestor chain has no `trailer_ts` MUST be rejected with `ERROR{tr::path::invalid}` (the relative timestamp is meaningless without an anchor).
 
 ### Use case: 1 GS/s ADC with per-sample timing
 
@@ -242,7 +242,7 @@ A receiver encountering a TLV with an unassigned type code in `0x0E – 0x7F` (o
 
 - MUST NOT crash; MUST continue parsing the surrounding stream.
 - MUST validate CRC (if present) and respect `length` when skipping over the unknown TLV.
-- If the unknown TLV is the outer addressed TLV: respond with `ERROR=TYPE_MISMATCH` if a return path exists.
+- If the unknown TLV is the outer addressed TLV: respond with `ERROR{tr::schema::type_mismatch}` if a return path exists.
 - If nested inside a structured TLV (parent has `opt.PL=1`): treat as opaque bytes and continue.
 - Forwarders MAY pass-through unmodified.
 
@@ -256,7 +256,7 @@ Reserved bits in `opt` non-zero MUST be rejected as INVALID — reserved-bit-non
 
 Conforming implementations MUST parse nested TLVs (structured TLVs with `opt.PL=1`) iteratively, using an explicit work stack. Recursive parsing is forbidden.
 
-- **Maximum nesting depth**: 32. Deeper TLVs MUST be rejected with `ERROR=NESTING_TOO_DEEP`.
+- **Maximum nesting depth**: 32. Deeper TLVs MUST be rejected with `ERROR{tr::tlv::nesting_too_deep}`.
 - **Work stack size**: bounded by depth limit; ~1 KiB.
 
 Rationale: MCU stacks are small (4 KiB on STM32F4 default). Maliciously deep nesting on the wire could overflow a recursive parser's call stack with no recovery.
@@ -278,8 +278,8 @@ The wire-receive context applies when a transport module reconstitutes a TLV fro
 
 If wire bytes end before the parser has consumed the full frame, it is a stream-level error:
 
-- Stream transports (TCP, UART, I²C): SHOULD wait for more bytes; report `ERROR=TRANSPORT_DOWN` if the stream is closed.
-- Datagram transports (UDP, single CAN frame): truncation is `ERROR=TRUNCATED`.
+- Stream transports (TCP, UART, I²C): SHOULD wait for more bytes; report `ERROR{tr::transport::down}` if the stream is closed.
+- Datagram transports (UDP, single CAN frame): truncation is `ERROR{tr::frame::truncated}`.
 
 Truncation MUST NOT cause buffer overrun. Implementations MUST validate `length` against available buffer before reading any payload byte.
 

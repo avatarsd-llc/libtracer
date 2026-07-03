@@ -25,7 +25,7 @@ reserved         = "/" / ":" / "." / "[" / "]" / "*" / "?"
 DIGIT            = %x30-39
 ```
 
-Wildcard segments (`*`, `**`) and the wildcard index (`[*]`) appear ONLY inside `subscriber-path`. `read`, `write`, and `await` take the strict `path` form and MUST reject any wildcard with `ERROR=INVALID_PATH`.
+Wildcard segments (`*`, `**`) and the wildcard index (`[*]`) appear ONLY inside `subscriber-path`. `read`, `write`, and `await` take the strict `path` form and MUST reject any wildcard with `ERROR{tr::path::invalid}`.
 
 - All names are UTF-8, case-sensitive, **case-folded NOT performed** (Unicode normalization is the application's responsibility — `/Sensor/temp` and `/sensor/temp` are different paths).
 - Maximum **single-name** length: 64 bytes (UTF-8 encoded).
@@ -34,7 +34,7 @@ Wildcard segments (`*`, `**`) and the wildcard index (`[*]`) appear ONLY inside 
 - Maximum **field-chain depth**: 8 (e.g., `:settings.transport_tcp.tls.cipher.suite` is at the limit).
 - Maximum **index value**: 65535 (fits in u16).
 
-A path that violates any limit MUST be rejected with `ERROR=INVALID_PATH`.
+A path that violates any limit MUST be rejected with `ERROR{tr::path::invalid}`.
 
 ### Examples
 
@@ -61,7 +61,7 @@ Indexing is resolved at **L4 from the field schema**, not from a wire marker: a 
 
 ### Reserved characters
 
-The five characters `/ : . [ ]` plus the wildcards `*` and `?` cannot appear inside a NAME segment. Implementations MUST reject any NAME containing them with `ERROR=INVALID_PATH`.
+The five characters `/ : . [ ]` plus the wildcards `*` and `?` cannot appear inside a NAME segment. Implementations MUST reject any NAME containing them with `ERROR{tr::path::invalid}`.
 
 (`?` is reserved for future single-character wildcard semantics; it is not in use in v1 but is reserved to keep the door open.)
 
@@ -82,7 +82,7 @@ Resolution proceeds in two stages:
 1. **Resolve the vertex address** by walking the segment chain from the root. Each segment must match a child vertex name; index segments select indexed children.
 2. **Resolve the field chain** against the vertex's schema (read `:schema` to enumerate). Each `.subfield` step descends one level; `[N]` selects a slot in an array-typed field.
 
-If stage 1 fails: `ERROR=NOT_FOUND`. If stage 2 fails: `ERROR=SCHEMA_NOT_FOUND` for an unknown field name; `ERROR=NOT_FOUND` for an out-of-range index on an existing array field.
+If stage 1 fails: `ERROR{tr::path::not_found}`. If stage 2 fails: `ERROR{tr::schema::not_found}` for an unknown field name; `ERROR{tr::path::not_found}` for an out-of-range index on an existing array field.
 
 ### Reading vs writing array slots
 
@@ -224,7 +224,7 @@ A path resolves within the host's own graph. No route prefix. Applies to:
 
 A remote vertex is reached by walking *through* a transport-vertex ([ADR-0027](../adr/0027-transport-and-connections-are-vertices.md) / [CONTEXT.md §Path-as-route](../../CONTEXT.md)): the path `/net/<conn>/<remote path>` — e.g. `/net/can0/sensor/wheel/left` — is the local address of the remote vertex, and **the path is the route**. The prefix is the transport-vertex's own path, not a configured string; the send-side suffix and the receive-side prefix are the same address.
 
-The operation travels as an `FWD` frame carrying its own route: each forwarder hop strips its leading `dst` segment and prepends the inbound-link NAME to `src`, so `dst` is always the remaining forward route and `src` the accumulated return route. Explicit source routes cannot loop — `dst` shrinks monotonically per hop, and a `dst` that revisits a node is rejected with `ERROR=INVALID_PATH`. Nothing is republished at a fixed prefix; a consumer addresses the routed path directly, and deliveries return along the accumulated route. See [reference/13](13-network-formation.md).
+The operation travels as an `FWD` frame carrying its own route: each forwarder hop strips its leading `dst` segment and prepends the inbound-link NAME to `src`, so `dst` is always the remaining forward route and `src` the accumulated return route. Explicit source routes cannot loop — `dst` shrinks monotonically per hop, and a `dst` that revisits a node is rejected with `ERROR{tr::path::invalid}`. Nothing is republished at a fixed prefix; a consumer addresses the routed path directly, and deliveries return along the accumulated route. See [reference/13](13-network-formation.md).
 
 Two links to the same peer are two different routed addresses (e.g. `/net/ws0/...` and `/net/can0/...`) — deliberate redundancy the consumer subscribes to explicitly, not auto-multipath.
 
@@ -238,7 +238,7 @@ A common convention (not normative): a peer's data is addressed through the conn
 
 When two registrations would claim the same local path:
 
-- **First-binder wins**: the first registrant to bind a vertex name owns it. Subsequent attempts return `ERROR=PATH_IN_USE` (a yet-to-be-assigned error code in the `0x0C..0x7F` reserved range).
+- **First-binder wins**: the first registrant to bind a vertex name owns it. Subsequent attempts return `ERROR{tr::path::in_use}` (a yet-to-be-assigned error code in the `0x0C..0x7F` reserved range).
 - Configuration avoids collisions by giving each link a distinct connection NAME (`/net/can0`, `/net/ws0`).
 - For routed addresses, uniqueness comes from the connection-NAME namespace of each node along the route. Conflicting peer identities on the network are a discovery-layer problem, not an addressing problem.
 
@@ -249,7 +249,7 @@ When two registrations would claim the same local path:
 Two textually-different paths that name the same vertex MUST canonicalize to the same internal representation:
 
 - Trailing slashes: `/sensor/temp/` and `/sensor/temp` are the same. Implementations SHOULD strip trailing slashes during parse.
-- Empty segments: `/sensor//temp` is **invalid**, not equivalent to `/sensor/temp`. Reject with `ERROR=INVALID_PATH`.
+- Empty segments: `/sensor//temp` is **invalid**, not equivalent to `/sensor/temp`. Reject with `ERROR{tr::path::invalid}`.
 - The root path is exactly `/`. `//` and beyond are invalid.
 
 Field paths do not have a trailing-separator equivalent; `:settings.` (trailing dot) is invalid.

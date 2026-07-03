@@ -21,7 +21,7 @@ A conforming **implementation** SHALL:
 3. Implement the read / write / await primitives and the field-write control surface of [04-communication-flows.md](04-communication-flows.md).
 4. Reserve type codes per [05-protocol-tlvs.md](05-protocol-tlvs.md) and treat unknown codes safely.
 5. Maintain the same-substrate invariant of [02-graph-model.md](02-graph-model.md): any sequence of mix/split/concat operations on the in-memory view tree, followed by serialization, MUST produce the same wire bytes as the equivalent fresh-buffer construction.
-6. Forward `FWD` frames hop-by-hop per [07-host-embedding.md](07-host-embedding.md): strip the leading `dst` segment, prepend the inbound-link NAME to `src`, and reject a `dst` that revisits the node with `ERROR=INVALID_PATH`, when acting as a forwarder.
+6. Forward `FWD` frames hop-by-hop per [07-host-embedding.md](07-host-embedding.md): strip the leading `dst` segment, prepend the inbound-link NAME to `src`, and reject a `dst` that revisits the node with `ERROR{tr::path::invalid}`, when acting as a forwarder.
 7. Provide path handles per [../spec/v1.md](../spec/v1.md) §3.1: encode each address used more than once into a PATH TLV exactly once (build-time literal or init-time registration); reuse the encoded bytes on every read / write / await; do not require string parsing or allocation on the hot path.
 
 A conforming **node** MAY load any subset of transport, discovery, security, and executor modules. A node loading **zero** transport modules is still conforming — it is an in-process-only graph. A node loading **multiple** transport modules SHALL implement the FWD forwarding logic of [07-host-embedding.md](07-host-embedding.md).
@@ -155,7 +155,7 @@ The TLV substrate plays two distinct roles, structurally distinguished by the `F
 - **Graph data** at a vertex: just the payload, no envelope. Identity = vertex path.
 - **In-flight message** crossing a link: an `FWD` TLV (structured, PL=1) carrying the op `VALUE`, the `dst` PATH (the remaining route — it shrinks one segment per hop), the `src` PATH (the accumulated return route — it grows one segment per hop), and the payload TLV as its last child. Identity = the explicit source route the frame carries.
 
-The terminus sheds the `FWD` envelope: it applies the op locally, stores only the bare payload (trailer-less at rest), and replies with a fresh `FWD{REPLY}` routed by the accumulated `src`. Because every remote endpoint is addressed by its explicit source route, forwarding is loop-free by construction (a `dst` that revisits a node is rejected with `ERROR=INVALID_PATH`) and needs no duplicate detection — the `0x0D ROUTER` code is a reserved wire codepoint with no assigned mechanism in this implementation. See [04-communication-flows.md](04-communication-flows.md) and [07-host-embedding.md](07-host-embedding.md).
+The terminus sheds the `FWD` envelope: it applies the op locally, stores only the bare payload (trailer-less at rest), and replies with a fresh `FWD{REPLY}` routed by the accumulated `src`. Because every remote endpoint is addressed by its explicit source route, forwarding is loop-free by construction (a `dst` that revisits a node is rejected with `ERROR{tr::path::invalid}`) and needs no duplicate detection — the `0x0D ROUTER` code is a reserved wire codepoint with no assigned mechanism in this implementation. See [04-communication-flows.md](04-communication-flows.md) and [07-host-embedding.md](07-host-embedding.md).
 
 ---
 
