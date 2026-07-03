@@ -532,7 +532,9 @@ ACL (PL=1) {                                ; outer = ACE collection
 
 `access_mask` bits: `READ=0x01 WRITE=0x02 SUBSCRIBE=0x04 CREATE=0x08 DELETE=0x10 READ_ACL=0x20 WRITE_ACL=0x40 WRITE_OWNER=0x80` (`0x100`+ reserved). The **`admin`** right is `WRITE_ACL` (modify the ACL / delegate); `CREATE` gates the `:children[]` creation field-write ([ADR-0017](../adr/0017-in-band-vertex-creation-controller-orchestration.md)).
 
-**Inheritance:** an ACE with `INHERIT` on a composite vertex applies to its whole subtree; a vertex's *effective* ACL is its own ACEs + inherited ancestor ACEs ([ADR-0020](../adr/0020-acl-nfsv4-style-aces-with-inheritance.md)). **Evaluation:** ALLOW/DENY, ordered, first-match-per-bit. The **wire layout is the full NFSv4 model**; the required-modules MCU profile enforces a subset (ALLOW-only, single `INHERIT` flag); full DENY/ordered evaluation is the `security_acl` host module. Enforcement is otherwise deferred per below.
+**Inheritance:** an ACE with `INHERIT` on a composite vertex applies to its whole subtree; a vertex's *effective* ACL is its own ACEs + inherited ancestor ACEs ([ADR-0020](../adr/0020-acl-nfsv4-style-aces-with-inheritance.md)). **Evaluation:** ALLOW/DENY, ordered, first-match-per-bit. The **wire layout is the full NFSv4 model**; the required-modules MCU profile enforces a subset (ALLOW-only, single `INHERIT` flag); full DENY/ordered evaluation is the `security_acl` host module.
+
+**Enforcement (core subset).** The reference core enforces the MCU subset (#81): **ALLOW-only** (a `:acl` write carrying a DENY ACE — or any flag bit beyond the single `INHERIT` — is rejected with `TYPE_MISMATCH`, so stored ACEs never carry semantics the subset evaluator would silently weaken), and **open by default** twice over — enforcement is off until a **subject resolver** is installed (the pluggable-subject-token seam of [ADR-0018](../adr/0018-access-control-authorization-pluggable-subject-token.md): caller context → subject token; the FWD terminus passes the inbound link as the caller context, local API calls are trusted by default), and a vertex whose *effective* ACL is empty stays unrestricted. With a resolver set, an operation is allowed iff some non-expired ACE with a matching subject (byte-equal, or the special `EVERYONE@`) grants the operation's bit: data/field read and `await` need `READ`, data/field writes need `WRITE`, the `:subscribers[]` append needs `SUBSCRIBE` on the *producer* and delivery needs `WRITE` on the *target* (the two-ACL gate of [ADR-0026](../adr/0026-consumer-initiated-subscription-client-write.md)), `:children[]` creation needs `CREATE`, and `:acl` read/write need `READ_ACL`/`WRITE_ACL`. Denial is `PermissionDenied` (`tr::access::denied`, `0x0050`). The effective ACL is computed at check time by walking the ancestor keys — control-plane frequency; the lock-free data hot path pays one null check when no resolver is installed.
 
 ### Header settings
 
@@ -541,7 +543,7 @@ ACL (PL=1) {                                ; outer = ACE collection
 ### Where it appears
 
 - `<vertex>:acl` field.
-- ACL enforcement is performed by the `security_acl` module (post-MVP per [10-module-catalog.md](10-module-catalog.md)). The TLV layout is **structurally defined** in v1 even though enforcement is deferred.
+- Core-subset enforcement (ALLOW-only, single `INHERIT`, resolver-gated — the paragraph above) lives in the reference core; the full DENY/ordered/audit model is the `security_acl` module (post-MVP per [10-module-catalog.md](10-module-catalog.md)).
 
 ### Constraints
 

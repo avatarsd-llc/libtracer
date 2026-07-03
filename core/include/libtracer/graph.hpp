@@ -15,6 +15,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <shared_mutex>
 #include <span>
 #include <string>
@@ -58,6 +59,24 @@ struct remote_delivery_t {
     bool delivery_compact = false; /**< @brief Opt-in to label-compacted delivery. */
 };
 
+/**
+ * @brief An operation's subject token — opaque bytes matched against ACE subjects (ADR-0018).
+ */
+using subject_token_t = std::vector<std::byte>;
+
+/**
+ * @brief The pluggable subject resolver (ADR-0018, #81): caller context → subject token.
+ *
+ * Maps an operation's caller context — this node's NAME for the inbound link a
+ * remote FWD arrived on, or empty for a local API call — to the subject token ACL
+ * evaluation matches against ACE subjects. Returning `std::nullopt` marks the
+ * caller trusted (no subject — the operation is allowed unchecked), which is the
+ * natural mapping for empty (local) contexts. The token is identity-provenance:
+ * v1 typically returns the transport-authenticated peer id for a link; a stronger
+ * (PKI) token slots in later without changing the ACL model.
+ */
+using subject_resolver_t = std::function<std::optional<subject_token_t>(std::string_view caller)>;
+
 class graph_t {
    public:
     graph_t();
@@ -92,24 +111,31 @@ class graph_t {
     // The built-in `stored_value` type is registered by the constructor.
     void register_child_type(std::string type, child_factory_t factory);
 
-    // Hot path — operate on a resolved handle; lock-free in the LKV slot.
-    [[nodiscard]] result_t<view_t> read(vertex_t* v) const;
-    [[nodiscard]] result_t<void> write(vertex_t* v, view_t value);
+    // Hot path — operate on a resolved handle; lock-free in the LKV slot. The trailing
+    // `caller` on each op is the ACL caller context (#81): empty for a local API call
+    // (the default — zero churn), the inbound link NAME when the FWD resolver drives
+    // the op. With no subject resolver installed it costs one null check.
+    [[nodiscard]] result_t<view_t> read(vertex_t* v, std::string_view caller = {}) const;
+    [[nodiscard]] result_t<void> write(vertex_t* v, view_t value, std::string_view caller = {});
     // Field-write by handle: resolve the vertex_t* and field_path_t once (e.g. from a
     // path_t::parse("/x:settings.reliability") kept around), then reuse them on the
     // hot path — no string parse, no map lookup per call. An empty `field` is an
     // ordinary value write. Pass `path.field()` for the field selector.
-    [[nodiscard]] result_t<void> write(vertex_t* v, const field_path_t& field, view_t value);
-    [[nodiscard]] result_t<view_t> await(vertex_t* v, std::chrono::nanoseconds timeout);
+    [[nodiscard]] result_t<void> write(vertex_t* v, const field_path_t& field, view_t value,
+                                       std::string_view caller = {});
+    [[nodiscard]] result_t<view_t> await(vertex_t* v, std::chrono::nanoseconds timeout,
+                                         std::string_view caller = {});
     // Field-read by handle (the read dual of the field-write overload): an empty `field`
     // is an ordinary value read; otherwise serve ":schema", ":acl", or a single
     // ":subscribers[N]" slot (the slot's stored SUBSCRIBER view, zero-copy). For the
     // whole-array ":subscribers[]" read use read_subscribers(). Used by the FWD resolver.
-    [[nodiscard]] result_t<view_t> read(vertex_t* v, const field_path_t& field) const;
+    [[nodiscard]] result_t<view_t> read(vertex_t* v, const field_path_t& field,
+                                        std::string_view caller = {}) const;
     // Read the ":subscribers[]" array: the populated slot SUBSCRIBER views in slot order
     // (each a zero-copy refcount clone of the stored source view). The FWD resolver ropes
     // these under a fresh PL=1 wrapper into the REPLY (RFC-0004 §D, no byte copy).
-    [[nodiscard]] result_t<std::vector<view_t>> read_subscribers(vertex_t* v) const;
+    [[nodiscard]] result_t<std::vector<view_t>> read_subscribers(
+        vertex_t* v, std::string_view caller = {}) const;
     // Stream history, newest last (Stream role only).
     [[nodiscard]] result_t<std::vector<view_t>> history(vertex_t* v) const;
 
@@ -139,6 +165,24 @@ class graph_t {
     void set_remote_delivery_sink(
         std::function<void(const remote_delivery_t&, const view_t&)> sink);
 
+    /**
+     * @brief Install the pluggable subject resolver (ADR-0018) — the ACL enforcement switch.
+     *
+     * No resolver (the default) ⇒ enforcement is DISABLED: every operation is allowed,
+     * exactly today's behavior, and the hot path pays one null check. With a resolver
+     * installed, each gated operation maps its caller context through it and — when a
+     * subject token comes back — evaluates the target vertex's *effective* ACL (own
+     * ACEs + ancestor ACEs carrying INHERIT, ADR-0020): allowed iff some non-expired
+     * ACE with a matching subject (or `"EVERYONE@"`) grants the operation's right bit;
+     * a vertex whose effective ACL is empty stays open (enforcement is opt-in per
+     * vertex via ACL presence). Denial returns status_t::PERMISSION_DENIED
+     * (`tr::access::denied` on the wire, RFC-0002).
+     *
+     * Set once at wiring time, before frames flow — read-only afterwards on the op
+     * paths, so no lock (the remote-sink / child-catalog contract).
+     */
+    void set_subject_resolver(subject_resolver_t resolver);
+
     // Store a REMOTE subscriber on `v`: a SUBSCRIBER slot carrying the consumer's
     // `return_route` (a view over a refcounted segment — the ONE copy of the route,
     // made by the caller at subscribe; every later delivery clones the refcount,
@@ -149,7 +193,9 @@ class graph_t {
     // (settings.durability == 1) and already holds a value, the current LKV is latched
     // to this subscriber immediately (one synchronous sink call, RFC-0004 §D). The
     // `source_view` (the SUBSCRIBER TLV) is retained zero-copy so a `:subscribers[]`
-    // read serves it back. NotFound is impossible (the caller holds `v`).
+    // read serves it back. NotFound is impossible (the caller holds `v`). The producer
+    // fan-out gate (#81, ADR-0026): `link` is the caller context — the append requires
+    // the SUBSCRIBE right on `v`'s :acl, else PERMISSION_DENIED.
     [[nodiscard]] result_t<void> add_remote_subscriber(
         vertex_t* v, view_t source_view, view_t return_route, std::string link,
         bool delivery_compact, delivery_mode_t mode = delivery_mode_t::EVERY);
@@ -166,19 +212,29 @@ class graph_t {
 
    private:
     // Update the vertex value (LKV/history/handler), then fan out to subscribers.
-    // `depth` bounds in-process re-dispatch cycles (kMaxDispatchDepth).
-    result_t<void> write_impl(vertex_t* v, view_t value, int depth);
+    // `depth` bounds in-process re-dispatch cycles (kMaxDispatchDepth). `caller` is
+    // the ACL caller context gating the WRITE right: the API caller's at depth 0,
+    // the subscription edge's stored context on a fan-out re-dispatch (fan-in gate).
+    result_t<void> write_impl(vertex_t* v, view_t value, int depth, std::string_view caller);
     void fan_out(vertex_t* v, const view_t& value, int depth);
     // Field surface: ":settings.<f>", ":subscribers[]" / "[N]", ":children[]".
-    result_t<void> field_write(vertex_t* v, const field_path_t& field, const view_t& value);
+    result_t<void> field_write(vertex_t* v, const field_path_t& field, const view_t& value,
+                               std::string_view caller);
+    // The ACL gate (#81, ADR-0018/0020 core subset): true iff `caller` may exercise
+    // `right` on `v`. True with no resolver installed (one null check — enforcement
+    // off), for a trusted caller (resolver returns nullopt), or when the effective
+    // ACL (own ACEs + INHERIT-flagged ancestor ACEs, walked at check time) is empty;
+    // otherwise true iff some non-expired matching ACE grants the bit. Takes each
+    // vertex's mutex one at a time (never nested) — control-plane frequency only.
+    [[nodiscard]] bool acl_allows(vertex_t* v, std::string_view caller, acl_right_t right) const;
     // ":children[]" append: instantiate a child from a SPEC via the type catalog (#82,
     // ADR-0017). Composes the child key (parent key + the SPEC `name` NAME), dispatches
     // on the SPEC `type`. Unknown type => SCHEMA_NOT_FOUND; duplicate name => PATH_IN_USE.
     result_t<void> create_child(vertex_t* parent, const view_t& spec_value);
     // ":schema" read => a POINT descriptor (name + settings).
     [[nodiscard]] result_t<view_t> read_schema(vertex_t* v) const;
-    // ":acl" read => the raw stored ACL TLV bytes (structural; #81-A, ADR-0018/0020). Storage
-    // only — enforcement is the deferred security_acl module, not this layer.
+    // ":acl" read => the raw stored ACL TLV bytes verbatim (#81-A, ADR-0018/0020). The
+    // caller-facing gate (READ_ACL) runs in read(v, field, caller) before reaching here.
     [[nodiscard]] result_t<view_t> read_acl(vertex_t* v) const;
 
     mutable std::shared_mutex map_mutex_;
@@ -191,6 +247,9 @@ class graph_t {
     // the write hot path — no lock needed (a benign data race with a late setup write
     // is excluded by the "configure before frames flow" contract, mirroring fwd_router).
     std::function<void(const remote_delivery_t&, const view_t&)> remote_sink_;
+    // The pluggable subject resolver (#81, ADR-0018). Null (default) => ACL enforcement
+    // disabled. Same set-once-before-frames-flow contract as remote_sink_.
+    subject_resolver_t subject_resolver_;
 };
 
 }  // namespace tr::graph
