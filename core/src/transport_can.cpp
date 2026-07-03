@@ -13,16 +13,6 @@
 #include "libtracer/segment.hpp"
 #include "libtracer/view.hpp"
 
-#ifdef __linux__
-#include <linux/can.h>
-#include <linux/can/raw.h>
-#include <net/if.h>
-#include <sys/ioctl.h>
-#include <sys/socket.h>
-#include <sys/time.h>
-#include <unistd.h>
-#endif
-
 namespace tr::net {
 
 namespace {
@@ -47,125 +37,10 @@ tr::mem::reassembly_key_t key_of(std::uint16_t node, std::uint16_t base_endpoint
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
-// socketcan_link_t
-// ---------------------------------------------------------------------------
-
-#ifdef __linux__
-
-socketcan_link_t::socketcan_link_t(const std::string& ifname) {
-    fd_ = ::socket(PF_CAN, SOCK_RAW, CAN_RAW);
-    if (fd_ < 0) return;
-
-    // Best-effort CAN-FD: a classic-only controller leaves this off and still works.
-    const int enable_fd = 1;
-    ::setsockopt(fd_, SOL_CAN_RAW, CAN_RAW_FD_FRAMES, &enable_fd, sizeof(enable_fd));
-
-    ifreq ifr{};
-    std::strncpy(ifr.ifr_name, ifname.c_str(), IFNAMSIZ - 1);
-    if (::ioctl(fd_, SIOCGIFINDEX, &ifr) < 0) {
-        ::close(fd_);
-        fd_ = -1;
-        return;
-    }
-
-    sockaddr_can addr{};
-    addr.can_family = AF_CAN;
-    addr.can_ifindex = ifr.ifr_ifindex;
-    if (::bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        ::close(fd_);
-        fd_ = -1;
-        return;
-    }
-
-    // A receive timeout lets the recv loop poll stop_ for a clean shutdown.
-    timeval tv{.tv_sec = 0, .tv_usec = 100000};  // 100 ms
-    ::setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    thread_ = std::thread([this] { run(); });
-}
-
-socketcan_link_t::~socketcan_link_t() {
-    stop_.store(true, std::memory_order_relaxed);
-    if (thread_.joinable()) thread_.join();
-    // Reset the fd under the write lock before closing so an in-flight write_raw
-    // never touches a closed/reused descriptor.
-    int doomed;
-    {
-        const std::lock_guard lock(write_m_);
-        doomed = fd_;
-        fd_ = -1;
-    }
-    if (doomed >= 0) ::close(doomed);
-}
-
-void socketcan_link_t::on_receive(rx_fn_t rx) {
-    const std::lock_guard lock(m_);
-    rx_ = std::move(rx);
-}
-
-void socketcan_link_t::write_raw(const can_frame_data_t& frame) {
-    const std::lock_guard lock(write_m_);
-    if (fd_ < 0) return;
-    // A CAN_RAW write is all-or-nothing per frame: on error (or a short write,
-    // which CAN_RAW never splits) the frame is dropped, best-effort — mirroring
-    // the RX side's skip-and-continue policy.
-    if (frame.fd) {
-        canfd_frame f{};
-        f.can_id = frame.id | CAN_EFF_FLAG;  // 29-bit extended id
-        f.len = frame.len;
-        std::memcpy(f.data, frame.data.data(), frame.len);
-        if (::write(fd_, &f, sizeof(f)) != static_cast<ssize_t>(sizeof(f))) return;
-    } else {
-        can_frame f{};
-        f.can_id = frame.id | CAN_EFF_FLAG;
-        f.can_dlc = frame.len;
-        std::memcpy(f.data, frame.data.data(), frame.len);
-        if (::write(fd_, &f, sizeof(f)) != static_cast<ssize_t>(sizeof(f))) return;
-    }
-}
-
-void socketcan_link_t::run() {
-    while (!stop_.load(std::memory_order_relaxed)) {
-        canfd_frame f{};
-        const ssize_t n = ::read(fd_, &f, sizeof(f));
-        if (n < 0) continue;  // timeout / EAGAIN → re-check stop_
-        if (n != static_cast<ssize_t>(sizeof(can_frame)) &&
-            n != static_cast<ssize_t>(sizeof(canfd_frame)))
-            continue;
-
-        can_frame_data_t out;
-        out.id = f.can_id & CAN_EFF_MASK;  // strip EFF/RTR/ERR flags → 29-bit id
-        out.fd = (n == static_cast<ssize_t>(sizeof(canfd_frame)));
-        out.len = f.len;
-        if (out.len > 64) out.len = 64;
-        std::memcpy(out.data.data(), f.data, out.len);
-
-        rx_fn_t rx;
-        {
-            const std::lock_guard lock(m_);
-            rx = rx_;
-        }
-        if (rx) rx(out);
-    }
-}
-
-#else  // non-Linux: a stub so the binding compiles everywhere; ok() stays false.
-
-socketcan_link_t::socketcan_link_t(const std::string&) {}
-socketcan_link_t::~socketcan_link_t() = default;
-void socketcan_link_t::on_receive(rx_fn_t rx) {
-    const std::lock_guard lock(m_);
-    rx_ = std::move(rx);
-}
-void socketcan_link_t::write_raw(const can_frame_data_t&) {}
-void socketcan_link_t::run() {}
-
-#endif  // __linux__
-
-// ---------------------------------------------------------------------------
-// transport_can
-// ---------------------------------------------------------------------------
+// socketcan_link_t lives in its OWN translation unit (src/socketcan_link.cpp,
+// Linux-only; src/socketcan_link_stub.cpp elsewhere) — platform selection is a
+// build-system concern, never an in-source #ifdef. This TU stays 100% portable:
+// the transport talks only to the can_link_t seam.
 
 transport_can::transport_can(std::unique_ptr<can_link_t> link, transport_can_config_t config)
     : link_(std::move(link)), cfg_(std::move(config)) {

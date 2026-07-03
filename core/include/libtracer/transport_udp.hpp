@@ -42,11 +42,13 @@ class udp_transport_t : public transport_t {
     //
     // `backend` is the host-injected RX memory seam (ADR-0042 §2): when a view
     // receiver is installed, each datagram is recvfrom'd straight into a fresh
-    // kMaxDatagram segment drawn from it (default: the process heap; a bounded
-    // host passes its pool over its static slab). Exhaustion (`alloc` == nullptr)
-    // is backpressure — the datagram is dropped and dropped_rx() ticks, never an
-    // OOM. Without a view receiver the backend is untouched (span path unchanged).
-    // Must outlive the transport.
+    // segment drawn from it, sized min(kMaxDatagram, backend->max_segment_size())
+    // — the injected backend BOUNDS the datagram a node accepts, so a pool over a
+    // static MCU slab (slot payload ≪ 64 KiB) works as-is (default: the process
+    // heap, which reports unbounded and keeps the full cap). Exhaustion (`alloc`
+    // == nullptr) is backpressure — the datagram is dropped and dropped_rx()
+    // ticks, never an OOM. Without a view receiver the backend is untouched
+    // (span path unchanged). Must outlive the transport.
     udp_transport_t(std::uint16_t bind_port, const std::string& peer_host, std::uint16_t peer_port,
                     mem::mem_backend_t* backend = &mem::heap_backend());
     ~udp_transport_t() override;

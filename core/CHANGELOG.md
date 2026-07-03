@@ -13,6 +13,26 @@ reference implementation is pre-1.0; everything currently lives under
 
 ## [Unreleased]
 
+### Changed
+
+- **`socketcan_link_t` moved to its own translation units — the last in-source
+  platform `#ifdef` is gone** (#183). `core/src/transport_can.cpp` is now 100%
+  portable (it talks only to the `can_link_t` seam); the Linux `PF_CAN`
+  implementation lives in `core/src/socketcan_link.cpp` and the always-off
+  stub in `core/src/socketcan_link_stub.cpp`, selected by the build system
+  (`CMAKE_SYSTEM_NAME`), per the no-feature-macro ruling. No API change; the
+  `transport_can.hpp` doc comment now states the build-system selection, and
+  platform ports (the ESP-IDF component's `twai_link_t`) implement the same
+  seam in their own tree.
+- **`udp_transport_t` RX is now bounded by the injected backend and keeps its
+  scratch off the recv-thread stack** (#183). RX segments are sized
+  `min(kMaxDatagram, backend->max_segment_size())`, so a `pool_t` over an
+  MCU-sized static slab (slot payload ≪ 64 KiB) receives datagrams instead of
+  dropping every one (ADR-0042 backpressure by injection); the legacy
+  borrowed-span path's 64 KiB scratch is allocated lazily on the heap on first
+  use instead of living in the recv thread's stack frame (which would overflow
+  FreeRTOS/pthread stacks on-target). Heap-backed hosts see identical behavior.
+
 ### Fixed
 
 - **v0.1 release must-fix bundle (pre-release hardening).** The CMake project now

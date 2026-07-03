@@ -12,8 +12,10 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cstring>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -126,7 +128,21 @@ void udp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
 }
 
 void udp_transport_t::run() {
-    std::array<std::byte, kMaxDatagram> buf;
+    // The borrowed-span path (and the exhaustion drain) needs a full-cap scratch
+    // buffer; it is allocated LAZILY on first use, so a steady-state owning-delivery
+    // node (view receiver installed, backend healthy) never pays for it — and the
+    // recv thread never carries a 64 KiB frame on its stack (FreeRTOS/pthread
+    // stacks are a few KiB; a stack array here would overflow them on-target).
+    std::unique_ptr<std::byte[]> scratch;
+    const auto scratch_buf = [&scratch]() -> std::byte* {
+        if (!scratch) scratch = std::make_unique<std::byte[]>(kMaxDatagram);
+        return scratch.get();
+    };
+    // ADR-0042 §2 backpressure by injection: the RX segment size is bounded by the
+    // injected backend — a pool's slot payload caps the datagram a bounded node
+    // accepts (an MCU's lwIP never yields a 64 KiB datagram anyway); the heap
+    // backend reports "unbounded", keeping the full kMaxDatagram cap.
+    const std::size_t rx_cap = std::min(kMaxDatagram, backend_->max_segment_size());
     view::segment_ptr_t rx_seg;  // pending RX segment, reused across recv timeouts
     while (!stop_.load(std::memory_order_relaxed)) {
         // The owning-delivery decision is made BEFORE the blocking recvfrom (the
@@ -145,12 +161,12 @@ void udp_transport_t::run() {
             // into a fresh refcounted segment from the injected backend; no library
             // buffer, no copy. The pending segment is reused across recv timeouts
             // (no idle churn). Exhaustion is backpressure: drain the datagram into
-            // the stack scratch, drop it, tick the counter — never an OOM.
-            if (!rx_seg) rx_seg = view::segment_ptr_t::adopt(backend_->alloc(kMaxDatagram));
+            // the lazy scratch, drop it, tick the counter — never an OOM.
+            if (!rx_seg) rx_seg = view::segment_ptr_t::adopt(backend_->alloc(rx_cap));
             sockaddr_in from{};
             socklen_t flen = sizeof(from);
-            std::byte* const dst = rx_seg ? rx_seg->bytes.data() : buf.data();
-            const std::size_t cap = rx_seg ? rx_seg->bytes.size() : buf.size();
+            std::byte* const dst = rx_seg ? rx_seg->bytes.data() : scratch_buf();
+            const std::size_t cap = rx_seg ? rx_seg->bytes.size() : kMaxDatagram;
             const ssize_t n =
                 ::recvfrom(fd_, dst, cap, 0, reinterpret_cast<sockaddr*>(&from), &flen);
             if (n <= 0) continue;  // timeout / EAGAIN / error → re-check stop_ (rx_seg kept)
@@ -170,8 +186,9 @@ void udp_transport_t::run() {
 
         sockaddr_in from{};
         socklen_t flen = sizeof(from);
+        std::byte* const buf = scratch_buf();
         const ssize_t n =
-            ::recvfrom(fd_, buf.data(), buf.size(), 0, reinterpret_cast<sockaddr*>(&from), &flen);
+            ::recvfrom(fd_, buf, kMaxDatagram, 0, reinterpret_cast<sockaddr*>(&from), &flen);
         if (n <= 0) continue;  // timeout / EAGAIN / error → re-check stop_
         // Listener mode: the latest datagram's source IS the peer (single-peer
         // UDP-server shape) — replies/sends target it from now on.
@@ -189,17 +206,17 @@ void udp_transport_t::run() {
             // blocked in recvfrom with the span decision — deliver owning anyway
             // via a one-time copy into a backend segment (race-window datagrams
             // only; every subsequent datagram takes the zero-copy path above).
-            view::segment_ptr_t seg = view::segment_ptr_t::adopt(backend_->alloc(kMaxDatagram));
-            if (!seg) {
+            view::segment_ptr_t seg = view::segment_ptr_t::adopt(backend_->alloc(rx_cap));
+            if (!seg || static_cast<std::size_t>(n) > seg->bytes.size()) {
                 dropped_rx_.fetch_add(1, std::memory_order_relaxed);
                 continue;
             }
-            std::memcpy(seg->bytes.data(), buf.data(), static_cast<std::size_t>(n));
+            std::memcpy(seg->bytes.data(), buf, static_cast<std::size_t>(n));
             view_receiver(
                 view::view_t::over(std::move(seg)).subview(0, static_cast<std::size_t>(n)));
             continue;
         }
-        if (receiver) receiver(std::span<const std::byte>(buf.data(), static_cast<std::size_t>(n)));
+        if (receiver) receiver(std::span<const std::byte>(buf, static_cast<std::size_t>(n)));
     }
 }
 

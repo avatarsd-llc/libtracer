@@ -31,6 +31,15 @@ add_library(libtracer STATIC
     src/transport_ws.cpp
     src/transport_can.cpp
 )
+# socketcan_link_t — platform TU selection (no in-source #ifdefs): the Linux
+# PF_CAN implementation on Linux, the always-off stub everywhere else. Platform
+# ports (e.g. the ESP-IDF component's twai_link_t) implement the same can_link_t
+# seam in their own tree.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(libtracer PRIVATE src/socketcan_link.cpp)
+else()
+    target_sources(libtracer PRIVATE src/socketcan_link_stub.cpp)
+endif()
 find_package(Threads REQUIRED)
 target_link_libraries(libtracer PUBLIC Threads::Threads)
 target_include_directories(libtracer PUBLIC

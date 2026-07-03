@@ -59,6 +59,75 @@ jobs:
         run: |
           ls -la build/*.bin build/*.elf 2>/dev/null || true
 
+  # Full-node gate (#183): build the full_node example — the FULL component
+  # (net plane: fwd_router / transport_vertex / udp / tcp / ws / transport_can
+  # + the TWAI can_link_t) — for both RISC-V targets. A clean `idf.py build`
+  # proves the whole net plane compiles and links against lwIP BSD sockets and
+  # esp_driver_twai on single-core FreeRTOS; the runtime proof is the linux-
+  # target run below (full-node-host), and bus-/radio-level validation is the
+  # on-silicon checklist on #183.
+  full-node:
+    runs-on: ubuntu-24.04
+    container: espressif/idf:release-v6.0
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32c6, esp32c3]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build full_node (full-node component) for ${{ matrix.target }}
+        shell: bash
+        working-directory: integrations/esp-idf/examples/full_node
+        run: |
+          . "${IDF_PATH}/export.sh"
+          idf.py set-target ${{ matrix.target }}
+          idf.py build
+
+      - name: Report footprint (flash / static RAM)
+        if: always()
+        shell: bash
+        working-directory: integrations/esp-idf/examples/full_node
+        run: |
+          ls -la build/*.bin build/*.elf 2>/dev/null || true
+          idf.py size 2>/dev/null || true
+
+  # Full-node HOST run (#183): the same full_node example on the ESP-IDF
+  # `linux` target, executed — the device node and an in-process host peer talk
+  # over REAL loopback datagrams (config-created udp connections via
+  # :children[] SPECs), driving read / subscribe / latch / fan-out / await end
+  # to end. This is the runtime proof CI can give without silicon. Same v5.3 +
+  # g++-12 arrangement as host-build (see the NOTE there re v6.0 linux target).
+  full-node-host:
+    runs-on: ubuntu-24.04
+    container: espressif/idf:release-v5.3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install g++-12 (C++23 <expected> for the host/linux toolchain)
+        shell: bash
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq g++-12 gcc-12
+
+      - name: Build full_node for the linux target
+        shell: bash
+        working-directory: integrations/esp-idf/examples/full_node
+        env:
+          CC: gcc-12
+          CXX: g++-12
+        run: |
+          . "${IDF_PATH}/export.sh"
+          idf.py -D CMAKE_C_COMPILER=gcc-12 -D CMAKE_CXX_COMPILER=g++-12 \
+            --preview set-target linux build
+
+      - name: Run full_node (device node + host peer over real datagrams)
+        shell: bash
+        working-directory: integrations/esp-idf/examples/full_node
+        run: |
+          ls -la build/full_node.elf
+          ./build/full_node.elf
+
   # Host-target gate: build the host_smoke example for the ESP-IDF `linux`
   # (POSIX host) target — proves the ESP-IDF *component* packages the core for a
   # host consumer (manifest target `linux`), distinct from core-ci.yml's plain

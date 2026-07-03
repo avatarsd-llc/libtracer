@@ -114,11 +114,13 @@ class can_link_t {
  * (`CAN_RAW_FD_FRAMES`, best-effort — a classic-only controller still works),
  * binds to the named interface (e.g. `"vcan0"`/`"can0"`), and spawns a receive
  * thread that translates each kernel frame into a @ref can_frame_data_t for the
- * registered callback. Compiled only on Linux (`<linux/can.h>`); on other
- * platforms it is a stub whose @ref ok is always false, so sanitizer/non-Linux
- * builds stay clean. The send path is `MSG_NOSIGNAL`-equivalent (a raw CAN write
- * cannot SIGPIPE) and serialized; the fd is reset under the write lock before
- * close on shutdown.
+ * registered callback. The implementation is selected by the BUILD SYSTEM, not
+ * by macros: Linux compiles `src/socketcan_link.cpp` (`<linux/can.h>`), every
+ * other platform compiles `src/socketcan_link_stub.cpp`, whose @ref ok is always
+ * false — so sanitizer/non-Linux builds stay clean and platform ports (e.g. the
+ * ESP-IDF component's `twai_link_t`) implement @ref can_link_t in their own TU.
+ * The send path is `MSG_NOSIGNAL`-equivalent (a raw CAN write cannot SIGPIPE)
+ * and serialized; the fd is reset under the write lock before close on shutdown.
  */
 class socketcan_link_t : public can_link_t {
    public:
