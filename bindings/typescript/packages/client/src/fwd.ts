@@ -40,23 +40,70 @@ export const FWD_KIND = Object.freeze({
  * `error.hpp` registry / `op_resolve.cpp` `error_code()` map.
  */
 export const FWD_ERROR = Object.freeze({
+  FRAME_TRUNCATED: 0x0001, // tr::frame::truncated
+  FRAME_INVALID: 0x0002, // tr::frame::invalid
+  FRAME_CRC_FAIL: 0x0003, // tr::frame::crc_fail
+  TLV_NESTING_TOO_DEEP: 0x0010, // tr::tlv::nesting_too_deep
   NOT_FOUND: 0x0020, // tr::path::not_found
-  PERMISSION_DENIED: 0x0050, // tr::access::denied
   INVALID_PATH: 0x0021, // tr::path::invalid
+  PATH_IN_USE: 0x0022, // tr::path::in_use
   TYPE_MISMATCH: 0x0030, // tr::schema::type_mismatch
+  SCHEMA_NOT_FOUND: 0x0031, // tr::schema::not_found
   BACKPRESSURE: 0x0040, // tr::flow::backpressure
   TIMEOUT: 0x0041, // tr::flow::timeout
-  SCHEMA_NOT_FOUND: 0x0031, // tr::schema::not_found
-  PATH_IN_USE: 0x0022, // tr::path::in_use
+  ADDRESS_SHIFT_GAP: 0x0042, // tr::flow::address_shift_gap
+  PERMISSION_DENIED: 0x0050, // tr::access::denied
+  TRANSPORT_DOWN: 0x0060, // tr::transport::down
+  VERSION_MISMATCH: 0x0070, // tr::version::mismatch
 } as const);
+
+/**
+ * The canonical `tr::<concept>::<error>` namespace path of each registered code
+ * (RFC-0002 §A/§D) — the string identity a NAME-form ERROR carries. Mirrors the
+ * C++ reference `error.hpp` `err_path()`.
+ */
+export const FWD_ERROR_PATH: Readonly<Record<number, string>> = Object.freeze({
+  [FWD_ERROR.FRAME_TRUNCATED]: 'tr::frame::truncated',
+  [FWD_ERROR.FRAME_INVALID]: 'tr::frame::invalid',
+  [FWD_ERROR.FRAME_CRC_FAIL]: 'tr::frame::crc_fail',
+  [FWD_ERROR.TLV_NESTING_TOO_DEEP]: 'tr::tlv::nesting_too_deep',
+  [FWD_ERROR.NOT_FOUND]: 'tr::path::not_found',
+  [FWD_ERROR.INVALID_PATH]: 'tr::path::invalid',
+  [FWD_ERROR.PATH_IN_USE]: 'tr::path::in_use',
+  [FWD_ERROR.TYPE_MISMATCH]: 'tr::schema::type_mismatch',
+  [FWD_ERROR.SCHEMA_NOT_FOUND]: 'tr::schema::not_found',
+  [FWD_ERROR.BACKPRESSURE]: 'tr::flow::backpressure',
+  [FWD_ERROR.TIMEOUT]: 'tr::flow::timeout',
+  [FWD_ERROR.ADDRESS_SHIFT_GAP]: 'tr::flow::address_shift_gap',
+  [FWD_ERROR.PERMISSION_DENIED]: 'tr::access::denied',
+  [FWD_ERROR.TRANSPORT_DOWN]: 'tr::transport::down',
+  [FWD_ERROR.VERSION_MISMATCH]: 'tr::version::mismatch',
+});
 
 const FWD_ERROR_NAME: Readonly<Record<number, string>> = Object.freeze(
   Object.fromEntries(Object.entries(FWD_ERROR).map(([k, v]) => [v, k])),
 );
 
+const FWD_ERROR_CODE_BY_PATH: Readonly<Record<string, number>> = Object.freeze(
+  Object.fromEntries(Object.entries(FWD_ERROR_PATH).map(([code, path]) => [path, Number(code)])),
+);
+
 /** The human name of a wire ERROR code (or `UNKNOWN(0x..)`). */
 export function fwdErrorName(code: number): string {
   return FWD_ERROR_NAME[code] ?? `UNKNOWN(0x${code.toString(16)})`;
+}
+
+/** The canonical `tr::…` path of a wire ERROR code (or `null` when unregistered). */
+export function fwdErrorPath(code: number): string | null {
+  return FWD_ERROR_PATH[code] ?? null;
+}
+
+/**
+ * The registered u16 code of a `tr::…` error path (RFC-0002 §A/§D), or 0 when
+ * the path is not in the frozen registry.
+ */
+export function fwdErrorCodeForPath(path: string): number {
+  return FWD_ERROR_CODE_BY_PATH[path] ?? 0;
 }
 
 /* ----------------------------------------------------------- value nodes --- */

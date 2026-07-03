@@ -321,12 +321,12 @@ The medium under a transport module determines whether a copy happens at the wir
 | Transport | Send-side copy? | Receive-side copy? |
 | ---- | ---- | ---- |
 | In-process / in-thread | none | none |
-| `transport_unix` (Unix domain socket) | one (kernel `write`) | one (kernel `read` into recv segment) |
+| `transport_unix` (Unix domain socket, future) | one (kernel `write`) | one (kernel `read` into recv segment) |
 | `transport_tcp` | one (kernel `send`) | one (kernel `recv` into recv segment) |
-| `transport_shm` | none (the segment IS shared mem) | none |
+| `transport_shm` (future) | none (the segment IS shared mem) | none |
 | `transport_iceoryx2` (future) | none (loan-publish-borrow) | none |
 | `transport_can` | one + per-CAN-frame fragmentation | one (HAL ISR copies each frame to RX buffer) |
-| `transport_uart` / `transport_i2c` | one (DMA or per-byte) | one (RX buffer, then framed-TLV view over it) |
+| `transport_uart` / `transport_i2c` (future) | one (DMA or per-byte) | one (RX buffer, then framed-TLV view over it) |
 | `transport_rdma` (future) | none on the data plane | none |
 
 The receive side on a stream/byte transport (UART, CAN, I²C, TCP) intrinsically needs an **RX buffer** because the bytes arrive incrementally and the framer needs to reconstitute a complete TLV. Once reconstituted, the framed TLV is a **view over the RX buffer**, and from that point on no further copies happen — the same view propagates through the router, fans out to subscribers, and is read by application code.

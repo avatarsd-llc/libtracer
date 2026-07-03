@@ -28,7 +28,17 @@ import { TYPE, decode, CodecError } from '@avatarsd-llc/libtracer';
 import type { Tlv } from '@avatarsd-llc/libtracer';
 import { encodeValue, encodePath, encodeSubscriber } from './tlv.js';
 import type { ValueOptions, SubscriberOptions } from './tlv.js';
-import { FWD_OP, FWD_KIND, encodeFwd, parseFwdTlv, replyErrorCode, fwdErrorName } from './fwd.js';
+import {
+  FWD_OP,
+  FWD_KIND,
+  encodeFwd,
+  parseFwdTlv,
+  replyErrorCode,
+  replyErrorPath,
+  fwdErrorName,
+  fwdErrorPath,
+  fwdErrorCodeForPath,
+} from './fwd.js';
 import type { ParsedFwd, FieldLevel } from './fwd.js';
 
 /**
@@ -41,6 +51,13 @@ export interface ClientTransport {
   send(frame: Uint8Array): void;
   /** Register (or clear with `null`) the inbound-frame receiver. */
   onFrame(receiver: ((bytes: Uint8Array) => void) | null): void;
+  /**
+   * Register (or clear with `null`) the connection-closed notifier — invoked once
+   * when the underlying connection closes or errors out, with the cause when one
+   * is known. OPTIONAL: a transport without it never notifies the client of a
+   * close, so pending requests only fail by timeout.
+   */
+  onClose?(handler: ((cause?: Error) => void) | null): void;
 }
 
 /** A delivered VALUE: its opaque payload bytes plus the decoded TLV it came from. */
@@ -58,6 +75,12 @@ export interface ClientOptions {
    * is fine; default `["client"]`.
    */
   readonly replyEndpoint?: string[];
+  /**
+   * Per-request deadline in milliseconds: a one-shot op whose FWD{REPLY} has not
+   * arrived within this window rejects with a timeout {@link Error}. Default
+   * 10 000 ms; pass `0` (or `Infinity`) to disable the deadline.
+   */
+  readonly requestTimeoutMs?: number;
 }
 
 /**
@@ -71,15 +94,54 @@ export class FwdError extends Error {
   /** The symbolic ERROR name (e.g. `"NOT_FOUND"`, `"TIMEOUT"`). */
   readonly codeName: string;
   /**
-   * @param code the registered u16 code carried in the reply's
-   *   `STATUS{ ERROR{ VALUE u16 } }` per RFC-0002
+   * The canonical `tr::<concept>::<error>` namespace path (RFC-0002 §A) — from
+   * the frozen registry for a registered code, or carried verbatim by a
+   * string-form (NAME identity) ERROR reply. `null` when neither is known.
    */
-  constructor(code: number) {
-    const name = fwdErrorName(code);
-    super(`FWD reply ERROR ${name} (0x${code.toString(16).padStart(4, '0')})`);
+  readonly path: string | null;
+  /**
+   * @param code the registered u16 code carried in the reply's
+   *   `STATUS{ ERROR{ VALUE u16 } }` per RFC-0002 (0 when absent)
+   * @param path the string-form `tr::…` identity when the reply carried a
+   *   `STATUS{ ERROR{ NAME utf8-path } }` instead of a registered code
+   */
+  constructor(code: number, path?: string | null) {
+    // A string-form identity that names a registered error resolves back to its
+    // code, so both wire forms surface identically (never UNKNOWN).
+    const resolved = code === 0 && path ? fwdErrorCodeForPath(path) : code;
+    const trPath = path ?? fwdErrorPath(resolved);
+    const name = resolved === 0 && trPath ? trPath : fwdErrorName(resolved);
+    super(`FWD reply ERROR ${name} (0x${resolved.toString(16).padStart(4, '0')})`);
     this.name = 'FwdError';
-    this.code = code;
+    this.code = resolved;
     this.codeName = name;
+    this.path = trPath;
+  }
+}
+
+/** ADVERTISE (`0x11`) — a route-handle label binding (RFC-0004 route handles). */
+const TYPE_ADVERTISE = 0x11;
+/** COMPACT (`0x12`) — a label-compacted delivery (RFC-0004 route handles). */
+const TYPE_COMPACT = 0x12;
+
+/**
+ * An inbound ADVERTISE (`0x11`) / COMPACT (`0x12`) frame reached this client,
+ * which does not implement the RFC-0004 compact (route-handle) delivery flow
+ * yet. Routed to {@link LibtracerClient.onError} so the failure is diagnosable
+ * instead of a silent drop; the sender should fall back to plain FWD delivery.
+ */
+export class CompactFlowError extends Error {
+  /** The offending wire type code (`0x11` ADVERTISE or `0x12` COMPACT). */
+  readonly frameType: number;
+  /** @param frameType the inbound frame's wire type code */
+  constructor(frameType: number) {
+    const kind = frameType === TYPE_ADVERTISE ? 'ADVERTISE' : 'COMPACT';
+    super(
+      `inbound ${kind} (0x${frameType.toString(16).padStart(2, '0')}) dropped: ` +
+        'compact (route-handle) delivery is not supported by this client yet',
+    );
+    this.name = 'CompactFlowError';
+    this.frameType = frameType;
   }
 }
 
@@ -87,6 +149,23 @@ export class FwdError extends Error {
 interface Pending {
   resolve(reply: ParsedFwd): void;
   reject(err: Error): void;
+  /**
+   * True once the promise has settled (timed out / transport closed). A settled
+   * entry stays in the FIFO so a late REPLY still consumes its slot — keeping
+   * every later request correlated to the right reply.
+   */
+  settled: boolean;
+  /** The per-request deadline timer (cleared on settle), when one is armed. */
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
+/** Settle a pending entry: clear its deadline and mark it consumed. */
+function settle(p: Pending): void {
+  p.settled = true;
+  if (p.timer !== null) {
+    clearTimeout(p.timer);
+    p.timer = null;
+  }
 }
 
 /**
@@ -101,18 +180,33 @@ interface Pending {
 export class LibtracerClient {
   private readonly transport: ClientTransport;
   private readonly replyEndpoint: string[];
+  private readonly requestTimeoutMs: number;
   private readonly valueHandlers = new Set<ValueHandler>();
   private readonly pending: Pending[] = [];
   private errorHandler: ((err: Error) => void) | null = null;
+  private closed: Error | null = null;
 
   /**
    * @param transport the injected connection seam (e.g. a connected `TransportWs`).
-   * @param options   optional reply-endpoint override (default `["client"]`).
+   * @param options   optional reply-endpoint / request-timeout overrides.
    */
   constructor(transport: ClientTransport, options: ClientOptions = {}) {
     this.transport = transport;
     this.replyEndpoint = [...(options.replyEndpoint ?? ['client'])];
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
     transport.onFrame((bytes) => this.dispatch(bytes));
+    transport.onClose?.((cause) => this.handleClose(cause));
+  }
+
+  /** Reject every pending request when the transport closes; fail-fast afterwards. */
+  private handleClose(cause?: Error): void {
+    this.closed = new Error('transport closed' + (cause ? `: ${cause.message}` : ''));
+    for (const p of this.pending) {
+      if (p.settled) continue;
+      settle(p);
+      p.reject(this.closed);
+    }
+    this.pending.length = 0;
   }
 
   /* ---------------------------------------------------------- inbound --- */
@@ -151,13 +245,25 @@ export class LibtracerClient {
       }
       if (parsed.op === FWD_OP.REPLY) {
         const waiter = this.pending.shift();
-        if (waiter) waiter.resolve(parsed);
+        // A settled waiter (timed out) still consumes its FIFO slot; its late
+        // reply is dropped so later requests stay correlated.
+        if (waiter && !waiter.settled) {
+          settle(waiter);
+          waiter.resolve(parsed);
+        }
         return;
       }
       // A delivery IS a FWD{WRITE} (RFC-0004 §D): deliver its VALUE payload.
       if (parsed.op === FWD_OP.WRITE && parsed.payload && parsed.payload.type === TYPE.VALUE) {
         this.deliver(parsed.payload);
       }
+      return;
+    }
+
+    // The compact (route-handle) flow is not implemented here: surface it loudly
+    // rather than silently dropping the delivery (v0.1 client limitation).
+    if (tlv.type === TYPE_ADVERTISE || tlv.type === TYPE_COMPACT) {
+      this.emitError(new CompactFlowError(tlv.type));
       return;
     }
 
@@ -179,11 +285,27 @@ export class LibtracerClient {
   /** Send a one-shot FWD and resolve its FWD{REPLY} (FIFO correlation). */
   private request(frame: Uint8Array): Promise<ParsedFwd> {
     return new Promise<ParsedFwd>((resolve, reject) => {
-      this.pending.push({ resolve, reject });
+      if (this.closed) {
+        reject(this.closed);
+        return;
+      }
+      const entry: Pending = { resolve, reject, settled: false, timer: null };
+      if (this.requestTimeoutMs > 0 && Number.isFinite(this.requestTimeoutMs)) {
+        entry.timer = setTimeout(() => {
+          // Leave the settled entry in the FIFO (see Pending) — its slot is
+          // consumed by the late reply, if one ever arrives.
+          settle(entry);
+          entry.reject(new Error(`request timed out after ${this.requestTimeoutMs}ms (no FWD reply)`));
+        }, this.requestTimeoutMs);
+        // Don't hold a Node event loop open for a pending deadline (no-op in browsers).
+        (entry.timer as { unref?: () => void }).unref?.();
+      }
+      this.pending.push(entry);
       try {
         this.transport.send(frame);
       } catch (err) {
         this.pending.pop();
+        settle(entry);
         reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
@@ -191,7 +313,11 @@ export class LibtracerClient {
 
   /** Turn a RESULT reply into its payload TLV; throw {@link FwdError} on ERROR. */
   private result(reply: ParsedFwd): Tlv | null {
-    if (reply.kind === FWD_KIND.ERROR) throw new FwdError(replyErrorCode(reply));
+    if (reply.kind === FWD_KIND.ERROR) {
+      // Registered-code and string-form (NAME tr::… path) identities both
+      // surface typed — a known path resolves back to its code, never UNKNOWN.
+      throw new FwdError(replyErrorCode(reply), replyErrorPath(reply));
+    }
     return reply.payload;
   }
 

@@ -22,6 +22,13 @@ internal transport thread). The reference catalog defines a poll-based
 `transport_vtable`; the C++ seam is callback + recv-thread — an implementation
 choice that matches how a real socket's receive loop feeds the FWD router.
 
+A transport that can hand up *owning* frames additionally implements the
+**view-receiver seam** ([ADR-0042](../adr/0042-refcounted-receiver-seam-view-delivery.md)):
+it overrides `delivers_views()` and delivers each inbound frame as a `view_t`
+over a refcounted segment (e.g. `tcp_transport_t` reads a frame straight into
+one segment). `fwd_router_t::add_child` installs whichever receiver matches the
+link's capability; every other transport keeps the borrowed-span receiver.
+
 `loopback_channel_t` wires two endpoints: a frame sent on one is delivered to the
 *other's* receiver on that endpoint's thread (modeling async cross-"wire" delivery).
 `shutdown()` joins the receive threads before the receivers are destroyed.

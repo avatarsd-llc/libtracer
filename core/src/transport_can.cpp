@@ -107,18 +107,21 @@ void socketcan_link_t::on_receive(rx_fn_t rx) {
 void socketcan_link_t::write_raw(const can_frame_data_t& frame) {
     const std::lock_guard lock(write_m_);
     if (fd_ < 0) return;
+    // A CAN_RAW write is all-or-nothing per frame: on error (or a short write,
+    // which CAN_RAW never splits) the frame is dropped, best-effort — mirroring
+    // the RX side's skip-and-continue policy.
     if (frame.fd) {
         canfd_frame f{};
         f.can_id = frame.id | CAN_EFF_FLAG;  // 29-bit extended id
         f.len = frame.len;
         std::memcpy(f.data, frame.data.data(), frame.len);
-        ::write(fd_, &f, sizeof(f));
+        if (::write(fd_, &f, sizeof(f)) != static_cast<ssize_t>(sizeof(f))) return;
     } else {
         can_frame f{};
         f.can_id = frame.id | CAN_EFF_FLAG;
         f.can_dlc = frame.len;
         std::memcpy(f.data, frame.data.data(), frame.len);
-        ::write(fd_, &f, sizeof(f));
+        if (::write(fd_, &f, sizeof(f)) != static_cast<ssize_t>(sizeof(f))) return;
     }
 }
 

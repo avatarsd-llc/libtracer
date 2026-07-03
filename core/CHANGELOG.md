@@ -13,6 +13,16 @@ reference implementation is pre-1.0; everything currently lives under
 
 ## [Unreleased]
 
+### Fixed
+
+- **v0.1 release must-fix bundle (pre-release hardening).** The CMake project now
+  declares its version (`project(libtracer VERSION 0.1.0 CXX)`), aligning the C++
+  reference with the `0.1.0` TypeScript packages. Fixed the two `-Wunused-result`
+  warnings in `socketcan_link_t::write_raw` (`core/src/transport_can.cpp`): the
+  `::write` return is now checked and a failed/short write drops the frame
+  best-effort, mirroring the RX side's skip-and-continue policy. A full build is
+  warning-free again.
+
 ### Added
 
 - **M6 — `tcp_transport_t`, the reliable stream transport** (new public header

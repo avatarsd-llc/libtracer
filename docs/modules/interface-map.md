@@ -77,7 +77,7 @@ flowchart LR
 | [graph](graph.md) | `class graph_t{ register_vertex; read; write; await; history; subscribe; add_remote_subscriber(vertex_t*, view_t source_view, …) }` · `enum class role_t` · `struct settings_t` · `struct handlers_t` |
 | [transport](transport.md) | `using peer_id_t = array<byte,16>` · `class transport_t{ send(); set_receiver() }` · `class loopback_channel_t` |
 | fwd-router | `class fwd_router_t{ fwd_router_t(graph_t&, std::pmr::memory_resource* = default); add_child; on_frame; on_reply; advertise; send_compact; registry() }` — the terminus arena draws from the injected resource directly · `class child_registry_t{ add; by_name; by_segment }` · `struct op_resolver_t` — FWD source-routing (RFC-0004) |
-| transport-vertex | `class transport_vertex_t{ register_transport_type; provide_link; set_link_state; settings_of }` · `enum class conn_role_t` · `struct conn_settings_t{ addr; port; role; keepalive_ms; kind }` — a connection as a `/net/<conn>` vertex (ADR-0027); a `:children[]` SPEC whose config names a transport `kind` (built-ins `udp`/`ws`) CONSTRUCTS and owns the real socket; `provide_link` is the test/manual seam |
+| transport-vertex | `class transport_vertex_t{ register_transport_type; provide_link; set_link_state; settings_of }` · `enum class conn_role_t` · `struct conn_settings_t{ addr; port; role; keepalive_ms; kind }` — a connection as a `/net/<conn>` vertex (ADR-0027); a `:children[]` SPEC whose config names a transport `kind` (built-ins `udp`/`tcp`/`ws`) CONSTRUCTS and owns the real socket; `provide_link` is the test/manual seam |
 
 ## Two contracts hold the stack together
 
@@ -96,12 +96,13 @@ role slots in without touching the others.
 
 See the [module roadmap](../reference/10-module-catalog.md). The graph core (M1–M4) is
 built; the socket transports landed too — **WebSocket** (`transport_ws`, the
-browser↔robot keystone), **UDP** (`udp_transport_t`), and **CAN** (`transport_can`,
-SocketCAN). The **RFC-0004 remote-operation plane** (`fwd_router_t` + `child_registry_t`,
+browser↔robot keystone), **UDP** (`udp_transport_t`), **TCP** (`tcp_transport_t`,
+length-prefix framed), and **CAN** (`transport_can`, SocketCAN). The **RFC-0004
+remote-operation plane** (`fwd_router_t` + `child_registry_t`,
 `op_resolver_t`, `route_handle_t` — path-addressed `read`/`write`/`await`/`subscribe`
 over `FWD`) is the net plane, with connections exposed as `/net/<conn>` vertices
-(`transport_vertex_t`, ADR-0027). Still ahead: a reliable byte-stream transport
-(TCP/QUIC), and the wider backend/discovery/security catalog (pbuf, DMA, mDNS, TLS).
+(`transport_vertex_t`, ADR-0027). Still ahead: QUIC, and the wider
+backend/discovery/security catalog (pbuf, DMA, mDNS, TLS).
 
 **The net plane is explicit-source-routed `FWD` only**
 ([ADR-0040](../adr/0040-net-plane-is-explicit-source-routed-only.md)): a remote endpoint

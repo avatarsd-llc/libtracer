@@ -29,6 +29,7 @@ export type { Frame } from './ws.js';
 export { TransportWs } from './transport.js';
 export type {
   FrameReceiver,
+  CloseHandler,
   WebSocketLike,
   WebSocketCtor,
   TransportWsOptions,

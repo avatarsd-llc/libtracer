@@ -37,7 +37,7 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@avatarsd-llc/libtracer": "^0.0.1"
+    "@avatarsd-llc/libtracer": ">=0.1.0 <0.2.0"
   },
   "scripts": {
     "build": "tsc",

@@ -5,9 +5,9 @@
  * An in-process loopback transport (dev/test only — docs/reference/10's
  * transports are all real wire tech). A loopback_channel_t owns two endpoints; a
  * frame sent on one endpoint is delivered to the OTHER endpoint's receiver, on
- * that endpoint's receive thread (modeling async cross-"wire" delivery, so a
- * bridge cycle terminates by hop_count rather than stack recursion). No sockets;
- * deterministic; the vehicle for exercising the bridge + ROUTER + dedup end to
+ * that endpoint's receive thread (modeling async cross-"wire" delivery, so no
+ * forwarding recurses on the sender's stack). No sockets; deterministic; the
+ * vehicle for exercising FWD forward/reply routing (RFC-0004, ADR-0040) end to
  * end.
  *
  * Lifetime: call shutdown() (or destroy the channel) before the registered
