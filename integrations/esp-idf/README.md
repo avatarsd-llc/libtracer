@@ -74,18 +74,19 @@ docker run --rm -v "$PWD:/p" -w /p/integrations/esp-idf/examples/full_node \
   espressif/idf:release-v6.0 bash -c "idf.py set-target esp32c6 build"
 ```
 
-## Memory budget (measured)
+## Memory budget (measured per CI run)
 
-Numbers from the `full_node` build for **esp32c6** (`espressif/idf:release-v6.0`, `-Os` defaults), via `idf.py size` — the full node: graph + fwd_router + transport_vertex + udp/tcp/ws/can transports + TWAI link, plus the example app and IDF's Wi-Fi/lwIP stack:
+Footprint numbers are **measured and published on every run of the `full-node` CI job** — this README deliberately carries no copied-in numbers (they would go stale the next time a source file changes). To read the current numbers:
 
-<!-- FOOTPRINT:BEGIN -->
-| Metric | esp32c6 |
-| --- | --- |
-| Total image size | *(filled from the CI `Report footprint` step)* |
-| Static RAM (data+bss) | *(filled from the CI `Report footprint` step)* |
-<!-- FOOTPRINT:END -->
+1. Open the latest [`esp-idf` workflow run](https://github.com/avatarsd-llc/libtracer/actions/workflows/esp-idf.yml) → the **`full-node (esp32c6)`** (or `esp32c3`) job.
+2. The **job step summary** carries a markdown table with the **libtracer component's own contribution** (flash = text+rodata, static RAM = data+bss+iram, from `esp-idf-size --archives` on `liblibtracer.a`) next to the whole-image totals, plus a per-memory-type breakdown.
+3. The same numbers are attached as a machine-readable **`footprint-<target>` JSON artifact**, and the raw `idf.py size` / `idf.py size-components` tables are in the `Report footprint` step log.
 
-Steady-state heap is what you configure: the full_node example runs its RX segments and router tables out of a **24 KiB static slab** (12 KiB pool → 7 × 1536 B datagram slots + 12 KiB pmr arena); each live socket transport additionally owns one recv thread (stack below). The `idf.py size` breakdown is printed by the CI `Report footprint` step of the `full-node` job on every run — read current numbers there rather than trusting a stale table.
+What is measured: the `full_node` build (`espressif/idf:release-v6.0`, `-Os` defaults) — graph + fwd_router + transport_vertex + udp/tcp/ws/can transports + TWAI link, plus the example app and IDF's Wi-Fi/lwIP stack.
+
+The same CI step is a **footprint sentinel**: it gates the libtracer component's flash and static-RAM contribution against thresholds set at the top of [`esp-idf.yml`](../../.github/workflows/esp-idf.yml) (via [`tools/esp_size_gate.py`](../../tools/esp_size_gate.py)). Thresholds are **measured and enforcing** (first baseline 2026-07-03: component flash ≈ 77–81 KiB, static RAM **16 bytes** — the library holds no internal buffers, so the 4 KiB static-RAM ceiling structurally guards that ruling).
+
+Steady-state heap is what you configure: the full_node example runs its RX segments and router tables out of a **24 KiB static slab** (12 KiB pool → 7 × 1536 B datagram slots + 12 KiB pmr arena); each live socket transport additionally owns one recv thread (stack below).
 
 ## FreeRTOS / threading notes
 
@@ -109,7 +110,7 @@ Steady-state heap is what you configure: the full_node example runs its RX segme
 **Built in CI** ([`.github/workflows/esp-idf.yml`](../../.github/workflows/esp-idf.yml)):
 
 - `inprocess_mirror` (P0 profile) — builds for **esp32c6** + **esp32c3**.
-- `full_node` (full-node profile, #183) — builds for **esp32c6** + **esp32c3**, including the TWAI link; the `Report footprint` step prints `idf.py size`.
+- `full_node` (full-node profile, #183) — builds for **esp32c6** + **esp32c3**, including the TWAI link; the footprint steps publish the component-size table to the job step summary, upload the `footprint-<target>` JSON artifact, and run the size sentinel (see [Memory budget](#memory-budget-measured-per-ci-run)).
 - `full_node` — builds **and runs** for the **`linux`** target: device node + host peer over real datagrams, read/subscribe/latch/fan-out/await end to end (the runtime proof CI can give without silicon).
 - `host_smoke` — builds and runs for the **`linux`** target (the host_test path).
 
