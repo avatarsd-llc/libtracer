@@ -13,6 +13,26 @@ reference implementation is pre-1.0; everything currently lives under
 
 ## [Unreleased]
 
+### Added
+
+- **ACL enforcement, core subset** (#81; [ADR-0018](../docs/adr/0018-access-control-authorization-pluggable-subject-token.md)/[0020](../docs/adr/0020-acl-nfsv4-style-aces-with-inheritance.md)/[0026](../docs/adr/0026-consumer-initiated-subscription-client-write.md)).
+  New public API in `graph.hpp`/`vertex.hpp`: `subject_token_t`, `subject_resolver_t`,
+  `graph_t::set_subject_resolver` (the pluggable subject-token seam — **no resolver ⇒
+  enforcement disabled**, today's behavior, one null check on the hot path), `acl_right_t`
+  (the §0x0A access-mask bits), `ace_t` + `kAceInherit` (the parsed ALLOW-only ACE), and a
+  defaulted `std::string_view caller` on `graph_t` `read`/`write`/`await`/
+  `read_subscribers` (source-compatible; the FWD terminus passes its `inbound_link`
+  through as the caller context, local calls default to trusted). A `:acl` write now
+  **parses** the ACEs (rejecting a DENY ACE or flag bits beyond the single `INHERIT` with
+  `TYPE_MISMATCH` so subset evaluation never silently weakens stored semantics) and, with
+  a resolver installed, gates: READ/AWAIT by `READ`, writes by `WRITE`, `:subscribers[]`
+  append by the producer's `SUBSCRIBE` and fan-out re-dispatch by the *target's* `WRITE`
+  under the edge's stored caller (the ADR-0026 two-ACL pair; `subscriber_t` gains
+  `caller`), `:children[]` by `CREATE`, `:acl` read/write by `READ_ACL`/`WRITE_ACL`.
+  Effective ACL = own ACEs + `INHERIT`-flagged ancestor ACEs (walked at check time; empty
+  ⇒ open). Denial returns `status_t::PERMISSION_DENIED` (`tr::access::denied` `0x0050` on
+  the wire). New conformance vector `acl/acl-aces`.
+
 ### Removed
 
 - **`op_resolver_t::resolve(const wire::tlv_t&, …)` — the `tlv_t` resolver overloads are

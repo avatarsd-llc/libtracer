@@ -7,8 +7,10 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <string_view>
 #include <utility>
 
@@ -47,6 +49,89 @@ void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
         i += 4 + len;
     }
     return last;
+}
+
+// The parent's canonical PATH-payload key: `key` with its last NAME encoding dropped
+// (empty at the root). The inheritance walk (#81, ADR-0020) derives ancestor keys with
+// this — the key IS the concatenated NAME encodings, so no string form is ever needed.
+[[nodiscard]] std::span<const std::byte> parent_key(std::span<const std::byte> key) {
+    std::size_t last_start = 0;
+    std::size_t i = 0;
+    while (i + 4 <= key.size()) {
+        const std::size_t len = detail::load_le<std::uint16_t>(key.subspan(i + 2, 2));
+        if (i + 4 + len > key.size()) break;
+        last_start = i;
+        i += 4 + len;
+    }
+    return key.first(last_start);
+}
+
+// Absolute wall-clock ns since the UNIX epoch — the ACE `expires_ns` reference clock.
+[[nodiscard]] std::uint64_t now_ns() {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                          std::chrono::system_clock::now().time_since_epoch())
+                                          .count());
+}
+
+// True iff `ace` grants `bit` to `subject` right now: not expired, mask carries the
+// bit, and the subject matches byte-for-byte (or the ACE names "EVERYONE@").
+[[nodiscard]] bool ace_grants(const ace_t& ace, std::span<const std::byte> subject,
+                              std::uint32_t bit, std::uint64_t now) {
+    if ((ace.access_mask & bit) == 0) return false;
+    if (ace.expires_ns != 0 && ace.expires_ns <= now) return false;
+    static constexpr std::string_view kEveryone = "EVERYONE@";
+    if (detail::as_string_view(ace.subject) == kEveryone) return true;
+    return std::ranges::equal(ace.subject, subject);
+}
+
+// Parse a decoded :acl ACL TLV into the core-subset ACE list (#81, ADR-0020 /
+// docs/reference/05 §0x0A). STRICT: anything beyond the core subset — a DENY ACE,
+// flag bits beyond INHERIT, a missing type/subject/access_mask, a non-ACL child —
+// is rejected with TYPE_MISMATCH at write time, so the stored ACEs never carry
+// semantics the ALLOW-only evaluator would silently weaken (full DENY / ordered
+// first-match-per-bit evaluation is the security_acl host module).
+[[nodiscard]] result_t<std::vector<ace_t>> parse_aces(const tlv_t& acl) {
+    std::vector<ace_t> out;
+    out.reserve(acl.children.size());
+    for (const tlv_t& entry : acl.children) {
+        if (entry.type != type_t::ACL || !entry.opt.pl)
+            return std::unexpected(status_t::TYPE_MISMATCH);
+        ace_t ace;
+        bool has_type = false;
+        bool has_subject = false;
+        bool has_mask = false;
+        const std::vector<tlv_t>& ch = entry.children;
+        for (std::size_t i = 0; i + 1 < ch.size(); ++i) {
+            if (ch[i].type != type_t::NAME) continue;
+            const std::string_view key = detail::as_string_view(ch[i].payload);
+            const tlv_t& val = ch[i + 1];
+            if (key == "type" && val.type == type_t::VALUE) {
+                // ALLOW=0 only; DENY (or any unknown type) is beyond the core subset.
+                if (detail::load_le<std::uint8_t>(val.payload) != 0)
+                    return std::unexpected(status_t::TYPE_MISMATCH);
+                has_type = true;
+            } else if (key == "flags" && val.type == type_t::VALUE) {
+                ace.flags = detail::load_le<std::uint8_t>(val.payload);
+                // Single INHERIT bit only: INHERIT_ONLY/NO_PROPAGATE/GROUP would be
+                // silently mis-evaluated by the subset, so reject rather than weaken.
+                if ((ace.flags & static_cast<std::uint8_t>(~kAceInherit)) != 0)
+                    return std::unexpected(status_t::TYPE_MISMATCH);
+            } else if (key == "subject") {
+                // The subject token is opaque bytes (ADR-0018) — accept any opaque
+                // TLV's payload (VALUE recommended; NAME for "OWNER@"/"EVERYONE@").
+                ace.subject.assign(val.payload.begin(), val.payload.end());
+                has_subject = ace.subject.size() > 0;
+            } else if (key == "access_mask" && val.type == type_t::VALUE) {
+                ace.access_mask = static_cast<std::uint32_t>(detail::load_le(val.payload));
+                has_mask = true;
+            } else if (key == "expires_ns" && val.type == type_t::VALUE) {
+                ace.expires_ns = detail::load_le<std::uint64_t>(val.payload);
+            }
+        }
+        if (!has_type || !has_subject || !has_mask) return std::unexpected(status_t::TYPE_MISMATCH);
+        out.push_back(std::move(ace));
+    }
+    return out;
 }
 
 }  // namespace
@@ -92,7 +177,46 @@ vertex_t* graph_t::find(std::span<const std::byte> key) const {
     return it == vertices_.end() ? nullptr : it->second.get();
 }
 
-result_t<view_t> graph_t::read(vertex_t* v) const {
+void graph_t::set_subject_resolver(subject_resolver_t resolver) {
+    subject_resolver_ = std::move(resolver);
+}
+
+bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right) const {
+    if (!subject_resolver_) return true;  // enforcement disabled — the one hot-path check
+    const std::optional<subject_token_t> subject = subject_resolver_(caller);
+    if (!subject) return true;  // trusted caller (no subject) — e.g. a local API call
+    const auto bit = static_cast<std::uint32_t>(right);
+    const std::uint64_t now = now_ns();
+    // Effective ACL = own ACEs + INHERIT-flagged ancestor ACEs (ADR-0020), computed at
+    // check time (control-plane frequency, no caching). Locks are taken one vertex at
+    // a time — own first, then each ancestor — never nested, so no ordering hazard.
+    bool effective_nonempty = false;
+    {
+        const std::lock_guard lock(v->m_);
+        for (const ace_t& ace : v->aces_) {
+            effective_nonempty = true;
+            if (ace_grants(ace, *subject, bit, now)) return true;
+        }
+    }
+    std::span<const std::byte> key = v->key_.bytes;
+    while (!(key = parent_key(key)).empty()) {
+        vertex_t* ancestor = find(key);
+        if (!ancestor) continue;  // an unregistered intermediate level holds no ACL
+        const std::lock_guard lock(ancestor->m_);
+        for (const ace_t& ace : ancestor->aces_) {
+            if ((ace.flags & kAceInherit) == 0) continue;  // non-INHERIT: that vertex only
+            effective_nonempty = true;
+            if (ace_grants(ace, *subject, bit, now)) return true;
+        }
+    }
+    // Open by default: no effective ACE at all => allowed (enforcement is opt-in via
+    // ACL presence). Any present ACE — even an expired one — closes the vertex.
+    return !effective_nonempty;
+}
+
+result_t<view_t> graph_t::read(vertex_t* v, std::string_view caller) const {
+    if (!acl_allows(v, caller, acl_right_t::READ))
+        return std::unexpected(status_t::PERMISSION_DENIED);
     if (v->role_ == role_t::HANDLER) {
         if (v->handlers_.on_read) return v->handlers_.on_read();
         return std::unexpected(status_t::NOT_FOUND);
@@ -121,6 +245,10 @@ void graph_t::fan_out(vertex_t* v, const view_t& value, int depth) {
         // the route alive across a concurrent unsubscribe while we dispatch.
         view_t return_route;
         bool delivery_compact = false;
+        // The edge's stored ACL caller context (#81): the target re-dispatch runs the
+        // fan-in WRITE gate under the subscription creator's identity, not the
+        // producer-side writer's. Copied under the lock, like target_key.
+        std::string caller;
     };
     constexpr std::size_t kInlineFanout = 8;
     std::array<disp_t, kInlineFanout> inline_buf;
@@ -143,7 +271,8 @@ void graph_t::fan_out(vertex_t* v, const view_t& value, int depth) {
                 }
                 s.last_delivered.assign(bytes.begin(), bytes.end());
             }
-            disp_t d{s.callback, s.target_key, s.link, s.return_route, s.delivery_compact};
+            disp_t d{s.callback,     s.target_key,       s.link,
+                     s.return_route, s.delivery_compact, s.caller};
             if (use_heap)
                 heap_buf.push_back(std::move(d));
             else
@@ -154,7 +283,10 @@ void graph_t::fan_out(vertex_t* v, const view_t& value, int depth) {
         if (d.callback) d.callback(value);  // cloned view
         if (!d.target_key.empty() && depth + 1 < kMaxDispatchDepth) {
             if (vertex_t* target = find(d.target_key)) {
-                (void)write_impl(target, value, depth + 1);  // value cloned into the param
+                // Fan-in gate (#81, ADR-0026): the re-dispatch is an ordinary write to
+                // the target, gated inside write_impl by the TARGET's :acl WRITE right
+                // under the edge's stored caller context. Denial drops this delivery.
+                (void)write_impl(target, value, depth + 1, d.caller);  // value cloned
             }
         }
         // Remote delivery (#136): a write fans out to a remote subscriber as a
@@ -173,7 +305,9 @@ void graph_t::fan_out(vertex_t* v, const view_t& value, int depth) {
         for (std::size_t i = 0; i < inline_n; ++i) dispatch(inline_buf[i]);
 }
 
-result_t<void> graph_t::write_impl(vertex_t* v, view_t value, int depth) {
+result_t<void> graph_t::write_impl(vertex_t* v, view_t value, int depth, std::string_view caller) {
+    if (!acl_allows(v, caller, acl_right_t::WRITE))
+        return std::unexpected(status_t::PERMISSION_DENIED);
     if (v->role_ == role_t::HANDLER) {
         if (!v->handlers_.on_write) return std::unexpected(status_t::NOT_FOUND);
         result_t<void> r = v->handlers_.on_write(value);
@@ -205,16 +339,22 @@ result_t<void> graph_t::write_impl(vertex_t* v, view_t value, int depth) {
     return {};
 }
 
-result_t<void> graph_t::write(vertex_t* v, view_t value) {
-    return write_impl(v, std::move(value), 0);
+result_t<void> graph_t::write(vertex_t* v, view_t value, std::string_view caller) {
+    return write_impl(v, std::move(value), 0, caller);
 }
 
-result_t<void> graph_t::write(vertex_t* v, const field_path_t& field, view_t value) {
-    if (field.empty()) return write_impl(v, std::move(value), 0);
-    return field_write(v, field, value);
+result_t<void> graph_t::write(vertex_t* v, const field_path_t& field, view_t value,
+                              std::string_view caller) {
+    if (field.empty()) return write_impl(v, std::move(value), 0, caller);
+    return field_write(v, field, value, caller);
 }
 
-result_t<view_t> graph_t::await(vertex_t* v, std::chrono::nanoseconds timeout) {
+result_t<view_t> graph_t::await(vertex_t* v, std::chrono::nanoseconds timeout,
+                                std::string_view caller) {
+    // await is the readiness form of a data READ — same gate, checked up front so a
+    // denied caller cannot camp on the condvar.
+    if (!acl_allows(v, caller, acl_right_t::READ))
+        return std::unexpected(status_t::PERMISSION_DENIED);
     std::unique_lock lock(v->m_);
     const std::uint64_t seq0 = v->write_seq_;
     if (!v->cv_.wait_for(lock, timeout, [&] { return v->write_seq_ != seq0; })) {
@@ -228,6 +368,8 @@ result_t<view_t> graph_t::await(vertex_t* v, std::chrono::nanoseconds timeout) {
 
 result_t<std::vector<view_t>> graph_t::history(vertex_t* v) const {
     if (v->role_ != role_t::STREAM) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    if (!acl_allows(v, {}, acl_right_t::READ))  // local-only helper => local (empty) context
+        return std::unexpected(status_t::PERMISSION_DENIED);
     const std::lock_guard lock(v->m_);
     std::vector<view_t> out;
     out.reserve(v->history_.size());
@@ -238,6 +380,11 @@ result_t<std::vector<view_t>> graph_t::history(vertex_t* v) const {
 result_t<void> graph_t::subscribe(const path_t& src, const path_t& target, delivery_mode_t mode) {
     vertex_t* v = find(src.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
+    // The local sugar is the same :subscribers[] append — same producer-side SUBSCRIBE
+    // gate (#81, ADR-0026), under the empty (local) caller context, so a resolver that
+    // assigns local callers a subject sees these too.
+    if (!acl_allows(v, {}, acl_right_t::SUBSCRIBE))
+        return std::unexpected(status_t::PERMISSION_DENIED);
     subscriber_t s;
     s.target_key.assign(target.key().begin(), target.key().end());
     s.mode = mode;
@@ -250,6 +397,8 @@ result_t<void> graph_t::subscribe(const path_t& src, std::function<void(const vi
                                   delivery_mode_t mode) {
     vertex_t* v = find(src.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
+    if (!acl_allows(v, {}, acl_right_t::SUBSCRIBE))  // same gate as the target overload
+        return std::unexpected(status_t::PERMISSION_DENIED);
     subscriber_t s;
     s.callback = std::move(callback);
     s.mode = mode;
@@ -266,8 +415,13 @@ void graph_t::set_remote_delivery_sink(
 result_t<void> graph_t::add_remote_subscriber(vertex_t* v, view_t source_view, view_t return_route,
                                               std::string link, bool delivery_compact,
                                               delivery_mode_t mode) {
+    // Producer fan-out gate (#81, ADR-0026): a remote subscribe requires the SUBSCRIBE
+    // right on the PRODUCER's :acl, under the inbound link as the caller context.
+    if (!acl_allows(v, link, acl_right_t::SUBSCRIBE))
+        return std::unexpected(status_t::PERMISSION_DENIED);
     subscriber_t s;
     s.mode = mode;
+    s.caller = link;  // the fan-in gate context this edge's deliveries run under (#81)
     s.delivery_compact = delivery_compact;
     s.return_route = std::move(return_route);
     s.link = std::move(link);
@@ -303,11 +457,16 @@ result_t<void> graph_t::add_remote_subscriber(vertex_t* v, view_t source_view, v
     return {};
 }
 
-result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, const view_t& value) {
+result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, const view_t& value,
+                                    std::string_view caller) {
     const field_step_t& step0 = field.steps[0];
 
     if (step0.name == "subscribers") {
         if (step0.append) {
+            // Producer fan-out gate (#81, ADR-0026): appending a subscriber edge
+            // requires the SUBSCRIBE right on this (the producer's) :acl.
+            if (!acl_allows(v, caller, acl_right_t::SUBSCRIBE))
+                return std::unexpected(status_t::PERMISSION_DENIED);
             const auto sub = view_as_tlv(value);
             if (!sub || sub->type != type_t::SUBSCRIBER)
                 return std::unexpected(status_t::TYPE_MISMATCH);
@@ -336,11 +495,14 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
             }
             s.source_view = value;  // retain the SUBSCRIBER TLV zero-copy (refcount clone) so a
                                     // later :subscribers[] read ropes it into the REPLY (ADR-0035).
+            s.caller.assign(caller);  // the fan-in gate context for this edge's deliveries (#81)
             const std::lock_guard lock(v->m_);
             v->subs_.push_back(std::move(s));
             return {};
         }
-        if (step0.indexed) {  // clear a subscriber slot (unsubscribe)
+        if (step0.indexed) {  // clear a subscriber slot (unsubscribe) — a control write
+            if (!acl_allows(v, caller, acl_right_t::WRITE))
+                return std::unexpected(status_t::PERMISSION_DENIED);
             const std::lock_guard lock(v->m_);
             if (step0.index < v->subs_.size()) v->subs_[step0.index].active = false;
             return {};
@@ -349,26 +511,40 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
     }
 
     if (step0.name == "acl") {
-        // STRUCTURAL STORAGE ONLY (#81-A, ADR-0018/0020): validate the value is an ACL TLV and
-        // stash its raw bytes opaquely — we do NOT parse the NFSv4 ACE children or enforce them.
-        // Enforcement (read/write/subscribe gating) is the deferred security_acl module.
+        // Store the :acl (#81, ADR-0018/0020): gate on WRITE_ACL — precisely the `admin`
+        // right — then validate + parse the core-subset ACEs (ALLOW-only, single INHERIT
+        // flag; parse_aces rejects anything beyond the subset with TYPE_MISMATCH) and
+        // keep BOTH the raw bytes (served back verbatim by read_acl) and the parsed
+        // list (evaluated by acl_allows).
+        if (!acl_allows(v, caller, acl_right_t::WRITE_ACL))
+            return std::unexpected(status_t::PERMISSION_DENIED);
         const auto acl = view_as_tlv(value);
         if (!acl || acl->type != type_t::ACL) return std::unexpected(status_t::TYPE_MISMATCH);
+        result_t<std::vector<ace_t>> aces = parse_aces(*acl);
+        if (!aces) return std::unexpected(aces.error());
         const std::span<const std::byte> bytes = value.bytes();
         const std::lock_guard lock(v->m_);
         v->acl_.assign(bytes.begin(), bytes.end());  // storing replaces; empty => no restrictions
+        v->aces_ = std::move(*aces);
         return {};
     }
 
     if (step0.name == "children") {
         // In-band vertex creation (#82, ADR-0017): a `:children[]` APPEND of a SPEC
-        // instantiates a child of a device-catalog type. A `[N]` clear (child removal)
-        // is deferred (#66). Read-back (members, not SPECs) is the field-read surface.
-        if (step0.append) return create_child(v, value);
+        // instantiates a child of a device-catalog type, gated by the parent's CREATE
+        // right (#81, ADR-0020). A `[N]` clear (child removal) is deferred (#66).
+        // Read-back (members, not SPECs) is the field-read surface.
+        if (step0.append) {
+            if (!acl_allows(v, caller, acl_right_t::CREATE))
+                return std::unexpected(status_t::PERMISSION_DENIED);
+            return create_child(v, value);
+        }
         return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     }
 
     if (step0.name == "settings" && field.steps.size() >= 2) {
+        if (!acl_allows(v, caller, acl_right_t::WRITE))  // QoS knobs are control writes
+            return std::unexpected(status_t::PERMISSION_DENIED);
         const auto tlv = view_as_tlv(value);
         if (!tlv || tlv->type != type_t::VALUE) return std::unexpected(status_t::TYPE_MISMATCH);
         const std::uint64_t n = detail::load_le(tlv->payload);
@@ -465,7 +641,8 @@ result_t<view_t> graph_t::read_schema(vertex_t* v) const {
 
 result_t<view_t> graph_t::read_acl(vertex_t* v) const {
     // Serve back the raw :acl TLV bytes stored by field_write (heap-alloc + copy, like
-    // read_schema), or NOT_FOUND when none was set. Opaque: no ACE parsing, no enforcement.
+    // read_schema), or NOT_FOUND when none was set. Verbatim — the parsed-ACE evaluation
+    // lives in acl_allows; the READ_ACL gate runs in the caller (read(v, field, caller)).
     std::vector<std::byte> acl;
     {
         const std::lock_guard lock(v->m_);
@@ -479,10 +656,19 @@ result_t<view_t> graph_t::read_acl(vertex_t* v) const {
     return out;
 }
 
-result_t<view_t> graph_t::read(vertex_t* v, const field_path_t& field) const {
-    if (field.empty()) return read(v);
+result_t<view_t> graph_t::read(vertex_t* v, const field_path_t& field,
+                               std::string_view caller) const {
+    if (field.empty()) return read(v, caller);
+    // Field reads are gated like data reads (#81): READ for the control surface,
+    // READ_ACL — its own right, distinct from acting on the vertex — for ":acl".
+    if (field.steps.size() == 1 && field.steps[0].name == "acl") {
+        if (!acl_allows(v, caller, acl_right_t::READ_ACL))
+            return std::unexpected(status_t::PERMISSION_DENIED);
+        return read_acl(v);
+    }
+    if (!acl_allows(v, caller, acl_right_t::READ))
+        return std::unexpected(status_t::PERMISSION_DENIED);
     if (field.steps.size() == 1 && field.steps[0].name == "schema") return read_schema(v);
-    if (field.steps.size() == 1 && field.steps[0].name == "acl") return read_acl(v);
     // A single subscriber slot ":subscribers[N]" — serve the stored SUBSCRIBER view (clone).
     if (field.steps.size() == 1 && field.steps[0].name == "subscribers" && field.steps[0].indexed &&
         !field.steps[0].append && !field.steps[0].wildcard) {
@@ -495,7 +681,10 @@ result_t<view_t> graph_t::read(vertex_t* v, const field_path_t& field) const {
     return std::unexpected(status_t::SCHEMA_NOT_FOUND);
 }
 
-result_t<std::vector<view_t>> graph_t::read_subscribers(vertex_t* v) const {
+result_t<std::vector<view_t>> graph_t::read_subscribers(vertex_t* v,
+                                                        std::string_view caller) const {
+    if (!acl_allows(v, caller, acl_right_t::READ))  // control-surface read, like ":schema"
+        return std::unexpected(status_t::PERMISSION_DENIED);
     const std::lock_guard lock(v->m_);
     std::vector<view_t> out;
     out.reserve(v->subs_.size());
@@ -507,13 +696,7 @@ result_t<std::vector<view_t>> graph_t::read_subscribers(vertex_t* v) const {
 result_t<view_t> graph_t::read(const path_t& path) const {
     vertex_t* v = find(path.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
-    if (!path.field().empty()) {
-        const field_path_t& f = path.field();
-        if (f.steps.size() == 1 && f.steps[0].name == "schema") return read_schema(v);
-        if (f.steps.size() == 1 && f.steps[0].name == "acl") return read_acl(v);
-        return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-    }
-    return read(v);
+    return read(v, path.field());  // handle-based; one locus for the field surface + ACL gates
 }
 
 result_t<void> graph_t::write(const path_t& path, view_t value) {

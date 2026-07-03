@@ -83,6 +83,11 @@ class op_resolver_t {
      * field-write — so `fwd_router_t`, which knows the link, passes it; a bare
      * local resolve does not.
      *
+     * @p inbound_link is also the operation's ACL caller context (#81, ADR-0018):
+     * every graph call the terminus makes passes it through, so with a subject
+     * resolver installed a denied op replies `kind=ERROR` with
+     * `STATUS{ERROR{VALUE tr::access::denied}}` (0x0050).
+     *
      * The arena (and the frame it borrows) only needs to outlive this call: every
      * span the reply retains is copied once to its owner (ADR-0041 §2).
      *

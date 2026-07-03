@@ -55,6 +55,43 @@ struct handlers_t {
     std::function<result_t<void>(const view_t&)> on_write;
 };
 
+/**
+ * @brief One right bit of an ACE `access_mask` (docs/reference/05 §0x0A, ADR-0020).
+ *
+ * Single-bit values so a gate tests exactly one right; a stored mask may carry any
+ * OR of them. `WRITE_ACL` is precisely the `admin` right (modify the ACL / delegate).
+ */
+enum class acl_right_t : std::uint32_t {
+    READ = 0x01,        /**< @brief Read the vertex value / control fields. */
+    WRITE = 0x02,       /**< @brief Write the vertex value / control fields (fan-in gate). */
+    SUBSCRIBE = 0x04,   /**< @brief Append a `:subscribers[]` edge (fan-out gate). */
+    CREATE = 0x08,      /**< @brief Create a child via `:children[]` (ADR-0017). */
+    DELETE = 0x10,      /**< @brief Remove a child (reserved; no core surface yet). */
+    READ_ACL = 0x20,    /**< @brief Read the `:acl` field. */
+    WRITE_ACL = 0x40,   /**< @brief Modify the `:acl` field — the `admin` right. */
+    WRITE_OWNER = 0x80, /**< @brief Transfer ownership (reserved; no core surface yet). */
+};
+
+/** @brief The one ACE flag the core subset honors: propagate to the subtree (ADR-0020). */
+inline constexpr std::uint8_t kAceInherit = 0x1;
+
+/**
+ * @brief One parsed ALLOW ACE of a vertex's `:acl` (core subset, ADR-0020 / #81).
+ *
+ * The core subset is ALLOW-only: a `:acl` write carrying a DENY ACE (or any flag
+ * bit beyond @ref kAceInherit) is rejected at write time with TYPE_MISMATCH, so
+ * stored ACEs never carry semantics this evaluator would silently weaken. Full
+ * DENY / ordered first-match-per-bit evaluation is the `security_acl` host module.
+ */
+struct ace_t {
+    std::uint8_t flags = 0;         /**< @brief ACE flags; only @ref kAceInherit is accepted. */
+    std::vector<std::byte> subject; /**< @brief Opaque subject token (ADR-0018); the special
+                                         subject `"EVERYONE@"` matches any resolved subject. */
+    std::uint32_t access_mask = 0;  /**< @brief Granted rights (an OR of @ref acl_right_t bits). */
+    std::uint64_t expires_ns = 0;   /**< @brief Absolute expiry, ns since the UNIX epoch;
+                                         0 = never expires. An expired ACE grants nothing. */
+};
+
 // Per-subscriber delivery policy (byte-agnostic; SUBSCRIBER.qos_settings.delivery_mode
 // in docs/reference/05). Numeric filtering (deadband) is NOT here — it is an
 // application filter vertex (ADR-0021 sibling). Wire values match reference 05.
@@ -99,6 +136,13 @@ struct subscriber_t {
     // sugar that carries no TLV. A :subscribers[] read ropes these slot views into the
     // FWD{REPLY} with no byte copy (RFC-0004 §D / ADR-0035 slice 2 zero-copy reply rule).
     view_t source_view{};
+    // The caller context this edge was created under (#81, ADR-0026 fan-in gate): the
+    // inbound link NAME for a remote subscribe, empty for a locally-wired edge. A
+    // fan-out re-dispatch into a LOCAL target vertex is gated by the TARGET's :acl
+    // WRITE right under this context — the subscription's creator is the "writer"
+    // the target authorizes ("who may write to me"). A REMOTE subscriber's fan-in
+    // gate runs on the peer instead (its FWD{WRITE} terminus checks the same right).
+    std::string caller;
 };
 
 class vertex_t {
@@ -124,9 +168,11 @@ class vertex_t {
     std::atomic<std::shared_ptr<const view_t>> lkv_{};   // lock-free read/write hot path
     std::deque<std::shared_ptr<const view_t>> history_;  // Stream ring; guarded by m_
     std::vector<subscriber_t> subs_;                     // fan-out edges; guarded by m_
-    std::vector<std::byte> acl_;  // raw :acl TLV bytes, stored opaquely; guarded by m_ (#81-A,
-                                  // ADR-0018/0020). Empty => no :acl set. Enforcement is NOT here:
-                                  // the security_acl module gates reads/writes/subscribes.
+    std::vector<std::byte> acl_;  // raw :acl TLV bytes, served back verbatim; guarded by m_
+                                  // (#81-A, ADR-0018/0020). Empty => no :acl set.
+    std::vector<ace_t> aces_;     // the :acl bytes parsed into core-subset ACEs at write time
+                                  // (#81, ALLOW-only + INHERIT); guarded by m_. graph_t's
+                                  // acl_allows evaluates these when a subject resolver is set.
     std::mutex m_;
     std::condition_variable cv_;
     std::uint64_t write_seq_ = 0;  // bumped per write; await waits for an increment (guarded by m_)

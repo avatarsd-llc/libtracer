@@ -351,7 +351,7 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
     switch (req.op) {
         case fwd_op_t::READ: {
             if (has_field && is_subscribers_array(field)) {
-                result_t<std::vector<view_t>> subs = graph_.read_subscribers(v);
+                result_t<std::vector<view_t>> subs = graph_.read_subscribers(v, inbound_link);
                 if (!subs) return assemble_error(fwd, req, subs.error());
                 std::size_t sub_len = 0;
                 for (const view_t& s : *subs) sub_len += s.length;
@@ -366,7 +366,8 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
                                 std::span<const std::byte>(wrapper.data(), wll ? 6u : 4u), *subs,
                                 sub_len);
             }
-            result_t<view_t> r = has_field ? graph_.read(v, field) : graph_.read(v);
+            result_t<view_t> r =
+                has_field ? graph_.read(v, field, inbound_link) : graph_.read(v, inbound_link);
             if (!r) return assemble_error(fwd, req, r.error());
             return assemble_result_view(fwd, req, *r);
         }
@@ -400,7 +401,8 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
                 return assemble(fwd, req, reply_kind_t::RESULT, {}, {}, 0);  // OK, empty payload
             }
 
-            result_t<void> w = graph_.write(v, has_field ? field : field_path_t{}, value);
+            result_t<void> w =
+                graph_.write(v, has_field ? field : field_path_t{}, value, inbound_link);
             if (!w) return assemble_error(fwd, req, w.error());
             return assemble(fwd, req, reply_kind_t::RESULT, {}, {}, 0);  // OK, empty payload
         }
@@ -408,7 +410,7 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
             const std::chrono::nanoseconds timeout =
                 req.has_await_timeout ? std::chrono::nanoseconds(req.await_timeout)
                                       : kDefaultAwaitTimeout;
-            result_t<view_t> r = graph_.await(v, timeout);
+            result_t<view_t> r = graph_.await(v, timeout, inbound_link);
             if (!r) return assemble_error(fwd, req, r.error());  // TIMEOUT => tr::flow::timeout
             return assemble_result_view(fwd, req, *r);
         }
