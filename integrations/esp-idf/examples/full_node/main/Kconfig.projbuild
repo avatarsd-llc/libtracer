@@ -1,0 +1,19 @@
+menu "full_node example"
+
+    config FULL_NODE_WIFI_SSID
+        string "Wi-Fi SSID (empty = loopback-only, no radio)"
+        default ""
+        help
+            SSID of the Wi-Fi station to join. Leave empty (the default, and
+            what CI builds) to skip Wi-Fi entirely: the node's self-proof runs
+            over lwIP's loopback netif. Set it (plus the password) to make the
+            node's UDP listener reachable from a real host peer on the LAN.
+
+    config FULL_NODE_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default ""
+        help
+            WPA2 password for FULL_NODE_WIFI_SSID. Ignored when the SSID is
+            empty.
+
+endmenu

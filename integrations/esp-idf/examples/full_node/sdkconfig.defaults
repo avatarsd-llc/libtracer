@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# Defaults for the libtracer full-node example.
+#
+# C++ exceptions and RTTI stay at the ESP-IDF default (OFF): the libtracer
+# data path is exception-free and RTTI-free (std::expected, never throws), and
+# this example avoids <future> for the same reason — the full node links clean
+# under -fno-exceptions -fno-rtti.
+
+# app_main runs the whole self-proof (two graphs + wire builders) — give the
+# main task room.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# std::thread on ESP-IDF is pthread on FreeRTOS: every libtracer recv thread
+# (one per socket transport) gets THIS stack unless the app sets a pthread cfg.
+# The udp recv loop keeps its big scratch off the stack (lazy heap), but the
+# ws/tcp serve loops carry ~4 KiB frame chunks + TLV decode frames; 12 KiB is a
+# comfortable floor. Tune per-node with real high-water marks.
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=12288
