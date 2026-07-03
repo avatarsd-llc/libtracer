@@ -10,11 +10,18 @@ Implementations: **`loopback_channel_t`** (in-process dev/test),
 stream, 4-byte u32-LE length-prefix framing — the prefix is transport framing,
 not part of the TLV), **`transport_ws_client` / `transport_ws_server`** (the
 browser↔robot WebSocket keystone, RFC 6455), **`transport_can`** (SocketCAN,
-classic + CAN-FD), and **`quic_transport_t`** (the separate `libtracer_quic`
+classic + CAN-FD), **`quic_transport_t`** (the separate `libtracer_quic`
 module, msquic — TLS 1.3, connection migration; one bidirectional stream
 carrying the same length-prefix framing as TCP; a host that talks QUIC links
 the module and registers `quic_transport_factory()`; ADR-0043 Phase A — the
-hosted, secure link; the MCU class keeps UDP/CAN).
+hosted, secure link; the MCU class keeps UDP/CAN), and
+**`webtransport_transport_t`** (same module, ADR-0043 Phase B — WebTransport
+over HTTP/3, the browser-reachable form of QUIC: a minimal module-private
+H3/QPACK handshake layer in front of one WebTransport bidirectional stream
+carrying the same length-prefix framing; kind `webtransport` via
+`webtransport_transport_factory()`; the TS twin is
+`@avatarsd-llc/libtracer-webtransport` — the #92 / ADR-0031 browser↔robot
+path).
 ```
 
 ## What it does

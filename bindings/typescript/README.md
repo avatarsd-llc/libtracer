@@ -7,10 +7,12 @@ package plus **per-transport** packages. The packaging architecture is decided i
 
 ## Packages
 
-| Package                     | Path                     | Publishes as                  | Status      |
-| --------------------------- | ------------------------ | ----------------------------- | ----------- |
-| core (in-process codec)     | `packages/core`          | `@avatarsd-llc/libtracer`     | published   |
-| WebSocket transport         | `packages/transport-ws`  | `@avatarsd-llc/libtracer-ws`  | scaffold    |
+| Package                     | Path                              | Publishes as                            | Status      |
+| --------------------------- | --------------------------------- | --------------------------------------- | ----------- |
+| core (in-process codec)     | `packages/core`                   | `@avatarsd-llc/libtracer`               | published   |
+| client SDK (experimental)   | `packages/client`                 | `@avatarsd-llc/libtracer-client`        | scaffold    |
+| WebSocket transport         | `packages/transport-ws`           | `@avatarsd-llc/libtracer-ws`            | scaffold    |
+| WebTransport transport      | `packages/transport-webtransport` | `@avatarsd-llc/libtracer-webtransport`  | scaffold    |
 
 The **core** carries no transports, so a consumer that only needs the codec
 never pulls a transport dependency. Per-layer slicing (L0/L1/L2/L4) is done with
