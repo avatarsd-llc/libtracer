@@ -17,7 +17,7 @@ The remaining sections of this reference suite specify byte format, graph semant
 A conforming **implementation** SHALL:
 
 1. Encode and decode TLV frames per [01-data-format.md](01-data-format.md).
-2. Honor the path syntax and wildcard semantics of [03-addressing.md](03-addressing.md).
+2. Honor the path syntax of [03-addressing.md](03-addressing.md) and the subtree-subscription semantics of [RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md) (every subscription observes its vertex and all descendants).
 3. Implement the read / write / await primitives and the field-write control surface of [04-communication-flows.md](04-communication-flows.md).
 4. Reserve type codes per [05-protocol-tlvs.md](05-protocol-tlvs.md) and treat unknown codes safely.
 5. Maintain the same-substrate invariant of [02-graph-model.md](02-graph-model.md): any sequence of mix/split/concat operations on the in-memory view tree, followed by serialization, MUST produce the same wire bytes as the equivalent fresh-buffer construction.
@@ -169,7 +169,7 @@ The full module catalog — everything across L0..L5 — is in [10-module-catalo
 
 A node's footprint is the sum of its loaded modules. The reference implementation targets ≤ 16 KB stripped (required modules only) on `arm-none-eabi-g++ -std=c++23 -Os -fno-exceptions -fno-rtti`. (A build-size sentinel now runs in CI, on a different profile: the `full-node` job of `.github/workflows/esp-idf.yml` measures the libtracer component's flash / static-RAM contribution to the esp32c3/c6 **full-node** build — all socket transports + CAN, far more than the required modules — publishes it per run (step summary + JSON artifact), and gates it via `tools/esp_size_gate.py`. The ≤ 16 KB Cortex-M0 required-modules bound itself is **not yet CI-proven** — no `arm-none-eabi` sentinel exists.) Adding `transport_tcp` brings ~5 KB on Linux / ~8 KB on Cortex-M (lwIP-dependent). A robot-fleet build pulling in TCP, UDP, mDNS, CAN, TLS lands in the 30–50 KB range; an RC-car build with only one UART transport stays under 25 KB.
 
-The module ABI itself is an **implementation** concern, not a protocol property — two implementations need not share a module ABI; they need to share the wire format, addressing scheme, and flows. See [10-module-catalog.md](10-module-catalog.md) §module ABI for the reference C ABI.
+The module ABI itself is an **implementation** concern, not a protocol property — two implementations need not share a module ABI; they need to share the wire format, addressing scheme, and flows. See [10-module-catalog.md](10-module-catalog.md) §module ABI for the reference implementation's seams.
 
 ---
 
@@ -188,7 +188,7 @@ The protocol itself is implementable in **any language** with:
 | LEB128 varint | length encoding | trivially portable |
 | CRC-32C, hardware-accelerated where present | integrity | x86 SSE 4.2, ARMv8 `+crc`, software fallback — present in any language |
 
-A pure-C++ port would be a thin layer (the C reference implementation already uses C++ headers in `tlv_vector.hpp` / `tlv_string.hpp` for the wrapper view types). A pure-Rust port is straightforward — `Bytes` from the `bytes` crate maps directly to libtracer's view + refcount; `tokio` or `mio` provides the run loop. A pure-Go port would lose the explicit refcount (Go has GC) but could use the same wire format and addressing.
+A portable **C binding** would be a thin `extern "C"` layer over the C++23 core — where this suite sketches C-shaped APIs, that is the shape being sketched (a potential binding surface, not the reference core itself). A pure-Rust port is straightforward — `Bytes` from the `bytes` crate maps directly to libtracer's view + refcount; `tokio` or `mio` provides the run loop. A pure-Go port would lose the explicit refcount (Go has GC) but could use the same wire format and addressing.
 
 **The wire format and the addressing scheme — not the C ABI — are the standard.** A future spec audit at the end of the v1 milestones is the gate to declaring this reference suite "frozen for v1," at which point a second implementation in C++ or Rust becomes the conformance test.
 
@@ -224,7 +224,7 @@ For a forwarder implementer: 02, 03, 04, 07 are mandatory; 06 is illustrative of
 
 ## Out-of-scope for this reference suite
 
-- The C ABI of any specific implementation (header signatures, struct layouts beyond the packed wire header). See the implementation's own headers — for the reference C core, those land in [../../core/](../../core/).
+- The API/ABI of any specific implementation (header signatures, struct layouts beyond the packed wire header). See the implementation's own headers — for the reference C++23 core, those land in [../../core/](../../core/).
 - The module ABI (`transport_vtable_t`, etc.). See [10-module-catalog.md](10-module-catalog.md) §module ABI.
 - The configuration file format (TOML for forwarding/discovery). See [10-module-catalog.md](10-module-catalog.md) §configuration.
 - Build options and CMake toggles (defined with the `core/` rebuild).

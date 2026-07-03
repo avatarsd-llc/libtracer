@@ -392,7 +392,7 @@ These L0/L1 integrations are resolved as the **modular memory-binding contract**
 
 - **Option A — wrap and pin**: A `view_t` over a streambuf prevents `streambuf::consume()` until the view's refcount drops to zero. Implementation: when libtracer creates a view, it bumps a per-streambuf "pinned bytes" counter; `consume()` becomes a no-op until the counter drops. This requires modifying or wrapping the streambuf — boost-side cooperation.
 - **Option B — copy on import**: At the boost-asio↔libtracer boundary, we copy the bytes into a `mem_heap` segment. Streambuf reverts to its normal consume behavior. Cost: one copy per ingress.
-- **Option C — don't integrate**: Boost-asio is a C++ ecosystem; libtracer is C-first. Provide a documented C-API shim that the user writes themselves; do not ship `mem_asio_streambuf` in v1.
+- **Option C — don't integrate**: document a copy-on-import shim recipe the user writes themselves against the public API; do not ship `mem_asio_streambuf` in v1.
 
 **Recommendation**: Option C for v1, revisit in v1.0 if there is real demand. Option A is the clean integration but requires either upstream cooperation or a forked streambuf; Option B is correct but defeats the zero-copy claim.
 
