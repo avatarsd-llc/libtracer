@@ -18,11 +18,22 @@
 
 namespace tr::net {
 
+namespace {
+// Pack a peer endpoint as (ip << 16) | port; 0 means "no peer known yet".
+[[nodiscard]] std::uint64_t pack_peer(std::uint32_t ip_net, std::uint16_t port_host) noexcept {
+    return (static_cast<std::uint64_t>(ip_net) << 16) | port_host;
+}
+}  // namespace
+
 udp_transport_t::udp_transport_t(std::uint16_t bind_port, const std::string& peer_host,
-                                 std::uint16_t peer_port)
-    : peer_port_(peer_port) {
+                                 std::uint16_t peer_port) {
+    std::uint32_t peer_ip = 0;
     in_addr addr{};
-    if (::inet_pton(AF_INET, peer_host.c_str(), &addr) == 1) peer_ip_ = addr.s_addr;
+    if (::inet_pton(AF_INET, peer_host.c_str(), &addr) == 1) peer_ip = addr.s_addr;
+    peer_.store(pack_peer(peer_ip, peer_port), std::memory_order_relaxed);
+    // An unresolved peer at construction = listener mode: learn it from inbound
+    // datagrams' source addresses (see the header note).
+    learn_peer_ = peer_ip == 0 || peer_port == 0;
 
     fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (fd_ < 0) return;
@@ -63,11 +74,12 @@ void udp_transport_t::set_receiver(receiver_t receiver) {
 }
 
 void udp_transport_t::send(std::span<const std::byte> frame) {
-    if (fd_ < 0) return;
+    const std::uint64_t p = peer();
+    if (fd_ < 0 || p == 0) return;  // no peer (learned or configured) => nobody to send to
     sockaddr_in peer{};
     peer.sin_family = AF_INET;
-    peer.sin_addr.s_addr = peer_ip_;
-    peer.sin_port = htons(peer_port_);
+    peer.sin_addr.s_addr = static_cast<std::uint32_t>(p >> 16);
+    peer.sin_port = htons(static_cast<std::uint16_t>(p & 0xFFFF));
     ::sendto(fd_, frame.data(), frame.size(), 0, reinterpret_cast<sockaddr*>(&peer), sizeof(peer));
 }
 
@@ -92,10 +104,12 @@ void udp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
         for (std::size_t i = 0; i < n; ++i)
             inline_vec[i] = ::iovec{const_cast<std::byte*>(iov[i].data()), iov[i].size()};
     }
+    const std::uint64_t p = peer();
+    if (p == 0) return;  // no peer (learned or configured) => nobody to send to
     sockaddr_in peer{};
     peer.sin_family = AF_INET;
-    peer.sin_addr.s_addr = peer_ip_;
-    peer.sin_port = htons(peer_port_);
+    peer.sin_addr.s_addr = static_cast<std::uint32_t>(p >> 16);
+    peer.sin_port = htons(static_cast<std::uint16_t>(p & 0xFFFF));
     msghdr msg{};
     msg.msg_name = &peer;
     msg.msg_namelen = sizeof(peer);
@@ -107,8 +121,16 @@ void udp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
 void udp_transport_t::run() {
     std::array<std::byte, 65536> buf;
     while (!stop_.load(std::memory_order_relaxed)) {
-        const ssize_t n = ::recvfrom(fd_, buf.data(), buf.size(), 0, nullptr, nullptr);
+        sockaddr_in from{};
+        socklen_t flen = sizeof(from);
+        const ssize_t n =
+            ::recvfrom(fd_, buf.data(), buf.size(), 0, reinterpret_cast<sockaddr*>(&from), &flen);
         if (n <= 0) continue;  // timeout / EAGAIN / error → re-check stop_
+        // Listener mode: the latest datagram's source IS the peer (single-peer
+        // UDP-server shape) — replies/sends target it from now on.
+        if (learn_peer_)
+            peer_.store(pack_peer(from.sin_addr.s_addr, ntohs(from.sin_port)),
+                        std::memory_order_relaxed);
         receiver_t receiver;
         {
             const std::lock_guard lock(m_);

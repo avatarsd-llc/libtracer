@@ -15,6 +15,32 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **Config-constructed socket transports — the `:children[]` SPEC now builds the real
+  socket** ([#83](https://github.com/avatarsd-llc/libtracer/issues/83) final piece;
+  [ADR-0027](../docs/adr/0027-transport-and-connections-are-vertices.md)). New public API
+  in `transport_vertex.hpp`: `transport_vertex_t::register_transport_type(kind, factory)`
+  — a transport-factory catalog mirroring the graph's child-type catalog — with
+  `transport_factory_t` returning an owning `std::unique_ptr<transport_t>` from the
+  parsed `conn_settings_t`; `conn_settings_t` gains `kind` (the config's transport
+  selector, parsed from a `NAME "kind" NAME <kind>` pair). Built-ins registered by the
+  constructor: **`udp`** (DIAL: bind ephemeral, peer = `addr:port`; LISTEN: bind `port`,
+  peer learned from inbound datagrams — `udp_transport_t` constructed peer-less now
+  adopts each datagram's source, so a listener replies to a dialing client's ephemeral
+  port) and **`ws`** (DIAL: `transport_ws_client(addr, port)`, a synchronous
+  connect+handshake at creation; LISTEN: `transport_ws_server(port)`, one inbound peer).
+  When a connection SPEC names a `kind` and no `provide_link` was staged, the connection
+  vertex **constructs and owns** the transport, wires it into `fwd_router_t` exactly as a
+  provided link, and writes its link state up; `provide_link` remains the test/manual
+  seam and **takes precedence** when staged. Errors are clean statuses: unknown `kind` ⇒
+  `SCHEMA_NOT_FOUND`, config missing the fields the kind requires ⇒ `TYPE_MISMATCH`,
+  bind/dial failure ⇒ `NOT_FOUND` (no vertex is created on any failure). Lifecycle
+  (honest): with no child-removal model yet (#66) an owned transport lives as long as its
+  `transport_vertex_t`, whose destructor joins the recv threads — declare it after the
+  router it feeds. Verified: `transport_vertex_test` grows a two-node
+  config-created-UDP end-to-end (FWD{READ} out A's SPEC-built socket to B's terminus and
+  the REPLY back over B's learned peer), provide-link-precedence, and creation-error
+  cases; all sanitizers clean; forward-hop zero-heap gate unaffected (setup-time only).
+
 - **ACL enforcement, core subset** (#81; [ADR-0018](../docs/adr/0018-access-control-authorization-pluggable-subject-token.md)/[0020](../docs/adr/0020-acl-nfsv4-style-aces-with-inheritance.md)/[0026](../docs/adr/0026-consumer-initiated-subscription-client-write.md)).
   New public API in `graph.hpp`/`vertex.hpp`: `subject_token_t`, `subject_resolver_t`,
   `graph_t::set_subject_resolver` (the pluggable subject-token seam — **no resolver ⇒
