@@ -27,6 +27,7 @@
 #include "libtracer/tlv.hpp"
 #include "libtracer/tlv_arena.hpp"
 #include "libtracer/transport.hpp"
+#include "libtracer/transport_tcp.hpp"
 #include "libtracer/transport_udp.hpp"
 #include "libtracer/transport_vertex.hpp"
 #include "libtracer/vertex.hpp"

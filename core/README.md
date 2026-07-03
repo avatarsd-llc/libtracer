@@ -2,7 +2,7 @@
 
 The reference implementation of the libtracer protocol. Targets ESP32, STM32, and bare-metal alongside hosted Linux/macOS.
 
-## Status: protocol-v1 rebuild in progress — M1 (codec) + M2 (substrate) + M3 (L4 graph) + M4 (loopback) + M5 (UDP transport) landed
+## Status: protocol-v1 rebuild in progress — M1 (codec) + M2 (substrate) + M3 (L4 graph) + M4 (loopback) + M5 (UDP transport) + M6 (TCP stream transport) landed
 
 > **2026-06-24.** The original headers under `include/libtracer/` were a pre-spec snapshot extracted from strawberry-fw (see [ADR-0001](../docs/adr/0001-extract-reference-implementation-from-strawberry-fw.md)). They did not compile and encoded the retired v0.0 wire model (in-header XOR-16 CRC, no `PL` bit, fixed `uint32` length, `connect`/`disconnect` API, NUL-terminated NAMEs). Per the protocol-v1 consistency consolidation they were **deleted, to be rebuilt fresh against the spec** rather than patched.
 
@@ -22,7 +22,7 @@ The rebuild targets the protocol-v1 wire format and API as fixed in the ADRs:
 - **M4 — first transport (landed).** The `Transport` seam + an in-process loopback transport (dev/test). The net plane is explicit-source-routed `FWD` ([ADR-0040](../docs/adr/0040-net-plane-is-explicit-source-routed-only.md), RFC-0004 — a forwarding node strips its own path segment and passes the rest; loop-free by construction, no dedup, no `hop_count`); `0x0D ROUTER` stays a reserved-but-unimplemented wire code.
 - **RFC-0004 remote-operation plane (landed).** `fwd_router_t` (+ `child_registry_t`, `op_resolver_t`, `route_handle_t`): path-addressed `read`/`write`/`await`/`subscribe` over `FWD`, with connections exposed as `/net/<conn>` vertices (`transport_vertex_t`, ADR-0027). The forward hop is heap-free (offset-dispatch + stack header buffers; a CI-gated `bench_forward_heap` proves 0 allocations, ADR-0038/0039). The terminus reads the ADR-0041 arena: `wire::decode_into`/`tlv_arena_t` (flat pre-order span-nodes over the inbound frame), a span-aliased `path_key` (a canonical PATH body *is* the vertex-map key — zero materialization), trailer-sliced stores (stored WRITE values are header+body only), and a direct-emitted `FWD{REPLY}` head in one exactly-sized segment. A remote subscriber's `return_route` is copied once at subscribe into a refcounted segment and refcount-cloned per delivery. The arena draws directly from the `fwd_router_t` constructor's `std::pmr::memory_resource*` (defaulted to the standard heap) — the library holds no internal buffer; a host injects a pool resource over its own slab for a zero-global-heap terminus.
 - **M5 — UDP socket transport (landed).** `udp_transport_t` — a real POSIX UDP socket behind the same `Transport` seam, so two nodes talk over the kernel network stack. One datagram = one frame (no stream reassembly), pairing with the flat decoder. Validated raw and end-to-end through the FWD plane over localhost UDP (`tests/udp_test.cpp`). TSan/ASan/UBSan clean. The two-process **network benchmark** vs Zenoh-over-UDP lives in `bench/`.
-- **M6 — a reliable stream transport (next).** TCP/QUIC behind the seam: length-prefix framing + partial-read reassembly, which is the consumer that finally builds **rope-aware (link-walking) zero-copy decode**.
+- **M6 — TCP stream transport (landed).** `tcp_transport_t` — a reliable byte stream behind the same seam. Each frame rides behind a 4-byte u32-LE **length prefix** (transport framing, not part of the TLV); the receive thread reassembles partial reads and honors record boundaries on coalesced writes, reading each frame straight into ONE refcounted segment from the injected `mem_backend_t` (ADR-0042 owning delivery; backend exhaustion drains the frame off the stream — framing sync survives). Prefixes above 16 MiB are malformed: counted, connection torn down. Dial (synchronous connect) and listen (one inbound peer) modes; `tcp` is a transport-factory builtin beside `udp`/`ws`. Validated raw and end-to-end through the FWD plane over localhost TCP (`tests/tcp_test.cpp`); TSan/ASan/UBSan clean. QUIC and the rope-aware (link-walking) zero-copy decode — the stream consumer that would let a frame span segments (ADR-0042 §4) — are not implemented.
 
 ## Layout
 
@@ -37,10 +37,10 @@ core/
 │   ├── transport.hpp loopback.hpp    M4 — transport seam + loopback
 │   ├── fwd_router.hpp child_registry.hpp op_resolve.hpp route_handle.hpp   FWD source-routing (RFC-0004)
 │   ├── transport_vertex.hpp          connection as a /net/<conn> vertex (ADR-0027)
-│   ├── transport_udp.hpp transport_ws.hpp transport_can.hpp   socket / bus transports
+│   ├── transport_tcp.hpp transport_udp.hpp transport_ws.hpp transport_can.hpp   socket / bus transports
 │   └── tracer.hpp                    umbrella include
 ├── src/                  codec, substrate, graph, FWD router, transports
-├── tests/                conformance_runner + graph_test + fwd_* + transport_vertex_test + udp/ws/can + CMake
+├── tests/                conformance_runner + graph_test + fwd_* + transport_vertex_test + tcp/udp/ws/can + CMake
 ├── examples/             in_process_pubsub.cpp
 ├── CHANGELOG.md          public-API change log
 └── CMakeLists.txt
