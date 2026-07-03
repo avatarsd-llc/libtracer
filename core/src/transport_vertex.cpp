@@ -83,14 +83,18 @@ void parse_config(const tlv_t* config, conn_settings_t& s) {
 // datagram's source (the single-peer UDP-server shape), so replies to a dialing client
 // (whose ephemeral port is unknowable in advance) route back. `keepalive` is ignored
 // (UDP is connectionless; there is no link to keep alive).
-result_t<std::unique_ptr<transport_t>> make_udp(const conn_settings_t& s) {
+// `rx_backend` is the ADR-0042 §2 receive-segment seam, threaded from the
+// transport_vertex_t constructor so config-constructed sockets participate in
+// owning view delivery with the host's memory policy.
+result_t<std::unique_ptr<transport_t>> make_udp(const conn_settings_t& s,
+                                                mem::mem_backend_t* rx_backend) {
     std::unique_ptr<udp_transport_t> t;
     if (s.role == conn_role_t::DIAL) {
         if (s.addr.empty() || s.port == 0) return std::unexpected(status_t::TYPE_MISMATCH);
-        t = std::make_unique<udp_transport_t>(0, s.addr, s.port);
+        t = std::make_unique<udp_transport_t>(0, s.addr, s.port, rx_backend);
     } else {
         if (s.port == 0) return std::unexpected(status_t::TYPE_MISMATCH);
-        t = std::make_unique<udp_transport_t>(s.port, s.addr, 0);
+        t = std::make_unique<udp_transport_t>(s.port, s.addr, 0, rx_backend);
     }
     if (!t->ok()) return std::unexpected(status_t::NOT_FOUND);  // bind failed
     return t;
@@ -117,8 +121,8 @@ result_t<std::unique_ptr<transport_t>> make_ws(const conn_settings_t& s) {
 }  // namespace
 
 transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& router,
-                                       std::string net_root)
-    : graph_(graph), router_(router), net_root_(std::move(net_root)) {
+                                       std::string net_root, mem::mem_backend_t* rx_backend)
+    : graph_(graph), router_(router), net_root_(std::move(net_root)), rx_backend_(rx_backend) {
     // Register the `/net` parent if it isn't already (it is the `:children[]` target).
     if (graph_.find(path_t::parse(net_root_)->key()) == nullptr) {
         (void)graph_.register_vertex(*path_t::parse(net_root_), graph::role_t::STORED_VALUE);
@@ -133,8 +137,11 @@ transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& rout
         "listener", [this](graph::graph_t&, std::vector<std::byte> key, const tlv_t* config) {
             return make_connection(std::move(key), config, conn_role_t::LISTEN);
         });
-    // The built-in transport-factory catalog entries (config `kind` selectors).
-    register_transport_type("udp", make_udp);
+    // The built-in transport-factory catalog entries (config `kind` selectors). The
+    // udp factory closes over the injected RX backend (ADR-0042 §2); ws stays
+    // span-delivering until its frame assembly is pointed at segments (ADR-0042 §4).
+    register_transport_type("udp",
+                            [this](const conn_settings_t& s) { return make_udp(s, rx_backend_); });
     register_transport_type("ws", make_ws);
 }
 

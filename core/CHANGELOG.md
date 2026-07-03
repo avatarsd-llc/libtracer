@@ -15,6 +15,41 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **The refcounted receiver seam — transports MAY hand up owning frames, and big WRITE
+  payloads may store zero-copy as frame subviews**
+  ([#173](https://github.com/avatarsd-llc/libtracer/issues/173),
+  [ADR-0042](../docs/adr/0042-refcounted-receiver-seam-view-delivery.md)). New public
+  API, all additive and defaulted:
+  - `transport.hpp`: `transport_t::set_view_receiver(view_receiver_t)` — the optional
+    OWNING inbound sink (each frame a `view::view_t` over a refcounted segment; base
+    impl is a documented no-op) — and `transport_t::delivers_views()` (default `false`),
+    the capability a view-delivering transport overrides. No adapter wraps a borrowed
+    span into a lying view; span-only transports keep span semantics.
+  - `transport_udp.hpp`: `udp_transport_t` gains a `mem::mem_backend_t* backend`
+    constructor parameter (default `&mem::heap_backend()`; listener mode included) —
+    with a view receiver installed, each datagram is `recvfrom`'d straight into a fresh
+    `kMaxDatagram` segment from that backend and handed up owning (one datagram = one
+    frame = one segment); backend exhaustion is backpressure (drop + the new
+    `dropped_rx()` counter), never an OOM. Without a view receiver the span path is
+    byte-identical to before. `delivers_views()` returns `true`.
+  - `transport_vertex.hpp`: `transport_vertex_t` gains an optional `rx_backend`
+    constructor parameter (default heap) threaded into the built-in `udp` factory, so
+    config-constructed sockets participate in owning delivery with the host's memory
+    policy.
+  - `vertex.hpp` / graph `:settings`: `settings_t::store_ref_min_bytes` (u32, default
+    0 = disabled; writable via `:settings.store_ref_min_bytes`) — on a view-delivered
+    terminus frame, a WRITE whose trailer-less payload TLV is ≥ the threshold stores a
+    **subview of the frame** (refcount pin, zero copy) instead of the ADR-0041 one-copy
+    `own_tlv`; smaller/trailered payloads and span-delivered frames keep the copy, and
+    the remote-subscriber return route keeps its subscription-scoped one-copy behavior.
+  - `op_resolve.hpp`: `op_resolver_t::resolve` gains an optional
+    `const view::view_t* frame_view = nullptr` parameter (the owning frame, threaded by
+    `fwd_router_t` from a view-delivering link); existing callers are unchanged.
+  `fwd_router_t::add_child` now installs the receiver matching the link's capability;
+  the forward hop stays span-based zero-heap (`ZEROHEAP_MAX=0` unaffected) — the
+  refcount rides only to the terminus. The big-payload WRITE path thus copies its bytes
+  **zero** times between the socket and the LKV.
+
 - **Config-constructed socket transports — the `:children[]` SPEC now builds the real
   socket** ([#83](https://github.com/avatarsd-llc/libtracer/issues/83) final piece;
   [ADR-0027](../docs/adr/0027-transport-and-connections-are-vertices.md)). New public API

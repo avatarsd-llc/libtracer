@@ -383,6 +383,157 @@ void test_non_canonical_dst() {
           "reply payload is the stored value (0x2A)");
 }
 
+// ADR-0042 §3 — the per-vertex `store_ref_min_bytes` referenced WRITE store: a
+// view-delivered frame's big trailer-less payload stores as a SUBVIEW of the frame
+// (segment-pointer identity, zero copy, frame pinned); the default (0), a small
+// payload, a trailered payload, and a span-delivered frame all keep the ADR-0041
+// one-copy trailer-sliced store.
+void test_store_ref_threshold() {
+    std::printf("store_ref_min_bytes — referenced vs copied WRITE store (ADR-0042 §3):\n");
+    graph_t g;
+    op_resolver_t resolver(g);
+    const auto path = path_t::parse("/sensor/blob");
+    tr::graph::vertex_t* v = *g.register_vertex(*path, role_t::STORED_VALUE);
+
+    // A 32-byte payload => a 36-byte trailer-less VALUE TLV on the wire.
+    std::vector<std::byte> big(32);
+    for (std::size_t i = 0; i < big.size(); ++i) big[i] = static_cast<std::byte>(i);
+    const std::vector<std::byte> big_tlv = b_value(big);
+    const auto fwd_big =
+        b_fwd(fwd_op_t::WRITE, b_path({"sensor", "blob"}), b_path({"reply-ep"}), {}, big_tlv);
+
+    // The frame as an OWNING view (what a view-delivering transport hands up).
+    tr::view::view_t frame = make_value(fwd_big);
+
+    // Default threshold 0 => referencing DISABLED: stored segment differs (copied).
+    {
+        const auto arena = tr::wire::decode_into(frame.bytes(), *std::pmr::get_default_resource());
+        auto reply = resolver.resolve(*arena, {}, &frame);
+        check(reply.has_value(), "WRITE with default threshold produced a reply");
+        const auto rd = g.read(v);
+        check(rd.has_value() && rd->owner.get() != frame.owner.get(),
+              "default store_ref_min_bytes=0 => stored bytes are a COPY (segment differs)");
+        check(rd.has_value() && rd->bytes().size() == big_tlv.size() &&
+                  std::memcmp(rd->bytes().data(), big_tlv.data(), big_tlv.size()) == 0,
+              "copied store holds the payload TLV bytes");
+    }
+
+    // Opt in via the `:settings` field-write (the wire path that parses the u32).
+    (void)g.write(*path_t::parse("/sensor/blob:settings.store_ref_min_bytes"),
+                  make_value(b_value({0x08, 0x00, 0x00, 0x00})));
+    check(v->settings().store_ref_min_bytes == 8,
+          ":settings.store_ref_min_bytes field-write parses the u32 (8)");
+
+    // Big trailer-less payload >= threshold => the stored view IS the frame segment.
+    {
+        const auto arena = tr::wire::decode_into(frame.bytes(), *std::pmr::get_default_resource());
+        auto reply = resolver.resolve(*arena, {}, &frame);
+        check(reply.has_value(), "WRITE over threshold produced a reply");
+        const auto rd = g.read(v);
+        check(rd.has_value() && rd->owner.get() == frame.owner.get(),
+              "referenced store: stored segment IS the frame segment (pointer identity)");
+        check(rd.has_value() && rd->bytes().size() == big_tlv.size() &&
+                  std::memcmp(rd->bytes().data(), big_tlv.data(), big_tlv.size()) == 0,
+              "referenced subview covers exactly the payload TLV within the frame");
+    }
+
+    // Release the frame: the store's refcount pin keeps the bytes alive.
+    frame = tr::view::view_t{};
+    {
+        const auto rd = g.read(v);
+        check(rd.has_value() && rd->bytes().size() == big_tlv.size() &&
+                  std::memcmp(rd->bytes().data(), big_tlv.data(), big_tlv.size()) == 0,
+              "referenced store survives the frame view's release (segment pinned)");
+    }
+
+    // A CRC-trailered payload over the threshold falls back to the trailer-sliced copy.
+    {
+        tlv_t val;
+        val.type = type_t::VALUE;
+        val.opt.cr = true;
+        std::vector<std::byte> pb(32);
+        val.payload = pb;
+        const std::vector<std::byte> val_bytes = tr::wire::encode(val);
+        const auto fwd_crc =
+            b_fwd(fwd_op_t::WRITE, b_path({"sensor", "blob"}), b_path({"reply-ep"}), {}, val_bytes);
+        tr::view::view_t crc_frame = make_value(fwd_crc);
+        const auto arena =
+            tr::wire::decode_into(crc_frame.bytes(), *std::pmr::get_default_resource());
+        auto reply = resolver.resolve(*arena, {}, &crc_frame);
+        check(reply.has_value(), "trailered WRITE over threshold produced a reply");
+        const auto rd = g.read(v);
+        check(rd.has_value() && rd->owner.get() != crc_frame.owner.get(),
+              "trailered payload => falls back to the one-copy store (no reference)");
+        const auto inner = tr::wire::view_as_tlv(*rd);
+        check(inner.has_value() && !inner->opt.cr && !inner->trailer.has_value(),
+              "trailered fallback stays trailer-sliced at rest (ADR-0041 §4)");
+    }
+
+    // A small payload (< threshold) keeps the copy.
+    {
+        const auto fwd_small = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "blob"}),
+                                     b_path({"reply-ep"}), {}, b_value({0x2A}));
+        tr::view::view_t small_frame = make_value(fwd_small);
+        const auto arena =
+            tr::wire::decode_into(small_frame.bytes(), *std::pmr::get_default_resource());
+        auto reply = resolver.resolve(*arena, {}, &small_frame);
+        check(reply.has_value(), "small WRITE produced a reply");
+        const auto rd = g.read(v);
+        check(rd.has_value() && rd->owner.get() != small_frame.owner.get(),
+              "payload under the threshold => copied (a small copy beats pinning)");
+    }
+}
+
+// TSan case: concurrent writers replace the LKV while a REFERENCED frame is pinned
+// by a reader's clone — the frame segment's refcount drop races across threads and
+// the pinned bytes must stay intact.
+void test_store_ref_concurrent() {
+    std::printf("referenced store under concurrent writes (TSan — pinned frame stays valid):\n");
+    graph_t g;
+    op_resolver_t resolver(g);
+    const auto path = path_t::parse("/sensor/blob");
+    tr::graph::settings_t s;
+    s.store_ref_min_bytes = 8;
+    tr::graph::vertex_t* v = *g.register_vertex(*path, role_t::STORED_VALUE, {}, s);
+
+    std::vector<std::byte> big(64);
+    for (std::size_t i = 0; i < big.size(); ++i) big[i] = static_cast<std::byte>(0xA0 + i);
+    const std::vector<std::byte> big_tlv = b_value(big);
+    const auto fwd =
+        b_fwd(fwd_op_t::WRITE, b_path({"sensor", "blob"}), b_path({"reply-ep"}), {}, big_tlv);
+    tr::view::view_t frame = make_value(fwd);
+    const auto arena = tr::wire::decode_into(frame.bytes(), *std::pmr::get_default_resource());
+    auto reply = resolver.resolve(*arena, {}, &frame);
+    check(reply.has_value(), "referenced WRITE produced a reply");
+
+    // Pin the referenced store via a reader clone, then drop the frame view.
+    const auto pinned = g.read(v);
+    check(pinned.has_value() && pinned->owner.get() == frame.owner.get(),
+          "reader clone pins the frame segment");
+    frame = tr::view::view_t{};
+
+    // Concurrent writers churn the LKV (each replacement drops a segment ref) while
+    // readers clone whatever is current. The pinned view must stay byte-stable.
+    std::vector<std::thread> workers;
+    for (int t = 0; t < 4; ++t) {
+        workers.emplace_back([&g, v, t] {
+            for (int i = 0; i < 200; ++i) {
+                std::vector<std::byte> p(16, static_cast<std::byte>(t * 16 + (i & 0xF)));
+                (void)g.write(v, make_value(b_value(p)));
+                const auto r = g.read(v);
+                (void)r;
+            }
+        });
+    }
+    for (auto& w : workers) w.join();
+
+    check(pinned->bytes().size() == big_tlv.size() &&
+              std::memcmp(pinned->bytes().data(), big_tlv.data(), big_tlv.size()) == 0,
+          "pinned referenced view is byte-stable across 800 concurrent writes");
+    const auto rd = g.read(v);
+    check(rd.has_value(), "vertex still reads cleanly after the churn");
+}
+
 std::vector<std::byte> read_file(const std::filesystem::path& p) {
     std::ifstream f(p, std::ios::binary);
     const std::vector<char> raw((std::istreambuf_iterator<char>(f)),
@@ -435,6 +586,8 @@ int main() {
     test_await();
     test_subscribers_field();
     test_write_trailer_sliced();
+    test_store_ref_threshold();
+    test_store_ref_concurrent();
     test_non_canonical_dst();
     test_wildcard_and_not_local();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,

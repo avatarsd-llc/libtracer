@@ -207,6 +207,32 @@ enum class index_mode_t : std::uint8_t { SCALAR = 0, ELEMENT = 1, WILDCARD = 2 }
     return v;
 }
 
+// True iff the node's opt byte carries NO trailer bits — the reference
+// implementation's ADR-0042 §3 restriction: a referenced store cannot patch the
+// opt byte in a shared frame, so only an already-trailer-less payload may be
+// referenced; a CRC/TS-carrying payload falls back to the trailer-sliced copy.
+[[nodiscard]] bool trailer_less(const arena_tlv_t& node) noexcept {
+    const opt_t& o = node.opt;
+    return !o.ts && !o.cr && !o.cw && !o.tf;
+}
+
+// The ADR-0042 §3 stored-value decision: reference the payload as a subview of the
+// owning frame (refcount pin, zero copy) when the frame was view-delivered, the
+// vertex opted in (`store_ref_min_bytes` > 0), the payload is big enough, and its
+// opt byte is trailer-less; otherwise the ADR-0041 §2 one-copy `own_tlv`. The
+// subview offset is computed from the span pointers — `node.wire` points into the
+// same bytes `frame_view` owns.
+[[nodiscard]] view_t own_or_ref_tlv(const arena_tlv_t& node, const view_t* frame_view,
+                                    std::uint32_t ref_min_bytes) {
+    if (frame_view != nullptr && ref_min_bytes > 0 && node.wire.size() >= ref_min_bytes &&
+        trailer_less(node)) {
+        const std::span<const std::byte> base = frame_view->bytes();
+        const std::size_t off = static_cast<std::size_t>(node.wire.data() - base.data());
+        return frame_view->subview(off, node.wire.size());
+    }
+    return own_tlv(node);
+}
+
 // A tiny cursor writer over a preallocated, exactly-sized head segment — the
 // direct-emit that replaces the old 4-stage (encode → children → head → segment)
 // staging: every length is known from the arena spans up front, so the reply
@@ -322,7 +348,8 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
 
 }  // namespace
 
-result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view inbound_link) {
+result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view inbound_link,
+                                        const view_t* frame_view) {
     result_t<parsed_fwd_t> parsed = parse_fwd(fwd);
     if (!parsed) return std::unexpected(parsed.error());
     const parsed_fwd_t& req = *parsed;
@@ -373,23 +400,35 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
         }
         case fwd_op_t::WRITE: {
             if (req.payload == 0) return assemble_error(fwd, req, status_t::TYPE_MISMATCH);
-            // The one ownership copy of the written value (ADR-0041 §2):
-            // trailer-sliced by construction (§4 — an arriving CRC/TS trailer is
-            // NOT stored; stored TLVs are trailer-less at rest, ADR-0035).
-            // A wire TLV is never empty, so an empty result is exactly an
-            // allocation failure → BACKPRESSURE.
             const arena_tlv_t& payload_node = fwd[req.payload];
-            const view_t value = own_tlv(payload_node);
+
+            // A remote subscribe — a `:subscribers[]` APPEND that arrived over a
+            // transport (inbound_link set) carrying a SUBSCRIBER — binds a REMOTE
+            // subscriber instead of a local fan-out edge (#136); its stored views
+            // (source SUBSCRIBER + return route) are subscription-scoped and keep
+            // the ADR-0041 one-copy behavior unconditionally (ADR-0042 §3 applies
+            // to the value store only).
+            const bool remote_sub = !inbound_link.empty() && has_field &&
+                                    is_subscribe_append(field) &&
+                                    payload_node.type == type_t::SUBSCRIBER;
+
+            // The stored written value: ADR-0041 §2 one ownership copy,
+            // trailer-sliced by construction (§4 — an arriving CRC/TS trailer is
+            // NOT stored; stored TLVs are trailer-less at rest, ADR-0035) — or, on
+            // an owning-delivery frame with the vertex opted in, an ADR-0042 §3
+            // SUBVIEW of the frame (refcount pin, zero copy). A wire TLV is never
+            // empty, so an empty result is exactly an allocation failure →
+            // BACKPRESSURE.
+            const view_t value = remote_sub ? own_tlv(payload_node)
+                                            : own_or_ref_tlv(payload_node, frame_view,
+                                                             v->settings().store_ref_min_bytes);
             if (value.empty()) return assemble_error(fwd, req, status_t::BACKPRESSURE);
 
-            // A remote subscribe — a `:subscribers[]` APPEND that arrived over a transport
-            // (inbound_link set) carrying a SUBSCRIBER — binds a REMOTE subscriber instead
-            // of a local fan-out edge (#136). The slot retains this request's accumulated
+            // The remote-subscribe binding: the slot retains this request's accumulated
             // return route (`src`, copied once, trailer-sliced) + the inbound link, so the
             // producer fan-out delivers FWD{WRITE}/COMPACT home. A bare local resolve
             // (no inbound_link) keeps the local field-write path unchanged.
-            if (!inbound_link.empty() && has_field && is_subscribe_append(field) &&
-                payload_node.type == type_t::SUBSCRIBER) {
+            if (remote_sub) {
                 // The ONE route copy of the subscription's life (ADR-0041 §2), into a
                 // refcounted segment — every later delivery clones the refcount.
                 const view_t return_route = own_tlv(fwd[req.src]);

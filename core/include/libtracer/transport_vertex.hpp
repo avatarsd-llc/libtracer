@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "libtracer/graph.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/transport.hpp"
 
 namespace tr::net {
@@ -109,9 +110,18 @@ class transport_vertex_t {
      * datagrams) and `ws` (DIAL: `transport_ws_client(addr, port)` — a synchronous
      * connect + RFC 6455 handshake at creation time; LISTEN: `transport_ws_server(port)`
      * — accepts one inbound peer).
-     * @param net_root The parent path for connection vertices (default "/net").
+     * @param net_root   The parent path for connection vertices (default "/net").
+     * @param rx_backend The RX memory seam config-constructed view-delivering
+     *                   transports draw their inbound frame segments from
+     *                   (ADR-0042 §2): the built-in `udp` factory passes it to
+     *                   every socket it constructs, so a `:children[]`-created
+     *                   connection participates in owning delivery. Default: the
+     *                   process heap; a bounded host injects its pool over its
+     *                   static slab. Must outlive this object (and thus every
+     *                   owned transport).
      */
-    transport_vertex_t(graph::graph_t& graph, fwd_router_t& router, std::string net_root = "/net");
+    transport_vertex_t(graph::graph_t& graph, fwd_router_t& router, std::string net_root = "/net",
+                       mem::mem_backend_t* rx_backend = &mem::heap_backend());
 
     transport_vertex_t(const transport_vertex_t&) = delete;
     transport_vertex_t& operator=(const transport_vertex_t&) = delete;
@@ -177,6 +187,7 @@ class transport_vertex_t {
     graph::graph_t& graph_;
     fwd_router_t& router_;
     std::string net_root_;
+    mem::mem_backend_t* rx_backend_;  // RX segment source for owned view-delivering sockets
     // Pre-supplied links awaiting their SPEC, and created connections, both by NAME;
     // the transport-factory catalog by config `kind`.
     std::map<std::string, transport_t*, std::less<>> pending_links_;

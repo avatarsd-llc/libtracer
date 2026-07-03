@@ -89,16 +89,30 @@ class op_resolver_t {
      * `STATUS{ERROR{VALUE tr::access::denied}}` (0x0050).
      *
      * The arena (and the frame it borrows) only needs to outlive this call: every
-     * span the reply retains is copied once to its owner (ADR-0041 §2).
+     * span the reply retains is copied once to its owner (ADR-0041 §2) — or, on an
+     * owning-delivery frame, referenced off it (ADR-0042 §3, below).
+     *
+     * A non-null @p frame_view marks the frame as OWNING (delivered as a
+     * refcounted `view_t` over the same bytes the arena borrows — the ADR-0042
+     * receiver seam). Then a WRITE whose payload TLV (`node.wire`) is at least the
+     * target vertex's `settings.store_ref_min_bytes` (> 0) and whose opt byte
+     * carries no trailer bits is stored as a SUBVIEW of the frame — a refcount
+     * bump that pins the whole frame, zero copy. Smaller, trailered, or
+     * span-delivered payloads keep the ADR-0041 one-copy trailer-sliced store,
+     * byte-identical to before; the remote-subscriber return route always keeps
+     * its subscription-scoped one-copy behavior.
      *
      * @param fwd          An arena-decoded request FWD (from `wire::decode_into`).
      * @param inbound_link This node's NAME for the link the request arrived on
      *                     (empty ⇒ local resolution, no remote-subscriber binding).
+     * @param frame_view   The owning frame view when the link delivers views
+     *                     (ADR-0042); nullptr on the borrowed-span path.
      * @return The reply as a @ref view::rope_t (head segment + roped payload views),
      *         or a @ref status_t on a malformed/non-request frame.
      */
     [[nodiscard]] result_t<view::rope_t> resolve(const wire::tlv_arena_t& fwd,
-                                                 std::string_view inbound_link = {});
+                                                 std::string_view inbound_link = {},
+                                                 const view::view_t* frame_view = nullptr);
 
    private:
     graph_t& graph_;

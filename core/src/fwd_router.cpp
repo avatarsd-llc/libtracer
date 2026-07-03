@@ -156,7 +156,16 @@ void fwd_router_t::add_child(std::string name, transport_t& link) {
     // (the set_receiver mutex provides the release/acquire fence). Registry is otherwise
     // immutable after setup — no lock on the read hot path.
     registry_.add(name, link);
-    link.set_receiver([this, name](std::span<const std::byte> frame) { on_frame(name, frame); });
+    // Capability-matched receiver (ADR-0042 §1): an owning-delivery link funnels
+    // through the same routing with the frame view alongside; a span link keeps the
+    // borrowed-span path. No adapter wraps a span into a lying view.
+    if (link.delivers_views()) {
+        link.set_view_receiver(
+            [this, name](view_t frame) { on_frame_view(name, std::move(frame)); });
+    } else {
+        link.set_receiver(
+            [this, name](std::span<const std::byte> frame) { on_frame(name, frame); });
+    }
 }
 
 void fwd_router_t::on_reply(std::function<void(const tlv_t&)> cb) { reply_cb_ = std::move(cb); }
@@ -201,6 +210,18 @@ void fwd_router_t::send_compact(std::string_view link_name, std::uint16_t label,
 }
 
 void fwd_router_t::on_frame(std::string_view inbound_name, std::span<const std::byte> frame) {
+    on_frame_impl(inbound_name, frame, nullptr);
+}
+
+void fwd_router_t::on_frame_view(std::string_view inbound_name, view_t frame) {
+    // The owning view's bytes span feeds the SAME routing as the borrowed path —
+    // the forward hop below never touches the refcount (zero-heap, ADR-0038); only
+    // the terminus sees the owner, for the ADR-0042 §3 referenced store.
+    on_frame_impl(inbound_name, frame.bytes(), &frame);
+}
+
+void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const std::byte> frame,
+                                 const view_t* frame_view) {
     if (raw_cb_) raw_cb_(inbound_name, frame);
     if (frame.size() < 4) return;
 
@@ -230,7 +251,7 @@ void fwd_router_t::on_frame(std::string_view inbound_name, std::span<const std::
             }
             return;
         }
-        resolve_terminus(inbound_name, frame);
+        resolve_terminus(inbound_name, frame, frame_view);
         return;
     }
 
@@ -337,8 +358,8 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     child.send(std::span<const std::span<const std::byte>>(iov.data(), n));
 }
 
-void fwd_router_t::resolve_terminus(std::string_view inbound_name,
-                                    std::span<const std::byte> frame) {
+void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<const std::byte> frame,
+                                    const view_t* frame_view) {
     // Local request terminus (ADR-0041 §5): arena-decode straight from the
     // node's injected resource (ADR-0039 §1) — the library keeps no buffer of
     // its own; a bounded host injects a pool resource over its slab and the
@@ -350,7 +371,7 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name,
     // (transient-local) fires inside resolve.
     const auto arena = wire::decode_into(frame, *mr_);
     if (!arena) return;  // malformed frame ⇒ drop
-    auto reply = resolver_.resolve(*arena, inbound_name);
+    auto reply = resolver_.resolve(*arena, inbound_name, frame_view);
     if (!reply) return;  // structurally non-request ⇒ drop
     if (transport_t* in = registry_.by_name(inbound_name)) {
         const std::vector<std::span<const std::byte>> iov = reply->to_iovec();
