@@ -15,7 +15,7 @@
 
 export const CLIENT_EXPERIMENTAL = true as const;
 
-export { LibtracerClient, FwdError } from './client.js';
+export { LibtracerClient, FwdError, CompactFlowError } from './client.js';
 export type {
   ClientTransport,
   ValueHandler,
@@ -30,7 +30,10 @@ export {
   FWD_OP,
   FWD_KIND,
   FWD_ERROR,
+  FWD_ERROR_PATH,
   fwdErrorName,
+  fwdErrorPath,
+  fwdErrorCodeForPath,
   encodeFwd,
   encodeField,
   parseField,

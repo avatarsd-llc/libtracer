@@ -1,6 +1,6 @@
 {
   "name": "@avatarsd-llc/libtracer",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "TypeScript core for libtracer — a lightweight decentralized graph-based networking protocol. Native pure-TS implementation (in-process codec; no transports), conformance-gated against the shared vectors.",
   "author": "avatarsd LLC",
   "license": "Apache-2.0",

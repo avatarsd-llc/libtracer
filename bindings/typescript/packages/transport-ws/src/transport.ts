@@ -20,6 +20,9 @@
 /** A received libtracer frame: the unmasked payload of one inbound BINARY frame. */
 export type FrameReceiver = (bytes: Uint8Array) => void;
 
+/** Invoked once when an OPEN connection closes/errors, with the cause when known. */
+export type CloseHandler = (cause?: Error) => void;
+
 /** The minimal WHATWG-WebSocket surface this transport relies on. */
 export interface WebSocketLike {
   binaryType: string;
@@ -72,6 +75,8 @@ export class TransportWs {
   private readonly ctor: WebSocketCtor;
   private ws: WebSocketLike | null = null;
   private receiver: FrameReceiver | null = null;
+  private closeHandler: CloseHandler | null = null;
+  private closeNotified = false;
 
   /**
    * @param url     The `ws://host:port` (or `wss://`) endpoint to dial.
@@ -96,6 +101,22 @@ export class TransportWs {
    */
   onFrame(receiver: FrameReceiver | null): void {
     this.receiver = receiver;
+  }
+
+  /**
+   * Register (or clear) the connection-closed notifier (the `ClientTransport`
+   * seam's optional close hook). Invoked at most once per connection, when an
+   * OPEN socket closes — remotely, on error, or via {@link close}.
+   */
+  onClose(handler: CloseHandler | null): void {
+    this.closeHandler = handler;
+  }
+
+  /** Fire the close notifier exactly once for the current connection. */
+  private notifyClose(cause?: Error): void {
+    if (this.closeNotified) return;
+    this.closeNotified = true;
+    if (this.closeHandler) this.closeHandler(cause);
   }
 
   /** True once the underlying WebSocket has opened and not yet closed. */
@@ -132,6 +153,7 @@ export class TransportWs {
         settled = true;
         clearTimeout(timer);
         this.ws = ws;
+        this.closeNotified = false; // arm the close notifier for this connection
         resolve();
       };
       ws.onmessage = (ev) => {
@@ -140,6 +162,9 @@ export class TransportWs {
       };
       ws.onerror = () => {
         if (settled) {
+          // Post-open socket error: the close notifier carries the cause (the
+          // subsequent onclose is deduped by notifyClose).
+          this.notifyClose(new Error('WebSocket error'));
           return;
         }
         settled = true;
@@ -148,7 +173,10 @@ export class TransportWs {
       };
       ws.onclose = () => {
         this.ws = null;
-        if (settled) return;
+        if (settled) {
+          this.notifyClose();
+          return;
+        }
         settled = true;
         clearTimeout(timer);
         reject(new Error('TransportWs.connect closed before opening'));
@@ -176,6 +204,7 @@ export class TransportWs {
       }
       ws.onclose = () => {
         this.ws = null;
+        this.notifyClose();
         resolve();
       };
       ws.close();

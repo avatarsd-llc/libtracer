@@ -9,6 +9,34 @@ versioning/publish strategy.
 
 ### Added
 
+- **Client session hardening (v0.1 must-fix bundle).**
+  `@avatarsd-llc/libtracer-client`: pending one-shot requests now **reject when
+  the transport closes** (`ClientTransport` gains an optional `onClose` hook,
+  implemented by `TransportWs`; after a close, new requests fail fast with
+  `"transport closed"`); a **per-request timeout** rejects a reply-less request
+  (`ClientOptions.requestTimeoutMs`, default 10 000 ms, `0`/`Infinity` disables —
+  a timed-out slot still consumes its late FWD{REPLY} so FIFO correlation holds);
+  and an inbound **ADVERTISE (`0x11`) / COMPACT (`0x12`)** frame now surfaces a
+  typed `CompactFlowError` on `onError` (compact route-handle delivery is not
+  supported by this client yet) instead of being silently dropped.
+- **RFC-0002 error-registry parity.** `FWD_ERROR` now carries the full 15-code
+  registry (adds `FRAME_TRUNCATED`, `FRAME_INVALID`, `FRAME_CRC_FAIL`,
+  `TLV_NESTING_TOO_DEEP`, `ADDRESS_SHIFT_GAP`, `TRANSPORT_DOWN`,
+  `VERSION_MISMATCH`), mirroring `docs/reference/05` §`0x08` / the C++
+  `error.hpp` registry, plus `FWD_ERROR_PATH` / `fwdErrorPath` /
+  `fwdErrorCodeForPath` for the canonical `tr::…` path names. `FwdError` exposes
+  `.path`, and a string-form (`NAME` `tr::…`) ERROR reply now surfaces typed on
+  `FwdError` (a registered path resolves back to its code) instead of collapsing
+  to `UNKNOWN`.
+
+### Changed
+
+- **Version alignment for v0.1**: `@avatarsd-llc/libtracer` (core) bumped
+  `0.0.1` → `0.1.0`, so all three packages ship as `0.1.0` (matching the C++
+  `project(libtracer VERSION 0.1.0)`). The client/transport peerDependency
+  ranges on the core (and the client's on `@avatarsd-llc/libtracer-ws`) are now
+  the explicit `>=0.1.0 <0.2.0` — avoiding the `^0.x` caret pitfall.
+
 - **`TYPE.FWD` (`0x0f`) and `TYPE.FIELD` (`0x10`)** in the wire codec's type-code
   registry (RFC-0004 / ADR-0035, slice 1). Both are structured TLVs handled by the
   existing generic codec; no codec logic changed. Cross-core conformance vectors

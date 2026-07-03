@@ -33,8 +33,8 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@avatarsd-llc/libtracer": "^0.0.1",
-    "@avatarsd-llc/libtracer-ws": "^0.1.0"
+    "@avatarsd-llc/libtracer": ">=0.1.0 <0.2.0",
+    "@avatarsd-llc/libtracer-ws": ">=0.1.0 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@avatarsd-llc/libtracer-ws": {

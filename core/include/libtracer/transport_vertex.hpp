@@ -79,7 +79,7 @@ struct conn_settings_t {
  *  1. a link staged via @ref provide_link (borrowed; the caller owns it) — the
  *     test/manual seam for loopback channels and transports the catalog doesn't cover;
  *  2. otherwise, the transport-factory catalog: the config's `kind` selects a factory
- *     (built-in `udp`/`ws`, or any registered via @ref register_transport_type), which
+ *     (built-in `udp`/`tcp`/`ws`, or any registered via @ref register_transport_type), which
  *     CONSTRUCTS the real socket from the parsed @ref conn_settings_t; the connection
  *     vertex OWNS it, and its link state is written up on successful construction.
  *

@@ -9,7 +9,7 @@ Engine comparison: libtracer's graph dispatch vs zenoh-c peer-mode local deliver
 Since `rmw_tracer`/`rmw_zenoh` are thin wrappers over these engines, the engine
 delta is the dominant term in the ROS-level result. `inproc-borrow` is the
 zero-copy loaned-message path (ADR-0025); `inproc` allocates per message;
-`loopback` adds encode/ROUTER/decode + a cross-thread queue. The fan_out
+`loopback` adds encode/FWD-route/decode + a cross-thread queue. The fan_out
 snapshot uses an inline stack buffer (no per-publish heap alloc), which is why
 libtracer's lead widens with fan-out.
 
