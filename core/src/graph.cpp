@@ -562,6 +562,8 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
             v->settings_.queue_max_bytes = static_cast<std::uint32_t>(n);
         } else if (f == "deadline_ns") {
             v->settings_.deadline_ns = n;
+        } else if (f == "store_ref_min_bytes") {
+            v->settings_.store_ref_min_bytes = static_cast<std::uint32_t>(n);
         } else {
             return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         }

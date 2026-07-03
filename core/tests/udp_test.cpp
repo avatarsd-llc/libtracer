@@ -10,16 +10,21 @@
  */
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <future>
+#include <mutex>
 #include <span>
 #include <string_view>
+#include <thread>
+#include <utility>
 #include <vector>
 
+#include "libtracer/mem_pool.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 
@@ -157,12 +162,155 @@ void test_scatter_gather() {
     }
 }
 
+// A heap-delegating backend that RECORDS every segment it hands out, so a test can
+// prove segment identity end to end (the RX frame segment IS the stored segment).
+// destroy is delegated too, though the heap's alloc stamps itself as the segment's
+// reclaimer, so this override is exercised only if that ever changes.
+class recording_backend_t final : public tr::mem::mem_backend_t {
+   public:
+    recording_backend_t() : mem_backend_t("rec_heap") {}
+
+    tr::view::segment_t* alloc(std::size_t size,
+                               tr::mem::alloc_hint_t hint = tr::mem::alloc_hint_t::NONE) override {
+        tr::view::segment_t* const seg = tr::mem::heap_backend().alloc(size, hint);
+        if (seg != nullptr) {
+            const std::lock_guard lock(m_);
+            segments_.push_back(seg);
+        }
+        return seg;
+    }
+    void destroy(tr::view::segment_t* seg) noexcept override {
+        tr::mem::heap_backend().destroy(seg);
+    }
+
+    [[nodiscard]] std::vector<tr::view::segment_t*> segments() const {
+        const std::lock_guard lock(m_);
+        return segments_;
+    }
+
+   private:
+    mutable std::mutex m_;
+    std::vector<tr::view::segment_t*> segments_;
+};
+
+// ADR-0042 §2 — the owning delivery path: an installed view receiver gets each
+// datagram as a view over a fresh refcounted segment from the injected backend.
+void test_view_delivery() {
+    std::printf("UDP transport — owning view delivery (ADR-0042 receiver seam):\n");
+    tr::net::udp_transport_t a(47106, "127.0.0.1", 47107);
+    tr::net::udp_transport_t b(47107, "127.0.0.1", 47106);
+    check(a.ok() && b.ok(), "both UDP sockets bound");
+    check(b.delivers_views(), "udp_transport_t::delivers_views() is true");
+
+    std::promise<tr::view::view_t> got;
+    auto fut = got.get_future();
+    b.set_view_receiver([&](tr::view::view_t f) { got.set_value(std::move(f)); });
+
+    const std::array<std::byte, 5> frame{std::byte{0x09}, std::byte{0xAB}, std::byte{0xCD},
+                                         std::byte{0xEF}, std::byte{0x42}};
+    a.send(frame);
+
+    const bool arrived = fut.wait_for(2s) == std::future_status::ready;
+    check(arrived, "owning frame received on the peer socket");
+    if (arrived) {
+        const tr::view::view_t v = fut.get();
+        check(static_cast<bool>(v.owner), "frame view OWNS a refcounted segment");
+        const auto bytes = v.bytes();
+        check(bytes.size() == frame.size() &&
+                  std::memcmp(bytes.data(), frame.data(), frame.size()) == 0,
+              "owning frame bytes are identical (narrowed to the datagram length)");
+        check(v.owner && v.owner->bytes.size() == tr::net::udp_transport_t::kMaxDatagram,
+              "frame segment was allocated at the transport's max datagram size");
+        check(v.owner.use_count() == 1, "the receiver holds the ONLY reference (no library copy)");
+    }
+    check(b.dropped_rx() == 0, "no backpressure drops on the heap backend");
+}
+
+// ADR-0042 §2 — pool exhaustion is backpressure: alloc == nullptr drops the
+// datagram and ticks dropped_rx(); never an OOM, never a crash.
+void test_view_pool_exhaustion() {
+    std::printf("UDP transport — exhausted pool backend drops cleanly (backpressure):\n");
+    // A slab far too small for even one kMaxDatagram slot => capacity 0 => every
+    // alloc returns nullptr (the deterministic bounded-host exhaustion shape).
+    std::array<std::byte, 256> slab;
+    tr::mem::pool_t pool(slab, tr::net::udp_transport_t::kMaxDatagram);
+    check(pool.capacity() == 0, "pool carves no kMaxDatagram slot from a 256-byte slab");
+
+    tr::net::udp_transport_t a(47110, "127.0.0.1", 47111);
+    tr::net::udp_transport_t b(47111, "127.0.0.1", 47110, &pool);
+    check(a.ok() && b.ok(), "both UDP sockets bound");
+
+    std::atomic<int> delivered{0};
+    b.set_view_receiver([&](tr::view::view_t) { delivered.fetch_add(1); });
+
+    const std::array<std::byte, 4> frame{std::byte{0x01}, std::byte{0x02}, std::byte{0x03},
+                                         std::byte{0x04}};
+    a.send(frame);
+    a.send(frame);
+
+    const auto deadline = std::chrono::steady_clock::now() + 3s;
+    while (b.dropped_rx() < 2 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(10ms);
+    check(b.dropped_rx() >= 2, "both datagrams counted as backpressure drops");
+    check(delivered.load() == 0, "nothing delivered while the pool is exhausted");
+}
+
+// ADR-0042 end to end: two nodes over real UDP with owning view delivery and a
+// store_ref_min_bytes opt-in — the WRITE lands ZERO-copy (the graph's stored
+// segment IS the RX frame segment, proven by pointer identity through graph read).
+void test_two_nodes_zero_copy_store() {
+    std::printf("Two nodes over UDP — view delivery + store_ref_min_bytes zero-copy WRITE:\n");
+    recording_backend_t rec;
+    graph_t node_a, node_b;
+    tr::net::fwd_router_t router_a(node_a);
+    tr::net::fwd_router_t router_b(node_b);
+    tr::net::udp_transport_t ta(47112, "127.0.0.1", 47113);
+    tr::net::udp_transport_t tb(47113, "127.0.0.1", 47112, &rec);
+
+    // B's target vertex opts in to the referenced store (threshold 8 bytes).
+    tr::graph::settings_t s;
+    s.store_ref_min_bytes = 8;
+    tr::graph::vertex_t* v =
+        *node_b.register_vertex(*path_t::parse("/sensor/blob"), role_t::STORED_VALUE, {}, s);
+    router_a.add_child("b", ta);
+    router_b.add_child("a", tb);  // tb delivers views => the owning receiver is installed
+
+    std::promise<void> written;
+    auto fut = written.get_future();
+    (void)node_b.subscribe(*path_t::parse("/sensor/blob"),
+                           [&written](const tr::view::view_t&) { written.set_value(); });
+
+    // A 64-byte payload => a 68-byte trailer-less VALUE TLV, well over the threshold.
+    std::vector<std::byte> pb(64);
+    for (std::size_t i = 0; i < pb.size(); ++i) pb[i] = static_cast<std::byte>(i);
+    std::vector<std::byte> payload;
+    tr::detail::emit_tlv(payload, tr::wire::type_t::VALUE, tr::wire::opt_t{}, pb);
+    const auto frame = fwd_write({"b", "sensor", "blob"}, payload);
+    router_a.on_frame("client", frame);
+
+    const bool arrived = fut.wait_for(3s) == std::future_status::ready;
+    check(arrived, "node B stores the FWD{WRITE} delivered over real UDP");
+    if (arrived) {
+        const auto rd = node_b.read(v);
+        check(rd.has_value() && rd->bytes().size() == payload.size() &&
+                  std::memcmp(rd->bytes().data(), payload.data(), payload.size()) == 0,
+              "stored bytes equal the written payload TLV");
+        const auto segs = rec.segments();
+        check(!segs.empty(), "the RX backend allocated the frame segment");
+        check(rd.has_value() && !segs.empty() && rd->owner.get() == segs.front(),
+              "stored segment IS the RX frame segment (zero-copy socket -> LKV)");
+    }
+}
+
 }  // namespace
 
 int main() {
     test_raw_frame();
     test_two_nodes_over_udp();
     test_scatter_gather();
+    test_view_delivery();
+    test_view_pool_exhaustion();
+    test_two_nodes_zero_copy_store();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

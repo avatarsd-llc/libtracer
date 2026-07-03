@@ -47,6 +47,11 @@ struct settings_t {
     std::uint64_t deadline_ns = 0;        // 0=off; max ns between writes before a liveness fault
     std::uint8_t priority = 0;            // 0=low .. 255=critical (transport hint, not a wire bit)
     std::uint32_t queue_max_bytes = 0;    // 0=unbounded; per-subscriber back-pressure cap
+    // ADR-0042 §3: a view-delivered WRITE whose payload TLV is >= this many bytes (and
+    // carries no trailer bits) is stored as a SUBVIEW of the inbound frame (refcount
+    // pin, zero copy) instead of the one-copy trailer-sliced store. 0 (the default)
+    // DISABLES referencing — pinning amplification is a per-vertex deployment call.
+    std::uint32_t store_ref_min_bytes = 0;
 };
 
 // User behavior for a Handler-role vertex.

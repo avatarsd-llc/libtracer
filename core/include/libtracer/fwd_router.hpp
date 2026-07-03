@@ -96,6 +96,12 @@ class fwd_router_t {
      * Installs a receiver on @p link that funnels each inbound frame to
      * `on_frame(name, ...)`. Call once per link, during setup (before frames flow).
      *
+     * Installs the receiver matching the link's capability (ADR-0042 §1): a
+     * view-delivering link (`link.delivers_views()`) gets a view receiver whose
+     * owning frame funnels through the SAME routing (the forward hop stays
+     * span-based zero-heap; the refcount rides only to the terminus); every other
+     * link keeps the borrowed-span receiver unchanged.
+     *
      * @param name This node's local NAME for the link (e.g. "up", "cli").
      * @param link The transport carrying the next/previous hop.
      */
@@ -213,13 +219,30 @@ class fwd_router_t {
 
    private:
     /**
+     * @brief Route one OWNING inbound frame from a view-delivering link (ADR-0042 §1).
+     *
+     * Runs the same routing as @ref on_frame over the view's bytes span — the
+     * forward hop is untouched (offset-dispatch, zero heap) — and threads the
+     * owning @p frame to the terminus, where a big trailer-less WRITE payload may
+     * be stored as a subview of it (refcount pin, zero copy) under the vertex's
+     * `store_ref_min_bytes` policy.
+     */
+    void on_frame_view(std::string_view inbound_name, view::view_t frame);
+    /** @brief The shared routing body: @p frame_view is the owning frame when the
+     *         link delivers views (nullptr on the borrowed-span path). */
+    void on_frame_impl(std::string_view inbound_name, std::span<const std::byte> frame,
+                       const view::view_t* frame_view);
+    /**
      * @brief Terminus: arena-decode @p frame (ADR-0041) and resolve + reply.
      *
      * The arena draws directly from the injected @ref mr_ (ADR-0039 §1) and is
      * released before returning — the memory policy is entirely the host's. The
-     * FWD{REPLY} is sent back over the link the request arrived on.
+     * FWD{REPLY} is sent back over the link the request arrived on. @p frame_view
+     * (non-null on the owning-delivery path) is threaded into the resolver for
+     * the ADR-0042 §3 referenced WRITE store.
      */
-    void resolve_terminus(std::string_view inbound_name, std::span<const std::byte> frame);
+    void resolve_terminus(std::string_view inbound_name, std::span<const std::byte> frame,
+                          const view::view_t* frame_view);
     /**
      * @brief The forward hop, read entirely by OFFSET — no decoded tree (ADR-0038 inv. #1).
      *

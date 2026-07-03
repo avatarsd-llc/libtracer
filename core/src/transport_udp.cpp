@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <cstring>
 #include <utility>
 #include <vector>
 
@@ -26,7 +27,8 @@ namespace {
 }  // namespace
 
 udp_transport_t::udp_transport_t(std::uint16_t bind_port, const std::string& peer_host,
-                                 std::uint16_t peer_port) {
+                                 std::uint16_t peer_port, mem::mem_backend_t* backend)
+    : backend_(backend) {
     std::uint32_t peer_ip = 0;
     in_addr addr{};
     if (::inet_pton(AF_INET, peer_host.c_str(), &addr) == 1) peer_ip = addr.s_addr;
@@ -71,6 +73,11 @@ udp_transport_t::~udp_transport_t() {
 void udp_transport_t::set_receiver(receiver_t receiver) {
     const std::lock_guard lock(m_);
     receiver_ = std::move(receiver);
+}
+
+void udp_transport_t::set_view_receiver(view_receiver_t receiver) {
+    const std::lock_guard lock(m_);
+    view_receiver_ = std::move(receiver);
 }
 
 void udp_transport_t::send(std::span<const std::byte> frame) {
@@ -119,8 +126,48 @@ void udp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
 }
 
 void udp_transport_t::run() {
-    std::array<std::byte, 65536> buf;
+    std::array<std::byte, kMaxDatagram> buf;
+    view::segment_ptr_t rx_seg;  // pending RX segment, reused across recv timeouts
     while (!stop_.load(std::memory_order_relaxed)) {
+        // The owning-delivery decision is made BEFORE the blocking recvfrom (the
+        // segment must exist to receive into). Both receivers are installed before
+        // frames flow (the set_receiver contract), so which path a given datagram
+        // takes is settled by then; the span path below re-reads its receiver after
+        // recvfrom, byte-identical to the pre-ADR-0042 loop.
+        view_receiver_t view_receiver;
+        {
+            const std::lock_guard lock(m_);
+            view_receiver = view_receiver_;
+        }
+
+        if (view_receiver) {
+            // ADR-0042 §2: one datagram = one frame = one segment — recvfrom straight
+            // into a fresh refcounted segment from the injected backend; no library
+            // buffer, no copy. The pending segment is reused across recv timeouts
+            // (no idle churn). Exhaustion is backpressure: drain the datagram into
+            // the stack scratch, drop it, tick the counter — never an OOM.
+            if (!rx_seg) rx_seg = view::segment_ptr_t::adopt(backend_->alloc(kMaxDatagram));
+            sockaddr_in from{};
+            socklen_t flen = sizeof(from);
+            std::byte* const dst = rx_seg ? rx_seg->bytes.data() : buf.data();
+            const std::size_t cap = rx_seg ? rx_seg->bytes.size() : buf.size();
+            const ssize_t n =
+                ::recvfrom(fd_, dst, cap, 0, reinterpret_cast<sockaddr*>(&from), &flen);
+            if (n <= 0) continue;  // timeout / EAGAIN / error → re-check stop_ (rx_seg kept)
+            if (learn_peer_)
+                peer_.store(pack_peer(from.sin_addr.s_addr, ntohs(from.sin_port)),
+                            std::memory_order_relaxed);
+            if (!rx_seg) {
+                dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+            // Narrow the whole-segment view to the received length and hand it up
+            // owning — the receiver may pin/subview it beyond this call.
+            view_receiver(
+                view::view_t::over(std::move(rx_seg)).subview(0, static_cast<std::size_t>(n)));
+            continue;
+        }
+
         sockaddr_in from{};
         socklen_t flen = sizeof(from);
         const ssize_t n =
@@ -135,6 +182,22 @@ void udp_transport_t::run() {
         {
             const std::lock_guard lock(m_);
             receiver = receiver_;
+            view_receiver = view_receiver_;
+        }
+        if (view_receiver) {
+            // The view receiver was installed while this iteration was already
+            // blocked in recvfrom with the span decision — deliver owning anyway
+            // via a one-time copy into a backend segment (race-window datagrams
+            // only; every subsequent datagram takes the zero-copy path above).
+            view::segment_ptr_t seg = view::segment_ptr_t::adopt(backend_->alloc(kMaxDatagram));
+            if (!seg) {
+                dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+            std::memcpy(seg->bytes.data(), buf.data(), static_cast<std::size_t>(n));
+            view_receiver(
+                view::view_t::over(std::move(seg)).subview(0, static_cast<std::size_t>(n)));
+            continue;
         }
         if (receiver) receiver(std::span<const std::byte>(buf.data(), static_cast<std::size_t>(n)));
     }

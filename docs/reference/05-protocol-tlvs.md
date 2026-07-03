@@ -728,7 +728,7 @@ flowchart LR
 Three properties of the arena resolve:
 
 - **Span-aliased vertex lookup** — a canonical PATH body is byte-identical to the graph's vertex-map key, so dispatch uses the frame's own bytes as the key with zero materialization (a non-canonical PATH from a foreign encoder falls back to a re-emit).
-- **Trailer-sliced stores** — a stored WRITE value copies the node's header+body span exactly once; the trailer never lands at rest.
+- **Trailer-sliced stores** — a stored WRITE value copies the node’s header+body span exactly once (or, when the frame arrived as an owning view and the target vertex opts in via `:settings.store_ref_min_bytes`, is **referenced** as a zero-copy subview of the refcounted frame — [ADR-0042](../adr/0042-refcounted-receiver-seam-view-delivery.md)); the trailer never lands at rest either way (a trailer-carrying payload always falls back to the sliced copy).
 - **Direct-emitted reply** — every reply-head length is known from the node spans, so the `FWD{REPLY}` head (including the route bytes, copied once) is emitted straight into one exactly-sized segment, and a READ's reply payload rides as a zero-copy refcounted rope.
 
 Across hops, `FWD` is **source-routed and stateless**: each forwarder strips the leading `dst` segment (the next link) and prepends its name for the inbound link to `src` (a zero-copy rope head-prepend), so `dst` shrinks toward the target while `src` grows into the return route. A `REPLY` retraces that accumulated `src` and does **not** itself accumulate:
