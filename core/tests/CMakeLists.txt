@@ -157,6 +157,14 @@ target_compile_definitions(udp_test PRIVATE
     LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME udp COMMAND udp_test)
 
+# M6 — TCP stream transport harness (length-prefix framing: split/coalesced writes,
+# oversize-prefix rejection, ADR-0042 owning delivery + backpressure drain, two-node
+# FWD end-to-end, and a config-created `kind=tcp` connection).
+add_executable(tcp_test tcp_test.cpp)
+target_link_libraries(tcp_test PRIVATE libtracer)
+libtracer_test_warnings(tcp_test)
+add_test(NAME tcp COMMAND tcp_test)
+
 # #54 — transport_ws server socket layer (TCP accept + RFC6455 handshake + transport_t).
 add_executable(ws_transport_test ws_transport_test.cpp)
 target_link_libraries(ws_transport_test PRIVATE libtracer)

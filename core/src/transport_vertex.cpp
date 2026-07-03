@@ -15,6 +15,7 @@
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/tlv_emit.hpp"
+#include "libtracer/transport_tcp.hpp"
 #include "libtracer/transport_udp.hpp"
 #include "libtracer/transport_ws.hpp"
 
@@ -100,6 +101,27 @@ result_t<std::unique_ptr<transport_t>> make_udp(const conn_settings_t& s,
     return t;
 }
 
+// Built-in `tcp` (M6): DIAL = tcp_transport_t(addr, port) — a SYNCHRONOUS TCP connect
+// at creation time (the peer's listener must be up, or the SPEC write fails NOT_FOUND);
+// LISTEN = tcp_transport_t(port), accepting ONE inbound peer at a time (the
+// transport_ws_server one-peer model). Length-prefix framing is internal to the
+// transport. `keepalive` is ignored (TCP's own keepalive/liveness is #66 lifecycle).
+// `rx_backend` is the ADR-0042 §2 receive-segment seam, as for `udp`.
+result_t<std::unique_ptr<transport_t>> make_tcp(const conn_settings_t& s,
+                                                mem::mem_backend_t* rx_backend) {
+    std::unique_ptr<tcp_transport_t> t;
+    if (s.role == conn_role_t::DIAL) {
+        if (s.addr.empty() || s.port == 0) return std::unexpected(status_t::TYPE_MISMATCH);
+        t = std::make_unique<tcp_transport_t>(s.addr, s.port, rx_backend);
+        if (!t->ok()) return std::unexpected(status_t::NOT_FOUND);  // dial failed
+        return t;
+    }
+    if (s.port == 0) return std::unexpected(status_t::TYPE_MISMATCH);
+    t = std::make_unique<tcp_transport_t>(s.port, rx_backend);
+    if (!t->ok()) return std::unexpected(status_t::NOT_FOUND);  // bind/listen failed
+    return t;
+}
+
 // Built-in `ws`: DIAL = transport_ws_client(addr, port) — a SYNCHRONOUS TCP connect +
 // RFC 6455 opening handshake at creation time (the peer's server must be up, or the
 // SPEC write fails NOT_FOUND); LISTEN = transport_ws_server(port), accepting ONE
@@ -138,10 +160,12 @@ transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& rout
             return make_connection(std::move(key), config, conn_role_t::LISTEN);
         });
     // The built-in transport-factory catalog entries (config `kind` selectors). The
-    // udp factory closes over the injected RX backend (ADR-0042 §2); ws stays
+    // udp and tcp factories close over the injected RX backend (ADR-0042 §2); ws stays
     // span-delivering until its frame assembly is pointed at segments (ADR-0042 §4).
     register_transport_type("udp",
                             [this](const conn_settings_t& s) { return make_udp(s, rx_backend_); });
+    register_transport_type("tcp",
+                            [this](const conn_settings_t& s) { return make_tcp(s, rx_backend_); });
     register_transport_type("ws", make_ws);
 }
 

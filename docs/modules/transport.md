@@ -6,10 +6,11 @@
 framed bytes (single buffer **or** a scatter-gather `iovec`), register a
 `receiver_t` for inbound frames. It never sees TLV semantics — only bytes.
 Implementations: **`loopback_channel_t`** (in-process dev/test),
-**`udp_transport_t`** (localhost/LAN UDP), **`transport_ws_client` /
-`transport_ws_server`** (the browser↔robot WebSocket keystone, RFC 6455), and
-**`transport_can`** (SocketCAN, classic + CAN-FD). A reliable byte-stream
-transport (TCP/QUIC) remains future work.
+**`udp_transport_t`** (localhost/LAN UDP), **`tcp_transport_t`** (reliable TCP
+stream, 4-byte u32-LE length-prefix framing — the prefix is transport framing,
+not part of the TLV), **`transport_ws_client` / `transport_ws_server`** (the
+browser↔robot WebSocket keystone, RFC 6455), and **`transport_can`** (SocketCAN,
+classic + CAN-FD). QUIC is not implemented.
 ```
 
 ## What it does

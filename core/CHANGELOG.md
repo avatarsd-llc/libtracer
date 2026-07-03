@@ -15,6 +15,25 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **M6 — `tcp_transport_t`, the reliable stream transport** (new public header
+  `transport_tcp.hpp`, included by the `tracer.hpp` umbrella). A TCP `transport_t`
+  with **4-byte u32-LE length-prefix framing** — the prefix is transport framing, NOT
+  part of the TLV; a prefix announcing more than `kMaxFrame` (16 MiB) is malformed:
+  counted via the new `malformed_rx()` and the connection is torn down. Two modes,
+  one class: DIAL (`tcp_transport_t(host, port)`, synchronous connect) and LISTEN
+  (`tcp_transport_t(port)`, one inbound peer at a time — the `transport_ws_server`
+  model; an ephemeral `0` resolved via `local_port()`). The receive thread
+  reassembles partial reads and honors record boundaries on coalesced writes, reading
+  each frame straight into ONE refcounted segment from the injected
+  `mem::mem_backend_t*` (default heap) — ADR-0042 owning delivery
+  (`delivers_views() == true`); without a view receiver the span receiver borrows the
+  same segment bytes. Backend exhaustion is backpressure: the frame is drained off
+  the stream (framing sync survives) and `dropped_rx()` ticks. `send(iov)` puts the
+  prefix as the first iovec entry ahead of the rope's spans — one gathered `sendmsg`,
+  no flatten copy. Reconnect is out of scope (#66 owns link lifecycle). The transport
+  factory gains a **`tcp` builtin** beside `udp`/`ws` (DIAL: `addr` + `port`; LISTEN:
+  `port`), threading the `rx_backend` seam like `udp`.
+
 - **The refcounted receiver seam — transports MAY hand up owning frames, and big WRITE
   payloads may store zero-copy as frame subviews**
   ([#173](https://github.com/avatarsd-llc/libtracer/issues/173),
