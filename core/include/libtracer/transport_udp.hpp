@@ -27,6 +27,12 @@ class udp_transport_t : public transport_t {
    public:
     // Bind a local UDP socket on `bind_port` (0 = ephemeral; see local_port());
     // send() targets `peer_host:peer_port` (IPv4 dotted-quad, e.g. "127.0.0.1").
+    // Listener mode: constructed with an unresolved peer (`peer_host` empty or
+    // `peer_port` 0), the transport LEARNS its peer from each inbound datagram's
+    // source address — the standard single-peer UDP-server shape, which lets a
+    // config-created `listener` connection (#83) reply to a dialing client whose
+    // ephemeral port is unknowable in advance. Until the first datagram arrives,
+    // send() is a no-op (there is nobody to send to).
     udp_transport_t(std::uint16_t bind_port, const std::string& peer_host, std::uint16_t peer_port);
     ~udp_transport_t() override;
 
@@ -43,10 +49,17 @@ class udp_transport_t : public transport_t {
    private:
     void run();  // receive thread
 
+    // The peer endpoint packed as (ip << 16) | port (ip network order, port host
+    // order), atomic because listener mode updates it from the recv thread while
+    // send() reads it from callers' threads. 0 = no peer yet (send is a no-op).
+    [[nodiscard]] std::uint64_t peer() const noexcept {
+        return peer_.load(std::memory_order_relaxed);
+    }
+
     int fd_ = -1;
     std::uint16_t bound_port_ = 0;
-    std::uint32_t peer_ip_ = 0;    // network byte order
-    std::uint16_t peer_port_ = 0;  // host byte order
+    std::atomic<std::uint64_t> peer_{0};
+    bool learn_peer_ = false;  // constructed peer-less => adopt each datagram's source
 
     receiver_t receiver_;  // guarded by m_
     std::mutex m_;
