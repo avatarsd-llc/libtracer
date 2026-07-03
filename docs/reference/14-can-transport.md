@@ -187,19 +187,32 @@ bindings" split, [CONTEXT.md](../../CONTEXT.md) *Framing modes*).
   manifest [ADR-0011](../adr/0011-address-shift-totality-opt-in.md) otherwise carries
   statically.
 
-On-wire layout (little-endian, a 16-byte header + the path bytes):
+Two further forms serve the [ADR-0044](../adr/0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md)
+peer plane (both transport-internal framing in the same advertise family):
+
+- **Hello / presence** — `slice_count == 0`: binds nothing and precedes no data;
+  it only announces "this node is on the bus" (plus its identity path). Emitted
+  once at join; any subsequent frame refreshes liveness.
+- **Directed** — `target_node != 0xFFFF`: the group is addressed to ONE peer.
+  Every other node recognizes and consumes its data slices but never reassembles
+  or delivers them — per-peer unicast semantics on a broadcast medium, which is
+  what makes transparent per-peer `FWD` forwarding possible.
+
+On-wire layout (little-endian, an 18-byte header + the path bytes; format `0x02`
+widened the v1 header with the explicit `target_node` field):
 
 | Offset | Size | Field |
 | --- | --- | --- |
 | 0 | 1 | magic = `0xAD` |
-| 1 | 1 | format version = `0x01` |
+| 1 | 1 | format version = `0x02` |
 | 2 | 1 | flags (`0x01` = group) |
 | 3 | 1 | reserved, must be zero |
 | 4 | 4 | `can_id` (u32 LE; a 29-bit value) |
 | 8 | 4 | `group_total_len` (u32 LE; 0 if single-value) |
-| 12 | 2 | `slice_count` (u16 LE; 1 if single-value) |
-| 14 | 2 | `path_len` (u16 LE) |
-| 16 | `path_len` | path bytes (UTF-8 libtracer path) |
+| 12 | 2 | `slice_count` (u16 LE; 1 if single-value, 0 = hello) |
+| 14 | 2 | `target_node` (u16 LE; `0xFFFF` = undirected broadcast) |
+| 16 | 2 | `path_len` (u16 LE) |
+| 18 | `path_len` | path bytes (UTF-8 libtracer path) |
 
 `encode_advertise` / `decode_advertise` round-trip this; decode rejects a wrong
 magic, an unknown format version, a non-zero reserved byte, or a truncated buffer
@@ -293,6 +306,70 @@ manifest (cross-ID arbitration) is held pending and re-driven when the manifest 
   (which a single producer gets on CAN); the pending-data buffer covers control/data
   cross-ID reordering.
 ```
+
+### Peer enumeration + transparent per-peer forwarding (ADR-0044)
+
+A CAN bus reaches many peers over one wire, so `transport_can` also implements
+the kind-neutral `tr::net::bus_link_t` capability (`transport_t::bus()`), which is
+how a client of the node holding the bus **enumerates** the currently-reachable
+peers and **forwards through** to them — with hard statelessness guarantees
+([ADR-0044](../adr/0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md)):
+
+- **No peer ever creates a vertex** — on this node or any other. The listing is
+  synthesized per read; nothing persists in the graph; a peer's reboot mutates
+  no listener's tree.
+- **The only peer state is a last-heard table** inside the transport: refreshed
+  by every valid same-version frame a peer emits (seeded by the join-time
+  **hello** advertise) and expired after `peer_ttl` of silence. Insert-only, one
+  entry per **distinct node id ever heard** — the same policy as the
+  identity↔path map — so it grows with the bus *population* (structurally
+  bounded by the 13-bit node-id space), never per request or per frame, and no
+  artificial capacity is hard-wired (memory policy stays the host's).
+- **The transit node keeps zero per-request state**: forwarding rides the
+  RFC-0004 frame-carried routes (`dst`-shrink / `src`-grow) unchanged.
+
+**Enumeration.** Peers appear as `n<node-id>` (decimal — the stable identity the
+structured 29-bit ID already carries; collision-safe within the bus). A read of
+the connection vertex's `:children[]` (e.g. `read("/net/can0:children[]")`,
+locally or via a remote `FWD{READ}`) serves a `POINT` whose children are
+`POINT{NAME n<id>}` members — a snapshot of who is currently audible, wired
+through the vertex's `on_children` handler by `transport_vertex_t` for any link
+whose `bus()` is non-null.
+
+**Forwarding.** Each listed name doubles as a routable next-hop segment: when a
+`FWD`'s first `dst` segment names no static child, the router's
+`child_registry_t` asks each bus child to resolve it as a peer
+(`bus_link_t::peer_link`), yielding a **directed** per-peer endpoint — the group's
+advertise carries `target_node`, so on the broadcast bus only the addressed peer
+delivers it. Inbound frames arrive tagged with the **sender's** peer name
+(`bus_link_t::set_peer_receiver`), which the router uses as the hop's inbound
+NAME — so the return route grown into `src` names the bus peer, and the reply is
+itself a directed send. The whole round trip:
+
+```{mermaid}
+sequenceDiagram
+    participant C as client
+    participant T as transit T (CAN node 1)
+    participant P as peer P (CAN node 5)
+    participant Q as bystander Q (node 7)
+    P->>T: hello advertise (join) — last-heard table gains n5
+    C->>T: FWD{READ, dst=/net/can0, :children[]}
+    T-->>C: POINT{ POINT{NAME n5}, … } (synthesized, no vertices)
+    C->>T: FWD{READ, dst=/n5/a/b, src=/reply-ep}
+    Note over T: "n5" = no static child → peer_link("n5")<br/>strip n5, grow src=/cli/reply-ep
+    T->>P: directed group (target_node=5): FWD{READ, dst=/a/b}
+    Note over Q: consumes slices, delivers nothing
+    Note over P: terminus: read /a/b<br/>inbound NAME = "n1" (sender's peer name)
+    P->>T: directed group (target_node=1): FWD{REPLY, dst=/cli/reply-ep}
+    T->>C: FWD{REPLY} forwarded over "cli"
+```
+
+The liveness model is deliberately minimal (design (b) of the ADR-0044
+implementation note): a peer is "reachable" iff it has been audible within
+`peer_ttl` — an idle-but-alive node ages out until it next speaks. Probe-on-read
+(a discovery probe emitted by the `:children[]` read, answered within a bounded
+window) is the recorded follow-on; it needs deferred reply completion at the
+`op_resolver_t` terminus, which is synchronous today.
 
 ### Tested two ways
 

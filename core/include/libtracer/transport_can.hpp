@@ -25,6 +25,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -34,12 +35,14 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
 #include "libtracer/can.hpp"
 #include "libtracer/mem_can_reassembly.hpp"
 #include "libtracer/transport.hpp"
+#include "libtracer/transport_vertex.hpp"
 #include "libtracer/view_can.hpp"
 
 /**
@@ -62,6 +65,9 @@ inline constexpr std::uint16_t kCanControlEndpoint = 0;
 
 /** @brief The first `endpoint` slot usable for header-elided data groups (control is 0). */
 inline constexpr std::uint16_t kCanFirstDataEndpoint = 1;
+
+/** @brief Default liveness window: a peer silent this long leaves the enumeration. */
+inline constexpr std::chrono::milliseconds kCanDefaultPeerTtl{3000};
 
 /**
  * @brief One raw CAN frame at the `can_link_t` seam — id + data field, no semantics.
@@ -169,6 +175,9 @@ struct transport_can_config_t {
     tr::view::can_frame_mode_t mode =
         tr::view::can_frame_mode_t::CLASSIC; /**< @brief Classic (≤8B) or CAN-FD (≤64B) framing. */
     std::string path; /**< @brief The path advertised for this node's groups. */
+    std::chrono::milliseconds peer_ttl =
+        kCanDefaultPeerTtl; /**< @brief Peer liveness window (ADR-0044): a peer silent
+                                 longer than this expires from the enumeration. */
 };
 
 /**
@@ -185,8 +194,27 @@ struct transport_can_config_t {
  * trimmed back to the advertised total (undoing FD padding), and delivered
  * byte-exact to the receiver. The map is rebuilt purely from advertise frames, so
  * a rejoining node self-heals with no coordinator (ADR-0030).
+ *
+ * **Bus capability (ADR-0044).** The bus reaches many peers over one wire, so the
+ * transport also implements @ref bus_link_t — statelessly, from live traffic:
+ *  - a last-heard table (one entry per DISTINCT node id ever heard — like the
+ *    identity↔path map, it grows with the bus population, structurally bounded
+ *    by the 13-bit node-id space, never per-request/per-frame; memory policy is
+ *    the host's) is refreshed by every valid same-version frame another node
+ *    emits, seeded by the **hello** advertise (`slice_count == 0`) a node sends
+ *    at join; a peer silent longer than `peer_ttl` expires from view;
+ *  - @ref enumerate_peers synthesizes the currently-audible peer names —
+ *    `n<node-id>` (decimal, no leading zeros): deterministic and collision-safe
+ *    within the bus, since the structured CAN ID makes node ids unique per bus;
+ *  - @ref peer_link resolves such a name to a per-peer DIRECTED endpoint whose
+ *    `send` stamps the group's advertise with `target_node`, so on the broadcast
+ *    medium only the addressed peer reassembles and delivers it;
+ *  - @ref set_peer_receiver tags each delivered frame with the SENDER's peer
+ *    name (derived from the CAN ID), which the FWD router uses as the hop's
+ *    inbound NAME — replies route back per-peer with no per-request state.
+ * No peer ever creates a vertex or any other graph state (ADR-0044 §1).
  */
-class transport_can : public transport_t {
+class transport_can : public transport_t, public bus_link_t {
    public:
     /**
      * @brief Bind this transport to raw link @p link with node identity @p config.
@@ -223,16 +251,74 @@ class transport_can : public transport_t {
      */
     [[nodiscard]] std::optional<can::advertise_t> learned_binding(std::uint32_t base_can_id) const;
 
+    // --- the bus capability (ADR-0044) ------------------------------------------
+
+    /** @brief This link IS a bus — expose the @ref bus_link_t facet. */
+    [[nodiscard]] bus_link_t* bus() override { return this; }
+
+    /**
+     * @brief Visit the peers currently audible on the bus, as `n<node-id>` names.
+     *
+     * Synthesized on the fly from the last-heard table — a snapshot of live
+     * traffic, never stored graph structure (ADR-0044 §1). Entries older than the
+     * configured `peer_ttl` are skipped.
+     * @note @p visit runs under the table lock; it must not re-enter this link.
+     */
+    void enumerate_peers(const peer_visitor_t& visit) const override;
+
+    /**
+     * @brief Resolve `n<node-id>` to this bus's directed endpoint for that peer.
+     * @retval nullptr @p peer is not a canonical peer name, or the peer expired.
+     */
+    [[nodiscard]] transport_t* peer_link(std::string_view peer) override;
+
+    /**
+     * @brief Register the peer-named inbound sink (preferred over @ref set_receiver).
+     * @param receiver Invoked on the link's receive thread with the SENDER's peer
+     *                 name (`n<node-id>`) and the byte-exact reassembled frame.
+     */
+    void set_peer_receiver(peer_receiver_t receiver) override;
+
    private:
+    // A directed per-peer sending endpoint (what peer_link returns): send() emits a
+    // group whose advertise carries `target_node`, so only that peer delivers it.
+    // Owned by its peer-table entry, whose map node never moves (insert-only table),
+    // so a pointer handed out by peer_link stays valid for the transport's life.
+    class peer_endpoint_t final : public transport_t {
+       public:
+        void send(std::span<const std::byte> frame) override;
+        void set_receiver(receiver_t receiver) override { (void)receiver; }  // ingress
+        // is the owning transport's (set_peer_receiver) — a documented no-op.
+
+       private:
+        friend class transport_can;
+        transport_can* owner_ = nullptr;
+        std::atomic<std::uint16_t> node_{0};
+    };
+
+    // One entry of the last-heard peer table (ADR-0044), keyed by node id. Entries
+    // are INSERT-ONLY (exactly the learned_ identity-map policy): expiry hides an
+    // entry from enumeration/resolution but never frees it, so the endpoint
+    // facades peer_link hands out stay pointer-stable for the transport's life
+    // (std::map nodes never move). Growth is one entry per DISTINCT node id ever
+    // heard — structurally bounded by the 13-bit id space, never per-frame.
+    struct peer_entry_t {
+        std::chrono::steady_clock::time_point last_heard{};
+        peer_endpoint_t endpoint;
+    };
+
     // --- ingress (runs on the link's receive thread) ---
     void on_rx(const can_frame_data_t& frame);
     void learn_advertise(const can::advertise_t& adv);  // requires rx_m_ held
     void process_data(const can_frame_data_t& frame);   // requires rx_m_ held
-    void deliver(std::span<const std::byte> frame);
+    void deliver(std::uint16_t src_node, std::span<const std::byte> frame);
+    void touch_peer(std::uint16_t node);  // refresh/insert into the last-heard table
 
-    // --- egress helpers (run under tx_m_) ---
+    // --- egress helpers ---
     std::uint16_t alloc_base(std::size_t slice_count);  // requires tx_m_ held
     void emit_advertise(const can::advertise_t& adv);   // requires tx_m_ held
+    void send_impl(std::span<const std::byte> frame, std::uint16_t target);
+    void emit_hello();  // the join-time presence advertise (slice_count == 0)
 
     std::unique_ptr<can_link_t> link_;
     transport_can_config_t cfg_;
@@ -241,16 +327,50 @@ class transport_can : public transport_t {
     std::mutex tx_m_;  // serializes whole-group emission
     std::uint16_t next_base_ = kCanFirstDataEndpoint;
 
-    // ingress
+    // ingress. A learned binding remembers whether its group is for THIS node —
+    // a directed group addressed elsewhere is consumed but never reassembled.
+    struct binding_t {
+        can::advertise_t adv;
+        bool deliver = true;
+    };
     std::mutex rx_m_;                                          // guards the map + buffers
     tr::mem::mem_can_reassembly_t reasm_;                      // data-slice reassembly
-    std::map<std::uint32_t, can::advertise_t> learned_;        // base CAN ID -> binding
+    std::map<std::uint32_t, binding_t> learned_;               // base CAN ID -> binding
     std::map<std::uint16_t, std::vector<std::byte>> control_;  // per-node advertise byte stream
     std::vector<can_frame_data_t> pending_;  // data frames awaiting their advertise
 
-    // receiver
+    // the last-heard peer table (ADR-0044) — node id -> entry, insert-only
+    mutable std::mutex peers_m_;
+    std::map<std::uint16_t, peer_entry_t> peers_;
+
+    // receivers (peer-named preferred; the flat receiver is the fallback)
     std::mutex m_;
     receiver_t receiver_;
+    peer_receiver_t peer_receiver_;
 };
+
+/**
+ * @brief The ready-to-register `can` transport factory — how the CAN module plugs
+ *        into the ADR-0027 connection-vertex catalog.
+ *
+ * Register at setup: `net.register_transport_type("can", can_transport_factory())`.
+ * A subsequent `write /net:children[] += SPEC{type, name, config{kind = "can", …}}`
+ * then constructs a @ref transport_can over a production @ref socketcan_link_t and
+ * the connection vertex owns it. Per the ADR-0043 §5 leanness ruling, every
+ * CAN-private key is parsed HERE from the raw config SETTINGS TLV — nothing lands
+ * in the shared @ref conn_settings_t:
+ *  - `ifname` (NAME, required) — the SocketCAN interface (e.g. `"can0"`, `"vcan0"`);
+ *  - `node` (VALUE u16, required) — this node's id in the structured 29-bit ID;
+ *  - `version` (VALUE u8) — the protocol-version prefix (default 0);
+ *  - `fd` (VALUE u8) — non-zero selects CAN-FD framing (default classic);
+ *  - `path` (NAME) — the identity path advertised for this node's groups;
+ *  - `peer_ttl_ms` (VALUE u32) — the ADR-0044 peer liveness window.
+ * A missing/invalid `ifname` or `node` fails with `TYPE_MISMATCH`; a socket that
+ * cannot bind (no kernel CAN / non-Linux stub) fails with `NOT_FOUND`. The
+ * universal `role` is ignored — a bus has no dial/listen asymmetry.
+ *
+ * @return The factory functor for @ref transport_vertex_t::register_transport_type.
+ */
+[[nodiscard]] transport_vertex_t::transport_factory_t can_transport_factory();
 
 }  // namespace tr::net

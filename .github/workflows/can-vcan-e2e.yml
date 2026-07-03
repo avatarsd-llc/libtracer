@@ -16,12 +16,14 @@ on:
     paths:
       - "core/src/transport_can.cpp"
       - "core/include/libtracer/transport_can.hpp"
+      - "core/include/libtracer/can.hpp"
       - "core/tests/transport_can_vcan_test.cpp"
       - ".github/workflows/can-vcan-e2e.yml"
   pull_request:
     paths:
       - "core/src/transport_can.cpp"
       - "core/include/libtracer/transport_can.hpp"
+      - "core/include/libtracer/can.hpp"
       - "core/tests/transport_can_vcan_test.cpp"
       - ".github/workflows/can-vcan-e2e.yml"
   workflow_dispatch:

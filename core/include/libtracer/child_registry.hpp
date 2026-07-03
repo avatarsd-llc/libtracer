@@ -39,10 +39,24 @@ class child_registry_t {
     /** @brief Register the link addressed by @p name. Call once per link, during setup. */
     void add(std::string name, transport_t& link) { children_.push_back({std::move(name), &link}); }
 
-    /** @brief The link addressed by @p name (nullptr if none). */
+    /**
+     * @brief The link addressed by @p name (nullptr if none).
+     *
+     * Resolution order (ADR-0044): an exact static child NAME wins; otherwise each
+     * registered BUS child (a link exposing @ref transport_t::bus) is asked to
+     * resolve @p name as a currently-audible peer (@ref bus_link_t::peer_link),
+     * yielding a DIRECTED per-peer endpoint. So an announced bus peer's name is a
+     * routable next-hop segment with no registry mutation and no stored peer state
+     * — the peer table lives inside the bus transport and expires with its traffic.
+     */
     [[nodiscard]] transport_t* by_name(std::string_view name) const {
         for (const child_t& c : children_) {
             if (c.name == name) return c.link;
+        }
+        for (const child_t& c : children_) {
+            if (bus_link_t* const bus = c.link->bus()) {
+                if (transport_t* const peer = bus->peer_link(name)) return peer;
+            }
         }
         return nullptr;
     }

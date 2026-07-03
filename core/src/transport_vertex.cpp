@@ -220,10 +220,35 @@ result_t<vertex_t*> transport_vertex_t::make_connection(std::vector<std::byte> c
         return std::unexpected(status_t::NOT_FOUND);
     }
 
+    // A BUS link (ADR-0044) serves its currently-audible peers as this vertex's
+    // synthesized `:children[]` — a POINT of POINT{NAME <peer>} members built on
+    // every read from the transport's live-traffic table. NO vertex is ever
+    // created for a peer, and each listed name doubles as a routable next-hop
+    // segment (the registry's peer fallback). Kind-neutral: any transport whose
+    // bus() is non-null gets this wiring; point-to-point links keep the plain
+    // vertex. The captured facet lives exactly as long as the link (the class's
+    // documented lifetime contract — the graph must not outlive this object).
+    graph::handlers_t handlers;
+    if (bus_link_t* const bus = link->bus()) {
+        handlers.on_children = [bus]() -> result_t<view_t> {
+            std::vector<std::byte> members;
+            bus->enumerate_peers([&members](std::string_view peer) {
+                std::vector<std::byte> body;
+                detail::emit_name(body, peer);
+                detail::emit_tlv(members, type_t::POINT, wire::opt_t{.pl = true}, body);
+            });
+            std::vector<std::byte> out;
+            detail::emit_tlv(out, type_t::POINT, wire::opt_t{.pl = true}, members);
+            const view_t res = view::over_bytes(out);
+            if (res.empty()) return std::unexpected(status_t::BACKPRESSURE);
+            return res;
+        };
+    }
+
     // Register the identity vertex at the composed /net/<name> key (graph owns addressing).
     // On failure the just-constructed socket (if any) is torn down by `owned`'s destructor.
-    result_t<vertex_t*> v =
-        graph_.register_vertex_key(std::move(child_key), graph::role_t::STORED_VALUE);
+    result_t<vertex_t*> v = graph_.register_vertex_key(
+        std::move(child_key), graph::role_t::STORED_VALUE, std::move(handlers));
     if (!v) return v;  // PATH_IN_USE on a duplicate connection name
 
     const bool constructed = owned != nullptr;

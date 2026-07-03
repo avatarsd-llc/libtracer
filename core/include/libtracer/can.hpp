@@ -144,10 +144,27 @@ struct can_id_fields_t {
 
 /** @brief Leading magic byte of an in-band @ref advertise_t frame. */
 inline constexpr std::uint8_t kAdvertiseMagic = 0xAD;
-/** @brief On-wire format version of the @ref advertise_t frame layout. */
-inline constexpr std::uint8_t kAdvertiseFormatVersion = 0x01;
+/**
+ * @brief On-wire format version of the @ref advertise_t frame layout.
+ *
+ * Version `0x02` (ADR-0044) widened the header from 16 to 18 bytes with the
+ * explicit `target_node` field (directed groups + the hello/presence form).
+ * The advertise family is transport-internal framing (ADR-0030 — not the L2 TLV
+ * spec), so the bump is a module-local change; all nodes of one bus deployment
+ * run one binding version.
+ */
+inline constexpr std::uint8_t kAdvertiseFormatVersion = 0x02;
 /** @brief Fixed size, in bytes, of the @ref advertise_t header that precedes the path. */
-inline constexpr std::size_t kAdvertiseHeaderSize = 16;
+inline constexpr std::size_t kAdvertiseHeaderSize = 18;
+/**
+ * @brief The `target_node` value meaning "undirected — every node on the bus".
+ *
+ * Deliberately outside the 13-bit node range (`> kNodeMax`), so no real node id
+ * can alias it. Any other value makes the group DIRECTED: a node whose own id
+ * differs consumes the group's data slices without reassembling or delivering
+ * them (ADR-0044 transparent per-peer forwarding on a broadcast medium).
+ */
+inline constexpr std::uint16_t kCanBroadcastNode = 0xFFFF;
 
 /**
  * @brief `flags` bit: the binding is a multi-frame **rope group**, not a single value.
@@ -157,6 +174,18 @@ inline constexpr std::size_t kAdvertiseHeaderSize = 16;
  * binding (CONTEXT.md *Advertise + id-match*).
  */
 inline constexpr std::uint8_t kAdvertiseFlagGroup = 0x01;
+
+/**
+ * @brief Largest `path_len` a well-formed advertise may carry.
+ *
+ * A wedge-resistance bound for the control-stream decoder: a desynchronized
+ * stream fragment that happens to start with the magic/version signature could
+ * otherwise claim an absurd path length and stall resynchronization for up to
+ * 64 KiB of control traffic. Real libtracer paths on a CAN bus are far shorter;
+ * encoders MUST NOT exceed this and decoders reject beyond it (which lets
+ * @ref advertise_prefix_plausible classify the prefix as garbage and resync).
+ */
+inline constexpr std::uint16_t kAdvertiseMaxPathLen = 1024;
 
 /**
  * @brief A decoded in-band `advertise` frame — the identity↔path manifest.
@@ -170,6 +199,15 @@ inline constexpr std::uint8_t kAdvertiseFlagGroup = 0x01;
  * own advertises, which is what makes the map self-healing (docs/reference/13
  * §self-healing).
  *
+ * Two special forms (ADR-0044, both transport-internal per ADR-0030):
+ *  - **hello / presence** — `slice_count == 0`: no binding is established and no
+ *    data frames follow; the frame only announces "this node is on the bus" (and
+ *    its identity path). Emitted at join; any advertise also refreshes liveness.
+ *  - **directed** — `target_node != kCanBroadcastNode`: the group is addressed to
+ *    ONE peer; every other node consumes its data slices without delivery. This
+ *    is how a FWD forwarded onto the broadcast bus reaches exactly the peer its
+ *    stripped `dst` segment named.
+ *
  * On-wire layout (little-endian; a fixed @ref kAdvertiseHeaderSize byte header,
  * then the path):
  * | offset | size | field |
@@ -180,16 +218,19 @@ inline constexpr std::uint8_t kAdvertiseFlagGroup = 0x01;
  * | 3      | 1    | reserved, must be zero |
  * | 4      | 4    | can_id (u32 LE; a 29-bit value) |
  * | 8      | 4    | group_total_len (u32 LE; 0 for a single value) |
- * | 12     | 2    | slice_count (u16 LE; 1 for a single value) |
- * | 14     | 2    | path_len (u16 LE) |
- * | 16     | path_len | path bytes (UTF-8 libtracer path) |
+ * | 12     | 2    | slice_count (u16 LE; 1 for a single value, 0 for hello) |
+ * | 14     | 2    | target_node (u16 LE; @ref kCanBroadcastNode = undirected) |
+ * | 16     | 2    | path_len (u16 LE) |
+ * | 18     | path_len | path bytes (UTF-8 libtracer path) |
  */
 struct advertise_t {
     std::uint32_t can_id = 0;          /**< @brief The 29-bit ID this advertise binds. */
     bool group = false;                /**< @brief True ⇒ a multi-frame rope group binding. */
     std::uint32_t group_total_len = 0; /**< @brief Total group payload bytes (0 if single-value). */
-    std::uint16_t slice_count = 1;     /**< @brief Slice count for the group (1 if single-value). */
-    std::string path;                  /**< @brief The libtracer path the id maps to. */
+    std::uint16_t slice_count = 1;     /**< @brief Slice count (1 = single value, 0 = hello). */
+    std::uint16_t target = kCanBroadcastNode; /**< @brief Directed target node id, or
+                                                   @ref kCanBroadcastNode for every node. */
+    std::string path;                         /**< @brief The libtracer path the id maps to. */
 
     /** @brief Field-wise equality (value type). */
     [[nodiscard]] bool operator==(const advertise_t&) const = default;
@@ -225,6 +266,7 @@ struct advertise_t {
     put_u32(a.can_id);
     put_u32(a.group_total_len);
     put_u16(a.slice_count);
+    put_u16(a.target);
     put_u16(static_cast<std::uint16_t>(path_len));
     for (char c : a.path) put_u8(static_cast<std::uint8_t>(c));
     return out;
@@ -266,8 +308,10 @@ struct advertise_t {
     a.can_id = u32(4);
     a.group_total_len = u32(8);
     a.slice_count = u16(12);
-    const std::uint16_t path_len = u16(14);
+    a.target = u16(14);
+    const std::uint16_t path_len = u16(16);
 
+    if (path_len > kAdvertiseMaxPathLen) return std::nullopt;  // wedge bound (see constant)
     // Overflow-safe bound: kAdvertiseHeaderSize <= buf.size() is guaranteed above,
     // so buf.size() - kAdvertiseHeaderSize cannot underflow.
     if (path_len > buf.size() - kAdvertiseHeaderSize) return std::nullopt;
@@ -277,6 +321,36 @@ struct advertise_t {
         a.path.push_back(static_cast<char>(u8(kAdvertiseHeaderSize + i)));
     }
     return std::make_pair(std::move(a), kAdvertiseHeaderSize + static_cast<std::size_t>(path_len));
+}
+
+/**
+ * @brief Could the front of @p buf be a (possibly still incomplete) advertise?
+ *
+ * Progressive prefix validation for the control-stream decoder's
+ * resynchronization: checks exactly the bytes that have arrived so far —
+ * magic, format version, reserved-MBZ, and the @ref kAdvertiseMaxPathLen
+ * bound — and never rejects a prefix that more bytes could still complete.
+ *
+ * A `true` on an incomplete buffer means "wait for more bytes"; a `false`
+ * means the stream cannot be decoded from this offset (a mid-stream join or
+ * a lost control frame left a fragment) and the consumer should drop bytes
+ * until the next plausible boundary. @ref decode_advertise stays the single
+ * authority for complete frames.
+ *
+ * @param buf The front of an advertise control byte stream (any length).
+ * @return Whether an advertise could still begin at offset 0 of @p buf.
+ */
+[[nodiscard]] inline bool advertise_prefix_plausible(std::span<const std::byte> buf) {
+    const auto u8 = [&](std::size_t i) { return std::to_integer<std::uint8_t>(buf[i]); };
+    if (!buf.empty() && u8(0) != kAdvertiseMagic) return false;
+    if (buf.size() >= 2 && u8(1) != kAdvertiseFormatVersion) return false;
+    if (buf.size() >= 4 && u8(3) != 0u) return false;  // reserved MBZ
+    if (buf.size() >= kAdvertiseHeaderSize) {
+        const auto path_len =
+            static_cast<std::uint16_t>(u8(16) | (static_cast<std::uint16_t>(u8(17)) << 8));
+        if (path_len > kAdvertiseMaxPathLen) return false;
+    }
+    return true;
 }
 
 }  // namespace tr::net::can

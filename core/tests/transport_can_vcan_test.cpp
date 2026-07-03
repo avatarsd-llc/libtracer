@@ -25,6 +25,8 @@
 #include <memory>
 #include <mutex>
 #include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "libtracer/transport_can.hpp"
@@ -114,6 +116,37 @@ int main() {
     const bool got_a = sink_a.wait_for_count(1, 3s);
     check(got_a, "A received B's frame over vcan0");
     if (got_a) check(equal_bytes(sink_a.last(), b2a), "B->A bytes byte-exact over the real bus");
+
+    // ADR-0044: stateless peer enumeration over the REAL bus. Both nodes have
+    // spoken (join hello + the round trips above), so each is audible to the other.
+    const auto peers_of = [](tr::net::transport_can& t) {
+        std::vector<std::string> names;
+        t.enumerate_peers([&](std::string_view p) { names.emplace_back(p); });
+        return names;
+    };
+    check(peers_of(tx_a) == std::vector<std::string>{"n2"}, "A enumerates exactly peer n2");
+    check(peers_of(tx_b) == std::vector<std::string>{"n1"}, "B enumerates exactly peer n1");
+
+    // ADR-0044: directed per-peer send over the real bus. C (node 3) joins the same
+    // vcan0; a frame A sends via its n2 peer endpoint reaches B and NOT C.
+    auto link_c = std::make_unique<tr::net::socketcan_link_t>("vcan0");
+    check(link_c->ok(), "third CAN_RAW socket bound to vcan0");
+    tr::net::transport_can tx_c(std::move(link_c),
+                                {0, 3, tr::view::can_frame_mode_t::CLASSIC, "c/r"});
+    sink_t sink_c;
+    tx_c.set_receiver([&](std::span<const std::byte> f) { sink_c.on(f); });
+
+    tr::net::transport_t* const to_b = tx_a.peer_link("n2");
+    check(to_b != nullptr, "A resolves peer n2 to a directed endpoint");
+    const std::vector<std::byte> directed = payload(18, 0x77);
+    if (to_b != nullptr) to_b->send(directed);
+    const bool got_directed = sink_b.wait_for_count(2, 3s);
+    check(got_directed, "B received the DIRECTED frame over vcan0");
+    if (got_directed) {
+        check(equal_bytes(sink_b.last(), directed), "directed bytes byte-exact");
+    }
+    check(!sink_c.wait_for_count(1, 300ms),
+          "bystander C delivered nothing (directed group skips non-addressed peers)");
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");

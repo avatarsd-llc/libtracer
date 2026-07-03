@@ -261,23 +261,64 @@ void test_fd_dlc_padding() {
     check(sink.wait_for_count(1, 2s), "FD payload delivered");
     check(equal_bytes(sink.last(), payload), "FD delivered bytes byte-exact (padding trimmed)");
 
-    // The tap drains on its own thread: advertise (3 control frames) + 2 data frames.
-    tap.wait_for_count(5, 2s);
-    // Inspect the data frames the bus actually carried (endpoint != control slot).
+    // The tap drains on its own thread and lags the delivery path; the frame
+    // census (hellos + advertise + data) is a v2 wire detail the test should not
+    // hard-code — wait for the condition itself: the padded tail data frame.
     bool saw_full = false, saw_padded = false, saw_control = false;
-    for (const auto& f : tap.snapshot()) {
-        const auto fields = can::decode_can_id(f.id);
-        if (!fields) continue;
-        if (fields->endpoint == tr::net::kCanControlEndpoint) {
-            saw_control = true;
-            continue;
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    do {
+        saw_full = saw_padded = saw_control = false;
+        for (const auto& f : tap.snapshot()) {
+            const auto fields = can::decode_can_id(f.id);
+            if (!fields) continue;
+            if (fields->endpoint == tr::net::kCanControlEndpoint) {
+                saw_control = true;
+                continue;
+            }
+            if (f.len == 64) saw_full = true;
+            if (f.len == 48) saw_padded = true;  // can_fd_dlc_round_up(36) == 48
         }
-        if (f.len == 64) saw_full = true;
-        if (f.len == 48) saw_padded = true;  // can_fd_dlc_round_up(36) == 48
-    }
+        if (saw_control && saw_full && saw_padded) break;
+        std::this_thread::sleep_for(5ms);
+    } while (std::chrono::steady_clock::now() < deadline);
     check(saw_control, "an advertise rode the control slot");
     check(saw_full, "interior FD slice carried a full 64-byte data field");
     check(saw_padded, "tail FD slice padded up to DLC 48 (can_fd_dlc_round_up(36))");
+}
+
+void test_control_stream_resync() {
+    std::printf("transport_can control-stream resync (mid-stream join):\n");
+
+    fake_can_bus_t bus;
+    auto link_b = std::make_unique<fake_link_t>(bus);
+    fake_link_t injector(bus);  // stands in for the tail of an in-flight advertise
+
+    // B is listening BEFORE A exists — then a fragment of node 1's control
+    // stream arrives (what a mid-stream join or a lost control frame leaves
+    // behind). Without resynchronization this wedges B's decoder for node 1
+    // permanently and A's later traffic is never delivered.
+    tr::net::transport_can tx_b(std::move(link_b),
+                                {0, 2, tr::view::can_frame_mode_t::CLASSIC, "q"});
+    sink_t sink;
+    tx_b.set_receiver([&](std::span<const std::byte> f) { sink.on(f); });
+
+    tr::net::can_frame_data_t fragment;
+    fragment.id = can::encode_can_id({0, 1, tr::net::kCanControlEndpoint});
+    fragment.fd = false;
+    fragment.len = 5;
+    const std::uint8_t tail[5] = {0x6F, 0x72, 0x2F, 0x74, 0x65};  // "or/te" — path bytes
+    for (std::size_t i = 0; i < 5; ++i) fragment.data[i] = static_cast<std::byte>(tail[i]);
+    injector.write_raw(fragment);
+
+    auto link_a = std::make_unique<fake_link_t>(bus);
+    tr::net::transport_can tx_a(std::move(link_a),
+                                {0, 1, tr::view::can_frame_mode_t::CLASSIC, "sensor/temp"});
+    const std::vector<std::byte> payload = make_payload(24);
+    tx_a.send(payload);
+
+    const bool got = sink.wait_for_count(1, 2s);
+    check(got, "delivery survives a garbage control-stream prefix (resync)");
+    if (got) check(equal_bytes(sink.last(), payload), "resynced delivery is byte-exact");
 }
 
 void test_lifecycle() {
@@ -323,6 +364,7 @@ int main() {
     test_roundtrip(tr::view::can_frame_mode_t::FD, 150, "CAN-FD, multi-frame");
     test_single_value();
     test_fd_dlc_padding();
+    test_control_stream_resync();
     test_lifecycle();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");

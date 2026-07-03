@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <functional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include "libtracer/view.hpp"
@@ -25,6 +26,68 @@ namespace tr::net {
 // A 16-byte node/peer identity — the ROUTER `origin_peer_id` (docs/reference/05
 // §0x0D ROUTER).
 using peer_id_t = std::array<std::byte, 16>;
+
+class transport_t;
+
+/**
+ * @brief The optional multi-peer (bus) capability of a transport link (ADR-0044).
+ *
+ * A point-to-point link (ws/tcp/udp/quic) carries exactly one peer, so its child
+ * NAME fully addresses the far side. A BUS link (CAN) reaches many peers over one
+ * wire; this interface is how such a link exposes them to the routing plane with
+ * ZERO stored graph state (ADR-0044 §1 — no vertex is ever created for a peer):
+ *
+ *  - @ref enumerate_peers synthesizes, on the fly, the names of the peers
+ *    currently audible on the bus (from the transport kind's own live
+ *    announce/heartbeat traffic) — the `:children[]` listing of the link's
+ *    connection vertex;
+ *  - @ref peer_link resolves one such NAME to a directed sending endpoint, the
+ *    seam @ref child_registry_t falls back to when a FWD's next `dst` segment
+ *    names no static child — so a peer name IS a routable hop segment;
+ *  - @ref set_peer_receiver replaces the flat inbound sink with a peer-named
+ *    one: each inbound frame arrives tagged with the SENDING peer's name, which
+ *    the router uses as the hop's inbound NAME — so the return route grown into
+ *    `src` names the bus peer to route the reply back to, symmetrically, with no
+ *    per-request state.
+ *
+ * Peer names are transport-defined but MUST be deterministic and collision-safe
+ * within the bus (the CAN binding derives them from the structured ID's `node`
+ * field). All three calls may race the transport's receive thread; impls
+ * synchronize internally.
+ */
+class bus_link_t {
+   public:
+    /** @brief Visitor invoked once per currently-audible peer name. */
+    using peer_visitor_t = std::function<void(std::string_view)>;
+    /** @brief The peer-named inbound sink: (sending peer's name, frame bytes). */
+    using peer_receiver_t = std::function<void(std::string_view, std::span<const std::byte>)>;
+
+    /**
+     * @brief Visit the peers currently audible on the bus (a live-traffic snapshot).
+     * @note Synthesized on the fly — no call allocates peer state or graph structure.
+     */
+    virtual void enumerate_peers(const peer_visitor_t& visit) const = 0;
+
+    /**
+     * @brief Resolve a peer NAME to a directed sending endpoint on this bus.
+     *
+     * The returned transport sends to THAT peer only (the bus binding's directed
+     * framing); it is owned by this link and stays valid for the link's lifetime.
+     * @retval nullptr @p peer names no currently-known bus peer.
+     */
+    [[nodiscard]] virtual transport_t* peer_link(std::string_view peer) = 0;
+
+    /**
+     * @brief Register the peer-named inbound sink (used INSTEAD of `set_receiver`).
+     *
+     * Must be set before frames flow; delivery may occur on an internal transport
+     * thread. When set, it takes precedence over a flat @ref transport_t receiver.
+     */
+    virtual void set_peer_receiver(peer_receiver_t receiver) = 0;
+
+   protected:
+    ~bus_link_t() = default;  // never deleted through this facet
+};
 
 class transport_t {
    public:
@@ -79,6 +142,16 @@ class transport_t {
      *        honors @ref set_view_receiver by delivering refcounted `view_t` frames.
      */
     [[nodiscard]] virtual bool delivers_views() const { return false; }
+
+    /**
+     * @brief The multi-peer (bus) capability (ADR-0044): non-null iff this link
+     *        reaches many peers and exposes them via @ref bus_link_t.
+     *
+     * A point-to-point transport keeps the default nullptr; a bus transport (the
+     * CAN binding) returns its own @ref bus_link_t facet, which the router and the
+     * connection vertex consult for peer resolution and peer enumeration.
+     */
+    [[nodiscard]] virtual bus_link_t* bus() { return nullptr; }
 };
 
 }  // namespace tr::net
