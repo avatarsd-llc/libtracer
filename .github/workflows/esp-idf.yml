@@ -31,19 +31,18 @@ on:
   workflow_dispatch:
 
 # ── Footprint sentinel thresholds (full-node job) ────────────────────────────
-# ⚠️ PLACEHOLDER VALUES — deliberately generous, NOT measured. No local IDF v6.0
-# toolchain was available when this sentinel was wired, so these bound nothing
-# yet: LIBTRACER_SENTINEL_MODE is "warn" (over-threshold prints a ::warning::
-# annotation, never fails the job). After the first CI run, read the measured
-# component numbers from the full-node job's step summary (or the
-# footprint-<target> artifact), TIGHTEN the two byte limits to measured value
-# + ~10 % headroom, and flip LIBTRACER_SENTINEL_MODE to "fail" so a footprint
-# regression turns the job red. Thresholds gate the libtracer component archive
-# (liblibtracer.a) only, not the whole app image.
+# MEASURED provenance (PR #193 first run, 2026-07-03, espressif/idf:release-v6.0,
+# -Os): liblibtracer.a flash 78,825 B (esp32c3) / 82,861 B (esp32c6); static RAM
+# 16 B on both. Flash limit = measured + ~15 % headroom. The static-RAM limit is
+# deliberately tight (4 KiB against a measured 16 B): the library holds NO
+# internal buffers (ADR-0041 §5) — any static buffer sneaking in trips the gate.
+# Thresholds gate the libtracer component archive (liblibtracer.a) only, not the
+# whole app image. To re-baseline after intentional growth: read the measured
+# numbers from the full-node job step summary / footprint-<target> artifact.
 env:
-  LIBTRACER_MAX_FLASH_BYTES: 524288 # 512 KiB — placeholder, tighten from CI
-  LIBTRACER_MAX_STATIC_RAM_BYTES: 65536 # 64 KiB — placeholder, tighten from CI
-  LIBTRACER_SENTINEL_MODE: warn # flip to "fail" once thresholds are measured
+  LIBTRACER_MAX_FLASH_BYTES: 98304 # 96 KiB — measured 2026-07-03: 78,825 B (c3) / 82,861 B (c6) + headroom
+  LIBTRACER_MAX_STATIC_RAM_BYTES: 4096 # measured 2026-07-03: 16 B — the tight ceiling ENFORCES the no-internal-buffers ruling (ADR-0041 §5)
+  LIBTRACER_SENTINEL_MODE: fail # thresholds are measured (see above); a breach is a real regression
 
 jobs:
   build:

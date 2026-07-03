@@ -84,7 +84,7 @@ Footprint numbers are **measured and published on every run of the `full-node` C
 
 What is measured: the `full_node` build (`espressif/idf:release-v6.0`, `-Os` defaults) — graph + fwd_router + transport_vertex + udp/tcp/ws/can transports + TWAI link, plus the example app and IDF's Wi-Fi/lwIP stack.
 
-The same CI step is a **footprint sentinel**: it gates the libtracer component's flash and static-RAM contribution against thresholds set at the top of [`esp-idf.yml`](../../.github/workflows/esp-idf.yml) (via [`tools/esp_size_gate.py`](../../tools/esp_size_gate.py)). The initial thresholds are generous placeholders in **warn-only mode**; they are to be tightened to measured-value + headroom (and flipped to `fail`) once the first runs publish real numbers — see the comment block in the workflow.
+The same CI step is a **footprint sentinel**: it gates the libtracer component's flash and static-RAM contribution against thresholds set at the top of [`esp-idf.yml`](../../.github/workflows/esp-idf.yml) (via [`tools/esp_size_gate.py`](../../tools/esp_size_gate.py)). Thresholds are **measured and enforcing** (first baseline 2026-07-03: component flash ≈ 77–81 KiB, static RAM **16 bytes** — the library holds no internal buffers, so the 4 KiB static-RAM ceiling structurally guards that ruling).
 
 Steady-state heap is what you configure: the full_node example runs its RX segments and router tables out of a **24 KiB static slab** (12 KiB pool → 7 × 1536 B datagram slots + 12 KiB pmr arena); each live socket transport additionally owns one recv thread (stack below).
 
