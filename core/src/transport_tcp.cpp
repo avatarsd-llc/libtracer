@@ -8,7 +8,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <poll.h>
+#include <sys/poll.h>  // the <sys/…> spelling: ESP-IDF's libc has no top-level <poll.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/uio.h>
