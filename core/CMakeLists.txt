@@ -16,6 +16,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_library(libtracer STATIC
     src/frame.cpp
     src/tlv_arena.cpp
+    src/backend_set.cpp
     src/mem_heap.cpp
     src/mem_pool.cpp
     src/rope.cpp

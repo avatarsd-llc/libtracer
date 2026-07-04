@@ -37,6 +37,7 @@ class borrowed_backend_t final : public mem_backend_t {
     borrowed_backend_t() noexcept : mem_backend_t("mem_borrowed") {}
     // No alloc: a borrow wraps existing bytes (see tr::view::borrow below).
     void destroy(view::segment_t* seg) noexcept override { delete seg; }  // control block only
+    [[nodiscard]] backend_tag tag() const noexcept override { return backend_tag::BORROWED; }
 };
 
 /** @brief The process-wide borrowed backend (function-local static). */
@@ -52,6 +53,7 @@ class borrowed_device_backend_t final : public mem_backend_t {
     borrowed_device_backend_t() noexcept : mem_backend_t("mem_borrowed_device") {}
     void destroy(view::segment_t* seg) noexcept override { delete seg; }
     [[nodiscard]] mem_space_t space() const noexcept override { return mem_space_t::DEVICE; }
+    [[nodiscard]] backend_tag tag() const noexcept override { return backend_tag::BORROWED_DEVICE; }
 };
 
 /** @brief The process-wide device-borrowed backend (function-local static). */

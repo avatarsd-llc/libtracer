@@ -50,7 +50,7 @@ import tempfile
 # rope), the L2/L3 wire codec (frame + terminus arena decode), and L4 addressing
 # (path). No graph runtime, no transports, no threads — the surface v1.md §3.1
 # guarantees an MCU can carry. Keep in sync with sentinel_node.cpp's includes.
-REQUIRED_MODULES = ("frame", "tlv_arena", "mem_pool", "rope", "path")
+REQUIRED_MODULES = ("frame", "tlv_arena", "backend_set", "mem_pool", "rope", "path")
 FIXTURE = "core/tests/footprint/sentinel_node.cpp"
 DEFAULT_BUDGET = 16 * 1024  # 16 KiB — the ADR-0016 §3 / ADR-0047 §5 Cortex-M0 bound.
 
@@ -88,6 +88,8 @@ def _compile_and_link(
         "-mthumb",
         "-DLIBTRACER_NO_ATOMIC",
         "-DNDEBUG",  # release profile: debug-only asserts (view.hpp bounds checks) compile out.
+        # Single-backend MCU profile: the destroy dispatch folds to one direct call (ADR-0047 §2).
+        "-DLIBTRACER_BACKEND_SET_POOL_ONLY",
         "-ffunction-sections",
         "-fdata-sections",
         "-Wall",

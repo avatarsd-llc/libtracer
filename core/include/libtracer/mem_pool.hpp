@@ -56,6 +56,7 @@ class pool_t final : public mem_backend_t {
     void destroy(view::segment_t* seg) noexcept override;
     [[nodiscard]] std::size_t alignment() const noexcept override { return align_; }
     [[nodiscard]] std::size_t max_segment_size() const noexcept override { return slot_payload_; }
+    [[nodiscard]] backend_tag tag() const noexcept override { return backend_tag::POOL; }
 
     [[nodiscard]] std::size_t capacity() const noexcept {
         return slot_count_;

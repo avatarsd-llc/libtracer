@@ -34,6 +34,7 @@ set(LIBTRACER_SRCS
     # L2/L3 wire codec + L0/L1 substrate + L4 graph runtime (the P0 profile)
     "${LIBTRACER_ROOT}/core/src/frame.cpp"
     "${LIBTRACER_ROOT}/core/src/tlv_arena.cpp"
+    "${LIBTRACER_ROOT}/core/src/backend_set.cpp"
     "${LIBTRACER_ROOT}/core/src/mem_heap.cpp"
     "${LIBTRACER_ROOT}/core/src/mem_pool.cpp"
     "${LIBTRACER_ROOT}/core/src/rope.cpp"
