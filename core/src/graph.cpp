@@ -35,11 +35,11 @@ using wire::view_as_tlv;
 namespace {
 
 // Emit a VALUE TLV holding a `width`-byte little-endian integer — the one bespoke
-// emitter for building a :schema POINT; NAME/SETTINGS/POINT use detail::emit_*.
+// emitter for building a :schema POINT; NAME/SETTINGS/POINT use wire::emit_*.
 void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
     std::vector<std::byte> payload(static_cast<std::size_t>(width));
     detail::store_le(payload, value, static_cast<std::size_t>(width));
-    detail::emit_tlv(out, type_t::VALUE, opt_t{}, payload);
+    wire::emit_tlv(out, type_t::VALUE, opt_t{}, payload);
 }
 
 // Canonical-key NAME navigation (last segment, parent, ancestor/child, level
@@ -173,7 +173,7 @@ struct branch_node_t {
             if (cn >= c.end || a[cn].type != type_t::NAME)
                 return std::unexpected(status_t::TYPE_MISMATCH);
             std::vector<std::byte> child_key = key;
-            detail::emit_name(child_key, a[cn].body);
+            wire::emit_name(child_key, a[cn].body);
             const result_t<bool> sub =
                 parse_branch_node(a, i, frame_view, std::move(child_key), out);
             if (!sub) return std::unexpected(sub.error());
@@ -870,7 +870,7 @@ result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value)
     // Compose the child key = parent's canonical PATH-payload + one NAME(child_name).
     // The graph owns this addressing; the factory only sees the finished key.
     std::vector<std::byte> child_key = parent->key_.bytes;
-    detail::emit_name(child_key, child_name);
+    wire::emit_name(child_key, child_name);
 
     result_t<vertex_t*> made = it->second(*this, std::move(child_key), config);
     if (!made) return std::unexpected(made.error());  // PATH_IN_USE on a duplicate name
@@ -886,18 +886,18 @@ result_t<view_t> graph_t::read_schema(vertex_t* v) const {
     // POINT { NAME <vertex name>, SETTINGS { NAME "deadline_ns" VALUE u64,
     //                                        NAME "history_keep_last" VALUE u32 } }
     std::vector<std::byte> settings_children;
-    detail::emit_name(settings_children, "deadline_ns");
+    wire::emit_name(settings_children, "deadline_ns");
     emit_value(settings_children, s.deadline_ns, 8);
-    detail::emit_name(settings_children, "history_keep_last");
+    wire::emit_name(settings_children, "history_keep_last");
     emit_value(settings_children, s.history_keep_last, 4);
 
     std::vector<std::byte> point_body;
-    detail::emit_name(point_body, key_view_t{v->key_.bytes}.last_segment());
-    detail::emit_tlv(point_body, type_t::SETTINGS, opt_t{.pl = true},
-                     settings_children);  // SETTINGS
+    wire::emit_name(point_body, key_view_t{v->key_.bytes}.last_segment());
+    wire::emit_tlv(point_body, type_t::SETTINGS, opt_t{.pl = true},
+                   settings_children);  // SETTINGS
 
     std::vector<std::byte> point;
-    detail::emit_tlv(point, type_t::POINT, opt_t{.pl = true}, point_body);  // POINT
+    wire::emit_tlv(point, type_t::POINT, opt_t{.pl = true}, point_body);  // POINT
 
     // `point` is a POINT TLV (never empty); an empty result is exactly an alloc
     // failure → BACKPRESSURE. One audited locus for the alloc/copy/over triplet.
@@ -939,11 +939,11 @@ result_t<view_t> graph_t::read_children(vertex_t* v) const {
             // A direct child is `pk` plus exactly one more NAME record; that record
             // IS the child's canonical NAME encoding — the POINT body verbatim.
             if (const auto rec = key_view_t{key.bytes}.child_record_under(pk))
-                detail::emit_tlv(members, type_t::POINT, opt_t{.pl = true}, *rec);
+                wire::emit_tlv(members, type_t::POINT, opt_t{.pl = true}, *rec);
         }
     }
     std::vector<std::byte> out;
-    detail::emit_tlv(out, type_t::POINT, opt_t{.pl = true}, members);
+    wire::emit_tlv(out, type_t::POINT, opt_t{.pl = true}, members);
     // `out` is non-empty by construction; an empty view is exactly an alloc
     // failure → BACKPRESSURE (the audited alloc/copy/over locus).
     const view_t res = view::over_bytes(out);

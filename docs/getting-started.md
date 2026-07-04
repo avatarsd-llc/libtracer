@@ -129,7 +129,7 @@ router_a.on_frame("client", fwd_write({"b", "sensor", "temp"}, value_tlv_23));
 ```{tip}
 Cross-node values travel as a **VALUE TLV** so the peer can decode them structurally;
 in-process you can store any opaque bytes. `fwd_write` builds the FWD frame with the
-`tr::detail::emit_tlv`/`emit_name` helpers from `tlv_emit.hpp` — see the
+`tr::wire::emit_tlv`/`emit_name` helpers from `tlv_emit.hpp` — see the
 `fwd_write` helper in
 [`udp_test.cpp`](https://github.com/avatarsd-llc/libtracer/blob/main/core/tests/udp_test.cpp)
 for the exact fifteen lines.

@@ -118,8 +118,8 @@ struct capture_transport_t : transport_t {
 // Append a NAME-only PATH TLV over `segs`.
 void emit_path(std::vector<std::byte>& out, std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
-    for (std::string_view s : segs) tr::detail::emit_name(body, s);
-    tr::detail::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    for (std::string_view s : segs) tr::wire::emit_name(body, s);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
 }
 
 // Build FWD{ op=WRITE, dst=<dst...>, src=<src...>, VALUE payload } — the frame a
@@ -129,12 +129,12 @@ std::vector<std::byte> make_fwd(std::initializer_list<std::string_view> dst,
                                 std::span<const std::byte> payload) {
     std::vector<std::byte> body;
     const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE)};
-    tr::detail::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
     emit_path(body, dst);
     emit_path(body, src);
-    tr::detail::emit_tlv(body, type_t::VALUE, opt_t{}, payload);
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, payload);
     std::vector<std::byte> frame;
-    tr::detail::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
     return frame;
 }
 
@@ -190,19 +190,17 @@ int main() {
     bool replied = false;
     if (v != nullptr) {
         std::vector<std::byte> stored;
-        tr::detail::emit_tlv(stored, type_t::VALUE, opt_t{},
-                             std::span<const std::byte>(payload, 4));
+        tr::wire::emit_tlv(stored, type_t::VALUE, opt_t{}, std::span<const std::byte>(payload, 4));
         tr::view::view_t sv = tr::view::over_bytes(stored);
         (void)graph.write(v, sv);
 
         std::vector<std::byte> read_body;
         const std::byte rop{static_cast<std::uint8_t>(tr::graph::fwd_op_t::READ)};
-        tr::detail::emit_tlv(read_body, type_t::VALUE, opt_t{},
-                             std::span<const std::byte>(&rop, 1));
+        tr::wire::emit_tlv(read_body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&rop, 1));
         emit_path(read_body, {"sensor", "temp"});
         emit_path(read_body, {"reply"});
         std::vector<std::byte> read_frame;
-        tr::detail::emit_tlv(read_frame, type_t::FWD, opt_t{.pl = true}, read_body);
+        tr::wire::emit_tlv(read_frame, type_t::FWD, opt_t{.pl = true}, read_body);
 
         router.on_frame("in", read_frame);  // warm outside the window
         const std::size_t warm_in = in_link.sends;

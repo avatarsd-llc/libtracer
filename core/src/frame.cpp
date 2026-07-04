@@ -201,7 +201,7 @@ std::vector<std::byte> encode(const tlv_t& tlv) {
 
 std::vector<std::byte> path_key(const tlv_t& path) {
     // The canonical PATH-payload key = the concatenated NAME-child encodings. Emit each
-    // NAME TLV in place (detail::emit_name appends `02 00 <len> <bytes>` directly) instead
+    // NAME TLV in place (wire::emit_name appends `02 00 <len> <bytes>` directly) instead
     // of encode()-per-child into a temporary vector — one reserve + N appends, no per-
     // segment allocation. A PATH's children are plain NAMEs (opt 0, no trailer), so this
     // is byte-identical to encode(name); and it matches what path_t/register_vertex store
@@ -210,7 +210,7 @@ std::vector<std::byte> path_key(const tlv_t& path) {
     std::size_t total = 0;
     for (const tlv_t& name : path.children) total += 4 + name.payload.size();
     key.reserve(total);
-    for (const tlv_t& name : path.children) detail::emit_name(key, name.payload);
+    for (const tlv_t& name : path.children) wire::emit_name(key, name.payload);
     return key;
 }
 

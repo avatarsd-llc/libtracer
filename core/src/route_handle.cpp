@@ -141,7 +141,7 @@ namespace {
 void emit_label(std::vector<std::byte>& out, std::uint16_t label) {
     std::array<std::byte, 2> p{};
     detail::store_le<std::uint16_t>(p, label);
-    detail::emit_tlv(out, type_t::VALUE, opt_t{}, p);
+    wire::emit_tlv(out, type_t::VALUE, opt_t{}, p);
 }
 
 }  // namespace
@@ -152,7 +152,7 @@ std::vector<std::byte> encode_advertise(std::uint16_t label,
     emit_label(body, label);
     body.insert(body.end(), route_path.begin(), route_path.end());
     std::vector<std::byte> out;
-    detail::emit_tlv(out, type_t::ADVERTISE, opt_t{.pl = true}, body);
+    wire::emit_tlv(out, type_t::ADVERTISE, opt_t{.pl = true}, body);
     return out;
 }
 
@@ -161,7 +161,7 @@ std::vector<std::byte> encode_compact(std::uint16_t label, std::span<const std::
     emit_label(body, label);
     body.insert(body.end(), payload.begin(), payload.end());
     std::vector<std::byte> out;
-    detail::emit_tlv(out, type_t::COMPACT, opt_t{.pl = true}, body);
+    wire::emit_tlv(out, type_t::COMPACT, opt_t{.pl = true}, body);
     return out;
 }
 
@@ -169,7 +169,7 @@ std::vector<std::byte> encode_handle_nack(std::uint16_t label) {
     std::vector<std::byte> body;
     emit_label(body, label);
     std::vector<std::byte> out;
-    detail::emit_tlv(out, type_t::HANDLE_NACK, opt_t{.pl = true}, body);
+    wire::emit_tlv(out, type_t::HANDLE_NACK, opt_t{.pl = true}, body);
     return out;
 }
 

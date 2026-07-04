@@ -336,15 +336,15 @@ std::vector<std::byte> fwd_read(std::initializer_list<std::string_view> dst,
                                 std::initializer_list<std::string_view> src) {
     std::vector<std::byte> body;
     const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::READ)};
-    tr::detail::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
     std::vector<std::byte> dst_segs;
-    for (std::string_view s : dst) tr::detail::emit_name(dst_segs, s);
-    tr::detail::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, dst_segs);
+    for (std::string_view s : dst) tr::wire::emit_name(dst_segs, s);
+    tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, dst_segs);
     std::vector<std::byte> src_segs;
-    for (std::string_view s : src) tr::detail::emit_name(src_segs, s);
-    tr::detail::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, src_segs);
+    for (std::string_view s : src) tr::wire::emit_name(src_segs, s);
+    tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, src_segs);
     std::vector<std::byte> frame;
-    tr::detail::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
     return frame;
 }
 
@@ -371,7 +371,7 @@ void test_fwd_read_round_trip() {
     (void)node_b.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
     std::vector<std::byte> tv;
     const std::byte tbyte{0x2A};
-    tr::detail::emit_tlv(tv, type_t::VALUE, opt_t{}, std::span<const std::byte>(&tbyte, 1));
+    tr::wire::emit_tlv(tv, type_t::VALUE, opt_t{}, std::span<const std::byte>(&tbyte, 1));
     (void)node_b.write(*path_t::parse("/sensor/temp"), owned(tv));
 
     router_a.add_child("b", ta);
@@ -408,36 +408,36 @@ view_t conn_spec(std::string_view type, std::string_view name, tr::net::conn_rol
                  std::uint16_t port, std::string_view addr = {}, std::string_view cert = {},
                  std::string_view key = {}) {
     std::vector<std::byte> cfg;
-    tr::detail::emit_name(cfg, "role");
+    tr::wire::emit_name(cfg, "role");
     const std::byte r{static_cast<std::uint8_t>(role)};
-    tr::detail::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&r, 1));
-    tr::detail::emit_name(cfg, "port");
+    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&r, 1));
+    tr::wire::emit_name(cfg, "port");
     std::vector<std::byte> pb(2);
     tr::detail::store_le(pb, port, 2);
-    tr::detail::emit_tlv(cfg, type_t::VALUE, opt_t{}, pb);
-    tr::detail::emit_name(cfg, "kind");
-    tr::detail::emit_name(cfg, "webtransport");
+    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, pb);
+    tr::wire::emit_name(cfg, "kind");
+    tr::wire::emit_name(cfg, "webtransport");
     if (!addr.empty()) {
-        tr::detail::emit_name(cfg, "addr");
-        tr::detail::emit_name(cfg, addr);
+        tr::wire::emit_name(cfg, "addr");
+        tr::wire::emit_name(cfg, addr);
     }
     if (!cert.empty()) {
-        tr::detail::emit_name(cfg, "cert");
-        tr::detail::emit_name(cfg, cert);
-        tr::detail::emit_name(cfg, "key");
-        tr::detail::emit_name(cfg, key);
+        tr::wire::emit_name(cfg, "cert");
+        tr::wire::emit_name(cfg, cert);
+        tr::wire::emit_name(cfg, "key");
+        tr::wire::emit_name(cfg, key);
     }
 
     std::vector<std::byte> body;
-    tr::detail::emit_name(body, "type");
-    tr::detail::emit_name(body, type);
-    tr::detail::emit_name(body, "name");
-    tr::detail::emit_name(body, name);
-    tr::detail::emit_name(body, "config");
-    tr::detail::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
+    tr::wire::emit_name(body, "type");
+    tr::wire::emit_name(body, type);
+    tr::wire::emit_name(body, "name");
+    tr::wire::emit_name(body, name);
+    tr::wire::emit_name(body, "config");
+    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
 
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
     return owned(out);
 }
 

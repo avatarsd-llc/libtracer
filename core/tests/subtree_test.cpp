@@ -73,7 +73,7 @@ std::vector<std::byte> value_tlv(std::initializer_list<std::uint8_t> payload) {
     std::vector<std::byte> body;
     for (const std::uint8_t b : payload) body.push_back(std::byte{b});
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::VALUE, opt_t{}, body);
+    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, body);
     return out;
 }
 
@@ -81,10 +81,10 @@ std::vector<std::byte> value_tlv(std::initializer_list<std::uint8_t> payload) {
 // (concatenated VALUE / nested POINT TLVs).
 std::vector<std::byte> point_tlv(std::string_view name, std::span<const std::byte> children) {
     std::vector<std::byte> body;
-    tr::detail::emit_name(body, name);
+    tr::wire::emit_name(body, name);
     body.insert(body.end(), children.begin(), children.end());
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::POINT, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::POINT, opt_t{.pl = true}, body);
     return out;
 }
 
@@ -274,7 +274,7 @@ void test_branch_write_strictness() {
 
     // Only NAME / VALUE / POINT children are admitted in a branch write.
     std::vector<std::byte> alien;
-    tr::detail::emit_tlv(alien, type_t::TIME, opt_t{}, std::vector<std::byte>(8));
+    tr::wire::emit_tlv(alien, type_t::TIME, opt_t{}, std::vector<std::byte>(8));
     const auto bad = g.write(s, make_value(point_tlv("s", alien)));
     check(!bad.has_value() && bad.error() == status_t::TYPE_MISMATCH,
           "a non-{NAME,VALUE,POINT} child => TYPE_MISMATCH");
@@ -322,21 +322,21 @@ void test_write_creates_acl_gate() {
     // ACE bytes per docs/reference/05 §0x0A (the acl_test builder shape).
     const std::uint32_t write_bit = static_cast<std::uint32_t>(acl_right_t::WRITE);
     std::vector<std::byte> ace_body;
-    tr::detail::emit_name(ace_body, "type");
-    tr::detail::emit_tlv(ace_body, type_t::VALUE, opt_t{}, std::vector<std::byte>{std::byte{0}});
-    tr::detail::emit_name(ace_body, "flags");
-    tr::detail::emit_tlv(ace_body, type_t::VALUE, opt_t{}, std::vector<std::byte>{std::byte{0x1}});
-    tr::detail::emit_name(ace_body, "subject");
+    tr::wire::emit_name(ace_body, "type");
+    tr::wire::emit_tlv(ace_body, type_t::VALUE, opt_t{}, std::vector<std::byte>{std::byte{0}});
+    tr::wire::emit_name(ace_body, "flags");
+    tr::wire::emit_tlv(ace_body, type_t::VALUE, opt_t{}, std::vector<std::byte>{std::byte{0x1}});
+    tr::wire::emit_name(ace_body, "subject");
     std::vector<std::byte> everyone;
     for (const char c : std::string_view("EVERYONE@")) everyone.push_back(std::byte(c));
-    tr::detail::emit_tlv(ace_body, type_t::VALUE, opt_t{}, everyone);
-    tr::detail::emit_name(ace_body, "access_mask");
-    tr::detail::emit_tlv(ace_body, type_t::VALUE, opt_t{},
-                         std::vector<std::byte>{std::byte(write_bit & 0xFF), std::byte{0}});
+    tr::wire::emit_tlv(ace_body, type_t::VALUE, opt_t{}, everyone);
+    tr::wire::emit_name(ace_body, "access_mask");
+    tr::wire::emit_tlv(ace_body, type_t::VALUE, opt_t{},
+                       std::vector<std::byte>{std::byte(write_bit & 0xFF), std::byte{0}});
     std::vector<std::byte> ace;
-    tr::detail::emit_tlv(ace, type_t::ACL, opt_t{.pl = true}, ace_body);
+    tr::wire::emit_tlv(ace, type_t::ACL, opt_t{.pl = true}, ace_body);
     std::vector<std::byte> acl;
-    tr::detail::emit_tlv(acl, type_t::ACL, opt_t{.pl = true}, ace);
+    tr::wire::emit_tlv(acl, type_t::ACL, opt_t{.pl = true}, ace);
     check(g.write(*path_t::parse("/p:acl"), make_value(acl)).has_value(),
           "install a WRITE-only (no CREATE) ACL on /p");
 
@@ -361,19 +361,19 @@ void test_branch_write_acl_admission() {
     });
     // Close /s/u to writes (an ACL granting only READ — any present ACE closes it).
     std::vector<std::byte> ace_body;
-    tr::detail::emit_name(ace_body, "type");
-    tr::detail::emit_tlv(ace_body, type_t::VALUE, opt_t{}, std::vector<std::byte>{std::byte{0}});
-    tr::detail::emit_name(ace_body, "subject");
+    tr::wire::emit_name(ace_body, "type");
+    tr::wire::emit_tlv(ace_body, type_t::VALUE, opt_t{}, std::vector<std::byte>{std::byte{0}});
+    tr::wire::emit_name(ace_body, "subject");
     std::vector<std::byte> everyone;
     for (const char c : std::string_view("EVERYONE@")) everyone.push_back(std::byte(c));
-    tr::detail::emit_tlv(ace_body, type_t::VALUE, opt_t{}, everyone);
-    tr::detail::emit_name(ace_body, "access_mask");
-    tr::detail::emit_tlv(ace_body, type_t::VALUE, opt_t{},
-                         std::vector<std::byte>{std::byte{0x01}, std::byte{0}});  // READ only
+    tr::wire::emit_tlv(ace_body, type_t::VALUE, opt_t{}, everyone);
+    tr::wire::emit_name(ace_body, "access_mask");
+    tr::wire::emit_tlv(ace_body, type_t::VALUE, opt_t{},
+                       std::vector<std::byte>{std::byte{0x01}, std::byte{0}});  // READ only
     std::vector<std::byte> ace;
-    tr::detail::emit_tlv(ace, type_t::ACL, opt_t{.pl = true}, ace_body);
+    tr::wire::emit_tlv(ace, type_t::ACL, opt_t{.pl = true}, ace_body);
     std::vector<std::byte> acl;
-    tr::detail::emit_tlv(acl, type_t::ACL, opt_t{.pl = true}, ace);
+    tr::wire::emit_tlv(acl, type_t::ACL, opt_t{.pl = true}, ace);
     check(g.write(*path_t::parse("/s/u:acl"), make_value(acl)).has_value(), "close /s/u to writes");
 
     const std::vector<std::byte> branch =

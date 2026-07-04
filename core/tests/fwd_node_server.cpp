@@ -60,7 +60,7 @@ std::vector<std::byte> value_u32(std::uint32_t v) {
     std::vector<std::byte> p(4);
     tr::detail::store_le<std::uint32_t>(p, v);
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, tr::wire::type_t::VALUE, tr::wire::opt_t{}, p);
+    tr::wire::emit_tlv(out, tr::wire::type_t::VALUE, tr::wire::opt_t{}, p);
     return out;
 }
 

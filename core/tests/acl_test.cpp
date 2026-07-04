@@ -131,16 +131,16 @@ tr::graph::result_t<void> write_u8(graph_t& g, vertex_t* v, std::uint8_t x,
                                    std::string_view caller = {}) {
     std::vector<std::byte> out;
     const std::byte payload[1] = {std::byte{x}};
-    tr::detail::emit_tlv(out, type_t::VALUE, opt_t{}, payload);
+    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, payload);
     return g.write(v, make_value(out), caller);
 }
 
 // --- FWD builders (the op_resolve_test idiom) --------------------------------
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
-    for (std::string_view s : segs) tr::detail::emit_name(body, s);
+    for (std::string_view s : segs) tr::wire::emit_name(body, s);
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
     return out;
 }
 
@@ -149,12 +149,12 @@ std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
                              const std::vector<std::byte>& payload = {}) {
     std::vector<std::byte> body;
     const std::byte opb[1] = {std::byte{static_cast<std::uint8_t>(op)}};
-    tr::detail::emit_tlv(body, type_t::VALUE, opt_t{}, opb);
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, opb);
     body.insert(body.end(), dst.begin(), dst.end());
     body.insert(body.end(), src.begin(), src.end());
     body.insert(body.end(), payload.begin(), payload.end());
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
     return out;
 }
 
@@ -347,7 +347,7 @@ void test_gated_ops() {
     // SUBSCRIBE — the producer-side :subscribers[] append gate
     {
         std::vector<std::byte> sub;
-        tr::detail::emit_tlv(sub, type_t::SUBSCRIBER, opt_t{.pl = true}, b_path({"sink"}));
+        tr::wire::emit_tlv(sub, type_t::SUBSCRIBER, opt_t{.pl = true}, b_path({"sink"}));
         const auto field = path_t::parse("/x:subscribers[]");
         check(g.write(v, field->field(), make_value(sub), "peer-s").has_value(),
               ":subscribers[] append allowed for a SUBSCRIBE-granted subject");
@@ -357,12 +357,12 @@ void test_gated_ops() {
     // CREATE — the :children[] gate (ADR-0017)
     {
         std::vector<std::byte> body;
-        tr::detail::emit_name(body, "type");
-        tr::detail::emit_name(body, "stored_value");
-        tr::detail::emit_name(body, "name");
-        tr::detail::emit_name(body, "kid");
+        tr::wire::emit_name(body, "type");
+        tr::wire::emit_name(body, "stored_value");
+        tr::wire::emit_name(body, "name");
+        tr::wire::emit_name(body, "kid");
         std::vector<std::byte> spec;
-        tr::detail::emit_tlv(spec, type_t::SPEC, opt_t{.pl = true}, body);
+        tr::wire::emit_tlv(spec, type_t::SPEC, opt_t{.pl = true}, body);
         const auto field = path_t::parse("/x:children[]");
         check(denied(g.write(v, field->field(), make_value(spec), "peer-a")),
               ":children[] create denied without the CREATE bit");
@@ -490,7 +490,7 @@ void test_two_acl_fan_in() {
 
     // Subscribe /src -> /dst as link-a (allowed by the producer's SUBSCRIBE grant).
     std::vector<std::byte> sub;
-    tr::detail::emit_tlv(sub, type_t::SUBSCRIBER, opt_t{.pl = true}, b_path({"dst"}));
+    tr::wire::emit_tlv(sub, type_t::SUBSCRIBER, opt_t{.pl = true}, b_path({"dst"}));
     const auto sub_field = path_t::parse("/src:subscribers[]");
     check(g.write(src, sub_field->field(), make_value(sub), "link-a").has_value(),
           "fan-out gate: link-a may subscribe (producer's :acl SUBSCRIBE)");
@@ -532,7 +532,7 @@ void test_remote_path() {
 
     std::vector<std::byte> payload;
     const std::byte one[1] = {std::byte{1}};
-    tr::detail::emit_tlv(payload, type_t::VALUE, opt_t{}, one);
+    tr::wire::emit_tlv(payload, type_t::VALUE, opt_t{}, one);
 
     {  // FWD WRITE denied => kind=ERROR STATUS{ERROR{VALUE 0x0050}}
         const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"x"}), b_path({"ret"}), payload);
@@ -557,18 +557,18 @@ void test_remote_path() {
     {  // a remote subscribe (SUBSCRIBER into :subscribers[]) — denied vs granted link.
         // Build FWD WRITE with a FIELD selector: NAME "subscribers" + index_mode=ELEMENT.
         std::vector<std::byte> field_body;
-        tr::detail::emit_name(field_body, "subscribers");
+        tr::wire::emit_name(field_body, "subscribers");
         const std::byte mode[1] = {std::byte{1}};  // index_mode ELEMENT (append)
-        tr::detail::emit_tlv(field_body, type_t::VALUE, opt_t{}, mode);
+        tr::wire::emit_tlv(field_body, type_t::VALUE, opt_t{}, mode);
         std::vector<std::byte> field;
-        tr::detail::emit_tlv(field, type_t::FIELD, opt_t{.pl = true}, field_body);
+        tr::wire::emit_tlv(field, type_t::FIELD, opt_t{.pl = true}, field_body);
 
         std::vector<std::byte> sub;
-        tr::detail::emit_tlv(sub, type_t::SUBSCRIBER, opt_t{.pl = true}, b_path({"sink"}));
+        tr::wire::emit_tlv(sub, type_t::SUBSCRIBER, opt_t{.pl = true}, b_path({"sink"}));
 
         std::vector<std::byte> body;
         const std::byte opb[1] = {std::byte{static_cast<std::uint8_t>(fwd_op_t::WRITE)}};
-        tr::detail::emit_tlv(body, type_t::VALUE, opt_t{}, opb);
+        tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, opb);
         const std::vector<std::byte> dst = b_path({"x"});
         const std::vector<std::byte> ret = b_path({"ret"});
         body.insert(body.end(), dst.begin(), dst.end());
@@ -576,7 +576,7 @@ void test_remote_path() {
         body.insert(body.end(), ret.begin(), ret.end());
         body.insert(body.end(), sub.begin(), sub.end());
         std::vector<std::byte> fwd;
-        tr::detail::emit_tlv(fwd, type_t::FWD, opt_t{.pl = true}, body);
+        tr::wire::emit_tlv(fwd, type_t::FWD, opt_t{.pl = true}, body);
 
         const auto denied_reply = resolve_bytes(resolver, fwd, "link-bad");
         const reply_info_t info = reply_info(*denied_reply);

@@ -77,7 +77,7 @@ void parse_config(const tlv_t* config, conn_settings_t& s) {
 [[nodiscard]] view_t link_state_value(bool up) {
     std::vector<std::byte> out;
     const std::byte b{static_cast<std::uint8_t>(up ? 1 : 0)};
-    detail::emit_tlv(out, type_t::VALUE, wire::opt_t{}, std::span<const std::byte>(&b, 1));
+    wire::emit_tlv(out, type_t::VALUE, wire::opt_t{}, std::span<const std::byte>(&b, 1));
     return view::over_bytes(out);
 }
 
@@ -234,11 +234,11 @@ result_t<vertex_t*> transport_vertex_t::make_connection(std::vector<std::byte> c
             std::vector<std::byte> members;
             bus->enumerate_peers([&members](std::string_view peer) {
                 std::vector<std::byte> body;
-                detail::emit_name(body, peer);
-                detail::emit_tlv(members, type_t::POINT, wire::opt_t{.pl = true}, body);
+                wire::emit_name(body, peer);
+                wire::emit_tlv(members, type_t::POINT, wire::opt_t{.pl = true}, body);
             });
             std::vector<std::byte> out;
-            detail::emit_tlv(out, type_t::POINT, wire::opt_t{.pl = true}, members);
+            wire::emit_tlv(out, type_t::POINT, wire::opt_t{.pl = true}, members);
             const view_t res = view::over_bytes(out);
             if (res.empty()) return std::unexpected(status_t::BACKPRESSURE);
             return res;

@@ -342,7 +342,7 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
     if (node.canonical_path) return node.body;
     const std::uint32_t end = node.end;
     for (std::uint32_t i = tlv_arena_t::first_child(path); i < end; i = a.next_sibling(i))
-        detail::emit_name(fallback, a[i].body);
+        wire::emit_name(fallback, a[i].body);
     return fallback;
 }
 
