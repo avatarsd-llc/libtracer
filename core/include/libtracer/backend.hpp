@@ -15,6 +15,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 /**
  * @file
@@ -194,5 +195,31 @@ class mem_backend_t {
  * backend types), keeping this L0 seam free of an upward dependency.
  */
 void destroy_dispatch(view::segment_t* seg) noexcept;
+
+/**
+ * @brief Move @p host.size() bytes between segment @p seg and host memory
+ *        @p host in direction @p dir — the module-set host↔device transfer
+ *        (ADR-0047 §2), bracketed by the backend's cache hooks.
+ *
+ * The single tag-dispatched byte-mover the codec routes a copy through,
+ * generalizing (and retiring) the CUDA-named `cuda_copy_from_host` /
+ * `cuda_copy_to_host` free functions:
+ * - `io_dir_t::CPU_TO_DEVICE` copies @p host **into** @p seg (host is the source);
+ * - `io_dir_t::DEVICE_TO_CPU` copies @p seg **out to** @p host (host is the sink).
+ *
+ * A host-addressable backend transfers with a `memcpy`, bracketed by
+ * `before_io`/`after_io` only when its `static constexpr needs_cache_ops` trait
+ * is set — so a cacheless backend (every one today) folds the hooks away at
+ * compile time (they are the traits' first in-tree consumer, review finding #8).
+ * A `DEVICE`-space backend (`mem_cuda`, built only with `LIBTRACER_WITH_CUDA`)
+ * routes to its device copy — where `after_io` gets its first caller (the CUDA
+ * stream barrier). Defined in `backend_set.cpp` (the module-set TU).
+ *
+ * @param seg  The segment to read from or write to; `nullptr` yields `false`.
+ * @param host CPU-addressable bytes; a `.size()` larger than @p seg's yields `false`.
+ * @param dir  Which way the bytes move (also the cache-hook direction).
+ * @retval false Null segment, an over-long @p host, or a device copy failure.
+ */
+[[nodiscard]] bool transfer(view::segment_t* seg, std::span<std::byte> host, io_dir_t dir) noexcept;
 
 }  // namespace tr::mem

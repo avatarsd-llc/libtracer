@@ -433,6 +433,12 @@ The method carries the *timing* (before vs. after the transfer); the `io_dir_t` 
 
 Cortex-M0 / -M3 / -M4 without cache: the hooks are no-ops.
 
+The one in-tree caller of the hooks is **`tr::mem::transfer(seg, host, io_dir_t)`** (ADR-0047 §2) — the module-set's tag-dispatched host↔device byte-mover. `CPU_TO_DEVICE` copies host bytes into the segment; `DEVICE_TO_CPU` copies them back out. A host-addressable backend transfers with a `memcpy`, bracketed by `before_io`/`after_io` **only** when its `needs_cache_ops` trait is set (below), so a cacheless backend folds the bracket away at compile time. A `DEVICE`-space backend (`mem_cuda`) routes to its device copy (`cudaMemcpy` + the `after_io` stream barrier). `transfer` replaced the earlier CUDA-named `cuda_copy_from_host` / `cuda_copy_to_host` free functions, generalizing them to one seam.
+
+### Module-set traits
+
+Per ADR-0047 §2 each concrete backend carries **compile-time contracts** as `static constexpr` members, replacing prose: `needs_cache_ops` (does a transfer need the cache hooks — read by `mem::transfer`), `is_isr_safe` (are `alloc`/`destroy` callable from an ISR — e.g. `mem_pool` yes, `mem_heap` no), and `owns_bytes` (are the bytes backend-owned and thus safe to durably store — false for a borrow). They are `static_assert`-able and, being compile-time, cost nothing on the MCU profile.
+
 ---
 
 ## Alignment

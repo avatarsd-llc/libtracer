@@ -58,6 +58,14 @@ class heap_backend_t final : public mem_backend_t {
     }
 
     [[nodiscard]] backend_tag tag() const noexcept override { return backend_tag::HEAP; }
+
+    // Module-set traits (ADR-0047 §2). `needs_cache_ops` is read by `mem::transfer`.
+    static constexpr bool needs_cache_ops =
+        false; /**< @brief No DMA cache maintenance (host RAM). */
+    static constexpr bool is_isr_safe =
+        false; /**< @brief `alloc`/`destroy` call `operator new`/`delete` — not ISR-safe. */
+    static constexpr bool owns_bytes =
+        true; /**< @brief Owns the `operator new`'d bytes — durably storable. */
 };
 
 /** @brief The process-wide heap backend (function-local static — no init-order trap). */
