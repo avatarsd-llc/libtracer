@@ -95,22 +95,22 @@ std::vector<std::byte> b_value_u32(std::uint32_t v) {
     std::vector<std::byte> p(4);
     tr::detail::store_le<std::uint32_t>(p, v);
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::VALUE, opt_t{}, p);
+    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, p);
     return out;
 }
 
 std::vector<std::byte> b_value_u8(std::uint8_t v) {
     const std::byte b{v};
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::VALUE, opt_t{}, std::span<const std::byte>(&b, 1));
+    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, std::span<const std::byte>(&b, 1));
     return out;
 }
 
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
-    for (std::string_view s : segs) tr::detail::emit_name(body, s);
+    for (std::string_view s : segs) tr::wire::emit_name(body, s);
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
     return out;
 }
 
@@ -125,46 +125,46 @@ void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
 view_t conn_spec(std::string_view type, std::string_view name, conn_role_t role, std::uint16_t port,
                  std::string_view kind, std::string_view addr = {}) {
     std::vector<std::byte> cfg;
-    tr::detail::emit_name(cfg, "role");
+    tr::wire::emit_name(cfg, "role");
     append(cfg, b_value_u8(static_cast<std::uint8_t>(role)));
-    tr::detail::emit_name(cfg, "port");
+    tr::wire::emit_name(cfg, "port");
     std::vector<std::byte> pb(2);
     tr::detail::store_le(pb, port, 2);
-    tr::detail::emit_tlv(cfg, type_t::VALUE, opt_t{}, pb);
-    tr::detail::emit_name(cfg, "kind");
-    tr::detail::emit_name(cfg, kind);
+    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, pb);
+    tr::wire::emit_name(cfg, "kind");
+    tr::wire::emit_name(cfg, kind);
     if (!addr.empty()) {
-        tr::detail::emit_name(cfg, "addr");
-        tr::detail::emit_name(cfg, addr);
+        tr::wire::emit_name(cfg, "addr");
+        tr::wire::emit_name(cfg, addr);
     }
 
     std::vector<std::byte> body;
-    tr::detail::emit_name(body, "type");
-    tr::detail::emit_name(body, type);
-    tr::detail::emit_name(body, "name");
-    tr::detail::emit_name(body, name);
-    tr::detail::emit_name(body, "config");
-    tr::detail::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
+    tr::wire::emit_name(body, "type");
+    tr::wire::emit_name(body, type);
+    tr::wire::emit_name(body, "name");
+    tr::wire::emit_name(body, name);
+    tr::wire::emit_name(body, "config");
+    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
 
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
     return owned(out);
 }
 
 // FIELD{ NAME "subscribers", VALUE u8 index_mode=ELEMENT } — ":subscribers[]" append.
 std::vector<std::byte> b_field_subscribers_append() {
     std::vector<std::byte> body;
-    tr::detail::emit_name(body, "subscribers");
+    tr::wire::emit_name(body, "subscribers");
     append(body, b_value_u8(1));  // index_mode = ELEMENT (append)
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::FIELD, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::FIELD, opt_t{.pl = true}, body);
     return out;
 }
 
 // SUBSCRIBER{ PATH target } — the remote-subscriber record a subscribe appends.
 std::vector<std::byte> b_subscriber(const std::vector<std::byte>& target) {
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::SUBSCRIBER, opt_t{.pl = true}, target);
+    tr::wire::emit_tlv(out, type_t::SUBSCRIBER, opt_t{.pl = true}, target);
     return out;
 }
 
@@ -179,7 +179,7 @@ std::vector<std::byte> b_fwd(tr::graph::fwd_op_t op, const std::vector<std::byte
     append(body, src);
     if (!payload.empty()) append(body, payload);
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
     return out;
 }
 

@@ -725,7 +725,7 @@ reference implementation is pre-1.0; everything currently lives under
   place. No wire change (conformance vectors unchanged; output byte-identical).
 
 - **Internal — `<libtracer/tlv_emit.hpp>`:** one raw-bytes TLV header emitter
-  (`detail::emit_tlv` / `emit_name`, built on `byteorder`). The ROUTER wrap, PATH
+  (`wire::emit_tlv` / `emit_name`, built on `byteorder`). The ROUTER wrap, PATH
   canonicalizer, and `:schema` POINT builder now share it — with named `Type`/`Opt`
   constants instead of magic bytes — instead of each hand-rolling the
   type/opt/length header. No wire change (conformance vectors unchanged).
