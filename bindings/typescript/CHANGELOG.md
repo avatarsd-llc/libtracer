@@ -49,6 +49,16 @@ versioning/publish strategy.
 
 ### Changed
 
+- **`@avatarsd-llc/libtracer-ws`: the RFC 6455 codec is no longer re-exported from
+  the package barrel.** `TransportWs` frames over the runtime's own WebSocket and
+  never uses the hand-rolled codec, so re-exporting the codec (`Opcode`,
+  `encodeFrame`, `acceptKey`, …) from the main entry forced every `TransportWs`
+  consumer to bundle SHA-1 + base64 + the frame (de)coder. The codec now lives
+  **only** at the `./ws` subpath (`@avatarsd-llc/libtracer-ws/ws`) — unchanged for
+  its real consumers (the `ws_diff_fuzz` interop oracle, the ws-codec tests,
+  no-native-WebSocket runtimes), and it now tree-shakes out of transport-only
+  bundles. No effect on `TransportWs`, which the barrel still exports.
+
 - **Version alignment for v0.1**: `@avatarsd-llc/libtracer` (core) bumped
   `0.0.1` → `0.1.0`, so all three packages ship as `0.1.0` (matching the C++
   `project(libtracer VERSION 0.1.0)`). The client/transport peerDependency

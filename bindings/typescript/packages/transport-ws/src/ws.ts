@@ -8,6 +8,13 @@
 // agreement layer: a TS client framed by this codec interoperates with the C++
 // `tr::net::transport_ws` server, and vice versa.
 //
+// Reachable only via the `./ws` subpath export (`@avatarsd-llc/libtracer-ws/ws`) —
+// deliberately NOT re-exported from the package barrel. Production `TransportWs`
+// frames over the runtime's own WebSocket and never imports this, so a consumer that
+// only wants the transport tree-shakes the codec (SHA-1, base64, frame (de)coder) out
+// of its bundle. Its consumers are the interop oracle (ws_diff_fuzz, ws-codec tests)
+// and runtimes without a native WebSocket.
+//
 // Two concerns only, mirroring the C++ header:
 //   1. the opening-handshake key derivation (SHA-1 + base64 -> Sec-WebSocket-Accept), and
 //   2. the data-frame codec (decode one masked/unmasked frame; encode one

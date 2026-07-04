@@ -7,24 +7,18 @@
 // first reliable transport (ADR-0029). This package carries libtracer TLV frames
 // over RFC 6455 WebSocket, wire-compatible with the C++ `tr::net::transport_ws`.
 //
-// Two entry points:
-//   - the `ws` subpath: a pure, socket-free RFC 6455 frame codec (cross-validated
-//     byte-for-byte against the C++ codec); and
-//   - this barrel: the `TransportWs` client plus a re-export of the codec.
+// Two entry points, deliberately separate:
+//   - this barrel (`.`): the production `TransportWs` client, which frames over the
+//     runtime's own WebSocket — it does NOT pull in the hand-rolled codec; and
+//   - the `./ws` subpath: the pure, socket-free RFC 6455 frame codec, cross-validated
+//     byte-for-byte against the C++ codec. It is the cross-implementation-agreement
+//     oracle (ws_diff_fuzz, the ws-codec tests) and the fallback for runtimes without
+//     a native WebSocket — not the production framing path. It is imported explicitly
+//     from `@avatarsd-llc/libtracer-ws/ws` so it tree-shakes out of every consumer that
+//     only wants the transport (it is NOT re-exported here).
 // The core (`@avatarsd-llc/libtracer`) is a peerDependency (ADR-0033).
 
 export const TRANSPORT = 'ws' as const;
-
-export {
-  Opcode,
-  acceptKey,
-  encodeFrame,
-  encodeClientFrame,
-  decodeFrame,
-  sha1,
-  base64,
-} from './ws.js';
-export type { Frame } from './ws.js';
 
 export { TransportWs } from './transport.js';
 export type {
