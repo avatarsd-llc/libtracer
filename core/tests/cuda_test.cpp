@@ -3,7 +3,7 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * mem_cuda GPU test (docs/adr/0024). Built only with LIBTRACER_WITH_CUDA; run on
- * a real GPU (locally, e.g. scripts/test-cuda.sh — never in CI, which has no GPU).
+ * a real GPU (locally, e.g. tools/test-cuda.sh — never in CI, which has no GPU).
  */
 #include <array>
 #include <cstddef>

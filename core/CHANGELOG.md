@@ -2,7 +2,7 @@
 
 All notable changes to the **public API** of the `core/` reference implementation
 (the headers under `include/libtracer/`) are recorded here, per
-[CONTRIBUTING](../CONTRIBUTING.md) / [CLAUDE.md](../CLAUDE.md). This tracks the
+[CONTRIBUTING](../.github/CONTRIBUTING.md) / [CLAUDE.md](../CLAUDE.md). This tracks the
 *implementation's* C++ API — which is implementation-defined per
 [ADR-0013](../docs/adr/0013-v1-scope-boundaries.md) and versioned independently of
 the immutable **protocol-v1** wire format it implements.
@@ -159,7 +159,7 @@ reference implementation is pre-1.0; everything currently lives under
   `transport_vertex_t::transport_factory_t` now receives
   `(const conn_settings_t&, const wire::tlv_t* raw_config)` (`raw_config` = the
   SPEC's config SETTINGS TLV, may be null; the built-ins ignore it). A new
-  `scripts/gen-dev-cert.sh` emits a self-signed dev certificate pair. Per-flow
+  `tools/gen-dev-cert.sh` emits a self-signed dev certificate pair. Per-flow
   streams, RFC 9221 datagrams, and WebTransport are staged follow-ons
   (ADR-0043 Phase B). CI: a dedicated `quic` workflow builds msquic and runs the
   full suite + ASan/UBSan + TSan with the module on; default jobs are unchanged.
@@ -677,7 +677,7 @@ reference implementation is pre-1.0; everything currently lives under
   `tr::view::cuda_alloc` / `cuda_copy_from_host` / `cuda_copy_to_host`. A GPU-backed
   value is a **heterogeneous host(header)+device(payload) rope**. Built only with
   `-DLIBTRACER_WITH_CUDA=ON` (off by default; **never in CI** — no GPU). Built and
-  **run on a real GPU locally** via `scripts/test-cuda.sh` (Docker + CDI;
+  **run on a real GPU locally** via `tools/test-cuda.sh` (Docker + CDI;
   `cuda_test` passed alloc, H2D/D2H round-trip, and the heterogeneous-rope checks).
 
 - **Memory-space tag (`tr::mem::mem_space_t` HOST/DEVICE) — the L1/L2 groundwork

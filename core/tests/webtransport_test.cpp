@@ -55,7 +55,7 @@ void check(bool ok, std::string_view what) {
     if (!ok) ++g_failures;
 }
 
-// Dev cert paths — generated once in main() by scripts/gen-dev-cert.sh.
+// Dev cert paths — generated once in main() by tools/gen-dev-cert.sh.
 std::string g_cert;
 std::string g_key;
 
@@ -483,7 +483,7 @@ void test_config_constructed_webtransport() {
 }  // namespace
 
 int main() {
-    // Generate the self-signed dev pair once (scripts/gen-dev-cert.sh) — the
+    // Generate the self-signed dev pair once (tools/gen-dev-cert.sh) — the
     // LISTEN-side credential every test below serves.
     char tmpl[] = "/tmp/libtracer-wt-XXXXXX";
     const char* dir = ::mkdtemp(tmpl);

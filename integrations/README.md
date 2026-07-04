@@ -11,4 +11,4 @@ Each subfolder packages the libtracer reference implementation for a specific pl
 
 ## Bridges
 
-A *bridge* is an integration that translates a foreign protocol (Modbus, Z-Wave, vendor-X RPC, …) into libtracer. Bridges may live in-tree under `integrations/bridges/<protocol>/` or out-of-tree as separate repos. See [CONTRIBUTING.md](../CONTRIBUTING.md#bridges-smart-device-adapters-for-incompatible-protocols).
+A *bridge* is an integration that translates a foreign protocol (Modbus, Z-Wave, vendor-X RPC, …) into libtracer. Bridges may live in-tree under `integrations/bridges/<protocol>/` or out-of-tree as separate repos. See [CONTRIBUTING.md](../.github/CONTRIBUTING.md#bridges-smart-device-adapters-for-incompatible-protocols).

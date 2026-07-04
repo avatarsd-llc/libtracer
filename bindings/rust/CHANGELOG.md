@@ -1,7 +1,7 @@
 # Changelog — libtracer (Rust binding)
 
 All notable changes to the **public API** of the `libtracer` Rust crate are
-recorded here, per [CONTRIBUTING](../../CONTRIBUTING.md) / [CLAUDE.md](../../CLAUDE.md).
+recorded here, per [CONTRIBUTING](../../.github/CONTRIBUTING.md) / [CLAUDE.md](../../CLAUDE.md).
 The crate is pre-1.0; everything currently lives under `[Unreleased]`.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).

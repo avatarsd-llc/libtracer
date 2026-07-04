@@ -42,7 +42,7 @@ struct quic_dial_tls_t {
                                                  trust store). */
     bool insecure_no_verify = false; /**< @brief DEV ONLY: skip server certificate
                                                  validation entirely (self-signed
-                                                 dev certs — scripts/gen-dev-cert.sh).
+                                                 dev certs — tools/gen-dev-cert.sh).
                                                  Never enable in deployment. */
 };
 
@@ -103,7 +103,7 @@ class quic_transport_t : public transport_t {
      * local_port(). The peer opens the frame stream.
      *
      * @param bind_port UDP port to listen on (host byte order; 0 → ephemeral).
-     * @param cert_file PEM server-certificate path (scripts/gen-dev-cert.sh
+     * @param cert_file PEM server-certificate path (tools/gen-dev-cert.sh
      *                  emits a self-signed dev pair).
      * @param key_file  PEM private-key path matching @p cert_file.
      * @param backend   The RX memory seam — see the DIAL constructor.
@@ -197,7 +197,7 @@ class quic_transport_t : public transport_t {
  * DEV-ONLY no-verify TLS mode (the config carries no trust material yet; a CA config
  * key is a follow-on, so config-dialed QUIC is dev-grade); LISTEN: `port` plus the
  * REQUIRED `cert`/`key` PEM-path config keys (QUIC is TLS 1.3 by construction;
- * scripts/gen-dev-cert.sh emits a dev pair). `cert`/`key` are quic-PRIVATE config
+ * tools/gen-dev-cert.sh emits a dev pair). `cert`/`key` are quic-PRIVATE config
  * keys: the factory parses them itself from the raw config SETTINGS TLV it receives —
  * they never appear in the shared `conn_settings_t`, which stays lean with only the
  * universal keys (the ADR-0043 §5 leanness ruling). Missing fields fail creation with

@@ -239,13 +239,13 @@ add_test(NAME substrate_no_atomic COMMAND substrate_test_no_atomic)
 # end-to-end over localhost QUIC, and a config-created `kind=quic` connection via the
 # register_transport_type extension seam. Only with LIBTRACER_WITH_QUIC (the dedicated
 # quic CI job); the test generates its own self-signed dev cert via
-# scripts/gen-dev-cert.sh at startup.
+# tools/gen-dev-cert.sh at startup.
 if(LIBTRACER_WITH_QUIC)
     add_executable(quic_test quic_test.cpp)
     target_link_libraries(quic_test PRIVATE libtracer_quic)
     libtracer_test_warnings(quic_test)
     target_compile_definitions(quic_test PRIVATE
-        LIBTRACER_DEV_CERT_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/gen-dev-cert.sh")
+        LIBTRACER_DEV_CERT_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/../../tools/gen-dev-cert.sh")
     add_test(NAME quic COMMAND quic_test)
     # libmsquic.so is not TSan-instrumented — suppress races INSIDE the library
     # (TSan cannot see its internal synchronization); libtracer's own code stays
@@ -263,7 +263,7 @@ if(LIBTRACER_WITH_QUIC)
     target_link_libraries(webtransport_test PRIVATE libtracer_quic)
     libtracer_test_warnings(webtransport_test)
     target_compile_definitions(webtransport_test PRIVATE
-        LIBTRACER_DEV_CERT_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/gen-dev-cert.sh")
+        LIBTRACER_DEV_CERT_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/../../tools/gen-dev-cert.sh")
     add_test(NAME webtransport COMMAND webtransport_test)
     set_tests_properties(webtransport PROPERTIES ENVIRONMENT
         "TSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tsan-msquic.supp")
@@ -278,7 +278,7 @@ if(LIBTRACER_WITH_QUIC)
 endif()
 
 # mem_cuda GPU test — only with LIBTRACER_WITH_CUDA; run on a real GPU locally
-# (scripts/test-cuda.sh), never in CI.
+# (tools/test-cuda.sh), never in CI.
 if(LIBTRACER_WITH_CUDA)
     add_executable(cuda_test cuda_test.cpp)
     target_link_libraries(cuda_test PRIVATE libtracer)

@@ -9,7 +9,7 @@ Thanks for your interest. There are several distinct ways to contribute, and the
 | Fix a bug or improve the reference impl       | "Code contributions" below                      |
 | Propose a wire-format / spec change           | [GOVERNANCE.md](GOVERNANCE.md) — RFC process    |
 | Add a new transport binding or integration    | "New integrations" below                        |
-| Register an independent implementation        | [implementations/README.md](implementations/)   |
+| Register an independent implementation        | [docs/implementations.md](../docs/implementations.md)   |
 | Build a bridge to a closed protocol           | "Bridges" below                                 |
 | Improve docs                                  | Just open a PR                                  |
 
@@ -49,7 +49,7 @@ Integrations may be maintained by sub-maintainers separate from the core team. L
 Bridges are first-class citizens — translating Modbus, Z-Wave, proprietary vendor X, etc. into libtracer is exactly what this project exists to enable. A bridge can be:
 
 - **In-tree** — under `integrations/bridges/<protocol>/`. Use this if the bridge has no external dependencies that complicate the core build.
-- **Out-of-tree** — your own repo, listed in [docs/reference/bridges.md](docs/reference/). Use this if the bridge depends on a proprietary SDK or has its own release cadence.
+- **Out-of-tree** — your own repo, listed in [docs/reference/bridges.md](../docs/reference/). Use this if the bridge depends on a proprietary SDK or has its own release cadence.
 
 Either way, link it from the bridge registry so users can find it.
 

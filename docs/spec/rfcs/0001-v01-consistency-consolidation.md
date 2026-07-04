@@ -81,4 +81,4 @@ Each decision's rejected options are recorded in its ADR: per-frame `VR` bit ([0
 
 ## Discussion
 
-Per [GOVERNANCE.md](../../../GOVERNANCE.md), the tracking issue stays open at least 14 days (until 2026-07-08) for implementer feedback before this document is merged. Record sustained objections and their resolution here.
+Per [GOVERNANCE.md](../../../.github/GOVERNANCE.md), the tracking issue stays open at least 14 days (until 2026-07-08) for implementer feedback before this document is merged. Record sustained objections and their resolution here.

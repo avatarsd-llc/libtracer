@@ -1,15 +1,15 @@
 # libtracer
 
-libtracer is a spec-first protocol project. See [GOVERNANCE.md](GOVERNANCE.md) for the three decision domains (spec / reference impl / tooling) and the RFC process for spec changes.
+libtracer is a spec-first protocol project. See [GOVERNANCE.md](.github/GOVERNANCE.md) for the three decision domains (spec / reference impl / tooling) and the RFC process for spec changes.
 
 ## Working in this repo
 
 - **Every change lands via a pull request.** No direct pushes to `main` — branch, push, open a PR, merge through GitHub.
-- **Sign commits** with `-s` (DCO required per [CONTRIBUTING.md](CONTRIBUTING.md)). Unsigned commits will be asked to be amended.
+- **Sign commits** with `-s` (DCO required per [CONTRIBUTING.md](.github/CONTRIBUTING.md)). Unsigned commits will be asked to be amended.
 - **Do not add `Co-Authored-By` trailers** to commit messages.
 - **C/C++ changes** must pass `clang-format` (config at `.clang-format`).
 - **C++ naming & comments** (full rules in [core/STYLE.md](core/STYLE.md)): types are `snake_case` with a `_t` suffix (`mem_backend_t`, `view_t`) — **never PascalCase**; enums are `enum class` with `SCREAMING_SNAKE` scoped values (`io_dir_t::DEVICE_TO_CPU`); namespaces mirror the layer model and never reuse an error-concept word — `tr::mem` (L0), `tr::view` (L1), `tr::wire` (L2/L3 codec), `tr::graph` (L4), `tr::net` (transport plane). Dependencies point up the layers only; `view_as_tlv` (the L1↔L2 cast) lives at L2 (`tr::wire`) because it produces a `tlv_t`. Doxygen on every public symbol using **`/** … */` block comments only** (never `///`; trailing docs use `/**< … */`), `@brief` mandatory — CI-gated by `core/Doxyfile` (`WARN_AS_ERROR`).
-- **Spec changes** (anything under [docs/spec/](docs/spec/)) require an RFC under [docs/spec/rfcs/](docs/spec/) per [GOVERNANCE.md](GOVERNANCE.md). A 14-day comment window applies before acceptance.
+- **Spec changes** (anything under [docs/spec/](docs/spec/)) require an RFC under [docs/spec/rfcs/](docs/spec/) per [GOVERNANCE.md](.github/GOVERNANCE.md). A 14-day comment window applies before acceptance.
 - **Public API changes** require a note in the relevant `CHANGELOG.md`.
 
 ## Where the canonical material lives
@@ -27,7 +27,7 @@ libtracer is a spec-first protocol project. See [GOVERNANCE.md](GOVERNANCE.md) f
 | [core/](core/)           | C++ reference implementation (CMake)                      |
 | [bindings/](bindings/)   | Language bindings — currently `rust/`, `typescript/`      |
 | [integrations/](integrations/) | Platform integrations — `arduino/`, `esphome/`, `platformio/` |
-| [implementations/](implementations/) | Registry of independent third-party implementations |
+| [docs/implementations.md](docs/implementations.md) | Registry of independent third-party implementations |
 | [examples/](examples/)   | Per-platform usage examples                               |
 | [tests/](tests/)         | Conformance test vectors                                  |
 | [docs/](docs/)           | Spec, reference, ADRs, RFCs (see above)              |
@@ -47,7 +47,7 @@ Issues live in **GitHub Issues at [`avatarsd-llc/libtracer`](https://github.com/
 - Label: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
 - Close: `gh issue close <number> --comment "..."`
 
-When a skill says "publish to the issue tracker," create a GitHub issue. When it says "fetch the relevant ticket," run `gh issue view <number> --comments`. Spec-change discussions use issues tagged `rfc` per [GOVERNANCE.md](GOVERNANCE.md).
+When a skill says "publish to the issue tracker," create a GitHub issue. When it says "fetch the relevant ticket," run `gh issue view <number> --comments`. Spec-change discussions use issues tagged `rfc` per [GOVERNANCE.md](.github/GOVERNANCE.md).
 
 ### Triage labels
 

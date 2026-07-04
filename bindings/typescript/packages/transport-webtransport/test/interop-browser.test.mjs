@@ -19,7 +19,7 @@
 //
 // The dev certificate is generated here: `serverCertificateHashes` is only
 // honored by browsers for an ECDSA certificate valid <= 14 days (a browser
-// rule) — scripts/gen-dev-cert.sh's RSA/365d pair would be rejected.
+// rule) — tools/gen-dev-cert.sh's RSA/365d pair would be rejected.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

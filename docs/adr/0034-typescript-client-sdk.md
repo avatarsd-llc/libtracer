@@ -1,6 +1,6 @@
 # TypeScript client SDK: ship a conservative, vector-pinned payload-builder + frame-I/O client; defer the path-addressed request envelope until the spec pins it
 
-Status: proposed (the public-API surface of the browser/Node client SDK, **reference-impl / tooling** domain per [GOVERNANCE.md](../../GOVERNANCE.md), so an ADR — not an RFC — governs it). The conservative, reversible foundation lands with this ADR as a `private`, experimental `0.0.0` package; every operation whose wire behavior the v1 spec does **not** pin is documented here as deferred, not implemented. Part of [#56](https://github.com/avatarsd-llc/libtracer/issues/56) (rides [#54](https://github.com/avatarsd-llc/libtracer/issues/54)).
+Status: proposed (the public-API surface of the browser/Node client SDK, **reference-impl / tooling** domain per [GOVERNANCE.md](../../.github/GOVERNANCE.md), so an ADR — not an RFC — governs it). The conservative, reversible foundation lands with this ADR as a `private`, experimental `0.0.0` package; every operation whose wire behavior the v1 spec does **not** pin is documented here as deferred, not implemented. Part of [#56](https://github.com/avatarsd-llc/libtracer/issues/56) (rides [#54](https://github.com/avatarsd-llc/libtracer/issues/54)).
 
 ## Context
 

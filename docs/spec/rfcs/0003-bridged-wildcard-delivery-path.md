@@ -67,4 +67,4 @@ New vectors under `tests/conformance/vectors/v1/wildcard-delivery/`: (1) a `ROUT
 
 ## Discussion
 
-Per [GOVERNANCE.md](../../../GOVERNANCE.md), the tracking issue stays open ≥ 14 days (until 2026-07-09) before merge. Open points invited for comment: the `NAME` tag spelling (`to` / `match` / `dst`); whether to also mandate the child for a cross-process-but-unbridged delivery; and whether the child should carry the full concrete `PATH` or a delta from the subscription pattern (smaller, but couples the subscriber to pattern-diffing).
+Per [GOVERNANCE.md](../../../.github/GOVERNANCE.md), the tracking issue stays open ≥ 14 days (until 2026-07-09) before merge. Open points invited for comment: the `NAME` tag spelling (`to` / `match` / `dst`); whether to also mandate the child for a cross-process-but-unbridged delivery; and whether the child should carry the full concrete `PATH` or a delta from the subscription pattern (smaller, but couples the subscriber to pattern-diffing).
