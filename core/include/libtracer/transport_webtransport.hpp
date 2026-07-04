@@ -49,7 +49,7 @@ struct webtransport_dial_tls_t {
                                                  trust store). */
     bool insecure_no_verify = false; /**< @brief DEV ONLY: skip server certificate
                                                  validation entirely (self-signed dev
-                                                 certs — scripts/gen-dev-cert.sh). Never
+                                                 certs — tools/gen-dev-cert.sh). Never
                                                  enable in deployment. */
 };
 

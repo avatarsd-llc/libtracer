@@ -9,7 +9,7 @@
 # side must use quic_dial_tls_t{.insecure_no_verify = true} (or trust the cert
 # file directly as its CA bundle). Deployments use a real certificate.
 #
-# Usage: scripts/gen-dev-cert.sh [out-dir]   (default: current directory)
+# Usage: tools/gen-dev-cert.sh [out-dir]   (default: current directory)
 set -eu
 
 out="${1:-.}"

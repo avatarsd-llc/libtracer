@@ -54,7 +54,7 @@ else()
 endif()
 
 # mem_cuda — the GPU device backend (docs/adr/0024). OFF by default: it needs the
-# CUDA toolkit and is built/tested locally (e.g. scripts/test-cuda.sh), never in
+# CUDA toolkit and is built/tested locally (e.g. tools/test-cuda.sh), never in
 # CI (no GPU). The .cpp uses only the CUDA runtime API (no kernels), so a host
 # compiler + libcudart suffices — no nvcc required.
 option(LIBTRACER_WITH_CUDA "Build the mem_cuda GPU backend (needs CUDA toolkit)" OFF)
