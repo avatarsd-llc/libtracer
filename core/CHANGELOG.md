@@ -15,6 +15,14 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **`tr::wire::key_view_t` — canonical-key NAME navigation (`key_view.hpp`).** One
+  locus for walking a vertex-map key (the concatenated NAME-TLV encodings):
+  `last_segment` / `parent` / `is_ancestor_of` / `child_record_under` /
+  `split_levels`. The L4 graph previously open-coded this walking across ~seven
+  sites in `graph.cpp` (last-segment, parent, ancestor/child, level split); those
+  now funnel through the module. Behavior-preserving — no wire or existing-API
+  change beyond the new header; contract pinned by `key_view_test.cpp`.
+
 - **Stateless transport-peer enumeration + transparent per-peer FWD (ADR-0044,
   Brick C).** New kind-neutral bus capability on the transport seam:
   `tr::net::bus_link_t` (`enumerate_peers` / `peer_link` / `set_peer_receiver`)

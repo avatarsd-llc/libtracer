@@ -17,6 +17,12 @@ target_link_libraries(byteorder_test PRIVATE libtracer)
 libtracer_test_warnings(byteorder_test)
 add_test(NAME byteorder COMMAND byteorder_test)
 
+# Canonical-key NAME navigation (key_view.hpp) — the locus the graph walks funnel through.
+add_executable(key_view_test key_view_test.cpp)
+target_link_libraries(key_view_test PRIVATE libtracer)
+libtracer_test_warnings(key_view_test)
+add_test(NAME key_view COMMAND key_view_test)
+
 # Path parsing / validation — reserved chars, limits, field tail (reference/03).
 add_executable(path_test path_test.cpp)
 target_link_libraries(path_test PRIVATE libtracer)

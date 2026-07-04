@@ -17,6 +17,7 @@
 
 #include "libtracer/byteorder.hpp"
 #include "libtracer/frame.hpp"
+#include "libtracer/key_view.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/tlv.hpp"
 #include "libtracer/tlv_arena.hpp"
@@ -26,6 +27,7 @@
 namespace tr::graph {
 
 using wire::encode;
+using wire::key_view_t;
 using wire::opt_t;
 using wire::tlv_t;
 using wire::type_t;
@@ -40,33 +42,8 @@ void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
     detail::emit_tlv(out, type_t::VALUE, opt_t{}, payload);
 }
 
-// The last NAME segment within a canonical PATH-payload key (the vertex's name).
-[[nodiscard]] std::span<const std::byte> last_segment(std::span<const std::byte> key) {
-    std::span<const std::byte> last;
-    std::size_t i = 0;
-    while (i + 4 <= key.size()) {
-        const std::size_t len = detail::load_le<std::uint16_t>(key.subspan(i + 2, 2));
-        if (i + 4 + len > key.size()) break;
-        last = key.subspan(i + 4, len);
-        i += 4 + len;
-    }
-    return last;
-}
-
-// The parent's canonical PATH-payload key: `key` with its last NAME encoding dropped
-// (empty at the root). The inheritance walk (#81, ADR-0020) derives ancestor keys with
-// this — the key IS the concatenated NAME encodings, so no string form is ever needed.
-[[nodiscard]] std::span<const std::byte> parent_key(std::span<const std::byte> key) {
-    std::size_t last_start = 0;
-    std::size_t i = 0;
-    while (i + 4 <= key.size()) {
-        const std::size_t len = detail::load_le<std::uint16_t>(key.subspan(i + 2, 2));
-        if (i + 4 + len > key.size()) break;
-        last_start = i;
-        i += 4 + len;
-    }
-    return key.first(last_start);
-}
+// Canonical-key NAME navigation (last segment, parent, ancestor/child, level
+// split) lives in one locus: tr::wire::key_view_t (key_view.hpp).
 
 // Absolute wall-clock ns since the UNIX epoch — the ACE `expires_ns` reference clock.
 [[nodiscard]] std::uint64_t now_ns() {
@@ -252,10 +229,11 @@ result_t<vertex_t*> graph_t::register_vertex_key(std::vector<std::byte> key, rol
     // sum and a concurrent subscribe walk never double-count) keep the write
     // path's is-anyone-listening check a single relaxed load.
     std::uint32_t above = 0;
-    std::span<const std::byte> kk = k.bytes;
+    key_view_t kk{k.bytes};
     while (!kk.empty()) {
-        kk = parent_key(kk);
-        const auto pit = vertices_.find(path_key_t{std::vector<std::byte>(kk.begin(), kk.end())});
+        kk = kk.parent();
+        const auto pit = vertices_.find(
+            path_key_t{std::vector<std::byte>(kk.bytes().begin(), kk.bytes().end())});
         if (pit != vertices_.end()) above += pit->second->own_subs_.load(std::memory_order_relaxed);
         if (kk.empty()) break;
     }
@@ -273,30 +251,23 @@ result_t<vertex_t*> graph_t::ensure_vertex(std::span<const std::byte> key,
     // (the core subset's INHERIT walk, ADR-0020). No ancestor at all ⇒ open, the
     // ACL-presence opt-in of docs/reference/05 §0x0A.
     {
-        std::span<const std::byte> k = key;
+        key_view_t k{key};
         vertex_t* ancestor = nullptr;
         while (!k.empty()) {
-            k = parent_key(k);
-            ancestor = find(k);
+            k = k.parent();
+            ancestor = find(k.bytes());
             if (ancestor != nullptr || k.empty()) break;
         }
         if (ancestor != nullptr && !acl_allows(ancestor, caller, acl_right_t::CREATE))
             return std::unexpected(status_t::PERMISSION_DENIED);
     }
-    // Validate the key's NAME-encoding framing and collect the per-level prefix
-    // lengths, then create every missing level shallowest-first (`mkdir -p`).
-    std::vector<std::size_t> level_ends;
-    std::size_t i = 0;
-    while (i + 4 <= key.size()) {
-        const std::size_t len = detail::load_le<std::uint16_t>(key.subspan(i + 2, 2));
-        if (i + 4 + len > key.size()) break;
-        i += 4 + len;
-        level_ends.push_back(i);
-    }
-    if (i != key.size() || level_ends.empty()) return std::unexpected(status_t::INVALID_PATH);
+    // Validate the key's NAME-encoding framing and collect the per-level prefixes,
+    // then create every missing level shallowest-first (`mkdir -p`).
+    std::vector<key_view_t> levels;
+    if (!key_view_t{key}.split_levels(levels)) return std::unexpected(status_t::INVALID_PATH);
     vertex_t* leaf = nullptr;
-    for (const std::size_t level : level_ends) {
-        const std::span<const std::byte> pk = key.first(level);
+    for (const key_view_t level : levels) {
+        const std::span<const std::byte> pk = level.bytes();
         if (vertex_t* existing = find(pk)) {
             leaf = existing;
             continue;
@@ -328,10 +299,9 @@ void graph_t::note_subscriber_added(vertex_t* v) {
     // boundary (the length header differs otherwise), so prefix ⇒ descendant.
     const std::shared_lock lock(map_mutex_);
     v->own_subs_.fetch_add(1, std::memory_order_relaxed);
-    const std::span<const std::byte> prefix = v->key().bytes;
+    const key_view_t prefix{v->key().bytes};
     for (const auto& [key, vert] : vertices_) {
-        if (key.bytes.size() <= prefix.size()) continue;
-        if (std::equal(prefix.begin(), prefix.end(), key.bytes.begin()))
+        if (prefix.is_ancestor_of(key_view_t{key.bytes}))
             vert->listeners_above_.fetch_add(1, std::memory_order_relaxed);
     }
 }
@@ -339,10 +309,9 @@ void graph_t::note_subscriber_added(vertex_t* v) {
 void graph_t::note_subscriber_removed(vertex_t* v) {
     const std::shared_lock lock(map_mutex_);
     v->own_subs_.fetch_sub(1, std::memory_order_relaxed);
-    const std::span<const std::byte> prefix = v->key().bytes;
+    const key_view_t prefix{v->key().bytes};
     for (const auto& [key, vert] : vertices_) {
-        if (key.bytes.size() <= prefix.size()) continue;
-        if (std::equal(prefix.begin(), prefix.end(), key.bytes.begin()))
+        if (prefix.is_ancestor_of(key_view_t{key.bytes}))
             vert->listeners_above_.fetch_sub(1, std::memory_order_relaxed);
     }
 }
@@ -375,9 +344,9 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
             if (ace_grants(ace, *subject, bit, now)) return true;
         }
     }
-    std::span<const std::byte> key = v->key_.bytes;
-    while (!(key = parent_key(key)).empty()) {
-        vertex_t* ancestor = find(key);
+    key_view_t key{v->key_.bytes};
+    while (!(key = key.parent()).empty()) {
+        vertex_t* ancestor = find(key.bytes());
         if (!ancestor) continue;  // an unregistered intermediate level holds no ACL
         const std::lock_guard lock(ancestor->m_);
         for (const ace_t& ace : ancestor->aces_) {
@@ -513,10 +482,10 @@ void graph_t::bubble_up(vertex_t* v, const view_t& value, int depth) {
     // the idle write path never walks (RFC-0005 §near-free-when-idle; the counter
     // below is what tests/benches assert on via ancestor_walks()).
     ancestor_walks_.fetch_add(1, std::memory_order_relaxed);
-    std::span<const std::byte> key = v->key_.bytes;
+    key_view_t key{v->key_.bytes};
     while (!key.empty()) {
-        key = parent_key(key);
-        if (vertex_t* ancestor = find(key)) fan_out(ancestor, value, depth);
+        key = key.parent();
+        if (vertex_t* ancestor = find(key.bytes())) fan_out(ancestor, value, depth);
         if (key.empty()) break;  // the root vertex (empty key) was just visited
     }
 }
@@ -563,7 +532,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view_t& value, int depth
     const std::uint32_t n0 = wire::tlv_arena_t::first_child(0);
     if (n0 >= a.root().end || a[n0].type != type_t::NAME)
         return std::unexpected(status_t::TYPE_MISMATCH);
-    if (!std::ranges::equal(a[n0].body, last_segment(v->key_.bytes)))
+    if (!std::ranges::equal(a[n0].body, key_view_t{v->key_.bytes}.last_segment()))
         return std::unexpected(status_t::INVALID_PATH);
 
     std::vector<branch_node_t> plan;  // post-order; plan.back() is the root
@@ -923,7 +892,7 @@ result_t<view_t> graph_t::read_schema(vertex_t* v) const {
     emit_value(settings_children, s.history_keep_last, 4);
 
     std::vector<std::byte> point_body;
-    detail::emit_name(point_body, last_segment(v->key_.bytes));
+    detail::emit_name(point_body, key_view_t{v->key_.bytes}.last_segment());
     detail::emit_tlv(point_body, type_t::SETTINGS, opt_t{.pl = true},
                      settings_children);  // SETTINGS
 
@@ -964,19 +933,13 @@ result_t<view_t> graph_t::read_children(vertex_t* v) const {
     std::vector<std::byte> members;
     {
         const std::shared_lock lock(map_mutex_);
-        const std::vector<std::byte>& pk = v->key_.bytes;
+        const key_view_t pk{v->key_.bytes};
         for (const auto& [key, vert] : vertices_) {
             (void)vert;
-            const std::vector<std::byte>& kb = key.bytes;
-            if (kb.size() <= pk.size() + 4) continue;  // too short for one more NAME
-            if (!std::equal(pk.begin(), pk.end(), kb.begin())) continue;
-            const std::span<const std::byte> rest(kb.data() + pk.size(), kb.size() - pk.size());
-            if (static_cast<type_t>(std::to_integer<std::uint8_t>(rest[0])) != type_t::NAME)
-                continue;
-            const std::size_t len = detail::load_le<std::uint16_t>(rest.subspan(2, 2));
-            if (rest.size() != 4 + len) continue;  // deeper descendant, not a direct child
-            // `rest` IS the child's canonical NAME record — the POINT body verbatim.
-            detail::emit_tlv(members, type_t::POINT, opt_t{.pl = true}, rest);
+            // A direct child is `pk` plus exactly one more NAME record; that record
+            // IS the child's canonical NAME encoding — the POINT body verbatim.
+            if (const auto rec = key_view_t{key.bytes}.child_record_under(pk))
+                detail::emit_tlv(members, type_t::POINT, opt_t{.pl = true}, *rec);
         }
     }
     std::vector<std::byte> out;
