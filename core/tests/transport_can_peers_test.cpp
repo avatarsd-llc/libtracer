@@ -166,9 +166,9 @@ void fake_can_bus_t::broadcast(fake_link_t* from, const tr::net::can_frame_data_
 
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
-    for (std::string_view s : segs) tr::detail::emit_name(body, s);
+    for (std::string_view s : segs) tr::wire::emit_name(body, s);
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
     return out;
 }
 
@@ -176,7 +176,7 @@ std::vector<std::byte> b_value_u32(std::uint32_t v) {
     std::vector<std::byte> p(4);
     tr::detail::store_le<std::uint32_t>(p, v);
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::VALUE, opt_t{}, p);
+    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, p);
     return out;
 }
 
@@ -184,11 +184,11 @@ std::vector<std::byte> b_value_u32(std::uint32_t v) {
 // index_mode VALUE u8 = ELEMENT with no index — the append/whole-array form).
 std::vector<std::byte> b_field_children() {
     std::vector<std::byte> body;
-    tr::detail::emit_name(body, "children");
+    tr::wire::emit_name(body, "children");
     const std::byte mode{1};  // index_mode ELEMENT, no index => "[]"
-    tr::detail::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&mode, 1));
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&mode, 1));
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::FIELD, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::FIELD, opt_t{.pl = true}, body);
     return out;
 }
 
@@ -197,12 +197,12 @@ std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
                              const std::vector<std::byte>& field = {}) {
     std::vector<std::byte> body;
     const std::byte ob{static_cast<std::uint8_t>(op)};
-    tr::detail::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&ob, 1));
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&ob, 1));
     body.insert(body.end(), dst.begin(), dst.end());
     body.insert(body.end(), field.begin(), field.end());
     body.insert(body.end(), src.begin(), src.end());
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
     return out;
 }
 
@@ -215,12 +215,12 @@ view_t owned(std::span<const std::byte> bytes) {
 // SPEC{ type, name } with no config — the provide_link-staged connection form.
 view_t conn_spec(std::string_view type, std::string_view name) {
     std::vector<std::byte> body;
-    tr::detail::emit_name(body, "type");
-    tr::detail::emit_name(body, type);
-    tr::detail::emit_name(body, "name");
-    tr::detail::emit_name(body, name);
+    tr::wire::emit_name(body, "type");
+    tr::wire::emit_name(body, type);
+    tr::wire::emit_name(body, "name");
+    tr::wire::emit_name(body, name);
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
     return owned(out);
 }
 
@@ -386,7 +386,7 @@ void test_enumeration_and_forwarding() {
     {
         std::vector<std::byte> body;
         const std::byte ob{static_cast<std::uint8_t>(fwd_op_t::WRITE)};
-        tr::detail::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&ob, 1));
+        tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&ob, 1));
         const std::vector<std::byte> dst = b_path({"n5", "a", "b"});
         const std::vector<std::byte> src = b_path({"reply-ep"});
         const std::vector<std::byte> payload = b_value_u32(kWritten);
@@ -394,7 +394,7 @@ void test_enumeration_and_forwarding() {
         body.insert(body.end(), src.begin(), src.end());
         body.insert(body.end(), payload.begin(), payload.end());
         std::vector<std::byte> out;
-        tr::detail::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
+        tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
         channel.b().send(out);
     }
     const auto r_write = inbox.wait(kBudget);

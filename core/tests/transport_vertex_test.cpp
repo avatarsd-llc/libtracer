@@ -62,33 +62,33 @@ view_t owned(std::span<const std::byte> bytes) {
 view_t conn_spec(std::string_view type, std::string_view name, conn_role_t role, std::uint16_t port,
                  std::string_view kind = {}, std::string_view addr = {}) {
     std::vector<std::byte> cfg;
-    tr::detail::emit_name(cfg, "role");
+    tr::wire::emit_name(cfg, "role");
     const std::byte r{static_cast<std::uint8_t>(role)};
-    tr::detail::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&r, 1));
-    tr::detail::emit_name(cfg, "port");
+    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&r, 1));
+    tr::wire::emit_name(cfg, "port");
     std::vector<std::byte> pb(2);
     tr::detail::store_le(pb, port, 2);
-    tr::detail::emit_tlv(cfg, type_t::VALUE, opt_t{}, pb);
+    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, pb);
     if (!kind.empty()) {
-        tr::detail::emit_name(cfg, "kind");
-        tr::detail::emit_name(cfg, kind);
+        tr::wire::emit_name(cfg, "kind");
+        tr::wire::emit_name(cfg, kind);
     }
     if (!addr.empty()) {
-        tr::detail::emit_name(cfg, "addr");
-        tr::detail::emit_name(cfg, addr);
+        tr::wire::emit_name(cfg, "addr");
+        tr::wire::emit_name(cfg, addr);
     }
 
     std::vector<std::byte> body;
-    tr::detail::emit_name(body, "type");
-    tr::detail::emit_name(body, type);
-    tr::detail::emit_name(body, "name");
-    tr::detail::emit_name(body, name);
-    tr::detail::emit_name(body,
-                          "config");  // the "config" key preceding its SETTINGS (reference/05)
-    tr::detail::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
+    tr::wire::emit_name(body, "type");
+    tr::wire::emit_name(body, type);
+    tr::wire::emit_name(body, "name");
+    tr::wire::emit_name(body, name);
+    tr::wire::emit_name(body,
+                        "config");  // the "config" key preceding its SETTINGS (reference/05)
+    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
 
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
     return owned(out);
 }
 
@@ -182,25 +182,25 @@ void test_fwd_still_routes() {
     std::vector<std::byte> dst;  // PATH{ NAME up, NAME temp }
     {
         std::vector<std::byte> segs;
-        tr::detail::emit_name(segs, "up");
-        tr::detail::emit_name(segs, "temp");
-        tr::detail::emit_tlv(dst, type_t::PATH, opt_t{.pl = true}, segs);
+        tr::wire::emit_name(segs, "up");
+        tr::wire::emit_name(segs, "temp");
+        tr::wire::emit_tlv(dst, type_t::PATH, opt_t{.pl = true}, segs);
     }
     std::vector<std::byte> src;  // PATH{ NAME reply }
     {
         std::vector<std::byte> segs;
-        tr::detail::emit_name(segs, "reply");
-        tr::detail::emit_tlv(src, type_t::PATH, opt_t{.pl = true}, segs);
+        tr::wire::emit_name(segs, "reply");
+        tr::wire::emit_tlv(src, type_t::PATH, opt_t{.pl = true}, segs);
     }
     std::vector<std::byte> body;
     const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE)};
-    tr::detail::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
     body.insert(body.end(), dst.begin(), dst.end());
     body.insert(body.end(), src.begin(), src.end());
     const std::byte pv{0x2A};
-    tr::detail::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&pv, 1));
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&pv, 1));
     std::vector<std::byte> frame;
-    tr::detail::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
 
     router_a.on_frame("self", frame);  // "self" names no child => forward by first dst seg "up"
     check(fut.wait_for(2s) == std::future_status::ready,
@@ -232,15 +232,15 @@ std::vector<std::byte> fwd_read(std::initializer_list<std::string_view> dst,
                                 std::initializer_list<std::string_view> src) {
     std::vector<std::byte> body;
     const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::READ)};
-    tr::detail::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
     std::vector<std::byte> segs;
-    for (std::string_view s : dst) tr::detail::emit_name(segs, s);
-    tr::detail::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, segs);
+    for (std::string_view s : dst) tr::wire::emit_name(segs, s);
+    tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, segs);
     segs.clear();
-    for (std::string_view s : src) tr::detail::emit_name(segs, s);
-    tr::detail::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, segs);
+    for (std::string_view s : src) tr::wire::emit_name(segs, s);
+    tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, segs);
     std::vector<std::byte> frame;
-    tr::detail::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
     return frame;
 }
 
@@ -274,7 +274,7 @@ void test_config_constructed_udp() {
     (void)node_b.register_vertex(*path_t::parse("/temp"), role_t::STORED_VALUE);
     std::vector<std::byte> tv;
     const std::byte tb{0x2A};
-    tr::detail::emit_tlv(tv, type_t::VALUE, opt_t{}, std::span<const std::byte>(&tb, 1));
+    tr::wire::emit_tlv(tv, type_t::VALUE, opt_t{}, std::span<const std::byte>(&tb, 1));
     (void)node_b.write(*path_t::parse("/temp"), owned(tv));
     const auto wb = node_b.write(*path_t::parse("/net:children[]"),
                                  conn_spec("listener", "a", conn_role_t::LISTEN, 47120, "udp"));

@@ -79,16 +79,16 @@ std::vector<std::byte> fwd_write(std::initializer_list<std::string_view> dst,
                                  std::span<const std::byte> payload_value_tlv) {
     std::vector<std::byte> body;
     const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE)};
-    tr::detail::emit_tlv(body, tr::wire::type_t::VALUE, tr::wire::opt_t{},
-                         std::span<const std::byte>(&op, 1));
+    tr::wire::emit_tlv(body, tr::wire::type_t::VALUE, tr::wire::opt_t{},
+                       std::span<const std::byte>(&op, 1));
     std::vector<std::byte> dst_segs;
-    for (std::string_view s : dst) tr::detail::emit_name(dst_segs, s);
-    tr::detail::emit_tlv(body, tr::wire::type_t::PATH, tr::wire::opt_t{.pl = true}, dst_segs);
-    tr::detail::emit_tlv(body, tr::wire::type_t::PATH, tr::wire::opt_t{.pl = true},
-                         std::span<const std::byte>{});  // src: empty, grows per hop
+    for (std::string_view s : dst) tr::wire::emit_name(dst_segs, s);
+    tr::wire::emit_tlv(body, tr::wire::type_t::PATH, tr::wire::opt_t{.pl = true}, dst_segs);
+    tr::wire::emit_tlv(body, tr::wire::type_t::PATH, tr::wire::opt_t{.pl = true},
+                       std::span<const std::byte>{});  // src: empty, grows per hop
     body.insert(body.end(), payload_value_tlv.begin(), payload_value_tlv.end());
     std::vector<std::byte> frame;
-    tr::detail::emit_tlv(frame, tr::wire::type_t::FWD, tr::wire::opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(frame, tr::wire::type_t::FWD, tr::wire::opt_t{.pl = true}, body);
     return frame;
 }
 
@@ -284,7 +284,7 @@ void test_two_nodes_zero_copy_store() {
     std::vector<std::byte> pb(64);
     for (std::size_t i = 0; i < pb.size(); ++i) pb[i] = static_cast<std::byte>(i);
     std::vector<std::byte> payload;
-    tr::detail::emit_tlv(payload, tr::wire::type_t::VALUE, tr::wire::opt_t{}, pb);
+    tr::wire::emit_tlv(payload, tr::wire::type_t::VALUE, tr::wire::opt_t{}, pb);
     const auto frame = fwd_write({"b", "sensor", "blob"}, payload);
     router_a.on_frame("client", frame);
 

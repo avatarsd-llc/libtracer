@@ -82,7 +82,7 @@ result_t<path_t> path_t::parse(std::string_view text) {
             if (has_reserved_char(seg)) return std::unexpected(status_t::INVALID_PATH);
             if (seg.size() > kMaxSegmentBytes) return std::unexpected(status_t::INVALID_PATH);
             if (++p.segments_ > kMaxSegments) return std::unexpected(status_t::INVALID_PATH);
-            detail::emit_name(p.payload_, seg);
+            wire::emit_name(p.payload_, seg);
             if (p.payload_.size() > kMaxPathBytes) return std::unexpected(status_t::INVALID_PATH);
             if (slash == std::string_view::npos) break;
             pos = slash + 1;

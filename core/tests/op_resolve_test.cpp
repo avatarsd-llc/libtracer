@@ -58,7 +58,7 @@ void check(bool ok, std::string_view what) {
 // --- wire builders (canonical bytes via the production emit helpers) ---------
 std::vector<std::byte> b_name(std::string_view s) {
     std::vector<std::byte> out;
-    tr::detail::emit_name(out, s);
+    tr::wire::emit_name(out, s);
     return out;
 }
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
@@ -68,12 +68,12 @@ std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
         body.insert(body.end(), n.begin(), n.end());
     }
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
     return out;
 }
 std::vector<std::byte> b_value(std::span<const std::byte> p) {
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::VALUE, opt_t{}, p);
+    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, p);
     return out;
 }
 std::vector<std::byte> b_value(std::initializer_list<std::uint8_t> bytes) {
@@ -83,7 +83,7 @@ std::vector<std::byte> b_value(std::initializer_list<std::uint8_t> bytes) {
 }
 std::vector<std::byte> b_subscriber(std::initializer_list<std::string_view> target) {
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::SUBSCRIBER, opt_t{.pl = true}, b_path(target));
+    tr::wire::emit_tlv(out, type_t::SUBSCRIBER, opt_t{.pl = true}, b_path(target));
     return out;
 }
 void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
@@ -102,7 +102,7 @@ std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
     append(body, src);
     if (!payload.empty()) append(body, payload);
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
     return out;
 }
 
@@ -271,7 +271,7 @@ void test_subscribers_field() {
     {
         std::vector<std::byte> body = b_name("subscribers");
         append(body, b_value({0x01}));  // index_mode=ELEMENT, no index => "[]"
-        tr::detail::emit_tlv(field_append, type_t::FIELD, opt_t{.pl = true}, body);
+        tr::wire::emit_tlv(field_append, type_t::FIELD, opt_t{.pl = true}, body);
     }
     // Two subscribes (distinct targets) to assert slot order.
     for (const char* tgt : {"sub-a", "sub-b"}) {
@@ -599,10 +599,10 @@ void test_write_creates_remote() {
     // A remote FIELD write to a nonexistent path still does NOT create — there is
     // no vertex whose control surface it could address.
     std::vector<std::byte> field_body;
-    tr::detail::emit_name(field_body, "settings");
-    tr::detail::emit_name(field_body, "priority");
+    tr::wire::emit_name(field_body, "settings");
+    tr::wire::emit_name(field_body, "priority");
     std::vector<std::byte> field_sel;
-    tr::detail::emit_tlv(field_sel, type_t::FIELD, opt_t{.pl = true}, field_body);
+    tr::wire::emit_tlv(field_sel, type_t::FIELD, opt_t{.pl = true}, field_body);
     const auto ffwd = b_fwd(fwd_op_t::WRITE, b_path({"other", "leaf"}), b_path({"reply-ep"}),
                             field_sel, b_value({1}));
     auto freply = resolve_bytes(resolver, ffwd);

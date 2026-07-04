@@ -65,6 +65,15 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Changed
 
+- **The raw-TLV byte emitters moved from `tr::detail` to `tr::wire`
+  (`tlv_emit.hpp`): `emit_tlv` / `emit_name` are now `tr::wire::emit_tlv` /
+  `tr::wire::emit_name`.** They produce wire bytes from wire types (`type_t`,
+  `opt_t`), so they are a codec (L2/L3) concern, not a layer-free `tr::detail`
+  primitive — removing the `tr::detail`-reaches-up-into-`tr::wire` anomaly the
+  architecture review flagged. Pure relocation: identical bytes (conformance
+  vectors unchanged); the LE byte helper `detail::append_le` (byteorder.hpp)
+  stays in `tr::detail`. Update callers `detail::emit_*` → `wire::emit_*`.
+
 - **`transport_can` ingress now filters by protocol-version prefix and ignores
   self-echoed frames** (frames whose CAN-ID `version` differs from the
   transport's, or whose `node` equals its own, are dropped before any map/table

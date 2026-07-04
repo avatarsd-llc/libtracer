@@ -49,12 +49,12 @@ view_t owned(std::span<const std::byte> bytes) {
 // Build a SPEC{ NAME "type" <type>, NAME "name" <name> } as an owned VALUE view.
 view_t spec(std::string_view type, std::string_view name) {
     std::vector<std::byte> body;
-    tr::detail::emit_name(body, "type");
-    tr::detail::emit_name(body, type);
-    tr::detail::emit_name(body, "name");
-    tr::detail::emit_name(body, name);
+    tr::wire::emit_name(body, "type");
+    tr::wire::emit_name(body, type);
+    tr::wire::emit_name(body, "name");
+    tr::wire::emit_name(body, name);
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
     return owned(out);
 }
 
@@ -62,7 +62,7 @@ view_t spec(std::string_view type, std::string_view name) {
 view_t bare_value() {
     std::vector<std::byte> out;
     const std::byte b{0x2A};
-    tr::detail::emit_tlv(out, type_t::VALUE, opt_t{}, std::span<const std::byte>(&b, 1));
+    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, std::span<const std::byte>(&b, 1));
     return owned(out);
 }
 

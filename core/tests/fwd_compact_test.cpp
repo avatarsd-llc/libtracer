@@ -70,7 +70,7 @@ void check(bool ok, std::string_view what) {
 // --- wire builders (canonical bytes via the production emit helpers) ---------
 std::vector<std::byte> b_name(std::string_view s) {
     std::vector<std::byte> out;
-    tr::detail::emit_name(out, s);
+    tr::wire::emit_name(out, s);
     return out;
 }
 std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
@@ -80,20 +80,20 @@ std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
         body.insert(body.end(), n.begin(), n.end());
     }
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
     return out;
 }
 std::vector<std::byte> b_value_u32(std::uint32_t v) {
     std::vector<std::byte> p(4);
     tr::detail::store_le<std::uint32_t>(p, v);
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::VALUE, opt_t{}, p);
+    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, p);
     return out;
 }
 std::vector<std::byte> b_value_u8(std::uint8_t v) {
     const std::byte b{v};
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::VALUE, opt_t{}, std::span<const std::byte>(&b, 1));
+    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, std::span<const std::byte>(&b, 1));
     return out;
 }
 void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
@@ -105,7 +105,7 @@ std::vector<std::byte> b_field_subscribers_append() {
     append(body, b_name("subscribers"));
     append(body, b_value_u8(1));  // index_mode = ELEMENT (append, no index VALUE)
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::FIELD, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::FIELD, opt_t{.pl = true}, body);
     return out;
 }
 // SUBSCRIBER{ PATH target, SETTINGS qos{ NAME "delivery_compact" VALUE u8 } }.
@@ -116,10 +116,10 @@ std::vector<std::byte> b_subscriber(const std::vector<std::byte>& target, bool c
     append(qos, b_name("delivery_compact"));
     append(qos, b_value_u8(compact ? 1 : 0));
     std::vector<std::byte> settings;
-    tr::detail::emit_tlv(settings, type_t::SETTINGS, opt_t{.pl = true}, qos);
+    tr::wire::emit_tlv(settings, type_t::SETTINGS, opt_t{.pl = true}, qos);
     append(body, settings);
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::SUBSCRIBER, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::SUBSCRIBER, opt_t{.pl = true}, body);
     return out;
 }
 std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
@@ -133,7 +133,7 @@ std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
     append(body, src);
     if (!payload.empty()) append(body, payload);
     std::vector<std::byte> out;
-    tr::detail::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
+    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
     return out;
 }
 

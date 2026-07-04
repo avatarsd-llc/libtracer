@@ -7,6 +7,11 @@
  * (PATH canonical keys, ROUTER envelopes, :schema POINT descriptors) all share
  * this instead of each hand-rolling the header. For decoding, and for emitting a
  * full `tlv_t` value (payload/children/trailers), use frame.hpp's encode/decode.
+ *
+ * Lives in `tr::wire` (L2/L3): it produces wire bytes from wire types (`type_t`,
+ * `opt_t`), so it is a codec concern, not a layer-free `tr::detail` primitive —
+ * the low-level LE byte helper it builds on (`detail::append_le`, byteorder.hpp)
+ * stays in `tr::detail`.
  */
 #pragma once
 
@@ -20,10 +25,7 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/tlv.hpp"
 
-namespace tr::detail {
-
-using wire::opt_t;
-using wire::type_t;
+namespace tr::wire {
 
 // Append one TLV: <type> <opt> <length> <body>, where length is u16 LE, widening
 // to u32 LE (with the LL bit set) when the body exceeds 0xFFFF. `opt` carries the
@@ -33,7 +35,7 @@ inline void emit_tlv(std::vector<std::byte>& out, type_t type, opt_t opt,
     if (body.size() > 0xFFFFu) opt.ll = true;
     out.push_back(static_cast<std::byte>(std::to_underlying(type)));
     out.push_back(static_cast<std::byte>(opt.encode()));
-    append_le(out, static_cast<std::uint32_t>(body.size()), opt.ll ? 4u : 2u);
+    detail::append_le(out, static_cast<std::uint32_t>(body.size()), opt.ll ? 4u : 2u);
     out.insert(out.end(), body.begin(), body.end());
 }
 
@@ -48,4 +50,4 @@ inline void emit_name(std::vector<std::byte>& out, std::string_view name) {
                                               name.size()));
 }
 
-}  // namespace tr::detail
+}  // namespace tr::wire

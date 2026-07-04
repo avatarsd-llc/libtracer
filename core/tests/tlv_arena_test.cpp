@@ -308,7 +308,7 @@ int main() {
         cases.push_back({std::byte{0x01}, std::byte{0x00}});  // < 4 bytes
         {
             std::vector<std::byte> b;  // LL header cut at 4 bytes
-            tr::detail::emit_tlv(b, type_t::VALUE, opt_t{.ll = true}, {});
+            tr::wire::emit_tlv(b, type_t::VALUE, opt_t{.ll = true}, {});
             b.resize(4);
             cases.push_back(std::move(b));
         }
@@ -346,7 +346,7 @@ int main() {
             std::vector<std::byte> inner = encode(make_value(payload));
             inner.pop_back();
             std::vector<std::byte> b;
-            tr::detail::emit_tlv(b, type_t::FWD, opt_t{.pl = true}, inner);
+            tr::wire::emit_tlv(b, type_t::FWD, opt_t{.pl = true}, inner);
             cases.push_back(std::move(b));
         }
         bool all = true;
