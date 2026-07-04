@@ -11,6 +11,7 @@
  */
 #pragma once
 
+#include <cassert>
 #include <cstddef>
 #include <span>
 #include <utility>
@@ -51,6 +52,10 @@ struct view_t {
      */
     [[nodiscard]] std::span<const std::byte> bytes() const noexcept {
         if (!owner) return {};
+        // The L1 window invariant (see the struct note): the window must lie within
+        // the segment. A debug-build assert (zero release cost); the fuzz + sanitizer
+        // CI exercises it, so an out-of-bounds view is caught at its source.
+        assert(offset + length <= owner->bytes.size());
         return std::span<const std::byte>(owner->bytes.data() + offset, length);
     }
 
@@ -67,6 +72,9 @@ struct view_t {
      * @note Precondition: `sub_offset + sub_length <= length`.
      */
     [[nodiscard]] view_t subview(std::size_t sub_offset, std::size_t sub_length) const {
+        // Precondition, enforced in debug builds (zero release cost; fuzz + sanitizer
+        // CI catches a violation): the sub-window must lie within this window.
+        assert(sub_offset + sub_length <= length);
         return view_t{owner, offset + sub_offset, sub_length};
     }
 };

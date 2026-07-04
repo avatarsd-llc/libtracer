@@ -87,6 +87,7 @@ def _compile_and_link(
         f"-mcpu={mcpu}",
         "-mthumb",
         "-DLIBTRACER_NO_ATOMIC",
+        "-DNDEBUG",  # release profile: debug-only asserts (view.hpp bounds checks) compile out.
         "-ffunction-sections",
         "-fdata-sections",
         "-Wall",
