@@ -28,6 +28,18 @@ namespace tr::mem {
 /** @brief The process-wide CUDA device backend (`cudaMalloc`/`cudaFree`; `space()` == DEVICE). */
 [[nodiscard]] mem_backend_t& cuda_backend() noexcept;
 
+/**
+ * @brief The device byte-move behind @ref transfer for a CUDA (`DEVICE`) segment:
+ *        `cudaMemcpy` in direction @p dir, bracketed by the backend's cache hooks
+ *        (`after_io` == the CUDA stream barrier).
+ *
+ * Declared here but **defined in mem_cuda.cpp** so `cudaMemcpy` stays TU-local;
+ * `backend_set.cpp`'s @ref transfer calls it only under `LIBTRACER_WITH_CUDA`.
+ * Not called directly — use @ref transfer, which routes CUDA-tagged segments here.
+ */
+[[nodiscard]] bool cuda_transfer(view::segment_t* seg, std::span<std::byte> host,
+                                 io_dir_t dir) noexcept;
+
 }  // namespace tr::mem
 
 namespace tr::view {
@@ -40,11 +52,5 @@ namespace tr::view {
  * @retval {} An empty handle if `cudaMalloc` fails.
  */
 [[nodiscard]] segment_ptr_t cuda_alloc(std::size_t size);
-
-/** @brief Copy host bytes into a device segment (`cudaMemcpy` H2D). @return true on success. */
-[[nodiscard]] bool cuda_copy_from_host(const segment_ptr_t& dev, std::span<const std::byte> host);
-
-/** @brief Copy a device segment's bytes out to host (`cudaMemcpy` D2H). @return true on success. */
-[[nodiscard]] bool cuda_copy_to_host(const segment_ptr_t& dev, std::span<std::byte> host);
 
 }  // namespace tr::view

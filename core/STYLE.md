@@ -42,6 +42,7 @@ The trailing `_t` is safe under `tr::`: C/POSIX reserves global trailing-`_t`, b
 | `mem_backend_t::destroy(seg)` | The refcount-hit-zero reclaim hook. **Never user-called**; `segment_ptr_t` invokes it. Never called on a live segment. |
 | `mem_backend_t::before_io(seg, io_dir_t)` | Cache prep *before* a DMA transfer (clean/invalidate per direction). No-op on cacheless cores. |
 | `mem_backend_t::after_io(seg, io_dir_t)` | Cache reconcile *after* a DMA transfer. The method carries timing; `io_dir_t` carries direction. |
+| `mem::transfer(seg, host, io_dir_t)` | Tag-dispatched host↔device byte-move (ADR-0047 §2): host `memcpy` bracketed by the cache hooks when `needs_cache_ops`; a `DEVICE` backend routes to its device copy. Retired `cuda_copy_from_host`/`_to_host`. |
 | `segment_ptr_t::adopt(seg)` | Take ownership of an existing reference **without** bumping (wraps `alloc`'s result). |
 | `segment_ptr_t::retain(seg)` | Take a **new** shared reference (bumps the count). |
 | `segment_ptr_t::reset()` | Drop this reference (acq_rel); fires `destroy` at zero. |

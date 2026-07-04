@@ -39,9 +39,11 @@ int main() {
     // 2. round-trip host -> device -> host (proves real GPU memory works)
     std::array<std::byte, 64> src{};
     for (std::size_t i = 0; i < src.size(); ++i) src[i] = std::byte(i + 1);
-    check(tr::view::cuda_copy_from_host(dev, src), "host -> device copy ok");
+    check(tr::mem::transfer(dev.get(), src, tr::mem::io_dir_t::CPU_TO_DEVICE),
+          "host -> device transfer ok");
     std::array<std::byte, 64> dst{};
-    check(tr::view::cuda_copy_to_host(dev, dst), "device -> host copy ok");
+    check(tr::mem::transfer(dev.get(), dst, tr::mem::io_dir_t::DEVICE_TO_CPU),
+          "device -> host transfer ok");
     bool same = true;
     for (std::size_t i = 0; i < src.size(); ++i) {
         if (src[i] != dst[i]) same = false;

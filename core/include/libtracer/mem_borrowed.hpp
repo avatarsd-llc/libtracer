@@ -38,6 +38,14 @@ class borrowed_backend_t final : public mem_backend_t {
     // No alloc: a borrow wraps existing bytes (see tr::view::borrow below).
     void destroy(view::segment_t* seg) noexcept override { delete seg; }  // control block only
     [[nodiscard]] backend_tag tag() const noexcept override { return backend_tag::BORROWED; }
+
+    // Module-set traits (ADR-0047 §2). `needs_cache_ops` is read by `mem::transfer`.
+    static constexpr bool needs_cache_ops =
+        false; /**< @brief No DMA cache maintenance (host RAM). */
+    static constexpr bool is_isr_safe =
+        false; /**< @brief `destroy` frees the control block via `operator delete`. */
+    static constexpr bool owns_bytes =
+        false; /**< @brief Borrows caller-owned bytes — must NOT be durably stored. */
 };
 
 /** @brief The process-wide borrowed backend (function-local static). */
@@ -54,6 +62,15 @@ class borrowed_device_backend_t final : public mem_backend_t {
     void destroy(view::segment_t* seg) noexcept override { delete seg; }
     [[nodiscard]] mem_space_t space() const noexcept override { return mem_space_t::DEVICE; }
     [[nodiscard]] backend_tag tag() const noexcept override { return backend_tag::BORROWED_DEVICE; }
+
+    // Module-set traits (ADR-0047 §2). Bytes are host memory tagged DEVICE (a
+    // CUDA-free stand-in), so `mem::transfer` still moves them with a `memcpy`.
+    static constexpr bool needs_cache_ops =
+        false; /**< @brief Test stand-in over host RAM — no real DMA. */
+    static constexpr bool is_isr_safe =
+        false; /**< @brief `destroy` frees the control block via `operator delete`. */
+    static constexpr bool owns_bytes =
+        false; /**< @brief Borrows caller-owned bytes — must NOT be durably stored. */
 };
 
 /** @brief The process-wide device-borrowed backend (function-local static). */

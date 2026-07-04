@@ -29,7 +29,30 @@ reference implementation is pre-1.0; everything currently lives under
   call** (the MCU single-member set). The follow-up that inlines the dispatch
   into `reset` (removing the small out-of-line seam — currently ~+20 B on the
   Cortex-M0 sentinel) needs the `mem_pool`↔`segment` header decouple, tracked for
-  the next increment; the traits + `mem::transfer` land after.
+  the next increment.
+
+- **L0 module-set `constexpr` traits + `tr::mem::transfer` (ADR-0047 §2, second
+  increment).** Each concrete backend now carries compile-time contracts as
+  `static constexpr` members in place of prose: `needs_cache_ops` (does a transfer
+  need the DMA cache hooks), `is_isr_safe` (`alloc`/`destroy` callable from an ISR
+  — `mem_pool` yes, `mem_heap`/`mem_borrowed` no), and `owns_bytes` (bytes
+  backend-owned and thus durably storable — false for a borrow). New
+  **`tr::mem::transfer(seg, host, io_dir_t)`** is the tag-dispatched host↔device
+  byte-mover: a host backend `memcpy`s (bracketed by `before_io`/`after_io` only
+  when `needs_cache_ops`, so the bracket folds away at compile time on cacheless
+  cores — the traits' and the I/O hooks' first in-tree consumer, review finding
+  #8); a `DEVICE` backend (`mem_cuda`) routes to `cudaMemcpy` + the `after_io`
+  stream barrier. Single-member (`-DLIBTRACER_BACKEND_SET_POOL_ONLY`) builds fold
+  the transfer dispatch to one direct call. No Cortex-M0 footprint delta (the
+  sentinel doesn't call `transfer`; `--gc-sections` drops it, traits are
+  compile-time).
+
+### Removed
+
+- **`tr::view::cuda_copy_from_host` / `cuda_copy_to_host`** (public API, CUDA-only
+  build): retired in favor of the general `tr::mem::transfer(seg, host, io_dir_t)`
+  which subsumes both directions (`CPU_TO_DEVICE` / `DEVICE_TO_CPU`) and every
+  host backend (ADR-0047 §2). `tr::view::cuda_alloc` is unchanged.
 
 - **`tr::wire::key_view_t` — canonical-key NAME navigation (`key_view.hpp`).** One
   locus for walking a vertex-map key (the concatenated NAME-TLV encodings):

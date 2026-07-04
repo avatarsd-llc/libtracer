@@ -186,6 +186,54 @@ void test_bounded_pool() {
     check(pool.alloc(17) == nullptr, "a request larger than the slot payload is refused");
 }
 
+// The module-set traits are compile-time backend contracts (ADR-0047 §2); pin the
+// load-bearing distinctions so a backend change that violates them fails to build.
+static_assert(!tr::mem::pool_t::needs_cache_ops, "the pool is plain RAM — no DMA cache ops");
+static_assert(tr::mem::pool_t::is_isr_safe, "the pool's free-list alloc/destroy is ISR-safe");
+static_assert(!tr::mem::heap_backend_t::is_isr_safe, "operator new/delete is not ISR-safe");
+static_assert(tr::mem::heap_backend_t::owns_bytes, "the heap owns its bytes (durably storable)");
+static_assert(!tr::mem::detail::borrowed_backend_t::owns_bytes,
+              "a borrow must NOT be durably stored");
+
+void test_mem_transfer() {
+    std::printf("mem::transfer — host byte-move + cache-hook seam (ADR-0047 §2):\n");
+    std::array<std::byte, 8> src{};
+    for (std::size_t i = 0; i < src.size(); ++i) src[i] = static_cast<std::byte>(0xA0 + i);
+
+    // Pool segment: write host bytes in (CPU_TO_DEVICE), read them back out (DEVICE_TO_CPU).
+    std::array<std::byte, 256> slab{};
+    tr::mem::pool_t pool(slab, 16);
+    tr::view::segment_ptr_t pseg = tr::view::segment_ptr_t::adopt(pool.alloc(8));
+    check(static_cast<bool>(pseg), "pool segment allocated for transfer");
+    check(tr::mem::transfer(pseg.get(), src, tr::mem::io_dir_t::CPU_TO_DEVICE),
+          "CPU_TO_DEVICE copies host bytes into the pool segment");
+    check(std::ranges::equal(pseg->bytes, src), "the segment now holds the source bytes");
+    std::array<std::byte, 8> out{};
+    check(tr::mem::transfer(pseg.get(), out, tr::mem::io_dir_t::DEVICE_TO_CPU),
+          "DEVICE_TO_CPU copies the segment bytes back out to host");
+    check(std::ranges::equal(out, src), "the round-trip preserves the bytes");
+
+    // Heap segment: the same round-trip through a different (host) backend.
+    tr::view::segment_ptr_t hseg = tr::view::heap_alloc(8);
+    check(tr::mem::transfer(hseg.get(), src, tr::mem::io_dir_t::CPU_TO_DEVICE) &&
+              std::ranges::equal(hseg->bytes, src),
+          "transfer works over the heap backend too");
+
+    // A borrowed-DEVICE segment is host memory tagged DEVICE — the fast path still memcpys it.
+    std::array<std::byte, 8> dev_store{};
+    tr::view::segment_ptr_t dseg = tr::view::borrow_device(dev_store);
+    check(tr::mem::transfer(dseg.get(), src, tr::mem::io_dir_t::CPU_TO_DEVICE) &&
+              std::ranges::equal(dev_store, src),
+          "transfer over a borrowed-DEVICE stand-in memcpys (no real device)");
+
+    // Guards: an over-long host buffer and a null segment are rejected, not truncated.
+    std::array<std::byte, 9> too_big{};
+    check(!tr::mem::transfer(pseg.get(), too_big, tr::mem::io_dir_t::CPU_TO_DEVICE),
+          "a host buffer larger than the segment is refused");
+    check(!tr::mem::transfer(nullptr, src, tr::mem::io_dir_t::DEVICE_TO_CPU),
+          "a null segment is refused");
+}
+
 }  // namespace
 
 void test_memory_space() {
@@ -228,6 +276,7 @@ int main() {
     test_rope_equivalence(vroot);
     test_cast_claim_outlives_source(vroot);
     test_bounded_pool();
+    test_mem_transfer();
     test_memory_space();
 
 #ifdef LIBTRACER_NO_ATOMIC

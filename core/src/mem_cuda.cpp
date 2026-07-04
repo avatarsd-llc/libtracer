@@ -43,8 +43,19 @@ class cuda_backend_t final : public mem_backend_t {
 
     [[nodiscard]] mem_space_t space() const noexcept override { return mem_space_t::DEVICE; }
     // TU-local (LIBTRACER_WITH_CUDA only): tagged CUDA, but not in backend_set.cpp's
-    // fast switch, so destroy_dispatch routes it through the virtual `destroy` above.
+    // fast switch, so destroy_dispatch routes it through the virtual `destroy` above
+    // and mem::transfer routes it through cuda_transfer (below).
     [[nodiscard]] backend_tag tag() const noexcept override { return backend_tag::CUDA; }
+
+    // Module-set traits (ADR-0047 §2). Device memory is not host-cached; the copy
+    // and its stream barrier live in cuda_transfer, so `needs_cache_ops` is not
+    // read on the CUDA path — set true for an honest, non-trivial cache contract.
+    static constexpr bool needs_cache_ops =
+        true; /**< @brief The cache hooks reduce to a CUDA stream barrier (after_io). */
+    static constexpr bool is_isr_safe =
+        false; /**< @brief `cudaMalloc`/`cudaFree` are not ISR-safe. */
+    static constexpr bool owns_bytes =
+        true; /**< @brief Owns the `cudaMalloc`'d device allocation. */
 };
 
 }  // namespace
@@ -54,24 +65,23 @@ mem_backend_t& cuda_backend() noexcept {
     return backend;
 }
 
+bool cuda_transfer(view::segment_t* seg, std::span<std::byte> host, io_dir_t dir) noexcept {
+    if (seg == nullptr || host.size() > seg->bytes.size()) return false;
+    seg->backend->before_io(seg, dir);  // no-op default (device memory is not host-cached).
+    const cudaError_t rc =
+        (dir == io_dir_t::CPU_TO_DEVICE)
+            ? cudaMemcpy(seg->bytes.data(), host.data(), host.size(), cudaMemcpyHostToDevice)
+            : cudaMemcpy(host.data(), seg->bytes.data(), host.size(), cudaMemcpyDeviceToHost);
+    seg->backend->after_io(seg, dir);  // cudaDeviceSynchronize — after_io's first caller.
+    return rc == cudaSuccess;
+}
+
 }  // namespace tr::mem
 
 namespace tr::view {
 
 segment_ptr_t cuda_alloc(std::size_t size) {
     return segment_ptr_t::adopt(mem::cuda_backend().alloc(size, mem::alloc_hint_t::NONE));
-}
-
-bool cuda_copy_from_host(const segment_ptr_t& dev, std::span<const std::byte> host) {
-    if (!dev || host.size() > dev->bytes.size()) return false;
-    return cudaMemcpy(dev->bytes.data(), host.data(), host.size(), cudaMemcpyHostToDevice) ==
-           cudaSuccess;
-}
-
-bool cuda_copy_to_host(const segment_ptr_t& dev, std::span<std::byte> host) {
-    if (!dev || host.size() > dev->bytes.size()) return false;
-    return cudaMemcpy(host.data(), dev->bytes.data(), host.size(), cudaMemcpyDeviceToHost) ==
-           cudaSuccess;
 }
 
 }  // namespace tr::view

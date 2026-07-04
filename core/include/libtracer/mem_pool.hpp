@@ -58,6 +58,15 @@ class pool_t final : public mem_backend_t {
     [[nodiscard]] std::size_t max_segment_size() const noexcept override { return slot_payload_; }
     [[nodiscard]] backend_tag tag() const noexcept override { return backend_tag::POOL; }
 
+    // Module-set traits (ADR-0047 §2): compile-time backend contracts the seam
+    // consumes in place of prose. `needs_cache_ops` is read by `mem::transfer`.
+    static constexpr bool needs_cache_ops =
+        false; /**< @brief No DMA cache maintenance (plain RAM slab). */
+    static constexpr bool is_isr_safe =
+        true; /**< @brief `alloc`/`destroy` are O(1) free-list ops — no heap, no syscall. */
+    static constexpr bool owns_bytes =
+        true; /**< @brief Bytes are backend-managed (freed only on `destroy`) — durably storable. */
+
     [[nodiscard]] std::size_t capacity() const noexcept {
         return slot_count_;
     } /**< @brief Total slots. */
