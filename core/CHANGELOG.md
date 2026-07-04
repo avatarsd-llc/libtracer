@@ -65,6 +65,14 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Changed
 
+- **`view_t::subview` / `view_t::bytes()` now assert their bounds preconditions
+  in debug builds** (`sub_offset + sub_length <= length`; `offset + length <=
+  segment size`). Zero release cost — `assert` compiles out under `NDEBUG`, so the
+  Cortex-M0 footprint is unchanged (the sentinel build now passes `-DNDEBUG`, a
+  release profile) — while the fuzz + sanitizer CI catches an out-of-bounds view
+  at its source instead of as a silent over-read. Hardens the L1 window invariant
+  the review flagged as prose-only.
+
 - **The raw-TLV byte emitters moved from `tr::detail` to `tr::wire`
   (`tlv_emit.hpp`): `emit_tlv` / `emit_name` are now `tr::wire::emit_tlv` /
   `tr::wire::emit_name`.** They produce wire bytes from wire types (`type_t`,
