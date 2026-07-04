@@ -11,7 +11,7 @@ code changes. Architecture and rationale: **[ADR-0023](../../docs/adr/0023-ros2-
 > **Build status.** This package requires the ROS 2 / ament toolchain (`rmw`,
 > `rcutils`, `rosidl_runtime_c` headers) and is **not** built by `core/`'s CMake
 > or `ctest`. It is a separate ament package built with `colcon`. It is
-> **build-verified** in `ros:jazzy` via [`scripts/build-ros.sh`](../../scripts/build-ros.sh)
+> **build-verified** in `ros:jazzy` via [`tools/build-ros.sh`](../../tools/build-ros.sh)
 > (libtracer + the package compile and link together); `src/rmw_tracer/identity.c`
 > is the first real translation unit. The remaining `rmw_*.c` TUs (the
 > [implementation plan](#implementation-plan-phased) below) are the work ahead.
@@ -76,7 +76,7 @@ returns `RMW_RET_UNSUPPORTED` so the library always links.
 | **R5 — transport differentiators** | wire `rmw_tracer` to libtracer transports | ROS over **CAN/UART** (header-elided, [ADR-0022](../../docs/adr/0022-transport-framing-modes-elided-full-tlv-advertise.md)); ROS into **GPU memory** ([mem_cuda](../../docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)); high-rate topics over **scatter-gather composition** (`send(iov)` — see [Performance](../../docs/performance.md)) |
 
 Each phase is validated in the `ros:jazzy` (and `nvidia/cuda` for R5) Docker images
-via `scripts/build-ros.sh`, never in CI (no ROS/GPU on the runners).
+via `tools/build-ros.sh`, never in CI (no ROS/GPU on the runners).
 
 ## Files
 

@@ -9,7 +9,7 @@ The libtracer project is stewarded by **avatarsd LLC**. The company:
 - Holds the **"libtracer" trademark** and enforces the [trademark policy](TRADEMARKS.md).
 - Holds **copyright** in contributions made by avatarsd LLC employees and contractors. Outside contributions remain copyright of their authors, licensed under Apache 2.0 (code) or CC BY 4.0 (spec) per the Developer Certificate of Origin.
 - **Funds and prioritizes** development of the reference implementation.
-- **May build proprietary products and services on top of libtracer** (Layer 3 in the [README](README.md)) and reserves the right to do so without obligation to open-source those products.
+- **May build proprietary products and services on top of libtracer** (Layer 3 in the [README](../README.md)) and reserves the right to do so without obligation to open-source those products.
 
 The company explicitly does **not**:
 
@@ -30,9 +30,9 @@ There are three distinct decision domains, each with different rules:
 
 ## Roles
 
-- **Maintainers** — have commit access. Listed in [MAINTAINERS.md](MAINTAINERS.md). Currently a single maintainer (BDFL model). The project will move to a steering committee once there are at least three active independent contributors.
+- **Maintainers** — have commit access. Currently a single maintainer (BDFL model): **@avatarsd** (founder — spec, core, bindings, integrations), stewarded by **avatarsd LLC** (trademark and copyright holder; code Apache 2.0, spec CC BY 4.0). Sub-maintainer areas (`bindings/rust/`, `bindings/typescript/`, `integrations/platformio/`, `integrations/esphome/`) are open — volunteer via an issue tagged `maintainer-volunteer`; sub-maintainers own their area without a vote on protocol-level decisions outside it. The project will move to a steering committee once there are at least three active independent contributors.
 - **Contributors** — anyone who opens a PR or RFC.
-- **Implementers** — maintainers of third-party implementations registered in [implementations/](implementations/). They have a standing seat in protocol-change discussions because spec changes affect them directly.
+- **Implementers** — maintainers of third-party implementations registered in [docs/implementations.md](../docs/implementations.md). They have a standing seat in protocol-change discussions because spec changes affect them directly.
 
 ## Spec changes (Layer 1)
 

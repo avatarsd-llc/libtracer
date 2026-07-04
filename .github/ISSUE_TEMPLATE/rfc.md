@@ -28,4 +28,4 @@ What did you reject and why?
 
 ## Discussion
 
-Per [GOVERNANCE.md](../../GOVERNANCE.md), this issue stays open at least 14 days for implementer feedback before a PR is merged.
+Per [GOVERNANCE.md](../GOVERNANCE.md), this issue stays open at least 14 days for implementer feedback before a PR is merged.

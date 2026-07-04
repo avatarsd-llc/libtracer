@@ -16,7 +16,7 @@ on:
     branches: [main]
     paths:
       - "core/**"
-      - "scripts/gen-dev-cert.sh"
+      - "tools/gen-dev-cert.sh"
       - ".github/workflows/quic.yml"
   pull_request:
     paths:
@@ -33,7 +33,7 @@ on:
       - "core/tests/tsan-msquic.supp"
       - "core/CMakeLists.txt"
       - "core/tests/CMakeLists.txt"
-      - "scripts/gen-dev-cert.sh"
+      - "tools/gen-dev-cert.sh"
       - ".github/workflows/quic.yml"
   workflow_dispatch:
 

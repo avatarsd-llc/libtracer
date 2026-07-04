@@ -45,4 +45,4 @@ What was rejected, and why. (Reference ADRs where a decision is already recorded
 
 ## Discussion
 
-Per [GOVERNANCE.md](../../../GOVERNANCE.md), the tracking issue stays open at least 14 days for implementer feedback before this document is merged. Record sustained objections and their resolution here.
+Per [GOVERNANCE.md](../../../.github/GOVERNANCE.md), the tracking issue stays open at least 14 days for implementer feedback before this document is merged. Record sustained objections and their resolution here.

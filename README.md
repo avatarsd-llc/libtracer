@@ -92,9 +92,9 @@ Every arrow speaks one protocol; the bridge forwards typed state across transpor
 
 A deliberate separation lets vendors build proprietary products on top without fragmenting the ecosystem, and lets the community contribute without fearing capture.
 
-1. **The Protocol** (open, normative, [docs/spec/](docs/spec/)). RFC-2119 keywords + conformance vectors. *An implementation is compatible if it passes the vectors for a spec version and honors all MUST clauses* — no source dependency. Changes governed by [GOVERNANCE.md](GOVERNANCE.md).
-2. **The Reference Implementation** (Apache 2.0). Ship it in proprietary firmware without copyleft. Independent re-implementations are encouraged — register in [implementations/](implementations/).
-3. **Proprietary products & services** (yours to build) — cloud, fleet management, hosted bridges, hardware. Compete here while interoperating at Layer 1. **"libtracer" is a trademark** ([TRADEMARKS.md](TRADEMARKS.md)): say "compatible with libtracer" if you pass the suite; don't imply endorsement otherwise.
+1. **The Protocol** (open, normative, [docs/spec/](docs/spec/)). RFC-2119 keywords + conformance vectors. *An implementation is compatible if it passes the vectors for a spec version and honors all MUST clauses* — no source dependency. Changes governed by [GOVERNANCE.md](.github/GOVERNANCE.md).
+2. **The Reference Implementation** (Apache 2.0). Ship it in proprietary firmware without copyleft. Independent re-implementations are encouraged — register in [docs/implementations.md](docs/implementations.md).
+3. **Proprietary products & services** (yours to build) — cloud, fleet management, hosted bridges, hardware. Compete here while interoperating at Layer 1. **"libtracer" is a trademark** ([TRADEMARKS.md](.github/TRADEMARKS.md)): say "compatible with libtracer" if you pass the suite; don't imply endorsement otherwise.
 
 In practice: ship a closed-source product → use the reference impl + follow the trademark policy. Build a competing core → pass the vectors, register, you're peers. Change the protocol → open an RFC under [docs/spec/rfcs/](docs/spec/). Bridge Modbus / Z-Wave / vendor-X → that's exactly the point.
 
@@ -109,7 +109,6 @@ libtracer/
 ├── bindings/
 │   ├── rust/              Native Rust core → crates.io
 │   └── typescript/        Native pure-TS core → npm (@avatarsd-llc/libtracer)
-├── implementations/        Registry of third-party implementations
 ├── integrations/           platformio/ · esphome/ · arduino/ · esp-idf/
 ├── examples/               Runnable examples per platform
 ├── bench/                  libtracer↔zenoh benchmark + figures
@@ -118,7 +117,9 @@ libtracer/
 │   ├── reference/         Descriptive six-layer architecture (the "what it is")
 │   └── adr/               Architecture decision records (the "why")
 ├── tests/conformance/      Cross-implementation vectors + run-all.py driver
-├── GOVERNANCE.md  CONTRIBUTING.md  TRADEMARKS.md  CONTEXT.md (glossary)
+├── .github/                CONTRIBUTING · GOVERNANCE · TRADEMARKS · CI workflows
+├── CONTEXT.md              Canonical glossary
+├── docs/implementations.md Registry of third-party implementations
 └── LICENSE                 Apache 2.0
 ```
 
@@ -132,7 +133,7 @@ libtracer/
 | Use it on ESP32 / PlatformIO / ESPHome | [integrations/](integrations/) |
 | Use it from Rust / Node / browser | [bindings/](bindings/) |
 | Build a bridge or form a network | [docs/reference/13-network-formation.md](docs/reference/13-network-formation.md) |
-| Contribute / propose a spec change | [CONTRIBUTING.md](CONTRIBUTING.md) · [docs/spec/rfcs/](docs/spec/) |
+| Contribute / propose a spec change | [CONTRIBUTING.md](.github/CONTRIBUTING.md) · [docs/spec/rfcs/](docs/spec/) |
 
 ## License
 
@@ -142,4 +143,4 @@ libtracer/
 | Protocol specification (`docs/spec/`) | **CC BY 4.0** | [docs/spec/LICENSE](docs/spec/LICENSE) |
 | Example code (`examples/`) | **CC0 1.0** | [examples/LICENSE](examples/LICENSE) |
 
-Copyright **avatarsd LLC** for company-authored work; outside contributions remain their authors', licensed per the scope above. Contributions are accepted under the [Developer Certificate of Origin](https://developercertificate.org/) — sign commits with `git commit -s`. The **"libtracer" name** is a trademark of avatarsd LLC, not granted by the licenses above ([TRADEMARKS.md](TRADEMARKS.md)).
+Copyright **avatarsd LLC** for company-authored work; outside contributions remain their authors', licensed per the scope above. Contributions are accepted under the [Developer Certificate of Origin](https://developercertificate.org/) — sign commits with `git commit -s`. The **"libtracer" name** is a trademark of avatarsd LLC, not granted by the licenses above ([TRADEMARKS.md](.github/TRADEMARKS.md)).

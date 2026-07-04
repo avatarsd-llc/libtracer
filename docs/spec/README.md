@@ -28,4 +28,4 @@ That is the entire compatibility contract. There is no certification authority.
 
 ## Proposing a change
 
-See [GOVERNANCE.md](https://github.com/avatarsd-llc/libtracer/blob/main/GOVERNANCE.md) for the RFC process.
+See [GOVERNANCE.md](https://github.com/avatarsd-llc/libtracer/blob/main/.github/GOVERNANCE.md) for the RFC process.

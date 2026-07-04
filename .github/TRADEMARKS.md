@@ -8,7 +8,7 @@ This policy exists to keep the name meaningful: when a user sees "libtracer-comp
 
 - **Refer to the project by name** in documentation, blog posts, talks, comparisons, academic work, and similar uses.
 - **State that your software uses libtracer** if it does (e.g., "built with libtracer", "uses the libtracer reference implementation").
-- **State that your implementation is libtracer-compatible** if it passes the conformance vectors in [tests/conformance/](tests/conformance/) for a specific spec version. Be specific about which version: "libtracer v1 compatible" is good; "libtracer compatible" without a version is ambiguous.
+- **State that your implementation is libtracer-compatible** if it passes the conformance vectors in [tests/conformance/](../tests/conformance/) for a specific spec version. Be specific about which version: "libtracer v1 compatible" is good; "libtracer compatible" without a version is ambiguous.
 - **Distribute unmodified copies** of the libtracer reference implementation under its existing name.
 - **Distribute modified versions** of the reference implementation under your own name. You may say "based on libtracer" or "fork of libtracer"; do not present a modified version as the canonical libtracer.
 
@@ -34,7 +34,7 @@ False claims of compatibility (badge displayed without passing vectors) are a mi
 
 ## Contact
 
-For trademark questions, open an issue tagged `trademark` or contact avatarsd LLC via the maintainers listed in [MAINTAINERS.md](MAINTAINERS.md).
+For trademark questions, open an issue tagged `trademark` or contact avatarsd LLC via the maintainers listed in [GOVERNANCE.md §Roles](GOVERNANCE.md).
 
 ## Inspiration
 
