@@ -43,6 +43,20 @@ add_executable(bench_forward_heap bench_forward_heap.cpp)
 target_link_libraries(bench_forward_heap PRIVATE libtracer)
 target_compile_options(bench_forward_heap PRIVATE -Wall -Wextra)
 
+# Many-core contention microbenchmarks (Wave 0e; the ADR-0032 measurement-first
+# answer to the 128-core scaling question). bench_fanout_clone_storm measures
+# segment-refcount cacheline contention under wide fan-out; bench_await_wakeup_storm
+# measures condvar/await fan-in scaling. DIAGNOSTIC ONLY — thread-contention numbers
+# are runner-dependent, so these are NOT wired into perf.yml's regression gate; run
+# them on the real many-core host (the nightly row).
+add_executable(bench_fanout_clone_storm bench_fanout_clone_storm.cpp)
+target_link_libraries(bench_fanout_clone_storm PRIVATE libtracer)
+target_compile_options(bench_fanout_clone_storm PRIVATE -Wall -Wextra)
+
+add_executable(bench_await_wakeup_storm bench_await_wakeup_storm.cpp)
+target_link_libraries(bench_await_wakeup_storm PRIVATE libtracer)
+target_compile_options(bench_await_wakeup_storm PRIVATE -Wall -Wextra)
+
 # Zenoh side — built only when the prebuilt is vendored (run bench/fetch_zenoh.sh).
 set(ZC ${CMAKE_CURRENT_SOURCE_DIR}/vendor/zenoh-c)
 set(ZCPP ${CMAKE_CURRENT_SOURCE_DIR}/vendor/zenoh-cpp-1.9.0)

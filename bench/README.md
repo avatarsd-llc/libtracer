@@ -17,6 +17,8 @@ The current numbers and figures are in **[RESULTS.md](RESULTS.md)** (snapshot) a
 | `grid.sh` | **response-surface grid** → `grid.csv` → 2D/3D figures via `plot.py`. |
 | `bench_scatter` | **scatter-gather egress**: one `sendmsg(iovec)` ships a K-value composite rope. |
 | `bench_forward_heap` | **16KB-RAM zero-heap gate**: a global `operator new` counter measures how many heap allocations one FWD *forward hop* costs (ADR-0038). |
+| `bench_fanout_clone_storm` | **many-core refcount contention**: T threads clone+release one shared segment — the per-subscriber fan-out primitive under wide fan-out (ADR-0032 128-core row). |
+| `bench_await_wakeup_storm` | **many-core await fan-in**: one writer storms writes while W threads `await` one vertex — condvar/notify_all + vertex-lock scaling (ADR-0032 128-core row). |
 
 ### `bench_forward_heap` — the 16KB-RAM zero-heap forward gate (ADR-0038)
 
@@ -59,6 +61,36 @@ python3 -m venv .venv && ./.venv/bin/pip install matplotlib numpy
 ```
 
 Without `fetch_zenoh.sh`, only the libtracer numbers print.
+
+## Many-core contention microbenchmarks (Wave 0e, ADR-0032)
+
+The 128-core scaling review left two data-plane questions to *measurement, not
+redesign* ([docs/research/2026-07-04-architecture-deepening-review.md](../docs/research/2026-07-04-architecture-deepening-review.md),
+"128-core scaling"): segment-refcount cacheline contention under wide fan-out, and
+`await`/condvar wakeup scaling. These two benches answer them. Both are **diagnostic**
+— thread-contention numbers are hardware-dependent, so they are deliberately **not**
+wired into `perf.yml`'s regression gate; run them on the real many-core target (the
+nightly row), not a shared CI runner.
+
+```sh
+cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
+cmake --build bench/build --target bench_fanout_clone_storm bench_await_wakeup_storm -j
+./bench/build/bench_fanout_clone_storm   # RESULT mode=clone_storm, fanout=T threads
+./bench/build/bench_await_wakeup_storm   # RESULT mode=wake_storm,  fanout=W waiters
+```
+
+- **`bench_fanout_clone_storm`** parks T threads on one shared value view and has each
+  clone+release it (`view_t copy = hot;` — a `segment_ptr_t` inc/dec) in a time-boxed
+  loop. `pub_per_s` is per-thread clone+release throughput; `deliv_per_s` is aggregate.
+  The contention signature is **aggregate plateauing while per-thread collapses ~1/T** —
+  the single refcount cacheline saturating. (A 24-core run: aggregate holds ~30–56 M
+  ops/s from T=2 up, while per-thread falls 90 M → 0.25 M and per-op climbs 11 ns → ~4 µs.)
+- **`bench_await_wakeup_storm`** runs one writer storming writes while W threads `await`
+  the same vertex, in steady state. `pub_per_s` is writer throughput (falls as `notify_all`
+  + the contended vertex lock get costlier — a 24-core run: ~2.1 M writes/s at W=1 down to
+  ~39 k at W=128, i.e. 0.47 µs → ~26 µs per write); `deliv_per_s` is aggregate wakeups/s.
+  Steady-state throughput is used over single-shot latency so no fragile "all W parked"
+  barrier is needed — the bench is not flaky.
 
 ## What is measured
 
