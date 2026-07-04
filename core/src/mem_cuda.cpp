@@ -42,6 +42,9 @@ class cuda_backend_t final : public mem_backend_t {
     }
 
     [[nodiscard]] mem_space_t space() const noexcept override { return mem_space_t::DEVICE; }
+    // TU-local (LIBTRACER_WITH_CUDA only): tagged CUDA, but not in backend_set.cpp's
+    // fast switch, so destroy_dispatch routes it through the virtual `destroy` above.
+    [[nodiscard]] backend_tag tag() const noexcept override { return backend_tag::CUDA; }
 };
 
 }  // namespace

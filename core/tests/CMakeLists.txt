@@ -226,6 +226,7 @@ libtracer_test_warnings(ws_fuzz_harness)
 add_executable(substrate_test_no_atomic
     substrate_test.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/frame.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/backend_set.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/mem_heap.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/mem_pool.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/rope.cpp

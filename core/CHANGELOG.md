@@ -15,6 +15,22 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **Build-time-closed backend set + tag dispatch for segment release (ADR-0047
+  §2, first increment).** `segment_t` now carries a `tr::mem::backend_tag`
+  (inherited from its backend like `space`), and `segment_ptr_t::reset` reclaims
+  through `tr::mem::destroy_dispatch` — a `switch` to a devirtualized (`final`-
+  class, qualified) direct call per linked backend, with the backend's virtual
+  `destroy` as the fallback for any unlisted tag (so dispatch is identical to the
+  prior `backend->destroy` for every backend; **behavior-preserving**, validated
+  under ASan/TSan + the full suite). `mem_backend_t` gains a `virtual tag()`;
+  `heap_backend_t` is now a public type in `mem_heap.hpp` (was TU-local) so the
+  dispatch can see it. A target that links only `mem_pool` defines
+  `-DLIBTRACER_BACKEND_SET_POOL_ONLY` and the dispatch **folds to a single direct
+  call** (the MCU single-member set). The follow-up that inlines the dispatch
+  into `reset` (removing the small out-of-line seam — currently ~+20 B on the
+  Cortex-M0 sentinel) needs the `mem_pool`↔`segment` header decouple, tracked for
+  the next increment; the traits + `mem::transfer` land after.
+
 - **`tr::wire::key_view_t` — canonical-key NAME navigation (`key_view.hpp`).** One
   locus for walking a vertex-map key (the concatenated NAME-TLV encodings):
   `last_segment` / `parent` / `is_ancestor_of` / `child_record_under` /

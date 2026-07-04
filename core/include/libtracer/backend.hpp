@@ -67,6 +67,26 @@ enum class mem_space_t : std::uint8_t {
 };
 
 /**
+ * @brief Which build-time-closed backend a segment came from — the module-set
+ *        tag (ADR-0047 §2).
+ *
+ * A segment carries its backend's tag so the per-segment-release destroy
+ * dispatch (`segment_ptr_t::reset` → @ref destroy_dispatch) is a `switch` →
+ * devirtualized direct call rather than a vtable indirect — foldable to a single
+ * direct call when a target links only one backend. An unrecognized tag
+ * (`UNKNOWN`, or a backend not in the fast set — e.g. `CUDA`) routes to the
+ * backend's virtual `destroy`, so dispatch is correct regardless.
+ */
+enum class backend_tag : std::uint8_t {
+    UNKNOWN = 0,     /**< @brief No fast-path tag → virtual `destroy` fallback. */
+    HEAP,            /**< @brief `mem_heap` (mem_heap.hpp). */
+    POOL,            /**< @brief `mem_pool` (mem_pool.hpp). */
+    BORROWED,        /**< @brief `mem_borrowed` (mem_borrowed.hpp). */
+    BORROWED_DEVICE, /**< @brief `mem_borrowed` device-space variant. */
+    CUDA,            /**< @brief `mem_cuda` (device; dispatched via the virtual fallback). */
+};
+
+/**
  * @brief A memory backend: the L0 seam libtracer binds any substrate behind.
  *
  * Subclass this to bind libtracer to any allocator — a heap, a fixed
@@ -146,11 +166,33 @@ class mem_backend_t {
      */
     [[nodiscard]] virtual mem_space_t space() const noexcept { return mem_space_t::HOST; }
 
+    /**
+     * @brief The build-time-closed module-set tag (default `UNKNOWN`, ADR-0047 §2).
+     *
+     * A backend that participates in the fast destroy dispatch overrides this to
+     * return its @ref backend_tag; segments read it once at construction (like
+     * @ref space). A backend that leaves the default is dispatched through its
+     * virtual `destroy`.
+     */
+    [[nodiscard]] virtual backend_tag tag() const noexcept { return backend_tag::UNKNOWN; }
+
     /** @brief The backend's stable identifier (e.g. for introspection / metrics). */
     [[nodiscard]] const char* name() const noexcept { return name_; }
 
    private:
     const char* name_;
 };
+
+/**
+ * @brief Reclaim @p seg through its backend — the module-set destroy dispatch
+ *        (ADR-0047 §2), called by `segment_ptr_t::reset` at refcount zero.
+ *
+ * Switches on the segment's @ref backend_tag to a devirtualized direct call for a
+ * linked fast-set backend, and falls back to the backend's virtual `destroy` for
+ * any other tag, so the result is identical to `seg->backend->destroy(seg)` for
+ * every backend. Defined in `backend_set.cpp` (the one TU that sees the concrete
+ * backend types), keeping this L0 seam free of an upward dependency.
+ */
+void destroy_dispatch(view::segment_t* seg) noexcept;
 
 }  // namespace tr::mem
