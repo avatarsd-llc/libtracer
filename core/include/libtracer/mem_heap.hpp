@@ -52,7 +52,7 @@ class heap_backend_t final : public mem_backend_t {
 
     void destroy(view::segment_t* seg) noexcept override {
         if (!seg->bytes.empty()) {
-            ::operator delete (seg->bytes.data(), std::align_val_t{alignof(std::max_align_t)});
+            ::operator delete(seg->bytes.data(), std::align_val_t{alignof(std::max_align_t)});
         }
         delete seg;
     }
