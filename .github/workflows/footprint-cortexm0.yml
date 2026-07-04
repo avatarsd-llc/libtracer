@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# The Cortex-M0 required-modules footprint sentinel (ADR-0047 §5). Cross-compiles
+# the minimum-feature (P0) libtracer node — the substrate + wire codec + path
+# modules a bare-metal MCU links, exercised by core/tests/footprint/sentinel_node.cpp
+# — for arm-none-eabi Cortex-M0 with the MCU profile, and gates the flash
+# footprint at 16 KiB. This is the standing referee for the compile-time /
+# template doctrine: templating techniques are admissible exactly as far as this
+# gate stays green (it catches vtable/erasure bloat AND template-instantiation
+# bloat). Complements the ESP-IDF whole-image sentinel in esp-idf.yml.
+#
+# Mode is `warn` today: the measured node is ~0.9 KiB over 16 KiB (std::pmr
+# soft-float via the arena decoder + CRC tables). Flip `--mode fail` once the
+# Wave 2 arena/codec rework brings the required modules under the ceiling.
+name: footprint-cortexm0
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "core/**"
+      - "tools/cortexm0_footprint.py"
+      - ".github/workflows/footprint-cortexm0.yml"
+  pull_request:
+    paths:
+      - "core/**"
+      - "tools/cortexm0_footprint.py"
+      - ".github/workflows/footprint-cortexm0.yml"
+  workflow_dispatch:
+
+jobs:
+  sentinel:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install arm-none-eabi toolchain
+        run: |
+          sudo apt-get update
+          # gcc-arm-none-eabi on 24.04 is 13.2 (has -std=c++23, <expected>,
+          # <memory_resource>); it pulls in binutils (arm-none-eabi-size) and
+          # newlib-nano (nano.specs / nosys.specs) as dependencies.
+          sudo apt-get install -y -qq gcc-arm-none-eabi
+          arm-none-eabi-g++ --version | head -1
+
+      - name: Cortex-M0 required-modules footprint gate
+        run: |
+          python3 tools/cortexm0_footprint.py \
+            --mode warn \
+            --max-flash-bytes 16384 \
+            --out-json footprint-cortexm0.json
+
+      - name: Upload footprint artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: footprint-cortexm0
+          path: footprint-cortexm0.json
+          if-no-files-found: ignore

@@ -58,6 +58,10 @@ build-*/
 compile_commands.json
 .cache/
 
+# Python bytecode caches (tools/*.py — the footprint/size gates)
+__pycache__/
+*.pyc
+
 # Sphinx documentation build output + Python venv
 docs/_build/
 _build/
