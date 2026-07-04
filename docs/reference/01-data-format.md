@@ -256,10 +256,10 @@ Reserved bits in `opt` non-zero MUST be rejected as INVALID — reserved-bit-non
 
 Conforming implementations MUST parse nested TLVs (structured TLVs with `opt.PL=1`) iteratively, using an explicit work stack. Recursive parsing is forbidden.
 
-- **Maximum nesting depth**: 32. Deeper TLVs MUST be rejected with `ERROR{tr::tlv::nesting_too_deep}`.
-- **Work stack size**: bounded by depth limit; ~1 KiB.
+- **Nesting depth**: unbounded by the wire format ([RFC-0006](../spec/rfcs/0006-resource-bounded-nesting-depth.md)). A receiver's actual capability is bounded by its **decode resources** — one explicit work-stack/arena node per open level, drawn from the implementation's injected memory resource. A frame exceeding them MUST be rejected with `ERROR{tr::tlv::nesting_too_deep}` ("exceeds this receiver's decode resources").
+- **Work stack size**: an implementation/deployment property (the injected resource), never a protocol constant. Protocol-defined TLV shapes nest ≤ 5 by construction, so every conforming receiver parses every protocol frame at any budget; user-data depth (e.g. a deep branch-write `POINT` tree) is a per-receiver capability of the same kind as maximum frame size.
 
-Rationale: MCU stacks are small (4 KiB on STM32F4 default). Maliciously deep nesting on the wire could overflow a recursive parser's call stack with no recovery.
+Rationale: the former fixed cap of 32 guarded a *recursive* parser's call stack. Parsing is required to be iterative, so the per-level cost is an explicit node already bounded by the injected resource — a 16 KB node rejects what its pool cannot hold, a large host parses arbitrarily deep, and no constant serves both.
 
 ### Two parser contexts
 

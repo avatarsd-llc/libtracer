@@ -1,5 +1,7 @@
 # The L0/L1 memory substrate is a CPU-mediated zero-copy scatter-gather router: namespaces mirror the layer model and templates never cross the seam
 
+> **Superseded in part by [ADR-0047](0047-build-time-closed-module-sets-compile-time-seams.md)** (2026-07-04): §Decision 3's runtime-vtable dispatch and "templates never cross the seam" rule are replaced by build-time-closed module sets with tag dispatch. §Decisions 1–2 (CPU-mediated scatter-gather; namespaces mirror the layer model), the uniform-boundary-type rule, and the backend-private `alloc_hint_t` shape remain in force.
+
 The memory substrate (`core/` M2 — `tr::mem` at L0, `tr::view` at L1) is the foundation every other layer stands on, and its reason to exist is a single load-bearing capability: **a source vertex's live memory — a user struct, an MMIO register, a DMA buffer — is the payload, gathered straight onto the wire and placed straight into the destination vertex's binding on a remote node, with no serialize step and no bounce buffer.** This is load-bearing claim 1 ("a TLV in memory IS the wire bytes") plus the transparent byte router ([ADR-0012](0012-modular-memory-binding-transparent-router.md)), stated as the substrate's *purpose* rather than a side effect. This ADR records the three hard-to-reverse, would-surprise-a-reader choices that realize it; the mechanical spellings (snake_case `_t`, `SCREAMING_SNAKE` enums, Doxygen) live in [`core/STYLE.md`](../../core/STYLE.md), not here.
 
 ## Decision 1 — transfer is CPU-mediated scatter-gather; assembly is rope-chaining, never `memcpy`
