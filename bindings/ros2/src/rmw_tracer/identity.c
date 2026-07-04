@@ -7,7 +7,7 @@
  * points (publish/subscribe/loaned/wait/qos/graph/service) are the staged work
  * documented in ../../README.md and docs/adr/0023, mapped onto the libtracer
  * graph. This TU exists so the ament package + libtracer + the ROS rmw headers
- * build together (scripts/build-ros.sh) before that work lands.
+ * build together (tools/build-ros.sh) before that work lands.
  */
 #include "rmw/rmw.h"
 
