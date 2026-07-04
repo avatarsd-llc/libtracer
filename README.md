@@ -34,7 +34,7 @@ The throughput win is **structural, not a timer**: zenoh raises throughput with 
 ## How it supersedes existing solutions
 
 - **vs DDS / RTPS.** DDS is powerful but heavy — it does not fit a 16 KB MCU and copies samples on fan-out. libtracer fits the MCU, does **zero-copy refcounted fan-out**, and needs no heavyweight discovery to talk on a bus.
-- **vs Zenoh.** Comparable design goals, but libtracer wins **both** throughput and latency (above), reaches **micro-ROS-class targets Zenoh cannot**, and carries ROS 2 messages in GPU memory. (Honest niche: Zenoh's ROS integration is mature and official; libtracer's edge is embedded / ultra-low-latency / zero-copy / on-robot fabric.)
+- **vs Zenoh.** Comparable design goals, but libtracer wins **both** throughput and latency (above) and reaches **micro-ROS-class targets Zenoh cannot**. The ROS 2 path — carrying `rmw_tracer` messages into GPU memory with no host copy — is **on the roadmap**: the RMW binding is an early stub today ([ADR-0023](docs/adr/0023-ros2-binding-via-rmw-tracer.md), [`bindings/ros2/`](bindings/ros2/)). (Honest niche: Zenoh's ROS integration is mature and official; libtracer's edge is embedded / ultra-low-latency / zero-copy / on-robot fabric.)
 - **vs MQTT.** No central broker required — the network is decentralized and **any node can bridge**. State is a **typed, addressable graph**, not opaque topic payloads, and delivery is zero-copy.
 - **vs a custom CAN/UART glue layer.** Header elision means libtracer rides your existing bus frames **with zero added bytes**, while still giving you addressing, fan-out, QoS, and a bridge to IP — instead of a bespoke, un-routable point-to-point hack.
 

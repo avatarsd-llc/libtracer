@@ -68,13 +68,16 @@ still a stub — it then shows as *pending* and does not gate.
 ## Reference harnesses
 
 - **C++** (golden): `core/tests/conformance_runner --tap <vectors-dir>`.
-- **TypeScript / Rust**: pending — implement this contract when the native core lands.
+- **TypeScript** (pure-TS core): `node bindings/typescript/packages/core/conformance/harness.mjs <vectors-dir>`.
+- **Rust** (native `no_std` + alloc core): `cargo run --manifest-path bindings/rust/Cargo.toml --example conformance -- <vectors-dir>`.
+
+All three are registered and `enabled` in [`harnesses.json`](harnesses.json), so the driver gates on their cross-core agreement.
 
 ## Differential fuzzing (cross-core drift, beyond the curated vectors)
 
-The curated vectors pin a dozen hand-picked wire shapes. To catch drift those
+The curated vectors pin a set of hand-picked wire shapes. To catch drift those
 points *miss*, [`diff_fuzz.py`](diff_fuzz.py) generates random **valid** frames
-from an explicit seed and round-trips each through **both** cores, asserting
+from an explicit seed and round-trips each through **all three** cores, asserting
 byte-for-byte agreement (ADR-0028 / ADR-0032 extended from curated points to a
 fuzzed corpus). A mismatch is a genuine cross-core bug; the failing seed + bytes
 are printed so the frame can be promoted to a curated vector.

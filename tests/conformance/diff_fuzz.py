@@ -3,8 +3,8 @@
 # SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 """Cross-core differential fuzzer for the libtracer wire codec.
 
-The 12 curated vectors under ``vectors/v1/`` pin a handful of hand-picked wire
-shapes. This catches the *drift between cores* those points miss: it generates
+The curated vectors under ``vectors/v1/`` pin a set of hand-picked wire shapes.
+This catches the *drift between cores* those points miss: it generates
 random **valid** frames from a seed, round-trips every frame through ALL THREE
 native cores (C++ golden + TypeScript + Rust), and asserts byte-for-byte
 agreement. A mismatch is a genuine cross-core bug — the failing seed + bytes are
@@ -18,9 +18,9 @@ Design (deterministic + reproducible):
      random legal opt-bit combo (reserved bits 0; TF only with TS and only on a
      nested node under an absolute-ts parent; LL/CW/CR/TS independent), correct
      length fields, random opaque payloads, and PL nesting kept well under the
-     depth cap. The generator is a third, independent codec — it computes its own
-     CRCs — so agreeing with it proves both cores agree with each other AND with
-     the spec's canonical form, not merely with one another.
+     depth cap. The generator is a further, independent codec — it computes its
+     own CRCs — so agreeing with it proves the cores agree with each other AND
+     with the spec's canonical form, not merely with one another.
 
   2. Each core re-encodes via its ``--roundtrip`` batch hook (one hex frame per
      stdin line -> one re-encoded hex line, or ``ERR:<reason>``). For frame F the
