@@ -57,9 +57,17 @@ struct span_cursor {
     [[nodiscard]] std::uint64_t load_le(std::size_t off, std::size_t n) const noexcept {
         return tr::detail::load_le(buf.subspan(off, n));
     }
-    /** @brief The @p n bytes at @p off as a contiguous span (for the CRC feed). */
-    [[nodiscard]] std::span<const std::byte> span(std::size_t off, std::size_t n) const noexcept {
-        return buf.subspan(off, n);
+    /**
+     * @brief Visit the @p n bytes at @p off as contiguous sub-spans, in order.
+     *
+     * The CRC-feed seam (@ref parse_header): a contiguous source yields exactly
+     * one span, so this is a straight call; the rope cursor yields one span per
+     * straddled link, letting the identical feed cross a link boundary with no
+     * concatenation buffer.
+     */
+    template <class Fn>
+    void for_each_span(std::size_t off, std::size_t n, Fn&& fn) const {
+        fn(buf.subspan(off, n));
     }
 };
 
@@ -117,20 +125,27 @@ template <class Cursor>
     if (avail < total) return std::unexpected(err_t::FRAME_TRUNCATED);
 
     if (opt.cr) {
-        const std::span<const std::byte> payload =
-            cur.span(header, static_cast<std::size_t>(length));
-        const std::span<const std::byte> ts_bytes = cur.span(header + length, ts_size);
-        const std::size_t crc_off = header + static_cast<std::size_t>(length) + ts_size;
-        // CRC over payload ++ ts_bytes via the two-span overloads — the feed
-        // crosses both spans with no intermediate `covered` buffer.
+        const std::size_t pay_len = static_cast<std::size_t>(length);
+        const std::size_t crc_off = header + pay_len + ts_size;
+        // CRC feed = payload ++ timestamp bytes, fed incrementally across whatever
+        // contiguous chunks the cursor yields — one span for a contiguous source,
+        // one per straddled link for a rope. Byte-identical to the two-span
+        // crc*(a, b) (the CRC is associative over the feed) with no `covered`
+        // concatenation buffer; a rope payload never has to flatten to be checked.
         if (opt.cw) {
-            if (crc::crc16_ccitt(payload, ts_bytes) !=
-                static_cast<std::uint16_t>(cur.load_le(crc_off, 2))) {
+            crc::crc16_ccitt_state crc;
+            const auto feed = [&crc](std::span<const std::byte> s) { crc.feed(s); };
+            cur.for_each_span(header, pay_len, feed);
+            cur.for_each_span(header + pay_len, ts_size, feed);
+            if (crc.value() != static_cast<std::uint16_t>(cur.load_le(crc_off, 2))) {
                 return std::unexpected(err_t::FRAME_CRC_FAIL);
             }
         } else {
-            if (crc::crc32c(payload, ts_bytes) !=
-                static_cast<std::uint32_t>(cur.load_le(crc_off, 4))) {
+            crc::crc32c_state crc;
+            const auto feed = [&crc](std::span<const std::byte> s) { crc.feed(s); };
+            cur.for_each_span(header, pay_len, feed);
+            cur.for_each_span(header + pay_len, ts_size, feed);
+            if (crc.value() != static_cast<std::uint32_t>(cur.load_le(crc_off, 4))) {
                 return std::unexpected(err_t::FRAME_CRC_FAIL);
             }
         }

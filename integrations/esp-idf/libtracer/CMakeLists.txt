@@ -38,6 +38,7 @@ set(LIBTRACER_SRCS
     "${LIBTRACER_ROOT}/core/src/mem_heap.cpp"
     "${LIBTRACER_ROOT}/core/src/mem_pool.cpp"
     "${LIBTRACER_ROOT}/core/src/rope.cpp"
+    "${LIBTRACER_ROOT}/core/src/rope_decode.cpp"
     "${LIBTRACER_ROOT}/core/src/path.cpp"
     "${LIBTRACER_ROOT}/core/src/graph.cpp"
     # net plane (ADR-0038/0040): FWD routing + transport/connection vertices
