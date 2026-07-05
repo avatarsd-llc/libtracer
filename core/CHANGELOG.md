@@ -256,6 +256,19 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Fixed
 
+- **`route_handle_t::clear_link` data race / use-after-free (leak).** `tables()` and
+  `find_tables` release the registry `shared_mutex` before the caller locks the
+  per-link mutex, so the `link_tables_t&` they return could dangle: `clear_link`
+  `erase`d that registry entry, and a concurrent `ensure_egress`/`bind_ingress`
+  mid-write then operated on a destroyed `link_tables_t` — a use-after-free that
+  orphaned the egress buffer (a leak LeakSanitizer intermittently caught in the
+  `fwd_fanout` writer-vs-clear stress). `clear_link` now **empties the entry in
+  place** under the per-link mutex instead of erasing it, leaving `links_`
+  insert-only so every handed-out table reference is stable for the object's
+  lifetime (`std::map` nodes never move). Semantically identical (cleared bindings,
+  allocator restart at label 1, counts) — regression-covered by `route_handle_test`
+  and the now-deterministic `fwd_fanout` concurrency test (100× ASan / 40× TSan clean).
+
 - **v0.1 release must-fix bundle (pre-release hardening).** The CMake project now
   declares its version (`project(libtracer VERSION 0.1.0 CXX)`), aligning the C++
   reference with the `0.1.0` TypeScript packages. Fixed the two `-Wunused-result`
