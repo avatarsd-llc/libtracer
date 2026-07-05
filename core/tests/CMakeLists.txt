@@ -47,6 +47,11 @@ target_link_libraries(rope_decode_test PRIVATE libtracer)
 libtracer_test_warnings(rope_decode_test)
 add_test(NAME rope_decode COMMAND rope_decode_test)
 
+add_executable(rope_decode_fuzz_test rope_decode_fuzz_test.cpp)
+target_link_libraries(rope_decode_fuzz_test PRIVATE libtracer)
+libtracer_test_warnings(rope_decode_fuzz_test)
+add_test(NAME rope_decode_fuzz COMMAND rope_decode_fuzz_test)
+
 # #54 — transport_ws RFC 6455 protocol layer (handshake key + frame codec; header-only).
 add_executable(ws_test ws_test.cpp)
 target_link_libraries(ws_test PRIVATE libtracer)
