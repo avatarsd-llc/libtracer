@@ -14,9 +14,22 @@
  * `(link, route)` flow — the reuse-read hot path — as T scales 1 → 128.
  *
  * The contention signature is per-thread throughput collapsing while aggregate
- * plateaus: the per-link mutex serialising the reads. If it shows, a per-link
- * `shared_mutex` (readers don't serialise) is the cheap fix; if it doesn't, the
- * current mutex is fine and no change is warranted (measure before optimising).
+ * plateaus: the per-link mutex serialising the reads. It shows clearly on a
+ * 24-core host — per-thread 37M -> 46K ops/s (~800x), aggregate declining past T=2.
+ *
+ * FINDING (measured 2026-07-05, back-to-back same host): the obvious "cheap fix",
+ * a per-link `std::shared_mutex` so reuse-reads run concurrently, does NOT help —
+ * it is slightly-to-24%-WORSE (T=1 36.4M -> 27.8M; T=8 784K -> 534K; T=128 ~equal).
+ * The critical section is a ~1-entry linear scan (nanoseconds), so the LOCK ITSELF
+ * is the contended cacheline, and shared_mutex's lock_shared/unlock_shared do an
+ * atomic RMW on a shared reader-count that is equally contended (and heavier
+ * single-thread) — concurrent-reader locks only pay off when the critical section
+ * is long enough to overlap. So the exclusive mutex stays. The only things that
+ * would actually scale here avoid touching shared state on the read path: a
+ * seqlock (versioned lock-free reads) or a per-producer thread-local (route ->
+ * label) cache. Both are larger/riskier, and this is an EXTREME fan-in workload
+ * (many producer threads publishing to ONE downstream link); deferred until a real
+ * one is confirmed. Measure before optimising — and re-measure the optimisation.
  *
  * DIAGNOSTIC (thread-contention numbers are runner-dependent), NOT a CI gate — not
  * wired into perf.yml's regression gate, exactly like bench_fanout_clone_storm.
