@@ -57,6 +57,12 @@ add_executable(bench_await_wakeup_storm bench_await_wakeup_storm.cpp)
 target_link_libraries(bench_await_wakeup_storm PRIVATE libtracer)
 target_compile_options(bench_await_wakeup_storm PRIVATE -Wall -Wextra)
 
+# route_handle per-link-lock contention: many producers doing steady-state
+# ensure_egress (reuse reads) on one hot link. Diagnostic, not a perf gate.
+add_executable(bench_route_handle_contention bench_route_handle_contention.cpp)
+target_link_libraries(bench_route_handle_contention PRIVATE libtracer)
+target_compile_options(bench_route_handle_contention PRIVATE -Wall -Wextra)
+
 # Zenoh side — built only when the prebuilt is vendored (run bench/fetch_zenoh.sh).
 set(ZC ${CMAKE_CURRENT_SOURCE_DIR}/vendor/zenoh-c)
 set(ZCPP ${CMAKE_CURRENT_SOURCE_DIR}/vendor/zenoh-cpp-1.9.0)
