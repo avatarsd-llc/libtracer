@@ -78,7 +78,8 @@ void parse_config(const tlv_t* config, conn_settings_t& s) {
     std::vector<std::byte> out;
     const std::byte b{static_cast<std::uint8_t>(up ? 1 : 0)};
     wire::emit_tlv(out, type_t::VALUE, wire::opt_t{}, std::span<const std::byte>(&b, 1));
-    return view::over_bytes(out);
+    return view::over_bytes(out).value_or(
+        view_t{});  // empty view on alloc failure (caller-checked)
 }
 
 // Built-in `udp`: DIAL binds an ephemeral local port and targets `addr:port`; LISTEN
@@ -239,9 +240,9 @@ result_t<vertex_t*> transport_vertex_t::make_connection(std::vector<std::byte> c
             });
             std::vector<std::byte> out;
             wire::emit_tlv(out, type_t::POINT, wire::opt_t{.pl = true}, members);
-            const view_t res = view::over_bytes(out);
-            if (res.empty()) return std::unexpected(status_t::BACKPRESSURE);
-            return res;
+            const auto res = view::over_bytes(out);
+            if (!res) return std::unexpected(status_t::BACKPRESSURE);
+            return *res;
         };
     }
 

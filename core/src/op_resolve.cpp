@@ -211,7 +211,7 @@ enum class index_mode_t : std::uint8_t { SCALAR = 0, ELEMENT = 1, WILDCARD = 2 }
 // `node.wire` (trailer already excluded) with the copied opt byte's trailer bits
 // cleared (§4) — the stored TLV is trailer-less at rest and self-consistent.
 [[nodiscard]] view_t own_tlv(const arena_tlv_t& node) {
-    view_t v = view::over_bytes(node.wire);
+    view_t v = view::over_bytes(node.wire).value_or(view_t{});  // empty view on alloc failure
     if (!v.empty()) v.owner->bytes[1] = struct_opt(v.owner->bytes[1]);
     return v;
 }

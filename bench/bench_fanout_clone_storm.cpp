@@ -65,7 +65,7 @@ int main() {
     // One hot value view: a single segment with a single refcount, shared by every
     // cloner — the "delivered sample" of a wide fan-out.
     std::vector<std::byte> bytes(kSegBytes, std::byte{0xAB});
-    const view_t hot = tr::view::over_bytes(bytes);
+    const view_t hot = tr::view::over_bytes(bytes).value_or(view_t{});
 
     for (const std::size_t T : kFanouts) {
         std::atomic<std::uint64_t> ready{0};

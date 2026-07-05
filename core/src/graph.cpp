@@ -899,11 +899,11 @@ result_t<view_t> graph_t::read_schema(vertex_t* v) const {
     std::vector<std::byte> point;
     wire::emit_tlv(point, type_t::POINT, opt_t{.pl = true}, point_body);  // POINT
 
-    // `point` is a POINT TLV (never empty); an empty result is exactly an alloc
-    // failure → BACKPRESSURE. One audited locus for the alloc/copy/over triplet.
-    const view_t out = view::over_bytes(point);
-    if (out.empty()) return std::unexpected(status_t::BACKPRESSURE);
-    return out;
+    // `point` is a POINT TLV (never empty); `nullopt` is exactly an alloc failure
+    // → BACKPRESSURE. One audited locus for the alloc/copy/over triplet.
+    const auto out = view::over_bytes(point);
+    if (!out) return std::unexpected(status_t::BACKPRESSURE);
+    return *out;
 }
 
 result_t<view_t> graph_t::read_acl(vertex_t* v) const {
@@ -916,11 +916,11 @@ result_t<view_t> graph_t::read_acl(vertex_t* v) const {
         if (v->acl_.empty()) return std::unexpected(status_t::NOT_FOUND);
         acl = v->acl_;
     }
-    // `acl` is non-empty (guarded above); an empty result is exactly an alloc
-    // failure → BACKPRESSURE. One audited locus for the alloc/copy/over triplet.
-    const view_t out = view::over_bytes(acl);
-    if (out.empty()) return std::unexpected(status_t::BACKPRESSURE);
-    return out;
+    // `acl` is non-empty (guarded above); `nullopt` is exactly an alloc failure
+    // → BACKPRESSURE. One audited locus for the alloc/copy/over triplet.
+    const auto out = view::over_bytes(acl);
+    if (!out) return std::unexpected(status_t::BACKPRESSURE);
+    return *out;
 }
 
 result_t<view_t> graph_t::read_children(vertex_t* v) const {
@@ -944,11 +944,11 @@ result_t<view_t> graph_t::read_children(vertex_t* v) const {
     }
     std::vector<std::byte> out;
     wire::emit_tlv(out, type_t::POINT, opt_t{.pl = true}, members);
-    // `out` is non-empty by construction; an empty view is exactly an alloc
-    // failure → BACKPRESSURE (the audited alloc/copy/over locus).
-    const view_t res = view::over_bytes(out);
-    if (res.empty()) return std::unexpected(status_t::BACKPRESSURE);
-    return res;
+    // `out` is non-empty by construction; `nullopt` is exactly an alloc failure
+    // → BACKPRESSURE (the audited alloc/copy/over locus).
+    const auto res = view::over_bytes(out);
+    if (!res) return std::unexpected(status_t::BACKPRESSURE);
+    return *res;
 }
 
 result_t<view_t> graph_t::read(vertex_t* v, const field_path_t& field,

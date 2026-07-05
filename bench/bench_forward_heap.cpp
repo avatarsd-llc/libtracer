@@ -191,7 +191,7 @@ int main() {
     if (v != nullptr) {
         std::vector<std::byte> stored;
         tr::wire::emit_tlv(stored, type_t::VALUE, opt_t{}, std::span<const std::byte>(payload, 4));
-        tr::view::view_t sv = tr::view::over_bytes(stored);
+        tr::view::view_t sv = tr::view::over_bytes(stored).value_or(tr::view::view_t{});
         (void)graph.write(v, sv);
 
         std::vector<std::byte> read_body;

@@ -483,11 +483,11 @@ bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
     // The canonical PATH key (concatenated NAME encodings) — the graph vertex-map key.
     graph::vertex_t* const v = graph_.find(wire::path_key(*route));
     if (v == nullptr) return false;
-    // `payload` is a wire-encoded TLV (never empty); an empty result is exactly
-    // an alloc failure → drop the delivery (one audited alloc/copy/over locus).
-    const view_t payload_view = view::over_bytes(payload);
-    if (payload_view.empty()) return false;
-    return graph_.write(v, payload_view).has_value();
+    // `payload` is a wire-encoded TLV (never empty); `nullopt` is exactly an alloc
+    // failure → drop the delivery (one audited alloc/copy/over locus).
+    const auto payload_view = view::over_bytes(payload);
+    if (!payload_view) return false;
+    return graph_.write(v, *payload_view).has_value();
 }
 
 void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const view_t& value) {

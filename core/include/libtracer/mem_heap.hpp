@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstring>
 #include <new>
+#include <optional>
 #include <span>
 #include <utility>
 
@@ -93,14 +94,20 @@ namespace tr::view {
  * Collapses the repeated alloc/copy/over triplet across the codec and runtime
  * (graph read_schema/read_acl, the FWD resolver's WRITE-payload and reply head,
  * fwd_router's local delivery) into one audited locus.
- * @retval A view with a null @ref view_t::owner on allocation failure (the caller
- *         maps that to BACKPRESSURE); an empty @p bytes span yields an unowned
- *         empty view (heap_alloc(0) is not called).
+ *
+ * The return type disambiguates the two outcomes an unowned `view_t` used to
+ * conflate (docs/reference/08 §L1 contracts): `std::nullopt` is an allocation
+ * failure the caller maps to BACKPRESSURE; an **engaged, empty** view is a
+ * legitimately-empty @p bytes span (`heap_alloc(0)` is not called).
+ *
+ * @retval std::nullopt Allocation failure / backpressure.
+ * @retval {engaged}    An owned copy of @p bytes (empty-and-unowned iff @p bytes
+ *                      is empty).
  */
-[[nodiscard]] inline view_t over_bytes(std::span<const std::byte> bytes) noexcept {
-    if (bytes.empty()) return view_t{};
+[[nodiscard]] inline std::optional<view_t> over_bytes(std::span<const std::byte> bytes) noexcept {
+    if (bytes.empty()) return view_t{};  // engaged-empty: a legitimately-empty input
     segment_ptr_t seg = heap_alloc(bytes.size());
-    if (!seg) return view_t{};
+    if (!seg) return std::nullopt;  // allocation failure => BACKPRESSURE
     std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
     return view_t::over(std::move(seg));
 }
