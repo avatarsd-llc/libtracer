@@ -29,11 +29,20 @@ using wire::type_t;
 
 namespace {
 
-// The opt-byte mask an ADR-0041 §4 trailer-sliced copy applies: the structural
-// bits (PL, LL) survive; the trailer bits (TS, CR, CW, TF) are cleared so the
-// copied TLV — whose bytes exclude the trailer by construction (`node.wire`) —
-// stays self-consistent and trailer-less at rest.
-constexpr std::byte kStructOptMask{0x48};
+// The opt byte an ADR-0041 §4 trailer-sliced copy carries: the structural bits
+// (PL, LL) survive; the trailer bits (TS, CR, CW, TF) are cleared so the copied
+// TLV — whose bytes exclude the trailer by construction (`node.wire`) — stays
+// self-consistent and trailer-less at rest. Cleared through `opt_t` (not a raw
+// `& 0x48` mask) so there is one representation of the opt bitfield.
+[[nodiscard]] constexpr std::byte struct_opt(std::byte opt_byte) noexcept {
+    return static_cast<std::byte>(
+        opt_t::decode(std::to_integer<std::uint8_t>(opt_byte)).without_trailer().encode());
+}
+
+// Byte-identical to the retired `& 0x48` mask for any validated opt byte (0x7E =
+// every non-reserved bit set → PL|LL == 0x48; a plain opaque VALUE 0x00 → 0x00).
+static_assert(struct_opt(std::byte{0x7E}) == std::byte{0x48});
+static_assert(struct_opt(std::byte{0x00}) == std::byte{0x00});
 
 // Map an L4 status_t to its registered tr:: error code (RFC-0002 §D registry,
 // wire::err_t) — the u16 the kind=ERROR reply's ERROR{VALUE} identity carries.
@@ -203,7 +212,7 @@ enum class index_mode_t : std::uint8_t { SCALAR = 0, ELEMENT = 1, WILDCARD = 2 }
 // cleared (§4) — the stored TLV is trailer-less at rest and self-consistent.
 [[nodiscard]] view_t own_tlv(const arena_tlv_t& node) {
     view_t v = view::over_bytes(node.wire);
-    if (!v.empty()) v.owner->bytes[1] &= kStructOptMask;
+    if (!v.empty()) v.owner->bytes[1] = struct_opt(v.owner->bytes[1]);
     return v;
 }
 
@@ -256,7 +265,7 @@ struct emit_cursor_t {
     }
     void tlv_sliced(const arena_tlv_t& node) {  // trailer-sliced whole-TLV copy (§4)
         std::memcpy(p, node.wire.data(), node.wire.size());
-        p[1] &= kStructOptMask;
+        p[1] = struct_opt(p[1]);
         p += node.wire.size();
     }
     void raw(std::span<const std::byte> bytes) {

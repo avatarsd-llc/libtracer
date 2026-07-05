@@ -15,6 +15,14 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **`tr::wire::opt_t::without_trailer()`** — returns the `opt` with the trailer
+  bits (TS/CR/CW/TF) cleared, keeping only the structural bits (PL/LL). It
+  replaces the raw `opt & 0x48` mask (`kStructOptMask`) that `op_resolve.cpp`'s
+  ADR-0041 §4 trailer-sliced copy open-coded — the third representation of the
+  `opt` bitfield (review finding #7) is gone; there is now one typed representation.
+  Byte-identical to the retired mask for any validated opt byte (compile-time
+  asserted). Behavior-preserving (byte-exact under conformance + the FWD suites).
+
 - **One wire-grammar core behind a chunk-cursor seam (ADR-0048 §1, first
   increment).** The TLV header/trailer grammar — `type == 0x00` reject,
   reserved-bit reject, `LL` length width, trailer sizing, the two-span CRC verify
