@@ -77,6 +77,17 @@ struct opt_t {
                                          (ll ? 0x08 : 0) | (cw ? 0x04 : 0) | (tf ? 0x02 : 0));
     }
 
+    // The same opt with the trailer bits (TS/CR/CW/TF) cleared — only the
+    // structural bits (PL/LL) survive. An ADR-0041 §4 trailer-sliced whole-TLV
+    // copy (op_resolve.cpp) applies this so the copy, whose bytes exclude the
+    // trailer by construction, stays self-consistent — the typed replacement for
+    // the raw `opt & 0x48` mask that once encoded these bits.
+    [[nodiscard]] constexpr opt_t without_trailer() const noexcept {
+        opt_t o = *this;
+        o.ts = o.cr = o.cw = o.tf = false;
+        return o;
+    }
+
     constexpr bool operator==(const opt_t&) const noexcept = default;
 };
 
