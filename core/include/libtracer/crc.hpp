@@ -75,26 +75,63 @@ namespace detail {
 
 }  // namespace detail
 
+// A running CRC-32C accumulator — the one home of the init/final-xor constants.
+// Feed the covered bytes as any number of contiguous chunks (a rope crossing link
+// boundaries, a payload-plus-trailer region), then read value(): byte-identical to
+// crc32c over the concatenation (the CRC is associative over the feed), with no
+// intermediate buffer. The single-/two-span crc32c() below delegate to it.
+struct crc32c_state {
+    std::uint32_t c = 0xFFFFFFFFu; /**< @brief Running state; init per RFC 3720. */
+    /** @brief Feed one contiguous chunk of covered bytes. */
+    constexpr void feed(std::span<const std::byte> data) noexcept {
+        c = detail::crc32c_update(c, data);
+    }
+    /** @brief The finalized CRC-32C over everything fed so far. */
+    [[nodiscard]] constexpr std::uint32_t value() const noexcept { return c ^ 0xFFFFFFFFu; }
+};
+
+// A running CRC-16-CCITT (FALSE) accumulator — the crc16 twin of @ref crc32c_state
+// (init 0xFFFF, no final xor). Same feed-chunks-then-read-value contract.
+struct crc16_ccitt_state {
+    std::uint16_t c = 0xFFFFu; /**< @brief Running state; init 0xFFFF, no final xor. */
+    /** @brief Feed one contiguous chunk of covered bytes. */
+    constexpr void feed(std::span<const std::byte> data) noexcept {
+        c = detail::crc16_update(c, data);
+    }
+    /** @brief The finalized CRC-16-CCITT over everything fed so far. */
+    [[nodiscard]] constexpr std::uint16_t value() const noexcept { return c; }
+};
+
 [[nodiscard]] constexpr std::uint32_t crc32c(std::span<const std::byte> data) noexcept {
-    return detail::crc32c_update(0xFFFFFFFFu, data) ^ 0xFFFFFFFFu;
+    crc32c_state s;
+    s.feed(data);
+    return s.value();
 }
 
 // CRC-32C over the concatenation of @p a then @p b — byte-identical to
 // crc32c(a++b) (CRC is associative over the feed), with no intermediate buffer.
 [[nodiscard]] constexpr std::uint32_t crc32c(std::span<const std::byte> a,
                                              std::span<const std::byte> b) noexcept {
-    return detail::crc32c_update(detail::crc32c_update(0xFFFFFFFFu, a), b) ^ 0xFFFFFFFFu;
+    crc32c_state s;
+    s.feed(a);
+    s.feed(b);
+    return s.value();
 }
 
 [[nodiscard]] constexpr std::uint16_t crc16_ccitt(std::span<const std::byte> data) noexcept {
-    return detail::crc16_update(0xFFFFu, data);
+    crc16_ccitt_state s;
+    s.feed(data);
+    return s.value();
 }
 
 // CRC-16-CCITT over the concatenation of @p a then @p b — byte-identical to
 // crc16_ccitt(a++b), no intermediate buffer.
 [[nodiscard]] constexpr std::uint16_t crc16_ccitt(std::span<const std::byte> a,
                                                   std::span<const std::byte> b) noexcept {
-    return detail::crc16_update(detail::crc16_update(0xFFFFu, a), b);
+    crc16_ccitt_state s;
+    s.feed(a);
+    s.feed(b);
+    return s.value();
 }
 
 }  // namespace tr::crc

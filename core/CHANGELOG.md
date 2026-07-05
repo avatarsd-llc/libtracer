@@ -15,6 +15,27 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **Rope-aware grammar: `tr::wire::validate_rope` + the rope byte-source cursor
+  (ADR-0048 §1).** `validate_rope(const view::rope_t&) -> std::expected<void, err_t>`
+  (`rope_decode.hpp`) runs the one grammar core (`grammar::parse_header`) over a
+  scatter-gather rope through a new `grammar::rope_cursor`, so CAN reassembly / WS
+  fragments can be **validated without flattening** — a header or trailer straddling
+  a link boundary is stitched byte-by-byte, and a CRC-covered payload is fed
+  link-by-link. It reaches the byte-for-byte identical verdict (and `err_t`) as
+  `decode(flatten(rope))` for every adversarial split, gated by a differential test.
+  Every link must be HOST (a device link is rejected `FRAME_INVALID`). The rope
+  cursor lives in its **own TU** (`rope_decode.cpp`) so a span-only target never
+  instantiates it. **Structure + CRC only** — materializing a rope into a `tlv_t` /
+  arena node is the ratification-gated sink-type follow-on (both sink node types
+  hold a borrowed contiguous `std::span` that cannot name a straddling payload,
+  ADR-0041 §2).
+- **`tr::crc::crc32c_state` / `tr::crc::crc16_ccitt_state` (`crc.hpp`)** — running
+  CRC accumulators (feed contiguous chunks, then read `value()`) that are now the
+  single home of the CRC init/final-xor constants; the existing single-/two-span
+  `crc32c`/`crc16_ccitt` overloads delegate to them (byte-identical), and the
+  grammar's incremental CRC over rope links uses them instead of open-coding the
+  constants a third time.
+
 - **Per-connection receive frame cap via `:settings max_frame` (kMaxFrame→:settings,
   tcp first).** `tr::net::conn_settings_t` gains a `max_frame` field (parsed from a
   `max_frame` SPEC `:settings` key), and `tcp_transport_t`'s constructors gain a
