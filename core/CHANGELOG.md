@@ -141,6 +141,18 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Changed
 
+- **The stream transports' receive frame cap is now the injected backend's real
+  capacity** — `min(kMaxFrame, backend.max_segment_size())` (kMaxFrame→pool-bound,
+  first slice). A length prefix claiming more than the rx backend could ever
+  allocate (e.g. a bounded `mem_pool`'s slot) is now rejected up front as
+  malformed, so an undeliverable frame is never drained (the no-synthetic-limits
+  doctrine: the bound is the injected resource, not just a magic constant). The
+  cap lives in `length_prefix_framer::feed` (so `transport_quic`/`transport_webtransport`
+  get it with no change) and inline in `transport_tcp`'s receive loop. **No
+  regression for heap-backed connections** (`max_segment_size()` ≈ unbounded ⇒ the
+  cap stays `kMaxFrame`). Full removal of `kMaxFrame` (a per-connection `:settings`
+  override) is a follow-up.
+
 - **`tr::view::over_bytes` returns `std::optional<view_t>`** (was `view_t`,
   review finding #9 / L1 contracts). It no longer conflates the two outcomes an
   unowned `view_t` used to share: **`std::nullopt`** is an allocation failure the

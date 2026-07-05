@@ -66,7 +66,12 @@ class length_prefix_framer {
      * @tparam OnFrame  Callable `void(tr::view::segment_ptr_t seg, std::size_t len)`
      *                  — `seg` owns exactly @p len bytes of one reassembled frame.
      * @param backend   Where each frame's segment is allocated (ADR-0042 §2/§4).
-     * @param max_frame The largest legal frame; a prefix above it is malformed.
+     * @param max_frame The caller's frame ceiling. The **effective** cap is
+     *                  `min(max_frame, backend.max_segment_size())` — a prefix
+     *                  claiming more than the backend could ever allocate (e.g. a
+     *                  bounded pool's slot) is rejected up front, so no undeliverable
+     *                  frame is drained (the no-synthetic-limits doctrine: the bound
+     *                  is the injected resource's real capacity, not a magic number).
      * @param p,n       The chunk (may split a prefix or a body arbitrarily).
      * @param on_frame  Invoked once per completed frame, in arrival order.
      * @return Per-chunk @ref result_t: frames dropped to backpressure, and whether
@@ -75,6 +80,8 @@ class length_prefix_framer {
     template <class OnFrame>
     result_t feed(mem::mem_backend_t& backend, std::size_t max_frame, const std::byte* p,
                   std::size_t n, OnFrame&& on_frame) {
+        const std::size_t backend_cap = backend.max_segment_size();
+        const std::size_t cap = max_frame < backend_cap ? max_frame : backend_cap;
         result_t res;
         while (n > 0) {
             if (drain_left_ > 0) {
@@ -101,9 +108,10 @@ class length_prefix_framer {
                     prefix_have_ = 0;
                     continue;
                 }
-                if (len > max_frame) {
-                    // Malformed (corrupt or hostile): a desynced stream cannot be
-                    // re-framed — stop and let the caller shut the peer down.
+                if (len > cap) {
+                    // Malformed (corrupt/hostile) or undeliverable (exceeds the
+                    // backend's capacity): a desynced stream cannot be re-framed —
+                    // stop and let the caller shut the peer down.
                     res.malformed = true;
                     return res;
                 }

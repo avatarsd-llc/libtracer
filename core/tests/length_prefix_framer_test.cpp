@@ -51,11 +51,13 @@ class toggle_backend_t final : public tr::mem::mem_backend_t {
    public:
     toggle_backend_t() noexcept : mem_backend_t("toggle") {}
     bool fail = false;
+    std::size_t max_seg = ~std::size_t{0};  // largest allocatable segment (default: unbounded)
     tr::view::segment_t* alloc(std::size_t size,
                                tr::mem::alloc_hint_t = tr::mem::alloc_hint_t::NONE) override {
         return fail ? nullptr : tr::mem::heap_backend().alloc(size);
     }
     void destroy(tr::view::segment_t*) noexcept override {}  // never fires (heap-owned segments)
+    [[nodiscard]] std::size_t max_segment_size() const noexcept override { return max_seg; }
 };
 
 // Collect each delivered frame's bytes so the test can compare against the input.
@@ -153,6 +155,19 @@ int main() {
         const auto res2 = f.feed(be, kMax, r2.data(), r2.size(), c);
         check(res2.dropped == 0 && c.frames.size() == 1 && c.frames[0] == kept_payload,
               "framing resyncs: the next record delivers cleanly after a drop");
+    }
+
+    // 6b. A prefix beyond the backend's capacity is malformed (rejected without a
+    //     drain), even when it is within the caller's max_frame ceiling.
+    {
+        tr::net::length_prefix_framer f;
+        collector_t c;
+        toggle_backend_t be;
+        be.max_seg = 8;                        // this backend can never allocate more than 8 bytes
+        const bytes_t rec = record(ramp(20));  // claims 20 > 8, though 20 < kMax
+        const auto res = f.feed(be, kMax, rec.data(), rec.size(), c);
+        check(res.malformed, "a frame beyond backend.max_segment_size() is malformed");
+        check(c.frames.empty(), "no frame delivered when the backend could never hold it");
     }
 
     // 7. reset() discards partial state (a half-read prefix does not corrupt the next).

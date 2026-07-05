@@ -232,9 +232,15 @@ void tcp_transport_t::serve(int fd) {
         if (!read_exact(fd, prefix.data(), prefix.size())) return;
         const std::size_t len = detail::load_le<std::uint32_t>(prefix);
         if (len == 0) continue;  // an empty record carries no TLV — a no-op
-        if (len > kMaxFrame) {
-            // A prefix beyond the cap is malformed (corrupt or hostile): count it
-            // and tear the connection down — a desynced stream cannot be re-framed.
+        // Effective cap = min(kMaxFrame, the rx backend's capacity): a prefix beyond
+        // what the backend could ever allocate (e.g. a bounded pool's slot) is
+        // undeliverable, so reject it up front — no undeliverable frame is drained
+        // (the no-synthetic-limits doctrine; the bound is the injected resource).
+        const std::size_t backend_cap = backend_->max_segment_size();
+        const std::size_t cap = backend_cap < kMaxFrame ? backend_cap : kMaxFrame;
+        if (len > cap) {
+            // A prefix beyond the cap is malformed (corrupt/hostile) or undeliverable:
+            // count it and tear the connection down — a desynced stream can't re-frame.
             malformed_rx_.fetch_add(1, std::memory_order_relaxed);
             return;
         }
