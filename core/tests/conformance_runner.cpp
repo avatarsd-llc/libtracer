@@ -42,18 +42,21 @@ void check(bool ok, std::string_view what) {
 }
 
 // --- hex + error helpers (used by the --roundtrip differential-fuzz mode) ----
-const char* error_name(tr::wire::error_t e) noexcept {
+// The four decode outcomes, mapped to the stable conformance ERR:<name> strings.
+// decode only ever yields these; any other err_t (schema/flow/…) is UNKNOWN here.
+const char* error_name(tr::wire::err_t e) noexcept {
     switch (e) {
-        case tr::wire::error_t::FRAME_TRUNCATED:
+        case tr::wire::err_t::FRAME_TRUNCATED:
             return "FRAME_TRUNCATED";
-        case tr::wire::error_t::FRAME_INVALID:
+        case tr::wire::err_t::FRAME_INVALID:
             return "FRAME_INVALID";
-        case tr::wire::error_t::FRAME_CRC_FAIL:
+        case tr::wire::err_t::FRAME_CRC_FAIL:
             return "FRAME_CRC_FAIL";
-        case tr::wire::error_t::TLV_NESTING_TOO_DEEP:
+        case tr::wire::err_t::TLV_NESTING_TOO_DEEP:
             return "TLV_NESTING_TOO_DEEP";
+        default:
+            return "UNKNOWN";
     }
-    return "UNKNOWN";
 }
 
 std::optional<std::vector<std::byte>> from_hex(std::string_view s) {
@@ -228,7 +231,7 @@ int main(int argc, char** argv) {
         const std::vector<std::byte> bad{std::byte{0x09}, std::byte{0x01}, std::byte{0},
                                          std::byte{0}};
         const auto dec = tr::wire::decode(bad);
-        check(!dec.has_value() && dec.error() == tr::wire::error_t::FRAME_INVALID,
+        check(!dec.has_value() && dec.error() == tr::wire::err_t::FRAME_INVALID,
               "reserved-bit input rejected as frame::invalid");
     }
 

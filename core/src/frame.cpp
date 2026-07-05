@@ -10,12 +10,11 @@
 
 #include "libtracer/byteorder.hpp"
 #include "libtracer/crc.hpp"
+#include "libtracer/grammar.hpp"
 #include "libtracer/tlv_emit.hpp"
 
 namespace tr::wire {
 namespace {
-
-constexpr std::uint8_t u8(std::byte b) noexcept { return std::to_integer<std::uint8_t>(b); }
 
 // Read `n` little-endian bytes at `off` (a thin span adaptor over detail::load_le).
 std::uint64_t read_le(std::span<const std::byte> b, std::size_t off, std::size_t n) noexcept {
@@ -36,62 +35,42 @@ struct parsed_t {
     std::span<const std::byte> children{};
 };
 
-std::expected<parsed_t, error_t> parse_one(std::span<const std::byte> buf) {
-    if (buf.size() < 4) return std::unexpected(error_t::FRAME_TRUNCATED);
-
-    const std::uint8_t type_b = u8(buf[0]);
-    const std::uint8_t opt_b = u8(buf[1]);
-    if (type_b == 0x00) return std::unexpected(error_t::FRAME_INVALID);
-    if (opt_t::reserved_set(opt_b)) return std::unexpected(error_t::FRAME_INVALID);
-
-    const opt_t opt = opt_t::decode(opt_b);
-    const std::size_t header = opt.ll ? 6u : 4u;
-    if (buf.size() < header) return std::unexpected(error_t::FRAME_TRUNCATED);
-
-    const std::uint64_t length = read_le(buf, 2, opt.ll ? 4u : 2u);
-    const std::size_t ts_size = opt.ts ? (opt.tf ? 4u : 8u) : 0u;
-    const std::size_t crc_size = opt.cr ? (opt.cw ? 2u : 4u) : 0u;
-    const std::size_t total = header + length + ts_size + crc_size;
-    if (buf.size() < total) return std::unexpected(error_t::FRAME_TRUNCATED);
+std::expected<parsed_t, err_t> parse_one(std::span<const std::byte> buf) {
+    // The header/trailer grammar (incl. the two-span CRC verify) lives once in
+    // grammar::parse_header (ADR-0048 §1); here we only MODEL the result as a
+    // tlv_t — extracting the payload span and reading the (already-verified)
+    // trailer values into the owning tree.
+    const auto h = grammar::parse_header(grammar::span_cursor{buf});
+    if (!h) return std::unexpected(h.error());
 
     tlv_t tlv;
-    tlv.type = static_cast<type_t>(type_b);
-    tlv.opt = opt;
-    const std::span<const std::byte> payload = buf.subspan(header, length);
+    tlv.type = h->type;
+    tlv.opt = h->opt;
+    const std::span<const std::byte> payload = buf.subspan(h->header, h->length);
 
-    if (opt.ts || opt.cr) {
+    if (h->opt.ts || h->opt.cr) {
         trailer_t trailer;
-        if (opt.ts) {
+        if (h->opt.ts) {
             timestamp_t t;
-            t.relative = opt.tf;
-            if (opt.tf) {
+            t.relative = h->opt.tf;
+            if (h->opt.tf) {
                 t.value = static_cast<std::int32_t>(
-                    static_cast<std::uint32_t>(read_le(buf, header + length, 4)));
+                    static_cast<std::uint32_t>(read_le(buf, h->header + h->length, 4)));
             } else {
-                t.value = static_cast<std::int64_t>(read_le(buf, header + length, 8));
+                t.value = static_cast<std::int64_t>(read_le(buf, h->header + h->length, 8));
             }
             trailer.ts = t;
         }
-        if (opt.cr) {
-            const std::span<const std::byte> ts_bytes = buf.subspan(header + length, ts_size);
-            const std::size_t crc_off = header + length + ts_size;
-
-            // CRC over payload ++ ts_bytes — the two-span overloads feed the CRC
-            // state across both spans without concatenating them into a fresh
-            // `covered` buffer (no per-frame heap allocation + payload copy).
+        if (h->opt.cr) {
+            // CRC already verified in parse_header; read the stored value to model it.
+            const std::size_t crc_off = h->header + h->length + h->ts_size;
             crc_t c;
-            if (opt.cw) {
+            if (h->opt.cw) {
                 c.width = crc_t::width_t::CRC16_CCITT;
                 c.value = static_cast<std::uint32_t>(read_le(buf, crc_off, 2));
-                if (crc::crc16_ccitt(payload, ts_bytes) != static_cast<std::uint16_t>(c.value)) {
-                    return std::unexpected(error_t::FRAME_CRC_FAIL);
-                }
             } else {
                 c.width = crc_t::width_t::CRC32C;
                 c.value = static_cast<std::uint32_t>(read_le(buf, crc_off, 4));
-                if (crc::crc32c(payload, ts_bytes) != c.value) {
-                    return std::unexpected(error_t::FRAME_CRC_FAIL);
-                }
             }
             trailer.crc = c;
         }
@@ -99,8 +78,8 @@ std::expected<parsed_t, error_t> parse_one(std::span<const std::byte> buf) {
     }
 
     parsed_t out;
-    out.total = total;
-    if (opt.pl) {
+    out.total = h->total;
+    if (h->opt.pl) {
         out.children = payload;  // walked iteratively by decode(), not here
     } else {
         tlv.payload = payload;
@@ -111,14 +90,14 @@ std::expected<parsed_t, error_t> parse_one(std::span<const std::byte> buf) {
 
 }  // namespace
 
-std::expected<tlv_t, error_t> decode(std::span<const std::byte> input) {
+std::expected<tlv_t, err_t> decode(std::span<const std::byte> input) {
     // Iterative parse with an explicit work stack — recursion is forbidden so a
     // maliciously deep frame cannot overflow a small MCU call stack
     // (docs/reference/01-data-format.md §Iterative parsing requirement).
     auto root = parse_one(input);
     if (!root) return std::unexpected(root.error());
     if (root->total != input.size())
-        return std::unexpected(error_t::FRAME_INVALID);  // trailing bytes
+        return std::unexpected(err_t::FRAME_INVALID);    // trailing bytes
     if (!root->tlv.opt.pl) return std::move(root->tlv);  // opaque root: done
 
     // An open structured node whose children are still being parsed. `pos` is the
@@ -144,7 +123,7 @@ std::expected<tlv_t, error_t> decode(std::span<const std::byte> input) {
             continue;
         }
         // A child of stack.back() sits at depth == stack.size(); reject at the cap.
-        if (stack.size() >= kMaxDepth) return std::unexpected(error_t::TLV_NESTING_TOO_DEEP);
+        if (stack.size() >= kMaxDepth) return std::unexpected(err_t::TLV_NESTING_TOO_DEEP);
         auto child = parse_one(stack.back().payload.subspan(stack.back().pos));
         if (!child) return std::unexpected(child.error());
         if (child->tlv.opt.pl) {

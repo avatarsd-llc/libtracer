@@ -16,19 +16,16 @@
 #include <span>
 #include <vector>
 
+#include "libtracer/error.hpp"
 #include "libtracer/tlv.hpp"
 #include "libtracer/view.hpp"
 
 namespace tr::wire {
 
-// Decode failures, named after the tr:: built-in error concepts (RFC-0002).
-// The full ERROR *wire* shape is RFC-0002 (gated); this is the local reason.
-enum class error_t {
-    FRAME_TRUNCATED,       // tr::frame::truncated  — ran out of bytes
-    FRAME_INVALID,         // tr::frame::invalid    — reserved bit, type 0x00, bad structure
-    FRAME_CRC_FAIL,        // tr::frame::crc_fail   — trailer CRC mismatch
-    TLV_NESTING_TOO_DEEP,  // tr::tlv::nesting_too_deep — depth cap exceeded
-};
+// Decode failures reuse the RFC-0002 registry codes (error.hpp) directly — the
+// grammar returns `err_t` (ADR-0048), so `err_path`/severity/disposition come
+// for free and there is no parallel decode-only error vocabulary. Decode only
+// ever yields FRAME_TRUNCATED / FRAME_INVALID / FRAME_CRC_FAIL / TLV_NESTING_TOO_DEEP.
 
 struct crc_t {
     enum class width_t { CRC32C, CRC16_CCITT };
@@ -67,7 +64,7 @@ inline constexpr std::size_t kMaxDepth = 32;
 [[nodiscard]] bool equal(const tlv_t& a, const tlv_t& b) noexcept;
 
 // Decode exactly one TLV that fills `input`; trailing bytes => FrameInvalid.
-[[nodiscard]] std::expected<tlv_t, error_t> decode(std::span<const std::byte> input);
+[[nodiscard]] std::expected<tlv_t, err_t> decode(std::span<const std::byte> input);
 
 // Encode a TLV (recomputing the trailer CRC from the body when opt.CR is set).
 [[nodiscard]] std::vector<std::byte> encode(const tlv_t& tlv);
@@ -85,7 +82,7 @@ inline constexpr std::size_t kMaxDepth = 32;
  * the view's bytes, so keep the view — and thus its segment — alive while using
  * it.
  */
-[[nodiscard]] inline std::expected<tlv_t, error_t> view_as_tlv(const view::view_t& v) {
+[[nodiscard]] inline std::expected<tlv_t, err_t> view_as_tlv(const view::view_t& v) {
     return decode(v.bytes());
 }
 

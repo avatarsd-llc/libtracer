@@ -14,7 +14,7 @@
  *       monotonic_buffer_resource with a null upstream (zero heap anywhere),
  *       and every rejection branch (truncation at each boundary, reserved
  *       bits, type 0x00, CRC fail both widths, trailing bytes, depth cap)
- *       returns the same error_t as decode().
+ *       returns the same err_t as decode().
  */
 
 #include "libtracer/tlv_arena.hpp"
@@ -289,7 +289,7 @@ int main() {
         check(decode_into(ok_bytes, mr1).has_value() && equivalent(ok_bytes, "depth 31"),
               "deepest legal nesting decodes");
         const auto deep = decode_into(deep_bytes, mr2);
-        check(!deep && deep.error() == tr::wire::error_t::TLV_NESTING_TOO_DEEP &&
+        check(!deep && deep.error() == tr::wire::err_t::TLV_NESTING_TOO_DEEP &&
                   equivalent(deep_bytes, "depth 32"),
               "over-cap nesting rejected as TLV_NESTING_TOO_DEEP");
     }
