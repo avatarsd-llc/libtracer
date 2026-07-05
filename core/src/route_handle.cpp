@@ -106,10 +106,25 @@ std::uint16_t route_handle_t::alloc_label(std::string_view link) {
 }
 
 void route_handle_t::clear_link(std::string_view link) {
-    // Drop the link's whole table (allocator state included) - the self-heal hook,
-    // reconnect frequency, so the exclusive registry lock is fine here.
-    const std::unique_lock lock(links_m_);
-    if (const auto it = links_.find(link); it != links_.end()) links_.erase(it);
+    // Self-heal: forget the link's ingress/egress bindings and restart its label
+    // allocator, so a post-reconnect delivery re-advertises from a clean slate.
+    //
+    // The entry is EMPTIED in place, NOT erased. tables()/find_tables release
+    // links_m_ before the caller locks the per-link mutex, so a reference they
+    // handed out must stay valid while it is used; erasing the entry here (as an
+    // earlier version did) could destroy a link_tables_t a concurrent
+    // ensure_egress/bind_ingress was mid-write on — a use-after-free that orphaned
+    // the egress buffer (a leak). Keeping `links_` insert-only makes every such
+    // reference stable for this object's lifetime (std::map nodes never move), and
+    // the per-link mutex serializes this clear against those writers. A cleared
+    // link keeps only its small (empty) table shell, reused on the next advertise;
+    // the route bytes each egress entry owned are freed with the entries.
+    link_tables_t* const t = find_tables(link);
+    if (t == nullptr) return;
+    const std::lock_guard lock(t->m);
+    t->ingress.clear();
+    t->egress.clear();
+    t->next_label = 1;  // 0 is reserved "none" — restart, matching a fresh table
 }
 
 std::size_t route_handle_t::ingress_count() const {

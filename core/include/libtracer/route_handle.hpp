@@ -64,8 +64,9 @@ struct handle_binding_t {
  * monotonic label allocator — drawn from the injected memory resource and guarded
  * by the LINK'S OWN mutex, so label traffic on one connection never contends with
  * another. The only cross-link lock is a `shared_mutex` over the link registry,
- * taken exclusively only when a link's tables are first created or cleared
- * (setup/reconnect frequency, never per delivery). State exists only for flows
+ * taken exclusively only when a link's tables are first CREATED (never on clear —
+ * which empties an existing entry under the per-link mutex, leaving the registry
+ * insert-only so a handed-out table reference can never dangle). State exists only for flows
  * that opted into compaction, so @ref ingress_count on a node forwarding only
  * one-shot/cold traffic is zero.
  */
