@@ -15,6 +15,13 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **`tr::wire::emit_header` (`tlv_emit.hpp`)** — the single home of the TLV header
+  byte layout (`<type> <opt> <length>`, ADR-0048 §3). `emit_tlv` now delegates to it
+  (still auto-widening `LL` for an oversize body), and `frame.cpp`'s `encode` routes
+  its formerly hand-rolled header push through it (respecting the `tlv_t`'s existing
+  `opt.ll`) — byte-identical output (conformance-gated), retiring the last hand-rolled
+  header emission.
+
 - **Rope-aware grammar: `tr::wire::validate_rope` + the rope byte-source cursor
   (ADR-0048 §1).** `validate_rope(const view::rope_t&) -> std::expected<void, err_t>`
   (`rope_decode.hpp`) runs the one grammar core (`grammar::parse_header`) over a

@@ -149,9 +149,9 @@ std::vector<std::byte> encode(const tlv_t& tlv) {
     }
 
     std::vector<std::byte> out;
-    out.push_back(static_cast<std::byte>(std::to_underlying(tlv.type)));
-    out.push_back(static_cast<std::byte>(tlv.opt.encode()));
-    write_le(out, body.size(), tlv.opt.ll ? 4u : 2u);
+    // The header byte layout has one home now (ADR-0048 §3) — emit_header respects
+    // tlv.opt.ll verbatim, byte-identical to the hand-rolled push it replaces.
+    wire::emit_header(out, tlv.type, tlv.opt, body.size());
     out.insert(out.end(), body.begin(), body.end());
 
     std::vector<std::byte> ts_bytes;

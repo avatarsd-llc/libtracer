@@ -27,15 +27,24 @@
 
 namespace tr::wire {
 
+// Append just a TLV header: <type> <opt> <length>, length u16 LE or (with the LL
+// bit set) u32 LE — the ONE representation of the header byte layout (ADR-0048 §3).
+// The length width follows `opt.ll` verbatim; the caller owns the LL decision (so
+// `encode`, which respects a tlv_t's existing `opt.ll`, and `emit_tlv`, which
+// auto-widens for an oversize body, share this without either changing behavior).
+inline void emit_header(std::vector<std::byte>& out, type_t type, opt_t opt, std::size_t body_len) {
+    out.push_back(static_cast<std::byte>(std::to_underlying(type)));
+    out.push_back(static_cast<std::byte>(opt.encode()));
+    detail::append_le(out, static_cast<std::uint32_t>(body_len), opt.ll ? 4u : 2u);
+}
+
 // Append one TLV: <type> <opt> <length> <body>, where length is u16 LE, widening
 // to u32 LE (with the LL bit set) when the body exceeds 0xFFFF. `opt` carries the
 // structural bits — pass `opt_t{.pl = true}` for a structured (list) payload.
 inline void emit_tlv(std::vector<std::byte>& out, type_t type, opt_t opt,
                      std::span<const std::byte> body) {
     if (body.size() > 0xFFFFu) opt.ll = true;
-    out.push_back(static_cast<std::byte>(std::to_underlying(type)));
-    out.push_back(static_cast<std::byte>(opt.encode()));
-    detail::append_le(out, static_cast<std::uint32_t>(body.size()), opt.ll ? 4u : 2u);
+    emit_header(out, type, opt, body.size());
     out.insert(out.end(), body.begin(), body.end());
 }
 
