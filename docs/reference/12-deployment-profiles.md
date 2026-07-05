@@ -24,7 +24,7 @@ One MCU, one bus. An RC car over UART; a sensor over CAN.
 ```
 Rung 0  +  one transport  +  its paired L0/L1 module
   transport_uart  → mem_uart_rx_dma → view_uart_dma
-  transport_can   → mem_can_reassembly → view_can_frames   (framing: header-elided)
+  transport_can   → can_reassembly → view_can_frames   (framing: header-elided)
 ```
 
 The leaf publishes a few paths; a host subscribes. Framing is **header-elided** (the CAN ID *is* the path); ≤ 25 KB on a Cortex-M0.
@@ -37,7 +37,7 @@ The milestone: **drop-in replacement for the strawberry-fw io_layer over its exi
 Rung 0  +  forwarder (P2)
   transport_can  (header-elided)   ── strawberry's remote boards / sensors
   transport_ws   (full-TLV)        ── strawberry's web-ui
-  mem_borrowed (live IO values) · mem_can_reassembly · mem_pool_class
+  mem_borrowed (live IO values) · can_reassembly · mem_pool_class
   dispatcher: per-subscriber delivery policy (delivery_mode ✓; throttle/keepalive)
   schema_registry: :schema POINT (dtype/unit/range, the io_descriptor)
 ```

@@ -28,7 +28,7 @@ INPUT                  = core/include/libtracer/backend.hpp \
                          core/include/libtracer/mem_pool.hpp \
                          core/include/libtracer/mem_borrowed.hpp \
                          core/include/libtracer/mem_cuda.hpp \
-                         core/include/libtracer/mem_can_reassembly.hpp \
+                         core/include/libtracer/can_reassembly.hpp \
                          core/include/libtracer/view_can.hpp \
                          core/include/libtracer/can.hpp \
                          core/include/libtracer/key_view.hpp

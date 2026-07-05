@@ -6,20 +6,21 @@
  * real socket. Asserts:
  *   - the 29-bit structured CAN-ID codec against an explicit bit-layout vector,
  *   - header-elided view_can_frames split + reassembly (classic 8B + CAN-FD 64B),
- *   - mem_can_reassembly out-of-order + missing-interior + totality handling,
+ *   - can_reassembly out-of-order + missing-interior + totality handling,
  *   - the in-band advertise frame codec (explicit bytes, round-trip, need-more).
  */
 
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <memory_resource>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "libtracer/can.hpp"
-#include "libtracer/mem_can_reassembly.hpp"
+#include "libtracer/can_reassembly.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/view.hpp"
@@ -133,11 +134,11 @@ int main() {
         check(tr::view::can_fd_dlc_round_up(8) == 8, "can_fd_dlc_round_up(8) == 8");
     }
 
-    // --- 3. mem_can_reassembly: out-of-order, missing-interior, totality. ---
+    // --- 3. can_reassembly: out-of-order, missing-interior, totality. ---
     {
         using tr::view::can_frame_mode_t;
         using tr::view::view_can_frames_t;
-        tr::mem::reassembly_key_t key;
+        tr::net::reassembly_key_t key;
         key.origin = {1, 2, 3};  // rest zero
         key.ts = 0xCAFE;
 
@@ -145,7 +146,7 @@ int main() {
         const auto framed = view_can_frames_t::split(view_over(payload), can_frame_mode_t::CLASSIC);
 
         // Feed slices OUT OF ORDER: 2, 0, 1.
-        tr::mem::mem_can_reassembly_t reasm;
+        tr::net::can_reassembly_t reasm;
         reasm.set_expected_count(key, 3);
         reasm.add_slice(key, 2, framed.frames()[2]);
         reasm.add_slice(key, 0, framed.frames()[0]);
@@ -163,7 +164,7 @@ int main() {
               "  reassembled (out-of-order) rope == original payload");
 
         // Totality opt-in: without expected_count, completeness is undecidable.
-        tr::mem::mem_can_reassembly_t no_total;
+        tr::net::can_reassembly_t no_total;
         no_total.add_slice(key, 0, framed.frames()[0]);
         no_total.add_slice(key, 1, framed.frames()[1]);
         no_total.add_slice(key, 2, framed.frames()[2]);
@@ -171,6 +172,31 @@ int main() {
               "no expected_count => not complete (trailing-drop blind)");
         no_total.erase(key);
         check(!no_total.contains(key), "erase() drops the group");
+    }
+
+    // --- 3b. can_reassembly bounding: evict-oldest + dropped_groups counter. ---
+    {
+        using tr::view::can_frame_mode_t;
+        using tr::view::view_can_frames_t;
+        const std::vector<std::byte> payload = ramp(20);
+        const auto framed = view_can_frames_t::split(view_over(payload), can_frame_mode_t::CLASSIC);
+        const auto key_ts = [](std::uint64_t ts) {
+            tr::net::reassembly_key_t k;
+            k.ts = ts;
+            return k;
+        };
+
+        // Bound live groups at 2; a third distinct group evicts the oldest (ts=1),
+        // never OOM (the no-synthetic-limits doctrine: bounded drop + a counter).
+        tr::net::can_reassembly_t bounded(std::pmr::new_delete_resource(), /*max_groups=*/2);
+        bounded.add_slice(key_ts(1), 0, framed.frames()[0]);
+        bounded.add_slice(key_ts(2), 0, framed.frames()[0]);
+        check(bounded.dropped_groups() == 0, "no eviction while within the group bound");
+        bounded.add_slice(key_ts(3), 0, framed.frames()[0]);  // exceeds 2 => evict oldest (ts=1)
+        check(bounded.dropped_groups() == 1, "a 3rd group evicts one (dropped_groups == 1)");
+        check(!bounded.contains(key_ts(1)), "the oldest group (ts=1) was evicted");
+        check(bounded.contains(key_ts(2)) && bounded.contains(key_ts(3)),
+              "the two newest groups survive the bound");
     }
 
     // --- 4. in-band advertise frame codec. ---

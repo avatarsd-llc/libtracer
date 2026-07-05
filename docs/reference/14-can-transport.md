@@ -30,7 +30,7 @@ The reference-implementation symbols are:
 | --- | --- | --- | --- |
 | 29-bit ID + advertise codec | `tr::net::can` | `can.hpp` | transport plane |
 | header-elided framing | `tr::view::view_can_frames_t` | `view_can.hpp` | L1 |
-| multi-frame reassembly | `tr::mem::mem_can_reassembly_t` | `mem_can_reassembly.hpp` | L0 |
+| multi-frame reassembly | `tr::net::can_reassembly_t` | `can_reassembly.hpp` | net |
 | **SocketCAN binding + raw-frame seam** | **`tr::net::transport_can`, `can_link_t`, `socketcan_link_t`** | **`transport_can.hpp`** | **transport plane** |
 
 ## The structured 29-bit extended ID
@@ -133,7 +133,7 @@ zero-copy subviews); applying the DLC padding is the SocketCAN binding's job.
 
 ## Multi-frame reassembly — address-shift, not ISO-TP
 
-`mem_can_reassembly_t` reassembles a payload that spanned several CAN frames. Each
+`can_reassembly_t` reassembles a payload that spanned several CAN frames. Each
 frame is a **slice**; slices are grouped by the in-flight identity `(origin, ts)`
 (the same collision-free `(origin_peer_id, ts)` used for cycle-dedup and slice
 grouping, [CONTEXT.md](../../CONTEXT.md) *Address-shift slicing*) and ordered by
@@ -159,12 +159,15 @@ group" serves CAN, UDP scatter-gather, and QUIC alike.
 
 ```{admonition} Layer placement of the reassembly buffer
 :class: note
-`mem_can_reassembly_t` is named for L0 (`tr::mem`) per [ADR-0030](../adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md)
-and #55, yet it yields an L1 `rope_t`. The reassembly *bookkeeping* (which indices
-arrived, totality, gap detection) is the genuine L0 concern; chaining the borrowed
-slice views into a rope is zero-copy (no allocation), so it does not run afoul of
-the "owning-handle helpers live in `tr::view`" rule ([ADR-0016](../adr/0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md) §2).
-It is the one L0-named component that references the L1 rope it assembles.
+`can_reassembly_t` lives in **`tr::net`**, beside `transport_can` (header
+`can_reassembly.hpp`). ADR-0030/#55 originally named it for L0 (`tr::mem::mem_can_reassembly_t`),
+but that was a self-admitted layer inversion — an L0 type referencing the L1
+`rope_t` it assembles. The rehome (ADR-0048 round 2) resolves it: the reassembly
+is a transport-plane concern that composes L1 views into a rope, exactly as any
+transport does, so no `tr::mem` type reaches up into `tr::view`. Its structure is
+drawn from an injected `std::pmr::memory_resource` and the live group count is
+bounded by config (evict-oldest + a `dropped_groups` counter), so a constrained
+node degrades by a bounded drop rather than unbounded growth.
 ```
 
 ## The in-band advertise frame and the dynamic map
@@ -287,7 +290,7 @@ never interleave on the bus):
 The receive thread decodes each frame's CAN ID. A **control-slot** frame feeds the
 per-node advertise byte stream (`decode_advertise` pops each complete manifest),
 which **learns the `id ↔ path` binding** and sets the group's expected slice count.
-A **data-slot** frame is reassembled by `mem_can_reassembly_t`, keyed by
+A **data-slot** frame is reassembled by `can_reassembly_t`, keyed by
 `(node, base-endpoint) + (endpoint − base) index` — all derived from the CAN ID, so
 no per-frame origin/ts ever rides the bus. On completion the slices are flattened and
 **trimmed back to the advertised total length**, which is what undoes CAN-FD tail

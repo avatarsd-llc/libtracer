@@ -42,7 +42,7 @@ libtracer_test_warnings(ws_test)
 add_test(NAME ws COMMAND ws_test)
 
 # #55 — transport_can pure framing layer (29-bit ID codec, view_can_frames,
-# mem_can_reassembly, advertise codec; no SocketCAN). Links libtracer for heap_alloc.
+# can_reassembly, advertise codec; no SocketCAN). Links libtracer for heap_alloc.
 add_executable(can_frames_test can_frames_test.cpp)
 target_link_libraries(can_frames_test PRIVATE libtracer)
 libtracer_test_warnings(can_frames_test)

@@ -50,7 +50,7 @@ Backends that own real bytes. Each implements the `tr::mem::mem_backend_t` inter
 | `mem_shared` | mem-backend | A POSIX SHM region (single-process refcounted, multi-process treats as MMIO) | v1 |
 | `mem_uart_rx_simple` | mem-backend | A circular UART RX buffer with byte-by-byte cursor | v1 |
 | `mem_uart_rx_dma` | mem-backend | A double-buffered DMA UART RX ring (half-complete and complete IRQs) | v1 |
-| `mem_can_reassembly` | mem-backend | A reassembly slab for multi-frame CAN/CAN-FD messages | v1 |
+| `can_reassembly` | net (transport) | Multi-frame CAN/CAN-FD reassembly buffer (`tr::net`, `pmr`-backed, bounded — was mis-filed as an L0 `mem-backend`; rehomed per ADR-0048 round 2) | v1 |
 | `mem_iceoryx2` | mem-backend | An iceoryx2 publish-side block | future |
 | `mem_rdma` | mem-backend | An RDMA-registered memory region with ibv tags | future |
 | `mem_cuda` | mem-backend | CUDA device memory (`DEVICE` space — the codec must not CPU-deref it; backs a VALUE payload in a heterogeneous host+device rope, [ADR-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)) | v1, opt-in `LIBTRACER_WITH_CUDA` |
@@ -69,7 +69,7 @@ The view + rope + cast machinery itself is one `required` module; integrations w
 | `view_dma_descriptor` | view-module | `mem_dma_buffer` | v1 |
 | `view_uart_simple` | view-module | `mem_uart_rx_simple` | v1 |
 | `view_uart_dma` | view-module | `mem_uart_rx_dma` | v1 |
-| `view_can_frames` | view-module | `mem_can_reassembly` | v1 |
+| `view_can_frames` | view-module | `can_reassembly` | v1 |
 | `view_shm` | view-module | `mem_shared` | v1 |
 | `view_iceoryx2` | view-module | `mem_iceoryx2` | future |
 | `view_rdma` | view-module | `mem_rdma` | future |
@@ -374,7 +374,7 @@ The natural pairings of L0 backend / L1 view module / transport. Other combinati
 | Linux router | `mem_heap` + `mem_lwip_pbuf` | `view_basic` + `view_pbuf` | `transport_tcp` + `transport_quic` | Two backends, two view modules, two transports — the forwarder wires them |
 | ADC streaming | `mem_dma_buffer` | `view_dma_descriptor` (rope-capable) | `transport_udp` (multicast) | DMA-half-complete IRQ produces views; egress walks the rope |
 | MMIO sensor (GPIO, ADC raw register) | `mem_mmio` | `view_basic` | (in-process only, or via copy at transport egress) | Segment lifetime is permanent; reads always TOCTOU-snapshot at view-create — see §hard integrations |
-| CAN-linked peripheral | `mem_can_reassembly` | `view_can_frames` | `transport_can` | Reassembly into a multi-frame view at L0; egress fragments back into CAN frames |
+| CAN-linked peripheral | `mem_heap` / `mem_pool` | `view_can_frames` | `transport_can` (`can_reassembly`) | `transport_can`'s `can_reassembly` (tr::net) reassembles slices into a multi-frame view; egress fragments back into CAN frames |
 | Cross-process intra-host | `mem_shared` | `view_shm` | (no transport — shared memory) | Single-process refcount; cross-process treats as MMIO and copies — see §hard integrations |
 | Browser WASM | `mem_heap` | `view_basic` | `transport_ws` | Standard heap; WS framing |
 
