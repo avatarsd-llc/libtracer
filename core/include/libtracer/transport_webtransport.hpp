@@ -97,7 +97,8 @@ class webtransport_transport_t : public transport_t {
      */
     webtransport_transport_t(const std::string& peer_host, std::uint16_t peer_port,
                              const std::string& path = "/", webtransport_dial_tls_t tls = {},
-                             mem::mem_backend_t* backend = &mem::heap_backend());
+                             mem::mem_backend_t* backend = &mem::heap_backend(),
+                             std::size_t max_frame = 0);
 
     /**
      * @brief LISTEN mode: serve WebTransport (ALPN `h3`) on @p bind_port with
@@ -118,7 +119,8 @@ class webtransport_transport_t : public transport_t {
      */
     webtransport_transport_t(std::uint16_t bind_port, const std::string& cert_file,
                              const std::string& key_file,
-                             mem::mem_backend_t* backend = &mem::heap_backend());
+                             mem::mem_backend_t* backend = &mem::heap_backend(),
+                             std::size_t max_frame = 0);
 
     /** @brief Shut the session down, drain msquic callbacks, and release the
      *         msquic API (listener → streams → connection → registration order). */

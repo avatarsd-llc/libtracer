@@ -24,8 +24,11 @@ reference implementation is pre-1.0; everything currently lives under
   (e.g. a heap-backed host connection wanting a hard cap without a bounded pool),
   but never raise it. Behavior-preserving default (unset ⇒ `kMaxFrame`, exactly
   the #216 behavior). The send-side `kMaxFrame` check is unchanged (it is the
-  peer's limit, not the local receive cap). `quic`/`webtransport` wiring of the
-  same `:settings` is a follow-up (they still cap at their `kMaxFrame`).
+  peer's limit, not the local receive cap). **`quic` and `webtransport` now honor
+  the same `:settings max_frame`** — a trailing `std::size_t max_frame = 0` on their
+  constructors flows through the pImpl to the shared `length_prefix_framer`, and
+  their factories pass `settings.max_frame` — so all three length-prefix transports
+  cap uniformly.
 
 - **`tr::net::length_prefix_framer` (`length_prefix_framer.hpp`)** — the
   u32-LE length-prefix stream reassembler extracted from the **byte-for-byte
