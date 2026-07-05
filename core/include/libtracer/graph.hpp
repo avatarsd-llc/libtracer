@@ -287,6 +287,14 @@ class graph_t {
     [[nodiscard]] result_t<view_t> read_acl(vertex_t* v) const;
 
     mutable std::shared_mutex map_mutex_;
+    // INSERT-ONLY (guarded by map_mutex_): vertices are emplaced, never erased.
+    // find() hands out a raw vertex_t* that callers hold PAST the map lock; that is
+    // sound only because the heap-owned vertex_t is pointer-stable across rehash AND
+    // is never destroyed while the graph lives. Implementing vertex retirement (the
+    // ADR "retire-LIST") must NOT be a bare `vertices_.erase` — that would dangle
+    // every outstanding find() pointer (the route_handle clear_link dangling-ref
+    // class, fixed in #220); it needs a vertex lifetime scheme (refcount / epoch
+    // reclamation, or a tombstone) first.
     std::unordered_map<path_key_t, std::unique_ptr<vertex_t>, path_key_hash_t> vertices_;
     // The device creation catalog (#82, ADR-0017): SPEC `type` -> factory. Populated at
     // setup (register_child_type), read-only once frames flow, so no lock (same contract

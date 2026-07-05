@@ -320,6 +320,11 @@ vertex_t* graph_t::find(std::span<const std::byte> key) const {
     path_key_t k{std::vector<std::byte>(key.begin(), key.end())};
     const std::shared_lock lock(map_mutex_);
     const auto it = vertices_.find(k);
+    // The returned raw pointer is used by callers OUTSIDE this shared_lock. That is
+    // sound only because `vertices_` is insert-only (see its declaration): the
+    // heap-owned vertex_t is pointer-stable across rehash and is never destroyed
+    // while the graph lives. Do NOT add vertex erasure/retirement without first
+    // giving vertices a lifetime scheme — a bare erase would dangle these pointers.
     return it == vertices_.end() ? nullptr : it->second.get();
 }
 
