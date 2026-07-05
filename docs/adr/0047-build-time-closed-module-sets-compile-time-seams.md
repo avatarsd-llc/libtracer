@@ -1,6 +1,6 @@
 # Compile-time dispatch where identity is per-target and the path is hot; runtime dispatch where identity is dynamic or the call is wiring-frequency
 
-Status: accepted. Supersedes [ADR-0016](0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md) §Decision 3 (the runtime-polymorphic `mem_backend_t` vtable and the "templates never cross the seam" rule); supersedes the receiver-signature spelling of [ADR-0042](0042-refcounted-receiver-seam-view-delivery.md) §1 and fulfills its §4 (the rope overload, now that rope-aware decode is committed); maintainer-ratified 2026-07-04 (revised same day: the net-plane control structures stay runtime-dispatched — see §4).
+Status: accepted. Supersedes [ADR-0016](0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md) §Decision 3 (the runtime-polymorphic `mem_backend_t` vtable and the "templates never cross the seam" rule); supersedes the receiver-signature spelling of [ADR-0042](0042-refcounted-receiver-seam-view-delivery.md) §1 and fulfills its §4 (the rope overload, now that rope-aware decode is committed); maintainer-ratified 2026-07-04 (revised same day: the net-plane control structures stay runtime-dispatched — see §4). **Amended 2026-07-05: §3's fn-ptr receiver conversion is DEFERRED — `std::function` is retained on the delivery path pending a measured need (see [§Amendment](#amendment-2026-07-05-fn-ptr-receiver-conversion-deferred)).**
 
 ## Context
 
@@ -52,3 +52,16 @@ ADR-0016 §3 cited a "≤ 16 KB stripped Cortex-M0 sentinel" that does not exist
 - CONTEXT.md's **module set** entry names the two realizations explicitly: tag-dispatched at L0; link-time in the net plane.
 - Reference docs [09](../reference/09-memory-substrate.md)/[10](../reference/10-module-catalog.md) §module ABI are updated to describe the concept-and-set seam as the reference implementation's mechanism.
 - Future seams cite §1's appropriateness rule instead of re-litigating vtable-vs-template per case.
+
+## Amendment (2026-07-05): fn-ptr receiver conversion deferred
+
+§3's replacement of `std::function` receivers with `void (*)(void* ctx, …)` + context is **deferred**; `std::function` is retained on the delivery path until a gated profile demonstrates it is the bottleneck. The other half of §3 — the owning tier delivering a `rope_t` (fulfilling ADR-0042 §4) — is **unaffected** and still planned.
+
+The re-examination (against §1's own "hot **or** size-critical" test and the maintainer's measurement-first doctrine):
+
+- **Speed** — neutral. A `std::function` call is one extra indirection over a raw fn-ptr call (invoke the type-erased thunk, which calls the target); against per-frame work that is noise. §3 already conceded "an erased *call* costs the same as an indirect call," so the appropriateness rule's "hot path" limb does not, by itself, justify the change.
+- **Heap** — weak in practice. libstdc++ `std::function` has small-buffer optimization; a `[this]` capture (one pointer — the dominant receiver shape here) lives inline, **no heap**. Heap allocation only occurs for a capture wider than the SBO (≈2 pointers), which this path does not use.
+- **Code size** — the only real cost: each distinct `std::function<Sig>` instantiates an invoke thunk plus a copy/move/destroy manager, on the order of **0.5–2 KB of flash** across the delivery path's signatures.
+- **But that cost is unmeasured on any gated profile.** The receiver/delivery path (`fwd_router`, `transport_*`, the graph runtime) is **not** part of the ≤16 KB Cortex-M0 P0 sentinel (`sentinel_node.cpp` is L0/L1 + codec + path only). No sentinel or CI gate currently measures a graph+transport MCU node, so the fn-ptr saving is speculative for every profile we referee — while the ergonomic cost (each install site becomes a static trampoline + context, and can no longer be a capturing lambda) is paid everywhere, immediately.
+
+Per §1's own rule ("size-critical" must be *demonstrated*, not assumed) and the measurement-first doctrine, the conversion is not justified today. **Re-open it** when a graph+transport footprint gate exists and shows `std::function` pushing that node over its budget; until then `std::function` stays — it is speed-equal, heap-free for the captures in use, ergonomic, and binds a method (via `ctx`) as readily as a free function.
