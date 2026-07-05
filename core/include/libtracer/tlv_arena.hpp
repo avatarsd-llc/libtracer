@@ -95,8 +95,8 @@ class tlv_arena_t {
     }
 
    private:
-    friend std::expected<tlv_arena_t, error_t> decode_into(std::span<const std::byte>,
-                                                           std::pmr::memory_resource&);
+    friend std::expected<tlv_arena_t, err_t> decode_into(std::span<const std::byte>,
+                                                         std::pmr::memory_resource&);
     std::pmr::vector<arena_tlv_t> nodes_;
 };
 
@@ -110,7 +110,7 @@ class tlv_arena_t {
  * owning `tlv_t` tree — zero heap when @p mr is a stack-buffer
  * `monotonic_buffer_resource`. @p input and @p mr must outlive the arena.
  */
-[[nodiscard]] std::expected<tlv_arena_t, error_t> decode_into(std::span<const std::byte> input,
-                                                              std::pmr::memory_resource& mr);
+[[nodiscard]] std::expected<tlv_arena_t, err_t> decode_into(std::span<const std::byte> input,
+                                                            std::pmr::memory_resource& mr);
 
 }  // namespace tr::wire

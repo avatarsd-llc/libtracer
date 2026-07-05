@@ -15,6 +15,21 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **One wire-grammar core behind a chunk-cursor seam (ADR-0048 §1, first
+  increment).** The TLV header/trailer grammar — `type == 0x00` reject,
+  reserved-bit reject, `LL` length width, trailer sizing, the two-span CRC verify
+  — now lives **once** in `grammar.hpp`'s `tr::wire::grammar::parse_header`, read
+  through a `span_cursor` byte-source seam. Both materializing decoders delegate
+  to it: the owning `tlv_t` tree (`frame.cpp` `decode`) and the terminus arena
+  (`tlv_arena.cpp` `decode_into`). Previously the grammar was **forked**
+  (`parse_one` vs the arena's `parse_header`, ~40 lines held byte-for-byte equal
+  only by the `decode`↔`decode_into` equivalence test — every future rule a
+  two-file edit; review finding #7). **Behavior-preserving** (byte-exact under the
+  conformance vectors + the equivalence test); the two decoders' iterative walks
+  stay distinct (sinks differ). The cursor seam is where the ADR-0048 rope cursor
+  (rope-aware decode) plugs in next. Net Cortex-M0 footprint: **−296 B** (the two
+  forked parse functions fold to one instantiation).
+
 - **Build-time-closed backend set + tag dispatch for segment release (ADR-0047
   §2, first increment).** `segment_t` now carries a `tr::mem::backend_tag`
   (inherited from its backend like `space`), and `segment_ptr_t::reset` reclaims
@@ -103,6 +118,15 @@ reference implementation is pre-1.0; everything currently lives under
   CREATE-ACL-gated on the nearest existing ancestor).
 
 ### Changed
+
+- **The wire decoders return `tr::wire::err_t` (error.hpp), not the deleted
+  decode-local `error_t` (ADR-0048).** `decode`, `decode_into`, and `view_as_tlv`
+  now yield the RFC-0002 registry code directly — so `err_path` / `err_severity` /
+  `err_disposition` come for free and there is no parallel decode-only error
+  vocabulary. The four decode outcomes keep their names (`FRAME_TRUNCATED` /
+  `FRAME_INVALID` / `FRAME_CRC_FAIL` / `TLV_NESTING_TOO_DEEP`) and the conformance
+  `ERR:<name>` strings are unchanged; a `std::expected<…, wire::error_t>` in a
+  caller becomes `wire::err_t` (value-compatible, same names). Behavior-preserving.
 
 - **`view_t::subview` / `view_t::bytes()` now assert their bounds preconditions
   in debug builds** (`sub_offset + sub_length <= length`; `offset + length <=

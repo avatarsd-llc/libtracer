@@ -5,18 +5,16 @@
 
 #include "libtracer/tlv_arena.hpp"
 
-#include "libtracer/byteorder.hpp"
-#include "libtracer/crc.hpp"
+#include "libtracer/grammar.hpp"
 
 namespace tr::wire {
 namespace {
 
-constexpr std::uint8_t u8(std::byte b) noexcept { return std::to_integer<std::uint8_t>(b); }
-
-// One TLV header parsed + trailer-validated in isolation — the arena twin of
-// frame.cpp's parse_one, producing spans instead of a tlv_t. Kept byte-for-byte
-// equivalent in what it accepts/rejects (the decode <-> decode_into equivalence
-// test runs both over every conformance vector).
+// One TLV header parsed via the shared grammar (grammar.hpp, ADR-0048 §1),
+// reshaped into the arena's span view. `wire` is header+body (trailer excluded,
+// so a whole-TLV copy is trailer-less at rest); `body` is the payload / children
+// region. The header/trailer rules + two-span CRC verify are no longer forked
+// here — this is the arena twin of frame.cpp's parse_one, both delegating.
 struct parsed_t {
     type_t type{};
     opt_t opt{};
@@ -25,48 +23,15 @@ struct parsed_t {
     std::span<const std::byte> body{};  // payload / children region
 };
 
-std::expected<parsed_t, error_t> parse_header(std::span<const std::byte> buf) {
-    if (buf.size() < 4) return std::unexpected(error_t::FRAME_TRUNCATED);
-
-    const std::uint8_t type_b = u8(buf[0]);
-    const std::uint8_t opt_b = u8(buf[1]);
-    if (type_b == 0x00) return std::unexpected(error_t::FRAME_INVALID);
-    if (opt_t::reserved_set(opt_b)) return std::unexpected(error_t::FRAME_INVALID);
-
-    const opt_t opt = opt_t::decode(opt_b);
-    const std::size_t header = opt.ll ? 6u : 4u;
-    if (buf.size() < header) return std::unexpected(error_t::FRAME_TRUNCATED);
-
-    const std::uint64_t length = detail::load_le(buf.subspan(2, opt.ll ? 4u : 2u));
-    const std::size_t ts_size = opt.ts ? (opt.tf ? 4u : 8u) : 0u;
-    const std::size_t crc_size = opt.cr ? (opt.cw ? 2u : 4u) : 0u;
-    const std::size_t total = header + length + ts_size + crc_size;
-    if (buf.size() < total) return std::unexpected(error_t::FRAME_TRUNCATED);
-
-    const std::span<const std::byte> body = buf.subspan(header, length);
-    if (opt.cr) {
-        const std::span<const std::byte> ts_bytes = buf.subspan(header + length, ts_size);
-        const std::size_t crc_off = header + length + ts_size;
-        // CRC over body ++ ts_bytes via the two-span overloads (same as decode).
-        if (opt.cw) {
-            const auto stored =
-                static_cast<std::uint16_t>(detail::load_le(buf.subspan(crc_off, 2)));
-            if (crc::crc16_ccitt(body, ts_bytes) != stored)
-                return std::unexpected(error_t::FRAME_CRC_FAIL);
-        } else {
-            const auto stored =
-                static_cast<std::uint32_t>(detail::load_le(buf.subspan(crc_off, 4)));
-            if (crc::crc32c(body, ts_bytes) != stored)
-                return std::unexpected(error_t::FRAME_CRC_FAIL);
-        }
-    }
-
+std::expected<parsed_t, err_t> parse_node(std::span<const std::byte> buf) {
+    const auto h = grammar::parse_header(grammar::span_cursor{buf});
+    if (!h) return std::unexpected(h.error());
     return parsed_t{
-        .type = static_cast<type_t>(type_b),
-        .opt = opt,
-        .total = total,
-        .wire = buf.first(header + length),
-        .body = body,
+        .type = h->type,
+        .opt = h->opt,
+        .total = h->total,
+        .wire = buf.first(h->header + h->length),
+        .body = buf.subspan(h->header, h->length),
     };
 }
 
@@ -79,15 +44,15 @@ bool is_canonical_name(const parsed_t& p) noexcept {
 
 }  // namespace
 
-std::expected<tlv_arena_t, error_t> decode_into(std::span<const std::byte> input,
-                                                std::pmr::memory_resource& mr) {
+std::expected<tlv_arena_t, err_t> decode_into(std::span<const std::byte> input,
+                                              std::pmr::memory_resource& mr) {
     // Iterative parse with an explicit open-node stack, mirroring decode()'s
     // walk (docs/reference/01 §Iterative parsing requirement) — but appending
     // pre-order arena nodes instead of grafting owning children.
-    auto root = parse_header(input);
+    auto root = parse_node(input);
     if (!root) return std::unexpected(root.error());
     if (root->total != input.size())
-        return std::unexpected(error_t::FRAME_INVALID);  // trailing bytes
+        return std::unexpected(err_t::FRAME_INVALID);  // trailing bytes
 
     tlv_arena_t arena(mr);
     auto& nodes = arena.nodes_;
@@ -133,8 +98,8 @@ std::expected<tlv_arena_t, error_t> decode_into(std::span<const std::byte> input
             continue;
         }
         // A child of stack.back() sits at depth == stack.size(); reject at the cap.
-        if (stack.size() >= kMaxDepth) return std::unexpected(error_t::TLV_NESTING_TOO_DEEP);
-        const auto child = parse_header(top.payload.subspan(top.pos));
+        if (stack.size() >= kMaxDepth) return std::unexpected(err_t::TLV_NESTING_TOO_DEEP);
+        const auto child = parse_node(top.payload.subspan(top.pos));
         if (!child) return std::unexpected(child.error());
         top.pos += child->total;
         if (!is_canonical_name(*child)) top.names_only = false;

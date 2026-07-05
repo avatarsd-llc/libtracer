@@ -77,7 +77,7 @@ int main() {
         const std::vector<std::byte> bytes = encode(built);
         const auto dec = decode(bytes);
         check(!dec.has_value(), "over-cap nesting (leaf depth 32) is rejected");
-        check(!dec.has_value() && dec.error() == tr::wire::error_t::TLV_NESTING_TOO_DEEP,
+        check(!dec.has_value() && dec.error() == tr::wire::err_t::TLV_NESTING_TOO_DEEP,
               "rejection reason is NESTING_TOO_DEEP");
     }
 

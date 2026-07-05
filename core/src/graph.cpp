@@ -522,7 +522,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view_t& value, int depth
     // — a refcount bump on the written frame's segment, never a byte copy.
     std::array<std::byte, 4096> stack;
     std::pmr::monotonic_buffer_resource mr(stack.data(), stack.size());
-    const std::expected<wire::tlv_arena_t, wire::error_t> arena =
+    const std::expected<wire::tlv_arena_t, wire::err_t> arena =
         wire::decode_into(value.bytes(), mr);
     if (!arena) return std::unexpected(status_t::TYPE_MISMATCH);
     const wire::tlv_arena_t& a = *arena;
