@@ -51,6 +51,7 @@
 
 #include "libtracer/byteorder.hpp"
 #include "libtracer/frame.hpp"
+#include "libtracer/length_prefix_framer.hpp"
 #include "wt_h3.hpp"
 
 // msquic is not TSan-instrumented — restate its two happens-before contracts
@@ -195,20 +196,11 @@ struct webtransport_transport_t::impl_t {
     bool session_done = false;
     bool session_ok = false;
 
-    // RX frame reassembly across msquic RECEIVE chunks (the transport_quic.cpp
-    // state machine) — touched only on the frame stream's callback.
-    std::array<std::byte, kPrefixBytes> prefix{};
-    std::size_t prefix_have = 0;
-    view::segment_ptr_t rx_seg;
-    std::size_t rx_len = 0;
-    std::size_t rx_off = 0;
-    std::size_t drain_left = 0;  // backpressure: bytes of a dropped frame left to skip
+    // RX frame reassembly across msquic RECEIVE chunks — the shared
+    // length_prefix_framer, touched only on the frame stream's callback.
+    length_prefix_framer framer_;
 
-    void reset_rx() {
-        prefix_have = 0;
-        rx_seg = {};
-        rx_len = rx_off = drain_left = 0;
-    }
+    void reset_rx() { framer_.reset(); }
 
     void signal_handshake(bool ok) {
         {
@@ -255,59 +247,18 @@ struct webtransport_transport_t::impl_t {
         }
     }
 
-    // The length-prefix reassembly state machine (transport_quic.cpp verbatim:
-    // one exactly-sized segment per frame, backpressure drain, malformed
-    // oversize prefix => connection shutdown). Returns false once shut down.
+    // The length-prefix reassembly, delegated to the shared length_prefix_framer
+    // (one exactly-sized segment per frame, backpressure drain, malformed oversize
+    // prefix => connection shutdown). Returns false once shut down.
     bool on_rx_chunk(const std::uint8_t* p, std::size_t n) {
-        while (n > 0) {
-            if (drain_left > 0) {
-                const std::size_t take = drain_left < n ? drain_left : n;
-                drain_left -= take;
-                p += take;
-                n -= take;
-                if (drain_left == 0) prefix_have = 0;
-                continue;
-            }
-            if (prefix_have < kPrefixBytes) {
-                const std::size_t want = kPrefixBytes - prefix_have;
-                const std::size_t take = want < n ? want : n;
-                std::memcpy(prefix.data() + prefix_have, p, take);
-                prefix_have += take;
-                p += take;
-                n -= take;
-                if (prefix_have < kPrefixBytes) return true;  // await the rest
-                const std::size_t len = detail::load_le<std::uint32_t>(prefix);
-                if (len == 0) {  // an empty record carries no TLV — a no-op
-                    prefix_have = 0;
-                    continue;
-                }
-                if (len > kMaxFrame) {
-                    malformed_rx.fetch_add(1, std::memory_order_relaxed);
-                    shutdown_conn(kAppErrMalformed);
-                    return false;
-                }
-                rx_seg = view::segment_ptr_t::adopt(backend->alloc(len));
-                if (!rx_seg) {
-                    dropped_rx.fetch_add(1, std::memory_order_relaxed);
-                    drain_left = len;
-                    continue;
-                }
-                rx_len = len;
-                rx_off = 0;
-                continue;
-            }
-            const std::size_t want = rx_len - rx_off;
-            const std::size_t take = want < n ? want : n;
-            std::memcpy(rx_seg->bytes.data() + rx_off, p, take);
-            rx_off += take;
-            p += take;
-            n -= take;
-            if (rx_off == rx_len) {
-                deliver(std::move(rx_seg), rx_len);
-                rx_seg = {};
-                prefix_have = 0;
-                rx_len = rx_off = 0;
-            }
+        const auto res = framer_.feed(
+            *backend, kMaxFrame, reinterpret_cast<const std::byte*>(p), n,
+            [this](view::segment_ptr_t seg, std::size_t len) { deliver(std::move(seg), len); });
+        if (res.dropped != 0) dropped_rx.fetch_add(res.dropped, std::memory_order_relaxed);
+        if (res.malformed) {
+            malformed_rx.fetch_add(1, std::memory_order_relaxed);
+            shutdown_conn(kAppErrMalformed);
+            return false;
         }
         return true;
     }
@@ -859,7 +810,7 @@ webtransport_transport_t::~webtransport_transport_t() {
     if (i.reg != nullptr) i.api->RegistrationClose(i.reg);
     MsQuicClose(i.api);
     // Every callback has drained — take their published writes before the
-    // members (rx_seg et al.) destruct.
+    // members (framer_ et al.) destruct.
     tsan_acquire(&i);
 }
 

@@ -17,6 +17,13 @@ target_link_libraries(byteorder_test PRIVATE libtracer)
 libtracer_test_warnings(byteorder_test)
 add_test(NAME byteorder COMMAND byteorder_test)
 
+# u32-length-prefix stream reassembler (length_prefix_framer.hpp) — the extracted
+# transport_quic/webtransport RX state machine, tested without a live connection.
+add_executable(length_prefix_framer_test length_prefix_framer_test.cpp)
+target_link_libraries(length_prefix_framer_test PRIVATE libtracer)
+libtracer_test_warnings(length_prefix_framer_test)
+add_test(NAME length_prefix_framer COMMAND length_prefix_framer_test)
+
 # Canonical-key NAME navigation (key_view.hpp) — the locus the graph walks funnel through.
 add_executable(key_view_test key_view_test.cpp)
 target_link_libraries(key_view_test PRIVATE libtracer)
