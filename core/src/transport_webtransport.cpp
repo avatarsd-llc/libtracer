@@ -170,6 +170,8 @@ struct webtransport_transport_t::impl_t {
 
     // RX segment source for frame reassembly (ADR-0042 §2) + counters.
     mem::mem_backend_t* backend = nullptr;
+    std::size_t max_frame =
+        webtransport_transport_t::kMaxFrame;  // per-connection RX cap (:settings)
     std::atomic<std::uint64_t> dropped_rx{0};
     std::atomic<std::uint64_t> malformed_rx{0};
 
@@ -252,7 +254,7 @@ struct webtransport_transport_t::impl_t {
     // prefix => connection shutdown). Returns false once shut down.
     bool on_rx_chunk(const std::uint8_t* p, std::size_t n) {
         const auto res = framer_.feed(
-            *backend, kMaxFrame, reinterpret_cast<const std::byte*>(p), n,
+            *backend, max_frame, reinterpret_cast<const std::byte*>(p), n,
             [this](view::segment_ptr_t seg, std::size_t len) { deliver(std::move(seg), len); });
         if (res.dropped != 0) dropped_rx.fetch_add(res.dropped, std::memory_order_relaxed);
         if (res.malformed) {
@@ -652,10 +654,12 @@ struct webtransport_transport_t::impl_t {
 webtransport_transport_t::webtransport_transport_t(const std::string& peer_host,
                                                    std::uint16_t peer_port, const std::string& path,
                                                    webtransport_dial_tls_t tls,
-                                                   mem::mem_backend_t* backend)
+                                                   mem::mem_backend_t* backend,
+                                                   std::size_t max_frame)
     : impl_(std::make_unique<impl_t>()) {
     impl_t& i = *impl_;
     i.backend = backend;
+    if (max_frame != 0) i.max_frame = max_frame;
     i.authority = peer_host + ":" + std::to_string(peer_port);
     i.path = path.empty() ? "/" : path;
 
@@ -745,10 +749,12 @@ webtransport_transport_t::webtransport_transport_t(const std::string& peer_host,
 webtransport_transport_t::webtransport_transport_t(std::uint16_t bind_port,
                                                    const std::string& cert_file,
                                                    const std::string& key_file,
-                                                   mem::mem_backend_t* backend)
+                                                   mem::mem_backend_t* backend,
+                                                   std::size_t max_frame)
     : impl_(std::make_unique<impl_t>()) {
     impl_t& i = *impl_;
     i.backend = backend;
+    if (max_frame != 0) i.max_frame = max_frame;
     i.listen = true;
 
     QUIC_CERTIFICATE_FILE cert{};
@@ -921,14 +927,16 @@ transport_vertex_t::transport_factory_t webtransport_transport_factory(
                 return std::unexpected(graph::status_t::TYPE_MISMATCH);
             t = std::make_unique<webtransport_transport_t>(
                 s.addr, s.port, "/",
-                webtransport_dial_tls_t{.ca_file = {}, .insecure_no_verify = true}, rx_backend);
+                webtransport_dial_tls_t{.ca_file = {}, .insecure_no_verify = true}, rx_backend,
+                s.max_frame);
             if (!t->ok()) return std::unexpected(graph::status_t::NOT_FOUND);  // handshake failed
             return t;
         }
         const wt_private_cfg_t priv = parse_wt_config(raw_config);
         if (s.port == 0 || priv.cert.empty() || priv.key.empty())
             return std::unexpected(graph::status_t::TYPE_MISMATCH);
-        t = std::make_unique<webtransport_transport_t>(s.port, priv.cert, priv.key, rx_backend);
+        t = std::make_unique<webtransport_transport_t>(s.port, priv.cert, priv.key, rx_backend,
+                                                       s.max_frame);
         if (!t->ok()) return std::unexpected(graph::status_t::NOT_FOUND);  // bind/cred failed
         return t;
     };

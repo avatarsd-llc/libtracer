@@ -68,10 +68,10 @@ struct conn_settings_t {
     std::uint32_t keepalive_ms = 0;       /**< @brief Keepalive interval (transport-specific;
                                                       ignored by the built-ins). */
     std::uint32_t max_frame = 0;          /**< @brief Per-connection receive frame cap for the
-                                                      length-prefix stream transports; 0 = the
-                                                      protocol default (`kMaxFrame`, 16 MiB). Only
-                                                      tightens, never raises. Honored by `tcp`
-                                                      (quic/webtransport wiring is a follow-up). */
+                                                      length-prefix stream transports (`tcp`,
+                                                      `quic`, `webtransport`); 0 = the protocol
+                                                      default (`kMaxFrame`, 16 MiB). Only tightens,
+                                                      never raises. */
     std::string kind;                     /**< @brief Transport-factory selector ("udp",
                                                       "ws", ...); empty = provide_link only. */
 };

@@ -90,7 +90,8 @@ class quic_transport_t : public transport_t {
      *                  an OOM. Must outlive the transport.
      */
     quic_transport_t(const std::string& peer_host, std::uint16_t peer_port,
-                     quic_dial_tls_t tls = {}, mem::mem_backend_t* backend = &mem::heap_backend());
+                     quic_dial_tls_t tls = {}, mem::mem_backend_t* backend = &mem::heap_backend(),
+                     std::size_t max_frame = 0);
 
     /**
      * @brief LISTEN mode: serve QUIC on @p bind_port with the PEM certificate
@@ -110,7 +111,7 @@ class quic_transport_t : public transport_t {
      */
     quic_transport_t(std::uint16_t bind_port, const std::string& cert_file,
                      const std::string& key_file,
-                     mem::mem_backend_t* backend = &mem::heap_backend());
+                     mem::mem_backend_t* backend = &mem::heap_backend(), std::size_t max_frame = 0);
 
     /** @brief Shut the connection down, drain msquic callbacks, and release the
      *         msquic API (listener → stream → connection → registration order). */
