@@ -119,6 +119,21 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Changed
 
+- **CAN reassembly rehomed `tr::mem::mem_can_reassembly_t` →
+  `tr::net::can_reassembly_t` (ADR-0048 round 2).** The header moves
+  `mem_can_reassembly.hpp` → **`can_reassembly.hpp`** and the type moves to
+  **`tr::net`**, beside `transport_can`. This resolves a self-admitted layer
+  inversion — an L0 (`tr::mem`) type that referenced the L1 `rope_t` it assembles;
+  the reassembly is a transport-plane concern that composes L1 views, like any
+  transport. The two internal `std::map`s become `std::pmr::map`s over an
+  **injected `std::pmr::memory_resource`** with a **config-bounded live-group
+  count** (evict-oldest + a `dropped_groups()` counter), so a constrained node
+  degrades by a bounded drop, never OOM (the no-synthetic-limits doctrine). The
+  defaults — the process heap, unbounded — preserve the prior behavior
+  (verified by the existing `can_frames` / `transport_can` suites); `reassembly_key_t`
+  and `can_origin_id_t` move to `tr::net` with the same shape. Public API change
+  for anyone naming the type directly (transports use it internally).
+
 - **The wire decoders return `tr::wire::err_t` (error.hpp), not the deleted
   decode-local `error_t` (ADR-0048).** `decode`, `decode_into`, and `view_as_tlv`
   now yield the RFC-0002 registry code directly — so `err_path` / `err_severity` /

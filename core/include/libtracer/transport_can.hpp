@@ -3,7 +3,7 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * transport_can (increment 2 of #55) — the SocketCAN binding that drives the
- * pure framing layer (can.hpp / view_can.hpp / mem_can_reassembly.hpp) over a
+ * pure framing layer (can.hpp / view_can.hpp / can_reassembly.hpp) over a
  * real Linux CAN bus. It is a `tr::net::transport_t`: a bridge hands it a complete
  * libtracer frame via send(), the transport address-shift-fragments that frame
  * across CAN data fields (header-elided — the 29-bit CAN ID is the path, ADR-0022),
@@ -40,7 +40,7 @@
 #include <vector>
 
 #include "libtracer/can.hpp"
-#include "libtracer/mem_can_reassembly.hpp"
+#include "libtracer/can_reassembly.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/transport_vertex.hpp"
 #include "libtracer/view_can.hpp"
@@ -190,7 +190,7 @@ struct transport_can_config_t {
  * id-matched data frames follow — CAN-FD windows DLC-padded up to a legal size.
  * **Ingress** (the link's receive thread): advertise frames populate the dynamic
  * identity↔path map; data frames are reassembled by @ref
- * tr::mem::mem_can_reassembly_t keyed by `(node, base-endpoint) + slice-index`,
+ * can_reassembly_t keyed by `(node, base-endpoint) + slice-index`,
  * trimmed back to the advertised total (undoing FD padding), and delivered
  * byte-exact to the receiver. The map is rebuilt purely from advertise frames, so
  * a rejoining node self-heals with no coordinator (ADR-0030).
@@ -334,7 +334,7 @@ class transport_can : public transport_t, public bus_link_t {
         bool deliver = true;
     };
     std::mutex rx_m_;                                          // guards the map + buffers
-    tr::mem::mem_can_reassembly_t reasm_;                      // data-slice reassembly
+    can_reassembly_t reasm_;                                   // data-slice reassembly
     std::map<std::uint32_t, binding_t> learned_;               // base CAN ID -> binding
     std::map<std::uint16_t, std::vector<std::byte>> control_;  // per-node advertise byte stream
     std::vector<can_frame_data_t> pending_;  // data frames awaiting their advertise

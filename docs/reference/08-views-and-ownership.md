@@ -342,7 +342,7 @@ L1 is core (the view + refcount machinery) **plus** module-style integrations wi
 ### `view_can_frames` — week 6
 
 - **Status**: with the CAN demo.
-- **Pairs with**: `mem_can_reassembly`.
+- **Pairs with**: `can_reassembly`.
 - **What it provides**: per-peer reassembly buffer surfaced as a view once a complete TLV's frames have arrived. The reassembly pool is per-`(peer × inflight)`; on RX-frame, bytes accumulate; on completion, a view is handed off and the slot is reclaimed when the view releases.
 - **Special semantics**: timeout reclamation if a reassembly never completes; emits `STATUS=ERROR(TIMEOUT)` at the transport ingress.
 
@@ -385,7 +385,7 @@ Some L0 backend / L1 module pairings are natural and standard:
 | `mem_rdma` | `view_rdma` |
 | `mem_uart_rx_simple` | `view_uart_simple` |
 | `mem_uart_rx_dma` | `view_uart_dma` |
-| `mem_can_reassembly` | `view_can_frames` |
+| `can_reassembly` | `view_can_frames` |
 
 A host loads only the pairings it needs. An RC-car build with one UART loads `mem_uart_rx_simple` + `view_uart_simple` plus a tiny `mem_pool_static` for outgoing TLVs. A gateway loads heap + pbuf + DMA + their corresponding view modules.
 
@@ -405,7 +405,7 @@ Example: TLV received over lwIP (pbuf rope) forwarded to a Linux raw-socket tran
 
 If the target transport needs a contiguous buffer (CAN with limited DMA descriptors, UART with byte-by-byte FIFO, a transport without iovec support), the transport egress materializes the rope into a flat segment in the target's substrate.
 
-Example: TLV received over lwIP (pbuf rope) forwarded to CAN — the egress allocates a CAN-capable segment from `mem_can_reassembly`'s TX pool, walks the pbuf rope, and copies bytes into the CAN segment. One copy at the transport boundary; no further copies during CAN egress.
+Example: TLV received over lwIP (pbuf rope) forwarded to CAN — the egress allocates a CAN-capable segment from `can_reassembly`'s TX pool, walks the pbuf rope, and copies bytes into the CAN segment. One copy at the transport boundary; no further copies during CAN egress.
 
 The transition cost is **per cross-substrate hop**, not per fanout. Subscribers on the lwIP side still see zero-copy delivery; only the cross-substrate traffic pays.
 
@@ -477,7 +477,7 @@ The DMA buffer's refcount is the back-pressure signal: if subscribers are slow, 
 
 ```
 1. CAN frame arrives with sequence-bit indicating "first" of a multi-frame TLV.
-2. mem_can_reassembly allocates a per-peer slot, copies first-frame payload.
+2. can_reassembly allocates a per-peer slot, copies first-frame payload.
 3. Subsequent frames append (each is one HW DMA into the reassembly slot).
 4. Last-frame bit: framer constructs a view over the completed reassembly slot.
 5. View is dispatched to subscribers; refcount holds the slot.

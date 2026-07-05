@@ -119,7 +119,7 @@ flowchart TB
     subgraph HW_OWNED["HW-owned (lifetime determined externally)"]
         B1[mem_dma_buffer<br/><i>cache hooks required</i>]
         B2[mem_mmio<br/><i>permanent segment</i>]
-        B3[mem_uart_rx_dma<br/>mem_can_reassembly]
+        B3[mem_uart_rx_dma<br/>can_reassembly]
     end
     subgraph STACK_OWNED["Network-stack-owned"]
         C1[mem_lwip_pbuf]
@@ -316,12 +316,18 @@ Each entry: status, what it wraps, allocation supported, footprint, when to use,
 - **Footprint**: small (200-500 bytes code per peripheral).
 - **When to use**: bytes-arrive-incrementally patterns (UART, I²C in master-receive mode, SPI slave). The simple variant is byte-by-byte ISR; the DMA variant uses cache hooks.
 
-### `mem_can_reassembly` — week 6
+### `can_reassembly` — rehomed to `tr::net`
 
-- **Status**: with the CAN demo.
-- **Wraps**: a small per-peer reassembly buffer that accumulates multi-frame CAN messages until a complete TLV is present.
-- **Allocation**: from a dedicated pool sized for `(peers × inflight)` reassembly slots.
-- **When to use**: `transport_can` module's RX path.
+- **Status**: **not an L0 backend.** `can_reassembly_t` was originally named for L0
+  (`tr::mem::mem_can_reassembly_t`) but that was a layer inversion (an L0 type
+  referencing the L1 `rope_t` it assembles). It has been rehomed to **`tr::net`**,
+  beside `transport_can` (ADR-0048 round 2) — see
+  [14-can-transport.md](14-can-transport.md) §Multi-frame reassembly.
+- **Wraps**: a per-group reassembly buffer accumulating multi-frame CAN slices
+  until a complete TLV is present; its structure is drawn from an injected
+  `std::pmr::memory_resource` with a config-bounded live-group count (evict-oldest
+  + a `dropped_groups` counter), never OOM.
+- **When to use**: internal to the `transport_can` RX path.
 
 ---
 

@@ -59,15 +59,15 @@ struct peer_name_buf_t {
 // sub-field becomes the 16-byte origin and the group's base endpoint becomes the
 // `ts`. Both peers compute it the same way from the same id, so no per-frame
 // origin/ts ever rides the constrained bus (header-elided).
-tr::mem::can_origin_id_t origin_of(std::uint16_t node) {
-    tr::mem::can_origin_id_t o{};
+tr::net::can_origin_id_t origin_of(std::uint16_t node) {
+    tr::net::can_origin_id_t o{};
     o[0] = static_cast<std::uint8_t>(node & 0xFFu);
     o[1] = static_cast<std::uint8_t>((node >> 8) & 0xFFu);
     return o;
 }
 
-tr::mem::reassembly_key_t key_of(std::uint16_t node, std::uint16_t base_endpoint) {
-    return tr::mem::reassembly_key_t{origin_of(node), static_cast<std::uint64_t>(base_endpoint)};
+tr::net::reassembly_key_t key_of(std::uint16_t node, std::uint16_t base_endpoint) {
+    return tr::net::reassembly_key_t{origin_of(node), static_cast<std::uint64_t>(base_endpoint)};
 }
 
 // (removed) own_copy — the alloc/copy/over triplet now lives in one audited
@@ -353,7 +353,7 @@ void transport_can::process_data(const can_frame_data_t& frame) {
     // dropped — no reassembly buffer is spent on a neighbour's traffic.
     if (!binding->deliver) return;
 
-    const tr::mem::reassembly_key_t key = key_of(fields->node, base_ep);
+    const tr::net::reassembly_key_t key = key_of(fields->node, base_ep);
     const std::uint32_t index = static_cast<std::uint32_t>(fields->endpoint - base_ep);
     reasm_.add_slice(key, index, tr::view::over_bytes(frame.bytes()));
 
