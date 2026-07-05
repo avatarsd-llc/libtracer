@@ -211,9 +211,10 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
     const std::lock_guard lock(tx_m_);
 
     // Own the bytes so view_can_frames_t can carve zero-copy subviews out of them.
-    const tr::view::view_t payload = tr::view::over_bytes(frame);
+    const auto payload = tr::view::over_bytes(frame);
+    if (!payload) return;  // alloc failure => backpressure drop
     const tr::view::view_can_frames_t frames =
-        tr::view::view_can_frames_t::split(payload, cfg_.mode);
+        tr::view::view_can_frames_t::split(*payload, cfg_.mode);
     const std::size_t count = frames.frame_count();
     if (count == 0) return;
 
@@ -355,7 +356,7 @@ void transport_can::process_data(const can_frame_data_t& frame) {
 
     const tr::net::reassembly_key_t key = key_of(fields->node, base_ep);
     const std::uint32_t index = static_cast<std::uint32_t>(fields->endpoint - base_ep);
-    reasm_.add_slice(key, index, tr::view::over_bytes(frame.bytes()));
+    reasm_.add_slice(key, index, tr::view::over_bytes(frame.bytes()).value_or(tr::view::view_t{}));
 
     if (!reasm_.is_complete(key)) return;
     const auto rope = reasm_.assemble(key);

@@ -141,6 +141,16 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Changed
 
+- **`tr::view::over_bytes` returns `std::optional<view_t>`** (was `view_t`,
+  review finding #9 / L1 contracts). It no longer conflates the two outcomes an
+  unowned `view_t` used to share: **`std::nullopt`** is an allocation failure the
+  caller maps to BACKPRESSURE; an **engaged, empty** view is a legitimately-empty
+  input span. The call sites (graph read_schema/read_acl/read_children, the FWD
+  resolver's `own_tlv`, `fwd_router` local delivery, `transport_vertex`,
+  `transport_can`, and the two heap benchmarks) branch on the optional instead of
+  hand-disambiguating an empty view. Behavior-preserving (each site's prior
+  failure semantics kept).
+
 - **CAN reassembly rehomed `tr::mem::mem_can_reassembly_t` →
   `tr::net::can_reassembly_t` (ADR-0048 round 2).** The header moves
   `mem_can_reassembly.hpp` → **`can_reassembly.hpp`** and the type moves to
