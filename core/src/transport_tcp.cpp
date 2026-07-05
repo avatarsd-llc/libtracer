@@ -75,8 +75,9 @@ void writev_all(int fd, ::iovec* vec, std::size_t count) {
 }  // namespace
 
 tcp_transport_t::tcp_transport_t(const std::string& peer_host, std::uint16_t peer_port,
-                                 mem::mem_backend_t* backend)
+                                 mem::mem_backend_t* backend, std::size_t max_frame)
     : backend_(backend) {
+    if (max_frame != 0) max_frame_ = max_frame;
     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return;
 
@@ -103,8 +104,10 @@ tcp_transport_t::tcp_transport_t(const std::string& peer_host, std::uint16_t pee
     });
 }
 
-tcp_transport_t::tcp_transport_t(std::uint16_t bind_port, mem::mem_backend_t* backend)
+tcp_transport_t::tcp_transport_t(std::uint16_t bind_port, mem::mem_backend_t* backend,
+                                 std::size_t max_frame)
     : listen_(true), backend_(backend) {
+    if (max_frame != 0) max_frame_ = max_frame;
     listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd_ < 0) return;
 
@@ -237,7 +240,7 @@ void tcp_transport_t::serve(int fd) {
         // undeliverable, so reject it up front — no undeliverable frame is drained
         // (the no-synthetic-limits doctrine; the bound is the injected resource).
         const std::size_t backend_cap = backend_->max_segment_size();
-        const std::size_t cap = backend_cap < kMaxFrame ? backend_cap : kMaxFrame;
+        const std::size_t cap = backend_cap < max_frame_ ? backend_cap : max_frame_;
         if (len > cap) {
             // A prefix beyond the cap is malformed (corrupt/hostile) or undeliverable:
             // count it and tear the connection down — a desynced stream can't re-frame.

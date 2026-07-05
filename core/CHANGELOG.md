@@ -15,6 +15,18 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **Per-connection receive frame cap via `:settings max_frame` (kMaxFrame→:settings,
+  tcp first).** `tr::net::conn_settings_t` gains a `max_frame` field (parsed from a
+  `max_frame` SPEC `:settings` key), and `tcp_transport_t`'s constructors gain a
+  trailing `std::size_t max_frame = 0` (`0` = the protocol default `kMaxFrame`,
+  16 MiB). The receive cap is `min(max_frame, backend.max_segment_size())` — a
+  connection can **tighten** its accepted frame size below the protocol ceiling
+  (e.g. a heap-backed host connection wanting a hard cap without a bounded pool),
+  but never raise it. Behavior-preserving default (unset ⇒ `kMaxFrame`, exactly
+  the #216 behavior). The send-side `kMaxFrame` check is unchanged (it is the
+  peer's limit, not the local receive cap). `quic`/`webtransport` wiring of the
+  same `:settings` is a follow-up (they still cap at their `kMaxFrame`).
+
 - **`tr::net::length_prefix_framer` (`length_prefix_framer.hpp`)** — the
   u32-LE length-prefix stream reassembler extracted from the **byte-for-byte
   identical** RX state machines `transport_quic` and `transport_webtransport` each

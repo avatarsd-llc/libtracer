@@ -72,7 +72,7 @@ class tcp_transport_t : public transport_t {
      *                  transport.
      */
     tcp_transport_t(const std::string& peer_host, std::uint16_t peer_port,
-                    mem::mem_backend_t* backend = &mem::heap_backend());
+                    mem::mem_backend_t* backend = &mem::heap_backend(), std::size_t max_frame = 0);
 
     /**
      * @brief LISTEN mode: bind+listen on @p bind_port, accept ONE inbound peer.
@@ -86,7 +86,8 @@ class tcp_transport_t : public transport_t {
      * @param backend   The RX memory seam — see the DIAL constructor.
      */
     explicit tcp_transport_t(std::uint16_t bind_port,
-                             mem::mem_backend_t* backend = &mem::heap_backend());
+                             mem::mem_backend_t* backend = &mem::heap_backend(),
+                             std::size_t max_frame = 0);
 
     /** @brief Stop the receive thread and close all sockets. */
     ~tcp_transport_t() override;
@@ -164,6 +165,7 @@ class tcp_transport_t : public transport_t {
 
     // RX segment source for frame reassembly (ADR-0042 §2) + drop counters.
     mem::mem_backend_t* backend_;
+    std::size_t max_frame_ = kMaxFrame;  // per-connection receive cap (:settings; 0 => kMaxFrame)
     std::atomic<std::uint64_t> dropped_rx_{0};
     std::atomic<std::uint64_t> malformed_rx_{0};
 

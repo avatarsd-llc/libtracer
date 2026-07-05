@@ -210,6 +210,29 @@ void test_oversize_prefix() {
     check(n == 0, "the connection was closed (EOF at the peer)");
 }
 
+// A per-connection :settings max_frame tightens the receive cap below kMaxFrame:
+// a prefix within the 16 MiB protocol ceiling but above the connection's cap is
+// rejected as malformed (kMaxFrame→:settings; behavior-preserving default when 0).
+void test_settings_max_frame() {
+    std::printf("TCP transport — a :settings max_frame tightens the receive cap:\n");
+    tcp_transport_t listener(std::uint16_t{0}, &tr::mem::heap_backend(), /*max_frame=*/64);
+    std::atomic<int> delivered{0};
+    listener.set_receiver([&](std::span<const std::byte>) { delivered.fetch_add(1); });
+
+    raw_client_t client(listener.local_port());
+    std::vector<std::byte> prefix;
+    tr::detail::append_le(prefix, std::uint32_t{100});  // 100 > 64 (cap), yet 100 < kMaxFrame
+    client.write(prefix);
+
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (listener.malformed_rx() == 0 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(5ms);
+    check(listener.malformed_rx() == 1, "a frame above the :settings cap is malformed");
+    check(delivered.load() == 0, "nothing delivered");
+    std::array<std::byte, 1> b;
+    check(::recv(client.fd, b.data(), 1, 0) == 0, "the connection was closed (EOF at the peer)");
+}
+
 // A heap-delegating backend that RECORDS every segment it hands out (segment
 // identity) and can FAIL its first `fail_first` allocations (backpressure).
 class recording_backend_t final : public tr::mem::mem_backend_t {
@@ -508,6 +531,7 @@ int main() {
     test_raw_frame_duplex();
     test_partial_and_coalesced();
     test_oversize_prefix();
+    test_settings_max_frame();
     test_view_delivery_segment_identity();
     test_backpressure_drain();
     test_scatter_gather();
