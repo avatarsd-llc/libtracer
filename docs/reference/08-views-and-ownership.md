@@ -213,25 +213,17 @@ The publisher and the transport never wait for subscribers; back-pressure surfac
 
 ## Casting a view to a TLV
 
-Given a view whose bytes start with a valid L2 TLV header, the cast is a zero-copy reinterpretation. Because it produces a `tlv_t`, the cast itself lives at L2 (`tr::wire`, not `tr::view`) — L1 never depends upward:
+Given a view whose bytes hold an L2 TLV, the cast decodes and **validates** it. Because it produces a `tlv_t`, the cast itself lives at L2 (`tr::wire`, not `tr::view`) — L1 never depends upward:
 
 ```cpp
-const tlv_t* tlv = tr::wire::view_as_tlv(v);
+std::expected<tlv_t, tr::wire::err_t> tlv = tr::wire::view_as_tlv(v);
 ```
 
-After the cast, `tlv` is a logical pointer (or rope-aware accessor) that:
+`view_as_tlv(v)` is exactly `decode(v.bytes())`: it **validates** the framing (minimum size, reserved-bit and type-`0x00` rejects, the `LL` length width, trailer sizing, CRC verification, and the nesting-depth cap) and, on success, materializes an owning `tlv_t` tree. The decoded payload spans (and every child's) **borrow** `v`'s bytes, so the view — and thus its refcounted segment (§refcount) — must outlive the returned `tlv_t`. On malformed input it yields the `err_t` the grammar rejected with (`FRAME_TRUNCATED` / `FRAME_INVALID` / `FRAME_CRC_FAIL` / `TLV_NESTING_TOO_DEEP`).
 
-- Points to the wire bytes via `v`.
-- Returns `tlv_type(tlv)` by reading byte 0.
-- Returns `tlv_opt(tlv)` by reading byte 1.
-- Returns `tlv_length(tlv)` by reading bytes 2-3 (or 2-5 if `LL=1`).
-- Provides `tlv_payload_view(tlv)` returning a sub-view (or sub-rope) covering the payload region.
+There is **no** separate non-validating cast. The earlier draft's split — "the cast trusts the bytes; call `view_validate_as_tlv` first" — was dropped ([ADR-0048](../adr/0048-one-wire-grammar-chunk-cursor-rope-aware-decode.md) §4): the receive path always validates, and a non-validating lazy accessor had no consumer (the forwarder's hand-tuned offset peeks over already-validated framing are a net-plane optimization, not a public cast).
 
-For a flat view (single-link), the cast is literally a pointer reinterpretation of `v.bytes().data()`, and accessors are byte loads at known offsets.
-
-For a rope view (multi-link), the cast is a logical accessor that walks the rope as needed. Implementations typically inline the flat case and fall back to rope-aware accessors only when the chain has more than one link.
-
-**The cast does not validate** — it trusts the bytes. A separate `view_validate_as_tlv(v)` function checks the L2 framing rules (length sanity, optional CRC verification) before casting if needed; this is a recv-path concern.
+For a flat (single-link) view the decode reads `v.bytes()` directly. **Rope-aware** decode — casting a multi-link view without first flattening it, by reading the grammar through a chunk-cursor — is committed by [ADR-0048](../adr/0048-one-wire-grammar-chunk-cursor-rope-aware-decode.md) §1 but not yet implemented (the grammar core + span cursor have landed; the rope cursor has not); today a multi-link rope is `flatten()`ed to one contiguous view before the cast.
 
 ---
 
