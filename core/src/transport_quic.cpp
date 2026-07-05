@@ -37,6 +37,7 @@
 
 #include "libtracer/byteorder.hpp"
 #include "libtracer/frame.hpp"
+#include "libtracer/length_prefix_framer.hpp"
 
 // msquic is not TSan-instrumented, so the happens-before edges it PROVIDES —
 // StreamSend → SEND_COMPLETE (buffer ownership returns), and the per-connection
@@ -150,18 +151,9 @@ struct quic_transport_t::impl_t {
     // RX frame reassembly across msquic RECEIVE chunks. Touched only on the
     // stream's callback (msquic serializes per-connection callbacks) and reset
     // by the listener before a replacement peer's stream can start.
-    std::array<std::byte, kPrefixBytes> prefix{};
-    std::size_t prefix_have = 0;
-    view::segment_ptr_t rx_seg;
-    std::size_t rx_len = 0;
-    std::size_t rx_off = 0;
-    std::size_t drain_left = 0;  // backpressure: bytes of a dropped frame left to skip
+    length_prefix_framer framer_;
 
-    void reset_rx() {
-        prefix_have = 0;
-        rx_seg = {};
-        rx_len = rx_off = drain_left = 0;
-    }
+    void reset_rx() { framer_.reset(); }
 
     void signal_handshake(bool ok) {
         {
@@ -190,77 +182,27 @@ struct quic_transport_t::impl_t {
         }
     }
 
-    // Feed one msquic RECEIVE chunk through the length-prefix state machine
-    // (the tcp_transport_t framing, chunk-driven instead of read-driven).
-    // Returns false when the connection was shut down (malformed prefix) —
-    // the caller stops consuming this event's remaining chunks.
+    // Feed one msquic RECEIVE chunk through the shared length-prefix reassembler
+    // (length_prefix_framer — the state machine transport_quic and
+    // transport_webtransport once open-coded). Returns false when the connection
+    // was shut down (malformed prefix) — the caller stops consuming this event's
+    // remaining chunks.
     bool on_rx_chunk(const std::uint8_t* p, std::size_t n) {
-        while (n > 0) {
-            if (drain_left > 0) {
-                // Backpressure discard: skip the dropped frame's bytes so the
-                // next prefix lines up (framing sync survives exhaustion).
-                const std::size_t take = drain_left < n ? drain_left : n;
-                drain_left -= take;
-                p += take;
-                n -= take;
-                if (drain_left == 0) prefix_have = 0;
-                continue;
+        const auto res = framer_.feed(
+            *backend, kMaxFrame, reinterpret_cast<const std::byte*>(p), n,
+            [this](view::segment_ptr_t seg, std::size_t len) { deliver(std::move(seg), len); });
+        if (res.dropped != 0) dropped_rx.fetch_add(res.dropped, std::memory_order_relaxed);
+        if (res.malformed) {
+            // A desynced stream cannot be re-framed: count it and shut the peer down.
+            malformed_rx.fetch_add(1, std::memory_order_relaxed);
+            HQUIC c = nullptr;
+            {
+                const std::lock_guard lock(conn_m);
+                c = conn;
             }
-            if (prefix_have < kPrefixBytes) {
-                // Reassemble the 4-byte prefix across chunk boundaries.
-                const std::size_t want = kPrefixBytes - prefix_have;
-                const std::size_t take = want < n ? want : n;
-                std::memcpy(prefix.data() + prefix_have, p, take);
-                prefix_have += take;
-                p += take;
-                n -= take;
-                if (prefix_have < kPrefixBytes) return true;  // await the rest
-                const std::size_t len = detail::load_le<std::uint32_t>(prefix);
-                if (len == 0) {  // an empty record carries no TLV — a no-op
-                    prefix_have = 0;
-                    continue;
-                }
-                if (len > kMaxFrame) {
-                    // Malformed (corrupt or hostile): count it and shut the
-                    // connection down — a desynced stream cannot be re-framed.
-                    malformed_rx.fetch_add(1, std::memory_order_relaxed);
-                    HQUIC c = nullptr;
-                    {
-                        const std::lock_guard lock(conn_m);
-                        c = conn;
-                    }
-                    if (c != nullptr)
-                        api->ConnectionShutdown(c, QUIC_CONNECTION_SHUTDOWN_FLAG_NONE,
-                                                kAppErrMalformed);
-                    return false;
-                }
-                // ADR-0042 §2/§4: ONE exactly-sized refcounted segment from the
-                // injected backend per frame. Exhaustion is backpressure: skip
-                // the frame's bytes, tick the counter — never an OOM.
-                rx_seg = view::segment_ptr_t::adopt(backend->alloc(len));
-                if (!rx_seg) {
-                    dropped_rx.fetch_add(1, std::memory_order_relaxed);
-                    drain_left = len;
-                    continue;
-                }
-                rx_len = len;
-                rx_off = 0;
-                continue;
-            }
-            // Fill the frame body from this chunk (msquic already owns the RX
-            // bytes, so this is the single unavoidable copy into the segment).
-            const std::size_t want = rx_len - rx_off;
-            const std::size_t take = want < n ? want : n;
-            std::memcpy(rx_seg->bytes.data() + rx_off, p, take);
-            rx_off += take;
-            p += take;
-            n -= take;
-            if (rx_off == rx_len) {
-                deliver(std::move(rx_seg), rx_len);
-                rx_seg = {};
-                prefix_have = 0;
-                rx_len = rx_off = 0;
-            }
+            if (c != nullptr)
+                api->ConnectionShutdown(c, QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, kAppErrMalformed);
+            return false;
         }
         return true;
     }
@@ -504,7 +446,7 @@ quic_transport_t::~quic_transport_t() {
     if (i.reg != nullptr) i.api->RegistrationClose(i.reg);
     MsQuicClose(i.api);
     // Every callback has drained (the Closes above block on that) — take their
-    // published writes before the members (rx_seg et al.) destruct.
+    // published writes before the members (framer_ et al.) destruct.
     tsan_acquire(&i);
 }
 

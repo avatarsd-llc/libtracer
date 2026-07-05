@@ -15,6 +15,20 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **`tr::net::length_prefix_framer` (`length_prefix_framer.hpp`)** — the
+  u32-LE length-prefix stream reassembler extracted from the **byte-for-byte
+  identical** RX state machines `transport_quic` and `transport_webtransport` each
+  open-coded (review finding #4, self-labeled "verbatim"). A chunk-fed state
+  machine: each complete frame is reassembled into ONE exactly-sized refcounted
+  segment from the caller's backend (ADR-0042 §2/§4), an `alloc` failure is
+  backpressure (drain + a per-chunk `dropped` count), and an oversize prefix is
+  `malformed` (the caller shuts the peer down). It carries **no msquic type, no
+  atomic, no connection handle** — the transport keeps its counters/shutdown and
+  drives them from the per-chunk `result_t` — so it is unit-tested directly
+  (`length_prefix_framer_test`, 11 cases incl. split prefix/body, multi-frame,
+  empty records, oversize, backpressure resync, reset) in the default build
+  without a live QUIC connection. Behavior-preserving for both transports.
+
 - **`tr::wire::opt_t::without_trailer()`** — returns the `opt` with the trailer
   bits (TS/CR/CW/TF) cleared, keeping only the structural bits (PL/LL). It
   replaces the raw `opt & 0x48` mask (`kStructOptMask`) that `op_resolve.cpp`'s
