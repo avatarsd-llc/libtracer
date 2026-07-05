@@ -69,6 +69,8 @@ void parse_config(const tlv_t* config, conn_settings_t& s) {
                                                                      : conn_role_t::LISTEN;
         } else if (key == "keepalive" && val.type == type_t::VALUE && !val.payload.empty()) {
             s.keepalive_ms = detail::load_le<std::uint32_t>(val.payload);
+        } else if (key == "max_frame" && val.type == type_t::VALUE && !val.payload.empty()) {
+            s.max_frame = detail::load_le<std::uint32_t>(val.payload);
         }
     }
 }
@@ -115,12 +117,12 @@ result_t<std::unique_ptr<transport_t>> make_tcp(const conn_settings_t& s,
     std::unique_ptr<tcp_transport_t> t;
     if (s.role == conn_role_t::DIAL) {
         if (s.addr.empty() || s.port == 0) return std::unexpected(status_t::TYPE_MISMATCH);
-        t = std::make_unique<tcp_transport_t>(s.addr, s.port, rx_backend);
+        t = std::make_unique<tcp_transport_t>(s.addr, s.port, rx_backend, s.max_frame);
         if (!t->ok()) return std::unexpected(status_t::NOT_FOUND);  // dial failed
         return t;
     }
     if (s.port == 0) return std::unexpected(status_t::TYPE_MISMATCH);
-    t = std::make_unique<tcp_transport_t>(s.port, rx_backend);
+    t = std::make_unique<tcp_transport_t>(s.port, rx_backend, s.max_frame);
     if (!t->ok()) return std::unexpected(status_t::NOT_FOUND);  // bind/listen failed
     return t;
 }
