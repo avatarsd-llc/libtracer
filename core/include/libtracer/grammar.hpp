@@ -72,6 +72,21 @@ struct span_cursor {
 };
 
 /**
+ * @brief When @ref parse_header checks a CRC trailer (ADR-0053 §4).
+ *
+ * `VERIFY` is the eager decoders' policy (and the default — every pre-existing
+ * caller is unchanged): the trailer is checked during the header parse, which
+ * walks the whole payload. `DEFER` is the lazy tier's policy: sizing and bounds
+ * are validated but the payload is never touched, so iterating past a sibling
+ * costs O(header) — integrity is checked by whichever consumer *accesses* the
+ * TLV (`tlv_view_t::verify`), per the end-to-end argument.
+ */
+enum class crc_check_t : std::uint8_t {
+    VERIFY, /**< @brief Check the CRC trailer now (walks the payload). */
+    DEFER,  /**< @brief Skip the CRC walk; integrity is the accessor's to check. */
+};
+
+/**
  * @brief A validated TLV header + trailer: the sink-neutral parse result.
  *
  * Offsets/sizes only (no payload span), so each sink extracts the spans it wants
@@ -101,11 +116,15 @@ struct header_t {
  *
  * @tparam Cursor A byte-source cursor (@ref span_cursor, or the rope cursor).
  * @param  cur    The cursor positioned at the TLV's first byte.
+ * @param  crc    CRC-trailer policy (@ref crc_check_t). Defaults to `VERIFY`
+ *                (the eager decoders' behavior); the lazy tier passes `DEFER`
+ *                so skipping a sibling never walks its payload (ADR-0053 §4).
  * @return The validated @ref header_t, or the `err_t` the grammar rejects with
  *         (`FRAME_TRUNCATED` / `FRAME_INVALID` / `FRAME_CRC_FAIL`).
  */
 template <class Cursor>
-[[nodiscard]] std::expected<header_t, err_t> parse_header(const Cursor& cur) {
+[[nodiscard]] std::expected<header_t, err_t> parse_header(
+    const Cursor& cur, crc_check_t crc_policy = crc_check_t::VERIFY) {
     const std::size_t avail = cur.size();
     if (avail < 4) return std::unexpected(err_t::FRAME_TRUNCATED);
 
@@ -124,7 +143,7 @@ template <class Cursor>
     const std::size_t total = static_cast<std::size_t>(header + length + ts_size + crc_size);
     if (avail < total) return std::unexpected(err_t::FRAME_TRUNCATED);
 
-    if (opt.cr) {
+    if (opt.cr && crc_policy == crc_check_t::VERIFY) {
         const std::size_t pay_len = static_cast<std::size_t>(length);
         const std::size_t crc_off = header + pay_len + ts_size;
         // CRC feed = payload ++ timestamp bytes, fed incrementally across whatever

@@ -21,6 +21,7 @@ add_library(libtracer STATIC
     src/mem_pool.cpp
     src/rope.cpp
     src/rope_decode.cpp
+    src/tlv_view.cpp
     src/path.cpp
     src/graph.cpp
     src/op_resolve.cpp

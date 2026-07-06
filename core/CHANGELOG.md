@@ -15,6 +15,28 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **`tr::wire::tlv_view_t` (`tlv_view.hpp`) — the lazy rope-backed decode view
+  (ADR-0053 §1).** What a rope-delivered frame becomes on the decode side:
+  `tlv_view_t::over(rope)` anchors the bounds (root header, CRC **deferred**, exact
+  `total == rope size`) and everything after is on-demand — `children().next()`
+  parses exactly one child header per step, `body()`/`wire()` hand out refcounted
+  subropes (zero copy, links keep their segments alive past the transport read
+  loop — the owning tier, a scoped ADR-0041 §2 revision that leaves the span arena
+  untouched), `verify()` checks *this* TLV's CRC trailer at access time (fully lazy
+  validation, ADR-0053 §4; endpoints needing atomicity use verify-all-then-apply),
+  `timestamp()` reads the trailer, and `materialize()` is the single explicit copy
+  point (flatten + eager `decode` → `{flat, tlv_t}`). Own TU (`tlv_view.cpp`);
+  a span-only target never instantiates the lazy tier. Gated by a lazy-vs-eager
+  differential test and a full-lazy-walk mode in the rope fuzzer.
+- **`tr::view::rope_t::subrope(off, len)` (`rope.hpp`)** — the `[off, off+len)`
+  sub-range as its own rope: covering links trimmed via `view_t::subview`, so the
+  result refcounts exactly the segments its window touches (chaining, no copy).
+  The region primitive of the lazy decode tier.
+- **`tr::wire::grammar::crc_check_t` (`grammar.hpp`)** — CRC-trailer policy for
+  `parse_header`: `VERIFY` (the default — every pre-existing caller unchanged) or
+  `DEFER` (sizing/bounds validated, payload never walked) for the lazy tier, so
+  stepping over a sibling costs O(header), not O(payload).
+
 - **`tr::wire::emit_header` (`tlv_emit.hpp`)** — the single home of the TLV header
   byte layout (`<type> <opt> <length>`, ADR-0048 §3). `emit_tlv` now delegates to it
   (still auto-widening `LL` for an oversize body), and `frame.cpp`'s `encode` routes

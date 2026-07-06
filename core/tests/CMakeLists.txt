@@ -47,6 +47,11 @@ target_link_libraries(rope_decode_test PRIVATE libtracer)
 libtracer_test_warnings(rope_decode_test)
 add_test(NAME rope_decode COMMAND rope_decode_test)
 
+add_executable(tlv_view_test tlv_view_test.cpp)
+target_link_libraries(tlv_view_test PRIVATE libtracer)
+libtracer_test_warnings(tlv_view_test)
+add_test(NAME tlv_view COMMAND tlv_view_test)
+
 add_executable(rope_decode_fuzz_test rope_decode_fuzz_test.cpp)
 target_link_libraries(rope_decode_fuzz_test PRIVATE libtracer)
 libtracer_test_warnings(rope_decode_fuzz_test)
