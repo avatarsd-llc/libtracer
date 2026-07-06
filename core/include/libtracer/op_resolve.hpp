@@ -109,7 +109,7 @@ class op_resolver_t {
      * @param frame_view   The owning frame view when the link delivers views
      *                     (ADR-0042); nullptr on the borrowed-span path.
      * @return The reply as a @ref view::rope_t (head segment + roped payload views),
-     *         or a @ref status_t on a malformed/non-request frame.
+     *         or a `status_t` on a malformed/non-request frame.
      */
     [[nodiscard]] result_t<view::rope_t> resolve(const wire::tlv_arena_t& fwd,
                                                  std::string_view inbound_link = {},
@@ -132,7 +132,7 @@ class op_resolver_t {
      *                     (empty ⇒ local resolution, no remote-subscriber binding).
      * @param frame_view   Reserved for the ADR-0042 owning-store seam; the rope
      *                     tier stores its one ownership copy, so pass `nullptr`.
-     * @return The reply as a @ref view::rope_t, or a @ref status_t on a
+     * @return The reply as a @ref view::rope_t, or a `status_t` on a
      *         malformed/non-request frame.
      */
     [[nodiscard]] result_t<view::rope_t> resolve(const wire::tlv_view_t& fwd,
