@@ -67,7 +67,7 @@ struct arena_tlv_t {
 /**
  * @brief A frame decoded as a flat pre-order node array over borrowed spans.
  *
- * Produced by @ref decode_into; drawn from the injected memory resource, which
+ * Produced by `decode`_into; drawn from the injected memory resource, which
  * must outlive the arena (as must the input buffer). A resolve-scoped object:
  * read it, take the ADR-0041 ownership copies, and drop it — never store it.
  */
@@ -103,8 +103,8 @@ class tlv_arena_t {
 /**
  * @brief Decode exactly one TLV filling @p input into a flat arena drawn from @p mr.
  *
- * The terminus-side counterpart of @ref decode (ADR-0041 §1): identical
- * validation (bounds, reserved bits, type 0x00, @ref kMaxDepth, trailer CRC,
+ * The terminus-side counterpart of `decode` (ADR-0041 §1): identical
+ * validation (bounds, reserved bits, type 0x00, `kMaxDepth`, trailer CRC,
  * trailing bytes ⇒ FRAME_INVALID), iterative (no recursion), but the result is
  * a pre-order @ref arena_tlv_t array of spans into @p input instead of an
  * owning `tlv_t` tree — zero heap when @p mr is a stack-buffer

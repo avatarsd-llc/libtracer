@@ -40,6 +40,9 @@ INPUT                  = core/include/libtracer/backend.hpp \
                          core/include/libtracer/status.hpp \
                          core/include/libtracer/error.hpp \
                          core/include/libtracer/tlv.hpp \
+                         core/include/libtracer/tlv_view.hpp \
+                         core/include/libtracer/tlv_arena.hpp \
+                         core/include/libtracer/tlv_emit.hpp \
                          core/include/libtracer/crc.hpp \
                          core/include/libtracer/loopback.hpp
 RECURSIVE              = NO
