@@ -49,6 +49,16 @@ struct span_cursor {
 
     /** @brief Number of bytes available from the TLV's start. */
     [[nodiscard]] std::size_t size() const noexcept { return buf.size(); }
+    /**
+     * @brief A sub-cursor over the `[off, off + len)` window of this cursor.
+     *
+     * The contiguous analogue of @ref rope_cursor::region — a plain `subspan`, so
+     * the same cursor-generic code (a forward-plane header read, a child descent)
+     * narrows either source with one call.
+     */
+    [[nodiscard]] span_cursor region(std::size_t off, std::size_t len) const noexcept {
+        return span_cursor{buf.subspan(off, len)};
+    }
     /** @brief The unsigned byte at offset @p off. */
     [[nodiscard]] std::uint8_t byte_at(std::size_t off) const noexcept {
         return std::to_integer<std::uint8_t>(buf[off]);
