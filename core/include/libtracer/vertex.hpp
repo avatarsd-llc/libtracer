@@ -108,13 +108,21 @@ struct ace_t {
                                          0 = never expires. An expired ACE grants nothing. */
 };
 
-// Per-subscriber delivery policy (byte-agnostic; SUBSCRIBER.qos_settings.delivery_mode
-// in docs/reference/05). Numeric filtering (deadband) is NOT here — it is an
-// application filter vertex (ADR-0021 sibling). Wire values match reference 05.
+// Per-VERTEX propagation policy (value-agnostic; RFC-0008 §C). Governs whether an
+// ANCESTOR's propagate sweep includes this vertex — NOT a per-subscriber value
+// filter (there is no byte comparison; ADR-0053 §1, a vertex never parses its bytes).
+// `assign` and a DIRECT propagate on the vertex itself are never gated by it. Held
+// as vertex state (default IF_NEWER); wire config via the vertex `:settings` is
+// deferred. Numeric filtering (deadband) remains an application filter vertex
+// (ADR-0021 sibling), never a field here.
 enum class delivery_mode_t : std::uint8_t {
-    EVERY = 0,      // deliver every write
-    THROTTLED = 1,  // reserved (min_interval_ns) — not yet enforced
-    ON_CHANGE = 2,  // deliver only when the value bytes differ from the last delivered
+    IF_NEWER = 0,       // default: an ancestor sweep includes this vertex only if it was
+                        // assigned since the last covering sweep (write_seq_ advanced) —
+                        // the structural coalescing flush (RFC-0008 §B)
+    UNCONDITIONAL = 1,  // an ancestor sweep ALWAYS includes this vertex's current value
+                        // (a sweep-driven keepalive; the producer's timer sets the rate)
+    EXPLICIT = 2,       // an ancestor sweep NEVER includes it; deliverable only by a
+                        // direct propagate on the vertex itself
 };
 
 // One subscription edge (M3b). A write to this vertex fans out to a target vertex
@@ -124,12 +132,9 @@ enum class delivery_mode_t : std::uint8_t {
 struct subscriber_t {
     std::vector<std::byte> target_key;            // canonical PATH key (empty => callback-only)
     std::function<void(const rope_t&)> callback;  // null => target-only (ADR-0053 §6 rope value)
-    delivery_mode_t mode = delivery_mode_t::EVERY;
-    // ON_CHANGE: the producer-side snapshot of the bytes last delivered (under m_). The
-    // change test walks the new value's rope links against this buffer WITHOUT flattening
-    // the rope into a temp (ADR-0053 §6); the snapshot itself is bookkeeping, not the data
-    // path — EVERY mode (the default, and the streaming mode) never touches it.
-    std::vector<std::byte> last_delivered;
+    // Delivery is value-agnostic: an active edge receives every propagated value. WHICH
+    // vertices a sweep propagates is the per-vertex delivery_mode_t (RFC-0008 §C), never
+    // a per-subscriber byte comparison — so a subscriber edge carries no delivery policy.
     bool active = true;
     // The route-handle opt-in (SUBSCRIBER.qos_settings.delivery_compact, RFC-0004
     // §E.1 / ADR-0035 slice 4). When true the consumer requests label-compacted
@@ -197,7 +202,17 @@ class vertex_t {
                                   // acl_allows evaluates these when a subject resolver is set.
     std::mutex m_;
     std::condition_variable cv_;
-    std::uint64_t write_seq_ = 0;  // bumped per write; await waits for an increment (guarded by m_)
+    std::uint64_t write_seq_ = 0;  // bumped per assign; await waits for an increment, and it is
+                                   // the value-agnostic "newer" signal a sweep reads (RFC-0008 §B).
+                                   // Guarded by m_.
+    // How this vertex participates in an ANCESTOR's propagate sweep (RFC-0008 §C).
+    // Set at wiring time via graph_t::set_delivery_mode (the "configure before frames
+    // flow" contract, like settings_); read on the assign path. Default IF_NEWER.
+    delivery_mode_t delivery_mode_ = delivery_mode_t::IF_NEWER;
+    // STREAM drain cursor (RFC-0008 §E): write_seq_ at the last flush of this stream, so
+    // a propagate drains the ring entries appended since — a queue, not a coalesce.
+    // Guarded by m_.
+    std::uint64_t last_flushed_seq_ = 0;
 
     // Subtree-subscription bookkeeping (RFC-0005): every subscription observes its
     // vertex AND all descendants, so a write must fan out to ancestor subscribers

@@ -13,6 +13,42 @@ reference implementation is pre-1.0; everything currently lives under
 
 ## [Unreleased]
 
+### Changed
+
+- **Vertex value operations split into `assign` + `propagate`; `write` retained as
+  their composition (RFC-0008 — breaking).** `graph_t` now exposes the two irreducible
+  operations a `write` was hiding: `assign(v, value)` performs only the state transition
+  (swap the last-known-value, append the stream ring, bump the write sequence, mark the
+  vertex for the next sweep) and delivers **nothing**; `propagate(v)` performs only the
+  edge transition — it delivers `v` (always — the argument is the explicit target) and
+  sweeps its subtree, flushing the descendants assigned since the last covering sweep in
+  *O((pending + unconditional)-in-subtree)*. `write(v, value)` stays as the eager
+  convenience (assign, then a targeted delivery of the written vertex), which is exactly
+  a `FWD{WRITE}` terminus, so existing callers are unaffected — but nothing fans out from
+  `assign` itself.
+- **`delivery_mode` redefined value-agnostic and moved per-vertex (RFC-0008 — breaking).**
+  No longer a per-subscriber value filter — now a per-vertex policy governing whether an
+  *ancestor's* `propagate` sweep includes the vertex: `IF_NEWER` (default — included only
+  if assigned since the last covering sweep, the structural coalescing flush),
+  `UNCONDITIONAL` (always — a sweep-driven keepalive), `EXPLICIT` (never by an ancestor;
+  deliverable only by a direct `propagate` on the vertex). Set via the new
+  `graph_t::set_delivery_mode`. The `delivery_mode_t mode` parameter is gone from
+  `subscribe` / `add_remote_subscriber` (a subscription no longer carries a delivery
+  policy), and `delivery_mode_t`'s values are now `IF_NEWER` / `UNCONDITIONAL` /
+  `EXPLICIT`.
+
+### Removed
+
+- **Value-based delivery filtering (`delivery_mode_t::ON_CHANGE` byte-diff) and the
+  throttle (`THROTTLED` / `min_interval_ns` / `keepalive_ns`) (RFC-0008).** The runtime no
+  longer compares stored bytes (or wall-clock) to decide delivery — a vertex never parses
+  its value (ADR-0053 §1), so what counts as "changed" is an application judgement, not the
+  graph's. Selective delivery is now structural (the write-sequence sweep above). The
+  `subscriber_t::mode` / `last_delivered` fields and the `rope_bytes_equal` /
+  `rope_snapshot_bytes` helpers are gone. On the wire, `SUBSCRIBER.qos_settings` loses
+  `delivery_mode` / `min_interval_ns` / `keepalive_ns` (reference/05); `delivery_compact`
+  (label compaction) is orthogonal and retained.
+
 ### Added
 
 - **`tr::view::rope_t` small-buffer inline storage + `only()` / `materialize()`

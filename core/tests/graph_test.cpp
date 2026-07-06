@@ -369,26 +369,64 @@ void test_dispatch_cycle_cap() {
 
 }  // namespace
 
-void test_subscribe_on_change() {
-    std::printf("per-subscriber delivery_mode (ON_CHANGE vs EVERY):\n");
+void test_assign_propagate() {
+    std::printf("assign/propagate + per-vertex delivery_mode (RFC-0008):\n");
     graph_t g;
-    auto* v = *g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+    // A subtree /r with leaves /r/a /r/b /r/c, each carrying its own subscriber so we can
+    // see exactly which vertices a sweep delivered.
+    auto* r = *g.register_vertex(*path_t::parse("/r"), role_t::STORED_VALUE);
+    auto* a = *g.register_vertex(*path_t::parse("/r/a"), role_t::STORED_VALUE);
+    auto* b = *g.register_vertex(*path_t::parse("/r/b"), role_t::STORED_VALUE);
+    auto* c = *g.register_vertex(*path_t::parse("/r/c"), role_t::STORED_VALUE);
+    auto ca = std::make_shared<int>(0);
+    auto cb = std::make_shared<int>(0);
+    auto cc = std::make_shared<int>(0);
+    (void)g.subscribe(*path_t::parse("/r/a"), [ca](const tr::view::rope_t&) { ++*ca; });
+    (void)g.subscribe(*path_t::parse("/r/b"), [cb](const tr::view::rope_t&) { ++*cb; });
+    (void)g.subscribe(*path_t::parse("/r/c"), [cc](const tr::view::rope_t&) { ++*cc; });
 
-    auto on_change = std::make_shared<int>(0);
-    (void)g.subscribe(
-        *path_t::parse("/sensor/temp"), [on_change](const tr::view::rope_t&) { ++*on_change; },
-        delivery_mode_t::ON_CHANGE);
-    auto every = std::make_shared<int>(0);
-    (void)g.subscribe(*path_t::parse("/sensor/temp"),
-                      [every](const tr::view::rope_t&) { ++*every; });  // default = EVERY
+    // assign is state-only: it delivers nothing, and repeated assigns coalesce.
+    (void)g.assign(a, make_value({0x01}));
+    (void)g.assign(a, make_value({0x02}));
+    check(*ca == 0, "assign delivers nothing (state plane only)");
 
-    (void)g.write(v, make_value({0x55}));  // change   -> both fire
-    (void)g.write(v, make_value({0x55}));  // unchanged-> only EVERY fires
-    (void)g.write(v, make_value({0x66}));  // change   -> both fire
-    (void)g.write(v, make_value({0x66}));  // unchanged-> only EVERY fires
+    // propagate(root) flushes ONLY the descendant assigned since the last sweep, once.
+    g.propagate(r);
+    check(*ca == 1, "propagate(root) flushes the assigned descendant once (coalesced)");
+    check(*cb == 0 && *cc == 0, "IF_NEWER: descendants not assigned since the sweep are skipped");
 
-    check(*on_change == 2, "ON_CHANGE delivers only on a byte-change (2 of 4 writes)");
-    check(*every == 4, "EVERY (default) delivers on every write (4 of 4)");
+    // Self-clearing: a second sweep with nothing newly assigned delivers nothing.
+    g.propagate(r);
+    check(*ca == 1, "a clean subtree flushes nothing (write_seq did not advance)");
+
+    // Selective subtree propagation: assign b and c, one propagate delivers exactly them.
+    (void)g.assign(b, make_value({0x10}));
+    (void)g.assign(c, make_value({0x20}));
+    g.propagate(r);
+    check(*cb == 1 && *cc == 1, "propagate flushes exactly the newly-assigned descendants");
+    check(*ca == 1, "an unassigned descendant is not re-sent");
+
+    // UNCONDITIONAL rides every sweep, even with no assignment since the last one.
+    g.set_delivery_mode(a, delivery_mode_t::UNCONDITIONAL);
+    g.propagate(r);
+    check(*ca == 2, "UNCONDITIONAL is swept every time (even unassigned)");
+    check(*cb == 1 && *cc == 1, "IF_NEWER siblings stay clean across an UNCONDITIONAL sweep");
+
+    // EXPLICIT is never pulled in by an ancestor sweep; a direct propagate still delivers it
+    // (the argument of propagate is always delivered — RFC-0008 §C).
+    g.set_delivery_mode(b, delivery_mode_t::EXPLICIT);
+    (void)g.assign(b, make_value({0x11}));
+    g.propagate(r);
+    check(*cb == 1, "EXPLICIT is never included by an ancestor sweep");
+    g.propagate(b);
+    check(*cb == 2, "a direct propagate on an EXPLICIT vertex delivers it");
+
+    // write() remains the eager §D composition (assign then deliver the vertex).
+    auto cw = std::make_shared<int>(0);
+    auto* w = *g.register_vertex(*path_t::parse("/w"), role_t::STORED_VALUE);
+    (void)g.subscribe(*path_t::parse("/w"), [cw](const tr::view::rope_t&) { ++*cw; });
+    (void)g.write(w, make_value({0x77}));
+    check(*cw == 1, "write() delivers immediately (assign + targeted propagate)");
 }
 
 int main() {
@@ -399,7 +437,7 @@ int main() {
     test_await();
     test_subscribe_callback();
     test_subscribe_target();
-    test_subscribe_on_change();
+    test_assign_propagate();
     test_field_write_settings();
     test_field_write_handle();
     test_subscribe_via_field_write_and_unsubscribe();
