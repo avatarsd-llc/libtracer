@@ -16,6 +16,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Tracking issue** | [#125](https://github.com/avatarsd-llc/libtracer/issues/125) |
 | **Target spec version** | v1 (draft refinement — no released v1 yet, so no v2 needed) |
 
+> **Partially superseded by [RFC-0008](0008-vertex-operations-assign-propagate.md) (2026-07-06):** the `delivery_mode` QoS hint (`EVERY`/`THROTTLED`/`ON_CHANGE`) referenced in §E is removed — the runtime no longer filters delivery by comparing values. `delivery_compact` (label compaction) is orthogonal and unaffected.
+
 ## Summary
 
 `docs/spec/v1.md` §3 (the wire encoding of a **remote** `read`/`write`/`await` against a `path:field`) is stubbed ("to be written"). Locally the three primitives are direct router calls and never hit the wire; the wire only appears for a *remote* operation across a transport, and today the only remote mechanism is a bridge **mounting** inbound data under a fixed prefix ([reference/04](../../reference/04-communication-flows.md) §bridge republish). There is no frame for "operate on an **arbitrary** remote `path:field`," so a web UI cannot `read`/`write`/`await`/`subscribe` a vertex behind another node — which blocks the TypeScript client SDK higher operations (#56, [ADR-0034](../../adr/0034-typescript-client-sdk.md)), the declarative reconciler (#58), and transport-as-vertex orchestration (#83).
