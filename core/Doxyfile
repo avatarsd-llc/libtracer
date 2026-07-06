@@ -39,7 +39,9 @@ INPUT                  = core/include/libtracer/backend.hpp \
                          core/include/libtracer/vertex.hpp \
                          core/include/libtracer/status.hpp \
                          core/include/libtracer/error.hpp \
-                         core/include/libtracer/tlv.hpp
+                         core/include/libtracer/tlv.hpp \
+                         core/include/libtracer/crc.hpp \
+                         core/include/libtracer/loopback.hpp
 RECURSIVE              = NO
 
 # Document only what is explicitly commented; internal `detail` helpers are not

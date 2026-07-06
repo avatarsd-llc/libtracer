@@ -30,9 +30,17 @@ namespace tr::net {
 
 class loopback_channel_t;
 
+/**
+ * @brief One end of an in-process loopback link (dev/test only).
+ *
+ * A @ref transport_t whose @ref send hands the frame to the PEER endpoint's receiver, on
+ * that peer's receive thread. Constructed and owned by a @ref loopback_channel_t.
+ */
 class loopback_endpoint_t final : public transport_t {
    public:
+    /** @brief Send one frame — delivered to the peer endpoint's receiver on its recv thread. */
     void send(std::span<const std::byte> frame) override;
+    /** @brief Register the inbound-frame sink for this endpoint. */
     void set_receiver(receiver_t receiver) override;
 
    private:
@@ -53,17 +61,31 @@ class loopback_endpoint_t final : public transport_t {
     std::thread thread_;
 };
 
+/**
+ * @brief An in-process loopback channel: two endpoints, each delivering to the other.
+ *
+ * A frame sent on @ref a is delivered to @ref b's receiver (and vice-versa), on that
+ * endpoint's receive thread — modeling async cross-"wire" delivery so forwarding never
+ * recurses on the sender's stack. No sockets; deterministic. The vehicle for exercising FWD
+ * forward/reply routing end to end (RFC-0004, ADR-0040). Non-copyable. Call @ref shutdown
+ * (or destroy the channel) before the registered receivers are destroyed.
+ */
 class loopback_channel_t {
    public:
+    /** @brief Construct a channel and start both endpoints' receive threads. */
     loopback_channel_t();
+    /** @brief Destroy the channel, joining both receive threads first. */
     ~loopback_channel_t();
     loopback_channel_t(const loopback_channel_t&) = delete;
     loopback_channel_t& operator=(const loopback_channel_t&) = delete;
 
+    /** @brief The first endpoint; a frame sent here is delivered to @ref b. */
     [[nodiscard]] loopback_endpoint_t& a() noexcept { return a_; }
+    /** @brief The second endpoint; a frame sent here is delivered to @ref a. */
     [[nodiscard]] loopback_endpoint_t& b() noexcept { return b_; }
 
-    void shutdown();  // join both receive threads (idempotent)
+    /** @brief Join both receive threads so no frame reaches a dead receiver (idempotent). */
+    void shutdown();
 
    private:
     loopback_endpoint_t a_;
