@@ -3,3 +3,4 @@ vendor/
 build/
 .venv/
 perf_baseline.json
+benchmark_output.json

@@ -27,6 +27,20 @@ Canonical points from `bench_libtracer` (the µs-latency / zero-copy thesis, ADR
 | in-process, zero-alloc loaned path | 90 ns | 91 ns | 14.1 M/s |
 | write-by-path (registry lookup) | 140 ns | 139 ns | 8.4 M/s |
 
+### Regression protection (two layers, both in ns)
+
+1. **Per-PR hard gate** — `bench/perf_gate.py` (the `perf` CI job) builds `main`'s bench
+   and the PR's bench on the **same runner** and fails the PR on a real relative
+   regression (p50 up >50% / throughput down >34%), with absolute-ns floors as a
+   backstop. Runner-speed cancels because both are timed on identical hardware.
+2. **Build-to-build ns history** — on every push to `main`, `bench/perf_emit_benchmark.py`
+   records each commit's **p50 / p99 / ns-per-delivery** (all in ns, smaller-is-better)
+   to a persisted [github-action-benchmark](https://github.com/benchmark-action/github-action-benchmark)
+   series on the `gh-pages` branch and charts it, with a tighter **125% soft alert** that
+   auto-comments on the offending commit — so slow drift that stays under the hard gate's
+   50% threshold across many commits is still caught as a trend. (The chart lives on the
+   `gh-pages` branch; this repo's Pages URL is the Sphinx site, deployed separately.)
+
 ## Cross-core codec performance (decode→encode roundtrip, same v1 vectors)
 
 Every native core (cpp-core / ts-core / rust-core) runs the SAME per-vector

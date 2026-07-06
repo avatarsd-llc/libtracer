@@ -35,6 +35,10 @@ on:
 jobs:
   perf:
     runs-on: ubuntu-24.04
+    # contents: write lets the build-to-build tracker (below) push the ns history to the
+    # gh-pages branch and post a commit comment when a metric drifts past the soft alert.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -74,3 +78,35 @@ jobs:
       - name: Performance gate (absolute floors)
         if: github.event_name == 'push'
         run: python3 bench/perf_gate.py --update-baseline
+
+      # --- main push: persist the build-to-build ns history -----------------------
+      # perf_gate.py above is the HARD, per-PR relative gate (fails a PR at >50%
+      # latency / >34% throughput vs its same-runner main baseline). It does NOT keep a
+      # durable series, so slow drift that stays under 50% across many commits is
+      # invisible. This step records every main commit's p50 / p99 / ns-per-delivery (all
+      # in ns) to a persisted history and charts it, with a TIGHTER 125% soft alert that
+      # comments on the offending commit — catching creep the hard gate misses.
+      #
+      # NOTE: the history + interactive chart live on the `gh-pages` BRANCH (github-
+      # action-benchmark's store). This repo's Pages URL is the Sphinx site, which
+      # docs.yml deploys from an Actions artifact (Pages source = GitHub Actions), so the
+      # two do not collide — but the chart is not served at the Pages URL; view it at the
+      # gh-pages branch's dev/bench/index.html (or repoint Pages to the branch if wanted).
+      - name: Emit the bench as ns metrics (github-action-benchmark JSON)
+        if: github.event_name == 'push'
+        run: python3 bench/perf_emit_benchmark.py --bench bench/build/bench_libtracer --out bench/benchmark_output.json
+      - name: Track ns history + soft-alert on drift
+        if: github.event_name == 'push'
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: libtracer in-process latency (ns, smaller is better)
+          tool: customSmallerIsBetter
+          output-file-path: bench/benchmark_output.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/bench
+          alert-threshold: '125%'      # tighter than perf_gate's 150% hard gate: catch creep
+          comment-on-alert: true       # auto-comment on the commit that drifted
+          fail-on-alert: false         # perf_gate.py remains the hard gate; this is a signal
+          alert-comment-cc-users: '@avatarsd'
