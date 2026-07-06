@@ -172,3 +172,86 @@ span, at **egress**.
   ② owning-tier delivery of ropes end-to-end (WS reassembly → rope); ③ CAN reassembly
   → rope; ④ partial-path routing consumes `tlv_view_t` at forwarding hops;
   ⑤ `compose → rope` emission; ⑥ remove interim flatten call-sites.
+  *Steps ④–⑥ are refined by the 2026-07-06 amendment below (④ splits into ④a/④b).*
+
+## Amendment (2026-07-06): rope-valued vertices, the lazy resolver, and the ratified ④ realization
+
+Ratified in the second design review (after steps ①–③ landed), extending — not
+revising — the decision above. Two poles calibrated every choice here: the **simplest
+case** (a single scalar written into a vertex, where rope machinery must add nothing)
+and the **hardest case** (a chunked media stream, e.g. RTSP frames arriving as
+multi-link ropes from transport reassembly, written into one vertex and drained by a
+consumer link-by-link — where any per-chunk copy is the exact copy this ADR exists to
+delete).
+
+### 6. Vertex values are ropes (L4)
+
+The graph's stored value becomes `view::rope_t`; a `view_t` is the **single-link
+trivial case** (§5's "delivers views and delivers ropes are one capability", applied to
+storage). Concretely:
+
+- `vertex_t`'s LKV slot, the `history_` stream ring, and subscriber fan-out hold rope
+  values. The hot path is unchanged in kind: a lock-free `shared_ptr` swap per write, a
+  refcount clone per fan-out edge — latency-flat regardless of link count.
+- The vertex still **never parses its value** (a structured TLV payload is stored as
+  opaque bytes; the consumer decodes — §1's contract). A multi-link value is stored as
+  the rope it arrived as; the [ADR-0042](0042-refcounted-receiver-seam-view-delivery.md)
+  §3 referenced store generalizes to *subrope into the slot* — zero copy on the store
+  path at both poles.
+- **Trivial-case cost guard**: `rope_t` gains small-buffer inline storage for 1–2
+  links, so a single-scalar write allocates exactly what it allocates today. This is
+  the acceptance gate for the change; the contention/latency benches must not move.
+- **API migration is rename-and-migrate** (the #230 `view_receiver_t → rope_receiver_t`
+  precedent, pre-1.0): `graph_t::write` takes `rope_t` (existing `view_t` callers
+  compile unchanged via the implicit conversion), `read`/`await` return `rope_t`,
+  subscriber callbacks receive `const rope_t&`. A consumer that needs contiguous bytes
+  *visibly* calls the single-link accessor or `materialize()` — which form to consume
+  in is the consumer's choice, made legible in the type. No silent-flattening parallel
+  view API is kept.
+
+### 7. The ratified ④ realization
+
+- **Forward plane on the grammar cursor** — the peeks (`peek_fwd_first_dst_seg`,
+  `peek_fwd_op`) and the forward-hop field walk become templates over
+  `grammar::parse_header<Cursor>` (CRC `DEFER`), instantiated with `span_cursor`
+  (single-link: byte-identical, zero-heap) and `rope_cursor` (multi-link). This deletes
+  `fwd_router.cpp`'s private `read_header` — the last grammar fork outside the
+  [ADR-0048](0048-one-wire-grammar-chunk-cursor-rope-aware-decode.md) §1 core.
+- **Multi-link egress iov** — the scatter-gather entry count is `~6 + link_count`,
+  unbounded at compile time; a stack cap would be a synthetic limit
+  ([ADR-0051](0051-delivery-terminates-at-target-no-dispatch-limits.md)). The
+  multi-link instantiation builds its iov in a `std::pmr::vector` over the router's
+  injected resource. This is a **scoped reading of ADR-0038 inv. #2**, not a revision:
+  the "stack `std::array`, never a `std::vector`" invariant stays literally true on the
+  span-tier hop where it was stated; the multi-link hop is owning-tier traffic that
+  postdates it, bounded by the injected resource per the RFC-0006 doctrine.
+- **Lazy resolver now, one templated walk** — the terminus does *not* materialize:
+  the resolve walk is templated over a node-reader concept with two instantiations —
+  the `arena_tlv_t` reader (span tier: byte-identical, still the MCU terminus and
+  conformance oracle) and the `tlv_view_t` reader serving the **whole owning tier,
+  single-link ropes included**, so the lazy path is exercised by every TCP/QUIC/WS
+  frame, not only the rare fragmented ones. A second hand-written resolver was rejected
+  as the same drift class ADR-0048 §1 eliminated in the grammar. Per-TLV verify-at-access
+  (§4) lives once in the shared walk, gated to the view instantiation.
+- **Value handoff** — a VALUE payload region subropes straight into the vertex slot
+  (§6); fixed-width scalars the resolver itself reads (op discriminants, labels)
+  stitch across links via the existing `rope_cursor` loads.
+
+### Revised migration order (supersedes steps ④–⑥ of the original list)
+
+- **④a — rope-valued vertices** (§6): L4 slot/history/fan-out + API
+  rename + `rope_t` small-buffer storage. One documented interim: remote delivery of a
+  multi-link value flattens inside the remote-delivery sink until ⑤.
+- **④b — routing + lazy resolver** (§7): grammar-cursor forward plane, pmr iov,
+  templated resolve walk; deletes the `on_frame_rope` pre-routing flatten.
+- **⑤ — `compose → rope` emission**: data-path emission (subscriber delivery + reply)
+  goes scatter-gather, deleting the ④a remote-sink flatten and the reply-path copies.
+  Control-frame emission (ADVERTISE / COMPACT setup / NACK) stays eager `encode` —
+  cold flow-setup paths, allowed to allocate per ADR-0039.
+- **⑥ — flatten sweep**: remove remaining owning-path flatten call-sites; span-tier
+  flattens are legitimate and stay.
+- **Follow-up (post-⑥), WS unmask double copy**: first attempt unmasking directly into
+  a fresh segment (no L0 change); only if the codec shape forbids it, admit an
+  adopt-vector backend via an explicit [ADR-0047](0047-l0-module-set-compile-time-dispatch.md)
+  amendment. Until it lands, WS RX pays one extra copy per fragment — the one
+  documented exception to the steady-state zero-copy requirement.
