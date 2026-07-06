@@ -1,6 +1,11 @@
 # Materializing a rope-delivered frame: the decode sink node type
 
-Status: **proposed** (awaiting maintainer ratification — this is the design-decision half of the [ADR-0048](0048-one-wire-grammar-chunk-cursor-rope-aware-decode.md) rope-aware-decode arc; the validation half — the rope cursor + `wire::validate_rope` — landed in #225, and the differential fuzzer in #227). Touches the [ADR-0041](0041-terminus-arena-decode-span-contract.md) §2 borrowed-span contract and, in one option, the cross-core `tlv_t` model, so it is raised for ratification rather than merged autonomously.
+Status: **accepted** (ratified 2026-07-06 in maintainer design review — **not** as this
+document originally recommended; see *Ratification outcome* below. This is the
+design-decision half of the [ADR-0048](0048-one-wire-grammar-chunk-cursor-rope-aware-decode.md)
+rope-aware-decode arc; the validation half — the rope cursor + `wire::validate_rope` —
+landed in #225, and the differential fuzzer in #227. The ratified architecture is
+specified in [ADR-0053](0053-lazy-rope-backed-decode-view-partial-path-routing.md).)
 
 ## Context
 
@@ -20,9 +25,10 @@ So the promised zero-copy rope decode cannot be expressed against today's sink n
 
 Note the current fallback already works and is not broken: a rope-delivering transport can `validate_rope` (cheap reject, #225) and then `flatten()` **once** into a contiguous segment and `decode_into` the existing span arena. That is one copy per delivered frame — correct, just not zero-copy.
 
-## Decision (proposed — recommended default (C), with (B) as the ratified escalation)
+## Options as proposed (kept as record; superseded by *Ratification outcome* below)
 
-Adopt **(C)** now and keep **(B)** as the pre-agreed escalation gated on a measured need; **do not** adopt (A).
+The proposal recommended adopting **(C)** now with **(B)** as a measured-need
+escalation, and rejecting (A). The maintainer ratified differently.
 
 - **(C) Validate-then-flatten-once at rope ingress (no new sink type).** Keep `arena_tlv_t` / `tlv_t` exactly as they are. A rope-delivering transport calls `wire::validate_rope` (rejects a bad reassembled frame with no copy — the #225 win) and then, only for a good frame, `rope_t::flatten()` **once** into a contiguous refcounted segment that the terminus arena borrows as today. Cost: one bounded copy per *delivered* frame; **zero** copy for the (common) rejected-garbage case, which previously paid the flatten before it could even be rejected. No contract change, no cross-core change, smallest blast radius. This is the honest minimum and it fully closes the ADR-0048 §1 *"decode a rope without a flatten-then-reject"* obligation; it leaves only the *steady-state zero-copy-good-frame* payload unrealized.
 
@@ -40,12 +46,41 @@ Adopt **(C)** now and keep **(B)** as the pre-agreed escalation gated on a measu
 
 ## Consequences
 
+*(As drafted for the proposal; operative consequences now live in
+[ADR-0053](0053-lazy-rope-backed-decode-view-partial-path-routing.md). Still-true parts:
+the ingress recipe below survives as the interim migration path, and the Cortex-M0
+span-only sentinel remains unaffected. No longer true: "`tlv_t` parity is preserved
+under both (C) and (B)" — parity **is** preserved, but by ADR-0053's new-type shape,
+not by adopting (C)/(B).)*
+
 - **Under (C) (recommended):** no code churn beyond documenting the ingress recipe (`validate_rope` → `flatten` → `decode_into`) and, optionally, a helper `wire::decode_rope(rope, mr)` that performs exactly that (flatten once + span arena). ADR-0041 §2 is untouched. The Cortex-M0 sentinel is unaffected (the rope cursor is already its own TU, not linked by a span-only target). The only thing not delivered is steady-state zero-copy for a *straddling good frame* — quantify it before spending (B)'s complexity.
 - **If (B) is later ratified:** a new `rope_arena_t` / `rope_tlv_t` + a resolver overload; the differential oracle extends naturally (the #227 fuzzer already proves the rope *grammar* matches the span grammar — a rope-arena would reuse the same walk, so equivalence is `rope_arena` node-for-node vs `decode`). ADR-0041 §2's contract text gains a scoped carve-out ("the *rope* arena's nodes hold refcounted `view_t`/`rope_t` slices; the *span* arena remains pure-borrow").
 - **`tlv_t` parity is preserved** under both (C) and (B) — neither touches the cross-core type, keeping the ADR-0028 three-core equivalence intact. Only (A), rejected, would have disturbed it.
 
-## Question for the maintainer
+## Ratification outcome (2026-07-06)
 
-1. Ratify **(C) as the default** (document the ingress recipe, optionally add `wire::decode_rope`), and hold **(B)** for a measured CAN/WS throughput need? — the recommended path.
-2. Or is steady-state zero-copy rope decode a hard requirement *now* (skip straight to (B))?
-3. Confirm **(A) stays rejected** (no change to `tlv_t.payload` / cross-core parity), so the compose→rope owning-tier work is understood as coupled to a future (B), not a `tlv_t` mutation.
+The maintainer answered the three questions as follows:
+
+1. **(C) is NOT the end state.** Steady-state zero-copy rope decode **is a hard
+   requirement now** (question 2's branch), explicitly including WS message reassembly
+   and CAN frame-group reassembly delivering ropes upward. On review this was already
+   the position of the root glossary — [CONTEXT.md](../../CONTEXT.md) defines
+   reassembly as *"constructing a rope by chaining views — zero-copy, never `memcpy`"*
+   and permits a contiguous copy only at a transport-**egress** DMA boundary — so this
+   proposal's (C)-as-end-state recommendation was in tension with an existing
+   load-bearing commitment, and the ratification resolves that tension in the
+   glossary's favor. (C) is demoted to the **interim migration recipe** for
+   not-yet-converted paths and the explicit `materialize()` escape hatch.
+2. **The realization is neither (B) nor (A) as written**, but a shape this proposal did
+   not contain: a **new lazy decode-side type** (`tr::wire::tlv_view_t`) with
+   on-demand child materialization, partial-path routing, and fully lazy validation —
+   specified in [ADR-0053](0053-lazy-rope-backed-decode-view-partial-path-routing.md).
+   It subsumes (B): an eager `rope_arena_t` is strictly less capable than a lazy view
+   over the same `rope_cursor`, and eager whole-frame decode does work partial routing
+   never asks for.
+3. **(A) as literally proposed — mutating `tlv_t.payload` / `arena_tlv_t` — stays
+   rejected.** `tlv_t` remains the eager encode-side / materialized representation and
+   the cross-core parity type; the span arena keeps its ADR-0041 §2 pure-borrow
+   contract. The zero-copy *goal* of (A) is achieved by the new type instead, and the
+   compose→rope emission tier (ADR-0048 §3) is now unblocked and couples to
+   ADR-0053's region vocabulary, not to a `tlv_t` mutation.
