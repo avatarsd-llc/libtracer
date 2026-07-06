@@ -166,6 +166,14 @@ target_compile_definitions(op_resolve_test PRIVATE
     LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME op_resolve COMMAND op_resolve_test)
 
+# ADR-0053 §7 (3c-ii) — differential oracle: the owning rope-tier resolver
+# (resolve(tlv_view_t)) must produce byte-identical replies to the span-tier
+# arena resolver for the same request under every rope fragmentation.
+add_executable(op_resolve_view_test op_resolve_view_test.cpp)
+target_link_libraries(op_resolve_view_test PRIVATE libtracer)
+libtracer_test_warnings(op_resolve_view_test)
+add_test(NAME op_resolve_view COMMAND op_resolve_view_test)
+
 # RFC-0004 / ADR-0035 slice 3 — multi-hop FWD forwarding + zero-copy src
 # accumulation over LIVE transport_ws (client -> A forwarder -> B terminus).
 add_executable(fwd_multihop_test fwd_multihop_test.cpp)

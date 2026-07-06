@@ -25,6 +25,7 @@ add_library(libtracer STATIC
     src/path.cpp
     src/graph.cpp
     src/op_resolve.cpp
+    src/op_resolve_view.cpp
     src/route_handle.cpp
     src/fwd_router.cpp
     src/transport_vertex.cpp
