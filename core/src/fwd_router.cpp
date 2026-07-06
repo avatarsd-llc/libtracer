@@ -134,6 +134,43 @@ template <class Cursor>
     return static_cast<fwd_op_t>(cur.byte_at(op_h->body_off));
 }
 
+// A control frame (ADVERTISE / COMPACT / HANDLE_NACK) peeked off any cursor without a
+// decoded tree: `type`, the `u16` label (child[0] VALUE, LE), and the `[off, total)` of
+// child[1] — the route (ADVERTISE) / payload (COMPACT) sub-TLV, or `{0, 0}` for a
+// bare-label HANDLE_NACK. nullopt for malformed / non-control frames. Source-agnostic
+// (offsets, not spans), so the caller re-slices from its own cursor (ADR-0053 ④b/⑥).
+struct control_head_t {
+    type_t type = type_t::VALUE;
+    std::uint16_t label = 0;
+    std::size_t child1_off = 0;    // 0 ⇒ no child[1] (a bare-label NACK)
+    std::size_t child1_total = 0;  // header + body + trailer of child[1]
+};
+template <class Cursor>
+[[nodiscard]] std::optional<control_head_t> peek_control(const Cursor& cur) {
+    const auto outer = read_header(cur, 0);
+    if (!outer || !outer->opt.pl) return std::nullopt;
+    if (outer->type != type_t::ADVERTISE && outer->type != type_t::COMPACT &&
+        outer->type != type_t::HANDLE_NACK)
+        return std::nullopt;
+    const std::size_t body_end = outer->body_off + outer->body_len;
+    const auto label_h = read_header(cur, outer->body_off);
+    if (!label_h || label_h->type != type_t::VALUE || label_h->body_len < 2) return std::nullopt;
+    // The label VALUE is a 2-byte LE u16; stitch it a byte at a time so a value that
+    // straddles a link boundary reads the same as a contiguous one.
+    const auto label = static_cast<std::uint16_t>(
+        cur.byte_at(label_h->body_off) |
+        (static_cast<std::uint16_t>(cur.byte_at(label_h->body_off + 1)) << 8));
+    control_head_t head{outer->type, label, 0, 0};
+    const std::size_t c1 = outer->body_off + label_h->total;
+    if (c1 < body_end) {
+        if (const auto c1_h = read_header(cur, c1)) {
+            head.child1_off = c1;
+            head.child1_total = c1_h->total;
+        }
+    }
+    return head;
+}
+
 // A fixed-capacity stack byte-writer — the zero-heap counterpart of the old
 // vector-based header builder for the forward hop (ADR-0038 inv. #2: "the fresh header bytes ... a
 // stack std::array, not a std::vector"). Bounded by the wire header widths + one NAME
@@ -323,12 +360,10 @@ void fwd_router_t::on_frame_rope(std::string_view inbound_name, view::rope_t fra
             return;
         }
     }
-    // Control frame (or a device/short rope): the route-handle sinks still decode a
-    // contiguous tree — the documented ADR-0053 interim flatten, deleted when the
-    // rope-aware control sinks land (⑥ part 2). An empty flat ⇒ dropped.
-    const view_t flat = frame.flatten();
-    if (flat.empty()) return;
-    on_frame_impl(inbound_name, flat.bytes(), &flat);
+    // Control frame (or a device/short rope): served rope-native (ADR-0055 §2/§3). The
+    // route-handle sinks read the label off the rope and materialize only the sub-rope
+    // they need contiguous — the interim whole-frame flatten is gone (ADR-0053 ⑥).
+    on_control_rope(inbound_name, std::move(frame));
 }
 
 void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const std::byte> frame,
@@ -376,18 +411,27 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
         return;
     }
 
-    // Control frames (route-handle flow setup) keep the owning decode.
+    // Control frames (route-handle flow setup) keep the owning decode — a contiguous
+    // span decodes eagerly (byte-identical MCU terminus). Decompose the tree into the
+    // (label, child) the refactored sinks take, so the span and rope (on_control_rope)
+    // paths share one handler body (ADR-0055 §2).
     const auto dec = wire::decode(frame);
     if (!dec || !dec->opt.pl) return;  // drop malformed / non-structured
+    if (dec->children.empty() || dec->children[0].type != type_t::VALUE ||
+        dec->children[0].payload.size() < 2)
+        return;  // every control frame leads with a u16 label VALUE
+    const auto label = detail::load_le<std::uint16_t>(dec->children[0].payload);
     switch (dec->type) {
         case type_t::ADVERTISE:
-            on_advertise(inbound_name, *dec);
+            if (dec->children.size() < 2) return;
+            on_advertise(inbound_name, label, dec->children[1]);
             return;
         case type_t::COMPACT:
-            on_compact(inbound_name, *dec);
+            if (dec->children.size() < 2) return;
+            on_compact(inbound_name, label, wire::encode(dec->children[1]));
             return;
         case type_t::HANDLE_NACK:
-            on_nack(inbound_name, *dec);
+            on_nack(inbound_name, label);
             return;
         default:
             return;  // drop anything else
@@ -543,12 +587,48 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
 
 // --- route-handle (ws delivery-compaction, RFC-0004 §E.1) --------------------
 
-void fwd_router_t::on_advertise(std::string_view inbound_name, const tlv_t& adv) {
-    if (adv.children.size() < 2) return;
-    const tlv_t& label_tlv = adv.children[0];
-    const tlv_t& route = adv.children[1];
-    if (label_tlv.type != type_t::VALUE || route.type != type_t::PATH) return;
-    const auto label = detail::load_le<std::uint16_t>(label_tlv.payload);
+void fwd_router_t::on_control_rope(std::string_view inbound_name, view::rope_t frame) {
+    // Only a MULTI-link control frame reaches here — a contiguous (single-link) one
+    // decodes eagerly in on_frame_impl. A control frame is never a DEVICE payload, so a
+    // non-all-host rope is not one; drop it (as the old flatten→failed-decode path did).
+    if (!frame.all_host()) return;
+    const wire::grammar::rope_cursor cur{frame};
+    const auto head = peek_control(cur);
+    if (!head) return;
+    switch (head->type) {
+        case type_t::HANDLE_NACK:
+            // Label only — no materialize at all.
+            on_nack(inbound_name, head->label);
+            return;
+        case type_t::ADVERTISE: {
+            if (head->child1_off == 0) return;
+            // Materialize ONLY the route sub-rope: on_advertise strips its leading segment
+            // and re-encodes, which needs a contiguous tree (ADR-0052 legitimate flatten).
+            const view_t route_flat =
+                frame.subrope(head->child1_off, head->child1_total).materialize();
+            const auto route = wire::decode(route_flat.bytes());
+            if (!route) return;
+            on_advertise(inbound_name, head->label, *route);
+            return;
+        }
+        case type_t::COMPACT: {
+            if (head->child1_off == 0) return;
+            // Materialize ONLY the payload sub-rope: it is stored (deliver_local) or
+            // re-wrapped (encode_compact) as contiguous bytes — a transport-egress / local-
+            // store boundary (ADR-0055 §2). Hold the owning view while reading its span.
+            const view_t payload_flat =
+                frame.subrope(head->child1_off, head->child1_total).materialize();
+            on_compact(inbound_name, head->label, payload_flat.bytes());
+            return;
+        }
+        default:
+            return;
+    }
+}
+
+void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t label,
+                                const tlv_t& route) {
+    if (route.type != type_t::PATH) return;
 
     // Resolve the first route segment against this node's transport children — the
     // SAME rule the FWD forward step uses, so the label tracks the delivery route.
@@ -584,11 +664,11 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, const tlv_t& adv)
             .terminus = true, .down_link = {}, .out_label = 0, .local_route = wire::encode(route)});
 }
 
-void fwd_router_t::on_compact(std::string_view inbound_name, const tlv_t& comp) {
-    if (comp.children.size() < 2 || comp.children[0].type != type_t::VALUE) return;
-    const auto label = detail::load_le<std::uint16_t>(comp.children[0].payload);
-    const tlv_t& payload = comp.children[1];
-
+void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label,
+                              std::span<const std::byte> payload_bytes) {
+    // `payload_bytes` is the already-contiguous wire encoding of the COMPACT payload TLV
+    // (the span path re-encodes the decoded child; the rope path materializes only the
+    // payload sub-rope — ADR-0055 §2). It is never re-decoded here — just stored/forwarded.
     const std::optional<handle_binding_t> binding = handles_.lookup_ingress(inbound_name, label);
     if (!binding) {
         // Stale/unknown label: drop, observe, and NACK back to prompt a re-advertise
@@ -601,7 +681,6 @@ void fwd_router_t::on_compact(std::string_view inbound_name, const tlv_t& comp) 
         return;
     }
 
-    const std::vector<std::byte> payload_bytes = wire::encode(payload);
     if (binding->terminus) {
         // Local delivery — expand the label to the bound route and apply the write
         // (a delivery IS a write, RFC-0004 §D), then notify the delivery sink.
@@ -617,9 +696,7 @@ void fwd_router_t::on_compact(std::string_view inbound_name, const tlv_t& comp) 
     }
 }
 
-void fwd_router_t::on_nack(std::string_view inbound_name, const tlv_t& nack) {
-    if (nack.children.empty() || nack.children[0].type != type_t::VALUE) return;
-    const auto label = detail::load_le<std::uint16_t>(nack.children[0].payload);
+void fwd_router_t::on_nack(std::string_view inbound_name, std::uint16_t label) {
     // A downstream peer lost the binding for `label` on this link — re-advertise the
     // route we hold for it so the flow self-heals without a setup handshake.
     const std::optional<std::vector<std::byte>> route = handles_.egress_route(inbound_name, label);
