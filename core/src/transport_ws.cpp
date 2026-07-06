@@ -20,9 +20,53 @@
 #include <string_view>
 #include <utility>
 
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/rope.hpp"
 #include "libtracer/ws.hpp"
 
 namespace tr::net {
+
+namespace {
+
+// RFC 6455 fragmented-message reassembly as ROPE CHAINING (ADR-0053 §5):
+// each data fragment becomes one owning link (the copy out of the reused
+// connection buffer is the legitimate substrate-boundary copy; chaining the
+// fragments is pointer-linking, never a memcpy). One assembler per connection,
+// used only on its recv thread.
+struct ws_assembler_t {
+    tr::view::rope_t partial;
+    bool assembling = false;
+
+    void reset() {
+        partial = tr::view::rope_t{};
+        assembling = false;
+    }
+
+    // Feed one data frame (BINARY or CONT). Returns the completed message as a
+    // rope when this frame finishes one, std::nullopt otherwise. A BINARY that
+    // arrives mid-assembly is an RFC 6455 protocol error: the stale assembly is
+    // dropped and the new message starts. A stray CONT (no assembly open) is
+    // dropped. An allocation failure drops the whole message (backpressure).
+    std::optional<tr::view::rope_t> on_data(ws::opcode_t op, bool fin,
+                                            std::span<const std::byte> payload) {
+        if (op == ws::opcode_t::BINARY && assembling) reset();             // protocol error
+        if (op == ws::opcode_t::CONT && !assembling) return std::nullopt;  // stray
+
+        const std::optional<tr::view::view_t> link = tr::view::over_bytes(payload);
+        if (!link) {  // allocation failure => drop the message (backpressure)
+            reset();
+            return std::nullopt;
+        }
+        partial.append(*link);
+        assembling = true;
+        if (!fin) return std::nullopt;
+        tr::view::rope_t done = std::move(partial);
+        reset();
+        return done;
+    }
+};
+
+}  // namespace
 
 namespace {
 
@@ -90,6 +134,11 @@ transport_ws_server::~transport_ws_server() {
     if (listen_fd_ >= 0) ::close(listen_fd_);
 }
 
+void transport_ws_server::set_rope_receiver(rope_receiver_t receiver) {
+    const std::lock_guard lock(m_);
+    rope_receiver_ = std::move(receiver);
+}
+
 void transport_ws_server::set_receiver(receiver_t receiver) {
     const std::lock_guard lock(m_);
     receiver_ = std::move(receiver);
@@ -151,6 +200,7 @@ bool transport_ws_server::handshake(int fd) {
 }
 
 void transport_ws_server::serve(int fd) {
+    ws_assembler_t asm_state;  // per-connection fragment assembly (recv thread only)
     std::vector<std::byte> buf;
     std::array<std::byte, 4096> chunk;
 
@@ -175,13 +225,32 @@ void transport_ws_server::serve(int fd) {
             buf.erase(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(consumed));
 
             switch (frame.op) {
-                case ws::opcode_t::BINARY: {
+                case ws::opcode_t::BINARY:
+                case ws::opcode_t::CONT: {
                     receiver_t receiver;
+                    rope_receiver_t rope_receiver;
                     {
                         const std::lock_guard lock(m_);
                         receiver = receiver_;
+                        rope_receiver = rope_receiver_;
                     }
-                    if (receiver) receiver(std::span<const std::byte>(frame.payload));
+                    // Unfragmented fast path on the span tier: the borrowed
+                    // payload is delivered directly, no owning copy (as before).
+                    if (frame.op == ws::opcode_t::BINARY && frame.fin && !asm_state.assembling &&
+                        !rope_receiver) {
+                        if (receiver) receiver(std::span<const std::byte>(frame.payload));
+                        break;
+                    }
+                    auto msg = asm_state.on_data(frame.op, frame.fin, frame.payload);
+                    if (!msg) break;  // mid-message (or dropped)
+                    // The reassembled message IS a rope — one owning link per
+                    // fragment (ADR-0053 §5). Only the span tier pays a flatten.
+                    if (rope_receiver) {
+                        rope_receiver(std::move(*msg));
+                    } else if (receiver) {
+                        const tr::view::view_t flat = msg->flatten();
+                        if (!flat.empty() || msg->total_length() == 0) receiver(flat.bytes());
+                    }
                     break;
                 }
                 case ws::opcode_t::PING: {
@@ -194,7 +263,7 @@ void transport_ws_server::serve(int fd) {
                 case ws::opcode_t::CLOSE:
                     return;  // tear the connection down
                 default:
-                    break;  // TEXT / PONG / CONT: ignored
+                    break;  // TEXT / PONG: ignored
             }
         }
     }
@@ -270,6 +339,11 @@ transport_ws_client::~transport_ws_client() {
     // double-closes.
     const int leftover = conn_fd_.exchange(-1, std::memory_order_relaxed);
     if (leftover >= 0) ::close(leftover);
+}
+
+void transport_ws_client::set_rope_receiver(rope_receiver_t receiver) {
+    const std::lock_guard lock(m_);
+    rope_receiver_ = std::move(receiver);
 }
 
 void transport_ws_client::set_receiver(receiver_t receiver) {
@@ -357,6 +431,7 @@ bool transport_ws_client::handshake(int fd, const std::string& host, std::uint16
 }
 
 void transport_ws_client::serve(int fd) {
+    ws_assembler_t asm_state;  // per-connection fragment assembly (recv thread only)
     std::vector<std::byte> buf;
     std::array<std::byte, 4096> chunk;
 
@@ -379,13 +454,32 @@ void transport_ws_client::serve(int fd) {
             buf.erase(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(consumed));
 
             switch (frame.op) {
-                case ws::opcode_t::BINARY: {
+                case ws::opcode_t::BINARY:
+                case ws::opcode_t::CONT: {
                     receiver_t receiver;
+                    rope_receiver_t rope_receiver;
                     {
                         const std::lock_guard lock(m_);
                         receiver = receiver_;
+                        rope_receiver = rope_receiver_;
                     }
-                    if (receiver) receiver(std::span<const std::byte>(frame.payload));
+                    // Unfragmented fast path on the span tier: the borrowed
+                    // payload is delivered directly, no owning copy (as before).
+                    if (frame.op == ws::opcode_t::BINARY && frame.fin && !asm_state.assembling &&
+                        !rope_receiver) {
+                        if (receiver) receiver(std::span<const std::byte>(frame.payload));
+                        break;
+                    }
+                    auto msg = asm_state.on_data(frame.op, frame.fin, frame.payload);
+                    if (!msg) break;  // mid-message (or dropped)
+                    // The reassembled message IS a rope — one owning link per
+                    // fragment (ADR-0053 §5). Only the span tier pays a flatten.
+                    if (rope_receiver) {
+                        rope_receiver(std::move(*msg));
+                    } else if (receiver) {
+                        const tr::view::view_t flat = msg->flatten();
+                        if (!flat.empty() || msg->total_length() == 0) receiver(flat.bytes());
+                    }
                     break;
                 }
                 case ws::opcode_t::PING: {
@@ -399,7 +493,7 @@ void transport_ws_client::serve(int fd) {
                 case ws::opcode_t::CLOSE:
                     goto teardown;  // peer asked to close
                 default:
-                    break;  // TEXT / PONG / CONT: ignored
+                    break;  // TEXT / PONG: ignored
             }
         }
     }
