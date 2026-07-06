@@ -35,40 +35,49 @@ using view::rope_t;
 using view::segment_ptr_t;
 using view::view_t;
 
+/** @brief A vertex's behavioral role (docs/reference/11 §roles). */
 enum class role_t {
-    STORED_VALUE,  // role 1: last-writer-wins; holds the last-written view_t
-    STREAM,        // role 2: bounded history ring sized by settings.history_keep_last
-    HANDLER,       // roles 3-7: user on_read / on_write supplies the behavior
+    STORED_VALUE, /**< @brief Role 1: last-writer-wins; holds the last-written value. */
+    STREAM,       /**< @brief Role 2: bounded history ring sized by `settings.history_keep_last`. */
+    HANDLER,      /**< @brief Roles 3-7: user `on_read` / `on_write` supplies the behavior. */
 };
 
-// The mandatory core QoS fields (docs/reference/02 §core writable fields).
+/** @brief The mandatory core QoS fields of a vertex (docs/reference/02 §core writable fields). */
 struct settings_t {
-    std::uint8_t reliability = 0;         // 0=best-effort, 1=reliable
-    std::uint8_t durability = 0;          // 0=volatile, 1=transient-local
-    std::uint32_t history_keep_last = 1;  // Stream ring depth (>=1)
-    std::uint64_t deadline_ns = 0;        // 0=off; max ns between writes before a liveness fault
-    std::uint8_t priority = 0;            // 0=low .. 255=critical (transport hint, not a wire bit)
-    std::uint32_t queue_max_bytes = 0;    // 0=unbounded; per-subscriber back-pressure cap
-    // ADR-0042 §3: a view-delivered WRITE whose payload TLV is >= this many bytes (and
-    // carries no trailer bits) is stored as a SUBVIEW of the inbound frame (refcount
-    // pin, zero copy) instead of the one-copy trailer-sliced store. 0 (the default)
-    // DISABLES referencing — pinning amplification is a per-vertex deployment call.
+    std::uint8_t reliability = 0;        /**< @brief 0=best-effort, 1=reliable. */
+    std::uint8_t durability = 0;         /**< @brief 0=volatile, 1=transient-local. */
+    std::uint32_t history_keep_last = 1; /**< @brief Stream ring depth (>=1). */
+    std::uint64_t deadline_ns = 0;       /**< @brief 0=off; max ns between writes before a
+                                              liveness fault. */
+    std::uint8_t priority = 0;           /**< @brief 0=low .. 255=critical (transport hint, not a
+                                              wire bit). */
+    std::uint32_t queue_max_bytes = 0; /**< @brief 0=unbounded; per-subscriber back-pressure cap. */
+    /**
+     * @brief Store-by-reference threshold (ADR-0042 §3): a view-delivered WRITE whose
+     *        payload TLV is >= this many bytes (and carries no trailer bits) is stored as a
+     *        SUBVIEW of the inbound frame (refcount pin, zero copy) instead of the one-copy
+     *        trailer-sliced store. 0 (the default) DISABLES referencing — pinning
+     *        amplification is a per-vertex deployment call.
+     */
     std::uint32_t store_ref_min_bytes = 0;
 };
 
-// User behavior for a Handler-role vertex. `on_children` additionally applies to
-// ANY role: when set, a read of the vertex's `:children[]` field serves this
-// synthesized member listing (a complete POINT TLV view) INSTEAD of enumerating
-// registered child vertices — the ADR-0044 seam by which a transport/connection
-// vertex lists its live bus peers without ever creating a vertex for them.
+/**
+ * @brief User behavior for a Handler-role vertex.
+ *
+ * `on_children` additionally applies to ANY role: when set, a read of the vertex's
+ * `:children[]` field serves this synthesized member listing (a complete POINT TLV view)
+ * INSTEAD of enumerating registered child vertices — the ADR-0044 seam by which a
+ * transport/connection vertex lists its live bus peers without ever creating a vertex for
+ * them. The value seam is rope-typed (ADR-0053 §6): `on_read` supplies the vertex value as
+ * the rope it is (a contiguous scalar is the single-link case), `on_write` receives the
+ * written value without a flatten copy.
+ */
 struct handlers_t {
-    // The value seam is rope-typed (ADR-0053 §6): on_read supplies the vertex value
-    // as the rope it is (a contiguous scalar is the single-link case), on_write
-    // receives the written value without a flatten copy. on_children stays a
-    // contiguous view — a synthesized control listing, always freshly encoded.
-    std::function<result_t<rope_t>()> on_read;
-    std::function<result_t<void>(const rope_t&)> on_write;
-    std::function<result_t<view_t>()> on_children;
+    std::function<result_t<rope_t>()> on_read; /**< @brief Supplies the vertex value on read. */
+    std::function<result_t<void>(const rope_t&)>
+        on_write;                                  /**< @brief Receives the written value. */
+    std::function<result_t<view_t>()> on_children; /**< @brief Synthesized `:children[]` listing. */
 };
 
 /**
@@ -95,91 +104,127 @@ inline constexpr std::uint8_t kAceInherit = 0x1;
  * @brief One parsed ALLOW ACE of a vertex's `:acl` (core subset, ADR-0020 / #81).
  *
  * The core subset is ALLOW-only: a `:acl` write carrying a DENY ACE (or any flag
- * bit beyond @ref kAceInherit) is rejected at write time with TYPE_MISMATCH, so
+ * bit beyond `kAceInherit`) is rejected at write time with TYPE_MISMATCH, so
  * stored ACEs never carry semantics this evaluator would silently weaken. Full
  * DENY / ordered first-match-per-bit evaluation is the `security_acl` host module.
  */
 struct ace_t {
-    std::uint8_t flags = 0;         /**< @brief ACE flags; only @ref kAceInherit is accepted. */
+    std::uint8_t flags = 0;         /**< @brief ACE flags; only `kAceInherit` is accepted. */
     std::vector<std::byte> subject; /**< @brief Opaque subject token (ADR-0018); the special
                                          subject `"EVERYONE@"` matches any resolved subject. */
-    std::uint32_t access_mask = 0;  /**< @brief Granted rights (an OR of @ref acl_right_t bits). */
+    std::uint32_t access_mask = 0;  /**< @brief Granted rights (an OR of `acl_right_t` bits). */
     std::uint64_t expires_ns = 0;   /**< @brief Absolute expiry, ns since the UNIX epoch;
                                          0 = never expires. An expired ACE grants nothing. */
 };
 
-// Per-VERTEX propagation policy (value-agnostic; RFC-0008 §C). Governs whether an
-// ANCESTOR's propagate sweep includes this vertex — NOT a per-subscriber value
-// filter (there is no byte comparison; ADR-0053 §1, a vertex never parses its bytes).
-// `assign` and a DIRECT propagate on the vertex itself are never gated by it. Held
-// as vertex state (default IF_NEWER); wire config via the vertex `:settings` is
-// deferred. Numeric filtering (deadband) remains an application filter vertex
-// (ADR-0021 sibling), never a field here.
+/**
+ * @brief Per-VERTEX propagation policy (value-agnostic; RFC-0008 §C).
+ *
+ * Governs whether an ANCESTOR's propagate sweep includes this vertex — NOT a
+ * per-subscriber value filter (there is no byte comparison; ADR-0053 §1, a vertex never
+ * parses its bytes). `assign` and a DIRECT propagate on the vertex itself are never gated
+ * by it. Held as vertex state (default IF_NEWER); wire config via the vertex `:settings`
+ * is deferred. Numeric filtering (deadband) remains an application filter vertex (ADR-0021
+ * sibling), never a field here.
+ */
 enum class delivery_mode_t : std::uint8_t {
-    IF_NEWER = 0,       // default: an ancestor sweep includes this vertex only if it was
-                        // assigned since the last covering sweep (write_seq_ advanced) —
-                        // the structural coalescing flush (RFC-0008 §B)
-    UNCONDITIONAL = 1,  // an ancestor sweep ALWAYS includes this vertex's current value
-                        // (a sweep-driven keepalive; the producer's timer sets the rate)
-    EXPLICIT = 2,       // an ancestor sweep NEVER includes it; deliverable only by a
-                        // direct propagate on the vertex itself
+    /** @brief Default: an ancestor sweep includes this vertex only if it was assigned since
+     *         the last covering sweep — the structural coalescing flush (RFC-0008 §B). */
+    IF_NEWER = 0,
+    /** @brief An ancestor sweep ALWAYS includes this vertex's current value (a sweep-driven
+     *         keepalive; the producer's timer sets the rate). */
+    UNCONDITIONAL = 1,
+    /** @brief An ancestor sweep NEVER includes it; deliverable only by a direct propagate
+     *         on the vertex itself. */
+    EXPLICIT = 2,
 };
 
-// One subscription edge (M3b). A write to this vertex fans out to a target vertex
-// (target_key — spec-faithful re-dispatch) and/or an in-process callback (sugar).
-// docs/reference/02 §dispatch + 04 §write fanout. Inactive slots model an
-// unsubscribe (a cleared :subscribers[N]).
+/**
+ * @brief One subscription edge (M3b).
+ *
+ * A write to the owning vertex fans out to a target vertex (@ref target_key —
+ * spec-faithful re-dispatch) and/or an in-process @ref callback (sugar), per
+ * docs/reference/02 §dispatch + 04 §write fanout. An inactive slot models an unsubscribe
+ * (a cleared `:subscribers[N]`).
+ */
 struct subscriber_t {
-    std::vector<std::byte> target_key;            // canonical PATH key (empty => callback-only)
-    std::function<void(const rope_t&)> callback;  // null => target-only (ADR-0053 §6 rope value)
-    // Delivery is value-agnostic: an active edge receives every propagated value. WHICH
-    // vertices a sweep propagates is the per-vertex delivery_mode_t (RFC-0008 §C), never
-    // a per-subscriber byte comparison — so a subscriber edge carries no delivery policy.
+    std::vector<std::byte> target_key; /**< @brief Canonical PATH key (empty ⇒ callback-only). */
+    std::function<void(const rope_t&)>
+        callback; /**< @brief In-process sink; null ⇒ target-only (ADR-0053 §6 rope value). */
+    /** @brief Active flag; an active edge receives every propagated value (delivery is
+     *         value-agnostic — WHICH vertices a sweep propagates is the vertex's
+     *         `delivery_mode_t`, never a per-subscriber byte comparison). */
     bool active = true;
-    // The route-handle opt-in (SUBSCRIBER.qos_settings.delivery_compact, RFC-0004
-    // §E.1 / ADR-0035 slice 4). When true the consumer requests label-compacted
-    // deliveries: the producer MAY advertise a per-link label aliasing this
-    // subscriber's return route and thereafter stream lean COMPACT frames instead
-    // of full-route FWD{WRITE} deliveries. Default false ⇒ stateless full-route
-    // delivery (the slice-3 path), so a cold/one-shot flow allocates no label state.
+    /**
+     * @brief Route-handle opt-in (`SUBSCRIBER.qos_settings.delivery_compact`, RFC-0004
+     *        §E.1 / ADR-0035 slice 4).
+     *
+     * When true the consumer requests label-compacted deliveries: the producer MAY
+     * advertise a per-link label aliasing this subscriber's return route and thereafter
+     * stream lean COMPACT frames instead of full-route `FWD{WRITE}` deliveries. Default
+     * false ⇒ stateless full-route delivery, so a cold/one-shot flow allocates no label
+     * state.
+     */
     bool delivery_compact = false;
-    // The consumer's accumulated return route (a complete PATH TLV's bytes — the FWD
-    // `src` the subscribe arrived with) and this node's NAME for the link it arrived
-    // on. Both empty ⇒ an in-process slot (callback/target sugar); the producer fan-out
-    // ignores it for remote delivery. Both populated ⇒ a REMOTE subscriber: a write to
-    // this vertex hands (link, return_route, delivery_compact, value) to the graph's
-    // injected remote-delivery sink, which emits the FWD{WRITE} (or auto-promoted
-    // COMPACT) back over the link (RFC-0004 §D/§E.1, ADR-0035 slice 4 / #136). Held as
-    // a view over a REFCOUNTED segment (ADR-0041 §2): copied once at subscribe, then
-    // every delivery snapshot is a refcount clone — O(1) copies over the subscription's
-    // life, and an in-flight delivery keeps the route alive across a concurrent
-    // unsubscribe. An opaque view + an opaque NAME, so L4 never depends on tr::net.
+    /**
+     * @brief The consumer's accumulated return route (a complete PATH TLV's bytes — the FWD
+     *        `src` the subscribe arrived with).
+     *
+     * Empty together with @ref link ⇒ an in-process slot (callback/target sugar), ignored
+     * for remote delivery. Populated ⇒ a REMOTE subscriber: a write hands (@ref link, this
+     * route, @ref delivery_compact, value) to the graph's injected remote-delivery sink,
+     * which emits the `FWD{WRITE}` (or auto-promoted COMPACT) back over the link (RFC-0004
+     * §D/§E.1, ADR-0035 slice 4 / #136). Held as a view over a REFCOUNTED segment (ADR-0041
+     * §2): copied once at subscribe, then every delivery snapshot is a refcount clone —
+     * O(1) copies over the subscription's life, and an in-flight delivery keeps the route
+     * alive across a concurrent unsubscribe. An opaque view, so L4 never depends on tr::net.
+     */
     view_t return_route{};
-    std::string link;
-    // The original SUBSCRIBER TLV view this slot was written from, retained zero-copy
-    // (a refcount clone of the field-write payload). Empty for in-process callback/target
-    // sugar that carries no TLV. A :subscribers[] read ropes these slot views into the
-    // FWD{REPLY} with no byte copy (RFC-0004 §D / ADR-0035 slice 2 zero-copy reply rule).
+    std::string link; /**< @brief This node's NAME for the link the subscribe arrived on. */
+    /**
+     * @brief The original SUBSCRIBER TLV view this slot was written from, retained zero-copy
+     *        (a refcount clone of the field-write payload).
+     *
+     * Empty for in-process callback/target sugar that carries no TLV. A `:subscribers[]`
+     * read ropes these slot views into the `FWD{REPLY}` with no byte copy (RFC-0004 §D /
+     * ADR-0035 slice 2 zero-copy reply rule).
+     */
     view_t source_view{};
-    // The caller context this edge was created under (#81, ADR-0026 fan-in gate): the
-    // inbound link NAME for a remote subscribe, empty for a locally-wired edge. A
-    // fan-out re-dispatch into a LOCAL target vertex is gated by the TARGET's :acl
-    // WRITE right under this context — the subscription's creator is the "writer"
-    // the target authorizes ("who may write to me"). A REMOTE subscriber's fan-in
-    // gate runs on the peer instead (its FWD{WRITE} terminus checks the same right).
+    /**
+     * @brief The caller context this edge was created under (#81, ADR-0026 fan-in gate).
+     *
+     * The inbound link NAME for a remote subscribe, empty for a locally-wired edge. A
+     * fan-out re-dispatch into a LOCAL target vertex is gated by the TARGET's `:acl` WRITE
+     * right under this context — the subscription's creator is the "writer" the target
+     * authorizes. A REMOTE subscriber's fan-in gate runs on the peer instead (its
+     * `FWD{WRITE}` terminus checks the same right).
+     */
     std::string caller;
 };
 
+/**
+ * @brief An L4 graph vertex: a named, addressable position holding a value, a bounded
+ *        history, or a user handler (docs/reference/11 §roles).
+ *
+ * Pinned in place (the atomic last-known-value slot + mutex + condvar are non-movable) and
+ * always handled via a `vertex_t*` returned by `graph_t::register_vertex`. The
+ * read/write hot path is lock-free (an atomic shared_ptr swap); the mutex guards only the
+ * history ring, the subscriber list, and the await waiter accounting. Non-copyable.
+ */
 class vertex_t {
    public:
+    /** @brief Construct a vertex with its role, canonical key, QoS settings, and handlers. */
     vertex_t(role_t role, path_key_t key, settings_t settings, handlers_t handlers)
         : role_(role), key_(std::move(key)), settings_(settings), handlers_(std::move(handlers)) {}
 
     vertex_t(const vertex_t&) = delete;
     vertex_t& operator=(const vertex_t&) = delete;
 
+    /** @brief This vertex's behavioral role. */
     [[nodiscard]] role_t role() const noexcept { return role_; }
+    /** @brief This vertex's canonical PATH-payload key (the vertex-map key). */
     [[nodiscard]] const path_key_t& key() const noexcept { return key_; }
+    /** @brief This vertex's QoS settings. */
     [[nodiscard]] const settings_t& settings() const noexcept { return settings_; }
 
    private:
