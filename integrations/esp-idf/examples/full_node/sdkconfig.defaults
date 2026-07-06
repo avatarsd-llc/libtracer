@@ -8,6 +8,16 @@
 # this example avoids <future> for the same reason — the full node links clean
 # under -fno-exceptions -fno-rtti.
 
+# Optimize for size (-Os). This is the footprint-reference example (the size
+# sentinel measures the libtracer component archive from THIS build), so it must
+# compile the way a flash-budget node actually ships — for space, not the IDF
+# default -Og (COMPILER_OPTIMIZATION_DEBUG). Measuring -Og would overstate the
+# footprint by ~30% and gate against a config no size-constrained deployment
+# uses. -Os is what keeps the ADR-0053 two-instantiation terminus (arena +
+# lazy-rope resolve walks, both link-retained on the full node) inside the
+# component flash ceiling.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
 # app_main runs the whole self-proof (two graphs + wire builders) — give the
 # main task room.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
