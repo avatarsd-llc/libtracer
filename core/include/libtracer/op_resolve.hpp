@@ -33,6 +33,7 @@
 #include "libtracer/rope.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/tlv_arena.hpp"
+#include "libtracer/tlv_view.hpp"
 
 namespace tr::graph {
 
@@ -111,6 +112,30 @@ class op_resolver_t {
      *         or a @ref status_t on a malformed/non-request frame.
      */
     [[nodiscard]] result_t<view::rope_t> resolve(const wire::tlv_arena_t& fwd,
+                                                 std::string_view inbound_link = {},
+                                                 const view::view_t* frame_view = nullptr);
+
+    /**
+     * @brief Resolve a rope-delivered request FWD (the lazy `tlv_view_t` tier) and
+     *        build the `FWD{REPLY}` rope — the owning-delivery twin of the arena
+     *        overload (ADR-0053 §7).
+     *
+     * The same terminus semantics as the @ref wire::tlv_arena_t overload — it runs
+     * the ONE templated resolve walk, here over the forward-only @ref
+     * wire::tlv_view_t reader (ADR-0053 §1), so a frame reassembled as a
+     * scatter-gather rope (fragmented WS / CAN) is resolved WITHOUT an interim
+     * flatten of the whole frame. Byte-identical replies to the arena tier for the
+     * same logical request (the differential oracle in `op_resolve_view_test`).
+     *
+     * @param fwd          A rope-backed request FWD (`wire::tlv_view_t::over`).
+     * @param inbound_link This node's NAME for the link the request arrived on
+     *                     (empty ⇒ local resolution, no remote-subscriber binding).
+     * @param frame_view   Reserved for the ADR-0042 owning-store seam; the rope
+     *                     tier stores its one ownership copy, so pass `nullptr`.
+     * @return The reply as a @ref view::rope_t, or a @ref status_t on a
+     *         malformed/non-request frame.
+     */
+    [[nodiscard]] result_t<view::rope_t> resolve(const wire::tlv_view_t& fwd,
                                                  std::string_view inbound_link = {},
                                                  const view::view_t* frame_view = nullptr);
 
