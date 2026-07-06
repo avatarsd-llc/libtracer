@@ -18,6 +18,9 @@
 //! TLV tree) so it can target WASM and bare-metal MCUs.
 
 #![no_std]
+// Documentation coverage is a build gate, mirroring the C++ Doxygen WARN_AS_ERROR
+// gate (core/Doxyfile / docs.yml): every public item MUST carry a rustdoc comment.
+#![deny(missing_docs)]
 
 extern crate alloc;
 
