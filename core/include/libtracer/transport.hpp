@@ -43,7 +43,7 @@ class transport_t;
  *    announce/heartbeat traffic) — the `:children[]` listing of the link's
  *    connection vertex;
  *  - @ref peer_link resolves one such NAME to a directed sending endpoint, the
- *    seam @ref child_registry_t falls back to when a FWD's next `dst` segment
+ *    seam `child_registry_t` falls back to when a FWD's next `dst` segment
  *    names no static child — so a peer name IS a routable hop segment;
  *  - @ref set_peer_receiver replaces the flat inbound sink with a peer-named
  *    one: each inbound frame arrives tagged with the SENDING peer's name, which
@@ -109,8 +109,18 @@ class bus_link_t {
     ~bus_link_t() = default;  // never deleted through this facet
 };
 
+/**
+ * @brief A point-to-point (or bus-facet-exposing) transport link: the byte seam
+ *        between the routing plane and one wire (ws/tcp/udp/quic/CAN).
+ *
+ * The router sends complete TLV frames via @ref send and receives them through an
+ * installed sink (@ref set_receiver for borrowed spans, or @ref set_rope_receiver
+ * for owning refcounted rope frames when @ref delivers_ropes is true). A multi-peer
+ * bus link additionally exposes a @ref bus_link_t facet via @ref bus.
+ */
 class transport_t {
    public:
+    /** @brief The borrowed-span inbound sink: a frame valid only for the callback. */
     using receiver_t = std::function<void(std::span<const std::byte>)>;
     /** @brief The OWNING inbound sink (ADR-0042, generalized to ropes per
      *         ADR-0053): each frame is a `rope_t` of refcounted links the receiver
@@ -121,13 +131,17 @@ class transport_t {
 
     virtual ~transport_t() = default;
 
-    // Emit one frame (a complete TLV's bytes) onto the wire.
+    /** @brief Emit one frame (a complete TLV's bytes) onto the wire. */
     virtual void send(std::span<const std::byte> frame) = 0;
 
-    // Scatter-gather send: emit the gathered spans as ONE frame, without a flatten
-    // copy — hand a rope's `to_iovec()` straight to the wire (the "rope we put into
-    // tx"). The default gathers into a temporary and calls send(); transports with
-    // native scatter-gather (sendmsg/writev/RDMA SGE) override this to avoid the copy.
+    /**
+     * @brief Scatter-gather send: emit the gathered spans as ONE frame, no flatten copy.
+     *
+     * Hand a rope's `to_iovec()` straight to the wire. The default gathers into a
+     * temporary and calls @ref send(std::span<const std::byte>); transports with native
+     * scatter-gather (sendmsg/writev/RDMA SGE) override this to avoid the copy.
+     * @param iov The spans to emit, in order, as a single frame.
+     */
     virtual void send(std::span<const std::span<const std::byte>> iov) {
         std::size_t total = 0;
         for (const auto& s : iov) total += s.size();
@@ -137,8 +151,14 @@ class transport_t {
         send(std::span<const std::byte>(tmp));
     }
 
-    // Register the sink for inbound frames (the bridge's ingest). Must be set
-    // before frames flow; delivery may occur on an internal transport thread.
+    /**
+     * @brief Register the borrowed-span sink for inbound frames (the bridge's ingest).
+     *
+     * Must be set before frames flow; delivery may occur on an internal transport
+     * thread. The delivered span is valid only for the callback — a receiver that needs
+     * to keep the frame uses @ref set_rope_receiver instead.
+     * @param receiver The inbound frame sink.
+     */
     virtual void set_receiver(receiver_t receiver) = 0;
 
     /**
