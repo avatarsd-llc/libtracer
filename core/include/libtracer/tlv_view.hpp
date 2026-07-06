@@ -70,7 +70,7 @@ class tlv_view_t {
      * @param frame The reassembled inbound frame (the rope is adopted —
      *              refcounted links, no copy). Every link must be HOST
      *              (@ref view::rope_t::all_host): rejected `FRAME_INVALID`
-     *              otherwise, exactly as @ref validate_rope.
+     *              otherwise, exactly as `validate_rope`.
      * @return The root view, or the grammar's `err_t` (`FRAME_TRUNCATED` /
      *         `FRAME_INVALID` — including trailing bytes).
      */
@@ -167,7 +167,7 @@ class tlv_view_t {
      *
      * `root` borrows `flat`'s segment bytes (stable across moves — the segment
      * is refcounted heap memory), so keep the pair together, exactly like
-     * @ref view_as_tlv's "keep the view alive" contract.
+     * `view_as_tlv`'s "keep the view alive" contract.
      */
     struct materialized_t {
         view::view_t flat; /**< @brief The single contiguous copy of the wire bytes. */
@@ -179,7 +179,7 @@ class tlv_view_t {
      *
      * Everything lazy access deferred is paid here, once, by the consumer that
      * asked for it: one contiguous copy, the full grammar walk INCLUDING every
-     * CRC trailer, and the @ref kMaxDepth cap — byte-identical to
+     * CRC trailer, and the `kMaxDepth` cap — byte-identical to
      * `decode(flatten(wire()))`.
      *
      * @param backend Where the flat segment is allocated.

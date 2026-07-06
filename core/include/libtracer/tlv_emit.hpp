@@ -27,20 +27,27 @@
 
 namespace tr::wire {
 
-// Append just a TLV header: <type> <opt> <length>, length u16 LE or (with the LL
-// bit set) u32 LE — the ONE representation of the header byte layout (ADR-0048 §3).
-// The length width follows `opt.ll` verbatim; the caller owns the LL decision (so
-// `encode`, which respects a tlv_t's existing `opt.ll`, and `emit_tlv`, which
-// auto-widens for an oversize body, share this without either changing behavior).
+/**
+ * @brief Append just a TLV header: `<type> <opt> <length>` — the ONE representation of the
+ *        header byte layout (ADR-0048 §3).
+ *
+ * Length is u16 LE, or u32 LE when the `opt.ll` bit is set. The width follows `opt.ll`
+ * verbatim; the caller owns the LL decision (so `encode`, which respects a `tlv_t`'s
+ * existing `opt.ll`, and `emit_tlv`, which auto-widens for an oversize body, share this
+ * without either changing behavior).
+ */
 inline void emit_header(std::vector<std::byte>& out, type_t type, opt_t opt, std::size_t body_len) {
     out.push_back(static_cast<std::byte>(std::to_underlying(type)));
     out.push_back(static_cast<std::byte>(opt.encode()));
     detail::append_le(out, static_cast<std::uint32_t>(body_len), opt.ll ? 4u : 2u);
 }
 
-// Append one TLV: <type> <opt> <length> <body>, where length is u16 LE, widening
-// to u32 LE (with the LL bit set) when the body exceeds 0xFFFF. `opt` carries the
-// structural bits — pass `opt_t{.pl = true}` for a structured (list) payload.
+/**
+ * @brief Append one TLV: `<type> <opt> <length> <body>`.
+ *
+ * Length is u16 LE, widening to u32 LE (the LL bit set) when @p body exceeds 0xFFFF. @p opt
+ * carries the structural bits — pass `opt_t{.pl = true}` for a structured (list) payload.
+ */
 inline void emit_tlv(std::vector<std::byte>& out, type_t type, opt_t opt,
                      std::span<const std::byte> body) {
     if (body.size() > 0xFFFFu) opt.ll = true;
@@ -48,12 +55,12 @@ inline void emit_tlv(std::vector<std::byte>& out, type_t type, opt_t opt,
     out.insert(out.end(), body.begin(), body.end());
 }
 
-// Append a NAME TLV over opaque bytes — the PATH-segment / metadata-tag workhorse.
+/** @brief Append a NAME TLV over opaque bytes — the PATH-segment / metadata-tag workhorse. */
 inline void emit_name(std::vector<std::byte>& out, std::span<const std::byte> name) {
     emit_tlv(out, type_t::NAME, opt_t{}, name);
 }
 
-// Append a NAME TLV over a text segment (no temporary buffer).
+/** @brief Append a NAME TLV over a text segment (no temporary buffer). */
 inline void emit_name(std::vector<std::byte>& out, std::string_view name) {
     emit_name(out, std::span<const std::byte>(reinterpret_cast<const std::byte*>(name.data()),
                                               name.size()));
