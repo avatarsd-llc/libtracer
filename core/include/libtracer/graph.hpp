@@ -17,7 +17,9 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <set>
 #include <shared_mutex>
 #include <span>
 #include <string>
@@ -130,6 +132,29 @@ class graph_t {
     // targets a contiguous control TLV, so a multi-link value is materialized first.
     [[nodiscard]] result_t<void> write(vertex_t* v, const field_path_t& field, rope_t value,
                                        std::string_view caller = {});
+    // The two irreducible vertex operations `write` composes (RFC-0008). `write` is the
+    // §D convenience — an `assign` immediately followed by a targeted delivery of the
+    // written vertex — kept because a `FWD{WRITE}` terminus *is* that composition. A
+    // caller that wants the timer-driven "update many, propagate once" workflow uses the
+    // two directly.
+    //
+    // assign(v, value) — the STATE transition only: swap v's last-known-value (atomic),
+    // append to the stream ring, bump the write sequence (waking await), and mark v for
+    // the next covering propagate sweep (unless v is EXPLICIT, or nobody observes at/above
+    // it). Sends NOTHING. WRITE-gated like write. A branch POINT decomposes and assigns
+    // each descendant (no notify). Never gated by delivery_mode.
+    [[nodiscard]] result_t<void> assign(vertex_t* v, rope_t value, std::string_view caller = {});
+    // propagate(v) — the EDGE transition only: deliver, along subscription edges, v's
+    // current value (always — the argument is the explicit target, so a direct propagate
+    // is never gated by v's delivery_mode) AND the qualifying descendants of v's subtree
+    // per each descendant's delivery_mode (RFC-0008 §B/§C): IF_NEWER descendants assigned
+    // since the last covering sweep, and every UNCONDITIONAL descendant. Reads the
+    // last-known-value — no value argument. Costs O((pending + unconditional)-in-subtree).
+    void propagate(vertex_t* v);
+    // Set v's per-vertex propagation policy (RFC-0008 §C). Wiring-time call (the
+    // "configure before frames flow" contract), like settings; maintains the sweep's
+    // UNCONDITIONAL membership. Default (unset) is IF_NEWER.
+    void set_delivery_mode(vertex_t* v, delivery_mode_t mode);
     [[nodiscard]] result_t<rope_t> await(vertex_t* v, std::chrono::nanoseconds timeout,
                                          std::string_view caller = {});
     // Field-read by handle (the read dual of the field-write overload): an empty `field`
@@ -156,13 +181,12 @@ class graph_t {
     // field (ADR-0026), exactly as connect() is sugar over that field-write. Routing
     // these helpers through the `:subscribers[]` field-write surface (rather than the
     // current direct path) is tracked in #59.
-    [[nodiscard]] result_t<void> subscribe(const path_t& src, const path_t& target,
-                                           delivery_mode_t mode = delivery_mode_t::EVERY);
-    // Subscribe `src` to an in-process callback (sugar; the callback fires inline on
-    // each write to src with a cloned view). `mode` gates delivery producer-side.
+    [[nodiscard]] result_t<void> subscribe(const path_t& src, const path_t& target);
+    // Subscribe `src` to an in-process callback (sugar; the callback fires inline on each
+    // delivery to src with a cloned view). Delivery is value-agnostic (RFC-0008): WHICH
+    // vertices a sweep propagates is the source vertex's delivery_mode, not a per-edge policy.
     [[nodiscard]] result_t<void> subscribe(const path_t& src,
-                                           std::function<void(const rope_t&)> callback,
-                                           delivery_mode_t mode = delivery_mode_t::EVERY);
+                                           std::function<void(const rope_t&)> callback);
 
     // Install the sink the producer fan-out hands each REMOTE subscriber's delivery to
     // (#136, RFC-0004 §D/§E.1). Set once at wiring time by the transport plane
@@ -207,9 +231,9 @@ class graph_t {
     // read serves it back. NotFound is impossible (the caller holds `v`). The producer
     // fan-out gate (#81, ADR-0026): `link` is the caller context — the append requires
     // the SUBSCRIBE right on `v`'s :acl, else PERMISSION_DENIED.
-    [[nodiscard]] result_t<void> add_remote_subscriber(
-        vertex_t* v, view_t source_view, view_t return_route, std::string link,
-        bool delivery_compact, delivery_mode_t mode = delivery_mode_t::EVERY);
+    [[nodiscard]] result_t<void> add_remote_subscriber(vertex_t* v, view_t source_view,
+                                                       view_t return_route, std::string link,
+                                                       bool delivery_compact);
 
     // Convenience — resolve the path key once (guarded map lookup), then hot path.
     // A write/read whose path has a field tail (e.g. ":settings.deadline_ns",
@@ -259,12 +283,36 @@ class graph_t {
     // gated), then notifies each covered subscription point once with its slice. A
     // decomposable POINT is contiguous, so the walk reads the materialized head
     // (single-link: zero copy) and lands rope slices of it (ADR-0053 §6).
+    // Branch-write decomposition (RFC-0005): a POINT payload written to `v` lands each
+    // value-carrying node at the corresponding descendant vertex. `notify` picks the
+    // half: true (the `write` path) delivers each covered site + bubbles; false (the
+    // `assign` path) marks each landed vertex for the next sweep and delivers nothing.
     result_t<void> write_branch(vertex_t* v, const rope_t& value, int depth,
-                                std::string_view caller);
+                                std::string_view caller, bool notify);
     void fan_out(vertex_t* v, const rope_t& value, int depth);
     // Vertical bubbling (RFC-0005): fan `value` out to every registered ancestor's
     // subscribers. Called only when v->listeners_above_ says someone is listening.
     void bubble_up(vertex_t* v, const rope_t& value, int depth);
+    // Deliver `value` as `v`'s value to v's full observer set: v's own edges (fan_out)
+    // + every ancestor subtree subscriber (bubble_up, gated on listeners_above_). The
+    // per-vertex delivery unit both `write` (eager) and `propagate` (sweep) build on.
+    void deliver_vertex(vertex_t* v, const rope_t& value, int depth);
+    // Deliver v's CURRENT stored value (propagate reads the LKV — no value argument).
+    // STORED_VALUE: the last-known-value once; STREAM: drains the ring entries appended
+    // since the last flush, in order (RFC-0008 §E — a queue, not a coalesce); HANDLER /
+    // never-assigned (null LKV): nothing.
+    void deliver_current(vertex_t* v, int depth);
+    // The propagate(v) sweep body at an explicit recursion depth (cycle-bounded like a
+    // write re-dispatch). Delivers v then its qualifying descendants (RFC-0008 §B/§C).
+    void propagate_impl(vertex_t* v, int depth);
+    // Record v as assigned-since-last-sweep so a covering propagate flushes it (RFC-0008
+    // §B). No-op for EXPLICIT (never ancestor-swept), for UNCONDITIONAL (already a
+    // permanent sweep member), and — the idle-write fast path — when nothing observes at
+    // or above v (a sweep would deliver it nowhere; RFC-0005 listeners gate).
+    void mark_pending(vertex_t* v);
+    // Drop v from the pending set (an eager `write` delivered it, so a later covering
+    // sweep must not re-deliver). Gated on the same listeners fast path as mark_pending.
+    void clear_pending(vertex_t* v);
     // Subscribe/unsubscribe bookkeeping (RFC-0005): bump v's own active-slot count
     // and every descendant's listeners_above_, under the map lock (shared — the
     // counters are atomics; the lock only excludes concurrent vertex creation so
@@ -320,6 +368,19 @@ class graph_t {
     subject_resolver_t subject_resolver_;
     // Bubbling-walk instrumentation (RFC-0005) — see ancestor_walks().
     mutable std::atomic<std::uint64_t> ancestor_walks_{0};
+
+    // The propagate-sweep selection sets (RFC-0008 §B), keyed on canonical PATH-payload
+    // bytes and ORDERED so a subtree is a contiguous prefix range (a parent's key is a
+    // byte-prefix of every descendant's — key_view_t::is_ancestor_of). `pending_` holds
+    // the IF_NEWER vertices assigned since the last covering sweep (drained on sweep);
+    // `unconditional_` holds every UNCONDITIONAL vertex (persistent membership, iterated
+    // not drained). Both guarded by sweep_mutex_ — a distinct, coarse lock touched only
+    // when a subscriber exists at/above a written vertex, so the idle write stays
+    // lock-free. Snapshots are taken under it and delivered outside it (callbacks /
+    // re-dispatch re-enter the graph), mirroring fan_out's discipline.
+    std::set<std::vector<std::byte>> pending_;
+    std::set<std::vector<std::byte>> unconditional_;
+    std::mutex sweep_mutex_;
 };
 
 }  // namespace tr::graph

@@ -46,7 +46,8 @@ code changes. Architecture and rationale: **[ADR-0023](../../docs/adr/0023-ros2-
 - **Wait set** — `rmw_create_wait_set`, `rmw_wait`, guard conditions: driven by
   the graph's `await` + subscription callbacks signalling readiness.
 - **QoS** — translate `rmw_qos_profile_t` ⇄ `:settings`; expose libtracer-only
-  knobs (`delivery_mode=ON_CHANGE`) under an `rmw_tracer`-namespaced QoS extension.
+  knobs (the per-vertex `delivery_mode=EXPLICIT`, RFC-0008) under an
+  `rmw_tracer`-namespaced QoS extension.
 - **Graph events** — `rmw_get_node_names`, `rmw_*_graph_guard_condition`: from the
   graph's structural feed (subscribing a parent's `:children[]`).
 - **Services / actions** — request/response path pairs; actions compose from
@@ -71,7 +72,7 @@ returns `RMW_RET_UNSUPPORTED` so the library always links.
 | **R0 — loads** | `identity.c` (done), `init.c` (`rmw_init`/`shutdown`/`init_options`), `serialization.c`, plus an `unsupported.c` returning `RMW_RET_UNSUPPORTED` for the rest | `rmw_tracer` loads; `ros2 doctor` sees it |
 | **R1 — pub/sub (copy path)** | `node.c`, `publisher.c` (`rmw_publish` → `graph.write(path, VALUE=CDR)`), `subscription.c` (`rmw_take` pops the ring, copies out), `wait.c` (`rmw_wait` over graph `await` + guard conditions) | a `talker`/`listener` pair over `rmw_tracer` |
 | **R2 — zero-copy (the edge over `rmw_zenoh`)** | loaned-message TUs: `rmw_borrow_loaned_message`/`rmw_publish_loaned_message`/`rmw_take_loaned_message`/`rmw_return_loaned_message` | a `view_t` **is** the loaned message — no copy. This is the **`inproc-borrow` path the bench shows beating zenoh** (flat 80 ns @ 8 KB); intra-host SHM = `mem_shared`. |
-| **R3 — QoS + graph** | `qos.c` (`rmw_qos_profile_t` ⇄ `:settings`; `rmw_tracer`-namespaced `delivery_mode=ON_CHANGE`), `graph.c` (`rmw_get_node_names`, graph guard conditions via `:children[]`) | QoS round-trips; `ros2 topic list` works |
+| **R3 — QoS + graph** | `qos.c` (`rmw_qos_profile_t` ⇄ `:settings`; `rmw_tracer`-namespaced `delivery_mode=EXPLICIT`), `graph.c` (`rmw_get_node_names`, graph guard conditions via `:children[]`) | QoS round-trips; `ros2 topic list` works |
 | **R4 — services/actions** | `service.c`, `client.c` (request/response path pairs) | services; actions compose on top |
 | **R5 — transport differentiators** | wire `rmw_tracer` to libtracer transports | ROS over **CAN/UART** (header-elided, [ADR-0022](../../docs/adr/0022-transport-framing-modes-elided-full-tlv-advertise.md)); ROS into **GPU memory** ([mem_cuda](../../docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)); high-rate topics over **scatter-gather composition** (`send(iov)` — see [Performance](../../docs/performance.md)) |
 
