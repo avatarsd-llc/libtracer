@@ -1,0 +1,28 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPointStrategy": "packages",
+  "entryPoints": [
+    "packages/core",
+    "packages/client",
+    "packages/transport-ws",
+    "packages/transport-webtransport"
+  ],
+  "out": "docs-api",
+  "name": "libtracer TypeScript bindings",
+  "readme": "README.md",
+  "includeVersion": false,
+  "validation": {
+    "notExported": true,
+    "invalidLink": true,
+    "notDocumented": true
+  },
+  "treatValidationWarningsAsErrors": true,
+  "externalSymbolLinkMappings": {
+    "typescript": {
+      "Error": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error"
+    },
+    "@avatarsd-llc/libtracer": {
+      "Tlv": "https://www.npmjs.com/package/@avatarsd-llc/libtracer"
+    }
+  }
+}
