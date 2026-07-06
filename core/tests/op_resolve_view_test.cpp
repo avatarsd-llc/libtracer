@@ -259,6 +259,44 @@ int main() {
               "both tiers stored byte-identical LKV after the WRITE");
     }
 
+    // ADR-0053 ⑤ / ADR-0042 §3 — the rope-tier referenced store: a view-delivered
+    // MULTI-LINK payload on a vertex that opted in (store_ref_min_bytes > 0) is PINNED
+    // as a subrope of the delivery (its segments kept, ZERO copy), yet byte-identical
+    // to the copy a default vertex makes. The arena tier proves the contiguous-frame
+    // twin in op_resolve_test's store_ref_threshold; here the payload spans many links.
+    {
+        std::printf("rope-tier pinned store (store_ref_min_bytes, multi-link payload):\n");
+        graph_t g;
+        tr::graph::vertex_t* v =
+            *g.register_vertex(*path_t::parse("/sensor/blob"), role_t::STORED_VALUE);
+        // Opt in via the :settings field-write (parses the u32), matching the arena test.
+        (void)g.write(*path_t::parse("/sensor/blob:settings.store_ref_min_bytes"),
+                      make_value(b_value({0x08, 0x00, 0x00, 0x00})));
+
+        std::vector<std::byte> big(32);
+        for (std::size_t i = 0; i < big.size(); ++i) big[i] = static_cast<std::byte>(i);
+        std::vector<std::byte> big_tlv;  // a 36-byte trailer-less VALUE TLV
+        tr::wire::emit_tlv(big_tlv, type_t::VALUE, opt_t{}, big);
+        const auto wframe =
+            b_fwd(fwd_op_t::WRITE, b_path({"sensor", "blob"}), b_path({"reply-ep"}), {}, big_tlv);
+
+        // One link per byte: the payload TLV is guaranteed to span many links.
+        std::vector<std::size_t> every_byte;
+        for (std::size_t i = 1; i < wframe.size(); ++i) every_byte.push_back(i);
+        op_resolver_t r(g);
+        const auto view = tr::wire::tlv_view_t::over(rope_split(wframe, every_byte));
+        check(view.has_value(), "fragmented WRITE frame adopts as a lazy view");
+        const auto reply = r.resolve(*view);
+        check(reply.has_value(), "rope-tier WRITE over threshold produced a reply");
+
+        const auto rd = g.read(v);
+        check(rd.has_value() && rd->link_count() > 1,
+              "multi-link payload PINNED as a subrope (segments kept, not copied to one buffer)");
+        check(rd.has_value() && rd->flatten().bytes().size() == big_tlv.size() &&
+                  std::memcmp(rd->flatten().bytes().data(), big_tlv.data(), big_tlv.size()) == 0,
+              "pinned store reads back byte-identical to the written VALUE TLV");
+    }
+
     // Remote subscribe — a :subscribers[] APPEND over a link (inbound_link set)
     // carrying a SUBSCRIBER: a fan-out edge bound identically by both tiers.
     differential("WRITE :subscribers[] remote subscribe (RESULT)", seed_temp_empty,
