@@ -272,12 +272,14 @@ void test_view_delivery_segment_identity() {
     std::printf("TCP transport — owning view delivery (ADR-0042 receiver seam):\n");
     recording_backend_t rec;
     tcp_transport_t listener(std::uint16_t{0}, &rec);
-    check(listener.delivers_views(), "tcp_transport_t::delivers_views() is true");
+    check(listener.delivers_ropes(), "tcp_transport_t::delivers_ropes() is true");
     tcp_transport_t dialer("127.0.0.1", listener.local_port());
 
     std::promise<tr::view::view_t> got;
     auto fut = got.get_future();
-    listener.set_view_receiver([&](tr::view::view_t f) { got.set_value(std::move(f)); });
+    listener.set_rope_receiver([&](tr::view::rope_t f) {
+        if (f.link_count() == 1) got.set_value(f.links()[0]);  // single-link: the trivial rope
+    });
 
     const auto frame = test_frame(48, 0x21);
     dialer.send(frame);
@@ -308,7 +310,7 @@ void test_backpressure_drain() {
     recording_backend_t rec(2);  // the first two allocations fail
     tcp_transport_t listener(std::uint16_t{0}, &rec);
     sink_t sink;
-    listener.set_view_receiver([&](tr::view::view_t f) { sink.push(f.bytes()); });
+    listener.set_rope_receiver([&](tr::view::rope_t f) { sink.push(f.links()[0].bytes()); });
     tcp_transport_t dialer("127.0.0.1", listener.local_port());
 
     const auto f1 = test_frame(8192, 0x01);  // bigger than the drain scratch (4 KiB)

@@ -128,10 +128,10 @@ class tcp_transport_t : public transport_t {
      * when absent, the span receiver gets a borrowed span over the same segment
      * bytes (the segment is released when the callback returns).
      */
-    void set_view_receiver(view_receiver_t receiver) override;
+    void set_rope_receiver(rope_receiver_t receiver) override;
 
-    /** @brief True — this transport honors @ref set_view_receiver (ADR-0042). */
-    [[nodiscard]] bool delivers_views() const override { return true; }
+    /** @brief True — this transport honors @ref set_rope_receiver (ADR-0042). */
+    [[nodiscard]] bool delivers_ropes() const override { return true; }
 
     /** @brief DIAL: the connect succeeded; LISTEN: the listen socket is bound. */
     [[nodiscard]] bool ok() const noexcept {
@@ -170,7 +170,7 @@ class tcp_transport_t : public transport_t {
     std::atomic<std::uint64_t> malformed_rx_{0};
 
     receiver_t receiver_;            // guarded by m_
-    view_receiver_t view_receiver_;  // guarded by m_; installed => owning delivery
+    rope_receiver_t rope_receiver_;  // guarded by m_; installed => owning delivery
     std::mutex m_;                   // guards the receivers
     std::mutex write_m_;             // serializes writes to conn_fd_
     std::atomic<int> conn_fd_{-1};   // the live peer connection (-1 = none)

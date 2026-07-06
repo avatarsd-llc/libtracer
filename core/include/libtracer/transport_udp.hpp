@@ -69,10 +69,10 @@ class udp_transport_t : public transport_t {
      * subsequent datagram; when absent, delivery is the borrowed-span path,
      * byte-identical to a backend-less transport.
      */
-    void set_view_receiver(view_receiver_t receiver) override;
+    void set_rope_receiver(rope_receiver_t receiver) override;
 
-    /** @brief True — this transport honors @ref set_view_receiver (ADR-0042 §2). */
-    [[nodiscard]] bool delivers_views() const override { return true; }
+    /** @brief True — this transport honors @ref set_rope_receiver (ADR-0042 §2). */
+    [[nodiscard]] bool delivers_ropes() const override { return true; }
 
     [[nodiscard]] bool ok() const noexcept { return fd_ >= 0; }
     [[nodiscard]] std::uint16_t local_port() const noexcept { return bound_port_; }
@@ -103,7 +103,7 @@ class udp_transport_t : public transport_t {
     std::atomic<std::uint64_t> dropped_rx_{0};
 
     receiver_t receiver_;            // guarded by m_
-    view_receiver_t view_receiver_;  // guarded by m_; installed => owning delivery path
+    rope_receiver_t rope_receiver_;  // guarded by m_; installed => owning delivery path
     std::mutex m_;
     std::atomic<bool> stop_{false};
     std::thread thread_;

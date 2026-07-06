@@ -176,7 +176,7 @@ struct webtransport_transport_t::impl_t {
     std::atomic<std::uint64_t> malformed_rx{0};
 
     receiver_t receiver;            // guarded by m
-    view_receiver_t view_receiver;  // guarded by m; installed => owning delivery
+    rope_receiver_t rope_receiver;  // guarded by m; installed => owning delivery
     std::mutex m;                   // guards the receivers
 
     // The single live session: its connection, every stream context, and the
@@ -235,11 +235,11 @@ struct webtransport_transport_t::impl_t {
 
     // Hand one reassembled frame up (owning when a view receiver is installed).
     void deliver(view::segment_ptr_t seg, std::size_t len) {
-        view_receiver_t vr;
+        rope_receiver_t vr;
         receiver_t r;
         {
             const std::lock_guard lock(m);
-            vr = view_receiver;
+            vr = rope_receiver;
             r = receiver;
         }
         if (vr) {
@@ -825,9 +825,9 @@ void webtransport_transport_t::set_receiver(receiver_t receiver) {
     impl_->receiver = std::move(receiver);
 }
 
-void webtransport_transport_t::set_view_receiver(view_receiver_t receiver) {
+void webtransport_transport_t::set_rope_receiver(rope_receiver_t receiver) {
     const std::lock_guard lock(impl_->m);
-    impl_->view_receiver = std::move(receiver);
+    impl_->rope_receiver = std::move(receiver);
 }
 
 void webtransport_transport_t::send(std::span<const std::byte> frame) {

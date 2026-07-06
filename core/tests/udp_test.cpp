@@ -200,11 +200,13 @@ void test_view_delivery() {
     tr::net::udp_transport_t a(47106, "127.0.0.1", 47107);
     tr::net::udp_transport_t b(47107, "127.0.0.1", 47106);
     check(a.ok() && b.ok(), "both UDP sockets bound");
-    check(b.delivers_views(), "udp_transport_t::delivers_views() is true");
+    check(b.delivers_ropes(), "udp_transport_t::delivers_ropes() is true");
 
     std::promise<tr::view::view_t> got;
     auto fut = got.get_future();
-    b.set_view_receiver([&](tr::view::view_t f) { got.set_value(std::move(f)); });
+    b.set_rope_receiver([&](tr::view::rope_t f) {
+        if (f.link_count() == 1) got.set_value(f.links()[0]);  // single-link: the trivial rope
+    });
 
     const std::array<std::byte, 5> frame{std::byte{0x09}, std::byte{0xAB}, std::byte{0xCD},
                                          std::byte{0xEF}, std::byte{0x42}};
@@ -241,7 +243,7 @@ void test_view_pool_exhaustion() {
     check(a.ok() && b.ok(), "both UDP sockets bound");
 
     std::atomic<int> delivered{0};
-    b.set_view_receiver([&](tr::view::view_t) { delivered.fetch_add(1); });
+    b.set_rope_receiver([&](const tr::view::rope_t&) { delivered.fetch_add(1); });
 
     const std::array<std::byte, 4> frame{std::byte{0x01}, std::byte{0x02}, std::byte{0x03},
                                          std::byte{0x04}};

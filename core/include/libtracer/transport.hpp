@@ -19,6 +19,7 @@
 #include <string_view>
 #include <vector>
 
+#include "libtracer/rope.hpp"
 #include "libtracer/view.hpp"
 
 namespace tr::net {
@@ -92,9 +93,12 @@ class bus_link_t {
 class transport_t {
    public:
     using receiver_t = std::function<void(std::span<const std::byte>)>;
-    /** @brief The OWNING inbound sink (ADR-0042): each frame is a `view_t` over a
-     *         refcounted segment the receiver may keep, subview, or rope onward. */
-    using view_receiver_t = std::function<void(view::view_t)>;
+    /** @brief The OWNING inbound sink (ADR-0042, generalized to ropes per
+     *         ADR-0053): each frame is a `rope_t` of refcounted links the receiver
+     *         may keep, subrope, or forward — a contiguous frame is the trivial
+     *         single-link case ("delivers views" and "delivers ropes" are ONE
+     *         capability, not two tiers — CONTEXT.md §ingress rope delivery). */
+    using rope_receiver_t = std::function<void(view::rope_t)>;
 
     virtual ~transport_t() = default;
 
@@ -121,27 +125,31 @@ class transport_t {
     /**
      * @brief Register the optional OWNING inbound sink (the ADR-0042 receiver seam).
      *
-     * A transport that can hand up owning frames (its @ref delivers_views returns
-     * true) delivers each inbound frame to @p receiver as a `view::view_t` over a
-     * refcounted segment drawn from a host-injected `mem_backend_t` — the receiver
-     * may pin, subview, or rope the frame beyond the callback (unlike the borrowed
-     * span of @ref set_receiver, which dies when the callback returns). Must be set
-     * before frames flow; delivery may occur on an internal transport thread.
+     * A transport that can hand up owning frames (its @ref delivers_ropes returns
+     * true) delivers each inbound frame to @p receiver as a `view::rope_t` whose
+     * links are refcounted views over segments drawn from a host-injected
+     * `mem_backend_t` — the receiver may pin, subrope, or forward the frame beyond
+     * the callback (unlike the borrowed span of @ref set_receiver, which dies when
+     * the callback returns). A contiguous frame arrives as a single-link rope; a
+     * scattered one (a CAN reassembly group, fragmented WS message) crosses this
+     * seam AS THE ROPE IT ALREADY IS — reassembly is chaining views, never a
+     * memcpy (ADR-0053 §5). Must be set before frames flow; delivery may occur on
+     * an internal transport thread.
      *
      * The base implementation is a documented no-op: a span-only transport ignores
-     * an installed view receiver, honestly — there is NO adapter that wraps a
-     * borrowed span into a `view_t` whose refcount would lie about lifetime
+     * an installed rope receiver, honestly — there is NO adapter that wraps a
+     * borrowed span into a rope whose refcounts would lie about lifetime
      * (ADR-0042 §1). A transport that honors this seam MUST also override
-     * @ref delivers_views to return true, so `fwd_router_t::add_child` installs
+     * @ref delivers_ropes to return true, so `fwd_router_t::add_child` installs
      * the receiver matching the link's capability.
      */
-    virtual void set_view_receiver(view_receiver_t receiver) { (void)receiver; }
+    virtual void set_rope_receiver(rope_receiver_t receiver) { (void)receiver; }
 
     /**
      * @brief The owning-delivery capability (ADR-0042 §1): true iff this transport
-     *        honors @ref set_view_receiver by delivering refcounted `view_t` frames.
+     *        honors @ref set_rope_receiver by delivering refcounted rope frames.
      */
-    [[nodiscard]] virtual bool delivers_views() const { return false; }
+    [[nodiscard]] virtual bool delivers_ropes() const { return false; }
 
     /**
      * @brief The multi-peer (bus) capability (ADR-0044): non-null iff this link

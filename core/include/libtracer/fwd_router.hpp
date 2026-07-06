@@ -96,11 +96,11 @@ class fwd_router_t {
      * Installs a receiver on @p link that funnels each inbound frame to
      * `on_frame(name, ...)`. Call once per link, during setup (before frames flow).
      *
-     * Installs the receiver matching the link's capability (ADR-0042 §1): a
-     * view-delivering link (`link.delivers_views()`) gets a view receiver whose
-     * owning frame funnels through the SAME routing (the forward hop stays
-     * span-based zero-heap; the refcount rides only to the terminus); every other
-     * link keeps the borrowed-span receiver unchanged.
+     * Installs the receiver matching the link's capability (ADR-0042 §1, ropes
+     * per ADR-0053): an owning link (`link.delivers_ropes()`) gets a rope
+     * receiver whose frame funnels through the SAME routing (the forward hop
+     * stays span-based zero-heap; the refcounts ride only to the terminus);
+     * every other link keeps the borrowed-span receiver unchanged.
      *
      * @param name This node's local NAME for the link (e.g. "up", "cli").
      * @param link The transport carrying the next/previous hop.
@@ -219,17 +219,21 @@ class fwd_router_t {
 
    private:
     /**
-     * @brief Route one OWNING inbound frame from a view-delivering link (ADR-0042 §1).
+     * @brief Route one OWNING inbound frame from a rope-delivering link
+     *        (ADR-0042 §1, generalized per ADR-0053).
      *
-     * Runs the same routing as @ref on_frame over the view's bytes span — the
-     * forward hop is untouched (offset-dispatch, zero heap) — and threads the
-     * owning @p frame to the terminus, where a big trailer-less WRITE payload may
-     * be stored as a subview of it (refcount pin, zero copy) under the vertex's
-     * `store_ref_min_bytes` policy.
+     * A single-link rope (every current producer) runs the same routing as
+     * @ref on_frame over the link's bytes span — the forward hop is untouched
+     * (offset-dispatch, zero heap) — and threads the owning view to the
+     * terminus, where a big trailer-less WRITE payload may be stored as a
+     * subview of it (refcount pin, zero copy) under the vertex's
+     * `store_ref_min_bytes` policy. A multi-link rope is flattened ONCE here —
+     * the documented ADR-0053 interim recipe until partial-path routing
+     * (migration step ④) consumes `tlv_view_t` and step ⑥ deletes the flatten.
      */
-    void on_frame_view(std::string_view inbound_name, view::view_t frame);
+    void on_frame_rope(std::string_view inbound_name, view::rope_t frame);
     /** @brief The shared routing body: @p frame_view is the owning frame when the
-     *         link delivers views (nullptr on the borrowed-span path). */
+     *         link delivers ropes (nullptr on the borrowed-span path). */
     void on_frame_impl(std::string_view inbound_name, std::span<const std::byte> frame,
                        const view::view_t* frame_view);
     /**

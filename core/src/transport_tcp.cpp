@@ -147,9 +147,9 @@ void tcp_transport_t::set_receiver(receiver_t receiver) {
     receiver_ = std::move(receiver);
 }
 
-void tcp_transport_t::set_view_receiver(view_receiver_t receiver) {
+void tcp_transport_t::set_rope_receiver(rope_receiver_t receiver) {
     const std::lock_guard lock(m_);
-    view_receiver_ = std::move(receiver);
+    rope_receiver_ = std::move(receiver);
 }
 
 void tcp_transport_t::send(std::span<const std::byte> frame) {
@@ -250,11 +250,11 @@ void tcp_transport_t::serve(int fd) {
 
         // Both receivers are installed before frames flow (the set_receiver
         // contract); snapshot them before the body read.
-        view_receiver_t view_receiver;
+        rope_receiver_t rope_receiver;
         receiver_t receiver;
         {
             const std::lock_guard lock(m_);
-            view_receiver = view_receiver_;
+            rope_receiver = rope_receiver_;
             receiver = receiver_;
         }
 
@@ -270,10 +270,10 @@ void tcp_transport_t::serve(int fd) {
         }
         if (!read_exact(fd, seg->bytes.data(), len)) return;
 
-        if (view_receiver) {
+        if (rope_receiver) {
             // Hand the frame up OWNING (narrowed to the frame length) — the
             // receiver may pin, subview, or rope it beyond this call.
-            view_receiver(view::view_t::over(std::move(seg)).subview(0, len));
+            rope_receiver(view::view_t::over(std::move(seg)).subview(0, len));
         } else if (receiver) {
             // Borrowed-span delivery from the same segment bytes; the segment is
             // released when the callback returns.

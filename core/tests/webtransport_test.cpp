@@ -286,12 +286,14 @@ void test_view_delivery_and_backpressure() {
     std::printf("WebTransport — owning view delivery (ADR-0042) + backpressure drain:\n");
     recording_backend_t rec;
     webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key, &rec);
-    check(listener.delivers_views(), "webtransport_transport_t::delivers_views() is true");
+    check(listener.delivers_ropes(), "webtransport_transport_t::delivers_ropes() is true");
     webtransport_transport_t dialer("127.0.0.1", listener.local_port(), "/", dev_tls());
 
     std::promise<tr::view::view_t> got;
     auto fut = got.get_future();
-    listener.set_view_receiver([&](tr::view::view_t f) { got.set_value(std::move(f)); });
+    listener.set_rope_receiver([&](tr::view::rope_t f) {
+        if (f.link_count() == 1) got.set_value(f.links()[0]);  // single-link: the trivial rope
+    });
 
     const auto frame = test_frame(48, 0x21);
     dialer.send(frame);
@@ -316,7 +318,7 @@ void test_view_delivery_and_backpressure() {
     recording_backend_t starved(2);
     webtransport_transport_t listener2(std::uint16_t{0}, g_cert, g_key, &starved);
     sink_t sink;
-    listener2.set_view_receiver([&](tr::view::view_t f) { sink.push(f.bytes()); });
+    listener2.set_rope_receiver([&](tr::view::rope_t f) { sink.push(f.links()[0].bytes()); });
     webtransport_transport_t dialer2("127.0.0.1", listener2.local_port(), "/", dev_tls());
     const auto d1 = test_frame(8192, 0x01);
     const auto d2 = test_frame(16, 0x50);

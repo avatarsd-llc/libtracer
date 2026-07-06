@@ -77,9 +77,9 @@ void udp_transport_t::set_receiver(receiver_t receiver) {
     receiver_ = std::move(receiver);
 }
 
-void udp_transport_t::set_view_receiver(view_receiver_t receiver) {
+void udp_transport_t::set_rope_receiver(rope_receiver_t receiver) {
     const std::lock_guard lock(m_);
-    view_receiver_ = std::move(receiver);
+    rope_receiver_ = std::move(receiver);
 }
 
 void udp_transport_t::send(std::span<const std::byte> frame) {
@@ -150,13 +150,13 @@ void udp_transport_t::run() {
         // frames flow (the set_receiver contract), so which path a given datagram
         // takes is settled by then; the span path below re-reads its receiver after
         // recvfrom, byte-identical to the pre-ADR-0042 loop.
-        view_receiver_t view_receiver;
+        rope_receiver_t rope_receiver;
         {
             const std::lock_guard lock(m_);
-            view_receiver = view_receiver_;
+            rope_receiver = rope_receiver_;
         }
 
-        if (view_receiver) {
+        if (rope_receiver) {
             // ADR-0042 §2: one datagram = one frame = one segment — recvfrom straight
             // into a fresh refcounted segment from the injected backend; no library
             // buffer, no copy. The pending segment is reused across recv timeouts
@@ -179,7 +179,7 @@ void udp_transport_t::run() {
             }
             // Narrow the whole-segment view to the received length and hand it up
             // owning — the receiver may pin/subview it beyond this call.
-            view_receiver(
+            rope_receiver(
                 view::view_t::over(std::move(rx_seg)).subview(0, static_cast<std::size_t>(n)));
             continue;
         }
@@ -199,9 +199,9 @@ void udp_transport_t::run() {
         {
             const std::lock_guard lock(m_);
             receiver = receiver_;
-            view_receiver = view_receiver_;
+            rope_receiver = rope_receiver_;
         }
-        if (view_receiver) {
+        if (rope_receiver) {
             // The view receiver was installed while this iteration was already
             // blocked in recvfrom with the span decision — deliver owning anyway
             // via a one-time copy into a backend segment (race-window datagrams
@@ -212,7 +212,7 @@ void udp_transport_t::run() {
                 continue;
             }
             std::memcpy(seg->bytes.data(), buf, static_cast<std::size_t>(n));
-            view_receiver(
+            rope_receiver(
                 view::view_t::over(std::move(seg)).subview(0, static_cast<std::size_t>(n)));
             continue;
         }
