@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 
@@ -303,6 +304,64 @@ int main() {
             check(inner && inner->type == type_t::VALUE && inner->payload.size() == 4 &&
                       tr::detail::load_le<std::uint32_t>(inner->payload) == kWritten,
                   "LKV updated to the CRC-verified value");
+        }
+    }
+
+    // Control frame over a multi-link rope (ADR-0055 §2/§3): the on_frame_rope whole-frame
+    // flatten is gone — ADVERTISE / COMPACT are served rope-native by on_control_rope,
+    // which reads the label off the rope and materializes ONLY the child sub-rope it needs.
+    {
+        std::printf("ADVERTISE forward over a multi-link rope (rope-native control sink):\n");
+        // route /up/sensor: "up" names a child, so this node re-advertises downstream.
+        const std::vector<std::byte> adv =
+            tr::net::encode_advertise(0x1234u, b_path({"up", "sensor"}));
+        const auto oracle = forward_contiguous(adv);
+        check(oracle.size() == 1, "contiguous ADVERTISE re-advertises exactly one frame");
+        if (!oracle.empty()) {
+            const auto dec = tr::wire::decode(oracle[0]);
+            check(dec && dec->type == type_t::ADVERTISE, "oracle egress is an ADVERTISE");
+        }
+        int mismatches = 0, checked = 0;
+        for (std::size_t cut = 1; cut < adv.size(); ++cut) {
+            const std::array<std::size_t, 1> cuts{cut};
+            if (forward_as_rope(adv, cuts) != oracle) ++mismatches;
+            ++checked;
+        }
+        check(checked > 0 && mismatches == 0,
+              "every multi-link ADVERTISE split re-advertises byte-identically to the oracle");
+        std::vector<std::size_t> every_byte;
+        for (std::size_t i = 1; i < adv.size(); ++i) every_byte.push_back(i);
+        check(forward_as_rope(adv, every_byte) == oracle,
+              "one-link-per-byte ADVERTISE rope re-advertises byte-identically");
+    }
+
+    // COMPACT terminus over a multi-link rope: advertise a LOCAL route first (binds the
+    // label to this node), then deliver a label-compacted COMPACT as a scatter-gather
+    // rope — on_control_rope materializes ONLY the payload sub-rope and deliver_local
+    // applies the write to the LKV.
+    {
+        std::printf("COMPACT terminus over a multi-link rope (payload sub-rope materialize):\n");
+        graph_t g;
+        const auto sensor = path_t::parse("/sensor");
+        tr::graph::vertex_t* v = *g.register_vertex(*sensor, role_t::STORED_VALUE);
+        fwd_router_t router(g);
+        fake_rope_link_t in;
+        router.add_child("in", in);
+        // "sensor" names no child ⇒ a terminus binding for label 0x0042 on link "in".
+        const std::uint16_t kLabel = 0x0042u;
+        const std::vector<std::byte> adv = tr::net::encode_advertise(kLabel, b_path({"sensor"}));
+        in.inject(rope_split(adv, std::array<std::size_t, 0>{}));  // single link: binds the label
+        const std::uint32_t kVal = 0xFEEDBEEFu;
+        const std::vector<std::byte> comp = tr::net::encode_compact(kLabel, b_value_u32(kVal));
+        const std::array<std::size_t, 1> cuts{comp.size() / 2};
+        in.inject(rope_split(comp, cuts));  // multi-link: the path under test
+        const auto stored = g.read(v);
+        check(stored.has_value(), "/sensor written by a multi-link COMPACT terminus");
+        if (stored) {
+            const auto inner = tr::wire::view_as_tlv(stored->only());
+            check(inner && inner->type == type_t::VALUE && inner->payload.size() == 4 &&
+                      tr::detail::load_le<std::uint32_t>(inner->payload) == kVal,
+                  "LKV updated to the label-compacted value (payload sub-rope decoded)");
         }
     }
 

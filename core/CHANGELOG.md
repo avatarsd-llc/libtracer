@@ -39,7 +39,14 @@ reference implementation is pre-1.0; everything currently lives under
   `[](const view::rope_t& r){ const view::view_t m = r.materialize(); const auto b =
   m.bytes(); … }` — hold `m` while reading its span; this also drops the old
   decode-then-re-encode round-trip. Deletes the `on_frame_rope` whole-frame flatten for
-  replies; `tlv_t` and the ADR-0041 §2 span-arena contract are untouched.
+  replies; `tlv_t` and the ADR-0041 §2 span-arena contract are untouched. A follow-on
+  (ADR-0055 §2/§3) makes the **control-frame** egress (`ADVERTISE` / `COMPACT` /
+  `HANDLE_NACK`) rope-native too — the label is read off the rope and only the child
+  sub-rope a handler needs contiguous (the route to re-encode, the payload to store) is
+  materialized — which **deletes the `on_frame_rope` whole-frame flatten entirely**,
+  completing the ADR-0053 ⑥ flatten sweep for the net plane. The only flattens left on the
+  receive path are the legitimate span-tier decodes on the contiguous `on_frame` path and
+  the on-demand payload/route sub-rope materializes at the control egress/store boundary.
 
 - **Vertex value operations split into `assign` + `propagate`; `write` retained as
   their composition (RFC-0008 — breaking).** `graph_t` now exposes the two irreducible

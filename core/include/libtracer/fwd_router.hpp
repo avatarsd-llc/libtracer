@@ -289,12 +289,27 @@ class fwd_router_t {
      */
     template <class Cursor>
     void route_fwd_forward(std::string_view inbound_name, const Cursor& cur, transport_t& child);
+    /**
+     * @brief Dispatch a multi-link control frame (ADVERTISE / COMPACT / HANDLE_NACK)
+     *        rope-native (ADR-0055 §2).
+     *
+     * Reads the outer type + `u16` label straight off the scatter-gather @p frame via a
+     * @ref wire::grammar::rope_cursor — NO whole-frame flatten. A `HANDLE_NACK` acts on the
+     * label alone (zero materialize); ADVERTISE / COMPACT materialize **only** the child
+     * sub-rope a handler genuinely needs contiguous (the route to strip+re-encode, the
+     * payload to store/forward — an ADR-0052 legitimate egress/store boundary), never the
+     * whole frame. A contiguous (single-link) control frame never reaches here — it decodes
+     * eagerly in @ref on_frame_impl. This is the sink that let the interim
+     * `on_frame_rope` whole-frame flatten be deleted (ADR-0053 ⑥ / ADR-0055 §3).
+     */
+    void on_control_rope(std::string_view inbound_name, view::rope_t frame);
     /** @brief Learn (or re-advertise downstream) a `label ↔ route` binding (RFC-0004 §E.1). */
-    void on_advertise(std::string_view inbound_name, const wire::tlv_t& adv);
-    /** @brief Forward (swap label) or locally deliver a label-compacted COMPACT. */
-    void on_compact(std::string_view inbound_name, const wire::tlv_t& comp);
+    void on_advertise(std::string_view inbound_name, std::uint16_t label, const wire::tlv_t& route);
+    /** @brief Forward (swap label) or locally deliver a label-compacted COMPACT payload. */
+    void on_compact(std::string_view inbound_name, std::uint16_t label,
+                    std::span<const std::byte> payload_bytes);
     /** @brief Re-advertise an egress binding in response to a downstream HANDLE_NACK. */
-    void on_nack(std::string_view inbound_name, const wire::tlv_t& nack);
+    void on_nack(std::string_view inbound_name, std::uint16_t label);
     /** @brief Resolve a bound local route and apply the delivered write (delivery-is-a-write). */
     [[nodiscard]] bool deliver_local(std::span<const std::byte> route_path,
                                      std::span<const std::byte> payload);
