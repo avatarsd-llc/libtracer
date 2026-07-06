@@ -233,7 +233,11 @@ int main() {
     fwd_router_t router_c(graph_c);
     mailbox_t delivered;    // ordered payload bytes delivered to C
     mailbox_t reply_inbox;  // subscribe / one-shot REPLY frames
-    router_c.on_reply([&](const tlv_t& reply) { reply_inbox.push(tr::wire::encode(reply)); });
+    router_c.on_reply([&](const tr::view::rope_t& reply) {
+        const tr::view::view_t mat = reply.materialize();
+        const auto b = mat.bytes();
+        reply_inbox.push(std::vector<std::byte>(b.begin(), b.end()));
+    });
     router_c.on_compact_delivery(
         [&](std::span<const std::byte>, std::span<const std::byte> payload) {
             delivered.push(std::vector<std::byte>(payload.begin(), payload.end()));

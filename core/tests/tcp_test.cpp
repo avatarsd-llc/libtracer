@@ -482,9 +482,11 @@ void test_config_constructed_tcp() {
     // A's reply sink is set BEFORE the sockets exist (configure before frames flow).
     std::promise<std::vector<std::byte>> got;
     auto fut = got.get_future();
-    router_a.on_reply([&got](const tr::wire::tlv_t& reply) {
+    router_a.on_reply([&got](const tr::view::rope_t& reply) {
         try {
-            got.set_value(tr::wire::encode(reply));
+            const tr::view::view_t mat = reply.materialize();
+            const auto b = mat.bytes();
+            got.set_value(std::vector<std::byte>(b.begin(), b.end()));
         } catch (...) {
         }
     });

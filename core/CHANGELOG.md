@@ -15,6 +15,20 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Changed
 
+- **`fwd_router_t::on_reply` is now rope-native (ADR-0055 — breaking).** The reply sink
+  changes from `std::function<void(const wire::tlv_t&)>` to
+  `std::function<void(const view::rope_t&)>`. The router no longer decodes or flattens a
+  terminating `FWD{REPLY}` on the consumer's behalf — a rope-delivered reply reaches the
+  sink zero-copy, and the sink materializes on demand: `reply.materialize()` yields the
+  contiguous bytes (a single-link reply — the common case — is returned zero-copy, no
+  alloc; only a multi-link reply pays one flatten), which feed `wire::decode` for the
+  eager tree (the ADR-0052 escape hatch, now at the consumer). Migration for an existing
+  `[](const tlv_t& r){ … wire::encode(r) … }` sink: take
+  `[](const view::rope_t& r){ const view::view_t m = r.materialize(); const auto b =
+  m.bytes(); … }` — hold `m` while reading its span; this also drops the old
+  decode-then-re-encode round-trip. Deletes the `on_frame_rope` whole-frame flatten for
+  replies; `tlv_t` and the ADR-0041 §2 span-arena contract are untouched.
+
 - **Vertex value operations split into `assign` + `propagate`; `write` retained as
   their composition (RFC-0008 — breaking).** `graph_t` now exposes the two irreducible
   operations a `write` was hiding: `assign(v, value)` performs only the state transition

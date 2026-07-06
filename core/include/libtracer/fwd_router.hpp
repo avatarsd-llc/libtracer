@@ -110,14 +110,23 @@ class fwd_router_t {
     /**
      * @brief Set the sink for a REPLY that terminates at this node's reply endpoint.
      *
-     * Invoked (with the decoded FWD{REPLY}) when a REPLY's first `dst` segment does
-     * not name a transport child — i.e. the accumulated return route has been fully
-     * consumed and this node is the originator. Optional; absent ⇒ such a reply is
-     * dropped.
+     * Invoked (with the `FWD{REPLY}` frame as a @ref view::rope_t) when a REPLY's first
+     * `dst` segment does not name a transport child — i.e. the accumulated return route
+     * has been fully consumed and this node is the originator. Optional; absent ⇒ such a
+     * reply is dropped.
+     *
+     * The frame is handed over rope-native (ADR-0055): the router performs NO decode and
+     * NO flatten — a rope-delivered reply reaches the sink zero-copy. A sink that wants
+     * contiguous bytes holds `const view_t m = reply.materialize()` and reads `m.bytes()`
+     * — a single-link reply (the common case) is returned zero-copy, no alloc, no copy;
+     * only a multi-link reply pays one flatten, on demand. A sink that wants the eager
+     * tree decodes those bytes (`wire::decode(m.bytes())`). The materialize escape hatch
+     * (ADR-0052) now lives at the consumer, not the router; keep `m` alive while reading
+     * its span.
      *
      * @param cb Callback invoked on a transport receive thread; keep it cheap.
      */
-    void on_reply(std::function<void(const wire::tlv_t&)> cb);
+    void on_reply(std::function<void(const view::rope_t&)> cb);
 
     /**
      * @brief Set a read-only observer of every inbound FWD (observability/tests).
@@ -304,7 +313,7 @@ class fwd_router_t {
     std::pmr::memory_resource* mr_;  // terminus-arena spill resource (ADR-0039 §1)
     child_registry_t registry_;      // the one NAME→link demux table (Brick 3a, ADR-0037)
     route_handle_t handles_;         // per-link label tables (compact flows only)
-    std::function<void(const wire::tlv_t&)> reply_cb_;
+    std::function<void(const view::rope_t&)> reply_cb_;
     std::function<void(std::string_view, const wire::tlv_t&)> inbound_cb_;
     std::function<void(std::string_view, std::span<const std::byte>)> raw_cb_;
     std::function<void(std::span<const std::byte>, std::span<const std::byte>)> delivery_cb_;

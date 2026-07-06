@@ -263,9 +263,11 @@ void test_config_constructed_udp() {
     // the same "configure before frames flow" contract as add_child.
     std::promise<std::vector<std::byte>> got;
     auto fut = got.get_future();
-    router_a.on_reply([&got](const tr::wire::tlv_t& reply) {
+    router_a.on_reply([&got](const tr::view::rope_t& reply) {
         try {
-            got.set_value(tr::wire::encode(reply));
+            const tr::view::view_t mat = reply.materialize();
+            const auto b = mat.bytes();
+            got.set_value(std::vector<std::byte>(b.begin(), b.end()));
         } catch (...) {
         }
     });
