@@ -24,6 +24,14 @@
 
 namespace tr::net {
 
+/**
+ * @brief A single-peer UDP datagram @ref transport_t (one datagram = one frame).
+ *
+ * Binds a local UDP socket and sends to one peer; a listener-mode instance learns its peer
+ * from the first inbound datagram's source address. Supports the owning rope-receiver seam
+ * (ADR-0042 §2): each datagram is received straight into a refcounted segment from a
+ * host-injected `mem_backend_t`, which also bounds the datagram size a node accepts.
+ */
 class udp_transport_t : public transport_t {
    public:
     /** @brief The largest datagram one frame can occupy — the RX segment size a view
@@ -31,24 +39,23 @@ class udp_transport_t : public transport_t {
      *         = one frame = one segment, ADR-0042 §2). */
     static constexpr std::size_t kMaxDatagram = 65536;
 
-    // Bind a local UDP socket on `bind_port` (0 = ephemeral; see local_port());
-    // send() targets `peer_host:peer_port` (IPv4 dotted-quad, e.g. "127.0.0.1").
-    // Listener mode: constructed with an unresolved peer (`peer_host` empty or
-    // `peer_port` 0), the transport LEARNS its peer from each inbound datagram's
-    // source address — the standard single-peer UDP-server shape, which lets a
-    // config-created `listener` connection (#83) reply to a dialing client whose
-    // ephemeral port is unknowable in advance. Until the first datagram arrives,
-    // send() is a no-op (there is nobody to send to).
-    //
-    // `backend` is the host-injected RX memory seam (ADR-0042 §2): when a view
-    // receiver is installed, each datagram is recvfrom'd straight into a fresh
-    // segment drawn from it, sized min(kMaxDatagram, backend->max_segment_size())
-    // — the injected backend BOUNDS the datagram a node accepts, so a pool over a
-    // static MCU slab (slot payload ≪ 64 KiB) works as-is (default: the process
-    // heap, which reports unbounded and keeps the full cap). Exhaustion (`alloc`
-    // == nullptr) is backpressure — the datagram is dropped and dropped_rx()
-    // ticks, never an OOM. Without a view receiver the backend is untouched
-    // (span path unchanged). Must outlive the transport.
+    /**
+     * @brief Bind a local UDP socket on @p bind_port and target @p peer_host : @p peer_port.
+     *
+     * @p bind_port 0 = ephemeral (see @ref local_port). @p peer_host is an IPv4 dotted-quad
+     * (e.g. "127.0.0.1"). Listener mode: with an unresolved peer (@p peer_host empty or
+     * @p peer_port 0) the transport LEARNS its peer from each inbound datagram's source
+     * address — the single-peer UDP-server shape that lets a config-created `listener`
+     * connection (#83) reply to a dialing client whose ephemeral port is unknowable in
+     * advance; until the first datagram arrives, @ref send is a no-op.
+     *
+     * @p backend is the host-injected RX memory seam (ADR-0042 §2): when a rope receiver is
+     * installed, each datagram is recvfrom'd straight into a fresh segment drawn from it,
+     * sized `min(kMaxDatagram, backend->max_segment_size())` — so the backend BOUNDS the
+     * datagram a node accepts (a pool over a static MCU slab works as-is; default is the
+     * process heap, unbounded, keeping the full cap). Exhaustion is backpressure — the
+     * datagram is dropped and @ref dropped_rx ticks, never an OOM. Must outlive the transport.
+     */
     udp_transport_t(std::uint16_t bind_port, const std::string& peer_host, std::uint16_t peer_port,
                     mem::mem_backend_t* backend = &mem::heap_backend());
     ~udp_transport_t() override;
@@ -74,7 +81,9 @@ class udp_transport_t : public transport_t {
     /** @brief True — this transport honors @ref set_rope_receiver (ADR-0042 §2). */
     [[nodiscard]] bool delivers_ropes() const override { return true; }
 
+    /** @brief True iff the socket bound successfully. */
     [[nodiscard]] bool ok() const noexcept { return fd_ >= 0; }
+    /** @brief The bound local port (resolves an ephemeral @c bind_port of 0). */
     [[nodiscard]] std::uint16_t local_port() const noexcept { return bound_port_; }
     /** @brief Datagrams dropped because the RX backend was exhausted (backpressure,
      *         ADR-0039 §4 / ADR-0042 §2) — never an OOM. */

@@ -79,7 +79,7 @@ struct conn_settings_t {
 /**
  * @brief Groups connection vertices under `/net` and makes each a `/` vertex (ADR-0027).
  *
- * Construct over a live @ref graph::graph_t and @ref fwd_router_t. Registers a
+ * Construct over a live @ref graph::graph_t and `fwd_router_t`. Registers a
  * `client` and `listener` child type on the graph (via the #82 `register_child_type`
  * seam) so an in-band `write /net:children[] += SPEC{type, name, config}` instantiates
  * a connection vertex at `/net/<name>` and wires its transport into the router's

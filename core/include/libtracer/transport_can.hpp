@@ -372,7 +372,7 @@ class transport_can : public transport_t, public bus_link_t {
  * then constructs a @ref transport_can over a production @ref socketcan_link_t and
  * the connection vertex owns it. Per the ADR-0043 §5 leanness ruling, every
  * CAN-private key is parsed HERE from the raw config SETTINGS TLV — nothing lands
- * in the shared @ref conn_settings_t:
+ * in the shared `conn_settings_t`:
  *  - `ifname` (NAME, required) — the SocketCAN interface (e.g. `"can0"`, `"vcan0"`);
  *  - `node` (VALUE u16, required) — this node's id in the structured 29-bit ID;
  *  - `version` (VALUE u8) — the protocol-version prefix (default 0);
