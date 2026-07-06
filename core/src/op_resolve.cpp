@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cstring>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -68,46 +69,96 @@ static_assert(struct_opt(std::byte{0x00}) == std::byte{0x00});
     return wire::err_t::PATH_NOT_FOUND;
 }
 
-// A parsed request FWD — arena node INDICES, no bytes owned (ADR-0041 §2: the
-// arena and its spans are read-only until an ownership copy is taken).
+// The node-reader concept (ADR-0053 §7): the terminus resolves through ONE
+// templated walk over a decoded-TLV node, so the span arena and the lazy rope
+// view share the resolver instead of forking it (the drift class ADR-0048 §1
+// eliminated in the grammar). A node exposes its header facts, its
+// trailer-excluded whole-TLV `wire` bytes and its `body` bytes, and FORWARD
+// child iteration (`children().next()`) — never random sibling access, so the
+// same walk serves a forward-only rope view. `arena_node` is the span-tier
+// instantiation (byte-identical, still the MCU terminus + conformance oracle);
+// the `tlv_view_t` reader instantiation follows (3c).
+struct arena_node {
+    const tlv_arena_t* a = nullptr;
+    std::uint32_t i = 0;
+
+    [[nodiscard]] const arena_tlv_t& node() const noexcept { return (*a)[i]; }
+    [[nodiscard]] type_t type() const noexcept { return node().type; }
+    [[nodiscard]] opt_t opt() const noexcept { return node().opt; }
+    [[nodiscard]] bool structured() const noexcept { return node().opt.pl; }
+    [[nodiscard]] std::span<const std::byte> wire() const noexcept { return node().wire; }
+    [[nodiscard]] std::span<const std::byte> body() const noexcept { return node().body; }
+    [[nodiscard]] bool canonical_path() const noexcept { return node().canonical_path; }
+
+    // Forward-only child cursor — the shared shape of `tlv_view_t::children_t`.
+    class children_cursor {
+       public:
+        children_cursor(const tlv_arena_t* a, std::uint32_t begin, std::uint32_t end) noexcept
+            : a_(a), j_(begin), end_(end) {}
+        [[nodiscard]] std::optional<arena_node> next() noexcept {
+            if (j_ >= end_) return std::nullopt;
+            const std::uint32_t cur = j_;
+            j_ = a_->next_sibling(j_);
+            return arena_node{a_, cur};
+        }
+
+       private:
+        const tlv_arena_t* a_;
+        std::uint32_t j_;
+        std::uint32_t end_;
+    };
+    [[nodiscard]] children_cursor children() const noexcept {
+        return children_cursor{a, tlv_arena_t::first_child(i), node().end};
+    }
+};
+
+// A parsed request FWD over node HANDLES — re-readable, no bytes owned until an
+// ownership copy is taken (ADR-0041 §2). Templated over the node-reader @p N so
+// the arena and the lazy view produce the same parsed shape.
+template <class N>
 struct parsed_fwd_t {
     fwd_op_t op{};
-    std::uint32_t dst = 0;            // forward route (PATH node index)
-    std::uint32_t selector = 0;       // optional :field (FIELD node index; 0 = absent)
-    std::uint32_t src = 0;            // accumulated return route (PATH node index)
-    std::uint32_t payload = 0;        // WRITE only (node index; 0 = absent)
+    N dst{};                          // forward route (a PATH node)
+    std::optional<N> selector{};      // optional :field (a FIELD node)
+    N src{};                          // accumulated return route (a PATH node)
+    std::optional<N> payload{};       // WRITE only (the value node)
     std::uint64_t await_timeout = 0;  // AWAIT only
     bool has_await_timeout = false;
 };
 
 // Parse the FWD child sequence positionally (RFC-0004 §B order: op, dst, FIELD?,
-// src, [payload | await_timeout]) over the arena's pre-order indices. Returns
-// INVALID_PATH for a structurally malformed frame (the resolver turns that into
-// the error side, not a reply). Index 0 is the root, so 0 doubles as "absent".
-[[nodiscard]] result_t<parsed_fwd_t> parse_fwd(const tlv_arena_t& a) {
-    const arena_tlv_t& root = a.root();
-    if (root.type != type_t::FWD || !root.opt.pl) return std::unexpected(status_t::INVALID_PATH);
-    const std::uint32_t end = root.end;
-    parsed_fwd_t p;
-    std::uint32_t i = tlv_arena_t::first_child(0);
-    if (i >= end || a[i].type != type_t::VALUE) return std::unexpected(status_t::INVALID_PATH);
-    p.op = static_cast<fwd_op_t>(detail::load_le<std::uint8_t>(a[i].body));
-    i = a.next_sibling(i);
-    if (i >= end || a[i].type != type_t::PATH) return std::unexpected(status_t::INVALID_PATH);
-    p.dst = i;
-    i = a.next_sibling(i);
-    if (i < end && a[i].type == type_t::FIELD) {
-        p.selector = i;
-        i = a.next_sibling(i);
+// src, [payload | await_timeout]) by FORWARD iteration over @p root's children.
+// Returns INVALID_PATH for a structurally malformed frame (the resolver turns
+// that into the error side, not a reply).
+template <class N>
+[[nodiscard]] result_t<parsed_fwd_t<N>> parse_fwd(const N& root) {
+    if (root.type() != type_t::FWD || !root.structured())
+        return std::unexpected(status_t::INVALID_PATH);
+    auto ch = root.children();
+    parsed_fwd_t<N> p;
+
+    const std::optional<N> op = ch.next();
+    if (!op || op->type() != type_t::VALUE) return std::unexpected(status_t::INVALID_PATH);
+    p.op = static_cast<fwd_op_t>(detail::load_le<std::uint8_t>(op->body()));
+
+    std::optional<N> dst = ch.next();
+    if (!dst || dst->type() != type_t::PATH) return std::unexpected(status_t::INVALID_PATH);
+    p.dst = *dst;
+
+    std::optional<N> next = ch.next();
+    if (next && next->type() == type_t::FIELD) {
+        p.selector = *next;
+        next = ch.next();
     }
-    if (i >= end || a[i].type != type_t::PATH) return std::unexpected(status_t::INVALID_PATH);
-    p.src = i;
-    i = a.next_sibling(i);
+    if (!next || next->type() != type_t::PATH) return std::unexpected(status_t::INVALID_PATH);
+    p.src = *next;
+
+    const std::optional<N> tail = ch.next();
     if (p.op == fwd_op_t::WRITE) {
-        if (i < end) p.payload = i;
+        if (tail) p.payload = *tail;
     } else if (p.op == fwd_op_t::AWAIT) {
-        if (i < end && a[i].type == type_t::VALUE) {
-            p.await_timeout = detail::load_le<std::uint64_t>(a[i].body);
+        if (tail && tail->type() == type_t::VALUE) {
+            p.await_timeout = detail::load_le<std::uint64_t>(tail->body());
             p.has_await_timeout = true;
         }
     }
@@ -121,35 +172,35 @@ enum class index_mode_t : std::uint8_t { SCALAR = 0, ELEMENT = 1, WILDCARD = 2 }
 // NAME followed by 0/1/2 VALUE children: 0 => SCALAR; 1 => index_mode only
 // (ELEMENT append "[]" or WILDCARD "[*]"); 2 => [index u32, index_mode u8]
 // ("[N]"). `wildcard_seen` is set if any level carries index_mode=WILDCARD.
-[[nodiscard]] result_t<field_path_t> selector_to_field(const tlv_arena_t& a, std::uint32_t field,
-                                                       bool& wildcard_seen) {
+template <class N>
+[[nodiscard]] result_t<field_path_t> selector_to_field(const N& field, bool& wildcard_seen) {
     field_path_t fp;
-    const std::uint32_t end = a[field].end;
-    std::uint32_t i = tlv_arena_t::first_child(field);
-    while (i < end) {
-        if (a[i].type != type_t::NAME) return std::unexpected(status_t::INVALID_PATH);
+    auto ch = field.children();
+    std::optional<N> cur = ch.next();
+    while (cur) {  // one level per NAME + its 0/1/2 trailing VALUEs
+        if (cur->type() != type_t::NAME) return std::unexpected(status_t::INVALID_PATH);
         field_step_t step;
-        step.name.assign(detail::as_string_view(a[i].body));
-        i = a.next_sibling(i);
-        std::uint32_t v0 = 0;
-        std::uint32_t v1 = 0;
-        if (i < end && a[i].type == type_t::VALUE) {
-            v0 = i;
-            i = a.next_sibling(i);
+        step.name.assign(detail::as_string_view(cur->body()));
+        std::optional<N> v0;
+        std::optional<N> v1;
+        std::optional<N> next = ch.next();
+        if (next && next->type() == type_t::VALUE) {
+            v0 = std::move(next);
+            next = ch.next();
         }
-        if (i < end && a[i].type == type_t::VALUE) {
-            v1 = i;
-            i = a.next_sibling(i);
+        if (v0 && next && next->type() == type_t::VALUE) {
+            v1 = std::move(next);
+            next = ch.next();
         }
         index_mode_t mode = index_mode_t::SCALAR;
         bool has_index = false;
         std::uint32_t index = 0;
-        if (v0 != 0 && v1 != 0) {
+        if (v0 && v1) {
             has_index = true;
-            index = detail::load_le<std::uint32_t>(a[v0].body);
-            mode = static_cast<index_mode_t>(detail::load_le<std::uint8_t>(a[v1].body));
-        } else if (v0 != 0) {
-            mode = static_cast<index_mode_t>(detail::load_le<std::uint8_t>(a[v0].body));
+            index = detail::load_le<std::uint32_t>(v0->body());
+            mode = static_cast<index_mode_t>(detail::load_le<std::uint8_t>(v1->body()));
+        } else if (v0) {
+            mode = static_cast<index_mode_t>(detail::load_le<std::uint8_t>(v0->body()));
         }
         switch (mode) {
             case index_mode_t::ELEMENT:
@@ -171,6 +222,7 @@ enum class index_mode_t : std::uint8_t { SCALAR = 0, ELEMENT = 1, WILDCARD = 2 }
         }
         fp.steps.push_back(std::move(step));
         if (fp.steps.size() > kMaxFieldDepth) return std::unexpected(status_t::INVALID_PATH);
+        cur = std::move(next);  // the lookahead item is the next level's NAME (or end)
     }
     return fp;
 }
@@ -191,17 +243,20 @@ enum class index_mode_t : std::uint8_t { SCALAR = 0, ELEMENT = 1, WILDCARD = 2 }
 // from the arena-decoded SUBSCRIBER node; false when absent. Mirrors graph.cpp
 // field_write's parse (one locus per layer — graph stores the local slot's flag,
 // the resolver reads it for the remote-subscriber binding) so the two never drift.
-[[nodiscard]] bool subscriber_compact(const tlv_arena_t& a, std::uint32_t sub) noexcept {
-    const std::uint32_t sub_end = a[sub].end;
-    for (std::uint32_t c = tlv_arena_t::first_child(sub); c < sub_end; c = a.next_sibling(c)) {
-        if (a[c].type != type_t::SETTINGS) continue;
-        const std::uint32_t q_end = a[c].end;
-        for (std::uint32_t n = tlv_arena_t::first_child(c); n < q_end; n = a.next_sibling(n)) {
-            const std::uint32_t v = a.next_sibling(n);
-            if (v >= q_end) break;
-            if (a[n].type != type_t::NAME || a[v].type != type_t::VALUE) continue;
-            if (detail::as_string_view(a[n].body) == "delivery_compact")
-                return detail::load_le<std::uint8_t>(a[v].body) != 0;
+template <class N>
+[[nodiscard]] bool subscriber_compact(const N& sub) {
+    auto sc = sub.children();
+    for (std::optional<N> c = sc.next(); c; c = sc.next()) {
+        if (c->type() != type_t::SETTINGS) continue;
+        // Scan every adjacent (NAME, VALUE) pair — a rolling previous node yields
+        // the same pairs the arena read via `next_sibling(n)`, forward-only.
+        auto qc = c->children();
+        std::optional<N> prev;
+        for (std::optional<N> n = qc.next(); n; n = qc.next()) {
+            if (prev && prev->type() == type_t::NAME && n->type() == type_t::VALUE &&
+                detail::as_string_view(prev->body()) == "delivery_compact")
+                return detail::load_le<std::uint8_t>(n->body()) != 0;
+            prev = std::move(n);
         }
     }
     return false;
@@ -210,8 +265,9 @@ enum class index_mode_t : std::uint8_t { SCALAR = 0, ELEMENT = 1, WILDCARD = 2 }
 // The one ADR-0041 §2 ownership copy of a whole TLV into a fresh owned segment:
 // `node.wire` (trailer already excluded) with the copied opt byte's trailer bits
 // cleared (§4) — the stored TLV is trailer-less at rest and self-consistent.
-[[nodiscard]] view_t own_tlv(const arena_tlv_t& node) {
-    view_t v = view::over_bytes(node.wire).value_or(view_t{});  // empty view on alloc failure
+template <class N>
+[[nodiscard]] view_t own_tlv(const N& node) {
+    view_t v = view::over_bytes(node.wire()).value_or(view_t{});  // empty view on alloc failure
     if (!v.empty()) v.owner->bytes[1] = struct_opt(v.owner->bytes[1]);
     return v;
 }
@@ -220,8 +276,9 @@ enum class index_mode_t : std::uint8_t { SCALAR = 0, ELEMENT = 1, WILDCARD = 2 }
 // implementation's ADR-0042 §3 restriction: a referenced store cannot patch the
 // opt byte in a shared frame, so only an already-trailer-less payload may be
 // referenced; a CRC/TS-carrying payload falls back to the trailer-sliced copy.
-[[nodiscard]] bool trailer_less(const arena_tlv_t& node) noexcept {
-    const opt_t& o = node.opt;
+template <class N>
+[[nodiscard]] bool trailer_less(const N& node) noexcept {
+    const opt_t o = node.opt();
     return !o.ts && !o.cr && !o.cw && !o.tf;
 }
 
@@ -231,13 +288,15 @@ enum class index_mode_t : std::uint8_t { SCALAR = 0, ELEMENT = 1, WILDCARD = 2 }
 // opt byte is trailer-less; otherwise the ADR-0041 §2 one-copy `own_tlv`. The
 // subview offset is computed from the span pointers — `node.wire` points into the
 // same bytes `frame_view` owns.
-[[nodiscard]] view_t own_or_ref_tlv(const arena_tlv_t& node, const view_t* frame_view,
+template <class N>
+[[nodiscard]] view_t own_or_ref_tlv(const N& node, const view_t* frame_view,
                                     std::uint32_t ref_min_bytes) {
-    if (frame_view != nullptr && ref_min_bytes > 0 && node.wire.size() >= ref_min_bytes &&
+    const std::span<const std::byte> wire = node.wire();
+    if (frame_view != nullptr && ref_min_bytes > 0 && wire.size() >= ref_min_bytes &&
         trailer_less(node)) {
         const std::span<const std::byte> base = frame_view->bytes();
-        const std::size_t off = static_cast<std::size_t>(node.wire.data() - base.data());
-        return frame_view->subview(off, node.wire.size());
+        const std::size_t off = static_cast<std::size_t>(wire.data() - base.data());
+        return frame_view->subview(off, wire.size());
     }
     return own_tlv(node);
 }
@@ -355,40 +414,45 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
 // (ADR-0041 §3 — the PATH body IS the key, zero materialization), re-emitted
 // into `fallback` otherwise (a foreign encoder's LL-widened / trailer-carrying
 // NAMEs). Our own encoders always produce the canonical form.
-[[nodiscard]] std::span<const std::byte> path_lookup_key(const tlv_arena_t& a, std::uint32_t path,
+template <class N>
+[[nodiscard]] std::span<const std::byte> path_lookup_key(const N& path,
                                                          std::vector<std::byte>& fallback) {
-    const arena_tlv_t& node = a[path];
-    if (node.canonical_path) return node.body;
-    const std::uint32_t end = node.end;
-    for (std::uint32_t i = tlv_arena_t::first_child(path); i < end; i = a.next_sibling(i))
-        wire::emit_name(fallback, a[i].body);
+    if (path.canonical_path()) return path.body();
+    auto ch = path.children();
+    for (std::optional<N> seg = ch.next(); seg; seg = ch.next())
+        wire::emit_name(fallback, seg->body());
     return fallback;
 }
 
-}  // namespace
-
-result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view inbound_link,
-                                        const view_t* frame_view) {
-    result_t<parsed_fwd_t> parsed = parse_fwd(fwd);
+// The ONE templated resolve walk (ADR-0053 §7): apply an @p N-read request FWD
+// against @p graph and build the FWD{REPLY} rope. Instantiated with `arena_node`
+// (span tier, byte-identical) and — 3c — the `tlv_view_t` reader (owning rope
+// tier). Every frame read goes through the node-reader concept; nothing here
+// names a specific decode representation.
+template <class N>
+[[nodiscard]] result_t<rope_t> resolve_node(graph_t& graph, const N& root,
+                                            std::string_view inbound_link,
+                                            const view_t* frame_view) {
+    result_t<parsed_fwd_t<N>> parsed = parse_fwd(root);
     if (!parsed) return std::unexpected(parsed.error());
-    const parsed_fwd_t& req = *parsed;
+    const parsed_fwd_t<N>& req = *parsed;
     if (req.op == fwd_op_t::REPLY) return std::unexpected(status_t::INVALID_PATH);
 
     // The reply's route is the request's routes swapped: reply dst = request src (the
     // accumulated return route), reply src = request dst (this node's responder
-    // endpoint). Their trailer-excluded whole-TLV `wire` spans feed every assemble
-    // below — read once here so the reply builder never reaches back into the arena
-    // (ADR-0053 §7 node-reader seam). parse_fwd guarantees both PATH nodes exist.
-    const std::span<const std::byte> reply_dst_wire = fwd[req.src].wire;
-    const std::span<const std::byte> reply_src_wire = fwd[req.dst].wire;
+    // endpoint). Their trailer-excluded whole-TLV `wire` bytes feed every assemble
+    // below — read once here so the reply builder never reaches back into a specific
+    // node model (ADR-0053 §7 node-reader seam). parse_fwd guarantees both PATH nodes.
+    const std::span<const std::byte> reply_dst_wire = req.src.wire();
+    const std::span<const std::byte> reply_src_wire = req.dst.wire();
 
     // Decode the optional :field selector and the wildcard deferral: a [*] level
     // on a non-subscriber-path target is rejected with INVALID_PATH.
     field_path_t field;
-    const bool has_field = req.selector != 0;
+    const bool has_field = req.selector.has_value();
     if (has_field) {
         bool wildcard = false;
-        result_t<field_path_t> f = selector_to_field(fwd, req.selector, wildcard);
+        result_t<field_path_t> f = selector_to_field(*req.selector, wildcard);
         if (!f) return assemble_error(reply_dst_wire, reply_src_wire, status_t::INVALID_PATH);
         field = std::move(*f);
         if (wildcard && (field.steps.empty() || field.steps[0].name != "subscribers"))
@@ -399,15 +463,15 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
     // canonical PATH (ADR-0041 §3: the frame IS the key). Local-only: a dst
     // naming a transport child / unknown path is not local => ERROR(NOT_FOUND).
     std::vector<std::byte> key_fallback;
-    const std::span<const std::byte> dst_key = path_lookup_key(fwd, req.dst, key_fallback);
-    vertex_t* v = graph_.find(dst_key);
+    const std::span<const std::byte> dst_key = path_lookup_key(req.dst, key_fallback);
+    vertex_t* v = graph.find(dst_key);
     if (!v) {
         // Write-creates (RFC-0005): a remote DATA write (no :field selector) to a
         // nonexistent path creates it, mkdir-p style, CREATE-gated on the nearest
         // existing ancestor under the inbound link's subject. Field ops and
         // read/await keep NOT_FOUND — there is no vertex to control or serve.
         if (req.op == fwd_op_t::WRITE && !has_field) {
-            const result_t<vertex_t*> made = graph_.ensure_vertex(dst_key, inbound_link);
+            const result_t<vertex_t*> made = graph.ensure_vertex(dst_key, inbound_link);
             if (!made) return assemble_error(reply_dst_wire, reply_src_wire, made.error());
             v = *made;
         } else {
@@ -418,7 +482,7 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
     switch (req.op) {
         case fwd_op_t::READ: {
             if (has_field && is_subscribers_array(field)) {
-                result_t<std::vector<view_t>> subs = graph_.read_subscribers(v, inbound_link);
+                result_t<std::vector<view_t>> subs = graph.read_subscribers(v, inbound_link);
                 if (!subs) return assemble_error(reply_dst_wire, reply_src_wire, subs.error());
                 std::size_t sub_len = 0;
                 for (const view_t& s : *subs) sub_len += s.length;
@@ -434,14 +498,14 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
                                 sub_len);
             }
             result_t<rope_t> r =
-                has_field ? graph_.read(v, field, inbound_link) : graph_.read(v, inbound_link);
+                has_field ? graph.read(v, field, inbound_link) : graph.read(v, inbound_link);
             if (!r) return assemble_error(reply_dst_wire, reply_src_wire, r.error());
             return assemble_result_rope(reply_dst_wire, reply_src_wire, *r);
         }
         case fwd_op_t::WRITE: {
-            if (req.payload == 0)
+            if (!req.payload.has_value())
                 return assemble_error(reply_dst_wire, reply_src_wire, status_t::TYPE_MISMATCH);
-            const arena_tlv_t& payload_node = fwd[req.payload];
+            const N& payload_node = *req.payload;
 
             // A remote subscribe — a `:subscribers[]` APPEND that arrived over a
             // transport (inbound_link set) carrying a SUBSCRIBER — binds a REMOTE
@@ -451,7 +515,7 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
             // to the value store only).
             const bool remote_sub = !inbound_link.empty() && has_field &&
                                     is_subscribe_append(field) &&
-                                    payload_node.type == type_t::SUBSCRIBER;
+                                    payload_node.type() == type_t::SUBSCRIBER;
 
             // The stored written value: ADR-0041 §2 one ownership copy,
             // trailer-sliced by construction (§4 — an arriving CRC/TS trailer is
@@ -473,19 +537,19 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
             if (remote_sub) {
                 // The ONE route copy of the subscription's life (ADR-0041 §2), into a
                 // refcounted segment — every later delivery clones the refcount.
-                const view_t return_route = own_tlv(fwd[req.src]);
+                const view_t return_route = own_tlv(req.src);
                 if (return_route.empty())
                     return assemble_error(reply_dst_wire, reply_src_wire, status_t::BACKPRESSURE);
                 result_t<void> w =
-                    graph_.add_remote_subscriber(v, value, return_route, std::string(inbound_link),
-                                                 subscriber_compact(fwd, req.payload));
+                    graph.add_remote_subscriber(v, value, return_route, std::string(inbound_link),
+                                                subscriber_compact(payload_node));
                 if (!w) return assemble_error(reply_dst_wire, reply_src_wire, w.error());
                 return assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT, {}, {},
                                 0);  // OK, empty payload
             }
 
             result_t<void> w =
-                graph_.write(v, has_field ? field : field_path_t{}, value, inbound_link);
+                graph.write(v, has_field ? field : field_path_t{}, value, inbound_link);
             if (!w) return assemble_error(reply_dst_wire, reply_src_wire, w.error());
             return assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT, {}, {},
                             0);  // OK, empty payload
@@ -494,7 +558,7 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
             const std::chrono::nanoseconds timeout =
                 req.has_await_timeout ? std::chrono::nanoseconds(req.await_timeout)
                                       : kDefaultAwaitTimeout;
-            result_t<rope_t> r = graph_.await(v, timeout, inbound_link);
+            result_t<rope_t> r = graph.await(v, timeout, inbound_link);
             if (!r)
                 return assemble_error(reply_dst_wire, reply_src_wire,
                                       r.error());  // TIMEOUT => tr::flow::timeout
@@ -504,6 +568,15 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
             break;  // unreachable — handled above
     }
     return std::unexpected(status_t::INVALID_PATH);
+}
+
+}  // namespace
+
+result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view inbound_link,
+                                        const view_t* frame_view) {
+    // The span-tier instantiation: the arena root (index 0) read through the
+    // node-reader concept. Byte-identical to the pre-templating resolver.
+    return resolve_node(graph_, arena_node{&fwd, 0}, inbound_link, frame_view);
 }
 
 }  // namespace tr::graph
