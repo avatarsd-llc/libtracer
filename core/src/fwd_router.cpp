@@ -31,8 +31,8 @@ namespace {
 constexpr std::uint8_t u8(std::byte b) noexcept { return std::to_integer<std::uint8_t>(b); }
 
 // One top-level TLV header read in isolation (NO descent) — the byte offsets the
-// zero-copy forward rebuild needs, kept as ABSOLUTE offsets into the caller's buffer so
-// the rebuild can re-slice src/payload as views (no copy). It is a thin ADAPTER over the
+// zero-copy forward rebuild needs, kept as ABSOLUTE offsets into the source so the
+// rebuild can re-slice src/payload as views (no copy). It is a thin ADAPTER over the
 // ONE wire grammar (`grammar::parse_header`, ADR-0048 §1 / finding #7): the length math
 // is no longer mirrored here — this only turns the grammar's relative `header_t` into the
 // absolute `body_off = pos + header` the forward plane reads by. CRC is DEFERRED (the
@@ -45,14 +45,20 @@ struct hdr_t {
     type_t type{};
     opt_t opt{};
     std::size_t header_len = 0;  // 4 (u16 length) or 6 (u32 length)
-    std::size_t body_off = 0;    // absolute offset of the body within the buffer
+    std::size_t body_off = 0;    // absolute offset of the body within the source
     std::size_t body_len = 0;    // body (children/payload) length, trailer excluded
     std::size_t total = 0;       // header_len + body_len + trailer
 };
 
-[[nodiscard]] std::optional<hdr_t> read_header(std::span<const std::byte> buf, std::size_t pos) {
-    if (pos > buf.size()) return std::nullopt;
-    const auto h = wire::grammar::parse_header(wire::grammar::span_cursor{buf.subspan(pos)},
+// Templated over the grammar `Cursor` concept (ADR-0053 ④b): the forward plane reads
+// its dispatch offsets through the SAME byte-source seam the one grammar validates
+// through — `span_cursor` for the contiguous path (byte-identical to before), the rope
+// cursor for a scatter-gather frame, with no per-cursor offset math. `cur.region(pos, …)`
+// narrows either source in O(1) before the header parse.
+template <class Cursor>
+[[nodiscard]] std::optional<hdr_t> read_header(const Cursor& cur, std::size_t pos) {
+    if (pos > cur.size()) return std::nullopt;
+    const auto h = wire::grammar::parse_header(cur.region(pos, cur.size() - pos),
                                                wire::grammar::crc_check_t::DEFER);
     if (!h) return std::nullopt;
     return hdr_t{.type = h->type,
@@ -65,36 +71,40 @@ struct hdr_t {
 
 // The forward dispatch decision, read by OFFSET with no allocation (ADR-0038 inv. #1,
 // ADR-0039): a FWD whose first `dst` segment names a transport child is a forward hop
-// that never needs the decoded tree. Returns the first-dst-segment NAME bytes iff the
-// frame is a structured FWD with an op VALUE + a non-empty dst PATH; nullopt otherwise
-// (malformed, non-FWD, or empty dst ⇒ fall back to the full-decode terminus path).
-[[nodiscard]] std::optional<std::span<const std::byte>> peek_fwd_first_dst_seg(
-    std::span<const std::byte> frame) {
-    const auto fwd_h = read_header(frame, 0);
+// that never needs the decoded tree. Returns the `[body_off, body_len)` of the first
+// dst-segment NAME iff the frame is a structured FWD with an op VALUE + a non-empty dst
+// PATH; nullopt otherwise (malformed, non-FWD, or empty dst ⇒ fall back to the
+// full-decode terminus path). Offsets, not a span, so the result is source-agnostic —
+// the caller re-slices the segment bytes from its own cursor (contiguous or rope).
+template <class Cursor>
+[[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> peek_fwd_first_dst_seg(
+    const Cursor& cur) {
+    const auto fwd_h = read_header(cur, 0);
     if (!fwd_h || fwd_h->type != type_t::FWD || !fwd_h->opt.pl) return std::nullopt;
     const std::size_t body_end = fwd_h->body_off + fwd_h->body_len;
     // child[0] = op VALUE
-    const auto op_h = read_header(frame, fwd_h->body_off);
+    const auto op_h = read_header(cur, fwd_h->body_off);
     if (!op_h || op_h->type != type_t::VALUE) return std::nullopt;
     // child[1] = dst PATH
     const std::size_t dst_pos = fwd_h->body_off + op_h->total;
     if (dst_pos >= body_end) return std::nullopt;
-    const auto dst_h = read_header(frame, dst_pos);
+    const auto dst_h = read_header(cur, dst_pos);
     if (!dst_h || dst_h->type != type_t::PATH || dst_h->body_len == 0) return std::nullopt;
     // dst.child[0] = first segment NAME
-    const auto seg_h = read_header(frame, dst_h->body_off);
+    const auto seg_h = read_header(cur, dst_h->body_off);
     if (!seg_h || seg_h->type != type_t::NAME) return std::nullopt;
-    return frame.subspan(seg_h->body_off, seg_h->body_len);
+    return std::pair{seg_h->body_off, seg_h->body_len};
 }
 
 // Read the FWD op discriminant (child[0], a VALUE u8) by OFFSET — the terminus
 // split (REPLY → originator sink vs request → arena resolve) without a decode.
-[[nodiscard]] std::optional<graph::fwd_op_t> peek_fwd_op(std::span<const std::byte> frame) {
-    const auto fwd_h = read_header(frame, 0);
+template <class Cursor>
+[[nodiscard]] std::optional<graph::fwd_op_t> peek_fwd_op(const Cursor& cur) {
+    const auto fwd_h = read_header(cur, 0);
     if (!fwd_h || fwd_h->type != type_t::FWD || !fwd_h->opt.pl) return std::nullopt;
-    const auto op_h = read_header(frame, fwd_h->body_off);
+    const auto op_h = read_header(cur, fwd_h->body_off);
     if (!op_h || op_h->type != type_t::VALUE || op_h->body_len == 0) return std::nullopt;
-    return static_cast<fwd_op_t>(u8(frame[op_h->body_off]));
+    return static_cast<fwd_op_t>(cur.byte_at(op_h->body_off));
 }
 
 // A fixed-capacity stack byte-writer — the zero-heap counterpart of the old
@@ -267,14 +277,16 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
             if (const auto dec = wire::decode(frame); dec && dec->opt.pl)
                 inbound_cb_(inbound_name, *dec);
         }
-        if (const auto seg = peek_fwd_first_dst_seg(frame)) {
-            if (transport_t* const child = registry_.by_segment(*seg)) {
+        const wire::grammar::span_cursor cur{frame};
+        if (const auto seg = peek_fwd_first_dst_seg(cur)) {
+            if (transport_t* const child =
+                    registry_.by_segment(frame.subspan(seg->first, seg->second))) {
                 route_fwd_forward(inbound_name, frame, *child);
                 return;
             }
             // First dst segment names no child ⇒ this node is the terminus.
         }
-        if (peek_fwd_op(frame) == fwd_op_t::REPLY) {
+        if (peek_fwd_op(cur) == fwd_op_t::REPLY) {
             // The accumulated return route is fully consumed — this node is the
             // originator. Deliver the decoded FWD{REPLY} to the reply sink.
             if (reply_cb_) {
@@ -309,25 +321,28 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     // All offsets, no decoded tree. Layout: FWD{ op VALUE, dst PATH, FIELD? sel, src
     // PATH, tail } — strip dst's leading segment, grow src by the inbound NAME (unless
     // REPLY), scatter-gather the fresh heads + views into the untouched inbound frame.
-    const auto fwd_h = read_header(frame, 0);
+    // Reads go through the grammar `span_cursor` seam (ADR-0053 ④b); the egress still
+    // re-slices the contiguous frame (the rope egress is the follow-on step).
+    const wire::grammar::span_cursor cur_src{frame};
+    const auto fwd_h = read_header(cur_src, 0);
     if (!fwd_h || fwd_h->type != type_t::FWD) return;
     const std::size_t body_end = fwd_h->body_off + fwd_h->body_len;
 
     std::size_t cur = fwd_h->body_off;
-    const auto op_h = read_header(frame, cur);
+    const auto op_h = read_header(cur_src, cur);
     if (!op_h || op_h->type != type_t::VALUE || op_h->body_len == 0) return;
     const std::size_t op_pos = cur;
-    const bool is_reply = static_cast<fwd_op_t>(u8(frame[op_h->body_off])) == fwd_op_t::REPLY;
+    const bool is_reply = static_cast<fwd_op_t>(cur_src.byte_at(op_h->body_off)) == fwd_op_t::REPLY;
     cur += op_h->total;
 
-    const auto dst_h = read_header(frame, cur);
+    const auto dst_h = read_header(cur_src, cur);
     if (!dst_h || dst_h->type != type_t::PATH) return;
     cur += dst_h->total;
 
     std::size_t sel_pos = 0;
     std::size_t sel_total = 0;
     if (cur < body_end) {
-        const auto peek = read_header(frame, cur);
+        const auto peek = read_header(cur_src, cur);
         if (peek && peek->type == type_t::FIELD) {
             sel_pos = cur;
             sel_total = peek->total;
@@ -335,7 +350,7 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
         }
     }
 
-    const auto src_h = read_header(frame, cur);
+    const auto src_h = read_header(cur_src, cur);
     if (!src_h || src_h->type != type_t::PATH) return;
     cur += src_h->total;
 
@@ -343,7 +358,7 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     const std::size_t tail_len = body_end > cur ? body_end - cur : 0;
 
     // The leading dst segment (a NAME) to strip.
-    const auto seg_h = read_header(frame, dst_h->body_off);
+    const auto seg_h = read_header(cur_src, dst_h->body_off);
     if (!seg_h || seg_h->type != type_t::NAME) return;
     const std::size_t rem_dst_off = dst_h->body_off + seg_h->total;
     const std::size_t rem_dst_len = dst_h->body_len - seg_h->total;
