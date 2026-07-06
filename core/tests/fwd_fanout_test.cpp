@@ -224,6 +224,52 @@ void test_full_route_fanout() {
     check(!any_write, "volatile producer does NOT latch on subscribe");
 }
 
+// ADR-0053 ⑤: a MULTI-LINK stored value fans out to a remote subscriber
+// scatter-gathered over the rope's links — deliver_remote emits one FWD{WRITE}
+// iov (head + route + empty src + each value segment) with NO interim flatten.
+// The receiver must reassemble the byte-identical payload from the scattered
+// segments, exactly as a single-link value would.
+void test_full_route_fanout_multilink() {
+    std::printf("Full-route fan-out of a multi-link value (scatter-gather, no flatten):\n");
+    graph_t graph;
+    fwd_router_t router(graph);
+    fake_link_t link;
+    router.add_child("client", link);
+
+    const auto p = path_t::parse("/sensor/temp");
+    auto v = graph.register_vertex(*p, role_t::STORED_VALUE);
+    link.inject(b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"client"}),
+                      b_field_subscribers_append(), b_subscriber(b_path({"client"}), false)));
+    link.drain();  // discard the subscribe REPLY
+
+    // Split one VALUE TLV across three rope links (zero-copy subviews of one
+    // segment) — the fan-out must gather them back into the intact VALUE.
+    const std::vector<std::byte> vbytes = b_value_u32(0xFEEDFACE);
+    const tr::view::view_t whole = make_value(vbytes);
+    const std::size_t n = whole.length;
+    const std::size_t c1 = n / 3;
+    const std::size_t c2 = 2 * n / 3;
+    tr::view::rope_t value;
+    value.append(whole.subview(0, c1));
+    value.append(whole.subview(c1, c2 - c1));
+    value.append(whole.subview(c2, n - c2));
+    check(value.link_count() == 3 && value.total_length() == n,
+          "value is a genuine 3-link rope over the VALUE TLV");
+
+    (void)graph.write(*v, std::move(value));
+    const auto sent = link.drain();
+    check(sent.size() == 1, "one delivery frame fanned out");
+    if (sent.size() == 1) {
+        const auto d = tr::wire::decode(sent[0]);
+        check(d.has_value() && fwd_op(*d) == static_cast<int>(fwd_op_t::WRITE),
+              "delivery is a FWD{WRITE}");
+        check(d && fwd_dst_bytes(*d) == b_path({"client"}),
+              "dst == the subscribe src (return route)");
+        check(d && fwd_payload_u32(*d) == 0xFEEDFACE,
+              "scatter-gathered payload reassembles to the intact VALUE");
+    }
+}
+
 void test_transient_local_latch() {
     std::printf("Transient-local latch on subscribe:\n");
     graph_t graph;
@@ -334,6 +380,7 @@ void test_concurrent_writer_vs_clear() {
 
 int main() {
     test_full_route_fanout();
+    test_full_route_fanout_multilink();
     test_transient_local_latch();
     test_compact_auto_promote();
     test_concurrent_writer_vs_clear();
