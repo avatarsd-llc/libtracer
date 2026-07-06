@@ -42,6 +42,11 @@ target_link_libraries(frame_test PRIVATE libtracer)
 libtracer_test_warnings(frame_test)
 add_test(NAME frame COMMAND frame_test)
 
+add_executable(rope_test rope_test.cpp)
+target_link_libraries(rope_test PRIVATE libtracer)
+libtracer_test_warnings(rope_test)
+add_test(NAME rope COMMAND rope_test)
+
 add_executable(rope_decode_test rope_decode_test.cpp)
 target_link_libraries(rope_decode_test PRIVATE libtracer)
 libtracer_test_warnings(rope_decode_test)

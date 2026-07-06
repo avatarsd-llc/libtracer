@@ -215,8 +215,8 @@ void test_storage_roundtrip() {
         const auto w = g.write(*path_t::parse("/x:acl"), make_value(acl));
         check(w.has_value(), "writing a valid ALLOW-only ACL TLV to :acl succeeds");
         const auto r = g.read(*path_t::parse("/x:acl"));
-        const bool eq = r.has_value() && r->bytes().size() == acl.size() &&
-                        std::equal(acl.begin(), acl.end(), r->bytes().begin());
+        const bool eq = r.has_value() && r->only().bytes().size() == acl.size() &&
+                        std::equal(acl.begin(), acl.end(), r->only().bytes().begin());
         check(eq, "read :acl returns the stored bytes verbatim");
     }
 
@@ -227,8 +227,8 @@ void test_storage_roundtrip() {
         check(!w.has_value() && w.error() == status_t::TYPE_MISMATCH,
               "writing a non-ACL TLV to :acl returns TYPE_MISMATCH");
         const auto r = g.read(*path_t::parse("/x:acl"));
-        const bool unchanged = r.has_value() && r->bytes().size() == acl.size() &&
-                               std::equal(acl.begin(), acl.end(), r->bytes().begin());
+        const bool unchanged = r.has_value() && r->only().bytes().size() == acl.size() &&
+                               std::equal(acl.begin(), acl.end(), r->only().bytes().begin());
         check(unchanged, "rejected write leaves the stored ACL unchanged");
     }
 }

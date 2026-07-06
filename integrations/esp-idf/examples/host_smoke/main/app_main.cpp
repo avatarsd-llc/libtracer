@@ -81,7 +81,7 @@ extern "C" void app_main(void) {
         std::printf("FAIL: read\n");
         std::exit(1);
     }
-    const std::uint32_t got = as_u32(*rb);
+    const std::uint32_t got = as_u32(rb->only());
     std::printf("read-back: /sensor/temp = %" PRIu32 "\n", got);
     if (got != 23) {
         std::printf("FAIL: read-back mismatch (expected 23)\n");

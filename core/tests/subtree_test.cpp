@@ -41,6 +41,7 @@ using tr::graph::role_t;
 using tr::graph::status_t;
 using tr::graph::subject_token_t;
 using tr::graph::vertex_t;
+using tr::view::rope_t;
 using tr::view::view_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
@@ -123,16 +124,18 @@ void test_bubbling_and_idle_walk() {
 
     std::vector<std::vector<std::byte>> at_a;
     std::vector<std::vector<std::byte>> at_x;
-    check(
-        g.subscribe(*path_t::parse("/a"),
-                    [&](const view_t& v) { at_a.emplace_back(v.bytes().begin(), v.bytes().end()); })
-            .has_value(),
-        "subscribe callback at ancestor /a");
-    check(
-        g.subscribe(*path_t::parse("/x"),
-                    [&](const view_t& v) { at_x.emplace_back(v.bytes().begin(), v.bytes().end()); })
-            .has_value(),
-        "subscribe callback at unrelated /x");
+    check(g.subscribe(*path_t::parse("/a"),
+                      [&](const rope_t& v) {
+                          at_a.emplace_back(v.only().bytes().begin(), v.only().bytes().end());
+                      })
+              .has_value(),
+          "subscribe callback at ancestor /a");
+    check(g.subscribe(*path_t::parse("/x"),
+                      [&](const rope_t& v) {
+                          at_x.emplace_back(v.only().bytes().begin(), v.only().bytes().end());
+                      })
+              .has_value(),
+          "subscribe callback at unrelated /x");
 
     const std::vector<std::byte> written{std::byte{0x01}, std::byte{0x00}, std::byte{0x02},
                                          std::byte{0x00}, std::byte{0xAB}, std::byte{0xCD}};
@@ -163,7 +166,7 @@ void test_bubbling_to_late_created_descendant() {
     graph_t g;
     (void)*g.register_vertex(*path_t::parse("/a"), role_t::STORED_VALUE);
     std::size_t hits = 0;
-    check(g.subscribe(*path_t::parse("/a"), [&](const view_t&) { ++hits; }).has_value(),
+    check(g.subscribe(*path_t::parse("/a"), [&](const rope_t&) { ++hits; }).has_value(),
           "subscribe at /a first");
     // The descendant is created afterwards (write-creates) — its creation-time
     // ancestor-listener sum must still route its writes up.
@@ -184,10 +187,10 @@ void test_remote_ancestor_subscriber() {
     std::string seen_link;
     std::vector<std::byte> seen_value;
     std::vector<std::byte> seen_route;
-    g.set_remote_delivery_sink([&](const tr::graph::remote_delivery_t& d, const view_t& v) {
+    g.set_remote_delivery_sink([&](const tr::graph::remote_delivery_t& d, const rope_t& v) {
         ++deliveries;
         seen_link.assign(d.link);
-        seen_value.assign(v.bytes().begin(), v.bytes().end());
+        seen_value.assign(v.only().bytes().begin(), v.only().bytes().end());
         seen_route.assign(d.return_route.bytes().begin(), d.return_route.bytes().end());
     });
     check(g.add_remote_subscriber(a, make_value({0x04, 0x40, 0x00, 0x00}), make_value(route),
@@ -212,12 +215,13 @@ void test_branch_write_decomposition() {
 
     std::vector<std::vector<std::byte>> at_s;
     std::vector<view_t> at_st;
-    check(
-        g.subscribe(*path_t::parse("/s"),
-                    [&](const view_t& v) { at_s.emplace_back(v.bytes().begin(), v.bytes().end()); })
-            .has_value(),
-        "subscribe at the branch root /s");
-    check(g.subscribe(*path_t::parse("/s/t"), [&](const view_t& v) { at_st.push_back(v); })
+    check(g.subscribe(*path_t::parse("/s"),
+                      [&](const rope_t& v) {
+                          at_s.emplace_back(v.only().bytes().begin(), v.only().bytes().end());
+                      })
+              .has_value(),
+          "subscribe at the branch root /s");
+    check(g.subscribe(*path_t::parse("/s/t"), [&](const rope_t& v) { at_st.push_back(v.only()); })
               .has_value(),
           "subscribe at the leaf /s/t");
 
@@ -231,14 +235,15 @@ void test_branch_write_decomposition() {
 
     // Values are the truth at the vertices where they land (one store per vertex).
     const auto r_s = g.read(s);
-    check(r_s.has_value() && same_bytes(*r_s, value_tlv({0x07})),
+    check(r_s.has_value() && same_bytes(r_s->only(), value_tlv({0x07})),
           "read /s returns the root's own VALUE TLV");
     const auto r_t = g.read(st);
-    check(r_t.has_value() && same_bytes(*r_t, t_val), "read /s/t returns the leaf's VALUE TLV");
-    check(r_t.has_value() && is_subview_of(*r_t, frame),
+    check(r_t.has_value() && same_bytes(r_t->only(), t_val),
+          "read /s/t returns the leaf's VALUE TLV");
+    check(r_t.has_value() && is_subview_of(r_t->only(), frame),
           "leaf store is a refcount SUBVIEW of the written frame (zero copy)");
     const auto r_u = g.read(*path_t::parse("/s/u"));
-    check(r_u.has_value() && same_bytes(*r_u, value_tlv({0xCC})),
+    check(r_u.has_value() && same_bytes(r_u->only(), value_tlv({0xCC})),
           "write-created /s/u holds its decomposed VALUE");
 
     // Notifications: one per covered subscription point, with its slice.
@@ -253,7 +258,8 @@ void test_branch_write_decomposition() {
 
     // Read-after-notify invariant: the LKV a read serves is never behind what the
     // subscriber just saw (it IS the same refcounted slice here).
-    check(r_t.has_value() && at_st.size() == 1 && r_t->bytes().data() == at_st[0].bytes().data(),
+    check(r_t.has_value() && at_st.size() == 1 &&
+              r_t->only().bytes().data() == at_st[0].bytes().data(),
           "read and notification serve the same stored slice");
 }
 
@@ -281,7 +287,7 @@ void test_branch_write_strictness() {
 
     // A value-free branch is a no-op write (nothing stored, nothing delivered).
     std::size_t hits = 0;
-    check(g.subscribe(*path_t::parse("/s"), [&](const view_t&) { ++hits; }).has_value(),
+    check(g.subscribe(*path_t::parse("/s"), [&](const rope_t&) { ++hits; }).has_value(),
           "subscribe at /s");
     check(g.write(s, make_value(point_tlv("s", point_tlv("t", {})))).has_value(),
           "value-free branch write is accepted");
@@ -298,7 +304,7 @@ void test_write_creates() {
     check(g.write(*path_t::parse("/new/deep/leaf"), make_value(val)).has_value(),
           "write to a nonexistent path creates it");
     const auto r = g.read(*path_t::parse("/new/deep/leaf"));
-    check(r.has_value() && same_bytes(*r, val), "created leaf serves the written value");
+    check(r.has_value() && same_bytes(r->only(), val), "created leaf serves the written value");
     check(g.find(path_t::parse("/new/deep")->key()) != nullptr,
           "intermediate levels are created too (mkdir-p)");
 

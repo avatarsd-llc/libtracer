@@ -511,10 +511,14 @@ bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
     return graph_.write(v, *payload_view).has_value();
 }
 
-void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const view_t& value) {
+void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const view::rope_t& value) {
     transport_t* const link = registry_.by_name(sub.link);
     if (link == nullptr) return;  // link torn down between subscribe and this write
-    const std::span<const std::byte> payload = value.bytes();  // the stored VALUE TLV bytes
+    // ADR-0053 §6 ④a interim: the value crosses as a rope; materialize it to contiguous
+    // bytes (single-link — the current case — is zero copy; a multi-link value pays one
+    // flatten here) until ⑤ makes this emission scatter-gather over the rope's links.
+    const view_t flat = value.materialize();
+    const std::span<const std::byte> payload = flat.bytes();  // the stored VALUE TLV bytes
     const std::span<const std::byte> route = sub.return_route.bytes();  // the stored PATH TLV
 
     if (sub.delivery_compact) {

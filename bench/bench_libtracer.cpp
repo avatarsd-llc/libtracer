@@ -33,6 +33,7 @@ using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::settings_t;
 using tr::graph::vertex_t;
+using tr::view::rope_t;
 using tr::view::view_t;
 
 namespace {
@@ -72,7 +73,7 @@ void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool
     verts.reserve(E);
     paths.reserve(E);
     std::atomic<std::uint64_t> recv{0};
-    auto cb = [&](const view_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
+    auto cb = [&](const rope_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
     for (std::size_t e = 0; e < E; ++e) {
         path_t path = *path_t::parse("/bench/v" + std::to_string(e));
         vertex_t* v = *g.register_vertex(path, role_t::STORED_VALUE);
@@ -133,7 +134,7 @@ void run_mixed() {
     std::vector<std::size_t> fan;
     std::vector<std::vector<std::byte>> tlvs;
     std::atomic<std::uint64_t> recv{0};
-    auto cb = [&](const view_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
+    auto cb = [&](const rope_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
     std::size_t total_fan = 0;
     for (std::size_t e = 0; e < E; ++e) {
         path_t path = *path_t::parse("/bench/m" + std::to_string(e));
@@ -196,7 +197,7 @@ void run_inproc_mt(std::size_t T) {
         auto w = std::make_unique<worker_t>();
         w->buf = tlv;  // per-thread copy => per-thread segment, no shared refcount
         w->v = *w->g.register_vertex(*path_t::parse("/bench/mt"), role_t::STORED_VALUE);
-        (void)w->g.subscribe(*path_t::parse("/bench/mt"), [p = w.get()](const view_t&) {
+        (void)w->g.subscribe(*path_t::parse("/bench/mt"), [p = w.get()](const rope_t&) {
             p->recv.fetch_add(1, std::memory_order_relaxed);
         });
         w->view = borrowed_view(w->buf);
@@ -292,7 +293,7 @@ void run_eptype_stream() {
     const path_t path = *path_t::parse("/bench/stream");
     vertex_t* v = *g.register_vertex(path, role_t::STREAM, {}, st);
     std::atomic<std::uint64_t> recv{0};
-    (void)g.subscribe(path, [&](const view_t&) { recv.fetch_add(1, std::memory_order_relaxed); });
+    (void)g.subscribe(path, [&](const rope_t&) { recv.fetch_add(1, std::memory_order_relaxed); });
 
     const std::vector<std::byte> tlv = value_tlv(S);
     const auto put = [&]() { (void)g.write(v, owned_view(tlv)); };  // heap view: lean parity

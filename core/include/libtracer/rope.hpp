@@ -10,12 +10,16 @@
  * segment only when a flat-buffer consumer demands it (the single
  * bridge-boundary copy). See docs/adr/0016 §1.
  *
- * A single-link view_t is the hot path and allocates nothing; only a multi-link
- * rope_t allocates (one vector for the chain). A bounded/embedded small-buffer
- * rope is a follow-on optimization that does not change this API.
+ * A rope_t keeps its first two links in inline small-buffer storage, so the hot
+ * path — a single-link value (or a two-link head+payload) — allocates nothing
+ * for the chain; only a third link spills the chain to the heap. This is the
+ * ADR-0053 §6 trivial-case cost guard: a rope-valued vertex slot costs exactly
+ * what a view-valued slot cost, so the contention/latency benches do not move.
  */
 #pragma once
 
+#include <array>
+#include <cassert>
 #include <cstddef>
 #include <span>
 #include <utility>
@@ -46,25 +50,70 @@ class rope_t {
    public:
     rope_t() = default;
     /** @brief Implicitly adopt a single view as a one-link rope. */
-    rope_t(view_t v) { links_.push_back(std::move(v)); }
+    rope_t(view_t v) { append(std::move(v)); }
 
     /** @brief Append a link (chaining — no copy). */
-    void append(view_t v) { links_.push_back(std::move(v)); }
+    void append(view_t v) {
+        if (!heap_.empty()) {
+            heap_.push_back(std::move(v));  // already spilled — stays on the heap chain
+            return;
+        }
+        if (inline_n_ < kInline) {
+            inline_[inline_n_++] = std::move(v);  // fits in small-buffer storage — no alloc
+            return;
+        }
+        // The kInline+1-th link spills the whole chain to the heap (the only allocation).
+        heap_.reserve(kInline + 1);
+        for (std::size_t i = 0; i < inline_n_; ++i) heap_.push_back(std::move(inline_[i]));
+        heap_.push_back(std::move(v));
+        inline_n_ = 0;
+        for (view_t& s : inline_) s = view_t{};  // drop the moved-from links' refcounts eagerly
+    }
     /** @brief Chain @p other's links onto this rope (no copy). */
     rope_t& concat(const rope_t& other) {
-        links_.insert(links_.end(), other.links_.begin(), other.links_.end());
+        for (const view_t& l : other.links()) append(l);
         return *this;
     }
 
     /** @brief Number of links in the chain. */
-    [[nodiscard]] std::size_t link_count() const noexcept { return links_.size(); }
-    /** @brief The links, in order. */
-    [[nodiscard]] const std::vector<view_t>& links() const noexcept { return links_; }
+    [[nodiscard]] std::size_t link_count() const noexcept {
+        return heap_.empty() ? inline_n_ : heap_.size();
+    }
+    /** @brief The links, in order (inline small-buffer storage or the spilled chain). */
+    [[nodiscard]] std::span<const view_t> links() const noexcept {
+        if (heap_.empty()) return std::span<const view_t>(inline_.data(), inline_n_);
+        return std::span<const view_t>(heap_);
+    }
+
+    /**
+     * @brief The single contiguous link — the consumer's explicit "this value is
+     *        one segment" (ADR-0053 §6), zero copy.
+     * @note Precondition: `link_count() == 1` (debug-asserted). A consumer that
+     *       cannot promise contiguity calls @ref materialize instead.
+     */
+    [[nodiscard]] const view_t& only() const noexcept {
+        assert(link_count() == 1);
+        return links()[0];
+    }
+
+    /**
+     * @brief The rope as one contiguous @ref view_t — zero copy when single-link,
+     *        one @ref flatten copy otherwise.
+     *
+     * The visible choice a contiguous-bytes consumer makes (ADR-0053 §6): a
+     * single-link rope is returned as its link (a refcount bump, no byte copy); a
+     * multi-link rope pays the single flatten copy from @p backend. Distinct from
+     * @ref flatten, which always copies — this keeps the trivial case free.
+     */
+    [[nodiscard]] view_t materialize(mem::mem_backend_t& backend = mem::heap_backend()) const {
+        if (link_count() == 1) return links()[0];
+        return flatten(backend);
+    }
 
     /** @brief Total logical length across all links. */
     [[nodiscard]] std::size_t total_length() const noexcept {
         std::size_t n = 0;
-        for (const auto& l : links_) n += l.length;
+        for (const view_t& l : links()) n += l.length;
         return n;
     }
 
@@ -75,7 +124,7 @@ class rope_t {
      * operations (`flatten`, CRC) cannot touch it.
      */
     [[nodiscard]] bool all_host() const noexcept {
-        for (const auto& l : links_) {
+        for (const view_t& l : links()) {
             if (l.is_device()) return false;
         }
         return true;
@@ -96,7 +145,7 @@ class rope_t {
         rope_t out;
         std::size_t skip = off;
         std::size_t remaining = len;
-        for (const auto& l : links_) {
+        for (const view_t& l : links()) {
             if (remaining == 0) break;
             if (skip >= l.length) {
                 skip -= l.length;
@@ -113,7 +162,7 @@ class rope_t {
     /** @brief Visit each link's contiguous bytes in order (parsers, serializers, CRC). */
     template <class Fn>
     void walk(Fn&& fn) const {
-        for (const auto& l : links_) fn(l.bytes());
+        for (const view_t& l : links()) fn(l.bytes());
     }
 
     /**
@@ -123,8 +172,8 @@ class rope_t {
      */
     [[nodiscard]] std::vector<std::span<const std::byte>> to_iovec() const {
         std::vector<std::span<const std::byte>> iov;
-        iov.reserve(links_.size());
-        for (const auto& l : links_) iov.push_back(l.bytes());
+        iov.reserve(link_count());
+        for (const view_t& l : links()) iov.push_back(l.bytes());
         return iov;
     }
 
@@ -141,7 +190,13 @@ class rope_t {
     [[nodiscard]] view_t flatten(mem::mem_backend_t& backend = mem::heap_backend()) const;
 
    private:
-    std::vector<view_t> links_;
+    // Inline small-buffer storage for the first two links (the ADR-0053 §6 cost
+    // guard). `heap_` is empty iff the chain is inline; the kInline+1-th append
+    // spills the whole chain there and `inline_n_` goes to 0 (see @ref append).
+    static constexpr std::size_t kInline = 2;
+    std::array<view_t, kInline> inline_{};
+    std::size_t inline_n_ = 0;
+    std::vector<view_t> heap_;
 };
 
 /** @brief Concatenate two ropes (chaining — no copy). */

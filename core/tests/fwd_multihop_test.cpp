@@ -261,7 +261,7 @@ int main() {
     const auto stored = graph_b.read(vB);
     check(stored.has_value(), "B /sensor readable after forwarded WRITE");
     if (stored) {
-        const auto inner = tr::wire::view_as_tlv(*stored);
+        const auto inner = tr::wire::view_as_tlv(stored->only());
         check(inner && inner->type == type_t::VALUE && inner->payload.size() == 4 &&
                   tr::detail::load_le<std::uint32_t>(inner->payload) == kWritten,
               "B /sensor LKV updated to the forwarded value (byte-exact)");

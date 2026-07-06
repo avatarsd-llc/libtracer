@@ -15,6 +15,18 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **`tr::view::rope_t` small-buffer inline storage + `only()` / `materialize()`
+  (`rope.hpp`, ADR-0053 §6).** A `rope_t` now keeps its first two links in inline
+  storage, so a single-link value (or a two-link head+payload) allocates nothing for
+  the chain — the third link spills it to the heap. This is the trivial-case cost
+  guard that lets the L4 graph store rope values without a per-write regression: a
+  scalar write is still one allocation (`make_shared<rope_t>`), what the old `view_t`
+  slot cost. Two consumer-facing accessors make the consumption form explicit:
+  `only()` returns the sole link (asserts single-link, zero copy — for callers that
+  know the value is contiguous), and `materialize()` returns the rope as one
+  contiguous `view_t` (zero copy when single-link, one flatten copy otherwise —
+  distinct from `flatten()`, which always copies). Locked by `tests/rope_test.cpp`,
+  which structurally asserts 1–2 link ropes stay inline and the 3rd spills.
 - **`tr::wire::tlv_view_t` (`tlv_view.hpp`) — the lazy rope-backed decode view
   (ADR-0053 §1).** What a rope-delivered frame becomes on the decode side:
   `tlv_view_t::over(rope)` anchors the bounds (root header, CRC **deferred**, exact
@@ -206,6 +218,26 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Changed
 
+- **The L4 graph value type is `tr::view::rope_t` (ADR-0053 §6 / step ④a) —
+  breaking.** A vertex's stored value, its stream history, and subscriber fan-out
+  now hold ropes, so a chunked stream (e.g. RTSP fragments reassembled by a
+  transport) is stored and drained link-by-link with no per-chunk copy; a scalar is
+  the single-link trivial case (unchanged cost, guarded by the new inline storage).
+  The data API migrates rename-and-migrate (the #230 rope-receiver precedent,
+  pre-1.0): `graph_t::read` / `await` / `read(v, field)` / `read(path)` /
+  `await(path)` now return `result_t<rope_t>`; `history` returns
+  `result_t<std::vector<rope_t>>`; `write` / the field-write overload / `write(path)`
+  take `rope_t` (an existing `view_t` caller compiles unchanged via the implicit
+  `view_t → rope_t`); `handlers_t::on_read` returns `result_t<rope_t>` and `on_write`
+  takes `const rope_t&`; `subscribe(callback)` / `subscriber_t::callback` take
+  `const rope_t&`; and `set_remote_delivery_sink`'s value is `const rope_t&`. A
+  consumer needing contiguous bytes calls `rope_t::only()` (single-link, zero copy)
+  or `materialize()` — the consumption form is now legible in the type; there is no
+  silent-flattening parallel view API. The [ADR-0042](../docs/adr/0042-refcounted-receiver-seam-view-delivery.md)
+  §3 referenced store generalizes to *subrope into the slot*. ON_CHANGE compares the
+  new value against the last-delivered snapshot across links without flattening. One
+  documented interim: `deliver_remote` materializes a multi-link value to contiguous
+  bytes until step ⑤ makes the emission path scatter-gather.
 - **WS supports RFC 6455 fragmented messages and delivers ropes (ADR-0053 §5 /
   step ②).** Both `transport_ws_server` and `transport_ws_client` now reassemble
   fragmented BINARY messages — previously a non-final fragment was delivered as if
