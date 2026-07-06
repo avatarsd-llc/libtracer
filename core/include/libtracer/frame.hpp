@@ -81,7 +81,7 @@ inline constexpr std::size_t kMaxDepth = 32;
 /**
  * @brief Decode exactly one TLV that fills @p input.
  * @param input The bytes to decode — must be exactly one TLV; trailing bytes ⇒ `FrameInvalid`.
- * @return The decoded @ref tlv_t (borrowing @p input), or an @ref err_t on failure.
+ * @return The decoded @ref tlv_t (borrowing @p input), or an `err_t` on failure.
  */
 [[nodiscard]] std::expected<tlv_t, err_t> decode(std::span<const std::byte> input);
 
