@@ -13,6 +13,10 @@
  *     validate_rope(rope-split(buf)).verdict == decode(buf).verdict          AND
  *     validate_rope(...).error() == decode(buf).error()   (when both reject)
  *
+ * and, since ADR-0053, the same obligation for the LAZY tier: a FULL lazy walk
+ * (tlv_view_t::over + verify + DFS children) must reach decode's verdict too —
+ * when everything is accessed, laziness defers work, never changes answers.
+ *
  * for EVERY single-cut split (each interior offset — so mid-header, mid-trailer
  * and mid-payload are all hit) plus several random multi-cut splits. A divergence
  * is a genuine rope-cursor vs span-cursor grammar bug; the seed + cut + verdicts
@@ -29,6 +33,7 @@
 #include "libtracer/frame.hpp"
 #include "libtracer/mem_borrowed.hpp"
 #include "libtracer/rope_decode.hpp"
+#include "libtracer/tlv_view.hpp"
 #include "libtracer/view.hpp"
 
 namespace {
@@ -119,7 +124,42 @@ split_rope_t split_into(const std::vector<std::byte>& flat, const std::vector<st
     return out;
 }
 
-// The invariant for one split. Returns true on agreement.
+// A FULL lazy walk over the view tier (ADR-0053): over() -> verify(root) ->
+// DFS children, verifying each child right after its header parse — the same
+// node order as decode()'s parse_one-then-descend, with the same kMaxDepth cap
+// applied before a child parse. When everything is accessed, lazy defers
+// nothing, so the verdict must equal decode's.
+std::expected<void, tr::wire::err_t> lazy_full_walk(const tr::view::rope_t& r) {
+    auto root = tr::wire::tlv_view_t::over(r);
+    if (!root) return std::unexpected(root.error());
+    if (const auto ok = root->verify(); !ok) return std::unexpected(ok.error());
+    std::vector<tr::wire::tlv_view_t::children_t> stack;
+    if (root->structured()) stack.push_back(root->children());
+    while (!stack.empty()) {
+        if (stack.back().exhausted()) {
+            stack.pop_back();
+            continue;
+        }
+        // Mirror decode(): a child of stack.back() sits at depth == stack.size().
+        if (stack.size() >= tr::wire::kMaxDepth) {
+            return std::unexpected(tr::wire::err_t::TLV_NESTING_TOO_DEEP);
+        }
+        auto nx = stack.back().next();
+        if (!nx) return std::unexpected(nx.error());
+        if (!*nx) continue;  // (unreachable: exhausted() checked above)
+        const tr::wire::tlv_view_t child = std::move(**nx);
+        if (const auto ok = child.verify(); !ok) return std::unexpected(ok.error());
+        if (child.structured()) stack.push_back(child.children());
+    }
+    return {};
+}
+
+// The invariant for one split: BOTH rope-tier readers must agree with decode.
+// One documented divergence: over() anchors bounds BEFORE any CRC (ADR-0053 §4),
+// while decode checks the root CRC before its trailing-bytes check — so a frame
+// with BOTH defects yields FRAME_CRC_FAIL eagerly but FRAME_INVALID lazily.
+// That exact err_t pair (same reject verdict) is accepted; everything else must
+// match exactly.
 bool split_agrees(const std::vector<std::byte>& buf, const std::vector<std::size_t>& cuts,
                   bool expect_ok, tr::wire::err_t expect_err, tr::wire::err_t& got_err) {
     split_rope_t sr = split_into(buf, cuts);
@@ -128,6 +168,21 @@ bool split_agrees(const std::vector<std::byte>& buf, const std::vector<std::size
     got_err = ok ? tr::wire::err_t{} : v.error();
     if (ok != expect_ok) return false;
     if (!ok && !expect_ok && v.error() != expect_err) return false;
+
+    const auto lazy = lazy_full_walk(sr.rope);
+    const bool lok = lazy.has_value();
+    if (lok != expect_ok) {
+        got_err = lok ? tr::wire::err_t{} : lazy.error();
+        return false;
+    }
+    if (!lok && !expect_ok && lazy.error() != expect_err) {
+        const bool documented_reorder = expect_err == tr::wire::err_t::FRAME_CRC_FAIL &&
+                                        lazy.error() == tr::wire::err_t::FRAME_INVALID;
+        if (!documented_reorder) {
+            got_err = lazy.error();
+            return false;
+        }
+    }
     return true;
 }
 

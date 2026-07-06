@@ -81,6 +81,35 @@ class rope_t {
         return true;
     }
 
+    /**
+     * @brief The `[off, off + len)` sub-range as its own rope (chaining — no copy).
+     *
+     * Trims the covering links with @ref view_t::subview, so the result shares
+     * (refcounts) exactly the segments its window touches and keeps only those
+     * alive — the region primitive of the lazy decode tier (ADR-0053 §1): a
+     * child TLV, a routed path suffix, or a payload handed onward is a subrope
+     * of the inbound frame, never a copy of it.
+     * @note Precondition: `off + len <= total_length()` (debug-asserted via the
+     *       subview window invariant; a shorter tail yields a shorter rope).
+     */
+    [[nodiscard]] rope_t subrope(std::size_t off, std::size_t len) const {
+        rope_t out;
+        std::size_t skip = off;
+        std::size_t remaining = len;
+        for (const auto& l : links_) {
+            if (remaining == 0) break;
+            if (skip >= l.length) {
+                skip -= l.length;
+                continue;
+            }
+            const std::size_t take = std::min(remaining, l.length - skip);
+            if (take > 0) out.append(l.subview(skip, take));
+            remaining -= take;
+            skip = 0;
+        }
+        return out;
+    }
+
     /** @brief Visit each link's contiguous bytes in order (parsers, serializers, CRC). */
     template <class Fn>
     void walk(Fn&& fn) const {
