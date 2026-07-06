@@ -227,9 +227,12 @@ class fwd_router_t {
      * (offset-dispatch, zero heap) — and threads the owning view to the
      * terminus, where a big trailer-less WRITE payload may be stored as a
      * subview of it (refcount pin, zero copy) under the vertex's
-     * `store_ref_min_bytes` policy. A multi-link rope is flattened ONCE here —
-     * the documented ADR-0053 interim recipe until partial-path routing
-     * (migration step ④) consumes `tlv_view_t` and step ⑥ deletes the flatten.
+     * `store_ref_min_bytes` policy. A multi-link rope routes a FORWARD hop
+     * directly over the rope cursor (ADR-0053 ④b): the dispatch offsets are read
+     * through the link-walking @ref wire::grammar::rope_cursor and the egress
+     * scatter-gathers the untouched links — no flatten. Only a terminus / reply /
+     * control frame, which still needs a contiguous decode (the rope-aware sink is
+     * the migration ⑤/⑥ follow-on), pays the one flatten fallback.
      */
     void on_frame_rope(std::string_view inbound_name, view::rope_t frame);
     /** @brief The shared routing body: @p frame_view is the owning frame when the
@@ -252,11 +255,17 @@ class fwd_router_t {
      *
      * Strips the leading `dst` segment, prepends the inbound-link NAME to `src` (unless a
      * REPLY), and scatter-gather-sends onward via @p child. @p child is the transport the
-     * first `dst` segment already resolved to. Shared by the decode-free `on_frame` fast
-     * path and the decoded `route_fwd`'s forward branch.
+     * first `dst` segment already resolved to. Templated over the grammar `Cursor` (ADR-0053
+     * ④b): a @ref wire::grammar::span_cursor reads a contiguous frame (byte-identical to the
+     * pre-rope path, zero heap — a stack `iov` array), a @ref wire::grammar::rope_cursor reads
+     * a scatter-gather frame (the egress gathers each region's per-link sub-spans into a
+     * `std::pmr::vector` drawn from the injected @ref mr_ — still no payload copy).
+     *
+     * @tparam Cursor A grammar byte-source cursor (span or rope).
+     * @param cur     The cursor positioned at the inbound FWD frame's first byte.
      */
-    void route_fwd_forward(std::string_view inbound_name, std::span<const std::byte> frame,
-                           transport_t& child);
+    template <class Cursor>
+    void route_fwd_forward(std::string_view inbound_name, const Cursor& cur, transport_t& child);
     /** @brief Learn (or re-advertise downstream) a `label ↔ route` binding (RFC-0004 §E.1). */
     void on_advertise(std::string_view inbound_name, const wire::tlv_t& adv);
     /** @brief Forward (swap label) or locally deliver a label-compacted COMPACT. */

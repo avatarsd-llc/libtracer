@@ -7,13 +7,17 @@
 
 #include <array>
 #include <cstring>
+#include <memory_resource>
 #include <optional>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
 #include "libtracer/grammar.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/path.hpp"
+#include "libtracer/rope_decode.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/view.hpp"
 
@@ -252,10 +256,40 @@ void fwd_router_t::on_frame_rope(std::string_view inbound_name, view::rope_t fra
         on_frame_impl(inbound_name, v.bytes(), &v);
         return;
     }
-    // Multi-link: the routing plane still reads by offset over a contiguous span,
-    // so flatten ONCE here — the documented ADR-0053 interim recipe, removed when
-    // partial-path routing consumes tlv_view_t (migration step 4; step 6 deletes
-    // this call-site). Empty/device ropes yield an empty flat view -> dropped.
+    // Multi-link: route a FORWARD hop directly over the rope — NO flatten
+    // (ADR-0053 ④b). The forward-vs-terminus split is read through the link-walking
+    // grammar cursor and the egress scatter-gathers the untouched links; a header or
+    // trailer straddling a link boundary is stitched by the cursor (grammar.hpp). Only
+    // a terminus / reply / control frame — which still needs a contiguous decode (the
+    // rope-aware sink is the migration ⑤/⑥ follow-on) — pays the one flatten fallback.
+    // A device link cannot be CPU-read, so a non-all-host rope skips straight to the
+    // fallback (flatten drops it, as before).
+    if (frame.total_length() >= 4 && frame.all_host()) {
+        const wire::grammar::rope_cursor cur{frame};
+        if (const auto seg = peek_fwd_first_dst_seg(cur)) {
+            // Resolve the first dst segment NAME. A routable segment is bounded
+            // (≤ kMaxSegmentBytes), so it is stitched into a small stack scratch —
+            // contiguous when it lies in one link, a byte-at-a-time copy across a link
+            // boundary; an over-long "segment" is not routable ⇒ fall to the terminus.
+            const auto [seg_off, seg_len] = *seg;
+            if (seg_len > 0 && seg_len <= graph::kMaxSegmentBytes) {
+                std::array<std::byte, graph::kMaxSegmentBytes> scratch;
+                std::size_t w = 0;
+                cur.for_each_span(seg_off, seg_len, [&](std::span<const std::byte> s) {
+                    for (std::byte b : s) scratch[w++] = b;
+                });
+                if (transport_t* const child =
+                        registry_.by_segment(std::span<const std::byte>(scratch.data(), seg_len))) {
+                    route_fwd_forward(inbound_name, cur, *child);
+                    return;
+                }
+            }
+            // No child (or over-long segment) ⇒ this node is the terminus for the frame.
+        }
+    }
+    // Terminus / reply / control (or a device/short rope): the contiguous decode path
+    // still needs a flat frame — the documented ADR-0053 interim flatten, deleted when
+    // the rope-aware terminus sink lands (migration ⑤/⑥). An empty flat view ⇒ dropped.
     const view_t flat = frame.flatten();
     if (flat.empty()) return;
     on_frame_impl(inbound_name, flat.bytes(), &flat);
@@ -281,7 +315,7 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
         if (const auto seg = peek_fwd_first_dst_seg(cur)) {
             if (transport_t* const child =
                     registry_.by_segment(frame.subspan(seg->first, seg->second))) {
-                route_fwd_forward(inbound_name, frame, *child);
+                route_fwd_forward(inbound_name, cur, *child);
                 return;
             }
             // First dst segment names no child ⇒ this node is the terminus.
@@ -316,14 +350,15 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
     }
 }
 
-void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
-                                     std::span<const std::byte> frame, transport_t& child) {
+template <class Cursor>
+void fwd_router_t::route_fwd_forward(std::string_view inbound_name, const Cursor& cur_src,
+                                     transport_t& child) {
     // All offsets, no decoded tree. Layout: FWD{ op VALUE, dst PATH, FIELD? sel, src
     // PATH, tail } — strip dst's leading segment, grow src by the inbound NAME (unless
-    // REPLY), scatter-gather the fresh heads + views into the untouched inbound frame.
-    // Reads go through the grammar `span_cursor` seam (ADR-0053 ④b); the egress still
-    // re-slices the contiguous frame (the rope egress is the follow-on step).
-    const wire::grammar::span_cursor cur_src{frame};
+    // REPLY), scatter-gather the fresh heads + the untouched inbound regions onward.
+    // Reads AND the egress go through the grammar `Cursor` seam (ADR-0053 ④b): the same
+    // code serves a contiguous `span_cursor` (each region is one sub-span) and a
+    // link-walking `rope_cursor` (a region yields one sub-span per link it crosses).
     const auto fwd_h = read_header(cur_src, 0);
     if (!fwd_h || fwd_h->type != type_t::FWD) return;
     const std::size_t body_end = fwd_h->body_off + fwd_h->body_len;
@@ -381,7 +416,7 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     // buffer overrun.
     stack_writer<64> head1;
     head1.header(type_t::FWD, new_fwd_body);
-    head1.raw(frame.subspan(op_pos, op_h->total));
+    cur_src.for_each_span(op_pos, op_h->total, [&](std::span<const std::byte> s) { head1.raw(s); });
     head1.header(type_t::PATH, new_dst_body);
 
     stack_writer<96> head2;
@@ -390,18 +425,35 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
 
     if (!head1.ok() || !head2.ok()) return;  // malformed oversized op ⇒ drop, no overrun
 
-    // Scatter-gather egress: small stack heads interleaved with views straight into the
-    // inbound frame (remaining dst, selector, original src bytes, payload) — no copy, no
-    // heap. `iov` is a stack std::array, not a std::vector (ADR-0038 inv. #2).
-    std::array<std::span<const std::byte>, 6> iov;
-    std::size_t n = 0;
-    iov[n++] = head1.span();
-    if (rem_dst_len > 0) iov[n++] = frame.subspan(rem_dst_off, rem_dst_len);
-    if (sel_total > 0) iov[n++] = frame.subspan(sel_pos, sel_total);
-    iov[n++] = head2.span();
-    if (src_h->body_len > 0) iov[n++] = frame.subspan(src_h->body_off, src_h->body_len);
-    if (tail_len > 0) iov[n++] = frame.subspan(tail_off, tail_len);
-    child.send(std::span<const std::span<const std::byte>>(iov.data(), n));
+    // Scatter-gather egress: the small stack heads interleaved with the untouched inbound
+    // regions (remaining dst, selector, original src bytes, payload) — no payload copy. The
+    // gather is written ONCE over the cursor seam; each region is emitted via
+    // `for_each_span`, which yields exactly one sub-span for a contiguous source and one per
+    // straddled link for a rope. So the container is the only thing that varies: a stack
+    // `std::array` for the span path (ZERO heap, ADR-0038 inv. #2) vs a `std::pmr::vector`
+    // over the injected @ref mr_ for the rope path (a link count is only known at run time).
+    const auto gather = [&](auto&& push) {
+        push(head1.span());
+        if (rem_dst_len > 0) cur_src.for_each_span(rem_dst_off, rem_dst_len, push);
+        if (sel_total > 0) cur_src.for_each_span(sel_pos, sel_total, push);
+        push(head2.span());
+        if (src_h->body_len > 0) cur_src.for_each_span(src_h->body_off, src_h->body_len, push);
+        if (tail_len > 0) cur_src.for_each_span(tail_off, tail_len, push);
+    };
+
+    if constexpr (std::is_same_v<Cursor, wire::grammar::span_cursor>) {
+        // Contiguous source: at most 6 regions, each a single sub-span — a stack array.
+        std::array<std::span<const std::byte>, 6> iov;
+        std::size_t n = 0;
+        gather([&](std::span<const std::byte> s) { iov[n++] = s; });
+        child.send(std::span<const std::span<const std::byte>>(iov.data(), n));
+    } else {
+        // Rope source: a region may cross several links — gather into a pmr vector drawn
+        // from the terminus arena's resource (the forward hop still copies no payload).
+        std::pmr::vector<std::span<const std::byte>> iov{mr_};
+        gather([&](std::span<const std::byte> s) { iov.push_back(s); });
+        child.send(std::span<const std::span<const std::byte>>(iov.data(), iov.size()));
+    }
 }
 
 void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<const std::byte> frame,
