@@ -13,9 +13,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "libtracer/status.hpp"
@@ -48,9 +50,27 @@ struct field_path_t {
 // optional field tail. The payload bytes are the vertex-map key.
 class path_t {
    public:
+    path_t() = default;
+
+    /**
+     * @brief Construct from a compile-site / known-good path LITERAL, parsing ONCE.
+     *
+     * `path_t p("/sensor/temp"); write(p, a); write(p, b);` — parse the string a single
+     * time, then hold the value and reuse the handle; the graph API takes `const path_t&`
+     * so a held path never re-parses on the hot path (docs/reference/02 §dispatch keys on
+     * the parsed PATH-TLV bytes, never the string). A malformed literal is a source bug,
+     * so this **hard-aborts** rather than yielding a fallible @ref result_t the caller
+     * would only `*`-deref unchecked. For a RUNTIME string whose validity is a genuine
+     * runtime condition, use @ref parse (fallible). `explicit` — construction is always
+     * a visible, deliberate parse, never an implicit per-call one. No exceptions (usable
+     * under `-fno-exceptions`).
+     */
+    explicit path_t(std::string_view text);
+
     // Parse "/sensor/temp" or "/sensor/temp:settings.deadline_ns". Validates and
     // canonicalizes: strip trailing '/', reject empty segments ("//") and
-    // unrooted paths, enforce the size/depth limits above.
+    // unrooted paths, enforce the size/depth limits above. Fallible — for a RUNTIME
+    // string; a known-good literal uses the parse-once constructor above.
     [[nodiscard]] static result_t<path_t> parse(std::string_view text);
 
     // The vertex-map key: the canonical PATH-TLV payload bytes (NAME children).
@@ -65,6 +85,12 @@ class path_t {
     field_path_t field_;
     std::size_t segments_ = 0;
 };
+
+inline path_t::path_t(std::string_view text) {
+    result_t<path_t> p = parse(text);
+    if (!p) std::abort();  // malformed path LITERAL — a source bug; fail loud, not silent
+    *this = std::move(*p);
+}
 
 // Owned byte key for the vertex map (a copy of a path's canonical payload).
 struct path_key_t {

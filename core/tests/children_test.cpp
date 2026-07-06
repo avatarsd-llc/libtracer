@@ -69,18 +69,18 @@ view_t bare_value() {
 void test_create_and_resolve() {
     std::printf("Create a child via :children[] SPEC and resolve it:\n");
     graph_t g;
-    (void)g.register_vertex(*path_t::parse("/dev"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
 
-    const auto w = g.write(*path_t::parse("/dev:children[]"), spec("stored_value", "temp"));
+    const auto w = g.write(path_t("/dev:children[]"), spec("stored_value", "temp"));
     check(w.has_value(), "SPEC{stored_value, temp} write accepted");
 
     // The child is now a first-class vertex at /dev/temp — resolvable and writable.
     vertex_t* child = g.find(path_t::parse("/dev/temp")->key());
     check(child != nullptr, "child /dev/temp resolves in the vertex map");
     const auto val = bare_value();
-    const auto cw = g.write(*path_t::parse("/dev/temp"), val);
+    const auto cw = g.write(path_t("/dev/temp"), val);
     check(cw.has_value(), "the created child accepts an ordinary value write");
-    const auto cr = g.read(*path_t::parse("/dev/temp"));
+    const auto cr = g.read(path_t("/dev/temp"));
     check(cr.has_value() && cr->only().bytes().size() == val.bytes().size() &&
               std::memcmp(cr->only().bytes().data(), val.bytes().data(), val.bytes().size()) == 0,
           "and reads back the identical VALUE bytes (last-writer-wins)");
@@ -89,8 +89,8 @@ void test_create_and_resolve() {
 void test_unknown_type() {
     std::printf("Unknown catalog type => SCHEMA_NOT_FOUND:\n");
     graph_t g;
-    (void)g.register_vertex(*path_t::parse("/dev"), role_t::STORED_VALUE);
-    const auto w = g.write(*path_t::parse("/dev:children[]"), spec("no_such_type", "x"));
+    (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
+    const auto w = g.write(path_t("/dev:children[]"), spec("no_such_type", "x"));
     check(!w.has_value() && w.error() == status_t::SCHEMA_NOT_FOUND,
           "unknown type is the ENOTTY of creation");
     check(g.find(path_t::parse("/dev/x")->key()) == nullptr, "no child was created");
@@ -99,10 +99,10 @@ void test_unknown_type() {
 void test_duplicate_name() {
     std::printf("Duplicate child name => PATH_IN_USE:\n");
     graph_t g;
-    (void)g.register_vertex(*path_t::parse("/dev"), role_t::STORED_VALUE);
-    check(g.write(*path_t::parse("/dev:children[]"), spec("stored_value", "dup")).has_value(),
+    (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
+    check(g.write(path_t("/dev:children[]"), spec("stored_value", "dup")).has_value(),
           "first create succeeds");
-    const auto again = g.write(*path_t::parse("/dev:children[]"), spec("stored_value", "dup"));
+    const auto again = g.write(path_t("/dev:children[]"), spec("stored_value", "dup"));
     check(!again.has_value() && again.error() == status_t::PATH_IN_USE,
           "second create with the same name is rejected");
 }
@@ -110,8 +110,8 @@ void test_duplicate_name() {
 void test_non_spec_value() {
     std::printf("A non-SPEC :children[] value => TYPE_MISMATCH:\n");
     graph_t g;
-    (void)g.register_vertex(*path_t::parse("/dev"), role_t::STORED_VALUE);
-    const auto w = g.write(*path_t::parse("/dev:children[]"), bare_value());
+    (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
+    const auto w = g.write(path_t("/dev:children[]"), bare_value());
     check(!w.has_value() && w.error() == status_t::TYPE_MISMATCH,
           "a bare VALUE is not a creation spec");
 }
@@ -119,7 +119,7 @@ void test_non_spec_value() {
 void test_custom_factory() {
     std::printf("A device-registered custom type (the #83 transport-vertex seam):\n");
     graph_t g;
-    (void)g.register_vertex(*path_t::parse("/dev"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
 
     // A device adds its own catalog type — here a STREAM-role vertex, standing in for
     // a controller / transport connection. The graph composes the key; the factory
@@ -131,7 +131,7 @@ void test_custom_factory() {
             return gg.register_vertex_key(std::move(key), role_t::STREAM);
         });
 
-    const auto w = g.write(*path_t::parse("/dev:children[]"), spec("streamy", "s"));
+    const auto w = g.write(path_t("/dev:children[]"), spec("streamy", "s"));
     check(w.has_value(), "SPEC of a custom-registered type is accepted");
     check(factory_ran, "the device factory ran");
     check(g.find(path_t::parse("/dev/s")->key()) != nullptr, "the custom child resolves");

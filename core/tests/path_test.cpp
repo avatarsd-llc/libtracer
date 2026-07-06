@@ -7,7 +7,9 @@
  * limits, and that the field tail (dot-separated, with [N]/[]) still parses.
  */
 
+#include <algorithm>
 #include <cstdio>
+#include <ranges>
 #include <string_view>
 
 #include "libtracer/tracer.hpp"
@@ -56,6 +58,21 @@ int main() {
     std::printf("Structural limits still hold:\n");
     rejected("relative/no/root");  // must be rooted at '/'
     rejected("/a//b");             // empty segment
+
+    std::printf("The parse-once constructor yields the same key as parse():\n");
+    {
+        // path_t("literal") parses once; the key must be byte-identical to parse()'s,
+        // so a held path is a drop-in for `*path_t::parse(...)` at every call site.
+        const path_t ctor("/sensor/temp");
+        const auto viaparse = path_t::parse("/sensor/temp");
+        check(viaparse.has_value(), "control path parses");
+        check(viaparse && std::ranges::equal(ctor.key(), viaparse->key()),
+              "path_t(\"/sensor/temp\").key() == parse(\"/sensor/temp\").key()");
+        // Held once, reused — the point of the constructor (no re-parse per use).
+        const path_t held("/x:subscribers[3]");
+        check(std::ranges::equal(held.key(), held.key()) && held.field() == held.field(),
+              "a held path_t is stable across reuse (field tail preserved)");
+    }
 
     std::printf(g_failures == 0 ? "\nPATH: PASS\n" : "\nPATH: FAIL (%d)\n", g_failures);
     return g_failures == 0 ? 0 : 1;

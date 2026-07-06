@@ -113,10 +113,10 @@ bool is_subview_of(const view_t& v, const view_t& frame) {
 void test_bubbling_and_idle_walk() {
     std::printf("vertical bubbling + near-free-when-idle (RFC-0005):\n");
     graph_t g;
-    vertex_t* a = *g.register_vertex(*path_t::parse("/a"), role_t::STORED_VALUE);
-    (void)*g.register_vertex(*path_t::parse("/a/b"), role_t::STORED_VALUE);
-    vertex_t* abc = *g.register_vertex(*path_t::parse("/a/b/c"), role_t::STORED_VALUE);
-    vertex_t* x = *g.register_vertex(*path_t::parse("/x"), role_t::STORED_VALUE);
+    vertex_t* a = *g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
+    (void)*g.register_vertex(path_t("/a/b"), role_t::STORED_VALUE);
+    vertex_t* abc = *g.register_vertex(path_t("/a/b/c"), role_t::STORED_VALUE);
+    vertex_t* x = *g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
 
     // Idle: nobody listens above — a write never walks ancestors.
     check(g.write(abc, make_value({0x01})).has_value(), "leaf write with no subscribers");
@@ -124,13 +124,13 @@ void test_bubbling_and_idle_walk() {
 
     std::vector<std::vector<std::byte>> at_a;
     std::vector<std::vector<std::byte>> at_x;
-    check(g.subscribe(*path_t::parse("/a"),
+    check(g.subscribe(path_t("/a"),
                       [&](const rope_t& v) {
                           at_a.emplace_back(v.only().bytes().begin(), v.only().bytes().end());
                       })
               .has_value(),
           "subscribe callback at ancestor /a");
-    check(g.subscribe(*path_t::parse("/x"),
+    check(g.subscribe(path_t("/x"),
                       [&](const rope_t& v) {
                           at_x.emplace_back(v.only().bytes().begin(), v.only().bytes().end());
                       })
@@ -152,8 +152,7 @@ void test_bubbling_and_idle_walk() {
     check(g.ancestor_walks() == 1, "write at /a (nothing above) does not walk");
 
     // Unsubscribe (clear the slot) => the walk stops.
-    check(g.write(*path_t::parse("/a:subscribers[0]"), make_value({0x09, 0x00, 0x00, 0x00}))
-              .has_value(),
+    check(g.write(path_t("/a:subscribers[0]"), make_value({0x09, 0x00, 0x00, 0x00})).has_value(),
           "clear /a:subscribers[0] (unsubscribe)");
     check(g.write(abc, make_value({0x05})).has_value(), "leaf write after unsubscribe");
     check(g.ancestor_walks() == 1, "unsubscribed => the walk stops again");
@@ -164,13 +163,13 @@ void test_bubbling_and_idle_walk() {
 void test_bubbling_to_late_created_descendant() {
     std::printf("bubbling from a vertex created AFTER the subscription:\n");
     graph_t g;
-    (void)*g.register_vertex(*path_t::parse("/a"), role_t::STORED_VALUE);
+    (void)*g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
     std::size_t hits = 0;
-    check(g.subscribe(*path_t::parse("/a"), [&](const rope_t&) { ++hits; }).has_value(),
+    check(g.subscribe(path_t("/a"), [&](const rope_t&) { ++hits; }).has_value(),
           "subscribe at /a first");
     // The descendant is created afterwards (write-creates) — its creation-time
     // ancestor-listener sum must still route its writes up.
-    check(g.write(*path_t::parse("/a/new/leaf"), make_value({0x42})).has_value(),
+    check(g.write(path_t("/a/new/leaf"), make_value({0x42})).has_value(),
           "write-creates /a/new/leaf under the live subscription");
     check(hits == 1, "the late-created descendant's write bubbles to /a");
 }
@@ -178,8 +177,8 @@ void test_bubbling_to_late_created_descendant() {
 void test_remote_ancestor_subscriber() {
     std::printf("remote ancestor subscriber (fan-out via return_route):\n");
     graph_t g;
-    vertex_t* a = *g.register_vertex(*path_t::parse("/a"), role_t::STORED_VALUE);
-    vertex_t* ab = *g.register_vertex(*path_t::parse("/a/b"), role_t::STORED_VALUE);
+    vertex_t* a = *g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
+    vertex_t* ab = *g.register_vertex(path_t("/a/b"), role_t::STORED_VALUE);
 
     std::vector<std::byte> route{std::byte{0x06}, std::byte{0x40}, std::byte{0x00},
                                  std::byte{0x00}};
@@ -210,18 +209,18 @@ void test_remote_ancestor_subscriber() {
 void test_branch_write_decomposition() {
     std::printf("branch-write (POINT) decomposition:\n");
     graph_t g;
-    vertex_t* s = *g.register_vertex(*path_t::parse("/s"), role_t::STORED_VALUE);
-    vertex_t* st = *g.register_vertex(*path_t::parse("/s/t"), role_t::STORED_VALUE);
+    vertex_t* s = *g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
+    vertex_t* st = *g.register_vertex(path_t("/s/t"), role_t::STORED_VALUE);
 
     std::vector<std::vector<std::byte>> at_s;
     std::vector<view_t> at_st;
-    check(g.subscribe(*path_t::parse("/s"),
+    check(g.subscribe(path_t("/s"),
                       [&](const rope_t& v) {
                           at_s.emplace_back(v.only().bytes().begin(), v.only().bytes().end());
                       })
               .has_value(),
           "subscribe at the branch root /s");
-    check(g.subscribe(*path_t::parse("/s/t"), [&](const rope_t& v) { at_st.push_back(v.only()); })
+    check(g.subscribe(path_t("/s/t"), [&](const rope_t& v) { at_st.push_back(v.only()); })
               .has_value(),
           "subscribe at the leaf /s/t");
 
@@ -242,7 +241,7 @@ void test_branch_write_decomposition() {
           "read /s/t returns the leaf's VALUE TLV");
     check(r_t.has_value() && is_subview_of(r_t->only(), frame),
           "leaf store is a refcount SUBVIEW of the written frame (zero copy)");
-    const auto r_u = g.read(*path_t::parse("/s/u"));
+    const auto r_u = g.read(path_t("/s/u"));
     check(r_u.has_value() && same_bytes(r_u->only(), value_tlv({0xCC})),
           "write-created /s/u holds its decomposed VALUE");
 
@@ -266,7 +265,7 @@ void test_branch_write_decomposition() {
 void test_branch_write_strictness() {
     std::printf("branch-write strictness (shape / addressing errors):\n");
     graph_t g;
-    vertex_t* s = *g.register_vertex(*path_t::parse("/s"), role_t::STORED_VALUE);
+    vertex_t* s = *g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
 
     // Root NAME must equal the target vertex's leaf segment.
     const auto wrong = g.write(s, make_value(point_tlv("zz", value_tlv({0x01}))));
@@ -287,12 +286,11 @@ void test_branch_write_strictness() {
 
     // A value-free branch is a no-op write (nothing stored, nothing delivered).
     std::size_t hits = 0;
-    check(g.subscribe(*path_t::parse("/s"), [&](const rope_t&) { ++hits; }).has_value(),
-          "subscribe at /s");
+    check(g.subscribe(path_t("/s"), [&](const rope_t&) { ++hits; }).has_value(), "subscribe at /s");
     check(g.write(s, make_value(point_tlv("s", point_tlv("t", {})))).has_value(),
           "value-free branch write is accepted");
     check(hits == 0, "value-free branch delivers nothing");
-    check(!g.read(*path_t::parse("/s/t")).has_value(), "value-free branch stores nothing");
+    check(!g.read(path_t("/s/t")).has_value(), "value-free branch stores nothing");
 }
 
 void test_write_creates() {
@@ -301,15 +299,15 @@ void test_write_creates() {
     // A data write to a nonexistent path creates it (and intermediates).
     const std::vector<std::byte> val{std::byte{0x01}, std::byte{0x00}, std::byte{0x01},
                                      std::byte{0x00}, std::byte{0x2A}};
-    check(g.write(*path_t::parse("/new/deep/leaf"), make_value(val)).has_value(),
+    check(g.write(path_t("/new/deep/leaf"), make_value(val)).has_value(),
           "write to a nonexistent path creates it");
-    const auto r = g.read(*path_t::parse("/new/deep/leaf"));
+    const auto r = g.read(path_t("/new/deep/leaf"));
     check(r.has_value() && same_bytes(r->only(), val), "created leaf serves the written value");
     check(g.find(path_t::parse("/new/deep")->key()) != nullptr,
           "intermediate levels are created too (mkdir-p)");
 
     // A :field write to a nonexistent vertex does NOT create.
-    const auto f = g.write(*path_t::parse("/nope:settings.priority"), make_value({1, 0, 1, 0, 1}));
+    const auto f = g.write(path_t("/nope:settings.priority"), make_value({1, 0, 1, 0, 1}));
     check(!f.has_value() && f.error() == status_t::NOT_FOUND,
           "field write to a nonexistent vertex stays NOT_FOUND");
     check(g.find(path_t::parse("/nope")->key()) == nullptr, "field write created nothing");
@@ -318,7 +316,7 @@ void test_write_creates() {
 void test_write_creates_acl_gate() {
     std::printf("write-creates CREATE-ACL gate (denied => PERMISSION_DENIED):\n");
     graph_t g;
-    (void)*g.register_vertex(*path_t::parse("/p"), role_t::STORED_VALUE);
+    (void)*g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
     // Every caller (including local) resolves to a subject — enforcement is on.
     g.set_subject_resolver([](std::string_view) -> std::optional<subject_token_t> {
         return subject_token_t{std::byte{'u'}};
@@ -343,25 +341,25 @@ void test_write_creates_acl_gate() {
     tr::wire::emit_tlv(ace, type_t::ACL, opt_t{.pl = true}, ace_body);
     std::vector<std::byte> acl;
     tr::wire::emit_tlv(acl, type_t::ACL, opt_t{.pl = true}, ace);
-    check(g.write(*path_t::parse("/p:acl"), make_value(acl)).has_value(),
+    check(g.write(path_t("/p:acl"), make_value(acl)).has_value(),
           "install a WRITE-only (no CREATE) ACL on /p");
 
-    const auto denied = g.write(*path_t::parse("/p/child"), make_value({0x01, 0, 1, 0, 9}));
+    const auto denied = g.write(path_t("/p/child"), make_value({0x01, 0, 1, 0, 9}));
     check(!denied.has_value() && denied.error() == status_t::PERMISSION_DENIED,
           "write-create under /p without the CREATE right => PERMISSION_DENIED");
     check(g.find(path_t::parse("/p/child")->key()) == nullptr, "denied create made no vertex");
 
     // Writing to the existing /p itself is still allowed (WRITE granted).
-    check(g.write(*path_t::parse("/p"), make_value({0x01, 0, 1, 0, 9})).has_value(),
+    check(g.write(path_t("/p"), make_value({0x01, 0, 1, 0, 9})).has_value(),
           "plain write to /p still allowed by the WRITE grant");
 }
 
 void test_branch_write_acl_admission() {
     std::printf("branch-write admission is all-or-nothing under ACL:\n");
     graph_t g;
-    vertex_t* s = *g.register_vertex(*path_t::parse("/s"), role_t::STORED_VALUE);
-    vertex_t* st = *g.register_vertex(*path_t::parse("/s/t"), role_t::STORED_VALUE);
-    vertex_t* su = *g.register_vertex(*path_t::parse("/s/u"), role_t::STORED_VALUE);
+    vertex_t* s = *g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
+    vertex_t* st = *g.register_vertex(path_t("/s/t"), role_t::STORED_VALUE);
+    vertex_t* su = *g.register_vertex(path_t("/s/u"), role_t::STORED_VALUE);
     g.set_subject_resolver([](std::string_view) -> std::optional<subject_token_t> {
         return subject_token_t{std::byte{'u'}};
     });
@@ -380,7 +378,7 @@ void test_branch_write_acl_admission() {
     tr::wire::emit_tlv(ace, type_t::ACL, opt_t{.pl = true}, ace_body);
     std::vector<std::byte> acl;
     tr::wire::emit_tlv(acl, type_t::ACL, opt_t{.pl = true}, ace);
-    check(g.write(*path_t::parse("/s/u:acl"), make_value(acl)).has_value(), "close /s/u to writes");
+    check(g.write(path_t("/s/u:acl"), make_value(acl)).has_value(), "close /s/u to writes");
 
     const std::vector<std::byte> branch =
         point_tlv("s", cat({point_tlv("t", value_tlv({0x11})), point_tlv("u", value_tlv({0x22}))}));

@@ -419,7 +419,7 @@ void test_store_ref_threshold() {
     }
 
     // Opt in via the `:settings` field-write (the wire path that parses the u32).
-    (void)g.write(*path_t::parse("/sensor/blob:settings.store_ref_min_bytes"),
+    (void)g.write(path_t("/sensor/blob:settings.store_ref_min_bytes"),
                   make_value(b_value({0x08, 0x00, 0x00, 0x00})));
     check(v->settings().store_ref_min_bytes == 8,
           ":settings.store_ref_min_bytes field-write parses the u32 (8)");
@@ -591,8 +591,7 @@ void test_write_creates_remote() {
     const auto dec = decode_reply(*reply);
     check(value_u8(dec.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
           "write-create replies kind=RESULT (not NOT_FOUND)");
-    check(g.read(*path_t::parse("/fresh/leaf")).has_value(),
-          "the created vertex serves the written value");
+    check(g.read(path_t("/fresh/leaf")).has_value(), "the created vertex serves the written value");
     check(g.find(path_t::parse("/fresh")->key()) != nullptr,
           "the intermediate level was created too (mkdir-p)");
 

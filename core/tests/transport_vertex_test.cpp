@@ -101,8 +101,8 @@ void test_create_connection_vertex() {
     tr::net::loopback_channel_t channel;
     net.provide_link("up", channel.a());  // Stage-1 (A): supply the pre-built link
 
-    const auto w = node.write(*path_t::parse("/net:children[]"),
-                              conn_spec("client", "up", conn_role_t::DIAL, 8080));
+    const auto w =
+        node.write(path_t("/net:children[]"), conn_spec("client", "up", conn_role_t::DIAL, 8080));
     check(w.has_value(), "SPEC{client, up} write creates the connection");
     check(node.find(path_t::parse("/net/up")->key()) != nullptr,
           "the connection resolves as /net/up (a first-class / vertex)");
@@ -126,14 +126,14 @@ void test_await_link_state() {
     transport_vertex_t net(node, router);
     tr::net::loopback_channel_t channel;
     net.provide_link("up", channel.a());
-    (void)node.write(*path_t::parse("/net:children[]"),
+    (void)node.write(path_t("/net:children[]"),
                      conn_spec("listener", "up", conn_role_t::LISTEN, 0));
 
     // A waiter blocks on the connection vertex; set_link_state(up) must wake it.
     std::promise<bool> woke;
     auto fut = woke.get_future();
     std::thread waiter([&] {
-        const auto r = node.await(*path_t::parse("/net/up"), 2s);
+        const auto r = node.await(path_t("/net/up"), 2s);
         woke.set_value(r.has_value());
     });
     std::this_thread::sleep_for(20ms);  // let the waiter reach the wait
@@ -157,12 +157,11 @@ void test_fwd_still_routes() {
 
     graph_t node_b;
     fwd_router_t router_b(node_b);
-    (void)node_b.register_vertex(*path_t::parse("/temp"), role_t::STORED_VALUE);
+    (void)node_b.register_vertex(path_t("/temp"), role_t::STORED_VALUE);
 
     tr::net::loopback_channel_t channel;
     net_a.provide_link("up", channel.a());
-    (void)node_a.write(*path_t::parse("/net:children[]"),
-                       conn_spec("client", "up", conn_role_t::DIAL, 0));
+    (void)node_a.write(path_t("/net:children[]"), conn_spec("client", "up", conn_role_t::DIAL, 0));
     router_b.add_child("down", channel.b());  // B's side: plain router child (unchanged path)
 
     // Observe inbound FWDs on B. A FWD{WRITE dst=/up/temp} from A: A strips "up" and
@@ -217,14 +216,14 @@ void test_local_path_untouched() {
     fwd_router_t router(node);
     transport_vertex_t net(node, router);  // present, but off the local path
 
-    (void)node.register_vertex(*path_t::parse("/sensor"), role_t::STORED_VALUE);
+    (void)node.register_vertex(path_t("/sensor"), role_t::STORED_VALUE);
     std::atomic<int> hits{0};
-    (void)node.subscribe(*path_t::parse("/sensor"), [&hits](const tr::view::rope_t&) {
+    (void)node.subscribe(path_t("/sensor"), [&hits](const tr::view::rope_t&) {
         hits.fetch_add(1, std::memory_order_relaxed);
     });
 
     const std::byte b{0x7B};
-    (void)node.write(*path_t::parse("/sensor"), owned(std::span<const std::byte>(&b, 1)));
+    (void)node.write(path_t("/sensor"), owned(std::span<const std::byte>(&b, 1)));
     check(hits.load() == 1, "local subscriber fired inline on the write (direct call, no /net)");
 }
 
@@ -274,19 +273,19 @@ void test_config_constructed_udp() {
 
     // B: a stored value at /temp (an encoded VALUE TLV — the reply embeds the LKV
     // verbatim), and a udp LISTENER on a fixed localhost port.
-    (void)node_b.register_vertex(*path_t::parse("/temp"), role_t::STORED_VALUE);
+    (void)node_b.register_vertex(path_t("/temp"), role_t::STORED_VALUE);
     std::vector<std::byte> tv;
     const std::byte tb{0x2A};
     tr::wire::emit_tlv(tv, type_t::VALUE, opt_t{}, std::span<const std::byte>(&tb, 1));
-    (void)node_b.write(*path_t::parse("/temp"), owned(tv));
-    const auto wb = node_b.write(*path_t::parse("/net:children[]"),
+    (void)node_b.write(path_t("/temp"), owned(tv));
+    const auto wb = node_b.write(path_t("/net:children[]"),
                                  conn_spec("listener", "a", conn_role_t::LISTEN, 47120, "udp"));
     check(wb.has_value(), "B: SPEC{listener, kind=udp, port} constructs the bound socket");
     check(router_b.registry().by_name("a") != nullptr, "B: the socket is wired into the router");
 
     // A: a udp CLIENT dialing B's port — also purely from config.
     const auto wa =
-        node_a.write(*path_t::parse("/net:children[]"),
+        node_a.write(path_t("/net:children[]"),
                      conn_spec("client", "b", conn_role_t::DIAL, 47120, "udp", "127.0.0.1"));
     check(wa.has_value(), "A: SPEC{client, kind=udp, addr, port} constructs the dialing socket");
     const auto* s = net_a.settings_of("b");
@@ -294,7 +293,7 @@ void test_config_constructed_udp() {
           "A: the parsed :settings carry kind/addr/port");
 
     // Construction wrote the link state up — the /net/b vertex value is VALUE{0x01}.
-    const auto lv = node_a.read(*path_t::parse("/net/b"));
+    const auto lv = node_a.read(path_t("/net/b"));
     bool up = false;
     if (lv) {
         const auto t = tr::wire::view_as_tlv(lv->only());
@@ -331,7 +330,7 @@ void test_provide_link_wins() {
     net.provide_link("up", channel.a());  // staged first — must win over kind=udp
 
     const auto w =
-        node.write(*path_t::parse("/net:children[]"),
+        node.write(path_t("/net:children[]"),
                    conn_spec("client", "up", conn_role_t::DIAL, 47121, "udp", "127.0.0.1"));
     check(w.has_value(), "SPEC with kind=udp still creates the connection");
     check(router.registry().by_name("up") == &channel.a(),
@@ -349,18 +348,18 @@ void test_creation_errors() {
 
     // Unknown transport kind => SCHEMA_NOT_FOUND (unsupported catalog entry), no vertex.
     const auto w1 =
-        node.write(*path_t::parse("/net:children[]"),
+        node.write(path_t("/net:children[]"),
                    conn_spec("client", "x", conn_role_t::DIAL, 47122, "pigeon", "127.0.0.1"));
     check(!w1.has_value() && w1.error() == status_t::SCHEMA_NOT_FOUND,
           "unknown kind => SCHEMA_NOT_FOUND");
     check(node.find(path_t::parse("/net/x")->key()) == nullptr, "no /net/x vertex was created");
 
     // A udp DIAL without addr (and a LISTEN without port) => TYPE_MISMATCH, no vertex.
-    const auto w2 = node.write(*path_t::parse("/net:children[]"),
+    const auto w2 = node.write(path_t("/net:children[]"),
                                conn_spec("client", "y", conn_role_t::DIAL, 47123, "udp"));
     check(!w2.has_value() && w2.error() == status_t::TYPE_MISMATCH,
           "udp client without addr => TYPE_MISMATCH");
-    const auto w3 = node.write(*path_t::parse("/net:children[]"),
+    const auto w3 = node.write(path_t("/net:children[]"),
                                conn_spec("listener", "z", conn_role_t::LISTEN, 0, "udp"));
     check(!w3.has_value() && w3.error() == status_t::TYPE_MISMATCH,
           "udp listener without port => TYPE_MISMATCH");
@@ -369,8 +368,8 @@ void test_creation_errors() {
           "no vertices were created for the failed configs");
 
     // No kind and no staged link => NOT_FOUND (nothing can carry the bytes).
-    const auto w4 = node.write(*path_t::parse("/net:children[]"),
-                               conn_spec("client", "w", conn_role_t::DIAL, 8080));
+    const auto w4 =
+        node.write(path_t("/net:children[]"), conn_spec("client", "w", conn_role_t::DIAL, 8080));
     check(!w4.has_value() && w4.error() == status_t::NOT_FOUND,
           "no kind + no provide_link => NOT_FOUND");
 }

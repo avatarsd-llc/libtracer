@@ -206,12 +206,12 @@ void seed_temp_value(graph_t& g) {
     (void)g.write(v, make_value(b_value({0xD2, 0x04, 0x00, 0x00})));  // VALUE u32=1234
 }
 void seed_temp_empty(graph_t& g) {
-    (void)g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
 }
 // Register /sensor/temp and bind two REMOTE subscribers (via the resolver itself,
 // so both graphs reach byte-identical slot state) for the :subscribers[] read.
 void seed_temp_with_remote_subs(graph_t& g) {
-    (void)g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     op_resolver_t r(g);
     const auto field = b_field_subscribers_append();
     for (const char* tgt : {"sub-a", "sub-b"}) {
@@ -267,10 +267,9 @@ int main() {
     {
         std::printf("rope-tier pinned store (store_ref_min_bytes, multi-link payload):\n");
         graph_t g;
-        tr::graph::vertex_t* v =
-            *g.register_vertex(*path_t::parse("/sensor/blob"), role_t::STORED_VALUE);
+        tr::graph::vertex_t* v = *g.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE);
         // Opt in via the :settings field-write (parses the u32), matching the arena test.
-        (void)g.write(*path_t::parse("/sensor/blob:settings.store_ref_min_bytes"),
+        (void)g.write(path_t("/sensor/blob:settings.store_ref_min_bytes"),
                       make_value(b_value({0x08, 0x00, 0x00, 0x00})));
 
         std::vector<std::byte> big(32);

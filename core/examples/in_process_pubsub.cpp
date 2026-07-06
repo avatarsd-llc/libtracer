@@ -65,8 +65,7 @@ int main() {
     constexpr std::uint32_t kSent = 23;
     tr::graph::graph_t g;
 
-    tr::graph::vertex_t* temp =
-        *g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+    tr::graph::vertex_t* temp = *g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
 
     // Values captured from each delivery path, verified at the end.
     std::uint32_t cb_got = 0;     // subscriber 1 (callback)
@@ -81,15 +80,15 @@ int main() {
         std::printf("  [sink vertex /log/temp] received %u\n", sink_got);
         return {};
     };
-    (void)g.register_vertex(*path_t::parse("/log/temp"), role_t::HANDLER, std::move(sink));
+    (void)g.register_vertex(path_t("/log/temp"), role_t::HANDLER, std::move(sink));
 
     // subscriber_t 1 — direct in-process callback.
-    (void)g.subscribe(*path_t::parse("/sensor/temp"), [&cb_got](const tr::view::rope_t& v) {
+    (void)g.subscribe(path_t("/sensor/temp"), [&cb_got](const tr::view::rope_t& v) {
         cb_got = as_u32(v.only());
         std::printf("  [callback sub] received %u\n", cb_got);
     });
     // subscriber_t 2 — spec-faithful target-path subscription -> /log/temp.
-    (void)g.subscribe(*path_t::parse("/sensor/temp"), *path_t::parse("/log/temp"));
+    (void)g.subscribe(path_t("/sensor/temp"), path_t("/log/temp"));
 
     // subscriber_t 3 — a thread blocking in await().
     std::thread waiter([&] {
@@ -111,8 +110,8 @@ int main() {
     std::printf("read-back /sensor/temp = %u\n", rb_got);
 
     // Field-write a QoS setting, then discover it via :schema.
-    (void)g.write(*path_t::parse("/sensor/temp:settings.deadline_ns"), value_u32(5000));
-    auto schema = g.read(*path_t::parse("/sensor/temp:schema"));
+    (void)g.write(path_t("/sensor/temp:settings.deadline_ns"), value_u32(5000));
+    auto schema = g.read(path_t("/sensor/temp:schema"));
     std::size_t schema_children = 0;
     if (schema) {
         if (auto point = tr::wire::view_as_tlv(schema->only()))
