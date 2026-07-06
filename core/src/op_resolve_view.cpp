@@ -10,13 +10,15 @@
  * instantiates the span-tier `arena_node` reader and NOTHING else.
  *
  * The reader adapts a forward-only `tlv_view_t` to the node-reader concept
- * (op_resolve_walk.hpp): header facts delegate to the view; the contiguous
- * `wire`/`body` spans the walk reads are materialized once per node into a
- * refcounted segment (a single-link rope is adopted zero-copy, ADR-0053 §6; a
- * multi-link rope pays one interim flatten — the copy ⑤ later removes when the
- * reply itself becomes scatter-gather). `canonical_path()` is `false`: the view
- * re-emits its PATH key via `emit_name`, producing the identical canonical
- * lookup bytes (ADR-0041 §3) without span-aliasing a borrowed frame.
+ * (op_resolve_walk.hpp): header facts delegate to the view; the small contiguous
+ * `wire`/`body` spans the walk reads for parsing are materialized once per node
+ * into a refcounted segment (a single-link rope is adopted zero-copy, ADR-0053 §6;
+ * a multi-link one pays one flatten). The OWNERSHIP path is scatter-gather (ADR-0053
+ * ⑤): `own_wire` adopts a multi-link flatten instead of copying it twice, and
+ * `pin_wire` stores an opted-in payload as a zero-copy subrope of the delivery
+ * (ADR-0042 §3 on the rope tier). `canonical_path()` is `false`: the view re-emits
+ * its PATH key via `emit_name`, producing the identical canonical lookup bytes
+ * (ADR-0041 §3) without span-aliasing a borrowed frame.
  */
 
 #include "libtracer/op_resolve.hpp"
@@ -61,10 +63,22 @@ class view_node {
     // clears the trailer bits on the owned opt byte; both branches yield an
     // exclusively-owned segment safe to patch.
     [[nodiscard]] view_t own_wire() const {
-        const std::size_t n = header_size() + v_->body_size();  // trailer excluded
-        const rope_t sub = v_->wire().subrope(0, n);
-        if (sub.link_count() > 1) return sub.flatten();  // one flatten, adopt (no 2nd copy)
+        const rope_t sub = v_->wire().subrope(0, wire_size());  // trailer excluded
+        if (sub.link_count() > 1) return sub.flatten();         // one flatten, adopt (no 2nd copy)
         return view::over_bytes(sub.only().bytes()).value_or(view_t{});
+    }
+
+    // The trailer-excluded whole-TLV length — from the header + body, NO materialize
+    // (the ADR-0042 §3 store-size test must not flatten just to measure).
+    [[nodiscard]] std::size_t wire_size() const noexcept { return header_size() + v_->body_size(); }
+
+    // Pin this TLV as a subrope of the delivery's own scatter-gather segments (ADR-0042
+    // §3 on the rope tier, ADR-0053 ⑤): the stored value refcounts the frame's links —
+    // a multi-link payload is stored with ZERO copy. `frame_view` is unused (the rope IS
+    // the owning delivery here). Eligibility (opt-in / size / trailer-less) is the
+    // caller's; this always CAN pin.
+    [[nodiscard]] std::optional<rope_t> pin_wire(const view_t*) const {
+        return v_->wire().subrope(0, wire_size());
     }
 
     // Forward-only child cursor — the shared shape of `arena_node::children_cursor`
