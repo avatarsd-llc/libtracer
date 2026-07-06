@@ -163,21 +163,20 @@ SUBSCRIBER (PL=1) {
 }
 ```
 
-The `qos_settings` SETTINGS carries the **per-subscriber delivery policy** (byte-agnostic; numeric filtering like deadband is an application *filter vertex*, never a field — ADR-0019's sibling decision):
+The `qos_settings` SETTINGS carries **per-subscriber encoding hints** (byte-agnostic; numeric filtering like deadband is an application *filter vertex*, never a field — ADR-0019's sibling decision). The value-based **delivery filter** it once held (`delivery_mode == ON_CHANGE` byte-diff) and the throttle (`min_interval_ns` / `keepalive_ns`) are **removed** ([RFC-0008](../spec/rfcs/0008-vertex-operations-assign-propagate.md)): the runtime no longer inspects values or times to decide delivery. Delivery selection is now **structural and per-vertex** — see `delivery_mode` below.
 
 ```
 qos_settings = SETTINGS {
-  NAME "delivery_mode"     VALUE <u8: EVERY=0, THROTTLED=1, ON_CHANGE=2>  ; on-change = byte-diff
-  NAME "min_interval_ns"   VALUE <u64>     ; throttle floor (THROTTLED)
-  NAME "keepalive_ns"      VALUE <u64>     ; force re-deliver if unchanged
   NAME "delivery_scope"    VALUE <u8: DELTA=0, SNAPSHOT=1>   ; reserved (RFC-0005: as-written is the delivery; SNAPSHOT re-aggregation deferred)
   NAME "delivery_compact"  VALUE <u8: 0=off, 1=on>  ; opt into route-handle compaction (§route-handle)
 }
 ```
 
+**Per-vertex `delivery_mode` ([RFC-0008](../spec/rfcs/0008-vertex-operations-assign-propagate.md)).** Whether a vertex rides an *ancestor's* `propagate` sweep is a value-agnostic property of the **vertex** (not the subscriber): `UNCONDITIONAL` (always swept), `IF_NEWER` (default — swept only if its write sequence advanced since the last covering sweep), `EXPLICIT` (never swept by an ancestor; deliverable only by a direct `propagate` on the vertex). `assign` and a direct `propagate` on the vertex are never gated by it. It is host state defaulting to `IF_NEWER`; wire configuration reuses the vertex's own `:settings` (a `delivery_mode` NAME/VALUE under the vertex `SETTINGS`) and is deferred.
+
 `delivery_compact` (RFC-0004 §E.1, ADR-0035 slice 4) is the consumer's **opt-in to label-compacted deliveries**: on a full-TLV transport (ws/UDP, default *full-route* deliveries) a producer MAY, for a subscriber that set it, advertise a per-link **label** aliasing that subscriber's return route and thereafter stream lean `COMPACT` frames instead of full-route `FWD{WRITE}` (see §route-handle). It is **optional and NAME-tagged**: an older parser (or a producer that does not honor it) simply keeps the full-route delivery path, so it does not perturb any existing conformance vector. Header-elided transports (CAN) always label and ignore the hint.
 
-Policy is **enforced producer-side** (before fan-out), and it applies to bubbled deliveries (below) exactly as to direct ones. The `capability` child carries the subscriber's **subject-token** ([ADR-0018](../adr/0018-access-control-authorization-pluggable-subject-token.md)); subscribe-authorization is gated by the *source's* `:acl`.
+The per-vertex `delivery_mode` is **enforced producer-side** (during the `propagate` sweep, before fan-out), and it applies to bubbled deliveries (below) exactly as to direct ones. The `capability` child carries the subscriber's **subject-token** ([ADR-0018](../adr/0018-access-control-authorization-pluggable-subject-token.md)); subscribe-authorization is gated by the *source's* `:acl`.
 
 ### Subtree subscription — vertical bubbling ([RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md))
 
