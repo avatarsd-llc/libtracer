@@ -62,6 +62,10 @@ class bus_link_t {
     using peer_visitor_t = std::function<void(std::string_view)>;
     /** @brief The peer-named inbound sink: (sending peer's name, frame bytes). */
     using peer_receiver_t = std::function<void(std::string_view, std::span<const std::byte>)>;
+    /** @brief The OWNING peer-named sink (ADR-0053 §5): (sending peer's name, the
+     *         reassembled frame as the rope it already is — refcounted links the
+     *         receiver may keep, subrope, or forward past the callback). */
+    using peer_rope_receiver_t = std::function<void(std::string_view, view::rope_t)>;
 
     /**
      * @brief Visit the peers currently audible on the bus (a live-traffic snapshot).
@@ -85,6 +89,21 @@ class bus_link_t {
      * thread. When set, it takes precedence over a flat @ref transport_t receiver.
      */
     virtual void set_peer_receiver(peer_receiver_t receiver) = 0;
+
+    /**
+     * @brief Register the OWNING peer-named sink (ADR-0053 §5) — used INSTEAD of
+     *        @ref set_peer_receiver when the bus @ref delivers_ropes.
+     *
+     * A reassembling bus (CAN groups, fragmented WS) hands the frame up as the
+     * rope its reassembly already built — chained refcounted slice views, never a
+     * flatten memcpy; transport padding is trimmed by shortening the tail link.
+     * The base implementation is a documented no-op, the same honesty rule as
+     * `transport_t::set_rope_receiver`: a span-only bus must not fake ownership.
+     */
+    virtual void set_peer_rope_receiver(peer_rope_receiver_t receiver) { (void)receiver; }
+
+    /** @brief True iff this bus honors @ref set_peer_rope_receiver (ADR-0053 §5). */
+    [[nodiscard]] virtual bool delivers_ropes() const { return false; }
 
    protected:
     ~bus_link_t() = default;  // never deleted through this facet
