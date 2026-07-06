@@ -251,7 +251,7 @@ class fwd_router_t {
     /**
      * @brief Terminus: arena-decode @p frame (ADR-0041) and resolve + reply.
      *
-     * The arena draws directly from the injected @ref mr_ (ADR-0039 §1) and is
+     * The arena draws directly from the injected `mr_` (ADR-0039 §1) and is
      * released before returning — the memory policy is entirely the host's. The
      * FWD{REPLY} is sent back over the link the request arrived on. @p frame_view
      * (non-null on the owning-delivery path) is threaded into the resolver for
@@ -262,7 +262,7 @@ class fwd_router_t {
     /**
      * @brief Terminus over a MULTI-LINK rope: resolve straight off the rope, NO flatten.
      *
-     * The owning rope-tier twin of @ref resolve_terminus (ADR-0053 ④b / 3c-iii):
+     * The owning rope-tier twin of `resolve_terminus` (ADR-0053 ④b / 3c-iii):
      * a request FWD reassembled as a scatter-gather rope (fragmented WS / CAN) is
      * adopted as a lazy @ref wire::tlv_view_t and resolved through the view-tier
      * `op_resolver_t::resolve(tlv_view_t)` — the interim flatten this replaces is
@@ -282,7 +282,7 @@ class fwd_router_t {
      * ④b): a @ref wire::grammar::span_cursor reads a contiguous frame (byte-identical to the
      * pre-rope path, zero heap — a stack `iov` array), a @ref wire::grammar::rope_cursor reads
      * a scatter-gather frame (the egress gathers each region's per-link sub-spans into a
-     * `std::pmr::vector` drawn from the injected @ref mr_ — still no payload copy).
+     * `std::pmr::vector` drawn from the injected `mr_` — still no payload copy).
      *
      * @tparam Cursor A grammar byte-source cursor (span or rope).
      * @param cur     The cursor positioned at the inbound FWD frame's first byte.
@@ -299,7 +299,7 @@ class fwd_router_t {
      * sub-rope a handler genuinely needs contiguous (the route to strip+re-encode, the
      * payload to store/forward — an ADR-0052 legitimate egress/store boundary), never the
      * whole frame. A contiguous (single-link) control frame never reaches here — it decodes
-     * eagerly in @ref on_frame_impl. This is the sink that let the interim
+     * eagerly in `on_frame_impl`. This is the sink that let the interim
      * `on_frame_rope` whole-frame flatten be deleted (ADR-0053 ⑥ / ADR-0055 §3).
      */
     void on_control_rope(std::string_view inbound_name, view::rope_t frame);

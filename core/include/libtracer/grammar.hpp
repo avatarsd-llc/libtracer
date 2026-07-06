@@ -41,7 +41,7 @@ namespace tr::wire::grammar {
  * @brief The contiguous byte-source cursor — the grammar's only source today.
  *
  * A thin adaptor over one `std::span`: the grammar reads its bytes through this
- * seam (@ref parse_header) so the identical rules serve a rope cursor
+ * seam (`parse_header`) so the identical rules serve a rope cursor
  * (link-walking, ADR-0048 §1) once that lands, with no rule change here.
  */
 struct span_cursor {
@@ -70,7 +70,7 @@ struct span_cursor {
     /**
      * @brief Visit the @p n bytes at @p off as contiguous sub-spans, in order.
      *
-     * The CRC-feed seam (@ref parse_header): a contiguous source yields exactly
+     * The CRC-feed seam (`parse_header`): a contiguous source yields exactly
      * one span, so this is a straight call; the rope cursor yields one span per
      * straddled link, letting the identical feed cross a link boundary with no
      * concatenation buffer.
@@ -82,7 +82,7 @@ struct span_cursor {
 };
 
 /**
- * @brief When @ref parse_header checks a CRC trailer (ADR-0053 §4).
+ * @brief When `parse_header` checks a CRC trailer (ADR-0053 §4).
  *
  * `VERIFY` is the eager decoders' policy (and the default — every pre-existing
  * caller is unchanged): the trailer is checked during the header parse, which
@@ -126,7 +126,7 @@ struct header_t {
  *
  * @tparam Cursor A byte-source cursor (@ref span_cursor, or the rope cursor).
  * @param  cur    The cursor positioned at the TLV's first byte.
- * @param  crc    CRC-trailer policy (@ref crc_check_t). Defaults to `VERIFY`
+ * @param  crc_policy CRC-trailer policy (@ref crc_check_t). Defaults to `VERIFY`
  *                (the eager decoders' behavior); the lazy tier passes `DEFER`
  *                so skipping a sibling never walks its payload (ADR-0053 §4).
  * @return The validated @ref header_t, or the `err_t` the grammar rejects with
