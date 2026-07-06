@@ -1,0 +1,143 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * Man-page aesthetic for the libtracer docs, layered on the stock furo theme
+ * (the theme itself is unchanged — this only retunes tokens + a few components).
+ * The read: this is a SYSTEM LIBRARY reference, so the type is monospace-forward
+ * and dense, sections are ruled like man(7), tables carry tabular figures, and
+ * the signal-teal accent is the one spot of colour. Everything is driven through
+ * furo's CSS variables so light and dark both adapt.
+ */
+
+/* ---- accent + neutrals (furo brand tokens) -------------------------------- */
+:root {
+  --color-brand-primary: #0c9a8b;
+  --color-brand-content: #0b8a7c;
+  --color-api-name: #0c9a8b;
+  --color-api-pre-name: #0b8a7c;
+  --tr-rule: rgba(20, 45, 65, 0.14);
+  --tr-eyebrow: #55636f;
+}
+body[data-theme="dark"], .dark {
+  --color-brand-primary: #33d2c1;
+  --color-brand-content: #4ad9c9;
+  --color-api-name: #33d2c1;
+  --color-api-pre-name: #4ad9c9;
+  --tr-rule: rgba(150, 170, 190, 0.16);
+  --tr-eyebrow: #8494a1;
+}
+@media (prefers-color-scheme: dark) {
+  body:not([data-theme="light"]) {
+    --color-brand-primary: #33d2c1;
+    --color-brand-content: #4ad9c9;
+    --color-api-name: #33d2c1;
+    --color-api-pre-name: #4ad9c9;
+    --tr-rule: rgba(150, 170, 190, 0.16);
+    --tr-eyebrow: #8494a1;
+  }
+}
+
+/* ---- monospace-forward type ------------------------------------------------ */
+:root {
+  --font-stack--monospace: "SF Mono", "JetBrains Mono", "IBM Plex Mono",
+    ui-monospace, Menlo, Consolas, monospace;
+}
+
+/* The brand/wordmark in the sidebar reads as a command name. */
+.sidebar-brand-text {
+  font-family: var(--font-stack--monospace);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* ---- man(7)-style section rules ------------------------------------------- */
+/* Top-level headings get a hairline rule above, like the SECTION breaks in a
+   man page; the eyebrow tick marks them as structural, not decorative. */
+.content h2 {
+  border-top: 1px solid var(--tr-rule);
+  padding-top: 1.4rem;
+  margin-top: 2.6rem;
+  letter-spacing: -0.01em;
+}
+.content h2::before {
+  content: "§ ";
+  color: var(--color-brand-primary);
+  font-family: var(--font-stack--monospace);
+  font-weight: 600;
+}
+.content h3 {
+  font-family: var(--font-stack--monospace);
+  font-size: 1.02rem;
+  letter-spacing: -0.01em;
+}
+
+/* The first paragraph after the page title reads as the man-page NAME line:
+   the one-sentence summary of what this page is. */
+.content > section > h1 + p {
+  font-size: 1.06rem;
+  color: var(--color-foreground-muted);
+  border-left: 2px solid var(--color-brand-primary);
+  padding-left: 0.9rem;
+}
+
+/* ---- SYNOPSIS / code blocks ------------------------------------------------ */
+.highlight pre,
+div[class*="highlight-"] pre {
+  border: 1px solid var(--tr-rule);
+  border-radius: 8px;
+  font-size: 0.86em;
+  line-height: 1.65;
+}
+/* Inline literals read like man-page bold args. */
+.content code.literal,
+.content span.pre {
+  font-weight: 600;
+}
+
+/* ---- tables: dense, tabular figures ---------------------------------------- */
+.content table.docutils {
+  border-collapse: collapse;
+  font-size: 0.9em;
+}
+.content table.docutils td,
+.content table.docutils th {
+  font-variant-numeric: tabular-nums;
+  padding: 0.5rem 0.85rem;
+}
+.content table.docutils thead th {
+  font-family: var(--font-stack--monospace);
+  font-size: 0.74rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--tr-eyebrow);
+  border-bottom: 1px solid var(--color-brand-primary);
+}
+
+/* ---- Breathe / Doxygen API signatures embedded in the pages ---------------- */
+/* Keep the generated C++ declarations reading like a man-page SYNOPSIS block. */
+dl.cpp {
+  border-left: 2px solid var(--tr-rule);
+  padding-left: 1rem;
+}
+dl.cpp > dt {
+  font-family: var(--font-stack--monospace);
+  font-size: 0.9em;
+  background: var(--color-background-secondary);
+  border-radius: 6px;
+  padding: 0.5rem 0.7rem;
+}
+dl.cpp .sig-name.descname { color: var(--color-api-name); font-weight: 700; }
+
+/* ---- mermaid diagrams: sit them on a framed plate -------------------------- */
+.mermaid, div.mermaid {
+  border: 1px solid var(--tr-rule);
+  border-radius: 10px;
+  padding: 1.1rem;
+  background: var(--color-background-secondary);
+  margin: 1.4rem 0;
+  text-align: center;
+}
+
+/* ---- SEE ALSO / cross-links ------------------------------------------------ */
+.content a.reference { text-underline-offset: 2px; }
