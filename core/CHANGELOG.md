@@ -206,6 +206,19 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Changed
 
+- **CAN reassembly delivers ropes (ADR-0053 §5 / step ③).** `bus_link_t` gains the
+  owning peer-named seam — `peer_rope_receiver_t` / `set_peer_rope_receiver`
+  (default no-op, same honesty rule as `set_rope_receiver`) and
+  `bus_link_t::delivers_ropes()` — and `transport_can` implements it: a completed
+  group crosses the seam as the rope its reassembly already built (one refcounted
+  owning link per slice), with CAN-FD DLC padding trimmed by **shortening the tail
+  link** (`rope_t::subrope`), never by flattening. The span-tier sinks
+  (`set_peer_receiver` / `set_receiver`) still receive contiguous bytes and now pay
+  their single flatten inside `deliver()` — the legitimate bridge-boundary copy —
+  instead of every delivery paying it. `fwd_router_t::add_child` prefers the owning
+  bus seam when available. Byte-exact delivery unchanged (existing round-trip /
+  DLC-padding tests untouched and passing).
+
 - **The owning delivery seam is rope-typed (ADR-0053 §5 / ADR-0042 generalized).**
   `transport_t::view_receiver_t` / `set_view_receiver` / `delivers_views()` are now
   `rope_receiver_t` (`std::function<void(view::rope_t)>`) / `set_rope_receiver` /

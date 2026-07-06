@@ -164,9 +164,17 @@ void fwd_router_t::add_child(std::string name, transport_t& link) {
     // routing with the frame view alongside; a span link keeps the borrowed-span
     // path. No adapter wraps a span into a lying view.
     if (bus_link_t* const bus = link.bus()) {
-        bus->set_peer_receiver([this](std::string_view peer, std::span<const std::byte> frame) {
-            on_frame(peer, frame);
-        });
+        // A reassembling bus that delivers ropes (ADR-0053 §5) hands its group up
+        // as-is — zero-copy; a span-only bus keeps the borrowed peer-named path.
+        if (bus->delivers_ropes()) {
+            bus->set_peer_rope_receiver([this](std::string_view peer, view::rope_t frame) {
+                on_frame_rope(peer, std::move(frame));
+            });
+        } else {
+            bus->set_peer_receiver([this](std::string_view peer, std::span<const std::byte> frame) {
+                on_frame(peer, frame);
+            });
+        }
     } else if (link.delivers_ropes()) {
         link.set_rope_receiver(
             [this, name](view::rope_t frame) { on_frame_rope(name, std::move(frame)); });

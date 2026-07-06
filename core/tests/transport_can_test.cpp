@@ -30,7 +30,9 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -359,11 +361,62 @@ void test_single_value() {
 
 }  // namespace
 
+// ADR-0053 §5: the owning peer-named sink receives the reassembled group AS THE
+// ROPE IT ALREADY IS — one link per slice, CAN-FD DLC padding trimmed by
+// SHORTENING the tail link (never a flatten), bytes byte-exact, zero-copy.
+void test_rope_delivery() {
+    std::printf("transport_can owning rope delivery (ADR-0053):\n");
+
+    fake_can_bus_t bus;
+    auto link_a = std::make_unique<fake_link_t>(bus);
+    auto link_b = std::make_unique<fake_link_t>(bus);
+
+    tr::net::transport_can tx_a(std::move(link_a), {0, 1, tr::view::can_frame_mode_t::FD, "p"});
+    tr::net::transport_can tx_b(std::move(link_b), {0, 2, tr::view::can_frame_mode_t::FD, "q"});
+
+    check(tx_b.delivers_ropes(), "transport_can::delivers_ropes() is true");
+
+    std::mutex m;
+    std::condition_variable cv;
+    std::string peer;
+    std::optional<tr::view::rope_t> got;
+    tx_b.set_peer_rope_receiver([&](std::string_view name, tr::view::rope_t frame) {
+        const std::lock_guard lock(m);
+        peer = name;
+        got = std::move(frame);  // the refcounted links outlive the callback
+        cv.notify_all();
+    });
+
+    // 100 bytes in FD: slices 64 + 36; the 36-byte tail was padded to DLC 48 on
+    // the wire, so the trim must SHORTEN the second link back to 36.
+    const std::vector<std::byte> payload = make_payload(100);
+    tx_a.send(payload);
+
+    std::unique_lock lock(m);
+    const bool arrived = cv.wait_for(lock, 2s, [&] { return got.has_value(); });
+    check(arrived, "group delivered to the owning peer-named sink");
+    if (!arrived) return;
+
+    check(peer == "n1", "delivered under the SENDER's peer name");
+    check(got->total_length() == payload.size(), "rope length == advertised total (trimmed)");
+    check(got->link_count() == 2, "one link per slice (no flatten, no re-chaining)");
+    if (got->link_count() == 2) {
+        check(got->links()[0].length == 64 && got->links()[1].length == 36,
+              "DLC padding removed by shortening the tail link");
+    }
+    std::vector<std::byte> flatbytes;
+    got->walk([&](std::span<const std::byte> sp) {
+        flatbytes.insert(flatbytes.end(), sp.begin(), sp.end());
+    });
+    check(equal_bytes(flatbytes, payload), "rope bytes are byte-exact");
+}
+
 int main() {
     test_roundtrip(tr::view::can_frame_mode_t::CLASSIC, 20, "classic, multi-frame");
     test_roundtrip(tr::view::can_frame_mode_t::FD, 150, "CAN-FD, multi-frame");
     test_single_value();
     test_fd_dlc_padding();
+    test_rope_delivery();
     test_control_stream_resync();
     test_lifecycle();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,

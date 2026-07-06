@@ -96,6 +96,7 @@ transport_can::~transport_can() {
         const std::lock_guard lock(m_);
         receiver_ = nullptr;
         peer_receiver_ = nullptr;
+        peer_rope_receiver_ = nullptr;
     }
     link_.reset();
 }
@@ -103,6 +104,11 @@ transport_can::~transport_can() {
 void transport_can::set_receiver(receiver_t receiver) {
     const std::lock_guard lock(m_);
     receiver_ = std::move(receiver);
+}
+
+void transport_can::set_peer_rope_receiver(peer_rope_receiver_t receiver) {
+    const std::lock_guard lock(m_);
+    peer_rope_receiver_ = std::move(receiver);
 }
 
 void transport_can::set_peer_receiver(peer_receiver_t receiver) {
@@ -366,30 +372,41 @@ void transport_can::process_data(const can_frame_data_t& frame) {
     // overwrite when the node re-advertises); only the per-group slice buffer is freed.
     if (!rope) return;
 
-    // Flatten the reassembled slices, then trim back to the advertised total —
-    // this is where CAN-FD DLC padding on the tail slice is removed.
-    const tr::view::view_t flat = rope->flatten();
-    const std::span<const std::byte> all = flat.bytes();
-    const std::size_t n = std::min<std::size_t>(total, all.size());
-    deliver(fields->node, std::span<const std::byte>(all.data(), n));
+    // Trim back to the advertised total by SHORTENING the tail link (subrope) —
+    // CAN-FD DLC padding removal is never a flatten (CONTEXT.md: "trimming
+    // transport padding is shortening the last link"). The trimmed rope IS the
+    // delivered frame (ADR-0053 §5); only a span-tier receiver pays a flatten.
+    const std::size_t n = std::min<std::size_t>(total, rope->total_length());
+    deliver(fields->node, rope->subrope(0, n));
 }
 
-void transport_can::deliver(std::uint16_t src_node, std::span<const std::byte> frame) {
+void transport_can::deliver(std::uint16_t src_node, tr::view::rope_t frame) {
     receiver_t receiver;
     peer_receiver_t peer_receiver;
+    peer_rope_receiver_t peer_rope_receiver;
     {
         const std::lock_guard lock(m_);
         receiver = receiver_;
         peer_receiver = peer_receiver_;
+        peer_rope_receiver = peer_rope_receiver_;
     }
-    // The peer-named sink wins (ADR-0044): the sender's bus name becomes the FWD
+    // The peer-named sinks win (ADR-0044): the sender's bus name becomes the FWD
     // hop's inbound NAME, so a reply routes back to exactly that peer, directed.
-    if (peer_receiver) {
+    // The OWNING sink is preferred (ADR-0053 §5): the reassembled rope crosses the
+    // seam as-is, zero-copy. Only a span-tier sink pays the single flatten (its
+    // borrowed span must be contiguous — the legitimate bridge-boundary copy).
+    if (peer_rope_receiver) {
         const peer_name_buf_t name = format_peer_name(src_node);
-        peer_receiver(name.view(), frame);
+        peer_rope_receiver(name.view(), std::move(frame));
         return;
     }
-    if (receiver) receiver(frame);
+    const tr::view::view_t flat = frame.flatten();
+    if (peer_receiver) {
+        const peer_name_buf_t name = format_peer_name(src_node);
+        peer_receiver(name.view(), flat.bytes());
+        return;
+    }
+    if (receiver) receiver(flat.bytes());
 }
 
 // --- the `can` catalog factory (ADR-0027 / ADR-0043 §5 / ADR-0044) -----------

@@ -279,6 +279,19 @@ class transport_can : public transport_t, public bus_link_t {
      */
     void set_peer_receiver(peer_receiver_t receiver) override;
 
+    /**
+     * @brief Register the OWNING peer-named sink: the reassembled group crosses
+     *        this seam as the rope its slices already are (ADR-0053 §5).
+     * @param receiver Invoked on the link's receive thread with the SENDER's peer
+     *                 name (`n<node-id>`) and the frame as a rope of the group's
+     *                 owning slice views — CAN-FD DLC padding already trimmed by
+     *                 shortening the tail link, never by flattening.
+     */
+    void set_peer_rope_receiver(peer_rope_receiver_t receiver) override;
+
+    /** @brief True — the CAN bus reassembles into ropes and delivers them as-is. */
+    [[nodiscard]] bool delivers_ropes() const override { return true; }
+
    private:
     // A directed per-peer sending endpoint (what peer_link returns): send() emits a
     // group whose advertise carries `target_node`, so only that peer delivers it.
@@ -311,7 +324,7 @@ class transport_can : public transport_t, public bus_link_t {
     void on_rx(const can_frame_data_t& frame);
     void learn_advertise(const can::advertise_t& adv);  // requires rx_m_ held
     void process_data(const can_frame_data_t& frame);   // requires rx_m_ held
-    void deliver(std::uint16_t src_node, std::span<const std::byte> frame);
+    void deliver(std::uint16_t src_node, tr::view::rope_t frame);
     void touch_peer(std::uint16_t node);  // refresh/insert into the last-heard table
 
     // --- egress helpers ---
@@ -347,6 +360,7 @@ class transport_can : public transport_t, public bus_link_t {
     std::mutex m_;
     receiver_t receiver_;
     peer_receiver_t peer_receiver_;
+    peer_rope_receiver_t peer_rope_receiver_;
 };
 
 /**
