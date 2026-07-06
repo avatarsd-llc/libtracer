@@ -42,16 +42,16 @@
 namespace tr::wire::grammar {
 
 /**
- * @brief The rope byte-source cursor — the link-walking twin of @ref span_cursor.
+ * @brief The rope byte-source cursor — the link-walking twin of `span_cursor`.
  *
  * Reads the grammar's bytes across an ordered chain of @ref view::view_t links so
- * the same @ref parse_header rules serve a scatter-gather frame. A window
+ * the same `parse_header` rules serve a scatter-gather frame. A window
  * `[base, end)` into the rope; @ref region narrows it in O(1) (offsets only, never
  * copying links) to descend into a structured node's children region — the rope
  * analogue of the span cursor's `subspan`.
  *
  * @warning Reads dereference link bytes on the CPU, so every link must be HOST
- *          (@ref view::rope_t::all_host). @ref validate_rope enforces this.
+ *          (@ref view::rope_t::all_host). `validate_rope` enforces this.
  */
 class rope_cursor {
    public:
@@ -140,12 +140,12 @@ namespace tr::wire {
 /**
  * @brief Validate one whole TLV frame delivered as a scatter-gather rope (ADR-0048 §1).
  *
- * Applies the exact @ref grammar::parse_header grammar — bounds, `type == 0x00`
+ * Applies the exact `grammar::parse_header` grammar — bounds, `type == 0x00`
  * reject, reserved-bit reject, `LL` width, trailer sizing, the two-region CRC, the
- * @ref kMaxDepth cap, and trailing-bytes reject — over the rope's links WITHOUT
+ * `kMaxDepth` cap, and trailing-bytes reject — over the rope's links WITHOUT
  * flattening, so CAN/WS ingress can reject a malformed reassembled frame before
  * paying the single flatten copy. Iterative (no recursion), mirroring
- * @ref decode_into's walk.
+ * `decode_into`'s walk.
  *
  * @param r The reassembled frame. Every link MUST be HOST (@ref
  *          view::rope_t::all_host) — a device link cannot be CPU-read to verify a

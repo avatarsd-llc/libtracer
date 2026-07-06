@@ -43,6 +43,11 @@ INPUT                  = core/include/libtracer/backend.hpp \
                          core/include/libtracer/tlv_view.hpp \
                          core/include/libtracer/tlv_arena.hpp \
                          core/include/libtracer/tlv_emit.hpp \
+                         core/include/libtracer/tracer.hpp \
+                         core/include/libtracer/child_registry.hpp \
+                         core/include/libtracer/op_resolve.hpp \
+                         core/include/libtracer/rope_decode.hpp \
+                         core/include/libtracer/length_prefix_framer.hpp \
                          core/include/libtracer/crc.hpp \
                          core/include/libtracer/loopback.hpp
 RECURSIVE              = NO

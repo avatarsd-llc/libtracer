@@ -16,7 +16,7 @@
  * The state machine is transport-agnostic — no msquic types, no atomics, no
  * connection handle — so it is unit-tested directly (length_prefix_framer_test)
  * in the default build, without a live QUIC connection. The transport keeps its
- * own counters and shutdown, driven by the per-chunk @ref result_t.
+ * own counters and shutdown, driven by the per-chunk `result_t`.
  */
 #pragma once
 
@@ -74,7 +74,7 @@ class length_prefix_framer {
      *                  is the injected resource's real capacity, not a magic number).
      * @param p,n       The chunk (may split a prefix or a body arbitrarily).
      * @param on_frame  Invoked once per completed frame, in arrival order.
-     * @return Per-chunk @ref result_t: frames dropped to backpressure, and whether
+     * @return Per-chunk `result_t`: frames dropped to backpressure, and whether
      *         an oversize prefix stopped the feed (the caller shuts the peer down).
      */
     template <class OnFrame>
