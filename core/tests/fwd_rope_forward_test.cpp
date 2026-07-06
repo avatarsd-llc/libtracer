@@ -13,8 +13,9 @@
  * link) — and the bytes the downstream child receives must be IDENTICAL for every
  * split. Splits are chosen to straddle the FWD header, a segment NAME (forcing the
  * bounded-scratch stitch), and every single byte, so header stitching and the
- * segment materialize are all exercised. A terminus (dst names no child) still
- * takes the documented flatten fallback and updates the local LKV.
+ * segment materialize are all exercised. A terminus (dst names no child) is
+ * resolved straight off the rope through the view-tier resolver (ADR-0053 3c-iii —
+ * no flatten), verifying CRC at access (§4) before the op updates the local LKV.
  */
 
 #include <array>
@@ -236,11 +237,11 @@ int main() {
         check(got == oracle, "a 3-link split across segment + header routes byte-identically");
     }
 
-    // Terminus fallback: a multi-link rope whose dst names NO child (local /sensor)
-    // still decodes via the interim flatten and applies the WRITE to the LKV.
+    // Terminus over a multi-link rope: dst names NO child (local /sensor), so the
+    // router resolves the request straight off the rope through the view-tier
+    // resolver (ADR-0053 3c-iii — NO flatten) and applies the WRITE to the LKV.
     {
-        std::printf(
-            "Terminus over a multi-link rope (flatten fallback still applies the write):\n");
+        std::printf("Terminus over a multi-link rope (view resolver applies the write):\n");
         graph_t g;
         const auto sensor = path_t::parse("/sensor");
         tr::graph::vertex_t* v = *g.register_vertex(*sensor, role_t::STORED_VALUE);
@@ -258,7 +259,50 @@ int main() {
             const auto inner = tr::wire::view_as_tlv(stored->only());
             check(inner && inner->type == type_t::VALUE && inner->payload.size() == 4 &&
                       tr::detail::load_le<std::uint32_t>(inner->payload) == kWritten,
-                  "LKV updated to the forwarded value (flatten fallback decoded correctly)");
+                  "LKV updated to the forwarded value (view resolver decoded correctly)");
+        }
+    }
+
+    // Verify-at-access (ADR-0053 §4): the lazy rope terminus verifies CRC before the
+    // op mutates state, matching the arena terminus's decode_into(VERIFY). A
+    // frame-CRC WRITE whose body is corrupt fails verify and is DROPPED (LKV never
+    // written); the same frame intact applies. Proven on a FRESH vertex so "no value"
+    // is unambiguous evidence the corrupt frame was dropped, not merely overwritten.
+    {
+        std::printf(
+            "Verify-at-access over a multi-link rope (bad CRC dropped, good CRC applied):\n");
+        graph_t g;
+        const auto sensor = path_t::parse("/sensor");
+        tr::graph::vertex_t* v = *g.register_vertex(*sensor, role_t::STORED_VALUE);
+        fwd_router_t router(g);
+        fake_rope_link_t in;
+        router.add_child("in", in);
+
+        const std::uint32_t kWritten = 0x0C0FFEE0u;
+        const std::vector<std::byte> plain =
+            b_fwd(fwd_op_t::WRITE, b_path({"sensor"}), b_path({"reply-ep"}), b_value_u32(kWritten));
+        // Re-emit the FWD carrying a whole-frame CRC-32C trailer (opt.cr covers the body).
+        tr::wire::tlv_t crc_fwd = *tr::wire::decode(plain);
+        crc_fwd.opt.cr = true;
+        const std::vector<std::byte> crc_frame = tr::wire::encode(crc_fwd);
+        check(crc_frame.size() == plain.size() + 4, "CRC frame carries a 4-byte CRC-32C trailer");
+
+        // Corrupt the last BODY byte (payload data — grammar stays valid, CRC breaks).
+        std::vector<std::byte> corrupt = crc_frame;
+        corrupt[corrupt.size() - 5] ^= std::byte{0xFF};
+        const std::array<std::size_t, 1> cuts{corrupt.size() / 2};
+        in.inject(rope_split(corrupt, cuts));
+        check(!g.read(v).has_value(), "corrupt-CRC multi-link WRITE is dropped (LKV unwritten)");
+
+        // The intact CRC frame applies (proving the drop was the CRC, not the path).
+        in.inject(rope_split(crc_frame, cuts));
+        const auto stored = g.read(v);
+        check(stored.has_value(), "intact-CRC multi-link WRITE applies");
+        if (stored) {
+            const auto inner = tr::wire::view_as_tlv(stored->only());
+            check(inner && inner->type == type_t::VALUE && inner->payload.size() == 4 &&
+                      tr::detail::load_le<std::uint32_t>(inner->payload) == kWritten,
+                  "LKV updated to the CRC-verified value");
         }
     }
 

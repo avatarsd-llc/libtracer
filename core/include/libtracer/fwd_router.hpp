@@ -251,6 +251,20 @@ class fwd_router_t {
     void resolve_terminus(std::string_view inbound_name, std::span<const std::byte> frame,
                           const view::view_t* frame_view);
     /**
+     * @brief Terminus over a MULTI-LINK rope: resolve straight off the rope, NO flatten.
+     *
+     * The owning rope-tier twin of @ref resolve_terminus (ADR-0053 ④b / 3c-iii):
+     * a request FWD reassembled as a scatter-gather rope (fragmented WS / CAN) is
+     * adopted as a lazy @ref wire::tlv_view_t and resolved through the view-tier
+     * `op_resolver_t::resolve(tlv_view_t)` — the interim flatten this replaces is
+     * deleted. The lazy view defers CRC, so integrity is verified here
+     * (verify-all-then-apply, ADR-0053 §4) before the op mutates state, matching the
+     * arena terminus's `decode_into(VERIFY)`. The ADR-0042 §3 referenced store needs
+     * a contiguous frame view, so the rope tier stores its one ownership copy (no
+     * `frame_view`). Reply routes back over @p inbound_name exactly as the arena path.
+     */
+    void resolve_terminus_rope(std::string_view inbound_name, view::rope_t frame);
+    /**
      * @brief The forward hop, read entirely by OFFSET — no decoded tree (ADR-0038 inv. #1).
      *
      * Strips the leading `dst` segment, prepends the inbound-link NAME to `src` (unless a
