@@ -634,46 +634,53 @@ bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
 void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const view::rope_t& value) {
     transport_t* const link = registry_.by_name(sub.link);
     if (link == nullptr) return;  // link torn down between subscribe and this write
-    // ADR-0053 §6 ④a interim: the value crosses as a rope; materialize it to contiguous
-    // bytes (single-link — the current case — is zero copy; a multi-link value pays one
-    // flatten here) until ⑤ makes this emission scatter-gather over the rope's links.
-    const view_t flat = value.materialize();
-    const std::span<const std::byte> payload = flat.bytes();  // the stored VALUE TLV bytes
     const std::span<const std::byte> route = sub.return_route.bytes();  // the stored PATH TLV
 
     if (sub.delivery_compact) {
         // Auto-promote (Q5 / RFC-0004 §E.1): advertise the label once per flow, then stream
         // lean COMPACT. ensure_egress is idempotent per (link,route); clear_link on a
         // reconnect drops the binding so the next delivery re-advertises (self-heal).
+        // A COMPACT wraps a CONTIGUOUS payload (encode_compact), so a multi-link value pays
+        // one flatten here — single-link, the common case, is a zero-copy adopt. The
+        // scatter-gather win is the default full-route path below (the hot fan-out leg).
+        const view_t flat = value.materialize();
         const auto [label, fresh] = handles_.ensure_egress(sub.link, route);
         if (fresh) {
             const std::vector<std::byte> adv = encode_advertise(label, route);
             link->send(std::span<const std::byte>(adv));
         }
-        const std::vector<std::byte> out = encode_compact(label, payload);
+        const std::vector<std::byte> out = encode_compact(label, flat.bytes());
         link->send(std::span<const std::byte>(out));
         return;
     }
     // Default: full-route `FWD{ op=WRITE, dst=<return route>, src=<empty PATH>,
-    // payload=<VALUE> }` (delivery-is-a-write, RFC-0004 §D / #136), scatter-gathered:
-    // fresh stack heads + the ROPED stored route and value views — the route bytes
-    // were copied ONCE at subscribe (ADR-0041 §2); a delivery copies nothing. src
-    // starts empty — each forwarding hop grows it (the way back). The refcounted
-    // route view (`sub.return_route`) stays alive for this call even if the slot is
-    // concurrently unsubscribed.
+    // payload=<VALUE> }` (delivery-is-a-write, RFC-0004 §D / #136), scatter-gathered over
+    // the stored value's rope links (ADR-0053 ⑤): a fresh stack head + the ROPED stored
+    // route + each value segment, NO flatten. The route bytes were copied ONCE at subscribe
+    // (ADR-0041 §2); a delivery copies nothing — a multi-link value crosses as its own
+    // segments. src starts empty — each forwarding hop grows it (the way back). The
+    // refcounted route view (`sub.return_route`) stays alive for this call even if the slot
+    // is concurrently unsubscribed.
     constexpr std::array<std::byte, 5> op_tlv{std::byte{0x01}, std::byte{0x00}, std::byte{0x01},
                                               std::byte{0x00},
                                               std::byte{std::to_underlying(fwd_op_t::WRITE)}};
     constexpr std::array<std::byte, 4> empty_src{std::byte{0x06}, std::byte{0x40}, std::byte{0x00},
                                                  std::byte{0x00}};
-    const std::size_t body_len = op_tlv.size() + route.size() + empty_src.size() + payload.size();
+    const std::size_t body_len =
+        op_tlv.size() + route.size() + empty_src.size() + value.total_length();
     stack_writer<16> head;  // FWD header (≤6) + the 5-byte op TLV
     head.header(type_t::FWD, body_len);
     head.raw(op_tlv);
     if (!head.ok()) return;
 
-    std::array<std::span<const std::byte>, 4> iov{head.span(), route,
-                                                  std::span<const std::byte>(empty_src), payload};
+    // iov = head + route + empty_src + one span per value link (sized to the rope, no
+    // synthetic cap — the same per-send iov vector the rope terminus reply builds).
+    std::vector<std::span<const std::byte>> iov;
+    iov.reserve(3 + value.link_count());
+    iov.push_back(head.span());
+    iov.push_back(route);
+    iov.push_back(std::span<const std::byte>(empty_src));
+    for (const view_t& l : value.links()) iov.push_back(l.bytes());
     link->send(std::span<const std::span<const std::byte>>(iov));
 }
 
