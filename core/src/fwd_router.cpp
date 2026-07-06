@@ -167,9 +167,9 @@ void fwd_router_t::add_child(std::string name, transport_t& link) {
         bus->set_peer_receiver([this](std::string_view peer, std::span<const std::byte> frame) {
             on_frame(peer, frame);
         });
-    } else if (link.delivers_views()) {
-        link.set_view_receiver(
-            [this, name](view_t frame) { on_frame_view(name, std::move(frame)); });
+    } else if (link.delivers_ropes()) {
+        link.set_rope_receiver(
+            [this, name](view::rope_t frame) { on_frame_rope(name, std::move(frame)); });
     } else {
         link.set_receiver(
             [this, name](std::span<const std::byte> frame) { on_frame(name, frame); });
@@ -221,11 +221,24 @@ void fwd_router_t::on_frame(std::string_view inbound_name, std::span<const std::
     on_frame_impl(inbound_name, frame, nullptr);
 }
 
-void fwd_router_t::on_frame_view(std::string_view inbound_name, view_t frame) {
-    // The owning view's bytes span feeds the SAME routing as the borrowed path —
-    // the forward hop below never touches the refcount (zero-heap, ADR-0038); only
-    // the terminus sees the owner, for the ADR-0042 §3 referenced store.
-    on_frame_impl(inbound_name, frame.bytes(), &frame);
+void fwd_router_t::on_frame_rope(std::string_view inbound_name, view::rope_t frame) {
+    // Single-link (every current producer): the link's bytes span feeds the SAME
+    // routing as the borrowed path — the forward hop below never touches the
+    // refcount (zero-heap, ADR-0038); only the terminus sees the owner, for the
+    // ADR-0042 §3 referenced store. This is the pre-ADR-0053 view path, unchanged.
+    if (frame.link_count() == 1) {
+        const view_t& v = frame.links()[0];
+        if (v.is_device()) return;  // CPU routing cannot read a DEVICE frame
+        on_frame_impl(inbound_name, v.bytes(), &v);
+        return;
+    }
+    // Multi-link: the routing plane still reads by offset over a contiguous span,
+    // so flatten ONCE here — the documented ADR-0053 interim recipe, removed when
+    // partial-path routing consumes tlv_view_t (migration step 4; step 6 deletes
+    // this call-site). Empty/device ropes yield an empty flat view -> dropped.
+    const view_t flat = frame.flatten();
+    if (flat.empty()) return;
+    on_frame_impl(inbound_name, flat.bytes(), &flat);
 }
 
 void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const std::byte> frame,

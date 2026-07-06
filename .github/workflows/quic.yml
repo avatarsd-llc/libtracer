@@ -26,6 +26,7 @@ on:
       - "core/include/libtracer/transport_webtransport.hpp"
       - "core/src/wt_h3.hpp"
       - "core/include/libtracer/length_prefix_framer.hpp"  # quic/webtransport RX reassembler
+      - "core/include/libtracer/transport.hpp"  # the receiver seam both transports implement
       - "core/src/transport_vertex.cpp"
       - "core/include/libtracer/transport_vertex.hpp"
       - "core/tests/quic_test.cpp"

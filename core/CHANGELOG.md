@@ -206,6 +206,18 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Changed
 
+- **The owning delivery seam is rope-typed (ADR-0053 §5 / ADR-0042 generalized).**
+  `transport_t::view_receiver_t` / `set_view_receiver` / `delivers_views()` are now
+  `rope_receiver_t` (`std::function<void(view::rope_t)>`) / `set_rope_receiver` /
+  `delivers_ropes()` — "delivers views" and "delivers ropes" are ONE capability
+  (CONTEXT.md §ingress rope delivery), a contiguous frame being the trivial
+  single-link rope. All four owning transports (tcp/udp/quic/webtransport) deliver
+  exactly the single-link ropes their old views were (behavior-preserving);
+  `fwd_router_t` routes a single-link rope over the identical zero-heap span path
+  as before, and flattens a multi-link rope ONCE (the documented ADR-0053 interim
+  recipe, removed when partial-path routing lands). This unblocks CAN/WS
+  reassembly delivering their scatter-gather frames as the ropes they already are.
+
 - **The stream transports' receive frame cap is now the injected backend's real
   capacity** — `min(kMaxFrame, backend.max_segment_size())` (kMaxFrame→pool-bound,
   first slice). A length prefix claiming more than the rx backend could ever
