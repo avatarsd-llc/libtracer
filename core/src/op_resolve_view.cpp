@@ -53,6 +53,20 @@ class view_node {
         return cache_.bytes().subspan(header_size(), v_->body_size());
     }
 
+    // The trailer-excluded whole TLV as a fresh OWNED segment (ADR-0053 ⑤): a
+    // multi-link value is flattened ONCE and adopted — not materialized into the
+    // node cache and then copied a second time by the shared `own_tlv`. A
+    // single-link value aliases the frame, so it is copied once into an owned
+    // segment (the required ADR-0041 §2 ownership copy). The shared `own_tlv`
+    // clears the trailer bits on the owned opt byte; both branches yield an
+    // exclusively-owned segment safe to patch.
+    [[nodiscard]] view_t own_wire() const {
+        const std::size_t n = header_size() + v_->body_size();  // trailer excluded
+        const rope_t sub = v_->wire().subrope(0, n);
+        if (sub.link_count() > 1) return sub.flatten();  // one flatten, adopt (no 2nd copy)
+        return view::over_bytes(sub.only().bytes()).value_or(view_t{});
+    }
+
     // Forward-only child cursor — the shared shape of `arena_node::children_cursor`
     // and `tlv_view_t::children_t`. A grammar error in a child ends iteration (the
     // interim slice builds well-formed, trailer-less frames; 3c-iii wires the

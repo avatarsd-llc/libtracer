@@ -108,6 +108,12 @@ struct arena_node {
     [[nodiscard]] std::span<const std::byte> body() const noexcept { return node().body; }
     [[nodiscard]] bool canonical_path() const noexcept { return node().canonical_path; }
 
+    // The trailer-excluded whole TLV as a fresh OWNED segment (the ADR-0041 §2
+    // ownership copy of a borrowed arena span — the span tier always copies its
+    // bytes, since the arena outlives nothing). The lazy rope reader overrides this
+    // to adopt a multi-link flatten instead of copying it twice (ADR-0053 ⑤).
+    [[nodiscard]] view_t own_wire() const { return view::over_bytes(wire()).value_or(view_t{}); }
+
     // Forward-only child cursor — the shared shape of `tlv_view_t::children_t`.
     class children_cursor {
        public:
@@ -281,11 +287,13 @@ template <class N>
 }
 
 // The one ADR-0041 §2 ownership copy of a whole TLV into a fresh owned segment:
-// `node.wire` (trailer already excluded) with the copied opt byte's trailer bits
-// cleared (§4) — the stored TLV is trailer-less at rest and self-consistent.
+// the reader's trailer-excluded `own_wire` (span tier copies its borrowed bytes;
+// rope tier adopts a multi-link flatten, ADR-0053 ⑤) with the copied opt byte's
+// trailer bits cleared (§4) — the stored TLV is trailer-less at rest and
+// self-consistent. The opt patch lives here, ONE locus for both readers.
 template <class N>
 [[nodiscard]] view_t own_tlv(const N& node) {
-    view_t v = view::over_bytes(node.wire()).value_or(view_t{});  // empty view on alloc failure
+    view_t v = node.own_wire();  // owned, trailer-excluded; empty view on alloc failure
     if (!v.empty()) v.owner->bytes[1] = struct_opt(v.owner->bytes[1]);
     return v;
 }
