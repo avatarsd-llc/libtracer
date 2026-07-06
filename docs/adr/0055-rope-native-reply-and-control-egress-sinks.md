@@ -55,10 +55,12 @@ ADR-0052 escape hatch itself.
 1. **`on_reply` becomes rope-native (breaking public API change).**
    `std::function<void(const wire::tlv_t&)>` → `std::function<void(const view::rope_t&)>`.
    The router performs **no decode and no flatten** for a reply. A consumer that only
-   needs the bytes (every current in-tree consumer) takes `reply.flatten().bytes()` — a
-   single-link reply is a zero-copy `only()`, a multi-link one pays exactly the one
-   contiguous copy it was always going to pay, now **at the consumer, on demand**. A
-   consumer that wants the tree calls `wire::decode(reply.materialize().bytes())`.
+   needs the bytes (every current in-tree consumer) holds `const view_t m =
+   reply.materialize()` and reads `m.bytes()` — a single-link reply (the common case) is
+   returned **zero-copy** (`only()`, no alloc, no copy); a multi-link one pays exactly the
+   one contiguous flatten it was always going to pay, now **at the consumer, on demand**.
+   A consumer that wants the tree feeds those bytes to `wire::decode`. (Hold `m` while
+   reading its span — `materialize()` returns an owning `view_t` for the multi-link case.)
 
 2. **Control-frame delivery is served off the rope.** `on_advertise` / `on_nack` read
    only a `u16` label — stitched via the existing `grammar::rope_cursor` loads, no
@@ -81,7 +83,7 @@ happens.
 `on_reply` is a reference-implementation host API (`fwd_router_t`), not a wire-format or
 spec surface — no RFC, no conformance-vector change, no cross-core mirror. The blast
 radius is six in-tree call sites (five transport/router tests + the `full_node` example),
-each of which *shrinks*: `wire::encode(reply)` → `reply.flatten().bytes()` drops the
+each of which *shrinks*: `wire::encode(reply)` → `reply.materialize().bytes()` drops the
 decode+re-encode round-trip. A public-API note lands in `core/CHANGELOG.md`. The
 alternative — the router flattening on every consumer's behalf forever — is exactly the
 "flatten as end state" ADR-0052 rejected.
@@ -105,7 +107,7 @@ alternative — the router flattening on every consumer's behalf forever — is 
 ## Consequences
 
 - `on_reply`'s signature changes; `core/CHANGELOG.md` gets a breaking-change note; the
-  six in-tree consumers migrate to `reply.flatten().bytes()` (a net simplification).
+  six in-tree consumers migrate to `reply.materialize().bytes()`, holding the returned view (a net simplification).
 - `on_frame_rope` has no owning-path flatten left; the ADR-0053 ⑥ "flatten sweep" is
   complete for the net plane. The only remaining flattens are the **legitimate**
   span-tier decodes on the contiguous `on_frame` path and the on-demand payload
