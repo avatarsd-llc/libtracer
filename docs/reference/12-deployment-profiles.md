@@ -38,7 +38,7 @@ Rung 0  +  forwarder (P2)
   transport_can  (header-elided)   ── strawberry's remote boards / sensors
   transport_ws   (full-TLV)        ── strawberry's web-ui
   mem_borrowed (live IO values) · can_reassembly · mem_pool_class
-  dispatcher: per-subscriber delivery policy (delivery_mode ✓; throttle/keepalive)
+  dispatcher: per-vertex delivery policy (value-agnostic delivery_mode ✓: UNCONDITIONAL/IF_NEWER/EXPLICIT — RFC-0008)
   schema_registry: :schema POINT (dtype/unit/range, the io_descriptor)
 ```
 

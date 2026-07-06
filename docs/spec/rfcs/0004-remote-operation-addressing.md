@@ -16,7 +16,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Tracking issue** | [#125](https://github.com/avatarsd-llc/libtracer/issues/125) |
 | **Target spec version** | v1 (draft refinement — no released v1 yet, so no v2 needed) |
 
-> **Partially superseded by [RFC-0008](0008-vertex-operations-assign-propagate.md) (2026-07-06):** the `delivery_mode` QoS hint (`EVERY`/`THROTTLED`/`ON_CHANGE`) referenced in §E is removed — the runtime no longer filters delivery by comparing values. `delivery_compact` (label compaction) is orthogonal and unaffected.
+> **Partially superseded by [RFC-0008](0008-vertex-operations-assign-propagate.md) (2026-07-06, amended 2026-07-06b):** the value-based `delivery_mode` QoS hint (`EVERY`/`THROTTLED`/`ON_CHANGE`) and the `min_interval_ns` throttle referenced in §E are removed from `SUBSCRIBER.qos_settings` — the runtime no longer filters delivery by comparing values. `delivery_mode` survives redefined as a value-agnostic **per-vertex** policy (`UNCONDITIONAL`/`IF_NEWER`/`EXPLICIT`), not a per-subscriber value filter. `delivery_compact` (label compaction) is orthogonal and unaffected.
 
 ## Summary
 
