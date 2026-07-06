@@ -49,7 +49,7 @@ inline constexpr int kMaxDispatchDepth = 32;
  *
  * A pure description of one remote subscription edge: the consumer's accumulated
  * return route and this node's NAME for the link it arrived on, both opaque to L4,
- * plus the @ref vertex_t::subscriber_t delivery_compact opt-in. The injected sink
+ * plus the `vertex_t::subscriber_t` delivery_compact opt-in. The injected sink
  * (a `tr::net` concern — @ref graph_t::set_remote_delivery_sink) interprets these:
  * it maps @ref link to a transport child and emits a full-route `FWD{WRITE}` or,
  * when @ref delivery_compact, an auto-promoted label `COMPACT` (RFC-0004 §D/§E.1).
@@ -81,122 +81,180 @@ using subject_token_t = std::vector<std::byte>;
  */
 using subject_resolver_t = std::function<std::optional<subject_token_t>(std::string_view caller)>;
 
+/**
+ * @brief The L4 in-process graph runtime: the vertex map plus the whole data API
+ *        (register / read / write / await / subscribe, ADR-0006).
+ *
+ * Vertices are keyed on their canonical PATH-TLV payload bytes (docs/reference/02
+ * §dispatch). The hot path resolves a `vertex_t*` once — at registration or via one
+ * guarded @ref find — then read/write/await on that handle are lock-free in the
+ * vertex's last-known-value slot. Non-copyable; a graph is a fixed runtime root.
+ */
 class graph_t {
    public:
+    /** @brief Construct an empty graph (registers the built-in `stored_value` child type). */
     graph_t();
     graph_t(const graph_t&) = delete;
     graph_t& operator=(const graph_t&) = delete;
 
-    // Register a vertex at `path` (any field tail is ignored). Returns the pinned
-    // handle, or PathInUse if the path is already registered.
+    /**
+     * @brief Register a vertex at @p path (any `:field` tail is ignored).
+     * @return The pinned vertex handle, or `PATH_IN_USE` if the path is already registered.
+     */
     [[nodiscard]] result_t<vertex_t*> register_vertex(const path_t& path, role_t role,
                                                       handlers_t handlers = {},
                                                       settings_t settings = {});
 
-    // Register a vertex by its canonical PATH-payload key directly (the in-band
-    // `:children[]` path — the key is composed parent-key + NAME(child), not parsed
-    // from a string). PathInUse if the key is already registered.
+    /**
+     * @brief Register a vertex by its canonical PATH-payload @p key directly (the in-band
+     *        `:children[]` path).
+     *
+     * The key is a composed parent-key + `NAME(child)`, not parsed from a string.
+     * @return The pinned handle, or `PATH_IN_USE` if the key is already registered.
+     */
     [[nodiscard]] result_t<vertex_t*> register_vertex_key(std::vector<std::byte> key, role_t role,
                                                           handlers_t handlers = {},
                                                           settings_t settings = {});
 
-    // A child-vertex factory: the device-catalog entry ADR-0017 makes concrete. Given
-    // the composed child key (parent key + the SPEC's `name` NAME) and the optional
-    // SPEC `config` SETTINGS, it registers the child vertex(es) and returns the primary
-    // handle (or a status — e.g. PATH_IN_USE). The graph owns the *addressing* (the key
-    // is composed for it); the factory owns the *catalog* (what a `type` instantiates).
+    /**
+     * @brief A child-vertex factory: the device-catalog entry ADR-0017 makes concrete.
+     *
+     * Given the composed child key (parent key + the SPEC's `name` NAME) and the optional
+     * SPEC `config` SETTINGS, it registers the child vertex(es) and returns the primary
+     * handle (or a status — e.g. `PATH_IN_USE`). The graph owns the *addressing* (the key
+     * is composed for it); the factory owns the *catalog* (what a `type` instantiates).
+     */
     using child_factory_t = std::function<result_t<vertex_t*>(
         graph_t&, std::vector<std::byte> child_key, const wire::tlv_t* config)>;
 
-    // Populate the device's creation catalog (ADR-0017): map a SPEC `type` selector to a
-    // factory. A `:children[]` SPEC write whose `type` is unregistered returns
-    // SCHEMA_NOT_FOUND (the ENOTTY of an unsupported creation). Not thread-safe against
-    // concurrent creation — call at setup, before frames flow (mirrors the delivery sink).
-    // The built-in `stored_value` type is registered by the constructor.
+    /**
+     * @brief Populate the device creation catalog (ADR-0017): map a SPEC `type` selector
+     *        to a @ref child_factory_t.
+     *
+     * A `:children[]` SPEC write whose `type` is unregistered returns `SCHEMA_NOT_FOUND`
+     * (the ENOTTY of an unsupported creation). Not thread-safe against concurrent creation
+     * — call at setup, before frames flow (mirrors the delivery sink). The built-in
+     * `stored_value` type is registered by the constructor.
+     */
     void register_child_type(std::string type, child_factory_t factory);
 
-    // Hot path — operate on a resolved handle; lock-free in the LKV slot. The trailing
-    // `caller` on each op is the ACL caller context (#81): empty for a local API call
-    // (the default — zero churn), the inbound link NAME when the FWD resolver drives
-    // the op. With no subject resolver installed it costs one null check.
-    // read/await return the stored value as a rope (ADR-0053 §6): a scalar is the
-    // single-link case; a consumer needing contiguous bytes calls rope_t::only()
-    // (single-link, zero copy) or rope_t::materialize(). write takes a rope; an
-    // existing view_t caller compiles unchanged via the implicit view_t→rope_t.
+    /**
+     * @brief Read a resolved vertex's stored value (the hot path — lock-free in the LKV slot).
+     *
+     * Returns the last-known-value as a rope (ADR-0053 §6): a scalar is the single-link
+     * case; a consumer needing contiguous bytes calls `rope_t::only()` (single-link, zero
+     * copy) or `rope_t::materialize()`. The trailing @p caller is the ACL caller context
+     * (#81): empty for a local API call (the default — zero churn), the inbound link NAME
+     * when the FWD resolver drives the op. With no subject resolver installed it costs one
+     * null check.
+     */
     [[nodiscard]] result_t<rope_t> read(vertex_t* v, std::string_view caller = {}) const;
+    /**
+     * @brief Write a resolved vertex's value: `assign` then deliver (RFC-0008 §D).
+     *
+     * Takes a rope; an existing `view_t` caller compiles unchanged via the implicit
+     * `view_t`→`rope_t`. @p caller is the ACL caller context (see @ref read).
+     */
     [[nodiscard]] result_t<void> write(vertex_t* v, rope_t value, std::string_view caller = {});
-    // Field-write by handle: resolve the vertex_t* and field_path_t once (e.g. from a
-    // path_t::parse("/x:settings.reliability") kept around), then reuse them on the
-    // hot path — no string parse, no map lookup per call. An empty `field` is an
-    // ordinary value write. Pass `path.field()` for the field selector. A field write
-    // targets a contiguous control TLV, so a multi-link value is materialized first.
+    /**
+     * @brief Field-write by handle: resolve the `vertex_t*` and @ref field_path_t once,
+     *        then reuse them on the hot path — no string parse, no map lookup per call.
+     *
+     * An empty @p field is an ordinary value write. Pass `path.field()` for the field
+     * selector. A field write targets a contiguous control TLV, so a multi-link value is
+     * materialized first.
+     */
     [[nodiscard]] result_t<void> write(vertex_t* v, const field_path_t& field, rope_t value,
                                        std::string_view caller = {});
-    // The two irreducible vertex operations `write` composes (RFC-0008). `write` is the
-    // §D convenience — an `assign` immediately followed by a targeted delivery of the
-    // written vertex — kept because a `FWD{WRITE}` terminus *is* that composition. A
-    // caller that wants the timer-driven "update many, propagate once" workflow uses the
-    // two directly.
-    //
-    // assign(v, value) — the STATE transition only: swap v's last-known-value (atomic),
-    // append to the stream ring, bump the write sequence (waking await), and mark v for
-    // the next covering propagate sweep (unless v is EXPLICIT, or nobody observes at/above
-    // it). Sends NOTHING. WRITE-gated like write. A branch POINT decomposes and assigns
-    // each descendant (no notify). Never gated by delivery_mode.
+    /**
+     * @brief Assign a vertex's value — the STATE transition only, sends NOTHING (RFC-0008).
+     *
+     * One of the two irreducible operations `write` composes: swap v's last-known-value
+     * (atomic), append to the stream ring, bump the write sequence (waking await), and
+     * mark v for the next covering @ref propagate sweep (unless v is EXPLICIT, or nobody
+     * observes at/above it). WRITE-gated like @ref write; never gated by delivery_mode. A
+     * branch POINT decomposes and assigns each descendant (no notify). Pair with
+     * @ref propagate for the "update many, propagate once" workflow.
+     */
     [[nodiscard]] result_t<void> assign(vertex_t* v, rope_t value, std::string_view caller = {});
-    // propagate(v) — the EDGE transition only: deliver, along subscription edges, v's
-    // current value (always — the argument is the explicit target, so a direct propagate
-    // is never gated by v's delivery_mode) AND the qualifying descendants of v's subtree
-    // per each descendant's delivery_mode (RFC-0008 §B/§C): IF_NEWER descendants assigned
-    // since the last covering sweep, and every UNCONDITIONAL descendant. Reads the
-    // last-known-value — no value argument. Costs O((pending + unconditional)-in-subtree).
+    /**
+     * @brief Propagate along subscription edges — the EDGE transition only (RFC-0008 §B/§C).
+     *
+     * Delivers v's current value (always — @p v is the explicit target, so a direct
+     * propagate is never gated by v's delivery_mode) AND the qualifying descendants of v's
+     * subtree per each descendant's delivery_mode: IF_NEWER descendants assigned since the
+     * last covering sweep, and every UNCONDITIONAL descendant. Reads the last-known-value
+     * — no value argument. Costs O((pending + unconditional)-in-subtree).
+     */
     void propagate(vertex_t* v);
-    // Set v's per-vertex propagation policy (RFC-0008 §C). Wiring-time call (the
-    // "configure before frames flow" contract), like settings; maintains the sweep's
-    // UNCONDITIONAL membership. Default (unset) is IF_NEWER.
+    /**
+     * @brief Set v's per-vertex propagation policy (RFC-0008 §C).
+     *
+     * A wiring-time call (the "configure before frames flow" contract), like settings;
+     * maintains the sweep's UNCONDITIONAL membership. Default (unset) is IF_NEWER.
+     */
     void set_delivery_mode(vertex_t* v, delivery_mode_t mode);
+    /**
+     * @brief Block until the vertex's value changes or @p timeout elapses; return the value.
+     * @return The stored value as a rope, or a `status_t` (e.g. `TIMEOUT`).
+     */
     [[nodiscard]] result_t<rope_t> await(vertex_t* v, std::chrono::nanoseconds timeout,
                                          std::string_view caller = {});
-    // Field-read by handle (the read dual of the field-write overload): an empty `field`
-    // is an ordinary value read (the stored rope); otherwise serve ":schema", ":acl", or
-    // a single ":subscribers[N]" slot (the slot's stored SUBSCRIBER view, zero-copy) as a
-    // single-link rope. For the whole-array ":subscribers[]" read use read_subscribers().
-    // Used by the FWD resolver.
+    /**
+     * @brief Field-read by handle (the read dual of the field-write overload).
+     *
+     * An empty @p field is an ordinary value read (the stored rope); otherwise serve
+     * `:schema`, `:acl`, or a single `:subscribers[N]` slot (the slot's stored SUBSCRIBER
+     * view, zero-copy) as a single-link rope. For the whole-array `:subscribers[]` read use
+     * @ref read_subscribers. Used by the FWD resolver.
+     */
     [[nodiscard]] result_t<rope_t> read(vertex_t* v, const field_path_t& field,
                                         std::string_view caller = {}) const;
-    // Read the ":subscribers[]" array: the populated slot SUBSCRIBER views in slot order
-    // (each a zero-copy refcount clone of the stored source view). The FWD resolver ropes
-    // these under a fresh PL=1 wrapper into the REPLY (RFC-0004 §D, no byte copy).
+    /**
+     * @brief Read the `:subscribers[]` array — the populated slot SUBSCRIBER views in slot order.
+     *
+     * Each is a zero-copy refcount clone of the stored source view. The FWD resolver ropes
+     * these under a fresh PL=1 wrapper into the REPLY (RFC-0004 §D, no byte copy).
+     */
     [[nodiscard]] result_t<std::vector<view_t>> read_subscribers(
         vertex_t* v, std::string_view caller = {}) const;
-    // Stream history, newest last (Stream role only) — each entry the stored rope value.
+    /** @brief Stream history, newest last (Stream role only) — each entry the stored rope value. */
     [[nodiscard]] result_t<std::vector<rope_t>> history(vertex_t* v) const;
 
-    // Subscribe `src` to a target vertex (spec-faithful: a write to src re-dispatches
-    // the cloned value to `target`). NotFound if src is unknown.
-    //
-    // These subscribe(...) overloads are *host SDK sugar*, not new wire primitives:
-    // the wire data API stays read/write/await (ADR-0006). On the wire, subscription
-    // is a consumer-initiated SUBSCRIBER write into the producer's `:subscribers[]`
-    // field (ADR-0026), exactly as connect() is sugar over that field-write. Routing
-    // these helpers through the `:subscribers[]` field-write surface (rather than the
-    // current direct path) is tracked in #59.
+    /**
+     * @brief Subscribe @p src to a @p target vertex — a write to src re-dispatches the
+     *        cloned value to target (spec-faithful). `NOT_FOUND` if src is unknown.
+     *
+     * These `subscribe(...)` overloads are *host SDK sugar*, not new wire primitives: the
+     * wire data API stays read/write/await (ADR-0006). On the wire, subscription is a
+     * consumer-initiated SUBSCRIBER write into the producer's `:subscribers[]` field
+     * (ADR-0026), exactly as connect() is sugar over that field-write. Routing these helpers
+     * through the `:subscribers[]` field-write surface (rather than the current direct path)
+     * is tracked in #59.
+     */
     [[nodiscard]] result_t<void> subscribe(const path_t& src, const path_t& target);
-    // Subscribe `src` to an in-process callback (sugar; the callback fires inline on each
-    // delivery to src with a cloned view). Delivery is value-agnostic (RFC-0008): WHICH
-    // vertices a sweep propagates is the source vertex's delivery_mode, not a per-edge policy.
+    /**
+     * @brief Subscribe @p src to an in-process @p callback (sugar; fires inline on each
+     *        delivery to src with a cloned view).
+     *
+     * Delivery is value-agnostic (RFC-0008): WHICH vertices a sweep propagates is the
+     * source vertex's delivery_mode, not a per-edge policy.
+     */
     [[nodiscard]] result_t<void> subscribe(const path_t& src,
                                            std::function<void(const rope_t&)> callback);
 
-    // Install the sink the producer fan-out hands each REMOTE subscriber's delivery to
-    // (#136, RFC-0004 §D/§E.1). Set once at wiring time by the transport plane
-    // (tr::net::fwd_router_t) before frames flow; the sink fires on whatever thread
-    // calls write() (outside the vertex lock), and on subscribe for a transient-local
-    // latch. L4 keeps it as an opaque std::function, so the graph never depends on a
-    // transport. A null sink (the default) ⇒ remote slots are stored but never deliver.
-    // The value reaches the sink as a rope (ADR-0053 §6). Until ⑤ makes the emission
-    // path scatter-gather, the sink flattens a multi-link value internally (the one
-    // documented ④a interim); a single-link value materializes zero-copy.
+    /**
+     * @brief Install the sink the producer fan-out hands each REMOTE subscriber's delivery
+     *        to (#136, RFC-0004 §D/§E.1).
+     *
+     * Set once at wiring time by the transport plane (`tr::net::fwd_router_t`) before frames
+     * flow; the sink fires on whatever thread calls @ref write (outside the vertex lock),
+     * and on @ref subscribe for a transient-local latch. L4 keeps it as an opaque
+     * `std::function`, so the graph never depends on a transport. A null sink (the default)
+     * ⇒ remote slots are stored but never deliver. The value reaches the sink as a rope
+     * (ADR-0053 §6): a single-link value materializes zero-copy, a multi-link value is
+     * handed over as the rope it is.
+     */
     void set_remote_delivery_sink(
         std::function<void(const remote_delivery_t&, const rope_t&)> sink);
 
@@ -218,31 +276,41 @@ class graph_t {
      */
     void set_subject_resolver(subject_resolver_t resolver);
 
-    // Store a REMOTE subscriber on `v`: a SUBSCRIBER slot carrying the consumer's
-    // `return_route` (a view over a refcounted segment — the ONE copy of the route,
-    // made by the caller at subscribe; every later delivery clones the refcount,
-    // ADR-0041 §2) + this node's NAME for its `link` + the `delivery_compact` opt-in,
-    // so a later write fans out a FWD{WRITE}/COMPACT delivery via the remote sink. The
-    // wire dual of the local subscribe(...) sugar, driven by the FWD resolver on an
-    // inbound `:subscribers[]` WRITE (#59/#136). If `v` is transient-local
-    // (settings.durability == 1) and already holds a value, the current LKV is latched
-    // to this subscriber immediately (one synchronous sink call, RFC-0004 §D). The
-    // `source_view` (the SUBSCRIBER TLV) is retained zero-copy so a `:subscribers[]`
-    // read serves it back. NotFound is impossible (the caller holds `v`). The producer
-    // fan-out gate (#81, ADR-0026): `link` is the caller context — the append requires
-    // the SUBSCRIBE right on `v`'s :acl, else PERMISSION_DENIED.
+    /**
+     * @brief Store a REMOTE subscriber on @p v — the wire dual of local @ref subscribe sugar.
+     *
+     * Creates a SUBSCRIBER slot carrying the consumer's @p return_route (a view over a
+     * refcounted segment — the ONE copy of the route, made by the caller at subscribe;
+     * every later delivery clones the refcount, ADR-0041 §2), this node's NAME for its
+     * @p link, and the @p delivery_compact opt-in, so a later write fans out a
+     * `FWD{WRITE}`/COMPACT delivery via the remote sink. Driven by the FWD resolver on an
+     * inbound `:subscribers[]` WRITE (#59/#136). If @p v is transient-local
+     * (`settings.durability == 1`) and already holds a value, the current LKV is latched to
+     * this subscriber immediately (one synchronous sink call, RFC-0004 §D). @p source_view
+     * (the SUBSCRIBER TLV) is retained zero-copy so a `:subscribers[]` read serves it back.
+     * `NOT_FOUND` is impossible (the caller holds @p v). Producer fan-out gate (#81,
+     * ADR-0026): @p link is the caller context — the append requires the SUBSCRIBE right on
+     * @p v's `:acl`, else `PERMISSION_DENIED`.
+     */
     [[nodiscard]] result_t<void> add_remote_subscriber(vertex_t* v, view_t source_view,
                                                        view_t return_route, std::string link,
                                                        bool delivery_compact);
 
-    // Convenience — resolve the path key once (guarded map lookup), then hot path.
-    // A write/read whose path has a field tail (e.g. ":settings.deadline_ns",
-    // ":subscribers[]", ":schema") is routed to the field surface.
+    /**
+     * @brief Read by path — resolve the path key once (guarded map lookup), then the hot path.
+     *
+     * A read whose path has a field tail (e.g. `:settings.deadline_ns`, `:subscribers[]`,
+     * `:schema`) is routed to the field surface.
+     */
     [[nodiscard]] result_t<rope_t> read(const path_t& path) const;
+    /** @brief Write by path — resolve the key once, then @ref write(vertex_t*, rope_t,
+     * std::string_view). */
     [[nodiscard]] result_t<void> write(const path_t& path, rope_t value);
+    /** @brief Await by path — resolve the key once, then @ref await(vertex_t*,
+     * std::chrono::nanoseconds, std::string_view). */
     [[nodiscard]] result_t<rope_t> await(const path_t& path, std::chrono::nanoseconds timeout);
 
-    // Resolve a canonical PATH-payload key to its vertex (nullptr if unknown).
+    /** @brief Resolve a canonical PATH-payload @p key to its vertex (nullptr if unknown). */
     [[nodiscard]] vertex_t* find(std::span<const std::byte> key) const;
 
     /**

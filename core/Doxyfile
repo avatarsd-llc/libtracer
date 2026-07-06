@@ -34,7 +34,8 @@ INPUT                  = core/include/libtracer/backend.hpp \
                          core/include/libtracer/key_view.hpp \
                          core/include/libtracer/path.hpp \
                          core/include/libtracer/transport.hpp \
-                         core/include/libtracer/frame.hpp
+                         core/include/libtracer/frame.hpp \
+                         core/include/libtracer/graph.hpp
 RECURSIVE              = NO
 
 # Document only what is explicitly commented; internal `detail` helpers are not
