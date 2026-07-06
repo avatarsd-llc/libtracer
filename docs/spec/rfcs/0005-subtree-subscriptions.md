@@ -16,6 +16,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Tracking issue** | [#66](https://github.com/avatarsd-llc/libtracer/issues/66) |
 | **Target spec version** | v1 (draft refinement — no released v1 yet, so no v2 needed) |
 
+> **Partially superseded by [RFC-0008](0008-vertex-operations-assign-propagate.md) (2026-07-06):** the per-subscriber `delivery_mode` / ON_CHANGE byte-diff delivery policy (§A) is removed; selective propagation is now **structural** (dirty-tracked `assign` / `propagate`), not value-based. The subtree-subscription, vertical-bubbling, branch-write-decomposition, and write-creates semantics all stand — RFC-0008 restates bubbling in terms of `propagate` over the dirty set.
+
 ## Summary
 
 Every subscription becomes a **subtree subscription**: a `SUBSCRIBER` edge on a
