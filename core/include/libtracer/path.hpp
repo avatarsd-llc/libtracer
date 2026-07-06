@@ -42,11 +42,13 @@ inline constexpr std::size_t kMaxFieldDepth = 8;
  * @ref append, or @ref wildcard is meaningful when a `[...]` selector is present.
  */
 struct field_step_t {
-    std::string name;         /**< @brief The step's NAME (the text before any `[...]`). */
-    bool indexed = false;     /**< @brief True if a `[...]` selector was present. */
-    bool append = false;      /**< @brief True for `[]` — append to a sequence. */
-    bool wildcard = false;    /**< @brief True for `[*]` — FIELD index_mode=WILDCARD (RFC-0004 §C). */
-    std::uint16_t index = 0;  /**< @brief The `[N]` index; valid when `indexed && !append && !wildcard`. */
+    std::string name;     /**< @brief The step's NAME (the text before any `[...]`). */
+    bool indexed = false; /**< @brief True if a `[...]` selector was present. */
+    bool append = false;  /**< @brief True for `[]` — append to a sequence. */
+    /** @brief True for `[*]` — FIELD index_mode=WILDCARD (RFC-0004 §C). */
+    bool wildcard = false;
+    /** @brief The `[N]` index; valid when `indexed && !append && !wildcard`. */
+    std::uint16_t index = 0;
     /** @brief Value equality over every field. */
     bool operator==(const field_step_t&) const = default;
 };
@@ -58,7 +60,8 @@ struct field_step_t {
  * field-write / field-read control surface (docs/reference/04).
  */
 struct field_path_t {
-    std::vector<field_step_t> steps;  /**< @brief The `.`-separated steps; empty ⇒ the vertex value itself. */
+    /** @brief The `.`-separated steps; empty ⇒ the vertex value itself. */
+    std::vector<field_step_t> steps;
     /** @brief True when there is no field tail (addresses the vertex value). */
     [[nodiscard]] bool empty() const noexcept { return steps.empty(); }
     /** @brief Value equality over the step sequence. */
@@ -129,7 +132,7 @@ inline path_t::path_t(std::string_view text) {
 
 /** @brief Owned byte key for the vertex map (a copy of a path's canonical payload). */
 struct path_key_t {
-    std::vector<std::byte> bytes;  /**< @brief The owned canonical PATH payload bytes. */
+    std::vector<std::byte> bytes; /**< @brief The owned canonical PATH payload bytes. */
     /** @brief Value equality over the key bytes. */
     bool operator==(const path_key_t&) const noexcept = default;
 };
