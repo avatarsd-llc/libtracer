@@ -277,10 +277,12 @@ int run_host_probe(device_node_t& dev) {
     std::mutex reply_m;
     std::vector<std::byte> reply_bytes;
     std::atomic<bool> reply_ready{false};
-    router.on_reply([&](const tr::wire::tlv_t& r) {
+    router.on_reply([&](const tr::view::rope_t& r) {
         const std::lock_guard lock(reply_m);
         if (!reply_ready.load(std::memory_order_relaxed)) {
-            reply_bytes = tr::wire::encode(r);
+            const tr::view::view_t mat = r.materialize();
+            const auto b = mat.bytes();
+            reply_bytes.assign(b.begin(), b.end());
             reply_ready.store(true, std::memory_order_release);
         }
     });

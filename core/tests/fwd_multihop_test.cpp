@@ -207,7 +207,11 @@ int main() {
     graph_t graph_c;
     mailbox_t inbox;
     fwd_router_t router_c(graph_c);
-    router_c.on_reply([&](const tlv_t& reply) { inbox.push(tr::wire::encode(reply)); });
+    router_c.on_reply([&](const tr::view::rope_t& reply) {
+        const tr::view::view_t mat = reply.materialize();
+        const auto b = mat.bytes();
+        inbox.push(std::vector<std::byte>(b.begin(), b.end()));
+    });
     transport_ws_client c_to_a("127.0.0.1", srv_a.local_port());
     if (!c_to_a.ok()) {
         std::fprintf(stderr, "client: ws client to A failed to connect\n");

@@ -223,7 +223,9 @@ void fwd_router_t::add_child(std::string name, transport_t& link) {
     }
 }
 
-void fwd_router_t::on_reply(std::function<void(const tlv_t&)> cb) { reply_cb_ = std::move(cb); }
+void fwd_router_t::on_reply(std::function<void(const view::rope_t&)> cb) {
+    reply_cb_ = std::move(cb);
+}
 
 void fwd_router_t::on_inbound(std::function<void(std::string_view, const tlv_t&)> cb) {
     inbound_cb_ = std::move(cb);
@@ -309,18 +311,21 @@ void fwd_router_t::on_frame_rope(std::string_view inbound_name, view::rope_t fra
             }
             // No child (or over-long segment) ⇒ this node is the terminus for the frame.
             // A request FWD is resolved straight off the rope (ADR-0053 3c-iii — NO
-            // flatten, verify-at-access §4). A REPLY that reaches its originator here
-            // still takes the flatten fallback: the reply sink (`reply_cb_`) is handed
-            // the decoded tree, and that rope-aware sink is the ⑤/⑥ follow-on.
+            // flatten, verify-at-access §4).
             if (peek_fwd_op(cur) != fwd_op_t::REPLY) {
                 resolve_terminus_rope(inbound_name, std::move(frame));
                 return;
             }
+            // A REPLY that reaches its originator here is handed to the sink rope-native
+            // (ADR-0055): NO flatten — the sink materializes on demand. Absent sink ⇒
+            // dropped (as the flatten path would, into a no-op decode).
+            if (reply_cb_) reply_cb_(frame);
+            return;
         }
     }
-    // Terminus REPLY / control (or a device/short rope): the contiguous decode path
-    // still needs a flat frame — the documented ADR-0053 interim flatten, deleted when
-    // the rope-aware reply/control sinks land (migration ⑤/⑥). An empty flat ⇒ dropped.
+    // Control frame (or a device/short rope): the route-handle sinks still decode a
+    // contiguous tree — the documented ADR-0053 interim flatten, deleted when the
+    // rope-aware control sinks land (⑥ part 2). An empty flat ⇒ dropped.
     const view_t flat = frame.flatten();
     if (flat.empty()) return;
     on_frame_impl(inbound_name, flat.bytes(), &flat);
@@ -353,9 +358,17 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
         }
         if (peek_fwd_op(cur) == fwd_op_t::REPLY) {
             // The accumulated return route is fully consumed — this node is the
-            // originator. Deliver the decoded FWD{REPLY} to the reply sink.
+            // originator. Hand the FWD{REPLY} to the sink rope-native (ADR-0055): NO
+            // decode. A view-delivered frame ropes zero-copy off its owning view; a
+            // borrowed span is copied once into an owned segment (the copy the old
+            // decode-then-consumer-encode round-trip already paid).
             if (reply_cb_) {
-                if (const auto dec = wire::decode(frame); dec && dec->opt.pl) reply_cb_(*dec);
+                if (frame_view != nullptr) {
+                    reply_cb_(view::rope_t(*frame_view));
+                } else if (view_t owned = view::over_bytes(frame).value_or(view_t{});
+                           !owned.empty()) {
+                    reply_cb_(view::rope_t(std::move(owned)));
+                }
             }
             return;
         }
