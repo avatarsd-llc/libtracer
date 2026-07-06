@@ -191,6 +191,14 @@ target_link_libraries(fwd_fanout_test PRIVATE libtracer)
 libtracer_test_warnings(fwd_fanout_test)
 add_test(NAME fwd_fanout COMMAND fwd_fanout_test)
 
+# ADR-0053 ④b — the FWD forward hop over a MULTI-LINK rope, without flattening: an oracle
+# equality that every adversarial split routes byte-identically to the contiguous path,
+# plus the terminus flatten fallback.
+add_executable(fwd_rope_forward_test fwd_rope_forward_test.cpp)
+target_link_libraries(fwd_rope_forward_test PRIVATE libtracer)
+libtracer_test_warnings(fwd_rope_forward_test)
+add_test(NAME fwd_rope_forward COMMAND fwd_rope_forward_test)
+
 # #83 Stage-1 — transport/connection as a / vertex (shell over the live fwd path).
 add_executable(transport_vertex_test transport_vertex_test.cpp)
 target_link_libraries(transport_vertex_test PRIVATE libtracer)
