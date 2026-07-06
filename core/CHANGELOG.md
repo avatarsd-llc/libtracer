@@ -206,6 +206,20 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Changed
 
+- **WS supports RFC 6455 fragmented messages and delivers ropes (ADR-0053 §5 /
+  step ②).** Both `transport_ws_server` and `transport_ws_client` now reassemble
+  fragmented BINARY messages — previously a non-final fragment was delivered as if
+  it were a whole frame and CONT frames were dropped — and join the owning tier:
+  `set_rope_receiver` / `delivers_ropes() == true`, each completed message a rope
+  with **one owning link per fragment** (reassembly is chaining, never a flat
+  memcpy; the per-fragment copy out of the reused connection buffer is the single
+  legitimate substrate-boundary copy). Control frames (PING) interleave mid-message
+  per RFC 6455 §5.4; a BINARY mid-assembly (protocol error) restarts the assembly;
+  a stray CONT is dropped. The span tier is unchanged for unfragmented messages
+  (borrowed, zero-copy) and pays a single flatten for fragmented ones.
+  `ws::encode_frame` / `ws::encode_client_frame` gain a trailing `bool fin = true`
+  (existing callers byte-identical).
+
 - **CAN reassembly delivers ropes (ADR-0053 §5 / step ③).** `bus_link_t` gains the
   owning peer-named seam — `peer_rope_receiver_t` / `set_peer_rope_receiver`
   (default no-op, same honesty rule as `set_rope_receiver`) and

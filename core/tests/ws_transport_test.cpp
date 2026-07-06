@@ -34,6 +34,7 @@
 #include <string_view>
 #include <vector>
 
+#include "libtracer/rope.hpp"
 #include "libtracer/transport_ws.hpp"
 #include "libtracer/ws.hpp"
 
@@ -101,9 +102,9 @@ std::vector<std::byte> read_until(int fd, Done done, std::chrono::milliseconds b
 // Build a MASKED client→server frame (RFC 6455 §5.3): FIN=1, given opcode, the
 // MASK bit set with a 4-byte key, payload XOR-masked. Small payloads only (<126).
 std::vector<std::byte> masked_client_frame(ws::opcode_t op, std::span<const std::byte> payload,
-                                           std::array<std::uint8_t, 4> mask) {
+                                           std::array<std::uint8_t, 4> mask, bool fin = true) {
     std::vector<std::byte> out;
-    out.push_back(static_cast<std::byte>(0x80u | static_cast<std::uint8_t>(op)));  // FIN=1
+    out.push_back(static_cast<std::byte>((fin ? 0x80u : 0x00u) | static_cast<std::uint8_t>(op)));
     out.push_back(
         static_cast<std::byte>(0x80u | static_cast<std::uint8_t>(payload.size())));  // MASK=1
     for (std::uint8_t m : mask) out.push_back(static_cast<std::byte>(m));
@@ -112,6 +113,109 @@ std::vector<std::byte> masked_client_frame(ws::opcode_t op, std::span<const std:
             static_cast<std::byte>(std::to_integer<std::uint8_t>(payload[i]) ^ mask[i % 4]));
     }
     return out;
+}
+
+// Drive the RFC 6455 opening handshake on a raw client fd. Returns true on 101.
+bool raw_handshake(int cfd) {
+    const std::string client_key = "dGhlIHNhbXBsZSBub25jZQ==";
+    std::string upgrade =
+        "GET / HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Key: ";
+    upgrade += client_key;
+    upgrade += "\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    write_str(cfd, upgrade);
+    const auto resp_bytes = read_until(
+        cfd,
+        [](const std::vector<std::byte>& b) {
+            return std::string_view(reinterpret_cast<const char*>(b.data()), b.size())
+                       .find("\r\n\r\n") != std::string_view::npos;
+        },
+        2s);
+    const std::string resp(reinterpret_cast<const char*>(resp_bytes.data()), resp_bytes.size());
+    return resp.find("101 Switching Protocols") != std::string::npos;
+}
+
+// A fragmented message reaches the OWNING sink as the rope its fragments already
+// are — one owning link per fragment, chained, never memcpy'd flat (ADR-0053 §5)
+// — with an interleaved control frame (PING) handled mid-message per RFC 6455.
+void test_fragmented_message_rope() {
+    std::printf("transport_ws server — fragmented message -> rope (ADR-0053):\n");
+
+    tr::net::transport_ws_server server(0);
+    check(server.ok() && server.delivers_ropes(), "server up; delivers_ropes() is true");
+
+    std::promise<tr::view::rope_t> got;
+    auto fut = got.get_future();
+    server.set_rope_receiver([&](tr::view::rope_t msg) { got.set_value(std::move(msg)); });
+
+    const int cfd = tcp_connect(server.local_port());
+    check(cfd >= 0 && raw_handshake(cfd), "raw client connected + 101 handshake");
+
+    const std::array<std::uint8_t, 4> mask{0x37, 0xFA, 0x21, 0x3D};
+    const auto part = [](const char* t) {
+        std::vector<std::byte> v(std::strlen(t));
+        std::memcpy(v.data(), t, v.size());
+        return v;
+    };
+    const auto p1 = part("AAAA"), p2 = part("BBB"), p3 = part("CC");
+    write_bytes(cfd, masked_client_frame(ws::opcode_t::BINARY, p1, mask, /*fin=*/false));
+    write_bytes(cfd, masked_client_frame(ws::opcode_t::CONT, p2, mask, /*fin=*/false));
+    // A control frame MAY be injected in the middle of a fragmented message
+    // (RFC 6455 §5.4) — it must not disturb the assembly.
+    write_bytes(cfd, masked_client_frame(ws::opcode_t::PING, p3, mask));
+    write_bytes(cfd, masked_client_frame(ws::opcode_t::CONT, p3, mask, /*fin=*/true));
+
+    const bool arrived = fut.wait_for(2s) == std::future_status::ready;
+    check(arrived, "one completed message delivered to the rope sink");
+    if (arrived) {
+        const tr::view::rope_t msg = fut.get();
+        check(msg.link_count() == 3, "one owning link per fragment (chained, not flattened)");
+        check(msg.total_length() == 9, "total length == sum of fragments");
+        std::vector<std::byte> flat;
+        msg.walk(
+            [&](std::span<const std::byte> sp) { flat.insert(flat.end(), sp.begin(), sp.end()); });
+        check(flat.size() == 9 && std::memcmp(flat.data(), "AAAABBBCC", 9) == 0,
+              "reassembled bytes are byte-exact");
+    }
+    ::close(cfd);
+}
+
+// The same fragmented message on the SPAN tier: delivered once, byte-exact
+// (the borrowed tier pays the single flatten inside the transport).
+void test_fragmented_message_span() {
+    std::printf("transport_ws server — fragmented message -> span tier:\n");
+
+    tr::net::transport_ws_server server(0);
+    check(server.ok(), "server up");
+
+    std::promise<std::vector<std::byte>> got;
+    auto fut = got.get_future();
+    server.set_receiver([&](std::span<const std::byte> f) {
+        got.set_value(std::vector<std::byte>(f.begin(), f.end()));
+    });
+
+    const int cfd = tcp_connect(server.local_port());
+    check(cfd >= 0 && raw_handshake(cfd), "raw client connected + 101 handshake");
+
+    const std::array<std::uint8_t, 4> mask{0x11, 0x22, 0x33, 0x44};
+    const std::array<std::byte, 3> a{std::byte{1}, std::byte{2}, std::byte{3}};
+    const std::array<std::byte, 2> b{std::byte{4}, std::byte{5}};
+    write_bytes(cfd, masked_client_frame(ws::opcode_t::BINARY, a, mask, /*fin=*/false));
+    write_bytes(cfd, masked_client_frame(ws::opcode_t::CONT, b, mask, /*fin=*/true));
+
+    const bool arrived = fut.wait_for(2s) == std::future_status::ready;
+    check(arrived, "one completed message delivered to the span sink");
+    if (arrived) {
+        const auto r = fut.get();
+        const std::array<std::byte, 5> want{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4},
+                                            std::byte{5}};
+        check(r.size() == 5 && std::memcmp(r.data(), want.data(), 5) == 0,
+              "span delivery is byte-exact (single flatten inside the transport)");
+    }
+    ::close(cfd);
 }
 
 void test_handshake_and_frames() {
@@ -252,6 +356,8 @@ void test_client_server_roundtrip() {
 
 int main() {
     test_handshake_and_frames();
+    test_fragmented_message_rope();
+    test_fragmented_message_span();
     test_client_server_roundtrip();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");

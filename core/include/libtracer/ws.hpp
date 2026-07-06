@@ -279,7 +279,7 @@ struct frame_t {
 }
 
 /**
- * @brief Encode one server→client RFC 6455 frame: FIN=1, given opcode, UNMASKED.
+ * @brief Encode one server→client RFC 6455 frame: given opcode, UNMASKED.
  *
  * Server frames MUST NOT be masked (RFC 6455 §5.1), so the MASK bit is always
  * 0 and no masking key is emitted. The length uses the smallest legal encoding
@@ -287,12 +287,15 @@ struct frame_t {
  *
  * @param op      The frame opcode.
  * @param payload The application payload to send.
+ * @param fin     The FIN bit (default true — a complete, unfragmented message;
+ *                pass false for a non-final fragment, RFC 6455 §5.4).
  * @return The fully serialized frame bytes, ready to write to the socket.
  */
 [[nodiscard]] inline std::vector<std::byte> encode_frame(opcode_t op,
-                                                         std::span<const std::byte> payload) {
+                                                         std::span<const std::byte> payload,
+                                                         bool fin = true) {
     std::vector<std::byte> out;
-    out.push_back(static_cast<std::byte>(0x80u | static_cast<std::uint8_t>(op)));  // FIN=1
+    out.push_back(static_cast<std::byte>((fin ? 0x80u : 0x00u) | static_cast<std::uint8_t>(op)));
 
     const std::size_t len = payload.size();
     if (len < 126) {
@@ -314,7 +317,7 @@ struct frame_t {
 }
 
 /**
- * @brief Encode one client→server RFC 6455 frame: FIN=1, given opcode, MASKED.
+ * @brief Encode one client→server RFC 6455 frame: given opcode, MASKED.
  *
  * Client frames MUST be masked (RFC 6455 §5.1): the MASK bit is set, a 4-byte
  * masking key is emitted big-endian after the length, and every payload byte is
@@ -327,13 +330,16 @@ struct frame_t {
  * @param op       The frame opcode.
  * @param payload  The application payload to send.
  * @param mask_key The 32-bit masking key (its 4 bytes form the RFC 6455 key).
+ * @param fin      The FIN bit (default true — a complete, unfragmented message;
+ *                 pass false for a non-final fragment, RFC 6455 §5.4).
  * @return The fully serialized masked frame bytes, ready to write to the socket.
  */
 [[nodiscard]] inline std::vector<std::byte> encode_client_frame(opcode_t op,
                                                                 std::span<const std::byte> payload,
-                                                                std::uint32_t mask_key) {
+                                                                std::uint32_t mask_key,
+                                                                bool fin = true) {
     std::vector<std::byte> out;
-    out.push_back(static_cast<std::byte>(0x80u | static_cast<std::uint8_t>(op)));  // FIN=1
+    out.push_back(static_cast<std::byte>((fin ? 0x80u : 0x00u) | static_cast<std::uint8_t>(op)));
 
     const std::size_t len = payload.size();
     if (len < 126) {
