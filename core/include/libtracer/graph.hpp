@@ -117,29 +117,35 @@ class graph_t {
     // `caller` on each op is the ACL caller context (#81): empty for a local API call
     // (the default — zero churn), the inbound link NAME when the FWD resolver drives
     // the op. With no subject resolver installed it costs one null check.
-    [[nodiscard]] result_t<view_t> read(vertex_t* v, std::string_view caller = {}) const;
-    [[nodiscard]] result_t<void> write(vertex_t* v, view_t value, std::string_view caller = {});
+    // read/await return the stored value as a rope (ADR-0053 §6): a scalar is the
+    // single-link case; a consumer needing contiguous bytes calls rope_t::only()
+    // (single-link, zero copy) or rope_t::materialize(). write takes a rope; an
+    // existing view_t caller compiles unchanged via the implicit view_t→rope_t.
+    [[nodiscard]] result_t<rope_t> read(vertex_t* v, std::string_view caller = {}) const;
+    [[nodiscard]] result_t<void> write(vertex_t* v, rope_t value, std::string_view caller = {});
     // Field-write by handle: resolve the vertex_t* and field_path_t once (e.g. from a
     // path_t::parse("/x:settings.reliability") kept around), then reuse them on the
     // hot path — no string parse, no map lookup per call. An empty `field` is an
-    // ordinary value write. Pass `path.field()` for the field selector.
-    [[nodiscard]] result_t<void> write(vertex_t* v, const field_path_t& field, view_t value,
+    // ordinary value write. Pass `path.field()` for the field selector. A field write
+    // targets a contiguous control TLV, so a multi-link value is materialized first.
+    [[nodiscard]] result_t<void> write(vertex_t* v, const field_path_t& field, rope_t value,
                                        std::string_view caller = {});
-    [[nodiscard]] result_t<view_t> await(vertex_t* v, std::chrono::nanoseconds timeout,
+    [[nodiscard]] result_t<rope_t> await(vertex_t* v, std::chrono::nanoseconds timeout,
                                          std::string_view caller = {});
     // Field-read by handle (the read dual of the field-write overload): an empty `field`
-    // is an ordinary value read; otherwise serve ":schema", ":acl", or a single
-    // ":subscribers[N]" slot (the slot's stored SUBSCRIBER view, zero-copy). For the
-    // whole-array ":subscribers[]" read use read_subscribers(). Used by the FWD resolver.
-    [[nodiscard]] result_t<view_t> read(vertex_t* v, const field_path_t& field,
+    // is an ordinary value read (the stored rope); otherwise serve ":schema", ":acl", or
+    // a single ":subscribers[N]" slot (the slot's stored SUBSCRIBER view, zero-copy) as a
+    // single-link rope. For the whole-array ":subscribers[]" read use read_subscribers().
+    // Used by the FWD resolver.
+    [[nodiscard]] result_t<rope_t> read(vertex_t* v, const field_path_t& field,
                                         std::string_view caller = {}) const;
     // Read the ":subscribers[]" array: the populated slot SUBSCRIBER views in slot order
     // (each a zero-copy refcount clone of the stored source view). The FWD resolver ropes
     // these under a fresh PL=1 wrapper into the REPLY (RFC-0004 §D, no byte copy).
     [[nodiscard]] result_t<std::vector<view_t>> read_subscribers(
         vertex_t* v, std::string_view caller = {}) const;
-    // Stream history, newest last (Stream role only).
-    [[nodiscard]] result_t<std::vector<view_t>> history(vertex_t* v) const;
+    // Stream history, newest last (Stream role only) — each entry the stored rope value.
+    [[nodiscard]] result_t<std::vector<rope_t>> history(vertex_t* v) const;
 
     // Subscribe `src` to a target vertex (spec-faithful: a write to src re-dispatches
     // the cloned value to `target`). NotFound if src is unknown.
@@ -155,7 +161,7 @@ class graph_t {
     // Subscribe `src` to an in-process callback (sugar; the callback fires inline on
     // each write to src with a cloned view). `mode` gates delivery producer-side.
     [[nodiscard]] result_t<void> subscribe(const path_t& src,
-                                           std::function<void(const view_t&)> callback,
+                                           std::function<void(const rope_t&)> callback,
                                            delivery_mode_t mode = delivery_mode_t::EVERY);
 
     // Install the sink the producer fan-out hands each REMOTE subscriber's delivery to
@@ -164,8 +170,11 @@ class graph_t {
     // calls write() (outside the vertex lock), and on subscribe for a transient-local
     // latch. L4 keeps it as an opaque std::function, so the graph never depends on a
     // transport. A null sink (the default) ⇒ remote slots are stored but never deliver.
+    // The value reaches the sink as a rope (ADR-0053 §6). Until ⑤ makes the emission
+    // path scatter-gather, the sink flattens a multi-link value internally (the one
+    // documented ④a interim); a single-link value materializes zero-copy.
     void set_remote_delivery_sink(
-        std::function<void(const remote_delivery_t&, const view_t&)> sink);
+        std::function<void(const remote_delivery_t&, const rope_t&)> sink);
 
     /**
      * @brief Install the pluggable subject resolver (ADR-0018) — the ACL enforcement switch.
@@ -205,9 +214,9 @@ class graph_t {
     // Convenience — resolve the path key once (guarded map lookup), then hot path.
     // A write/read whose path has a field tail (e.g. ":settings.deadline_ns",
     // ":subscribers[]", ":schema") is routed to the field surface.
-    [[nodiscard]] result_t<view_t> read(const path_t& path) const;
-    [[nodiscard]] result_t<void> write(const path_t& path, view_t value);
-    [[nodiscard]] result_t<view_t> await(const path_t& path, std::chrono::nanoseconds timeout);
+    [[nodiscard]] result_t<rope_t> read(const path_t& path) const;
+    [[nodiscard]] result_t<void> write(const path_t& path, rope_t value);
+    [[nodiscard]] result_t<rope_t> await(const path_t& path, std::chrono::nanoseconds timeout);
 
     // Resolve a canonical PATH-payload key to its vertex (nullptr if unknown).
     [[nodiscard]] vertex_t* find(std::span<const std::byte> key) const;
@@ -240,20 +249,22 @@ class graph_t {
     // `depth` bounds in-process re-dispatch cycles (kMaxDispatchDepth). `caller` is
     // the ACL caller context gating the WRITE right: the API caller's at depth 0,
     // the subscription edge's stored context on a fan-out re-dispatch (fan-in gate).
-    result_t<void> write_impl(vertex_t* v, view_t value, int depth, std::string_view caller);
+    result_t<void> write_impl(vertex_t* v, rope_t value, int depth, std::string_view caller);
     // The store half of a write (LKV/history/handler + seq bump + await wake),
     // WITHOUT fan-out — shared by write_impl and the branch-write apply (RFC-0005).
-    result_t<void> store_value(vertex_t* v, view_t value);
+    result_t<void> store_value(vertex_t* v, rope_t value);
     // Branch-write decomposition (RFC-0005): a POINT payload written to `v` lands
     // each value-carrying node at the corresponding descendant vertex as a
     // refcount SUBVIEW of the written frame (creating missing vertices, CREATE-
-    // gated), then notifies each covered subscription point once with its slice.
-    result_t<void> write_branch(vertex_t* v, const view_t& value, int depth,
+    // gated), then notifies each covered subscription point once with its slice. A
+    // decomposable POINT is contiguous, so the walk reads the materialized head
+    // (single-link: zero copy) and lands rope slices of it (ADR-0053 §6).
+    result_t<void> write_branch(vertex_t* v, const rope_t& value, int depth,
                                 std::string_view caller);
-    void fan_out(vertex_t* v, const view_t& value, int depth);
+    void fan_out(vertex_t* v, const rope_t& value, int depth);
     // Vertical bubbling (RFC-0005): fan `value` out to every registered ancestor's
     // subscribers. Called only when v->listeners_above_ says someone is listening.
-    void bubble_up(vertex_t* v, const view_t& value, int depth);
+    void bubble_up(vertex_t* v, const rope_t& value, int depth);
     // Subscribe/unsubscribe bookkeeping (RFC-0005): bump v's own active-slot count
     // and every descendant's listeners_above_, under the map lock (shared — the
     // counters are atomics; the lock only excludes concurrent vertex creation so
@@ -303,7 +314,7 @@ class graph_t {
     // The remote-delivery sink (#136). Set once before frames flow, then read-only on
     // the write hot path — no lock needed (a benign data race with a late setup write
     // is excluded by the "configure before frames flow" contract, mirroring fwd_router).
-    std::function<void(const remote_delivery_t&, const view_t&)> remote_sink_;
+    std::function<void(const remote_delivery_t&, const rope_t&)> remote_sink_;
     // The pluggable subject resolver (#81, ADR-0018). Null (default) => ACL enforcement
     // disabled. Same set-once-before-frames-flow contract as remote_sink_.
     subject_resolver_t subject_resolver_;

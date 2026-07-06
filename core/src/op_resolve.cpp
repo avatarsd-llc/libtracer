@@ -334,11 +334,15 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
     return assemble(a, req, reply_kind_t::ERROR, tail, {}, 0);
 }
 
-// A kind=RESULT reply whose single payload child is a stored view (data / slot read).
-[[nodiscard]] rope_t assemble_result_view(const tlv_arena_t& a, const parsed_fwd_t& req,
-                                          const view_t& payload) {
-    const std::vector<view_t> shared{payload};
-    return assemble(a, req, reply_kind_t::RESULT, {}, shared, payload.length);
+// A kind=RESULT reply whose payload children are a stored rope value's links (ADR-0053
+// §6): a single-link value contributes one payload child (the trivial case, identical to
+// a view read); a multi-link stored value ropes ALL its links into the reply zero-copy —
+// no flatten.
+[[nodiscard]] rope_t assemble_result_rope(const tlv_arena_t& a, const parsed_fwd_t& req,
+                                          const rope_t& payload) {
+    const std::span<const view_t> links = payload.links();
+    const std::vector<view_t> shared(links.begin(), links.end());
+    return assemble(a, req, reply_kind_t::RESULT, {}, shared, payload.total_length());
 }
 
 // The vertex-map key for an arena-decoded PATH: span-aliased when canonical
@@ -415,10 +419,10 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
                                 std::span<const std::byte>(wrapper.data(), wll ? 6u : 4u), *subs,
                                 sub_len);
             }
-            result_t<view_t> r =
+            result_t<rope_t> r =
                 has_field ? graph_.read(v, field, inbound_link) : graph_.read(v, inbound_link);
             if (!r) return assemble_error(fwd, req, r.error());
-            return assemble_result_view(fwd, req, *r);
+            return assemble_result_rope(fwd, req, *r);
         }
         case fwd_op_t::WRITE: {
             if (req.payload == 0) return assemble_error(fwd, req, status_t::TYPE_MISMATCH);
@@ -471,9 +475,9 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
             const std::chrono::nanoseconds timeout =
                 req.has_await_timeout ? std::chrono::nanoseconds(req.await_timeout)
                                       : kDefaultAwaitTimeout;
-            result_t<view_t> r = graph_.await(v, timeout, inbound_link);
+            result_t<rope_t> r = graph_.await(v, timeout, inbound_link);
             if (!r) return assemble_error(fwd, req, r.error());  // TIMEOUT => tr::flow::timeout
-            return assemble_result_view(fwd, req, *r);
+            return assemble_result_rope(fwd, req, *r);
         }
         case fwd_op_t::REPLY:
             break;  // unreachable — handled above

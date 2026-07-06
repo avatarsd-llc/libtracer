@@ -163,7 +163,7 @@ void test_read_zero_copy() {
 
     // Reference handle on the stored segment (LKV + this = use_count 2).
     const auto stored = g.read(v);
-    check(stored.has_value() && stored->owner.use_count() == 2, "stored LKV use_count == 2");
+    check(stored.has_value() && stored->only().owner.use_count() == 2, "stored LKV use_count == 2");
 
     const auto fwd = b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), b_path({"reply-ep"}));
     auto reply = resolve_bytes(resolver, fwd);
@@ -172,9 +172,9 @@ void test_read_zero_copy() {
     const auto& links = reply->links();
     check(links.size() == 2, "reply rope = fresh head + 1 roped payload link");
     const tr::view::view_t& payload_link = links.back();
-    check(payload_link.owner.get() == stored->owner.get(),
+    check(payload_link.owner.get() == stored->only().owner.get(),
           "reply payload link SHARES the stored segment (segment-pointer identity)");
-    check(stored->owner.use_count() == 3,
+    check(stored->only().owner.use_count() == 3,
           "stored segment refcount bumped by the reply rope (LKV+ref+reply == 3), no copy");
 
     const auto dr = decode_reply(*reply);
@@ -211,9 +211,9 @@ void test_write() {
     check(value_u8(r.children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
           "WRITE reply kind == RESULT");
     const auto rd = g.read(v);
-    check(rd.has_value() && rd->bytes().size() == 5 /*VALUE 01 00 01 00 2A*/,
+    check(rd.has_value() && rd->only().bytes().size() == 5 /*VALUE 01 00 01 00 2A*/,
           "vertex LKV updated by the WRITE");
-    const auto inner = tr::wire::view_as_tlv(*rd);
+    const auto inner = tr::wire::view_as_tlv(rd->only());
     check(inner && inner->type == type_t::VALUE && value_u8(*inner) == 0x2A,
           "stored value decodes to the written byte 0x2A");
 }
@@ -342,9 +342,9 @@ void test_write_trailer_sliced() {
     // Stored-at-rest: header + body only (6 bytes), opt trailer bits cleared,
     // and the stored TLV is self-consistent (decodes with no trailer).
     const auto rd = g.read(v);
-    check(rd.has_value() && rd->bytes().size() == 6,
+    check(rd.has_value() && rd->only().bytes().size() == 6,
           "stored LKV excludes the trailer (6 bytes, not 10)");
-    const auto inner = tr::wire::view_as_tlv(*rd);
+    const auto inner = tr::wire::view_as_tlv(rd->only());
     check(inner.has_value() && inner->type == type_t::VALUE && !inner->opt.cr &&
               !inner->trailer.has_value() && inner->payload.size() == 2,
           "stored value decodes trailer-less with the CR bit cleared");
@@ -411,10 +411,10 @@ void test_store_ref_threshold() {
         auto reply = resolver.resolve(*arena, {}, &frame);
         check(reply.has_value(), "WRITE with default threshold produced a reply");
         const auto rd = g.read(v);
-        check(rd.has_value() && rd->owner.get() != frame.owner.get(),
+        check(rd.has_value() && rd->only().owner.get() != frame.owner.get(),
               "default store_ref_min_bytes=0 => stored bytes are a COPY (segment differs)");
-        check(rd.has_value() && rd->bytes().size() == big_tlv.size() &&
-                  std::memcmp(rd->bytes().data(), big_tlv.data(), big_tlv.size()) == 0,
+        check(rd.has_value() && rd->only().bytes().size() == big_tlv.size() &&
+                  std::memcmp(rd->only().bytes().data(), big_tlv.data(), big_tlv.size()) == 0,
               "copied store holds the payload TLV bytes");
     }
 
@@ -430,10 +430,10 @@ void test_store_ref_threshold() {
         auto reply = resolver.resolve(*arena, {}, &frame);
         check(reply.has_value(), "WRITE over threshold produced a reply");
         const auto rd = g.read(v);
-        check(rd.has_value() && rd->owner.get() == frame.owner.get(),
+        check(rd.has_value() && rd->only().owner.get() == frame.owner.get(),
               "referenced store: stored segment IS the frame segment (pointer identity)");
-        check(rd.has_value() && rd->bytes().size() == big_tlv.size() &&
-                  std::memcmp(rd->bytes().data(), big_tlv.data(), big_tlv.size()) == 0,
+        check(rd.has_value() && rd->only().bytes().size() == big_tlv.size() &&
+                  std::memcmp(rd->only().bytes().data(), big_tlv.data(), big_tlv.size()) == 0,
               "referenced subview covers exactly the payload TLV within the frame");
     }
 
@@ -441,8 +441,8 @@ void test_store_ref_threshold() {
     frame = tr::view::view_t{};
     {
         const auto rd = g.read(v);
-        check(rd.has_value() && rd->bytes().size() == big_tlv.size() &&
-                  std::memcmp(rd->bytes().data(), big_tlv.data(), big_tlv.size()) == 0,
+        check(rd.has_value() && rd->only().bytes().size() == big_tlv.size() &&
+                  std::memcmp(rd->only().bytes().data(), big_tlv.data(), big_tlv.size()) == 0,
               "referenced store survives the frame view's release (segment pinned)");
     }
 
@@ -462,9 +462,9 @@ void test_store_ref_threshold() {
         auto reply = resolver.resolve(*arena, {}, &crc_frame);
         check(reply.has_value(), "trailered WRITE over threshold produced a reply");
         const auto rd = g.read(v);
-        check(rd.has_value() && rd->owner.get() != crc_frame.owner.get(),
+        check(rd.has_value() && rd->only().owner.get() != crc_frame.owner.get(),
               "trailered payload => falls back to the one-copy store (no reference)");
-        const auto inner = tr::wire::view_as_tlv(*rd);
+        const auto inner = tr::wire::view_as_tlv(rd->only());
         check(inner.has_value() && !inner->opt.cr && !inner->trailer.has_value(),
               "trailered fallback stays trailer-sliced at rest (ADR-0041 §4)");
     }
@@ -479,7 +479,7 @@ void test_store_ref_threshold() {
         auto reply = resolver.resolve(*arena, {}, &small_frame);
         check(reply.has_value(), "small WRITE produced a reply");
         const auto rd = g.read(v);
-        check(rd.has_value() && rd->owner.get() != small_frame.owner.get(),
+        check(rd.has_value() && rd->only().owner.get() != small_frame.owner.get(),
               "payload under the threshold => copied (a small copy beats pinning)");
     }
 }
@@ -508,7 +508,7 @@ void test_store_ref_concurrent() {
 
     // Pin the referenced store via a reader clone, then drop the frame view.
     const auto pinned = g.read(v);
-    check(pinned.has_value() && pinned->owner.get() == frame.owner.get(),
+    check(pinned.has_value() && pinned->only().owner.get() == frame.owner.get(),
           "reader clone pins the frame segment");
     frame = tr::view::view_t{};
 
@@ -527,8 +527,8 @@ void test_store_ref_concurrent() {
     }
     for (auto& w : workers) w.join();
 
-    check(pinned->bytes().size() == big_tlv.size() &&
-              std::memcmp(pinned->bytes().data(), big_tlv.data(), big_tlv.size()) == 0,
+    check(pinned->only().bytes().size() == big_tlv.size() &&
+              std::memcmp(pinned->only().bytes().data(), big_tlv.data(), big_tlv.size()) == 0,
           "pinned referenced view is byte-stable across 800 concurrent writes");
     const auto rd = g.read(v);
     check(rd.has_value(), "vertex still reads cleanly after the churn");

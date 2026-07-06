@@ -24,12 +24,14 @@
 #include <vector>
 
 #include "libtracer/path.hpp"
+#include "libtracer/rope.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/view.hpp"
 
 namespace tr::graph {
 
 // L1 types this layer consumes (upward dependency on tr::view, docs/adr/0016 §2).
+using view::rope_t;
 using view::segment_ptr_t;
 using view::view_t;
 
@@ -60,8 +62,12 @@ struct settings_t {
 // registered child vertices — the ADR-0044 seam by which a transport/connection
 // vertex lists its live bus peers without ever creating a vertex for them.
 struct handlers_t {
-    std::function<result_t<view_t>()> on_read;
-    std::function<result_t<void>(const view_t&)> on_write;
+    // The value seam is rope-typed (ADR-0053 §6): on_read supplies the vertex value
+    // as the rope it is (a contiguous scalar is the single-link case), on_write
+    // receives the written value without a flatten copy. on_children stays a
+    // contiguous view — a synthesized control listing, always freshly encoded.
+    std::function<result_t<rope_t>()> on_read;
+    std::function<result_t<void>(const rope_t&)> on_write;
     std::function<result_t<view_t>()> on_children;
 };
 
@@ -117,9 +123,13 @@ enum class delivery_mode_t : std::uint8_t {
 // unsubscribe (a cleared :subscribers[N]).
 struct subscriber_t {
     std::vector<std::byte> target_key;            // canonical PATH key (empty => callback-only)
-    std::function<void(const view_t&)> callback;  // null => target-only
+    std::function<void(const rope_t&)> callback;  // null => target-only (ADR-0053 §6 rope value)
     delivery_mode_t mode = delivery_mode_t::EVERY;
-    std::vector<std::byte> last_delivered;  // ON_CHANGE: bytes last sent (producer-side, under m_)
+    // ON_CHANGE: the producer-side snapshot of the bytes last delivered (under m_). The
+    // change test walks the new value's rope links against this buffer WITHOUT flattening
+    // the rope into a temp (ADR-0053 §6); the snapshot itself is bookkeeping, not the data
+    // path — EVERY mode (the default, and the streaming mode) never touches it.
+    std::vector<std::byte> last_delivered;
     bool active = true;
     // The route-handle opt-in (SUBSCRIBER.qos_settings.delivery_compact, RFC-0004
     // §E.1 / ADR-0035 slice 4). When true the consumer requests label-compacted
@@ -175,8 +185,10 @@ class vertex_t {
     settings_t settings_;
     handlers_t handlers_;
 
-    std::atomic<std::shared_ptr<const view_t>> lkv_{};   // lock-free read/write hot path
-    std::deque<std::shared_ptr<const view_t>> history_;  // Stream ring; guarded by m_
+    // The stored value is a rope (ADR-0053 §6): a contiguous scalar is a single-link
+    // rope (small-buffer inline, no extra alloc), a chunked stream keeps its links.
+    std::atomic<std::shared_ptr<const rope_t>> lkv_{};   // lock-free read/write hot path
+    std::deque<std::shared_ptr<const rope_t>> history_;  // Stream ring; guarded by m_
     std::vector<subscriber_t> subs_;                     // fan-out edges; guarded by m_
     std::vector<std::byte> acl_;  // raw :acl TLV bytes, served back verbatim; guarded by m_
                                   // (#81-A, ADR-0018/0020). Empty => no :acl set.

@@ -104,10 +104,11 @@ void test_stored_value() {
     check(w.has_value(), "write succeeds");
 
     auto r = g.read(v);
-    check(r.has_value() && r->bytes().size() == 3, "read returns the written value");
-    check(r && std::to_integer<int>(r->bytes()[0]) == 0xAA, "value byte 0 == 0xAA");
+    check(r.has_value() && r->only().bytes().size() == 3, "read returns the written value");
+    check(r && std::to_integer<int>(r->only().bytes()[0]) == 0xAA, "value byte 0 == 0xAA");
     // The LKV holds one reference; read returned an independent clone => use_count 2.
-    check(r && r->owner.use_count() == 2, "read is a clone (segment use_count == 2), not a copy");
+    check(r && r->only().owner.use_count() == 2,
+          "read is a clone (segment use_count == 2), not a copy");
 
     check(!g.register_vertex(*path, role_t::STORED_VALUE).has_value(),
           "re-register same path fails");
@@ -127,10 +128,13 @@ void test_stream() {
 
     auto hist = g.history(v);
     check(hist.has_value() && hist->size() == 3, "history bounded to keep_last = 3");
-    check(hist && std::to_integer<int>((*hist)[0].bytes()[0]) == 3, "oldest kept is the 3rd write");
-    check(hist && std::to_integer<int>((*hist)[2].bytes()[0]) == 5, "newest kept is the 5th write");
+    check(hist && std::to_integer<int>((*hist)[0].only().bytes()[0]) == 3,
+          "oldest kept is the 3rd write");
+    check(hist && std::to_integer<int>((*hist)[2].only().bytes()[0]) == 5,
+          "newest kept is the 5th write");
     auto latest = g.read(v);
-    check(latest && std::to_integer<int>(latest->bytes()[0]) == 5, "read returns the latest (5)");
+    check(latest && std::to_integer<int>(latest->only().bytes()[0]) == 5,
+          "read returns the latest (5)");
 }
 
 void test_handler() {
@@ -140,15 +144,16 @@ void test_handler() {
     auto written = std::make_shared<std::vector<std::byte>>();
     tr::graph::handlers_t h;
     h.on_read = [] { return make_value({0x2A}); };  // always 42
-    h.on_write = [written](const tr::view::view_t& in) -> tr::graph::result_t<void> {
-        const auto b = in.bytes();
+    h.on_write = [written](const tr::view::rope_t& in) -> tr::graph::result_t<void> {
+        const auto b = in.only().bytes();
         written->assign(b.begin(), b.end());
         return {};
     };
     tr::graph::vertex_t* v = *g.register_vertex(*path, role_t::HANDLER, std::move(h));
 
     auto r = g.read(v);
-    check(r && std::to_integer<int>(r->bytes()[0]) == 0x2A, "on_read supplies the value (42)");
+    check(r && std::to_integer<int>(r->only().bytes()[0]) == 0x2A,
+          "on_read supplies the value (42)");
     (void)g.write(v, make_value({0x99}));
     check(written->size() == 1 && std::to_integer<int>((*written)[0]) == 0x99,
           "on_write receives the written bytes");
@@ -167,7 +172,7 @@ void test_await() {
     });
     auto r = g.await(v, 2s);
     writer.join();
-    check(r.has_value() && std::to_integer<int>(r->bytes()[0]) == 0x7E,
+    check(r.has_value() && std::to_integer<int>(r->only().bytes()[0]) == 0x7E,
           "await wakes on a concurrent write and delivers it");
 
     tr::graph::vertex_t* idle =
@@ -209,7 +214,8 @@ void test_concurrent_stress() {
             for (int i = 0; i < kReadsEach; ++i) {
                 auto rr = g.read(v);
                 // Any non-empty read must be a well-formed 8-byte value (no torn read).
-                if (rr && rr->bytes().size() != 8) return;  // leaves reads_done short => FAIL
+                if (rr && rr->only().bytes().size() != 8)
+                    return;  // leaves reads_done short => FAIL
             }
             reads_done.fetch_add(kReadsEach, std::memory_order_relaxed);
         });
@@ -221,7 +227,8 @@ void test_concurrent_stress() {
     check(reads_done.load() == static_cast<long>(kReaders) * kReadsEach,
           "all reads completed without crash under contention");
     auto fin = g.read(v);
-    check(fin.has_value() && fin->bytes().size() == 8, "final read returns a valid 8-byte value");
+    check(fin.has_value() && fin->only().bytes().size() == 8,
+          "final read returns a valid 8-byte value");
 }
 
 // A VALUE TLV wrapping `payload` (01 00 <len> <payload>), as an owned view_t.
@@ -251,8 +258,8 @@ void test_subscribe_callback() {
     auto seen = std::make_shared<int>(-1);
     tr::graph::vertex_t* src =
         *g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
-    (void)g.subscribe(*path_t::parse("/sensor/temp"), [seen](const tr::view::view_t& v) {
-        *seen = std::to_integer<int>(v.bytes()[0]);
+    (void)g.subscribe(*path_t::parse("/sensor/temp"), [seen](const tr::view::rope_t& v) {
+        *seen = std::to_integer<int>(v.only().bytes()[0]);
     });
     (void)g.write(src, make_value({0x42}));
     check(*seen == 0x42, "callback fires on write with the delivered value");
@@ -263,8 +270,8 @@ void test_subscribe_target() {
     graph_t g;
     auto sink_seen = std::make_shared<int>(-1);
     tr::graph::handlers_t h;
-    h.on_write = [sink_seen](const tr::view::view_t& in) -> tr::graph::result_t<void> {
-        *sink_seen = std::to_integer<int>(in.bytes()[0]);
+    h.on_write = [sink_seen](const tr::view::rope_t& in) -> tr::graph::result_t<void> {
+        *sink_seen = std::to_integer<int>(in.only().bytes()[0]);
         return {};
     };
     (void)g.register_vertex(*path_t::parse("/log/temp"), role_t::HANDLER, std::move(h));
@@ -309,8 +316,8 @@ void test_subscribe_via_field_write_and_unsubscribe() {
     graph_t g;
     auto sink_seen = std::make_shared<int>(0);
     tr::graph::handlers_t h;
-    h.on_write = [sink_seen](const tr::view::view_t& in) -> tr::graph::result_t<void> {
-        *sink_seen += std::to_integer<int>(in.bytes()[0]);
+    h.on_write = [sink_seen](const tr::view::rope_t& in) -> tr::graph::result_t<void> {
+        *sink_seen += std::to_integer<int>(in.only().bytes()[0]);
         return {};
     };
     (void)g.register_vertex(*path_t::parse("/sink"), role_t::HANDLER, std::move(h));
@@ -335,7 +342,7 @@ void test_schema_read() {
     (void)g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
     auto schema = g.read(*path_t::parse("/sensor/temp:schema"));
     check(schema.has_value(), ":schema read returns a value");
-    auto point = tr::wire::view_as_tlv(*schema);
+    auto point = tr::wire::view_as_tlv(schema->only());
     check(point && point->type == tr::wire::type_t::POINT, ":schema decodes to a POINT");
     check(point && point->children.size() == 2, "POINT has a NAME and a SETTINGS child");
     check(point && point->children[0].type == tr::wire::type_t::NAME &&
@@ -352,8 +359,8 @@ void test_dispatch_cycle_cap() {
     // Mutual target subscriptions form a cycle; a counter callback on each level.
     (void)g.subscribe(*path_t::parse("/a"), *path_t::parse("/b"));
     (void)g.subscribe(*path_t::parse("/b"), *path_t::parse("/a"));
-    (void)g.subscribe(*path_t::parse("/a"), [count](const tr::view::view_t&) { ++*count; });
-    (void)g.subscribe(*path_t::parse("/b"), [count](const tr::view::view_t&) { ++*count; });
+    (void)g.subscribe(*path_t::parse("/a"), [count](const tr::view::rope_t&) { ++*count; });
+    (void)g.subscribe(*path_t::parse("/b"), [count](const tr::view::rope_t&) { ++*count; });
 
     (void)g.write(a, make_value({0x01}));  // must terminate, not infinite-loop / stack-overflow
     check(*count > 1, "the cycle did dispatch (callbacks fired both ways)");
@@ -369,11 +376,11 @@ void test_subscribe_on_change() {
 
     auto on_change = std::make_shared<int>(0);
     (void)g.subscribe(
-        *path_t::parse("/sensor/temp"), [on_change](const tr::view::view_t&) { ++*on_change; },
+        *path_t::parse("/sensor/temp"), [on_change](const tr::view::rope_t&) { ++*on_change; },
         delivery_mode_t::ON_CHANGE);
     auto every = std::make_shared<int>(0);
     (void)g.subscribe(*path_t::parse("/sensor/temp"),
-                      [every](const tr::view::view_t&) { ++*every; });  // default = EVERY
+                      [every](const tr::view::rope_t&) { ++*every; });  // default = EVERY
 
     (void)g.write(v, make_value({0x55}));  // change   -> both fire
     (void)g.write(v, make_value({0x55}));  // unchanged-> only EVERY fires

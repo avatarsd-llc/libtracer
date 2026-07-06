@@ -8,7 +8,7 @@
  *   1. a direct in-process callback     (subscribe(src, callback) sugar)
  *   2. a spec-faithful target vertex     (subscribe(src, target) -> a handler sink)
  *   3. a thread blocking in await()      (the single-shot primitive)
- * Delivery to (1) and (2) is a refcount-bump clone of the same view_t — no byte copy.
+ * Delivery to (1) and (2) is a refcount-bump clone of the same rope value — no byte copy.
  */
 
 #include <chrono>
@@ -51,15 +51,15 @@ int main() {
     // A "sink" vertex backed by a callback handler — the target of a spec-faithful
     // SUBSCRIBER (subscriber 2 below re-dispatches to it).
     tr::graph::handlers_t sink;
-    sink.on_write = [](const tr::view::view_t& in) -> tr::graph::result_t<void> {
-        std::printf("  [sink vertex /log/temp] received %u\n", as_u32(in));
+    sink.on_write = [](const tr::view::rope_t& in) -> tr::graph::result_t<void> {
+        std::printf("  [sink vertex /log/temp] received %u\n", as_u32(in.only()));
         return {};
     };
     (void)g.register_vertex(*path_t::parse("/log/temp"), role_t::HANDLER, std::move(sink));
 
     // subscriber_t 1 — direct in-process callback.
-    (void)g.subscribe(*path_t::parse("/sensor/temp"), [](const tr::view::view_t& v) {
-        std::printf("  [callback sub] received %u\n", as_u32(v));
+    (void)g.subscribe(*path_t::parse("/sensor/temp"), [](const tr::view::rope_t& v) {
+        std::printf("  [callback sub] received %u\n", as_u32(v.only()));
     });
     // subscriber_t 2 — spec-faithful target-path subscription -> /log/temp.
     (void)g.subscribe(*path_t::parse("/sensor/temp"), *path_t::parse("/log/temp"));
@@ -67,7 +67,7 @@ int main() {
     // subscriber_t 3 — a thread blocking in await().
     std::thread waiter([&] {
         auto r = g.await(temp, 2s);
-        if (r) std::printf("  [await sub] received %u\n", as_u32(*r));
+        if (r) std::printf("  [await sub] received %u\n", as_u32(r->only()));
     });
     std::this_thread::sleep_for(50ms);  // let the waiter park in await()
 
@@ -77,13 +77,13 @@ int main() {
 
     // Read back the last-known-value (a clone — keeps the segment alive for us).
     auto rb = g.read(temp);
-    std::printf("read-back /sensor/temp = %u\n", rb ? as_u32(*rb) : 0u);
+    std::printf("read-back /sensor/temp = %u\n", rb ? as_u32(rb->only()) : 0u);
 
     // Field-write a QoS setting, then discover it via :schema.
     (void)g.write(*path_t::parse("/sensor/temp:settings.deadline_ns"), value_u32(5000));
     auto schema = g.read(*path_t::parse("/sensor/temp:schema"));
     if (schema) {
-        auto point = tr::wire::view_as_tlv(*schema);
+        auto point = tr::wire::view_as_tlv(schema->only());
         std::printf(":schema is a POINT with %zu children\n", point ? point->children.size() : 0u);
     }
     return 0;

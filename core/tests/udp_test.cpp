@@ -110,8 +110,8 @@ void test_two_nodes_over_udp() {
 
     std::promise<std::vector<std::byte>> got;
     auto fut = got.get_future();
-    (void)node_b.subscribe(*path_t::parse("/sensor/temp"), [&got](const tr::view::view_t& v) {
-        const auto b = v.bytes();
+    (void)node_b.subscribe(*path_t::parse("/sensor/temp"), [&got](const tr::view::rope_t& v) {
+        const auto b = v.only().bytes();
         got.set_value(std::vector<std::byte>(b.begin(), b.end()));
     });
 
@@ -280,7 +280,7 @@ void test_two_nodes_zero_copy_store() {
     std::promise<void> written;
     auto fut = written.get_future();
     (void)node_b.subscribe(*path_t::parse("/sensor/blob"),
-                           [&written](const tr::view::view_t&) { written.set_value(); });
+                           [&written](const tr::view::rope_t&) { written.set_value(); });
 
     // A 64-byte payload => a 68-byte trailer-less VALUE TLV, well over the threshold.
     std::vector<std::byte> pb(64);
@@ -294,12 +294,12 @@ void test_two_nodes_zero_copy_store() {
     check(arrived, "node B stores the FWD{WRITE} delivered over real UDP");
     if (arrived) {
         const auto rd = node_b.read(v);
-        check(rd.has_value() && rd->bytes().size() == payload.size() &&
-                  std::memcmp(rd->bytes().data(), payload.data(), payload.size()) == 0,
+        check(rd.has_value() && rd->only().bytes().size() == payload.size() &&
+                  std::memcmp(rd->only().bytes().data(), payload.data(), payload.size()) == 0,
               "stored bytes equal the written payload TLV");
         const auto segs = rec.segments();
         check(!segs.empty(), "the RX backend allocated the frame segment");
-        check(rd.has_value() && !segs.empty() && rd->owner.get() == segs.front(),
+        check(rd.has_value() && !segs.empty() && rd->only().owner.get() == segs.front(),
               "stored segment IS the RX frame segment (zero-copy socket -> LKV)");
     }
 }

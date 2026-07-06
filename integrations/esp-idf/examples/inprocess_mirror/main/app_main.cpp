@@ -63,7 +63,7 @@ void await_task(void*) {
     ESP_LOGI(kTag, "await: parking on /sensor/temp (2s timeout)");
     auto r = g_graph.await(g_temp, std::chrono::seconds(2));
     if (r) {
-        ESP_LOGI(kTag, "await: woke with value = %" PRIu32, as_u32(*r));
+        ESP_LOGI(kTag, "await: woke with value = %" PRIu32, as_u32(r->only()));
     } else {
         ESP_LOGW(kTag, "await: timed out with no write");
     }
@@ -96,7 +96,7 @@ extern "C" void app_main(void) {
 
     // 4) Read it back (a refcount-clone of the stored last-known-value).
     if (auto rb = g_graph.read(g_temp); rb) {
-        ESP_LOGI(kTag, "read-back: /sensor/temp = %" PRIu32, as_u32(*rb));
+        ESP_LOGI(kTag, "read-back: /sensor/temp = %" PRIu32, as_u32(rb->only()));
     } else {
         ESP_LOGE(kTag, "read failed");
     }

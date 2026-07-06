@@ -318,7 +318,7 @@ int run_host_probe(device_node_t& dev) {
     bool latched = false;
     for (int i = 0; i < 60 && !latched; ++i) {
         const auto lkv = graph.read(probe_path);
-        latched = lkv.has_value() && value_u32_of(*lkv) == 21;
+        latched = lkv.has_value() && value_u32_of(lkv->only()) == 21;
         if (!latched) std::this_thread::sleep_for(50ms);
     }
     check(latched, "subscribe latched the current value (transient-local)");
@@ -329,7 +329,7 @@ int run_host_probe(device_node_t& dev) {
     std::optional<std::uint32_t> delivered;
     std::thread awaiter([&graph, &probe_path, &delivered] {
         const auto d = graph.await(probe_path, 3s);
-        if (d.has_value()) delivered = value_u32_of(*d);
+        if (d.has_value()) delivered = value_u32_of(d->only());
     });
     std::this_thread::sleep_for(100ms);  // let await arm
     check(dev.write_sensor(22), "device: write /sensor/temp = 22");

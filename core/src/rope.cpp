@@ -17,7 +17,7 @@ view_t rope_t::flatten(mem::mem_backend_t& backend) const {
     segment_t* seg = backend.alloc(n, mem::alloc_hint_t::NONE);
     if (seg == nullptr) return view_t{};
     std::size_t pos = 0;
-    for (const auto& l : links_) {
+    for (const view_t& l : links()) {
         const auto b = l.bytes();
         if (!b.empty()) std::memcpy(seg->bytes.data() + pos, b.data(), b.size());
         pos += b.size();

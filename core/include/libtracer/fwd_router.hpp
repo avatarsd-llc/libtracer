@@ -79,7 +79,7 @@ class fwd_router_t {
                           std::pmr::memory_resource* mr = std::pmr::get_default_resource())
         : graph_(graph), resolver_(graph), mr_(mr), handles_(mr) {
         graph_.set_remote_delivery_sink(
-            [this](const graph::remote_delivery_t& sub, const view::view_t& value) {
+            [this](const graph::remote_delivery_t& sub, const view::rope_t& value) {
                 deliver_remote(sub, value);
             });
     }
@@ -274,7 +274,7 @@ class fwd_router_t {
      * lean `COMPACT` (RFC-0004 §D/§E.1). Fires on the writer thread (outside the vertex
      * lock); all label state is in the mutex-guarded @ref route_handle_t.
      */
-    void deliver_remote(const graph::remote_delivery_t& sub, const view::view_t& value);
+    void deliver_remote(const graph::remote_delivery_t& sub, const view::rope_t& value);
 
     graph::graph_t& graph_;
     graph::op_resolver_t resolver_;

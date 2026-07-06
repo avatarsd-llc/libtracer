@@ -365,19 +365,50 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     return !effective_nonempty;
 }
 
-result_t<view_t> graph_t::read(vertex_t* v, std::string_view caller) const {
+result_t<rope_t> graph_t::read(vertex_t* v, std::string_view caller) const {
     if (!acl_allows(v, caller, acl_right_t::READ))
         return std::unexpected(status_t::PERMISSION_DENIED);
     if (v->role_ == role_t::HANDLER) {
         if (v->handlers_.on_read) return v->handlers_.on_read();
         return std::unexpected(status_t::NOT_FOUND);
     }
-    const std::shared_ptr<const view_t> sp = v->lkv_.load();  // lock-free
+    const std::shared_ptr<const rope_t> sp = v->lkv_.load();  // lock-free
     if (!sp) return std::unexpected(status_t::NOT_FOUND);
-    return *sp;  // copies the view_t => clones the segment_ptr_t (refcount bump, no byte copy)
+    return *sp;  // copies the rope => clones each link's segment_ptr_t (refcount bump, no byte
+                 // copy)
 }
 
-void graph_t::fan_out(vertex_t* v, const view_t& value, int depth) {
+namespace {
+// The ON_CHANGE change test (ADR-0053 §6): does `r`'s logical byte sequence equal the
+// producer-side snapshot `prev`, compared link-by-link with NO flatten into a temp? A
+// non-host (device) link cannot be CPU-compared, so such a value counts as changed.
+[[nodiscard]] bool rope_bytes_equal(const view::rope_t& r, const std::vector<std::byte>& prev) {
+    if (!r.all_host() || r.total_length() != prev.size()) return false;
+    std::size_t pos = 0;
+    for (const view_t& l : r.links()) {
+        const std::span<const std::byte> b = l.bytes();
+        if (!std::equal(b.begin(), b.end(), prev.begin() + static_cast<std::ptrdiff_t>(pos)))
+            return false;
+        pos += b.size();
+    }
+    return true;
+}
+
+// Snapshot `r`'s logical bytes into `prev` — producer-side ON_CHANGE bookkeeping, not the
+// data path (EVERY mode, the streaming default, never calls this). Skipped for a device
+// value: it cannot be CPU-copied, and leaving `prev` stale makes the next host value deliver.
+void rope_snapshot_bytes(const view::rope_t& r, std::vector<std::byte>& prev) {
+    if (!r.all_host()) return;
+    prev.clear();
+    prev.reserve(r.total_length());
+    for (const view_t& l : r.links()) {
+        const std::span<const std::byte> b = l.bytes();
+        prev.insert(prev.end(), b.begin(), b.end());
+    }
+}
+}  // namespace
+
+void graph_t::fan_out(vertex_t* v, const rope_t& value, int depth) {
     // Evaluate the per-subscriber delivery policy UNDER the lock (ON_CHANGE compares
     // and updates last_delivered, which lives on the real subscriber), snapshotting
     // the survivors, then dispatch them OUTSIDE the lock (callbacks / re-dispatch may
@@ -385,7 +416,7 @@ void graph_t::fan_out(vertex_t* v, const view_t& value, int depth) {
     // small fan-out (the common case) uses a stack buffer — no per-publish heap
     // allocation — and large fan-out reserves the heap vector exactly once.
     struct disp_t {
-        std::function<void(const view_t&)> callback;
+        std::function<void(const rope_t&)> callback;
         std::vector<std::byte> target_key;
         // Remote fan-out (#136): a non-empty `link` ⇒ hand this delivery to remote_sink_.
         // Copied under the lock (like target_key) so the slot may be cleared concurrently
@@ -408,7 +439,6 @@ void graph_t::fan_out(vertex_t* v, const view_t& value, int depth) {
     bool use_heap = false;
     {
         const std::lock_guard lock(v->m_);
-        const std::span<const std::byte> bytes = value.bytes();
         if (v->subs_.size() > kInlineFanout) {
             use_heap = true;
             heap_buf.reserve(v->subs_.size());
@@ -416,11 +446,10 @@ void graph_t::fan_out(vertex_t* v, const view_t& value, int depth) {
         for (subscriber_t& s : v->subs_) {
             if (!s.active) continue;
             if (s.mode == delivery_mode_t::ON_CHANGE) {
-                if (std::equal(s.last_delivered.begin(), s.last_delivered.end(), bytes.begin(),
-                               bytes.end())) {
+                if (rope_bytes_equal(value, s.last_delivered)) {
                     continue;  // suppressed: value unchanged since last delivery
                 }
-                s.last_delivered.assign(bytes.begin(), bytes.end());
+                rope_snapshot_bytes(value, s.last_delivered);
             }
             disp_t d{s.callback,     s.target_key,       s.link,
                      s.return_route, s.delivery_compact, s.caller};
@@ -431,7 +460,8 @@ void graph_t::fan_out(vertex_t* v, const view_t& value, int depth) {
         }
     }
     const auto dispatch = [&](const disp_t& d) {
-        if (d.callback) d.callback(value);  // cloned view
+        if (d.callback)
+            d.callback(value);  // the rope value by const ref (callback may clone links)
         if (!d.target_key.empty() && depth + 1 < kMaxDispatchDepth) {
             if (vertex_t* target = find(d.target_key)) {
                 // Fan-in gate (#81, ADR-0026): the re-dispatch is an ordinary write to
@@ -456,7 +486,7 @@ void graph_t::fan_out(vertex_t* v, const view_t& value, int depth) {
         for (std::size_t i = 0; i < inline_n; ++i) dispatch(inline_buf[i]);
 }
 
-result_t<void> graph_t::store_value(vertex_t* v, view_t value) {
+result_t<void> graph_t::store_value(vertex_t* v, rope_t value) {
     if (v->role_ == role_t::HANDLER) {
         if (!v->handlers_.on_write) return std::unexpected(status_t::NOT_FOUND);
         result_t<void> r = v->handlers_.on_write(value);
@@ -467,7 +497,9 @@ result_t<void> graph_t::store_value(vertex_t* v, view_t value) {
         return {};
     }
 
-    auto sp = std::make_shared<const view_t>(std::move(value));
+    // One allocation (make_shared): the rope's inline small-buffer holds the single-link
+    // trivial case, so a scalar write costs exactly what the view_t slot cost (ADR-0053 §6).
+    auto sp = std::make_shared<const rope_t>(std::move(value));
     v->lkv_.store(sp);  // lock-free publish of the new last-known-value
 
     const std::lock_guard lock(v->m_);
@@ -482,7 +514,7 @@ result_t<void> graph_t::store_value(vertex_t* v, view_t value) {
     return {};
 }
 
-void graph_t::bubble_up(vertex_t* v, const view_t& value, int depth) {
+void graph_t::bubble_up(vertex_t* v, const rope_t& value, int depth) {
     // Entered only when v->listeners_above_ says an ancestor subscriber exists —
     // the idle write path never walks (RFC-0005 §near-free-when-idle; the counter
     // below is what tests/benches assert on via ancestor_walks()).
@@ -495,21 +527,22 @@ void graph_t::bubble_up(vertex_t* v, const view_t& value, int depth) {
     }
 }
 
-result_t<void> graph_t::write_impl(vertex_t* v, view_t value, int depth, std::string_view caller) {
+result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, int depth, std::string_view caller) {
     if (!acl_allows(v, caller, acl_right_t::WRITE))
         return std::unexpected(status_t::PERMISSION_DENIED);
     // Branch-write peek (RFC-0005 §decomposition): a POINT payload (type 0x07,
     // opt.PL=1) is a branch write and decomposes; anything else — VALUE, user-range
-    // records, other structured TLVs — stores as-is. Two byte loads on the hot
-    // path; a device-memory view is never dereferenced (and never decomposes).
-    if (v->role_ != role_t::HANDLER && value.is_host()) {
-        const std::span<const std::byte> head = value.bytes();
+    // records, other structured TLVs — stores as-is. The header sits at the start of
+    // the first link (a decomposable POINT is contiguous); a device-memory link is
+    // never dereferenced (and never decomposes).
+    if (v->role_ != role_t::HANDLER && value.link_count() >= 1 && value.links()[0].is_host()) {
+        const std::span<const std::byte> head = value.links()[0].bytes();
         if (head.size() >= 4 &&
             std::to_integer<std::uint8_t>(head[0]) == std::to_underlying(type_t::POINT) &&
             (std::to_integer<std::uint8_t>(head[1]) & 0x40) != 0)
             return write_branch(v, value, depth, caller);
     }
-    const view_t notify = value;  // refcount clone — store_value consumes `value`
+    const rope_t notify = value;  // refcount clone — store_value consumes `value`
     result_t<void> stored = store_value(v, std::move(value));
     if (!stored) return stored;
     fan_out(v, notify, depth);
@@ -520,15 +553,17 @@ result_t<void> graph_t::write_impl(vertex_t* v, view_t value, int depth, std::st
     return {};
 }
 
-result_t<void> graph_t::write_branch(vertex_t* v, const view_t& value, int depth,
+result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, int depth,
                                      std::string_view caller) {
-    // Decode the written frame into a resolve-scoped arena (ADR-0041): every node
-    // span points into `value`'s bytes, so each landed slice is value.subview(...)
-    // — a refcount bump on the written frame's segment, never a byte copy.
+    // A decomposable POINT is contiguous, so decode reads the materialized head:
+    // single-link (the ④a case — ingress values are single-link until ④b), that is
+    // the sole link with zero copy; a multi-link POINT pays one flatten here (the
+    // interim until the ④b rope-cursor decode). Every node span points into `head`,
+    // so each landed slice is head.subview(...) — a refcount bump, never a byte copy.
+    const view_t head = value.materialize();
     std::array<std::byte, 4096> stack;
     std::pmr::monotonic_buffer_resource mr(stack.data(), stack.size());
-    const std::expected<wire::tlv_arena_t, wire::err_t> arena =
-        wire::decode_into(value.bytes(), mr);
+    const std::expected<wire::tlv_arena_t, wire::err_t> arena = wire::decode_into(head.bytes(), mr);
     if (!arena) return std::unexpected(status_t::TYPE_MISMATCH);
     const wire::tlv_arena_t& a = *arena;
 
@@ -542,7 +577,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view_t& value, int depth
 
     std::vector<branch_node_t> plan;  // post-order; plan.back() is the root
     const result_t<bool> parsed =
-        parse_branch_node(a, 0, value, std::vector<std::byte>(v->key_.bytes), plan);
+        parse_branch_node(a, 0, head, std::vector<std::byte>(v->key_.bytes), plan);
     if (!parsed) return std::unexpected(parsed.error());
     if (!*parsed) return {};  // a value-free branch is a no-op write
 
@@ -583,7 +618,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view_t& value, int depth
     for (const branch_node_t& node : plan) {
         const bool is_root = &node == &plan.back();
         if (!node.subtree_has_value) continue;
-        const view_t& slice = is_root ? value : node.notify;
+        const view_t& slice = is_root ? head : node.notify;
         if (slice.empty()) continue;
         vertex_t* vx = is_root ? v : find(node.key);
         if (vx != nullptr) fan_out(vx, slice, depth);
@@ -592,17 +627,19 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view_t& value, int depth
     return {};
 }
 
-result_t<void> graph_t::write(vertex_t* v, view_t value, std::string_view caller) {
+result_t<void> graph_t::write(vertex_t* v, rope_t value, std::string_view caller) {
     return write_impl(v, std::move(value), 0, caller);
 }
 
-result_t<void> graph_t::write(vertex_t* v, const field_path_t& field, view_t value,
+result_t<void> graph_t::write(vertex_t* v, const field_path_t& field, rope_t value,
                               std::string_view caller) {
     if (field.empty()) return write_impl(v, std::move(value), 0, caller);
-    return field_write(v, field, value, caller);
+    // A field write targets a contiguous control TLV (settings / acl / subscribers);
+    // materialize it (single-link: zero copy) before the field surface parses it.
+    return field_write(v, field, value.materialize(), caller);
 }
 
-result_t<view_t> graph_t::await(vertex_t* v, std::chrono::nanoseconds timeout,
+result_t<rope_t> graph_t::await(vertex_t* v, std::chrono::nanoseconds timeout,
                                 std::string_view caller) {
     // await is the readiness form of a data READ — same gate, checked up front so a
     // denied caller cannot camp on the condvar.
@@ -614,17 +651,17 @@ result_t<view_t> graph_t::await(vertex_t* v, std::chrono::nanoseconds timeout,
         return std::unexpected(status_t::TIMEOUT);
     }
     lock.unlock();
-    const std::shared_ptr<const view_t> sp = v->lkv_.load();
+    const std::shared_ptr<const rope_t> sp = v->lkv_.load();
     if (!sp) return std::unexpected(status_t::NOT_FOUND);  // e.g. a Handler-role write
     return *sp;
 }
 
-result_t<std::vector<view_t>> graph_t::history(vertex_t* v) const {
+result_t<std::vector<rope_t>> graph_t::history(vertex_t* v) const {
     if (v->role_ != role_t::STREAM) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     if (!acl_allows(v, {}, acl_right_t::READ))  // local-only helper => local (empty) context
         return std::unexpected(status_t::PERMISSION_DENIED);
     const std::lock_guard lock(v->m_);
-    std::vector<view_t> out;
+    std::vector<rope_t> out;
     out.reserve(v->history_.size());
     for (const auto& sp : v->history_) out.push_back(*sp);  // clone each (refcount bump)
     return out;
@@ -649,7 +686,7 @@ result_t<void> graph_t::subscribe(const path_t& src, const path_t& target, deliv
     return {};
 }
 
-result_t<void> graph_t::subscribe(const path_t& src, std::function<void(const view_t&)> callback,
+result_t<void> graph_t::subscribe(const path_t& src, std::function<void(const rope_t&)> callback,
                                   delivery_mode_t mode) {
     vertex_t* v = find(src.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
@@ -667,7 +704,7 @@ result_t<void> graph_t::subscribe(const path_t& src, std::function<void(const vi
 }
 
 void graph_t::set_remote_delivery_sink(
-    std::function<void(const remote_delivery_t&, const view_t&)> sink) {
+    std::function<void(const remote_delivery_t&, const rope_t&)> sink) {
     remote_sink_ = std::move(sink);
 }
 
@@ -690,7 +727,7 @@ result_t<void> graph_t::add_remote_subscriber(vertex_t* v, view_t source_view, v
     // (durability == 1) and already holds an LKV (RFC-0004 §D / Q4). Snapshot the slot's
     // remote fields + the LKV under the lock, then deliver OUTSIDE it (the sink does
     // transport I/O), mirroring fan_out's lock discipline.
-    std::shared_ptr<const view_t> latch;
+    std::shared_ptr<const rope_t> latch;
     std::string latch_link;  // owning copy — the snapshot below outlives the lock;
     view_t latch_route;      // the route snapshot is a refcount clone (no byte copy).
     bool latch_compact = false;
@@ -698,7 +735,7 @@ result_t<void> graph_t::add_remote_subscriber(vertex_t* v, view_t source_view, v
         const std::lock_guard lock(v->m_);
         v->subs_.push_back(std::move(s));
         if (v->settings_.durability == 1) {
-            if (std::shared_ptr<const view_t> lkv = v->lkv_.load()) {
+            if (std::shared_ptr<const rope_t> lkv = v->lkv_.load()) {
                 const subscriber_t& stored = v->subs_.back();
                 latch = std::move(lkv);
                 latch_link = stored.link;
@@ -956,36 +993,42 @@ result_t<view_t> graph_t::read_children(vertex_t* v) const {
     return *res;
 }
 
-result_t<view_t> graph_t::read(vertex_t* v, const field_path_t& field,
+result_t<rope_t> graph_t::read(vertex_t* v, const field_path_t& field,
                                std::string_view caller) const {
-    if (field.empty()) return read(v, caller);
-    // Field reads are gated like data reads (#81): READ for the control surface,
-    // READ_ACL — its own right, distinct from acting on the vertex — for ":acl".
-    if (field.steps.size() == 1 && field.steps[0].name == "acl") {
-        if (!acl_allows(v, caller, acl_right_t::READ_ACL))
+    if (field.empty()) return read(v, caller);  // value read → the stored rope
+    // A field read serves a contiguous control TLV; it crosses back as a single-link
+    // rope (ADR-0053 §6 — the data API returns ropes). Compute the control view, then
+    // wrap once. Field reads are gated like data reads (#81): READ for the control
+    // surface, READ_ACL — its own right, distinct from acting on the vertex — for ":acl".
+    const result_t<view_t> fv = [&]() -> result_t<view_t> {
+        if (field.steps.size() == 1 && field.steps[0].name == "acl") {
+            if (!acl_allows(v, caller, acl_right_t::READ_ACL))
+                return std::unexpected(status_t::PERMISSION_DENIED);
+            return read_acl(v);
+        }
+        if (!acl_allows(v, caller, acl_right_t::READ))
             return std::unexpected(status_t::PERMISSION_DENIED);
-        return read_acl(v);
-    }
-    if (!acl_allows(v, caller, acl_right_t::READ))
-        return std::unexpected(status_t::PERMISSION_DENIED);
-    if (field.steps.size() == 1 && field.steps[0].name == "schema") return read_schema(v);
-    // ":children[]" (or bare ":children") — member enumeration, the read dual of
-    // the SPEC-creating append. A single "[N]" slot has no meaning here (members
-    // are named, not indexed) and falls through to SCHEMA_NOT_FOUND.
-    if (field.steps.size() == 1 && field.steps[0].name == "children" && !field.steps[0].wildcard &&
-        (field.steps[0].append || !field.steps[0].indexed)) {
-        return read_children(v);
-    }
-    // A single subscriber slot ":subscribers[N]" — serve the stored SUBSCRIBER view (clone).
-    if (field.steps.size() == 1 && field.steps[0].name == "subscribers" && field.steps[0].indexed &&
-        !field.steps[0].append && !field.steps[0].wildcard) {
-        const std::lock_guard lock(v->m_);
-        const std::size_t idx = field.steps[0].index;
-        if (idx < v->subs_.size() && v->subs_[idx].active && v->subs_[idx].source_view.owner)
-            return v->subs_[idx].source_view;  // clone (refcount bump, no byte copy)
-        return std::unexpected(status_t::NOT_FOUND);
-    }
-    return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        if (field.steps.size() == 1 && field.steps[0].name == "schema") return read_schema(v);
+        // ":children[]" (or bare ":children") — member enumeration, the read dual of
+        // the SPEC-creating append. A single "[N]" slot has no meaning here (members
+        // are named, not indexed) and falls through to SCHEMA_NOT_FOUND.
+        if (field.steps.size() == 1 && field.steps[0].name == "children" &&
+            !field.steps[0].wildcard && (field.steps[0].append || !field.steps[0].indexed)) {
+            return read_children(v);
+        }
+        // A single slot ":subscribers[N]" — serve the stored SUBSCRIBER view (clone).
+        if (field.steps.size() == 1 && field.steps[0].name == "subscribers" &&
+            field.steps[0].indexed && !field.steps[0].append && !field.steps[0].wildcard) {
+            const std::lock_guard lock(v->m_);
+            const std::size_t idx = field.steps[0].index;
+            if (idx < v->subs_.size() && v->subs_[idx].active && v->subs_[idx].source_view.owner)
+                return v->subs_[idx].source_view;  // clone (refcount bump, no byte copy)
+            return std::unexpected(status_t::NOT_FOUND);
+        }
+        return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    }();
+    if (!fv) return std::unexpected(fv.error());
+    return rope_t{*fv};
 }
 
 result_t<std::vector<view_t>> graph_t::read_subscribers(vertex_t* v,
@@ -1000,13 +1043,13 @@ result_t<std::vector<view_t>> graph_t::read_subscribers(vertex_t* v,
     return out;
 }
 
-result_t<view_t> graph_t::read(const path_t& path) const {
+result_t<rope_t> graph_t::read(const path_t& path) const {
     vertex_t* v = find(path.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
     return read(v, path.field());  // handle-based; one locus for the field surface + ACL gates
 }
 
-result_t<void> graph_t::write(const path_t& path, view_t value) {
+result_t<void> graph_t::write(const path_t& path, rope_t value) {
     vertex_t* v = find(path.key());
     if (!v) {
         // Write-creates (RFC-0005): a DATA write to a nonexistent path creates it,
@@ -1021,7 +1064,7 @@ result_t<void> graph_t::write(const path_t& path, view_t value) {
     return write(v, path.field(), std::move(value));  // handle-based; see the vertex_t* overload
 }
 
-result_t<view_t> graph_t::await(const path_t& path, std::chrono::nanoseconds timeout) {
+result_t<rope_t> graph_t::await(const path_t& path, std::chrono::nanoseconds timeout) {
     vertex_t* v = find(path.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
     return await(v, timeout);

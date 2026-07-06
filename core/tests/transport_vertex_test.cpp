@@ -219,8 +219,9 @@ void test_local_path_untouched() {
 
     (void)node.register_vertex(*path_t::parse("/sensor"), role_t::STORED_VALUE);
     std::atomic<int> hits{0};
-    (void)node.subscribe(*path_t::parse("/sensor"),
-                         [&hits](const view_t&) { hits.fetch_add(1, std::memory_order_relaxed); });
+    (void)node.subscribe(*path_t::parse("/sensor"), [&hits](const tr::view::rope_t&) {
+        hits.fetch_add(1, std::memory_order_relaxed);
+    });
 
     const std::byte b{0x7B};
     (void)node.write(*path_t::parse("/sensor"), owned(std::span<const std::byte>(&b, 1)));
@@ -294,7 +295,7 @@ void test_config_constructed_udp() {
     const auto lv = node_a.read(*path_t::parse("/net/b"));
     bool up = false;
     if (lv) {
-        const auto t = tr::wire::view_as_tlv(*lv);
+        const auto t = tr::wire::view_as_tlv(lv->only());
         up = t.has_value() && t->type == type_t::VALUE && t->payload.size() == 1 &&
              t->payload[0] == std::byte{0x01};
     }
