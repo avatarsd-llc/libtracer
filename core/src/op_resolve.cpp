@@ -263,10 +263,10 @@ struct emit_cursor_t {
         *p++ = std::byte{0};
         *p++ = std::byte{v};
     }
-    void tlv_sliced(const arena_tlv_t& node) {  // trailer-sliced whole-TLV copy (§4)
-        std::memcpy(p, node.wire.data(), node.wire.size());
+    void tlv_sliced(std::span<const std::byte> wire) {  // trailer-sliced whole-TLV copy (§4)
+        std::memcpy(p, wire.data(), wire.size());
         p[1] = struct_opt(p[1]);
-        p += node.wire.size();
+        p += wire.size();
     }
     void raw(std::span<const std::byte> bytes) {
         if (!bytes.empty()) std::memcpy(p, bytes.data(), bytes.size());
@@ -281,12 +281,16 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
 // `shared` (refcount clones of the stored payload view(s)). The head is the only
 // allocation; the route bytes are copied ONCE (trailer-sliced); `shared` is never
 // copied — RFC-0004 §D / ADR-0035 zero-copy reply rule, ADR-0041 §5 direct emit.
-[[nodiscard]] rope_t assemble(const tlv_arena_t& a, const parsed_fwd_t& req, reply_kind_t kind,
+// @p reply_dst_wire (the request's `src`) and @p reply_src_wire (the request's `dst`,
+// the responder endpoint) are the trailer-excluded whole-TLV `wire` spans of those two
+// PATH nodes — passed in rather than read off the arena so the reply builder is
+// decoupled from the request's node model (ADR-0053 §7: a node-reader-agnostic seam,
+// and where ⑤'s scatter-gather reply emission will hook).
+[[nodiscard]] rope_t assemble(std::span<const std::byte> reply_dst_wire,
+                              std::span<const std::byte> reply_src_wire, reply_kind_t kind,
                               std::span<const std::byte> inline_tail,
                               const std::vector<view_t>& shared, std::size_t shared_len) {
-    const arena_tlv_t& reply_dst = a[req.src];  // reply dst = the request's src
-    const arena_tlv_t& reply_src = a[req.dst];  // reply src = the responder endpoint
-    const std::size_t children_len = kU8ValueLen + reply_dst.wire.size() + reply_src.wire.size() +
+    const std::size_t children_len = kU8ValueLen + reply_dst_wire.size() + reply_src_wire.size() +
                                      kU8ValueLen + inline_tail.size();
     const std::size_t body_len = children_len + shared_len;
     const bool ll = body_len > 0xFFFFu;
@@ -299,8 +303,8 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
         emit_cursor_t out{seg->bytes.data()};
         out.struct_header(type_t::FWD, ll, body_len);
         out.u8_value(std::to_underlying(fwd_op_t::REPLY));
-        out.tlv_sliced(reply_dst);
-        out.tlv_sliced(reply_src);
+        out.tlv_sliced(reply_dst_wire);
+        out.tlv_sliced(reply_src_wire);
         out.u8_value(std::to_underlying(kind));
         out.raw(inline_tail);
         rope.append(view_t::over(std::move(seg)));
@@ -312,8 +316,8 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
 // A kind=ERROR reply carrying STATUS{ ERROR{ VALUE u16 LE code } } (RFC-0004 §D
 // with the RFC-0002 §C registered-code identity) — a fixed 14-byte tail, built
 // on the stack.
-[[nodiscard]] rope_t assemble_error(const tlv_arena_t& a, const parsed_fwd_t& req,
-                                    status_t status) {
+[[nodiscard]] rope_t assemble_error(std::span<const std::byte> reply_dst_wire,
+                                    std::span<const std::byte> reply_src_wire, status_t status) {
     const std::uint16_t code = std::to_underlying(error_code(status));
     const std::array<std::byte, 14> tail{
         static_cast<std::byte>(std::to_underlying(type_t::STATUS)),
@@ -331,18 +335,20 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
         static_cast<std::byte>(code & 0xFFu),
         static_cast<std::byte>(code >> 8),
     };
-    return assemble(a, req, reply_kind_t::ERROR, tail, {}, 0);
+    return assemble(reply_dst_wire, reply_src_wire, reply_kind_t::ERROR, tail, {}, 0);
 }
 
 // A kind=RESULT reply whose payload children are a stored rope value's links (ADR-0053
 // §6): a single-link value contributes one payload child (the trivial case, identical to
 // a view read); a multi-link stored value ropes ALL its links into the reply zero-copy —
 // no flatten.
-[[nodiscard]] rope_t assemble_result_rope(const tlv_arena_t& a, const parsed_fwd_t& req,
+[[nodiscard]] rope_t assemble_result_rope(std::span<const std::byte> reply_dst_wire,
+                                          std::span<const std::byte> reply_src_wire,
                                           const rope_t& payload) {
     const std::span<const view_t> links = payload.links();
     const std::vector<view_t> shared(links.begin(), links.end());
-    return assemble(a, req, reply_kind_t::RESULT, {}, shared, payload.total_length());
+    return assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT, {}, shared,
+                    payload.total_length());
 }
 
 // The vertex-map key for an arena-decoded PATH: span-aliased when canonical
@@ -368,6 +374,14 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
     const parsed_fwd_t& req = *parsed;
     if (req.op == fwd_op_t::REPLY) return std::unexpected(status_t::INVALID_PATH);
 
+    // The reply's route is the request's routes swapped: reply dst = request src (the
+    // accumulated return route), reply src = request dst (this node's responder
+    // endpoint). Their trailer-excluded whole-TLV `wire` spans feed every assemble
+    // below — read once here so the reply builder never reaches back into the arena
+    // (ADR-0053 §7 node-reader seam). parse_fwd guarantees both PATH nodes exist.
+    const std::span<const std::byte> reply_dst_wire = fwd[req.src].wire;
+    const std::span<const std::byte> reply_src_wire = fwd[req.dst].wire;
+
     // Decode the optional :field selector and the wildcard deferral: a [*] level
     // on a non-subscriber-path target is rejected with INVALID_PATH.
     field_path_t field;
@@ -375,10 +389,10 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
     if (has_field) {
         bool wildcard = false;
         result_t<field_path_t> f = selector_to_field(fwd, req.selector, wildcard);
-        if (!f) return assemble_error(fwd, req, status_t::INVALID_PATH);
+        if (!f) return assemble_error(reply_dst_wire, reply_src_wire, status_t::INVALID_PATH);
         field = std::move(*f);
         if (wildcard && (field.steps.empty() || field.steps[0].name != "subscribers"))
-            return assemble_error(fwd, req, status_t::INVALID_PATH);
+            return assemble_error(reply_dst_wire, reply_src_wire, status_t::INVALID_PATH);
     }
 
     // dst resolution is the router's PATH-keyed dispatch — span-aliased for a
@@ -394,10 +408,10 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
         // read/await keep NOT_FOUND — there is no vertex to control or serve.
         if (req.op == fwd_op_t::WRITE && !has_field) {
             const result_t<vertex_t*> made = graph_.ensure_vertex(dst_key, inbound_link);
-            if (!made) return assemble_error(fwd, req, made.error());
+            if (!made) return assemble_error(reply_dst_wire, reply_src_wire, made.error());
             v = *made;
         } else {
-            return assemble_error(fwd, req, status_t::NOT_FOUND);
+            return assemble_error(reply_dst_wire, reply_src_wire, status_t::NOT_FOUND);
         }
     }
 
@@ -405,7 +419,7 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
         case fwd_op_t::READ: {
             if (has_field && is_subscribers_array(field)) {
                 result_t<std::vector<view_t>> subs = graph_.read_subscribers(v, inbound_link);
-                if (!subs) return assemble_error(fwd, req, subs.error());
+                if (!subs) return assemble_error(reply_dst_wire, reply_src_wire, subs.error());
                 std::size_t sub_len = 0;
                 for (const view_t& s : *subs) sub_len += s.length;
                 // PL=1 wrapper (POINT) whose children are the slot SUBSCRIBER views,
@@ -415,17 +429,18 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
                 const bool wll = sub_len > 0xFFFFu;
                 emit_cursor_t wout{wrapper.data()};
                 wout.struct_header(type_t::POINT, wll, sub_len);
-                return assemble(fwd, req, reply_kind_t::RESULT,
+                return assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT,
                                 std::span<const std::byte>(wrapper.data(), wll ? 6u : 4u), *subs,
                                 sub_len);
             }
             result_t<rope_t> r =
                 has_field ? graph_.read(v, field, inbound_link) : graph_.read(v, inbound_link);
-            if (!r) return assemble_error(fwd, req, r.error());
-            return assemble_result_rope(fwd, req, *r);
+            if (!r) return assemble_error(reply_dst_wire, reply_src_wire, r.error());
+            return assemble_result_rope(reply_dst_wire, reply_src_wire, *r);
         }
         case fwd_op_t::WRITE: {
-            if (req.payload == 0) return assemble_error(fwd, req, status_t::TYPE_MISMATCH);
+            if (req.payload == 0)
+                return assemble_error(reply_dst_wire, reply_src_wire, status_t::TYPE_MISMATCH);
             const arena_tlv_t& payload_node = fwd[req.payload];
 
             // A remote subscribe — a `:subscribers[]` APPEND that arrived over a
@@ -448,7 +463,8 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
             const view_t value = remote_sub ? own_tlv(payload_node)
                                             : own_or_ref_tlv(payload_node, frame_view,
                                                              v->settings().store_ref_min_bytes);
-            if (value.empty()) return assemble_error(fwd, req, status_t::BACKPRESSURE);
+            if (value.empty())
+                return assemble_error(reply_dst_wire, reply_src_wire, status_t::BACKPRESSURE);
 
             // The remote-subscribe binding: the slot retains this request's accumulated
             // return route (`src`, copied once, trailer-sliced) + the inbound link, so the
@@ -458,26 +474,31 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, std::string_view
                 // The ONE route copy of the subscription's life (ADR-0041 §2), into a
                 // refcounted segment — every later delivery clones the refcount.
                 const view_t return_route = own_tlv(fwd[req.src]);
-                if (return_route.empty()) return assemble_error(fwd, req, status_t::BACKPRESSURE);
+                if (return_route.empty())
+                    return assemble_error(reply_dst_wire, reply_src_wire, status_t::BACKPRESSURE);
                 result_t<void> w =
                     graph_.add_remote_subscriber(v, value, return_route, std::string(inbound_link),
                                                  subscriber_compact(fwd, req.payload));
-                if (!w) return assemble_error(fwd, req, w.error());
-                return assemble(fwd, req, reply_kind_t::RESULT, {}, {}, 0);  // OK, empty payload
+                if (!w) return assemble_error(reply_dst_wire, reply_src_wire, w.error());
+                return assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT, {}, {},
+                                0);  // OK, empty payload
             }
 
             result_t<void> w =
                 graph_.write(v, has_field ? field : field_path_t{}, value, inbound_link);
-            if (!w) return assemble_error(fwd, req, w.error());
-            return assemble(fwd, req, reply_kind_t::RESULT, {}, {}, 0);  // OK, empty payload
+            if (!w) return assemble_error(reply_dst_wire, reply_src_wire, w.error());
+            return assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT, {}, {},
+                            0);  // OK, empty payload
         }
         case fwd_op_t::AWAIT: {
             const std::chrono::nanoseconds timeout =
                 req.has_await_timeout ? std::chrono::nanoseconds(req.await_timeout)
                                       : kDefaultAwaitTimeout;
             result_t<rope_t> r = graph_.await(v, timeout, inbound_link);
-            if (!r) return assemble_error(fwd, req, r.error());  // TIMEOUT => tr::flow::timeout
-            return assemble_result_rope(fwd, req, *r);
+            if (!r)
+                return assemble_error(reply_dst_wire, reply_src_wire,
+                                      r.error());  // TIMEOUT => tr::flow::timeout
+            return assemble_result_rope(reply_dst_wire, reply_src_wire, *r);
         }
         case fwd_op_t::REPLY:
             break;  // unreachable — handled above
