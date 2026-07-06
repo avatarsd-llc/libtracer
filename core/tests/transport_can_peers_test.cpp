@@ -307,15 +307,13 @@ void test_enumeration_and_forwarding() {
     tr::net::transport_can tcan_t(std::make_unique<fake_link_t>(bus),
                                   {0, 1, tr::view::can_frame_mode_t::CLASSIC, "transit"});
     net_t.provide_link("can0", tcan_t);
-    const auto made =
-        graph_t_.write(*path_t::parse("/net:children[]"), conn_spec("client", "can0"));
+    const auto made = graph_t_.write(path_t("/net:children[]"), conn_spec("client", "can0"));
     check(made.has_value(), "the CAN connection vertex /net/can0 is SPEC-created");
 
     // ----- peer P (CAN node 5): terminus with /a/b holding a known VALUE. ----
     graph_t graph_p;
     const std::uint32_t kStored = 0xCAFEF00Du;
-    tr::graph::vertex_t* vp =
-        *graph_p.register_vertex(*path_t::parse("/a/b"), role_t::STORED_VALUE);
+    tr::graph::vertex_t* vp = *graph_p.register_vertex(path_t("/a/b"), role_t::STORED_VALUE);
     (void)graph_p.write(vp, owned(b_value_u32(kStored)));
     fwd_router_t router_p(graph_p);
     tr::net::transport_can tcan_p(std::make_unique<fake_link_t>(bus),

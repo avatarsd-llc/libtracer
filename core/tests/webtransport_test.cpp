@@ -370,11 +370,11 @@ void test_fwd_read_round_trip() {
     webtransport_transport_t ta("127.0.0.1", tb.local_port(), "/", dev_tls());
     check(ta.ok(), "the WebTransport session to B is up");
 
-    (void)node_b.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+    (void)node_b.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     std::vector<std::byte> tv;
     const std::byte tbyte{0x2A};
     tr::wire::emit_tlv(tv, type_t::VALUE, opt_t{}, std::span<const std::byte>(&tbyte, 1));
-    (void)node_b.write(*path_t::parse("/sensor/temp"), owned(tv));
+    (void)node_b.write(path_t("/sensor/temp"), owned(tv));
 
     router_a.add_child("b", ta);
     router_b.add_child("a", tb);
@@ -461,21 +461,21 @@ void test_config_constructed_webtransport() {
     // B: a webtransport LISTENER on a fixed localhost port, its dev cert/key
     // handed in as the kind-PRIVATE `cert`/`key` config keys.
     const auto wb = node_b.write(
-        *path_t::parse("/net:children[]"),
+        path_t("/net:children[]"),
         conn_spec("listener", "a", tr::net::conn_role_t::LISTEN, 47133, {}, g_cert, g_key));
     check(wb.has_value(),
           "B: SPEC{listener, kind=webtransport, port, cert, key} constructs the listener");
     check(router_b.registry().by_name("a") != nullptr, "B: the endpoint is wired into the router");
 
     // A missing cert/key on a webtransport LISTEN is a TYPE_MISMATCH.
-    const auto bad = node_b.write(*path_t::parse("/net:children[]"),
+    const auto bad = node_b.write(path_t("/net:children[]"),
                                   conn_spec("listener", "bad", tr::net::conn_role_t::LISTEN, 0));
     check(!bad.has_value(), "B: a webtransport listener without cert/key fails creation");
 
     // A: a webtransport CLIENT dialing B — a synchronous session from config
     // (the DEV-ONLY no-verify trust mode, documented on the factory).
     const auto wa =
-        node_a.write(*path_t::parse("/net:children[]"),
+        node_a.write(path_t("/net:children[]"),
                      conn_spec("client", "b", tr::net::conn_role_t::DIAL, 47133, "127.0.0.1"));
     check(wa.has_value(),
           "A: SPEC{client, kind=webtransport, addr, port} constructs the dialing endpoint");

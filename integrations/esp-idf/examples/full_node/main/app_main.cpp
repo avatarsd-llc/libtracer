@@ -234,8 +234,7 @@ struct device_node_t {
         // subscriber LATCHES the current value — one immediate delivery.
         tr::graph::settings_t s;
         s.durability = 1;
-        auto reg =
-            graph.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE, {}, s);
+        auto reg = graph.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE, {}, s);
         if (!reg) return false;
         sensor = *reg;
         if (!write_sensor(21)) return false;
@@ -244,7 +243,7 @@ struct device_node_t {
         // NAME "host" is the segment this node prepends to inbound src (the way
         // back) and the segment a dst routes onward through this link.
         const auto w =
-            graph.write(*path_t::parse("/net:children[]"),
+            graph.write(path_t("/net:children[]"),
                         conn_spec("listener", "host", conn_role_t::LISTEN, kNodePort, "udp"));
         return w.has_value();
     }
@@ -268,7 +267,7 @@ int run_host_probe(device_node_t& dev) {
     // Fan-out deliveries land here: the device's return route for our subscribe
     // is `src` as the device saw it ({host, self, probe}); the device forwards
     // through its "host" link, we receive {self, probe} and resolve it locally.
-    const auto probe_path = *path_t::parse("/self/probe");
+    const auto probe_path = path_t("/self/probe");
     if (!graph.register_vertex(probe_path, role_t::STORED_VALUE)) return 1;
 
     // The reply sink is installed BEFORE the socket exists (frames may flow the
@@ -289,7 +288,7 @@ int run_host_probe(device_node_t& dev) {
 
     // Dial the device: a config-created udp client connection at /net/dev.
     const auto wa =
-        graph.write(*path_t::parse("/net:children[]"),
+        graph.write(path_t("/net:children[]"),
                     conn_spec("client", "dev", conn_role_t::DIAL, kNodePort, "udp", "127.0.0.1"));
     check(wa.has_value(), "SPEC{client, kind=udp, 127.0.0.1} constructs the dialing socket");
 

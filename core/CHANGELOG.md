@@ -13,6 +13,18 @@ reference implementation is pre-1.0; everything currently lives under
 
 ## [Unreleased]
 
+### Added
+
+- **`path_t(std::string_view)` — a parse-once constructor for literal paths (ADR-0054).**
+  `path_t p("/sensor/temp");` parses the string ONCE; hold `p` and reuse it across
+  operations (the graph API takes `const path_t&`, so a held path never re-parses on the
+  hot path). `explicit`, and **infallible by hard-abort** — a malformed *literal* is a
+  source bug, so it `std::abort()`s rather than returning a `result_t` the caller would
+  `*`-deref unchecked (no exceptions; usable under `-fno-exceptions`). Use the fallible
+  `path_t::parse` for a genuine RUNTIME string. This retires the repo-wide
+  `*path_t::parse("…")` unchecked-deref idiom at 168 literal call sites (the two
+  runtime-string sites keep `parse` + a check). `path_t() = default` is restored.
+
 ### Changed
 
 - **`fwd_router_t::on_reply` is now rope-native (ADR-0055 — breaking).** The reply sink

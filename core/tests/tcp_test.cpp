@@ -399,13 +399,13 @@ void test_two_nodes_over_tcp() {
     tcp_transport_t ta("127.0.0.1", tb.local_port());
 
     // B holds the target vertex and a subscriber; A knows the link to B as "b".
-    (void)node_b.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+    (void)node_b.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     router_a.add_child("b", ta);  // A routes a `dst` starting with "b" out over TCP to B
     router_b.add_child("a", tb);  // B's name for the inbound link (src accumulation)
 
     std::promise<std::vector<std::byte>> got;
     auto fut = got.get_future();
-    (void)node_b.subscribe(*path_t::parse("/sensor/temp"), [&got](const tr::view::rope_t& v) {
+    (void)node_b.subscribe(path_t("/sensor/temp"), [&got](const tr::view::rope_t& v) {
         const auto b = v.only().bytes();
         got.set_value(std::vector<std::byte>(b.begin(), b.end()));
     });
@@ -492,19 +492,19 @@ void test_config_constructed_tcp() {
     });
 
     // B: a stored value at /temp and a tcp LISTENER on a fixed localhost port.
-    (void)node_b.register_vertex(*path_t::parse("/temp"), role_t::STORED_VALUE);
+    (void)node_b.register_vertex(path_t("/temp"), role_t::STORED_VALUE);
     std::vector<std::byte> tv;
     const std::byte tb{0x2A};
     tr::wire::emit_tlv(tv, type_t::VALUE, opt_t{}, std::span<const std::byte>(&tb, 1));
-    (void)node_b.write(*path_t::parse("/temp"), owned(tv));
-    const auto wb = node_b.write(*path_t::parse("/net:children[]"),
+    (void)node_b.write(path_t("/temp"), owned(tv));
+    const auto wb = node_b.write(path_t("/net:children[]"),
                                  conn_spec("listener", "a", tr::net::conn_role_t::LISTEN, 47130));
     check(wb.has_value(), "B: SPEC{listener, kind=tcp, port} constructs the bound socket");
     check(router_b.registry().by_name("a") != nullptr, "B: the socket is wired into the router");
 
     // A: a tcp CLIENT dialing B's port — a SYNCHRONOUS connect from config.
     const auto wa =
-        node_a.write(*path_t::parse("/net:children[]"),
+        node_a.write(path_t("/net:children[]"),
                      conn_spec("client", "b", tr::net::conn_role_t::DIAL, 47130, "127.0.0.1"));
     check(wa.has_value(), "A: SPEC{client, kind=tcp, addr, port} constructs the dialing socket");
     const auto* s = net_a.settings_of("b");

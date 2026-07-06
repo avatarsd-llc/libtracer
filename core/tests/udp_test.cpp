@@ -104,13 +104,13 @@ void test_two_nodes_over_udp() {
     tr::net::udp_transport_t tb(47103, "127.0.0.1", 47102);
 
     // B holds the target vertex and a subscriber; A knows the link to B as "b".
-    (void)node_b.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+    (void)node_b.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     router_a.add_child("b", ta);  // A routes a `dst` starting with "b" out over UDP to B
     router_b.add_child("a", tb);  // B's name for the inbound link (src accumulation)
 
     std::promise<std::vector<std::byte>> got;
     auto fut = got.get_future();
-    (void)node_b.subscribe(*path_t::parse("/sensor/temp"), [&got](const tr::view::rope_t& v) {
+    (void)node_b.subscribe(path_t("/sensor/temp"), [&got](const tr::view::rope_t& v) {
         const auto b = v.only().bytes();
         got.set_value(std::vector<std::byte>(b.begin(), b.end()));
     });
@@ -273,13 +273,13 @@ void test_two_nodes_zero_copy_store() {
     tr::graph::settings_t s;
     s.store_ref_min_bytes = 8;
     tr::graph::vertex_t* v =
-        *node_b.register_vertex(*path_t::parse("/sensor/blob"), role_t::STORED_VALUE, {}, s);
+        *node_b.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE, {}, s);
     router_a.add_child("b", ta);
     router_b.add_child("a", tb);  // tb delivers views => the owning receiver is installed
 
     std::promise<void> written;
     auto fut = written.get_future();
-    (void)node_b.subscribe(*path_t::parse("/sensor/blob"),
+    (void)node_b.subscribe(path_t("/sensor/blob"),
                            [&written](const tr::view::rope_t&) { written.set_value(); });
 
     // A 64-byte payload => a 68-byte trailer-less VALUE TLV, well over the threshold.

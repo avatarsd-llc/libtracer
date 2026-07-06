@@ -62,7 +62,7 @@ extern "C" void app_main(void) {
     tr::graph::graph_t graph;
 
     // 1) Register a path.
-    auto reg = graph.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+    auto reg = graph.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     if (!reg) {
         std::printf("FAIL: register_vertex\n");
         std::exit(1);

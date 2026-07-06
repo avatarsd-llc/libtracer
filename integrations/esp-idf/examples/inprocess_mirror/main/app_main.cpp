@@ -76,7 +76,7 @@ extern "C" void app_main(void) {
     ESP_LOGI(kTag, "libtracer P0 in-process mirror starting");
 
     // 1) Register a path.
-    auto reg = g_graph.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+    auto reg = g_graph.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     if (!reg) {
         ESP_LOGE(kTag, "register_vertex failed");
         return;
