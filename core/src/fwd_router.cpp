@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/grammar.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/view.hpp"
@@ -30,9 +31,16 @@ namespace {
 constexpr std::uint8_t u8(std::byte b) noexcept { return std::to_integer<std::uint8_t>(b); }
 
 // One top-level TLV header read in isolation (NO descent) — the byte offsets the
-// zero-copy forward rebuild needs. Mirrors frame.cpp's parse_one length math,
-// including the optional trailer size, but keeps everything as offsets into the
-// caller's buffer so the rebuild can re-slice src/payload as views (no copy).
+// zero-copy forward rebuild needs, kept as ABSOLUTE offsets into the caller's buffer so
+// the rebuild can re-slice src/payload as views (no copy). It is a thin ADAPTER over the
+// ONE wire grammar (`grammar::parse_header`, ADR-0048 §1 / finding #7): the length math
+// is no longer mirrored here — this only turns the grammar's relative `header_t` into the
+// absolute `body_off = pos + header` the forward plane reads by. CRC is DEFERRED (the
+// forward hop never walks a payload; the terminus / next hop verifies), matching the old
+// reader's offset-only behavior. One deliberate difference: the grammar rejects a
+// `type == 0x00` or reserved-opt-bit header up front, so a malformed frame is dropped at
+// this hop instead of forwarded — every caller already rejected such a header by its type
+// check, so well-formed traffic is byte-identical.
 struct hdr_t {
     type_t type{};
     opt_t opt{};
@@ -43,22 +51,16 @@ struct hdr_t {
 };
 
 [[nodiscard]] std::optional<hdr_t> read_header(std::span<const std::byte> buf, std::size_t pos) {
-    if (pos + 2 > buf.size()) return std::nullopt;
-    const opt_t opt = opt_t::decode(u8(buf[pos + 1]));
-    const std::size_t header_len = opt.ll ? 6u : 4u;
-    if (pos + header_len > buf.size()) return std::nullopt;
-    const std::size_t body_len =
-        static_cast<std::size_t>(detail::load_le(buf.subspan(pos + 2, opt.ll ? 4u : 2u)));
-    const std::size_t ts_size = opt.ts ? (opt.tf ? 4u : 8u) : 0u;
-    const std::size_t crc_size = opt.cr ? (opt.cw ? 2u : 4u) : 0u;
-    const std::size_t total = header_len + body_len + ts_size + crc_size;
-    if (pos + total > buf.size()) return std::nullopt;
-    return hdr_t{.type = static_cast<type_t>(u8(buf[pos])),
-                 .opt = opt,
-                 .header_len = header_len,
-                 .body_off = pos + header_len,
-                 .body_len = body_len,
-                 .total = total};
+    if (pos > buf.size()) return std::nullopt;
+    const auto h = wire::grammar::parse_header(wire::grammar::span_cursor{buf.subspan(pos)},
+                                               wire::grammar::crc_check_t::DEFER);
+    if (!h) return std::nullopt;
+    return hdr_t{.type = h->type,
+                 .opt = h->opt,
+                 .header_len = h->header,
+                 .body_off = pos + h->header,
+                 .body_len = h->length,
+                 .total = h->total};
 }
 
 // The forward dispatch decision, read by OFFSET with no allocation (ADR-0038 inv. #1,
