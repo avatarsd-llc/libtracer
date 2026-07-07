@@ -5,15 +5,17 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0003 — Concrete-path delivery for bridged wildcard subscriptions
 
+> **Deferred (2026-07-07):** the design direction is sound, but this RFC governs *bridged* wildcard delivery, which no implementation exercises yet. Per the standing "stay 0.x DRAFT — don't lock a wire commitment before it is exercised" stance, it is **deferred** (tracked in [#303](https://github.com/avatarsd-llc/libtracer/issues/303)) rather than accepted-now or left to silently lapse. Re-open for comment when a real consumer (the strawberry-fw migration, or a second implementation) exercises the path and the three open sub-questions in [§Discussion](#discussion) are resolved.
+
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0003 |
 | **Title** | Concrete-path delivery for bridged wildcard subscriptions |
-| **Status** | draft |
+| **Status** | **deferred** (2026-07-07 — sound direction; awaits a bridged-delivery consumer) |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-06-25 |
-| **Comment window closes** | 2026-07-09 (≥ 14 days) |
-| **Tracking issue** | _to be filed_ |
+| **Comment window** | deferred — re-opens when bridged delivery is exercised (see banner above) |
+| **Tracking issue** | [#303](https://github.com/avatarsd-llc/libtracer/issues/303) |
 | **Target spec version** | v1 (draft refinement — no released v1 yet, so no v2 needed) |
 
 ## Summary
@@ -24,7 +26,7 @@ A wildcard subscriber (e.g. `/sensor/*/temp`) receives TLVs from many concrete p
 
 [03-addressing.md](../../reference/03-addressing.md) §subscriber identity requires only that "a subscriber can determine which concrete path produced each delivered TLV," leaving the mechanism implementation-defined. That is acceptable in-node (subscriber and dispatcher share an address space, so the matched path is a callback argument). It is **not** acceptable across a bridge: the remote subscriber sees only the delivered data TLV, and nothing on the wire tells it whether the producer was `/sensor/A/temp` or `/sensor/B/temp`. Two independent implementations therefore cannot interoperate on bridged wildcard subscriptions — exactly the interop the reference suite exists to guarantee. The `ROUTER` TLV ([05-protocol-tlvs.md](../../reference/05-protocol-tlvs.md) §`0x0D`) already carries bridge metadata as NAME-tagged children and is the natural carrier.
 
-## Proposed change — **Proposed (open for comment)**
+## Proposed change — **Deferred (design of record; not yet open for acceptance)**
 
 ### A. The delivery-path child
 When a node fans out a write to a subscriber whose subscription `PATH` contains a wildcard (`*`, `**`, or `[*]`) **and** the delivery crosses a bridge, the `ROUTER` envelope wrapping the data TLV MUST include the **matched concrete `PATH`** (`0x06`) as a metadata child, tagged `NAME "to"` immediately preceding it, placed among `ROUTER`'s metadata children **before** the terminating `NAME "data"` + wrapped data TLV:

@@ -11,10 +11,10 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0001 |
 | **Title** | Protocol-v1 wire-format consistency consolidation |
-| **Status** | draft |
+| **Status** | **accepted** (2026-07-07; every section applied via ADR-0002…0007, error-model carve-out is RFC-0002) |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-06-24 |
-| **Comment window closes** | 2026-07-08 (≥ 14 days) |
+| **Comment window** | waived by the maintainer (solo-maintainer project, GOVERNANCE.md window dead ceremony) |
 | **Tracking issue** | [#3](https://github.com/avatarsd-llc/libtracer/issues/3) |
 | **Target spec version** | v1 (draft refinement — no released v1 yet, so no v2 needed) |
 
@@ -82,3 +82,5 @@ Each decision's rejected options are recorded in its ADR: per-frame `VR` bit ([0
 ## Discussion
 
 Per [GOVERNANCE.md](../../../.github/GOVERNANCE.md), the tracking issue stays open at least 14 days (until 2026-07-08) for implementer feedback before this document is merged. Record sustained objections and their resolution here.
+
+**Accepted 2026-07-07** — window waived (solo-maintainer, GOVERNANCE.md window dead ceremony); no sustained objections. Every section is applied: supporting ADR-0002…0007 are accepted, `docs/spec/v1.md §3` normatively incorporates `reference/01`+`05`, and the error-model sections (§C.1 withdrawn; §C.2/§C.3) are carried by the accepted [RFC-0002](0002-protocol-error-model.md).
