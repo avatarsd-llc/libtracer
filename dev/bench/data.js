@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783452100421,
+  "lastUpdate": 1783460902671,
   "repoUrl": "https://github.com/avatarsd-llc/libtracer",
   "entries": {
     "libtracer in-process latency (ns, smaller is better)": [
@@ -755,6 +755,60 @@ window.BENCHMARK_DATA = {
           {
             "name": "inproc-borrow 64B/fan1/1ep ns/delivery",
             "value": 208.6,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "15184545+AvatarSD@users.noreply.github.com",
+            "name": "avatarsd",
+            "username": "AvatarSD"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b16a822ed2ea49e319670c5fbbf8bf1135b1fa37",
+          "message": "Merge pull request #328 from avatarsd-llc/feat/vertex-handle\n\nfeat(graph): opaque vertex_handle_t + infallible register_vertex (ADR-0056) [HELD for 0.4.0]",
+          "timestamp": "2026-07-08T00:47:25+03:00",
+          "tree_id": "b13c47939afc6d8025ca8fd461923a09f6910888",
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/b16a822ed2ea49e319670c5fbbf8bf1135b1fa37"
+        },
+        "date": 1783460901988,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "inproc 64B/fan1/1ep p50 latency",
+            "value": 260,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan1/1ep p99 latency",
+            "value": 295,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan1/1ep ns/delivery",
+            "value": 247.1,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep p50 latency",
+            "value": 220,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep p99 latency",
+            "value": 240,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep ns/delivery",
+            "value": 202.3,
             "unit": "ns"
           }
         ]
