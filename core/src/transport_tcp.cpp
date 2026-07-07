@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/length_prefix_framer.hpp"
 
 namespace tr::net {
 
@@ -30,7 +31,8 @@ namespace {
 constexpr int MSG_NOSIGNAL = 0;
 #endif
 
-constexpr std::size_t kPrefixBytes = 4;  // the u32-LE length prefix (transport framing)
+// The u32-LE length prefix (transport framing) — the framer's, shared verbatim.
+constexpr std::size_t kPrefixBytes = length_prefix_framer::kPrefixBytes;
 
 // A receive timeout lets every blocking read poll stop_ for a clean shutdown
 // (the transport_udp SO_RCVTIMEO idiom, applied per connection).
@@ -234,18 +236,29 @@ void tcp_transport_t::serve(int fd) {
         // boundaries (read_exact resumes partial reads through receive timeouts).
         if (!read_exact(fd, prefix.data(), prefix.size())) return;
         const std::size_t len = detail::load_le<std::uint32_t>(prefix);
-        if (len == 0) continue;  // an empty record carries no TLV — a no-op
-        // Effective cap = min(kMaxFrame, the rx backend's capacity): a prefix beyond
-        // what the backend could ever allocate (e.g. a bounded pool's slot) is
-        // undeliverable, so reject it up front — no undeliverable frame is drained
-        // (the no-synthetic-limits doctrine; the bound is the injected resource).
-        const std::size_t backend_cap = backend_->max_segment_size();
-        const std::size_t cap = backend_cap < max_frame_ ? backend_cap : max_frame_;
-        if (len > cap) {
-            // A prefix beyond the cap is malformed (corrupt/hostile) or undeliverable:
-            // count it and tear the connection down — a desynced stream can't re-frame.
+
+        // The framing rules (effective cap, empty record, oversize ⇒ malformed,
+        // alloc failure ⇒ backpressure drain) live in length_prefix_framer — one
+        // home shared with the chunk-fed transports (quic/webtransport). Only the
+        // byte source differs: this pull-mode loop reads the body straight off
+        // the socket into the accepted segment (ADR-0042 §2/§4 — no library
+        // buffer, no copy; feeding recv chunks through feed() would add one).
+        using kind_t = length_prefix_framer::prefix_decision_t::kind_t;
+        auto dec = length_prefix_framer::on_prefix(
+            *backend_, length_prefix_framer::effective_cap(*backend_, max_frame_), len);
+        if (dec.kind == kind_t::EMPTY) continue;  // an empty record carries no TLV — a no-op
+        if (dec.kind == kind_t::MALFORMED) {
+            // Malformed (corrupt/hostile) or undeliverable: count it and tear the
+            // connection down — a desynced stream can't re-frame.
             malformed_rx_.fetch_add(1, std::memory_order_relaxed);
             return;
+        }
+        if (dec.kind == kind_t::DROP) {
+            // Exhaustion is backpressure: drain the frame off the stream (framing
+            // sync survives), drop it, tick the counter — never an OOM.
+            dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+            if (!drain(fd, len)) return;
+            continue;
         }
 
         // Both receivers are installed before frames flow (the set_receiver
@@ -258,16 +271,7 @@ void tcp_transport_t::serve(int fd) {
             receiver = receiver_;
         }
 
-        // ADR-0042 §2/§4: reassemble the frame into ONE refcounted segment drawn
-        // from the injected backend, read straight off the socket — no library
-        // buffer, no copy. Exhaustion is backpressure: drain the frame off the
-        // stream (framing sync survives), drop it, tick the counter — never an OOM.
-        view::segment_ptr_t seg = view::segment_ptr_t::adopt(backend_->alloc(len));
-        if (!seg) {
-            dropped_rx_.fetch_add(1, std::memory_order_relaxed);
-            if (!drain(fd, len)) return;
-            continue;
-        }
+        view::segment_ptr_t seg = std::move(dec.seg);
         if (!read_exact(fd, seg->bytes.data(), len)) return;
 
         if (rope_receiver) {
