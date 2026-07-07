@@ -109,12 +109,12 @@ These are required even at profile P0 (in-process build). "Required" does not im
 | `transport_udp` | transport | UDP socket (unicast and multicast) | v1 |
 | `transport_quic` | transport | QUIC + WebTransport (implemented — optional `libtracer_quic` target, ADR-0043) | v1 opt-in |
 | `transport_ws` | transport | WebSocket (browser / WASM) | v1, week 5 |
-| `transport_unix` | transport | Unix domain socket | v1 |
+| `transport_unix` | transport | Unix domain socket | planned (no TU yet) |
 | `transport_shm` | transport | Iceoryx-style shared-memory ring | post-MVP |
-| `transport_uart` | transport | UART (simple + DMA modes) | v1, week 6 |
+| `transport_uart` | transport | UART (simple + DMA modes) | planned (no TU yet) |
 | `transport_can` | transport | CAN classic + CAN-FD with reassembly | v1, week 6 |
-| `transport_i2c` | transport | I²C bus | v1 |
-| `transport_spi` | transport | SPI bus | v1 |
+| `transport_i2c` | transport | I²C bus | future |
+| `transport_spi` | transport | SPI bus | future |
 | `transport_ble_gatt` | transport | BLE GATT characteristics | future |
 | `transport_rdma` | transport | RDMA (ibverbs) | future |
 

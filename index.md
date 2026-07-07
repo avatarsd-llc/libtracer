@@ -40,6 +40,14 @@ The descriptive six-layer model and load-bearing architecture — the "what it i
 read as one standard, independent of any implementation.
 :::
 
+:::{grid-item-card} Compare implementations
+:link: docs/capability-matrix
+:link-type: doc
+
+Which language core or platform port does what — native codecs, ports, bindings —
+and how far each is verified, in one honest capability matrix.
+:::
+
 :::{grid-item-card} Implement the protocol
 :link: docs/spec/v1
 :link-type: doc
@@ -76,6 +84,7 @@ C++ modules <docs/modules/index>
 :maxdepth: 2
 
 Reference (descriptive) <docs/reference/README>
+Capability matrix <docs/capability-matrix>
 ```
 
 ```{toctree}

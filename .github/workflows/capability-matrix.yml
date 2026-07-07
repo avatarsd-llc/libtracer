@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# Keeps docs/capability-matrix.md honest. tools/gen_capability_matrix.py renders
+# the page from real test evidence and auto-derives the module table from the
+# source tree; this job runs it in --check mode and fails if (a) any cited
+# artifact (a conformance vector, a ctest, a cargo/npm test, an ESP manifest) is
+# missing, or (b) the committed page has drifted from what the evidence produces.
+# So a capability can never be claimed on the page without a real, CI-run test
+# behind it — and the module table cannot overclaim a TU that does not exist.
+name: capability-matrix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/capability-matrix.md
+      - tools/gen_capability_matrix.py
+      - .github/workflows/capability-matrix.yml
+      - core/src/**
+      - core/tests/**
+      - tests/conformance/vectors/**
+      - bindings/**
+      - integrations/esp-idf/**
+  pull_request:
+    paths:
+      - docs/capability-matrix.md
+      - tools/gen_capability_matrix.py
+      - .github/workflows/capability-matrix.yml
+      - core/src/**
+      - core/tests/**
+      - tests/conformance/vectors/**
+      - bindings/**
+      - integrations/esp-idf/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Capability matrix matches real test evidence
+        run: python3 tools/gen_capability_matrix.py --check

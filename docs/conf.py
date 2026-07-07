@@ -55,6 +55,7 @@ root_doc = "index"
 include_patterns = [
     "index.md",
     "docs/getting-started.md",
+    "docs/capability-matrix.md",
     "docs/performance.md",
     "docs/test-report.md",
     "docs/reference/**",
