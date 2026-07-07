@@ -92,6 +92,7 @@ MODULES = [
     ("transport_quic", "transport_quic", "quic_test"),
     ("transport_webtransport", "transport_webtransport", "webtransport_test"),
     ("transport_unix", "transport_unix", "transport_unix_test"),
+    ("transport_uart", "transport_uart", "transport_uart_test"),
     ("transport_i2c", "transport_i2c", "transport_i2c_test"),
     ("transport_spi", "transport_spi", "transport_spi_test"),
     ("fwd_router", "fwd_router", "fwd_fanout_test"),
