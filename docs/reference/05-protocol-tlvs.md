@@ -747,10 +747,10 @@ sequenceDiagram
     participant N as Node (op_resolver_t)
     participant V as Vertex
     C->>N: FWD{ op=READ, dst=/sensor/temp, src=/client }
-    N->>V: resolve dst → local vertex; read LKV
+    N->>V: resolve dst → local vertex, read LKV
     V-->>N: view_t (zero-copy refcount clone)
     N-->>C: FWD{ op=REPLY, dst=/client, kind=RESULT, VALUE }
-    Note over C,N: WRITE/AWAIT/subscribe ride the same shape;<br/>an error returns kind=ERROR + STATUS{ERROR}
+    Note over C,N: WRITE/AWAIT/subscribe ride the same shape<br/>an error returns kind=ERROR + STATUS{ERROR}
 ```
 
 At the terminus — the one place a node reads the whole FWD tree — the frame is decoded into a flat **arena** rather than an owning tree ([ADR-0041](../adr/0041-terminus-arena-decode-span-contract.md)): `wire::decode_into(frame, mr)` parses it into a `tlv_arena_t` of pre-order span-nodes (`{type, opt, wire — trailer-excluded, body, end, canonical_path}`), every span pointing into the inbound frame; `op_resolver_t::resolve` runs over that arena. The nodes are drawn from an injected `std::pmr::memory_resource` — a host that supplies a pool resource over its own slab gets a terminus that allocates nothing from the global heap.
@@ -780,7 +780,7 @@ sequenceDiagram
     participant A as Forwarder A
     participant B as Producer B
     C->>A: FWD{ dst=A·B·temp, src=C }
-    Note over A: strip leading dst (A); prepend inbound link to src
+    Note over A: strip leading dst (A), prepend inbound link to src
     A->>B: FWD{ dst=B·temp, src=A·C }
     Note over B: first dst segment is local ⇒ terminus
     B-->>A: FWD{ op=REPLY, dst=A·C }

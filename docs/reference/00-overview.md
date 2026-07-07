@@ -98,13 +98,13 @@ flowchart TB
   L1 -->|alloc/release/cache hooks| L0
 
   classDef applic fill:#fdf,stroke:#333
-  classDef graph  fill:#dfd,stroke:#333
+  classDef graphl fill:#dfd,stroke:#333
   classDef tlv    fill:#dff,stroke:#333
   classDef wire   fill:#ddf,stroke:#333
   classDef view   fill:#ffd,stroke:#333
   classDef mem    fill:#fdd,stroke:#333
   class L5 applic
-  class L4 graph
+  class L4 graphl
   class L3 tlv
   class L2 wire
   class L1 view

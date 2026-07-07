@@ -41,7 +41,8 @@ flowchart LR
     P --> K["key bytes<br/>NAME sensor · NAME temp"]
     P --> F["field<br/>settings → deadline_ns"]
     K --> M{{"vertex map<br/>(byte-keyed)"}}
-    classDef e fill:#dbeafe,stroke:#1e40af; class M e;
+    classDef e fill:#dbeafe,stroke:#1e40af
+    class M e
 ```
 
 ## Benefits
