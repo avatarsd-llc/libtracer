@@ -1,0 +1,62 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * Styling for the sidebar version switcher (version-switcher.js). Uses Furo's own
+ * theme tokens so it adapts to light/dark without a second ruleset.
+ */
+.lt-version-slot {
+  padding: 0.5rem 1rem 0;
+}
+
+.lt-version-switcher {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: var(--font-size--small, 0.8125rem);
+}
+
+.lt-version-label {
+  color: var(--color-foreground-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+
+.lt-version-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.25rem 0.4rem;
+  border-radius: 6px;
+  border: 1px solid var(--color-background-border);
+  background: var(--color-background-secondary);
+  color: var(--color-foreground-primary);
+  font: inherit;
+  font-size: var(--font-size--small, 0.8125rem);
+  cursor: pointer;
+}
+
+.lt-version-select:hover {
+  border-color: var(--color-foreground-border);
+}
+
+.lt-version-select:focus-visible {
+  outline: 2px solid var(--color-brand-primary);
+  outline-offset: 1px;
+}
+
+.lt-version-chip {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+  background: var(--color-background-secondary);
+  border: 1px solid var(--color-background-border);
+  color: var(--color-foreground-secondary);
+  font-size: var(--font-size--small, 0.8125rem);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
