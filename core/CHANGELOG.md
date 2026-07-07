@@ -42,6 +42,20 @@ reference implementation is pre-1.0; everything currently lives under
   concentrates the thrice-cloned DIAL/LISTEN factory boilerplate in
   `transport_vertex.cpp` into `make_checked` / `dial_or_listen` helpers.
 
+- **`security_acl.hpp` — the pure ACL policy seam (ADR-0050).** ACE evaluation
+  leaves `graph.cpp`'s anonymous namespace for a pure per-target policy:
+  `allow_only_policy_t` (the ALLOW-only MCU profile, the default) and
+  `full_acl_policy_t` (ordered first-match-per-bit with DENY), selected at build
+  time via the new CMake option `LIBTRACER_ACL_FULL` (ADR-0047 §1 — a
+  target-configuration change, never an edit to `graph.cpp`). The typed ACE
+  surface lands with it: `parse_acl<Policy>()` (strictness follows the policy —
+  ALLOW-only rejects DENY at write time) and `encode_acl()` (replaces the
+  hand-rolled ACE byte builders in `acl_test`/`subtree_test`). `ace_t` gains a
+  leading `type` field (`ace_type_t::ALLOW`/`DENY`). Effective-ACL semantics
+  (ADR-0020) are unchanged; the graph still owns the ancestor walk — the
+  ADR-0050 cached effective-ACE merge is the follow-up behind the same
+  interface.
+
 - **`length_prefix_framer` exposes the shared framing-rule kernel.** New public
   statics `effective_cap(backend, max_frame)` (the RX cap =
   `min(max_frame, backend.max_segment_size())`) and

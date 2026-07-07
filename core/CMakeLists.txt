@@ -87,6 +87,17 @@ endif()
 # CUDA toolkit and is built/tested locally (e.g. tools/test-cuda.sh), never in
 # CI (no GPU). The .cpp uses only the CUDA runtime API (no kernels), so a host
 # compiler + libcudart suffices — no nvcc required.
+# security_acl — the ACL policy seam (docs/adr/0050). The policy is selected at
+# build time per target (ADR-0047 §1): OFF (default) = the ALLOW-only MCU
+# profile; ON = the full host policy (ordered first-match-per-bit with DENY).
+# Both adapters are always compiled and unit-tested (security_acl_test); this
+# switch only picks which one graph_t evaluates and how strict :acl parse is.
+option(LIBTRACER_ACL_FULL "Evaluate ACLs with the full security_acl host policy (DENY, ordered)"
+       OFF)
+if(LIBTRACER_ACL_FULL)
+    target_compile_definitions(libtracer PUBLIC LIBTRACER_ACL_FULL)
+endif()
+
 option(LIBTRACER_WITH_CUDA "Build the mem_cuda GPU backend (needs CUDA toolkit)" OFF)
 if(LIBTRACER_WITH_CUDA)
     find_package(CUDAToolkit REQUIRED)
