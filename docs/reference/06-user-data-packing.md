@@ -28,12 +28,19 @@ The key insight: **the graph imposes no shape**. An endpoint is a name attached 
 
 The minimal endpoint. A 1-byte payload, optionally with the timestamp prefix.
 
-```c
-// Publisher
+```cpp
+// Publisher — see the graph module (../modules/graph.md) and view module (../modules/views.md).
+tr::graph::graph_t g;
+tr::graph::vertex_t* led =
+    *g.register_vertex(tr::graph::path_t("/dashboard/led"), tr::graph::role_t::STORED_VALUE);
+
+// Build a fresh single-byte VALUE view.
 bool led_on = true;
-uint8_t b = led_on ? 1 : 0;
-tlv_t *tlv = tlv_new_value(&b, sizeof b);
-tracer_write("/dashboard/led", tlv);
+tr::view::segment_ptr_t seg = tr::view::heap_alloc(1);
+seg->bytes[0] = static_cast<std::byte>(led_on ? 1 : 0);
+tr::view::view_t value = tr::view::view_t::over(std::move(seg));
+
+g.write(led, value);
 ```
 
 On the wire (no trailer, default `LL=0` u16 length):
@@ -56,22 +63,21 @@ Per-message overhead is the same whether the payload is 1 byte or 1 MiB; the cos
 
 If the publisher's source data is already a `bool` somewhere in memory (e.g., a struct field, a stack local with stable address), the TLV's view can point directly to it instead of being copied:
 
-```c
+```cpp
 struct dashboard_state {
     bool led_on;        // single byte
-    uint8_t  brightness;
+    std::uint8_t brightness;
     // ...
 };
 
-extern struct dashboard_state g_dash;
+extern dashboard_state g_dash;
 
-// Construct a view directly over g_dash.led_on. Because the segment
-// owner is g_dash itself (or a static segment descriptor for it),
-// no memcpy happens. The view is a (pointer, length=1) pair into
-// the live struct.
-tlv_t *tlv = tlv_view_into(&g_dash.led_on, sizeof g_dash.led_on,
-                           &g_dash_segment);
-tracer_write("/dashboard/led", tlv);
+// Borrow the live byte directly — no memcpy, no ownership transfer.
+// The view is a (pointer, length=1) span into the live struct.
+tr::view::view_t value = tr::view::view_t::over(
+    tr::view::borrow(std::span<std::byte>{
+        reinterpret_cast<std::byte*>(&g_dash.led_on), sizeof g_dash.led_on}));
+g.write(led, value);
 ```
 
 The published TLV reads the byte directly from `g_dash.led_on` at every fanout. If `g_dash` is updated between publish and subscriber-consume, the subscriber sees the new value. (Whether this is desired or a bug is application-dependent — usually you want a snapshot, in which case the explicit-copy form above is correct.)
@@ -84,51 +90,57 @@ For a **multi-byte scalar** (u32, f64) the same pattern applies; the protocol do
 
 A hardware register is just memory at a fixed address. Wrap it in a view and it becomes a libtracer vertex with **zero-copy reads**.
 
-```c
-#define GPIOA_IDR_ADDR  0x40020010   // STM32F4 GPIOA input data register
+```cpp
+constexpr std::uintptr_t GPIOA_IDR_ADDR = 0x40020010;   // STM32F4 GPIOA input data register
 
-// Construct a static segment descriptor for the MMIO region. The segment's
-// `destroy` callback is a no-op (MMIO is not allocated; you can't free it).
-static segment_t gpio_segment = {
-    .refcount = 1,                   // permanently held
-    .destroy  = noop_destroy,
-    .base     = (void *)GPIOA_IDR_ADDR,
-    .size     = sizeof(uint32_t),
-};
+tr::graph::graph_t g;
 
-// Expose GPIOA's input data register as a vertex.
-// Every read produces a TLV whose view points at the live register;
-// no memory copy occurs.
-tracer_register_view_vertex("/gpio/A/IDR",
-                            &gpio_segment,
-                            /*offset=*/0,
-                            /*length=*/sizeof(uint32_t));
+// Borrow the MMIO region directly — no allocation, no ownership, nothing to free.
+// borrow() takes a std::span<std::byte>; for a register at a fixed address, point
+// a std::byte* at that address. The view is a live window onto the register.
+auto* idr = reinterpret_cast<std::byte*>(GPIOA_IDR_ADDR);
+tr::view::view_t idr_view =
+    tr::view::view_t::over(tr::view::borrow(std::span<std::byte>{idr, sizeof(std::uint32_t)}));
+
+// Expose GPIOA's input data register as a vertex whose stored view points at the
+// live register; every read observes the register with no memory copy.
+tr::graph::vertex_t* v_idr =
+    *g.register_vertex(tr::graph::path_t("/gpio/A/IDR"), tr::graph::role_t::STORED_VALUE);
+g.write(v_idr, idr_view);
 ```
 
 ### Subscriber side
 
-```c
-tlv_t *t = tracer_read("/gpio/A/IDR");
-uint32_t idr_value;
-memcpy(&idr_value, tlv_payload(t), sizeof idr_value);  // first copy at the boundary
-tlv_release(t);
+```cpp
+auto r = g.read(v_idr);                         // r is std::expected<rope_t, …>
+std::span<const std::byte> bytes = r->only().bytes();
+std::uint32_t idr_value;
+std::memcpy(&idr_value, bytes.data(), sizeof idr_value);   // first copy at the boundary
 ```
 
 The TLV's payload pointer points directly at `0x40020010`. The subscriber chooses whether to copy into local memory (for a stable snapshot) or operate on the view directly.
 
 ### Write side (single-copy, register-mapped)
 
-```c
-uint32_t bit = 1u << 5;  // set pin PA5
-tlv_t *tlv = tlv_new_value(&bit, sizeof bit);
-tracer_write("/gpio/A/BSRR", tlv);
+```cpp
+// Standard fresh-VALUE helper.
+tr::view::view_t value_u32(std::uint32_t x) {
+    tr::view::segment_ptr_t seg = tr::view::heap_alloc(4);
+    for (int i = 0; i < 4; ++i)
+        seg->bytes[i] = static_cast<std::byte>((x >> (8 * i)) & 0xFF);
+    return tr::view::view_t::over(std::move(seg));
+}
+
+tr::graph::vertex_t* v_bsrr =
+    *g.register_vertex(tr::graph::path_t("/gpio/A/BSRR"), tr::graph::role_t::HANDLER);
+g.write(v_bsrr, value_u32(1u << 5));   // set pin PA5
 ```
 
 The vertex registered for `/gpio/A/BSRR` (Bit Set/Reset Register at `0x40020018`) has a write-handler that copies the incoming TLV's payload bytes into the register. **One copy** — from the TLV view into the register. This is the single-copy write semantic: the TLV is a view (no copies on the way in), but landing it in the register requires one write to `*(volatile uint32_t *)0x40020018`.
 
 ### Why this matters
 
-A single API substrate (`tracer_read` / `tracer_write`) covers:
+A single API substrate (`g.read` / `g.write`, see the [graph module](../modules/graph.md)) covers:
 
 - Logical software-defined endpoints (sensor readings, control state).
 - Hardware-defined endpoints (GPIO registers, peripheral SFRs).
@@ -142,23 +154,49 @@ To a subscriber, all three look identical. Tooling like `tracer-top` enumerates 
 
 For self-describing data, define a user-range structured TLV (`opt.PL=1`) with NAME + value children. Pick a type code in `0x80–0xFF` and document its layout for your project.
 
-```c
+The reference impl models a structured node as a parent (`POINT`) TLV with `opt.PL=1` carrying `NAME` + `VALUE` children; the encoder emits it under a user-range type code (`0x80+`). See the [wire module](../modules/frame-codec.md).
+
+```cpp
 struct imu_sample {
-    uint64_t ts_ns;
-    float    accel_x, accel_y, accel_z;
-    float    gyro_x, gyro_y, gyro_z;
+    std::uint64_t ts_ns;
+    float accel_x, accel_y, accel_z;
+    float gyro_x, gyro_y, gyro_z;
 };
 
-void publish_imu(const struct imu_sample *s) {
-    // type=0x80 USER_IMU_RECORD, opt.PL=1
-    tlv_t *rec = tlv_new_structured(USER_IMU_RECORD);
-    tlv_append_child(rec, tlv_new_name("ts_ns"));
-    tlv_append_child(rec, tlv_new_value(&s->ts_ns, sizeof s->ts_ns));
-    tlv_append_child(rec, tlv_new_name("accel"));
-    tlv_append_child(rec, tlv_new_value(&s->accel_x, 3 * sizeof(float)));
-    tlv_append_child(rec, tlv_new_name("gyro"));
-    tlv_append_child(rec, tlv_new_value(&s->gyro_x, 3 * sizeof(float)));
-    tracer_write("/imu", rec);
+// TLV builder helpers.
+tr::wire::tlv_t name_tlv(std::string_view s) {
+    tr::wire::tlv_t t;
+    t.type = tr::wire::type_t::NAME;
+    t.payload = {reinterpret_cast<const std::byte*>(s.data()), s.size()};
+    return t;
+}
+tr::wire::tlv_t value_tlv(std::span<const std::byte> b) {
+    tr::wire::tlv_t t;
+    t.type = tr::wire::type_t::VALUE;
+    t.payload = b;
+    return t;
+}
+
+void publish_imu(const imu_sample& s, tr::graph::graph_t& g, tr::graph::vertex_t* imu) {
+    auto bytes = [](const auto& x) {
+        return std::span<const std::byte>{reinterpret_cast<const std::byte*>(&x), sizeof x};
+    };
+
+    // Parent record: POINT + opt.PL=1, self-describing NAME/VALUE children.
+    tr::wire::tlv_t rec;
+    rec.type = tr::wire::type_t::POINT;
+    rec.opt  = tr::wire::opt_t{.pl = true};
+    rec.children = {
+        name_tlv("ts_ns"), value_tlv(bytes(s.ts_ns)),
+        name_tlv("accel"), value_tlv({reinterpret_cast<const std::byte*>(&s.accel_x), 3 * sizeof(float)}),
+        name_tlv("gyro"),  value_tlv({reinterpret_cast<const std::byte*>(&s.gyro_x), 3 * sizeof(float)}),
+    };
+
+    // Encode to wire bytes, then publish as a view over those bytes.
+    std::vector<std::byte> wire = tr::wire::encode(rec);
+    tr::view::segment_ptr_t seg = tr::view::heap_alloc(wire.size());
+    std::memcpy(seg->bytes.data(), wire.data(), wire.size());
+    g.write(imu, tr::view::view_t::over(std::move(seg)));
 }
 ```
 
@@ -166,9 +204,13 @@ A subscriber walks the children iteratively (per [01-data-format.md](01-data-for
 
 For a **fixed-shape** struct where schema evolution doesn't matter and bytes are precious, pack the whole struct as one VALUE TLV instead:
 
-```c
-tlv_t *tlv = tlv_new_value(s, sizeof *s);
-tracer_write("/imu", tlv);
+```cpp
+// One opaque VALUE holding the packed struct.
+tr::wire::tlv_t v = value_tlv({reinterpret_cast<const std::byte*>(&s), sizeof s});
+std::vector<std::byte> wire = tr::wire::encode(v);
+tr::view::segment_ptr_t seg = tr::view::heap_alloc(wire.size());
+std::memcpy(seg->bytes.data(), wire.data(), wire.size());
+g.write(imu, tr::view::view_t::over(std::move(seg)));
 ```
 
 The trade-off is wire-format-versus-self-description, identical to the choice between Cap'n Proto (fixed schema) and JSON (named fields).
@@ -181,43 +223,40 @@ The publisher slices the stream across enumerated child endpoints with shared ti
 
 ### Publisher
 
-```c
-#define SLICE_SIZE  (4 * 1024)         // 4 KiB per slice, fits one MTU on most LANs
-#define SLICES_PER_SECOND  (1000UL * 1000 * 1000 / SLICE_SIZE)  // ~244000
+```cpp
+constexpr std::size_t SLICE_SIZE = 4 * 1024;   // 4 KiB per slice, fits one MTU on most LANs
 
-void on_dma_complete(const uint8_t *adc_buf, size_t buf_len, uint64_t ts) {
-    size_t n_slices = buf_len / SLICE_SIZE;
-    for (size_t i = 0; i < n_slices; i++) {
-        // Construct a view directly into the DMA buffer — no memcpy.
-        // The DMA buffer's segment refcount tracks who holds views.
-        tlv_t *tlv = tlv_view_into_with_ts(
-            adc_buf + i * SLICE_SIZE,
-            SLICE_SIZE,
-            &dma_buf_segment,
-            ts);
+// Slice vertices registered once at init (see §static path handles in 03-addressing).
+extern tr::graph::vertex_t* adc_raw[];         // adc_raw[i] == /adc/raw[i]
 
-        char path[64];
-        snprintf(path, sizeof path, "/adc/raw[%zu]", i);
-        tracer_write(path, tlv);
+void on_dma_complete(std::byte* adc_buf, std::size_t buf_len,
+                     tr::graph::graph_t& g) {
+    std::size_t n_slices = buf_len / SLICE_SIZE;
+    for (std::size_t i = 0; i < n_slices; ++i) {
+        // Borrow directly into the DMA buffer — no memcpy, no ownership transfer.
+        tr::view::view_t slice = tr::view::view_t::over(
+            tr::view::borrow(std::span<std::byte>{adc_buf + i * SLICE_SIZE, SLICE_SIZE}));
+        g.write(adc_raw[i], slice);
     }
 }
 ```
 
-Each `tracer_write` is a view-clone (refcount bump on the DMA segment) and a router dispatch. **No byte copies happen between the DMA buffer and the network's egress.** The only copy is in the transport layer when bytes leave the host (`send` system call into kernel buffer); for SHM or RDMA transports, even that copy disappears.
+Each `g.write` is a view-clone (a refcount bump on the DMA segment's backend) and a router dispatch. **No byte copies happen between the DMA buffer and the network's egress.** The only copy is in the transport layer when bytes leave the host (`send` system call into kernel buffer); for SHM or RDMA transports, even that copy disappears.
 
 ### Subscriber (process-as-stream)
 
-```c
-// Subscribe with assemble=false (default) — receive each slice as it arrives.
-tlv_t *sub = tlv_new_subscriber("/local/dsp-pipeline", default_settings());
-tracer_write("/adc/raw:subscribers[]", sub);   // subtree subscription: observes every /adc/raw[i]
+Register the subscription by writing a SUBSCRIBER record to the parent's `:subscribers[]` field — a subtree subscription observes every indexed child (see [03-addressing.md](03-addressing.md) §subtree subscriptions and the [graph module](../modules/graph.md)):
 
-// In the dsp-pipeline handler:
-void on_adc_slice(const tlv_t *t, void *ctx) {
-    const uint8_t *bytes = tlv_payload(t);
-    size_t        len   = tlv_payload_len(t);
-    uint64_t      ts    = tlv_timestamp(t);
-    process_adc_slice(bytes, len, ts);   // FIR filter, FFT, whatever
+```cpp
+// Subscribe with assemble=false (default) — receive each slice as it arrives.
+// The SUBSCRIBER value names the local handler path /local/dsp-pipeline.
+g.write(tr::graph::path_t("/adc/raw:subscribers[]"), subscriber_value);   // subtree: every /adc/raw[i]
+
+// In the dsp-pipeline handler, the delivered view borrows the producer's bytes.
+void on_adc_slice(const tr::view::view_t& delivered) {
+    auto t = tr::wire::view_as_tlv(delivered);        // zero-copy decode
+    std::span<const std::byte> bytes = t->payload;    // spans borrow the buffer
+    process_adc_slice(bytes);                          // FIR filter, FFT, whatever
 }
 ```
 
@@ -225,14 +264,15 @@ The subscriber processes 4 KiB at a time, never holding more than one slice's wo
 
 ### Subscriber (assemble for batch processing)
 
-```c
-tlv_t *settings = tlv_new_settings_list({
-    {"address_shift.assemble", true},
-    {"address_shift.expected_count", n_slices_per_second / 10},  // 100ms batches
-    {"deadline_ns", 200 * 1000 * 1000},                          // 200ms safety
-});
-tlv_t *sub = tlv_new_subscriber("/local/batch-handler", settings);
-tracer_write("/adc/raw:subscribers[]", sub);   // subtree subscription: observes every /adc/raw[i]
+Set the assembly QoS atomically on the subscriber's `:settings` object, then register the subscription. The `address_shift.*` / `deadline_ns` fields are the v1 QoS design (see [03-addressing.md](03-addressing.md) §subscriber assembly policies):
+
+```cpp
+// Atomic whole-object settings write (SETTINGS 0x0B): assemble=true,
+// expected_count for 100 ms batches, deadline_ns=200 ms safety window.
+g.write(tr::graph::path_t("/local/batch-handler:settings"), assemble_settings_value);
+
+// Register the subtree subscription: observes every /adc/raw[i].
+g.write(tr::graph::path_t("/adc/raw:subscribers[]"), subscriber_value);
 ```
 
 The router buffers slices per timestamp group; once the group is complete (or deadline expires), it delivers one assembled TLV. This is the right shape for batch DSP that needs N-sample windows.
@@ -267,65 +307,66 @@ Each producer publishes to its own vertex with its own slicing. **Both producers
 
 ### Publisher: camera
 
-```c
-void on_frame(const uint8_t *frame, size_t frame_len, uint64_t ts_ns) {
-    size_t slice_size = 64 * 1024;
-    size_t n = (frame_len + slice_size - 1) / slice_size;
-    for (size_t i = 0; i < n; i++) {
-        tlv_t *t = tlv_view_into_with_ts(frame + i * slice_size,
-                                          MIN(slice_size, frame_len - i * slice_size),
-                                          &camera_segment, ts_ns);
-        char p[48];
-        snprintf(p, sizeof p, "/camera/frame[%zu]", i);
-        tracer_write(p, t);
+```cpp
+extern tr::graph::vertex_t* camera_frame[];   // camera_frame[i] == /camera/frame[i]
+
+void on_frame(std::byte* frame, std::size_t frame_len, std::uint64_t /*ts_ns*/,
+              tr::graph::graph_t& g) {
+    std::size_t slice_size = 64 * 1024;
+    std::size_t n = (frame_len + slice_size - 1) / slice_size;
+    for (std::size_t i = 0; i < n; ++i) {
+        std::size_t len = std::min(slice_size, frame_len - i * slice_size);
+        tr::view::view_t slice = tr::view::view_t::over(
+            tr::view::borrow(std::span<std::byte>{frame + i * slice_size, len}));
+        g.write(camera_frame[i], slice);   // all slices share the frame's ts_ns domain
     }
 }
 ```
 
 ### Publisher: LIDAR
 
-```c
-void on_scan(const uint8_t *scan, size_t scan_len, uint64_t ts_ns) {
-    // Scan fits in one slice.
-    tlv_t *t = tlv_view_into_with_ts(scan, scan_len, &lidar_segment, ts_ns);
-    tracer_write("/lidar/scan[0]", t);
+```cpp
+void on_scan(std::byte* scan, std::size_t scan_len, std::uint64_t /*ts_ns*/,
+             tr::graph::graph_t& g, tr::graph::vertex_t* lidar_scan0) {
+    // Scan fits in one slice — borrow it directly.
+    tr::view::view_t t = tr::view::view_t::over(
+        tr::view::borrow(std::span<std::byte>{scan, scan_len}));
+    g.write(lidar_scan0, t);   // lidar_scan0 == /lidar/scan[0]
 }
 ```
 
 ### Subscriber: temporal join
 
-```c
-// Subscribe to both streams.
-tlv_t *cam_sub   = tlv_new_subscriber("/local/fusion/cam",   default_settings());
-tlv_t *lidar_sub = tlv_new_subscriber("/local/fusion/lidar", default_settings());
-tracer_write("/camera/frame:subscribers[]", cam_sub);   // subtree: every /camera/frame[i]
-tracer_write("/lidar/scan:subscribers[]",   lidar_sub);   // subtree: every /lidar/scan[i]
+```cpp
+// Subscribe to both streams: a SUBSCRIBER record naming the local fusion handler,
+// written to each parent's :subscribers[] field (subtree subscription).
+g.write(tr::graph::path_t("/camera/frame:subscribers[]"), cam_subscriber_value);   // every /camera/frame[i]
+g.write(tr::graph::path_t("/lidar/scan:subscribers[]"),   lidar_subscriber_value); // every /lidar/scan[i]
 
-// In the fusion handler:
-static frame_buffer_t  pending_frame;   // map: ts_ns → assembled frame
-static scan_buffer_t   pending_scan;
+// In the fusion handler. The delivered view borrows the producer's bytes; a
+// copy of the view_t (refcounted) keeps the segment alive while it sits in a buffer.
+static frame_buffer_t pending_frame;   // map: ts_ns → assembled frame
+static scan_buffer_t  pending_scan;
 
-void on_camera_slice(const tlv_t *t, void *_) {
-    uint64_t ts = tlv_timestamp(t);
-    frame_buffer_add_slice(&pending_frame, ts, t);   // tlv_acquire to keep view alive
+void on_camera_slice(const tr::view::view_t& delivered) {
+    std::uint64_t ts = slice_timestamp(delivered);   // app reads the agreed timestamp
+    frame_buffer_add_slice(&pending_frame, ts, delivered);   // stores a view_t copy
     try_emit_pair(ts);
 }
 
-void on_lidar_scan(const tlv_t *t, void *_) {
-    uint64_t ts = tlv_timestamp(t);
-    scan_buffer_add(&pending_scan, ts, t);
+void on_lidar_scan(const tr::view::view_t& delivered) {
+    std::uint64_t ts = slice_timestamp(delivered);
+    scan_buffer_add(&pending_scan, ts, delivered);
     try_emit_pair(ts);
 }
 
-void try_emit_pair(uint64_t ts) {
+void try_emit_pair(std::uint64_t ts) {
     // Allow ±5 ms slack in matching (PTP-synced clocks, sensor exposure window)
-    uint64_t slack = 5 * 1000 * 1000;
+    std::uint64_t slack = 5 * 1000 * 1000;
     auto frame = frame_buffer_take_complete_near(&pending_frame, ts, slack);
     auto scan  = scan_buffer_take_near(&pending_scan, ts, slack);
     if (frame && scan) {
-        run_fusion(frame, scan);
-        tlv_release(frame);
-        tlv_release(scan);
+        run_fusion(*frame, *scan);   // views drop when the locals go out of scope
     }
 }
 ```
@@ -344,31 +385,32 @@ A common need: a configuration or state variable that lives in one process and s
 
 ### Define the variable as a vertex
 
-```c
-// On the authoritative host:
-static int32_t target_rpm = 3000;
-tracer_register_view_vertex("/control/target_rpm",
-                            &local_segment,
-                            offsetof(/* the local var */ ...),
-                            sizeof(int32_t));
+```cpp
+// On the authoritative host: expose the variable as a STORED_VALUE vertex.
+static std::int32_t target_rpm = 3000;
+
+tr::graph::vertex_t* v_rpm =
+    *g.register_vertex(tr::graph::path_t("/control/target_rpm"), tr::graph::role_t::STORED_VALUE);
+
+// Borrow the live variable's bytes (zero-copy) and store the view.
+g.write(v_rpm, tr::view::view_t::over(tr::view::borrow(
+    std::span<std::byte>{reinterpret_cast<std::byte*>(&target_rpm), sizeof target_rpm})));
 ```
 
 ### Other hosts subscribe with `transient_local` durability
 
-```c
-// On a consumer host:
-tlv_t *settings = tlv_new_settings_list({
-    {"durability", DURABILITY_TRANSIENT_LOCAL},
-    {"history_keep_last", 1},
-});
-tlv_t *sub = tlv_new_subscriber("/local/cached/target_rpm", settings);
-tracer_write("/control/target_rpm:subscribers[]", sub);
+```cpp
+// On a consumer host: set durability=transient_local + history_keep_last=1 on the
+// cached subscriber's :settings, then register the subtree subscription.
+g.write(tr::graph::path_t("/local/cached/target_rpm:settings"), durability_settings_value);
+g.write(tr::graph::path_t("/control/target_rpm:subscribers[]"), subscriber_value);
 
 // Anytime the consumer wants the latest value:
-tlv_t *t = tracer_read("/local/cached/target_rpm");
-int32_t rpm;
-memcpy(&rpm, tlv_payload(t), sizeof rpm);
-tlv_release(t);
+tr::graph::vertex_t* cached =
+    *g.register_vertex(tr::graph::path_t("/local/cached/target_rpm"), tr::graph::role_t::STORED_VALUE);
+auto r = g.read(cached);
+std::int32_t rpm;
+std::memcpy(&rpm, r->only().bytes().data(), sizeof rpm);
 ```
 
 The combination of:
@@ -414,38 +456,42 @@ A structured TLV (any type with `opt.PL=1`) can be manipulated structurally with
 
 ### Concat: merge two structured TLVs of the same type
 
-```c
-tlv_t *a = ...; // SETTINGS {NAME "x", VALUE 1}
-tlv_t *b = ...; // SETTINGS {NAME "y", VALUE 2}
-tlv_t *merged = tlv_struct_concat(a, b);
+A structured `tr::wire::tlv_t` carries its members in a `children` vector, so these operations are expressed directly on that vector (see the [wire module](../modules/frame-codec.md)); the leaf `payload` spans keep borrowing their original buffers — no bytes are copied until you re-encode.
+
+```cpp
+tr::wire::tlv_t a = /* … */;   // SETTINGS {NAME "x", VALUE 1}
+tr::wire::tlv_t b = /* … */;   // SETTINGS {NAME "y", VALUE 2}
+
+tr::wire::tlv_t merged = a;    // same type/opt
+merged.children.insert(merged.children.end(), b.children.begin(), b.children.end());
 // merged is SETTINGS {NAME "x", VALUE 1, NAME "y", VALUE 2}
-// No bytes copied. 'merged' holds views into a's and b's segments.
+// The child payload spans still borrow a's and b's buffers.
 ```
 
 ### Split: cut a structured TLV at child index K
 
-```c
-tlv_t *whole = ...; // structured TLV with K1+K2 children
-tlv_t *first, *rest;
-tlv_struct_split(whole, K1, &first, &rest);
-// first holds first K1 children; rest holds the remaining K2.
-// Both share whole's underlying segment via refcount.
+```cpp
+tr::wire::tlv_t whole = /* … */;   // structured TLV with K1+K2 children
+
+tr::wire::tlv_t first = whole, rest = whole;
+first.children.assign(whole.children.begin(), whole.children.begin() + K1);
+rest.children.assign(whole.children.begin() + K1, whole.children.end());
+// first holds the first K1 children; rest holds the remaining K2.
+// Both keep borrowing whole's child payload buffers.
 ```
 
 ### Mix: insert a child at position K
 
-```c
-tlv_struct_insert(whole, K, new_child);
-// View tree updated; insertion point's children shifted in the view-array.
-// No bytes copied unless serialization is requested.
+```cpp
+whole.children.insert(whole.children.begin() + K, new_child);
+// The children vector is updated; entries after K shift by one.
+// No bytes copied unless you re-encode.
 ```
 
 ### Serialize
 
-```c
-size_t  n = tlv_serialized_size(merged);
-uint8_t *out = malloc(n);
-tlv_serialize_to(merged, out, n);
+```cpp
+std::vector<std::byte> out = tr::wire::encode(merged);
 // 'out' contains the canonical wire bytes for merged.
 // The proof obligation from [02-graph-model.md] guarantees this is identical
 // to the bytes that would result from constructing the same logical container
@@ -469,29 +515,33 @@ The proof obligation is the contract that makes mix/split/concat **safe to compo
 > **Normative reference**: [../spec/v1.md](../spec/v1.md) §3.1.
 > **See also**: [03-addressing.md](03-addressing.md) §static path handles; [04-communication-flows.md](04-communication-flows.md) §the static-path write flow.
 
-The examples earlier in this document use `tracer_write("/path/string", tlv)` for clarity. On hosted platforms (Linux laptops, ESP32 with PSRAM and a relaxed code budget) this is fine. On a 16 KB Cortex-M0+ flashing telemetry from an ISR, it is unacceptable: `snprintf` alone is 2–6 KB of code, the parser walks the path string each call, and the segment allocator runs from interrupt context.
+The examples earlier in this document write by handle after registering a `path_t("/path/string")` (see the [graph module](../modules/graph.md)). On hosted platforms (Linux laptops, ESP32 with PSRAM and a relaxed code budget) this is fine. On a 16 KB Cortex-M0+ flashing telemetry from an ISR, it is unacceptable: `snprintf` alone is 2–6 KB of code, the parser walks the path string each call, and the segment allocator runs from interrupt context.
 
 The MCU-friendly variant is to **encode the PATH TLV at build time** and pass a handle to the writer. Three orders of magnitude less per-write cost, and `snprintf` is no longer linked.
 
 ### Recipe — single sensor, build-time path
 
-```c
-#include "tracer.h"
+```cpp
+// Parse-once handle: the PATH TLV is encoded a single time at registration and
+// its bytes live for the node's lifetime. The path_t("...") ctor validates the
+// literal (ADR-0054). A binding may additionally expose a consteval PATH encoder
+// that emits the same bytes into .rodata.
+tr::graph::graph_t g;
+tr::graph::vertex_t* temp =
+    *g.register_vertex(tr::graph::path_t("/sensor/temp"), tr::graph::role_t::STORED_VALUE);
 
-// PATH TLV is generated at compile time and lives in .rodata / flash.
-// The macro validates the literal at preprocessor time; an invalid
-// path fails the build, not the runtime.
-static const tracer_path_t TEMP_PATH = TRACER_PATH("/sensor/temp");
-
-void tim2_irq_handler(void) {       // hard-real-time ISR
+void tim2_irq_handler() {            // hard-real-time ISR
     float t = read_thermistor_adc();
 
-    // Inline value TLV; no heap touch.
-    uint8_t buf[12];
-    tlv_t value = tlv_inline_value_f32(buf, sizeof buf, t);
+    // Fresh f32 VALUE view.
+    tr::view::segment_ptr_t seg = tr::view::heap_alloc(4);
+    std::uint32_t bits;
+    std::memcpy(&bits, &t, 4);
+    for (int i = 0; i < 4; ++i)
+        seg->bytes[i] = static_cast<std::byte>((bits >> (8 * i)) & 0xFF);
 
     // Single load + dispatch. ~0.4 µs at 100 MHz.
-    tracer_write(&TEMP_PATH, &value);
+    g.write(temp, tr::view::view_t::over(std::move(seg)));
 
     TIM2->SR &= ~TIM_SR_UIF;
 }
@@ -511,52 +561,52 @@ What the macro emits, verbatim, into `.rodata`:
 
 When the path includes a runtime-derived index (an address-shift slice number, a peer-id), encode once at init and reuse the handle:
 
-```c
-#define N_SLICES  64
+```cpp
+constexpr std::size_t N_SLICES = 64;
 
-// File scope — handles are filled in at init.
-static tracer_path_handle_t h_slice[N_SLICES];
+// File scope — vertex handles are filled in at init.
+static tr::graph::vertex_t* slice_vtx[N_SLICES];
 
 // Called once from main() before the DMA / capture loop starts.
-void publisher_init(void) {
-    for (size_t i = 0; i < N_SLICES; i++) {
-        char buf[40];
-        // sprintf is ALLOWED here — init runs once, code-size of one
-        // sprintf call amortizes across the program lifetime.
-        snprintf(buf, sizeof buf, "/adc/raw[%zu]", i);
-        h_slice[i] = tracer_path_register(buf);
-        // h_slice[i] now points at a heap-allocated PATH TLV that
-        // will not be freed for the rest of the node's life.
+void publisher_init(tr::graph::graph_t& g) {
+    for (std::size_t i = 0; i < N_SLICES; ++i) {
+        // String work is ALLOWED here — init runs once and amortizes across the
+        // program lifetime. path_t::parse returns std::expected; deref on success.
+        auto p = tr::graph::path_t::parse("/adc/raw[" + std::to_string(i) + "]");
+        slice_vtx[i] = *g.register_vertex(*p, tr::graph::role_t::STREAM);
+        // Each register_vertex encodes exactly one long-lived PATH TLV.
     }
 }
 
 // DMA-half-complete ISR — has to be fast and ISR-safe.
-void dma_half_complete_irq(const uint8_t *bytes, size_t len, uint64_t ts_ns) {
-    size_t slice = (current_offset / SLICE_SIZE) % N_SLICES;
-    tlv_t v = tlv_view_into_with_ts(bytes, len, &dma_segment, ts_ns);
-    tracer_write(h_slice[slice], &v);    // pointer load + dispatch; no string ops
+void dma_half_complete_irq(std::byte* bytes, std::size_t len, tr::graph::graph_t& g) {
+    std::size_t slice = (current_offset / SLICE_SIZE) % N_SLICES;
+    tr::view::view_t v = tr::view::view_t::over(
+        tr::view::borrow(std::span<std::byte>{bytes, len}));
+    g.write(slice_vtx[slice], v);    // pointer load + dispatch; no string ops
 }
 ```
 
 The trade: a one-time RAM cost of ~1.6 KB (64 PATH TLVs averaging ~25 bytes each + bookkeeping) buys ISR-safe publishing of 64 distinct slot paths.
 
-### Recipe — indexed-handle helper (when registering N is too costly)
+### Recipe — indexed slot paths (and a non-implemented optimization)
 
-For very large N (e.g., 4096 slices) where individual registration burns RAM, the indexed-handle form encodes the **base path** once and supplies the index at write time. The implementation expands `[i]` into the dispatch key on the fly without allocating:
+The reference core writes each slice by the handle of its real indexed path `/adc/raw[i]`:
 
-```c
-// One PATH TLV for the base name.
-static const tracer_path_t ADC_RAW = TRACER_PATH("/adc/raw");
+```cpp
+extern tr::graph::vertex_t* adc_raw[];   // adc_raw[i] == /adc/raw[i], registered at init
 
-void dma_half_complete_irq(...) {
-    for (size_t i = 0; i < n_slices_in_buf; i++) {
-        tlv_t v = tlv_view_into_with_ts(bytes + i*S, S, &dma_segment, ts_ns);
-        tracer_write_indexed(&ADC_RAW, /*index=*/i, &v);
+void dma_half_complete_irq(std::byte* bytes, std::size_t S, std::size_t n_slices_in_buf,
+                           tr::graph::graph_t& g) {
+    for (std::size_t i = 0; i < n_slices_in_buf; ++i) {
+        tr::view::view_t v = tr::view::view_t::over(
+            tr::view::borrow(std::span<std::byte>{bytes + i * S, S}));
+        g.write(adc_raw[i], v);
     }
 }
 ```
 
-The router treats `tracer_write_indexed(&ADC_RAW, i, v)` as semantically equivalent to a write to `/adc/raw[i]`. From the subscriber's perspective the wire bytes are identical.
+For very large N (e.g., 4096 slices) where individual registration would burn RAM, a **single-PATH-plus-index** form — encoding the base `/adc/raw` once and supplying `i` at write time, expanding `[i]` into the dispatch key without allocating — would help. This is a **permitted-but-not-implemented** optimization (non-normative): the reference core has no separate indexed-handle write. It would be semantically equivalent to the real write to `/adc/raw[i]` shown above, and from the subscriber's perspective the wire bytes are identical.
 
 ### What this buys, concretely
 
@@ -564,10 +614,10 @@ For a representative Cortex-M4 RC-car build (1 transport, no GUI, 32 KB flash bu
 
 | Variant | Flash overhead | RAM overhead | Per-write cost | ISR-safe? |
 | ---- | ---- | ---- | ---- | ---- |
-| String-form `tracer_write_str(...)` | +5 KB (`snprintf` etc.) | small heap alloc per write | 1–10 µs | No |
-| Build-time `TRACER_PATH(...)` literal | +bytes of the path | none | ~0.4 µs | Yes |
+| String-form `path_t::parse(...)` on the hot path | +5 KB (`snprintf` etc.) | small heap alloc per write | 1–10 µs | No |
+| Parse-once `path_t("...")` literal | +bytes of the path | none | ~0.4 µs | Yes |
 | Init-registered handle | +bytes of the path | one PATH TLV per path | ~0.4 µs | Yes |
-| Indexed-handle on a base path | +bytes of the base path | none | ~0.5 µs | Yes |
+| Indexed slot paths (per-`[i]` handle) | +bytes of each path | one PATH TLV per slot | ~0.5 µs | Yes |
 
 ### When the string form is still the right answer
 

@@ -92,13 +92,16 @@ If stage 1 fails: `ERROR{tr::path::not_found}`. If stage 2 fails: `ERROR{tr::sch
 
 A single `write(path, tlv)` is atomic: a concurrent reader sees either the full prior state or the full new state at that path, not a partial mixture. To update multiple fields atomically, write a single SETTINGS TLV (`0x0B`) containing all the fields to a parent path; the router applies the SETTINGS as one operation.
 
-```c
+```cpp
+// See the graph module: ../modules/graph.md
+tr::graph::graph_t g;
+
 // Non-atomic (reader between calls sees inconsistent state):
-tracer_write("/x:settings.reliability", tlv1);
-tracer_write("/x:settings.deadline_ns", tlv2);
+g.write(tr::graph::path_t("/x:settings.reliability"), reliability_value);
+g.write(tr::graph::path_t("/x:settings.deadline_ns"), deadline_value);
 
 // Atomic (reader sees both fields update together):
-tracer_write("/x:settings", settings_tlv(tlv1, tlv2));   // SETTINGS (0x0B), not a generic container
+g.write(tr::graph::path_t("/x:settings"), settings_value);   // one SETTINGS (0x0B) object, not a generic container
 ```
 
 ---
@@ -252,7 +255,7 @@ Three modes, in order of preference for embedded targets:
 | Mode | Where the PATH TLV lives | When the bytes are produced | Hot path cost |
 | ---- | ---- | ---- | ---- |
 | **Build-time literal** | `.rodata` / flash | At compile time (macro or codegen emits the byte literal) | Pointer-load — zero runtime work |
-| **Init-time registration** | RAM (long-lived segment) | Once during `tracer_init` | Pointer-load |
+| **Init-time registration** | RAM (long-lived segment) | Once at node init (`register_vertex`) | Pointer-load |
 | **String at hot path** (string-parsed, convenience) | RAM (short-lived) | On every call | Parse + alloc + canonicalize |
 
 The string-at-hot-path mode is **NOT required** of conforming implementations and a minimum-feature (P0) build MAY omit the string entry points entirely.
@@ -263,20 +266,20 @@ The string-at-hot-path mode is **NOT required** of conforming implementations an
 flowchart LR
   subgraph Build["Build time"]
     S["Source path string<br/>&quot;/sensor/temp&quot;"]
-    M["TRACER_PATH(&quot;/sensor/temp&quot;)<br/>macro / codegen"]
+    M["path_t(&quot;/sensor/temp&quot;)<br/>parse-once ctor / codegen"]
     R[".rodata bytes:<br/>06 40 12 00 ... NAME &quot;sensor&quot; ... NAME &quot;temp&quot;"]
     S --> M --> R
   end
 
   subgraph Init["Node init (once)"]
-    I["tracer_path_register(string)"]
+    I["path_t::parse(string)"]
     H["heap segment with same bytes"]
     I --> H
   end
 
   subgraph Hot["Hot path (per write)"]
     HND["path handle<br/>(&rodata or &heap)"]
-    W["tracer_write(handle, value_tlv)"]
+    W["g.write(handle, value)"]
     DISP["router dispatch<br/>(byte-compare on PATH bytes)"]
     HND --> W --> DISP
   end
@@ -287,24 +290,36 @@ flowchart LR
 
 Both paths land in the same shape: a const region whose bytes are a valid PATH TLV. The hot-path API treats them identically.
 
-### Build-time encoding via macro
+### Parse-once path construction
 
-An implementation supplies a `TRACER_PATH` build-time encoding facility that expands a literal string to a `static const` PATH TLV byte array — a `consteval` function in C++, a macro in a portable C binding. The C-flavored sketch below shows the shape as a C binding would expose it (informative — implementation choice, not normative):
+The reference implementation encodes a literal path exactly once via the parse-once `path_t("...")` constructor (ADR-0054): it is a constructor, infallible for literals, and the resulting handle is reused on every subsequent write. A binding may additionally expose a build-time / `consteval` PATH encoder; the wire bytes are identical. The C++ sketch below shows the reference shape (see the [graph module](../modules/graph.md) and the [view module](../modules/views.md)):
 
-```c
-// Expands to a static const uint8_t[] containing exactly the PATH TLV bytes.
-// All segment validation (length caps, reserved chars) happens at compile time
-// via _Static_assert; a malformed path fails the build.
-static const tracer_path_t SENSOR_TEMP = TRACER_PATH("/sensor/temp");
+```cpp
+tr::graph::graph_t g;
 
-// Hot path — no allocation, no string parsing.
+// Parse-once handle: the PATH TLV is encoded a single time here.
+// Reserved-char / length validation happens in the constructor.
+tr::graph::vertex_t* sensor_temp =
+    *g.register_vertex(tr::graph::path_t("/sensor/temp"),
+                       tr::graph::role_t::STORED_VALUE);
+
+// Build a fresh VALUE view over f32 bytes (standard helper pattern).
+tr::view::view_t value_f32(float f) {
+    tr::view::segment_ptr_t seg = tr::view::heap_alloc(4);
+    std::uint32_t bits;
+    std::memcpy(&bits, &f, 4);
+    for (int i = 0; i < 4; ++i)
+        seg->bytes[i] = static_cast<std::byte>((bits >> (8 * i)) & 0xFF);
+    return tr::view::view_t::over(std::move(seg));
+}
+
+// Hot path — write by handle, no path parsing.
 void on_sample(float t) {
-    tlv_t value = TLV_VALUE_F32_INLINE(t);   // value also static-friendly
-    tracer_write(&SENSOR_TEMP, &value);
+    g.write(sensor_temp, value_f32(t));
 }
 ```
 
-The macro's job is to walk the literal at preprocessor time, count segments, reject reserved characters via `_Static_assert`, and emit the byte sequence:
+Encoding the literal once walks the path, rejects reserved characters, counts segments, and emits the byte sequence:
 
 ```
 06 PL=1+CR=0  LL=0  length=u16  | type, opt, length
@@ -321,43 +336,52 @@ Some paths are not known at compile time:
 - Connection-routed paths (`/net/<conn>/sensor/temp`) — the connection name is established at runtime.
 - Address-shift slice paths (`/camera/frame[0]`, `/camera/frame[1]`, …) — the index varies per slice.
 
-For these, the implementation provides:
+For these, register each concrete indexed path once at init and keep its vertex handle. Runtime strings are parsed with `path_t::parse` (which returns `std::expected`); literal indexed paths use the `path_t("...")` constructor directly:
 
-```c
-// Validate, canonicalize, encode once. Returned handle is stable for node lifetime.
-tracer_path_handle_t h_frame_slice[N];
-for (size_t i = 0; i < N; i++) {
-    char buf[64];
-    snprintf(buf, sizeof buf, "/camera/frame[%zu]", i);   // sprintf allowed at INIT
-    h_frame_slice[i] = tracer_path_register(buf);          // encodes once
+```cpp
+tr::graph::graph_t g;
+
+// Validate, canonicalize, encode once. The vertex handle is stable for node lifetime.
+tr::graph::vertex_t* frame_slice[N];
+for (std::size_t i = 0; i < N; ++i) {
+    // Runtime-derived index → path_t::parse returns std::expected; deref on success.
+    auto p = tr::graph::path_t::parse("/camera/frame[" + std::to_string(i) + "]");
+    frame_slice[i] = *g.register_vertex(*p, tr::graph::role_t::STREAM);
 }
 
-// Hot path — no snprintf.
-void on_dma_complete(const uint8_t *frame, uint64_t ts) {
-    for (size_t i = 0; i < N; i++) {
-        tracer_write(h_frame_slice[i], view_into(frame + i*S, S, ts));
+// Hot path — zero-copy borrow of the DMA buffer, no string work.
+void on_dma_complete(std::byte* frame, std::uint64_t /*ts*/) {
+    for (std::size_t i = 0; i < N; ++i) {
+        tr::view::view_t slice =
+            tr::view::view_t::over(tr::view::borrow(std::span<std::byte>{frame + i * S, S}));
+        g.write(frame_slice[i], slice);
     }
 }
 ```
 
-`tracer_path_register` allocates exactly one PATH TLV in a long-lived segment, validates per [03-addressing.md](03-addressing.md) §path syntax, and returns the handle. After init, the handle behaves identically to a build-time literal: a pointer-load and a dispatch.
+`register_vertex` encodes exactly one PATH TLV in a long-lived segment, validates per [03-addressing.md](03-addressing.md) §path syntax, and returns the handle. After init, the handle behaves identically to a build-time literal: a pointer-load and a dispatch.
 
-### Indexed slot paths without runtime formatting
+### Indexed slot paths
 
-For the common case of `name[i]` where `i` ranges over a known set, the implementation MAY offer an **indexed-handle** form that encodes the name once and supplies the index as a separate u16 at the dispatch boundary:
+For the common case of `name[i]` where `i` ranges over a known set, register each real indexed path (`/camera/frame[0]`, `/camera/frame[1]`, …) once and write by its handle:
 
-```c
-// One PATH TLV for "/camera/frame", plus per-call index.
-static const tracer_path_t CAMERA_FRAME = TRACER_PATH("/camera/frame");
+```cpp
+tr::graph::graph_t g;
 
-void on_dma_complete(...) {
-    for (size_t i = 0; i < N; i++) {
-        tracer_write_indexed(&CAMERA_FRAME, /*index=*/i, slice_tlv);
+// One vertex per real indexed path.
+tr::graph::vertex_t* frame[N];
+frame[0] = *g.register_vertex(tr::graph::path_t("/camera/frame[0]"), tr::graph::role_t::STREAM);
+frame[1] = *g.register_vertex(tr::graph::path_t("/camera/frame[1]"), tr::graph::role_t::STREAM);
+// …
+
+void on_dma_complete(/* … */) {
+    for (std::size_t i = 0; i < N; ++i) {
+        g.write(frame[i], slice_view(i));
     }
 }
 ```
 
-The router treats an indexed-handle write as equivalent to a write to `/camera/frame[i]`. This is an optimization, not a different addressing scheme — the resolved vertex and the wire bytes (after index expansion) are identical.
+A single-PATH-plus-index form — encoding `/camera/frame` once and supplying `i` as a separate u16 at the dispatch boundary — is a **permitted-but-not-implemented** optimization (non-normative): the reference core has no separate indexed-handle API. It would be equivalent to the real write to `/camera/frame[i]` above — the resolved vertex and the wire bytes (after index expansion) are identical.
 
 ### Diagram: hot-path dispatch with a static handle
 
@@ -370,7 +394,7 @@ sequenceDiagram
     participant Subs as Subscribers
 
     App->>Hnd: load pointer (1 cycle on Cortex-M)
-    App->>Disp: tracer_write(handle, value_tlv)
+    App->>Disp: g.write(handle, value)
     Disp->>Disp: dispatch_table[hash(handle.bytes)]
     Note over Disp: byte-compare on PATH bytes;<br/>no string parse, no alloc
     Disp->>Vtx: store value_tlv as LKV
