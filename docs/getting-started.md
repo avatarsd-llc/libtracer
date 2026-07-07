@@ -82,15 +82,16 @@ or [Arduino](https://github.com/avatarsd-llc/libtracer/tree/main/integrations/ar
 using tr::graph::graph_t, tr::graph::path_t, tr::graph::role_t;
 
 graph_t g;
-// Resolve the path ONCE to a vertex_t* handle (the hot-path token — no strings after).
-tr::graph::vertex_t* temp = *g.register_vertex(path_t("/sensor/temp"),
-                                               role_t::STORED_VALUE);
+// Resolve the path ONCE to a vertex_handle_t (the hot-path token — no strings after).
+// register_vertex is infallible on a literal (ADR-0056): it returns the handle, no *-deref.
+const tr::graph::vertex_handle_t temp =
+    g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
 
 (void)g.write(temp, make_value(23));   // store an opaque value (a view_t over bytes)
 auto got = g.read(temp);               // read the last-known value back (a rope clone)
 ```
 
-**The one idea that matters:** `register_vertex` returns a **`vertex_t*` handle**, and
+**The one idea that matters:** `register_vertex` returns a **`vertex_handle_t`**, and
 the hot path — `write(v, …)` / `read(v)` — takes that handle. No string formatting,
 no parse, no map lookup per call (the spec's rule; `reference/10` §path-handle).
 The `path_t("…")` constructor parses the literal once (ADR-0054); a runtime string

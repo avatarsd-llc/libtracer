@@ -313,7 +313,7 @@ void test_enumeration_and_forwarding() {
     // ----- peer P (CAN node 5): terminus with /a/b holding a known VALUE. ----
     graph_t graph_p;
     const std::uint32_t kStored = 0xCAFEF00Du;
-    tr::graph::vertex_t* vp = *graph_p.register_vertex(path_t("/a/b"), role_t::STORED_VALUE);
+    tr::graph::vertex_handle_t vp = graph_p.register_vertex(path_t("/a/b"), role_t::STORED_VALUE);
     (void)graph_p.write(vp, owned(b_value_u32(kStored)));
     fwd_router_t router_p(graph_p);
     tr::net::transport_can tcan_p(std::make_unique<fake_link_t>(bus),
@@ -337,8 +337,8 @@ void test_enumeration_and_forwarding() {
 
     // No vertex was created for any peer — the transit graph holds only what the
     // test created (ADR-0044 §1: peers never mutate any node's graph).
-    check(graph_t_.find(path_t::parse("/n5")->key()) == nullptr &&
-              graph_t_.find(path_t::parse("/net/can0/n5")->key()) == nullptr,
+    check(!graph_t_.find(path_t::parse("/n5")->key()).has_value() &&
+              !graph_t_.find(path_t::parse("/net/can0/n5")->key()).has_value(),
           "no vertex exists for peer n5 anywhere on the transit node");
     check(enumerate_local(graph_t_, "/net:children[]") == std::set<std::string>{"can0"},
           "/net:children[] (generic member read) still lists only the connection");
@@ -413,7 +413,7 @@ void test_enumeration_and_forwarding() {
           "P's /a/b LKV updated to the forwarded value (byte-exact)");
 
     // Statelessness of the transit: still no peer vertices, no label state.
-    check(graph_t_.find(path_t::parse("/n5")->key()) == nullptr,
+    check(!graph_t_.find(path_t::parse("/n5")->key()).has_value(),
           "transit graph still untouched after forwarded READ+WRITE");
 }
 

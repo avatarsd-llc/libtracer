@@ -53,7 +53,8 @@ void check(bool& ok, bool cond, const char* what) {
 /** @brief Run one fan-out width: @p fanout subscribers, @p writes writes; returns ok. */
 bool run_fanout(std::size_t fanout, std::uint32_t writes, bool& ok) {
     tr::graph::graph_t g;
-    tr::graph::vertex_t* v = *g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+    const tr::graph::vertex_handle_t v =
+        g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
 
     // One delivery counter shared by every callback — each fires inline per write.
     std::uint64_t deliveries = 0;

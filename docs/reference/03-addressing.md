@@ -299,8 +299,8 @@ tr::graph::graph_t g;
 
 // Parse-once handle: the PATH TLV is encoded a single time here.
 // Reserved-char / length validation happens in the constructor.
-tr::graph::vertex_t* sensor_temp =
-    *g.register_vertex(tr::graph::path_t("/sensor/temp"),
+tr::graph::vertex_handle_t sensor_temp =
+    g.register_vertex(tr::graph::path_t("/sensor/temp"),
                        tr::graph::role_t::STORED_VALUE);
 
 // Build a fresh VALUE view over f32 bytes (standard helper pattern).
@@ -342,11 +342,12 @@ For these, register each concrete indexed path once at init and keep its vertex 
 tr::graph::graph_t g;
 
 // Validate, canonicalize, encode once. The vertex handle is stable for node lifetime.
-tr::graph::vertex_t* frame_slice[N];
+std::vector<tr::graph::vertex_handle_t> frame_slice;
+frame_slice.reserve(N);
 for (std::size_t i = 0; i < N; ++i) {
     // Runtime-derived index → path_t::parse returns std::expected; deref on success.
     auto p = tr::graph::path_t::parse("/camera/frame[" + std::to_string(i) + "]");
-    frame_slice[i] = *g.register_vertex(*p, tr::graph::role_t::STREAM);
+    frame_slice.push_back(g.register_vertex(*p, tr::graph::role_t::STREAM));
 }
 
 // Hot path — zero-copy borrow of the DMA buffer, no string work.
@@ -369,9 +370,9 @@ For the common case of `name[i]` where `i` ranges over a known set, register eac
 tr::graph::graph_t g;
 
 // One vertex per real indexed path.
-tr::graph::vertex_t* frame[N];
-frame[0] = *g.register_vertex(tr::graph::path_t("/camera/frame[0]"), tr::graph::role_t::STREAM);
-frame[1] = *g.register_vertex(tr::graph::path_t("/camera/frame[1]"), tr::graph::role_t::STREAM);
+std::vector<tr::graph::vertex_handle_t> frame;
+frame.push_back(g.register_vertex(tr::graph::path_t("/camera/frame[0]"), tr::graph::role_t::STREAM));
+frame.push_back(g.register_vertex(tr::graph::path_t("/camera/frame[1]"), tr::graph::role_t::STREAM));
 // …
 
 void on_dma_complete(/* … */) {

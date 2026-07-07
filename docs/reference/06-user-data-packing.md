@@ -31,8 +31,8 @@ The minimal endpoint. A 1-byte payload, optionally with the timestamp prefix.
 ```cpp
 // Publisher — see the graph module (../modules/graph.md) and view module (../modules/views.md).
 tr::graph::graph_t g;
-tr::graph::vertex_t* led =
-    *g.register_vertex(tr::graph::path_t("/dashboard/led"), tr::graph::role_t::STORED_VALUE);
+tr::graph::vertex_handle_t led =
+    g.register_vertex(tr::graph::path_t("/dashboard/led"), tr::graph::role_t::STORED_VALUE);
 
 // Build a fresh single-byte VALUE view.
 bool led_on = true;
@@ -104,8 +104,8 @@ tr::view::view_t idr_view =
 
 // Expose GPIOA's input data register as a vertex whose stored view points at the
 // live register; every read observes the register with no memory copy.
-tr::graph::vertex_t* v_idr =
-    *g.register_vertex(tr::graph::path_t("/gpio/A/IDR"), tr::graph::role_t::STORED_VALUE);
+tr::graph::vertex_handle_t v_idr =
+    g.register_vertex(tr::graph::path_t("/gpio/A/IDR"), tr::graph::role_t::STORED_VALUE);
 g.write(v_idr, idr_view);
 ```
 
@@ -131,8 +131,8 @@ tr::view::view_t value_u32(std::uint32_t x) {
     return tr::view::view_t::over(std::move(seg));
 }
 
-tr::graph::vertex_t* v_bsrr =
-    *g.register_vertex(tr::graph::path_t("/gpio/A/BSRR"), tr::graph::role_t::HANDLER);
+tr::graph::vertex_handle_t v_bsrr =
+    g.register_vertex(tr::graph::path_t("/gpio/A/BSRR"), tr::graph::role_t::HANDLER);
 g.write(v_bsrr, value_u32(1u << 5));   // set pin PA5
 ```
 
@@ -177,7 +177,7 @@ tr::wire::tlv_t value_tlv(std::span<const std::byte> b) {
     return t;
 }
 
-void publish_imu(const imu_sample& s, tr::graph::graph_t& g, tr::graph::vertex_t* imu) {
+void publish_imu(const imu_sample& s, tr::graph::graph_t& g, tr::graph::vertex_handle_t imu) {
     auto bytes = [](const auto& x) {
         return std::span<const std::byte>{reinterpret_cast<const std::byte*>(&x), sizeof x};
     };
@@ -227,7 +227,7 @@ The publisher slices the stream across enumerated child endpoints with shared ti
 constexpr std::size_t SLICE_SIZE = 4 * 1024;   // 4 KiB per slice, fits one MTU on most LANs
 
 // Slice vertices registered once at init (see §static path handles in 03-addressing).
-extern tr::graph::vertex_t* adc_raw[];         // adc_raw[i] == /adc/raw[i]
+extern std::vector<tr::graph::vertex_handle_t> adc_raw;         // adc_raw[i] == /adc/raw[i]
 
 void on_dma_complete(std::byte* adc_buf, std::size_t buf_len,
                      tr::graph::graph_t& g) {
@@ -308,7 +308,7 @@ Each producer publishes to its own vertex with its own slicing. **Both producers
 ### Publisher: camera
 
 ```cpp
-extern tr::graph::vertex_t* camera_frame[];   // camera_frame[i] == /camera/frame[i]
+extern std::vector<tr::graph::vertex_handle_t> camera_frame;   // camera_frame[i] == /camera/frame[i]
 
 void on_frame(std::byte* frame, std::size_t frame_len, std::uint64_t /*ts_ns*/,
               tr::graph::graph_t& g) {
@@ -327,7 +327,7 @@ void on_frame(std::byte* frame, std::size_t frame_len, std::uint64_t /*ts_ns*/,
 
 ```cpp
 void on_scan(std::byte* scan, std::size_t scan_len, std::uint64_t /*ts_ns*/,
-             tr::graph::graph_t& g, tr::graph::vertex_t* lidar_scan0) {
+             tr::graph::graph_t& g, tr::graph::vertex_handle_t lidar_scan0) {
     // Scan fits in one slice — borrow it directly.
     tr::view::view_t t = tr::view::view_t::over(
         tr::view::borrow(std::span<std::byte>{scan, scan_len}));
@@ -389,8 +389,8 @@ A common need: a configuration or state variable that lives in one process and s
 // On the authoritative host: expose the variable as a STORED_VALUE vertex.
 static std::int32_t target_rpm = 3000;
 
-tr::graph::vertex_t* v_rpm =
-    *g.register_vertex(tr::graph::path_t("/control/target_rpm"), tr::graph::role_t::STORED_VALUE);
+tr::graph::vertex_handle_t v_rpm =
+    g.register_vertex(tr::graph::path_t("/control/target_rpm"), tr::graph::role_t::STORED_VALUE);
 
 // Borrow the live variable's bytes (zero-copy) and store the view.
 g.write(v_rpm, tr::view::view_t::over(tr::view::borrow(
@@ -406,8 +406,8 @@ g.write(tr::graph::path_t("/local/cached/target_rpm:settings"), durability_setti
 g.write(tr::graph::path_t("/control/target_rpm:subscribers[]"), subscriber_value);
 
 // Anytime the consumer wants the latest value:
-tr::graph::vertex_t* cached =
-    *g.register_vertex(tr::graph::path_t("/local/cached/target_rpm"), tr::graph::role_t::STORED_VALUE);
+tr::graph::vertex_handle_t cached =
+    g.register_vertex(tr::graph::path_t("/local/cached/target_rpm"), tr::graph::role_t::STORED_VALUE);
 auto r = g.read(cached);
 std::int32_t rpm;
 std::memcpy(&rpm, r->only().bytes().data(), sizeof rpm);
@@ -527,8 +527,8 @@ The MCU-friendly variant is to **encode the PATH TLV at build time** and pass a 
 // literal (ADR-0054). A binding may additionally expose a consteval PATH encoder
 // that emits the same bytes into .rodata.
 tr::graph::graph_t g;
-tr::graph::vertex_t* temp =
-    *g.register_vertex(tr::graph::path_t("/sensor/temp"), tr::graph::role_t::STORED_VALUE);
+tr::graph::vertex_handle_t temp =
+    g.register_vertex(tr::graph::path_t("/sensor/temp"), tr::graph::role_t::STORED_VALUE);
 
 void tim2_irq_handler() {            // hard-real-time ISR
     float t = read_thermistor_adc();
@@ -565,15 +565,16 @@ When the path includes a runtime-derived index (an address-shift slice number, a
 constexpr std::size_t N_SLICES = 64;
 
 // File scope — vertex handles are filled in at init.
-static tr::graph::vertex_t* slice_vtx[N_SLICES];
+static std::vector<tr::graph::vertex_handle_t> slice_vtx;
 
 // Called once from main() before the DMA / capture loop starts.
 void publisher_init(tr::graph::graph_t& g) {
+    slice_vtx.reserve(N_SLICES);
     for (std::size_t i = 0; i < N_SLICES; ++i) {
         // String work is ALLOWED here — init runs once and amortizes across the
         // program lifetime. path_t::parse returns std::expected; deref on success.
         auto p = tr::graph::path_t::parse("/adc/raw[" + std::to_string(i) + "]");
-        slice_vtx[i] = *g.register_vertex(*p, tr::graph::role_t::STREAM);
+        slice_vtx.push_back(g.register_vertex(*p, tr::graph::role_t::STREAM));
         // Each register_vertex encodes exactly one long-lived PATH TLV.
     }
 }
@@ -594,7 +595,7 @@ The trade: a one-time RAM cost of ~1.6 KB (64 PATH TLVs averaging ~25 bytes each
 The reference core writes each slice by the handle of its real indexed path `/adc/raw[i]`:
 
 ```cpp
-extern tr::graph::vertex_t* adc_raw[];   // adc_raw[i] == /adc/raw[i], registered at init
+extern std::vector<tr::graph::vertex_handle_t> adc_raw;   // adc_raw[i] == /adc/raw[i], registered at init
 
 void dma_half_complete_irq(std::byte* bytes, std::size_t S, std::size_t n_slices_in_buf,
                            tr::graph::graph_t& g) {

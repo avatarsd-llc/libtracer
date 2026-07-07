@@ -202,7 +202,7 @@ void differential(std::string_view name, const seed_fn& seed, const std::vector<
 // Seed helpers -----------------------------------------------------------------
 void seed_temp_value(graph_t& g) {
     const auto path = path_t::parse("/sensor/temp");
-    tr::graph::vertex_t* v = *g.register_vertex(*path, role_t::STORED_VALUE);
+    tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::STORED_VALUE);
     (void)g.write(v, make_value(b_value({0xD2, 0x04, 0x00, 0x00})));  // VALUE u32=1234
 }
 void seed_temp_empty(graph_t& g) {
@@ -250,8 +250,8 @@ int main() {
         const auto view =
             tr::wire::tlv_view_t::over(rope_split(wframe, std::array<std::size_t, 1>{5}));
         (void)rv.resolve(*view);
-        const auto sa = ga.read(ga.find(path_t::parse("/sensor/temp")->key()));
-        const auto sv = gv.read(gv.find(path_t::parse("/sensor/temp")->key()));
+        const auto sa = ga.read(*ga.find(path_t::parse("/sensor/temp")->key()));
+        const auto sv = gv.read(*gv.find(path_t::parse("/sensor/temp")->key()));
         check(sa.has_value() && sv.has_value() &&
                   sa->flatten().bytes().size() == sv->flatten().bytes().size() &&
                   std::memcmp(sa->flatten().bytes().data(), sv->flatten().bytes().data(),
@@ -267,7 +267,8 @@ int main() {
     {
         std::printf("rope-tier pinned store (store_ref_min_bytes, multi-link payload):\n");
         graph_t g;
-        tr::graph::vertex_t* v = *g.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE);
+        tr::graph::vertex_handle_t v =
+            g.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE);
         // Opt in via the :settings field-write (parses the u32), matching the arena test.
         (void)g.write(path_t("/sensor/blob:settings.store_ref_min_bytes"),
                       make_value(b_value({0x08, 0x00, 0x00, 0x00})));

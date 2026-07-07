@@ -36,16 +36,18 @@ struct handlers_t { std::function<result_t<rope_t>()> on_read;
                   std::function<result_t<void>(const rope_t&)> on_write; };
 
 class graph_t {
-    result_t<vertex_t*> register_vertex(const path_t&, role_t, handlers_t={}, settings_t={});
-    result_t<rope_t>    read (vertex_t*) const;        // atomic LKV load (rope; scalar = 1 link)
-    result_t<void>    write(vertex_t*, rope_t);        // store + fan-out (view_t → rope_t implicit)
-    result_t<rope_t>    await(vertex_t*, std::chrono::nanoseconds);   // blocks for next write
-    result_t<std::vector<rope_t>> history(vertex_t*) const;          // stream window
+    vertex_handle_t register_vertex(const path_t&, role_t, handlers_t={}, settings_t={}); // infallible (ADR-0056)
+    result_t<vertex_handle_t> try_register_vertex(const path_t&, role_t, handlers_t={}, settings_t={}); // runtime path
+    result_t<rope_t>    read (vertex_handle_t) const;  // atomic LKV load (rope; scalar = 1 link)
+    result_t<void>    write(vertex_handle_t, rope_t);  // store + fan-out (view_t → rope_t implicit)
+    result_t<rope_t>    await(vertex_handle_t, std::chrono::nanoseconds);   // blocks for next write
+    result_t<std::vector<rope_t>> history(vertex_handle_t) const;    // stream window
 
     result_t<void> subscribe(const path_t& src, const path_t& target);    // re-dispatch
     result_t<void> subscribe(const path_t& src, std::function<void(const rope_t&)>);  // callback
 
-    result_t<void> write(vertex_t*, const field_path_t&, rope_t);  // handle-based field-write
+    result_t<void> write(vertex_handle_t, const field_path_t&, rope_t);  // handle-based field-write
+    std::optional<vertex_handle_t> find(std::span<const std::byte> key) const;  // resolve → handle
     result_t<rope_t> read (const path_t&) const;       // field tail → :schema, …
     result_t<void> write(const path_t&, rope_t);       // field tail → :subscribers[]/:settings.*
 };
@@ -56,7 +58,7 @@ class graph_t {
 The hot path is **handle-typed** (the spec's rule, `reference/10` §path-handle).
 A `path_t` encodes the canonical PATH bytes **once** — the `path_t(std::string_view)`
 constructor for a known-good literal (ADR-0054), or the fallible `path_t::parse` for a
-runtime string; `register_vertex` / `find` resolve a **`vertex_t*`** once; then
+runtime string; `register_vertex` / `find` resolve a **`vertex_handle_t`** once; then
 `write(v, value)` and `write(v, fieldpath, value)` reuse those handles — **no string
 crafting, no parse, no map lookup per call**. The string/`path_t` overloads are init-time
 conveniences.
@@ -65,7 +67,7 @@ conveniences.
 ```cpp
 // idiomatic: encode the path once (parse-once ctor), reuse the handle
 path_t p("/x:settings.reliability");                    // once — no *-deref (ADR-0054)
-auto* v = g.find(p.key());                              // once
+auto v = *g.find(p.key());                              // once — find → std::optional<vertex_handle_t>
 for (...) g.write(v, p.field(), reliable_tlv);           // hot loop — zero strings
 ```
 

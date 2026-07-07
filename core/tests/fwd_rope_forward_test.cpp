@@ -245,7 +245,7 @@ int main() {
         std::printf("Terminus over a multi-link rope (view resolver applies the write):\n");
         graph_t g;
         const auto sensor = path_t::parse("/sensor");
-        tr::graph::vertex_t* v = *g.register_vertex(*sensor, role_t::STORED_VALUE);
+        tr::graph::vertex_handle_t v = g.register_vertex(*sensor, role_t::STORED_VALUE);
         fwd_router_t router(g);
         fake_rope_link_t in;
         router.add_child("in", in);  // reply goes back over the inbound link
@@ -274,7 +274,7 @@ int main() {
             "Verify-at-access over a multi-link rope (bad CRC dropped, good CRC applied):\n");
         graph_t g;
         const auto sensor = path_t::parse("/sensor");
-        tr::graph::vertex_t* v = *g.register_vertex(*sensor, role_t::STORED_VALUE);
+        tr::graph::vertex_handle_t v = g.register_vertex(*sensor, role_t::STORED_VALUE);
         fwd_router_t router(g);
         fake_rope_link_t in;
         router.add_child("in", in);
@@ -343,7 +343,7 @@ int main() {
         std::printf("COMPACT terminus over a multi-link rope (payload sub-rope materialize):\n");
         graph_t g;
         const auto sensor = path_t::parse("/sensor");
-        tr::graph::vertex_t* v = *g.register_vertex(*sensor, role_t::STORED_VALUE);
+        tr::graph::vertex_handle_t v = g.register_vertex(*sensor, role_t::STORED_VALUE);
         fwd_router_t router(g);
         fake_rope_link_t in;
         router.add_child("in", in);

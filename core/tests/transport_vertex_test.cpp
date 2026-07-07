@@ -104,7 +104,7 @@ void test_create_connection_vertex() {
     const auto w =
         node.write(path_t("/net:children[]"), conn_spec("client", "up", conn_role_t::DIAL, 8080));
     check(w.has_value(), "SPEC{client, up} write creates the connection");
-    check(node.find(path_t::parse("/net/up")->key()) != nullptr,
+    check(node.find(path_t::parse("/net/up")->key()).has_value(),
           "the connection resolves as /net/up (a first-class / vertex)");
 
     const auto* s = net.settings_of("up");
@@ -352,7 +352,7 @@ void test_creation_errors() {
                    conn_spec("client", "x", conn_role_t::DIAL, 47122, "pigeon", "127.0.0.1"));
     check(!w1.has_value() && w1.error() == status_t::SCHEMA_NOT_FOUND,
           "unknown kind => SCHEMA_NOT_FOUND");
-    check(node.find(path_t::parse("/net/x")->key()) == nullptr, "no /net/x vertex was created");
+    check(!node.find(path_t::parse("/net/x")->key()).has_value(), "no /net/x vertex was created");
 
     // A udp DIAL without addr (and a LISTEN without port) => TYPE_MISMATCH, no vertex.
     const auto w2 = node.write(path_t("/net:children[]"),
@@ -363,8 +363,8 @@ void test_creation_errors() {
                                conn_spec("listener", "z", conn_role_t::LISTEN, 0, "udp"));
     check(!w3.has_value() && w3.error() == status_t::TYPE_MISMATCH,
           "udp listener without port => TYPE_MISMATCH");
-    check(node.find(path_t::parse("/net/y")->key()) == nullptr &&
-              node.find(path_t::parse("/net/z")->key()) == nullptr,
+    check(!node.find(path_t::parse("/net/y")->key()).has_value() &&
+              !node.find(path_t::parse("/net/z")->key()).has_value(),
           "no vertices were created for the failed configs");
 
     // No kind and no staged link => NOT_FOUND (nothing can carry the bytes).

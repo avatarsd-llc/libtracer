@@ -75,8 +75,8 @@ void test_create_and_resolve() {
     check(w.has_value(), "SPEC{stored_value, temp} write accepted");
 
     // The child is now a first-class vertex at /dev/temp — resolvable and writable.
-    vertex_t* child = g.find(path_t::parse("/dev/temp")->key());
-    check(child != nullptr, "child /dev/temp resolves in the vertex map");
+    check(g.find(path_t::parse("/dev/temp")->key()).has_value(),
+          "child /dev/temp resolves in the vertex map");
     const auto val = bare_value();
     const auto cw = g.write(path_t("/dev/temp"), val);
     check(cw.has_value(), "the created child accepts an ordinary value write");
@@ -93,7 +93,7 @@ void test_unknown_type() {
     const auto w = g.write(path_t("/dev:children[]"), spec("no_such_type", "x"));
     check(!w.has_value() && w.error() == status_t::SCHEMA_NOT_FOUND,
           "unknown type is the ENOTTY of creation");
-    check(g.find(path_t::parse("/dev/x")->key()) == nullptr, "no child was created");
+    check(!g.find(path_t::parse("/dev/x")->key()).has_value(), "no child was created");
 }
 
 void test_duplicate_name() {
@@ -134,7 +134,7 @@ void test_custom_factory() {
     const auto w = g.write(path_t("/dev:children[]"), spec("streamy", "s"));
     check(w.has_value(), "SPEC of a custom-registered type is accepted");
     check(factory_ran, "the device factory ran");
-    check(g.find(path_t::parse("/dev/s")->key()) != nullptr, "the custom child resolves");
+    check(g.find(path_t::parse("/dev/s")->key()).has_value(), "the custom child resolves");
 }
 
 }  // namespace

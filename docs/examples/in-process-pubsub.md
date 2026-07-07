@@ -16,7 +16,7 @@ field-writing a QoS setting, then discovering it via the `:schema` control read.
 ## What to notice
 
 - **Handles, not strings, on the hot path** — the path is encoded once via the parse-once
-  `path_t("…")` constructor; `register_vertex` returns a `vertex_t*` reused for every op.
+  `path_t("…")` constructor; `register_vertex` returns a `vertex_handle_t` reused for every op.
 - **`await` is join-safe** — the publisher `join()`s the waiter *after* the write, so every
   delivery is complete and visible when the checks run.
 - **It self-checks** — each delivery path is asserted, so the ctest smoke test guards

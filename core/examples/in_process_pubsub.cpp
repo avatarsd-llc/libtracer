@@ -65,7 +65,8 @@ int main() {
     constexpr std::uint32_t kSent = 23;
     tr::graph::graph_t g;
 
-    tr::graph::vertex_t* temp = *g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+    const tr::graph::vertex_handle_t temp =
+        g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
 
     // Values captured from each delivery path, verified at the end.
     std::uint32_t cb_got = 0;     // subscriber 1 (callback)

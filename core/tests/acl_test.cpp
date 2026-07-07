@@ -46,7 +46,7 @@ using tr::graph::reply_kind_t;
 using tr::graph::role_t;
 using tr::graph::status_t;
 using tr::graph::subject_token_t;
-using tr::graph::vertex_t;
+using tr::graph::vertex_handle_t;
 using tr::wire::opt_t;
 using tr::wire::tlv_t;
 using tr::wire::type_t;
@@ -117,7 +117,7 @@ std::optional<subject_token_t> caller_is_subject(std::string_view caller) {
 }
 
 // Write `text` bytes as a VALUE TLV to `v` under `caller`.
-tr::graph::result_t<void> write_u8(graph_t& g, vertex_t* v, std::uint8_t x,
+tr::graph::result_t<void> write_u8(graph_t& g, vertex_handle_t v, std::uint8_t x,
                                    std::string_view caller = {}) {
     std::vector<std::byte> out;
     const std::byte payload[1] = {std::byte{x}};
@@ -273,7 +273,7 @@ void test_open_by_default() {
 
     {  // no resolver installed => a restrictive ACL is stored but not enforced
         graph_t g;
-        vertex_t* v = *g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
+        vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
         (void)g.write(
             path_t("/x:acl"),
             make_value(make_acl({{.subject = "only-peer-z", .mask = bit(acl_right_t::READ)}})));
@@ -284,14 +284,14 @@ void test_open_by_default() {
     {  // resolver installed, vertex has no ACL => open
         graph_t g;
         g.set_subject_resolver(caller_is_subject);
-        vertex_t* v = *g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
+        vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
         check(write_u8(g, v, 1, "peer-a").has_value(), "resolver + no ACL => WRITE allowed");
         check(g.read(v, "peer-a").has_value(), "resolver + no ACL => READ allowed");
     }
     {  // resolver installed, trusted (local, empty-context) caller => allowed
         graph_t g;
         g.set_subject_resolver(caller_is_subject);
-        vertex_t* v = *g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
+        vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
         (void)g.write(
             path_t("/x:acl"),
             make_value(make_acl({{.subject = "only-peer-z", .mask = bit(acl_right_t::READ)}})));
@@ -304,7 +304,7 @@ void test_gated_ops() {
     std::printf("every gated op, allow + deny (resolver installed):\n");
     graph_t g;
     g.set_subject_resolver(caller_is_subject);
-    vertex_t* v = *g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
+    vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
     (void)write_u8(g, v, 7);  // seed an LKV (trusted local write)
 
     // peer-a: READ+WRITE; peer-s: SUBSCRIBE; peer-c: CREATE; peer-r: READ_ACL;
@@ -358,7 +358,7 @@ void test_gated_ops() {
               ":children[] create denied without the CREATE bit");
         check(g.write(v, field->field(), make_value(spec), "peer-c").has_value(),
               ":children[] create allowed for a CREATE-granted subject");
-        check(g.find(path_t::parse("/x/kid")->key()) != nullptr, "the child was created");
+        check(g.find(path_t::parse("/x/kid")->key()).has_value(), "the child was created");
     }
     // READ_ACL — its own right, distinct from READ
     {
@@ -394,7 +394,7 @@ void test_expiry() {
     std::printf("ACE expiry (expires_ns, absolute ns since epoch):\n");
     graph_t g;
     g.set_subject_resolver(caller_is_subject);
-    vertex_t* v = *g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
+    vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
     (void)write_u8(g, v, 7);
 
     const std::uint64_t far_future = ~std::uint64_t{0} >> 1;  // ~year 2262
@@ -413,8 +413,8 @@ void test_inheritance() {
     graph_t g;
     g.set_subject_resolver(caller_is_subject);
     (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
-    vertex_t* child = *g.register_vertex(path_t("/dev/temp"), role_t::STORED_VALUE);
-    vertex_t* grandchild = *g.register_vertex(path_t("/dev/temp/raw"), role_t::STORED_VALUE);
+    vertex_handle_t child = g.register_vertex(path_t("/dev/temp"), role_t::STORED_VALUE);
+    vertex_handle_t grandchild = g.register_vertex(path_t("/dev/temp/raw"), role_t::STORED_VALUE);
     (void)write_u8(g, child, 7);
     (void)write_u8(g, grandchild, 7);
 
@@ -432,7 +432,7 @@ void test_inheritance() {
           "grandchild READ allowed via the INHERIT ACE (whole subtree)");
     check(denied(write_u8(g, child, 1, "peer-i")),
           "the inherited grant is bit-scoped — child WRITE denied");
-    check(write_u8(g, g.find(path_t::parse("/dev")->key()), 1, "peer-l").has_value(),
+    check(write_u8(g, *g.find(path_t::parse("/dev")->key()), 1, "peer-l").has_value(),
           "the non-INHERIT WRITE ACE applies on /dev itself");
     check(denied(write_u8(g, child, 1, "peer-l")),
           "the non-INHERIT WRITE ACE does NOT travel to the child (closed by the "
@@ -444,11 +444,11 @@ void test_inheritance() {
     (void)g.register_vertex(path_t("/base/leaf"), role_t::STORED_VALUE);
     (void)g.write(path_t("/base:acl"),
                   make_value(make_acl({{.subject = "peer-x", .mask = bit(acl_right_t::READ)}})));
-    vertex_t* leaf = g.find(path_t::parse("/base/leaf")->key());
+    const auto leaf = *g.find(path_t::parse("/base/leaf")->key());
     check(write_u8(g, leaf, 1, "anyone").has_value(),
           "non-INHERIT parent ACE does not propagate — the leaf stays open");
     // ... while the parent itself is closed by that same ACE.
-    check(denied(write_u8(g, g.find(path_t::parse("/base")->key()), 1, "anyone")),
+    check(denied(write_u8(g, *g.find(path_t::parse("/base")->key()), 1, "anyone")),
           "the same ACE closes the parent itself (WRITE denied)");
 
     // Own ACEs + inherited ACEs combine: the child grants peer-o WRITE; peer-i keeps
@@ -464,8 +464,8 @@ void test_two_acl_fan_in() {
     std::printf("two-ACL gating (ADR-0026) — fan-out SUBSCRIBE + fan-in WRITE:\n");
     graph_t g;
     g.set_subject_resolver(caller_is_subject);
-    vertex_t* src = *g.register_vertex(path_t("/src"), role_t::STORED_VALUE);
-    vertex_t* dst = *g.register_vertex(path_t("/dst"), role_t::STORED_VALUE);
+    vertex_handle_t src = g.register_vertex(path_t("/src"), role_t::STORED_VALUE);
+    vertex_handle_t dst = g.register_vertex(path_t("/dst"), role_t::STORED_VALUE);
 
     // The producer authorizes its subscribers: /src:acl grants SUBSCRIBE to link-a
     // (and WRITE to the local producer path — writes arrive under the trusted local
@@ -510,7 +510,7 @@ void test_remote_path() {
     graph_t g;
     g.set_subject_resolver(caller_is_subject);
     op_resolver_t resolver(g);
-    vertex_t* v = *g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
+    vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
     (void)write_u8(g, v, 7);
     (void)g.write(path_t("/x:acl"), make_value(make_acl({
                                         {.subject = "link-ok",

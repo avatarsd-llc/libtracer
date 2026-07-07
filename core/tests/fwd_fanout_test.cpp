@@ -199,7 +199,7 @@ void test_full_route_fanout() {
                       b_field_subscribers_append(), b_subscriber(b_path({"client"}), false)));
     link.drain();  // discard the subscribe REPLY
 
-    (void)graph.write(*v, make_value(b_value_u32(0xCAFEBABE)));
+    (void)graph.write(v, make_value(b_value_u32(0xCAFEBABE)));
     const auto sent = link.drain();
     check(sent.size() == 1, "one delivery frame fanned out");
     if (sent.size() == 1) {
@@ -256,7 +256,7 @@ void test_full_route_fanout_multilink() {
     check(value.link_count() == 3 && value.total_length() == n,
           "value is a genuine 3-link rope over the VALUE TLV");
 
-    (void)graph.write(*v, std::move(value));
+    (void)graph.write(v, std::move(value));
     const auto sent = link.drain();
     check(sent.size() == 1, "one delivery frame fanned out");
     if (sent.size() == 1) {
@@ -281,7 +281,7 @@ void test_transient_local_latch() {
     settings_t s;
     s.durability = 1;  // transient-local
     auto v = graph.register_vertex(*p, role_t::STORED_VALUE, {}, s);
-    (void)graph.write(*v, make_value(b_value_u32(0x11223344)));  // seed BEFORE subscribe
+    (void)graph.write(v, make_value(b_value_u32(0x11223344)));  // seed BEFORE subscribe
 
     link.inject(b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"client"}),
                       b_field_subscribers_append(), b_subscriber(b_path({"client"}), false)));
@@ -312,7 +312,7 @@ void test_compact_auto_promote() {
                       b_field_subscribers_append(), b_subscriber(b_path({"client"}), true)));
     link.drain();  // discard the subscribe REPLY
 
-    (void)graph.write(*v, make_value(b_value_u32(0xA1A1A1A1)));
+    (void)graph.write(v, make_value(b_value_u32(0xA1A1A1A1)));
     const auto first = link.drain();
     check(first.size() == 2, "first compact delivery = ADVERTISE + COMPACT");
     std::size_t compact_len = 0;
@@ -324,7 +324,7 @@ void test_compact_auto_promote() {
         compact_len = first[1].size();
     }
 
-    (void)graph.write(*v, make_value(b_value_u32(0xB2B2B2B2)));
+    (void)graph.write(v, make_value(b_value_u32(0xB2B2B2B2)));
     const auto second = link.drain();
     check(second.size() == 1, "subsequent delivery = COMPACT only (no re-advertise)");
     if (second.size() == 1) {
@@ -340,7 +340,7 @@ void test_compact_auto_promote() {
 
     // Reconnect self-heal: clear_link drops the binding, so the next delivery re-advertises.
     router.clear_link("client");
-    (void)graph.write(*v, make_value(b_value_u32(0xC3C3C3C3)));
+    (void)graph.write(v, make_value(b_value_u32(0xC3C3C3C3)));
     const auto healed = link.drain();
     check(healed.size() == 2, "post-reconnect delivery re-advertises (ADVERTISE + COMPACT)");
 }
@@ -363,7 +363,7 @@ void test_concurrent_writer_vs_clear() {
         while (!go.load()) {
         }
         for (int i = 0; i < 500; ++i)
-            (void)graph.write(*v, make_value(b_value_u32(0xD0D0'0000u + i)));
+            (void)graph.write(v, make_value(b_value_u32(0xD0D0'0000u + i)));
     });
     std::thread healer([&] {
         while (!go.load()) {

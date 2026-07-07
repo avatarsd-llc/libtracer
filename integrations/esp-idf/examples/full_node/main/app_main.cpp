@@ -227,16 +227,14 @@ struct device_node_t {
     // before the router/graph they feed are torn down.
     transport_vertex_t net{graph, router, "/net", &rx_pool};
 
-    tr::graph::vertex_t* sensor = nullptr;
+    std::optional<tr::graph::vertex_handle_t> sensor;
 
     bool bring_up() {
         // The sensor vertex: transient-local (durability=1) so a fresh remote
         // subscriber LATCHES the current value — one immediate delivery.
         tr::graph::settings_t s;
         s.durability = 1;
-        auto reg = graph.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE, {}, s);
-        if (!reg) return false;
-        sensor = *reg;
+        sensor = graph.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE, {}, s);
         if (!write_sensor(21)) return false;
 
         // The UDP listener, created IN-BAND from config — the production path.
@@ -249,7 +247,7 @@ struct device_node_t {
     }
 
     bool write_sensor(std::uint32_t v) {
-        return graph.write(sensor, owned(b_value_u32(v))).has_value();
+        return graph.write(*sensor, owned(b_value_u32(v))).has_value();
     }
 };
 
@@ -268,7 +266,7 @@ int run_host_probe(device_node_t& dev) {
     // is `src` as the device saw it ({host, self, probe}); the device forwards
     // through its "host" link, we receive {self, probe} and resolve it locally.
     const auto probe_path = path_t("/self/probe");
-    if (!graph.register_vertex(probe_path, role_t::STORED_VALUE)) return 1;
+    (void)graph.register_vertex(probe_path, role_t::STORED_VALUE);  // infallible (ADR-0056)
 
     // The reply sink is installed BEFORE the socket exists (frames may flow the
     // moment the SPEC write returns). No <future>: the example runs under the
