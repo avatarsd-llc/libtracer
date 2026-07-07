@@ -267,7 +267,7 @@ class rope_t {
 
 // Cast a (flat) view to a TLV in place — zero-copy reinterpretation (the
 // decoder). The returned tlv borrows the view's bytes; keep the view alive.
-[[nodiscard]] std::expected<tlv_t, error_t> view_as_tlv(const view_t& v);
+[[nodiscard]] std::expected<tlv_t, err_t> view_as_tlv(const view_t& v);
 
 }  // namespace tr::view
 ```
