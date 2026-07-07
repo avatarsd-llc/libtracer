@@ -77,7 +77,7 @@ jobs:
           cmake --build core/build -j          # all test targets, for the live test report
           bash bench/fetch_zenoh.sh || echo "zenoh fetch failed — comparison will be omitted"
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build bench/build --target bench_libtracer bench_codec bench_forward_heap bench_transports -j
+          cmake --build bench/build --target bench_libtracer bench_codec bench_forward_heap bench_transports bench_scatter -j
           # zenoh is optional: build it separately so a missing/failed vendor never breaks
           # the docs deploy (the comparison degrades to a note; libtracer numbers stand).
           cmake --build bench/build --target bench_zenoh bench_zenoh_net -j || echo "bench_zenoh unavailable — comparison omitted"
@@ -87,6 +87,9 @@ jobs:
         run: |
           out="${RUNNER_TEMP}/compare.tsv"
           { ./bench/build/bench_libtracer grid; ./bench/build/bench_zenoh grid; } >"$out" 2>/dev/null || true
+          # Network throughput vs composition size K: libtracer composite send (one datagram
+          # for K values) vs Zenoh's flat timer-batched put rate.
+          { ./bench/build/bench_scatter; ./bench/build/bench_zenoh scatter; } >>"$out" 2>/dev/null || true
           # Network transports (UDP/TCP) — two-process pub/sub over real loopback sockets,
           # the SAME topology for both engines. Best-effort; never fails the build (a chart
           # is simply omitted if a transport doesn't come up).
