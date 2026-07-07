@@ -33,6 +33,35 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `vertex_t*` to `vertex_handle_t` (or `auto`); use `try_register_vertex` where a duplicate
   path is a real runtime outcome. Wire protocol and conformance vectors unaffected.
 
+### Performance
+
+- **Hardware-dispatched CRC-32C (byte-exact).** `tr::crc::crc32c` / `crc32c_state::feed`
+  (`include/libtracer/crc.hpp`) now route their runtime path through a CPU-dispatched
+  CRC-32C: the SSE4.2 `_mm_crc32_u8/u64` instruction on x86 (selected once via
+  `__builtin_cpu_supports("sse4.2")`), the ARMv8 `__crc32cb/__crc32cd` instruction on
+  aarch64 (`__ARM_FEATURE_CRC32`), and a portable **slice-by-8** table fallback for CPUs
+  with neither. The SSE4.2 intrinsics are confined to a `target("sse4.2")`-attributed
+  function, so the translation unit is **not** built for SSE4.2 and still runs on older
+  CPUs. Compile-time CRCs keep the `constexpr` Sarwate table loop (guarded by
+  `std::is_constant_evaluated`). The hardware, slice-by-8, and Sarwate paths produce
+  **byte-identical** CRCs — the frozen conformance vectors and the CRC-16-CCITT path are
+  unchanged. Header-only (no new translation unit).
+- **Zero-allocation, transparent vertex-key lookup.** `path_key_hash_t` and the new
+  `path_key_eq_t` (`include/libtracer/path.hpp`) are now heterogeneous (`is_transparent`),
+  so `graph_t::find_ptr` keys the vertex map straight off a `std::span<const std::byte>`
+  with **no** owned `path_key_t` copy and **no** FNV re-hash of a fresh vector on every
+  internal by-key lookup (fan-out, ancestor bubble-up, ACL walk, FWD resolve). The by-span
+  hash is byte-identical to the owned-key hash.
+- **Transport receivers snapshotted into a local, re-copied only on change — not per frame.**
+  The TCP / UDP / WebSocket RX loops (`src/transport_tcp.cpp`, `transport_udp.cpp`,
+  `transport_ws.cpp`) took a mutex and copied the `std::function` receiver on **every**
+  inbound frame — and the installed `fwd_router_t` receiver closure exceeds the
+  `std::function` small-buffer, so that copy heap-allocated per frame. Each loop now holds a
+  local snapshot and re-copies it under the lock **only** when `set_receiver` /
+  `set_rope_receiver` set a per-transport `rx_dirty_` flag; the steady-state per-frame cost is
+  one relaxed atomic load, no lock, copy, or allocation. Mid-run receiver swaps still take
+  effect (they set the flag), and UDP no longer re-copies on idle-timeout wakeups.
+
 ## [0.3.0] — 2026-07-07
 
 ### Changed

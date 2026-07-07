@@ -255,8 +255,10 @@ The contract:
   address, so growing the map never moves an existing vertex). Hold the handle;
   do not re-resolve per call.
 - **Thread-safety**: registration takes the graph's writer lock and is safe to
-  call concurrently with reads/writes/awaits on other handles (those stay
-  lock-free on their own LKV slot).
+  call concurrently with reads/writes/awaits on other handles. A read is
+  lock-free on its own LKV slot; a write publishes to the slot lock-free and
+  then takes a short per-vertex lock only for the write-sequence bump + waiter
+  notify (a 0.4.0 optimization will skip it when no waiter is parked).
 - **NOT ISR-safe**: registration acquires a mutex, so it must run from a task /
   thread context, never from an interrupt. Register on the discovery task, not in
   the bus ISR.
