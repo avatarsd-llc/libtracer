@@ -1,0 +1,78 @@
+/* SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * Styles for the libtracer-vs-Zenoh absolute-value comparison charts embedded in
+ * the Performance page (bench/render_compare.py emits the markup; ltz_compare.js
+ * draws the SVGs). Theme-aware: honours prefers-color-scheme AND Furo's data-theme
+ * toggle (set on <body>), so it tracks the reader's light/dark choice either way.
+ * All tokens are scoped under .ltz-compare so nothing leaks into the rest of the page. */
+.ltz-compare {
+  --ltz-ink: #1a212b; --ltz-muted: #5a6473;
+  --ltz-line: #d3d9e2; --ltz-grid: #dbe1ea; --ltz-gridminor: #eef1f6; --ltz-hair: #c3cbd8;
+  --ltz-panel: rgba(127, 140, 160, .05);
+  --ltz-lt: #2563c9; --ltz-zn: #d9662e;
+  --ltz-warn-bg: #fdf3e7; --ltz-warn-bd: #e7c9a2; --ltz-warn-ink: #7a4d18;
+  --ltz-mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+  margin: 8px 0 4px;
+}
+@media (prefers-color-scheme: dark) {
+  .ltz-compare {
+    --ltz-ink: #e6e9ef; --ltz-muted: #98a2b3;
+    --ltz-line: #2c3644; --ltz-grid: #26303c; --ltz-gridminor: #1a222c; --ltz-hair: #3a4655;
+    --ltz-panel: rgba(127, 140, 160, .07);
+    --ltz-lt: #6ea8ff; --ltz-zn: #f0955f;
+    --ltz-warn-bg: #2a2013; --ltz-warn-bd: #5a4423; --ltz-warn-ink: #e6c69a;
+  }
+}
+/* Furo toggles data-theme on <body>; let it win in both directions. */
+body[data-theme="light"] .ltz-compare, :root[data-theme="light"] .ltz-compare {
+  --ltz-ink: #1a212b; --ltz-muted: #5a6473;
+  --ltz-line: #d3d9e2; --ltz-grid: #dbe1ea; --ltz-gridminor: #eef1f6; --ltz-hair: #c3cbd8;
+  --ltz-panel: rgba(127, 140, 160, .05);
+  --ltz-lt: #2563c9; --ltz-zn: #d9662e;
+  --ltz-warn-bg: #fdf3e7; --ltz-warn-bd: #e7c9a2; --ltz-warn-ink: #7a4d18;
+}
+body[data-theme="dark"] .ltz-compare, :root[data-theme="dark"] .ltz-compare {
+  --ltz-ink: #e6e9ef; --ltz-muted: #98a2b3;
+  --ltz-line: #2c3644; --ltz-grid: #26303c; --ltz-gridminor: #1a222c; --ltz-hair: #3a4655;
+  --ltz-panel: rgba(127, 140, 160, .07);
+  --ltz-lt: #6ea8ff; --ltz-zn: #f0955f;
+  --ltz-warn-bg: #2a2013; --ltz-warn-bd: #5a4423; --ltz-warn-ink: #e6c69a;
+}
+
+.ltz-compare .ltz-banner {
+  display: flex; gap: 11px; align-items: flex-start;
+  background: var(--ltz-warn-bg); border: 1px solid var(--ltz-warn-bd);
+  color: var(--ltz-warn-ink); border-radius: 8px; padding: 12px 15px;
+  margin: 4px 0 18px; font-size: 13.5px; line-height: 1.5;
+}
+.ltz-compare .ltz-banner .ic { font-family: var(--ltz-mono); font-weight: 700; flex: none; }
+.ltz-compare .ltz-legend { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; margin: 0 0 14px; }
+.ltz-compare .ltz-legend .item { display: flex; gap: 8px; align-items: center; font-size: 13.5px; font-weight: 600; color: var(--ltz-ink); }
+.ltz-compare .ltz-legend .sw { width: 22px; height: 3px; border-radius: 2px; }
+.ltz-compare .ltz-legend .sub { color: var(--ltz-muted); font-weight: 400; font-size: 12.5px; }
+
+.ltz-compare .ltz-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+@media (max-width: 720px) { .ltz-compare .ltz-grid { grid-template-columns: 1fr; } }
+.ltz-compare .ltz-card { background: var(--ltz-panel); border: 1px solid var(--ltz-line); border-radius: 10px; padding: 15px 15px 12px; }
+.ltz-compare .ltz-card h4 { margin: 0 0 2px; font-size: 14.5px; font-weight: 650; color: var(--ltz-ink); }
+.ltz-compare .ltz-card .cond { font-family: var(--ltz-mono); font-size: 11px; color: var(--ltz-muted); margin: 0 0 8px; }
+.ltz-compare .ltz-card svg { display: block; width: 100%; height: auto; }
+.ltz-compare .ltz-reading { font-size: 12.5px; color: var(--ltz-muted); margin: 7px 2px 0; line-height: 1.45; }
+.ltz-compare .ltz-reading b { color: var(--ltz-ink); font-weight: 600; }
+
+.ltz-compare .ltz-ax, .ltz-compare .ltz-tick { fill: var(--ltz-muted); font-family: var(--ltz-mono); font-size: 10px; }
+.ltz-compare .ltz-axtitle { fill: var(--ltz-muted); font-size: 11px; }
+.ltz-compare .ltz-gl { stroke: var(--ltz-grid); stroke-width: 1; }
+.ltz-compare .ltz-glm { stroke: var(--ltz-gridminor); stroke-width: 1; }
+.ltz-compare .ltz-frame { stroke: var(--ltz-hair); stroke-width: 1; fill: none; }
+
+.ltz-compare .ltz-tablewrap { overflow-x: auto; border: 1px solid var(--ltz-line); border-radius: 9px; margin-top: 18px; }
+.ltz-compare table.ltz-raw { border-collapse: collapse; width: 100%; font-size: 12.5px; margin: 0; }
+.ltz-compare table.ltz-raw thead th { text-align: right; font-family: var(--ltz-mono); font-weight: 600; font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--ltz-muted); padding: 9px 13px; }
+.ltz-compare table.ltz-raw thead th:first-child, .ltz-compare table.ltz-raw tbody td:first-child { text-align: left; }
+.ltz-compare table.ltz-raw tbody td { padding: 7px 13px; text-align: right; border-top: 1px solid var(--ltz-line); font-variant-numeric: tabular-nums; font-family: var(--ltz-mono); color: var(--ltz-ink); }
+.ltz-compare table.ltz-raw tbody td.sys { font-weight: 600; }
+.ltz-compare table.ltz-raw tbody td.sys .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; vertical-align: middle; }
+.ltz-compare table.ltz-raw tbody tr.grp td { border-top: 2px solid var(--ltz-hair); }
+.ltz-compare .ltz-prov { font-family: var(--ltz-mono); font-size: 11.5px; color: var(--ltz-muted); margin: 14px 0 0; }

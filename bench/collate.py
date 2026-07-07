@@ -69,8 +69,9 @@ table("Endpoint/topic scaling (64B, 1 sub, write-by-path)",
 table("Mixed workload (128 topics, varied fan-out + payload)",
       [("mixed", pick(mode="mixed"))], "")
 
-# 5. Relative summary: libtracer/inproc vs zenoh/inproc at matched (size, fan, ep).
-print("\n## libtracer vs zenoh (matched size/fanout/endpoints)")
+# 5. Side-by-side absolute deliveries/s at matched (size, fan, ep) — no ratios; the
+#    published comparison charts (bench/render_compare.py) plot these on shared axes.
+print("\n## libtracer vs zenoh — absolute, matched size/fanout/endpoints")
 printed = False
 for r in rows:
     if r["sys"] != "libtracer" or r["mode"] != "inproc":
@@ -80,6 +81,7 @@ for r in rows:
     if z and z["deliv"] > 0 and z["p50"] > 0:
         printed = True
         print(f"  size={r['size']}B fan={r['fan']} ep={r['ep']}: "
-              f"throughput x{r['deliv'] / z['deliv']:.1f}, p50 latency x{z['p50'] / r['p50']:.1f} lower")
+              f"deliv/s libtracer={n(r['deliv'])} zenoh={n(z['deliv'])}; "
+              f"p50 libtracer={us(r['p50'])} zenoh={us(z['p50'])}")
 if not printed:
     print("  (no zenoh rows — run ./fetch_zenoh.sh and rebuild for the comparison)")

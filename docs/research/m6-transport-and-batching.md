@@ -16,7 +16,8 @@ composite endpoint's value is a rope already batched in memory, shipped in **one
 `sendmsg(iovec)`** via `transport_t::send(iov)` (the scatter-gather seam, shipped in
 the perf work — see [Performance](../performance.md) and `bench/bench_scatter`). One
 syscall carries K values, so throughput scales with composition size *at flat
-latency* — libtracer now beats zenoh-c on **both** throughput and latency. The
+latency* (the measured, absolute libtracer-vs-Zenoh comparison is on the
+[Performance page](../performance.md), generated in CI). The
 `BatchingTransport` timer-decorator is therefore **superseded** (kept below only as
 the considered-and-rejected alternative). The remaining M6 work is purely the
 **reliable byte-stream transport** (TCP/QUIC + `FrameReassembler`) for ROS

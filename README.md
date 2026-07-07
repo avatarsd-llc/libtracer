@@ -17,19 +17,11 @@ This repo is not just a library — it **defines a protocol the community can im
 - **Zero-overhead on constrained buses.** **Header-elided framing** lets the transport's native identity (a CAN ID, a WS channel) *be* the path — the TLV header is synthesized on ingress and elided on egress, so it **never hits the bus**; existing CAN/WS frames are byte-unchanged. The *same* **advertise + id-match** mechanism scales from a 9-byte elided CAN sample to a multi-GB advertised rope group.
 - **One model across 8 orders of magnitude.** A 1-bit boolean, a GPIO MMIO register, an IMU record, a 1 GB/s ADC stream, and a tensor in GPU memory are all the *same* vertex model — addressed identically, lighting up different optional `:` fields. A Cortex-M0 is a **first-class node** (~16 KB, static path handles, no `snprintf`/malloc on the hot path, ISR-safe). Memory backends (heap, pool, MMIO, DMA, CUDA) are pluggable; libtracer is a **transparent byte router** that imposes no copy/CRC on a live binding.
 
-## Performance — faster *and* lower-latency than zenoh
+## Performance — measured against Zenoh, in absolute terms
 
-Benchmarked against [Eclipse Zenoh](https://zenoh.io) across a payload × fan-out × topic-count grid (both at `-O3`). Bottom line: **libtracer beats zenoh-c on both throughput and latency on every path.** (`rmw_tracer`/`rmw_zenoh` are thin wrappers over these engines, so the engine delta is the dominant ROS-level term.)
+Benchmarked against [Eclipse Zenoh](https://zenoh.io) (zenoh-c 1.9.0) across a payload × fan-out × topic-count grid, both built `-O3` and measured in the **same pass on the same runner**. The comparison is **generated in CI on every docs build** and published — with interactive **absolute-value** charts (throughput / latency / bandwidth, libtracer and Zenoh as two series on shared axes) — on the **[Performance page](https://avatarsd-llc.github.io/libtracer/performance.html)**. No speed-up ratios and no committed figures: you read the real numbers off the axes, stamped with the commit + runner that produced them.
 
-| Path | libtracer vs zenoh-c |
-| --- | --- |
-| In-process, fan-out 1 → 8192 | **2.5× → 6.4× throughput**, **2.6× → 6.6× lower p50** |
-| In-process, payload 1 B → 8 KB | **2.2× → 2.6×** throughput/latency |
-| Borrowed (loaned) read path | flat **~80 ns** even at 8 KB |
-| Network latency (localhost UDP) | **~14 µs vs ~64 µs p50** (≈4.5× lower) — one datagram per message, no batching timer |
-| Network throughput (scatter-gather) | up to **~46.6 M values/s** via one `sendmsg` per composite, vs zenoh-c ~3.5 M @ 62 µs |
-
-The throughput win is **structural, not a timer**: zenoh raises throughput with a batching (Nagle-style) timer — which is why its latency is worse. libtracer batches by **composition** — a composite endpoint's value is a rope already batched in memory, shipped in one syscall — so throughput scales with composition size *at flat latency*. Full harness, figures, and honest caveats: [`docs/performance.md`](docs/performance.md), [`bench/RESULTS.md`](bench/RESULTS.md).
+Where the engines differ most is **fan-out** — libtracer's TLV bytes are simultaneously the wire encoding, the in-memory value, and the graph node, so a publish moves zero bytes (a refcount bump) rather than running a full per-sample path. On the **topic-count** axis the two run close. The charts show exactly where each holds; run [`bench/grid.sh`](bench/) to reproduce them locally.
 
 ## How it supersedes existing solutions
 

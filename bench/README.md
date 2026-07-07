@@ -5,8 +5,11 @@ A side-by-side **speed and latency** comparison of libtracer and
 size × subscriber fan-out × topic count) plus a mixed workload — so the result is a
 *response surface*, not a single point.
 
-The current numbers and figures are in **[RESULTS.md](RESULTS.md)** (snapshot) and
-**[figures/](figures/)** (2D/3D plots). This README is the methodology.
+The live numbers + interactive **absolute-value** charts are auto-generated in CI on
+every docs build and published on the
+**[Performance page](https://avatarsd-llc.github.io/libtracer/performance.html)** — no
+committed figures, no speed-up ratios. This README is the methodology; run `./grid.sh`
+for a local `preview.html` of the same charts.
 
 ## Harnesses
 
@@ -14,7 +17,7 @@ The current numbers and figures are in **[RESULTS.md](RESULTS.md)** (snapshot) a
 | --- | --- |
 | `run.sh` | **in-process** sweep: dispatch + (optionally) serialization cost, on one process. |
 | `run_net.sh` | **network**: two processes over real localhost **UDP** (the kernel path). |
-| `grid.sh` | **response-surface grid** → `grid.csv` → 2D/3D figures via `plot.py`. |
+| `grid.sh` | **response-surface grid** for both engines → a self-contained `preview.html` of the absolute-value comparison charts (the same ones CI publishes, via `render_compare.py`). |
 | `bench_scatter` | **scatter-gather egress**: one `sendmsg(iovec)` ships a K-value composite rope. |
 | `bench_forward_heap` | **16KB-RAM zero-heap gate**: a global `operator new` counter measures how many heap allocations one FWD *forward hop* costs (ADR-0038). |
 | `bench_fanout_clone_storm` | **many-core refcount contention**: T threads clone+release one shared segment — the per-subscriber fan-out primitive under wide fan-out (ADR-0032 128-core row). |
@@ -54,13 +57,13 @@ freely, out of the armed window.
 
 ```sh
 ./fetch_zenoh.sh   # vendors prebuilt zenoh-c 1.9.0 + zenoh-cpp (x86_64 linux; not committed)
-./run.sh           # in-process matrix
-./run_net.sh       # network (two processes over UDP)
-python3 -m venv .venv && ./.venv/bin/pip install matplotlib numpy
-./grid.sh          # grid.csv + figures/
+./run.sh           # in-process matrix — side-by-side terminal table
+./grid.sh          # sweep both engines → preview.html (absolute-value charts, no extra deps)
 ```
 
-Without `fetch_zenoh.sh`, only the libtracer numbers print.
+Without `fetch_zenoh.sh`, only the libtracer numbers appear. (A two-process
+transport comparison — tcp/udp/ws/quic vs zenoh — is being rebuilt on the current FWD
+net plane; the old UDP-only `run_net.sh` predates that and is not currently wired.)
 
 ## Many-core contention microbenchmarks (Wave 0e, ADR-0032)
 
@@ -200,32 +203,27 @@ total bytes (512); `fan` and `ep` are 1.
 - Both sides build at **`-O3`** (Release) for parity; the app payload size (not the
   on-wire envelope) is used for MB/s.
 
-## Results summary
+## Results
 
-See **[RESULTS.md](RESULTS.md)** for the tables and **[figures/](figures/)** for the
-plots. Headline (libtracer vs zenoh-c, this machine):
+The comparison is **generated in CI on every docs build** and published — with
+interactive **absolute-value** charts (throughput / latency / bandwidth vs fan-out,
+payload, and topic count, libtracer and zenoh-c as two series on shared axes) — on the
+**[Performance page](https://avatarsd-llc.github.io/libtracer/performance.html)**. No
+numbers or figures are committed here on purpose: absolute values are runner-dependent,
+so the only honest snapshot is the one CI just measured, stamped with its commit + runner.
+Run `./grid.sh` to reproduce the same charts locally in `preview.html`.
 
-- **In-process:** ~2.5× → ~6.4× throughput and ~2.6× → ~6.6× lower p50 as fan-out
-  grows 1 → 8192; the `inproc-borrow` (loaned) path is flat ~80 ns even at 8 KB.
-- **Network latency:** ~14 µs vs ~64 µs p50 (≈4.5× lower) — libtracer sends one
-  datagram per message immediately.
-- **Network throughput:** via **scatter-gather composition** (`transport_t::send(iov)`),
-  one `sendmsg` ships a K-value rope → 5.1M values/s @ ~3 µs (K=8) up to 46.6M @
-  ~12 µs (K=256), vs zenoh-c 3.5M @ 62 µs. **libtracer wins both axes.**
+## How to read the numbers
 
-## Why libtracer wins — and the honest caveats
-
-- **In-process:** the same TLV bytes are the wire encoding *and* the in-memory value
-  *and* the graph node, so a publish moves **zero bytes** (a refcount bump). zenoh's
-  intra-session path, though well-tuned, still runs its full sample machinery.
-- **Network throughput is *structural*, not a timer.** zenoh raises throughput with
-  a **batching timer** — which is why its latency is ~4.5× worse. libtracer batches
-  by **composition**: a composite endpoint's value is a rope already batched in
-  memory, shipped zero-copy in one `sendmsg(iovec)` — no Nagle timer, so no latency
-  penalty. (The plain one-`sendto`-per-message path remains for lowest single-message
-  latency.)
-- **`loopback` is *slower* than zenoh** — it's a dev/test transport (encode + ROUTER
-  + cross-thread queue + decode), not an optimized one; not the network comparison.
-- **Caveats:** single machine; localhost UDP is best-effort (drops shrink counts);
-  zenoh's default reliable-TCP comparison waits on libtracer's reliable-stream
-  transport (the remaining **M6** work). Numbers are representative single runs.
+- **Absolute, not ratios.** Both engines are measured in the same pass on the same
+  runner, so the two curves are directly comparable; you read the real numbers off the
+  axes rather than trusting a single speed-up figure. Shared-runner variance is real —
+  read trends and orders of magnitude, not the third digit.
+- **In-process, why the shapes differ:** libtracer's TLV bytes are the wire encoding
+  *and* the in-memory value *and* the graph node, so a publish moves **zero bytes** (a
+  refcount bump); zenoh's intra-session path, though well-tuned, runs its full sample
+  machinery. This shows up most on the **fan-out** axis; on the **topic-count** axis the
+  two are close — the charts show exactly where each holds.
+- **Caveats:** single machine; the in-process comparison is what CI publishes today. A
+  two-process **transport** comparison (tcp/udp/ws/quic vs zenoh) is being rebuilt on the
+  current FWD net plane and will be added to the same page.
