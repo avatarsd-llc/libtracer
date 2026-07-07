@@ -34,26 +34,30 @@ against it, so the number cannot drift:
 - **`core/CMakeLists.txt`** reads `VERSION` for its `project(VERSION …)` — except
   when building at a release **git tag `vMAJOR.MINOR.PATCH`**, which wins, so a
   tagged checkout reports its exact tagged version.
-- **The static package manifests cannot read git or the file**, so they are
-  *stamped* from `VERSION` by [`tools/sync-version.py`](../tools/sync-version.py):
+- **Every publishable manifest is stamped** from `VERSION` by
+  [`tools/sync-version.py`](../tools/sync-version.py) — **unified lockstep**, so
+  one `vX.Y.Z` release means `X.Y.Z` everywhere and no registry ever sees a
+  version collision:
 
   | Manifest | Ecosystem |
   | --- | --- |
   | [`library.json`](../library.json) | PlatformIO |
   | [`integrations/arduino/library.properties`](../integrations/arduino/library.properties) | Arduino |
   | [`integrations/esp-idf/libtracer/idf_component.yml`](../integrations/esp-idf/libtracer/idf_component.yml) | ESP Component Registry |
+  | `bindings/typescript/packages/*/package.json` (×4) | npm (`@avatarsd-llc/*`) |
+  | [`bindings/rust/Cargo.toml`](../bindings/rust/Cargo.toml) | crates.io |
+
+  The stamper also rewrites the TS packages' internal `@avatarsd-llc/*` dependency
+  **ranges** (leaving `*`/`workspace:` dev links alone). The ROS 2 stub is
+  unreleased and intentionally excluded.
 
 - **CI enforces it.** [`version-consistency.yml`](workflows/version-consistency.yml)
-  runs `python3 tools/sync-version.py --check` and fails any PR where a manifest
+  runs `python3 tools/sync-version.py --check` and fails any PR where an artifact
   has drifted from `VERSION`, so a bump can never land half-applied.
 
-To bump the core version: edit `VERSION`, run `python3 tools/sync-version.py`,
-commit the file + the three stamped manifests together.
-
-The **Rust and TypeScript bindings version independently** of the core (their own
-`Cargo.toml` / `package.json`), on their own cadence — a core release does not
-force a binding release, or vice versa. They are intentionally *not* touched by
-`sync-version.py`.
+To bump the version: edit `VERSION`, run `python3 tools/sync-version.py`, refresh
+the lockfiles (`cd bindings/typescript && npm install --package-lock-only`;
+`cd bindings/rust && cargo update -p libtracer`), and commit them together.
 
 ## Pre-release gates
 
@@ -73,39 +77,38 @@ force a binding release, or vice versa. They are intentionally *not* touched by
 
 ## Steps
 
-1. **Bump + changelog PR.** In one PR: edit the [`VERSION`](../VERSION) file to
-   `X.Y.Z` and run `python3 tools/sync-version.py` (stamps the three manifests —
-   `version-consistency` CI verifies no drift), and move `core/CHANGELOG.md`'s
-   `[Unreleased]` entries under a new `## [X.Y.Z] — YYYY-MM-DD` heading. Merge it
-   (signed, per DCO).
-2. **Tag.** On the merge commit, create a **signed, annotated** tag and push it:
+1. **Bump + changelog PR.** In one PR: edit [`VERSION`](../VERSION) to `X.Y.Z`, run
+   `python3 tools/sync-version.py` (stamps **every** manifest — the
+   `version-consistency` gate verifies no drift) and refresh the lockfiles
+   (`npm install --package-lock-only`, `cargo update -p libtracer`), and move
+   `core/CHANGELOG.md`'s `[Unreleased]` entries under a new
+   `## [X.Y.Z] — YYYY-MM-DD` heading. Merge it (signed, per DCO).
+2. **Tag + push — this triggers the whole release.** On the merge commit:
    ```sh
    git tag -s vX.Y.Z -m "libtracer vX.Y.Z"
    git push origin vX.Y.Z
    ```
-   From here CMake reports `X.Y.Z` for any checkout at that tag.
-3. **GitHub Release.** Publish a GitHub Release from the tag (release notes = the
-   new CHANGELOG section). This is the **C++ core** release. It does **not**
-   publish npm — the tag/Release are deliberately **decoupled** from
-   `publish-npm.yml` (the TS packages version independently and republishing an
-   already-published version would fail). See step 4 for npm.
-4. **Package publishes (each independent — do the ones you're actually
-   releasing):**
-   - **npm (`@avatarsd-llc/*` TS packages)** — bump the TS package versions
-     intentionally (they are **not** the core version), then run
-     [`publish-npm.yml`](workflows/publish-npm.yml) via **`workflow_dispatch`**
-     (dry-run first; needs the `NPM_TOKEN` secret for a real publish). It is
-     manual-only — a core tag never triggers it.
-   - **crates.io** — `cargo publish` from `bindings/rust/` (the crate is
-     `libtracer`; versioned independently — only when the Rust binding is being
-     released; not yet published).
-   - **PlatformIO / Arduino / ESP Component Registry** — no publish workflow
-     exists yet; register/update from the `VERSION`-stamped manifests per each
-     registry's process. *(Automating these is a TODO.)*
-5. **Verify.** Install from a clean checkout at the tag and confirm
-   `find_package(libtracer X.Y REQUIRED)` resolves (the `install-consume` CI job
-   does this per-PR; re-confirm the tagged artifact). Check any published npm /
-   crates versions.
+   [`release.yml`](workflows/release.yml) fires on the `v*` tag, first **asserts
+   the tag == `VERSION`**, then does all of the following automatically. Each
+   publish is an **independent job**: a missing secret **skips** that registry
+   with a warning (add tokens incrementally) rather than failing the release.
+   - **GitHub Release** — an AI-written summary (from the CHANGELOG + commits)
+     above the extracted `## [X.Y.Z]` CHANGELOG section. Needs `ANTHROPIC_API_KEY`;
+     without it, the CHANGELOG section alone is the body.
+   - **npm** — the four `@avatarsd-llc/*` packages at `X.Y.Z`. Needs `NPM_TOKEN`.
+   - **crates.io** — `libtracer` at `X.Y.Z`. Needs `CARGO_REGISTRY_TOKEN`.
+   - **PlatformIO** — `pio package publish`. Needs `PLATFORMIO_AUTH_TOKEN`.
+   - **ESP Component Registry** — `compote component upload`. Needs
+     `IDF_COMPONENT_API_TOKEN`.
+
+   ([`publish-npm.yml`](workflows/publish-npm.yml) remains as a manual
+   `workflow_dispatch` **dry-run tester** for the npm packages only.)
+3. **Arduino (manual, one-time).** The Arduino Library Registry is a submission
+   PR to [`arduino/library-registry`](https://github.com/arduino/library-registry),
+   not a tag push — do it once; thereafter it tracks new tags automatically.
+4. **Verify.** Check the GitHub Release and that npm / crates.io / PlatformIO /
+   ESP show `X.Y.Z`. `find_package(libtracer X.Y REQUIRED)` is already proven by
+   the `install-consume` CI job.
 
 ## Notes
 

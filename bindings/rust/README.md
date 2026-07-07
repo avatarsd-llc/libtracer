@@ -1,9 +1,9 @@
 # libtracer (Rust binding)
 
 Native Rust implementation of the libtracer wire codec. The crate is `libtracer`,
-versioned independently of the C++ core. **Not yet published to crates.io** — a
-publish workflow is still a TODO (see [Releasing](#releasing)); depend on the git
-repo until the first crate release.
+versioned in **lockstep** with the C++ core (one `vX.Y.Z` tag releases everything
+at that version). **Not yet published to crates.io** — it publishes on the next
+release tag (see [Releasing](#releasing)); until then, depend on the git repo.
 
 ## Status
 
@@ -45,4 +45,8 @@ Run on a trusted link or tunnel the transport until `security_*` lands.
 
 ## Releasing
 
-Tag the repo with `rust-vX.Y.Z` to trigger publish (see `.github/workflows/publish-crate.yml` once added).
+The crate publishes to crates.io automatically on a `vX.Y.Z` release tag, in
+lockstep with the C++ core and the npm packages — see
+[`.github/RELEASING.md`](../../.github/RELEASING.md) and
+[`release.yml`](../../.github/workflows/release.yml). Needs the
+`CARGO_REGISTRY_TOKEN` secret.

@@ -7,9 +7,13 @@ versioning/publish strategy.
 
 ## Unreleased
 
+_Nothing yet._
+
+## [0.3.0] — 2026-07-07
+
 ### Added
 
-- **New package `@avatarsd-llc/libtracer-webtransport` (0.1.0) — the browser
+- **New package `@avatarsd-llc/libtracer-webtransport` — the browser
   WebTransport transport (ADR-0043 Phase B / ADR-0031, #92).**
   `TransportWebTransport` drives the runtime's `WebTransport` (HTTP/3 extended
   CONNECT), opens ONE bidirectional stream as the frame channel, and carries
