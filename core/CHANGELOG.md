@@ -15,6 +15,15 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Changed
 
+- **Project version derives from the git tag, not a hardcoded number
+  (packaging).** `core/CMakeLists.txt` now sets `project(VERSION …)` from
+  `git describe --tags` (a `vX.Y.Z` tag), falling back to
+  `LIBTRACER_FALLBACK_VERSION` (`0.3.0`) for an untagged checkout — so there is
+  no hardcoded C++ version to drift from the tag. This **supersedes** the earlier
+  pre-release must-fix bundle's hardcoded `project(libtracer VERSION 0.1.0)`
+  (recorded further below) and aligns the reference with the `0.3.0` package
+  manifests (`library.json`, `library.properties`, `idf_component.yml`).
+
 - **The structural TLV descent is unified in `grammar::walk` (ADR-0048 §1
   completion — internal).** ADR-0048 unified the header *grammar*
   (`parse_header`); the open-node stack machine that turns headers into a tree
