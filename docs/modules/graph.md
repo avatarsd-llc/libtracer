@@ -3,11 +3,11 @@
 ```{admonition} In one paragraph
 :class: tip
 The graph is the node. A **`vertex_t`** is a named, addressable slot holding a value
-(a `view_t`), a bounded history, or a user handler. The entire data API is three
-calls — **`read` / `write` / `await`** — and every control surface (subscriptions,
-QoS) is a **field-write** to a `:`-addressed field. `write` fans out to
-subscribers by **cloning the view_t** (a refcount bump, no copy). Reads/writes of the
-last-known-value are **lock-free**.
+(a `rope_t` — a contiguous scalar is the single-link case), a bounded history, or a
+user handler. The entire data API is three calls — **`read` / `write` / `await`** — and
+every control surface (subscriptions, QoS) is a **field-write** to a `:`-addressed field.
+`write` fans out to subscribers by **cloning the value** (a refcount bump, no copy).
+Reads/writes of the last-known-value are **lock-free**.
 ```
 
 ## What it does
@@ -16,7 +16,7 @@ last-known-value are **lock-free**.
 has a **role**: *stored-value* (last-writer-wins), *stream* (a bounded ring sized by
 `:settings.history_keep_last`), or *handler* (your `on_read`/`on_write` — covering
 computed, proxy, sink, live-MMIO patterns). The last-known-value slot is an
-`atomic<shared_ptr<const view_t>>` swap, so `read`/`write` never take the per-vertex
+`atomic<shared_ptr<const rope_t>>` swap, so `read`/`write` never take the per-vertex
 mutex; that mutex guards only the subscriber list, history, and the `await` waiter
 accounting; a per-vertex condvar makes `await` block until the next write
 ([ADR-0015] in the repo).
@@ -32,39 +32,41 @@ return a `POINT` descriptor.
 ```cpp
 enum class role_t { STORED_VALUE, STREAM, HANDLER };
 struct settings_t { /* reliability, durability, history_keep_last, deadline_ns, … */ };
-struct handlers_t { std::function<result_t<view_t>()> on_read;
-                  std::function<result_t<void>(const view_t&)> on_write; };
+struct handlers_t { std::function<result_t<rope_t>()> on_read;
+                  std::function<result_t<void>(const rope_t&)> on_write; };
 
 class graph_t {
     result_t<vertex_t*> register_vertex(const path_t&, role_t, handlers_t={}, settings_t={});
-    result_t<view_t>    read (vertex_t*) const;        // atomic LKV load = a clone
-    result_t<void>    write(vertex_t*, view_t);        // store + fan-out
-    result_t<view_t>    await(vertex_t*, std::chrono::nanoseconds);   // blocks for next write
-    result_t<std::vector<view_t>> history(vertex_t*) const;          // stream window
+    result_t<rope_t>    read (vertex_t*) const;        // atomic LKV load (rope; scalar = 1 link)
+    result_t<void>    write(vertex_t*, rope_t);        // store + fan-out (view_t → rope_t implicit)
+    result_t<rope_t>    await(vertex_t*, std::chrono::nanoseconds);   // blocks for next write
+    result_t<std::vector<rope_t>> history(vertex_t*) const;          // stream window
 
     result_t<void> subscribe(const path_t& src, const path_t& target);    // re-dispatch
-    result_t<void> subscribe(const path_t& src, std::function<void(const view_t&)>);  // callback
+    result_t<void> subscribe(const path_t& src, std::function<void(const rope_t&)>);  // callback
 
-    result_t<void> write(vertex_t*, const field_path_t&, view_t);  // handle-based field-write
-    result_t<view_t> read (const path_t&) const;       // field tail → :schema, …
-    result_t<void> write(const path_t&, view_t);       // field tail → :subscribers[]/:settings.*
+    result_t<void> write(vertex_t*, const field_path_t&, rope_t);  // handle-based field-write
+    result_t<rope_t> read (const path_t&) const;       // field tail → :schema, …
+    result_t<void> write(const path_t&, rope_t);       // field tail → :subscribers[]/:settings.*
 };
 ```
 
 ```{admonition} No strings on the hot path
 :class: important
 The hot path is **handle-typed** (the spec's rule, `reference/10` §path-handle).
-`path_t::parse` encodes the canonical PATH bytes **once**; `register_vertex` /
-`find` resolve a **`vertex_t*`** once; then `write(v, value)` and
-`write(v, fieldpath, value)` reuse those handles — **no string crafting, no parse,
-no map lookup per call**. The string/`path_t` overloads are init-time conveniences.
+A `path_t` encodes the canonical PATH bytes **once** — the `path_t(std::string_view)`
+constructor for a known-good literal (ADR-0054), or the fallible `path_t::parse` for a
+runtime string; `register_vertex` / `find` resolve a **`vertex_t*`** once; then
+`write(v, value)` and `write(v, fieldpath, value)` reuse those handles — **no string
+crafting, no parse, no map lookup per call**. The string/`path_t` overloads are init-time
+conveniences.
 ```
 
 ```cpp
-// idiomatic: encode the path once, reuse the handle
-auto p = path_t::parse("/x:settings.reliability");      // once
-auto* v = g.find(p->key());                             // once
-for (...) g.write(v, p->field(), reliable_tlv);          // hot loop — zero strings
+// idiomatic: encode the path once (parse-once ctor), reuse the handle
+path_t p("/x:settings.reliability");                    // once — no *-deref (ADR-0054)
+auto* v = g.find(p.key());                              // once
+for (...) g.write(v, p.field(), reliable_tlv);           // hot loop — zero strings
 ```
 
 ## Write → fan-out
@@ -76,7 +78,7 @@ sequenceDiagram
     participant V as /sensor/temp
     participant S1 as subscriber (callback)
     participant S2 as subscriber (target vertex)
-    P->>G: write(/sensor/temp, view_t)
+    P->>G: write(/sensor/temp, rope_t)
     G->>V: atomic LKV store (lock-free)
     G->>V: snapshot subscribers (brief lock)
     G-->>S1: callback(clone)  %% refcount bump
@@ -91,8 +93,8 @@ sequenceDiagram
   QoS, and discovery; no `connect`/`subscribe` API to mismatch.
 - **Lock-free reads** — the LKV is an atomic pointer swap; readers never block on
   writers (validated race-free under TSan).
-- **Zero-copy fan-out** — N subscribers get N clones of one `view_t`, not N copies.
-- **The value is the bytes** — a vertex stores a `view_t`, so what it holds is exactly
+- **Zero-copy fan-out** — N subscribers get N refcount clones of one `rope_t`, not N copies.
+- **The value is the bytes** — a vertex stores a `rope_t`, so what it holds is exactly
   what goes on the wire.
 
 ## API reference

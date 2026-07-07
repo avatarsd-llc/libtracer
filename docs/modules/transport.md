@@ -34,11 +34,14 @@ internal transport thread). The reference catalog defines a poll-based
 choice that matches how a real socket's receive loop feeds the FWD router.
 
 A transport that can hand up *owning* frames additionally implements the
-**view-receiver seam** ([ADR-0042](../adr/0042-refcounted-receiver-seam-view-delivery.md)):
-it overrides `delivers_views()` and delivers each inbound frame as a `view_t`
-over a refcounted segment (e.g. `tcp_transport_t` reads a frame straight into
-one segment). `fwd_router_t::add_child` installs whichever receiver matches the
-link's capability; every other transport keeps the borrowed-span receiver.
+**rope-receiver seam** ([ADR-0042](../adr/0042-refcounted-receiver-seam-view-delivery.md),
+generalized to ropes by [ADR-0053](../adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)): it overrides
+`delivers_ropes()` and delivers each inbound frame as a `rope_t` of refcounted links — a
+contiguous frame is the single-link case (e.g. `tcp_transport_t` reads a frame straight into
+one segment); a scattered one (a CAN reassembly group, a fragmented WS message) crosses the
+seam as the rope it already is, never a flatten copy. `fwd_router_t::add_child` installs
+whichever receiver matches the link's capability; every other transport keeps the
+borrowed-span receiver.
 
 `loopback_channel_t` wires two endpoints: a frame sent on one is delivered to the
 *other's* receiver on that endpoint's thread (modeling async cross-"wire" delivery).
