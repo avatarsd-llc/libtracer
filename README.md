@@ -19,7 +19,7 @@ This repo is not just a library — it **defines a protocol the community can im
 
 ## Performance — measured against Zenoh, in absolute terms
 
-Benchmarked against [Eclipse Zenoh](https://zenoh.io) (zenoh-c 1.9.0) across a payload × fan-out × topic-count grid, both built `-O3` and measured in the **same pass on the same runner**. The comparison is **generated in CI on every docs build** and published — with interactive **absolute-value** charts (throughput / latency / bandwidth, libtracer and Zenoh as two series on shared axes) — on the **[Performance page](https://avatarsd-llc.github.io/libtracer/performance.html)**. No speed-up ratios and no committed figures: you read the real numbers off the axes, stamped with the commit + runner that produced them.
+Benchmarked against [Eclipse Zenoh](https://zenoh.io) (zenoh-c 1.9.0) across a payload × fan-out × topic-count grid, both built `-O3` and measured in the **same pass on the same runner**. The comparison is **generated in CI on every docs build** and published — with interactive **absolute-value** charts (throughput / latency / bandwidth, libtracer and Zenoh as two series on shared axes) — on the **[Performance page](https://avatarsd-llc.github.io/libtracer/docs/performance.html)**. No speed-up ratios and no committed figures: you read the real numbers off the axes, stamped with the commit + runner that produced them.
 
 Where the engines differ most is **fan-out** — libtracer's TLV bytes are simultaneously the wire encoding, the in-memory value, and the graph node, so a publish moves zero bytes (a refcount bump) rather than running a full per-sample path. On the **topic-count** axis the two run close. The charts show exactly where each holds; run [`bench/grid.sh`](bench/) to reproduce them locally.
 

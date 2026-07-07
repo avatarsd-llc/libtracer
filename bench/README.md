@@ -7,7 +7,7 @@ size × subscriber fan-out × topic count) plus a mixed workload — so the resu
 
 The live numbers + interactive **absolute-value** charts are auto-generated in CI on
 every docs build and published on the
-**[Performance page](https://avatarsd-llc.github.io/libtracer/performance.html)** — no
+**[Performance page](https://avatarsd-llc.github.io/libtracer/docs/performance.html)** — no
 committed figures, no speed-up ratios. This README is the methodology; run `./grid.sh`
 for a local `preview.html` of the same charts.
 
@@ -212,7 +212,7 @@ total bytes (512); `fan` and `ep` are 1.
 The comparison is **generated in CI on every docs build** and published — with
 interactive **absolute-value** charts (throughput / latency / bandwidth vs fan-out,
 payload, and topic count, libtracer and zenoh-c as two series on shared axes) — on the
-**[Performance page](https://avatarsd-llc.github.io/libtracer/performance.html)**. No
+**[Performance page](https://avatarsd-llc.github.io/libtracer/docs/performance.html)**. No
 numbers or figures are committed here on purpose: absolute values are runner-dependent,
 so the only honest snapshot is the one CI just measured, stamped with its commit + runner.
 Run `./grid.sh` to reproduce the same charts locally in `preview.html`.

@@ -119,7 +119,7 @@ jobs:
             const body = `${marker}\n### 📊 libtracer vs Zenoh — absolute (this run)\n\n`
               + `Measured on this CI runner, both engines \`-O3\` in the same pass. Absolute values, no ratios — `
               + `shared-runner variance is real, read trends not the third digit. Interactive charts land on the `
-              + `[Performance page](https://avatarsd-llc.github.io/libtracer/performance.html) after merge.\n\n`
+              + `[Performance page](https://avatarsd-llc.github.io/libtracer/docs/performance.html) after merge.\n\n`
               + table;
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
