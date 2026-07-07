@@ -12,6 +12,34 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-module build-time modularity — a node compiles only the modules it needs
+  (CMake options, no feature macros).** `core/CMakeLists.txt` gains per-module options
+  that toggle whether a module's translation unit(s) are **compiled** into `libtracer`
+  (they are NOT compile-definitions — a dropped module leaves neither code nor a
+  symbol): `LIBTRACER_TRANSPORT_TCP` / `_UDP` / `_WS` / `_CAN` (each adds/omits its
+  `transport_*.cpp`, plus shared deps — `posix_endpoint.cpp` when any socket transport
+  is on, `socketcan_link*.cpp` when CAN is on) and `LIBTRACER_NET_PLANE` (the FWD routing
+  plane: `op_resolve*` / `route_handle` / `fwd_router` / `transport_vertex`). All default
+  **ON**, so the default build is byte-for-byte the full node it is today; modularity is
+  opt-**out**. The required core — the L2/L3 wire codec, the L0/L1 substrate, `path`, and
+  the L4 graph runtime — always compiles, so a pure in-process node (`-DLIBTRACER_NET_PLANE=OFF`)
+  or a graph+udp node (`-DLIBTRACER_TRANSPORT_TCP=OFF -DLIBTRACER_TRANSPORT_WS=OFF
+  -DLIBTRACER_TRANSPORT_CAN=OFF`) links with no reference to the excluded modules
+  (measured: the minimal graph+udp `libtracer.a` drops ~250 KB vs. the full node). The
+  built-in `udp`/`tcp`/`ws` transport-factory registrations move out of
+  `transport_vertex.cpp` — which hard-referenced the concrete transports — into one glue
+  TU each (`builtin_transport_{udp,tcp,ws}.cpp`) behind the new internal
+  `builtin_transports.hpp` seam, called through a `register_builtin_transports()`
+  dispatcher (the hand-written `builtin_transports.cpp` for a full node; a
+  CMake-generated variant naming only the enabled transports for a partial build), so a
+  dropped transport leaves no dangling reference. Selection is by which TUs compile — no
+  preprocessor `#ifdef` (the project's no-feature-macro doctrine, cf. `socketcan_link.cpp`
+  vs. its stub). `LIBTRACER_WITH_CUDA` / `_QUIC`, `LIBTRACER_ACL_FULL`, and
+  `LIBTRACER_INSTALL` are unchanged; the ESP-IDF component and the PlatformIO portable set
+  still build the full node.
+
 ### Changed
 
 - **Opaque `vertex_handle_t` + infallible `register_vertex` retire the raw-pointer graph

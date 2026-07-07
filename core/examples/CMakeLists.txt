@@ -53,14 +53,18 @@ endif()
 # (ADR-0040), with cross-wire latency. A one-line swap to udp_transport_t makes it a
 # real socket (core/tests/udp_test.cpp). The retired two_node_loopback/udp_two_node
 # examples predated the explicit-source-routed FWD plane; this replaces them.
-add_executable(two_node_fwd two_node_fwd.cpp)
-target_link_libraries(two_node_fwd PRIVATE libtracer)
-find_package(Threads REQUIRED)
-target_link_libraries(two_node_fwd PRIVATE Threads::Threads)
-if(MSVC)
-    target_compile_options(two_node_fwd PRIVATE /W4)
-else()
-    target_compile_options(two_node_fwd PRIVATE -Wall -Wextra)
+# Needs the FWD net plane (fwd_router_t), so it is built only when LIBTRACER_NET_PLANE
+# is ON — a pure in-process node (net plane off) has no forwarding to demonstrate.
+if(LIBTRACER_NET_PLANE)
+    add_executable(two_node_fwd two_node_fwd.cpp)
+    target_link_libraries(two_node_fwd PRIVATE libtracer)
+    find_package(Threads REQUIRED)
+    target_link_libraries(two_node_fwd PRIVATE Threads::Threads)
+    if(MSVC)
+        target_compile_options(two_node_fwd PRIVATE /W4)
+    else()
+        target_compile_options(two_node_fwd PRIVATE -Wall -Wextra)
+    endif()
 endif()
 
 # Run the examples as smoke tests when testing is enabled (they self-check and
@@ -71,5 +75,7 @@ if(BUILD_TESTING)
     add_test(NAME example_rope_scatter COMMAND rope_scatter)
     add_test(NAME example_pubsub_fanout COMMAND pubsub_fanout)
     add_test(NAME example_wire_codec COMMAND wire_codec)
-    add_test(NAME example_two_node_fwd COMMAND two_node_fwd)
+    if(LIBTRACER_NET_PLANE)
+        add_test(NAME example_two_node_fwd COMMAND two_node_fwd)
+    endif()
 endif()

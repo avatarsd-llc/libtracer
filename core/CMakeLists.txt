@@ -43,10 +43,34 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# M1: the L2/L3 wire codec (frame + CRC + TLV model).
-# M2: the L0/L1 substrate (segment refcount + backends + view/rope).
-# M3: the L4 in-process graph runtime (path + vertex + read/write/await).
-# M4: the first transport + bridge (loopback transport, ROUTER envelope, dedup).
+# ---------------------------------------------------------------------------
+# Per-module build options — the project's own "a node is a chosen set of modules"
+# design. Each option toggles whether its module's translation unit(s) are COMPILED
+# into libtracer; it is NOT a compile-definition, so a dropped module leaves neither
+# code nor a symbol behind. Selection is by which TUs compile (the no-feature-macro
+# doctrine, cf. socketcan_link.cpp vs. its stub, picked by CMAKE_SYSTEM_NAME). All
+# default ON, so the default build is the full node — modularity is opt-OUT.
+#
+#   * The required core (below) ALWAYS compiles: the L2/L3 wire codec (frame +
+#     tlv_arena), the L0/L1 substrate (backends + view/rope), path, and the L4 graph
+#     runtime. A pure in-process node needs nothing more.
+#   * LIBTRACER_NET_PLANE adds the FWD routing plane (op_resolve, route_handle,
+#     fwd_router, transport_vertex) — a node that forwards to other nodes.
+#   * LIBTRACER_TRANSPORT_{TCP,UDP,WS,CAN} each add their transport's TU(s), plus
+#     shared deps (posix_endpoint when any socket transport is on; socketcan_link when
+#     CAN is on). udp/tcp/ws are the net-plane builtins auto-registered on the
+#     transport vertex; can/quic/webtransport are opt-in external factories.
+option(LIBTRACER_NET_PLANE
+       "Build the FWD net/routing plane (op_resolve, route_handle, fwd_router, transport_vertex)"
+       ON)
+option(LIBTRACER_TRANSPORT_TCP "Build the TCP stream transport (tcp_transport_t)" ON)
+option(LIBTRACER_TRANSPORT_UDP "Build the UDP datagram transport (udp_transport_t)" ON)
+option(LIBTRACER_TRANSPORT_WS "Build the WebSocket transport (transport_ws_*)" ON)
+option(LIBTRACER_TRANSPORT_CAN "Build the CAN transport (transport_can + socketcan_link)" ON)
+
+# The required core (always compiled): L2/L3 wire codec + L0/L1 substrate + path + L4
+# graph runtime, plus the in-process loopback transport (dev/test, no dependencies; a
+# tracer.hpp umbrella member).
 add_library(libtracer STATIC
     src/frame.cpp
     src/tlv_arena.cpp
@@ -58,26 +82,78 @@ add_library(libtracer STATIC
     src/tlv_view.cpp
     src/path.cpp
     src/graph.cpp
-    src/op_resolve.cpp
-    src/op_resolve_view.cpp
-    src/route_handle.cpp
-    src/fwd_router.cpp
-    src/transport_vertex.cpp
     src/loopback.cpp
-    src/posix_endpoint.cpp
-    src/transport_tcp.cpp
-    src/transport_udp.cpp
-    src/transport_ws.cpp
-    src/transport_can.cpp
 )
-# socketcan_link_t — platform TU selection (no in-source #ifdefs): the Linux
-# PF_CAN implementation on Linux, the always-off stub everywhere else. Platform
-# ports (e.g. the ESP-IDF component's twai_link_t) implement the same can_link_t
-# seam in their own tree.
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_sources(libtracer PRIVATE src/socketcan_link.cpp)
-else()
-    target_sources(libtracer PRIVATE src/socketcan_link_stub.cpp)
+
+# The net/routing plane (LIBTRACER_NET_PLANE). The graph runtime above works without it
+# for a pure in-process node.
+if(LIBTRACER_NET_PLANE)
+    target_sources(libtracer PRIVATE
+        src/op_resolve.cpp
+        src/op_resolve_view.cpp
+        src/route_handle.cpp
+        src/fwd_router.cpp
+        src/transport_vertex.cpp
+    )
+    # The built-in transport-factory registrations transport_vertex_t wires up. One glue
+    # TU per enabled builtin (udp/tcp/ws), plus a dispatcher (register_builtin_transports)
+    # that calls exactly the enabled ones: the hand-written src/builtin_transports.cpp for
+    # a FULL node (also what PlatformIO and the ESP-IDF component compile), else a
+    # CMake-generated variant naming only the enabled register_*_transport. No preprocessor
+    # macros — a disabled transport contributes neither its glue TU nor a call, so nothing
+    # references a dropped transport (the decoupling that lets a transport TU be omitted).
+    set(_libtracer_builtin_calls "")
+    if(LIBTRACER_TRANSPORT_UDP)
+        target_sources(libtracer PRIVATE src/builtin_transport_udp.cpp)
+        string(APPEND _libtracer_builtin_calls "    register_udp_transport(vertex, rx_backend);\n")
+    endif()
+    if(LIBTRACER_TRANSPORT_TCP)
+        target_sources(libtracer PRIVATE src/builtin_transport_tcp.cpp)
+        string(APPEND _libtracer_builtin_calls "    register_tcp_transport(vertex, rx_backend);\n")
+    endif()
+    if(LIBTRACER_TRANSPORT_WS)
+        target_sources(libtracer PRIVATE src/builtin_transport_ws.cpp)
+        string(APPEND _libtracer_builtin_calls "    register_ws_transport(vertex, rx_backend);\n")
+    endif()
+    if(LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_WS)
+        target_sources(libtracer PRIVATE src/builtin_transports.cpp)
+    else()
+        set(LIBTRACER_BUILTIN_TRANSPORT_CALLS "${_libtracer_builtin_calls}")
+        configure_file(
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/builtin_transports.cpp.in
+            ${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_transports.cpp
+            @ONLY)
+        target_sources(libtracer PRIVATE
+            ${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_transports.cpp)
+    endif()
+endif()
+
+# Socket transports — tcp/udp/ws share posix_endpoint_t (the recv-thread/endpoint
+# scaffold), compiled when ANY of them is on.
+if(LIBTRACER_TRANSPORT_TCP OR LIBTRACER_TRANSPORT_UDP OR LIBTRACER_TRANSPORT_WS)
+    target_sources(libtracer PRIVATE src/posix_endpoint.cpp)
+endif()
+if(LIBTRACER_TRANSPORT_TCP)
+    target_sources(libtracer PRIVATE src/transport_tcp.cpp)
+endif()
+if(LIBTRACER_TRANSPORT_UDP)
+    target_sources(libtracer PRIVATE src/transport_udp.cpp)
+endif()
+if(LIBTRACER_TRANSPORT_WS)
+    target_sources(libtracer PRIVATE src/transport_ws.cpp)
+endif()
+
+# CAN transport (portable framing/reassembly) + its can_link_t platform binding.
+# socketcan_link_t — platform TU selection (no in-source #ifdefs): the Linux PF_CAN
+# implementation on Linux, the always-off stub everywhere else. Platform ports (e.g.
+# the ESP-IDF component's twai_link_t) implement the same can_link_t seam in their tree.
+if(LIBTRACER_TRANSPORT_CAN)
+    target_sources(libtracer PRIVATE src/transport_can.cpp)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_sources(libtracer PRIVATE src/socketcan_link.cpp)
+    else()
+        target_sources(libtracer PRIVATE src/socketcan_link_stub.cpp)
+    endif()
 endif()
 # Namespaced alias so a build-tree consumer (add_subdirectory / FetchContent) links
 # the SAME `libtracer::libtracer` name that `find_package(libtracer)` provides from
