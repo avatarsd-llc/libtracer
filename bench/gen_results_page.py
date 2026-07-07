@@ -155,7 +155,9 @@ COMPARE_INTRO = """\
 A side-by-side comparison against [Eclipse Zenoh](https://zenoh.io) (zenoh-c 1.9.0, peer
 mode). Two surfaces: three **in-process** axes — subscriber **fan-out**, **payload** size,
 and **topic count** — and a **network** comparison over the real loopback kernel path
-across three transports (**UDP**, **TCP**, **WebSocket**). Both engines are built `-O3`
+across three transports (**UDP**, **TCP**, **WebSocket**). The network charts render
+wherever both engines establish the link — reliably via `bench/grid.sh` locally; a
+sandboxed CI runner may omit the Zenoh side. Both engines are built `-O3`
 and measured in the **same pass on the same runner**, so the numbers are directly
 comparable on identical hardware. The charts plot **absolute** throughput / latency /
 bandwidth — libtracer and Zenoh as two series on shared axes — so you read the real

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import pathlib
 import sys
 
 REF_SIZE = 64  # the fixed payload for the fan-out / topic sweeps (must be a kGridSizes point)
@@ -152,8 +153,8 @@ def build(rows: list[dict]) -> dict:
         mode = f"net-{proto}"
         spec = {"mode": mode, "fixed": {"fan": 1, "ep": 1}, "axis": "size"}
         s = two(**{**spec, "col": "deliv"})
-        if not (s["libtracer"] or s["zenoh"]):
-            continue  # this transport didn't run on either side
+        if not (s["libtracer"] and s["zenoh"]):
+            continue  # only chart a transport when BOTH engines measured it — never one-sided
         net_specs.append((proto, spec))
         charts.append({"id": f"net-tp-{proto}", "title": f"{proto.upper()} — throughput vs payload",
                        "cond": "one publisher · one subscriber · loopback kernel path",
@@ -198,12 +199,23 @@ BANNER = (
 )
 
 
+def _assets() -> tuple[str, str]:
+    """The committed chart CSS + JS (docs/_static/ltz_compare.{css,js}), read at generate
+    time so they can be INLINED into the page. They must be inlined rather than linked:
+    performance.md renders one directory deep (docs/performance.html), and a relative
+    `_static/...` href resolves to docs/_static/... — a 404, since Sphinx copies _static to
+    the SITE ROOT. Inlining is path-independent and self-contained."""
+    static = pathlib.Path(__file__).resolve().parent.parent / "docs" / "_static"
+    return (static / "ltz_compare.css").read_text(), (static / "ltz_compare.js").read_text()
+
+
 def html_block(rows: list[dict], provenance: str) -> str:
     data = build(rows)
     payload = json.dumps(data, separators=(",", ":"))
+    css, js = _assets()
     return f"""\
 :::{{raw}} html
-<link rel="stylesheet" href="_static/ltz_compare.css">
+<style>{css}</style>
 <div class="ltz-compare">
   <div class="ltz-banner"><span class="ic">i</span><span>{BANNER}</span></div>
   <div class="ltz-legend">
@@ -217,26 +229,19 @@ def html_block(rows: list[dict], provenance: str) -> str:
   <p class="ltz-prov">{provenance}</p>
   <script type="application/json" id="ltz-data">{payload}</script>
 </div>
-<script src="_static/ltz_compare.js"></script>
+<script>{js}</script>
 :::"""
 
 
 def standalone_html(rows: list[dict], provenance: str) -> str:
-    """A self-contained HTML page (assets inlined) for offline local preview — the same
-    charts the docs render, viewable without a Sphinx build. See bench/grid.sh."""
-    import pathlib
-    static = pathlib.Path(__file__).resolve().parent.parent / "docs" / "_static"
-    css = (static / "ltz_compare.css").read_text()
-    js = (static / "ltz_compare.js").read_text()
-    block = html_block(rows, provenance)
-    # strip the MyST fence + the _static asset references; inline css/js instead.
-    inner = block.split("\n", 1)[1].rsplit(":::", 1)[0]
-    inner = inner.replace('<link rel="stylesheet" href="_static/ltz_compare.css">', "")
-    inner = inner.replace('<script src="_static/ltz_compare.js"></script>', "")
+    """A self-contained HTML page for offline local preview — the same charts the docs
+    render (assets already inlined by html_block), viewable without a Sphinx build.
+    See bench/grid.sh."""
+    inner = html_block(rows, provenance).split("\n", 1)[1].rsplit(":::", 1)[0]
     return (f"<!doctype html><html><head><meta charset='utf-8'>"
-            f"<title>libtracer vs Zenoh</title><style>body{{margin:2rem;max-width:1100px;"
-            f"font-family:system-ui,sans-serif}}{css}</style></head><body>"
-            f"<h1>libtracer vs Zenoh — absolute</h1>{inner}<script>{js}</script></body></html>")
+            f"<title>libtracer vs Zenoh</title>"
+            f"<style>body{{margin:2rem;max-width:1100px;font-family:system-ui,sans-serif}}</style>"
+            f"</head><body><h1>libtracer vs Zenoh — absolute</h1>{inner}</body></html>")
 
 
 def markdown_table(rows: list[dict]) -> str:

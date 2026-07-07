@@ -91,7 +91,9 @@ jobs:
           # build (a flaky/absent transport just omits that chart).
           { timeout 150 ./bench/build/bench_transports >>"$out" 2>/dev/null; } || true
           if [ -x ./bench/build/bench_zenoh_transports ]; then
-            { timeout 200 ./bench/build/bench_zenoh_transports >>"$out" 2>/dev/null; } || true
+            # stderr goes to the step log (not /dev/null) so a skipped transport is diagnosable.
+            echo "== zenoh transports (RESULT -> tsv; notes below) =="
+            { timeout 240 ./bench/build/bench_zenoh_transports >>"$out"; } || true
           fi
       - name: Generate live performance + conformance page
         env:
@@ -117,7 +119,7 @@ jobs:
             const body = `${marker}\n### 📊 libtracer vs Zenoh — absolute (this run)\n\n`
               + `Measured on this CI runner, both engines \`-O3\` in the same pass. Absolute values, no ratios — `
               + `shared-runner variance is real, read trends not the third digit. Interactive charts land on the `
-              + `[Performance page](https://avatarsd-llc.github.io/libtracer/performance.html) after merge.\n\n`
+              + `[Performance page](https://avatarsd-llc.github.io/libtracer/docs/performance.html) after merge.\n\n`
               + table;
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
