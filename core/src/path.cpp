@@ -110,18 +110,29 @@ result_t<path_t> path_t::parse(std::string_view text) {
     return p;
 }
 
-std::size_t path_key_hash_t::operator()(const path_key_t& k) const noexcept {
-    // FNV-1a 64-bit over the canonical payload bytes. The 64-bit offset basis and
-    // prime can't live in a std::size_t on a 32-bit target (std::size_t is unsigned
-    // int on RISC-V MCUs), so accumulate in std::uint64_t and narrow to std::size_t
-    // for the bucket index via an explicit cast — the 64-bit state keeps the
-    // avalanche, and the cast avoids -Woverflow (GCC 15, newly strict) on 32-bit.
+namespace {
+// FNV-1a 64-bit over the canonical payload bytes. The 64-bit offset basis and prime
+// can't live in a std::size_t on a 32-bit target (std::size_t is unsigned int on
+// RISC-V MCUs), so accumulate in std::uint64_t and narrow to std::size_t for the
+// bucket index via an explicit cast — the 64-bit state keeps the avalanche, and the
+// cast avoids -Woverflow (GCC 15, newly strict) on 32-bit. The owned-key and by-span
+// hashers share this so a heterogeneous lookup hashes identically to the stored key.
+[[nodiscard]] std::size_t fnv1a_key(std::span<const std::byte> bytes) noexcept {
     std::uint64_t h = 1469598103934665603ull;
-    for (std::byte b : k.bytes) {
+    for (std::byte b : bytes) {
         h ^= std::to_integer<std::uint8_t>(b);
         h *= 1099511628211ull;
     }
     return static_cast<std::size_t>(h);
+}
+}  // namespace
+
+std::size_t path_key_hash_t::operator()(const path_key_t& k) const noexcept {
+    return fnv1a_key(k.bytes);
+}
+
+std::size_t path_key_hash_t::operator()(std::span<const std::byte> k) const noexcept {
+    return fnv1a_key(k);
 }
 
 }  // namespace tr::graph

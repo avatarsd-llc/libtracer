@@ -73,11 +73,13 @@ udp_transport_t::~udp_transport_t() {
 void udp_transport_t::set_receiver(receiver_t receiver) {
     const std::lock_guard lock(m_);
     receiver_ = std::move(receiver);
+    rx_dirty_.store(true, std::memory_order_release);  // recv loop re-snapshots next datagram
 }
 
 void udp_transport_t::set_rope_receiver(rope_receiver_t receiver) {
     const std::lock_guard lock(m_);
     rope_receiver_ = std::move(receiver);
+    rx_dirty_.store(true, std::memory_order_release);  // recv loop re-snapshots next datagram
 }
 
 void udp_transport_t::send(std::span<const std::byte> frame) {
@@ -142,17 +144,27 @@ void udp_transport_t::run() {
     // backend reports "unbounded", keeping the full kMaxDatagram cap.
     const std::size_t rx_cap = std::min(kMaxDatagram, backend_->max_segment_size());
     view::segment_ptr_t rx_seg;  // pending RX segment, reused across recv timeouts
+
+    // Snapshot the receivers into locals and re-copy them ONLY when set_receiver /
+    // set_rope_receiver marked rx_dirty_ — never per datagram (and never on an idle-
+    // timeout wakeup): the installed fwd_router closure exceeds the std::function SBO,
+    // so a per-datagram copy heap-allocated on EVERY inbound frame. The dirty flag
+    // starts true so the first iteration snapshots. The owning-vs-span path is decided
+    // from the snapshot BEFORE the blocking recvfrom (the segment must exist to receive
+    // into); the span path re-checks the flag AFTER recvfrom so a rope_receiver
+    // installed DURING the blocking call still delivers that datagram owning.
+    rope_receiver_t rope_receiver;
+    receiver_t receiver;
+    const auto resnapshot = [&] {
+        if (!rx_dirty_.load(std::memory_order_acquire)) return;
+        rx_dirty_.store(false, std::memory_order_release);  // clear BEFORE copy — re-armable
+        const std::lock_guard lock(m_);
+        rope_receiver = rope_receiver_;
+        receiver = receiver_;
+    };
+
     while (!stop_.load(std::memory_order_relaxed)) {
-        // The owning-delivery decision is made BEFORE the blocking recvfrom (the
-        // segment must exist to receive into). Both receivers are installed before
-        // frames flow (the set_receiver contract), so which path a given datagram
-        // takes is settled by then; the span path below re-reads its receiver after
-        // recvfrom, byte-identical to the pre-ADR-0042 loop.
-        rope_receiver_t rope_receiver;
-        {
-            const std::lock_guard lock(m_);
-            rope_receiver = rope_receiver_;
-        }
+        resnapshot();
 
         if (rope_receiver) {
             // ADR-0042 §2: one datagram = one frame = one segment — recvfrom straight
@@ -182,6 +194,7 @@ void udp_transport_t::run() {
             continue;
         }
 
+        // Span path: recvfrom into the borrowed scratch (no owning segment committed).
         sockaddr_in from{};
         socklen_t flen = sizeof(from);
         std::byte* const buf = scratch_buf();
@@ -193,17 +206,12 @@ void udp_transport_t::run() {
         if (learn_peer_)
             peer_.store(pack_peer(from.sin_addr.s_addr, ntohs(from.sin_port)),
                         std::memory_order_relaxed);
-        receiver_t receiver;
-        {
-            const std::lock_guard lock(m_);
-            receiver = receiver_;
-            rope_receiver = rope_receiver_;
-        }
+        // A rope_receiver may have been installed while we were blocked in recvfrom
+        // above with the span decision already made — re-check and, if so, deliver this
+        // datagram owning via a one-time copy into a backend segment (race-window
+        // datagrams only; every subsequent datagram takes the zero-copy path above).
+        resnapshot();
         if (rope_receiver) {
-            // The view receiver was installed while this iteration was already
-            // blocked in recvfrom with the span decision — deliver owning anyway
-            // via a one-time copy into a backend segment (race-window datagrams
-            // only; every subsequent datagram takes the zero-copy path above).
             view::segment_ptr_t seg = view::segment_ptr_t::adopt(backend_->alloc(rx_cap));
             if (!seg || static_cast<std::size_t>(n) > seg->bytes.size()) {
                 dropped_rx_.fetch_add(1, std::memory_order_relaxed);
