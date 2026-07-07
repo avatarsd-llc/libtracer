@@ -1,5 +1,7 @@
 # CRC lives in the optional append-only trailer (opt.CR), CRC-32C default
 
+Status: accepted
+
 Frame integrity is a **trailer** field, present iff `opt.CR=1`, **appended at egress and stripped at ingress**, computed over `payload + trailer_ts` bytes (the header is excluded). Width is selected by `opt.CW`: **CRC-32C** (Castagnoli, default) or CRC-16-CCITT; both are mandatory for conforming receivers, and a mismatch returns `ERROR=CRC_FAIL`. CRC is a bit-flip detector, **not** adversarial integrity.
 
 ## Considered options

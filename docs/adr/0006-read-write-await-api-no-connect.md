@@ -1,5 +1,7 @@
 # The API is read / write / await + a field-write control surface — no connect/disconnect/subscribe
 
+Status: accepted
+
 The entire data API is **three calls — `read`, `write`, `await`** — plus refcount management. Every control surface (subscriptions, QoS, ACLs, liveness) is a **field-write** to a `:`-addressed vertex field: subscribing *is* writing a SUBSCRIBER TLV into a `:subscribers[]` slot. There is **no** `connect` / `disconnect` / `subscribe` primitive.
 
 ## Considered options

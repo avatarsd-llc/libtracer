@@ -1,5 +1,7 @@
 # Vertex creation is an in-band, ACL-gated field-write; controllers are created from a device-known catalog and wired by a separate binding step
 
+Status: accepted
+
 Reference 11 §"what this document does NOT specify" states that *"the C-API for declaring a vertex's role is implementation-specific"* and that *"roles are intentionally invisible to peers."* Registration was an out-of-band, local act. Substituting the strawberry-fw `io_layer` (and the controller/logic-executor it carries) with a libtracer graph breaks that assumption: a remote **orchestrator** must be able to **create a controller on a device** and wire it to other devices' endpoints. This ADR records that creation becomes a first-class, in-band graph operation, and how it stays inside the read/write-only API and the facade — **superseding the "registration is out-of-band / roles invisible" stance of reference 11**.
 
 ## Decision

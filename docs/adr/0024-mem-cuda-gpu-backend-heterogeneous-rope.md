@@ -1,5 +1,7 @@
 # `mem_cuda` is a CPU-opaque value-payload backend; framing stays host-side and a TLV becomes a heterogeneous host+GPU rope
 
+Status: accepted
+
 The flagship use case — **100 ksps from an STM32 over CAN, fed directly into tensor cores (GPU memory) at lowest latency** — needs GPU memory to be a libtracer L0 backend so payload bytes can live where the tensor cores read them. CUDA device memory, however, breaks an assumption baked into the codec: **the CPU cannot dereference a GPU device pointer**, yet libtracer's framing, CRC, and decode are CPU operations. This ADR defines `mem_cuda` around that constraint rather than against it.
 
 ## Decision

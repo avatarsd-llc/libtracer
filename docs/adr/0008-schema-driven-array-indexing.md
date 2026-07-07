@@ -1,5 +1,7 @@
 # Schema-driven array indexing: array-ness is an L4 schema property, not a wire type or `opt` bit
 
+Status: accepted
+
 libtracer has **no wire-level array marker**. Whether a vertex field is an array — and whether its elements are fixed-size — is a property of the **vertex schema (L4)**, not of the TLV envelope (L3). On the wire an array is just a structured TLV (`opt.PL=1`) whose children are homogeneous; the bytes are identical whether or not anything treats them as an array. Indexed access `:field[N]` is resolved at L4: when the schema declares the field a **fixed-stride array** (all elements the same size), `[N]` resolves by direct offset (`base + N × stride`, O(1)) **on contiguous backing**; otherwise — variable-size elements, or an in-memory rope ([02-graph-model.md](../reference/02-graph-model.md) §rope) that scatters elements across segments — `[N]` resolves by **walking** children (O(n)). No `opt` bit is spent; the two forever-reserved `opt` bits (7, 0) stay reserved ([0002](0002-versioning-protocol-vs-release-no-per-frame-version.md); [01-data-format.md](../reference/01-data-format.md) §reserved bits).
 
 ## Considered options

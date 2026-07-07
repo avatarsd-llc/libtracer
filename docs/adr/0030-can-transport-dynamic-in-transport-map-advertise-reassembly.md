@@ -1,5 +1,7 @@
 # CAN transport: a dynamic identity↔path map held *inside* `transport_can`, a structured 29-bit ID, and advertise+id-match reassembly — no roles, self-healing
 
+Status: accepted
+
 [ADR-0022](0022-transport-framing-modes-elided-full-tlv-advertise.md) established **header-elided** framing (the transport's native identity *is* the path; the TLV header never hits the bus) and named a "static `identity↔path` map held by the transport adapter." Designing the CAN transport for real forced three concrete questions ADR-0022 left open: **where the map lives and whether it's static or dynamic; how a path maps to a CAN ID; and how a payload larger than one frame is reassembled.** The maintainer's steer was decisive: *"the CAN map is dynamic config inside `transport_can`; there is no orchestrator or router role; genuinely the system is pure-decentralized, self-healing."*
 
 ## Decision

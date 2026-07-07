@@ -1,5 +1,7 @@
 # `origin_timestamp` is a per-producer monotonic (hybrid-logical-clock) value, not wall-clock, so the `(origin, ts)` identity survives clock divergence
 
+Status: accepted
+
 The in-flight identity of a TLV is the pair `(origin_peer_id, origin_timestamp)`. It is the dedup key for the cycle recent-set ([reference 07](../reference/07-host-embedding.md) §cycle handling, [ADR-0014](0014-router-cycle-termination-hop-count.md)) and the group key for address-shift slice reassembly ([ADR-0011](0011-address-shift-totality-opt-in.md)). Reference 07 currently defines `origin_timestamp` as *"the wall-clock time (ns since epoch) at which the TLV was first published."* Designing the io_layer substitution against "a coherent system where node clocks diverge" exposed that this definition is **incorrect for an identity**: wall-clock is neither unique nor monotonic per producer.
 
 ## Decision

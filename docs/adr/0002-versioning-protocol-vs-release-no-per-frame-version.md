@@ -1,5 +1,7 @@
 # Versioning: integer protocol version, decoupled release semver, no per-frame version field
 
+Status: accepted
+
 libtracer keeps two version axes separate. The **protocol** (wire format + the spec that defines it) is versioned as an **integer** — currently **v1** — and is frozen-immutable once finalized; a wire-incompatible change becomes **protocol v2**. The **release** version is independent semver living in git tags / `library.json` / `Cargo.toml` (currently **0.0.x**); a 0.0.x release is an early, partial implementation of **protocol v1**. The wire carries **no per-frame version field** — `opt` bit 7 is forever-reserved-MUST-be-zero — and peers learn the protocol version at the **discovery layer** (mDNS `_libtracer._tcp` = v1, `_libtracer-v2._tcp` = v2).
 
 ## Considered options
