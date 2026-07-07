@@ -3,11 +3,15 @@
 
 cmake_minimum_required(VERSION 3.16)
 
-# Version: derived from the git tag (`vMAJOR.MINOR.PATCH`) — the single source of
-# truth, so there is no hardcoded version to drift (the protocol/wire version is
-# separate and pinned by docs/spec/v1.md). A build outside a git checkout, or
-# before the first release tag, falls back to the in-development version below.
-set(LIBTRACER_FALLBACK_VERSION 0.3.0)
+# Version — one source of truth, no hardcoded literal to drift. Resolution order:
+#   1. the release git tag (`vMAJOR.MINOR.PATCH`), when building at a tag, so a
+#      tagged release reports its exact version;
+#   2. otherwise the repo-root `VERSION` file — the single hand-edited version for
+#      the core release axis, mirrored into the package manifests by
+#      `tools/sync-version.py` (CI-gated by version-consistency.yml);
+#   3. a last-resort literal, reached only by a vendored `core/` copied away from
+#      the repo root (no `VERSION` file present).
+# The protocol/wire version is a separate axis, pinned by docs/spec/v1.md.
 set(_libtracer_version "")
 find_program(GIT_EXECUTABLE git)
 if(GIT_EXECUTABLE)
@@ -23,8 +27,13 @@ if(GIT_EXECUTABLE)
         string(REGEX REPLACE "^v" "" _libtracer_version "${_libtracer_git_tag}")
     endif()
 endif()
+if(NOT _libtracer_version AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION")
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" _libtracer_version_file)
+    string(STRIP "${_libtracer_version_file}" _libtracer_version)
+endif()
 if(NOT _libtracer_version)
-    set(_libtracer_version ${LIBTRACER_FALLBACK_VERSION})
+    # Last resort: a `core/` tree vendored away from the repo-root VERSION file.
+    set(_libtracer_version 0.3.0)
 endif()
 
 project(libtracer VERSION ${_libtracer_version} LANGUAGES CXX)

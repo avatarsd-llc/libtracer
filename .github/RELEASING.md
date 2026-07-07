@@ -27,21 +27,33 @@ SHOULD NOT: freeze `v1.md` first (see the gate below).
 
 ## Source of truth for the version
 
-The **git tag `vMAJOR.MINOR.PATCH`** is authoritative. `core/CMakeLists.txt`
-derives `project(VERSION …)` from `git describe --tags` (falling back to an
-in-development version only when no tag is reachable), so there is no hardcoded
-C++ version to drift. The **static package manifests cannot read git**, so they
-carry a hardcoded version that must be bumped in lockstep with the tag:
+There is **one hand-edited version for the core release axis**: the repo-root
+[`VERSION`](../VERSION) file. Everything else derives from it or is checked
+against it, so the number cannot drift:
 
-| Manifest | Ecosystem |
-| --- | --- |
-| [`library.json`](../library.json) | PlatformIO |
-| [`integrations/arduino/library.properties`](../integrations/arduino/library.properties) | Arduino |
-| [`integrations/esp-idf/libtracer/idf_component.yml`](../integrations/esp-idf/libtracer/idf_component.yml) | ESP Component Registry |
+- **`core/CMakeLists.txt`** reads `VERSION` for its `project(VERSION …)` — except
+  when building at a release **git tag `vMAJOR.MINOR.PATCH`**, which wins, so a
+  tagged checkout reports its exact tagged version.
+- **The static package manifests cannot read git or the file**, so they are
+  *stamped* from `VERSION` by [`tools/sync-version.py`](../tools/sync-version.py):
+
+  | Manifest | Ecosystem |
+  | --- | --- |
+  | [`library.json`](../library.json) | PlatformIO |
+  | [`integrations/arduino/library.properties`](../integrations/arduino/library.properties) | Arduino |
+  | [`integrations/esp-idf/libtracer/idf_component.yml`](../integrations/esp-idf/libtracer/idf_component.yml) | ESP Component Registry |
+
+- **CI enforces it.** [`version-consistency.yml`](workflows/version-consistency.yml)
+  runs `python3 tools/sync-version.py --check` and fails any PR where a manifest
+  has drifted from `VERSION`, so a bump can never land half-applied.
+
+To bump the core version: edit `VERSION`, run `python3 tools/sync-version.py`,
+commit the file + the three stamped manifests together.
 
 The **Rust and TypeScript bindings version independently** of the core (their own
 `Cargo.toml` / `package.json`), on their own cadence — a core release does not
-force a binding release, or vice versa.
+force a binding release, or vice versa. They are intentionally *not* touched by
+`sync-version.py`.
 
 ## Pre-release gates
 
