@@ -42,7 +42,7 @@
 using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
-using tr::graph::vertex_t;
+using tr::graph::vertex_handle_t;
 using tr::view::view_t;
 
 namespace {
@@ -63,7 +63,7 @@ constexpr auto kAwaitTimeout = std::chrono::milliseconds(20);
 int main() {
     graph_t g;
     const path_t path = *path_t::parse("/bench/wake");
-    vertex_t* const v = *g.register_vertex(path, role_t::STORED_VALUE);
+    const vertex_handle_t v = g.register_vertex(path, role_t::STORED_VALUE);
 
     // A stable borrowed value: zero-alloc per write, so the writer measures the
     // write / notify path, not allocation.

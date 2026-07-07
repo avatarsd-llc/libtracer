@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -32,7 +33,7 @@ using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::settings_t;
-using tr::graph::vertex_t;
+using tr::graph::vertex_handle_t;
 using tr::view::rope_t;
 using tr::view::view_t;
 
@@ -63,12 +64,12 @@ enum class alloc_t { HEAP, BORROW };
 
 // One inproc run: E endpoints, F subscribers each, S-byte payload. `by_path`
 // writes through the path registry (lookup each publish) instead of the resolved
-// vertex_t* hot path — the honest "many topics" measurement.
+// vertex_handle_t hot path — the honest "many topics" measurement.
 void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool by_path,
                 const char* mode, std::uint64_t budget = kDeliveryBudget,
                 std::uint64_t latbudget = kLatencyDeliveryBudget) {
     graph_t g;
-    std::vector<vertex_t*> verts;
+    std::vector<vertex_handle_t> verts;
     std::vector<path_t> paths;
     verts.reserve(E);
     paths.reserve(E);
@@ -76,7 +77,7 @@ void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool
     auto cb = [&](const rope_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
     for (std::size_t e = 0; e < E; ++e) {
         path_t path = *path_t::parse("/bench/v" + std::to_string(e));
-        vertex_t* v = *g.register_vertex(path, role_t::STORED_VALUE);
+        auto v = g.register_vertex(path, role_t::STORED_VALUE);
         for (std::size_t f = 0; f < F; ++f) (void)g.subscribe(path, cb);
         verts.push_back(v);
         paths.push_back(std::move(path));
@@ -128,7 +129,7 @@ void run_grid() {
 void run_mixed() {
     graph_t g;
     constexpr std::size_t E = 128;
-    std::vector<vertex_t*> verts;
+    std::vector<vertex_handle_t> verts;
     std::vector<std::size_t> fan;
     std::vector<std::vector<std::byte>> tlvs;
     std::atomic<std::uint64_t> recv{0};
@@ -136,7 +137,7 @@ void run_mixed() {
     std::size_t total_fan = 0;
     for (std::size_t e = 0; e < E; ++e) {
         path_t path = *path_t::parse("/bench/m" + std::to_string(e));
-        vertex_t* v = *g.register_vertex(path, role_t::STORED_VALUE);
+        auto v = g.register_vertex(path, role_t::STORED_VALUE);
         const std::size_t F = std::size_t{1} << (e % 5);  // 1,2,4,8,16
         for (std::size_t f = 0; f < F; ++f) (void)g.subscribe(path, cb);
         verts.push_back(v);
@@ -182,7 +183,7 @@ void run_inproc_mt(std::size_t T) {
     // counter, payload buffer, and the single reused borrowed view.
     struct worker_t {
         graph_t g;
-        vertex_t* v = nullptr;
+        std::optional<vertex_handle_t> v;
         std::vector<std::byte> buf;
         view_t view;
         std::atomic<std::uint64_t> recv{0};
@@ -194,7 +195,7 @@ void run_inproc_mt(std::size_t T) {
     for (std::size_t t = 0; t < T; ++t) {
         auto w = std::make_unique<worker_t>();
         w->buf = tlv;  // per-thread copy => per-thread segment, no shared refcount
-        w->v = *w->g.register_vertex(*path_t::parse("/bench/mt"), role_t::STORED_VALUE);
+        w->v = w->g.register_vertex(*path_t::parse("/bench/mt"), role_t::STORED_VALUE);
         (void)w->g.subscribe(*path_t::parse("/bench/mt"), [p = w.get()](const rope_t&) {
             p->recv.fetch_add(1, std::memory_order_relaxed);
         });
@@ -210,12 +211,12 @@ void run_inproc_mt(std::size_t T) {
     for (std::size_t t = 0; t < T; ++t) {
         worker_t* w = ws[t].get();
         threads.emplace_back([w, &ready, &go]() {
-            for (std::size_t i = 0; i < 1000; ++i) (void)w->g.write(w->v, w->view);  // warmup
+            for (std::size_t i = 0; i < 1000; ++i) (void)w->g.write(*w->v, w->view);  // warmup
             w->recv.store(0, std::memory_order_relaxed);
             ready.fetch_add(1, std::memory_order_acq_rel);
             while (!go.load(std::memory_order_acquire)) { /* spin until released */
             }
-            for (std::size_t i = 0; i < MSGS; ++i) (void)w->g.write(w->v, w->view);
+            for (std::size_t i = 0; i < MSGS; ++i) (void)w->g.write(*w->v, w->view);
         });
     }
     while (ready.load(std::memory_order_acquire) < T) { /* wait for all warmed up */
@@ -243,7 +244,7 @@ void run_inproc_mt(std::size_t T) {
             }
             for (std::size_t i = 0; i < LATN; ++i) {
                 const auto a = now_ns();
-                (void)w->g.write(w->v, w->view);
+                (void)w->g.write(*w->v, w->view);
                 w->lat.push_back(now_ns() - a);
             }
         });
@@ -289,7 +290,7 @@ void run_eptype_stream() {
     settings_t st{};
     st.history_keep_last = 16;  // a real bounded ring: retention work on every write
     const path_t path = *path_t::parse("/bench/stream");
-    vertex_t* v = *g.register_vertex(path, role_t::STREAM, {}, st);
+    auto v = g.register_vertex(path, role_t::STREAM, {}, st);
     std::atomic<std::uint64_t> recv{0};
     (void)g.subscribe(path, [&](const rope_t&) { recv.fetch_add(1, std::memory_order_relaxed); });
 
