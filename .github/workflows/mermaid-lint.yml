@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# Mermaid syntax gate for the docs.
+#
+# sphinxcontrib-mermaid embeds every ```mermaid block into the page verbatim and lets
+# mermaid.js render it in the reader's browser — the Sphinx build (docs.yml) never parses
+# the diagram, so a syntax error still builds and deploys green and only surfaces as a
+# "Syntax error in text" box when someone opens the page. This job closes that gap: it
+# parses every mermaid block under docs/ with the SAME mermaid version the site loads
+# (tools/mermaid-lint pins it to docs/conf.py's mermaid_version), failing the PR on any
+# block the browser would reject. Kept separate from the heavy docs build so it stays
+# fast and its result is unambiguous.
+name: mermaid-lint
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**/*.md"
+      - "*.md"
+      - "tools/mermaid-lint/**"
+      - ".github/workflows/mermaid-lint.yml"
+  pull_request:
+    paths:
+      - "docs/**/*.md"
+      - "*.md"
+      - "tools/mermaid-lint/**"
+      - ".github/workflows/mermaid-lint.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  mermaid-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tools/mermaid-lint/package-lock.json
+      - name: Install the pinned mermaid parser
+        working-directory: tools/mermaid-lint
+        run: npm ci
+      - name: Parse every docs mermaid block
+        run: node tools/mermaid-lint/check-mermaid.mjs
