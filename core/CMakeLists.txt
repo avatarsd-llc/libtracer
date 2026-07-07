@@ -2,7 +2,32 @@
 # SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 cmake_minimum_required(VERSION 3.16)
-project(libtracer VERSION 0.1.0 LANGUAGES CXX)
+
+# Version: derived from the git tag (`vMAJOR.MINOR.PATCH`) — the single source of
+# truth, so there is no hardcoded version to drift (the protocol/wire version is
+# separate and pinned by docs/spec/v1.md). A build outside a git checkout, or
+# before the first release tag, falls back to the in-development version below.
+set(LIBTRACER_FALLBACK_VERSION 0.3.0)
+set(_libtracer_version "")
+find_program(GIT_EXECUTABLE git)
+if(GIT_EXECUTABLE)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} describe --tags --abbrev=0 --match "v[0-9]*"
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE _libtracer_git_tag
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE _libtracer_git_result)
+    if(_libtracer_git_result EQUAL 0 AND _libtracer_git_tag)
+        # Strip the leading `v`; project() wants a bare MAJOR.MINOR.PATCH.
+        string(REGEX REPLACE "^v" "" _libtracer_version "${_libtracer_git_tag}")
+    endif()
+endif()
+if(NOT _libtracer_version)
+    set(_libtracer_version ${LIBTRACER_FALLBACK_VERSION})
+endif()
+
+project(libtracer VERSION ${_libtracer_version} LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
