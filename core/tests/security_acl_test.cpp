@@ -162,7 +162,10 @@ int main() {
     {
         const std::vector<ace_t> in{
             ace("alice", bit(acl_right_t::READ), ace_type_t::ALLOW, /*flags=*/0x2)};
-        const auto acl = tr::wire::decode(encode_acl(in));
+        // Bind the encoded bytes: decode() is zero-copy (the tlv borrows the input),
+        // so the buffer must outlive parse_acl below.
+        const std::vector<std::byte> wire = encode_acl(in);
+        const auto acl = tr::wire::decode(wire);
         check(acl.has_value() && !parse_acl<full_acl_policy_t>(*acl).has_value(),
               "a flag bit beyond INHERIT is TYPE_MISMATCH even under full");
     }
