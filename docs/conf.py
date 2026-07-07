@@ -94,4 +94,10 @@ html_show_sourcelink = False
 # lives), unlike include_patterns which are relative to the source root — so this
 # is "_static", i.e. docs/_static, not "docs/_static".
 html_static_path = ["_static"]
-html_css_files = ["custom.css"]
+html_css_files = ["custom.css", "version-switcher.css"]
+# The sidebar version switcher. It reads a generated versions.json at the site
+# root (tools/gen_versions_json.py, emitted by docs.yml after the build) and
+# renders a picker only once a released vX.Y.Z subtree is actually deployed; until
+# then it shows the current version as a chip. Base-path agnostic (resolves via
+# Sphinx's URL_ROOT), so it works on github.io and on a custom domain alike.
+html_js_files = ["version-switcher.js"]
