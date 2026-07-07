@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783460902671,
+  "lastUpdate": 1783463312109,
   "repoUrl": "https://github.com/avatarsd-llc/libtracer",
   "entries": {
     "libtracer in-process latency (ns, smaller is better)": [
@@ -809,6 +809,60 @@ window.BENCHMARK_DATA = {
           {
             "name": "inproc-borrow 64B/fan1/1ep ns/delivery",
             "value": 202.3,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "15184545+AvatarSD@users.noreply.github.com",
+            "name": "avatarsd",
+            "username": "AvatarSD"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b04ab8d5781fd1c980a972f9bc7aff8414b92b4e",
+          "message": "Merge pull request #329 from avatarsd-llc/feat/perf-tier-a\n\nperf(core): tier-A wins — hardware CRC-32C, transparent key lookup, receiver snapshot (0.3.0)",
+          "timestamp": "2026-07-08T01:27:50+03:00",
+          "tree_id": "c6d85d0376e321f1c34ca815fd09731e71bd3611",
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/b04ab8d5781fd1c980a972f9bc7aff8414b92b4e"
+        },
+        "date": 1783463311848,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "inproc 64B/fan1/1ep p50 latency",
+            "value": 245,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan1/1ep p99 latency",
+            "value": 280,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan1/1ep ns/delivery",
+            "value": 224.9,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep p50 latency",
+            "value": 220,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep p99 latency",
+            "value": 281,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep ns/delivery",
+            "value": 190.7,
             "unit": "ns"
           }
         ]
