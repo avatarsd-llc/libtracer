@@ -11,7 +11,7 @@ the input buffer; **`encode`** serializes a `tlv_t` and recomputes the CRC. The
 
 ## What it does
 
-`decode(bytes) → std::expected<tlv_t, error_t>` parses exactly one TLV that fills the
+`decode(bytes) → std::expected<tlv_t, err_t>` parses exactly one TLV that fills the
 input: it reads the header, rejects reserved bits and bad structure, verifies the
 trailer CRC, and — when `opt.PL=1` (payload-is-structured) — walks child TLVs
 **iteratively** with a depth cap of 32 (no recursion blow-ups). The result borrows
@@ -22,7 +22,7 @@ over the body when `opt.CR` is set.
 ```{mermaid}
 flowchart TD
     H["read header:<br/>type · opt · length"] --> V{"bounds ok?<br/>reserved bits zero?"}
-    V -->|no| E["error_t"]
+    V -->|no| E["err_t"]
     V -->|yes| P{"opt.PL?"}
     P -->|"1 — structured"| C["push children region<br/>(depth cap 32)"]
     P -->|"0 — opaque"| O["payload = span into input"]
@@ -52,7 +52,7 @@ struct tlv_t {
     std::optional<trailer_t> trailer;                  // {timestamp_t?, crc_t?}
 };
 
-std::expected<tlv_t, error_t> decode(std::span<const std::byte>);   // borrowed, depth-capped
+std::expected<tlv_t, err_t> decode(std::span<const std::byte>);   // borrowed, depth-capped
 std::vector<std::byte>    encode(const tlv_t&);                 // recomputes CRC
 
 namespace crc { std::uint32_t crc32c(...); std::uint16_t crc16_ccitt(...); }   // constexpr
