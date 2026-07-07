@@ -172,8 +172,13 @@ class tcp_transport_t : public transport_t, private posix_endpoint_t {
     receiver_t receiver_;            // guarded by m_
     rope_receiver_t rope_receiver_;  // guarded by m_; installed => owning delivery
     std::mutex m_;                   // guards the receivers
-    std::mutex write_m_;             // serializes writes to conn_fd_
-    std::atomic<int> conn_fd_{-1};   // the live peer connection (-1 = none)
+    // Set by set_receiver/set_rope_receiver; the recv loop re-snapshots the receivers
+    // ONLY when this flag is set — never per frame (the fwd_router closure exceeds the
+    // std::function SBO, so a per-frame copy heap-allocated). Starts true so the first
+    // frame takes its one snapshot.
+    std::atomic<bool> rx_dirty_{true};
+    std::mutex write_m_;            // serializes writes to conn_fd_
+    std::atomic<int> conn_fd_{-1};  // the live peer connection (-1 = none)
 };
 
 }  // namespace tr::net

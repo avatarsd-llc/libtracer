@@ -135,11 +135,13 @@ transport_ws_server::~transport_ws_server() {
 void transport_ws_server::set_rope_receiver(rope_receiver_t receiver) {
     const std::lock_guard lock(m_);
     rope_receiver_ = std::move(receiver);
+    rx_dirty_.store(true, std::memory_order_release);  // recv loop re-snapshots next frame
 }
 
 void transport_ws_server::set_receiver(receiver_t receiver) {
     const std::lock_guard lock(m_);
     receiver_ = std::move(receiver);
+    rx_dirty_.store(true, std::memory_order_release);  // recv loop re-snapshots next frame
 }
 
 void transport_ws_server::write_all(int fd, std::span<const std::byte> bytes) {
@@ -200,6 +202,13 @@ void transport_ws_server::serve(int fd) {
     ws_assembler_t asm_state;  // per-connection fragment assembly (recv thread only)
     std::vector<std::byte> buf;
     std::array<std::byte, 4096> chunk;
+    // Snapshot the receivers into locals and re-copy them ONLY when set_receiver /
+    // set_rope_receiver marked rx_dirty_ — never per frame: the installed fwd_router
+    // closure exceeds the std::function SBO, so a per-frame copy heap-allocated on
+    // EVERY inbound data frame. The flag starts true so the first data frame snapshots
+    // (honoring "receiver set before frames flow"); a mid-run swap re-snapshots next.
+    receiver_t receiver;
+    rope_receiver_t rope_receiver;
 
     while (!stop_.load(std::memory_order_relaxed)) {
         const int pr = poll_readable(fd);  // one bounded 100 ms readability wait
@@ -223,9 +232,11 @@ void transport_ws_server::serve(int fd) {
             switch (frame.op) {
                 case ws::opcode_t::BINARY:
                 case ws::opcode_t::CONT: {
-                    receiver_t receiver;
-                    rope_receiver_t rope_receiver;
-                    {
+                    // Re-snapshot the receivers only if they changed (rx_dirty_) since
+                    // the last data frame; clear the flag BEFORE the copy so a
+                    // concurrent set_receiver re-arms it.
+                    if (rx_dirty_.load(std::memory_order_acquire)) {
+                        rx_dirty_.store(false, std::memory_order_release);
                         const std::lock_guard lock(m_);
                         receiver = receiver_;
                         rope_receiver = rope_receiver_;
@@ -337,11 +348,13 @@ transport_ws_client::~transport_ws_client() {
 void transport_ws_client::set_rope_receiver(rope_receiver_t receiver) {
     const std::lock_guard lock(m_);
     rope_receiver_ = std::move(receiver);
+    rx_dirty_.store(true, std::memory_order_release);  // recv loop re-snapshots next frame
 }
 
 void transport_ws_client::set_receiver(receiver_t receiver) {
     const std::lock_guard lock(m_);
     receiver_ = std::move(receiver);
+    rx_dirty_.store(true, std::memory_order_release);  // recv loop re-snapshots next frame
 }
 
 std::uint32_t transport_ws_client::next_mask_key() {
@@ -426,6 +439,11 @@ void transport_ws_client::serve(int fd) {
     ws_assembler_t asm_state;  // per-connection fragment assembly (recv thread only)
     std::vector<std::byte> buf;
     std::array<std::byte, 4096> chunk;
+    // Snapshot the receivers into locals and re-copy them ONLY when rx_dirty_ is set
+    // (see the server serve() note): the fwd_router closure exceeds the std::function
+    // SBO, so a per-frame copy heap-allocated on every inbound data frame.
+    receiver_t receiver;
+    rope_receiver_t rope_receiver;
 
     while (!stop_.load(std::memory_order_relaxed)) {
         const int pr = poll_readable(fd);  // one bounded 100 ms readability wait
@@ -447,9 +465,11 @@ void transport_ws_client::serve(int fd) {
             switch (frame.op) {
                 case ws::opcode_t::BINARY:
                 case ws::opcode_t::CONT: {
-                    receiver_t receiver;
-                    rope_receiver_t rope_receiver;
-                    {
+                    // Re-snapshot the receivers only if they changed (rx_dirty_) since
+                    // the last data frame; clear the flag BEFORE the copy so a
+                    // concurrent set_receiver re-arms it.
+                    if (rx_dirty_.load(std::memory_order_acquire)) {
+                        rx_dirty_.store(false, std::memory_order_release);
                         const std::lock_guard lock(m_);
                         receiver = receiver_;
                         rope_receiver = rope_receiver_;

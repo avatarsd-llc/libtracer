@@ -114,6 +114,11 @@ class udp_transport_t : public transport_t, private posix_endpoint_t {
     receiver_t receiver_;            // guarded by m_
     rope_receiver_t rope_receiver_;  // guarded by m_; installed => owning delivery path
     std::mutex m_;
+    // Set by set_receiver/set_rope_receiver; the recv loop re-snapshots the receivers
+    // ONLY when this flag is set — never per datagram (the fwd_router closure exceeds
+    // the std::function SBO, so a per-datagram copy heap-allocated). Starts true so the
+    // first datagram takes its one snapshot.
+    std::atomic<bool> rx_dirty_{true};
 };
 
 }  // namespace tr::net

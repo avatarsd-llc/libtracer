@@ -101,9 +101,14 @@ class transport_ws_server : public transport_t, private posix_endpoint_t {
     int listen_fd_ = -1;
     std::uint16_t bound_port_ = 0;
 
-    receiver_t receiver_;             // guarded by m_
-    rope_receiver_t rope_receiver_;   // guarded by m_; preferred when set
-    std::mutex m_;                    // guards the receivers
+    receiver_t receiver_;            // guarded by m_
+    rope_receiver_t rope_receiver_;  // guarded by m_; preferred when set
+    std::mutex m_;                   // guards the receivers
+    // Set by set_receiver/set_rope_receiver; the recv loop re-snapshots the receivers
+    // ONLY when this flag is set — never per frame (the fwd_router closure exceeds the
+    // std::function SBO, so a per-frame copy heap-allocated). Starts true so the first
+    // data frame takes its one snapshot.
+    std::atomic<bool> rx_dirty_{true};
     std::mutex write_m_;              // serializes writes to client_fd_
     std::atomic<int> client_fd_{-1};  // the connected client (-1 = none)
 };
@@ -180,8 +185,13 @@ class transport_ws_client : public transport_t, private posix_endpoint_t {
     receiver_t receiver_;            // guarded by m_
     rope_receiver_t rope_receiver_;  // guarded by m_; preferred when set
     std::mutex m_;                   // guards the receivers
-    std::mutex write_m_;             // serializes writes to conn_fd_
-    std::atomic<int> conn_fd_{-1};   // the live connection (-1 = torn down)
+    // Set by set_receiver/set_rope_receiver; the recv loop re-snapshots the receivers
+    // ONLY when this flag is set — never per frame (the fwd_router closure exceeds the
+    // std::function SBO, so a per-frame copy heap-allocated). Starts true so the first
+    // data frame takes its one snapshot.
+    std::atomic<bool> rx_dirty_{true};
+    std::mutex write_m_;            // serializes writes to conn_fd_
+    std::atomic<int> conn_fd_{-1};  // the live connection (-1 = torn down)
     std::atomic<std::uint64_t> mask_state_{0};
     bool connected_ = false;
 };

@@ -139,11 +139,13 @@ tcp_transport_t::~tcp_transport_t() {
 void tcp_transport_t::set_receiver(receiver_t receiver) {
     const std::lock_guard lock(m_);
     receiver_ = std::move(receiver);
+    rx_dirty_.store(true, std::memory_order_release);  // recv loop re-snapshots next frame
 }
 
 void tcp_transport_t::set_rope_receiver(rope_receiver_t receiver) {
     const std::lock_guard lock(m_);
     rope_receiver_ = std::move(receiver);
+    rx_dirty_.store(true, std::memory_order_release);  // recv loop re-snapshots next frame
 }
 
 void tcp_transport_t::send(std::span<const std::byte> frame) {
@@ -223,6 +225,14 @@ bool tcp_transport_t::drain(int fd, std::size_t len) {
 
 void tcp_transport_t::serve(int fd) {
     std::array<std::byte, kPrefixBytes> prefix;
+    // Snapshot the receivers into locals and re-copy them ONLY when set_receiver /
+    // set_rope_receiver marked rx_dirty_ — never per frame: the installed fwd_router
+    // closure exceeds the std::function SBO, so a per-frame copy heap-allocated on
+    // EVERY inbound frame. Steady state is one relaxed load, no lock, no copy. The
+    // dirty flag starts true, so the first framed body takes the snapshot (honoring
+    // "receiver set before frames flow"); a mid-run swap re-snapshots on its next frame.
+    rope_receiver_t rope_receiver;
+    receiver_t receiver;
     while (!stop_.load(std::memory_order_relaxed)) {
         // Read the 4-byte length prefix, reassembling it across TCP segment
         // boundaries (read_exact resumes partial reads through receive timeouts).
@@ -253,11 +263,10 @@ void tcp_transport_t::serve(int fd) {
             continue;
         }
 
-        // Both receivers are installed before frames flow (the set_receiver
-        // contract); snapshot them before the body read.
-        rope_receiver_t rope_receiver;
-        receiver_t receiver;
-        {
+        // Re-snapshot the receivers only if they changed (rx_dirty_) since the last
+        // frame; clear the flag BEFORE the copy so a concurrent set_receiver re-arms it.
+        if (rx_dirty_.load(std::memory_order_acquire)) {
+            rx_dirty_.store(false, std::memory_order_release);
             const std::lock_guard lock(m_);
             rope_receiver = rope_receiver_;
             receiver = receiver_;
