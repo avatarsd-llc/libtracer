@@ -166,6 +166,14 @@ jobs:
       - name: Skip note (no IDF_COMPONENT_API_TOKEN)
         if: ${{ env.IDF_COMPONENT_API_TOKEN == '' }}
         run: echo "::warning::IDF_COMPONENT_API_TOKEN not set — skipping ESP Component Registry publish"
+      # Vendor core/ INTO the component so the published archive is self-contained
+      # (the component's CMakeLists reaches up to core/ in-repo; a registry consumer
+      # only gets the component). The CMakeLists prefers this local copy when present.
+      - name: Vendor core into the component (self-contained archive)
+        if: ${{ env.IDF_COMPONENT_API_TOKEN != '' }}
+        run: |
+          mkdir -p integrations/esp-idf/libtracer/core
+          cp -r core/include core/src integrations/esp-idf/libtracer/core/
       - name: Upload to the ESP Component Registry
         if: ${{ env.IDF_COMPONENT_API_TOKEN != '' }}
         working-directory: integrations/esp-idf/libtracer

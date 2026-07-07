@@ -23,12 +23,20 @@
 # Requires the GCC 13+ toolchain (C++23: std::expected, std::span) shipped with
 # ESP-IDF >= 5.3; CI builds with release-v6.0 (GCC 15).
 
-# This component dir is integrations/esp-idf/libtracer/; the repo root (which
-# holds core/) is three levels up. An ESP-IDF project consumes this component in
-# place by pointing `EXTRA_COMPONENT_DIRS` at it (see the bundled examples'
-# top-level CMakeLists.txt) — so this relative path resolves against the real
-# checkout and core/ is reachable.
-set(LIBTRACER_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../..")
+# Where core/ lives, resolved for BOTH consumption modes:
+#   * In-repo: this component dir is integrations/esp-idf/libtracer/, so the repo
+#     root (which holds core/) is three levels up. An ESP-IDF project consumes the
+#     component in place by pointing `EXTRA_COMPONENT_DIRS` at it (see the bundled
+#     examples' top-level CMakeLists.txt).
+#   * Published registry component: the release job vendors core/ INTO this
+#     directory so the archive is self-contained (a consumer only gets the
+#     component, not the whole repo). When that vendored copy is present, prefer
+#     it. This keeps one CMakeLists correct in both modes.
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/core/src/frame.cpp")
+    set(LIBTRACER_ROOT "${CMAKE_CURRENT_LIST_DIR}")
+else()
+    set(LIBTRACER_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../..")
+endif()
 
 set(LIBTRACER_SRCS
     # L2/L3 wire codec + L0/L1 substrate + L4 graph runtime (the P0 profile)
