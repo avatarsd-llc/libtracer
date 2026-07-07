@@ -26,9 +26,9 @@
 #include <mutex>
 #include <span>
 #include <string>
-#include <thread>
 #include <vector>
 
+#include "libtracer/posix_endpoint.hpp"
 #include "libtracer/transport.hpp"
 
 namespace tr::net {
@@ -41,7 +41,7 @@ namespace tr::net {
  * delivers each inbound BINARY message's unmasked payload to the receiver. The
  * dial-out counterpart is transport_ws_client below.
  */
-class transport_ws_server : public transport_t {
+class transport_ws_server : public transport_t, private posix_endpoint_t {
    public:
     /**
      * @brief Bind+listen on @p bind_port (0 = ephemeral; see local_port()).
@@ -106,8 +106,6 @@ class transport_ws_server : public transport_t {
     std::mutex m_;                    // guards the receivers
     std::mutex write_m_;              // serializes writes to client_fd_
     std::atomic<int> client_fd_{-1};  // the connected client (-1 = none)
-    std::atomic<bool> stop_{false};
-    std::thread thread_;
 };
 
 /**
@@ -122,7 +120,7 @@ class transport_ws_server : public transport_t {
  * (ws::encode_client_frame); inbound server frames are unmasked and decode the
  * same way the server's do. ok() confirms the handshake completed.
  */
-class transport_ws_client : public transport_t {
+class transport_ws_client : public transport_t, private posix_endpoint_t {
    public:
     /**
      * @brief Connect to @p host:@p port and run the client opening handshake.
@@ -186,8 +184,6 @@ class transport_ws_client : public transport_t {
     std::atomic<int> conn_fd_{-1};   // the live connection (-1 = torn down)
     std::atomic<std::uint64_t> mask_state_{0};
     bool connected_ = false;
-    std::atomic<bool> stop_{false};
-    std::thread thread_;
 };
 
 }  // namespace tr::net

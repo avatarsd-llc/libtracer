@@ -8,7 +8,6 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
-#include <sys/time.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
@@ -59,16 +58,15 @@ udp_transport_t::udp_transport_t(std::uint16_t bind_port, const std::string& pee
     if (::getsockname(fd_, reinterpret_cast<sockaddr*>(&bound), &blen) == 0)
         bound_port_ = ntohs(bound.sin_port);
 
-    // A receive timeout lets the recv loop poll stop_ for a clean shutdown.
-    timeval tv{.tv_sec = 0, .tv_usec = 100000};  // 100 ms
-    ::setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    // A receive timeout lets the recv loop poll stop_ for a clean shutdown
+    // (the posix_endpoint_t SO_RCVTIMEO idiom).
+    set_rcv_timeout(fd_);
 
-    thread_ = std::thread([this] { run(); });
+    start([this] { run(); });
 }
 
 udp_transport_t::~udp_transport_t() {
-    stop_.store(true, std::memory_order_relaxed);
-    if (thread_.joinable()) thread_.join();
+    stop_and_join();  // FIRST: the run() thread reads fd_ released below
     if (fd_ >= 0) ::close(fd_);
 }
 

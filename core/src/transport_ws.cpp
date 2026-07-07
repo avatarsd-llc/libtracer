@@ -7,7 +7,6 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -125,12 +124,11 @@ transport_ws_server::transport_ws_server(std::uint16_t bind_port) {
     if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound), &blen) == 0)
         bound_port_ = ntohs(bound.sin_port);
 
-    thread_ = std::thread([this] { run(); });
+    start([this] { run(); });
 }
 
 transport_ws_server::~transport_ws_server() {
-    stop_.store(true, std::memory_order_relaxed);
-    if (thread_.joinable()) thread_.join();
+    stop_and_join();  // FIRST: the run()/serve() thread touches the fds closed below
     if (listen_fd_ >= 0) ::close(listen_fd_);
 }
 
@@ -169,8 +167,7 @@ bool transport_ws_server::handshake(int fd) {
     // Read until the end of the HTTP header block (CRLFCRLF), bounded.
     while (req.find("\r\n\r\n") == std::string::npos) {
         if (stop_.load(std::memory_order_relaxed)) return false;
-        pollfd pfd{.fd = fd, .events = POLLIN, .revents = 0};
-        const int pr = ::poll(&pfd, 1, 100);
+        const int pr = poll_readable(fd);  // one bounded 100 ms readability wait
         if (pr < 0) return false;
         if (pr == 0) continue;  // timeout → re-check stop_
         const ssize_t n = ::recv(fd, chunk.data(), chunk.size(), 0);
@@ -205,8 +202,7 @@ void transport_ws_server::serve(int fd) {
     std::array<std::byte, 4096> chunk;
 
     while (!stop_.load(std::memory_order_relaxed)) {
-        pollfd pfd{.fd = fd, .events = POLLIN, .revents = 0};
-        const int pr = ::poll(&pfd, 1, 100);
+        const int pr = poll_readable(fd);  // one bounded 100 ms readability wait
         if (pr < 0) return;
         if (pr == 0) continue;  // timeout → re-check stop_
 
@@ -271,11 +267,9 @@ void transport_ws_server::serve(int fd) {
 
 void transport_ws_server::run() {
     while (!stop_.load(std::memory_order_relaxed)) {
-        pollfd pfd{.fd = listen_fd_, .events = POLLIN, .revents = 0};
-        const int pr = ::poll(&pfd, 1, 100);
-        if (pr <= 0) continue;  // timeout / error → re-check stop_
-
-        const int fd = ::accept(listen_fd_, nullptr, nullptr);
+        // One poll-100ms-recheck accept pass (posix_endpoint_t): timeout / error /
+        // no connection → re-check stop_ and try again.
+        const int fd = poll_accept(listen_fd_);
         if (fd < 0) continue;
 
         if (!handshake(fd)) {
@@ -328,12 +322,11 @@ transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t 
 
     conn_fd_.store(fd, std::memory_order_relaxed);
     connected_ = true;
-    thread_ = std::thread([this, fd] { serve(fd); });
+    start([this, fd] { serve(fd); });
 }
 
 transport_ws_client::~transport_ws_client() {
-    stop_.store(true, std::memory_order_relaxed);
-    if (thread_.joinable()) thread_.join();
+    stop_and_join();  // FIRST: serve() touches conn_fd_ released below
     // serve() tears the socket down on exit; this only catches a never-spawned
     // thread (handshake failed) where conn_fd_ is already -1, so it never
     // double-closes.
@@ -415,8 +408,7 @@ bool transport_ws_client::handshake(int fd, const std::string& host, std::uint16
     std::array<char, 1024> chunk;
     while (resp.find("\r\n\r\n") == std::string::npos) {
         if (stop_.load(std::memory_order_relaxed)) return false;
-        pollfd pfd{.fd = fd, .events = POLLIN, .revents = 0};
-        const int pr = ::poll(&pfd, 1, 100);
+        const int pr = poll_readable(fd);  // one bounded 100 ms readability wait
         if (pr < 0) return false;
         if (pr == 0) continue;  // timeout → re-check stop_
         const ssize_t n = ::recv(fd, chunk.data(), chunk.size(), 0);
@@ -436,8 +428,7 @@ void transport_ws_client::serve(int fd) {
     std::array<std::byte, 4096> chunk;
 
     while (!stop_.load(std::memory_order_relaxed)) {
-        pollfd pfd{.fd = fd, .events = POLLIN, .revents = 0};
-        const int pr = ::poll(&pfd, 1, 100);
+        const int pr = poll_readable(fd);  // one bounded 100 ms readability wait
         if (pr < 0) break;
         if (pr == 0) continue;  // timeout → re-check stop_
 

@@ -29,9 +29,9 @@
 #include <mutex>
 #include <span>
 #include <string>
-#include <thread>
 
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/posix_endpoint.hpp"
 #include "libtracer/transport.hpp"
 
 namespace tr::net {
@@ -46,7 +46,7 @@ namespace tr::net {
  * segment). With a view receiver installed the frame is handed up OWNING; the
  * span receiver otherwise gets a borrowed span over the same segment bytes.
  */
-class tcp_transport_t : public transport_t {
+class tcp_transport_t : public transport_t, private posix_endpoint_t {
    public:
     /** @brief The largest frame the length prefix may announce (16 MiB). A larger
      *         prefix is malformed — counted via @ref malformed_rx and the
@@ -174,8 +174,6 @@ class tcp_transport_t : public transport_t {
     std::mutex m_;                   // guards the receivers
     std::mutex write_m_;             // serializes writes to conn_fd_
     std::atomic<int> conn_fd_{-1};   // the live peer connection (-1 = none)
-    std::atomic<bool> stop_{false};
-    std::thread thread_;
 };
 
 }  // namespace tr::net

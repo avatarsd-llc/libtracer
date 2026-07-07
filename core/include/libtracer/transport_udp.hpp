@@ -17,9 +17,9 @@
 #include <mutex>
 #include <span>
 #include <string>
-#include <thread>
 
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/posix_endpoint.hpp"
 #include "libtracer/transport.hpp"
 
 namespace tr::net {
@@ -32,7 +32,7 @@ namespace tr::net {
  * (ADR-0042 §2): each datagram is received straight into a refcounted segment from a
  * host-injected `mem_backend_t`, which also bounds the datagram size a node accepts.
  */
-class udp_transport_t : public transport_t {
+class udp_transport_t : public transport_t, private posix_endpoint_t {
    public:
     /** @brief The largest datagram one frame can occupy — the RX segment size a view
      *         receiver's frames are allocated at (the UDP payload bound, one datagram
@@ -114,8 +114,6 @@ class udp_transport_t : public transport_t {
     receiver_t receiver_;            // guarded by m_
     rope_receiver_t rope_receiver_;  // guarded by m_; installed => owning delivery path
     std::mutex m_;
-    std::atomic<bool> stop_{false};
-    std::thread thread_;
 };
 
 }  // namespace tr::net

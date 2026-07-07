@@ -30,6 +30,18 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **`posix_endpoint.hpp` — the shared POSIX recv-thread/endpoint scaffold
+  (internal).** `posix_endpoint_t` is a protected base owning the `stop_` flag +
+  receive `thread_` (with `start()` / `stop_and_join()`) and the 100 ms
+  shutdown-responsive socket idioms (`set_rcv_timeout` / `poll_readable` /
+  `poll_accept`) that `tcp`/`udp`/`ws` (server + client) each open-coded. The
+  teardown invariants (stop-and-join before releasing thread-touched resources;
+  reset the fd under the write mutex before `::close`) are documented once on the
+  base. No public transport API or wire behavior changes; the transports' own
+  fds, receivers, counters, and write mutexes stay where they were. Also
+  concentrates the thrice-cloned DIAL/LISTEN factory boilerplate in
+  `transport_vertex.cpp` into `make_checked` / `dial_or_listen` helpers.
+
 - **`length_prefix_framer` exposes the shared framing-rule kernel.** New public
   statics `effective_cap(backend, max_frame)` (the RX cap =
   `min(max_frame, backend.max_segment_size())`) and

@@ -55,6 +55,7 @@ add_library(libtracer STATIC
     src/fwd_router.cpp
     src/transport_vertex.cpp
     src/loopback.cpp
+    src/posix_endpoint.cpp
     src/transport_tcp.cpp
     src/transport_udp.cpp
     src/transport_ws.cpp

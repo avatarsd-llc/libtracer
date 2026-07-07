@@ -8,9 +8,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <poll.h>
 #include <sys/socket.h>
-#include <sys/time.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
@@ -33,13 +31,6 @@ constexpr int MSG_NOSIGNAL = 0;
 
 // The u32-LE length prefix (transport framing) — the framer's, shared verbatim.
 constexpr std::size_t kPrefixBytes = length_prefix_framer::kPrefixBytes;
-
-// A receive timeout lets every blocking read poll stop_ for a clean shutdown
-// (the transport_udp SO_RCVTIMEO idiom, applied per connection).
-void set_rcv_timeout(int fd) {
-    timeval tv{.tv_sec = 0, .tv_usec = 100000};  // 100 ms
-    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-}
 
 // Frames are small and latency-sensitive (a READ round-trip is two tiny records);
 // Nagle coalescing would serialize them behind ACKs.
@@ -91,10 +82,12 @@ tcp_transport_t::tcp_transport_t(const std::string& peer_host, std::uint16_t pee
         ::close(fd);
         return;
     }
+    // A receive timeout lets every blocking read poll stop_ for a clean
+    // shutdown (the posix_endpoint_t SO_RCVTIMEO idiom, applied per connection).
     set_rcv_timeout(fd);
     set_nodelay(fd);
     conn_fd_.store(fd, std::memory_order_relaxed);
-    thread_ = std::thread([this, fd] {
+    start([this, fd] {
         serve(fd);
         // Tear down under write_m_ so a concurrent send() never writes to (or
         // reads) a closed/reused fd.
@@ -131,12 +124,11 @@ tcp_transport_t::tcp_transport_t(std::uint16_t bind_port, mem::mem_backend_t* ba
     if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound), &blen) == 0)
         bound_port_ = ntohs(bound.sin_port);
 
-    thread_ = std::thread([this] { run_listen(); });
+    start([this] { run_listen(); });
 }
 
 tcp_transport_t::~tcp_transport_t() {
-    stop_.store(true, std::memory_order_relaxed);
-    if (thread_.joinable()) thread_.join();
+    stop_and_join();  // FIRST: the thread touches the fds released below
     // The serve/accept thread closes the peer fd on exit; this only catches a
     // never-spawned thread (dial failed), so it never double-closes.
     const int leftover = conn_fd_.exchange(-1, std::memory_order_relaxed);
@@ -288,11 +280,9 @@ void tcp_transport_t::serve(int fd) {
 
 void tcp_transport_t::run_listen() {
     while (!stop_.load(std::memory_order_relaxed)) {
-        pollfd pfd{.fd = listen_fd_, .events = POLLIN, .revents = 0};
-        const int pr = ::poll(&pfd, 1, 100);
-        if (pr <= 0) continue;  // timeout / error → re-check stop_
-
-        const int fd = ::accept(listen_fd_, nullptr, nullptr);
+        // One poll-100ms-recheck accept pass (posix_endpoint_t): timeout /
+        // error / no connection → re-check stop_ and try again.
+        const int fd = poll_accept(listen_fd_);
         if (fd < 0) continue;
         set_rcv_timeout(fd);
         set_nodelay(fd);
