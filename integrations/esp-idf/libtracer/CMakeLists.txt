@@ -50,6 +50,7 @@ set(LIBTRACER_SRCS
     "${LIBTRACER_ROOT}/core/src/transport_vertex.cpp"
     "${LIBTRACER_ROOT}/core/src/loopback.cpp"
     # socket transports — lwIP BSD sockets on chip targets, glibc on `linux`
+    "${LIBTRACER_ROOT}/core/src/posix_endpoint.cpp"
     "${LIBTRACER_ROOT}/core/src/transport_udp.cpp"
     "${LIBTRACER_ROOT}/core/src/transport_tcp.cpp"
     "${LIBTRACER_ROOT}/core/src/transport_ws.cpp"
