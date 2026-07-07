@@ -10,14 +10,12 @@
 #include <span>
 #include <utility>
 
+#include "libtracer/builtin_transports.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/tlv_emit.hpp"
-#include "libtracer/transport_tcp.hpp"
-#include "libtracer/transport_udp.hpp"
-#include "libtracer/transport_ws.hpp"
 
 namespace tr::net {
 
@@ -84,73 +82,6 @@ void parse_config(const tlv_t* config, conn_settings_t& s) {
         view_t{});  // empty view on alloc failure (caller-checked)
 }
 
-// Construct concrete transport `T`, map a failed `ok()` (dial/bind/handshake failure)
-// to NOT_FOUND, and upcast to the base handle — the ok()→NOT_FOUND mapping every
-// built-in stream factory shares, in one locus (`ok()` is a concrete, non-virtual
-// method, so the check is templated on `T`, not called through `transport_t`).
-template <class T, class... Args>
-[[nodiscard]] result_t<std::unique_ptr<transport_t>> make_checked(Args&&... args) {
-    auto t = std::make_unique<T>(std::forward<Args>(args)...);
-    if (!t->ok()) return std::unexpected(status_t::NOT_FOUND);
-    return t;  // unique_ptr<T> => unique_ptr<transport_t> (upcast move)
-}
-
-// The role dispatch every built-in socket factory repeats: DIAL requires `addr` + `port`
-// and constructs the dialer; LISTEN requires `port` and constructs the listener
-// (`TYPE_MISMATCH` on a missing field). The per-transport construction — and, for ws,
-// the fact that DIAL and LISTEN are DIFFERENT concrete types — stays in the thunks.
-template <class Dial, class Listen>
-[[nodiscard]] result_t<std::unique_ptr<transport_t>> dial_or_listen(const conn_settings_t& s,
-                                                                    Dial&& dial, Listen&& listen) {
-    if (s.role == conn_role_t::DIAL) {
-        if (s.addr.empty() || s.port == 0) return std::unexpected(status_t::TYPE_MISMATCH);
-        return dial();
-    }
-    if (s.port == 0) return std::unexpected(status_t::TYPE_MISMATCH);
-    return listen();
-}
-
-// Built-in `udp`: DIAL binds an ephemeral local port and targets `addr:port`; LISTEN
-// binds `port` peer-less — udp_transport_t then learns the peer from each inbound
-// datagram's source (the single-peer UDP-server shape), so replies to a dialing client
-// (whose ephemeral port is unknowable in advance) route back. `keepalive` is ignored
-// (UDP is connectionless; there is no link to keep alive).
-// `rx_backend` is the ADR-0042 §2 receive-segment seam, threaded from the
-// transport_vertex_t constructor so config-constructed sockets participate in
-// owning view delivery with the host's memory policy.
-result_t<std::unique_ptr<transport_t>> make_udp(const conn_settings_t& s,
-                                                mem::mem_backend_t* rx_backend) {
-    return dial_or_listen(
-        s, [&] { return make_checked<udp_transport_t>(0, s.addr, s.port, rx_backend); },
-        [&] { return make_checked<udp_transport_t>(s.port, s.addr, 0, rx_backend); });
-}
-
-// Built-in `tcp` (M6): DIAL = tcp_transport_t(addr, port) — a SYNCHRONOUS TCP connect
-// at creation time (the peer's listener must be up, or the SPEC write fails NOT_FOUND);
-// LISTEN = tcp_transport_t(port), accepting ONE inbound peer at a time (the
-// transport_ws_server one-peer model). Length-prefix framing is internal to the
-// transport. `keepalive` is ignored (TCP's own keepalive/liveness is #66 lifecycle).
-// `rx_backend` is the ADR-0042 §2 receive-segment seam, as for `udp`.
-result_t<std::unique_ptr<transport_t>> make_tcp(const conn_settings_t& s,
-                                                mem::mem_backend_t* rx_backend) {
-    return dial_or_listen(
-        s, [&] { return make_checked<tcp_transport_t>(s.addr, s.port, rx_backend, s.max_frame); },
-        [&] { return make_checked<tcp_transport_t>(s.port, rx_backend, s.max_frame); });
-}
-
-// Built-in `ws`: DIAL = transport_ws_client(addr, port) — a SYNCHRONOUS TCP connect +
-// RFC 6455 opening handshake at creation time (the peer's server must be up, or the
-// SPEC write fails NOT_FOUND); LISTEN = transport_ws_server(port), accepting ONE
-// inbound peer (the headline browser↔board link). `keepalive` is ignored by both
-// (PING/PONG is handled at the ws protocol layer). Like all built-ins, ws has no
-// kind-private config keys, so the raw config TLV is ignored (ADR-0043 §5).
-result_t<std::unique_ptr<transport_t>> make_ws(const conn_settings_t& s,
-                                               const tlv_t* /*raw_config*/) {
-    return dial_or_listen(
-        s, [&] { return make_checked<transport_ws_client>(s.addr, s.port); },
-        [&] { return make_checked<transport_ws_server>(s.port); });
-}
-
 }  // namespace
 
 transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& router,
@@ -170,16 +101,13 @@ transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& rout
         "listener", [this](graph::graph_t&, std::vector<std::byte> key, const tlv_t* config) {
             return make_connection(std::move(key), config, conn_role_t::LISTEN);
         });
-    // The built-in transport-factory catalog entries (config `kind` selectors). The
-    // udp and tcp factories close over the injected RX backend (ADR-0042 §2); ws stays
-    // span-delivering until its frame assembly is pointed at segments (ADR-0042 §4).
-    register_transport_type("udp", [this](const conn_settings_t& s, const tlv_t* /*raw_config*/) {
-        return make_udp(s, rx_backend_);
-    });
-    register_transport_type("tcp", [this](const conn_settings_t& s, const tlv_t* /*raw_config*/) {
-        return make_tcp(s, rx_backend_);
-    });
-    register_transport_type("ws", make_ws);
+    // Register the built-in transport-factory catalog entries (config `kind` selectors)
+    // that this build compiled in — udp / tcp / ws, each from its own translation unit
+    // gated by a per-module CMake option (register_builtin_transports is the full-node or
+    // CMake-generated dispatcher; see builtin_transports.hpp). Keeping the concrete
+    // transport references out of this file lets a build DROP a transport without leaving
+    // a dangling reference — module selection is by compiled TU, no preprocessor macros.
+    register_builtin_transports(*this, rx_backend_);
     // The `quic` kind is NOT a builtin: it lives in the separate libtracer_quic
     // module (ADR-0043), which extends this catalog through register_transport_type
     // (quic_transport_factory) — this file never learns about msquic (open/closed).
