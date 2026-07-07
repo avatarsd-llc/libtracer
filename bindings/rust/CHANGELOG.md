@@ -2,11 +2,15 @@
 
 All notable changes to the **public API** of the `libtracer` Rust crate are
 recorded here, per [CONTRIBUTING](../../.github/CONTRIBUTING.md) / [CLAUDE.md](../../CLAUDE.md).
-The crate is pre-1.0; everything currently lives under `[Unreleased]`.
+The crate is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+_Nothing yet._
+
+## [0.3.0] — 2026-07-07
 
 ### Added
 

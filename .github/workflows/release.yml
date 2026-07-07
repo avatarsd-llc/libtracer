@@ -1,0 +1,174 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# Unified release-on-tag. Pushing a signed `vX.Y.Z` tag (per .github/RELEASING.md)
+# fires this workflow, which — after asserting the tag matches the VERSION file —
+# creates the GitHub Release (AI-written summary + CHANGELOG) and publishes every
+# packaged artifact at X.Y.Z in lockstep: npm, crates.io, PlatformIO, ESP.
+#
+# Each publish is an INDEPENDENT job that no-ops with a warning when its secret is
+# absent, so tokens can be added incrementally and one missing registry never
+# fails the release. Nothing here runs until a `v*` tag is pushed.
+#
+# Required secrets (add per registry as you go): ANTHROPIC_API_KEY (release notes),
+# NPM_TOKEN, CARGO_REGISTRY_TOKEN, PLATFORMIO_AUTH_TOKEN, IDF_COMPONENT_API_TOKEN.
+name: release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing vX.Y.Z tag to (re)run the release for"
+        required: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write # create the GitHub Release
+  id-token: write # npm provenance (OIDC)
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: Assert the tag matches the VERSION file
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          ver="$(tr -d '[:space:]' < VERSION)"
+          if [ "${tag#v}" != "$ver" ]; then
+            echo "::error::tag '$tag' does not match VERSION '$ver' — bump VERSION (tools/sync-version.py) before tagging"
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Releasing $tag (VERSION=$ver)"
+
+  github-release:
+    needs: verify
+    runs-on: ubuntu-24.04
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so we can list commits since the previous tag
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Commit list since the previous tag
+        run: |
+          prev="$(git describe --tags --abbrev=0 --match 'v[0-9]*' '${{ needs.verify.outputs.tag }}^' 2>/dev/null || true)"
+          range="${prev:+$prev..}${{ needs.verify.outputs.tag }}"
+          echo "range: ${range:-all history}"
+          git log --no-merges --pretty='- %s' ${range} 2>/dev/null | head -300 > "${RUNNER_TEMP}/commits.txt" || true
+      - name: Build the release body (AI summary + CHANGELOG)
+        run: |
+          python3 tools/gen_release_notes.py \
+            --version "${{ needs.verify.outputs.version }}" \
+            --changelog core/CHANGELOG.md \
+            --commits-file "${RUNNER_TEMP}/commits.txt" > "${RUNNER_TEMP}/body.md"
+          echo "----- release body -----"; cat "${RUNNER_TEMP}/body.md"
+      - name: Create the GitHub Release
+        run: |
+          gh release create "${{ needs.verify.outputs.tag }}" \
+            --title "libtracer ${{ needs.verify.outputs.tag }}" \
+            --notes-file "${RUNNER_TEMP}/body.md" \
+            --verify-tag
+
+  npm:
+    needs: verify
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: bindings/typescript
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+          cache-dependency-path: bindings/typescript/package-lock.json
+      - name: Skip note (no NPM_TOKEN)
+        if: ${{ env.NPM_TOKEN == '' }}
+        run: echo "::warning::NPM_TOKEN not set — skipping npm publish"
+      - name: Install + build
+        if: ${{ env.NPM_TOKEN != '' }}
+        run: |
+          npm ci
+          npm run build
+      - name: Publish to npm
+        if: ${{ env.NPM_TOKEN != '' }}
+        run: npm publish --workspaces --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  crates:
+    needs: verify
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Skip note (no CARGO_REGISTRY_TOKEN)
+        if: ${{ env.CARGO_REGISTRY_TOKEN == '' }}
+        run: echo "::warning::CARGO_REGISTRY_TOKEN not set — skipping crates.io publish"
+      - name: Publish libtracer to crates.io
+        if: ${{ env.CARGO_REGISTRY_TOKEN != '' }}
+        run: cargo publish --manifest-path bindings/rust/Cargo.toml
+
+  platformio:
+    needs: verify
+    runs-on: ubuntu-24.04
+    env:
+      PLATFORMIO_AUTH_TOKEN: ${{ secrets.PLATFORMIO_AUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Skip note (no PLATFORMIO_AUTH_TOKEN)
+        if: ${{ env.PLATFORMIO_AUTH_TOKEN == '' }}
+        run: echo "::warning::PLATFORMIO_AUTH_TOKEN not set — skipping PlatformIO publish"
+      - name: Publish to the PlatformIO registry
+        if: ${{ env.PLATFORMIO_AUTH_TOKEN != '' }}
+        run: |
+          pip install --quiet platformio
+          pio pkg publish --no-interactive
+
+  esp-component:
+    needs: verify
+    runs-on: ubuntu-24.04
+    env:
+      IDF_COMPONENT_API_TOKEN: ${{ secrets.IDF_COMPONENT_API_TOKEN }}
+      # Set the repo variable ESP_COMPONENT_NAMESPACE if your ESP registry
+      # namespace is not "avatarsd-llc".
+      NAMESPACE: ${{ vars.ESP_COMPONENT_NAMESPACE || 'avatarsd-llc' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Skip note (no IDF_COMPONENT_API_TOKEN)
+        if: ${{ env.IDF_COMPONENT_API_TOKEN == '' }}
+        run: echo "::warning::IDF_COMPONENT_API_TOKEN not set — skipping ESP Component Registry publish"
+      - name: Upload to the ESP Component Registry
+        if: ${{ env.IDF_COMPONENT_API_TOKEN != '' }}
+        working-directory: integrations/esp-idf/libtracer
+        run: |
+          pip install --quiet idf-component-manager
+          compote component upload --namespace "${NAMESPACE}" --name libtracer

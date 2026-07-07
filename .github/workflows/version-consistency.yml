@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 #
-# Guards the single source of truth for the core release version. The repo-root
-# `VERSION` file is the sole hand-edited version for the C++ core release axis;
-# the static package manifests (PlatformIO / Arduino / ESP Component Registry)
-# mirror it via `tools/sync-version.py`. This job runs the stamper in --check
-# mode and fails if any manifest has drifted from `VERSION`, so a version bump
-# can never land half-applied. The Rust / TypeScript / ROS 2 bindings version
-# independently and are not checked here.
+# Guards the single source of truth for the release version. The repo-root
+# `VERSION` file is the sole hand-edited version; every publishable artifact is
+# versioned in lockstep from it via `tools/sync-version.py` — the PlatformIO /
+# Arduino / ESP manifests, the four TypeScript packages (version + internal dep
+# ranges), and the Rust crate. This job runs the stamper in --check mode and
+# fails if anything has drifted from `VERSION`, so a version bump can never land
+# half-applied. (The ROS 2 stub is unreleased and intentionally excluded.)
 name: version-consistency
 
 on:
@@ -18,6 +18,8 @@ on:
       - library.json
       - integrations/arduino/library.properties
       - integrations/esp-idf/libtracer/idf_component.yml
+      - bindings/typescript/packages/**/package.json
+      - bindings/rust/Cargo.toml
       - tools/sync-version.py
       - .github/workflows/version-consistency.yml
   pull_request:
@@ -26,6 +28,8 @@ on:
       - library.json
       - integrations/arduino/library.properties
       - integrations/esp-idf/libtracer/idf_component.yml
+      - bindings/typescript/packages/**/package.json
+      - bindings/rust/Cargo.toml
       - tools/sync-version.py
       - .github/workflows/version-consistency.yml
   workflow_dispatch:
