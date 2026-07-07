@@ -1,139 +1,110 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC -->
+
 # libtracer
 
-**A decentralized, zero-copy, graph-based pub/sub protocol that supersedes DDS — one wire format from a 16 KB Cortex-M0 to a GPU, across vendors and transports.**
+**A decentralized, zero-copy, graph-based pub/sub protocol — one wire format from a 16 KB Cortex‑M0 to a GPU, across vendors and transports.**
 
-A libtracer node is a graph of addressable **vertices**. The load-bearing idea: **the same TLV bytes are the wire encoding, the in-memory value, *and* the graph node** — so publishing moves **zero bytes** (a refcount bump), and any node can route, translate, or relay any other node's state without understanding it. Big things connect to small things; small things connect to each other through whatever transport is available (UART, CAN, BLE, Wi-Fi, WebSocket, UDP, LoRa) or through any node acting as a bridge to something incompatible.
+[![conformance](https://github.com/avatarsd-llc/libtracer/actions/workflows/conformance.yml/badge.svg)](https://github.com/avatarsd-llc/libtracer/actions/workflows/conformance.yml)
+[![core CI](https://github.com/avatarsd-llc/libtracer/actions/workflows/core-ci.yml/badge.svg)](https://github.com/avatarsd-llc/libtracer/actions/workflows/core-ci.yml)
+[![docs](https://img.shields.io/badge/docs-libtracer.avatarsd.com-2ea043)](https://libtracer.avatarsd.com/)
+[![spec: protocol v1 (draft)](https://img.shields.io/badge/spec-protocol%20v1%20(draft)-blue)](https://libtracer.avatarsd.com/docs/spec/v1.html)
+[![license: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![stars](https://img.shields.io/github/stars/avatarsd-llc/libtracer?style=flat)](https://github.com/avatarsd-llc/libtracer/stargazers)
+
+A libtracer node is a graph of addressable **vertices**. The load‑bearing idea: **the same TLV bytes are the wire encoding, the in‑memory value, *and* the graph node** — so publishing moves **zero bytes** (a refcount bump), and any node can route, translate, or relay another node's state without understanding it. Big things connect to small things; small things connect to each other over whatever transport is available (UART, CAN, BLE, Wi‑Fi, WebSocket, UDP, QUIC) or through any node bridging to something incompatible.
 
 This repo is not just a library — it **defines a protocol the community can implement, extend, and interoperate around**, including across competing products and proprietary ecosystems.
+
+> **📖 Full documentation:** **[libtracer.avatarsd.com](https://libtracer.avatarsd.com/)** — architecture, the normative spec, reproducible benchmarks, worked examples, and the [implementation capability matrix](https://libtracer.avatarsd.com/docs/capability-matrix.html).
 
 ---
 
 ## Why libtracer — the keystones
 
-- **Graph unification (one substrate).** Wire bytes ≡ in-memory value ≡ graph node. There is no encode-on-send / decode-on-receive / copy-into-the-graph tax: an in-process hand-off is a refcount bump, and a network hop ships the bytes that *already are* the value. Decoupling *storage* composition (memory ropes) from *meaning* composition (TLV trees) is what makes this zero-copy hold end-to-end.
-- **Zero-copy everywhere.** Values are refcounted **views** over backing memory; a logically contiguous value scattered across segments is a **rope** (a chain of views, never `memcpy`). Fan-out to N subscribers is N refcount bumps, not N copies. Egress lowers a rope straight to the transport's scatter-gather (`iovec`/`sendmsg`, CAN descriptor chains, RDMA verbs) — one syscall per composite, no flatten. The borrowed/loaned read path is **flat ~80 ns even at 8 KB**.
-- **Stateless, decentralized graph routing.** Routing is **explicit source-routing**: a remote endpoint is addressed by its full path through transport-vertices (`/net/<conn>/<peer path>`), and each forwarding node just **strips its own segment and passes the rest** — **stateless, loop-free by construction** (a revisited segment is malformed), with no dedup and no shared state. **Any node with ≥2 transports forwards**; there are **no `router`/`orchestrator` roles**, only transient hats a peer wears. The network is **pure-decentralized and self-healing** (bindings re-form on reconnect, no central authority) — MCU-friendly. Two links to one peer are just *two explicit addresses* (deliberate redundancy), never auto-multipath.
-- **Three calls + an `ioctl`.** The entire data API is **`read` / `write` / `await`** (plus refcounts) — no `connect`/`subscribe`/`disconnect`. Control (subscriptions, QoS, ACLs, liveness) is **field-writes on a `:` plane** — the vertex's `ioctl`, on one identity (`/sensor/temp:subscribers[]`). Subscribing *is* a consumer-initiated client-write into the producer's subscriber list; delivery *is* an ordinary write.
-- **Zero-overhead on constrained buses.** **Header-elided framing** lets the transport's native identity (a CAN ID, a WS channel) *be* the path — the TLV header is synthesized on ingress and elided on egress, so it **never hits the bus**; existing CAN/WS frames are byte-unchanged. The *same* **advertise + id-match** mechanism scales from a 9-byte elided CAN sample to a multi-GB advertised rope group.
-- **One model across 8 orders of magnitude.** A 1-bit boolean, a GPIO MMIO register, an IMU record, a 1 GB/s ADC stream, and a tensor in GPU memory are all the *same* vertex model — addressed identically, lighting up different optional `:` fields. A Cortex-M0 is a **first-class node** (~16 KB, static path handles, no `snprintf`/malloc on the hot path, ISR-safe). Memory backends (heap, pool, MMIO, DMA, CUDA) are pluggable; libtracer is a **transparent byte router** that imposes no copy/CRC on a live binding.
+- **One substrate.** Wire bytes ≡ in‑memory value ≡ graph node. No encode‑on‑send / decode‑on‑receive / copy‑into‑the‑graph tax: an in‑process hand‑off is a refcount bump, and a network hop ships the bytes that *already are* the value.
+- **Zero‑copy everywhere.** Values are refcounted **views** over backing memory; a logically contiguous value scattered across segments is a **rope** (a chain of views, never `memcpy`). Fan‑out to N subscribers is N refcount bumps. Egress lowers a rope straight to the transport's scatter‑gather — one syscall per composite, no flatten. The borrowed read path is **flat ~80 ns even at 8 KB**.
+- **Stateless, decentralized routing.** Explicit source‑routing: a remote endpoint is addressed by its full path through transport‑vertices, and each forwarding node **strips its own segment and passes the rest** — stateless, loop‑free by construction, no dedup, no shared state. **Any node with ≥2 transports forwards**; there are **no privileged `router`/`orchestrator` roles**. The mesh is pure‑decentralized and self‑healing.
+- **Three calls + an `ioctl`.** The entire data API is **`read` / `write` / `await`** — no `connect`/`subscribe`/`disconnect`. Control (subscriptions, QoS, ACLs, liveness) is **field‑writes on a `:` plane** — the vertex's `ioctl`. Subscribing *is* a consumer‑initiated write into the producer's subscriber list; delivery *is* an ordinary write.
+- **Zero overhead on constrained buses.** **Header‑elided framing** lets a transport's native identity (a CAN ID, a WS channel) *be* the path — the TLV header is synthesized on ingress and elided on egress, so it never hits the bus; existing CAN/WS frames are byte‑unchanged.
+- **One model across 8 orders of magnitude.** A 1‑bit boolean, a GPIO register, an IMU record, a 1 GB/s ADC stream, and a GPU tensor are the *same* vertex model — addressed identically, lighting up different optional `:` fields. A Cortex‑M0 is a first‑class node (~16 KB, no malloc/`snprintf` on the hot path, ISR‑safe).
 
-## Performance — measured against Zenoh, in absolute terms
+## Implementations — what's real today
 
-Benchmarked against [Eclipse Zenoh](https://zenoh.io) (zenoh-c 1.9.0) across a payload × fan-out × topic-count grid, both built `-O3` and measured in the **same pass on the same runner**. The comparison is **generated in CI on every docs build** and published — with interactive **absolute-value** charts (throughput / latency / bandwidth, libtracer and Zenoh as two series on shared axes) — on the **[Performance page](https://avatarsd-llc.github.io/libtracer/docs/performance.html)**. No speed-up ratios and no committed figures: you read the real numbers off the axes, stamped with the commit + runner that produced them.
+libtracer is a **spec first**, then implementations. The C++ core is the golden reference; the Rust and TypeScript cores are *from‑scratch native reimplementations* kept byte‑identical to it by the same [shared conformance vectors](tests/conformance/) ([ADR‑0028](docs/adr/0028-native-cores-kept-consistent-by-conformance-vectors.md)). Every claim below is backed by a CI‑run test — see the **[capability matrix](https://libtracer.avatarsd.com/docs/capability-matrix.html)** (generated from that evidence, so it can't drift).
 
-Where the engines differ most is **fan-out** — libtracer's TLV bytes are simultaneously the wire encoding, the in-memory value, and the graph node, so a publish moves zero bytes (a refcount bump) rather than running a full per-sample path. On the **topic-count** axis the two run close. The charts show exactly where each holds; run [`bench/grid.sh`](bench/) to reproduce them locally.
-
-## How it supersedes existing solutions
-
-- **vs DDS / RTPS.** DDS is powerful but heavy — it does not fit a 16 KB MCU and copies samples on fan-out. libtracer fits the MCU, does **zero-copy refcounted fan-out**, and needs no heavyweight discovery to talk on a bus.
-- **vs Zenoh.** Comparable design goals, but libtracer wins **both** throughput and latency (above) and reaches **micro-ROS-class targets Zenoh cannot**. The ROS 2 path — carrying `rmw_tracer` messages into GPU memory with no host copy — is **on the roadmap**: the RMW binding is an early stub today ([ADR-0023](docs/adr/0023-ros2-binding-via-rmw-tracer.md), [`bindings/ros2/`](bindings/ros2/)). (Honest niche: Zenoh's ROS integration is mature and official; libtracer's edge is embedded / ultra-low-latency / zero-copy / on-robot fabric.)
-- **vs MQTT.** No central broker required — the network is decentralized and **any node can bridge**. State is a **typed, addressable graph**, not opaque topic payloads, and delivery is zero-copy.
-- **vs a custom CAN/UART glue layer.** Header elision means libtracer rides your existing bus frames **with zero added bytes**, while still giving you addressing, fan-out, QoS, and a bridge to IP — instead of a bespoke, un-routable point-to-point hack.
-
-## How you'd use it — simplest to most complex
-
-The same protocol scales across a deployment spectrum (modules layer on a common base; see [`docs/reference/12-deployment-profiles.md`](docs/reference/12-deployment-profiles.md)):
-
-| | Scenario | What it adds |
+| Implementation | Scope | Status |
 | --- | --- | --- |
-| **0** | In-process pub/sub | graph runtime + codec only |
-| **1** | Single-transport leaf | one transport (UART/CAN) — an RC car, a CAN sensor |
-| **2** | **Gateway** (CAN + WebSocket) | a 2nd transport + stateless source-routed forwarding — e.g. a grow controller fanning a CAN sensor field to a web UI |
-| **3** | RTSP / camera source | lazy on-demand streams as rope groups |
-| **4** | ROS 2 node (`rmw_tracer`) | drop-in RMW (`RMW_IMPLEMENTATION=rmw_tracer`), no node code changes — **roadmap; an early stub today** |
-| **5** | Flagship | 100 ksps STM32 → CAN → **GPU tensor cores**, zero host copy |
+| **C++ core** ([`core/`](core/)) | the **full** protocol — codec, graph runtime, FWD routing, transports (tcp/udp/ws/quic/webtransport/can) | reference; extensive test suite |
+| **Rust** ([`bindings/rust/`](bindings/rust/)) | native `#![no_std]` **wire codec + typed tier** (builders, PATH, ERROR registry, FWD/FIELD) — no transports/runtime yet | byte‑verified; pre‑release |
+| **TypeScript** ([`bindings/typescript/`](bindings/typescript/)) | native browser/**edge** — codec + client (read/write/await/subscribe) + WebSocket/WebTransport | byte‑verified; client/transports experimental |
+| **ESP‑IDF** ([`integrations/esp-idf/`](integrations/esp-idf/)) | packages the full C++ node as a managed component (CI‑built esp32c6/c3 + linux) | working |
+| **Arduino · PlatformIO · ESPHome** ([`integrations/`](integrations/)) | platform packaging | **stubs** (ESPHome is a placeholder) |
+| **ROS 2** (`rmw_tracer`, [`bindings/ros2/`](bindings/ros2/)) | drop‑in RMW over the C++ graph | **early stub** |
 
-A "smart device" here is **any node that translates an incompatible protocol (Modbus, Z-Wave, vendor-X) into libtracer** — making the legacy device a first-class citizen of the graph.
+## Quick start
 
-```text
-  ┌──────────┐  CAN  ┌──────────┐  WS / UDP ┌──────────┐  HTTP ┌──────────┐
-  │  sensor  │──────▶│  ESP32   │──────────▶│ gateway  │──────▶│  cloud   │
-  │  (tiny)  │       │  bridge  │           │          │       │ (web UI) │
-  └──────────┘       └────┬─────┘           └────▲─────┘       └──────────┘
-                          │ LoRa                 │ Modbus / proprietary
-                          ▼                      │
-                     ┌──────────┐          ┌──────────┐
-                     │ off-grid │          │ legacy   │
-                     │  sensor  │          │   PLC    │
-                     └──────────┘          └──────────┘
+**C++ (the reference):**
+```bash
+cmake -S core -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
+```
+Then `find_package(libtracer)` + `target_link_libraries(app PRIVATE libtracer::libtracer)`. See the **[getting‑started guide](https://libtracer.avatarsd.com/docs/getting-started.html)**.
+
+**Other surfaces** (available once `v0.3.0` is published — the pipeline publishes them in lockstep):
+
+```bash
+npm install @avatarsd-llc/libtracer          # TypeScript codec
+cargo add libtracer                          # Rust codec (git dep until first crate release)
+# ESP-IDF:  idf.py add-dependency "avatarsd-llc/libtracer"
 ```
 
-Every arrow speaks one protocol; the bridge forwards typed state across transports without understanding the payload.
+## How it compares
+
+- **vs DDS / RTPS** — DDS doesn't fit a 16 KB MCU and copies samples on fan‑out; libtracer fits the MCU and does zero‑copy refcounted fan‑out with no heavyweight discovery.
+- **vs Zenoh** — comparable goals; libtracer is benchmarked head‑to‑head on the **[performance page](https://libtracer.avatarsd.com/docs/performance.html)** (absolute numbers, generated in CI, no cherry‑picked ratios) and reaches embedded targets Zenoh can't. *(Honest niche: Zenoh's ROS integration is mature; libtracer's edge is embedded / ultra‑low‑latency / zero‑copy / on‑robot fabric.)*
+- **vs MQTT** — no central broker; state is a typed, addressable graph, not opaque topic payloads; delivery is zero‑copy.
+- **vs a bespoke CAN/UART glue layer** — header elision rides your existing bus frames with **zero added bytes**, while still giving you addressing, fan‑out, QoS, and a bridge to IP.
 
 ## Boundary cases & honest limits
 
-- **Route length is bounded by the frame size.** A remote op carries its explicit path (`dst`) in the frame, so a route that doesn't fit the transport MTU can't be expressed. Fine for ordinary topologies; the limit is pathologically deep gateway nesting.
-- **No auto-multipath / mesh failover.** Routing is **explicit source-routing** ([ADR-0040](docs/adr/0040-net-plane-is-explicit-source-routed-only.md)): a peer reachable two ways is *two explicit addresses* (`/net/ws/…` and `/net/can/…`), and a consumer that subscribes both gets both deliveries — deliberate redundancy it chose, not automatic dedup. There is no flooding and no `(origin, ts)` cycle-dedup; a folded auto-multipath mesh would need a future flooding profile (the `0x0D ROUTER` code is reserved for it).
-- **No global clock or cross-producer ordering.** Timestamps are per-producer monotonic (HLC-style); cross-node coherence needs a coordinated trigger.
-- **u32 length ceiling (no u64).** Payloads above 4 GiB use **address-shift slicing** across `ep[0..N]` — the deliberate interop discipline, not a wire-level fragmentation layer.
-- **Reliable stream transports have landed.** TCP is built in; QUIC/WebTransport ship as the optional `libtracer_quic` module. localhost UDP remains the best-effort default.
-- **v1 does authorization, not authentication.** ACLs gate operations on a pluggable subject-token (the transport-authenticated `origin_peer_id` in v1); raw-key ed25519 TOFU identity is the deferred module (X.509 PKI is rejected, ADR-0045) — the ACL model is unchanged when it lands.
-- **Pre-1.0.** The wire format is being drafted and is not yet frozen; pin to a commit if you depend on this today.
+- **Pre‑1.0.** The wire format is **DRAFT** and not yet frozen — pin to a commit/tag if you depend on it today.
+- **Route length is bounded by the frame size** — a remote op carries its explicit `dst` path in the frame.
+- **No auto‑multipath / mesh failover.** Routing is explicit source‑routing; a peer reachable two ways is two explicit addresses (deliberate redundancy, not automatic dedup).
+- **No global clock or cross‑producer ordering** — timestamps are per‑producer monotonic; cross‑node coherence needs a coordinated trigger.
+- **v1 does authorization, not authentication.** ACLs gate operations on a pluggable subject‑token (the transport‑authenticated `origin_peer_id` in v1); PKI/key management is a deferred module.
 
----
+## Open community + proprietary products
 
-## What libtracer gives you
+A deliberate separation lets vendors build proprietary products on top without fragmenting the ecosystem, and lets the community contribute without fearing capture:
 
-- **A wire-format specification** ([docs/spec/](docs/spec/)) — versioned, normative, conformance-tested. Implement it in any language and you are libtracer-compatible.
-- **A C++ reference implementation** ([core/](core/)) — header-first, no-RTTI, no-exceptions; ESP32 / STM32 / bare-metal capable. Apache 2.0.
-- **Native-language wire codecs, kept in lock-step by shared conformance vectors** (not FFI bindings) — a from-scratch [Rust](bindings/rust/) and TypeScript ([`@avatarsd-llc/libtracer`](bindings/typescript/)) implementation of the L2/L3 **codec** (not the graph runtime). Each ships a conformance harness and is CI-gated against the same vectors as the C++ core, so they can't drift. Both are pre-1.0: the Rust crate is **not yet on crates.io**, and TypeScript's client SDK and transports are **experimental** packages layered on the published codec.
-- **Platform integrations** — [ESP-IDF](integrations/esp-idf/) is a working managed component (the **full-node** profile — graph + FWD router + udp/tcp/ws/can transports + TWAI — CI-built for esp32c6 and esp32c3, plus a linux run). [PlatformIO](integrations/platformio/), [ESPHome](integrations/esphome/), and [Arduino](integrations/arduino/) are **packaging stubs today** (ESPHome is a no-op placeholder).
-- **Conformance test vectors** ([tests/conformance/](tests/conformance/)) — the same vectors every implementation runs. Pass them and you interoperate (`tests/conformance/run-all.py`).
-
-## Open community + proprietary products — three layers
-
-A deliberate separation lets vendors build proprietary products on top without fragmenting the ecosystem, and lets the community contribute without fearing capture.
-
-1. **The Protocol** (open, normative, [docs/spec/](docs/spec/)). RFC-2119 keywords + conformance vectors. *An implementation is compatible if it passes the vectors for a spec version and honors all MUST clauses* — no source dependency. Changes governed by [GOVERNANCE.md](.github/GOVERNANCE.md).
-2. **The Reference Implementation** (Apache 2.0). Ship it in proprietary firmware without copyleft. Independent re-implementations are encouraged — register in [docs/implementations.md](docs/implementations.md).
-3. **Proprietary products & services** (yours to build) — cloud, fleet management, hosted bridges, hardware. Compete here while interoperating at Layer 1. **"libtracer" is a trademark** ([TRADEMARKS.md](.github/TRADEMARKS.md)): say "compatible with libtracer" if you pass the suite; don't imply endorsement otherwise.
-
-In practice: ship a closed-source product → use the reference impl + follow the trademark policy. Build a competing core → pass the vectors, register, you're peers. Change the protocol → open an RFC under [docs/spec/rfcs/](docs/spec/). Bridge Modbus / Z-Wave / vendor-X → that's exactly the point.
+1. **The Protocol** (open, normative, [`docs/spec/`](docs/spec/)) — RFC‑2119 + conformance vectors. *An implementation is compatible if it passes the vectors for a spec version.* Changes go through the [RFC process](.github/GOVERNANCE.md).
+2. **The Reference Implementation** (Apache 2.0) — ship it in proprietary firmware without copyleft. Independent re‑implementations are welcome — register in [`docs/implementations.md`](docs/implementations.md).
+3. **Proprietary products & services** — cloud, fleet management, hosted bridges, hardware. Compete there while interoperating at Layer 1. **"libtracer" is a trademark** ([TRADEMARKS.md](.github/TRADEMARKS.md)): say "compatible with libtracer" if you pass the suite.
 
 ## Repository layout
 
 ```text
 libtracer/
-├── core/                  Reference C/C++ implementation (Apache 2.0)
-│   ├── include/libtracer/ Public headers — #include <libtracer/...>
-│   ├── src/  tests/        Implementation + unit/conformance tests
-│   └── CMakeLists.txt
-├── bindings/
-│   ├── rust/              Native Rust wire codec (pre-release; not on crates.io yet)
-│   └── typescript/        Native pure-TS codec → npm; client SDK + transports experimental
-├── integrations/           platformio/ · esphome/ · arduino/ · esp-idf/
-├── examples/               Runnable examples per platform
-├── bench/                  libtracer↔zenoh benchmark + figures
-├── docs/
-│   ├── spec/              Normative protocol specification + RFCs
-│   ├── reference/         Descriptive six-layer architecture (the "what it is")
-│   └── adr/               Architecture decision records (the "why")
-├── tests/conformance/      Cross-implementation vectors + run-all.py driver
-├── .github/                CONTRIBUTING · GOVERNANCE · TRADEMARKS · CI workflows
-├── CONTEXT.md              Canonical glossary
-├── docs/implementations.md Registry of third-party implementations
-└── LICENSE                 Apache 2.0
+├── core/                Reference C/C++ implementation (Apache 2.0) — src, include, tests
+├── bindings/            Native cores — rust/ (crates.io), typescript/ (npm @avatarsd-llc/*)
+├── integrations/        Platform packaging — esp-idf/ (working) · platformio/ · esphome/ · arduino/
+├── examples/            Runnable, CI-built examples
+├── bench/               libtracer↔Zenoh benchmark harness (feeds the live perf page)
+├── docs/                Spec (normative) · reference (descriptive) · ADRs (rationale)
+├── tests/conformance/   Cross-implementation vectors + run-all.py driver
+└── CONTEXT.md           Canonical glossary
 ```
 
-## Getting started
+## Contributing
 
-| If you want to… | Look here |
-|---|---|
-| Understand the architecture | [docs/reference/00-overview.md](docs/reference/00-overview.md) · [CONTEXT.md](CONTEXT.md) (glossary) |
-| Read the protocol | [docs/spec/v1.md](docs/spec/) |
-| See the numbers | [docs/performance.md](docs/performance.md) · [bench/](bench/) |
-| Use it as a C++ dependency (`find_package`) | [docs/getting-started.md](docs/getting-started.md) |
-| Use it on ESP32 / PlatformIO / ESPHome | [integrations/](integrations/) |
-| Use it from Rust / Node / browser | [bindings/](bindings/) |
-| Build a bridge or form a network | [docs/reference/13-network-formation.md](docs/reference/13-network-formation.md) |
-| Contribute / propose a spec change | [CONTRIBUTING.md](.github/CONTRIBUTING.md) · [docs/spec/rfcs/](docs/spec/) |
+Every change lands via a pull request; commits are DCO‑signed (`git commit -s`). Spec changes go through an [RFC](.github/GOVERNANCE.md). Start with **[CONTRIBUTING.md](.github/CONTRIBUTING.md)** and the [architecture overview](https://libtracer.avatarsd.com/docs/reference/00-overview.html).
 
 ## License
 
-| Scope | License | File |
-|---|---|---|
-| Reference implementation (`core/`, `bindings/`, `integrations/`) | **Apache 2.0** | [LICENSE](LICENSE) |
-| Protocol specification (`docs/spec/`) | **CC BY 4.0** | [docs/spec/LICENSE](docs/spec/LICENSE) |
-| Example code (`examples/`) | **CC0 1.0** | [examples/LICENSE](examples/LICENSE) |
+| Scope | License |
+| --- | --- |
+| Reference implementation (`core/`, `bindings/`, `integrations/`) | **Apache 2.0** ([LICENSE](LICENSE)) |
+| Protocol specification (`docs/spec/`) | **CC BY 4.0** |
+| Example code (`examples/`) | **CC0 1.0** |
 
-Copyright **avatarsd LLC** for company-authored work; outside contributions remain their authors', licensed per the scope above. Contributions are accepted under the [Developer Certificate of Origin](https://developercertificate.org/) — sign commits with `git commit -s`. The **"libtracer" name** is a trademark of avatarsd LLC, not granted by the licenses above ([TRADEMARKS.md](.github/TRADEMARKS.md)).
+Copyright **avatarsd LLC** for company‑authored work; outside contributions remain their authors', licensed per the scope above. The **"libtracer" name** is a trademark of avatarsd LLC ([TRADEMARKS.md](.github/TRADEMARKS.md)).
