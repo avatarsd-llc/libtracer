@@ -2,16 +2,16 @@
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 //
 // Cloudflare Worker: transparently reverse-proxy
-//   https://doc.avatarsd.com/libtracer/*   ->   https://avatarsd-llc.github.io/libtracer/*
+//   https://docs.avatarsd.com/libtracer/*   ->   https://avatarsd-llc.github.io/libtracer/*
 //
 // GitHub Pages serves this project at the /libtracer/ path prefix and routes by
 // Host header, so a plain custom domain can't preserve the sub-path. This Worker
-// keeps the public URL (doc.avatarsd.com/libtracer/...) while fetching from the
+// keeps the public URL (docs.avatarsd.com/libtracer/...) while fetching from the
 // unchanged Pages origin — so every internal link, which already uses the same
 // /libtracer/ prefix, resolves without any change to the built site. It also lets
-// doc.avatarsd.com host other projects under their own sub-paths later.
+// docs.avatarsd.com host other projects under their own sub-paths later.
 //
-// Deploy: see tools/cloudflare/README.md. Route it at `doc.avatarsd.com/libtracer*`.
+// Deploy: see tools/cloudflare/README.md. Route it at `docs.avatarsd.com/libtracer*`.
 const ORIGIN = "https://avatarsd-llc.github.io";
 const PREFIX = "/libtracer";
 

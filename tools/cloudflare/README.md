@@ -3,19 +3,19 @@ SPDX-License-Identifier: Apache-2.0
 SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 -->
 
-# Cloudflare — serve the docs at `doc.avatarsd.com/libtracer`
+# Cloudflare — serve the docs at `docs.avatarsd.com/libtracer`
 
 The docs are published by GitHub Pages at `avatarsd-llc.github.io/libtracer` (the
 `/libtracer` prefix is GitHub's project-pages path). To serve them at
-**`doc.avatarsd.com/libtracer`** — same path, your domain, and a spot for other
-projects under `doc.avatarsd.com/<project>` later — Cloudflare **reverse-proxies**
+**`docs.avatarsd.com/libtracer`** — same path, your domain, and a spot for other
+projects under `docs.avatarsd.com/<project>` later — Cloudflare **reverse-proxies**
 the path onto the unchanged Pages origin. Nothing about the built site changes, so
 every internal link keeps working; only [`docs/conf.py`](../../docs/conf.py)'s
 `html_baseurl` names the public URL for canonical/OpenGraph tags.
 
 This is a maintainer setup task on **your** Cloudflare account — Claude can't
 create accounts, change DNS, or deploy Workers for you. The Worker code is
-[`doc-proxy-worker.js`](doc-proxy-worker.js).
+[`docs-proxy-worker.js`](docs-proxy-worker.js).
 
 ## Steps
 
@@ -27,13 +27,13 @@ create accounts, change DNS, or deploy Workers for you. The Worker code is
    (The Worker below intercepts `/libtracer/*`; the CNAME target only matters for
    other paths.)
 3. **Worker.** Dashboard → **Workers & Pages** → **Create Worker** → paste
-   [`doc-proxy-worker.js`](doc-proxy-worker.js) → **Deploy**. (Or `wrangler deploy`.)
+   [`docs-proxy-worker.js`](docs-proxy-worker.js) → **Deploy**. (Or `wrangler deploy`.)
 4. **Route.** On the Worker → **Settings → Domains & Routes → Add route**:
-   `doc.avatarsd.com/libtracer*`  (zone `avatarsd.com`). This binds the Worker to
+   `docs.avatarsd.com/libtracer*`  (zone `avatarsd.com`). This binds the Worker to
    that path.
-5. **Verify.** Open `https://doc.avatarsd.com/libtracer/` — it should render the
-   docs. Internal navigation stays under `doc.avatarsd.com/libtracer/…`.
-6. **Web Analytics.** Dashboard → **Web Analytics** → add `doc.avatarsd.com`.
+5. **Verify.** Open `https://docs.avatarsd.com/libtracer/` — it should render the
+   docs. Internal navigation stays under `docs.avatarsd.com/libtracer/…`.
+6. **Web Analytics.** Dashboard → **Web Analytics** → add `docs.avatarsd.com`.
    Because the host is proxied, visits are counted at the edge — **no page-side JS
    beacon**, nothing rendered on the site, dashboard private to you.
 7. **Merge the docs PR** ([#312](https://github.com/avatarsd-llc/libtracer/pulls))
@@ -44,9 +44,9 @@ create accounts, change DNS, or deploy Workers for you. The Worker code is
 
 - **No GitHub custom domain / CNAME file** is set: the origin stays
   `avatarsd-llc.github.io/libtracer`, so the github.io URL keeps working too (both
-  resolve; `html_baseurl` marks `doc.avatarsd.com/libtracer` as canonical).
-- **No-code alternative:** a Cloudflare **Origin Rule** on `doc.avatarsd.com/libtracer*`
+  resolve; `html_baseurl` marks `docs.avatarsd.com/libtracer` as canonical).
+- **No-code alternative:** a Cloudflare **Origin Rule** on `docs.avatarsd.com/libtracer*`
   overriding the *Host header* + *origin* to `avatarsd-llc.github.io` achieves the
   same proxy without a Worker, if you prefer rules over code.
-- Want a different path (e.g. bare `doc.avatarsd.com`)? Change `PREFIX` in the
+- Want a different path (e.g. bare `docs.avatarsd.com`)? Change `PREFIX` in the
   Worker and the route, and `html_baseurl` in `conf.py`.
