@@ -178,7 +178,7 @@ int main() {
     // ----- node B: producer. /feed is the subscribed vertex; runs a ws server. ---
     graph_t graph_b;
     const auto feed_path = path_t::parse("/feed");
-    tr::graph::vertex_t* vB = *graph_b.register_vertex(*feed_path, role_t::STORED_VALUE);
+    tr::graph::vertex_handle_t vB = graph_b.register_vertex(*feed_path, role_t::STORED_VALUE);
     (void)graph_b.write(vB, make_value(b_value_u32(0)));
 
     fwd_router_t router_b(graph_b);
@@ -229,7 +229,7 @@ int main() {
     // ----- node C: consumer. /sink receives deliveries; ws client to A. ----------
     graph_t graph_c;
     const auto sink_path = path_t::parse("/sink");
-    tr::graph::vertex_t* vC = *graph_c.register_vertex(*sink_path, role_t::STORED_VALUE);
+    tr::graph::vertex_handle_t vC = graph_c.register_vertex(*sink_path, role_t::STORED_VALUE);
     fwd_router_t router_c(graph_c);
     mailbox_t delivered;    // ordered payload bytes delivered to C
     mailbox_t reply_inbox;  // subscribe / one-shot REPLY frames

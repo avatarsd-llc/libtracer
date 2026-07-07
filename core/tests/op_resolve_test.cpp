@@ -156,7 +156,7 @@ void test_read_zero_copy() {
     graph_t g;
     op_resolver_t resolver(g);
     const auto path = path_t::parse("/sensor/temp");
-    tr::graph::vertex_t* v = *g.register_vertex(*path, role_t::STORED_VALUE);
+    tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::STORED_VALUE);
 
     const std::vector<std::byte> val = b_value({0xD2, 0x04, 0x00, 0x00});  // VALUE u32=1234
     (void)g.write(v, make_value(val));
@@ -199,7 +199,7 @@ void test_write() {
     graph_t g;
     op_resolver_t resolver(g);
     const auto path = path_t::parse("/sensor/temp");
-    tr::graph::vertex_t* v = *g.register_vertex(*path, role_t::STORED_VALUE);
+    tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::STORED_VALUE);
 
     const auto fwd = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"reply-ep"}), {},
                            b_value({0x2A}));
@@ -223,7 +223,7 @@ void test_await() {
     graph_t g;
     op_resolver_t resolver(g);
     const auto path = path_t::parse("/sensor/temp");
-    tr::graph::vertex_t* v = *g.register_vertex(*path, role_t::STORED_VALUE);
+    tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::STORED_VALUE);
 
     // 5s await; a writer thread supplies the next value after a short delay.
     std::vector<std::byte> tobuf(8);
@@ -264,7 +264,7 @@ void test_subscribers_field() {
     graph_t g;
     op_resolver_t resolver(g);
     const auto path = path_t::parse("/sensor/temp");
-    tr::graph::vertex_t* v = *g.register_vertex(*path, role_t::STORED_VALUE);
+    tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::STORED_VALUE);
 
     // FIELD :subscribers[] (append): NAME "subscribers", VALUE u8 index_mode=ELEMENT.
     std::vector<std::byte> field_append;
@@ -320,7 +320,7 @@ void test_write_trailer_sliced() {
     graph_t g;
     op_resolver_t resolver(g);
     const auto path = path_t::parse("/sensor/temp");
-    tr::graph::vertex_t* v = *g.register_vertex(*path, role_t::STORED_VALUE);
+    tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::STORED_VALUE);
 
     // A VALUE carrying a CRC-32C trailer, as a foreign producer might send it.
     tlv_t val;
@@ -357,7 +357,7 @@ void test_non_canonical_dst() {
     const auto path = path_t::parse("/sensor/temp");
     (void)g.register_vertex(*path, role_t::STORED_VALUE);
     const std::vector<std::byte> val = b_value({0x2A});
-    (void)g.write(g.find(path->key()), make_value(val));
+    (void)g.write(*g.find(path->key()), make_value(val));
 
     // A dst PATH whose NAMEs use a widened (LL) length — legal wire, but NOT
     // byte-identical to the canonical vertex key, so the span-aliased lookup
@@ -393,7 +393,7 @@ void test_store_ref_threshold() {
     graph_t g;
     op_resolver_t resolver(g);
     const auto path = path_t::parse("/sensor/blob");
-    tr::graph::vertex_t* v = *g.register_vertex(*path, role_t::STORED_VALUE);
+    tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::STORED_VALUE);
 
     // A 32-byte payload => a 36-byte trailer-less VALUE TLV on the wire.
     std::vector<std::byte> big(32);
@@ -421,7 +421,7 @@ void test_store_ref_threshold() {
     // Opt in via the `:settings` field-write (the wire path that parses the u32).
     (void)g.write(path_t("/sensor/blob:settings.store_ref_min_bytes"),
                   make_value(b_value({0x08, 0x00, 0x00, 0x00})));
-    check(v->settings().store_ref_min_bytes == 8,
+    check(g.settings(v).store_ref_min_bytes == 8,
           ":settings.store_ref_min_bytes field-write parses the u32 (8)");
 
     // Big trailer-less payload >= threshold => the stored view IS the frame segment.
@@ -494,7 +494,7 @@ void test_store_ref_concurrent() {
     const auto path = path_t::parse("/sensor/blob");
     tr::graph::settings_t s;
     s.store_ref_min_bytes = 8;
-    tr::graph::vertex_t* v = *g.register_vertex(*path, role_t::STORED_VALUE, {}, s);
+    tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::STORED_VALUE, {}, s);
 
     std::vector<std::byte> big(64);
     for (std::size_t i = 0; i < big.size(); ++i) big[i] = static_cast<std::byte>(0xA0 + i);
@@ -592,7 +592,7 @@ void test_write_creates_remote() {
     check(value_u8(dec.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
           "write-create replies kind=RESULT (not NOT_FOUND)");
     check(g.read(path_t("/fresh/leaf")).has_value(), "the created vertex serves the written value");
-    check(g.find(path_t::parse("/fresh")->key()) != nullptr,
+    check(g.find(path_t::parse("/fresh")->key()).has_value(),
           "the intermediate level was created too (mkdir-p)");
 
     // A remote FIELD write to a nonexistent path still does NOT create — there is
@@ -610,7 +610,7 @@ void test_write_creates_remote() {
           "field write to an unregistered path => kind=ERROR");
     check(status_error_code(fdec.tlv.children[4]) == 0x0020 /*tr::path::not_found*/,
           "field write keeps tr::path::not_found (no vertex to control)");
-    check(g.find(path_t::parse("/other/leaf")->key()) == nullptr, "field write created nothing");
+    check(!g.find(path_t::parse("/other/leaf")->key()).has_value(), "field write created nothing");
 }
 
 }  // namespace

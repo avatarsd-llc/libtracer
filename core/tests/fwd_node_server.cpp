@@ -101,13 +101,9 @@ int main(int argc, char** argv) {
     // (RFC-0004 §D / #136) — the interop test's first delivery, with no producer thread.
     tr::graph::settings_t producer_settings;
     producer_settings.durability = 1;
-    auto vertex =
+    const auto vertex =
         graph.register_vertex(*temp_path, tr::graph::role_t::STORED_VALUE, {}, producer_settings);
-    if (!vertex) {
-        std::fprintf(stderr, "fwd_node_server: failed to register /sensor/temp\n");
-        return 1;
-    }
-    (void)graph.write(*vertex, make_value(value_u32(kSeededTemp)));
+    (void)graph.write(vertex, make_value(value_u32(kSeededTemp)));
 
     // ----- the FWD router + ws server. The server link is the node's only child,
     // named "client"; an inbound FWD resolves /sensor/temp locally and the reply

@@ -272,8 +272,8 @@ void test_two_nodes_zero_copy_store() {
     // B's target vertex opts in to the referenced store (threshold 8 bytes).
     tr::graph::settings_t s;
     s.store_ref_min_bytes = 8;
-    tr::graph::vertex_t* v =
-        *node_b.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE, {}, s);
+    tr::graph::vertex_handle_t v =
+        node_b.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE, {}, s);
     router_a.add_child("b", ta);
     router_b.add_child("a", tb);  // tb delivers views => the owning receiver is installed
 

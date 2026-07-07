@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <new>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -182,17 +183,17 @@ int main() {
     // counted), the reply head is ONE exactly-sized segment, the ownership
     // copies are one each. A host that injects a pool resource over its slab
     // moves the arena draws off the global heap entirely.
-    tr::graph::vertex_t* v = nullptr;
+    std::optional<tr::graph::vertex_handle_t> v;
     if (const auto path = tr::graph::path_t::parse("/sensor/temp")) {
-        if (auto reg = graph.register_vertex(*path, tr::graph::role_t::STORED_VALUE)) v = *reg;
+        v = graph.register_vertex(*path, tr::graph::role_t::STORED_VALUE);  // infallible (ADR-0056)
     }
     std::size_t term_allocs = 0;
     bool replied = false;
-    if (v != nullptr) {
+    if (v) {
         std::vector<std::byte> stored;
         tr::wire::emit_tlv(stored, type_t::VALUE, opt_t{}, std::span<const std::byte>(payload, 4));
         tr::view::view_t sv = tr::view::over_bytes(stored).value_or(tr::view::view_t{});
-        (void)graph.write(v, sv);
+        (void)graph.write(*v, sv);
 
         std::vector<std::byte> read_body;
         const std::byte rop{static_cast<std::uint8_t>(tr::graph::fwd_op_t::READ)};

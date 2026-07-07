@@ -24,6 +24,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -37,6 +38,39 @@ struct tlv_t;  // fwd-decl: the child factory takes a `const tlv_t*` config (no 
 }
 
 namespace tr::graph {
+
+class graph_t;  // fwd-decl: vertex_handle_t names it as its sole constructing friend.
+
+/**
+ * @brief A non-owning, non-null, opaque handle to a graph vertex (ADR-0056).
+ *
+ * The caller-held result of @ref graph_t::register_vertex / @ref graph_t::find and the
+ * token handed back into every `graph_t` data op (read / write / await / assign /
+ * propagate / subscribe / history / field-write). Pointer-sized and trivially copyable,
+ * so it loads and passes exactly like the `vertex_t*` it replaces — identical codegen —
+ * but it exposes no `operator*` or raw-pointer accessor: a `vertex_t` is opaque L4 state,
+ * never dereferenced by callers. Constructed ONLY by @ref graph_t (the `friend`), which
+ * owns the pinned, pointer-stable, insert-only vertex map — so a handle always names a
+ * live vertex for the graph's lifetime. There is no invalid/null state; "no such vertex"
+ * is modelled by the `std::optional<vertex_handle_t>` @ref graph_t::find returns.
+ */
+class vertex_handle_t {
+   public:
+    /** @brief Two handles compare equal iff they name the same vertex. (`!=` is synthesized.) */
+    [[nodiscard]] friend bool operator==(vertex_handle_t a, vertex_handle_t b) noexcept {
+        return a.ptr_ == b.ptr_;
+    }
+
+   private:
+    friend class graph_t;  // sole constructor + the only code that unwraps to `vertex_t*`.
+    explicit vertex_handle_t(vertex_t* ptr) noexcept : ptr_(ptr) {}
+    [[nodiscard]] vertex_t* get() const noexcept { return ptr_; }
+    vertex_t* ptr_;
+};
+
+// The ADR-0056 zero-overhead claim, enforced: a handle is exactly a pointer.
+static_assert(std::is_trivially_copyable_v<vertex_handle_t>);
+static_assert(sizeof(vertex_handle_t) == sizeof(vertex_t*));
 
 // In-process fan-out cycle bound: a re-dispatch chain deeper than this is dropped
 // (Backpressure). This is the in-process analogue of the wire hop_count/MAX_HOPS
@@ -98,23 +132,42 @@ class graph_t {
     graph_t& operator=(const graph_t&) = delete;
 
     /**
-     * @brief Register a vertex at @p path (any `:field` tail is ignored).
-     * @return The pinned vertex handle, or `PATH_IN_USE` if the path is already registered.
+     * @brief Register a vertex at a known-good @p path LITERAL, parsing nothing further (any
+     *        `:field` tail is ignored) — INFALLIBLE (ADR-0056).
+     *
+     * The init-time registration form: a `PATH_IN_USE` collision on a compile-site literal is
+     * a source bug, not a runtime condition, so this **hard-aborts** (like
+     * `path_t(std::string_view)`, ADR-0054) rather than yielding a `result_t` the caller would
+     * only `*`-deref unchecked. Returns the pinned @ref vertex_handle_t directly — no `*`.
+     * For a genuine runtime path whose collision is a real outcome, use @ref try_register_vertex.
      */
-    [[nodiscard]] result_t<vertex_t*> register_vertex(const path_t& path, role_t role,
-                                                      handlers_t handlers = {},
-                                                      settings_t settings = {});
+    [[nodiscard]] vertex_handle_t register_vertex(const path_t& path, role_t role,
+                                                  handlers_t handlers = {},
+                                                  settings_t settings = {});
+
+    /**
+     * @brief Register a vertex at @p path — FALLIBLE (the runtime-path form of
+     *        @ref register_vertex).
+     * @return The pinned @ref vertex_handle_t, or `PATH_IN_USE` if the path is already
+     *         registered.
+     */
+    [[nodiscard]] result_t<vertex_handle_t> try_register_vertex(const path_t& path, role_t role,
+                                                                handlers_t handlers = {},
+                                                                settings_t settings = {});
 
     /**
      * @brief Register a vertex by its canonical PATH-payload @p key directly (the in-band
-     *        `:children[]` path).
+     *        `:children[]` path) — FALLIBLE.
      *
-     * The key is a composed parent-key + `NAME(child)`, not parsed from a string.
-     * @return The pinned handle, or `PATH_IN_USE` if the key is already registered.
+     * The key is a composed parent-key + `NAME(child)`, not parsed from a string. This is the
+     * genuine runtime path (a `:children[]` write can race a duplicate name), so it stays
+     * fallible.
+     * @return The pinned @ref vertex_handle_t, or `PATH_IN_USE` if the key is already registered.
      */
-    [[nodiscard]] result_t<vertex_t*> register_vertex_key(std::vector<std::byte> key, role_t role,
-                                                          handlers_t handlers = {},
-                                                          settings_t settings = {});
+    [[nodiscard]] result_t<vertex_handle_t> register_vertex_key(std::vector<std::byte> key,
+                                                                role_t role,
+                                                                handlers_t handlers = {},
+                                                                settings_t settings = {});
 
     /**
      * @brief A child-vertex factory: the device-catalog entry ADR-0017 makes concrete.
@@ -124,7 +177,7 @@ class graph_t {
      * handle (or a status — e.g. `PATH_IN_USE`). The graph owns the *addressing* (the key
      * is composed for it); the factory owns the *catalog* (what a `type` instantiates).
      */
-    using child_factory_t = std::function<result_t<vertex_t*>(
+    using child_factory_t = std::function<result_t<vertex_handle_t>(
         graph_t&, std::vector<std::byte> child_key, const wire::tlv_t* config)>;
 
     /**
@@ -148,23 +201,24 @@ class graph_t {
      * when the FWD resolver drives the op. With no subject resolver installed it costs one
      * null check.
      */
-    [[nodiscard]] result_t<rope_t> read(vertex_t* v, std::string_view caller = {}) const;
+    [[nodiscard]] result_t<rope_t> read(vertex_handle_t v, std::string_view caller = {}) const;
     /**
      * @brief Write a resolved vertex's value: `assign` then deliver (RFC-0008 §D).
      *
      * Takes a rope; an existing `view_t` caller compiles unchanged via the implicit
      * `view_t`→`rope_t`. @p caller is the ACL caller context (see @ref read).
      */
-    [[nodiscard]] result_t<void> write(vertex_t* v, rope_t value, std::string_view caller = {});
+    [[nodiscard]] result_t<void> write(vertex_handle_t v, rope_t value,
+                                       std::string_view caller = {});
     /**
-     * @brief Field-write by handle: resolve the `vertex_t*` and @ref field_path_t once,
-     *        then reuse them on the hot path — no string parse, no map lookup per call.
+     * @brief Field-write by handle: resolve the @ref vertex_handle_t and @ref field_path_t
+     *        once, then reuse them on the hot path — no string parse, no map lookup per call.
      *
      * An empty @p field is an ordinary value write. Pass `path.field()` for the field
      * selector. A field write targets a contiguous control TLV, so a multi-link value is
      * materialized first.
      */
-    [[nodiscard]] result_t<void> write(vertex_t* v, const field_path_t& field, rope_t value,
+    [[nodiscard]] result_t<void> write(vertex_handle_t v, const field_path_t& field, rope_t value,
                                        std::string_view caller = {});
     /**
      * @brief Assign a vertex's value — the STATE transition only, sends NOTHING (RFC-0008).
@@ -176,7 +230,8 @@ class graph_t {
      * branch POINT decomposes and assigns each descendant (no notify). Pair with
      * @ref propagate for the "update many, propagate once" workflow.
      */
-    [[nodiscard]] result_t<void> assign(vertex_t* v, rope_t value, std::string_view caller = {});
+    [[nodiscard]] result_t<void> assign(vertex_handle_t v, rope_t value,
+                                        std::string_view caller = {});
     /**
      * @brief Propagate along subscription edges — the EDGE transition only (RFC-0008 §B/§C).
      *
@@ -186,19 +241,19 @@ class graph_t {
      * last covering sweep, and every UNCONDITIONAL descendant. Reads the last-known-value
      * — no value argument. Costs O((pending + unconditional)-in-subtree).
      */
-    void propagate(vertex_t* v);
+    void propagate(vertex_handle_t v);
     /**
      * @brief Set v's per-vertex propagation policy (RFC-0008 §C).
      *
      * A wiring-time call (the "configure before frames flow" contract), like settings;
      * maintains the sweep's UNCONDITIONAL membership. Default (unset) is IF_NEWER.
      */
-    void set_delivery_mode(vertex_t* v, delivery_mode_t mode);
+    void set_delivery_mode(vertex_handle_t v, delivery_mode_t mode);
     /**
      * @brief Block until the vertex's value changes or @p timeout elapses; return the value.
      * @return The stored value as a rope, or a `status_t` (e.g. `TIMEOUT`).
      */
-    [[nodiscard]] result_t<rope_t> await(vertex_t* v, std::chrono::nanoseconds timeout,
+    [[nodiscard]] result_t<rope_t> await(vertex_handle_t v, std::chrono::nanoseconds timeout,
                                          std::string_view caller = {});
     /**
      * @brief Field-read by handle (the read dual of the field-write overload).
@@ -208,7 +263,7 @@ class graph_t {
      * view, zero-copy) as a single-link rope. For the whole-array `:subscribers[]` read use
      * @ref read_subscribers. Used by the FWD resolver.
      */
-    [[nodiscard]] result_t<rope_t> read(vertex_t* v, const field_path_t& field,
+    [[nodiscard]] result_t<rope_t> read(vertex_handle_t v, const field_path_t& field,
                                         std::string_view caller = {}) const;
     /**
      * @brief Read the `:subscribers[]` array — the populated slot SUBSCRIBER views in slot order.
@@ -217,9 +272,9 @@ class graph_t {
      * these under a fresh PL=1 wrapper into the REPLY (RFC-0004 §D, no byte copy).
      */
     [[nodiscard]] result_t<std::vector<view_t>> read_subscribers(
-        vertex_t* v, std::string_view caller = {}) const;
+        vertex_handle_t v, std::string_view caller = {}) const;
     /** @brief Stream history, newest last (Stream role only) — each entry the stored rope value. */
-    [[nodiscard]] result_t<std::vector<rope_t>> history(vertex_t* v) const;
+    [[nodiscard]] result_t<std::vector<rope_t>> history(vertex_handle_t v) const;
 
     /**
      * @brief Subscribe @p src to a @p target vertex — a write to src re-dispatches the
@@ -299,7 +354,7 @@ class graph_t {
      * transient-local, `settings.durability == 1`, and holds a value, the LKV is latched
      * to this subscriber — one synchronous sink call, RFC-0004 §D).
      */
-    [[nodiscard]] result_t<void> subscribe_wire(vertex_t* v, view_t source_view,
+    [[nodiscard]] result_t<void> subscribe_wire(vertex_handle_t v, view_t source_view,
                                                 view_t return_route, std::string link);
 
     /**
@@ -309,15 +364,25 @@ class graph_t {
      * `:schema`) is routed to the field surface.
      */
     [[nodiscard]] result_t<rope_t> read(const path_t& path) const;
-    /** @brief Write by path — resolve the key once, then @ref write(vertex_t*, rope_t,
+    /** @brief Write by path — resolve the key once, then @ref write(vertex_handle_t, rope_t,
      * std::string_view). */
     [[nodiscard]] result_t<void> write(const path_t& path, rope_t value);
-    /** @brief Await by path — resolve the key once, then @ref await(vertex_t*,
+    /** @brief Await by path — resolve the key once, then @ref await(vertex_handle_t,
      * std::chrono::nanoseconds, std::string_view). */
     [[nodiscard]] result_t<rope_t> await(const path_t& path, std::chrono::nanoseconds timeout);
 
-    /** @brief Resolve a canonical PATH-payload @p key to its vertex (nullptr if unknown). */
-    [[nodiscard]] vertex_t* find(std::span<const std::byte> key) const;
+    /** @brief Resolve a canonical PATH-payload @p key to its vertex handle (`nullopt` if
+     *         unknown). */
+    [[nodiscard]] std::optional<vertex_handle_t> find(std::span<const std::byte> key) const;
+
+    /**
+     * @brief The QoS settings of the vertex @p v names (ADR-0056).
+     *
+     * The read accessor the opaque handle does not expose directly: a resolver that needs a
+     * per-vertex knob (e.g. `store_ref_min_bytes`, ADR-0042 §3) queries it here instead of
+     * dereferencing the vertex. Wiring-stable — settings change only via `:settings` writes.
+     */
+    [[nodiscard]] const settings_t& settings(vertex_handle_t v) const noexcept;
 
     /**
      * @brief Find-or-create the vertex at @p key (write-creates, RFC-0005).
@@ -330,8 +395,8 @@ class graph_t {
      * caller is benign (the winner's vertex is returned). @p key must be a
      * well-formed, non-empty canonical PATH-payload (else INVALID_PATH).
      */
-    [[nodiscard]] result_t<vertex_t*> ensure_vertex(std::span<const std::byte> key,
-                                                    std::string_view caller = {});
+    [[nodiscard]] result_t<vertex_handle_t> ensure_vertex(std::span<const std::byte> key,
+                                                          std::string_view caller = {});
 
     /**
      * @brief How many writes performed the ancestor (bubbling) walk — instrumentation.
@@ -343,6 +408,12 @@ class graph_t {
     [[nodiscard]] std::uint64_t ancestor_walks() const noexcept;
 
    private:
+    // Internal (raw `vertex_t*`) forms of the public handle-returning resolvers: the graph's
+    // own machinery threads raw pointers (ADR-0056 — internal methods keep `vertex_t*`), and
+    // the public @ref find / @ref ensure_vertex wrap these once at the boundary.
+    [[nodiscard]] vertex_t* find_ptr(std::span<const std::byte> key) const;
+    [[nodiscard]] result_t<vertex_t*> ensure_vertex_ptr(std::span<const std::byte> key,
+                                                        std::string_view caller);
     // Update the vertex value (LKV/history/handler), then fan out to subscribers.
     // `depth` bounds in-process re-dispatch cycles (kMaxDispatchDepth). `caller` is
     // the ACL caller context gating the WRITE right: the API caller's at depth 0,

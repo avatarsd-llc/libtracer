@@ -171,7 +171,7 @@ int main() {
     // ----- node B: the terminus. /sensor holds a known VALUE; runs a ws server. -
     graph_t graph_b;
     const auto sensor_path = path_t::parse("/sensor");
-    tr::graph::vertex_t* vB = *graph_b.register_vertex(*sensor_path, role_t::STORED_VALUE);
+    tr::graph::vertex_handle_t vB = graph_b.register_vertex(*sensor_path, role_t::STORED_VALUE);
     const std::uint32_t kStored = 0xDEADBEEFu;
     (void)graph_b.write(vB, make_value(b_value_u32(kStored)));
 

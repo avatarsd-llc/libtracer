@@ -94,9 +94,7 @@ void test_stored_value() {
     std::printf("Stored-value vertex (read/write, clone-on-read):\n");
     graph_t g;
     const auto path = path_t::parse("/sensor/temp");
-    auto reg = g.register_vertex(*path, role_t::STORED_VALUE);
-    check(reg.has_value(), "register stored-value vertex");
-    tr::graph::vertex_t* v = *reg;
+    const auto v = g.register_vertex(*path, role_t::STORED_VALUE);  // infallible (ADR-0056)
 
     check(!g.read(v).has_value() && g.read(v).error() == status_t::NOT_FOUND,
           "read before any write => NotFound");
@@ -111,9 +109,9 @@ void test_stored_value() {
     check(r && r->only().owner.use_count() == 2,
           "read is a clone (segment use_count == 2), not a copy");
 
-    check(!g.register_vertex(*path, role_t::STORED_VALUE).has_value(),
+    check(!g.try_register_vertex(*path, role_t::STORED_VALUE).has_value(),
           "re-register same path fails");
-    check(g.register_vertex(*path, role_t::STORED_VALUE).error() == status_t::PATH_IN_USE,
+    check(g.try_register_vertex(*path, role_t::STORED_VALUE).error() == status_t::PATH_IN_USE,
           "duplicate registration reports PathInUse");
 }
 
@@ -123,7 +121,7 @@ void test_stream() {
     const auto path = path_t::parse("/log/events");
     settings_t s;
     s.history_keep_last = 3;
-    tr::graph::vertex_t* v = *g.register_vertex(*path, role_t::STREAM, {}, s);
+    tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::STREAM, {}, s);
 
     for (std::uint8_t i = 1; i <= 5; ++i) (void)g.write(v, make_value({i}));
 
@@ -150,7 +148,7 @@ void test_handler() {
         written->assign(b.begin(), b.end());
         return {};
     };
-    tr::graph::vertex_t* v = *g.register_vertex(*path, role_t::HANDLER, std::move(h));
+    tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::HANDLER, std::move(h));
 
     auto r = g.read(v);
     check(r && std::to_integer<int>(r->only().bytes()[0]) == 0x2A,
@@ -163,7 +161,7 @@ void test_handler() {
 void test_await() {
     std::printf("await (blocks until next write; times out otherwise):\n");
     graph_t g;
-    tr::graph::vertex_t* v = *g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+    tr::graph::vertex_handle_t v = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
 
     // A writer publishes shortly after we begin awaiting.
     std::thread writer([&] {
@@ -175,7 +173,8 @@ void test_await() {
     check(r.has_value() && std::to_integer<int>(r->only().bytes()[0]) == 0x7E,
           "await wakes on a concurrent write and delivers it");
 
-    tr::graph::vertex_t* idle = *g.register_vertex(path_t("/sensor/idle"), role_t::STORED_VALUE);
+    tr::graph::vertex_handle_t idle =
+        g.register_vertex(path_t("/sensor/idle"), role_t::STORED_VALUE);
     auto t = g.await(idle, 20ms);
     check(!t.has_value() && t.error() == status_t::TIMEOUT, "await times out with no write");
 }
@@ -183,7 +182,7 @@ void test_await() {
 void test_concurrent_stress() {
     std::printf("Concurrent stress (lock-free LKV under contention):\n");
     graph_t g;
-    tr::graph::vertex_t* v = *g.register_vertex(path_t("/stress/v"), role_t::STORED_VALUE);
+    tr::graph::vertex_handle_t v = g.register_vertex(path_t("/stress/v"), role_t::STORED_VALUE);
 
     constexpr int kWriters = 4;
     constexpr int kReaders = 4;
@@ -255,7 +254,8 @@ void test_subscribe_callback() {
     std::printf("subscribe(src, callback) — direct in-process delivery:\n");
     graph_t g;
     auto seen = std::make_shared<int>(-1);
-    tr::graph::vertex_t* src = *g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+    tr::graph::vertex_handle_t src =
+        g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     (void)g.subscribe(path_t("/sensor/temp"), [seen](const tr::view::rope_t& v) {
         *seen = std::to_integer<int>(v.only().bytes()[0]);
     });
@@ -273,7 +273,8 @@ void test_subscribe_target() {
         return {};
     };
     (void)g.register_vertex(path_t("/log/temp"), role_t::HANDLER, std::move(h));
-    tr::graph::vertex_t* src = *g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+    tr::graph::vertex_handle_t src =
+        g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     (void)g.subscribe(path_t("/sensor/temp"), path_t("/log/temp"));
     (void)g.write(src, make_value({0x55}));
     check(*sink_seen == 0x55, "write re-dispatches to the target vertex's on_write");
@@ -282,11 +283,11 @@ void test_subscribe_target() {
 void test_field_write_settings() {
     std::printf("field-write :settings.<field>:\n");
     graph_t g;
-    tr::graph::vertex_t* v = *g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+    tr::graph::vertex_handle_t v = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     const auto payload = std::array<std::byte, 8>{std::byte{0x88}, std::byte{0x13}};  // 5000 LE
     auto w = g.write(path_t("/sensor/temp:settings.deadline_ns"), value_tlv(payload));
     check(w.has_value(), "field-write returns OK");
-    check(v->settings().deadline_ns == 5000, "deadline_ns updated to 5000 via field-write");
+    check(g.settings(v).deadline_ns == 5000, "deadline_ns updated to 5000 via field-write");
     check(!g.write(path_t("/sensor/temp:settings.bogus"), value_tlv(payload)).has_value(),
           "unknown settings field => SchemaNotFound");
 }
@@ -294,14 +295,14 @@ void test_field_write_settings() {
 void test_field_write_handle() {
     std::printf("Handle-based field-write (no strings on the hot path):\n");
     graph_t g;
-    auto* v = *g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+    auto v = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     // Parse the field path ONCE; reuse the vertex_t* handle + field_path_t thereafter
     // (no per-call string parse, no map lookup).
     const auto fp = path_t::parse("/sensor/temp:settings.deadline_ns");
     const std::array<std::byte, 8> le{std::byte{0x10}, std::byte{0x27}};  // 10000 LE
     check(g.write(v, fp->field(), value_tlv(le)).has_value(),
           "write(vertex_t*, field_path_t, view_t) returns OK");
-    check(v->settings().deadline_ns == 10000,
+    check(g.settings(v).deadline_ns == 10000,
           "deadline_ns updated via the handle (no string parse, no map lookup)");
     check(g.write(v, tr::graph::field_path_t{}, make_value({0x55})).has_value(),
           "an empty field_path_t is an ordinary value write");
@@ -317,7 +318,8 @@ void test_subscribe_via_field_write_and_unsubscribe() {
         return {};
     };
     (void)g.register_vertex(path_t("/sink"), role_t::HANDLER, std::move(h));
-    tr::graph::vertex_t* src = *g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+    tr::graph::vertex_handle_t src =
+        g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
 
     auto sub = g.write(path_t("/sensor/temp:subscribers[]"), subscriber_tlv("sink"));
     check(sub.has_value(), "subscribe via field-write a SUBSCRIBER TLV");
@@ -353,8 +355,8 @@ void test_admission_door_uniformity() {
     {
         graph_t g;
         (void)g.register_vertex(path_t("/sink"), role_t::STORED_VALUE);
-        tr::graph::vertex_t* a = *g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
-        tr::graph::vertex_t* b = *g.register_vertex(path_t("/b"), role_t::STORED_VALUE);
+        tr::graph::vertex_handle_t a = g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
+        tr::graph::vertex_handle_t b = g.register_vertex(path_t("/b"), role_t::STORED_VALUE);
         check(g.subscribe(path_t("/a"), path_t("/sink")).has_value(), "sugar door subscribes");
         check(g.write(path_t("/b:subscribers[]"), subscriber_tlv("sink")).has_value(),
               "field-write door subscribes");
@@ -374,7 +376,8 @@ void test_admission_door_uniformity() {
         graph_t g;
         settings_t s;
         s.durability = 1;  // transient-local
-        tr::graph::vertex_t* src = *g.register_vertex(path_t("/tl"), role_t::STORED_VALUE, {}, s);
+        tr::graph::vertex_handle_t src =
+            g.register_vertex(path_t("/tl"), role_t::STORED_VALUE, {}, s);
         (void)g.write(src, make_value({0x5A}));  // seed the LKV BEFORE subscribing
 
         auto seen = std::make_shared<int>(-1);
@@ -383,7 +386,7 @@ void test_admission_door_uniformity() {
         });
         check(*seen == 0x5A, "callback door: the LKV latches at subscribe");
 
-        tr::graph::vertex_t* tgt = *g.register_vertex(path_t("/tgt"), role_t::STORED_VALUE);
+        tr::graph::vertex_handle_t tgt = g.register_vertex(path_t("/tgt"), role_t::STORED_VALUE);
         (void)g.subscribe(path_t("/tl"), path_t("/tgt"));
         const auto latched = g.read(tgt);
         check(latched.has_value() && std::to_integer<int>(latched->only().bytes()[0]) == 0x5A,
@@ -393,7 +396,7 @@ void test_admission_door_uniformity() {
     // A volatile (durability==0, the default) vertex still does NOT latch.
     {
         graph_t g;
-        tr::graph::vertex_t* src = *g.register_vertex(path_t("/vol"), role_t::STORED_VALUE);
+        tr::graph::vertex_handle_t src = g.register_vertex(path_t("/vol"), role_t::STORED_VALUE);
         (void)g.write(src, make_value({0x77}));
         auto fired = std::make_shared<int>(0);
         (void)g.subscribe(path_t("/vol"), [fired](const tr::view::rope_t&) { ++*fired; });
@@ -405,7 +408,7 @@ void test_dispatch_cycle_cap() {
     std::printf("dispatch-depth cycle cap (in-process A->B->A terminates):\n");
     graph_t g;
     auto count = std::make_shared<int>(0);
-    tr::graph::vertex_t* a = *g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
+    tr::graph::vertex_handle_t a = g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
     (void)g.register_vertex(path_t("/b"), role_t::STORED_VALUE);
     // Mutual target subscriptions form a cycle; a counter callback on each level.
     (void)g.subscribe(path_t("/a"), path_t("/b"));
@@ -425,10 +428,10 @@ void test_assign_propagate() {
     graph_t g;
     // A subtree /r with leaves /r/a /r/b /r/c, each carrying its own subscriber so we can
     // see exactly which vertices a sweep delivered.
-    auto* r = *g.register_vertex(path_t("/r"), role_t::STORED_VALUE);
-    auto* a = *g.register_vertex(path_t("/r/a"), role_t::STORED_VALUE);
-    auto* b = *g.register_vertex(path_t("/r/b"), role_t::STORED_VALUE);
-    auto* c = *g.register_vertex(path_t("/r/c"), role_t::STORED_VALUE);
+    auto r = g.register_vertex(path_t("/r"), role_t::STORED_VALUE);
+    auto a = g.register_vertex(path_t("/r/a"), role_t::STORED_VALUE);
+    auto b = g.register_vertex(path_t("/r/b"), role_t::STORED_VALUE);
+    auto c = g.register_vertex(path_t("/r/c"), role_t::STORED_VALUE);
     auto ca = std::make_shared<int>(0);
     auto cb = std::make_shared<int>(0);
     auto cc = std::make_shared<int>(0);
@@ -474,7 +477,7 @@ void test_assign_propagate() {
 
     // write() remains the eager §D composition (assign then deliver the vertex).
     auto cw = std::make_shared<int>(0);
-    auto* w = *g.register_vertex(path_t("/w"), role_t::STORED_VALUE);
+    auto w = g.register_vertex(path_t("/w"), role_t::STORED_VALUE);
     (void)g.subscribe(path_t("/w"), [cw](const tr::view::rope_t&) { ++*cw; });
     (void)g.write(w, make_value({0x77}));
     check(*cw == 1, "write() delivers immediately (assign + targeted propagate)");

@@ -41,7 +41,7 @@ using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::status_t;
 using tr::graph::subject_token_t;
-using tr::graph::vertex_t;
+using tr::graph::vertex_handle_t;
 using tr::view::rope_t;
 using tr::view::view_t;
 using tr::wire::opt_t;
@@ -114,10 +114,10 @@ bool is_subview_of(const view_t& v, const view_t& frame) {
 void test_bubbling_and_idle_walk() {
     std::printf("vertical bubbling + near-free-when-idle (RFC-0005):\n");
     graph_t g;
-    vertex_t* a = *g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
-    (void)*g.register_vertex(path_t("/a/b"), role_t::STORED_VALUE);
-    vertex_t* abc = *g.register_vertex(path_t("/a/b/c"), role_t::STORED_VALUE);
-    vertex_t* x = *g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
+    vertex_handle_t a = g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/a/b"), role_t::STORED_VALUE);
+    vertex_handle_t abc = g.register_vertex(path_t("/a/b/c"), role_t::STORED_VALUE);
+    vertex_handle_t x = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
 
     // Idle: nobody listens above — a write never walks ancestors.
     check(g.write(abc, make_value({0x01})).has_value(), "leaf write with no subscribers");
@@ -164,7 +164,7 @@ void test_bubbling_and_idle_walk() {
 void test_bubbling_to_late_created_descendant() {
     std::printf("bubbling from a vertex created AFTER the subscription:\n");
     graph_t g;
-    (void)*g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
     std::size_t hits = 0;
     check(g.subscribe(path_t("/a"), [&](const rope_t&) { ++hits; }).has_value(),
           "subscribe at /a first");
@@ -178,8 +178,8 @@ void test_bubbling_to_late_created_descendant() {
 void test_remote_ancestor_subscriber() {
     std::printf("remote ancestor subscriber (fan-out via return_route):\n");
     graph_t g;
-    vertex_t* a = *g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
-    vertex_t* ab = *g.register_vertex(path_t("/a/b"), role_t::STORED_VALUE);
+    vertex_handle_t a = g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
+    vertex_handle_t ab = g.register_vertex(path_t("/a/b"), role_t::STORED_VALUE);
 
     std::vector<std::byte> route{std::byte{0x06}, std::byte{0x40}, std::byte{0x00},
                                  std::byte{0x00}};
@@ -209,8 +209,8 @@ void test_remote_ancestor_subscriber() {
 void test_branch_write_decomposition() {
     std::printf("branch-write (POINT) decomposition:\n");
     graph_t g;
-    vertex_t* s = *g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
-    vertex_t* st = *g.register_vertex(path_t("/s/t"), role_t::STORED_VALUE);
+    vertex_handle_t s = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
+    vertex_handle_t st = g.register_vertex(path_t("/s/t"), role_t::STORED_VALUE);
 
     std::vector<std::vector<std::byte>> at_s;
     std::vector<view_t> at_st;
@@ -265,7 +265,7 @@ void test_branch_write_decomposition() {
 void test_branch_write_strictness() {
     std::printf("branch-write strictness (shape / addressing errors):\n");
     graph_t g;
-    vertex_t* s = *g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
+    vertex_handle_t s = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
 
     // Root NAME must equal the target vertex's leaf segment.
     const auto wrong = g.write(s, make_value(point_tlv("zz", value_tlv({0x01}))));
@@ -303,20 +303,20 @@ void test_write_creates() {
           "write to a nonexistent path creates it");
     const auto r = g.read(path_t("/new/deep/leaf"));
     check(r.has_value() && same_bytes(r->only(), val), "created leaf serves the written value");
-    check(g.find(path_t::parse("/new/deep")->key()) != nullptr,
+    check(g.find(path_t::parse("/new/deep")->key()).has_value(),
           "intermediate levels are created too (mkdir-p)");
 
     // A :field write to a nonexistent vertex does NOT create.
     const auto f = g.write(path_t("/nope:settings.priority"), make_value({1, 0, 1, 0, 1}));
     check(!f.has_value() && f.error() == status_t::NOT_FOUND,
           "field write to a nonexistent vertex stays NOT_FOUND");
-    check(g.find(path_t::parse("/nope")->key()) == nullptr, "field write created nothing");
+    check(!g.find(path_t::parse("/nope")->key()).has_value(), "field write created nothing");
 }
 
 void test_write_creates_acl_gate() {
     std::printf("write-creates CREATE-ACL gate (denied => PERMISSION_DENIED):\n");
     graph_t g;
-    (void)*g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
     // Every caller (including local) resolves to a subject — enforcement is on.
     g.set_subject_resolver([](std::string_view) -> std::optional<subject_token_t> {
         return subject_token_t{std::byte{'u'}};
@@ -337,7 +337,7 @@ void test_write_creates_acl_gate() {
     const auto denied = g.write(path_t("/p/child"), make_value({0x01, 0, 1, 0, 9}));
     check(!denied.has_value() && denied.error() == status_t::PERMISSION_DENIED,
           "write-create under /p without the CREATE right => PERMISSION_DENIED");
-    check(g.find(path_t::parse("/p/child")->key()) == nullptr, "denied create made no vertex");
+    check(!g.find(path_t::parse("/p/child")->key()).has_value(), "denied create made no vertex");
 
     // Writing to the existing /p itself is still allowed (WRITE granted).
     check(g.write(path_t("/p"), make_value({0x01, 0, 1, 0, 9})).has_value(),
@@ -347,9 +347,9 @@ void test_write_creates_acl_gate() {
 void test_branch_write_acl_admission() {
     std::printf("branch-write admission is all-or-nothing under ACL:\n");
     graph_t g;
-    vertex_t* s = *g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
-    vertex_t* st = *g.register_vertex(path_t("/s/t"), role_t::STORED_VALUE);
-    vertex_t* su = *g.register_vertex(path_t("/s/u"), role_t::STORED_VALUE);
+    vertex_handle_t s = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
+    vertex_handle_t st = g.register_vertex(path_t("/s/t"), role_t::STORED_VALUE);
+    vertex_handle_t su = g.register_vertex(path_t("/s/u"), role_t::STORED_VALUE);
     g.set_subject_resolver([](std::string_view) -> std::optional<subject_token_t> {
         return subject_token_t{std::byte{'u'}};
     });

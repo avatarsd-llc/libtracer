@@ -23,6 +23,7 @@
 #include <chrono>
 #include <cinttypes>
 #include <cstdint>
+#include <optional>
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -38,7 +39,7 @@ using tr::graph::role_t;
 
 // The shared in-process graph and the pinned vertex handle, resolved once.
 tr::graph::graph_t g_graph;
-tr::graph::vertex_t* g_temp = nullptr;
+std::optional<tr::graph::vertex_handle_t> g_temp;
 
 // Encode a little-endian u32 into a fresh heap segment, returned as a view.
 tr::view::view_t value_u32(std::uint32_t v) {
@@ -61,7 +62,7 @@ std::uint32_t as_u32(const tr::view::view_t& view) {
 // A FreeRTOS task that parks in await() and reports the next value written.
 void await_task(void*) {
     ESP_LOGI(kTag, "await: parking on /sensor/temp (2s timeout)");
-    auto r = g_graph.await(g_temp, std::chrono::seconds(2));
+    auto r = g_graph.await(*g_temp, std::chrono::seconds(2));
     if (r) {
         ESP_LOGI(kTag, "await: woke with value = %" PRIu32, as_u32(r->only()));
     } else {
@@ -75,13 +76,8 @@ void await_task(void*) {
 extern "C" void app_main(void) {
     ESP_LOGI(kTag, "libtracer P0 in-process mirror starting");
 
-    // 1) Register a path.
-    auto reg = g_graph.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
-    if (!reg) {
-        ESP_LOGE(kTag, "register_vertex failed");
-        return;
-    }
-    g_temp = *reg;
+    // 1) Register a path (infallible on a literal — ADR-0056).
+    g_temp = g_graph.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
 
     // 2) Spawn the await waiter, then let it park before the write.
     xTaskCreate(await_task, "tr_await", 4096, nullptr, 5, nullptr);
@@ -89,13 +85,13 @@ extern "C" void app_main(void) {
 
     // 3) Write a value.
     ESP_LOGI(kTag, "write: /sensor/temp = 23");
-    if (auto w = g_graph.write(g_temp, value_u32(23)); !w) {
+    if (auto w = g_graph.write(*g_temp, value_u32(23)); !w) {
         ESP_LOGE(kTag, "write failed");
         return;
     }
 
     // 4) Read it back (a refcount-clone of the stored last-known-value).
-    if (auto rb = g_graph.read(g_temp); rb) {
+    if (auto rb = g_graph.read(*g_temp); rb) {
         ESP_LOGI(kTag, "read-back: /sensor/temp = %" PRIu32, as_u32(rb->only()));
     } else {
         ESP_LOGE(kTag, "read failed");
