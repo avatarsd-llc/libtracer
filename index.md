@@ -60,15 +60,6 @@ other document disagree, the spec wins.
 ::::
 
 ```{toctree}
-:caption: Evaluate
-:hidden:
-:maxdepth: 1
-
-Performance & conformance <docs/performance>
-Test report <docs/test-report>
-```
-
-```{toctree}
 :caption: Build with libtracer
 :hidden:
 :maxdepth: 2
@@ -94,6 +85,15 @@ Capability matrix <docs/capability-matrix>
 
 Protocol v1 — the wire format <docs/spec/v1>
 About the specification <docs/spec/README>
+```
+
+```{toctree}
+:caption: Evaluate
+:hidden:
+:maxdepth: 1
+
+Performance & conformance <docs/performance>
+Test report <docs/test-report>
 ```
 
 ```{toctree}
