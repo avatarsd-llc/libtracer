@@ -43,20 +43,22 @@ using tr::graph::graph_t, tr::graph::path_t, tr::graph::role_t;
 
 graph_t g;
 // Resolve the path ONCE to a vertex_t* handle (the hot-path token — no strings after).
-tr::graph::vertex_t* temp = *g.register_vertex(*path_t::parse("/sensor/temp"),
+tr::graph::vertex_t* temp = *g.register_vertex(path_t("/sensor/temp"),
                                                role_t::STORED_VALUE);
 
 (void)g.write(temp, make_value(23));   // store an opaque value (a view_t over bytes)
-auto got = g.read(temp);               // read the last-known value back (a clone)
+auto got = g.read(temp);               // read the last-known value back (a rope clone)
 ```
 
 **The one idea that matters:** `register_vertex` returns a **`vertex_t*` handle**, and
 the hot path — `write(v, …)` / `read(v)` — takes that handle. No string formatting,
 no parse, no map lookup per call (the spec's rule; `reference/10` §path-handle).
-`path_t::parse` is an init-time step you do once.
+The `path_t("…")` constructor parses the literal once (ADR-0054); a runtime string
+uses the fallible `path_t::parse`.
 
 A value is just **opaque bytes** wrapped in a `view_t` (a refcounted, zero-copy handle
-over a `segment_t`). The simplest constructor:
+over a `segment_t`) — which the graph stores as a single-link `rope_t`. The simplest
+constructor:
 
 ```cpp
 tr::view::view_t make_value(std::uint32_t v) {
@@ -67,7 +69,8 @@ tr::view::view_t make_value(std::uint32_t v) {
 }
 ```
 
-`read` returns a *clone* of the `view_t` (a refcount bump — no byte copy), keeping the
+`read` returns the value as a *`rope_t`* (a refcount-clone — no byte copy; a scalar is a
+single-link rope, so `got->only().bytes()` gives you the contiguous bytes), keeping the
 segment alive for as long as you hold it.
 
 ## 3. Pub/sub — subscribe and fan out
@@ -75,12 +78,12 @@ segment alive for as long as you hold it.
 A write fans out to every subscriber. Three delivery styles, all on the same vertex:
 
 ```cpp
-// (1) an in-process callback (fires inline on each write, with a cloned view_t)
-(void)g.subscribe(*path_t::parse("/sensor/temp"),
-                  [](const tr::view::view_t& v) { /* … use v.bytes() … */ });
+// (1) an in-process callback (fires inline on each write, with a cloned rope_t)
+(void)g.subscribe(path_t("/sensor/temp"),
+                  [](const tr::view::rope_t& v) { /* … use v.only().bytes() … */ });
 
 // (2) a spec-faithful target vertex (a write re-dispatches the value to /log/temp)
-(void)g.subscribe(*path_t::parse("/sensor/temp"), *path_t::parse("/log/temp"));
+(void)g.subscribe(path_t("/sensor/temp"), path_t("/log/temp"));
 
 // (3) a thread blocking on the next write (the single-shot primitive)
 auto r = g.await(temp, std::chrono::seconds{2});
@@ -115,10 +118,10 @@ tr::net::fwd_router_t router_a(node_a);
 tr::net::fwd_router_t router_b(node_b);
 
 // B owns the target vertex and a subscriber; A knows its link to B as "b".
-(void)node_b.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+(void)node_b.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
 router_a.add_child("b", channel.a());   // A routes a dst starting with "b" over the wire
 router_b.add_child("a", channel.b());   // B's name for the inbound link (the way back)
-(void)node_b.subscribe(*path_t::parse("/sensor/temp"), /* callback … */);
+(void)node_b.subscribe(path_t("/sensor/temp"), /* callback … */);
 
 // A client hands A's router FWD{ op=WRITE, dst=/b/sensor/temp, payload=VALUE(23) }:
 // A strips "b" and forwards /sensor/temp across the wire; B's terminus writes it.

@@ -35,7 +35,7 @@ flowchart TB
     GRAPH --> DISP --> FWD
     FWD --> FRAME
     FWD --> TRANSPORT
-    GRAPH -. "value IS a view_t" .-> VIEWS
+    GRAPH -. "value IS a rope_t (scalar = 1 link)" .-> VIEWS
     FRAME -- "cast, no copy" --> VIEWS
     VIEWS --> SEG --> BACK
     classDef done fill:#dcfce7,stroke:#166534;
