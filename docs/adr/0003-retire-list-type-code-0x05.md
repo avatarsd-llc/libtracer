@@ -1,5 +1,7 @@
 # Retire type code 0x05 (LIST); nesting is opt.PL=1 on a purpose-specific type byte
 
+Status: accepted
+
 There is **no generic structured-container type**. Type code `0x05` (formerly `LIST`) is permanently retired and never reused; senders MUST NOT emit it, and receivers treat it as reserved-but-unassigned. Any TLV with `opt.PL=1` is a structured container of concatenated child TLVs, and its **type byte declares what the children mean** (PATH, SUBSCRIBER, POINT, ROUTER, SETTINGS, …). An array-whole read (e.g. `read('/x:subscribers[]')`) returns a `PL=1` reply whose children are the element TLVs; an **atomic multi-field write uses SETTINGS (`0x0B`)**.
 
 ## Considered options

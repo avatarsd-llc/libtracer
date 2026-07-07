@@ -1,5 +1,7 @@
 # Access control is authorization over a pluggable subject-token; ACL-lists and capabilities are one model, not rivals
 
+Status: accepted
+
 The protocol reserves an `ACL` type code (`0x0A`) and a `PermissionDenied` status, but L4 implements neither — access control is greenfield. Two pressures force a decision now: in-band vertex creation ([ADR-0017](0017-in-band-vertex-creation-controller-orchestration.md)) is defined as *"ACL-gated,"* and the orchestration use case needs **third-party binding** (an orchestrator that is neither producer nor consumer grants a consumer the right to subscribe a producer). This ADR pins the access model and, crucially, the relationship between the ACL-list and capability approaches that initially looked like rivals.
 
 ## Decision

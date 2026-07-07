@@ -1,5 +1,7 @@
 # The reference graph runtime reads/writes the last-known-value lock-free and bounds in-process dispatch cycles with a depth cap
 
+Status: accepted
+
 > **Superseded in part by [RFC-0007](../spec/rfcs/0007-delivery-terminates-at-target.md) / [ADR-0051](0051-delivery-terminates-at-target-no-dispatch-limits.md)** (2026-07-04): the in-process dispatch-depth cap is deleted — SUBSCRIBER delivery now terminates at its target (no re-dispatch to the target's subscribers), so dispatch-level cycles are impossible by construction and no cap or termination machinery exists. This ADR's concurrency model (lock-free LKV, per-vertex atomicity, await) remains in force.
 
 The L4 graph runtime (`core/` M3) is multi-threaded: publishers `write`, consumers `read` or block in `await`, concurrently, across threads. The protocol leaves the locking strategy implementation-defined ([ADR-0013](0013-v1-scope-boundaries.md)) and states only that **each vertex is the atomic unit** of a read/write ([02-graph-model.md](../reference/02-graph-model.md) §required atomic operations). This ADR records how the reference implementation realizes that, and how it terminates in-process subscriber cycles — both being load-bearing, hard-to-reverse choices that a reader would otherwise find surprising.

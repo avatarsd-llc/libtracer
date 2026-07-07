@@ -1,5 +1,7 @@
 # Memory binding is a modular spectrum; libtracer is a transparent byte router
 
+Status: accepted
+
 libtracer's L0/L1 memory substrate is a **modular, unopinionated binding layer**. An endpoint's bytes may be bound anywhere on a spectrum — a heap snapshot, a shadow vertex the publisher updates, or a live/raw view over an MMIO register or program variable (no copy, no CRC, lock-free) — and the choice is the user's, made by selecting a backend module ([09-memory-substrate.md](../reference/09-memory-substrate.md) `mem_backend_t`). In the live/raw case libtracer is a **transparent byte router**: it routes whatever bytes the binding exposes and imposes no snapshot, copy, or CRC semantics (CRC is an optional higher-layer concern, [01-data-format.md](../reference/01-data-format.md) `opt.CR`). The protocol does **not** forbid "dangerous" access; instead **each backend module owns and declares its per-architecture concurrency/coherency contract** — allocation, cache hooks (`prepare_for_io`/`finalize_after_io`), ISR-safety, atomicity granularity, memory ordering (x86 TSO vs weak ARM/MIPS), `destroy` thread-affinity, and any lock-free read protocol (e.g. a seqlock for consistent multi-word live reads). Safety (snapshot/shadow) is **recommended by default but never mandated**.
 
 ## Considered options

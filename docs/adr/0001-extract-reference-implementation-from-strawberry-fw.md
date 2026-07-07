@@ -1,7 +1,7 @@
 # 1. Extract the reference implementation from strawberry-fw's `io_layer`
 
 - **Date:** 2026-06-24
-- **Status:** Proposed
+- **Status:** Accepted
 - **Deciders:** avatarsd LLC (spec + reference-impl domains, see [GOVERNANCE.md](../../.github/GOVERNANCE.md))
 - **Related:** the original design plans (`00-vision-and-reality-check`, `02-roadmap-weeks-1-to-8`; removed — see git history),
   [docs/reference/02-graph-model.md](../reference/02-graph-model.md),

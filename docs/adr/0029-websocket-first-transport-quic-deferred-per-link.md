@@ -1,5 +1,7 @@
 # WebSocket is the strawberry/board-to-board reliable transport now; QUIC is deferred as a per-link, gateway-and-up upgrade
 
+Status: accepted
+
 The strawberry profile is **CAN + a reliable IP transport** ([reference 12](../reference/12-deployment-profiles.md)). The open question was which reliable transport to build first — and whether board-to-board (controller-to-controller) links should be the same one. [The M6 research note](../research/m6-transport-and-batching.md) left **TCP-vs-QUIC** open; the maintainer asked specifically about **WebSocket vs QUIC**, flagging QUIC's **connection migration** as the one real reason to prefer it (roaming). This ADR settles the choice without locking the project in, because a transport is a swappable seam ([ADR-0027](0027-transport-and-connections-are-vertices.md)).
 
 ## Decision

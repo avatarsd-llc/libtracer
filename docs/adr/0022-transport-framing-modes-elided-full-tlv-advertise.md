@@ -1,5 +1,7 @@
 # Transport framing modes: full-TLV, header-elided (transport-native addressing), and advertise+id-match — chosen by the adapter, uniform to the bridge
 
+Status: accepted
+
 "First-ready-to-strawberry" requires a **zero-overhead swap over the existing CAN and WebSocket buses**: drop libtracer in as the io_layer without regressing latency or bandwidth. The flagship — **100 ksps over CAN** — makes the constraint sharp: a 9-byte sample cannot afford a 4-byte TLV header (+44% on a bandwidth-bound bus). Yet load-bearing claim 4 says **bridges are core and transport choice is invisible** — the router must stay uniform. This ADR reconciles the two by making *framing* a transport-adapter concern with three coexisting modes.
 
 ## Decision

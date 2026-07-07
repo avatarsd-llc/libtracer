@@ -1,5 +1,7 @@
 # Subscription is consumer-initiated (a client-write into the producer's `:subscribers[]`); the target stays control-passive
 
+Status: accepted
+
 [ADR-0006](0006-read-write-await-api-no-connect.md) fixed the wire API at `read`/`write`/`await` with **no `connect`/`subscribe` primitive**, and [CONTEXT.md](../../CONTEXT.md) (*SUBSCRIBER direction*) fixed **producer-holds**: the edge lives on the source's `:subscribers[]`, delivery is an ordinary write, and the target is *subscription-unaware* at runtime. Designing third-party network formation forced an unanswered question: **who issues the subscribe-write, and how is a sink protected from unwanted fan-in?** Two readings were live — an orchestrator (or anyone with the source's subscribe-right) writes the edge directly into the producer, versus the *consumer* driving it. This ADR fixes the direction without disturbing producer-holds or the wire API.
 
 ## Decision

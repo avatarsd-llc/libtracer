@@ -1,5 +1,7 @@
 # End-to-end zero-copy ROS 2 (`rmw_tracer`): loaned POD messages over shared-memory and RDMA, and "rcl over RDMA"
 
+Status: accepted
+
 [ADR-0023](0023-ros2-binding-via-rmw-tracer.md) established `rmw_tracer` and made the loaned-message API mandatory for a zero-copy *take*. That is necessary but not sufficient for **end-to-end** zero-copy: the publish side, the transport, and the cross-host case must each avoid a copy too. This ADR specifies the full chain — and shows that "**rcl over RDMA**" (ROS 2 nodes communicating over RDMA with one-sided zero-copy) is not a new mechanism but the composition of three pieces we already have.
 
 ## Decision

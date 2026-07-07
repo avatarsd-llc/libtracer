@@ -1,5 +1,7 @@
 # A transport — and each connection within it — is a first-class `/` vertex, created and configured through the same in-band API as any other vertex
 
+Status: accepted
+
 [ADR-0021](0021-colon-field-plane-is-the-vertex-ioctl.md) established the `:` field plane as a vertex's `ioctl` and **rejected** turning a vertex's *control facets* (`/v/acl`, `/v/subscribers`) into `/` sub-vertices, because that dissolves one-identity atomicity. [ADR-0017](0017-in-band-vertex-creation-controller-orchestration.md) made vertex creation an in-band, ACL-gated `:children[]` write. The open question for third-party network formation: **how does an orchestrator (typically a web UI) bring up a transport link — e.g. a QUIC connection from B to A?** A first sketch squeezed it into a `transport_quic:peers[]` field. This ADR rejects that and places the transport in the path tree.
 
 ## Decision

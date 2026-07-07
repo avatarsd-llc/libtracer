@@ -1,5 +1,7 @@
 # Protocol-v1 scope boundaries: no in-band capability negotiation; the module ABI is implementation-defined
 
+Status: accepted
+
 Two things sit deliberately **outside** the protocol-v1 standard, because the standard is the wire format and addressing alone ([00-overview.md](../reference/00-overview.md) §the standard, [01-data-format.md](../reference/01-data-format.md), [03-addressing.md](../reference/03-addressing.md)):
 
 1. **No in-band capability negotiation.** A conforming receiver MUST already accept every `LL`/`CW`/`TF` variant and can pre-allocate worst-case buffers ([01-data-format.md](../reference/01-data-format.md) §interop); senders SHOULD default to the compact variants. So per-peer "what do you support?" negotiation buys nothing within protocol v1 — there are no other negotiable wire features (the reserved `opt` bits are forever-frozen, and any wire-incompatible change is a different protocol version selected at the discovery layer, [ADR-0002](0002-versioning-protocol-vs-release-no-per-frame-version.md)). There is no capability-discovery handshake, and none is needed.

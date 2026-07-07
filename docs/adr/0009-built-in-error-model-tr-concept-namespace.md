@@ -1,5 +1,7 @@
 # Built-in error model: a `tr::` concept namespace, registered-code-or-string identity, severity + disposition in a registry
 
+Status: accepted
+
 A protocol/stack error is identified within a hierarchical, **implementation-independent** namespace keyed by **stable protocol concept** — `tr::<concept>::<error>` (e.g. `tr::path::not_found`, `tr::frame::crc_fail`), where `<concept>` is one of `frame`, `tlv`, `path`, `schema`, `flow`, `access`, `transport`, `version` — **never** the raising module (which is implementation-specific and mutable). On the wire an error's **identity** takes one of two forms: a compact **registered code** (a single integer a frozen registry assigns to the whole path, for the built-in concepts) or the literal **string** path (for unregistered/third-party extensions — the unbounded case). Optional **structured detail** may attach to either form. Per-error **severity** and **disposition** (`transient` | `permanent` | `fatal`) are properties of the **registry entry**, not transmitted on the wire. The namespace is prefix-filterable like a path (`tr::flow::*`). The wire byte layout of the `ERROR` (`0x08`) TLV that carries this is specified in [RFC-0002](../spec/rfcs/0002-protocol-error-model.md).
 
 ## Considered options

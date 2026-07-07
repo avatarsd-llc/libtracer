@@ -1,5 +1,7 @@
 # ROUTER cycle termination is guaranteed by `hop_count`; the dedup recent-set is a bounded best-effort optimization
 
+Status: accepted
+
 A bridge has two independent loop defenses ([05-protocol-tlvs.md](../reference/05-protocol-tlvs.md) §`0x0D` ROUTER, [07-host-embedding.md](../reference/07-host-embedding.md) §cycle handling): a **recent-set** of seen `(origin_peer_id, origin_timestamp)` pairs (already-seen TLVs dropped silently), and a **`hop_count`** incremented by each bridge with a hard `MAX_HOPS` cap (recommended 32) beyond which a bridge MUST drop the TLV and emit a local error.
 
 **`hop_count`/`MAX_HOPS` is the normative termination guarantee.** The recent-set is therefore a **bounded, evictable best-effort optimization** — time-windowed and size-capped — that suppresses *most* redundant forwarding early. A node MAY run an arbitrarily small (even size-zero) recent-set without compromising termination; the only cost of eviction is **bounded duplicate delivery** — at most `MAX_HOPS` × fanout copies of a message before `hop_count` stops the loop — which pub/sub subscribers already tolerate (idempotent handling or app-level dedup).

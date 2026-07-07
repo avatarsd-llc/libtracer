@@ -1,5 +1,7 @@
 # Access control uses NFSv4-style ACEs with inheritance; `admin` is precisely `WRITE_ACL`
 
+Status: accepted
+
 [ADR-0018](0018-access-control-authorization-pluggable-subject-token.md) established that access control is *authorization over a pluggable subject-token*, but left the **rights model** open and used a flat `READ/WRITE/SUBSCRIBE` bitfield ([reference 05](../reference/05-protocol-tlvs.md) §`0x0A` ACL). Designing the byte layout for in-band creation ([ADR-0017](0017-in-band-vertex-creation-controller-orchestration.md)) exposed two gaps: there is no `create` or `admin` right, and there is no way to apply an ACL to a **composite** (a subtree) without writing it on every leaf. This ADR adopts the **NFSv4 ACL model** to fill both.
 
 ## Decision

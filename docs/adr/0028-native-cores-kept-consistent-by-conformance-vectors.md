@@ -1,5 +1,7 @@
 # Each language gets a native core; consistency is enforced by shared conformance vectors, not by a shared C core via FFI
 
+Status: accepted
+
 libtracer will have **C++, TypeScript, and (later) Rust** cores. Two ways to do that: **(B)** one C core that TS/Rust reach through **FFI** (Rust `-sys` + safe wrapper, TS = WASM-of-C) — zero drift by construction, but FFI friction, a C dependency everywhere, and a WASM bundle in the browser; or **(A)** **native reimplementations** per language — idiomatic, native perf, pure-TS in the browser, pure-Rust — at the cost of N× code and **drift risk**. This decision picks A and names the mechanism that makes A safe.
 
 ## Decision

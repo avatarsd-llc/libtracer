@@ -1,5 +1,7 @@
 # ROS 2 integration is an RMW implementation (`rmw_tracer`), not an rclcpp bridge — topics map to paths, ROS QoS to `:settings`, messages stay opaque
 
+Status: accepted
+
 ROS 2 is a first-class target. The decision is *where* libtracer plugs into the ROS 2 stack. ROS 2 is layered `rclcpp`/`rclpy` → `rcl` → **`rmw`** (the ROS MiddleWare abstraction) → a concrete middleware (`rmw_fastrtps`, `rmw_cyclonedds`, …). This ADR pins the binding at the **RMW layer** — `rmw_tracer` — and the mapping from ROS 2 concepts onto the libtracer graph. (The repository term *"rwx_tracer"* is read as `rmw_tracer`, the RMW-plugin naming convention.)
 
 ## Decision

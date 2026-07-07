@@ -1,5 +1,7 @@
 # The `:` field plane is the vertex's `ioctl`: an optional, protocol-defined-plus-device-private control surface on one identity
 
+Status: accepted
+
 Load-bearing claim 2 says the control surface — subscriptions, QoS, ACLs, liveness — is expressed as writable `:`-addressed fields, not as separate primitives. Designing the byte layout (and weighing a "make creation/ACL device-private endpoints instead" alternative) forced three questions the claim did not answer: must *every* vertex carry this machinery? does splitting control into sub-addresses **dissolve** the vertex's consistency? and how does a *generic* orchestrator act across heterogeneous devices? This ADR resolves all three with one framing.
 
 ## Decision

@@ -1,5 +1,7 @@
 # Address-shift totality is opt-in: tail-slice loss is not guaranteed-detectable
 
+Status: accepted
+
 An address-shift group ([03-addressing.md](../reference/03-addressing.md) §address-shift slicing) is identified by **`(origin_peer_id, ts)`** — the same in-flight identity as cycle-dedup ([02-graph-model.md](../reference/02-graph-model.md), [07-host-embedding.md](../reference/07-host-embedding.md)) — and a receiver detects a missing **interior** slice as an index gap at deadline. A dropped **trailing** slice, however, is **not** detectable unless the group's total is known: without it the assembler infers `N = max-observed-index + 1`, so a lost tail looks like a shorter-but-complete message. v1 makes totality **opt-in** — the publisher MAY declare it (`expected_count`, or a leading `:manifest` index-set TLV) — but the protocol does **not** require it. Tail-loss is therefore guaranteed-detectable only when the publisher opts in.
 
 ## Considered options

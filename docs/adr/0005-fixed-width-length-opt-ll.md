@@ -1,5 +1,7 @@
 # Length is fixed-width LE selected by opt.LL (u16 / u32), capped at u32
 
+Status: accepted
+
 The TLV `length` field is **fixed-width little-endian**, selected per-TLV by `opt.LL`: **u16** (2 bytes, ≤ 65535) by default, **u32** (4 bytes, ≤ 4 GiB−1) when `opt.LL=1`. This fixes the header at **4 bytes** (6 with `LL=1`) and the minimum frame at 4 bytes. There is no u64 length.
 
 ## Considered options
