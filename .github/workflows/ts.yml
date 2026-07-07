@@ -51,6 +51,23 @@ jobs:
       - name: Run the package test suites (core conformance TAP + transport-ws)
         run: npm test
 
+      # Published-package smoke: pack the core tarball exactly as `npm publish`
+      # would, install it into a clean throwaway project, and import it. This runs
+      # against the SHIPPED artifact — proving `dist/` is included and the `exports`
+      # map resolves — which the workspace `npm test` (running from source) cannot
+      # catch. Guards against a broken `files`/`exports` field shipping a package
+      # that installs but won't import (the ESP-archive class of packaging bug).
+      - name: Published-package smoke (pack + clean install + import)
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          npm pack --workspace @avatarsd-llc/libtracer --pack-destination "$tmp"
+          cp scripts/smoke-published.mjs "$tmp/"
+          cd "$tmp"
+          npm init -y >/dev/null 2>&1
+          npm install ./avatarsd-llc-libtracer-*.tgz
+          node smoke-published.mjs
+
       # API-doc coverage gate: typedoc.json sets notDocumented/invalidLink/
       # notExported validation with treatValidationWarningsAsErrors, so an
       # undocumented or dangling-link public symbol fails the build — the TS
