@@ -31,6 +31,7 @@ use alloc::vec::Vec;
 // produces / parses the exact bytes the shared conformance vectors pin, matching
 // the C++ core and the TypeScript client byte-for-byte. See each module's docs.
 
+pub mod path;
 pub mod tlv_builders;
 
 pub use tlv_builders::{
