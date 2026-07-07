@@ -70,6 +70,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 else()
     target_sources(libtracer PRIVATE src/socketcan_link_stub.cpp)
 endif()
+# Namespaced alias so a build-tree consumer (add_subdirectory / FetchContent) links
+# the SAME `libtracer::libtracer` name that `find_package(libtracer)` provides from
+# the installed package — one target spelling regardless of how libtracer was pulled in.
+add_library(libtracer::libtracer ALIAS libtracer)
 find_package(Threads REQUIRED)
 target_link_libraries(libtracer PUBLIC Threads::Threads)
 target_include_directories(libtracer PUBLIC
