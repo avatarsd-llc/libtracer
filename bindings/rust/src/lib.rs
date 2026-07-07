@@ -26,6 +26,34 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+// ---------------------------------------------------------------- typed tier ---
+// The typed protocol layer built on top of the raw wire codec below. Each module
+// produces / parses the exact bytes the shared conformance vectors pin, matching
+// the C++ core and the TypeScript client byte-for-byte. See each module's docs.
+
+pub mod error_registry;
+pub mod field;
+pub mod fwd;
+pub mod path;
+pub mod structured;
+pub mod tlv_builders;
+
+pub use error_registry::{
+    error_code, error_raw_code, error_string, parse_error, status_errors, status_ok,
+    status_with_errors, Disposition, ErrCode, ErrorId, ParsedError, Severity,
+};
+pub use field::{
+    encode_field, field_tlv, parse_field, parse_field_tlv, FieldLevel, FieldMode, MAX_FIELD_DEPTH,
+};
+pub use fwd::{
+    decode_fwd, encode_fwd, encode_fwd_bytes, parse_fwd_tlv, reply_error_code, reply_error_path,
+    FieldSel, FwdRequest, ParsedFwd,
+};
+pub use tlv_builders::{
+    name, subscriber, validate_segment, value, value_opts, value_u16, value_u32, value_u64,
+    value_u8, BuildError, ValueOptions, MAX_PATH_BYTES, MAX_SEGMENTS, MAX_SEGMENT_BYTES,
+};
+
 /// Core type-code registry (0x01-0x10). 0x05 is retired (was LIST, ADR-0003).
 /// The codec treats every nonzero type generically, so these constants are a
 /// convenience, not an exhaustive set.
