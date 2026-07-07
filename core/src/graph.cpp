@@ -189,8 +189,8 @@ result_t<vertex_handle_t> graph_t::register_vertex_key(std::vector<std::byte> ke
     key_view_t kk{k.bytes};
     while (!kk.empty()) {
         kk = kk.parent();
-        const auto pit = vertices_.find(
-            path_key_t{std::vector<std::byte>(kk.bytes().begin(), kk.bytes().end())});
+        // Heterogeneous by-span lookup — no owned path_key_t copy per ancestor level.
+        const auto pit = vertices_.find(kk.bytes());
         if (pit != vertices_.end()) above += pit->second->own_subs_.load(std::memory_order_relaxed);
         if (kk.empty()) break;
     }
@@ -281,9 +281,10 @@ void graph_t::note_subscriber_removed(vertex_t* v) {
 }
 
 vertex_t* graph_t::find_ptr(std::span<const std::byte> key) const {
-    path_key_t k{std::vector<std::byte>(key.begin(), key.end())};
     const std::shared_lock lock(map_mutex_);
-    const auto it = vertices_.find(k);
+    // Heterogeneous lookup (path_key_hash_t / path_key_eq_t are is_transparent): key the
+    // map straight off the span — NO owned path_key_t copy, no re-hash of a fresh vector.
+    const auto it = vertices_.find(key);
     // The returned raw pointer is used by callers OUTSIDE this shared_lock. That is
     // sound only because `vertices_` is insert-only (see its declaration): the
     // heap-owned vertex_t is pointer-stable across rehash and is never destroyed

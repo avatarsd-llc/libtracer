@@ -508,7 +508,12 @@ class graph_t {
     // every outstanding find() pointer (the route_handle clear_link dangling-ref
     // class, fixed in #220); it needs a vertex lifetime scheme (refcount / epoch
     // reclamation, or a tombstone) first.
-    std::unordered_map<path_key_t, std::unique_ptr<vertex_t>, path_key_hash_t> vertices_;
+    // The hasher and equality are `is_transparent`, so find_ptr looks a vertex up by a
+    // raw `std::span<const std::byte>` key with NO owned path_key_t materialized and no
+    // FNV re-hash of a fresh copy (the hot internal by-key path — fan_out, bubble_up,
+    // ACL walk, FWD resolve). By-handle ops already avoid the map entirely.
+    std::unordered_map<path_key_t, std::unique_ptr<vertex_t>, path_key_hash_t, path_key_eq_t>
+        vertices_;
     // The device creation catalog (#82, ADR-0017): SPEC `type` -> factory. Populated at
     // setup (register_child_type), read-only once frames flow, so no lock (same contract
     // as remote_sink_). `std::less<>` enables heterogeneous string_view lookup.

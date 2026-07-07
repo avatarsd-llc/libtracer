@@ -11,6 +11,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -137,10 +138,48 @@ struct path_key_t {
     bool operator==(const path_key_t&) const noexcept = default;
 };
 
-/** @brief Hash functor for @ref path_key_t (FNV-1a over the key bytes) — the map hasher. */
+/**
+ * @brief Hash functor for @ref path_key_t (FNV-1a over the key bytes) — the map hasher.
+ *
+ * Heterogeneous (`is_transparent`): the `std::span<const std::byte>` overload hashes the
+ * SAME bytes to the IDENTICAL value, so a by-span lookup keys the vertex map without
+ * materializing an owned @ref path_key_t (the hot internal by-key path in
+ * `graph_t::find_ptr`, which fans out fan_out / bubble_up / ACL-walk / FWD-resolve).
+ */
 struct path_key_hash_t {
+    using is_transparent = void; /**< @brief Enables heterogeneous (by-span) map lookup. */
     /** @brief Hash the key's canonical PATH bytes. */
     [[nodiscard]] std::size_t operator()(const path_key_t& k) const noexcept;
+    /** @brief Hash canonical PATH bytes given as a span — same FNV-1a value as the owned key. */
+    [[nodiscard]] std::size_t operator()(std::span<const std::byte> k) const noexcept;
+};
+
+/**
+ * @brief Heterogeneous equality for the vertex map (`is_transparent`): compares
+ *        @ref path_key_t and raw `std::span<const std::byte>` key bytes interchangeably,
+ *        so a by-span lookup needs no owned key. Byte-equality, length included.
+ */
+struct path_key_eq_t {
+    using is_transparent = void; /**< @brief Enables heterogeneous (by-span) map lookup. */
+    /** @brief True iff the two owned keys hold identical bytes. */
+    [[nodiscard]] bool operator()(const path_key_t& a, const path_key_t& b) const noexcept {
+        return a.bytes == b.bytes;
+    }
+    /** @brief True iff the owned key's bytes equal the span's bytes. */
+    [[nodiscard]] bool operator()(const path_key_t& a,
+                                  std::span<const std::byte> b) const noexcept {
+        return a.bytes.size() == b.size() && std::equal(a.bytes.begin(), a.bytes.end(), b.begin());
+    }
+    /** @brief True iff the span's bytes equal the owned key's bytes. */
+    [[nodiscard]] bool operator()(std::span<const std::byte> a,
+                                  const path_key_t& b) const noexcept {
+        return a.size() == b.bytes.size() && std::equal(a.begin(), a.end(), b.bytes.begin());
+    }
+    /** @brief True iff the two spans hold identical bytes. */
+    [[nodiscard]] bool operator()(std::span<const std::byte> a,
+                                  std::span<const std::byte> b) const noexcept {
+        return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin());
+    }
 };
 
 }  // namespace tr::graph
