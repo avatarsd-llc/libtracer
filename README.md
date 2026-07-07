@@ -122,6 +122,7 @@ libtracer/
 | Understand the architecture | [docs/reference/00-overview.md](docs/reference/00-overview.md) · [CONTEXT.md](CONTEXT.md) (glossary) |
 | Read the protocol | [docs/spec/v1.md](docs/spec/) |
 | See the numbers | [docs/performance.md](docs/performance.md) · [bench/](bench/) |
+| Use it as a C++ dependency (`find_package`) | [docs/getting-started.md](docs/getting-started.md) |
 | Use it on ESP32 / PlatformIO / ESPHome | [integrations/](integrations/) |
 | Use it from Rust / Node / browser | [bindings/](bindings/) |
 | Build a bridge or form a network | [docs/reference/13-network-formation.md](docs/reference/13-network-formation.md) |
