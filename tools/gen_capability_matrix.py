@@ -93,8 +93,8 @@ MODULES = [
     ("transport_webtransport", "transport_webtransport", "webtransport_test"),
     ("transport_unix", "transport_unix", "transport_unix_test"),
     ("transport_uart", "transport_uart", "transport_uart_test"),
-    ("transport_i2c", "transport_i2c", "transport_i2c_test"),
-    ("transport_spi", "transport_spi", "transport_spi_test"),
+    # i2c/spi are future plans (no design commitment yet) — tracked in the module
+    # catalog's `future` tier, intentionally omitted from the "what's built" matrix.
     ("fwd_router", "fwd_router", "fwd_fanout_test"),
     ("graph_runtime", "graph", "graph_test"),
     ("security_acl", "security_acl", "security_acl_test"),

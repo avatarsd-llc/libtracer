@@ -113,8 +113,8 @@ These are required even at profile P0 (in-process build). "Required" does not im
 | `transport_shm` | transport | Iceoryx-style shared-memory ring | post-MVP |
 | `transport_uart` | transport | UART (simple + DMA modes) | planned (no TU yet) |
 | `transport_can` | transport | CAN classic + CAN-FD with reassembly | v1, week 6 |
-| `transport_i2c` | transport | I²C bus | planned (no TU yet) |
-| `transport_spi` | transport | SPI bus | planned (no TU yet) |
+| `transport_i2c` | transport | I²C bus | future |
+| `transport_spi` | transport | SPI bus | future |
 | `transport_ble_gatt` | transport | BLE GATT characteristics | future |
 | `transport_rdma` | transport | RDMA (ibverbs) | future |
 
