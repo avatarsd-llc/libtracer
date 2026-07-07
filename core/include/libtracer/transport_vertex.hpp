@@ -190,7 +190,7 @@ class transport_vertex_t {
     // The NAME→link routing table is NOT duplicated here — it has one owner, the router's
     // child_registry_t (Brick 3a); make_connection registers the link there.
     struct conn_t {
-        graph::vertex_t* vertex = nullptr;  // the /net/<name> identity vertex
+        graph::vertex_handle_t vertex;  // the /net/<name> identity vertex (set on creation)
         conn_settings_t settings;
         std::unique_ptr<transport_t> owned;  // config-constructed socket (see class docs)
     };
@@ -198,8 +198,9 @@ class transport_vertex_t {
     // The catalog factory shared by the `client`/`listener` types: parse the SPEC config,
     // resolve the link (provided > config-constructed), record the leaf, wire the link
     // into the router. `role` distinguishes the two types (a config `role` overrides).
-    graph::result_t<graph::vertex_t*> make_connection(std::vector<std::byte> child_key,
-                                                      const wire::tlv_t* config, conn_role_t role);
+    graph::result_t<graph::vertex_handle_t> make_connection(std::vector<std::byte> child_key,
+                                                            const wire::tlv_t* config,
+                                                            conn_role_t role);
 
     graph::graph_t& graph_;
     fwd_router_t& router_;

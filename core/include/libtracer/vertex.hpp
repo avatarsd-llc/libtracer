@@ -5,7 +5,7 @@
  * An L4 graph vertex: a named, addressable position holding a value, a bounded
  * history, or a user handler (docs/reference/11 §roles). Pinned in place (the
  * atomic LKV slot + mutex + condvar are non-movable); always handled via a
- * vertex_t* returned by graph_t::register_vertex. The read/write LKV hot path is
+ * vertex_handle_t returned by graph_t::register_vertex (ADR-0056). The read/write LKV hot path is
  * lock-free (an atomic shared_ptr swap, the orderings M2 already pays for); the
  * mutex guards only the history ring, the subscriber list (M3b), and the await
  * waiter accounting.
@@ -217,7 +217,7 @@ struct subscriber_t {
  *        history, or a user handler (docs/reference/11 §roles).
  *
  * Pinned in place (the atomic last-known-value slot + mutex + condvar are non-movable) and
- * always handled via a `vertex_t*` returned by `graph_t::register_vertex`. The
+ * always handled via a `vertex_handle_t` returned by `graph_t::register_vertex` (ADR-0056). The
  * read/write hot path is lock-free (an atomic shared_ptr swap); the mutex guards only the
  * history ring, the subscriber list, and the await waiter accounting. Non-copyable.
  */

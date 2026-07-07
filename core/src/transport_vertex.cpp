@@ -24,7 +24,7 @@ namespace tr::net {
 using graph::path_t;
 using graph::result_t;
 using graph::status_t;
-using graph::vertex_t;
+using graph::vertex_handle_t;
 using view::view_t;
 using wire::tlv_t;
 using wire::type_t;
@@ -157,7 +157,7 @@ transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& rout
                                        std::string net_root, mem::mem_backend_t* rx_backend)
     : graph_(graph), router_(router), net_root_(std::move(net_root)), rx_backend_(rx_backend) {
     // Register the `/net` parent if it isn't already (it is the `:children[]` target).
-    if (graph_.find(path_t::parse(net_root_)->key()) == nullptr) {
+    if (!graph_.find(path_t::parse(net_root_)->key())) {
         (void)graph_.register_vertex(*path_t::parse(net_root_), graph::role_t::STORED_VALUE);
     }
     // Register the two catalog types on the graph via the #82 seam. Both build a
@@ -193,8 +193,9 @@ void transport_vertex_t::provide_link(std::string name, transport_t& link) {
     pending_links_.insert_or_assign(std::move(name), &link);
 }
 
-result_t<vertex_t*> transport_vertex_t::make_connection(std::vector<std::byte> child_key,
-                                                        const tlv_t* config, conn_role_t role) {
+result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::byte> child_key,
+                                                              const tlv_t* config,
+                                                              conn_role_t role) {
     const std::string name = last_segment(child_key);
     if (name.empty()) return std::unexpected(status_t::INVALID_PATH);
     if (conns_.contains(name)) return std::unexpected(status_t::PATH_IN_USE);
@@ -254,7 +255,7 @@ result_t<vertex_t*> transport_vertex_t::make_connection(std::vector<std::byte> c
 
     // Register the identity vertex at the composed /net/<name> key (graph owns addressing).
     // On failure the just-constructed socket (if any) is torn down by `owned`'s destructor.
-    result_t<vertex_t*> v = graph_.register_vertex_key(
+    result_t<vertex_handle_t> v = graph_.register_vertex_key(
         std::move(child_key), graph::role_t::STORED_VALUE, std::move(handlers));
     if (!v) return v;  // PATH_IN_USE on a duplicate connection name
 

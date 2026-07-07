@@ -481,20 +481,21 @@ template <class N>
     // naming a transport child / unknown path is not local => ERROR(NOT_FOUND).
     std::vector<std::byte> key_fallback;
     const std::span<const std::byte> dst_key = path_lookup_key(req.dst, key_fallback);
-    vertex_t* v = graph.find(dst_key);
-    if (!v) {
+    std::optional<vertex_handle_t> found = graph.find(dst_key);
+    if (!found) {
         // Write-creates (RFC-0005): a remote DATA write (no :field selector) to a
         // nonexistent path creates it, mkdir-p style, CREATE-gated on the nearest
         // existing ancestor under the inbound link's subject. Field ops and
         // read/await keep NOT_FOUND — there is no vertex to control or serve.
         if (req.op == fwd_op_t::WRITE && !has_field) {
-            const result_t<vertex_t*> made = graph.ensure_vertex(dst_key, inbound_link);
+            const result_t<vertex_handle_t> made = graph.ensure_vertex(dst_key, inbound_link);
             if (!made) return assemble_error(reply_dst_wire, reply_src_wire, made.error());
-            v = *made;
+            found = *made;
         } else {
             return assemble_error(reply_dst_wire, reply_src_wire, status_t::NOT_FOUND);
         }
     }
+    const vertex_handle_t v = *found;
 
     switch (req.op) {
         case fwd_op_t::READ: {
@@ -566,7 +567,7 @@ template <class N>
             // opted in, an ADR-0042 §3 pinned subrope of the frame (refcount, zero copy;
             // multi-link on the rope tier). An empty rope is an allocation failure.
             const rope_t value =
-                own_or_ref_tlv(payload_node, frame_view, v->settings().store_ref_min_bytes);
+                own_or_ref_tlv(payload_node, frame_view, graph.settings(v).store_ref_min_bytes);
             if (value.total_length() == 0)
                 return assemble_error(reply_dst_wire, reply_src_wire, status_t::BACKPRESSURE);
 

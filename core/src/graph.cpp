@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <memory_resource>
 #include <mutex>
@@ -145,25 +146,36 @@ graph_t::graph_t() {
     // `config` SETTINGS is ignored for now (a stored-value has no instantiation params
     // beyond the standard `:settings` field, written separately). Devices add richer
     // types (controllers, transport connections — #83) via register_child_type.
-    register_child_type(
-        "stored_value",
-        [](graph_t& g, std::vector<std::byte> child_key, const tlv_t*) -> result_t<vertex_t*> {
-            return g.register_vertex_key(std::move(child_key), role_t::STORED_VALUE);
-        });
+    register_child_type("stored_value",
+                        [](graph_t& g, std::vector<std::byte> child_key,
+                           const tlv_t*) -> result_t<vertex_handle_t> {
+                            return g.register_vertex_key(std::move(child_key),
+                                                         role_t::STORED_VALUE);
+                        });
 }
 
 void graph_t::register_child_type(std::string type, child_factory_t factory) {
     child_types_.insert_or_assign(std::move(type), std::move(factory));
 }
 
-result_t<vertex_t*> graph_t::register_vertex(const path_t& path, role_t role, handlers_t handlers,
-                                             settings_t settings) {
+vertex_handle_t graph_t::register_vertex(const path_t& path, role_t role, handlers_t handlers,
+                                         settings_t settings) {
+    result_t<vertex_handle_t> h = try_register_vertex(path, role, std::move(handlers), settings);
+    // PATH_IN_USE on a compile-site literal is a source bug, not a runtime outcome — fail loud
+    // (ADR-0056, mirroring path_t(std::string_view)) rather than hand back a result the caller
+    // would only `*`-deref unchecked. A genuine runtime path uses try_register_vertex.
+    if (!h) std::abort();
+    return *h;
+}
+
+result_t<vertex_handle_t> graph_t::try_register_vertex(const path_t& path, role_t role,
+                                                       handlers_t handlers, settings_t settings) {
     return register_vertex_key(std::vector<std::byte>(path.key().begin(), path.key().end()), role,
                                std::move(handlers), settings);
 }
 
-result_t<vertex_t*> graph_t::register_vertex_key(std::vector<std::byte> key, role_t role,
-                                                 handlers_t handlers, settings_t settings) {
+result_t<vertex_handle_t> graph_t::register_vertex_key(std::vector<std::byte> key, role_t role,
+                                                       handlers_t handlers, settings_t settings) {
     path_key_t k{std::move(key)};
     const std::unique_lock lock(map_mutex_);
     if (vertices_.find(k) != vertices_.end()) return std::unexpected(status_t::PATH_IN_USE);
@@ -185,12 +197,19 @@ result_t<vertex_t*> graph_t::register_vertex_key(std::vector<std::byte> key, rol
     vertex->listeners_above_.store(above, std::memory_order_relaxed);
     vertex_t* ptr = vertex.get();
     vertices_.emplace(std::move(k), std::move(vertex));
-    return ptr;
+    return vertex_handle_t{ptr};
 }
 
-result_t<vertex_t*> graph_t::ensure_vertex(std::span<const std::byte> key,
-                                           std::string_view caller) {
-    if (vertex_t* v = find(key)) return v;
+result_t<vertex_handle_t> graph_t::ensure_vertex(std::span<const std::byte> key,
+                                                 std::string_view caller) {
+    result_t<vertex_t*> p = ensure_vertex_ptr(key, caller);
+    if (!p) return std::unexpected(p.error());
+    return vertex_handle_t{*p};
+}
+
+result_t<vertex_t*> graph_t::ensure_vertex_ptr(std::span<const std::byte> key,
+                                               std::string_view caller) {
+    if (vertex_t* v = find_ptr(key)) return v;
     // Write-creates (RFC-0005): gate CREATE on the nearest EXISTING ancestor — its
     // effective ACL is exactly what every vertex of the missing chain would inherit
     // (the core subset's INHERIT walk, ADR-0020). No ancestor at all ⇒ open, the
@@ -200,7 +219,7 @@ result_t<vertex_t*> graph_t::ensure_vertex(std::span<const std::byte> key,
         vertex_t* ancestor = nullptr;
         while (!k.empty()) {
             k = k.parent();
-            ancestor = find(k.bytes());
+            ancestor = find_ptr(k.bytes());
             if (ancestor != nullptr || k.empty()) break;
         }
         if (ancestor != nullptr && !acl_allows(ancestor, caller, acl_right_t::CREATE))
@@ -213,18 +232,18 @@ result_t<vertex_t*> graph_t::ensure_vertex(std::span<const std::byte> key,
     vertex_t* leaf = nullptr;
     for (const key_view_t level : levels) {
         const std::span<const std::byte> pk = level.bytes();
-        if (vertex_t* existing = find(pk)) {
+        if (vertex_t* existing = find_ptr(pk)) {
             leaf = existing;
             continue;
         }
-        result_t<vertex_t*> made =
+        result_t<vertex_handle_t> made =
             register_vertex_key(std::vector<std::byte>(pk.begin(), pk.end()), role_t::STORED_VALUE);
         if (made) {
-            leaf = *made;
+            leaf = made->get();
             continue;
         }
         if (made.error() == status_t::PATH_IN_USE) {  // lost a benign creation race
-            leaf = find(pk);
+            leaf = find_ptr(pk);
             if (leaf != nullptr) continue;
         }
         return std::unexpected(made.error());
@@ -261,7 +280,7 @@ void graph_t::note_subscriber_removed(vertex_t* v) {
     }
 }
 
-vertex_t* graph_t::find(std::span<const std::byte> key) const {
+vertex_t* graph_t::find_ptr(std::span<const std::byte> key) const {
     path_key_t k{std::vector<std::byte>(key.begin(), key.end())};
     const std::shared_lock lock(map_mutex_);
     const auto it = vertices_.find(k);
@@ -271,6 +290,16 @@ vertex_t* graph_t::find(std::span<const std::byte> key) const {
     // while the graph lives. Do NOT add vertex erasure/retirement without first
     // giving vertices a lifetime scheme — a bare erase would dangle these pointers.
     return it == vertices_.end() ? nullptr : it->second.get();
+}
+
+std::optional<vertex_handle_t> graph_t::find(std::span<const std::byte> key) const {
+    vertex_t* p = find_ptr(key);
+    if (p == nullptr) return std::nullopt;
+    return vertex_handle_t{p};
+}
+
+const settings_t& graph_t::settings(vertex_handle_t v) const noexcept {
+    return v.get()->settings();
 }
 
 void graph_t::set_subject_resolver(subject_resolver_t resolver) {
@@ -301,7 +330,7 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     }
     key_view_t key{v->key_.bytes};
     while (!(key = key.parent()).empty()) {
-        vertex_t* ancestor = find(key.bytes());
+        vertex_t* ancestor = find_ptr(key.bytes());
         if (!ancestor) continue;  // an unregistered intermediate level holds no ACL
         const std::lock_guard lock(ancestor->m_);
         for (const ace_t& ace : ancestor->aces_) {
@@ -320,7 +349,8 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     return !effective_nonempty;
 }
 
-result_t<rope_t> graph_t::read(vertex_t* v, std::string_view caller) const {
+result_t<rope_t> graph_t::read(vertex_handle_t vh, std::string_view caller) const {
+    vertex_t* v = vh.get();
     if (!acl_allows(v, caller, acl_right_t::READ))
         return std::unexpected(status_t::PERMISSION_DENIED);
     if (v->role_ == role_t::HANDLER) {
@@ -382,7 +412,7 @@ void graph_t::fan_out(vertex_t* v, const rope_t& value, int depth) {
         if (d.callback)
             d.callback(value);  // the rope value by const ref (callback may clone links)
         if (!d.target_key.empty() && depth + 1 < kMaxDispatchDepth) {
-            if (vertex_t* target = find(d.target_key)) {
+            if (vertex_t* target = find_ptr(d.target_key)) {
                 // Fan-in gate (#81, ADR-0026): the re-dispatch is an ordinary write to
                 // the target, gated inside write_impl by the TARGET's :acl WRITE right
                 // under the edge's stored caller context. Denial drops this delivery.
@@ -441,7 +471,7 @@ void graph_t::bubble_up(vertex_t* v, const rope_t& value, int depth) {
     key_view_t key{v->key_.bytes};
     while (!key.empty()) {
         key = key.parent();
-        if (vertex_t* ancestor = find(key.bytes())) fan_out(ancestor, value, depth);
+        if (vertex_t* ancestor = find_ptr(key.bytes())) fan_out(ancestor, value, depth);
         if (key.empty()) break;  // the root vertex (empty key) was just visited
     }
 }
@@ -485,7 +515,8 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, int depth, std::st
     return {};
 }
 
-result_t<void> graph_t::assign(vertex_t* v, rope_t value, std::string_view caller) {
+result_t<void> graph_t::assign(vertex_handle_t vh, rope_t value, std::string_view caller) {
+    vertex_t* v = vh.get();
     if (!acl_allows(v, caller, acl_right_t::WRITE))
         return std::unexpected(status_t::PERMISSION_DENIED);
     // The STATE half only (RFC-0008 §A): swap the last-known-value / append the stream
@@ -543,7 +574,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, int depth
         if (std::ranges::equal(node.key, v->key_.bytes)) {
             vx = v;  // the root value — `v` itself, already WRITE-gated by write_impl
         } else {
-            const result_t<vertex_t*> ensured = ensure_vertex(node.key, caller);
+            const result_t<vertex_t*> ensured = ensure_vertex_ptr(node.key, caller);
             if (!ensured) return std::unexpected(ensured.error());
             vx = *ensured;
             if (!acl_allows(vx, caller, acl_right_t::WRITE))
@@ -573,7 +604,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, int depth
         if (!node.subtree_has_value) continue;
         const view_t& slice = is_root ? head : node.notify;
         if (slice.empty()) continue;
-        vertex_t* vx = is_root ? v : find(node.key);
+        vertex_t* vx = is_root ? v : find_ptr(node.key);
         if (vx != nullptr) fan_out(vx, slice, depth);
     }
     if (v->listeners_above_.load(std::memory_order_relaxed) > 0) bubble_up(v, value, depth);
@@ -621,7 +652,7 @@ void graph_t::deliver_current(vertex_t* v, int depth) {
     deliver_vertex(v, *sp, depth);
 }
 
-void graph_t::propagate(vertex_t* v) { propagate_impl(v, 0); }
+void graph_t::propagate(vertex_handle_t v) { propagate_impl(v.get(), 0); }
 
 void graph_t::propagate_impl(vertex_t* v, int depth) {
     // The argument is always delivered — a direct propagate is never gated by the vertex's
@@ -649,7 +680,7 @@ void graph_t::propagate_impl(vertex_t* v, int depth) {
         }
     }
     for (const std::vector<std::byte>& k : to_deliver) {
-        if (vertex_t* u = find(k)) deliver_current(u, depth);
+        if (vertex_t* u = find_ptr(k)) deliver_current(u, depth);
     }
 }
 
@@ -675,7 +706,8 @@ void graph_t::clear_pending(vertex_t* v) {
     pending_.erase(std::vector<std::byte>(v->key_.bytes.begin(), v->key_.bytes.end()));
 }
 
-void graph_t::set_delivery_mode(vertex_t* v, delivery_mode_t mode) {
+void graph_t::set_delivery_mode(vertex_handle_t vh, delivery_mode_t mode) {
+    vertex_t* v = vh.get();
     const std::vector<std::byte> key(v->key_.bytes.begin(), v->key_.bytes.end());
     const std::lock_guard lock(sweep_mutex_);
     v->delivery_mode_ = mode;
@@ -688,20 +720,22 @@ void graph_t::set_delivery_mode(vertex_t* v, delivery_mode_t mode) {
     }
 }
 
-result_t<void> graph_t::write(vertex_t* v, rope_t value, std::string_view caller) {
-    return write_impl(v, std::move(value), 0, caller);
+result_t<void> graph_t::write(vertex_handle_t v, rope_t value, std::string_view caller) {
+    return write_impl(v.get(), std::move(value), 0, caller);
 }
 
-result_t<void> graph_t::write(vertex_t* v, const field_path_t& field, rope_t value,
+result_t<void> graph_t::write(vertex_handle_t vh, const field_path_t& field, rope_t value,
                               std::string_view caller) {
+    vertex_t* v = vh.get();
     if (field.empty()) return write_impl(v, std::move(value), 0, caller);
     // A field write targets a contiguous control TLV (settings / acl / subscribers);
     // materialize it (single-link: zero copy) before the field surface parses it.
     return field_write(v, field, value.materialize(), caller);
 }
 
-result_t<rope_t> graph_t::await(vertex_t* v, std::chrono::nanoseconds timeout,
+result_t<rope_t> graph_t::await(vertex_handle_t vh, std::chrono::nanoseconds timeout,
                                 std::string_view caller) {
+    vertex_t* v = vh.get();
     // await is the readiness form of a data READ — same gate, checked up front so a
     // denied caller cannot camp on the condvar.
     if (!acl_allows(v, caller, acl_right_t::READ))
@@ -717,7 +751,8 @@ result_t<rope_t> graph_t::await(vertex_t* v, std::chrono::nanoseconds timeout,
     return *sp;
 }
 
-result_t<std::vector<rope_t>> graph_t::history(vertex_t* v) const {
+result_t<std::vector<rope_t>> graph_t::history(vertex_handle_t vh) const {
+    vertex_t* v = vh.get();
     if (v->role_ != role_t::STREAM) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     if (!acl_allows(v, {}, acl_right_t::READ))  // local-only helper => local (empty) context
         return std::unexpected(status_t::PERMISSION_DENIED);
@@ -798,7 +833,7 @@ result_t<void> graph_t::admit_subscriber(vertex_t* v, subscriber_t s, std::strin
     // One immediate delivery, per edge kind — the same three legs fan_out dispatches.
     if (latch_callback) latch_callback(*latch);
     if (!latch_target.empty()) {
-        if (vertex_t* target = find(latch_target)) {
+        if (vertex_t* target = find_ptr(latch_target)) {
             // Fan-in gate (#81): an ordinary write to the target under the edge's stored
             // caller context; denial drops the latch delivery, never the edge.
             (void)write_impl(target, *latch, 1, latch_caller);
@@ -814,7 +849,7 @@ result_t<void> graph_t::admit_subscriber(vertex_t* v, subscriber_t s, std::strin
 }
 
 result_t<void> graph_t::subscribe(const path_t& src, const path_t& target) {
-    vertex_t* v = find(src.key());
+    vertex_t* v = find_ptr(src.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
     // ADR-0049: the sugar ENCODES the same SUBSCRIBER{PATH} TLV a wire subscribe carries
     // and enters the field-write door — subscribe-time is control-plane-cold, so the
@@ -837,7 +872,7 @@ result_t<void> graph_t::subscribe(const path_t& src, const path_t& target) {
 }
 
 result_t<void> graph_t::subscribe(const path_t& src, std::function<void(const rope_t&)> callback) {
-    vertex_t* v = find(src.key());
+    vertex_t* v = find_ptr(src.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
     // A std::function cannot ride a TLV, so this sugar has no parse to share — it still
     // enters the same single admission step as every other door (ADR-0049), under the
@@ -852,8 +887,9 @@ void graph_t::set_remote_delivery_sink(
     remote_sink_ = std::move(sink);
 }
 
-result_t<void> graph_t::subscribe_wire(vertex_t* v, view_t source_view, view_t return_route,
+result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view_t source_view, view_t return_route,
                                        std::string link) {
+    vertex_t* v = vh.get();
     // Parse the owned SUBSCRIBER copy ONCE (ADR-0049) — delivery_compact comes from this
     // parse (the resolver's parallel subscriber_compact() is retired); the tlv_t borrows
     // source_view's bytes, which the slot then retains zero-copy.
@@ -1005,7 +1041,7 @@ result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value)
     std::vector<std::byte> child_key = parent->key_.bytes;
     wire::emit_name(child_key, child_name);
 
-    result_t<vertex_t*> made = it->second(*this, std::move(child_key), config);
+    result_t<vertex_handle_t> made = it->second(*this, std::move(child_key), config);
     if (!made) return std::unexpected(made.error());  // PATH_IN_USE on a duplicate name
     return {};
 }
@@ -1084,9 +1120,10 @@ result_t<view_t> graph_t::read_children(vertex_t* v) const {
     return *res;
 }
 
-result_t<rope_t> graph_t::read(vertex_t* v, const field_path_t& field,
+result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
                                std::string_view caller) const {
-    if (field.empty()) return read(v, caller);  // value read → the stored rope
+    vertex_t* v = vh.get();
+    if (field.empty()) return read(vh, caller);  // value read → the stored rope
     // A field read serves a contiguous control TLV; it crosses back as a single-link
     // rope (ADR-0053 §6 — the data API returns ropes). Compute the control view, then
     // wrap once. Field reads are gated like data reads (#81): READ for the control
@@ -1122,8 +1159,9 @@ result_t<rope_t> graph_t::read(vertex_t* v, const field_path_t& field,
     return rope_t{*fv};
 }
 
-result_t<std::vector<view_t>> graph_t::read_subscribers(vertex_t* v,
+result_t<std::vector<view_t>> graph_t::read_subscribers(vertex_handle_t vh,
                                                         std::string_view caller) const {
+    vertex_t* v = vh.get();
     if (!acl_allows(v, caller, acl_right_t::READ))  // control-surface read, like ":schema"
         return std::unexpected(status_t::PERMISSION_DENIED);
     const std::lock_guard lock(v->m_);
@@ -1135,30 +1173,32 @@ result_t<std::vector<view_t>> graph_t::read_subscribers(vertex_t* v,
 }
 
 result_t<rope_t> graph_t::read(const path_t& path) const {
-    vertex_t* v = find(path.key());
+    vertex_t* v = find_ptr(path.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
-    return read(v, path.field());  // handle-based; one locus for the field surface + ACL gates
+    // handle-based; one locus for the field surface + ACL gates
+    return read(vertex_handle_t{v}, path.field());
 }
 
 result_t<void> graph_t::write(const path_t& path, rope_t value) {
-    vertex_t* v = find(path.key());
+    vertex_t* v = find_ptr(path.key());
     if (!v) {
         // Write-creates (RFC-0005): a DATA write to a nonexistent path creates it,
         // mkdir-p style, gated by CREATE on the nearest existing ancestor. The
         // `:field` control surface does not create — a field write to a
         // nonexistent vertex stays NOT_FOUND (there is no vertex to control).
         if (!path.field().empty()) return std::unexpected(status_t::NOT_FOUND);
-        const result_t<vertex_t*> made = ensure_vertex(path.key());
+        const result_t<vertex_t*> made = ensure_vertex_ptr(path.key(), {});
         if (!made) return std::unexpected(made.error());
         v = *made;
     }
-    return write(v, path.field(), std::move(value));  // handle-based; see the vertex_t* overload
+    // handle-based; see the vertex_handle_t overload
+    return write(vertex_handle_t{v}, path.field(), std::move(value));
 }
 
 result_t<rope_t> graph_t::await(const path_t& path, std::chrono::nanoseconds timeout) {
-    vertex_t* v = find(path.key());
+    vertex_t* v = find_ptr(path.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
-    return await(v, timeout);
+    return await(vertex_handle_t{v}, timeout);
 }
 
 }  // namespace tr::graph
