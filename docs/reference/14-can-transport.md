@@ -1,4 +1,4 @@
-# CAN transport — header-elided framing, a structured 29-bit ID, and self-healing in-band advertise
+# Reference 14 — CAN transport: header-elided framing, a structured 29-bit ID, and self-healing in-band advertise
 
 ```{admonition} In one paragraph
 :class: tip

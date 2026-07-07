@@ -1,4 +1,4 @@
-# Network formation — how a third party wires a graph across nodes
+# Reference 13 — Network formation: how a third party wires a graph across nodes
 
 ```{admonition} In one paragraph
 :class: tip
