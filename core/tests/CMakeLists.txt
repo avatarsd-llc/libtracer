@@ -99,6 +99,12 @@ target_link_libraries(transport_can_vcan_test PRIVATE libtracer)
 libtracer_test_warnings(transport_can_vcan_test)
 add_test(NAME transport_can_vcan COMMAND transport_can_vcan_test)
 
+# ADR-0050 — the pure ACL policy seam: both adapters + typed parse/build, no graph.
+add_executable(security_acl_test security_acl_test.cpp)
+target_link_libraries(security_acl_test PRIVATE libtracer)
+libtracer_test_warnings(security_acl_test)
+add_test(NAME security_acl COMMAND security_acl_test)
+
 # #81-A — per-endpoint :acl structural storage (store/serve raw ACL TLV; no enforcement).
 add_executable(acl_test acl_test.cpp)
 target_link_libraries(acl_test PRIVATE libtracer)

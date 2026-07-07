@@ -19,6 +19,7 @@
 #include "libtracer/frame.hpp"
 #include "libtracer/key_view.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/security_acl.hpp"
 #include "libtracer/tlv.hpp"
 #include "libtracer/tlv_arena.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -52,66 +53,10 @@ void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
                                           .count());
 }
 
-// True iff `ace` grants `bit` to `subject` right now: not expired, mask carries the
-// bit, and the subject matches byte-for-byte (or the ACE names "EVERYONE@").
-[[nodiscard]] bool ace_grants(const ace_t& ace, std::span<const std::byte> subject,
-                              std::uint32_t bit, std::uint64_t now) {
-    if ((ace.access_mask & bit) == 0) return false;
-    if (ace.expires_ns != 0 && ace.expires_ns <= now) return false;
-    static constexpr std::string_view kEveryone = "EVERYONE@";
-    if (detail::as_string_view(ace.subject) == kEveryone) return true;
-    return std::ranges::equal(ace.subject, subject);
-}
-
-// Parse a decoded :acl ACL TLV into the core-subset ACE list (#81, ADR-0020 /
-// docs/reference/05 §0x0A). STRICT: anything beyond the core subset — a DENY ACE,
-// flag bits beyond INHERIT, a missing type/subject/access_mask, a non-ACL child —
-// is rejected with TYPE_MISMATCH at write time, so the stored ACEs never carry
-// semantics the ALLOW-only evaluator would silently weaken (full DENY / ordered
-// first-match-per-bit evaluation is the security_acl host module).
-[[nodiscard]] result_t<std::vector<ace_t>> parse_aces(const tlv_t& acl) {
-    std::vector<ace_t> out;
-    out.reserve(acl.children.size());
-    for (const tlv_t& entry : acl.children) {
-        if (entry.type != type_t::ACL || !entry.opt.pl)
-            return std::unexpected(status_t::TYPE_MISMATCH);
-        ace_t ace;
-        bool has_type = false;
-        bool has_subject = false;
-        bool has_mask = false;
-        const std::vector<tlv_t>& ch = entry.children;
-        for (std::size_t i = 0; i + 1 < ch.size(); ++i) {
-            if (ch[i].type != type_t::NAME) continue;
-            const std::string_view key = detail::as_string_view(ch[i].payload);
-            const tlv_t& val = ch[i + 1];
-            if (key == "type" && val.type == type_t::VALUE) {
-                // ALLOW=0 only; DENY (or any unknown type) is beyond the core subset.
-                if (detail::load_le<std::uint8_t>(val.payload) != 0)
-                    return std::unexpected(status_t::TYPE_MISMATCH);
-                has_type = true;
-            } else if (key == "flags" && val.type == type_t::VALUE) {
-                ace.flags = detail::load_le<std::uint8_t>(val.payload);
-                // Single INHERIT bit only: INHERIT_ONLY/NO_PROPAGATE/GROUP would be
-                // silently mis-evaluated by the subset, so reject rather than weaken.
-                if ((ace.flags & static_cast<std::uint8_t>(~kAceInherit)) != 0)
-                    return std::unexpected(status_t::TYPE_MISMATCH);
-            } else if (key == "subject") {
-                // The subject token is opaque bytes (ADR-0018) — accept any opaque
-                // TLV's payload (VALUE recommended; NAME for "OWNER@"/"EVERYONE@").
-                ace.subject.assign(val.payload.begin(), val.payload.end());
-                has_subject = ace.subject.size() > 0;
-            } else if (key == "access_mask" && val.type == type_t::VALUE) {
-                ace.access_mask = static_cast<std::uint32_t>(detail::load_le(val.payload));
-                has_mask = true;
-            } else if (key == "expires_ns" && val.type == type_t::VALUE) {
-                ace.expires_ns = detail::load_le<std::uint64_t>(val.payload);
-            }
-        }
-        if (!has_type || !has_subject || !has_mask) return std::unexpected(status_t::TYPE_MISMATCH);
-        out.push_back(std::move(ace));
-    }
-    return out;
-}
+// ACE evaluation and the typed :acl parse live in security_acl.hpp (ADR-0050):
+// a pure per-target policy (acl_policy_t — ALLOW-only MCU profile by default,
+// the full first-match-per-bit host policy under LIBTRACER_ACL_FULL) plus
+// parse_acl/encode_acl. The graph keeps only the effective-ACE walk below.
 
 // True iff the node's opt byte carries no trailer bits. A branch write (RFC-0005)
 // stores refcount subviews of the written frame, so a trailer inside the tree
@@ -144,7 +89,7 @@ struct branch_node_t {
 
 // Parse one POINT node of a branch write into `out` (post-order; children precede
 // their parent). `key` is this node's canonical vertex key — the caller already
-// folded the node's leading NAME into it. STRICT (like parse_aces): children are
+// folded the node's leading NAME into it. STRICT (like parse_acl): children are
 // the leading NAME, at most one VALUE (the node's own value), and POINT
 // sub-branches; anything else — or any trailer-carrying node — is TYPE_MISMATCH,
 // so a stored slice never carries semantics the decomposition would silently
@@ -338,16 +283,21 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     if (!subject) return true;  // trusted caller (no subject) — e.g. a local API call
     const auto bit = static_cast<std::uint32_t>(right);
     const std::uint64_t now = now_ns();
-    // Effective ACL = own ACEs + INHERIT-flagged ancestor ACEs (ADR-0020), computed at
-    // check time (control-plane frequency, no caching). Locks are taken one vertex at
+    // Effective ACL = own ACEs + INHERIT-flagged ancestor ACEs (ADR-0020). The graph
+    // owns this walk; each list is handed to the PURE per-target policy (ADR-0050 —
+    // no locks, clock reads, or graph access inside it), own list first so the full
+    // policy's first-match-per-bit ordering follows the effective-ACL definition.
+    // NOTE this runs on EVERY gated data op, not just the control plane; the ADR-0050
+    // per-vertex merge cache (generation-bumped by :acl writes) is the follow-up that
+    // takes the ancestor mutex-walk off the data plane. Locks are taken one vertex at
     // a time — own first, then each ancestor — never nested, so no ordering hazard.
     bool effective_nonempty = false;
     {
         const std::lock_guard lock(v->m_);
-        for (const ace_t& ace : v->aces_) {
-            effective_nonempty = true;
-            if (ace_grants(ace, *subject, bit, now)) return true;
-        }
+        effective_nonempty |= !v->aces_.empty();
+        const acl_verdict_t verdict = acl_policy_t::allows(*subject, bit, v->aces_, now);
+        if (verdict == acl_verdict_t::ALLOW) return true;
+        if (verdict == acl_verdict_t::DENY) return false;
     }
     key_view_t key{v->key_.bytes};
     while (!(key = key.parent()).empty()) {
@@ -355,10 +305,15 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
         if (!ancestor) continue;  // an unregistered intermediate level holds no ACL
         const std::lock_guard lock(ancestor->m_);
         for (const ace_t& ace : ancestor->aces_) {
-            if ((ace.flags & kAceInherit) == 0) continue;  // non-INHERIT: that vertex only
-            effective_nonempty = true;
-            if (ace_grants(ace, *subject, bit, now)) return true;
+            if ((ace.flags & kAceInherit) != 0) {  // non-INHERIT: that vertex only
+                effective_nonempty = true;
+                break;
+            }
         }
+        const acl_verdict_t verdict =
+            acl_policy_t::allows(*subject, bit, ancestor->aces_, now, kAceInherit);
+        if (verdict == acl_verdict_t::ALLOW) return true;
+        if (verdict == acl_verdict_t::DENY) return false;
     }
     // Open by default: no effective ACE at all => allowed (enforcement is opt-in via
     // ACL presence). Any present ACE — even an expired one — closes the vertex.
@@ -955,15 +910,15 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
 
     if (step0.name == "acl") {
         // Store the :acl (#81, ADR-0018/0020): gate on WRITE_ACL — precisely the `admin`
-        // right — then validate + parse the core-subset ACEs (ALLOW-only, single INHERIT
-        // flag; parse_aces rejects anything beyond the subset with TYPE_MISMATCH) and
-        // keep BOTH the raw bytes (served back verbatim by read_acl) and the parsed
-        // list (evaluated by acl_allows).
+        // right — then validate + parse the typed ACEs (ADR-0050 parse_acl; strictness
+        // follows the selected policy — the default ALLOW-only profile rejects DENY /
+        // extra flags with TYPE_MISMATCH) and keep BOTH the raw bytes (served back
+        // verbatim by read_acl) and the parsed list (evaluated by acl_allows).
         if (!acl_allows(v, caller, acl_right_t::WRITE_ACL))
             return std::unexpected(status_t::PERMISSION_DENIED);
         const auto acl = view_as_tlv(value);
         if (!acl || acl->type != type_t::ACL) return std::unexpected(status_t::TYPE_MISMATCH);
-        result_t<std::vector<ace_t>> aces = parse_aces(*acl);
+        result_t<std::vector<ace_t>> aces = parse_acl(*acl);
         if (!aces) return std::unexpected(aces.error());
         const std::span<const std::byte> bytes = value.bytes();
         const std::lock_guard lock(v->m_);
