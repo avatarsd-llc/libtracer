@@ -31,9 +31,14 @@ use alloc::vec::Vec;
 // produces / parses the exact bytes the shared conformance vectors pin, matching
 // the C++ core and the TypeScript client byte-for-byte. See each module's docs.
 
+pub mod error_registry;
 pub mod path;
 pub mod tlv_builders;
 
+pub use error_registry::{
+    error_code, error_raw_code, error_string, parse_error, status_errors, status_ok,
+    status_with_errors, Disposition, ErrCode, ErrorId, ParsedError, Severity,
+};
 pub use tlv_builders::{
     name, subscriber, validate_segment, value, value_opts, value_u16, value_u32, value_u64,
     value_u8, BuildError, ValueOptions, MAX_PATH_BYTES, MAX_SEGMENTS, MAX_SEGMENT_BYTES,
