@@ -84,6 +84,32 @@ void parse_config(const tlv_t* config, conn_settings_t& s) {
         view_t{});  // empty view on alloc failure (caller-checked)
 }
 
+// Construct concrete transport `T`, map a failed `ok()` (dial/bind/handshake failure)
+// to NOT_FOUND, and upcast to the base handle — the ok()→NOT_FOUND mapping every
+// built-in stream factory shares, in one locus (`ok()` is a concrete, non-virtual
+// method, so the check is templated on `T`, not called through `transport_t`).
+template <class T, class... Args>
+[[nodiscard]] result_t<std::unique_ptr<transport_t>> make_checked(Args&&... args) {
+    auto t = std::make_unique<T>(std::forward<Args>(args)...);
+    if (!t->ok()) return std::unexpected(status_t::NOT_FOUND);
+    return t;  // unique_ptr<T> => unique_ptr<transport_t> (upcast move)
+}
+
+// The role dispatch every built-in socket factory repeats: DIAL requires `addr` + `port`
+// and constructs the dialer; LISTEN requires `port` and constructs the listener
+// (`TYPE_MISMATCH` on a missing field). The per-transport construction — and, for ws,
+// the fact that DIAL and LISTEN are DIFFERENT concrete types — stays in the thunks.
+template <class Dial, class Listen>
+[[nodiscard]] result_t<std::unique_ptr<transport_t>> dial_or_listen(const conn_settings_t& s,
+                                                                    Dial&& dial, Listen&& listen) {
+    if (s.role == conn_role_t::DIAL) {
+        if (s.addr.empty() || s.port == 0) return std::unexpected(status_t::TYPE_MISMATCH);
+        return dial();
+    }
+    if (s.port == 0) return std::unexpected(status_t::TYPE_MISMATCH);
+    return listen();
+}
+
 // Built-in `udp`: DIAL binds an ephemeral local port and targets `addr:port`; LISTEN
 // binds `port` peer-less — udp_transport_t then learns the peer from each inbound
 // datagram's source (the single-peer UDP-server shape), so replies to a dialing client
@@ -94,16 +120,9 @@ void parse_config(const tlv_t* config, conn_settings_t& s) {
 // owning view delivery with the host's memory policy.
 result_t<std::unique_ptr<transport_t>> make_udp(const conn_settings_t& s,
                                                 mem::mem_backend_t* rx_backend) {
-    std::unique_ptr<udp_transport_t> t;
-    if (s.role == conn_role_t::DIAL) {
-        if (s.addr.empty() || s.port == 0) return std::unexpected(status_t::TYPE_MISMATCH);
-        t = std::make_unique<udp_transport_t>(0, s.addr, s.port, rx_backend);
-    } else {
-        if (s.port == 0) return std::unexpected(status_t::TYPE_MISMATCH);
-        t = std::make_unique<udp_transport_t>(s.port, s.addr, 0, rx_backend);
-    }
-    if (!t->ok()) return std::unexpected(status_t::NOT_FOUND);  // bind failed
-    return t;
+    return dial_or_listen(
+        s, [&] { return make_checked<udp_transport_t>(0, s.addr, s.port, rx_backend); },
+        [&] { return make_checked<udp_transport_t>(s.port, s.addr, 0, rx_backend); });
 }
 
 // Built-in `tcp` (M6): DIAL = tcp_transport_t(addr, port) — a SYNCHRONOUS TCP connect
@@ -114,17 +133,9 @@ result_t<std::unique_ptr<transport_t>> make_udp(const conn_settings_t& s,
 // `rx_backend` is the ADR-0042 §2 receive-segment seam, as for `udp`.
 result_t<std::unique_ptr<transport_t>> make_tcp(const conn_settings_t& s,
                                                 mem::mem_backend_t* rx_backend) {
-    std::unique_ptr<tcp_transport_t> t;
-    if (s.role == conn_role_t::DIAL) {
-        if (s.addr.empty() || s.port == 0) return std::unexpected(status_t::TYPE_MISMATCH);
-        t = std::make_unique<tcp_transport_t>(s.addr, s.port, rx_backend, s.max_frame);
-        if (!t->ok()) return std::unexpected(status_t::NOT_FOUND);  // dial failed
-        return t;
-    }
-    if (s.port == 0) return std::unexpected(status_t::TYPE_MISMATCH);
-    t = std::make_unique<tcp_transport_t>(s.port, rx_backend, s.max_frame);
-    if (!t->ok()) return std::unexpected(status_t::NOT_FOUND);  // bind/listen failed
-    return t;
+    return dial_or_listen(
+        s, [&] { return make_checked<tcp_transport_t>(s.addr, s.port, rx_backend, s.max_frame); },
+        [&] { return make_checked<tcp_transport_t>(s.port, rx_backend, s.max_frame); });
 }
 
 // Built-in `ws`: DIAL = transport_ws_client(addr, port) — a SYNCHRONOUS TCP connect +
@@ -135,16 +146,9 @@ result_t<std::unique_ptr<transport_t>> make_tcp(const conn_settings_t& s,
 // kind-private config keys, so the raw config TLV is ignored (ADR-0043 §5).
 result_t<std::unique_ptr<transport_t>> make_ws(const conn_settings_t& s,
                                                const tlv_t* /*raw_config*/) {
-    if (s.role == conn_role_t::DIAL) {
-        if (s.addr.empty() || s.port == 0) return std::unexpected(status_t::TYPE_MISMATCH);
-        auto t = std::make_unique<transport_ws_client>(s.addr, s.port);
-        if (!t->ok()) return std::unexpected(status_t::NOT_FOUND);  // dial/handshake failed
-        return t;
-    }
-    if (s.port == 0) return std::unexpected(status_t::TYPE_MISMATCH);
-    auto t = std::make_unique<transport_ws_server>(s.port);
-    if (!t->ok()) return std::unexpected(status_t::NOT_FOUND);  // bind/listen failed
-    return t;
+    return dial_or_listen(
+        s, [&] { return make_checked<transport_ws_client>(s.addr, s.port); },
+        [&] { return make_checked<transport_ws_server>(s.port); });
 }
 
 }  // namespace
