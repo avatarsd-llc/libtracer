@@ -17,8 +17,9 @@ This site is the public documentation:
 - **[Modules](docs/modules/index.md)** — a module-by-module guide to the reference
   C++ implementation, the [interface map](docs/modules/interface-map.md), and a
   hands-on [bit-level wire walkthrough](docs/modules/wire-format-bits.md).
-- **[Examples](docs/examples/index.md)** — worked, compile-tested example programs
-  (in-process pub/sub, wire codec round-trip), each built and smoke-tested in CI.
+- **[Examples](docs/examples/index.md)** — six worked, compile-tested programs (pub/sub and
+  fan-out, the wire codec, rope scatter-gather, two-node FWD delivery), each built and
+  smoke-tested in CI, several reporting live latency/throughput.
 - **[Reference](docs/reference/00-overview.md)** — the descriptive six-layer model
   and architecture (the "what it is").
 - **[Specification](docs/spec/v1.md)** — the normative v1 wire protocol.
@@ -61,7 +62,11 @@ Wire format, bit by bit <docs/modules/wire-format-bits>
 
 Overview <docs/examples/index>
 In-process pub/sub <docs/examples/in-process-pubsub>
+Pub/sub fan-out & dispatch cost <docs/examples/pubsub-fanout>
 Wire codec round-trip <docs/examples/wire-roundtrip>
+Wire codec deep-dive & throughput <docs/examples/wire-codec>
+Rope scatter-gather <docs/examples/rope-scatter>
+Two nodes over a wire — FWD delivery <docs/examples/two-node-fwd>
 ```
 
 ```{toctree}
