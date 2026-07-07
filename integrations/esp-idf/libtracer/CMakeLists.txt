@@ -57,6 +57,13 @@ set(LIBTRACER_SRCS
     "${LIBTRACER_ROOT}/core/src/fwd_router.cpp"
     "${LIBTRACER_ROOT}/core/src/transport_vertex.cpp"
     "${LIBTRACER_ROOT}/core/src/loopback.cpp"
+    # built-in transport-factory registrations (udp/tcp/ws) transport_vertex_t wires up.
+    # The ESP-IDF component is always a FULL node, so it compiles all three glue TUs plus
+    # the hand-written full-node dispatcher src/builtin_transports.cpp (register_builtin_transports).
+    "${LIBTRACER_ROOT}/core/src/builtin_transport_udp.cpp"
+    "${LIBTRACER_ROOT}/core/src/builtin_transport_tcp.cpp"
+    "${LIBTRACER_ROOT}/core/src/builtin_transport_ws.cpp"
+    "${LIBTRACER_ROOT}/core/src/builtin_transports.cpp"
     # socket transports — lwIP BSD sockets on chip targets, glibc on `linux`
     "${LIBTRACER_ROOT}/core/src/posix_endpoint.cpp"
     "${LIBTRACER_ROOT}/core/src/transport_udp.cpp"
