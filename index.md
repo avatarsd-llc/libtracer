@@ -17,6 +17,8 @@ This site is the public documentation:
 - **[Modules](docs/modules/index.md)** — a module-by-module guide to the reference
   C++ implementation, the [interface map](docs/modules/interface-map.md), and a
   hands-on [bit-level wire walkthrough](docs/modules/wire-format-bits.md).
+- **[Examples](docs/examples/index.md)** — worked, compile-tested example programs
+  (in-process pub/sub, wire codec round-trip), each built and smoke-tested in CI.
 - **[Reference](docs/reference/00-overview.md)** — the descriptive six-layer model
   and architecture (the "what it is").
 - **[Specification](docs/spec/v1.md)** — the normative v1 wire protocol.
@@ -44,6 +46,13 @@ is descriptive; the design rationale (ADRs) and proposals (RFCs) live in the
 /docs/modules/index
 /docs/modules/interface-map
 /docs/modules/wire-format-bits
+```
+
+```{toctree}
+:caption: Examples
+:maxdepth: 2
+
+/docs/examples/index
 ```
 
 ```{toctree}
