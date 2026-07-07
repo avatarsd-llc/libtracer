@@ -441,7 +441,7 @@ sequenceDiagram
     Note over App,Mem: For build-time literals,<br/>this entire phase is skipped —<br/>the PATH TLV is in .rodata already.
 ```
 
-Build-time literals skip registration entirely: the macro `TRACER_PATH("/sensor/temp")` expands to a `static const` byte array, and the handle is a pointer to that array.
+Build-time literals skip the fallible runtime parse: the `path_t("/sensor/temp")` constructor parses the string literal **once** at construction (ADR-0054), so a literal path pays no per-call parsing; a runtime string uses the fallible `path_t::parse`. Registering that path once yields the hot-path `vertex_t*` handle.
 
 ### Hot-path write through a path handle
 

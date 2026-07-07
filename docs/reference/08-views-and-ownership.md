@@ -259,7 +259,8 @@ while (link_idx < rope.link_count()) {
     const view_t& link  = rope.links()[link_idx];
     auto          bytes = link.bytes();
     while (in_link < bytes.size()) {
-        const tlv_t* t     = view_as_tlv(link.subview(in_link, bytes.size() - in_link));
+        auto         maybe = view_as_tlv(link.subview(in_link, bytes.size() - in_link));
+        const tlv_t& t     = *maybe;   // std::expected<tlv_t, err_t>; borrows the link's bytes
         std::size_t  total = tlv_total_size(t);
         if (in_link + total <= bytes.size()) {
             /* TLV fits in this link; process and advance within link */

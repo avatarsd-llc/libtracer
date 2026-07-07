@@ -265,11 +265,14 @@ class rope_t {
     [[nodiscard]] view_t flatten(tr::mem::mem_backend_t& backend) const;
 };
 
-// Cast a (flat) view to a TLV in place — zero-copy reinterpretation (the
-// decoder). The returned tlv borrows the view's bytes; keep the view alive.
-[[nodiscard]] std::expected<tlv_t, err_t> view_as_tlv(const view_t& v);
-
 }  // namespace tr::view
+
+namespace tr::wire {
+// Cast a (flat) view to a TLV in place — zero-copy reinterpretation (the
+// decoder). view_as_tlv lives at L2 (tr::wire) because it produces a tlv_t; the
+// returned tlv borrows the view's bytes, so keep the view alive.
+[[nodiscard]] std::expected<tlv_t, err_t> view_as_tlv(const view::view_t& v);
+}  // namespace tr::wire
 ```
 
 ### L2 ↔ L3: header-driven dispatch
