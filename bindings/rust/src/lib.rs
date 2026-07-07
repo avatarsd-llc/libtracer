@@ -26,6 +26,18 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+// ---------------------------------------------------------------- typed tier ---
+// The typed protocol layer built on top of the raw wire codec below. Each module
+// produces / parses the exact bytes the shared conformance vectors pin, matching
+// the C++ core and the TypeScript client byte-for-byte. See each module's docs.
+
+pub mod tlv_builders;
+
+pub use tlv_builders::{
+    name, subscriber, validate_segment, value, value_opts, value_u16, value_u32, value_u64,
+    value_u8, BuildError, ValueOptions, MAX_PATH_BYTES, MAX_SEGMENTS, MAX_SEGMENT_BYTES,
+};
+
 /// Core type-code registry (0x01-0x10). 0x05 is retired (was LIST, ADR-0003).
 /// The codec treats every nonzero type generically, so these constants are a
 /// convenience, not an exhaustive set.
