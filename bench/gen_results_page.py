@@ -19,6 +19,7 @@ Stdlib only.
 """
 from __future__ import annotations
 
+import datetime
 import os
 import pathlib
 import re
@@ -169,6 +170,27 @@ The latency speed-ups, throughput response surfaces, and per-axis plots are gene
 """
 
 
+def provenance() -> str:
+    """A one-line CI-generated stamp: date, commit, run, runner.
+
+    In GitHub Actions the GITHUB_* / RUNNER_OS env vars pin exactly which deploy
+    produced these numbers (so the figures are auditable per deploy, not a stale
+    hand-edit). Off CI it degrades to a plain local-build note.
+    """
+    date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return f"_Generated from a local build on {date} (not a CI deploy)._"
+    sha = os.environ.get("GITHUB_SHA", "")
+    server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    run_id = os.environ.get("GITHUB_RUN_ID", "")
+    runner = os.environ.get("RUNNER_OS", "")
+    commit = f"[`{sha[:7]}`]({server}/{repo}/commit/{sha})" if sha and repo else "unknown commit"
+    run = f"[run {run_id}]({server}/{repo}/actions/runs/{run_id})" if run_id and repo else "CI run"
+    runner_note = f" · runner `{runner}`" if runner else ""
+    return f"**🤖 CI-generated** on {date} · commit {commit} · {run}{runner_note}."
+
+
 def main() -> int:
     summary, passed = cross_core_block()
     page = f"""\
@@ -179,6 +201,8 @@ This page is **auto-generated** from the live test + benchmark harnesses on each
 build (`bench/gen_results_page.py`, ADR-0032). It is the published response surface,
 not a hand-edited snapshot. Absolute rates are representative of the CI runner;
 speed-ups vs zenoh are machine-independent.
+
+{provenance()}
 ```
 
 ## Cross-core conformance (every native core must agree byte-for-byte)
