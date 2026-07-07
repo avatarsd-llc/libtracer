@@ -144,11 +144,35 @@ def build(rows: list[dict]) -> dict:
                    "y": {"log": False, "fmt": "ns", "label": "p50 latency"},
                    "series": s, "reading": reading(s, f_ns)})
 
+    # --- network transports: per-transport libtracer-vs-Zenoh over the real kernel path ---
+    # Present only if the transport benches ran (mode `net-<proto>`); each transport gets a
+    # throughput and a latency chart vs payload, both engines on shared axes.
+    net_specs = []
+    for proto in ("udp", "tcp", "ws"):
+        mode = f"net-{proto}"
+        spec = {"mode": mode, "fixed": {"fan": 1, "ep": 1}, "axis": "size"}
+        s = two(**{**spec, "col": "deliv"})
+        if not (s["libtracer"] or s["zenoh"]):
+            continue  # this transport didn't run on either side
+        net_specs.append((proto, spec))
+        charts.append({"id": f"net-tp-{proto}", "title": f"{proto.upper()} — throughput vs payload",
+                       "cond": "one publisher · one subscriber · loopback kernel path",
+                       "x": {"log": True, "fmt": "bytes", "label": "payload size"},
+                       "y": {"log": True, "fmt": "rate", "label": "messages / second"},
+                       "series": s, "reading": reading(s, f_rate, label_x=f_bytes)})
+        sl = two(**{**spec, "col": "p50"})
+        charts.append({"id": f"net-lat-{proto}", "title": f"{proto.upper()} — p50 latency vs payload",
+                       "cond": "one-way, same-clock · loopback kernel path",
+                       "x": {"log": True, "fmt": "bytes", "label": "payload size"},
+                       "y": {"log": True, "fmt": "ns", "label": "p50 latency"},
+                       "series": sl, "reading": reading(sl, f_ns, label_x=f_bytes)})
+
     # raw table — every plotted point, absolute
     table = []
     sweeps = [("fan-out", fan, f_count, "deliv", None),
               ("payload", pay, f_bytes, "deliv", "mbps"),
               ("topics", top, f_count, "pub", None)]
+    sweeps += [(f"net-{proto}", spec, f_bytes, "deliv", "mbps") for proto, spec in net_specs]
     for si, (label, spec, xf, rate_col, bw_col) in enumerate(sweeps):
         for sys in ("libtracer", "zenoh"):
             cols = [rate_col, "p50"] + ([bw_col] if bw_col else [])

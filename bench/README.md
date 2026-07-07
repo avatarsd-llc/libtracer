@@ -61,9 +61,13 @@ freely, out of the armed window.
 ./grid.sh          # sweep both engines → preview.html (absolute-value charts, no extra deps)
 ```
 
-Without `fetch_zenoh.sh`, only the libtracer numbers appear. (A two-process
-transport comparison — tcp/udp/ws/quic vs zenoh — is being rebuilt on the current FWD
-net plane; the old UDP-only `run_net.sh` predates that and is not currently wired.)
+Without `fetch_zenoh.sh`, only the libtracer numbers appear.
+
+`grid.sh` sweeps both the **in-process** axes and the **network transports** (UDP / TCP /
+WebSocket, over the loopback kernel path) — `bench_transports` (libtracer) and
+`bench_zenoh_transports` (Zenoh) each send over the real socket and emit `net-<proto>`
+rows. (QUIC is a follow-up: it needs msquic + a TLS cert and the `-DLIBTRACER_WITH_QUIC`
+module, so it is gated like the dedicated `quic` CI job.)
 
 ## Many-core contention microbenchmarks (Wave 0e, ADR-0032)
 

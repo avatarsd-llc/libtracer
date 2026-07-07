@@ -12,13 +12,15 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release >/dev/null
-cmake --build build --target bench_libtracer bench_zenoh -j >/dev/null 2>&1 || \
-    cmake --build build --target bench_libtracer -j >/dev/null
+cmake --build build --target bench_libtracer bench_transports -j >/dev/null
+cmake --build build --target bench_zenoh bench_zenoh_transports -j >/dev/null 2>&1 || true
 
 res="$(mktemp)"
 ./build/bench_libtracer grid >>"$res" 2>/dev/null
+./build/bench_transports >>"$res" 2>/dev/null || true          # in-process axes + network transports
 if [ -x ./build/bench_zenoh ]; then
     ./build/bench_zenoh grid >>"$res" 2>/dev/null
+    [ -x ./build/bench_zenoh_transports ] && ./build/bench_zenoh_transports >>"$res" 2>/dev/null || true
 else
     echo "(zenoh not vendored — run ./fetch_zenoh.sh for the comparison)" >&2
 fi

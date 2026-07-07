@@ -36,6 +36,13 @@ add_executable(bench_scatter bench_scatter.cpp)
 target_link_libraries(bench_scatter PRIVATE libtracer)
 target_compile_options(bench_scatter PRIVATE -Wall -Wextra)
 
+# NETWORK transport comparison (UDP/TCP/WS over the loopback kernel path) — the
+# libtracer side of the transport matrix vs Zenoh (bench_zenoh_transports). Two
+# endpoints in one process; emits mode `net-udp` / `net-tcp` / `net-ws`.
+add_executable(bench_transports bench_transports.cpp)
+target_link_libraries(bench_transports PRIVATE libtracer)
+target_compile_options(bench_transports PRIVATE -Wall -Wextra)
+
 # The 16KB-RAM zero-heap forward-path gate (ADR-0038): a global operator-new counter
 # measures how many heap allocations one FWD forward hop costs. Report-only now (the
 # Stage-1 baseline is non-zero); CI flips it to a hard gate (ZEROHEAP_MAX=0) at Stage-2.
@@ -69,7 +76,8 @@ set(ZCPP ${CMAKE_CURRENT_SOURCE_DIR}/vendor/zenoh-cpp-1.9.0)
 if(EXISTS ${ZC}/lib/libzenohc.so AND EXISTS ${ZCPP}/include/zenoh.hxx)
     add_executable(bench_zenoh bench_zenoh.cpp)
     add_executable(bench_zenoh_net bench_zenoh_net.cpp)
-    foreach(t bench_zenoh bench_zenoh_net)
+    add_executable(bench_zenoh_transports bench_zenoh_transports.cpp)
+    foreach(t bench_zenoh bench_zenoh_net bench_zenoh_transports)
         target_include_directories(${t} PRIVATE ${ZC}/include ${ZCPP}/include)
         target_link_libraries(${t} PRIVATE ${ZC}/lib/libzenohc.so)
         target_compile_definitions(${t} PRIVATE ZENOHCXX_ZENOHC)

@@ -77,16 +77,22 @@ jobs:
           cmake --build core/build -j          # all test targets, for the live test report
           bash bench/fetch_zenoh.sh || echo "zenoh fetch failed — comparison will be omitted"
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build bench/build --target bench_libtracer bench_codec bench_forward_heap -j
+          cmake --build bench/build --target bench_libtracer bench_codec bench_forward_heap bench_transports -j
           # zenoh is optional: build it separately so a missing/failed vendor never breaks
           # the docs deploy (the comparison degrades to a note; libtracer numbers stand).
-          cmake --build bench/build --target bench_zenoh -j || echo "bench_zenoh unavailable — comparison omitted"
+          cmake --build bench/build --target bench_zenoh bench_zenoh_transports -j || echo "bench_zenoh unavailable — comparison omitted"
       # Run the libtracer-vs-Zenoh sweep ONCE here; both the docs page and the PR comment
       # consume this file (LIBTRACER_COMPARE_TSV) so the ~40s sweep isn't paid twice.
       - name: Run the libtracer-vs-Zenoh comparison sweep
         run: |
-          { ./bench/build/bench_libtracer grid; ./bench/build/bench_zenoh grid; } \
-            > "${RUNNER_TEMP}/compare.tsv" 2>/dev/null || true
+          out="${RUNNER_TEMP}/compare.tsv"
+          { ./bench/build/bench_libtracer grid; ./bench/build/bench_zenoh grid; } >"$out" 2>/dev/null || true
+          # network transports over real loopback sockets — best-effort, never fail the
+          # build (a flaky/absent transport just omits that chart).
+          { timeout 150 ./bench/build/bench_transports >>"$out" 2>/dev/null; } || true
+          if [ -x ./bench/build/bench_zenoh_transports ]; then
+            { timeout 200 ./bench/build/bench_zenoh_transports >>"$out" 2>/dev/null; } || true
+          fi
       - name: Generate live performance + conformance page
         env:
           LIBTRACER_CXX_HARNESS: ${{ github.workspace }}/core/build/tests/conformance_runner
