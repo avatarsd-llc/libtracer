@@ -113,3 +113,53 @@ The wire format does not version per-frame. v1 is committed once; future incompa
 - Not a feature comparison vs Zenoh / DDS / MQTT. See [../../README.md](../../README.md).
 - Not a security architecture. The wire format is security-agnostic; security wraps it at the transport layer per [10-module-catalog.md](10-module-catalog.md).
 - Not a roadmap. See the issue tracker.
+
+```{toctree}
+:caption: Overview & cross-cutting
+:hidden:
+:maxdepth: 1
+
+Overview — the six-layer model <00-overview>
+Module catalog & composition <10-module-catalog>
+Deployment profiles <12-deployment-profiles>
+```
+
+```{toctree}
+:caption: L0 — memory substrate
+:hidden:
+:maxdepth: 1
+
+Memory substrate <09-memory-substrate>
+```
+
+```{toctree}
+:caption: L1 — views & ownership
+:hidden:
+:maxdepth: 1
+
+Views & ownership <08-views-and-ownership>
+```
+
+```{toctree}
+:caption: L2/L3 — wire format
+:hidden:
+:maxdepth: 1
+
+Data format <01-data-format>
+Protocol-defined TLVs <05-protocol-tlvs>
+```
+
+```{toctree}
+:caption: L4 — graph, addressing, host & transport
+:hidden:
+:maxdepth: 1
+
+Graph model <02-graph-model>
+Addressing <03-addressing>
+Communication flows <04-communication-flows>
+User data packing <06-user-data-packing>
+Host embedding <07-host-embedding>
+Vertex roles & aggregation <11-vertex-roles-and-aggregation>
+Network formation <13-network-formation>
+CAN transport <14-can-transport>
+```
