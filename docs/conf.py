@@ -58,6 +58,7 @@ include_patterns = [
     "docs/test-report.md",
     "docs/reference/**",
     "docs/modules/**",
+    "docs/examples/**",
     "docs/spec/v1.md",
     "docs/spec/README.md",
     "CONTEXT.md",
