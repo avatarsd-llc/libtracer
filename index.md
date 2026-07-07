@@ -34,60 +34,69 @@ is descriptive; the design rationale (ADRs) and proposals (RFCs) live in the
 :caption: Getting started
 :maxdepth: 1
 
-/docs/getting-started
-/docs/performance
-/docs/test-report
+Getting started <docs/getting-started>
+Performance & conformance <docs/performance>
+Test report <docs/test-report>
 ```
 
 ```{toctree}
-:caption: Modules
-:maxdepth: 2
+:caption: Modules (per-module reference)
+:maxdepth: 1
 
-/docs/modules/index
-/docs/modules/interface-map
-/docs/modules/wire-format-bits
+Overview & layer map <docs/modules/index>
+Interface map <docs/modules/interface-map>
+segment — refcounted bytes (L0) <docs/modules/segment>
+backends — allocators (L0) <docs/modules/backends>
+views — view_t / rope_t (L1) <docs/modules/views>
+frame-codec — TLV wire codec (L2/L3) <docs/modules/frame-codec>
+path — addressing (L4) <docs/modules/path>
+graph — vertices & dispatch (L4) <docs/modules/graph>
+transport — the wire (L4) <docs/modules/transport>
+Wire format, bit by bit <docs/modules/wire-format-bits>
 ```
 
 ```{toctree}
 :caption: Examples
-:maxdepth: 2
+:maxdepth: 1
 
-/docs/examples/index
+Overview <docs/examples/index>
+In-process pub/sub <docs/examples/in-process-pubsub>
+Wire codec round-trip <docs/examples/wire-roundtrip>
 ```
 
 ```{toctree}
 :caption: Reference (descriptive)
-:maxdepth: 2
+:maxdepth: 1
 
-/docs/reference/00-overview
-/docs/reference/01-data-format
-/docs/reference/02-graph-model
-/docs/reference/03-addressing
-/docs/reference/04-communication-flows
-/docs/reference/05-protocol-tlvs
-/docs/reference/06-user-data-packing
-/docs/reference/07-host-embedding
-/docs/reference/08-views-and-ownership
-/docs/reference/09-memory-substrate
-/docs/reference/10-module-catalog
-/docs/reference/11-vertex-roles-and-aggregation
-/docs/reference/12-deployment-profiles
-/docs/reference/13-network-formation
-/docs/reference/14-can-transport
-/docs/reference/README
+Reading guide <docs/reference/README>
+Overview — the six-layer model <docs/reference/00-overview>
+Data format (L2) <docs/reference/01-data-format>
+Graph model (L4) <docs/reference/02-graph-model>
+Addressing (L4) <docs/reference/03-addressing>
+Communication flows (L4) <docs/reference/04-communication-flows>
+Protocol-defined TLVs (L3) <docs/reference/05-protocol-tlvs>
+User data packing (L4/L5) <docs/reference/06-user-data-packing>
+Host embedding (L4) <docs/reference/07-host-embedding>
+Views & ownership (L1) <docs/reference/08-views-and-ownership>
+Memory substrate (L0) <docs/reference/09-memory-substrate>
+Module catalog & composition <docs/reference/10-module-catalog>
+Vertex roles & aggregation (L4) <docs/reference/11-vertex-roles-and-aggregation>
+Deployment profiles <docs/reference/12-deployment-profiles>
+Network formation (L4) <docs/reference/13-network-formation>
+CAN transport <docs/reference/14-can-transport>
 ```
 
 ```{toctree}
 :caption: Specification (normative)
-:maxdepth: 2
+:maxdepth: 1
 
-/docs/spec/v1
-/docs/spec/README
+Protocol v1 — the wire format <docs/spec/v1>
+About the specification <docs/spec/README>
 ```
 
 ```{toctree}
 :caption: Glossary
 :maxdepth: 1
 
-/CONTEXT
+Context glossary <CONTEXT>
 ```

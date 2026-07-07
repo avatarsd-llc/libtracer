@@ -26,11 +26,3 @@ $ ./build/examples/wire_roundtrip
 Or run them the way CI does — as ctest smoke tests that self-check and fail on any
 mismatch: `ctest --test-dir build -R example_`.
 :::
-
-```{toctree}
-:maxdepth: 1
-:hidden:
-
-in-process-pubsub
-wire-roundtrip
-```

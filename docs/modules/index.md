@@ -47,33 +47,13 @@ a refcounted window onto L0 bytes. So the wire encoding, the in-memory value, an
 the graph node are **the same bytes** — moving data in-process is a refcount bump,
 not a copy.
 
-```{toctree}
-:caption: L0/L1 — substrate
-:maxdepth: 1
+Each module has its own page in the sidebar, grouped by layer:
 
-/docs/modules/segment
-/docs/modules/backends
-/docs/modules/views
-```
+- **L0 substrate** — [segment](segment.md) (refcounted bytes), [backends](backends.md) (allocators)
+- **L1 views** — [views](views.md) (`view_t` / `rope_t` / the L1→L2 cast)
+- **L2/L3 wire codec** — [frame-codec](frame-codec.md) (TLV decode/encode + CRC)
+- **L4 graph** — [path](path.md) (addressing), [graph](graph.md) (vertices, read/write/await, dispatch)
+- **L4 transport** — [transport](transport.md) (loopback · UDP · WS · CAN)
 
-```{toctree}
-:caption: L2/L3 — wire codec
-:maxdepth: 1
-
-/docs/modules/frame-codec
-```
-
-```{toctree}
-:caption: L4 — graph
-:maxdepth: 1
-
-/docs/modules/path
-/docs/modules/graph
-```
-
-```{toctree}
-:caption: L4 — transport
-:maxdepth: 1
-
-/docs/modules/transport
-```
+For the cross-cutting view of how they compose, see the **[interface map](interface-map.md)**;
+for the exact bytes on the wire, the **[bit-level walkthrough](wire-format-bits.md)**.
