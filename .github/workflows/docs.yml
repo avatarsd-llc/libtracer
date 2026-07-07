@@ -91,7 +91,9 @@ jobs:
           # build (a flaky/absent transport just omits that chart).
           { timeout 150 ./bench/build/bench_transports >>"$out" 2>/dev/null; } || true
           if [ -x ./bench/build/bench_zenoh_transports ]; then
-            { timeout 200 ./bench/build/bench_zenoh_transports >>"$out" 2>/dev/null; } || true
+            # stderr goes to the step log (not /dev/null) so a skipped transport is diagnosable.
+            echo "== zenoh transports (RESULT -> tsv; notes below) =="
+            { timeout 240 ./bench/build/bench_zenoh_transports >>"$out"; } || true
           fi
       - name: Generate live performance + conformance page
         env:

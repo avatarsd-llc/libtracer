@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <exception>
 #include <span>
 #include <string>
 #include <string_view>
@@ -38,12 +39,13 @@ Config link_config(std::string_view proto, bool listen, std::uint16_t port) {
     c.insert_json5(listen ? "listen/endpoints" : "connect/endpoints", ep);
     c.insert_json5("mode", "\"peer\"");
     c.insert_json5("scouting/multicast/enabled", "false");
+    c.insert_json5("scouting/gossip/enabled", "true");  // propagate declarations over the link
     return c;
 }
 
 // Returns false (with a stderr note) if the link never comes up — e.g. a protocol the
 // prebuilt zenoh-c wasn't compiled with. The comparison then just omits that transport.
-bool run_proto(std::string_view proto, std::uint16_t port) {
+bool run_proto(std::string_view proto, std::uint16_t port) try {
     Session sub_session = Session::open(link_config(proto, true, port));
     Session pub_session = Session::open(link_config(proto, false, port));
 
@@ -52,7 +54,25 @@ bool run_proto(std::string_view proto, std::uint16_t port) {
         KeyExpr("bench/net"), [&](const Sample&) { recv.fetch_add(1, std::memory_order_relaxed); },
         closures::none);
     auto pub = pub_session.declare_publisher(KeyExpr("bench/net"));
-    std::this_thread::sleep_for(800ms);  // let the link + routing establish
+
+    // Wait until the link is up AND the subscriber declaration has propagated to the
+    // publishing session — probe until the first sample actually lands (a shared CI
+    // runner establishes this far slower than a dev box). Skip the transport if it never
+    // connects within the window, rather than reporting a zero-delivery measurement.
+    {
+        const std::vector<std::uint8_t> probe(16, 0xCD);
+        const auto until = Clock::now() + 15s;
+        while (recv.load(std::memory_order_relaxed) == 0 && Clock::now() < until) {
+            pub.put(Bytes(probe));
+            std::this_thread::sleep_for(100ms);
+        }
+        if (recv.load(std::memory_order_relaxed) == 0) {
+            std::fprintf(stderr,
+                         "[zenoh-%.*s] link/subscription did not establish in 15s — skipped\n",
+                         static_cast<int>(proto.size()), proto.data());
+            return false;
+        }
+    }
 
     for (std::size_t S : net::kSizes) {
         std::vector<std::uint8_t> payload(S, 0xAB);
@@ -97,6 +117,10 @@ bool run_proto(std::string_view proto, std::uint16_t port) {
              lat.summarize());
     }
     return true;
+} catch (const std::exception& e) {
+    std::fprintf(stderr, "[zenoh-%.*s] failed: %s — skipped\n", static_cast<int>(proto.size()),
+                 proto.data(), e.what());
+    return false;
 }
 
 }  // namespace
