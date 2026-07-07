@@ -33,6 +33,7 @@ use alloc::vec::Vec;
 
 pub mod error_registry;
 pub mod field;
+pub mod fwd;
 pub mod path;
 pub mod structured;
 pub mod tlv_builders;
@@ -43,6 +44,10 @@ pub use error_registry::{
 };
 pub use field::{
     encode_field, field_tlv, parse_field, parse_field_tlv, FieldLevel, FieldMode, MAX_FIELD_DEPTH,
+};
+pub use fwd::{
+    decode_fwd, encode_fwd, encode_fwd_bytes, parse_fwd_tlv, reply_error_code, reply_error_path,
+    FieldSel, FwdRequest, ParsedFwd,
 };
 pub use tlv_builders::{
     name, subscriber, validate_segment, value, value_opts, value_u16, value_u32, value_u64,
