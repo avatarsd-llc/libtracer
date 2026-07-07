@@ -55,6 +55,10 @@ INPUT                  = core/include/libtracer/backend.hpp \
                          core/include/libtracer/transport_webtransport.hpp \
                          core/include/libtracer/transport_ws.hpp \
                          core/include/libtracer/transport_vertex.hpp \
+                         core/include/libtracer/fwd_router.hpp \
+                         core/include/libtracer/grammar.hpp \
+                         core/include/libtracer/route_handle.hpp \
+                         core/include/libtracer/ws.hpp \
                          core/include/libtracer/crc.hpp \
                          core/include/libtracer/loopback.hpp
 RECURSIVE              = NO
