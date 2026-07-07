@@ -87,6 +87,16 @@ html_theme = "furo"
 html_title = "libtracer"
 html_show_sourcelink = False
 
+# Public canonical origin. The site is served at doc.avatarsd.com/libtracer via a
+# Cloudflare reverse proxy in FRONT of GitHub Pages (see tools/cloudflare/): the
+# Pages origin stays avatarsd-llc.github.io/libtracer — the SAME /libtracer path
+# prefix, so every internal link resolves unchanged — and Cloudflare proxies
+# /libtracer/* onto it. No GitHub custom domain / CNAME is set; the origin is
+# unchanged, and only html_baseurl points at the public proxied URL (canonical /
+# OpenGraph links). Safe to deploy before the proxy is live: it changes no routing,
+# only the canonical URL meta.
+html_baseurl = "https://doc.avatarsd.com/libtracer/"
+
 # A few restrained touches layered on the stock furo theme (palette + fonts
 # unchanged): tabular figures in tables, softly-framed code/diagram blocks, a
 # monospace stack for code. Furo's own light/dark tokens carry the rest.
