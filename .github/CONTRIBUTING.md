@@ -34,6 +34,8 @@ We use DCO rather than a CLA to keep the contribution barrier low. The maintaine
 5. For C/C++ changes, run `clang-format` (config in `.clang-format`).
 6. Public API changes require a note in the relevant `CHANGELOG.md`.
 
+Cutting a release (version bump, tag, registry publishes) follows [RELEASING.md](RELEASING.md).
+
 ## New integrations
 
 A new integration (a new platform, transport, or framework wrapper) goes under `integrations/<name>/`. Include:
