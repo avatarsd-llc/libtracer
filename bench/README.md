@@ -63,11 +63,13 @@ freely, out of the armed window.
 
 Without `fetch_zenoh.sh`, only the libtracer numbers appear.
 
-`grid.sh` sweeps both the **in-process** axes and the **network transports** (UDP / TCP /
-WebSocket, over the loopback kernel path) — `bench_transports` (libtracer) and
-`bench_zenoh_transports` (Zenoh) each send over the real socket and emit `net-<proto>`
-rows. (QUIC is a follow-up: it needs msquic + a TLS cert and the `-DLIBTRACER_WITH_QUIC`
-module, so it is gated like the dedicated `quic` CI job.)
+`grid.sh` sweeps both the **in-process** axes and the **network transports** (UDP / TCP
+over the loopback kernel path) via `run_net.sh`, which launches a two-process pub/sub pair
+— `bench_transports` (libtracer) and `bench_zenoh_net` (Zenoh) — for each engine and
+protocol, the **same two-process topology** so the comparison is fair; each subscriber
+emits `net-<proto>` RESULT rows. (WebSocket is built but held: libtracer's WS transport
+shows order-of-magnitude single-run latency jitter under this bench. QUIC needs msquic + a
+TLS cert and the `-DLIBTRACER_WITH_QUIC` module, gated like the dedicated `quic` CI job.)
 
 ## Many-core contention microbenchmarks (Wave 0e, ADR-0032)
 
@@ -228,6 +230,9 @@ Run `./grid.sh` to reproduce the same charts locally in `preview.html`.
   refcount bump); zenoh's intra-session path, though well-tuned, runs its full sample
   machinery. This shows up most on the **fan-out** axis; on the **topic-count** axis the
   two are close — the charts show exactly where each holds.
-- **Caveats:** single machine; the in-process comparison is what CI publishes today. A
-  two-process **transport** comparison (tcp/udp/ws/quic vs zenoh) is being rebuilt on the
-  current FWD net plane and will be added to the same page.
+- **Network transports:** CI also publishes a **UDP** and **TCP** comparison — a separate
+  publisher and subscriber **process** per engine over the real loopback path (the same
+  two-process topology for both, so it is fair). **WebSocket** is built but held out of the
+  published charts: libtracer's WS transport shows order-of-magnitude single-run latency
+  jitter under this bench. **QUIC** needs the `-DLIBTRACER_WITH_QUIC` module (msquic + TLS).
+- **Caveats:** single machine; absolute numbers are representative of the runner.
