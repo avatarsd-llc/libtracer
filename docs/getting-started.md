@@ -35,6 +35,46 @@ C++23 (GCC 13+ / Clang 16+). A runnable example drops out of the build:
 ./core/build/examples/in_process_pubsub      # §2–§3 below
 ```
 
+## 1b. Use it as a dependency
+
+`core/` installs as a CMake package, so a downstream project links libtracer the
+modern way — no vendoring — and gets one namespaced target, `libtracer::libtracer`,
+regardless of how it was pulled in.
+
+**Installed, via `find_package`:**
+
+```sh
+cmake -S core -B core/build -DCMAKE_BUILD_TYPE=Release
+cmake --build core/build -j
+cmake --install core/build --prefix /usr/local   # any prefix on CMAKE_PREFIX_PATH
+```
+
+```cmake
+find_package(libtracer 0.3 REQUIRED)              # SameMinorVersion: 0.3 ≠ 0.4 (pre-1.0)
+target_link_libraries(app PRIVATE libtracer::libtracer)
+```
+
+The installed static archive is `libtracer.a`, so a non-CMake build links it with
+the conventional `-ltracer`.
+
+**In-tree, via `FetchContent` (no install step):**
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(libtracer
+    GIT_REPOSITORY https://github.com/avatarsd-llc/libtracer
+    GIT_TAG        main            # pin a commit — the wire format is not yet frozen
+    SOURCE_SUBDIR  core)
+FetchContent_MakeAvailable(libtracer)
+target_link_libraries(app PRIVATE libtracer::libtracer)   # same target either way
+```
+
+**Embedded / platform:** don't build the core yourself — consume a prebuilt
+integration: the [ESP-IDF managed component](https://github.com/avatarsd-llc/libtracer/tree/main/integrations/esp-idf)
+(`REQUIRES libtracer`),
+[PlatformIO](https://github.com/avatarsd-llc/libtracer/tree/main/integrations/platformio),
+or [Arduino](https://github.com/avatarsd-llc/libtracer/tree/main/integrations/arduino).
+
 ## 2. Your first node — register, write, read
 
 ```cpp

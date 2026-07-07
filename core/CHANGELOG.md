@@ -57,7 +57,9 @@ reference implementation is pre-1.0; everything currently lives under
   The static-library artifact now ships as **`libtracer.a`** (target `OUTPUT_NAME
   tracer`), not the double-prefixed `liblibtracer.a`, so a non-CMake consumer links
   `-ltracer`; CMake consumers use the `libtracer::libtracer` imported target and
-  are unaffected by the file name.
+  are unaffected by the file name. A namespaced `libtracer::libtracer` **alias** is
+  also defined in the build tree, so an `add_subdirectory()` / `FetchContent`
+  consumer links the exact same target name as a `find_package` consumer.
 
 - **`posix_endpoint.hpp` — the shared POSIX recv-thread/endpoint scaffold
   (internal).** `posix_endpoint_t` is a protected base owning the `stop_` flag +
