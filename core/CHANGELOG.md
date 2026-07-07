@@ -15,6 +15,17 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **`length_prefix_framer` exposes the shared framing-rule kernel.** New public
+  statics `effective_cap(backend, max_frame)` (the RX cap =
+  `min(max_frame, backend.max_segment_size())`) and
+  `on_prefix(backend, cap, len)` → `prefix_decision_t`
+  (`EMPTY` / `MALFORMED` / `DROP` / `ACCEPT{seg}`), plus a public `kPrefixBytes`.
+  These are the per-prefix rules `feed()` already applied, now callable by
+  pull-mode readers: `tcp_transport_t` consumes them directly instead of
+  open-coding the identical logic, while keeping its direct-into-segment body
+  read (ADR-0042 §2/§4 — chunk-feeding `feed()` there would add a copy).
+  Behavior on the wire is unchanged.
+
 - **`path_t(std::string_view)` — a parse-once constructor for literal paths (ADR-0054).**
   `path_t p("/sensor/temp");` parses the string ONCE; hold `p` and reuse it across
   operations (the graph API takes `const path_t&`, so a held path never re-parses on the
