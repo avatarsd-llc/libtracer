@@ -88,6 +88,16 @@ html_theme = "furo"
 html_title = "libtracer"
 html_show_sourcelink = False
 
+# Custom domain: the project docs are served at the ROOT of libtracer.avatarsd.com
+# (a dedicated subdomain, separate from the company's product pages). The CNAME
+# file is copied verbatim into the built-site root by html_extra_path, so every
+# Actions deploy re-asserts the domain (GitHub would otherwise drop a domain set
+# only in repo settings). html_baseurl is the canonical origin for absolute /
+# OpenGraph / sitemap URLs. NB: html_extra_path, like html_static_path, is
+# relative to the CONFIG dir (docs/) — so "_extra" is docs/_extra.
+html_baseurl = "https://libtracer.avatarsd.com/"
+html_extra_path = ["_extra"]
+
 # A few restrained touches layered on the stock furo theme (palette + fonts
 # unchanged): tabular figures in tables, softly-framed code/diagram blocks, a
 # monospace stack for code. Furo's own light/dark tokens carry the rest.
