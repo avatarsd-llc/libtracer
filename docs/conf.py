@@ -23,7 +23,22 @@ extensions = [
     "sphinx_design",  # grid / grid-item-card directives for the landing cards
     "breathe",  # render Doxygen XML as in-page C++ source references
     "sphinx.ext.githubpages",  # emit .nojekyll so underscore dirs (_static) serve
+    "sphinx_sitemap",  # sitemap.xml (SEO) — needs html_baseurl
+    "sphinxext.opengraph",  # Open Graph + Twitter cards + meta descriptions (SEO)
 ]
+
+# --- SEO ---------------------------------------------------------------------
+# sitemap.xml at the site root (single version/lang, so no {version}/{lang}
+# prefix). html_baseurl (set below) is the absolute origin every entry uses.
+sitemap_url_scheme = "{link}"
+# Open Graph / Twitter link previews + auto meta descriptions from each page's
+# first paragraph, so shared links render richly and rank better.
+ogp_site_url = "https://libtracer.avatarsd.com/"
+ogp_site_name = "libtracer"
+ogp_type = "website"
+ogp_description_length = 200
+ogp_enable_meta_description = True
+ogp_custom_meta_tags = ['<meta name="twitter:card" content="summary" />']
 
 # Doxygen → Breathe: generate the C++ API XML from the documented core/ headers
 # (core/Doxyfile) so `{doxygenclass}` directives can pull the reference impl's

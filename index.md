@@ -6,6 +6,24 @@ A node is a graph of addressable **vertices**; the same TLV bytes are the wire
 encoding, the in-memory representation, and the graph node — so an in-process
 hand-off moves **zero bytes**.
 
+```{raw} html
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "libtracer",
+  "description": "A decentralized, zero-copy, graph-based pub/sub protocol — one wire format from a 16 KB Cortex-M0 to a GPU, across vendors and transports.",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Cross-platform (embedded to server)",
+  "url": "https://libtracer.avatarsd.com/",
+  "codeRepository": "https://github.com/avatarsd-llc/libtracer",
+  "license": "https://www.apache.org/licenses/LICENSE-2.0",
+  "author": { "@type": "Organization", "name": "avatarsd LLC" },
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+}
+</script>
+```
+
 ```{note}
 When the spec and any other document disagree, the spec wins. The reference suite
 is descriptive; the design rationale (ADRs) and proposals (RFCs) live in the
