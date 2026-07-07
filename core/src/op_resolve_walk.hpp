@@ -279,29 +279,6 @@ template <class N>
     return fp.steps.size() == 1 && fp.steps[0].name == "subscribers" && fp.steps[0].append;
 }
 
-// Extract the SUBSCRIBER.qos_settings `delivery_compact` opt-in (RFC-0004 §E.1)
-// from the arena-decoded SUBSCRIBER node; false when absent. Mirrors graph.cpp
-// field_write's parse (one locus per layer — graph stores the local slot's flag,
-// the resolver reads it for the remote-subscriber binding) so the two never drift.
-template <class N>
-[[nodiscard]] bool subscriber_compact(const N& sub) {
-    auto sc = sub.children();
-    for (std::optional<N> c = sc.next(); c; c = sc.next()) {
-        if (c->type() != type_t::SETTINGS) continue;
-        // Scan every adjacent (NAME, VALUE) pair — a rolling previous node yields
-        // the same pairs the arena read via `next_sibling(n)`, forward-only.
-        auto qc = c->children();
-        std::optional<N> prev;
-        for (std::optional<N> n = qc.next(); n; n = qc.next()) {
-            if (prev && prev->type() == type_t::NAME && n->type() == type_t::VALUE &&
-                detail::as_string_view(prev->body()) == "delivery_compact")
-                return detail::load_le<std::uint8_t>(n->body()) != 0;
-            prev = std::move(n);
-        }
-    }
-    return false;
-}
-
 // The one ADR-0041 §2 ownership copy of a whole TLV into a fresh owned segment:
 // the reader's trailer-excluded `own_wire` (span tier copies its borrowed bytes;
 // rope tier adopts a multi-link flatten, ADR-0053 ⑤) with the copied opt byte's
@@ -573,9 +550,11 @@ template <class N>
                 const view_t return_route = own_tlv(req.src);
                 if (return_route.empty())
                     return assemble_error(reply_dst_wire, reply_src_wire, status_t::BACKPRESSURE);
-                result_t<void> w = graph.add_remote_subscriber(v, sub_value, return_route,
-                                                               std::string(inbound_link),
-                                                               subscriber_compact(payload_node));
+                // ADR-0049: the wire append enters the graph's single admission door
+                // (subscribe_wire → admit_subscriber) — the SUBSCRIBER TLV is parsed
+                // ONCE there (delivery_compact included), so no parallel parse here.
+                result_t<void> w =
+                    graph.subscribe_wire(v, sub_value, return_route, std::string(inbound_link));
                 if (!w) return assemble_error(reply_dst_wire, reply_src_wire, w.error());
                 return assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT, {}, {},
                                 0);  // OK, empty payload

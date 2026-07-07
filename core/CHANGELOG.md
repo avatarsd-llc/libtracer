@@ -13,6 +13,21 @@ reference implementation is pre-1.0; everything currently lives under
 
 ## [Unreleased]
 
+### Changed
+
+- **`field_write` is the single SUBSCRIBER admission door (ADR-0049 — breaking).**
+  `graph_t::add_remote_subscriber` is retired; the FWD resolver's wire append now
+  enters `graph_t::subscribe_wire(v, source_view, return_route, link)`, which parses
+  the SUBSCRIBER TLV ONCE (the resolver's parallel `delivery_compact` parse is gone)
+  and lands in the same internal admission step as every other door. Deliberate
+  behavior alignment, uniform across sugar / field-write / wire subscriptions:
+  the SUBSCRIBE ACL gate and the transient-local (`durability == 1`) LKV latch now
+  apply at every door — a LOCAL callback/target subscriber receives the latched
+  value at subscribe exactly as a remote one always did. The `subscribe(src, target)`
+  sugar now encodes a `SUBSCRIBER{PATH}` TLV through the field-write door, so its
+  edge reads back from `:subscribers[]` byte-identically to a wire-made one
+  (previously sugar edges were invisible to `:subscribers[]` reads).
+
 ### Added
 
 - **`path_t(std::string_view)` — a parse-once constructor for literal paths (ADR-0054).**

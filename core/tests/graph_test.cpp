@@ -11,6 +11,7 @@
  * segment refcounts race-free, and under ASan+UBSan leak/UB-free.
  */
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -343,6 +344,63 @@ void test_schema_read() {
           "POINT's NAME child is the vertex name 'temp'");
 }
 
+void test_admission_door_uniformity() {
+    std::printf("ADR-0049 single admission door (uniform read-back + latch):\n");
+
+    // Pin: the subscribe(src, target) SUGAR and an equivalent :subscribers[] FIELD-WRITE
+    // produce byte-identical :subscribers[] read-back — both edges enter the same door
+    // and retain the same encoded SUBSCRIBER{PATH} view.
+    {
+        graph_t g;
+        (void)g.register_vertex(path_t("/sink"), role_t::STORED_VALUE);
+        tr::graph::vertex_t* a = *g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
+        tr::graph::vertex_t* b = *g.register_vertex(path_t("/b"), role_t::STORED_VALUE);
+        check(g.subscribe(path_t("/a"), path_t("/sink")).has_value(), "sugar door subscribes");
+        check(g.write(path_t("/b:subscribers[]"), subscriber_tlv("sink")).has_value(),
+              "field-write door subscribes");
+        const auto ra = g.read_subscribers(a);
+        const auto rb = g.read_subscribers(b);
+        check(ra && ra->size() == 1, "sugar edge reads back from :subscribers[]");
+        check(rb && rb->size() == 1, "field-write edge reads back from :subscribers[]");
+        check(ra && rb && ra->size() == 1 && rb->size() == 1 &&
+                  std::ranges::equal((*ra)[0].bytes(), (*rb)[0].bytes()),
+              "both doors store the byte-identical SUBSCRIBER view");
+    }
+
+    // Behavior alignment (ADR-0049): the transient-local (durability==1) latch now fires
+    // for LOCAL doors too — a callback subscriber and a target subscriber each receive
+    // the LKV immediately at subscribe, exactly as a remote one does (was remote-only).
+    {
+        graph_t g;
+        settings_t s;
+        s.durability = 1;  // transient-local
+        tr::graph::vertex_t* src = *g.register_vertex(path_t("/tl"), role_t::STORED_VALUE, {}, s);
+        (void)g.write(src, make_value({0x5A}));  // seed the LKV BEFORE subscribing
+
+        auto seen = std::make_shared<int>(-1);
+        (void)g.subscribe(path_t("/tl"), [seen](const tr::view::rope_t& v) {
+            *seen = std::to_integer<int>(v.only().bytes()[0]);
+        });
+        check(*seen == 0x5A, "callback door: the LKV latches at subscribe");
+
+        tr::graph::vertex_t* tgt = *g.register_vertex(path_t("/tgt"), role_t::STORED_VALUE);
+        (void)g.subscribe(path_t("/tl"), path_t("/tgt"));
+        const auto latched = g.read(tgt);
+        check(latched.has_value() && std::to_integer<int>(latched->only().bytes()[0]) == 0x5A,
+              "target door: the LKV latches at subscribe (delivered as a write)");
+    }
+
+    // A volatile (durability==0, the default) vertex still does NOT latch.
+    {
+        graph_t g;
+        tr::graph::vertex_t* src = *g.register_vertex(path_t("/vol"), role_t::STORED_VALUE);
+        (void)g.write(src, make_value({0x77}));
+        auto fired = std::make_shared<int>(0);
+        (void)g.subscribe(path_t("/vol"), [fired](const tr::view::rope_t&) { ++*fired; });
+        check(*fired == 0, "no latch on a volatile vertex");
+    }
+}
+
 void test_dispatch_cycle_cap() {
     std::printf("dispatch-depth cycle cap (in-process A->B->A terminates):\n");
     graph_t g;
@@ -434,6 +492,7 @@ int main() {
     test_field_write_settings();
     test_field_write_handle();
     test_subscribe_via_field_write_and_unsubscribe();
+    test_admission_door_uniformity();
     test_schema_read();
     test_dispatch_cycle_cap();
     test_concurrent_stress();

@@ -192,8 +192,7 @@ void test_remote_ancestor_subscriber() {
         seen_value.assign(v.only().bytes().begin(), v.only().bytes().end());
         seen_route.assign(d.return_route.bytes().begin(), d.return_route.bytes().end());
     });
-    check(g.add_remote_subscriber(a, make_value({0x04, 0x40, 0x00, 0x00}), make_value(route),
-                                  "lnk0", false)
+    check(g.subscribe_wire(a, make_value({0x04, 0x40, 0x00, 0x00}), make_value(route), "lnk0")
               .has_value(),
           "bind a REMOTE subscriber at the ancestor /a");
 
