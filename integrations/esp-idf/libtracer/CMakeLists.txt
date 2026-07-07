@@ -102,3 +102,13 @@ idf_component_register(
 # libtracer's core is C++23. ESP-IDF compiles component sources with the project's
 # C++ standard; pin it here so the component is correct regardless of project default.
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_23)
+
+# Ship the component archive as `libtracer.a`, not the double-prefixed
+# `liblibtracer.a` that ESP-IDF's `lib${COMPONENT_NAME}.a` convention produces for
+# a component literally named `libtracer`. This only renames the output file; the
+# component NAME stays `libtracer` (so `REQUIRES libtracer`, the idf_component.yml
+# registry entry, and the docs are all unchanged) and IDF links by CMake target,
+# not by archive file name, so nothing in the link graph is affected. The
+# esp-idf-size footprint gate matches the archive by the substring `libtracer`
+# (tools/esp_size_gate.py --component-pattern), which still hits `libtracer.a`.
+set_target_properties(${COMPONENT_LIB} PROPERTIES OUTPUT_NAME tracer)

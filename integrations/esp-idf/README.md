@@ -79,7 +79,7 @@ docker run --rm -v "$PWD:/p" -w /p/integrations/esp-idf/examples/full_node \
 Footprint numbers are **measured and published on every run of the `full-node` CI job** — this README deliberately carries no copied-in numbers (they would go stale the next time a source file changes). To read the current numbers:
 
 1. Open the latest [`esp-idf` workflow run](https://github.com/avatarsd-llc/libtracer/actions/workflows/esp-idf.yml) → the **`full-node (esp32c6)`** (or `esp32c3`) job.
-2. The **job step summary** carries a markdown table with the **libtracer component's own contribution** (flash = text+rodata, static RAM = data+bss+iram, from `esp-idf-size --archives` on `liblibtracer.a`) next to the whole-image totals, plus a per-memory-type breakdown.
+2. The **job step summary** carries a markdown table with the **libtracer component's own contribution** (flash = text+rodata, static RAM = data+bss+iram, from `esp-idf-size --archives` on `libtracer.a`) next to the whole-image totals, plus a per-memory-type breakdown.
 3. The same numbers are attached as a machine-readable **`footprint-<target>` JSON artifact**, and the raw `idf.py size` / `idf.py size-components` tables are in the `Report footprint` step log.
 
 What is measured: the `full_node` build (`espressif/idf:release-v6.0`, built `-Os` — the example sets `CONFIG_COMPILER_OPTIMIZATION_SIZE`, overriding IDF's default `-Og`, so the footprint reflects a size-optimized deployment) — graph + fwd_router + transport_vertex + udp/tcp/ws/can transports + TWAI link, plus the example app and IDF's Wi-Fi/lwIP stack.

@@ -32,11 +32,11 @@ on:
 
 # ── Footprint sentinel thresholds (full-node job) ────────────────────────────
 # MEASURED provenance (PR #193 first run, 2026-07-03, espressif/idf:release-v6.0,
-# -Os): liblibtracer.a flash 78,825 B (esp32c3) / 82,861 B (esp32c6); static RAM
+# -Os): libtracer.a flash 78,825 B (esp32c3) / 82,861 B (esp32c6); static RAM
 # 16 B on both. Flash limit = measured + ~15 % headroom. The static-RAM limit is
 # deliberately tight (4 KiB against a measured 16 B): the library holds NO
 # internal buffers (ADR-0041 §5) — any static buffer sneaking in trips the gate.
-# Thresholds gate the libtracer component archive (liblibtracer.a) only, not the
+# Thresholds gate the libtracer component archive (libtracer.a) only, not the
 # whole app image. To re-baseline after intentional growth: read the measured
 # numbers from the full-node job step summary / footprint-<target> artifact.
 env:
