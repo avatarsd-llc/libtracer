@@ -8,9 +8,9 @@ name: core-ci
 on:
   push:
     branches: [main]
-    paths: ["core/**", ".github/workflows/core-ci.yml"]
+    paths: ["core/**", "tests/packaging/**", ".github/workflows/core-ci.yml"]
   pull_request:
-    paths: ["core/**", ".github/workflows/core-ci.yml"]
+    paths: ["core/**", "tests/packaging/**", ".github/workflows/core-ci.yml"]
   workflow_dispatch:
 
 jobs:
@@ -71,6 +71,28 @@ jobs:
           cmake --build core/build-tsan -j
           setarch "$(uname -m)" -R ctest --test-dir core/build-tsan --output-on-failure
 
+  # Regression guard for the CMake install/export (find_package packaging). Builds
+  # + installs core to a staging prefix, then configures the tests/packaging fixture
+  # SEPARATELY against that prefix — the real downstream flow: find_package(libtracer)
+  # + link libtracer::libtracer + include a public header + call a compiled symbol.
+  # Catches broken install rules, a malformed package config, or a missing exported
+  # target before they reach a consumer.
+  install-consume:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build + install core to a staging prefix
+        run: |
+          cmake -S core -B core/build-install -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release
+          cmake --build core/build-install -j
+          cmake --install core/build-install --prefix "${RUNNER_TEMP}/prefix"
+      - name: Consume via find_package(libtracer)
+        run: |
+          cmake -S tests/packaging -B "${RUNNER_TEMP}/consumer" \
+            -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/prefix"
+          cmake --build "${RUNNER_TEMP}/consumer" -j
+          "${RUNNER_TEMP}/consumer/app"
+
   format:
     runs-on: ubuntu-24.04
     steps:
@@ -79,7 +101,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y clang-format
           mapfile -t files < <(find core/include core/src core/tests core/examples \
-            -name '*.hpp' -o -name '*.cpp')
+            tests/packaging -name '*.hpp' -o -name '*.cpp')
           clang-format --dry-run --Werror "${files[@]}"
 
   doxygen-gate:
