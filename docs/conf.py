@@ -86,9 +86,9 @@ html_theme = "furo"
 html_title = "libtracer"
 html_show_sourcelink = False
 
-# A man-page aesthetic layered on the stock furo theme (theme unchanged): a
-# monospace-forward, section-ruled, tabular-figure treatment fit for a system-
-# library reference. Driven through furo's own CSS variables so light/dark adapt.
+# A few restrained touches layered on the stock furo theme (palette + fonts
+# unchanged): tabular figures in tables, softly-framed code/diagram blocks, a
+# monospace stack for code. Furo's own light/dark tokens carry the rest.
 # NB: html_static_path is relative to the CONFIG dir (docs/, where this conf.py
 # lives), unlike include_patterns which are relative to the source root — so this
 # is "_static", i.e. docs/_static, not "docs/_static".
