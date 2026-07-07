@@ -1,6 +1,9 @@
 # libtracer (Rust binding)
 
-Rust binding for libtracer. Published to crates.io as `libtracer`.
+Native Rust implementation of the libtracer wire codec. The crate is `libtracer`,
+versioned independently of the C++ core. **Not yet published to crates.io** — a
+publish workflow is still a TODO (see [Releasing](#releasing)); depend on the git
+repo until the first crate release.
 
 ## Status
 
@@ -30,7 +33,8 @@ implementations" cheaper to keep consistent than one impl behind two language wr
 
 ```toml
 [dependencies]
-libtracer = "0.1"
+# Not yet on crates.io — depend on the git repo until the first crate release:
+libtracer = { git = "https://github.com/avatarsd-llc/libtracer" }
 ```
 
 ## Security posture
