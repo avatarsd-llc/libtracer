@@ -68,4 +68,18 @@ flowchart LR
 - **Slicing is free** — `subview`/`concat` build new view structs that bump the
   segment refcount; no bytes move.
 
+## API reference
+
+Generated from `core/include/libtracer/view.hpp` and `rope.hpp` by Doxygen.
+
+```{doxygenstruct} tr::view::view_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::view::rope_t
+:project: libtracer
+:members:
+```
+
 See: [segment](segment.md), [frame-codec](frame-codec.md), [graph](graph.md).

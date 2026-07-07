@@ -110,4 +110,18 @@ flowchart LR
   [benchmark](../../bench/README.md) measures it).
 - **Bytes only** — a transport can't accidentally depend on graph semantics.
 
+## API reference
+
+Generated from `core/include/libtracer/transport.hpp` by Doxygen.
+
+```{doxygenclass} tr::net::transport_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::net::bus_link_t
+:project: libtracer
+:members:
+```
+
 See: [interface-map](interface-map.md), [reference §communication-flows](../reference/04-communication-flows.md).

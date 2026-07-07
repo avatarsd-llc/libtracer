@@ -93,5 +93,27 @@ vectors; a resolve-scoped view, never stored. The codec's `tlv_t` model,
 - **Bounded & safe** — fixed-width length (no varint ambiguity), iterative parse
   with a depth cap, CRC verified before you trust the bytes.
 
+## API reference
+
+Generated from `core/include/libtracer/frame.hpp` by Doxygen.
+
+```{doxygenstruct} tr::wire::tlv_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::wire::trailer_t
+:project: libtracer
+:members:
+```
+
+```{doxygenfunction} tr::wire::decode
+:project: libtracer
+```
+
+```{doxygenfunction} tr::wire::encode
+:project: libtracer
+```
+
 See the [reference data-format](../reference/01-data-format.md) for the normative
 rules and [wire-format-bits](wire-format-bits.md) for worked byte dumps.
