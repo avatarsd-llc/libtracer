@@ -77,6 +77,12 @@ target_include_directories(libtracer PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 target_compile_features(libtracer PUBLIC cxx_std_23)
+# The CMake target is `libtracer`, but the artifact ships as `libtracer.a` (not the
+# double-prefixed `liblibtracer.a`) so a non-CMake downstream links it with the
+# conventional `-ltracer`. CMake consumers use the imported `libtracer::libtracer`
+# target and are unaffected by the file name. (The ESP-IDF component archive stays
+# `liblibtracer.a` — that name is fixed by the IDF component build, a separate tree.)
+set_target_properties(libtracer PROPERTIES OUTPUT_NAME tracer)
 if(MSVC)
     target_compile_options(libtracer PRIVATE /W4)
 else()
@@ -152,6 +158,64 @@ if(LIBTRACER_WITH_QUIC)
     else()
         target_compile_options(libtracer_quic PRIVATE -Wall -Wextra)
     endif()
+endif()
+
+# Install / export: make libtracer consumable with `find_package(libtracer)` and
+# `target_link_libraries(app PRIVATE libtracer::libtracer)` — the release-hardening
+# packaging seam (before this, a downstream could only source-vendor the tree).
+# Scope: the default-build core static library only. The optional libtracer_quic
+# module is intentionally NOT part of the installed package yet — it links an
+# imported msquic target whose provenance (CMake package vs. bare library search)
+# can't be faithfully reconstructed in an exported config; packaging it cleanly is
+# its own follow-up. Gated on LIBTRACER_INSTALL (default: only when top-level), so
+# an embedding parent (bench/, esp-idf) that add_subdirectory()s core never
+# inherits install rules it didn't ask for.
+option(LIBTRACER_INSTALL "Generate install/export rules for libtracer" ${PROJECT_IS_TOP_LEVEL})
+if(LIBTRACER_INSTALL)
+    include(GNUInstallDirs)
+    include(CMakePackageConfigHelpers)
+
+    install(TARGETS libtracer
+        EXPORT libtracerTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+    install(DIRECTORY include/libtracer
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+    set(LIBTRACER_CMAKE_CONFIG_DIR ${CMAKE_INSTALL_LIBDIR}/cmake/libtracer)
+
+    install(EXPORT libtracerTargets
+        FILE libtracerTargets.cmake
+        NAMESPACE libtracer::
+        DESTINATION ${LIBTRACER_CMAKE_CONFIG_DIR})
+
+    # Dependencies the exported config must re-find. Threads is unconditional;
+    # CUDAToolkit only when the GPU backend was compiled into this install (its
+    # CUDA::cudart link is a usage requirement that must be reconstructable).
+    set(LIBTRACER_PACKAGE_DEPENDENCIES "find_dependency(Threads)")
+    if(LIBTRACER_WITH_CUDA)
+        string(APPEND LIBTRACER_PACKAGE_DEPENDENCIES "\nfind_dependency(CUDAToolkit)")
+    endif()
+
+    configure_package_config_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/cmake/libtracerConfig.cmake.in
+        ${CMAKE_CURRENT_BINARY_DIR}/libtracerConfig.cmake
+        INSTALL_DESTINATION ${LIBTRACER_CMAKE_CONFIG_DIR})
+
+    # Pre-1.0: a 0.x minor bump may break the C++ API (per CHANGELOG), so match on
+    # minor, not major — a consumer that asks for 0.3 won't silently accept 0.4.
+    write_basic_package_version_file(
+        ${CMAKE_CURRENT_BINARY_DIR}/libtracerConfigVersion.cmake
+        VERSION ${PROJECT_VERSION}
+        COMPATIBILITY SameMinorVersion)
+
+    install(FILES
+        ${CMAKE_CURRENT_BINARY_DIR}/libtracerConfig.cmake
+        ${CMAKE_CURRENT_BINARY_DIR}/libtracerConfigVersion.cmake
+        DESTINATION ${LIBTRACER_CMAKE_CONFIG_DIR})
 endif()
 
 if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")

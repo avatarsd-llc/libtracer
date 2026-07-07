@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# Package config for `find_package(libtracer)`. Reconstructs the libtracer::
+# imported targets and their transitive dependencies for a downstream consumer.
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# Usage requirements the installed target carries. Threads is always PUBLIC
+# (transport_vertex spins its own I/O threads); the rest are only present when
+# the corresponding optional backend was built into this install.
+@LIBTRACER_PACKAGE_DEPENDENCIES@
+
+include("${CMAKE_CURRENT_LIST_DIR}/libtracerTargets.cmake")
+
+check_required_components(libtracer)

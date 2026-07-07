@@ -42,6 +42,23 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Added
 
+- **CMake install/export — `find_package(libtracer)` now works (release
+  packaging).** `core/` gains `install(TARGETS … EXPORT)`, header installation,
+  and a generated package config (`libtracerConfig.cmake` +
+  `libtracerConfigVersion.cmake`, `SameMinorVersion` compatibility for the pre-1.0
+  API), so a downstream consumes the core with
+  `find_package(libtracer 0.3 REQUIRED)` and
+  `target_link_libraries(app PRIVATE libtracer::libtracer)` instead of
+  source-vendoring the tree. Gated on `LIBTRACER_INSTALL` (default: on only when
+  libtracer is the top-level project), so an embedding parent that
+  `add_subdirectory()`s core never inherits install rules. The optional
+  `libtracer_quic` module is intentionally not part of the installed package yet
+  (its imported-`msquic` dependency can't be faithfully re-exported — a follow-up).
+  The static-library artifact now ships as **`libtracer.a`** (target `OUTPUT_NAME
+  tracer`), not the double-prefixed `liblibtracer.a`, so a non-CMake consumer links
+  `-ltracer`; CMake consumers use the `libtracer::libtracer` imported target and
+  are unaffected by the file name.
+
 - **`posix_endpoint.hpp` — the shared POSIX recv-thread/endpoint scaffold
   (internal).** `posix_endpoint_t` is a protected base owning the `stop_` flag +
   receive `thread_` (with `start()` / `stop_and_join()`) and the 100 ms
