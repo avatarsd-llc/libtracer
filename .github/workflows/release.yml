@@ -53,8 +53,42 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "Releasing $tag (VERSION=$ver)"
 
-  github-release:
+  # Re-run the cross-implementation compatibility suite AT THE TAG before any
+  # publish — nothing ships unless the tagged tree is green (belt-and-suspenders
+  # over main's CI). This is the "real tests in CI before publishing" gate.
+  preflight:
     needs: verify
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the C++ conformance harness
+        run: |
+          cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build core/build --target conformance_runner -j
+      - name: 3-core conformance cross-match + differential fuzzer (C++ + TS + Rust)
+        env:
+          LIBTRACER_CXX_HARNESS: ${{ github.workspace }}/core/build/tests/conformance_runner
+        run: |
+          python3 tests/conformance/run-all.py
+          python3 tests/conformance/diff_fuzz.py -n 2000
+      - name: Rust binding tests
+        run: cargo test --manifest-path bindings/rust/Cargo.toml
+      - name: TypeScript package tests
+        working-directory: bindings/typescript
+        run: |
+          npm ci
+          npm run build
+          npm test
+      - name: Capability matrix matches real test evidence
+        if: ${{ hashFiles('tools/gen_capability_matrix.py') != '' }}
+        run: python3 tools/gen_capability_matrix.py --check
+
+  github-release:
+    needs: [verify, preflight]
     runs-on: ubuntu-24.04
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -87,7 +121,7 @@ jobs:
             --verify-tag
 
   npm:
-    needs: verify
+    needs: [verify, preflight]
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -117,7 +151,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   crates:
-    needs: verify
+    needs: [verify, preflight]
     runs-on: ubuntu-24.04
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -132,7 +166,7 @@ jobs:
         run: cargo publish --manifest-path bindings/rust/Cargo.toml
 
   platformio:
-    needs: verify
+    needs: [verify, preflight]
     runs-on: ubuntu-24.04
     env:
       PLATFORMIO_AUTH_TOKEN: ${{ secrets.PLATFORMIO_AUTH_TOKEN }}
@@ -151,7 +185,7 @@ jobs:
           pio pkg publish --no-interactive
 
   esp-component:
-    needs: verify
+    needs: [verify, preflight]
     runs-on: ubuntu-24.04
     env:
       IDF_COMPONENT_API_TOKEN: ${{ secrets.IDF_COMPONENT_API_TOKEN }}
