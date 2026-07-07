@@ -1,4 +1,4 @@
-# libtracer Protocol Reference (protocol v1, draft)
+# Reference suite — reading guide
 
 > **Status**: draft suite. All sections written; promotion to "frozen" gated by the conformance milestone tracked in the issue tracker.
 > **Last revision**: 2026-05-03. Notable architectural commitments:
