@@ -6,7 +6,9 @@
 #include "libtracer/frame.hpp"
 
 #include <algorithm>
+#include <memory_resource>
 #include <utility>
+#include <vector>
 
 #include "libtracer/byteorder.hpp"
 #include "libtracer/crc.hpp"
@@ -25,116 +27,86 @@ void write_le(std::vector<std::byte>& out, std::uint64_t v, std::size_t n) {
     detail::append_le(out, v, n);
 }
 
-// One TLV parsed in isolation — NO recursion into children. For a structured TLV
-// (opt.pl) `children` is the PL payload region, left for decode() to walk with an
-// explicit stack; for an opaque TLV `tlv.payload` holds the bytes. `total` is the
-// full encoded size (header + length + trailer).
-struct parsed_t {
+// Model one validated header (grammar::parse_header, ADR-0048 §1) as a tlv_t:
+// extract the payload span for an opaque node and read the (already-verified)
+// trailer values into the owning tree. `bytes` is the TLV's own bytes.
+tlv_t model(const grammar::header_t& h, std::span<const std::byte> bytes) {
     tlv_t tlv;
-    std::size_t total = 0;
-    std::span<const std::byte> children{};
-};
+    tlv.type = h.type;
+    tlv.opt = h.opt;
 
-std::expected<parsed_t, err_t> parse_one(std::span<const std::byte> buf) {
-    // The header/trailer grammar (incl. the two-span CRC verify) lives once in
-    // grammar::parse_header (ADR-0048 §1); here we only MODEL the result as a
-    // tlv_t — extracting the payload span and reading the (already-verified)
-    // trailer values into the owning tree.
-    const auto h = grammar::parse_header(grammar::span_cursor{buf});
-    if (!h) return std::unexpected(h.error());
-
-    tlv_t tlv;
-    tlv.type = h->type;
-    tlv.opt = h->opt;
-    const std::span<const std::byte> payload = buf.subspan(h->header, h->length);
-
-    if (h->opt.ts || h->opt.cr) {
+    if (h.opt.ts || h.opt.cr) {
         trailer_t trailer;
-        if (h->opt.ts) {
+        if (h.opt.ts) {
             timestamp_t t;
-            t.relative = h->opt.tf;
-            if (h->opt.tf) {
+            t.relative = h.opt.tf;
+            if (h.opt.tf) {
                 t.value = static_cast<std::int32_t>(
-                    static_cast<std::uint32_t>(read_le(buf, h->header + h->length, 4)));
+                    static_cast<std::uint32_t>(read_le(bytes, h.header + h.length, 4)));
             } else {
-                t.value = static_cast<std::int64_t>(read_le(buf, h->header + h->length, 8));
+                t.value = static_cast<std::int64_t>(read_le(bytes, h.header + h.length, 8));
             }
             trailer.ts = t;
         }
-        if (h->opt.cr) {
+        if (h.opt.cr) {
             // CRC already verified in parse_header; read the stored value to model it.
-            const std::size_t crc_off = h->header + h->length + h->ts_size;
+            const std::size_t crc_off = h.header + h.length + h.ts_size;
             crc_t c;
-            if (h->opt.cw) {
+            if (h.opt.cw) {
                 c.width = crc_t::width_t::CRC16_CCITT;
-                c.value = static_cast<std::uint32_t>(read_le(buf, crc_off, 2));
+                c.value = static_cast<std::uint32_t>(read_le(bytes, crc_off, 2));
             } else {
                 c.width = crc_t::width_t::CRC32C;
-                c.value = static_cast<std::uint32_t>(read_le(buf, crc_off, 4));
+                c.value = static_cast<std::uint32_t>(read_le(bytes, crc_off, 4));
             }
             trailer.crc = c;
         }
         tlv.trailer = trailer;
     }
 
-    parsed_t out;
-    out.total = h->total;
-    if (h->opt.pl) {
-        out.children = payload;  // walked iteratively by decode(), not here
-    } else {
-        tlv.payload = payload;
-    }
-    out.tlv = std::move(tlv);
-    return out;
+    if (!h.opt.pl) tlv.payload = bytes.subspan(h.header, h.length);
+    return tlv;
 }
+
+// The owning-tree sink for grammar::walk (ADR-0048 §1): builds the `tlv_t` tree
+// as the shared descent visits it. Opaque nodes are grafted into their parent
+// (or become the root); a structured node is held open on `open_` while its
+// children graft in, then grafted itself on close. The descent logic — pos/total
+// accounting, depth cap, when to descend — lives in the walk, not here.
+struct owning_sink {
+    std::vector<tlv_t> open_;  // the open structured nodes (innermost last)
+    tlv_t result_;             // set once, when the root node finalizes
+
+    void place(tlv_t node) {
+        if (open_.empty())
+            result_ = std::move(node);  // the root
+        else
+            open_.back().children.push_back(std::move(node));
+    }
+    void on_leaf(const grammar::header_t& h, const grammar::span_cursor& node) {
+        place(model(h, node.buf));
+    }
+    void on_open(const grammar::header_t& h, const grammar::span_cursor& node) {
+        open_.push_back(model(h, node.buf));
+    }
+    void on_close() {
+        tlv_t done = std::move(open_.back());
+        open_.pop_back();
+        place(std::move(done));
+    }
+};
 
 }  // namespace
 
 std::expected<tlv_t, err_t> decode(std::span<const std::byte> input) {
-    // Iterative parse with an explicit work stack — recursion is forbidden so a
-    // maliciously deep frame cannot overflow a small MCU call stack
-    // (docs/reference/01-data-format.md §Iterative parsing requirement).
-    auto root = parse_one(input);
-    if (!root) return std::unexpected(root.error());
-    if (root->total != input.size())
-        return std::unexpected(err_t::FRAME_INVALID);    // trailing bytes
-    if (!root->tlv.opt.pl) return std::move(root->tlv);  // opaque root: done
-
-    // An open structured node whose children are still being parsed. `pos` is the
-    // cursor within `payload`; `total` is the node's full size, used to advance the
-    // parent's cursor when this node closes.
-    struct open_t {
-        tlv_t node;
-        std::span<const std::byte> payload;
-        std::size_t pos = 0;
-        std::size_t total = 0;
-    };
-    std::vector<open_t> stack;
-    stack.push_back(open_t{std::move(root->tlv), root->children, 0, root->total});
-
-    while (true) {
-        if (stack.back().pos == stack.back().payload.size()) {
-            // Node complete — pop it and graft it onto its parent (or return if root).
-            open_t done = std::move(stack.back());
-            stack.pop_back();
-            if (stack.empty()) return std::move(done.node);
-            stack.back().node.children.push_back(std::move(done.node));
-            stack.back().pos += done.total;
-            continue;
-        }
-        // A child of stack.back() sits at depth == stack.size(); reject at the cap.
-        if (stack.size() >= kMaxDepth) return std::unexpected(err_t::TLV_NESTING_TOO_DEEP);
-        auto child = parse_one(stack.back().payload.subspan(stack.back().pos));
-        if (!child) return std::unexpected(child.error());
-        if (child->tlv.opt.pl) {
-            // Structured child: push and descend (invalidates the reference above,
-            // so the loop re-fetches stack.back()).
-            stack.push_back(open_t{std::move(child->tlv), child->children, 0, child->total});
-        } else {
-            stack.back().node.children.push_back(std::move(child->tlv));
-            stack.back().pos += child->total;
-        }
-    }
+    // The one structural descent lives in grammar::walk (ADR-0048 §1); this sink
+    // only builds the owning tree. The walk's cursor stack draws from the default
+    // (heap) resource — an owning-tree decode already allocates on the heap.
+    owning_sink sink;
+    const auto r = grammar::walk(grammar::span_cursor{input}, sink,
+                                 *std::pmr::get_default_resource(), kMaxDepth);
+    if (!r) return std::unexpected(r.error());
+    return std::move(sink.result_);
 }
 
 std::vector<std::byte> encode(const tlv_t& tlv) {

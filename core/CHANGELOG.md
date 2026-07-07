@@ -15,6 +15,18 @@ reference implementation is pre-1.0; everything currently lives under
 
 ### Changed
 
+- **The structural TLV descent is unified in `grammar::walk` (ADR-0048 §1
+  completion — internal).** ADR-0048 unified the header *grammar*
+  (`parse_header`); the open-node stack machine that turns headers into a tree
+  was still hand-written twice (`frame.cpp decode` and `tlv_arena.cpp
+  decode_into`), held equal only by the decode↔decode_into equivalence test. It
+  now lives once in `grammar::walk`, driven by a per-decoder sink (owning-tree vs
+  pre-order arena). Recursion-free and depth-capped as before; the walk's cursor
+  stack draws from a caller-supplied `memory_resource`, so the slab-bound
+  terminus decode stays heap-free. Public `decode` / `decode_into` signatures and
+  output are byte-identical (verified: the equivalence + reject-parity test over
+  every conformance vector, plus the rope-decode fuzzer, pass under ASan/UBSan).
+
 - **`field_write` is the single SUBSCRIBER admission door (ADR-0049 — breaking).**
   `graph_t::add_remote_subscriber` is retired; the FWD resolver's wire append now
   enters `graph_t::subscribe_wire(v, source_view, return_route, link)`, which parses

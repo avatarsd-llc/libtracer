@@ -21,7 +21,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <memory_resource>
 #include <span>
+#include <vector>
 
 #include "libtracer/byteorder.hpp"
 #include "libtracer/crc.hpp"
@@ -189,6 +191,96 @@ template <class Cursor>
         .crc_size = crc_size,
         .total = total,
     };
+}
+
+/**
+ * @brief Drive the iterative TLV descent, modelling each node through @p sink
+ *        (ADR-0048 §1 — the ONE structural walk).
+ *
+ * The recursion-free open-node stack machine that turns validated headers into a
+ * tree, shared by both materializing decoders: the owning `tlv_t` tree
+ * (`frame.cpp decode`) and the terminus arena (`tlv_arena.cpp decode_into`).
+ * ADR-0048 §1 unified the header *grammar* (@ref parse_header); this unifies the
+ * *descent* that was still hand-written twice, held equal only by the
+ * decode↔decode_into equivalence test. Only the SINK differs — grafting owning
+ * children vs appending pre-order arena nodes.
+ *
+ * Recursion is forbidden (a malicious deep frame must not overflow a small MCU
+ * call stack, docs/reference/01 §Iterative parsing requirement): the walk keeps
+ * an explicit cursor/pos stack drawn from @p stack_mr, so a slab-bound decode
+ * (the terminus arena) stays heap-free by passing its own resource.
+ *
+ * The sink models each node through three hooks (all balanced LIFO):
+ * - `on_open(const header_t&, const Cursor& node)` — a structured TLV opens;
+ * - `on_leaf(const header_t&, const Cursor& node)` — an opaque TLV;
+ * - `on_close()`                                    — the current open node's
+ *   children are complete.
+ * `node` is a cursor over that TLV's OWN bytes (offset 0 = its first byte), from
+ * which the sink extracts the spans it wants (payload / wire / trailer) using the
+ * header's offsets.
+ *
+ * @tparam Cursor A byte-source cursor (@ref span_cursor, or the rope cursor).
+ * @tparam Sink   A type providing the three hooks above.
+ * @param root      The cursor positioned at the frame's first byte.
+ * @param sink      The node model (built as the walk visits).
+ * @param stack_mr  Backs the walk's internal cursor stack (pass the arena's
+ *                  resource to keep a slab-bound decode heap-free; the default
+ *                  resource for an ordinary heap decode).
+ * @param max_depth The nesting cap: a child at depth `>= max_depth` is rejected
+ *                  with `TLV_NESTING_TOO_DEEP` (callers pass `wire::kMaxDepth`).
+ * @param crc_policy CRC-trailer policy forwarded to @ref parse_header.
+ * @return Nothing on success, or the first `err_t` the grammar rejects with
+ *         (including `FRAME_INVALID` for trailing bytes after the root).
+ */
+template <class Cursor, class Sink>
+[[nodiscard]] std::expected<void, err_t> walk(const Cursor& root, Sink& sink,
+                                              std::pmr::memory_resource& stack_mr,
+                                              std::size_t max_depth,
+                                              crc_check_t crc_policy = crc_check_t::VERIFY) {
+    const auto rh = parse_header(root, crc_policy);
+    if (!rh) return std::unexpected(rh.error());
+    if (rh->total != root.size()) return std::unexpected(err_t::FRAME_INVALID);  // trailing bytes
+    if (!rh->opt.pl) {
+        sink.on_leaf(*rh, root);  // opaque root: done
+        return {};
+    }
+    sink.on_open(*rh, root);
+
+    // One open structured node's traversal state: a cursor over its children
+    // region and the walk position within it.
+    struct frame_t {
+        Cursor body;
+        std::size_t pos = 0;
+    };
+    std::pmr::vector<frame_t> stack(&stack_mr);
+    // Reserve for the typical FWD nesting (~3-4), not max_depth: a full-depth
+    // reserve would draw ~1 KiB on EVERY decode, which a 16 KB-slab arena cannot
+    // spare; deeper frames grow (bounded by the cap).
+    stack.reserve(8);
+    stack.push_back(frame_t{root.region(rh->header, rh->length), 0});
+
+    while (!stack.empty()) {
+        frame_t& top = stack.back();
+        if (top.pos == top.body.size()) {
+            sink.on_close();  // node complete — seal / graft
+            stack.pop_back();
+            continue;
+        }
+        // A child of the open node sits at depth == stack.size(); reject at the cap.
+        if (stack.size() >= max_depth) return std::unexpected(err_t::TLV_NESTING_TOO_DEEP);
+        const auto ch =
+            parse_header(top.body.region(top.pos, top.body.size() - top.pos), crc_policy);
+        if (!ch) return std::unexpected(ch.error());
+        const Cursor node = top.body.region(top.pos, ch->total);  // the child's own bytes
+        top.pos += ch->total;
+        if (ch->opt.pl) {
+            sink.on_open(*ch, node);
+            stack.push_back(frame_t{node.region(ch->header, ch->length), 0});
+        } else {
+            sink.on_leaf(*ch, node);
+        }
+    }
+    return {};
 }
 
 }  // namespace tr::wire::grammar
