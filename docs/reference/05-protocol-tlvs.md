@@ -207,7 +207,7 @@ sequenceDiagram
     participant Prod as Producer node
     participant V as Vertex (transient-local)
     Cons->>Prod: FWD{WRITE, dst=/V, :subscribers[], src=/cons,<br/>SUBSCRIBER{ delivery_compact=1 }}
-    Prod->>V: add_remote_subscriber<br/>(retain return_route=/cons + inbound link)
+    Prod->>V: subscribe_wire — the ADR-0049 admission door<br/>(retain return_route=/cons + inbound link)
     Note over Prod,V: durability==1 ⇒ latch the current LKV
     Prod-->>Cons: FWD{WRITE, dst=/cons, VALUE}  (delivery #1 — the latch)
     Prod-->>Cons: FWD{REPLY} (subscribe ack)

@@ -228,9 +228,11 @@ class graph_t {
      * These `subscribe(...)` overloads are *host SDK sugar*, not new wire primitives: the
      * wire data API stays read/write/await (ADR-0006). On the wire, subscription is a
      * consumer-initiated SUBSCRIBER write into the producer's `:subscribers[]` field
-     * (ADR-0026), exactly as connect() is sugar over that field-write. Routing these helpers
-     * through the `:subscribers[]` field-write surface (rather than the current direct path)
-     * is tracked in #59.
+     * (ADR-0026), exactly as connect() is sugar over that field-write. Per ADR-0049 (#59)
+     * this overload ENCODES a `SUBSCRIBER{PATH}` TLV and enters the same `:subscribers[]`
+     * field-write admission door as a wire subscribe — one parse, one SUBSCRIBE gate, one
+     * durability latch, and the edge's stored SUBSCRIBER view reads back byte-identically
+     * from `:subscribers[]`.
      */
     [[nodiscard]] result_t<void> subscribe(const path_t& src, const path_t& target);
     /**
@@ -238,7 +240,10 @@ class graph_t {
      *        delivery to src with a cloned view).
      *
      * Delivery is value-agnostic (RFC-0008): WHICH vertices a sweep propagates is the
-     * source vertex's delivery_mode, not a per-edge policy.
+     * source vertex's delivery_mode, not a per-edge policy. A `std::function` cannot ride
+     * a TLV, so this overload skips the door's parse — but it enters the SAME single
+     * admission step (SUBSCRIBE gate → append → durability latch, ADR-0049) as every
+     * other door.
      */
     [[nodiscard]] result_t<void> subscribe(const path_t& src,
                                            std::function<void(const rope_t&)> callback);
@@ -277,24 +282,25 @@ class graph_t {
     void set_subject_resolver(subject_resolver_t resolver);
 
     /**
-     * @brief Store a REMOTE subscriber on @p v — the wire dual of local @ref subscribe sugar.
+     * @brief The wire `:subscribers[]` APPEND — the same admission door as the local
+     *        sugars and field-writes (ADR-0049), plus the remote delivery binding.
      *
-     * Creates a SUBSCRIBER slot carrying the consumer's @p return_route (a view over a
-     * refcounted segment — the ONE copy of the route, made by the caller at subscribe;
-     * every later delivery clones the refcount, ADR-0041 §2), this node's NAME for its
-     * @p link, and the @p delivery_compact opt-in, so a later write fans out a
-     * `FWD{WRITE}`/COMPACT delivery via the remote sink. Driven by the FWD resolver on an
-     * inbound `:subscribers[]` WRITE (#59/#136). If @p v is transient-local
-     * (`settings.durability == 1`) and already holds a value, the current LKV is latched to
-     * this subscriber immediately (one synchronous sink call, RFC-0004 §D). @p source_view
-     * (the SUBSCRIBER TLV) is retained zero-copy so a `:subscribers[]` read serves it back.
-     * `NOT_FOUND` is impossible (the caller holds @p v). Producer fan-out gate (#81,
-     * ADR-0026): @p link is the caller context — the append requires the SUBSCRIBE right on
-     * @p v's `:acl`, else `PERMISSION_DENIED`.
+     * Called by the FWD resolver on an inbound `:subscribers[]` WRITE (#59/#136); it
+     * replaces the retired `add_remote_subscriber` parallel API. @p source_view (the
+     * SUBSCRIBER TLV, an owned copy) is parsed ONCE here — the `delivery_compact` opt-in
+     * comes from this parse (the resolver no longer parses it in parallel) and the view is
+     * retained zero-copy so a `:subscribers[]` read serves it back. A PATH child, if
+     * present, names the consumer at ITS origin and is deliberately NOT bound as a local
+     * re-dispatch target — remote delivery rides @p return_route (a view over a refcounted
+     * segment — the ONE copy of the route; every later delivery clones the refcount,
+     * ADR-0041 §2) over @p link via the remote sink. Admission is the single ADR-0049
+     * step: SUBSCRIBE gate on @p v's `:acl` under @p link (#81, ADR-0026,
+     * `PERMISSION_DENIED` on denial) → slot append → durability latch (if @p v is
+     * transient-local, `settings.durability == 1`, and holds a value, the LKV is latched
+     * to this subscriber — one synchronous sink call, RFC-0004 §D).
      */
-    [[nodiscard]] result_t<void> add_remote_subscriber(vertex_t* v, view_t source_view,
-                                                       view_t return_route, std::string link,
-                                                       bool delivery_compact);
+    [[nodiscard]] result_t<void> subscribe_wire(vertex_t* v, view_t source_view,
+                                                view_t return_route, std::string link);
 
     /**
      * @brief Read by path — resolve the path key once (guarded map lookup), then the hot path.
@@ -387,6 +393,12 @@ class graph_t {
     // a newborn's creation-time sum and this walk never double-count).
     void note_subscriber_added(vertex_t* v);
     void note_subscriber_removed(vertex_t* v);
+    // The single SUBSCRIBER admission step (ADR-0049): SUBSCRIBE gate under `caller` →
+    // slot append → transient-local durability latch (delivered outside the lock, per
+    // the edge's kind) → RFC-0005 bookkeeping. Every door — the two subscribe() sugars,
+    // the local `:subscribers[]` field-write, and the wire subscribe_wire — ends here,
+    // so gate and latch semantics cannot diverge per entry point.
+    result_t<void> admit_subscriber(vertex_t* v, subscriber_t s, std::string_view caller);
     // Field surface: ":settings.<f>", ":subscribers[]" / "[N]", ":children[]".
     result_t<void> field_write(vertex_t* v, const field_path_t& field, const view_t& value,
                                std::string_view caller);

@@ -773,64 +773,53 @@ result_t<std::vector<rope_t>> graph_t::history(vertex_t* v) const {
     return out;
 }
 
-result_t<void> graph_t::subscribe(const path_t& src, const path_t& target) {
-    vertex_t* v = find(src.key());
-    if (!v) return std::unexpected(status_t::NOT_FOUND);
-    // The local sugar is the same :subscribers[] append — same producer-side SUBSCRIBE
-    // gate (#81, ADR-0026), under the empty (local) caller context, so a resolver that
-    // assigns local callers a subject sees these too.
-    if (!acl_allows(v, {}, acl_right_t::SUBSCRIBE))
-        return std::unexpected(status_t::PERMISSION_DENIED);
-    subscriber_t s;
-    s.target_key.assign(target.key().begin(), target.key().end());
-    {
-        const std::lock_guard lock(v->m_);
-        v->subs_.push_back(std::move(s));
+namespace {
+
+// Parse a SUBSCRIBER TLV into slot fields — the ONE parse every admission door shares
+// (ADR-0049; the resolver's parallel subscriber_compact() parse is retired). Extracts
+// the first PATH child's target key (may stay empty — the wire door ignores it) and
+// the optional qos_settings `delivery_compact` opt-in (NAME "delivery_compact" VALUE
+// u8, RFC-0004 §E.1 / docs/reference/05). Back-compat: a SUBSCRIBER without it (or an
+// older parser) just keeps the full-route delivery path — existing conformance vectors
+// unaffected.
+void parse_subscriber_tlv(const tlv_t& sub, subscriber_t& s) {
+    for (const tlv_t& child : sub.children) {
+        if (child.type == type_t::PATH && s.target_key.empty()) {
+            s.target_key = wire::path_key(child);
+        } else if (child.type == type_t::SETTINGS) {
+            const std::vector<tlv_t>& q = child.children;
+            for (std::size_t i = 0; i + 1 < q.size(); ++i) {
+                if (q[i].type != type_t::NAME || q[i + 1].type != type_t::VALUE) continue;
+                if (detail::as_string_view(q[i].payload) == "delivery_compact")
+                    s.delivery_compact = detail::load_le<std::uint8_t>(q[i + 1].payload) != 0;
+            }
+        }
     }
-    note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
-    return {};
 }
 
-result_t<void> graph_t::subscribe(const path_t& src, std::function<void(const rope_t&)> callback) {
-    vertex_t* v = find(src.key());
-    if (!v) return std::unexpected(status_t::NOT_FOUND);
-    if (!acl_allows(v, {}, acl_right_t::SUBSCRIBE))  // same gate as the target overload
+}  // namespace
+
+result_t<void> graph_t::admit_subscriber(vertex_t* v, subscriber_t s, std::string_view caller) {
+    // The single admission step (ADR-0049): every door lands here, so the SUBSCRIBE gate
+    // and the transient-local durability latch apply UNIFORMLY — which invariants fire no
+    // longer depends on which door an edge entered through.
+    // Producer fan-out gate (#81, ADR-0026): appending a subscriber edge requires the
+    // SUBSCRIBE right on this (the producer's) :acl, under the door's caller context.
+    if (!acl_allows(v, caller, acl_right_t::SUBSCRIBE))
         return std::unexpected(status_t::PERMISSION_DENIED);
-    subscriber_t s;
-    s.callback = std::move(callback);
-    {
-        const std::lock_guard lock(v->m_);
-        v->subs_.push_back(std::move(s));
-    }
-    note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
-    return {};
-}
-
-void graph_t::set_remote_delivery_sink(
-    std::function<void(const remote_delivery_t&, const rope_t&)> sink) {
-    remote_sink_ = std::move(sink);
-}
-
-result_t<void> graph_t::add_remote_subscriber(vertex_t* v, view_t source_view, view_t return_route,
-                                              std::string link, bool delivery_compact) {
-    // Producer fan-out gate (#81, ADR-0026): a remote subscribe requires the SUBSCRIBE
-    // right on the PRODUCER's :acl, under the inbound link as the caller context.
-    if (!acl_allows(v, link, acl_right_t::SUBSCRIBE))
-        return std::unexpected(status_t::PERMISSION_DENIED);
-    subscriber_t s;
-    s.caller = link;  // the fan-in gate context this edge's deliveries run under (#81)
-    s.delivery_compact = delivery_compact;
-    s.return_route = std::move(return_route);
-    s.link = std::move(link);
-    s.source_view = std::move(source_view);
 
     // Latch the current value to the new subscriber iff the producer is transient-local
-    // (durability == 1) and already holds an LKV (RFC-0004 §D / Q4). Snapshot the slot's
-    // remote fields + the LKV under the lock, then deliver OUTSIDE it (the sink does
-    // transport I/O), mirroring fan_out's lock discipline.
+    // (durability == 1) and already holds an LKV (RFC-0004 §D / Q4) — for EVERY door, not
+    // just the wire one (the ADR-0049 behavior alignment). Snapshot the slot's delivery
+    // fields + the LKV under the lock, then deliver OUTSIDE it (the remote sink does
+    // transport I/O; a callback / target re-dispatch may re-enter the graph), mirroring
+    // fan_out's lock discipline.
     std::shared_ptr<const rope_t> latch;
-    std::string latch_link;  // owning copy — the snapshot below outlives the lock;
-    view_t latch_route;      // the route snapshot is a refcount clone (no byte copy).
+    std::function<void(const rope_t&)> latch_callback;
+    std::vector<std::byte> latch_target;
+    std::string latch_caller;  // owning copies — the snapshot below outlives the lock;
+    std::string latch_link;
+    view_t latch_route;  // the route snapshot is a refcount clone (no byte copy).
     bool latch_compact = false;
     {
         const std::lock_guard lock(v->m_);
@@ -839,6 +828,9 @@ result_t<void> graph_t::add_remote_subscriber(vertex_t* v, view_t source_view, v
             if (std::shared_ptr<const rope_t> lkv = v->lkv_.load()) {
                 const subscriber_t& stored = v->subs_.back();
                 latch = std::move(lkv);
+                latch_callback = stored.callback;
+                latch_target = stored.target_key;
+                latch_caller = stored.caller;
                 latch_link = stored.link;
                 latch_route = stored.return_route;
                 latch_compact = stored.delivery_compact;
@@ -846,7 +838,18 @@ result_t<void> graph_t::add_remote_subscriber(vertex_t* v, view_t source_view, v
         }
     }
     note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
-    if (latch && remote_sink_) {
+
+    if (!latch) return {};
+    // One immediate delivery, per edge kind — the same three legs fan_out dispatches.
+    if (latch_callback) latch_callback(*latch);
+    if (!latch_target.empty()) {
+        if (vertex_t* target = find(latch_target)) {
+            // Fan-in gate (#81): an ordinary write to the target under the edge's stored
+            // caller context; denial drops the latch delivery, never the edge.
+            (void)write_impl(target, *latch, 1, latch_caller);
+        }
+    }
+    if (!latch_link.empty() && remote_sink_) {
         remote_sink_(
             remote_delivery_t{
                 .link = latch_link, .return_route = latch_route, .delivery_compact = latch_compact},
@@ -855,51 +858,83 @@ result_t<void> graph_t::add_remote_subscriber(vertex_t* v, view_t source_view, v
     return {};
 }
 
+result_t<void> graph_t::subscribe(const path_t& src, const path_t& target) {
+    vertex_t* v = find(src.key());
+    if (!v) return std::unexpected(status_t::NOT_FOUND);
+    // ADR-0049: the sugar ENCODES the same SUBSCRIBER{PATH} TLV a wire subscribe carries
+    // and enters the field-write door — subscribe-time is control-plane-cold, so the
+    // encode/parse round-trip is irrelevant, and the edge reads back from :subscribers[]
+    // byte-identically to a wire-made one. The target path's key IS the PATH payload
+    // (the concatenated NAME children, docs/reference/03), embedded verbatim. Runs under
+    // the empty (local) caller context, so a resolver that assigns local callers a
+    // subject sees these too (#81, ADR-0026).
+    const std::span<const std::byte> key = target.key();
+    std::vector<std::byte> sub;
+    sub.reserve(8 + key.size());
+    wire::emit_header(sub, type_t::SUBSCRIBER, opt_t{.pl = true}, 4 + key.size());
+    wire::emit_header(sub, type_t::PATH, opt_t{.pl = true}, key.size());
+    sub.insert(sub.end(), key.begin(), key.end());
+    const std::optional<view_t> value = view::over_bytes(sub);
+    if (!value) return std::unexpected(status_t::BACKPRESSURE);
+    field_path_t field;
+    field.steps.push_back(field_step_t{.name = "subscribers", .indexed = true, .append = true});
+    return field_write(v, field, *value, {});
+}
+
+result_t<void> graph_t::subscribe(const path_t& src, std::function<void(const rope_t&)> callback) {
+    vertex_t* v = find(src.key());
+    if (!v) return std::unexpected(status_t::NOT_FOUND);
+    // A std::function cannot ride a TLV, so this sugar has no parse to share — it still
+    // enters the same single admission step as every other door (ADR-0049), under the
+    // empty (local) caller context.
+    subscriber_t s;
+    s.callback = std::move(callback);
+    return admit_subscriber(v, std::move(s), {});
+}
+
+void graph_t::set_remote_delivery_sink(
+    std::function<void(const remote_delivery_t&, const rope_t&)> sink) {
+    remote_sink_ = std::move(sink);
+}
+
+result_t<void> graph_t::subscribe_wire(vertex_t* v, view_t source_view, view_t return_route,
+                                       std::string link) {
+    // Parse the owned SUBSCRIBER copy ONCE (ADR-0049) — delivery_compact comes from this
+    // parse (the resolver's parallel subscriber_compact() is retired); the tlv_t borrows
+    // source_view's bytes, which the slot then retains zero-copy.
+    const auto sub = view_as_tlv(source_view);
+    if (!sub || sub->type != type_t::SUBSCRIBER) return std::unexpected(status_t::TYPE_MISMATCH);
+    subscriber_t s;
+    parse_subscriber_tlv(*sub, s);
+    // A PATH child names the consumer at ITS origin — never a local re-dispatch target;
+    // remote delivery rides the return route over the link (RFC-0004 §D).
+    s.target_key.clear();
+    s.caller = link;  // the fan-in gate context this edge's deliveries run under (#81)
+    s.return_route = std::move(return_route);
+    s.source_view = std::move(source_view);
+    s.link = std::move(link);
+    const std::string gate_ctx = s.caller;  // survives the move below (the SUBSCRIBE gate
+                                            // runs under the inbound link, #81/ADR-0026)
+    return admit_subscriber(v, std::move(s), gate_ctx);
+}
+
 result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, const view_t& value,
                                     std::string_view caller) {
     const field_step_t& step0 = field.steps[0];
 
     if (step0.name == "subscribers") {
         if (step0.append) {
-            // Producer fan-out gate (#81, ADR-0026): appending a subscriber edge
-            // requires the SUBSCRIBE right on this (the producer's) :acl.
-            if (!acl_allows(v, caller, acl_right_t::SUBSCRIBE))
-                return std::unexpected(status_t::PERMISSION_DENIED);
             const auto sub = view_as_tlv(value);
             if (!sub || sub->type != type_t::SUBSCRIBER)
                 return std::unexpected(status_t::TYPE_MISMATCH);
             subscriber_t s;
-            for (const auto& child : sub->children) {
-                if (child.type == type_t::PATH) {
-                    s.target_key = wire::path_key(child);
-                    break;
-                }
-            }
+            parse_subscriber_tlv(*sub, s);  // the shared door parse (ADR-0049)
             if (s.target_key.empty()) return std::unexpected(status_t::TYPE_MISMATCH);
-            // Parse the optional qos_settings SETTINGS for the route-handle opt-in
-            // (NAME "delivery_compact" VALUE u8, RFC-0004 §E.1 / docs/reference/05).
-            // Back-compat: a SUBSCRIBER without it (or an older parser) just keeps
-            // the full-route delivery path — existing conformance vectors unaffected.
-            for (const auto& child : sub->children) {
-                if (child.type != type_t::SETTINGS) continue;
-                const std::vector<tlv_t>& q = child.children;
-                for (std::size_t i = 0; i + 1 < q.size(); ++i) {
-                    if (q[i].type != type_t::NAME || q[i + 1].type != type_t::VALUE) continue;
-                    const std::span<const std::byte> nm = q[i].payload;
-                    const std::string_view name(detail::as_string_view(nm));
-                    if (name == "delivery_compact")
-                        s.delivery_compact = detail::load_le<std::uint8_t>(q[i + 1].payload) != 0;
-                }
-            }
             s.source_view = value;  // retain the SUBSCRIBER TLV zero-copy (refcount clone) so a
                                     // later :subscribers[] read ropes it into the REPLY (ADR-0035).
             s.caller.assign(caller);  // the fan-in gate context for this edge's deliveries (#81)
-            {
-                const std::lock_guard lock(v->m_);
-                v->subs_.push_back(std::move(s));
-            }
-            note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
-            return {};
+            // The single admission step (ADR-0049): SUBSCRIBE gate → append → latch.
+            return admit_subscriber(v, std::move(s), caller);
         }
         if (step0.indexed) {  // clear a subscriber slot (unsubscribe) — a control write
             if (!acl_allows(v, caller, acl_right_t::WRITE))
