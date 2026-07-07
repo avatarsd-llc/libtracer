@@ -154,13 +154,21 @@ COMPARE_INTRO = """\
 
 A side-by-side comparison against [Eclipse Zenoh](https://zenoh.io) (zenoh-c 1.9.0, peer
 mode). Two surfaces: three **in-process** axes — subscriber **fan-out**, **payload** size,
-and **topic count** — and a **network** comparison over the real loopback kernel path,
-run as a separate publisher and subscriber **process** for each engine (the same
-two-process topology, so it is fair) across **UDP** and **TCP**. Both engines are built
+and **topic count** — and a **network** comparison over the real loopback kernel path. Both engines are built
 `-O3` and measured in the **same pass on the same runner**, so the numbers are directly
 comparable on identical hardware. The charts plot **absolute** throughput / latency /
 bandwidth — libtracer and Zenoh as two series on shared axes — so you read the real
 numbers off the graph; there are no speed-up ratios.
+
+Network **throughput** is charted against **composition size K**, because throughput here
+comes from *batching*, and the two engines batch differently. libtracer batches by
+**composition**: a composite endpoint's value is a K-link rope already in memory, shipped
+as **one datagram** (`send(iov)` — one syscall for K values), so effective values/s scale
+with K *at flat latency*. Zenoh has no composite send; its throughput is the transport's
+**timer-batched** put rate, independent of K — so it plots as a flat reference. (A single
+one-value-per-`send` rate would be the unbatched worst case for libtracer and is not the
+throughput path.) Network **latency** is the separate per-transport (**UDP** / **TCP**),
+single-value, two-process measurement — the same topology for both engines, so it is fair.
 
 WebSocket and QUIC are not yet charted: libtracer's WebSocket transport shows large
 single-run latency spikes under this bench (order-of-magnitude p50 jitter) that would make

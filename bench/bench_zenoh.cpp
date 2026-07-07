@@ -89,6 +89,25 @@ void run_grid(Session& session) {
             run(session, S, 1, E, "inproc-path", kGridBudget, kGridLatBudget);
 }
 
+// Egress-throughput reference for the composition (K) axis. Zenoh has no composite send:
+// its throughput comes from the transport's put-batching timer, which is independent of
+// any application grouping — so its effective values/s is essentially FLAT across K. We
+// measure the raw put egress rate once and report it at every K, as the flat reference the
+// libtracer scatter curve (one sendmsg for K values) is plotted against (bench_scatter).
+void run_scatter(Session& session) {
+    auto pub = session.declare_publisher(KeyExpr("bench/scatter"));
+    const std::vector<std::uint8_t> payload(kRefSize, 0xAB);
+    for (std::size_t i = 0; i < 20000; ++i) pub.put(Bytes(payload));  // warmup
+    const std::size_t N = 500000;
+    const auto t0 = now_ns();
+    for (std::size_t i = 0; i < N; ++i) pub.put(Bytes(payload));
+    const double secs = (now_ns() - t0) / 1e9;
+    const double put_rate = secs > 0 ? N / secs : 0;  // values/s (K-independent)
+    for (std::size_t K : {std::size_t{1}, std::size_t{8}, std::size_t{64}, std::size_t{256}})
+        emit("zenoh", "scatter", kRefSize, K, 1, put_rate / static_cast<double>(K), put_rate,
+             put_rate * static_cast<double>(kRefSize) / 1e6, Latency::Summary{});
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -96,6 +115,10 @@ int main(int argc, char** argv) {
     auto session = Session::open(Config::create_default());
     if (argc > 1 && std::string_view(argv[1]) == "grid") {
         run_grid(session);
+        return 0;
+    }
+    if (argc > 1 && std::string_view(argv[1]) == "scatter") {
+        run_scatter(session);
         return 0;
     }
     for (std::size_t F : kFanouts) run(session, kRefSize, F, kRefEndpoints, "inproc");

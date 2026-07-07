@@ -12,17 +12,19 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release >/dev/null
-cmake --build build --target bench_libtracer bench_transports -j >/dev/null
+cmake --build build --target bench_libtracer bench_transports bench_scatter -j >/dev/null
 cmake --build build --target bench_zenoh bench_zenoh_net -j >/dev/null 2>&1 || true
 
 res="$(mktemp)"
 ./build/bench_libtracer grid >>"$res" 2>/dev/null                # in-process axes
+./build/bench_scatter >>"$res" 2>/dev/null                       # network throughput vs composition K
 if [ -x ./build/bench_zenoh ]; then
     ./build/bench_zenoh grid >>"$res" 2>/dev/null
+    ./build/bench_zenoh scatter >>"$res" 2>/dev/null             # zenoh's flat timer-batched put rate
 else
     echo "(zenoh not vendored — run ./fetch_zenoh.sh for the comparison)" >&2
 fi
-bash run_net.sh >>"$res" 2>/dev/null || true                     # network transports (UDP/TCP, 2-process)
+bash run_net.sh >>"$res" 2>/dev/null || true                     # network per-transport latency (UDP/TCP, 2-process)
 
 python3 render_compare.py --standalone --prov "local preview ($(date -u +%Y-%m-%dT%H:%MZ))" \
     <"$res" >preview.html

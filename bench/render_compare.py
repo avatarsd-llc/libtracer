@@ -148,22 +148,33 @@ def build(rows: list[dict]) -> dict:
     # --- network transports: per-transport libtracer-vs-Zenoh over the real kernel path ---
     # Present only if the transport benches ran (mode `net-<proto>`); each transport gets a
     # throughput and a latency chart vs payload, both engines on shared axes.
+    # Throughput comes from BATCHING, so we chart it against composition size K, not a
+    # single-message rate: libtracer ships K values as one composite datagram (one
+    # sendmsg for the K-link rope), so effective values/s scales with K at flat latency;
+    # Zenoh has no composite send — its throughput is the transport's timer-batched put
+    # rate, independent of K, so it plots as a flat reference. (mode `scatter`.)
+    sc = {sys: [[p[0], p[1]] for p in _series(rows, sys, "scatter", {"size": REF_SIZE, "ep": 1}, "fan", ["deliv"])]
+          for sys in ("libtracer", "zenoh")}
+    if sc["libtracer"] and sc["zenoh"]:
+        charts.append({"id": "net-tp-compose", "title": "Network throughput vs composition size",
+                       "cond": f"{f_bytes(REF_SIZE)} values · one datagram per composite · effective values delivered",
+                       "x": {"log": True, "fmt": "count", "label": "values per composite (K)"},
+                       "y": {"log": True, "fmt": "rate", "label": "effective values / second"},
+                       "series": sc, "reading": reading(sc, f_rate)})
+
+    # Per-transport LATENCY (single value, paced) — the throughput chart above is the
+    # batched-composition story; a single-message net throughput would be the unbatched
+    # worst case for libtracer and is deliberately not charted.
     net_specs = []
     for proto in ("udp", "tcp", "ws"):
         mode = f"net-{proto}"
         spec = {"mode": mode, "fixed": {"fan": 1, "ep": 1}, "axis": "size"}
-        s = two(**{**spec, "col": "deliv"})
-        if not (s["libtracer"] and s["zenoh"]):
+        sl = two(**{**spec, "col": "p50"})
+        if not (sl["libtracer"] and sl["zenoh"]):
             continue  # only chart a transport when BOTH engines measured it — never one-sided
         net_specs.append((proto, spec))
-        charts.append({"id": f"net-tp-{proto}", "title": f"{proto.upper()} — throughput vs payload",
-                       "cond": "one publisher · one subscriber · loopback kernel path",
-                       "x": {"log": True, "fmt": "bytes", "label": "payload size"},
-                       "y": {"log": True, "fmt": "rate", "label": "messages / second"},
-                       "series": s, "reading": reading(s, f_rate, label_x=f_bytes)})
-        sl = two(**{**spec, "col": "p50"})
         charts.append({"id": f"net-lat-{proto}", "title": f"{proto.upper()} — p50 latency vs payload",
-                       "cond": "one-way, same-clock · loopback kernel path",
+                       "cond": "one-way, same-clock · loopback kernel path · single value",
                        "x": {"log": True, "fmt": "bytes", "label": "payload size"},
                        "y": {"log": True, "fmt": "ns", "label": "p50 latency"},
                        "series": sl, "reading": reading(sl, f_ns, label_x=f_bytes)})
@@ -173,7 +184,7 @@ def build(rows: list[dict]) -> dict:
     sweeps = [("fan-out", fan, f_count, "deliv", None),
               ("payload", pay, f_bytes, "deliv", "mbps"),
               ("topics", top, f_count, "pub", None)]
-    sweeps += [(f"net-{proto}", spec, f_bytes, "deliv", "mbps") for proto, spec in net_specs]
+    # (network compose-throughput and per-transport latency are shown in the charts above.)
     for si, (label, spec, xf, rate_col, bw_col) in enumerate(sweeps):
         for sys in ("libtracer", "zenoh"):
             cols = [rate_col, "p50"] + ([bw_col] if bw_col else [])
