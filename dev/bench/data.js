@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783443870620,
+  "lastUpdate": 1783452100421,
   "repoUrl": "https://github.com/avatarsd-llc/libtracer",
   "entries": {
     "libtracer in-process latency (ns, smaller is better)": [
@@ -701,6 +701,60 @@ window.BENCHMARK_DATA = {
           {
             "name": "inproc-borrow 64B/fan1/1ep ns/delivery",
             "value": 194,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "15184545+AvatarSD@users.noreply.github.com",
+            "name": "avatarsd",
+            "username": "AvatarSD"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "2246eb521b1dc4793b773259540d82e0952a2cc8",
+          "message": "Merge pull request #318 from avatarsd-llc/fix/esp-component-self-contained\n\nfix(esp): publish a self-contained ESP component archive",
+          "timestamp": "2026-07-07T22:20:57+03:00",
+          "tree_id": "fba1c316aa1c34669e0b0b9b229ee26e3b40928f",
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/2246eb521b1dc4793b773259540d82e0952a2cc8"
+        },
+        "date": 1783452100087,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "inproc 64B/fan1/1ep p50 latency",
+            "value": 255,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan1/1ep p99 latency",
+            "value": 266,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan1/1ep ns/delivery",
+            "value": 242.5,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep p50 latency",
+            "value": 230,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep p99 latency",
+            "value": 250,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep ns/delivery",
+            "value": 208.6,
             "unit": "ns"
           }
         ]
