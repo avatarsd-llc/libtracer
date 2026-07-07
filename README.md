@@ -40,7 +40,7 @@ The same protocol scales across a deployment spectrum (modules layer on a common
 | **1** | Single-transport leaf | one transport (UART/CAN) — an RC car, a CAN sensor |
 | **2** | **Gateway** (CAN + WebSocket) | a 2nd transport + stateless source-routed forwarding — e.g. a grow controller fanning a CAN sensor field to a web UI |
 | **3** | RTSP / camera source | lazy on-demand streams as rope groups |
-| **4** | ROS 2 node (`rmw_tracer`) | drop-in RMW: `RMW_IMPLEMENTATION=rmw_tracer`, no node code changes |
+| **4** | ROS 2 node (`rmw_tracer`) | drop-in RMW (`RMW_IMPLEMENTATION=rmw_tracer`), no node code changes — **roadmap; an early stub today** |
 | **5** | Flagship | 100 ksps STM32 → CAN → **GPU tensor cores**, zero host copy |
 
 A "smart device" here is **any node that translates an incompatible protocol (Modbus, Z-Wave, vendor-X) into libtracer** — making the legacy device a first-class citizen of the graph.
@@ -76,8 +76,8 @@ Every arrow speaks one protocol; the bridge forwards typed state across transpor
 
 - **A wire-format specification** ([docs/spec/](docs/spec/)) — versioned, normative, conformance-tested. Implement it in any language and you are libtracer-compatible.
 - **A C++ reference implementation** ([core/](core/)) — header-first, no-RTTI, no-exceptions; ESP32 / STM32 / bare-metal capable. Apache 2.0.
-- **Native language cores, kept in lock-step by shared conformance vectors** (not FFI bindings) — [Rust](bindings/rust/) and TypeScript ([`@avatarsd-llc/libtracer`](bindings/typescript/), a pure-TS client SDK). Each ships a conformance harness and is CI-gated against the same vectors, so the cores can't drift.
-- **Platform integrations** — [PlatformIO](integrations/platformio/), [ESPHome](integrations/esphome/), [Arduino](integrations/arduino/), [ESP-IDF](integrations/esp-idf/) (managed component; P0 in-process profile, CI-built for esp32c6).
+- **Native-language wire codecs, kept in lock-step by shared conformance vectors** (not FFI bindings) — a from-scratch [Rust](bindings/rust/) and TypeScript ([`@avatarsd-llc/libtracer`](bindings/typescript/)) implementation of the L2/L3 **codec** (not the graph runtime). Each ships a conformance harness and is CI-gated against the same vectors as the C++ core, so they can't drift. Both are pre-1.0: the Rust crate is **not yet on crates.io**, and TypeScript's client SDK and transports are **experimental** packages layered on the published codec.
+- **Platform integrations** — [ESP-IDF](integrations/esp-idf/) is a working managed component (the **full-node** profile — graph + FWD router + udp/tcp/ws/can transports + TWAI — CI-built for esp32c6 and esp32c3, plus a linux run). [PlatformIO](integrations/platformio/), [ESPHome](integrations/esphome/), and [Arduino](integrations/arduino/) are **packaging stubs today** (ESPHome is a no-op placeholder).
 - **Conformance test vectors** ([tests/conformance/](tests/conformance/)) — the same vectors every implementation runs. Pass them and you interoperate (`tests/conformance/run-all.py`).
 
 ## Open community + proprietary products — three layers
@@ -99,8 +99,8 @@ libtracer/
 │   ├── src/  tests/        Implementation + unit/conformance tests
 │   └── CMakeLists.txt
 ├── bindings/
-│   ├── rust/              Native Rust core → crates.io
-│   └── typescript/        Native pure-TS core → npm (@avatarsd-llc/libtracer)
+│   ├── rust/              Native Rust wire codec (pre-release; not on crates.io yet)
+│   └── typescript/        Native pure-TS codec → npm; client SDK + transports experimental
 ├── integrations/           platformio/ · esphome/ · arduino/ · esp-idf/
 ├── examples/               Runnable examples per platform
 ├── bench/                  libtracer↔zenoh benchmark + figures
