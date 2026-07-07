@@ -72,7 +72,7 @@ INTEGRATIONS = [
      ("✅", "esp32c6 + c3 + linux", ["integrations/esp-idf/libtracer/idf_component.yml", "integrations/esp-idf/libtracer/CMakeLists.txt"]),
      ("✅", "managed component", [])),
     ("Arduino", "port / packaging", "packages core as an Arduino library",
-     ("⚠️", "", ["integrations/arduino/library.properties"]), ("⚠️", "stub", [])),
+     ("—", "not planned", []), ("—", "not planned", [])),
     ("PlatformIO", "port / packaging", "ships + compiles the core (default portable set)",
      ("⚠️", "pack-verified", ["library.json"]), ("⚠️", "ships core; no pio consumer-build CI", [])),
     ("ESPHome", "—", "no-op placeholder component",
