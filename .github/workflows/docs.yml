@@ -34,6 +34,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  pull-requests: write # post the libtracer-vs-Zenoh absolute comparison as a PR comment
 
 # Allow one concurrent deployment; don't cancel an in-progress publish.
 concurrency:
@@ -52,7 +53,7 @@ jobs:
           cache-dependency-path: docs/requirements.txt
       - name: Install dependencies
         run: |
-          sudo apt-get update && sudo apt-get install -y doxygen
+          sudo apt-get update && sudo apt-get install -y doxygen unzip
           pip install -r docs/requirements.txt
       - uses: actions/setup-node@v4
         with:
@@ -74,12 +75,50 @@ jobs:
         run: |
           cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
           cmake --build core/build -j          # all test targets, for the live test report
+          bash bench/fetch_zenoh.sh || echo "zenoh fetch failed — comparison will be omitted"
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
           cmake --build bench/build --target bench_libtracer bench_codec bench_forward_heap -j
+          # zenoh is optional: build it separately so a missing/failed vendor never breaks
+          # the docs deploy (the comparison degrades to a note; libtracer numbers stand).
+          cmake --build bench/build --target bench_zenoh -j || echo "bench_zenoh unavailable — comparison omitted"
+      # Run the libtracer-vs-Zenoh sweep ONCE here; both the docs page and the PR comment
+      # consume this file (LIBTRACER_COMPARE_TSV) so the ~40s sweep isn't paid twice.
+      - name: Run the libtracer-vs-Zenoh comparison sweep
+        run: |
+          { ./bench/build/bench_libtracer grid; ./bench/build/bench_zenoh grid; } \
+            > "${RUNNER_TEMP}/compare.tsv" 2>/dev/null || true
       - name: Generate live performance + conformance page
         env:
           LIBTRACER_CXX_HARNESS: ${{ github.workspace }}/core/build/tests/conformance_runner
+          LIBTRACER_COMPARE_TSV: ${{ runner.temp }}/compare.tsv
         run: python3 bench/gen_results_page.py
+      # Absolute-number comparison table, upserted as a single sticky PR comment (option
+      # "publish result to pr"). Absolute values only — the full interactive charts land
+      # on the Performance page after merge.
+      - name: Post the absolute comparison on the PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const { execSync } = require('child_process');
+            const tsv = process.env.RUNNER_TEMP + '/compare.tsv';
+            let table;
+            try {
+              table = execSync('python3 bench/render_compare.py --md', { input: fs.readFileSync(tsv), encoding: 'utf8' });
+            } catch (e) { core.warning('comparison sweep produced no data; skipping PR comment'); return; }
+            const marker = '<!-- ltz-compare -->';
+            const body = `${marker}\n### 📊 libtracer vs Zenoh — absolute (this run)\n\n`
+              + `Measured on this CI runner, both engines \`-O3\` in the same pass. Absolute values, no ratios — `
+              + `shared-runner variance is real, read trends not the third digit. Interactive charts land on the `
+              + `[Performance page](https://avatarsd-llc.github.io/libtracer/performance.html) after merge.\n\n`
+              + table;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number });
+            const existing = comments.find(c => c.body.includes(marker));
+            if (existing) await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            else await github.rest.issues.createComment({ owner, repo, issue_number, body });
       - name: Generate live test report (ctest across every suite)
         run: python3 bench/gen_test_report.py
       - name: Build (sphinx-build, config in docs/, source = repo root)

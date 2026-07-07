@@ -4,3 +4,6 @@ build/
 .venv/
 perf_baseline.json
 benchmark_output.json
+# Local preview from grid.sh (the docs generate their own copy in CI).
+preview.html
+build-cmp/

@@ -26,8 +26,7 @@ using namespace bench;
 namespace {
 
 void run(Session& session, std::size_t S, std::size_t F, std::size_t E, const char* mode,
-         bool csv = false, std::uint64_t budget = kDeliveryBudget,
-         std::uint64_t latbudget = kLatencyDeliveryBudget) {
+         std::uint64_t budget = kDeliveryBudget, std::uint64_t latbudget = kLatencyDeliveryBudget) {
     std::atomic<std::uint64_t> recv{0};
     std::vector<Subscriber<void>> subs;
     std::vector<Publisher> pubs;
@@ -74,22 +73,20 @@ void run(Session& session, std::size_t S, std::size_t F, std::size_t E, const ch
     }
     const double pub_s = MSGS / secs;
     const double deliv_s = got / secs;
-    if (csv)
-        emit_csv("zenoh", S, F, E, pub_s, deliv_s, lat.summarize());
-    else
-        emit("zenoh", mode, S, F, E, pub_s, deliv_s, deliv_s * static_cast<double>(S) / 1e6,
-             lat.summarize());
+    emit("zenoh", mode, S, F, E, pub_s, deliv_s, deliv_s * static_cast<double>(S) / 1e6,
+         lat.summarize());
 }
 
-// Response-surface grid matching bench_libtracer's grid mode (CSV for plot.py).
+// Response-surface grid matching bench_libtracer's grid: size x fanout (mode
+// `inproc`) and size x endpoints (mode `inproc-path`). Emits the same mode-tagged
+// RESULT line as the default run so one parser feeds the docs comparison charts.
 void run_grid(Session& session) {
-    emit_csv_header();
     for (std::size_t S : kGridSizes)
         for (std::size_t F : kGridFanouts)
-            run(session, S, F, 1, "grid", true, kGridBudget, kGridLatBudget);
+            run(session, S, F, 1, "inproc", kGridBudget, kGridLatBudget);
     for (std::size_t S : kGridSizes)
         for (std::size_t E : kGridEndpoints)
-            run(session, S, 1, E, "grid", true, kGridBudget, kGridLatBudget);
+            run(session, S, 1, E, "inproc-path", kGridBudget, kGridLatBudget);
 }
 
 }  // namespace

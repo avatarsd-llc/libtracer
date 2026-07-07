@@ -65,7 +65,7 @@ enum class alloc_t { HEAP, BORROW };
 // writes through the path registry (lookup each publish) instead of the resolved
 // vertex_t* hot path — the honest "many topics" measurement.
 void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool by_path,
-                const char* mode, bool csv = false, std::uint64_t budget = kDeliveryBudget,
+                const char* mode, std::uint64_t budget = kDeliveryBudget,
                 std::uint64_t latbudget = kLatencyDeliveryBudget) {
     graph_t g;
     std::vector<vertex_t*> verts;
@@ -108,22 +108,20 @@ void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool
         put(i);
         lat.add(now_ns() - a);
     }
-    if (csv)
-        emit_csv("libtracer", S, F, E, pub_s, deliv_s, lat.summarize());
-    else
-        emit("libtracer", mode, S, F, E, pub_s, deliv_s, mb_s, lat.summarize());
+    emit("libtracer", mode, S, F, E, pub_s, deliv_s, mb_s, lat.summarize());
 }
 
-// Response-surface grid (system dynamics): size x fanout (endpoints=1) and
-// size x endpoints (fanout=1, write-by-path). Emits CSV for plot.py.
+// Response-surface grid (system dynamics): size x fanout (endpoints=1, mode
+// `inproc`) and size x endpoints (fanout=1, write-by-path, mode `inproc-path`).
+// Emits the standard mode-tagged RESULT line (same 12-field shape as the default
+// run) so one parser feeds both the terminal table and the docs comparison charts.
 void run_grid() {
-    emit_csv_header();
     for (std::size_t S : kGridSizes)
         for (std::size_t F : kGridFanouts)
-            run_inproc(S, F, 1, alloc_t::HEAP, false, "grid", true, kGridBudget, kGridLatBudget);
+            run_inproc(S, F, 1, alloc_t::HEAP, false, "inproc", kGridBudget, kGridLatBudget);
     for (std::size_t S : kGridSizes)
         for (std::size_t E : kGridEndpoints)
-            run_inproc(S, 1, E, alloc_t::HEAP, true, "grid", true, kGridBudget, kGridLatBudget);
+            run_inproc(S, 1, E, alloc_t::HEAP, true, "inproc-path", kGridBudget, kGridLatBudget);
 }
 
 // Mixed workload: 128 topics with varied fan-out (1..16) and payloads (1..8192).

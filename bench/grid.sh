@@ -2,28 +2,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 #
-# System-dynamics grid: sweep the log-spaced (payload x fan-out) and
-# (payload x topics) response surfaces for libtracer and zenoh, then render 2D
-# line plots, 3D surfaces, and libtracer/zenoh speedup heatmaps into figures/.
-# Vendor zenoh first with ./fetch_zenoh.sh; plotting needs the venv (see below).
+# Local preview of the libtracer-vs-Zenoh comparison: sweep the (payload x fan-out)
+# and (payload x topics) response surfaces for both engines, then render the SAME
+# absolute-value charts the docs publish into a self-contained preview.html you can
+# open in a browser. Vendor Zenoh first with ./fetch_zenoh.sh (otherwise only the
+# libtracer numbers appear). CI does this during the docs build (docs.yml); this is
+# the offline equivalent — no matplotlib, no committed figures.
 set -euo pipefail
 cd "$(dirname "$0")"
 
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release >/dev/null
-cmake --build build -j >/dev/null
+cmake --build build --target bench_libtracer bench_zenoh -j >/dev/null 2>&1 || \
+    cmake --build build --target bench_libtracer -j >/dev/null
 
-echo "system,size,fanout,endpoints,pub_s,deliv_s,p50_ns,p99_ns,mean_ns" >grid.csv
-./build/bench_libtracer grid | grep -v '^system,' >>grid.csv
+res="$(mktemp)"
+./build/bench_libtracer grid >>"$res" 2>/dev/null
 if [ -x ./build/bench_zenoh ]; then
-    ./build/bench_zenoh grid | grep -v '^system,' >>grid.csv
+    ./build/bench_zenoh grid >>"$res" 2>/dev/null
 else
     echo "(zenoh not vendored — run ./fetch_zenoh.sh for the comparison)" >&2
 fi
-echo "wrote grid.csv ($(( $(wc -l <grid.csv) - 1 )) rows)"
 
-# Plotting venv:  python3 -m venv .venv && ./.venv/bin/pip install matplotlib numpy
-if [ -x ./.venv/bin/python ]; then
-    ./.venv/bin/python plot.py grid.csv figures
-else
-    echo "(no .venv — create it: python3 -m venv .venv && ./.venv/bin/pip install matplotlib numpy)" >&2
-fi
+python3 render_compare.py --standalone --prov "local preview ($(date -u +%Y-%m-%dT%H:%MZ))" \
+    <"$res" >preview.html
+rm -f "$res"
+echo "wrote preview.html — open it in a browser for the absolute-value charts."
