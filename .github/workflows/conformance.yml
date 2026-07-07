@@ -33,7 +33,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             bindings/rust/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('bindings/rust/Cargo.toml', 'bindings/rust/src/**', 'bindings/rust/examples/**') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('bindings/rust/Cargo.toml', 'bindings/rust/src/**', 'bindings/rust/examples/**', 'bindings/rust/tests/**') }}
           restore-keys: cargo-${{ runner.os }}-
       - name: Build the C++ conformance harness (C++23)
         run: |
@@ -47,3 +47,10 @@ jobs:
         env:
           LIBTRACER_CXX_HARNESS: ${{ github.workspace }}/core/build/tests/conformance_runner
         run: python3 tests/conformance/diff_fuzz.py -n 2000
+      # The Rust binding's in-crate suite (typed builders/PATH/ERROR/FWD/FIELD/
+      # structured + the structural check that loads each vector's input.bin AND
+      # expected.json). The cross-core driver above only exercises the round-trip
+      # example; this gates the typed-decode semantics so they can't rot.
+      - name: Rust binding in-crate tests (typed codec + structural vectors)
+        working-directory: bindings/rust
+        run: cargo test
