@@ -30,4 +30,7 @@ use only on a physically trusted bus until `security_psk` lands.
 
 ## Status
 
-Stub.
+**Not planned.** The Arduino Library Manager path is not on the roadmap — the
+Arduino IDE toolchain and the AVR/no-STL targets it centers on are a poor fit for
+the C++23 core. Use the **PlatformIO** package (which ships and compiles the core)
+or the **ESP-IDF** managed component for embedded builds instead.
