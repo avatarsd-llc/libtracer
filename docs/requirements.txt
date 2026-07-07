@@ -7,3 +7,5 @@ furo>=2024.1.29
 sphinx-design>=0.6
 sphinxcontrib-mermaid>=0.9
 breathe>=4.35
+sphinx-sitemap>=2.6      # emit sitemap.xml (SEO)
+sphinxext-opengraph>=0.9 # Open Graph + Twitter cards + meta descriptions (SEO)
