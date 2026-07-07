@@ -5,7 +5,7 @@ Each subfolder packages the libtracer reference implementation for a specific pl
 | Integration | Distribution | Status |
 |-------------|--------------|--------|
 | [esp-idf/](esp-idf/) | ESP Component Registry (`idf_component.yml`) | managed component; P0 in-process profile built in CI for esp32c6 + esp32c3 (`.github/workflows/esp-idf.yml`) via the [`inprocess_mirror`](esp-idf/examples/inprocess_mirror/) example |
-| [platformio/](platformio/) | `registry.platformio.org` (`pio pkg publish`) | stub |
+| [platformio/](platformio/) | `registry.platformio.org` (`pio pkg publish`) | library ships + compiles the default core source set (codec + graph + tcp/udp/ws/can; CUDA/QUIC/WebTransport are opt-in and filtered out) |
 | [esphome/](esphome/) | `external_components:` git URL — no central registry | stub |
 | [arduino/](arduino/) | Arduino Library Manager | stub |
 
