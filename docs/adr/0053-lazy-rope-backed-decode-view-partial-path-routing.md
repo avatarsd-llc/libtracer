@@ -252,6 +252,6 @@ storage). Concretely:
   flattens are legitimate and stay.
 - **Follow-up (post-⑥), WS unmask double copy**: first attempt unmasking directly into
   a fresh segment (no L0 change); only if the codec shape forbids it, admit an
-  adopt-vector backend via an explicit [ADR-0047](0047-l0-module-set-compile-time-dispatch.md)
+  adopt-vector backend via an explicit [ADR-0047](0047-build-time-closed-module-sets-compile-time-seams.md)
   amendment. Until it lands, WS RX pays one extra copy per fragment — the one
   documented exception to the steady-state zero-copy requirement.
