@@ -10,9 +10,10 @@
 #
 # This is a SEPARATE, standalone workflow: it does NOT alter the required core
 # gates (build-test / sanitizers / tsan / format / doxygen) nor the ts.yml unit
-# gate. It runs ONLY on a published release, a `v*` tag push, or a manual
-# dispatch — never on every push. A manual dispatch defaults to a dry run, so the
-# pipeline is exercisable end-to-end without a token or an actual publish.
+# gate. It runs ONLY on a manual `workflow_dispatch` — it is intentionally NOT
+# wired to the core release tag (see the `on:` note below). A dispatch defaults
+# to a dry run, so the pipeline is exercisable end-to-end without a token or an
+# actual publish.
 #
 # Requires a repository secret `NPM_TOKEN` (an npm automation token for the
 # @avatarsd-llc org) for real publishes; the maintainer sets it. Provenance needs
@@ -20,11 +21,12 @@
 name: publish-npm
 
 on:
-  release:
-    types: [published]
-  push:
-    tags:
-      - "v*"
+  # npm publishing is DELIBERATELY DECOUPLED from the core release tag. The
+  # TypeScript packages version independently of the C++ core (a `v0.3.0` core
+  # tag does not imply a TS release — the packages are at their own 0.x versions,
+  # and republishing an already-published version would fail). So this workflow
+  # is manual-only: bump the TS package versions intentionally, then dispatch it
+  # (dry-run first). It no longer fires on a `v*` tag or a published Release.
   workflow_dispatch:
     inputs:
       dry-run:
@@ -64,10 +66,10 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run }}
         run: npm publish --workspaces --access public --dry-run
 
-      # Real publish on a release / v* tag, or a manual dispatch with
-      # dry-run=false. Private packages (the workspace root) are skipped.
+      # Real publish: a manual dispatch with dry-run=false. Private packages
+      # (the workspace root) are skipped by `npm publish --workspaces`.
       - name: Publish to npm
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry-run) }}
+        if: ${{ !inputs.dry-run }}
         run: npm publish --workspaces --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

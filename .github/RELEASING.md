@@ -73,9 +73,11 @@ force a binding release, or vice versa. They are intentionally *not* touched by
 
 ## Steps
 
-1. **Bump + changelog PR.** In one PR: set the three manifests above to `X.Y.Z`,
-   and move `core/CHANGELOG.md`'s `[Unreleased]` entries under a new
-   `## [X.Y.Z] — YYYY-MM-DD` heading. Merge it (signed, per DCO).
+1. **Bump + changelog PR.** In one PR: edit the [`VERSION`](../VERSION) file to
+   `X.Y.Z` and run `python3 tools/sync-version.py` (stamps the three manifests —
+   `version-consistency` CI verifies no drift), and move `core/CHANGELOG.md`'s
+   `[Unreleased]` entries under a new `## [X.Y.Z] — YYYY-MM-DD` heading. Merge it
+   (signed, per DCO).
 2. **Tag.** On the merge commit, create a **signed, annotated** tag and push it:
    ```sh
    git tag -s vX.Y.Z -m "libtracer vX.Y.Z"
@@ -83,21 +85,26 @@ force a binding release, or vice versa. They are intentionally *not* touched by
    ```
    From here CMake reports `X.Y.Z` for any checkout at that tag.
 3. **GitHub Release.** Publish a GitHub Release from the tag (release notes = the
-   new CHANGELOG section). Publishing the Release **triggers
-   [`publish-npm.yml`](workflows/publish-npm.yml)**, which publishes the three
-   scoped `@avatarsd-llc/*` TypeScript packages (needs the `NPM_TOKEN` secret; a
-   `v*` tag push also triggers it, and `workflow_dispatch` offers a dry run).
-4. **Manual publishes (not yet automated — do by hand when releasing that
-   surface):**
+   new CHANGELOG section). This is the **C++ core** release. It does **not**
+   publish npm — the tag/Release are deliberately **decoupled** from
+   `publish-npm.yml` (the TS packages version independently and republishing an
+   already-published version would fail). See step 4 for npm.
+4. **Package publishes (each independent — do the ones you're actually
+   releasing):**
+   - **npm (`@avatarsd-llc/*` TS packages)** — bump the TS package versions
+     intentionally (they are **not** the core version), then run
+     [`publish-npm.yml`](workflows/publish-npm.yml) via **`workflow_dispatch`**
+     (dry-run first; needs the `NPM_TOKEN` secret for a real publish). It is
+     manual-only — a core tag never triggers it.
    - **crates.io** — `cargo publish` from `bindings/rust/` (the crate is
      `libtracer`; versioned independently — only when the Rust binding is being
-     released).
+     released; not yet published).
    - **PlatformIO / Arduino / ESP Component Registry** — no publish workflow
-     exists yet; register/update from the manifests above per each registry's
-     process. *(Automating these is a TODO.)*
+     exists yet; register/update from the `VERSION`-stamped manifests per each
+     registry's process. *(Automating these is a TODO.)*
 5. **Verify.** Install from a clean checkout at the tag and confirm
    `find_package(libtracer X.Y REQUIRED)` resolves (the `install-consume` CI job
-   does this per-PR; re-confirm the tagged artifact). Check the published npm /
+   does this per-PR; re-confirm the tagged artifact). Check any published npm /
    crates versions.
 
 ## Notes
