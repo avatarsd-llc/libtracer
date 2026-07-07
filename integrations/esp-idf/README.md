@@ -21,7 +21,7 @@ Once published to the [ESP Component Registry](https://components.espressif.com/
 
 ```yaml
 dependencies:
-  avatarsd-llc/libtracer: "^0.0.1"
+  avatarsd-llc/libtracer: "^0.3.0"
 ```
 
 ## What the component packages
