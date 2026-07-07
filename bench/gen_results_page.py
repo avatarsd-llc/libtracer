@@ -154,14 +154,18 @@ COMPARE_INTRO = """\
 
 A side-by-side comparison against [Eclipse Zenoh](https://zenoh.io) (zenoh-c 1.9.0, peer
 mode). Two surfaces: three **in-process** axes — subscriber **fan-out**, **payload** size,
-and **topic count** — and a **network** comparison over the real loopback kernel path
-across three transports (**UDP**, **TCP**, **WebSocket**). The network charts render
-wherever both engines establish the link — reliably via `bench/grid.sh` locally; a
-sandboxed CI runner may omit the Zenoh side. Both engines are built `-O3`
-and measured in the **same pass on the same runner**, so the numbers are directly
+and **topic count** — and a **network** comparison over the real loopback kernel path,
+run as a separate publisher and subscriber **process** for each engine (the same
+two-process topology, so it is fair) across **UDP** and **TCP**. Both engines are built
+`-O3` and measured in the **same pass on the same runner**, so the numbers are directly
 comparable on identical hardware. The charts plot **absolute** throughput / latency /
 bandwidth — libtracer and Zenoh as two series on shared axes — so you read the real
-numbers off the graph; there are no speed-up ratios. Full harness in
+numbers off the graph; there are no speed-up ratios.
+
+WebSocket and QUIC are not yet charted: libtracer's WebSocket transport shows large
+single-run latency spikes under this bench (order-of-magnitude p50 jitter) that would make
+a published latency chart misleading, and QUIC needs the `-DLIBTRACER_WITH_QUIC` module
+(msquic + TLS). Full harness in
 [`bench/`](https://github.com/avatarsd-llc/libtracer/tree/main/bench)."""
 
 

@@ -80,21 +80,17 @@ jobs:
           cmake --build bench/build --target bench_libtracer bench_codec bench_forward_heap bench_transports -j
           # zenoh is optional: build it separately so a missing/failed vendor never breaks
           # the docs deploy (the comparison degrades to a note; libtracer numbers stand).
-          cmake --build bench/build --target bench_zenoh bench_zenoh_transports -j || echo "bench_zenoh unavailable — comparison omitted"
+          cmake --build bench/build --target bench_zenoh bench_zenoh_net -j || echo "bench_zenoh unavailable — comparison omitted"
       # Run the libtracer-vs-Zenoh sweep ONCE here; both the docs page and the PR comment
       # consume this file (LIBTRACER_COMPARE_TSV) so the ~40s sweep isn't paid twice.
       - name: Run the libtracer-vs-Zenoh comparison sweep
         run: |
           out="${RUNNER_TEMP}/compare.tsv"
           { ./bench/build/bench_libtracer grid; ./bench/build/bench_zenoh grid; } >"$out" 2>/dev/null || true
-          # network transports over real loopback sockets — best-effort, never fail the
-          # build (a flaky/absent transport just omits that chart).
-          { timeout 150 ./bench/build/bench_transports >>"$out" 2>/dev/null; } || true
-          if [ -x ./bench/build/bench_zenoh_transports ]; then
-            # stderr goes to the step log (not /dev/null) so a skipped transport is diagnosable.
-            echo "== zenoh transports (RESULT -> tsv; notes below) =="
-            { timeout 240 ./bench/build/bench_zenoh_transports >>"$out"; } || true
-          fi
+          # Network transports (UDP/TCP) — two-process pub/sub over real loopback sockets,
+          # the SAME topology for both engines. Best-effort; never fails the build (a chart
+          # is simply omitted if a transport doesn't come up).
+          bash bench/run_net.sh >>"$out" 2>/dev/null || true
       - name: Generate live performance + conformance page
         env:
           LIBTRACER_CXX_HARNESS: ${{ github.workspace }}/core/build/tests/conformance_runner

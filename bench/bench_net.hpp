@@ -19,6 +19,8 @@
 #include <cstdint>
 #include <cstring>
 #include <span>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "bench_common.hpp"
@@ -26,9 +28,13 @@
 namespace bench::net {
 
 inline constexpr std::size_t kSizes[] = {16, 256, 1024, 8192};  // ≥ 9 (ts+phase)
-inline constexpr std::size_t kLatencyMsgs = 5000;
-inline constexpr std::size_t kThroughputMsgs = 50000;
+inline constexpr std::size_t kLatencyMsgs = 4000;
+inline constexpr std::size_t kThroughputMsgs = 20000;
 inline constexpr std::uint64_t kPaceNs = 150000;  // 150 µs between latency sends
+// Pause after each size's throughput blast so its backlog fully drains before the next
+// size's PACED latency probes — otherwise, on an ordered transport (TCP/WS), the latency
+// samples queue behind the still-draining blast and read as milliseconds, not µs.
+inline constexpr std::uint64_t kDrainMs = 600;
 
 enum Phase : std::uint8_t { kLatency = 0, kThroughput = 1, kEof = 2 };
 
@@ -47,10 +53,14 @@ inline std::uint64_t read_ts(std::span<const std::byte> p) {
     return ts;
 }
 
-// Subscriber-side accumulator. Mutated only on the single receive thread.
+// Subscriber-side accumulator. Mutated only on the single receive thread. `mode`
+// tags the transport (e.g. `net-udp`) so the two-process transport benches share the
+// in-process RESULT parser; it defaults to `net` for the legacy single-transport use.
 struct SubState {
-    explicit SubState(const char* sys) : system(sys) {}
-    const char* system;
+    explicit SubState(std::string sys, std::string mode = "net")
+        : system(std::move(sys)), mode(std::move(mode)) {}
+    std::string system;
+    std::string mode;
     std::size_t cur_size = 0;
     Latency lat;
     std::uint64_t thru_first = 0, thru_last = 0, thru_count = 0;
@@ -65,7 +75,7 @@ struct SubState {
             if (cur_size && thru_count) {
                 const double secs = (thru_last - thru_first) / 1e9;
                 const double mps = secs > 0 ? thru_count / secs : 0;
-                emit(system, "net", cur_size, 1, 1, mps, mps,
+                emit(system.c_str(), mode.c_str(), cur_size, 1, 1, mps, mps,
                      thru_count * static_cast<double>(cur_size) / (secs > 0 ? secs : 1) / 1e6,
                      lat.summarize());
             }
