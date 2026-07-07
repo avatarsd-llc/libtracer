@@ -8,10 +8,13 @@ All notable changes to the **public API** of the `core/` reference implementatio
 the immutable **protocol-v1** wire format it implements.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
-reference implementation is pre-1.0; everything currently lives under
-`[Unreleased]`.
+reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
+
+_Nothing yet._
+
+## [0.3.0] — 2026-07-07
 
 ### Changed
 
