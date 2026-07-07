@@ -43,7 +43,7 @@ class rope_t {                                          // ordered chain of view
     view_t flatten(mem_backend_t& = mem::heap_backend()) const;   // one-copy materialize
 };
 
-std::expected<tlv_t, error_t> view_as_tlv(const view_t&);   // the L1 -> L2 cast
+std::expected<tlv_t, err_t> view_as_tlv(const view_t&);   // the L1 -> L2 cast
 ```
 
 ## Rope = one message, many buffers
