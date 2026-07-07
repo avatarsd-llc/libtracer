@@ -95,4 +95,24 @@ sequenceDiagram
 - **The value is the bytes** — a vertex stores a `view_t`, so what it holds is exactly
   what goes on the wire.
 
+## API reference
+
+The declarations below are pulled directly from the reference implementation's headers
+(`core/include/libtracer/graph.hpp`, `vertex.hpp`) by Doxygen — they cannot drift from the
+code.
+
+```{doxygenclass} tr::graph::graph_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::graph::vertex_t
+:project: libtracer
+:members:
+```
+
+```{doxygenenum} tr::graph::role_t
+:project: libtracer
+```
+
 See: [path](path.md), [views](views.md), [interface-map](interface-map.md).

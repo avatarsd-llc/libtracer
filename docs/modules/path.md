@@ -53,4 +53,23 @@ flowchart LR
 - **Validated** — malformed paths fail at parse with a typed `status_t`, not deep in
   dispatch.
 
+## API reference
+
+Generated from `core/include/libtracer/path.hpp` by Doxygen.
+
+```{doxygenclass} tr::graph::path_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::graph::field_path_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::graph::field_step_t
+:project: libtracer
+:members:
+```
+
 See: [graph](graph.md), [wire-format-bits](wire-format-bits.md).

@@ -172,6 +172,19 @@ Net: **the bytes you receive are the bytes you keep** — a decoded value is a s
 pointer load and handing a value to N subscribers is N refcount bumps, not N copies.
 That is the entire performance argument, visible in the layout.
 
+## API reference
+
+Generated from `core/include/libtracer/tlv.hpp` by Doxygen.
+
+```{doxygenstruct} tr::wire::opt_t
+:project: libtracer
+:members:
+```
+
+```{doxygenenum} tr::wire::type_t
+:project: libtracer
+```
+
 See: [frame-codec](frame-codec.md) · the normative
 [data-format reference](../reference/01-data-format.md) · the
 [TLV catalog](../reference/05-protocol-tlvs.md).
