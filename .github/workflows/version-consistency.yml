@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# Guards the single source of truth for the core release version. The repo-root
+# `VERSION` file is the sole hand-edited version for the C++ core release axis;
+# the static package manifests (PlatformIO / Arduino / ESP Component Registry)
+# mirror it via `tools/sync-version.py`. This job runs the stamper in --check
+# mode and fails if any manifest has drifted from `VERSION`, so a version bump
+# can never land half-applied. The Rust / TypeScript / ROS 2 bindings version
+# independently and are not checked here.
+name: version-consistency
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - VERSION
+      - library.json
+      - integrations/arduino/library.properties
+      - integrations/esp-idf/libtracer/idf_component.yml
+      - tools/sync-version.py
+      - .github/workflows/version-consistency.yml
+  pull_request:
+    paths:
+      - VERSION
+      - library.json
+      - integrations/arduino/library.properties
+      - integrations/esp-idf/libtracer/idf_component.yml
+      - tools/sync-version.py
+      - .github/workflows/version-consistency.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package manifests match the VERSION file
+        run: python3 tools/sync-version.py --check
