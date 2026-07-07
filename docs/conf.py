@@ -20,6 +20,7 @@ author = "avatarsd LLC"
 extensions = [
     "myst_parser",
     "sphinxcontrib.mermaid",
+    "sphinx_design",  # grid / grid-item-card directives for the landing cards
     "breathe",  # render Doxygen XML as in-page C++ source references
     "sphinx.ext.githubpages",  # emit .nojekyll so underscore dirs (_static) serve
 ]

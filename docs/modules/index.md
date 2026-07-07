@@ -57,3 +57,47 @@ Each module has its own page in the sidebar, grouped by layer:
 
 For the cross-cutting view of how they compose, see the **[interface map](interface-map.md)**;
 for the exact bytes on the wire, the **[bit-level walkthrough](wire-format-bits.md)**.
+
+```{toctree}
+:caption: Cross-cutting
+:hidden:
+:maxdepth: 1
+
+Interface map <interface-map>
+```
+
+```{toctree}
+:caption: L0 — substrate
+:hidden:
+:maxdepth: 1
+
+segment — refcounted bytes <segment>
+backends — allocators <backends>
+```
+
+```{toctree}
+:caption: L1 — views
+:hidden:
+:maxdepth: 1
+
+views — view_t / rope_t / cast <views>
+```
+
+```{toctree}
+:caption: L2/L3 — wire codec
+:hidden:
+:maxdepth: 1
+
+frame-codec — TLV codec + CRC <frame-codec>
+Wire format, bit by bit <wire-format-bits>
+```
+
+```{toctree}
+:caption: L4 — graph & transport
+:hidden:
+:maxdepth: 1
+
+path — addressing <path>
+graph — vertices & dispatch <graph>
+transport — the wire <transport>
+```

@@ -39,3 +39,16 @@ $ ./build/examples/two_node_fwd
 Or run them the way CI does — as ctest smoke tests that self-check and fail on any
 mismatch: `ctest --test-dir build -R example_`.
 :::
+
+```{toctree}
+:caption: Worked examples
+:hidden:
+:maxdepth: 1
+
+In-process pub/sub <in-process-pubsub>
+Pub/sub fan-out & dispatch cost <pubsub-fanout>
+Wire codec round-trip <wire-roundtrip>
+Wire codec deep-dive & throughput <wire-codec>
+Rope scatter-gather <rope-scatter>
+Two nodes over a wire — FWD delivery <two-node-fwd>
+```
