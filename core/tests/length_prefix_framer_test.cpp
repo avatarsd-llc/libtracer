@@ -183,6 +183,29 @@ int main() {
               "after reset, a complete record parses (no stale prefix bytes)");
     }
 
+    // 8. The shared rule kernel directly (on_prefix / effective_cap) — the same
+    //    rules tcp_transport_t applies in pull mode without the chunk machine.
+    {
+        using framer_t = tr::net::length_prefix_framer;
+        using kind_t = framer_t::prefix_decision_t::kind_t;
+        toggle_backend_t be;
+        be.max_seg = 64;
+        check(framer_t::effective_cap(be, 1000) == 64, "effective_cap: backend capacity wins");
+        check(framer_t::effective_cap(be, 16) == 16, "effective_cap: caller ceiling wins");
+
+        const std::size_t cap = framer_t::effective_cap(be, 1000);
+        check(framer_t::on_prefix(be, cap, 0).kind == kind_t::EMPTY, "on_prefix: len 0 => EMPTY");
+        check(framer_t::on_prefix(be, cap, 65).kind == kind_t::MALFORMED,
+              "on_prefix: len > cap => MALFORMED");
+        be.fail = true;
+        check(framer_t::on_prefix(be, cap, 10).kind == kind_t::DROP,
+              "on_prefix: alloc failure => DROP");
+        be.fail = false;
+        auto dec = framer_t::on_prefix(be, cap, 10);
+        check(dec.kind == kind_t::ACCEPT && dec.seg && dec.seg->bytes.size() >= 10,
+              "on_prefix: ACCEPT carries a segment holding the frame");
+    }
+
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;
