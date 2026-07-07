@@ -106,9 +106,10 @@ int main() {
     const double enc_ns = std::chrono::duration<double, std::nano>(t1 - t0).count() / kIters;
     const double dec_ns = std::chrono::duration<double, std::nano>(t2 - t1).count() / kIters;
     const double rt_Mps = 1.0 / ((enc_ns + dec_ns) * 1e-9) / 1e6;
-    std::printf("RESULT wire_codec bytes=%zu encode_ns=%.0f decode_ns=%.0f "
-                "roundtrip_Mps=%.2f (sink=%zu)\n",
-                wire.size(), enc_ns, dec_ns, rt_Mps, sink);
+    std::printf(
+        "RESULT wire_codec bytes=%zu encode_ns=%.0f decode_ns=%.0f "
+        "roundtrip_Mps=%.2f (sink=%zu)\n",
+        wire.size(), enc_ns, dec_ns, rt_Mps, sink);
 
     std::printf("%s\n", ok ? "wire codec OK" : "wire codec FAILED");
     return ok ? 0 : 1;

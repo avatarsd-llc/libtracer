@@ -39,8 +39,7 @@ using clock_t_ = std::chrono::steady_clock;
 /** @brief A heap segment of @p n bytes, each byte set to @p fill. */
 tr::view::view_t chunk(std::size_t n, std::uint8_t fill) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(n);
-    for (std::size_t i = 0; i < n; ++i)
-        seg->bytes[i] = static_cast<std::byte>(fill);
+    for (std::size_t i = 0; i < n; ++i) seg->bytes[i] = static_cast<std::byte>(fill);
     return tr::view::view_t::over(std::move(seg));
 }
 
@@ -55,8 +54,8 @@ void check(bool& ok, bool cond, const char* what) {
 }  // namespace
 
 int main() {
-    constexpr std::size_t kLinks = 16;      // chain length
-    constexpr std::size_t kChunk = 256;     // bytes per link
+    constexpr std::size_t kLinks = 16;   // chain length
+    constexpr std::size_t kChunk = 256;  // bytes per link
     constexpr std::size_t kLogical = kLinks * kChunk;
 
     // Compose the rope link by link. No bytes are copied — each append chains one
@@ -88,7 +87,10 @@ int main() {
     std::size_t p = 0;
     for (const auto& s : iov)
         for (const std::byte b : s)
-            if (p >= fb.size() || fb[p++] != b) { contents_match = false; break; }
+            if (p >= fb.size() || fb[p++] != b) {
+                contents_match = false;
+                break;
+            }
     check(ok, contents_match, "flatten reproduces the scatter-gather byte order exactly");
 
     // --- perf: scatter-gather (zero copy) vs. the one flatten copy ---
@@ -108,8 +110,9 @@ int main() {
         "RESULT rope_scatter links=%zu logical_bytes=%zu iovec_ns=%.0f flatten_ns=%.0f "
         "flatten_GBps=%.2f (sink=%zu)\n",
         kLinks, kLogical, iovec_ns, flat_ns, flat_gbps, sink);
-    std::printf("scatter-gather is O(links) pointer work; flatten is the one memcpy you pay "
-                "only at a non-scatter boundary.\n");
+    std::printf(
+        "scatter-gather is O(links) pointer work; flatten is the one memcpy you pay "
+        "only at a non-scatter boundary.\n");
 
     std::printf("%s\n", ok ? "rope scatter-gather OK" : "rope scatter-gather FAILED");
     return ok ? 0 : 1;

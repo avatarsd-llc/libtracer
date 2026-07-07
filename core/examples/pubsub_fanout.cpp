@@ -38,8 +38,7 @@ using tr::graph::role_t;
 tr::view::view_t value_u32(std::uint32_t v) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(4);
     for (int i = 0; i < 4; ++i)
-        seg->bytes[static_cast<std::size_t>(i)] =
-            static_cast<std::byte>((v >> (8 * i)) & 0xFF);
+        seg->bytes[static_cast<std::size_t>(i)] = static_cast<std::byte>((v >> (8 * i)) & 0xFF);
     return tr::view::view_t::over(std::move(seg));
 }
 
@@ -72,10 +71,11 @@ bool run_fanout(std::size_t fanout, std::uint32_t writes, bool& ok) {
     const double total_ns = std::chrono::duration<double, std::nano>(t1 - t0).count();
     const double per_delivery_ns = total_ns / double(expected);
     const double deliv_per_s = double(expected) / (total_ns * 1e-9);
-    std::printf("RESULT pubsub_fanout subs=%zu writes=%u deliveries=%llu "
-                "per_delivery_ns=%.1f deliveries_Mps=%.2f\n",
-                fanout, writes, static_cast<unsigned long long>(deliveries),
-                per_delivery_ns, deliv_per_s / 1e6);
+    std::printf(
+        "RESULT pubsub_fanout subs=%zu writes=%u deliveries=%llu "
+        "per_delivery_ns=%.1f deliveries_Mps=%.2f\n",
+        fanout, writes, static_cast<unsigned long long>(deliveries), per_delivery_ns,
+        deliv_per_s / 1e6);
     return ok;
 }
 
@@ -85,8 +85,9 @@ int main() {
     constexpr std::uint32_t kWrites = 5000;
     bool ok = true;
 
-    std::printf("fan-out dispatch: each write clones the rope per subscriber "
-                "(refcount bump, no byte copy)\n");
+    std::printf(
+        "fan-out dispatch: each write clones the rope per subscriber "
+        "(refcount bump, no byte copy)\n");
     for (std::size_t fanout : {std::size_t{1}, std::size_t{8}, std::size_t{64}})
         run_fanout(fanout, kWrites, ok);
 

@@ -112,13 +112,16 @@ int main() {
     {
         std::unique_lock<std::mutex> lk(m);
         const bool arrived = cv.wait_for(lk, 3s, [&] { return delivered >= 1; });
-        if (!arrived) { std::printf("  [FAIL] node B never received the FWD write\n"); ok = false; }
-        else if (last != payload) {
+        if (!arrived) {
+            std::printf("  [FAIL] node B never received the FWD write\n");
+            ok = false;
+        } else if (last != payload) {
             std::printf("  [FAIL] delivered payload differs from what A sent\n");
             ok = false;
         } else {
-            std::printf("node B received the FWD-delivered value across the wire "
-                        "(explicit source route /b/sensor/temp → /sensor/temp)\n");
+            std::printf(
+                "node B received the FWD-delivered value across the wire "
+                "(explicit source route /b/sensor/temp → /sensor/temp)\n");
         }
     }
 
@@ -132,9 +135,12 @@ int main() {
     {
         std::unique_lock<std::mutex> lk(m);
         const bool all = cv.wait_for(lk, 10s, [&] { return delivered >= target; });
-        if (!all) { std::printf("  [FAIL] only %llu/%llu frames delivered\n",
-                                static_cast<unsigned long long>(delivered - base),
-                                static_cast<unsigned long long>(kMsgs)); ok = false; }
+        if (!all) {
+            std::printf("  [FAIL] only %llu/%llu frames delivered\n",
+                        static_cast<unsigned long long>(delivered - base),
+                        static_cast<unsigned long long>(kMsgs));
+            ok = false;
+        }
     }
     auto t1 = clock_t_::now();
 
@@ -143,8 +149,9 @@ int main() {
     std::printf("RESULT two_node_fwd msgs=%llu mean_delivery_ns=%.0f throughput_Kps=%.1f\n",
                 static_cast<unsigned long long>(kMsgs), per_ns,
                 (double(kMsgs) / (total_ns * 1e-9)) / 1e3);
-    std::printf("each hop reads three headers by offset and scatter-gathers the shrunk-dst / "
-                "grown-src heads — the forward hop never touches the heap.\n");
+    std::printf(
+        "each hop reads three headers by offset and scatter-gathers the shrunk-dst / "
+        "grown-src heads — the forward hop never touches the heap.\n");
 
     std::printf("%s\n", ok ? "two-node FWD OK" : "two-node FWD FAILED");
     return ok ? 0 : 1;
