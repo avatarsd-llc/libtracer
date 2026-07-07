@@ -12,7 +12,26 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **Opaque `vertex_handle_t` + infallible `register_vertex` retire the raw-pointer graph
+  API ([ADR-0056](../docs/adr/0056-vertex-handle-infallible-register.md) — breaking).**
+  The caller-held vertex token is now `tr::graph::vertex_handle_t`, a non-null,
+  pointer-sized, trivially-copyable opaque wrapper over the internal `vertex_t*` (identical
+  pointer-load codegen; graph-only construction, no `operator*`/raw accessor). Every public
+  `graph_t` taker — `read` / `write` (both overloads) / `await` / `assign` / `propagate` /
+  `set_delivery_mode` / `history` / `read_subscribers` / `subscribe_wire` / field-write —
+  now takes a `vertex_handle_t`; `find` returns `std::optional<vertex_handle_t>`;
+  `ensure_vertex` / `register_vertex_key` and the `child_factory_t` return
+  `result_t<vertex_handle_t>`. `register_vertex(const path_t&, …)` is now **infallible**,
+  returning a `vertex_handle_t` directly and aborting on a `PATH_IN_USE` collision (a source
+  bug on a literal path, like `path_t(std::string_view)`) — the pervasive
+  `*g.register_vertex(...)` unchecked-deref idiom is gone. A fallible
+  `try_register_vertex(const path_t&, …) -> result_t<vertex_handle_t>` covers genuine
+  runtime-string sites. Added `settings(vertex_handle_t)` to read a vertex's QoS settings
+  through the handle. Migration: drop the `*` on `register_vertex` and change held
+  `vertex_t*` to `vertex_handle_t` (or `auto`); use `try_register_vertex` where a duplicate
+  path is a real runtime outcome. Wire protocol and conformance vectors unaffected.
 
 ## [0.3.0] — 2026-07-07
 
