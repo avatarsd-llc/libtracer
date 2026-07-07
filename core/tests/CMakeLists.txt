@@ -242,6 +242,14 @@ target_link_libraries(ws_transport_test PRIVATE libtracer)
 libtracer_test_warnings(ws_transport_test)
 add_test(NAME ws_transport COMMAND ws_transport_test)
 
+# transport_t seam conformance — ONE parameterized contract (send/receive, byte-identity,
+# scatter-gather, bidirectional, multi-frame, ADR-0042 owning view) over every
+# point-to-point adapter: in-process loopback + real localhost udp / tcp / ws.
+add_executable(transport_conformance_test transport_conformance_test.cpp)
+target_link_libraries(transport_conformance_test PRIVATE libtracer)
+libtracer_test_warnings(transport_conformance_test)
+add_test(NAME transport_conformance COMMAND transport_conformance_test)
+
 # #54 (interop) — standalone transport_ws_server harness driven by the TypeScript
 # transport-ws interop test (a real TS TransportWs client over a live socket).
 # Deliberately NOT an add_test(): it is a helper binary the TS test spawns (see
