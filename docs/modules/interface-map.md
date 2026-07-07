@@ -71,7 +71,7 @@ flowchart LR
 | [status](#) | `enum class status_t`; `template<class T> using result_t = std::expected<T, status_t>` |
 | [backends](backends.md) | `class mem_backend_t { alloc(); destroy(); alignment(); … }` · `view::heap_alloc()` · `view::borrow()` · `mem::pool_t` |
 | [segment](segment.md) | `struct segment_t{ ref_count_t; mem_backend_t*; span<byte> }` · `class segment_ptr_t{ adopt/retain; copy=clone; reset() }` |
-| [views](views.md) | `struct view_t{ owner; offset; length; bytes(); subview() }` · `class rope_t{ append; concat; to_iovec; flatten }` · `view_as_tlv(view_t)→result_t<tlv_t>` |
+| [views](views.md) | `struct view_t{ owner; offset; length; bytes(); subview() }` · `class rope_t{ append; concat; to_iovec; flatten }` · `tr::wire::view_as_tlv(view_t)→std::expected<tlv_t, err_t>` |
 | [frame-codec](frame-codec.md) | `enum class type_t` · `struct opt_t` · `struct tlv_t{ type; opt; payload; children; trailer }` · `decode()` · `encode()` · `decode_into(span, pmr)→tlv_arena_t` · `struct arena_tlv_t` · `crc::crc32c/crc16_ccitt` |
 | [path](path.md) | `class path_t{ parse(); key(); field() }` · `struct path_key_t` + `path_key_hash_t` |
 | [graph](graph.md) | `class graph_t{ register_vertex; read; write; await; history; subscribe; add_remote_subscriber(vertex_t*, view_t source_view, …) }` · `enum class role_t` · `struct settings_t` · `struct handlers_t` |

@@ -209,7 +209,7 @@ The same iterative pattern (recurse on `PL=1`, bound depth at 32) applies to bot
 
 > Any sequence of mix / split / concat operations on a view tree, followed by a `serialize_to_wire()` walk, MUST produce the same bytes as if the corresponding mutations had been applied to a fresh buffer.
 
-This invariant is testable: construct a view tree by parsing wire bytes, mutate it, serialize, and compare to the wire-bytes equivalent constructed from scratch. The reference implementation has `tests/test_substrate_invariant.c` exercising this (added with the `core/` rebuild).
+This invariant is testable: construct a view tree by parsing wire bytes, mutate it, serialize, and compare to the wire-bytes equivalent constructed from scratch. The reference implementation has `core/tests/substrate_test.cpp` exercising this.
 
 A second-language implementation that fails this invariant is **not conforming**, regardless of whether its wire output is otherwise valid.
 
