@@ -101,7 +101,8 @@ flowchart LR
     EB2 -->|enqueue| QA[("inbox A")]
     QA -->|recv thread| EA2["endpoint a"]
     EA2 -->|receiver| FA
-    classDef m fill:#fef9c3,stroke:#92400e; class EA,EB,EA2,EB2 m;
+    classDef m fill:#fef9c3,stroke:#92400e
+    class EA,EB,EA2,EB2 m
 ```
 
 ## Benefits

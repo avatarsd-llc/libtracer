@@ -189,7 +189,7 @@ sequenceDiagram
     Note over RxB: dst names a local vertex → terminus:<br/>arena-decode, dispatch keyed on the<br/>canonical PATH body itself<br/>(span-aliased — zero key materialization)
     RxB->>Vtx: write(VALUE)
     Vtx->>Sub: deliver(VALUE)
-    Note over Sub: subscriber holds<br/>its own .rodata handle;<br/>byte-equality match
+    Note over Sub: subscriber holds<br/>its own .rodata handle<br/>byte-equality match
 ```
 
 Step 5 is the key one: the terminus dispatch is keyed on **canonical PATH TLV bytes**, and a canonical `dst` PATH body in the arriving frame *is* that key — the vertex-map lookup runs over the frame's own bytes with no per-delivery materialization. This generalizes: any vertex that routinely receives or emits — every periodic publisher, every wildcard subscription's matched-set member — has a handle allocated at the time it becomes addressable, not at the time of each operation.

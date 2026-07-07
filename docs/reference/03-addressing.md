@@ -396,7 +396,7 @@ sequenceDiagram
     App->>Hnd: load pointer (1 cycle on Cortex-M)
     App->>Disp: g.write(handle, value)
     Disp->>Disp: dispatch_table[hash(handle.bytes)]
-    Note over Disp: byte-compare on PATH bytes;<br/>no string parse, no alloc
+    Note over Disp: byte-compare on PATH bytes<br/>no string parse, no alloc
     Disp->>Vtx: store value_tlv as LKV
     Disp->>Subs: refcount-bump and enqueue (per subscriber)
 ```
