@@ -50,3 +50,11 @@ jobs:
 
       - name: Run the package test suites (core conformance TAP + transport-ws)
         run: npm test
+
+      # API-doc coverage gate: typedoc.json sets notDocumented/invalidLink/
+      # notExported validation with treatValidationWarningsAsErrors, so an
+      # undocumented or dangling-link public symbol fails the build — the TS
+      # analogue of the C++ Doxygen WARN_AS_ERROR gate and the Rust
+      # deny(missing_docs). The rendered ./docs-api output is gitignored.
+      - name: Docs coverage gate (TypeDoc)
+        run: npm run docs
