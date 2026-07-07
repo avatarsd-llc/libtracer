@@ -402,12 +402,15 @@ class graph_t {
     // Field surface: ":settings.<f>", ":subscribers[]" / "[N]", ":children[]".
     result_t<void> field_write(vertex_t* v, const field_path_t& field, const view_t& value,
                                std::string_view caller);
-    // The ACL gate (#81, ADR-0018/0020 core subset): true iff `caller` may exercise
-    // `right` on `v`. True with no resolver installed (one null check — enforcement
-    // off), for a trusted caller (resolver returns nullopt), or when the effective
-    // ACL (own ACEs + INHERIT-flagged ancestor ACEs, walked at check time) is empty;
-    // otherwise true iff some non-expired matching ACE grants the bit. Takes each
-    // vertex's mutex one at a time (never nested) — control-plane frequency only.
+    // The ACL gate (#81, ADR-0018/0020): true iff `caller` may exercise `right` on
+    // `v`. True with no resolver installed (one null check — enforcement off), for a
+    // trusted caller (resolver returns nullopt), or when the effective ACL (own ACEs
+    // + INHERIT-flagged ancestor ACEs, walked at check time) is empty; otherwise the
+    // verdict of the pure per-target policy (ADR-0050 acl_policy_t, own list before
+    // ancestors). Takes each vertex's mutex one at a time (never nested). NOTE: runs
+    // on EVERY gated data op (read/write/await), not just the control plane — the
+    // ADR-0050 cached effective-ACE merge is the follow-up that removes the
+    // per-operation ancestor walk from the data plane.
     [[nodiscard]] bool acl_allows(vertex_t* v, std::string_view caller, acl_right_t right) const;
     // ":children[]" append: instantiate a child from a SPEC via the type catalog (#82,
     // ADR-0017). Composes the child key (parent key + the SPEC `name` NAME), dispatches

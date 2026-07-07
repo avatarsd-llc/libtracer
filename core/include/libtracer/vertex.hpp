@@ -100,21 +100,31 @@ enum class acl_right_t : std::uint32_t {
 /** @brief The one ACE flag the core subset honors: propagate to the subtree (ADR-0020). */
 inline constexpr std::uint8_t kAceInherit = 0x1;
 
+/** @brief An ACE's type (ADR-0020): ALLOW grants; DENY refuses (full policy only). */
+enum class ace_type_t : std::uint8_t {
+    ALLOW = 0, /**< @brief The ACE grants its mask's rights. */
+    DENY = 1,  /**< @brief The ACE refuses them — evaluated only by `full_acl_policy_t`
+                    (ADR-0050); the ALLOW-only profile rejects DENY at parse time. */
+};
+
 /**
- * @brief One parsed ALLOW ACE of a vertex's `:acl` (core subset, ADR-0020 / #81).
+ * @brief One parsed ACE of a vertex's `:acl` (ADR-0020 / #81).
  *
- * The core subset is ALLOW-only: a `:acl` write carrying a DENY ACE (or any flag
- * bit beyond `kAceInherit`) is rejected at write time with TYPE_MISMATCH, so
- * stored ACEs never carry semantics this evaluator would silently weaken. Full
- * DENY / ordered first-match-per-bit evaluation is the `security_acl` host module.
+ * Evaluation is the pure per-target policy of ADR-0050 (`security_acl.hpp`): the
+ * default ALLOW-only MCU profile rejects a DENY ACE (or any flag bit beyond
+ * `kAceInherit`) at write time with TYPE_MISMATCH, so stored ACEs never carry
+ * semantics the selected evaluator would silently weaken; the full `security_acl`
+ * host policy (LIBTRACER_ACL_FULL) stores DENY and evaluates ordered
+ * first-match-per-bit.
  */
 struct ace_t {
-    std::uint8_t flags = 0;         /**< @brief ACE flags; only `kAceInherit` is accepted. */
-    std::vector<std::byte> subject; /**< @brief Opaque subject token (ADR-0018); the special
-                                         subject `"EVERYONE@"` matches any resolved subject. */
-    std::uint32_t access_mask = 0;  /**< @brief Granted rights (an OR of `acl_right_t` bits). */
-    std::uint64_t expires_ns = 0;   /**< @brief Absolute expiry, ns since the UNIX epoch;
-                                         0 = never expires. An expired ACE grants nothing. */
+    ace_type_t type = ace_type_t::ALLOW; /**< @brief ALLOW or DENY (policy-gated at parse). */
+    std::uint8_t flags = 0;              /**< @brief ACE flags; only `kAceInherit` is accepted. */
+    std::vector<std::byte> subject;      /**< @brief Opaque subject token (ADR-0018); the special
+                                              subject `"EVERYONE@"` matches any resolved subject. */
+    std::uint32_t access_mask = 0; /**< @brief Granted rights (an OR of `acl_right_t` bits). */
+    std::uint64_t expires_ns = 0;  /**< @brief Absolute expiry, ns since the UNIX epoch;
+                                        0 = never expires. An expired ACE grants nothing. */
 };
 
 /**

@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 
@@ -90,31 +91,20 @@ tlv_t name_tlv(std::string_view s, std::vector<std::vector<std::byte>>& keep) {
     return tlv_t{.type = type_t::NAME, .payload = keep.back()};
 }
 
-// Encode ACL{ ACL{...ACE...}* } — NAME-tagged type/flags/subject/access_mask(u16)
-// /expires_ns(u64) children per docs/reference/05 §0x0A.
+// Encode ACL{ ACL{...ACE...}* } via the typed ADR-0050 surface (encode_acl) —
+// replaces the hand-rolled byte builder; deliberately-invalid ACLs (a DENY ACE
+// under the ALLOW-only profile) still encode, since parse_acl is the gate.
 std::vector<std::byte> make_acl(std::initializer_list<ace_spec_t> aces) {
-    // Payload spans in tlv_t borrow; keep every buffer alive until encode().
-    std::vector<std::vector<std::byte>> keep;
-    keep.reserve(aces.size() * 10 + 1);
-    tlv_t acl{.type = type_t::ACL, .opt = opt_t{.pl = true}};
+    std::vector<tr::graph::ace_t> typed;
+    typed.reserve(aces.size());
     for (const ace_spec_t& a : aces) {
-        tlv_t ace{.type = type_t::ACL, .opt = opt_t{.pl = true}};
-        ace.children.push_back(name_tlv("type", keep));
-        ace.children.push_back(u_value(a.type, 1, keep));
-        ace.children.push_back(name_tlv("flags", keep));
-        ace.children.push_back(u_value(a.flags, 1, keep));
-        ace.children.push_back(name_tlv("subject", keep));
-        keep.push_back(as_bytes(a.subject));
-        ace.children.push_back(tlv_t{.type = type_t::VALUE, .payload = keep.back()});
-        ace.children.push_back(name_tlv("access_mask", keep));
-        ace.children.push_back(u_value(a.mask, 2, keep));
-        if (a.expires_ns != 0) {
-            ace.children.push_back(name_tlv("expires_ns", keep));
-            ace.children.push_back(u_value(a.expires_ns, 8, keep));
-        }
-        acl.children.push_back(std::move(ace));
+        typed.push_back(tr::graph::ace_t{.type = static_cast<tr::graph::ace_type_t>(a.type),
+                                         .flags = a.flags,
+                                         .subject = as_bytes(a.subject),
+                                         .access_mask = a.mask,
+                                         .expires_ns = a.expires_ns});
     }
-    return tr::wire::encode(acl);
+    return tr::graph::encode_acl(typed);
 }
 
 constexpr std::uint32_t bit(acl_right_t r) { return static_cast<std::uint32_t>(r); }

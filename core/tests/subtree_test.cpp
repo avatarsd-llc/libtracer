@@ -29,6 +29,7 @@
 #include <utility>
 #include <vector>
 
+#include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 
@@ -322,24 +323,14 @@ void test_write_creates_acl_gate() {
     });
 
     // /p grants WRITE (with INHERIT) but NOT CREATE — creating below /p is denied.
-    // ACE bytes per docs/reference/05 §0x0A (the acl_test builder shape).
-    const std::uint32_t write_bit = static_cast<std::uint32_t>(acl_right_t::WRITE);
-    std::vector<std::byte> ace_body;
-    tr::wire::emit_name(ace_body, "type");
-    tr::wire::emit_tlv(ace_body, type_t::VALUE, opt_t{}, std::vector<std::byte>{std::byte{0}});
-    tr::wire::emit_name(ace_body, "flags");
-    tr::wire::emit_tlv(ace_body, type_t::VALUE, opt_t{}, std::vector<std::byte>{std::byte{0x1}});
-    tr::wire::emit_name(ace_body, "subject");
+    // Built via the typed ADR-0050 surface (encode_acl) — no hand-rolled ACE bytes.
     std::vector<std::byte> everyone;
     for (const char c : std::string_view("EVERYONE@")) everyone.push_back(std::byte(c));
-    tr::wire::emit_tlv(ace_body, type_t::VALUE, opt_t{}, everyone);
-    tr::wire::emit_name(ace_body, "access_mask");
-    tr::wire::emit_tlv(ace_body, type_t::VALUE, opt_t{},
-                       std::vector<std::byte>{std::byte(write_bit & 0xFF), std::byte{0}});
-    std::vector<std::byte> ace;
-    tr::wire::emit_tlv(ace, type_t::ACL, opt_t{.pl = true}, ace_body);
-    std::vector<std::byte> acl;
-    tr::wire::emit_tlv(acl, type_t::ACL, opt_t{.pl = true}, ace);
+    const std::vector<tr::graph::ace_t> aces{
+        {.flags = tr::graph::kAceInherit,
+         .subject = everyone,
+         .access_mask = static_cast<std::uint32_t>(acl_right_t::WRITE)}};
+    const std::vector<std::byte> acl = tr::graph::encode_acl(aces);
     check(g.write(path_t("/p:acl"), make_value(acl)).has_value(),
           "install a WRITE-only (no CREATE) ACL on /p");
 
@@ -362,21 +353,13 @@ void test_branch_write_acl_admission() {
     g.set_subject_resolver([](std::string_view) -> std::optional<subject_token_t> {
         return subject_token_t{std::byte{'u'}};
     });
-    // Close /s/u to writes (an ACL granting only READ — any present ACE closes it).
-    std::vector<std::byte> ace_body;
-    tr::wire::emit_name(ace_body, "type");
-    tr::wire::emit_tlv(ace_body, type_t::VALUE, opt_t{}, std::vector<std::byte>{std::byte{0}});
-    tr::wire::emit_name(ace_body, "subject");
+    // Close /s/u to writes (an ACL granting only READ — any present ACE closes it),
+    // built via the typed ADR-0050 surface (encode_acl).
     std::vector<std::byte> everyone;
     for (const char c : std::string_view("EVERYONE@")) everyone.push_back(std::byte(c));
-    tr::wire::emit_tlv(ace_body, type_t::VALUE, opt_t{}, everyone);
-    tr::wire::emit_name(ace_body, "access_mask");
-    tr::wire::emit_tlv(ace_body, type_t::VALUE, opt_t{},
-                       std::vector<std::byte>{std::byte{0x01}, std::byte{0}});  // READ only
-    std::vector<std::byte> ace;
-    tr::wire::emit_tlv(ace, type_t::ACL, opt_t{.pl = true}, ace_body);
-    std::vector<std::byte> acl;
-    tr::wire::emit_tlv(acl, type_t::ACL, opt_t{.pl = true}, ace);
+    const std::vector<tr::graph::ace_t> aces{
+        {.subject = everyone, .access_mask = static_cast<std::uint32_t>(acl_right_t::READ)}};
+    const std::vector<std::byte> acl = tr::graph::encode_acl(aces);
     check(g.write(path_t("/s/u:acl"), make_value(acl)).has_value(), "close /s/u to writes");
 
     const std::vector<std::byte> branch =
