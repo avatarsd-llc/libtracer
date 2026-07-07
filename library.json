@@ -22,12 +22,15 @@
   "export": {
     "include": [
       "core/include/**",
+      "core/src/**",
       "library.json",
       "LICENSE",
       "README.md"
     ]
   },
   "build": {
-    "includeDir": "core/include"
+    "includeDir": "core/include",
+    "srcDir": "core/src",
+    "srcFilter": "+<*> -<mem_cuda.cpp> -<transport_quic.cpp> -<transport_webtransport.cpp> -<socketcan_link.cpp>"
   }
 }
