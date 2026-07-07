@@ -34,6 +34,7 @@ use alloc::vec::Vec;
 pub mod error_registry;
 pub mod field;
 pub mod path;
+pub mod structured;
 pub mod tlv_builders;
 
 pub use error_registry::{
