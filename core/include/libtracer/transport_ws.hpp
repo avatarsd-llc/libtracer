@@ -23,10 +23,8 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <mutex>
 #include <span>
 #include <string>
-#include <vector>
 
 #include "libtracer/posix_endpoint.hpp"
 #include "libtracer/transport.hpp"
@@ -41,7 +39,7 @@ namespace tr::net {
  * delivers each inbound BINARY message's unmasked payload to the receiver. The
  * dial-out counterpart is transport_ws_client below.
  */
-class transport_ws_server : public transport_t, private posix_endpoint_t {
+class transport_ws_server : public transport_t, private stream_endpoint_t {
    public:
     /**
      * @brief Bind+listen on @p bind_port (0 = ephemeral; see local_port()).
@@ -86,13 +84,11 @@ class transport_ws_server : public transport_t, private posix_endpoint_t {
     void run();              // accept + recv thread
     bool handshake(int fd);  // read Upgrade, reply 101
     void serve(int fd);      // frame recv loop
-    void write_all(int fd, std::span<const std::byte> bytes);
 
     int listen_fd_ = -1;
     std::uint16_t bound_port_ = 0;
-
-    std::mutex write_m_;              // serializes writes to client_fd_
-    std::atomic<int> client_fd_{-1};  // the connected client (-1 = none)
+    // The connected client's fd + write mutex (and their teardown discipline)
+    // live in stream_endpoint_t (conn_fd_ / write_m_).
 };
 
 /**
@@ -107,7 +103,7 @@ class transport_ws_server : public transport_t, private posix_endpoint_t {
  * (ws::encode_client_frame); inbound server frames are unmasked and decode the
  * same way the server's do. ok() confirms the handshake completed.
  */
-class transport_ws_client : public transport_t, private posix_endpoint_t {
+class transport_ws_client : public transport_t, private stream_endpoint_t {
    public:
     /**
      * @brief Connect to @p host:@p port and run the client opening handshake.
@@ -151,11 +147,9 @@ class transport_ws_client : public transport_t, private posix_endpoint_t {
    private:
     bool handshake(int fd, const std::string& host, std::uint16_t port);  // GET Upgrade, verify 101
     void serve(int fd);                                                   // frame recv loop
-    void write_all(int fd, std::span<const std::byte> bytes);
     std::uint32_t next_mask_key();  // per-frame masking key (varied, not crypto)
 
-    std::mutex write_m_;            // serializes writes to conn_fd_
-    std::atomic<int> conn_fd_{-1};  // the live connection (-1 = torn down)
+    // conn_fd_ + write_m_ (and their teardown discipline) live in stream_endpoint_t.
     std::atomic<std::uint64_t> mask_state_{0};
     bool connected_ = false;
 };

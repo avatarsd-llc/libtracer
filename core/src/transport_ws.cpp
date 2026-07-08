@@ -69,11 +69,6 @@ struct ws_assembler_t {
 
 namespace {
 
-// SIGPIPE would otherwise kill the process if the client vanishes mid-write.
-#ifndef MSG_NOSIGNAL
-constexpr int MSG_NOSIGNAL = 0;
-#endif
-
 // Case-insensitive search for an HTTP header and return its trimmed value.
 // `request` is the raw header block; `name` is lowercase (e.g. "sec-websocket-key").
 std::string header_value(std::string_view request, std::string_view name) {
@@ -132,23 +127,10 @@ transport_ws_server::~transport_ws_server() {
     if (listen_fd_ >= 0) ::close(listen_fd_);
 }
 
-void transport_ws_server::write_all(int fd, std::span<const std::byte> bytes) {
-    if (fd < 0) return;
-    std::size_t off = 0;
-    while (off < bytes.size()) {
-        const ssize_t n = ::send(fd, bytes.data() + off, bytes.size() - off, MSG_NOSIGNAL);
-        if (n <= 0) return;  // peer gone / error → drop the rest
-        off += static_cast<std::size_t>(n);
-    }
-}
-
 void transport_ws_server::send(std::span<const std::byte> frame) {
-    const std::vector<std::byte> encoded = ws::encode_frame(ws::opcode_t::BINARY, frame);
-    // Hold write_m_ across the whole write so the recv thread cannot close and
-    // reset client_fd_ underneath us (it tears the connection down under the same
-    // lock); read the fd inside the lock to pair with that teardown.
-    const std::lock_guard lock(write_m_);
-    write_all(client_fd_.load(std::memory_order_relaxed), encoded);
+    // One serialized record under write_m_ (the stream_endpoint_t
+    // write-serialization invariant).
+    send_all_locked(ws::encode_frame(ws::opcode_t::BINARY, frame));
 }
 
 bool transport_ws_server::handshake(int fd) {
@@ -248,28 +230,10 @@ void transport_ws_server::serve(int fd) {
 }
 
 void transport_ws_server::run() {
-    while (!stop_.load(std::memory_order_relaxed)) {
-        // One poll-100ms-recheck accept pass (posix_endpoint_t): timeout / error /
-        // no connection → re-check stop_ and try again.
-        const int fd = poll_accept(listen_fd_);
-        if (fd < 0) continue;
-
-        if (!handshake(fd)) {
-            ::close(fd);
-            continue;
-        }
-        client_fd_.store(fd, std::memory_order_relaxed);
-
-        serve(fd);
-
-        // Tear down under write_m_ so a concurrent send() never writes to (or
-        // reads) a closed/reused fd.
-        {
-            const std::lock_guard lock(write_m_);
-            client_fd_.store(-1, std::memory_order_relaxed);
-        }
-        ::close(fd);
-    }
+    // The one-peer accept/serve/teardown shape is stream_endpoint_t's; only
+    // the opening handshake is WS's.
+    run_accept_loop(
+        listen_fd_, [this](int fd) { return handshake(fd); }, [this](int fd) { serve(fd); });
 }
 
 // ---------------------------------------------------------------------------
@@ -308,12 +272,9 @@ transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t 
 }
 
 transport_ws_client::~transport_ws_client() {
-    stop_and_join();  // FIRST: serve() touches conn_fd_ released below
-    // serve() tears the socket down on exit; this only catches a never-spawned
-    // thread (handshake failed) where conn_fd_ is already -1, so it never
-    // double-closes.
-    const int leftover = conn_fd_.exchange(-1, std::memory_order_relaxed);
-    if (leftover >= 0) ::close(leftover);
+    stop_and_join();  // FIRST: serve() touches conn_fd_
+    // A leftover fd (never-spawned thread — handshake failed — leaves conn_fd_
+    // at -1 anyway) is closed by ~stream_endpoint_t after this body.
 }
 
 std::uint32_t transport_ws_client::next_mask_key() {
@@ -326,24 +287,10 @@ std::uint32_t transport_ws_client::next_mask_key() {
     return static_cast<std::uint32_t>(z);
 }
 
-void transport_ws_client::write_all(int fd, std::span<const std::byte> bytes) {
-    if (fd < 0) return;
-    std::size_t off = 0;
-    while (off < bytes.size()) {
-        const ssize_t n = ::send(fd, bytes.data() + off, bytes.size() - off, MSG_NOSIGNAL);
-        if (n <= 0) return;  // peer gone / error → drop the rest
-        off += static_cast<std::size_t>(n);
-    }
-}
-
 void transport_ws_client::send(std::span<const std::byte> frame) {
-    const std::vector<std::byte> encoded =
-        ws::encode_client_frame(ws::opcode_t::BINARY, frame, next_mask_key());
-    // Same discipline as the server: hold write_m_ across the whole write so the
-    // recv thread cannot tear down and reset conn_fd_ underneath us; read the fd
-    // inside the lock to pair with that teardown.
-    const std::lock_guard lock(write_m_);
-    write_all(conn_fd_.load(std::memory_order_relaxed), encoded);
+    // One serialized MASKED record under write_m_ (the stream_endpoint_t
+    // write-serialization invariant).
+    send_all_locked(ws::encode_client_frame(ws::opcode_t::BINARY, frame, next_mask_key()));
 }
 
 bool transport_ws_client::handshake(int fd, const std::string& host, std::uint16_t port) {
@@ -454,13 +401,7 @@ void transport_ws_client::serve(int fd) {
     }
 
 teardown:
-    // Tear down under write_m_ so a concurrent send() never writes to (or reads)
-    // a closed/reused fd.
-    {
-        const std::lock_guard lock(write_m_);
-        conn_fd_.store(-1, std::memory_order_relaxed);
-    }
-    ::close(fd);
+    teardown_peer(fd);  // reset-under-write_m_ then close (stream_endpoint_t)
 }
 
 }  // namespace tr::net
