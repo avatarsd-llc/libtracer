@@ -174,9 +174,10 @@ struct send_ctx_t {
  */
 class msquic_endpoint_t {
    public:
-    /** @brief The largest frame the length prefix may announce (16 MiB — the
-     *         tcp_transport_t cap, restated by both public transport classes). */
-    static constexpr std::size_t kMaxFrame = 16u * 1024u * 1024u;
+    /** @brief The largest frame the length prefix may announce — the shared
+     *         length_prefix_framer::kDefaultMaxFrame (16 MiB), restated by both
+     *         public transport classes. */
+    static constexpr std::size_t kMaxFrame = length_prefix_framer::kDefaultMaxFrame;
 
     /** @brief Constructs inert: no msquic state opened yet. */
     msquic_endpoint_t() = default;

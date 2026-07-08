@@ -339,7 +339,7 @@ void test_schema_read() {
     (void)g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     auto schema = g.read(path_t("/sensor/temp:schema"));
     check(schema.has_value(), ":schema read returns a value");
-    auto point = tr::wire::view_as_tlv(schema->only());
+    auto point = tr::wire::decode(schema->only());
     check(point && point->type == tr::wire::type_t::POINT, ":schema decodes to a POINT");
     check(point && point->children.size() == 2, "POINT has a NAME and a SETTINGS child");
     check(point && point->children[0].type == tr::wire::type_t::NAME &&

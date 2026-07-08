@@ -14,6 +14,7 @@
 
 #include <array>
 #include <cerrno>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -89,13 +90,7 @@ tcp_transport_t::tcp_transport_t(const std::string& peer_host, std::uint16_t pee
     conn_fd_.store(fd, std::memory_order_relaxed);
     start([this, fd] {
         serve(fd);
-        // Tear down under write_m_ so a concurrent send() never writes to (or
-        // reads) a closed/reused fd.
-        {
-            const std::lock_guard lock(write_m_);
-            conn_fd_.store(-1, std::memory_order_relaxed);
-        }
-        ::close(fd);
+        teardown_peer(fd);  // reset-under-write_m_ then close (stream_endpoint_t)
     });
 }
 
@@ -129,10 +124,8 @@ tcp_transport_t::tcp_transport_t(std::uint16_t bind_port, mem::mem_backend_t* ba
 
 tcp_transport_t::~tcp_transport_t() {
     stop_and_join();  // FIRST: the thread touches the fds released below
-    // The serve/accept thread closes the peer fd on exit; this only catches a
-    // never-spawned thread (dial failed), so it never double-closes.
-    const int leftover = conn_fd_.exchange(-1, std::memory_order_relaxed);
-    if (leftover >= 0) ::close(leftover);
+    // A leftover peer fd (never-spawned thread — dial failed) is closed by
+    // ~stream_endpoint_t after this body; the listen socket is ours.
     if (listen_fd_ >= 0) ::close(listen_fd_);
 }
 
@@ -254,25 +247,16 @@ void tcp_transport_t::serve(int fd) {
 }
 
 void tcp_transport_t::run_listen() {
-    while (!stop_.load(std::memory_order_relaxed)) {
-        // One poll-100ms-recheck accept pass (posix_endpoint_t): timeout /
-        // error / no connection → re-check stop_ and try again.
-        const int fd = poll_accept(listen_fd_);
-        if (fd < 0) continue;
-        set_rcv_timeout(fd);
-        set_nodelay(fd);
-        conn_fd_.store(fd, std::memory_order_relaxed);
-
-        serve(fd);
-
-        // Tear down under write_m_ so a concurrent send() never writes to (or
-        // reads) a closed/reused fd; then re-accept the next peer.
-        {
-            const std::lock_guard lock(write_m_);
-            conn_fd_.store(-1, std::memory_order_relaxed);
-        }
-        ::close(fd);
-    }
+    // The one-peer accept/serve/teardown shape is stream_endpoint_t's; only
+    // the per-peer socket options are TCP's.
+    run_accept_loop(
+        listen_fd_,
+        [this](int fd) {
+            set_rcv_timeout(fd);
+            set_nodelay(fd);
+            return true;
+        },
+        [this](int fd) { serve(fd); });
 }
 
 }  // namespace tr::net
