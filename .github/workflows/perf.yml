@@ -53,7 +53,11 @@ jobs:
       # zero heap. Measured by a global operator-new counter armed around one steady-
       # state on_frame. Fails the build if the forward path ever allocates again.
       - name: Zero-heap forward gate (ADR-0038 §16KB-RAM)
-        run: ZEROHEAP_MAX=0 ./bench/build/bench_forward_heap
+        # tee: the probe's alloc/byte counts also feed the memory-footprint series of
+        # the history tracker below (push runs) and the per-run raw-results artifact.
+        run: |
+          set -o pipefail
+          ZEROHEAP_MAX=0 ./bench/build/bench_forward_heap | tee bench/bench_forward_heap_raw.txt
 
       # --- PR gate: same-runner baseline ------------------------------------------
       # Build main's bench_libtracer in a worktree on THIS runner, then record its
@@ -83,22 +87,55 @@ jobs:
       # perf_gate.py above is the HARD, per-PR relative gate (fails a PR at >50%
       # latency / >34% throughput vs its same-runner main baseline). It does NOT keep a
       # durable series, so slow drift that stays under 50% across many commits is
-      # invisible. This step records every main commit's p50 / p99 / ns-per-delivery (all
-      # in ns) to a persisted history and charts it, with a TIGHTER 125% soft alert that
-      # comments on the offending commit — catching creep the hard gate misses.
+      # invisible. These steps run the bench ONCE, archive the full raw transcript as a
+      # per-commit artifact (the "rich" results), and record EVERY (mode,size,fan,ep)
+      # point the run produces — latency, throughput and memory footprint as separate
+      # series — to a persisted history with a TIGHTER 125% soft alert that comments on
+      # the offending commit, catching creep the hard gate misses.
       #
       # NOTE: the history + interactive chart live on the `gh-pages` BRANCH (github-
-      # action-benchmark's store). This repo's Pages URL is the Sphinx site, which
-      # docs.yml deploys from an Actions artifact (Pages source = GitHub Actions), so the
-      # two do not collide — but the chart is not served at the Pages URL; view it at the
-      # gh-pages branch's dev/bench/index.html (or repoint Pages to the branch if wanted).
-      - name: Emit the bench as ns metrics (github-action-benchmark JSON)
+      # action-benchmark's store; machine-maintained — only this workflow writes it).
+      # Pages source is "GitHub Actions" (docs.yml's Sphinx artifact), so the branch is
+      # not served directly; docs.yml mirrors dev/bench/ from the branch into each
+      # deploy, so the chart is served at https://libtracer.avatarsd.com/dev/bench/.
+      - name: Run the bench once (raw transcript kept as the per-commit artifact)
         if: github.event_name == 'push'
-        run: python3 bench/perf_emit_benchmark.py --bench bench/build/bench_libtracer --out bench/benchmark_output.json
-      - name: Track ns history + soft-alert on drift
+        # GNU time -v: whole-run max RSS feeds the memory-footprint series. Degrades
+        # to an empty transcript (metric omitted) if GNU time is absent on the runner.
+        run: |
+          if [ -x /usr/bin/time ]; then
+            /usr/bin/time -v ./bench/build/bench_libtracer \
+              >bench/bench_libtracer_raw.txt 2>bench/bench_libtracer_time.txt
+          else
+            ./bench/build/bench_libtracer >bench/bench_libtracer_raw.txt
+            : >bench/bench_libtracer_time.txt
+          fi
+      - name: Emit the bench as history metrics (github-action-benchmark JSON)
+        if: github.event_name == 'push'
+        run: >-
+          python3 bench/perf_emit_benchmark.py
+          --raw bench/bench_libtracer_raw.txt
+          --zeroheap-raw bench/bench_forward_heap_raw.txt
+          --time-v bench/bench_libtracer_time.txt
+          --out-smaller bench/benchmark_output.json
+          --out-bigger bench/benchmark_throughput.json
+      - name: Upload the full raw bench results (rich per-commit record)
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ github.sha }}
+          path: |
+            bench/bench_libtracer_raw.txt
+            bench/bench_libtracer_time.txt
+            bench/bench_forward_heap_raw.txt
+            bench/benchmark_output.json
+            bench/benchmark_throughput.json
+          retention-days: 90
+      - name: Track latency + memory history + soft-alert on drift
         if: github.event_name == 'push'
         uses: benchmark-action/github-action-benchmark@v1
         with:
+          # Keep the historical suite name so the pre-existing ns series continue.
           name: libtracer in-process latency (ns, smaller is better)
           tool: customSmallerIsBetter
           output-file-path: bench/benchmark_output.json
@@ -109,4 +146,21 @@ jobs:
           alert-threshold: '125%'      # tighter than perf_gate's 150% hard gate: catch creep
           comment-on-alert: true       # auto-comment on the commit that drifted
           fail-on-alert: false         # perf_gate.py remains the hard gate; this is a signal
+          alert-comment-cc-users: '@avatarsd'
+      - name: Track throughput history + soft-alert on drift
+        if: github.event_name == 'push'
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          # Separate suite: throughput in natural deliveries/s needs the opposite
+          # direction (bigger is better); same gh-pages store, its own chart set.
+          name: libtracer in-process throughput (deliveries/s, bigger is better)
+          tool: customBiggerIsBetter
+          output-file-path: bench/benchmark_throughput.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/bench
+          alert-threshold: '125%'
+          comment-on-alert: true
+          fail-on-alert: false
           alert-comment-cc-users: '@avatarsd'
