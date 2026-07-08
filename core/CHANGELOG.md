@@ -12,6 +12,11 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-08
+
+<!-- The following subsections are the work landed after the initial
+     0.3.0 cut but before the tag; all of it ships in 0.3.0. -->
+
 ### Added
 
 - **PlatformIO: ESP32 CAN bus driver (best-effort).** The PlatformIO package gains a
@@ -95,8 +100,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `set_rope_receiver` set a per-transport `rx_dirty_` flag; the steady-state per-frame cost is
   one relaxed atomic load, no lock, copy, or allocation. Mid-run receiver swaps still take
   effect (they set the flag), and UDP no longer re-copies on idle-timeout wakeups.
-
-## [0.3.0] — 2026-07-07
 
 ### Changed
 
