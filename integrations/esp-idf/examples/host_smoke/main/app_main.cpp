@@ -1,9 +1,10 @@
-/*
+/**
+ * @file
+ * @brief host_smoke — the libtracer P0 (in-process) profile on the ESP-IDF
+ *        *linux* target (the POSIX host simulator).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
- *
- * host_smoke — the libtracer P0 (in-process) profile on the ESP-IDF *linux*
- * target (the POSIX host simulator).
  *
  * This is the host-target build/smoke for the integrations/esp-idf component.
  * It links the libtracer reference core (L0/L1 substrate, L2/L3 wire codec, L4
@@ -18,9 +19,6 @@
  * host_test suite exercises. The data path still bumps the L0 segment refcount
  * (tr::view::segment_ptr_t): every read() is a refcount clone of the same bytes,
  * never a byte copy.
- *
- * This is example code, not core: it intentionally uses plain comments rather
- * than the core's Doxygen style.
  */
 
 #include <cinttypes>
@@ -36,7 +34,7 @@ namespace {
 using tr::graph::path_t;
 using tr::graph::role_t;
 
-// Encode a little-endian u32 into a fresh heap segment, returned as a view.
+/** @brief Encode a little-endian u32 into a fresh heap segment, returned as a view. */
 tr::view::view_t value_u32(std::uint32_t v) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(4);
     for (int i = 0; i < 4; ++i) {

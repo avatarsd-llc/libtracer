@@ -1,8 +1,10 @@
-/*
+/**
+ * @file
+ * @brief inprocess_mirror — the libtracer P0 (in-process) profile on an
+ *        ESP32-C6.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
- *
- * inprocess_mirror — the libtracer P0 (in-process) profile on an ESP32-C6.
  *
  * This is the on-silicon build/smoke target for the integrations/esp-idf
  * component. It links the libtracer reference core (L0/L1 substrate, L2/L3 wire
@@ -15,9 +17,6 @@
  * <atomic> ref_count_t in segment.hpp): every read()/fan-out is a refcount clone
  * of the same bytes, never a byte copy. Exercising it here proves that atomic
  * refcount path links and runs on single-core FreeRTOS.
- *
- * This is example code, not core: it intentionally uses plain ESP_LOG comments
- * rather than the core's Doxygen style.
  */
 
 #include <chrono>
@@ -37,11 +36,11 @@ constexpr const char* kTag = "inprocess_mirror";
 using tr::graph::path_t;
 using tr::graph::role_t;
 
-// The shared in-process graph and the pinned vertex handle, resolved once.
+/** @brief The shared in-process graph and the pinned vertex handle, resolved once. */
 tr::graph::graph_t g_graph;
 std::optional<tr::graph::vertex_handle_t> g_temp;
 
-// Encode a little-endian u32 into a fresh heap segment, returned as a view.
+/** @brief Encode a little-endian u32 into a fresh heap segment, returned as a view. */
 tr::view::view_t value_u32(std::uint32_t v) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(4);
     for (int i = 0; i < 4; ++i) {
@@ -59,7 +58,7 @@ std::uint32_t as_u32(const tr::view::view_t& view) {
     return v;
 }
 
-// A FreeRTOS task that parks in await() and reports the next value written.
+/** @brief A FreeRTOS task that parks in await() and reports the next value written. */
 void await_task(void*) {
     ESP_LOGI(kTag, "await: parking on /sensor/temp (2s timeout)");
     auto r = g_graph.await(*g_temp, std::chrono::seconds(2));

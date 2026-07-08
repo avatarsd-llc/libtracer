@@ -1,4 +1,8 @@
-/*
+/**
+ * @file
+ * @brief full_node — the libtracer FULL-NODE profile on ESP-IDF, in the
+ *        strawberry shape.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
@@ -31,8 +35,6 @@
  * On the `linux` target the app exits 0/1 with the self-proof (the CI gate);
  * on a chip it parks in the publish loop, so a real host on the LAN (Wi-Fi
  * creds via menuconfig) can dial the same listener — the on-silicon e2e.
- *
- * This is example code, not core: plain comments, no Doxygen.
  */
 
 #include <atomic>
@@ -73,7 +75,7 @@ using tr::view::view_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-// The device's UDP listener port (the host peer dials it over loopback).
+/** @brief The device's UDP listener port (the host peer dials it over loopback). */
 constexpr std::uint16_t kNodePort = 47301;
 
 int g_failures = 0;
@@ -83,7 +85,7 @@ void check(bool ok, std::string_view what) {
     if (!ok) ++g_failures;
 }
 
-// ---- wire builders (canonical bytes via the production emit helpers) --------
+/** @name wire builders (canonical bytes via the production emit helpers) */
 
 view_t owned(std::span<const std::byte> bytes) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
@@ -118,10 +120,13 @@ void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
     dst.insert(dst.end(), src.begin(), src.end());
 }
 
-// SPEC{ NAME "type", NAME "name", SETTINGS "config"{ role, port [, kind][, addr] } }
-// — a connection-creation spec (ADR-0027 / reference/05), written to
-// /net:children[]. This is THE production wiring path: the connection vertex
-// constructs and owns the real socket from this config.
+/**
+ * @brief SPEC{ NAME "type", NAME "name", SETTINGS "config"{ role, port [, kind][, addr] } }
+ * — a connection-creation spec (ADR-0027 / reference/05), written to /net:children[].
+ *
+ * This is THE production wiring path: the connection vertex constructs and
+ * owns the real socket from this config.
+ */
 view_t conn_spec(std::string_view type, std::string_view name, conn_role_t role, std::uint16_t port,
                  std::string_view kind, std::string_view addr = {}) {
     std::vector<std::byte> cfg;
@@ -151,7 +156,7 @@ view_t conn_spec(std::string_view type, std::string_view name, conn_role_t role,
     return owned(out);
 }
 
-// FIELD{ NAME "subscribers", VALUE u8 index_mode=ELEMENT } — ":subscribers[]" append.
+/** @brief FIELD{ NAME "subscribers", VALUE u8 index_mode=ELEMENT } — ":subscribers[]" append. */
 std::vector<std::byte> b_field_subscribers_append() {
     std::vector<std::byte> body;
     tr::wire::emit_name(body, "subscribers");
@@ -161,7 +166,7 @@ std::vector<std::byte> b_field_subscribers_append() {
     return out;
 }
 
-// SUBSCRIBER{ PATH target } — the remote-subscriber record a subscribe appends.
+/** @brief SUBSCRIBER{ PATH target } — the remote-subscriber record a subscribe appends. */
 std::vector<std::byte> b_subscriber(const std::vector<std::byte>& target) {
     std::vector<std::byte> out;
     tr::wire::emit_tlv(out, type_t::SUBSCRIBER, opt_t{.pl = true}, target);
@@ -183,14 +188,14 @@ std::vector<std::byte> b_fwd(tr::graph::fwd_op_t op, const std::vector<std::byte
     return out;
 }
 
-// Decode the u32 out of a stored VALUE TLV (a vertex's last-known value).
+/** @brief Decode the u32 out of a stored VALUE TLV (a vertex's last-known value). */
 std::uint32_t value_u32_of(const view_t& lkv) {
     const auto t = tr::wire::decode(lkv);
     if (!t || t->type != type_t::VALUE || t->payload.size() != 4) return 0;
     return tr::detail::load_le<std::uint32_t>(t->payload);
 }
 
-// The trailing 4-byte VALUE of a FWD reply (the read's result).
+/** @brief The trailing 4-byte VALUE of a FWD reply (the read's result). */
 std::uint32_t reply_value_u32(const tr::wire::tlv_t& f) {
     for (auto it = f.children.rbegin(); it != f.children.rend(); ++it)
         if (it->type == type_t::VALUE && it->payload.size() == 4)
@@ -198,33 +203,46 @@ std::uint32_t reply_value_u32(const tr::wire::tlv_t& f) {
     return 0;
 }
 
-// ---- the device node (the strawberry shape) ---------------------------------
+/** @name the device node (the strawberry shape) */
 
-// ADR-0039 one-slab recipe, concretely: ONE static slab, partitioned once at
-// bring-up. The front region becomes the RX segment pool (pool_t — fixed slots,
-// exhaustion = backpressure, ADR-0042); the back region backs the container
-// memory_resource the router draws its terminus arena and label tables from.
-// Steady state allocates from THIS slab, not the global heap.
+/**
+ * @brief ADR-0039 one-slab recipe, concretely: ONE static slab, partitioned
+ *        once at bring-up.
+ *
+ * The front region becomes the RX segment pool (pool_t — fixed slots,
+ * exhaustion = backpressure, ADR-0042); the back region backs the container
+ * memory_resource the router draws its terminus arena and label tables from.
+ * Steady state allocates from THIS slab, not the global heap.
+ */
 constexpr std::size_t kSlabBytes = 24 * 1024;
-constexpr std::size_t kRxRegion = 12 * 1024;  // pool_t: RX datagram segments
-constexpr std::size_t kRxSlotPayload = 1536;  // one UDP/MTU-sized datagram per slot
+constexpr std::size_t kRxRegion = 12 * 1024; /**< @brief pool_t: RX datagram segments. */
+constexpr std::size_t kRxSlotPayload = 1536; /**< @brief One UDP/MTU-sized datagram per slot. */
 alignas(std::max_align_t) std::byte g_slab[kSlabBytes];
 
+/** @brief The device node: the one-slab substrate, graph, router, and transport vertex. */
 struct device_node_t {
-    // Segment seam: RX datagrams land in pool slots. udp_transport_t sizes its
-    // RX segments to the pool's slot payload (min with kMaxDatagram), so
-    // MCU-sized slots work as-is.
+    /**
+     * @brief Segment seam: RX datagrams land in pool slots.
+     *
+     * udp_transport_t sizes its RX segments to the pool's slot payload (min
+     * with kMaxDatagram), so MCU-sized slots work as-is.
+     */
     tr::mem::pool_t rx_pool{std::span<std::byte>(g_slab, kRxRegion), kRxSlotPayload};
-    // Container seam: a monotonic arena over the slab's back region; the
-    // synchronized pool on top recycles freed blocks (label tables, terminus
-    // arena spill) and makes the resource safe for the recv threads.
+    /**
+     * @brief Container seam: a monotonic arena over the slab's back region.
+     *
+     * The synchronized pool on top recycles freed blocks (label tables,
+     * terminus arena spill) and makes the resource safe for the recv threads.
+     */
     std::pmr::monotonic_buffer_resource arena{g_slab + kRxRegion, kSlabBytes - kRxRegion};
     std::pmr::synchronized_pool_resource mr{&arena};
 
     graph_t graph;
     fwd_router_t router{graph, &mr};
-    // Owns the config-created sockets; declared LAST so its recv threads stop
-    // before the router/graph they feed are torn down.
+    /**
+     * @brief Owns the config-created sockets; declared LAST so its recv
+     *        threads stop before the router/graph they feed are torn down.
+     */
     transport_vertex_t net{graph, router, "/net", &rx_pool};
 
     std::optional<tr::graph::vertex_handle_t> sensor;
@@ -251,7 +269,7 @@ struct device_node_t {
     }
 };
 
-// ---- the host-peer probe (the self-proof CI runs) ----------------------------
+/** @name the host-peer probe (the self-proof CI runs) */
 
 int run_host_probe(device_node_t& dev) {
     std::printf("host peer: dialing the device node over real datagrams (127.0.0.1:%u)\n",
