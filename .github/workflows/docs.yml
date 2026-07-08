@@ -46,6 +46,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history + tags: the released-version doc subtrees are rebuilt
+          # from their vX.Y.Z tags on every deploy (tools/assemble_release_docs.sh).
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -130,10 +134,15 @@ jobs:
         run: python3 bench/gen_test_report.py
       - name: Build (sphinx-build, config in docs/, source = repo root)
         run: sphinx-build -b html -c docs . docs/_build/html
+      # Rebuild each released version's docs from its vX.Y.Z tag into a subtree of
+      # the site (deploy-pages replaces the WHOLE site every push, so released
+      # subtrees must be re-assembled on every deploy, not once at release time).
+      # A tag whose docs fail to build is skipped — the manifest stays honest.
+      - name: Assemble released-version doc subtrees
+        run: bash tools/assemble_release_docs.sh docs/_build/html
       # Emit the version manifest the sidebar switcher reads. It scans the built
-      # site for deployed vX.Y.Z/ subtrees (none yet — released-version docs get
-      # assembled here as part of the release flow), so today it lists just
-      # "latest" and the switcher shows a single-version chip.
+      # site for the vX.Y.Z/ subtrees assembled above; "latest" (the main build,
+      # at the site root) is always first.
       - name: Generate the docs version manifest (versions.json)
         run: python3 tools/gen_versions_json.py docs/_build/html
       - name: Upload Pages artifact
