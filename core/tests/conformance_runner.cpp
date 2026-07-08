@@ -6,7 +6,9 @@
  * No JSON parser: input.bin is self-describing, so the codec is validated by
  *   (1) generic roundtrip  — encode(decode(input.bin)) == input.bin, for every vector;
  *   (2) golden builders     — encode(built) == input.bin && decode(input.bin) == built;
- *   (3) targeted asserts     — the CRC value, the PATH child count, reserved-bit rejection.
+ *   (3) targeted asserts     — the CRC value, the PATH child count, reserved-bit rejection;
+ *   (4) negative vectors    — decode(reject.bin) MUST fail with the error named by
+ *       expected.json's "reject" field (extracted by a tiny scan, no JSON parser).
  * expected.json stays as the human-readable / cross-language spec.
  */
 
@@ -118,6 +120,32 @@ int run_roundtrip() {
     return 0;
 }
 
+// The expected decode-error name for a negative case: the value of expected.json's
+// top-level "reject" field (tiny scan-to-quote, mirroring the Rust vector tests'
+// json_str helper — the field is machine-written pure ASCII, no escapes).
+std::optional<std::string> reject_expectation(const fs::path& case_dir) {
+    std::ifstream f(case_dir / "expected.json");
+    if (!f) return std::nullopt;
+    const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const std::size_t key = text.find("\"reject\"");
+    if (key == std::string::npos) return std::nullopt;
+    const std::size_t colon = text.find(':', key + 8);
+    if (colon == std::string::npos) return std::nullopt;
+    const std::size_t q1 = text.find('"', colon + 1);
+    if (q1 == std::string::npos) return std::nullopt;
+    const std::size_t q2 = text.find('"', q1 + 1);
+    if (q2 == std::string::npos) return std::nullopt;
+    return text.substr(q1 + 1, q2 - q1 - 1);
+}
+
+// One negative case: decode(reject.bin) MUST fail with exactly the expected error.
+bool check_reject(const fs::path& reject_bin, std::span<const std::byte> bytes) {
+    const auto want = reject_expectation(reject_bin.parent_path());
+    if (!want) return false;  // a reject.bin without a "reject" expectation is malformed
+    const auto dec = tr::wire::decode(bytes);
+    return !dec.has_value() && *want == error_name(dec.error());
+}
+
 std::vector<std::byte> read_file(const fs::path& p) {
     std::ifstream f(p, std::ios::binary);
     const std::vector<char> raw((std::istreambuf_iterator<char>(f)),
@@ -167,9 +195,14 @@ int main(int argc, char** argv) {
     if (argc > 1 && std::string_view(argv[1]) == "--tap") {
         std::vector<std::pair<std::string, bool>> tap;
         for (const auto& e : fs::recursive_directory_iterator(vroot)) {
-            if (e.path().filename() != "input.bin") continue;
+            const auto fname = e.path().filename();
+            if (fname != "input.bin" && fname != "reject.bin") continue;
             const std::string rel = fs::relative(e.path().parent_path(), vroot).generic_string();
             const std::vector<std::byte> bytes = read_file(e.path());
+            if (fname == "reject.bin") {
+                tap.emplace_back(rel, check_reject(e.path(), bytes));
+                continue;
+            }
             const auto dec = tr::wire::decode(bytes);
             tap.emplace_back(rel, dec.has_value() && tr::wire::encode(*dec) == bytes);
         }
@@ -194,6 +227,13 @@ int main(int argc, char** argv) {
             continue;
         }
         check(tr::wire::encode(*dec) == bytes, label);
+    }
+
+    std::printf("Negative vectors (decode(reject.bin) fails with expected.json's error):\n");
+    for (const auto& e : fs::recursive_directory_iterator(vroot)) {
+        if (e.path().filename() != "reject.bin") continue;
+        const std::string label = e.path().parent_path().filename().string();
+        check(check_reject(e.path(), read_file(e.path())), label);
     }
 
     std::printf("Golden builders (encode == input.bin && decode == built):\n");

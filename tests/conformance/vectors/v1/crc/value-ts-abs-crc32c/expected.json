@@ -1,0 +1,35 @@
+{
+  "name": "value-ts-abs-crc32c",
+  "category": "crc",
+  "hex": "01300300AABBCC08070605040302018AFCBA3D",
+  "total_bytes": 19,
+  "decoded": {
+    "type": "0x01 VALUE",
+    "opt": {
+      "raw": "0x30",
+      "PL": 0,
+      "TS": 1,
+      "CR": 1,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 3,
+    "payload": "AABBCC",
+    "trailer": {
+      "ts": {
+        "form": "absolute u64 ns",
+        "value": 72623859790382856,
+        "bytes_le": "0807060504030201"
+      },
+      "crc": {
+        "width": "CRC-32C",
+        "value": "0x3DBAFC8A",
+        "bytes_le": "8AFCBA3D"
+      }
+    },
+    "meaning": "TS=1 and CR=1 together: CRC-32C computed over payload ++ trailer_ts (AABBCC ++ 0807060504030201), never the header. Catches a core that CRCs the payload only when a ts trailer is present."
+  }
+}

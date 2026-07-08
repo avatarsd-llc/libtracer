@@ -16,6 +16,13 @@ Each case is a directory under `vectors/v1/<category>/<case>/` containing:
 | `expected.json` | Human-readable / cross-language decoded form (the spec of what `input.bin` *means*). |
 | `description.md` | Prose describing the case. |
 
+A **negative case** carries `reject.bin` **instead of** `input.bin` (exactly one of
+the two, never both): bytes the codec MUST refuse to decode. Its `expected.json`
+has a top-level `"reject": "<ERROR_NAME>"` naming the required decode error using
+the same stable names as the `--roundtrip` `ERR:<name>` strings (e.g.
+`FRAME_INVALID`). The distinct filename keeps every `input.bin` consumer (benches,
+arena tests, the coverage audit) on valid frames only.
+
 The **C++ reference is golden**: when the wire changes, it blesses new/updated
 vectors and every other core must match them.
 
@@ -36,6 +43,15 @@ A harness SHOULD additionally check the **semantic** form (`decode(input.bin)`
 matches `expected.json`) where the language has a JSON parser to hand.
 
 A decode that fails, or a round-trip that differs by one byte, is a `not ok`.
+
+For every case directory that contains a `reject.bin` (negative case), it MUST
+check instead that
+
+> `decode(reject.bin)` **fails**, with the error named by `expected.json`'s
+> `"reject"` field
+
+A decode that *succeeds*, or that fails with a different error, is a `not ok`.
+Both kinds of case are folded into the same sorted TAP list, keyed by directory.
 
 ## Output: TAP version 13
 

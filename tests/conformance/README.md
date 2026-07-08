@@ -23,6 +23,10 @@ tests/conformance/
                 └── description.md  human description + byte breakdown
 ```
 
+Negative cases (bytes every core MUST refuse — e.g. a reserved opt bit set) carry
+`reject.bin` **instead of** `input.bin`, and their `expected.json` names the
+required decode error in a top-level `"reject"` field. See [HARNESS.md](HARNESS.md).
+
 > This category layout (per r1 Q5.1) is canonical. It supersedes the earlier `encode/decode/roundtrip/` sketch and the `path_canonical/` mention in `docs/reference/02-graph-model.md`; those are reconciled by the v0.1 consolidation RFC. A driver in each implementation walks `input.bin` → decode → compare against `expected.json`, and re-encodes `expected.json` → compare against `input.bin` (round-trip).
 
 ## Seed vectors

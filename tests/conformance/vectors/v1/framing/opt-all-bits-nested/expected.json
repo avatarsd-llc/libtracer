@@ -1,0 +1,66 @@
+{
+  "name": "opt-all-bits-nested",
+  "category": "framing",
+  "hex": "07601100077E05000000020001007464000000D7610807060504030201",
+  "total_bytes": 29,
+  "decoded": {
+    "type": "0x07 POINT",
+    "opt": {
+      "raw": "0x60",
+      "PL": 1,
+      "TS": 1,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 17,
+    "trailer": {
+      "ts": {
+        "form": "absolute u64 ns",
+        "value": 72623859790382856,
+        "bytes_le": "0807060504030201"
+      },
+      "crc": null
+    },
+    "children": [
+      {
+        "type": "0x07 POINT",
+        "opt": {
+          "raw": "0x7E",
+          "PL": 1,
+          "TS": 1,
+          "CR": 1,
+          "LL": 1,
+          "CW": 1,
+          "TF": 1,
+          "reserved_bit7": 0,
+          "reserved_bit0": 0
+        },
+        "length": 5,
+        "children": [
+          {
+            "type": "0x02 NAME",
+            "length": 1,
+            "payload_utf8": "t"
+          }
+        ],
+        "trailer": {
+          "ts": {
+            "form": "relative i32 ns",
+            "value": 100,
+            "bytes_le": "64000000"
+          },
+          "crc": {
+            "width": "CRC-16-CCITT",
+            "value": "0x61D7",
+            "bytes_le": "D761"
+          }
+        }
+      }
+    ],
+    "meaning": "every defined opt bit set at once on the child (opt=0x7E = PL|TS|CR|LL|CW|TF, reserved bits clear): u32 length header, structured payload, relative i32 ts, CRC-16 over payload ++ trailer_ts. The strongest shifted-mask catcher — any off-by-one mask reads a reserved bit (reject) or breaks the header/trailer arithmetic."
+  }
+}

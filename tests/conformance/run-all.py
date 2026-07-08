@@ -33,11 +33,15 @@ TAP_LINE = re.compile(r"^(ok|not ok)\s+\d+\s*-\s*(.+?)\s*$")
 
 
 def vectors_on_disk(vectors_dir: Path) -> list[str]:
-    """Every vector = a directory containing input.bin, keyed by relative path."""
-    out = []
-    for p in sorted(vectors_dir.rglob("input.bin")):
-        out.append(p.parent.relative_to(vectors_dir).as_posix())
-    return out
+    """Every vector = a directory containing input.bin (round-trip case) or
+    reject.bin (negative case — decode MUST fail, HARNESS.md §negative vectors),
+    keyed by relative path."""
+    out = {
+        p.parent.relative_to(vectors_dir).as_posix()
+        for name in ("input.bin", "reject.bin")
+        for p in vectors_dir.rglob(name)
+    }
+    return sorted(out)
 
 
 def expand(cmd: list[str]) -> list[str] | None:
