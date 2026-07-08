@@ -1,0 +1,12 @@
+{
+  "name": "error-invalid-frame",
+  "category": "errors",
+  "hex": "08400600010002000200",
+  "total_bytes": 10,
+  "decoded": {
+    "type": "0x08 ERROR",
+    "structured": true,
+    "meaning": "ERROR{ VALUE u16=0x0002 (tr::frame::invalid) } — registered-code identity, no detail",
+    "note": "RFC-0002 §C/§D: tr::frame::invalid (code 0x0002) covers reserved-bit-set / type=0x00 / oversize length; severity=error, disposition=permanent"
+  }
+}

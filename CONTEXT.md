@@ -160,7 +160,7 @@ _Avoid_: "advertise+id-match obviates the M6 rope seam" (it composes with it for
 ### Errors
 
 **`tr::` error namespace**:
-The identity space for **protocol/stack** errors — `tr::<concept>::<error>`, keyed by stable protocol **concept** (`frame`, `tlv`, `path`, `schema`, `flow`, `access`, `transport`, `version`), never by an implementation module. Prefix-filterable like a path (`tr::flow::*`). Specified in [RFC-0002](docs/spec/rfcs/0002-protocol-error-model.md) (proposed; ratification pending) + [ADR-0009](docs/adr/0009-built-in-error-model-tr-concept-namespace.md).
+The identity space for **protocol/stack** errors — `tr::<concept>::<error>`, keyed by stable protocol **concept** (`frame`, `tlv`, `path`, `schema`, `flow`, `access`, `transport`, `version`), never by an implementation module. Prefix-filterable like a path (`tr::flow::*`). Specified in [RFC-0002](docs/spec/rfcs/0002-protocol-error-model.md) (accepted 2026-07-03) and [ADR-0009](docs/adr/0009-built-in-error-model-tr-concept-namespace.md).
 _Avoid_: the flat byte registry (`0x01 NOT_FOUND`, …), `tr::<layer>::<module>` (module-keyed), a `0x80–0xFF` user-error range.
 
 **`tr::` (two registers — error identities vs. C++ symbols)**:
@@ -232,7 +232,7 @@ _Avoid_: "a rope is a list of TLVs"; "a memory split must align to a TLV boundar
 - **"Core"** — not a privileged unit; it means the **required modules** (profile P0).
 - **"segment"** — overloaded; pin **view** (L1 window) vs **NAME segment** (path component).
 - **`io_dir_t`** — `DEVICE_TO_CPU` / `CPU_TO_DEVICE` is canonical across reference 08/09/10.
-- **"error identity"** — was a flat byte registry (`0x01 NOT_FOUND`, …); now the `tr::<concept>::<error>` namespace, registered-code-or-string, **protocol-only** (RFC-0002 proposed; ADR-0009/0010).
+- **"error identity"** — was a flat byte registry (`0x01 NOT_FOUND`, …); now the `tr::<concept>::<error>` namespace, registered-code-or-string, **protocol-only** (RFC-0002, accepted; ADR-0009/0010).
 - **"array indexing"** — array-ness is an **L4 schema** property (fixed-stride ⇒ O(1) on contiguous backing), never a wire bit (ADR-0008).
 
 ## Example dialogue
