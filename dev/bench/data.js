@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783539696235,
+  "lastUpdate": 1783540297042,
   "repoUrl": "https://github.com/avatarsd-llc/libtracer",
   "entries": {
     "libtracer in-process latency (ns, smaller is better)": [
@@ -1128,6 +1128,60 @@ window.BENCHMARK_DATA = {
           {
             "name": "inproc-borrow 64B/fan1/1ep p99 latency",
             "value": 311,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep ns/delivery",
+            "value": 278.7,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "15184545+AvatarSD@users.noreply.github.com",
+            "name": "avatarsd",
+            "username": "AvatarSD"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "00b68fdab591b1cba4437579a1115f84336eb6ed",
+          "message": "Merge pull request #339 from avatarsd-llc/docs/doxygen-everywhere\n\ndocs(style): doxygen-capable /** @brief */ comments everywhere — .cpp and bindings too",
+          "timestamp": "2026-07-08T22:50:47+03:00",
+          "tree_id": "3482d218fa99543fb25b85a70851d5fe2d9c24dd",
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/00b68fdab591b1cba4437579a1115f84336eb6ed"
+        },
+        "date": 1783540296358,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "inproc 64B/fan1/1ep p50 latency",
+            "value": 321,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan1/1ep p99 latency",
+            "value": 360,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan1/1ep ns/delivery",
+            "value": 311.5,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep p50 latency",
+            "value": 300,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep p99 latency",
+            "value": 320,
             "unit": "ns"
           },
           {
