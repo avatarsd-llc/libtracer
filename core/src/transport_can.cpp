@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/config_reader.hpp"
 #include "libtracer/frame.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/rope.hpp"
@@ -390,38 +391,21 @@ transport_vertex_t::transport_factory_t can_transport_factory() {
               const wire::tlv_t* raw_config) -> graph::result_t<std::unique_ptr<transport_t>> {
         // Every CAN-private key is parsed HERE from the raw config TLV (the
         // ADR-0043 §5 leanness ruling): nothing CAN-shaped lands in the shared
-        // conn_settings_t. Positional NAME-key / value pairs, like parse_config.
+        // conn_settings_t. The shared config_reader_t walk, CAN's own keys.
         std::string ifname;
         transport_can_config_t cfg;
         bool have_node = false;
-        if (raw_config != nullptr) {
-            const std::vector<wire::tlv_t>& ch = raw_config->children;
-            for (std::size_t i = 0; i + 1 < ch.size(); ++i) {
-                if (ch[i].type != wire::type_t::NAME) continue;
-                const std::string_view key = detail::as_string_view(ch[i].payload);
-                const wire::tlv_t& val = ch[i + 1];
-                if (key == "ifname" && val.type == wire::type_t::NAME) {
-                    ifname = std::string(detail::as_string_view(val.payload));
-                } else if (key == "path" && val.type == wire::type_t::NAME) {
-                    cfg.path = std::string(detail::as_string_view(val.payload));
-                } else if (key == "node" && val.type == wire::type_t::VALUE &&
-                           !val.payload.empty()) {
-                    cfg.node = detail::load_le<std::uint16_t>(val.payload);
-                    have_node = true;
-                } else if (key == "version" && val.type == wire::type_t::VALUE &&
-                           !val.payload.empty()) {
-                    cfg.version = detail::load_le<std::uint8_t>(val.payload);
-                } else if (key == "fd" && val.type == wire::type_t::VALUE && !val.payload.empty()) {
-                    cfg.mode = detail::load_le<std::uint8_t>(val.payload) != 0
-                                   ? tr::view::can_frame_mode_t::FD
-                                   : tr::view::can_frame_mode_t::CLASSIC;
-                } else if (key == "peer_ttl_ms" && val.type == wire::type_t::VALUE &&
-                           !val.payload.empty()) {
-                    cfg.peer_ttl =
-                        std::chrono::milliseconds(detail::load_le<std::uint32_t>(val.payload));
-                }
-            }
+        const config_reader_t reader(raw_config);
+        if (const auto v = reader.name("ifname")) ifname = std::string(*v);
+        if (const auto v = reader.name("path")) cfg.path = std::string(*v);
+        if (const auto v = reader.u16("node")) {
+            cfg.node = *v;
+            have_node = true;
         }
+        if (const auto v = reader.u8("version")) cfg.version = *v;
+        if (const auto v = reader.flag("fd"))
+            cfg.mode = *v ? tr::view::can_frame_mode_t::FD : tr::view::can_frame_mode_t::CLASSIC;
+        if (const auto v = reader.u32("peer_ttl_ms")) cfg.peer_ttl = std::chrono::milliseconds(*v);
         if (ifname.empty() || !have_node || cfg.node > can::kNodeMax ||
             cfg.version > can::kVersionMax) {
             return std::unexpected(graph::status_t::TYPE_MISMATCH);

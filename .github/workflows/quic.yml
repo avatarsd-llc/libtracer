@@ -29,6 +29,7 @@ on:
       - "core/include/libtracer/frame.hpp"  # quic/webtransport TUs decode through it
       - "core/include/libtracer/grammar.hpp"  # the one wire grammar frame decoding walks
       - "core/include/libtracer/length_prefix_framer.hpp"  # quic/webtransport RX reassembler
+      - "core/include/libtracer/config_reader.hpp"  # the quic factory parses cert/key through it
       - "core/include/libtracer/transport.hpp"  # the receiver seam both transports implement
       - "core/include/libtracer/receiver_slot.hpp"  # the delivery-tier slot transport.hpp embeds
       - "core/src/transport_vertex.cpp"
