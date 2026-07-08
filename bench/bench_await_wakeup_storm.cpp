@@ -1,8 +1,9 @@
-/*
+/**
+ * @file
+ * @brief Await wakeup storm — the condvar / await fan-in contention microbenchmark.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
- *
- * Await wakeup storm — the condvar / await fan-in contention microbenchmark.
  *
  * `await` (graph.cpp) parks on a per-vertex condvar until the next write bumps the
  * vertex's write sequence; a `write` bumps it and `notify_all`s. On a many-core
@@ -47,15 +48,22 @@ using tr::view::view_t;
 
 namespace {
 
-// Waiter counts (await fan-in width) to sweep. Fixed, not clamped to
-// hardware_concurrency: measures the tail on a real 128-core host; on a small
-// runner the high points show the oversubscribed regime.
+/**
+ * @brief Waiter counts (await fan-in width) to sweep.
+ *
+ * Fixed, not clamped to
+ * hardware_concurrency: measures the tail on a real 128-core host; on a small
+ * runner the high points show the oversubscribed regime.
+ */
 constexpr std::size_t kWaiters[] = {1, 2, 4, 8, 16, 32, 64, 128};
 
 constexpr auto kWindow = std::chrono::milliseconds(300);
-// Waiter await timeout: bounds how long a waiter lingers after `stop` before it
-// exits. Short enough to keep teardown snappy; long enough that, in steady state,
-// waiters wake on writes far more often than they time out.
+/**
+ * @brief Waiter await timeout: bounds how long a waiter lingers after `stop` before it exits.
+ *
+ * Short enough to keep teardown snappy; long enough that, in steady state,
+ * waiters wake on writes far more often than they time out.
+ */
 constexpr auto kAwaitTimeout = std::chrono::milliseconds(20);
 
 }  // namespace

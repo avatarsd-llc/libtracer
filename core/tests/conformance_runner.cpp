@@ -1,8 +1,10 @@
-/*
+/**
+ * @file
+ * @brief Conformance harness for the seed vectors under tests/conformance/vectors/v1/.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Conformance harness for the seed vectors under tests/conformance/vectors/v1/.
  * No JSON parser: input.bin is self-describing, so the codec is validated by
  *   (1) generic roundtrip  — encode(decode(input.bin)) == input.bin, for every vector;
  *   (2) golden builders     — encode(built) == input.bin && decode(input.bin) == built;
@@ -44,8 +46,11 @@ void check(bool ok, std::string_view what) {
 }
 
 // --- hex + error helpers (used by the --roundtrip differential-fuzz mode) ----
-// The four decode outcomes, mapped to the stable conformance ERR:<name> strings.
-// decode only ever yields these; any other err_t (schema/flow/…) is UNKNOWN here.
+/**
+ * @brief The four decode outcomes, mapped to the stable conformance ERR:<name> strings.
+ *
+ * decode only ever yields these; any other err_t (schema/flow/…) is UNKNOWN here.
+ */
 const char* error_name(tr::wire::err_t e) noexcept {
     switch (e) {
         case tr::wire::err_t::FRAME_TRUNCATED:
@@ -92,10 +97,14 @@ std::string to_hex(std::span<const std::byte> b) {
     return out;
 }
 
-// Read one hex frame per stdin line; for each, print decode->encode re-encoded as
-// hex, or `ERR:<reason>` if it fails to decode. One output line per input line —
-// the differential-fuzz driver (tests/conformance/diff_fuzz.py) compares these
-// against the TS core and the canonical generator output, byte-for-byte.
+/**
+ * @brief Read one hex frame per stdin line; for each, print decode->encode re-encoded as hex, or
+ *        `ERR:<reason>` if it fails to decode.
+ *
+ * One output line per input line —
+ * the differential-fuzz driver (tests/conformance/diff_fuzz.py) compares these
+ * against the TS core and the canonical generator output, byte-for-byte.
+ */
 int run_roundtrip() {
     std::string line;
     while (std::getline(std::cin, line)) {
@@ -120,9 +129,11 @@ int run_roundtrip() {
     return 0;
 }
 
-// The expected decode-error name for a negative case: the value of expected.json's
-// top-level "reject" field (tiny scan-to-quote, mirroring the Rust vector tests'
-// json_str helper — the field is machine-written pure ASCII, no escapes).
+/**
+ * @brief The expected decode-error name for a negative case: the value of expected.json's top-level
+ *        "reject" field (tiny scan-to-quote, mirroring the Rust vector tests' json_str helper — the
+ *        field is machine-written pure ASCII, no escapes).
+ */
 std::optional<std::string> reject_expectation(const fs::path& case_dir) {
     std::ifstream f(case_dir / "expected.json");
     if (!f) return std::nullopt;
@@ -138,7 +149,7 @@ std::optional<std::string> reject_expectation(const fs::path& case_dir) {
     return text.substr(q1 + 1, q2 - q1 - 1);
 }
 
-// One negative case: decode(reject.bin) MUST fail with exactly the expected error.
+/** @brief One negative case: decode(reject.bin) MUST fail with exactly the expected error. */
 bool check_reject(const fs::path& reject_bin, std::span<const std::byte> bytes) {
     const auto want = reject_expectation(reject_bin.parent_path());
     if (!want) return false;  // a reject.bin without a "reject" expectation is malformed

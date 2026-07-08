@@ -1,8 +1,11 @@
-/*
+/**
+ * @file
+ * @brief Scatter-gather egress demonstration (the "rope we put into tx" model).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Scatter-gather egress demonstration (the "rope we put into tx" model). Instead
+ * Instead
  * of a batching layer, a composite endpoint's value IS a rope already batched in
  * memory; the transport ships the whole rope with ONE sendmsg(iovec) — one
  * syscall for K values, at the latency of a single send. So network throughput

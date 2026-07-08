@@ -1,9 +1,11 @@
-/*
+/**
+ * @file
+ * @brief Per-endpoint :acl — storage (#81-A) + core-subset enforcement (#81, ADR-0018/ 0020/0026).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Per-endpoint :acl — storage (#81-A) + core-subset enforcement (#81, ADR-0018/
- * 0020/0026). The graph stores the raw ACL TLV bytes verbatim AND parses them
+ * The graph stores the raw ACL TLV bytes verbatim AND parses them
  * into ALLOW-only ACEs at write time (a DENY ACE or unsupported flag bits are
  * rejected with TYPE_MISMATCH so subset evaluation never silently weakens the
  * written semantics). Enforcement is opt-in twice over: no subject resolver =>
@@ -72,11 +74,11 @@ std::vector<std::byte> as_bytes(std::string_view s) {
 
 // --- ACL builders (docs/reference/05 §0x0A ACE byte layout) ------------------
 struct ace_spec_t {
-    std::uint8_t type = 0;  // ALLOW=0, DENY=1
+    std::uint8_t type = 0; /**< ALLOW=0, DENY=1 */
     std::uint8_t flags = 0;
     std::string_view subject;
     std::uint32_t mask = 0;
-    std::uint64_t expires_ns = 0;  // 0 => omit the field
+    std::uint64_t expires_ns = 0; /**< 0 => omit the field */
 };
 
 tlv_t u_value(std::uint64_t v, std::size_t width, std::vector<std::vector<std::byte>>& keep) {
@@ -91,9 +93,11 @@ tlv_t name_tlv(std::string_view s, std::vector<std::vector<std::byte>>& keep) {
     return tlv_t{.type = type_t::NAME, .payload = keep.back()};
 }
 
-// Encode ACL{ ACL{...ACE...}* } via the typed ADR-0050 surface (encode_acl) —
-// replaces the hand-rolled byte builder; deliberately-invalid ACLs (a DENY ACE
-// under the ALLOW-only profile) still encode, since parse_acl is the gate.
+/**
+ * @brief Encode ACL{ ACL{...ACE...}* } via the typed ADR-0050 surface (encode_acl) — replaces the
+ *        hand-rolled byte builder; deliberately-invalid ACLs (a DENY ACE under the ALLOW-only
+ *        profile) still encode, since parse_acl is the gate.
+ */
 std::vector<std::byte> make_acl(std::initializer_list<ace_spec_t> aces) {
     std::vector<tr::graph::ace_t> typed;
     typed.reserve(aces.size());
@@ -109,14 +113,16 @@ std::vector<std::byte> make_acl(std::initializer_list<ace_spec_t> aces) {
 
 constexpr std::uint32_t bit(acl_right_t r) { return static_cast<std::uint32_t>(r); }
 
-// The test resolver (ADR-0018): a non-empty caller context resolves to its own
-// bytes as the subject token; an empty (local) context is trusted (nullopt).
+/**
+ * @brief The test resolver (ADR-0018): a non-empty caller context resolves to its own bytes as the
+ *        subject token; an empty (local) context is trusted (nullopt).
+ */
 std::optional<subject_token_t> caller_is_subject(std::string_view caller) {
     if (caller.empty()) return std::nullopt;
     return as_bytes(caller);
 }
 
-// Write `text` bytes as a VALUE TLV to `v` under `caller`.
+/** @brief Write `text` bytes as a VALUE TLV to `v` under `caller`. */
 tr::graph::result_t<void> write_u8(graph_t& g, vertex_handle_t v, std::uint8_t x,
                                    std::string_view caller = {}) {
     std::vector<std::byte> out;
@@ -156,8 +162,10 @@ tr::graph::result_t<tr::view::rope_t> resolve_bytes(op_resolver_t& resolver,
     return resolver.resolve(*arena, inbound_link);
 }
 
-// The reply kind and — for kind=ERROR — the registered u16 code of the
-// STATUS{ERROR{VALUE u16 LE}} payload (RFC-0002 §C).
+/**
+ * @brief The reply kind and — for kind=ERROR — the registered u16 code of the STATUS{ERROR{VALUE
+ *        u16 LE}} payload (RFC-0002 §C).
+ */
 struct reply_info_t {
     reply_kind_t kind{};
     std::uint16_t code = 0;

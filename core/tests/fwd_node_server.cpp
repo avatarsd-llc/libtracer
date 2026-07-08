@@ -1,9 +1,11 @@
-/*
+/**
+ * @file
+ * @brief #56 / RFC-0004 (interop) — a standalone FWD-serving node harness driven by the TypeScript
+ *        client SDK interop test (bindings/typescript/.../client/test/interop.test.mjs).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * #56 / RFC-0004 (interop) — a standalone FWD-serving node harness driven by the
- * TypeScript client SDK interop test (bindings/typescript/.../client/test/interop.test.mjs).
  * It proves the web-UI<->device consumer path end to end: the TS
  * `LibtracerClient` issues a path-addressed `read`/`write`/`await` as a `FWD`
  * frame over a real `TransportWs`; this C++ node resolves it against a live
@@ -50,12 +52,17 @@ namespace {
 
 using namespace std::chrono_literals;
 
-// The seeded value at /sensor/temp — a VALUE u32 the TS interop test asserts
-// byte-exact. Keep in sync with the constant in the TS test.
+/**
+ * @brief The seeded value at /sensor/temp — a VALUE u32 the TS interop test asserts byte-exact.
+ *
+ * Keep in sync with the constant in the TS test.
+ */
 constexpr std::uint32_t kSeededTemp = 0x1234ABCDu;
 
-// Build a VALUE TLV (opt=0, 16-bit length, LE u32 payload) via the production
-// emit helpers — the canonical bytes the cross-validated TS codec also produces.
+/**
+ * @brief Build a VALUE TLV (opt=0, 16-bit length, LE u32 payload) via the production emit helpers —
+ *        the canonical bytes the cross-validated TS codec also produces.
+ */
 std::vector<std::byte> value_u32(std::uint32_t v) {
     std::vector<std::byte> p(4);
     tr::detail::store_le<std::uint32_t>(p, v);
@@ -70,7 +77,7 @@ tr::view::view_t make_value(std::span<const std::byte> bytes) {
     return tr::view::view_t::over(std::move(seg));
 }
 
-// Minimal argv parsing: --port N (default 0 = ephemeral), --timeout-ms N.
+/** @brief Minimal argv parsing: --port N (default 0 = ephemeral), --timeout-ms N. */
 std::uint16_t g_port = 0;
 int g_timeout_ms = 15000;
 

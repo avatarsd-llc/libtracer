@@ -1,9 +1,12 @@
-/*
+/**
+ * @file
+ * @brief ws differential-fuzz harness (#60 / hardening) — the C++ side of the RFC 6455 WebSocket
+ *        frame-decoder differential fuzzer.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * ws differential-fuzz harness (#60 / hardening) — the C++ side of the RFC 6455
- * WebSocket frame-decoder differential fuzzer. The ws frame layer is
+ * The ws frame layer is
  * network-facing attack surface: it parses untrusted bytes (FIN/opcode, the
  * 7/16/64-bit length encodings, the client mask, and the overflow-safe
  * 64-bit-over-long path) BEFORE the TLV layer ever sees them, so it must never
@@ -42,7 +45,7 @@
 
 namespace {
 
-// Decode one hex string to bytes; nullopt on odd length or a non-hex nibble.
+/** @brief Decode one hex string to bytes; nullopt on odd length or a non-hex nibble. */
 std::optional<std::vector<std::byte>> from_hex(std::string_view s) {
     if (s.size() % 2 != 0) return std::nullopt;
     const auto nibble = [](char c) -> int {

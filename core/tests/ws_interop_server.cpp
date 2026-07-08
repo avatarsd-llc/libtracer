@@ -1,9 +1,11 @@
-/*
+/**
+ * @file
+ * @brief #54 (interop) — a standalone transport_ws_server harness driven by the TypeScript
+ *        transport-ws interop test (bindings/typescript/.../test/interop.test.mjs).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * #54 (interop) — a standalone transport_ws_server harness driven by the
- * TypeScript transport-ws interop test (bindings/typescript/.../test/interop.test.mjs).
  * It proves the real socket path: the TS TransportWs client performs an actual
  * RFC 6455 101 handshake and sends a MASKED client BINARY frame; this C++
  * transport_ws_server unmasks it, hands the libtracer TLV to a receiver that
@@ -31,7 +33,7 @@ namespace {
 
 using namespace std::chrono_literals;
 
-// Minimal argv parsing: --port N (default 0 = ephemeral), --timeout-ms N.
+/** @brief Minimal argv parsing: --port N (default 0 = ephemeral), --timeout-ms N. */
 std::uint16_t g_port = 0;
 int g_timeout_ms = 10000;
 

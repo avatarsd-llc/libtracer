@@ -1,13 +1,18 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-//
-// Zenoh network bench (two processes, real UDP). The subscriber listens on a UDP
-// endpoint; the publisher connects to it; multicast scouting is disabled so they
-// talk only over the configured socket. Same phase protocol / payload as
-// bench_libtracer_net.cpp (see bench_net.hpp), same RESULT format.
-//
-//   bench_zenoh_net pub <sub_listen_port>
-//   bench_zenoh_net sub <sub_listen_port>
+/**
+ * @file
+ * @brief Zenoh network bench (two processes, real UDP).
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * The subscriber listens on a UDP
+ * endpoint; the publisher connects to it; multicast scouting is disabled so they
+ * talk only over the configured socket. Same phase protocol / payload as
+ * bench_libtracer_net.cpp (see bench_net.hpp), same RESULT format.
+ *
+ *   bench_zenoh_net pub <sub_listen_port>
+ *   bench_zenoh_net sub <sub_listen_port>
+ */
 
 #include <atomic>
 #include <cstdint>

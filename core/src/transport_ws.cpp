@@ -27,11 +27,14 @@ namespace tr::net {
 
 namespace {
 
-// RFC 6455 fragmented-message reassembly as ROPE CHAINING (ADR-0053 §5):
-// each data fragment becomes one owning link (the copy out of the reused
-// connection buffer is the legitimate substrate-boundary copy; chaining the
-// fragments is pointer-linking, never a memcpy). One assembler per connection,
-// used only on its recv thread.
+/**
+ * @brief RFC 6455 fragmented-message reassembly as ROPE CHAINING (ADR-0053 §5): each data fragment
+ *        becomes one owning link (the copy out of the reused connection buffer is the legitimate
+ *        substrate-boundary copy; chaining the fragments is pointer-linking, never a memcpy).
+ *
+ * One assembler per connection,
+ * used only on its recv thread.
+ */
 struct ws_assembler_t {
     tr::view::rope_t partial;
     bool assembling = false;
@@ -41,11 +44,15 @@ struct ws_assembler_t {
         assembling = false;
     }
 
-    // Feed one data frame (BINARY or CONT). Returns the completed message as a
-    // rope when this frame finishes one, std::nullopt otherwise. A BINARY that
-    // arrives mid-assembly is an RFC 6455 protocol error: the stale assembly is
-    // dropped and the new message starts. A stray CONT (no assembly open) is
-    // dropped. An allocation failure drops the whole message (backpressure).
+    /**
+     * @brief Feed one data frame (BINARY or CONT).
+     *
+     * Returns the completed message as a
+     * rope when this frame finishes one, std::nullopt otherwise. A BINARY that
+     * arrives mid-assembly is an RFC 6455 protocol error: the stale assembly is
+     * dropped and the new message starts. A stray CONT (no assembly open) is
+     * dropped. An allocation failure drops the whole message (backpressure).
+     */
     std::optional<tr::view::rope_t> on_data(ws::opcode_t op, bool fin,
                                             std::span<const std::byte> payload) {
         if (op == ws::opcode_t::BINARY && assembling) reset();             // protocol error
@@ -69,8 +76,11 @@ struct ws_assembler_t {
 
 namespace {
 
-// Case-insensitive search for an HTTP header and return its trimmed value.
-// `request` is the raw header block; `name` is lowercase (e.g. "sec-websocket-key").
+/**
+ * @brief Case-insensitive search for an HTTP header and return its trimmed value.
+ *
+ * `request` is the raw header block; `name` is lowercase (e.g. "sec-websocket-key").
+ */
 std::string header_value(std::string_view request, std::string_view name) {
     std::string lower(request);
     std::transform(lower.begin(), lower.end(), lower.begin(),

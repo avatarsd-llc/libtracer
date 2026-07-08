@@ -1,9 +1,12 @@
-/*
+/**
+ * @file
+ * @brief RFC-0005 — subtree subscriptions (vertical bubbling), branch-write decomposition, and
+ *        write-creates.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * RFC-0005 — subtree subscriptions (vertical bubbling), branch-write
- * decomposition, and write-creates. Every subscription observes writes to its
+ * Every subscription observes writes to its
  * vertex AND to any descendant: a write at V fans out to subscribers at V and
  * at each ancestor of V, delivering the written TLV as-is. The idle write path
  * never walks ancestors (asserted via graph_t::ancestor_walks()). A POINT
@@ -54,7 +57,7 @@ void check(bool ok, std::string_view what) {
     if (!ok) ++g_failures;
 }
 
-// A view_t over a fresh, owned heap segment holding `bytes`.
+/** @brief A view_t over a fresh, owned heap segment holding `bytes`. */
 view_t make_value(std::span<const std::byte> bytes) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
     if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
@@ -70,7 +73,7 @@ view_t make_value(std::initializer_list<std::uint8_t> bytes) {
 
 // --- branch-write (POINT tree) byte builders --------------------------------
 
-// A VALUE TLV over raw payload bytes.
+/** @brief A VALUE TLV over raw payload bytes. */
 std::vector<std::byte> value_tlv(std::initializer_list<std::uint8_t> payload) {
     std::vector<std::byte> body;
     for (const std::uint8_t b : payload) body.push_back(std::byte{b});
@@ -79,8 +82,10 @@ std::vector<std::byte> value_tlv(std::initializer_list<std::uint8_t> payload) {
     return out;
 }
 
-// A POINT TLV: NAME `name` first, then the pre-encoded `children` bytes
-// (concatenated VALUE / nested POINT TLVs).
+/**
+ * @brief A POINT TLV: NAME `name` first, then the pre-encoded `children` bytes (concatenated VALUE
+ *        / nested POINT TLVs).
+ */
 std::vector<std::byte> point_tlv(std::string_view name, std::span<const std::byte> children) {
     std::vector<std::byte> body;
     tr::wire::emit_name(body, name);
@@ -101,8 +106,10 @@ bool same_bytes(const view_t& v, std::span<const std::byte> expect) {
     return got.size() == expect.size() && std::memcmp(got.data(), expect.data(), got.size()) == 0;
 }
 
-// True iff `v`'s bytes live INSIDE `frame`'s segment window — the zero-copy
-// (refcount subview, no byte copy) assertion.
+/**
+ * @brief True iff `v`'s bytes live INSIDE `frame`'s segment window — the zero-copy (refcount
+ *        subview, no byte copy) assertion.
+ */
 bool is_subview_of(const view_t& v, const view_t& frame) {
     const std::span<const std::byte> f = frame.bytes();
     const std::span<const std::byte> s = v.bytes();

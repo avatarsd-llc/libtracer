@@ -1,9 +1,11 @@
-/*
+/**
+ * @file
+ * @brief Unit tests for tr::wire::key_view_t (key_view.hpp) — the canonical-key NAME navigation the
+ *        L4 graph dispatch and ACL-inheritance walks funnel through.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Unit tests for tr::wire::key_view_t (key_view.hpp) — the canonical-key NAME
- * navigation the L4 graph dispatch and ACL-inheritance walks funnel through.
  * Those call sites are covered end-to-end by graph/acl/subtree/children tests;
  * this pins the navigation contract directly, including the segment-boundary
  * property (a byte-prefix of a valid key aligns only on a NAME boundary) and the
@@ -31,7 +33,7 @@ void check(bool ok, const char* what) {
     if (!ok) ++g_failures;
 }
 
-// One NAME TLV record: [type=0x02, opt=0x00, u16 len (LE), payload...].
+/** @brief One NAME TLV record: [type=0x02, opt=0x00, u16 len (LE), payload...]. */
 std::vector<std::byte> name_rec(std::string_view s) {
     std::vector<std::byte> r;
     r.push_back(std::byte{0x02});
@@ -42,7 +44,7 @@ std::vector<std::byte> name_rec(std::string_view s) {
     return r;
 }
 
-// A canonical key: the concatenated NAME records of `segs`.
+/** @brief A canonical key: the concatenated NAME records of `segs`. */
 std::vector<std::byte> make_key(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> k;
     for (const std::string_view s : segs) {

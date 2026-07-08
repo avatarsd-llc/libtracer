@@ -1,8 +1,11 @@
-/*
+/**
+ * @file
+ * @brief RFC-0004 / ADR-0035 slice 4 (#136) — the PRODUCER remote fan-out.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * RFC-0004 / ADR-0035 slice 4 (#136) — the PRODUCER remote fan-out. Where
+ * Where
  * fwd_compact_test drives advertise()/send_compact() explicitly, this test proves
  * the AUTO path: a plain `graph.write` to a vertex that has a remote subscriber
  * (bound by an inbound `:subscribers[]` WRITE through fwd_router_t) fans out a
@@ -90,7 +93,9 @@ std::vector<std::byte> b_value_u8(std::uint8_t v) {
     tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, std::span<const std::byte>(&b, 1));
     return out;
 }
-// FIELD{ NAME "subscribers", VALUE u8 index_mode=ELEMENT } — the ":subscribers[]" append.
+/**
+ * @brief FIELD{ NAME "subscribers", VALUE u8 index_mode=ELEMENT } — the ":subscribers[]" append.
+ */
 std::vector<std::byte> b_field_subscribers_append() {
     std::vector<std::byte> body;
     append(body, b_name("subscribers"));
@@ -99,7 +104,7 @@ std::vector<std::byte> b_field_subscribers_append() {
     tr::wire::emit_tlv(out, type_t::FIELD, opt_t{.pl = true}, body);
     return out;
 }
-// SUBSCRIBER{ PATH target, SETTINGS qos{ NAME "delivery_compact" VALUE u8 } }.
+/** @brief SUBSCRIBER{ PATH target, SETTINGS qos{ NAME "delivery_compact" VALUE u8 } }. */
 std::vector<std::byte> b_subscriber(const std::vector<std::byte>& target, bool compact) {
     std::vector<std::byte> body;
     append(body, target);
@@ -134,10 +139,13 @@ tr::view::view_t make_value(std::span<const std::byte> bytes) {
     return tr::view::view_t::over(std::move(seg));
 }
 
-// An in-memory transport that records every frame send()'s; the router installs
-// its receiver into the base slot, which the test pokes to inject inbound frames.
-// Mutex-guarded so the concurrent (TSan) sub-test can capture sends from the
-// writer thread safely.
+/**
+ * @brief An in-memory transport that records every frame send()'s; the router installs its receiver
+ *        into the base slot, which the test pokes to inject inbound frames.
+ *
+ * Mutex-guarded so the concurrent (TSan) sub-test can capture sends from the
+ * writer thread safely.
+ */
 class fake_link_t : public transport_t {
    public:
     void send(std::span<const std::byte> frame) override {
@@ -160,21 +168,21 @@ class fake_link_t : public transport_t {
 };
 
 // --- decode helpers ----------------------------------------------------------
-// The op byte of a decoded FWD (or -1 if it is not a FWD with a leading VALUE op).
+/** @brief The op byte of a decoded FWD (or -1 if it is not a FWD with a leading VALUE op). */
 int fwd_op(const tlv_t& f) {
     if (f.type != type_t::FWD || f.children.empty()) return -1;
     const tlv_t& op = f.children[0];
     if (op.type != type_t::VALUE || op.payload.empty()) return -1;
     return std::to_integer<int>(op.payload[0]);
 }
-// The trailing VALUE-payload u32 of a FWD{WRITE} delivery (its last VALUE child).
+/** @brief The trailing VALUE-payload u32 of a FWD{WRITE} delivery (its last VALUE child). */
 std::uint32_t fwd_payload_u32(const tlv_t& f) {
     for (auto it = f.children.rbegin(); it != f.children.rend(); ++it)
         if (it->type == type_t::VALUE && it->payload.size() == 4)
             return tr::detail::load_le<std::uint32_t>(it->payload);
     return 0;
 }
-// The dst PATH (second child) of a FWD, re-encoded for a byte-exact compare.
+/** @brief The dst PATH (second child) of a FWD, re-encoded for a byte-exact compare. */
 std::vector<std::byte> fwd_dst_bytes(const tlv_t& f) {
     if (f.children.size() < 2 || f.children[1].type != type_t::PATH) return {};
     return tr::wire::encode(f.children[1]);
@@ -221,11 +229,14 @@ void test_full_route_fanout() {
     check(!any_write, "volatile producer does NOT latch on subscribe");
 }
 
-// ADR-0053 ⑤: a MULTI-LINK stored value fans out to a remote subscriber
-// scatter-gathered over the rope's links — deliver_remote emits one FWD{WRITE}
-// iov (head + route + empty src + each value segment) with NO interim flatten.
-// The receiver must reassemble the byte-identical payload from the scattered
-// segments, exactly as a single-link value would.
+/**
+ * @brief ADR-0053 ⑤: a MULTI-LINK stored value fans out to a remote subscriber scatter-gathered
+ *        over the rope's links — deliver_remote emits one FWD{WRITE} iov (head + route + empty src
+ *        + each value segment) with NO interim flatten.
+ *
+ * The receiver must reassemble the byte-identical payload from the scattered
+ * segments, exactly as a single-link value would.
+ */
 void test_full_route_fanout_multilink() {
     std::printf("Full-route fan-out of a multi-link value (scatter-gather, no flatten):\n");
     graph_t graph;

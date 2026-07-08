@@ -1,11 +1,13 @@
-/*
+/**
+ * @file
+ * @brief Shared benchmark scaffolding: a steady-clock timer, a latency-percentile accumulator, the
+ *        swept dimensions (payload size, subscriber fan-out, endpoint count), and a machine-
+ *        parseable RESULT line that collate.py renders into a side-by-side table.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Shared benchmark scaffolding: a steady-clock timer, a latency-percentile
- * accumulator, the swept dimensions (payload size, subscriber fan-out, endpoint
- * count), and a machine-parseable RESULT line that collate.py renders into a
- * side-by-side table. Kept tiny and dependency-free so the libtracer and Zenoh
+ * Kept tiny and dependency-free so the libtracer and Zenoh
  * harnesses emit identical, comparable output.
  */
 #pragma once
@@ -28,19 +30,25 @@ using Clock = std::chrono::steady_clock;
             .count());
 }
 
-// The three swept axes (the user's matrix). Each sweep holds two fixed while
-// varying the third; the mixed workload combines them.
+/**
+ * @brief The three swept axes (the user's matrix).
+ *
+ * Each sweep holds two fixed while
+ * varying the third; the mixed workload combines them.
+ */
 inline constexpr std::size_t kSizes[] = {1, 8, 64, 1024, 8192};       // payload bytes
 inline constexpr std::size_t kFanouts[] = {1, 8, 128, 1024, 8192};    // subscribers / endpoint
 inline constexpr std::size_t kEndpoints[] = {1, 8, 128, 1024, 8192};  // distinct topics
 
-// Fixed points used while sweeping a different axis.
+/** @brief Fixed points used while sweeping a different axis. */
 inline constexpr std::size_t kRefSize = 64;
 inline constexpr std::size_t kRefFanout = 1;
 inline constexpr std::size_t kRefEndpoints = 1;
 
-// Keep wall-clock bounded + the comparison fair: target a roughly constant number
-// of *deliveries* per run, so high fan-out does proportionally fewer publishes.
+/**
+ * @brief Keep wall-clock bounded + the comparison fair: target a roughly constant number of
+ *        *deliveries* per run, so high fan-out does proportionally fewer publishes.
+ */
 inline constexpr std::uint64_t kDeliveryBudget = 2'000'000;
 inline constexpr std::uint64_t kLatencyDeliveryBudget = 200'000;
 
@@ -90,12 +98,15 @@ inline void emit(const char* system, const char* mode, std::size_t size_bytes, s
     std::fflush(stdout);
 }
 
-// --- Response-surface grid (system dynamics) ------------------------------------
-// Log-spaced axes: a 7x7 grid, dense enough for a smooth libtracer-vs-Zenoh curve
-// yet keeping the (zenoh-bound) wall-clock sane. Two slices: size x fanout
-// (endpoints=1, mode `inproc`) and size x endpoints (fanout=1, mode `inproc-path`).
-// `grid` emits the same mode-tagged RESULT line as the default run (see emit()), so
-// bench/render_compare.py draws the docs comparison charts from one parser.
+/**
+ * @brief Response-surface grid (system dynamics).
+ *
+ * Log-spaced axes: a 7x7 grid, dense enough for a smooth libtracer-vs-Zenoh curve
+ * yet keeping the (zenoh-bound) wall-clock sane. Two slices: size x fanout
+ * (endpoints=1, mode `inproc`) and size x endpoints (fanout=1, mode `inproc-path`).
+ * `grid` emits the same mode-tagged RESULT line as the default run (see emit()), so
+ * bench/render_compare.py draws the docs comparison charts from one parser.
+ */
 inline constexpr std::size_t kGridSizes[] = {1, 16, 64, 256, 1024, 4096, 8192};
 inline constexpr std::size_t kGridFanouts[] = {1, 4, 16, 64, 256, 1024, 4096};
 inline constexpr std::size_t kGridEndpoints[] = {1, 4, 16, 64, 256, 1024, 4096};

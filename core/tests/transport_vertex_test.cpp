@@ -1,9 +1,12 @@
-/*
+/**
+ * @file
+ * @brief #83 Stage-1 — transport/connection as a `/` vertex (ADR-0027), the SHELL over the live
+ *        path (ADR-0037 Stage-1).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * #83 Stage-1 — transport/connection as a `/` vertex (ADR-0027), the SHELL over the
- * live path (ADR-0037 Stage-1). Proves: a connection is created in-band via a
+ * Proves: a connection is created in-band via a
  * `:children[]` SPEC, resolves as `/net/<conn>`, carries its transport-private
  * `:settings`, and `await`s link up/down — WHILE `fwd_router_t` still carries the
  * bytes (a FWD still routes through the wired link, unchanged). The loopback runs
@@ -56,9 +59,12 @@ view_t owned(std::span<const std::byte> bytes) {
     return view_t::over(std::move(seg));
 }
 
-// SPEC{ NAME "type" <type>, NAME "name" <name>, SETTINGS "config"{ NAME "role" VALUE u8,
-//       NAME "port" VALUE u16 [, NAME "kind" NAME <kind>][, NAME "addr" NAME <addr>] } }
-// — a connection-creation spec (ADR-0027 / reference/05). `kind`/`addr` empty = omitted.
+/**
+ * @brief A connection-creation spec (ADR-0027 / reference/05). `kind`/`addr` empty = omitted.
+ *
+ * SPEC{ NAME "type" <type>, NAME "name" <name>, SETTINGS "config"{ NAME "role" VALUE u8,
+ *       NAME "port" VALUE u16 [, NAME "kind" NAME <kind>][, NAME "addr" NAME <addr>] } }
+ */
 view_t conn_spec(std::string_view type, std::string_view name, conn_role_t role, std::uint16_t port,
                  std::string_view kind = {}, std::string_view addr = {}) {
     std::vector<std::byte> cfg;
@@ -228,7 +234,7 @@ void test_local_path_untouched() {
     check(hits.load() == 1, "local subscriber fired inline on the write (direct call, no /net)");
 }
 
-// FWD{ op, dst=<segs...>, src=<segs...> } with no payload — a remote READ request.
+/** @brief FWD{ op, dst=<segs...>, src=<segs...> } with no payload — a remote READ request. */
 std::vector<std::byte> fwd_read(std::initializer_list<std::string_view> dst,
                                 std::initializer_list<std::string_view> src) {
     std::vector<std::byte> body;

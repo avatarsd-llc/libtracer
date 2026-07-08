@@ -1,12 +1,13 @@
-/*
+/**
+ * @file
+ * @brief Tests for the lazy rope-backed decode view (ADR-0053): tlv_view_t over a scatter-gather
+ *        rope must (a) agree with the eager decoder node-for-node when fully walked, (b) be
+ *        actually LAZY — siblings of a corrupt TLV deliver, the corrupt one fails only its own
+ *        verify(), bytes are shared not copied — and (c) keep its links' segments alive past the
+ *        source rope (owning tier).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
- *
- * Tests for the lazy rope-backed decode view (ADR-0053): tlv_view_t over a
- * scatter-gather rope must (a) agree with the eager decoder node-for-node when
- * fully walked, (b) be actually LAZY — siblings of a corrupt TLV deliver, the
- * corrupt one fails only its own verify(), bytes are shared not copied — and
- * (c) keep its links' segments alive past the source rope (owning tier).
  */
 
 #include "libtracer/tlv_view.hpp"
@@ -33,7 +34,7 @@ void check(bool ok, std::string_view what) {
     if (!ok) ++g_failures;
 }
 
-// Owns the per-link byte copies and the rope viewing them (borrowed links).
+/** @brief Owns the per-link byte copies and the rope viewing them (borrowed links). */
 struct split_rope_t {
     std::vector<std::vector<std::byte>> parts;
     tr::view::rope_t rope;
@@ -61,8 +62,10 @@ std::vector<std::byte> rope_bytes(const tr::view::rope_t& r) {
     return out;
 }
 
-// Recursively compare a lazy view against the eager decode of the same bytes:
-// header facts, payload bytes, child count/order, and verify() at every node.
+/**
+ * @brief Recursively compare a lazy view against the eager decode of the same bytes: header facts,
+ *        payload bytes, child count/order, and verify() at every node.
+ */
 bool lazy_equals_eager(const tr::wire::tlv_view_t& v, const tr::wire::tlv_t& t) {
     if (v.type() != t.type || !(v.opt() == t.opt)) return false;
     if (!v.verify().has_value()) return false;

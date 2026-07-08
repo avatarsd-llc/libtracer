@@ -19,7 +19,7 @@
 namespace tr::wire {
 namespace {
 
-// Read `n` little-endian bytes at `off` (a thin span adaptor over detail::load_le).
+/** @brief Read `n` little-endian bytes at `off` (a thin span adaptor over detail::load_le). */
 std::uint64_t read_le(std::span<const std::byte> b, std::size_t off, std::size_t n) noexcept {
     return detail::load_le(b.subspan(off, n));
 }
@@ -28,9 +28,13 @@ void write_le(std::vector<std::byte>& out, std::uint64_t v, std::size_t n) {
     detail::append_le(out, v, n);
 }
 
-// Model one validated header (grammar::parse_header, ADR-0048 §1) as a tlv_t:
-// extract the payload span for an opaque node and read the (already-verified)
-// trailer values into the owning tree. `bytes` is the TLV's own bytes.
+/**
+ * @brief Model one validated header (grammar::parse_header, ADR-0048 §1) as a tlv_t: extract the
+ *        payload span for an opaque node and read the (already-verified) trailer values into the
+ *        owning tree.
+ *
+ * `bytes` is the TLV's own bytes.
+ */
 tlv_t model(const grammar::header_t& h, std::span<const std::byte> bytes) {
     tlv_t tlv;
     tlv.type = h.type;
@@ -69,14 +73,18 @@ tlv_t model(const grammar::header_t& h, std::span<const std::byte> bytes) {
     return tlv;
 }
 
-// The owning-tree sink for grammar::walk (ADR-0048 §1): builds the `tlv_t` tree
-// as the shared descent visits it. Opaque nodes are grafted into their parent
-// (or become the root); a structured node is held open on `open_` while its
-// children graft in, then grafted itself on close. The descent logic — pos/total
-// accounting, depth cap, when to descend — lives in the walk, not here.
+/**
+ * @brief The owning-tree sink for grammar::walk (ADR-0048 §1): builds the `tlv_t` tree as the
+ *        shared descent visits it.
+ *
+ * Opaque nodes are grafted into their parent
+ * (or become the root); a structured node is held open on `open_` while its
+ * children graft in, then grafted itself on close. The descent logic — pos/total
+ * accounting, depth cap, when to descend — lives in the walk, not here.
+ */
 struct owning_sink {
-    std::vector<tlv_t> open_;  // the open structured nodes (innermost last)
-    tlv_t result_;             // set once, when the root node finalizes
+    std::vector<tlv_t> open_; /**< the open structured nodes (innermost last) */
+    tlv_t result_;            /**< set once, when the root node finalizes */
 
     void place(tlv_t node) {
         if (open_.empty())

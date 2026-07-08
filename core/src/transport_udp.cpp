@@ -21,7 +21,7 @@
 namespace tr::net {
 
 namespace {
-// Pack a peer endpoint as (ip << 16) | port; 0 means "no peer known yet".
+/** @brief Pack a peer endpoint as (ip << 16) | port; 0 means "no peer known yet". */
 [[nodiscard]] std::uint64_t pack_peer(std::uint32_t ip_net, std::uint16_t port_host) noexcept {
     return (static_cast<std::uint64_t>(ip_net) << 16) | port_host;
 }

@@ -1,8 +1,10 @@
-/*
+/**
+ * @file
+ * @brief M6 TCP transport tests: length-prefix framing over a real localhost TCP stream.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * M6 TCP transport tests: length-prefix framing over a real localhost TCP stream.
  * Proves the stream properties UDP never exercises — a frame split across many
  * small writes reassembles (partial reads), two frames coalesced into one write
  * split apart (stream boundaries honored), and an oversize prefix is rejected as
@@ -55,7 +57,7 @@ void check(bool ok, std::string_view what) {
     if (!ok) ++g_failures;
 }
 
-// A collecting sink: frames delivered on the recv thread, read from the test thread.
+/** @brief A collecting sink: frames delivered on the recv thread, read from the test thread. */
 struct sink_t {
     std::mutex m;
     std::vector<std::vector<std::byte>> frames;
@@ -72,7 +74,7 @@ struct sink_t {
         const std::lock_guard lock(m);
         return frames.at(i);
     }
-    // Wait until `n` frames arrived (or the deadline passes).
+    /** @brief Wait until `n` frames arrived (or the deadline passes). */
     [[nodiscard]] bool wait_for_count(std::size_t n, std::chrono::milliseconds budget) {
         const auto deadline = std::chrono::steady_clock::now() + budget;
         while (count() < n) {
@@ -83,8 +85,10 @@ struct sink_t {
     }
 };
 
-// A raw POSIX TCP client — the test's hand on the wire, so writes can be split
-// and coalesced at will (a tcp_transport_t dialer would hide the boundaries).
+/**
+ * @brief A raw POSIX TCP client — the test's hand on the wire, so writes can be split and coalesced
+ *        at will (a tcp_transport_t dialer would hide the boundaries).
+ */
 struct raw_client_t {
     int fd = -1;
 
@@ -112,7 +116,7 @@ struct raw_client_t {
     }
 };
 
-// One length-prefixed record: u32-LE len ++ payload (the M6 transport framing).
+/** @brief One length-prefixed record: u32-LE len ++ payload (the M6 transport framing). */
 std::vector<std::byte> record(std::span<const std::byte> payload) {
     std::vector<std::byte> out;
     tr::detail::append_le(out, static_cast<std::uint32_t>(payload.size()));
@@ -217,9 +221,11 @@ void test_oversize_prefix() {
     check(n == 0, "the connection was closed (EOF at the peer)");
 }
 
-// A per-connection :settings max_frame tightens the receive cap below kMaxFrame:
-// a prefix within the 16 MiB protocol ceiling but above the connection's cap is
-// rejected as malformed (kMaxFrame→:settings; behavior-preserving default when 0).
+/**
+ * @brief A per-connection :settings max_frame tightens the receive cap below kMaxFrame: a prefix
+ *        within the 16 MiB protocol ceiling but above the connection's cap is rejected as malformed
+ *        (kMaxFrame→:settings; behavior-preserving default when 0).
+ */
 void test_settings_max_frame() {
     std::printf("TCP transport — a :settings max_frame tightens the receive cap:\n");
     std::atomic<int> delivered{0};
@@ -241,8 +247,10 @@ void test_settings_max_frame() {
     check(::recv(client.fd, b.data(), 1, 0) == 0, "the connection was closed (EOF at the peer)");
 }
 
-// A heap-delegating backend that RECORDS every segment it hands out (segment
-// identity) and can FAIL its first `fail_first` allocations (backpressure).
+/**
+ * @brief A heap-delegating backend that RECORDS every segment it hands out (segment identity) and
+ *        can FAIL its first `fail_first` allocations (backpressure).
+ */
 class recording_backend_t final : public tr::mem::mem_backend_t {
    public:
     explicit recording_backend_t(int fail_first = 0)
@@ -273,9 +281,11 @@ class recording_backend_t final : public tr::mem::mem_backend_t {
     std::vector<tr::view::segment_t*> segments_;
 };
 
-// ADR-0042 — the owning delivery path: an installed view receiver gets each frame
-// as a view over a fresh refcounted segment from the injected backend, allocated
-// at exactly the frame length (the stream reader knows `len` before it reads).
+/**
+ * @brief ADR-0042 — the owning delivery path: an installed view receiver gets each frame as a view
+ *        over a fresh refcounted segment from the injected backend, allocated at exactly the frame
+ *        length (the stream reader knows `len` before it reads).
+ */
 void test_view_delivery_segment_identity() {
     std::printf("TCP transport — owning view delivery (ADR-0042 receiver seam):\n");
     recording_backend_t rec;
@@ -312,8 +322,10 @@ void test_view_delivery_segment_identity() {
     check(listener.dropped_rx() == 0, "no backpressure drops on the heap backend");
 }
 
-// ADR-0042 §2 backpressure on a stream: an exhausted backend drops the frame but
-// DRAINS it off the stream, so framing sync survives and later frames deliver.
+/**
+ * @brief ADR-0042 §2 backpressure on a stream: an exhausted backend drops the frame but DRAINS it
+ *        off the stream, so framing sync survives and later frames deliver.
+ */
 void test_backpressure_drain() {
     std::printf("TCP transport — backend exhaustion drains the frame, sync survives:\n");
     recording_backend_t rec(2);  // the first two allocations fail
@@ -363,8 +375,10 @@ void test_scatter_gather() {
           "gathered segments arrive concatenated as one frame");
 }
 
-// Build FWD{ op=WRITE, dst=<segs...>, src=<empty PATH>, payload=<VALUE> } — a remote
-// write routed by explicit source route (RFC-0004 §D, ADR-0040).
+/**
+ * @brief Build FWD{ op=WRITE, dst=<segs...>, src=<empty PATH>, payload=<VALUE> } — a remote write
+ *        routed by explicit source route (RFC-0004 §D, ADR-0040).
+ */
 std::vector<std::byte> fwd_write(std::initializer_list<std::string_view> dst,
                                  std::span<const std::byte> payload_value_tlv) {
     std::vector<std::byte> body;
@@ -381,7 +395,7 @@ std::vector<std::byte> fwd_write(std::initializer_list<std::string_view> dst,
     return frame;
 }
 
-// FWD{ op=READ, dst, src } — a remote read whose REPLY source-routes back.
+/** @brief FWD{ op=READ, dst, src } — a remote read whose REPLY source-routes back. */
 std::vector<std::byte> fwd_read(std::initializer_list<std::string_view> dst,
                                 std::initializer_list<std::string_view> src) {
     std::vector<std::byte> body;
@@ -445,9 +459,12 @@ view_t owned(std::span<const std::byte> bytes) {
     return view_t::over(std::move(seg));
 }
 
-// SPEC{ NAME "type" <type>, NAME "name" <name>, SETTINGS "config"{ NAME "role" VALUE u8,
-//       NAME "port" VALUE u16, NAME "kind" NAME "tcp" [, NAME "addr" NAME <addr>] } }
-// — a connection-creation spec (ADR-0027 / reference/05), the transport_vertex_test shape.
+/**
+ * @brief A connection-creation spec (ADR-0027 / reference/05), the transport_vertex_test shape.
+ *
+ * SPEC{ NAME "type" <type>, NAME "name" <name>, SETTINGS "config"{ NAME "role" VALUE u8,
+ *       NAME "port" VALUE u16, NAME "kind" NAME "tcp" [, NAME "addr" NAME <addr>] } }
+ */
 view_t conn_spec(std::string_view type, std::string_view name, tr::net::conn_role_t role,
                  std::uint16_t port, std::string_view addr = {}) {
     std::vector<std::byte> cfg;

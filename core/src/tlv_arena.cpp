@@ -12,26 +12,32 @@
 namespace tr::wire {
 namespace {
 
-// A bare canonical NAME: type 0x02 with opt byte 0x00 — exactly the
-// `02 00 <u16 len>` header path_key emits, so a PATH made only of these has a
-// body byte-identical to its canonical vertex-map key (ADR-0041 §3).
+/**
+ * @brief A bare canonical NAME: type 0x02 with opt byte 0x00 — exactly the `02 00 <u16 len>` header
+ *        path_key emits, so a PATH made only of these has a body byte-identical to its canonical
+ *        vertex-map key (ADR-0041 §3).
+ */
 bool is_canonical_name(const grammar::header_t& h) noexcept {
     return h.type == type_t::NAME && h.opt == opt_t{};
 }
 
-// The terminus-arena sink for grammar::walk (ADR-0048 §1): appends pre-order
-// arena nodes as the shared descent visits them. Each node's `wire` is
-// header+body (trailer excluded, so a whole-TLV copy is trailer-less at rest);
-// a structured node's subtree extent (`end`) and its ADR-0041 §3 canonical-PATH
-// flag are sealed on close. The descent logic (pos/total, depth cap, when to
-// descend) lives in the walk; this is the pre-order twin of frame.cpp's
-// owning_sink. Its own open-node stack draws from the arena resource so a
-// slab-bound decode stays heap-free.
+/**
+ * @brief The terminus-arena sink for grammar::walk (ADR-0048 §1): appends pre-order arena nodes as
+ *        the shared descent visits them.
+ *
+ * Each node's `wire` is
+ * header+body (trailer excluded, so a whole-TLV copy is trailer-less at rest);
+ * a structured node's subtree extent (`end`) and its ADR-0041 §3 canonical-PATH
+ * flag are sealed on close. The descent logic (pos/total, depth cap, when to
+ * descend) lives in the walk; this is the pre-order twin of frame.cpp's
+ * owning_sink. Its own open-node stack draws from the arena resource so a
+ * slab-bound decode stays heap-free.
+ */
 struct arena_sink {
     std::pmr::vector<arena_tlv_t>& nodes_;
     struct open_t {
         std::uint32_t index = 0;
-        bool names_only = true;  // ADR-0041 §3 canonical-PATH property over direct children
+        bool names_only = true; /**< ADR-0041 §3 canonical-PATH property over direct children */
     };
     std::pmr::vector<open_t> open_;
 
@@ -50,8 +56,10 @@ struct arena_sink {
             .canonical_path = false,
         });
     }
-    // A node that is a direct child of the currently-open parent (if any) breaks
-    // the parent's canonical-PATH property unless it is a bare NAME.
+    /**
+     * @brief A node that is a direct child of the currently-open parent (if any) breaks the
+     *        parent's canonical-PATH property unless it is a bare NAME.
+     */
     void note_child(const grammar::header_t& h) {
         if (!open_.empty() && !is_canonical_name(h)) open_.back().names_only = false;
     }

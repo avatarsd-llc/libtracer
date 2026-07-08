@@ -1,11 +1,14 @@
-/*
+/**
+ * @file
+ * @brief L0/L1 substrate tests: refcount lifetime (the canonical intrusive_ptr orderings), zero-
+ *        copy subview/concat, rope serialization equivalence (the docs/reference/02 proof
+ *        obligation), the view->TLV cast claim with the lifetime gap M1 left open now closed, and
+ *        the bounded pool backend.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * L0/L1 substrate tests: refcount lifetime (the canonical intrusive_ptr
- * orderings), zero-copy subview/concat, rope serialization equivalence (the
- * docs/reference/02 proof obligation), the view->TLV cast claim with the
- * lifetime gap M1 left open now closed, and the bounded pool backend. Reuses the
+ * Reuses the
  * seed vectors as real TLV bytes; no JSON parser. Builds twice — once with
  * atomic refcounts, once with -DLIBTRACER_NO_ATOMIC (single-threaded mode).
  */
@@ -49,8 +52,12 @@ std::vector<std::byte> read_file(const fs::path& p) {
     return out;
 }
 
-// A backend that counts how many times destroy fires and frees the control block
-// it is handed. Used to assert exact refcount lifetime.
+/**
+ * @brief A backend that counts how many times destroy fires and frees the control block it is
+ *        handed.
+ *
+ * Used to assert exact refcount lifetime.
+ */
 class CountingBackend final : public tr::mem::mem_backend_t {
    public:
     CountingBackend() noexcept : tr::mem::mem_backend_t("counting") {}
@@ -61,7 +68,7 @@ class CountingBackend final : public tr::mem::mem_backend_t {
     int destroys = 0;
 };
 
-// Make an owned segment over `bytes` backed by `be` (refcount = 1, adopted).
+/** @brief Make an owned segment over `bytes` backed by `be` (refcount = 1, adopted). */
 tr::view::segment_ptr_t make_segment(CountingBackend& be, std::span<std::byte> bytes) {
     return tr::view::segment_ptr_t::adopt(new tr::view::segment_t(&be, bytes));
 }
@@ -186,8 +193,10 @@ void test_bounded_pool() {
     check(pool.alloc(17) == nullptr, "a request larger than the slot payload is refused");
 }
 
-// The module-set traits are compile-time backend contracts (ADR-0047 §2); pin the
-// load-bearing distinctions so a backend change that violates them fails to build.
+/**
+ * @brief The module-set traits are compile-time backend contracts (ADR-0047 §2); pin the load-
+ *        bearing distinctions so a backend change that violates them fails to build.
+ */
 static_assert(!tr::mem::pool_t::needs_cache_ops, "the pool is plain RAM — no DMA cache ops");
 static_assert(tr::mem::pool_t::is_isr_safe, "the pool's free-list alloc/destroy is ISR-safe");
 static_assert(!tr::mem::heap_backend_t::is_isr_safe, "operator new/delete is not ISR-safe");

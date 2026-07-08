@@ -1,12 +1,12 @@
-/*
+/**
+ * @file
+ * @brief length_prefix_framer unit test — drives the u32-length-prefix reassembly state machine
+ *        directly (no QUIC connection), the whole point of extracting it from transport_quic /
+ *        transport_webtransport (finding #4): prefix/body split across chunks, multiple frames per
+ *        chunk, empty records, oversize => malformed, backpressure drain + resync, and reset.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
- *
- * length_prefix_framer unit test — drives the u32-length-prefix reassembly state
- * machine directly (no QUIC connection), the whole point of extracting it from
- * transport_quic / transport_webtransport (finding #4): prefix/body split across
- * chunks, multiple frames per chunk, empty records, oversize => malformed,
- * backpressure drain + resync, and reset.
  */
 #include "libtracer/length_prefix_framer.hpp"
 
@@ -37,7 +37,7 @@ bytes_t ramp(std::size_t n, std::uint8_t base = 0) {
     return v;
 }
 
-// A u32-LE length-prefixed record: <len><payload>.
+/** @brief A u32-LE length-prefixed record: <len><payload>. */
 bytes_t record(std::span<const std::byte> payload) {
     bytes_t r;
     tr::detail::append_le(r, static_cast<std::uint32_t>(payload.size()), 4);
@@ -45,13 +45,15 @@ bytes_t record(std::span<const std::byte> payload) {
     return r;
 }
 
-// A backend that fails `alloc` on demand (to exercise backpressure), else yields a
-// real heap segment (whose backend is the heap singleton, so it self-reclaims).
+/**
+ * @brief A backend that fails `alloc` on demand (to exercise backpressure), else yields a real heap
+ *        segment (whose backend is the heap singleton, so it self-reclaims).
+ */
 class toggle_backend_t final : public tr::mem::mem_backend_t {
    public:
     toggle_backend_t() noexcept : mem_backend_t("toggle") {}
     bool fail = false;
-    std::size_t max_seg = ~std::size_t{0};  // largest allocatable segment (default: unbounded)
+    std::size_t max_seg = ~std::size_t{0}; /**< largest allocatable segment (default: unbounded) */
     tr::view::segment_t* alloc(std::size_t size,
                                tr::mem::alloc_hint_t = tr::mem::alloc_hint_t::NONE) override {
         return fail ? nullptr : tr::mem::heap_backend().alloc(size);
@@ -60,7 +62,7 @@ class toggle_backend_t final : public tr::mem::mem_backend_t {
     [[nodiscard]] std::size_t max_segment_size() const noexcept override { return max_seg; }
 };
 
-// Collect each delivered frame's bytes so the test can compare against the input.
+/** @brief Collect each delivered frame's bytes so the test can compare against the input. */
 struct collector_t {
     std::vector<bytes_t> frames;
     void operator()(tr::view::segment_ptr_t seg, std::size_t len) {

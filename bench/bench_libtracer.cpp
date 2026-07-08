@@ -1,8 +1,11 @@
-/*
+/**
+ * @file
+ * @brief libtracer side of the libtracer-vs-Zenoh comparison.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * libtracer side of the libtracer-vs-Zenoh comparison. Sweeps the matrix:
+ * Sweeps the matrix:
  *   - fan-out   1/8/128/1024/8192 subscribers on one endpoint (dispatch scaling)
  *   - payload   1..8192 bytes (per-byte cost), heap-alloc vs borrowed (zero-alloc)
  *   - endpoints 1..8192 distinct topics, write BY PATH (registry/lookup scaling)
@@ -40,7 +43,7 @@ using tr::view::view_t;
 
 namespace {
 
-// A VALUE TLV carrying `payload` bytes (so loopback exercises real encode/decode).
+/** @brief A VALUE TLV carrying `payload` bytes (so loopback exercises real encode/decode). */
 std::vector<std::byte> value_tlv(std::size_t payload) {
     std::vector<std::byte> p(payload, std::byte{0xAB});
     tr::wire::tlv_t t{};
@@ -49,23 +52,27 @@ std::vector<std::byte> value_tlv(std::size_t payload) {
     return tr::wire::encode(t);
 }
 
-// Per-message owned heap view (alloc + copy each publish) — the allocating path.
+/** @brief Per-message owned heap view (alloc + copy each publish) — the allocating path. */
 view_t owned_view(std::span<const std::byte> bytes) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
     std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
     return view_t::over(std::move(seg));
 }
 
-// Borrowed view over a stable buffer — zero alloc, zero copy (refcount handoff).
+/** @brief Borrowed view over a stable buffer — zero alloc, zero copy (refcount handoff). */
 view_t borrowed_view(std::span<const std::byte> bytes) {
     return view_t::over(tr::view::borrow_const(bytes));
 }
 
 enum class alloc_t { HEAP, BORROW };
 
-// One inproc run: E endpoints, F subscribers each, S-byte payload. `by_path`
-// writes through the path registry (lookup each publish) instead of the resolved
-// vertex_handle_t hot path — the honest "many topics" measurement.
+/**
+ * @brief One inproc run: E endpoints, F subscribers each, S-byte payload.
+ *
+ * `by_path`
+ * writes through the path registry (lookup each publish) instead of the resolved
+ * vertex_handle_t hot path — the honest "many topics" measurement.
+ */
 void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool by_path,
                 const char* mode, std::uint64_t budget = kDeliveryBudget,
                 std::uint64_t latbudget = kLatencyDeliveryBudget) {
@@ -157,10 +164,13 @@ void run_inproc_deliver(std::size_t S, std::size_t F, std::uint64_t budget = kDe
     emit("libtracer", "inproc-deliver", S, F, 1, pub_s, deliv_s, mb_s, lat.summarize());
 }
 
-// Response-surface grid (system dynamics): size x fanout (endpoints=1, mode
-// `inproc`) and size x endpoints (fanout=1, write-by-path, mode `inproc-path`).
-// Emits the standard mode-tagged RESULT line (same 12-field shape as the default
-// run) so one parser feeds both the terminal table and the docs comparison charts.
+/**
+ * @brief Response-surface grid (system dynamics): size x fanout (endpoints=1, mode `inproc`) and
+ *        size x endpoints (fanout=1, write-by-path, mode `inproc-path`).
+ *
+ * Emits the standard mode-tagged RESULT line (same 12-field shape as the default
+ * run) so one parser feeds both the terminal table and the docs comparison charts.
+ */
 void run_grid() {
     for (std::size_t S : kGridSizes)
         for (std::size_t F : kGridFanouts)
@@ -173,7 +183,7 @@ void run_grid() {
             run_inproc(S, 1, E, alloc_t::HEAP, true, "inproc-path", kGridBudget, kGridLatBudget);
 }
 
-// Mixed workload: 128 topics with varied fan-out (1..16) and payloads (1..8192).
+/** @brief Mixed workload: 128 topics with varied fan-out (1..16) and payloads (1..8192). */
 void run_mixed() {
     graph_t g;
     constexpr std::size_t E = 128;
@@ -216,12 +226,16 @@ void run_mixed() {
          lat.summarize());
 }
 
-// n-cores (parallel-dispatch) axis (#96 / ADR-0032). T independent publisher
-// threads, each driving its OWN graph + endpoint with the zero-copy in-process
-// path, measured for AGGREGATE throughput + per-op latency under load. Each
-// thread reuses one borrowed view over a stable per-thread buffer, so the timed
-// loop allocates nothing (no cross-thread allocator contention) — what scales is
-// dispatch itself. Fixed per-thread work, so more cores => more aggregate work.
+/**
+ * @brief n-cores (parallel-dispatch) axis (#96 / ADR-0032).
+ *
+ * T independent publisher
+ * threads, each driving its OWN graph + endpoint with the zero-copy in-process
+ * path, measured for AGGREGATE throughput + per-op latency under load. Each
+ * thread reuses one borrowed view over a stable per-thread buffer, so the timed
+ * loop allocates nothing (no cross-thread allocator contention) — what scales is
+ * dispatch itself. Fixed per-thread work, so more cores => more aggregate work.
+ */
 void run_inproc_mt(std::size_t T) {
     constexpr std::size_t S = 64;
     constexpr std::size_t MSGS = 2'000'000;  // per-thread fixed work (throughput phase)
@@ -334,7 +348,7 @@ void run_inproc_mt(std::size_t T) {
 // lean / lean-cached reuse the existing inproc paths via run_inproc(), re-emitted
 // under the eptype-* tag (the original inproc / inproc-borrow lines still print too).
 
-// The STREAM-role class: time write+deliver where each write retains history.
+/** @brief The STREAM-role class: time write+deliver where each write retains history. */
 void run_eptype_stream() {
     constexpr std::size_t S = 64;
     graph_t g;
@@ -370,24 +384,28 @@ void run_eptype_stream() {
     emit("libtracer", "eptype-stream", S, 1, 1, pub_s, deliv_s, mb_s, lat.summarize());
 }
 
-// The full ep-type sweep: lean, lean-cached, stream — all at size=64 fan=1 ep=1.
+/** @brief The full ep-type sweep: lean, lean-cached, stream — all at size=64 fan=1 ep=1. */
 void run_eptype() {
     run_inproc(kRefSize, 1, 1, alloc_t::HEAP, false, "eptype-lean");
     run_inproc(kRefSize, 1, 1, alloc_t::BORROW, false, "eptype-lean-cached");
     run_eptype_stream();
 }
 
-// n-layer-folded (fold-depth) axis (#96 / ADR-0032) — the LAST axis. How does the
-// L0/L1 zero-copy COMPOSITION cost scale with how many memory layers a value is
-// FOLDED across? We hold the TOTAL bytes CONSTANT (kFoldTotal) and sweep the fold
-// depth N: the same value is built as a rope of N borrowed views over N segments —
-// N=1 is one flat segment, N=8 is an 8-link rope of identical total bytes. Per op we
-// serialize the folded value for egress the way a transport does: build the
-// scatter-gather descriptor (rope_t::to_iovec — spans into the N segments, no copy)
-// and walk it. Because the bytes are fixed and only the fold depth changes, the delta
-// isolates the view-chain walk / scatter-gather cost: more folds => more links to
-// gather => higher per-op cost (and lower throughput). (The naming "n-layer-folded" /
-// "fold depth" is provisional — see bench/README.md "n-layer-folded axis".)
+/**
+ * @brief n-layer-folded (fold-depth) axis (#96 / ADR-0032) — the LAST axis.
+ *
+ * How does the
+ * L0/L1 zero-copy COMPOSITION cost scale with how many memory layers a value is
+ * FOLDED across? We hold the TOTAL bytes CONSTANT (kFoldTotal) and sweep the fold
+ * depth N: the same value is built as a rope of N borrowed views over N segments —
+ * N=1 is one flat segment, N=8 is an 8-link rope of identical total bytes. Per op we
+ * serialize the folded value for egress the way a transport does: build the
+ * scatter-gather descriptor (rope_t::to_iovec — spans into the N segments, no copy)
+ * and walk it. Because the bytes are fixed and only the fold depth changes, the delta
+ * isolates the view-chain walk / scatter-gather cost: more folds => more links to
+ * gather => higher per-op cost (and lower throughput). (The naming "n-layer-folded" /
+ * "fold depth" is provisional — see bench/README.md "n-layer-folded axis".)
+ */
 void run_fold(std::size_t N) {
     constexpr std::size_t kFoldTotal = 512;  // total bytes, CONSTANT across N (isolate fold)
     const std::size_t seg_bytes = kFoldTotal / N;
@@ -431,18 +449,21 @@ void run_fold(std::size_t N) {
     emit("libtracer", mode.c_str(), kFoldTotal, 1, 1, pub_s, deliv_s, mb_s, lat.summarize());
 }
 
-// ACL-gated data ops with inheritance (ADR-0050): a depth-4 tree whose root and
-// mid level carry INHERIT ACEs, a subject resolver installed, and every op arriving
-// under a granted caller context — so each op pays the full effective-ACL check.
-// The measured op is the GATED READ (the gate plus the lock-free LKV load — the
-// leanest gated data op, so the gate's cost is what the row sees). Two modes:
-//
-//   acl-inherit-d4      one thread, one leaf — the uncontended gate cost.
-//   acl-inherit-d4-mtT  T threads, each gating reads on its OWN leaf under the
-//                       SHARED ancestor chain — what the ADR-0050 cached merge
-//                       buys: pre-cache every op locked each shared ancestor's
-//                       mutex (cross-core cacheline traffic on hot composites);
-//                       post-cache an op touches only its own vertex's lock.
+/**
+ * @brief ACL-gated data ops with inheritance (ADR-0050): a depth-4 tree whose root and mid level
+ *        carry INHERIT ACEs, a subject resolver installed, and every op arriving under a granted
+ *        caller context — so each op pays the full effective-ACL check.
+ *
+ * The measured op is the GATED READ (the gate plus the lock-free LKV load — the
+ * leanest gated data op, so the gate's cost is what the row sees). Two modes:
+ *
+ *   acl-inherit-d4      one thread, one leaf — the uncontended gate cost.
+ *   acl-inherit-d4-mtT  T threads, each gating reads on its OWN leaf under the
+ *                       SHARED ancestor chain — what the ADR-0050 cached merge
+ *                       buys: pre-cache every op locked each shared ancestor's
+ *                       mutex (cross-core cacheline traffic on hot composites);
+ *                       post-cache an op touches only its own vertex's lock.
+ */
 namespace acl_bench {
 
 /** @brief Install a subject resolver mapping a non-empty caller to its own bytes. */
@@ -491,7 +512,7 @@ std::vector<vertex_handle_t> build_tree(graph_t& g, std::size_t leaves) {
 
 }  // namespace acl_bench
 
-// The single-threaded row: the uncontended per-op gate cost (mode acl-inherit-d4).
+/** @brief The single-threaded row: the uncontended per-op gate cost (mode acl-inherit-d4). */
 void run_acl_gated() {
     constexpr std::size_t S = 64;
     graph_t g;
@@ -520,8 +541,10 @@ void run_acl_gated() {
          lat.summarize());
 }
 
-// The contended row (mode acl-inherit-d4-mtT): T reader threads, one leaf each,
-// all gated through the SAME ancestor chain — the shared-composite hot case.
+/**
+ * @brief The contended row (mode acl-inherit-d4-mtT): T reader threads, one leaf each, all gated
+ *        through the SAME ancestor chain — the shared-composite hot case.
+ */
 void run_acl_gated_mt(std::size_t T) {
     constexpr std::size_t S = 64;
     graph_t g;

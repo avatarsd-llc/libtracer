@@ -48,23 +48,31 @@ using wire::type_t;
 
 namespace {
 
-// The opt byte an ADR-0041 §4 trailer-sliced copy carries: the structural bits
-// (PL, LL) survive; the trailer bits (TS, CR, CW, TF) are cleared so the copied
-// TLV — whose bytes exclude the trailer by construction (`node.wire`) — stays
-// self-consistent and trailer-less at rest. Cleared through `opt_t` (not a raw
-// `& 0x48` mask) so there is one representation of the opt bitfield.
+/**
+ * @brief The opt byte an ADR-0041 §4 trailer-sliced copy carries: the structural bits (PL, LL)
+ *        survive; the trailer bits (TS, CR, CW, TF) are cleared so the copied TLV — whose bytes
+ *        exclude the trailer by construction (`node.wire`) — stays self-consistent and trailer-less
+ *        at rest.
+ *
+ * Cleared through `opt_t` (not a raw
+ * `& 0x48` mask) so there is one representation of the opt bitfield.
+ */
 [[nodiscard]] constexpr std::byte struct_opt(std::byte opt_byte) noexcept {
     return static_cast<std::byte>(
         opt_t::decode(std::to_integer<std::uint8_t>(opt_byte)).without_trailer().encode());
 }
 
-// Byte-identical to the retired `& 0x48` mask for any validated opt byte (0x7E =
-// every non-reserved bit set → PL|LL == 0x48; a plain opaque VALUE 0x00 → 0x00).
+/**
+ * @brief Byte-identical to the retired `& 0x48` mask for any validated opt byte (0x7E = every non-
+ *        reserved bit set → PL|LL == 0x48; a plain opaque VALUE 0x00 → 0x00).
+ */
 static_assert(struct_opt(std::byte{0x7E}) == std::byte{0x48});
 static_assert(struct_opt(std::byte{0x00}) == std::byte{0x00});
 
-// Map an L4 status_t to its registered tr:: error code (RFC-0002 §D registry,
-// wire::err_t) — the u16 the kind=ERROR reply's ERROR{VALUE} identity carries.
+/**
+ * @brief Map an L4 status_t to its registered tr:: error code (RFC-0002 §D registry, wire::err_t) —
+ *        the u16 the kind=ERROR reply's ERROR{VALUE} identity carries.
+ */
 [[nodiscard]] wire::err_t error_code(status_t s) noexcept {
     switch (s) {
         case status_t::NOT_FOUND:
@@ -87,15 +95,18 @@ static_assert(struct_opt(std::byte{0x00}) == std::byte{0x00});
     return wire::err_t::PATH_NOT_FOUND;
 }
 
-// The node-reader concept (ADR-0053 §7): the terminus resolves through ONE
-// templated walk over a decoded-TLV node, so the span arena and the lazy rope
-// view share the resolver instead of forking it (the drift class ADR-0048 §1
-// eliminated in the grammar). A node exposes its header facts, its
-// trailer-excluded whole-TLV `wire` bytes and its `body` bytes, and FORWARD
-// child iteration (`children().next()`) — never random sibling access, so the
-// same walk serves a forward-only rope view. `arena_node` is the span-tier
-// instantiation (byte-identical, still the MCU terminus + conformance oracle);
-// the `tlv_view_t` reader instantiation follows (3c).
+/**
+ * @brief The node-reader concept (ADR-0053 §7): the terminus resolves through ONE templated walk
+ *        over a decoded-TLV node, so the span arena and the lazy rope view share the resolver
+ *        instead of forking it (the drift class ADR-0048 §1 eliminated in the grammar).
+ *
+ * A node exposes its header facts, its
+ * trailer-excluded whole-TLV `wire` bytes and its `body` bytes, and FORWARD
+ * child iteration (`children().next()`) — never random sibling access, so the
+ * same walk serves a forward-only rope view. `arena_node` is the span-tier
+ * instantiation (byte-identical, still the MCU terminus + conformance oracle);
+ * the `tlv_view_t` reader instantiation follows (3c).
+ */
 struct arena_node {
     const tlv_arena_t* a = nullptr;
     std::uint32_t i = 0;
@@ -108,21 +119,31 @@ struct arena_node {
     [[nodiscard]] std::span<const std::byte> body() const noexcept { return node().body; }
     [[nodiscard]] bool canonical_path() const noexcept { return node().canonical_path; }
 
-    // The trailer-excluded whole TLV as a fresh OWNED segment (the ADR-0041 §2
-    // ownership copy of a borrowed arena span — the span tier always copies its
-    // bytes, since the arena outlives nothing). The lazy rope reader overrides this
-    // to adopt a multi-link flatten instead of copying it twice (ADR-0053 ⑤).
+    /**
+     * @brief The trailer-excluded whole TLV as a fresh OWNED segment (the ADR-0041 §2 ownership
+     *        copy of a borrowed arena span — the span tier always copies its bytes, since the arena
+     *        outlives nothing).
+     *
+     * The lazy rope reader overrides this
+     * to adopt a multi-link flatten instead of copying it twice (ADR-0053 ⑤).
+     */
     [[nodiscard]] view_t own_wire() const { return view::over_bytes(wire()).value_or(view_t{}); }
 
-    // The trailer-excluded whole-TLV byte length — read WITHOUT materializing (the
-    // ADR-0042 §3 store-decision size test; the rope reader answers it from its
-    // header + body_size without a flatten).
+    /**
+     * @brief The trailer-excluded whole-TLV byte length — read WITHOUT materializing (the ADR-0042
+     *        §3 store-decision size test; the rope reader answers it from its header + body_size
+     *        without a flatten).
+     */
     [[nodiscard]] std::size_t wire_size() const noexcept { return node().wire.size(); }
 
-    // Pin this TLV as a subrope of the owning delivery instead of copying it (ADR-0042
-    // §3): the span tier pins a subview of the contiguous @p frame_view (a single link);
-    // `nullopt` when the frame is borrowed (no owning view to pin). The eligibility test
-    // (opt-in, size, trailer-less) is `own_or_ref_tlv`'s — this only produces the rope.
+    /**
+     * @brief Pin this TLV as a subrope of the owning delivery instead of copying it (ADR-0042 §3):
+     *        the span tier pins a subview of the contiguous @p frame_view (a single link);
+     *        `nullopt` when the frame is borrowed (no owning view to pin).
+     *
+     * The eligibility test
+     * (opt-in, size, trailer-less) is `own_or_ref_tlv`'s — this only produces the rope.
+     */
     [[nodiscard]] std::optional<rope_t> pin_wire(const view_t* frame_view) const {
         if (frame_view == nullptr) return std::nullopt;
         const std::span<const std::byte> w = node().wire;
@@ -130,7 +151,7 @@ struct arena_node {
         return rope_t(frame_view->subview(off, w.size()));
     }
 
-    // Forward-only child cursor — the shared shape of `tlv_view_t::children_t`.
+    /** @brief Forward-only child cursor — the shared shape of `tlv_view_t::children_t`. */
     class children_cursor {
        public:
         children_cursor(const tlv_arena_t* a, std::uint32_t begin, std::uint32_t end) noexcept
@@ -152,24 +173,31 @@ struct arena_node {
     }
 };
 
-// A parsed request FWD over node HANDLES — re-readable, no bytes owned until an
-// ownership copy is taken (ADR-0041 §2). Templated over the node-reader @p N so
-// the arena and the lazy view produce the same parsed shape.
+/**
+ * @brief A parsed request FWD over node HANDLES — re-readable, no bytes owned until an ownership
+ *        copy is taken (ADR-0041 §2).
+ *
+ * Templated over the node-reader @p N so
+ * the arena and the lazy view produce the same parsed shape.
+ */
 template <class N>
 struct parsed_fwd_t {
     fwd_op_t op{};
-    N dst{};                          // forward route (a PATH node)
-    std::optional<N> selector{};      // optional :field (a FIELD node)
-    N src{};                          // accumulated return route (a PATH node)
-    std::optional<N> payload{};       // WRITE only (the value node)
-    std::uint64_t await_timeout = 0;  // AWAIT only
+    N dst{};                         /**< forward route (a PATH node) */
+    std::optional<N> selector{};     /**< optional :field (a FIELD node) */
+    N src{};                         /**< accumulated return route (a PATH node) */
+    std::optional<N> payload{};      /**< WRITE only (the value node) */
+    std::uint64_t await_timeout = 0; /**< AWAIT only */
     bool has_await_timeout = false;
 };
 
-// Parse the FWD child sequence positionally (RFC-0004 §B order: op, dst, FIELD?,
-// src, [payload | await_timeout]) by FORWARD iteration over @p root's children.
-// Returns INVALID_PATH for a structurally malformed frame (the resolver turns
-// that into the error side, not a reply).
+/**
+ * @brief Parse the FWD child sequence positionally (RFC-0004 §B order: op, dst, FIELD?, src,
+ *        [payload | await_timeout]) by FORWARD iteration over @p root's children.
+ *
+ * Returns INVALID_PATH for a structurally malformed frame (the resolver turns
+ * that into the error side, not a reply).
+ */
 template <class N>
 [[nodiscard]] result_t<parsed_fwd_t<N>> parse_fwd(const N& root) {
     if (root.type() != type_t::FWD || !root.structured())
@@ -205,13 +233,17 @@ template <class N>
     return p;
 }
 
-// FIELD index_mode (RFC-0004 §C, the optional u8 index_mode VALUE).
+/** @brief FIELD index_mode (RFC-0004 §C, the optional u8 index_mode VALUE). */
 enum class index_mode_t : std::uint8_t { SCALAR = 0, ELEMENT = 1, WILDCARD = 2 };
 
-// Decode a FIELD selector node into the graph's field_path_t. Each level is a
-// NAME followed by 0/1/2 VALUE children: 0 => SCALAR; 1 => index_mode only
-// (ELEMENT append "[]" or WILDCARD "[*]"); 2 => [index u32, index_mode u8]
-// ("[N]"). `wildcard_seen` is set if any level carries index_mode=WILDCARD.
+/**
+ * @brief Decode a FIELD selector node into the graph's field_path_t.
+ *
+ * Each level is a
+ * NAME followed by 0/1/2 VALUE children: 0 => SCALAR; 1 => index_mode only
+ * (ELEMENT append "[]" or WILDCARD "[*]"); 2 => [index u32, index_mode u8]
+ * ("[N]"). `wildcard_seen` is set if any level carries index_mode=WILDCARD.
+ */
 template <class N>
 [[nodiscard]] result_t<field_path_t> selector_to_field(const N& field, bool& wildcard_seen) {
     field_path_t fp;
@@ -267,23 +299,28 @@ template <class N>
     return fp;
 }
 
-// True for a whole-array ":subscribers[]" read (vs. a single "[N]" slot).
+/** @brief True for a whole-array ":subscribers[]" read (vs. a single "[N]" slot). */
 [[nodiscard]] bool is_subscribers_array(const field_path_t& fp) noexcept {
     return fp.steps.size() == 1 && fp.steps[0].name == "subscribers" &&
            (fp.steps[0].append || (!fp.steps[0].indexed && !fp.steps[0].wildcard));
 }
 
-// True for the subscribe form specifically — a ":subscribers[]" APPEND (a new edge),
-// distinct from a ":subscribers[N]" clear (unsubscribe) or the whole-array read.
+/**
+ * @brief True for the subscribe form specifically — a ":subscribers[]" APPEND (a new edge),
+ *        distinct from a ":subscribers[N]" clear (unsubscribe) or the whole-array read.
+ */
 [[nodiscard]] bool is_subscribe_append(const field_path_t& fp) noexcept {
     return fp.steps.size() == 1 && fp.steps[0].name == "subscribers" && fp.steps[0].append;
 }
 
-// The one ADR-0041 §2 ownership copy of a whole TLV into a fresh owned segment:
-// the reader's trailer-excluded `own_wire` (span tier copies its borrowed bytes;
-// rope tier adopts a multi-link flatten, ADR-0053 ⑤) with the copied opt byte's
-// trailer bits cleared (§4) — the stored TLV is trailer-less at rest and
-// self-consistent. The opt patch lives here, ONE locus for both readers.
+/**
+ * @brief The one ADR-0041 §2 ownership copy of a whole TLV into a fresh owned segment: the reader's
+ *        trailer-excluded `own_wire` (span tier copies its borrowed bytes; rope tier adopts a
+ *        multi-link flatten, ADR-0053 ⑤) with the copied opt byte's trailer bits cleared (§4) — the
+ *        stored TLV is trailer-less at rest and self-consistent.
+ *
+ * The opt patch lives here, ONE locus for both readers.
+ */
 template <class N>
 [[nodiscard]] view_t own_tlv(const N& node) {
     view_t v = node.own_wire();  // owned, trailer-excluded; empty view on alloc failure
@@ -291,24 +328,29 @@ template <class N>
     return v;
 }
 
-// True iff the node's opt byte carries NO trailer bits — the reference
-// implementation's ADR-0042 §3 restriction: a referenced store cannot patch the
-// opt byte in a shared frame, so only an already-trailer-less payload may be
-// referenced; a CRC/TS-carrying payload falls back to the trailer-sliced copy.
+/**
+ * @brief True iff the node's opt byte carries NO trailer bits — the reference implementation's
+ *        ADR-0042 §3 restriction: a referenced store cannot patch the opt byte in a shared frame,
+ *        so only an already-trailer-less payload may be referenced; a CRC/TS-carrying payload falls
+ *        back to the trailer-sliced copy.
+ */
 template <class N>
 [[nodiscard]] bool trailer_less(const N& node) noexcept {
     const opt_t o = node.opt();
     return !o.ts && !o.cr && !o.cw && !o.tf;
 }
 
-// The ADR-0042 §3 stored-value decision, generalized to the rope tier (ADR-0053 ⑤):
-// PIN the payload as a subrope of the owning delivery (refcount, zero copy) when the
-// vertex opted in (`store_ref_min_bytes` > 0), the payload is big enough, its opt byte
-// is trailer-less, AND the reader can pin (`pin_wire`) — the span tier pins a subview
-// of the contiguous owning `frame_view`, the rope tier a subrope of its own
-// scatter-gather segments. Otherwise the ADR-0041 §2 one-copy `own_tlv`. The
-// eligibility test lives HERE, one locus for both readers; each reader only produces
-// its pinned rope. Returns a rope so a multi-link pinned payload keeps its segments.
+/**
+ * @brief The ADR-0042 §3 stored-value decision, generalized to the rope tier (ADR-0053 ⑤): PIN the
+ *        payload as a subrope of the owning delivery (refcount, zero copy) when the vertex opted in
+ *        (`store_ref_min_bytes` > 0), the payload is big enough, its opt byte is trailer-less, AND
+ *        the reader can pin (`pin_wire`) — the span tier pins a subview of the contiguous owning
+ *        `frame_view`, the rope tier a subrope of its own scatter-gather segments.
+ *
+ * Otherwise the ADR-0041 §2 one-copy `own_tlv`. The
+ * eligibility test lives HERE, one locus for both readers; each reader only produces
+ * its pinned rope. Returns a rope so a multi-link pinned payload keeps its segments.
+ */
 template <class N>
 [[nodiscard]] rope_t own_or_ref_tlv(const N& node, const view_t* frame_view,
                                     std::uint32_t ref_min_bytes) {
@@ -318,10 +360,12 @@ template <class N>
     return rope_t(own_tlv(node));
 }
 
-// A tiny cursor writer over a preallocated, exactly-sized head segment — the
-// direct-emit that replaces the old 4-stage (encode → children → head → segment)
-// staging: every length is known from the arena spans up front, so the reply
-// head is ONE allocation and each route byte is copied exactly once.
+/**
+ * @brief A tiny cursor writer over a preallocated, exactly-sized head segment — the direct-emit
+ *        that replaces the old 4-stage (encode → children → head → segment) staging: every length
+ *        is known from the arena spans up front, so the reply head is ONE allocation and each route
+ *        byte is copied exactly once.
+ */
 struct emit_cursor_t {
     std::byte* p;
 
@@ -352,16 +396,20 @@ struct emit_cursor_t {
 
 constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
 
-// Assemble the FWD{REPLY} rope: one exactly-sized head segment (FWD header +
-// op=REPLY + dst=req.src + src=req.dst + kind + `inline_tail`) prepended to
-// `shared` (refcount clones of the stored payload view(s)). The head is the only
-// allocation; the route bytes are copied ONCE (trailer-sliced); `shared` is never
-// copied — RFC-0004 §D / ADR-0035 zero-copy reply rule, ADR-0041 §5 direct emit.
-// @p reply_dst_wire (the request's `src`) and @p reply_src_wire (the request's `dst`,
-// the responder endpoint) are the trailer-excluded whole-TLV `wire` spans of those two
-// PATH nodes — passed in rather than read off the arena so the reply builder is
-// decoupled from the request's node model (ADR-0053 §7: a node-reader-agnostic seam,
-// and where ⑤'s scatter-gather reply emission will hook).
+/**
+ * @brief Assemble the FWD{REPLY} rope: one exactly-sized head segment (FWD header + op=REPLY +
+ *        dst=req.src + src=req.dst + kind + `inline_tail`) prepended to `shared` (refcount clones
+ *        of the stored payload view(s)).
+ *
+ * The head is the only
+ * allocation; the route bytes are copied ONCE (trailer-sliced); `shared` is never
+ * copied — RFC-0004 §D / ADR-0035 zero-copy reply rule, ADR-0041 §5 direct emit.
+ * @p reply_dst_wire (the request's `src`) and @p reply_src_wire (the request's `dst`,
+ * the responder endpoint) are the trailer-excluded whole-TLV `wire` spans of those two
+ * PATH nodes — passed in rather than read off the arena so the reply builder is
+ * decoupled from the request's node model (ADR-0053 §7: a node-reader-agnostic seam,
+ * and where ⑤'s scatter-gather reply emission will hook).
+ */
 [[nodiscard]] rope_t assemble(std::span<const std::byte> reply_dst_wire,
                               std::span<const std::byte> reply_src_wire, reply_kind_t kind,
                               std::span<const std::byte> inline_tail,
@@ -389,9 +437,10 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
     return rope;
 }
 
-// A kind=ERROR reply carrying STATUS{ ERROR{ VALUE u16 LE code } } (RFC-0004 §D
-// with the RFC-0002 §C registered-code identity) — a fixed 14-byte tail, built
-// on the stack.
+/**
+ * @brief A kind=ERROR reply carrying STATUS{ ERROR{ VALUE u16 LE code } } (RFC-0004 §D with the
+ *        RFC-0002 §C registered-code identity) — a fixed 14-byte tail, built on the stack.
+ */
 [[nodiscard]] rope_t assemble_error(std::span<const std::byte> reply_dst_wire,
                                     std::span<const std::byte> reply_src_wire, status_t status) {
     const std::uint16_t code = std::to_underlying(error_code(status));
@@ -414,10 +463,12 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
     return assemble(reply_dst_wire, reply_src_wire, reply_kind_t::ERROR, tail, {}, 0);
 }
 
-// A kind=RESULT reply whose payload children are a stored rope value's links (ADR-0053
-// §6): a single-link value contributes one payload child (the trivial case, identical to
-// a view read); a multi-link stored value ropes ALL its links into the reply zero-copy —
-// no flatten.
+/**
+ * @brief A kind=RESULT reply whose payload children are a stored rope value's links (ADR-0053 §6):
+ *        a single-link value contributes one payload child (the trivial case, identical to a view
+ *        read); a multi-link stored value ropes ALL its links into the reply zero-copy — no
+ *        flatten.
+ */
 [[nodiscard]] rope_t assemble_result_rope(std::span<const std::byte> reply_dst_wire,
                                           std::span<const std::byte> reply_src_wire,
                                           const rope_t& payload) {
@@ -427,10 +478,13 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
                     payload.total_length());
 }
 
-// The vertex-map key for an arena-decoded PATH: span-aliased when canonical
-// (ADR-0041 §3 — the PATH body IS the key, zero materialization), re-emitted
-// into `fallback` otherwise (a foreign encoder's LL-widened / trailer-carrying
-// NAMEs). Our own encoders always produce the canonical form.
+/**
+ * @brief The vertex-map key for an arena-decoded PATH: span-aliased when canonical (ADR-0041 §3 —
+ *        the PATH body IS the key, zero materialization), re-emitted into `fallback` otherwise (a
+ *        foreign encoder's LL-widened / trailer-carrying NAMEs).
+ *
+ * Our own encoders always produce the canonical form.
+ */
 template <class N>
 [[nodiscard]] std::span<const std::byte> path_lookup_key(const N& path,
                                                          std::vector<std::byte>& fallback) {
@@ -441,11 +495,15 @@ template <class N>
     return fallback;
 }
 
-// The ONE templated resolve walk (ADR-0053 §7): apply an @p N-read request FWD
-// against @p graph and build the FWD{REPLY} rope. Instantiated with `arena_node`
-// (span tier, byte-identical) and — 3c — the `tlv_view_t` reader (owning rope
-// tier). Every frame read goes through the node-reader concept; nothing here
-// names a specific decode representation.
+/**
+ * @brief The ONE templated resolve walk (ADR-0053 §7): apply an @p N-read request FWD against @p
+ *        graph and build the FWD{REPLY} rope.
+ *
+ * Instantiated with `arena_node`
+ * (span tier, byte-identical) and — 3c — the `tlv_view_t` reader (owning rope
+ * tier). Every frame read goes through the node-reader concept; nothing here
+ * names a specific decode representation.
+ */
 template <class N>
 [[nodiscard]] result_t<rope_t> resolve_node(graph_t& graph, const N& root,
                                             std::string_view inbound_link,

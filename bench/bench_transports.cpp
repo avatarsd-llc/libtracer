@@ -1,20 +1,25 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-//
-// libtracer NETWORK transport bench — TWO PROCESSES over a real loopback socket, one
-// transport each (UDP / TCP / WebSocket). A separate publisher and subscriber process
-// cross the kernel, exactly like the Zenoh two-process bench (bench_zenoh_net) — same
-// topology, same bench_net.hpp phase protocol (payload self-identifies its phase and
-// carries a CLOCK_MONOTONIC send-timestamp, so one-way latency is valid across the two
-// processes on one host), same RESULT line (`net-<proto>`). run_net.sh orchestrates the
-// pub/sub pair per protocol for both engines, so render_compare.py plots them on shared
-// absolute axes.
-//
-//   bench_transports sub <udp|tcp|ws> <port>
-//   bench_transports pub <udp|tcp|ws> <port>
-//
-// (Successor to the retired two-process bench_libtracer_net — ADR-0040 moved the net
-// plane to explicit-source-routed FWD; this measures the transport seam itself.)
+/**
+ * @file
+ * @brief libtracer NETWORK transport bench — TWO PROCESSES over a real loopback socket, one
+ *        transport each (UDP / TCP / WebSocket).
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * A separate publisher and subscriber process
+ * cross the kernel, exactly like the Zenoh two-process bench (bench_zenoh_net) — same
+ * topology, same bench_net.hpp phase protocol (payload self-identifies its phase and
+ * carries a CLOCK_MONOTONIC send-timestamp, so one-way latency is valid across the two
+ * processes on one host), same RESULT line (`net-<proto>`). run_net.sh orchestrates the
+ * pub/sub pair per protocol for both engines, so render_compare.py plots them on shared
+ * absolute axes.
+ *
+ *   bench_transports sub <udp|tcp|ws> <port>
+ *   bench_transports pub <udp|tcp|ws> <port>
+ *
+ * (Successor to the retired two-process bench_libtracer_net — ADR-0040 moved the net
+ * plane to explicit-source-routed FWD; this measures the transport seam itself.)
+ */
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -39,7 +44,7 @@ using namespace bench;
 
 namespace {
 
-// The subscriber binds/listens on `port`; the publisher's own UDP bind is port+1.
+/** @brief The subscriber binds/listens on `port`; the publisher's own UDP bind is port+1. */
 std::unique_ptr<transport_t> make_endpoint(std::string_view proto, bool sub, std::uint16_t port) {
     if (proto == "udp")
         return sub ? std::make_unique<tr::net::udp_transport_t>(port, "127.0.0.1", port + 1)

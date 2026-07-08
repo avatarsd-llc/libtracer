@@ -1,8 +1,9 @@
-/*
+/**
+ * @file
+ * @brief route_handle per-link-lock contention microbenchmark.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
- *
- * route_handle per-link-lock contention microbenchmark.
  *
  * A `graph.write` fanning out to a remote (ws) subscriber calls
  * `route_handle_t::ensure_egress(out_link, route)` on the writer's thread; once a
@@ -50,15 +51,19 @@
 
 namespace {
 
-// Producer-thread counts to sweep (fixed, not clamped to hardware_concurrency, so
-// a real many-core host measures the tail; a small runner shows onset + oversubscribe).
+/**
+ * @brief Producer-thread counts to sweep (fixed, not clamped to hardware_concurrency, so a real
+ *        many-core host measures the tail; a small runner shows onset + oversubscribe).
+ */
 constexpr std::size_t kThreads[] = {1, 2, 4, 8, 16, 32, 64, 128};
 
 constexpr auto kWindow = std::chrono::milliseconds(250);  // wall-clock per point
 constexpr std::size_t kRouteBytes = 32;                   // one representative route PATH.
 
-// Keep the label reads live past the optimizer (the mutex acquire/scan can't be
-// removed on its own, but this makes the intent explicit).
+/**
+ * @brief Keep the label reads live past the optimizer (the mutex acquire/scan can't be removed on
+ *        its own, but this makes the intent explicit).
+ */
 std::atomic<std::size_t> g_sink{0};
 
 }  // namespace
