@@ -30,6 +30,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import render_compare  # noqa: E402  (sibling module in bench/)
+import render_history  # noqa: E402  (sibling module in bench/)
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 OUT = REPO / "docs" / "performance.md"
@@ -281,16 +282,32 @@ def _fmt_val(v: float) -> str:
     return f"{v:.4g}"
 
 
-def history_tables_block() -> str:
+def unified_history_block(data: dict | None) -> str:
+    """@brief The UNIFIED family trend charts: one chart per series-family with
+    every series of the family as a line on shared axes (render_history.py),
+    release tags as labeled vertical markers, and — for numeric-parameter
+    families — the sweep / heatmap / 3D three-axis views. Self-contained inline
+    SVG+JS, no CDN; degrades to a note when the store is unreachable."""
+    if not data:
+        return ("_(per-commit history store unreachable in this build — the interactive"
+                " chart link above still serves it once published)_")
+    try:
+        block = render_history.html_block(data)
+    except Exception as e:  # a malformed store must never break the docs build
+        return f"_(unified history charts unavailable in this build — {e})_"
+    return block or "_(no chartable series family in the history store yet)_"
+
+
+def history_tables_block(data: dict | None) -> str:
     """@brief The IN-PAGE per-commit history: every tracked series across every
     `main` commit in the store, as compact tables (first→last, extremes, sparkline).
 
     This is the same data the interactive chart plots, embedded as text so the
     history survives wherever the iframe cannot (PDF export, RSS scrapers, a
     momentarily unpublished `/dev/bench/`), and so one page carries current
-    numbers, their full history, and the Zenoh comparison side by side.
+    numbers, their full history, and the Zenoh comparison side by side. Release
+    tags are noted per suite (render_history resolves them via git).
     """
-    data = _load_history()
     if not data:
         return ("_(per-commit history store unreachable in this build — the interactive"
                 " chart link above still serves it once published)_")
@@ -308,6 +325,10 @@ def history_tables_block() -> str:
         out.append(f"### {suite}")
         out.append("")
         out.append(f"{len(entries)} tracked commit(s), `{first_c}` → `{last_c}`; unit: {unit}.")
+        rel = render_history.release_note(entries)
+        if rel:
+            out.append("")
+            out.append(rel)
         out.append("")
         out.append("| series | pts | first → last | Δ | min … max | trend |")
         out.append("| --- | --- | --- | --- | --- | --- |")
@@ -389,6 +410,7 @@ def provenance() -> str:
 
 def main() -> int:
     summary, passed = cross_core_block()
+    history = _load_history()
     page = f"""\
 # Performance & Conformance
 
@@ -417,9 +439,23 @@ Canonical points from `bench_libtracer` (the µs-latency / zero-copy thesis, ADR
 
 {HISTORY_BLOCK}
 
+### Unified family trends (all related series on one axes; releases marked)
+
+Instead of one tiny chart per series, related series are grouped into **families** —
+fan-out sweep, payload sweep, MT scaling, dispatch modes, endpoint types, fold widths,
+ACL, heap/memory — and each family is ONE chart with its series as lines on shared axes
+(log axes where a family spans decades). Release tags are drawn as labeled vertical
+markers on every chart (**≈** = the tag's commit is not itself a recorded point; the
+marker sits at the nearest following recorded commit). Families swept over a numeric
+parameter carry the full three-axis view set — **trend** (value vs commit), **sweep**
+(value vs parameter, one line per commit), **heatmap** (commit × parameter, color =
+value), and an isometric **3D** surface — switchable per chart; hover for exact values.
+
+{unified_history_block(history)}
+
 ### Full history, in-page (every tracked series, all recorded `main` commits)
 
-{history_tables_block()}
+{history_tables_block(history)}
 
 {READING_BLOCK}
 
