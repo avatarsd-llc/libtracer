@@ -14,6 +14,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **PlatformIO: ESP32 CAN bus driver (best-effort).** The PlatformIO package gains a
+  `build.extraScript` hook (`integrations/platformio/pio_esp32_can.py`) that, on
+  `espressif32` targets, compiles the ESP-IDF TWAI `can_link_t`
+  (`twai_link.cpp`, already CI-built via the ESP-IDF component) so `transport_can` has a
+  real on-chip bus driver; a no-op on every other platform. **Not yet verified on a
+  physical board or in CI** — see the tracking issue.
 - **Per-module build-time modularity — a node compiles only the modules it needs
   (CMake options, no feature macros).** `core/CMakeLists.txt` gains per-module options
   that toggle whether a module's translation unit(s) are **compiled** into `libtracer`
