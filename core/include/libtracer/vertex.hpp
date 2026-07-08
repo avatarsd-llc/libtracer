@@ -22,6 +22,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <span>
 #include <string>
@@ -261,6 +262,59 @@ struct edge_latch_t {
 };
 
 /**
+ * @brief The fixed-capacity stack buffer of @ref edge_view_t dispatch views — the
+ *        no-heap small-fan-out half of @ref vertex_t::snapshot_edges.
+ *
+ * The element storage is RAW (uninitialized) bytes: declaring one on the publish hot
+ * path costs nothing, and only the views actually snapshotted are placement-constructed
+ * (and destroyed). A default-constructed `std::array<edge_view_t, 8>` here instead
+ * zeroed ~900 bytes of stack per publish — GCC lowers that to eight `rep stos` blocks
+ * whose microcode startup latency dominated single-subscriber fan-out (the post-v0.3.0
+ * fan1 delivery regression). Non-copyable; reused via @ref clear.
+ */
+class edge_snapshot_t {
+   public:
+    /** @brief The snapshot width (mirrored as `vertex_t::kInlineFanout`). */
+    static constexpr std::size_t kCapacity = 8;
+
+    /** @brief An empty snapshot; the element storage stays uninitialized (the point). */
+    edge_snapshot_t() noexcept = default;
+    /** @brief Non-copyable — a transient dispatch buffer, never a value. */
+    edge_snapshot_t(const edge_snapshot_t&) = delete;
+    /** @brief Non-assignable — a transient dispatch buffer, never a value. */
+    edge_snapshot_t& operator=(const edge_snapshot_t&) = delete;
+    /** @brief Destroy the constructed views (only those actually snapshotted). */
+    ~edge_snapshot_t() { clear(); }
+
+    /** @brief Placement-construct @p v as the next view; the caller (the snapshot loop)
+     *         keeps the count ≤ @ref kCapacity. */
+    void push_back(edge_view_t v) {
+        ::new (static_cast<void*>(raw_ + n_ * sizeof(edge_view_t))) edge_view_t(std::move(v));
+        ++n_;
+    }
+    /** @brief Destroy every constructed view; the buffer is reusable afterwards. */
+    void clear() noexcept {
+        for (std::size_t i = 0; i < n_; ++i) (*this)[i].~edge_view_t();
+        n_ = 0;
+    }
+    /** @brief The number of views constructed. */
+    [[nodiscard]] std::size_t size() const noexcept { return n_; }
+    /** @brief The @p i-th snapshotted view (@p i < @ref size). */
+    [[nodiscard]] edge_view_t& operator[](std::size_t i) noexcept {
+        return *std::launder(reinterpret_cast<edge_view_t*>(raw_ + i * sizeof(edge_view_t)));
+    }
+    /** @brief The @p i-th snapshotted view (@p i < @ref size), const. */
+    [[nodiscard]] const edge_view_t& operator[](std::size_t i) const noexcept {
+        return *std::launder(reinterpret_cast<const edge_view_t*>(raw_ + i * sizeof(edge_view_t)));
+    }
+
+   private:
+    /** @brief Uninitialized element storage (constructed views live at the front). */
+    alignas(edge_view_t) std::byte raw_[kCapacity * sizeof(edge_view_t)];
+    std::size_t n_ = 0; /**< @brief Constructed-view count. */
+};
+
+/**
  * @brief An L4 graph vertex: a named, addressable position holding a value, a bounded
  *        history, or a user handler (docs/reference/11 §roles).
  *
@@ -280,7 +334,7 @@ struct edge_latch_t {
 class vertex_t {
    public:
     /** @brief The no-heap small-fan-out snapshot width (@ref snapshot_edges buffer size). */
-    static constexpr std::size_t kInlineFanout = 8;
+    static constexpr std::size_t kInlineFanout = edge_snapshot_t::kCapacity;
     /** @brief Inline child slots before the child list spills to the sorted heap vector
      *         (ADR-0057 Composite tree — most vertices are leaves or narrow composites). */
     static constexpr std::size_t kInlineChildren = 2;
@@ -555,18 +609,19 @@ class vertex_t {
      * @brief Snapshot every ACTIVE edge's dispatch view into caller storage — the
      *        snapshot-under-lock half of the snapshot/dispatch-outside discipline.
      *
-     * Small fan-out (the common case, ≤ @p inline_buf's size) fills @p inline_buf —
-     * no heap allocation per publish; a larger subscriber list reserves @p overflow
-     * once and fills it instead (then @p overflow is non-empty and holds ALL views).
-     * @param inline_buf The caller's stack buffer (typically `kInlineFanout` wide).
+     * Small fan-out (the common case, ≤ `kInlineFanout`) placement-constructs into
+     * @p inline_buf — no heap allocation AND no dead stack zeroing per publish; a
+     * larger subscriber list reserves @p overflow once and fills it instead (then
+     * @p overflow is non-empty and holds ALL views).
+     * @param inline_buf The caller's raw stack buffer (cleared on entry).
      * @param overflow   The heap fallback for large fan-out (cleared on entry).
      * @return The number of views snapshotted (into whichever buffer was used).
      */
-    std::size_t snapshot_edges(std::span<edge_view_t> inline_buf,
-                               std::vector<edge_view_t>& overflow) {
+    std::size_t snapshot_edges(edge_snapshot_t& inline_buf, std::vector<edge_view_t>& overflow) {
+        inline_buf.clear();
         overflow.clear();
         const std::lock_guard lock(m_);
-        const bool use_heap = subs_.size() > inline_buf.size();
+        const bool use_heap = subs_.size() > edge_snapshot_t::kCapacity;
         if (use_heap) overflow.reserve(subs_.size());
         std::size_t n = 0;
         for (const subscriber_t& s : subs_) {
@@ -574,7 +629,7 @@ class vertex_t {
             if (use_heap)
                 overflow.push_back(edge_view_of(s));
             else
-                inline_buf[n] = edge_view_of(s);
+                inline_buf.push_back(edge_view_of(s));
             ++n;
         }
         return n;
