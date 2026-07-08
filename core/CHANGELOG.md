@@ -26,6 +26,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **BREAKING — the graph is a Composite vertex tree; `vertex_t::key()` is replaced by
+  `vertex_t::name()`** ([ADR-0057](../docs/adr/0057-graph-composite-vertex-tree.md)).
+  `graph_t`'s flat full-key `unordered_map` is replaced by parent/children links on
+  `vertex_t`: each vertex stores its **own canonical NAME record** (`name()`) plus a
+  parent pointer and a children container (`parent()` / `registered()` / `fill()` /
+  `add_child()` / `child_by_record()` / `for_each_child()`, and the `kInlineChildren`
+  inline-first width); the full key is rendered on demand by the graph. Vertical
+  bubbling and the ACL inheritance walk follow parent pointers lock-free instead of one
+  shared-lock map hop per ancestor level. `graph_t`'s public data API — handles,
+  register / find / read / write / await / subscribe / propagate — is unchanged, and
+  vertex lifetime stays insert-only (no erasure; handles remain stable for the graph's
+  lifetime). Callers never dereferenced `vertex_t` (opaque behind `vertex_handle_t`,
+  ADR-0056), so the impact is limited to code constructing bare vertices.
+
 - **BREAKING — `wire::kMaxDepth` is deleted; nesting depth is
   receiver-resource-bounded (RFC-0006).** `grammar::walk` no longer takes
   `(std::pmr::memory_resource&, std::size_t max_depth)`: it takes a

@@ -2,11 +2,12 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * The L4 in-process graph runtime. Holds the vertex map (keyed on canonical
- * PATH-TLV payload bytes, docs/reference/02 §dispatch) and exposes the entire
- * data API: read / write / await (ADR-0006). The hot path resolves a vertex_t*
- * once (at registration or via one guarded lookup), then read/write/await on
- * that handle are lock-free in the LKV slot. subscriber_t fan-out + field-write
+ * The L4 in-process graph runtime. Holds the Composite vertex tree (ADR-0057:
+ * parent/children links, one NAME segment per node; a canonical PATH-payload
+ * key resolves by an O(segments) child walk, docs/reference/02 §dispatch) and
+ * exposes the entire data API: read / write / await (ADR-0006). The hot path
+ * resolves a vertex_t* once (at registration or via one guarded lookup), then
+ * read/write/await on that handle are lock-free in the LKV slot. subscriber_t fan-out + field-write
  * land in M3b; M3a delivers values via the LKV and the blocking await.
  */
 #pragma once
@@ -26,7 +27,6 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
-#include <unordered_map>
 #include <vector>
 
 #include "libtracer/path.hpp"
@@ -117,13 +117,15 @@ using subject_token_t = std::vector<std::byte>;
 using subject_resolver_t = std::function<std::optional<subject_token_t>(std::string_view caller)>;
 
 /**
- * @brief The L4 in-process graph runtime: the vertex map plus the whole data API
- *        (register / read / write / await / subscribe, ADR-0006).
+ * @brief The L4 in-process graph runtime: the Composite vertex tree plus the whole data
+ *        API (register / read / write / await / subscribe, ADR-0006).
  *
- * Vertices are keyed on their canonical PATH-TLV payload bytes (docs/reference/02
- * §dispatch). The hot path resolves a `vertex_t*` once — at registration or via one
- * guarded @ref find — then read/write/await on that handle are lock-free in the
- * vertex's last-known-value slot. Non-copyable; a graph is a fixed runtime root.
+ * Vertices form a Composite tree (ADR-0057): each node stores its own NAME segment and
+ * its children; a canonical PATH-TLV payload key (docs/reference/02 §dispatch) resolves
+ * by an O(segments) child walk at wiring frequency. The hot path resolves a `vertex_t*`
+ * once — at registration or via one guarded @ref find — then read/write/await on that
+ * handle are lock-free in the vertex's last-known-value slot. Non-copyable; a graph is a
+ * fixed runtime root.
  */
 class graph_t {
    public:
@@ -456,8 +458,12 @@ class graph_t {
     void fan_out(vertex_t* v, const rope_t& value, int depth);
     // The ONE dispatch of a subscription edge's three legs (in-process callback, local
     // target re-dispatch, remote sink) — shared by fan_out and the admission durability
-    // latch (ADR-0049), always called OUTSIDE the vertex lock.
+    // latch (ADR-0049), always called OUTSIDE the vertex lock. The target/remote legs
+    // are split out so the per-edge body stays small enough to inline into the fan-out
+    // loop (the wide-fan-out hot loop; the callback leg is the in-process hot case).
     void dispatch_edge(const edge_view_t& e, const rope_t& value, int depth);
+    void dispatch_edge_target(const edge_view_t& e, const rope_t& value, int depth);
+    void dispatch_edge_remote(const edge_view_t& e, const rope_t& value);
     // Vertical bubbling (RFC-0005): fan `value` out to every registered ancestor's
     // subscribers. Called only when v->listeners_above_ says someone is listening.
     void bubble_up(vertex_t* v, const rope_t& value, int depth);
@@ -522,21 +528,29 @@ class graph_t {
     // caller-facing gate (READ_ACL) runs in read(v, field, caller) before reaching here.
     [[nodiscard]] result_t<view_t> read_acl(vertex_t* v) const;
 
+    // The full canonical key of `v` — its ancestors' NAME records concatenated root-down
+    // (ADR-0057 render-on-demand: vertices store one segment, not the full key). Walks
+    // immutable parent links, so no lock. Used only at sweep/observed-write/wiring
+    // frequency (the RFC-0008 byte-keyed sweep sets, `create_child` key composition).
+    [[nodiscard]] static std::vector<std::byte> build_key(const vertex_t* v);
+    // Bump every strict descendant's listeners_above_ by `delta` (RFC-0005 bookkeeping) —
+    // a child-link subtree walk (placeholders included, so a later fill inherits a
+    // correct count). Call with map_mutex_ held (shared suffices; counters are atomics).
+    static void bump_subtree_listeners(vertex_t* v, std::int32_t delta);
+
     mutable std::shared_mutex map_mutex_;
-    // INSERT-ONLY (guarded by map_mutex_): vertices are emplaced, never erased.
-    // find() hands out a raw vertex_t* that callers hold PAST the map lock; that is
-    // sound only because the heap-owned vertex_t is pointer-stable across rehash AND
-    // is never destroyed while the graph lives. Implementing vertex retirement (the
-    // ADR "retire-LIST") must NOT be a bare `vertices_.erase` — that would dangle
-    // every outstanding find() pointer (the route_handle clear_link dangling-ref
-    // class, fixed in #220); it needs a vertex lifetime scheme (refcount / epoch
-    // reclamation, or a tombstone) first.
-    // The hasher and equality are `is_transparent`, so find_ptr looks a vertex up by a
-    // raw `std::span<const std::byte>` key with NO owned path_key_t materialized and no
-    // FNV re-hash of a fresh copy (the hot internal by-key path — fan_out, bubble_up,
-    // ACL walk, FWD resolve). By-handle ops already avoid the map entirely.
-    std::unordered_map<path_key_t, std::unique_ptr<vertex_t>, path_key_hash_t, path_key_eq_t>
-        vertices_;
+    // The Composite vertex tree's root (ADR-0057): an unregistered structural node whose
+    // children container owns every top-level vertex (each child a non-moving unique_ptr
+    // allocation, recursively). INSERT-ONLY (mutation under a unique map_mutex_ hold):
+    // vertices are added, never erased. find() hands out a raw vertex_t* that callers
+    // hold PAST the map lock; that is sound only because each vertex_t is pointer-stable
+    // (owned by its parent's container via unique_ptr, never moved) AND never destroyed
+    // while the graph lives. Implementing vertex retirement (the ADR "retire-LIST") must
+    // NOT be a bare detach-from-parent — that would dangle every outstanding handle (the
+    // route_handle clear_link dangling-ref class, fixed in #220); it needs a vertex
+    // lifetime scheme (refcount / epoch reclamation, or a tombstone) first. Registering
+    // the empty key fills this node in place (the "root vertex" the flat map allowed).
+    std::unique_ptr<vertex_t> root_;
     // The device creation catalog (#82, ADR-0017): SPEC `type` -> factory. Populated at
     // setup (register_child_type), read-only once frames flow, so no lock (same contract
     // as remote_sink_). `std::less<>` enables heterogeneous string_view lookup.
@@ -563,6 +577,11 @@ class graph_t {
     std::set<std::vector<std::byte>> pending_;
     std::set<std::vector<std::byte>> unconditional_;
     std::mutex sweep_mutex_;
+    // pending_.size() mirrored as a relaxed atomic: the observed-write fast path
+    // (clear_pending on every eager delivery) skips the key render + sweep lock while no
+    // assign has marked anything — losing a race with a concurrent mark_pending leaves the
+    // mark for the next sweep, an ordering the locked erase already permitted (ADR-0057).
+    std::atomic<std::size_t> pending_count_{0};
 };
 
 }  // namespace tr::graph
