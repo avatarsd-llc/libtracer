@@ -57,6 +57,7 @@ INPUT                  = core/include/libtracer/backend.hpp \
                          core/include/libtracer/transport_ws.hpp \
                          core/include/libtracer/transport_vertex.hpp \
                          core/include/libtracer/fwd_router.hpp \
+                         core/include/libtracer/fwd_frame_view.hpp \
                          core/include/libtracer/grammar.hpp \
                          core/include/libtracer/route_handle.hpp \
                          core/include/libtracer/ws.hpp \
