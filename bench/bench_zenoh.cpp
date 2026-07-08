@@ -47,6 +47,13 @@ void run(Session& session, std::size_t S, std::size_t F, std::size_t E, const ch
     const std::size_t MSGS = publishes_for(F, budget);
     const std::uint64_t want = static_cast<std::uint64_t>(MSGS) * F;
 
+    // Equal warmup with bench_libtracer (1000 puts), drained before the counter reset
+    // so a leftover warmup delivery never counts toward the timed phase's `want`.
+    for (std::size_t i = 0; i < 1000; ++i) pubs[i % E].put(Bytes(payload));
+    const auto wd = Clock::now() + std::chrono::seconds(5);
+    while (recv.load(std::memory_order_relaxed) < 1000ull * F && Clock::now() < wd)
+        std::this_thread::yield();
+
     recv.store(0);
     const auto t0 = now_ns();
     for (std::size_t i = 0; i < MSGS; ++i) pubs[i % E].put(Bytes(payload));
@@ -62,12 +69,18 @@ void run(Session& session, std::size_t S, std::size_t F, std::size_t E, const ch
 
     Latency lat;
     const std::size_t LATN = publishes_for(F, latbudget);
+    // Symmetric bracketing with bench_libtracer: the timed window is put + spin-on-recv
+    // ONLY. The escape hatch for a dropped sample is an iteration cap fixed OUTSIDE the
+    // bracket — the old per-sample `Clock::now() + 500ms` deadline put a time_point
+    // construction and per-spin clock reads inside the start..stop window, inflating
+    // every Zenoh sample by ~tens of ns.
+    constexpr std::uint64_t kSpinCap = 5'000'000;  // yields (~1s) before giving up a sample
     for (std::size_t i = 0; i < LATN; ++i) {
-        const std::uint64_t before = recv.load(std::memory_order_relaxed);
+        const std::uint64_t want_i = recv.load(std::memory_order_relaxed) + F;
         const auto start = now_ns();
         pubs[i % E].put(Bytes(payload));
-        const auto ld = Clock::now() + std::chrono::milliseconds(500);
-        while (recv.load(std::memory_order_relaxed) < before + F && Clock::now() < ld)
+        for (std::uint64_t spins = 0;
+             recv.load(std::memory_order_relaxed) < want_i && spins < kSpinCap; ++spins)
             std::this_thread::yield();
         lat.add(now_ns() - start);
     }

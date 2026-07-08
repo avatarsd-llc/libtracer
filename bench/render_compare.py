@@ -107,14 +107,23 @@ def build(rows: list[dict]) -> dict:
         return (f"Across the sweep ({label_x(lt[0][0])} → {label_x(lt[-1][0])}): "
                 + "; ".join(f"<b>{p}</b>" for p in parts) + ".")
 
+    def add_deliver(series, col):
+        """The deliver-only (propagate) fan sweep as a third series next to the write
+        row — same fixed point (REF_SIZE, ep=1), mode `inproc-deliver`."""
+        dl = _series(rows, "libtracer", "inproc-deliver", {"size": REF_SIZE, "ep": 1},
+                     "fan", [col])
+        if dl:
+            series["libtracer-deliver"] = [[p[0], p[1]] for p in dl]
+        return series
+
     charts = []
-    s = two(**{**fan, "col": "deliv"})
+    s = add_deliver(two(**{**fan, "col": "deliv"}), "deliv")
     charts.append({"id": "tp-fan", "title": "Throughput vs fan-out",
                    "cond": f"{f_bytes(REF_SIZE)} payload · 1 topic · in-process",
                    "x": {"log": True, "fmt": "count", "label": "subscribers per topic (fan-out)"},
                    "y": {"log": True, "fmt": "rate", "label": "deliveries / second"},
                    "series": s, "reading": reading(s, f_rate)})
-    s = two(**{**fan, "col": "p50"})
+    s = add_deliver(two(**{**fan, "col": "p50"}), "p50")
     charts.append({"id": "lat-fan", "title": "p50 latency vs fan-out",
                    "cond": f"{f_bytes(REF_SIZE)} payload · 1 topic · in-process",
                    "x": {"log": True, "fmt": "count", "label": "subscribers per topic (fan-out)"},
@@ -230,8 +239,9 @@ def html_block(rows: list[dict], provenance: str) -> str:
 <div class="ltz-compare">
   <div class="ltz-banner"><span class="ic">i</span><span>{BANNER}</span></div>
   <div class="ltz-legend">
-    <span class="item"><span class="sw" style="background:var(--ltz-lt)"></span>libtracer <span class="sub">— inproc zero-copy dispatch</span></span>
-    <span class="item"><span class="sw" style="background:var(--ltz-zn)"></span>Zenoh <span class="sub">— zenoh-c 1.9.0, peer mode</span></span>
+    <span class="item"><span class="sw" style="background:var(--ltz-lt)"></span>libtracer <span class="sub">— write (store+notify+deliver)</span></span>
+    <span class="item"><span class="sw" style="background:var(--ltz-ltd)"></span>libtracer <span class="sub">— deliver-only (propagate)</span></span>
+    <span class="item"><span class="sw" style="background:var(--ltz-zn)"></span>Zenoh <span class="sub">— zenoh-c 1.9.0, peer mode (transient put)</span></span>
   </div>
   <div class="ltz-grid" id="ltz-charts"></div>
   <div class="ltz-tablewrap"><table class="ltz-raw" id="ltz-raw"><thead><tr>

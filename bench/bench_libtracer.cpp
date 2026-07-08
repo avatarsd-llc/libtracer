@@ -113,6 +113,50 @@ void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool
     emit("libtracer", mode, S, F, E, pub_s, deliv_s, mb_s, lat.summarize());
 }
 
+/**
+ * @brief Deliver-only row (mode `inproc-deliver`): RFC-0008's edge-transition
+ *        primitive, timed alone.
+ *
+ * The value is stored ONCE (a single `write` before the timed loops); each measured
+ * op is `graph_t::propagate(v)` — deliver the current last-known-value to the F
+ * subscribers. No per-op store, no segment allocation, no memcpy, no await/readiness
+ * sequence bump. This is the semantic analogue of Zenoh's transient put (delivery
+ * only) and the true apples-to-apples row; the `inproc` row's `write` does strictly
+ * more work per op (assign/store + readiness bump + deliver).
+ */
+void run_inproc_deliver(std::size_t S, std::size_t F, std::uint64_t budget = kDeliveryBudget,
+                        std::uint64_t latbudget = kLatencyDeliveryBudget) {
+    graph_t g;
+    const path_t path = *path_t::parse("/bench/deliver");
+    auto v = g.register_vertex(path, role_t::STORED_VALUE);
+    std::atomic<std::uint64_t> recv{0};
+    auto cb = [&](const rope_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
+    for (std::size_t f = 0; f < F; ++f) (void)g.subscribe(path, cb);
+    const std::vector<std::byte> tlv = value_tlv(S);
+    (void)g.write(v, owned_view(tlv));  // store ONCE — the timed ops below move no bytes
+    const auto put = [&]() { g.propagate(v); };
+
+    const std::size_t MSGS = publishes_for(F, budget);
+    const std::size_t LATN = publishes_for(F, latbudget);
+    for (std::size_t i = 0; i < 1000; ++i) put();  // warmup
+
+    recv.store(0);
+    const auto t0 = now_ns();
+    for (std::size_t i = 0; i < MSGS; ++i) put();
+    const double secs = (now_ns() - t0) / 1e9;
+    const double pub_s = MSGS / secs;
+    const double deliv_s = pub_s * static_cast<double>(F);
+    const double mb_s = deliv_s * static_cast<double>(S) / 1e6;
+
+    Latency lat;
+    for (std::size_t i = 0; i < LATN; ++i) {
+        const auto a = now_ns();
+        put();
+        lat.add(now_ns() - a);
+    }
+    emit("libtracer", "inproc-deliver", S, F, 1, pub_s, deliv_s, mb_s, lat.summarize());
+}
+
 // Response-surface grid (system dynamics): size x fanout (endpoints=1, mode
 // `inproc`) and size x endpoints (fanout=1, write-by-path, mode `inproc-path`).
 // Emits the standard mode-tagged RESULT line (same 12-field shape as the default
@@ -121,6 +165,9 @@ void run_grid() {
     for (std::size_t S : kGridSizes)
         for (std::size_t F : kGridFanouts)
             run_inproc(S, F, 1, alloc_t::HEAP, false, "inproc", kGridBudget, kGridLatBudget);
+    // Deliver-only fan sweep at the reference payload (the comparison charts' fixed
+    // size): propagate touches no payload bytes, so a full size sweep would be flat.
+    for (std::size_t F : kGridFanouts) run_inproc_deliver(kRefSize, F, kGridBudget, kGridLatBudget);
     for (std::size_t S : kGridSizes)
         for (std::size_t E : kGridEndpoints)
             run_inproc(S, 1, E, alloc_t::HEAP, true, "inproc-path", kGridBudget, kGridLatBudget);
@@ -537,8 +584,14 @@ int main(int argc, char** argv) {
         run_acl_gated_mt(4);
         return 0;
     }
+    if (argc > 1 && std::string_view(argv[1]) == "deliver") {  // deliver-only rows (A/B runs)
+        for (std::size_t F : kFanouts) run_inproc_deliver(kRefSize, F);
+        return 0;
+    }
     for (std::size_t F : kFanouts)
         run_inproc(kRefSize, F, kRefEndpoints, alloc_t::HEAP, false, "inproc");
+    // Deliver-only (propagate) fan sweep — the store-free counterpart of the row above.
+    for (std::size_t F : kFanouts) run_inproc_deliver(kRefSize, F);
     for (std::size_t S : kSizes)
         run_inproc(S, kRefFanout, kRefEndpoints, alloc_t::HEAP, false, "inproc");
     for (std::size_t S : kSizes)
