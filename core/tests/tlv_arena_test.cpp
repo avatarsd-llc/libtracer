@@ -13,8 +13,8 @@
  *   (3) memory — a typical frame decodes entirely inside a stack-buffer
  *       monotonic_buffer_resource with a null upstream (zero heap anywhere),
  *       and every rejection branch (truncation at each boundary, reserved
- *       bits, type 0x00, CRC fail both widths, trailing bytes, depth cap)
- *       returns the same err_t as decode().
+ *       bits, type 0x00, CRC fail both widths, trailing bytes) returns the
+ *       same err_t as decode().
  */
 
 #include "libtracer/tlv_arena.hpp"
@@ -278,20 +278,14 @@ int main() {
               "nested PATH inside FWD flagged on the PATH node only");
     }
 
-    // (2e) Depth cap: deepest legal depth decodes; one deeper rejects — both
-    // matching decode() exactly.
+    // (2e) Depth is receiver-resource-bounded (RFC-0006): a frame far deeper
+    // than the old cap of 32 decodes on a heap-backed resource, and the arena
+    // still agrees with decode() node-for-node.
     {
-        const int deepest_ok = static_cast<int>(kMaxDepth) - 1;
-        const std::vector<std::byte> ok_bytes = encode(nested(deepest_ok));
-        const std::vector<std::byte> deep_bytes = encode(nested(deepest_ok + 1));
-        auto mr1 = fresh_heap_resource();
-        auto mr2 = fresh_heap_resource();
-        check(decode_into(ok_bytes, mr1).has_value() && equivalent(ok_bytes, "depth 31"),
-              "deepest legal nesting decodes");
-        const auto deep = decode_into(deep_bytes, mr2);
-        check(!deep && deep.error() == tr::wire::err_t::TLV_NESTING_TOO_DEEP &&
-                  equivalent(deep_bytes, "depth 32"),
-              "over-cap nesting rejected as TLV_NESTING_TOO_DEEP");
+        const std::vector<std::byte> deep_bytes = encode(nested(100));
+        auto mr = fresh_heap_resource();
+        check(decode_into(deep_bytes, mr).has_value() && equivalent(deep_bytes, "depth 100"),
+              "deep nesting (100 levels) decodes, arena == tree");
     }
 
     // (3a) Every rejection branch returns the same error as decode().

@@ -6,6 +6,7 @@
 #include "libtracer/frame.hpp"
 
 #include <algorithm>
+#include <array>
 #include <memory_resource>
 #include <utility>
 #include <vector>
@@ -100,11 +101,14 @@ struct owning_sink {
 
 std::expected<tlv_t, err_t> decode(std::span<const std::byte> input) {
     // The one structural descent lives in grammar::walk (ADR-0048 §1); this sink
-    // only builds the owning tree. The walk's cursor stack draws from the default
-    // (heap) resource — an owning-tree decode already allocates on the heap.
+    // only builds the owning tree. The walk stack starts in these inline slots
+    // (a tuning knob sized for the typical FWD nesting, ~3-4 levels) and spills
+    // to the default (heap) resource for deeper frames — an owning-tree decode
+    // already allocates on the heap, so its RFC-0006 depth bound is the heap.
     owning_sink sink;
-    const auto r = grammar::walk(grammar::span_cursor{input}, sink,
-                                 *std::pmr::get_default_resource(), kMaxDepth);
+    std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;
+    grammar::walk_stack_t<grammar::span_cursor> stack(slots, std::pmr::get_default_resource());
+    const auto r = grammar::walk(grammar::span_cursor{input}, sink, stack);
     if (!r) return std::unexpected(r.error());
     return std::move(sink.result_);
 }

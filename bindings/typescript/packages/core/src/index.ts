@@ -13,7 +13,6 @@ export const SPEC_VERSION = 1 as const;
 export {
   TYPE,
   ERROR,
-  MAX_DEPTH,
   CodecError,
   decode,
   encode,
