@@ -32,6 +32,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   their spelling) but are now aliases of the shared default — same value, no
   behavior change.
 
+- **`fwd_frame_view.hpp` — the FWD forward-plane offset-dispatch cluster as a
+  public, unit-testable header (`tr::net`).** `fwd_hdr_t` / `read_fwd_header`
+  (absolute-offset header reads over the one grammar, CRC deferred),
+  `peek_fwd_first_dst_seg` / `peek_fwd_op` / `peek_control` (the forward-vs-
+  terminus and control-frame dispatch peeks), `stack_writer<N>` (the zero-heap
+  clamp-to-empty head builder, ADR-0038 inv. #2), and `fwd_rebuild_t` /
+  `rebuild_fwd_forward` (the shrunk-dst / grown-src head rebuild +
+  cursor-seam `gather`). Extracted from `fwd_router.cpp`, which now delegates
+  mechanically — forwarded frames are byte-identical. Cursor-templated
+  (ADR-0053 ④b), so span and rope sources share the identical logic; covered
+  directly by `fwd_frame_view_test` (the `length_prefix_framer` precedent).
 - **`graph::effective_acl_t` (`security_acl.hpp`) + the ADR-0050 cached
   effective-ACE merge.** The effective-ACL semantics that lived inline in
   `graph_t::acl_allows` — own ACEs before ancestors, nearest-first, ancestor
