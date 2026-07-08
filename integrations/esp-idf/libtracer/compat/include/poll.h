@@ -1,11 +1,14 @@
-/*
+/**
+ * @file
+ * @brief POSIX `<poll.h>` compatibility shim for ESP-IDF chip targets.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * POSIX <poll.h> compatibility shim for ESP-IDF chip targets: IDF's libc ships
- * the declarations only under <sys/poll.h>. Core sources use the POSIX spelling
- * (<poll.h>) and stay platform-neutral; this component-private include dir
- * absorbs the quirk, exactly like the platform TU selection in CMakeLists.txt.
+ * IDF's libc ships the declarations only under `<sys/poll.h>`. Core sources use
+ * the POSIX spelling (`<poll.h>`) and stay platform-neutral; this
+ * component-private include dir absorbs the quirk, exactly like the platform TU
+ * selection in CMakeLists.txt.
  */
 #pragma once
 

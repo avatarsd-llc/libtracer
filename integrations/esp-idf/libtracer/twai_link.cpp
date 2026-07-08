@@ -1,9 +1,12 @@
-/*
+/**
+ * @file
+ * @brief `twai_link_t` implementation — see include/libtracer_esp/twai_link.hpp.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * twai_link_t — see include/libtracer_esp/twai_link.hpp. Chip-target-only TU,
- * selected by the component CMakeLists (never an in-source #ifdef).
+ * Chip-target-only TU, selected by the component CMakeLists (never an
+ * in-source #ifdef).
  */
 
 #include "libtracer_esp/twai_link.hpp"
