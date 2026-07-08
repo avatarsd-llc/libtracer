@@ -50,15 +50,18 @@ std::vector<std::byte> value_tlv(std::initializer_list<std::uint8_t> bytes) {
 
 void test_raw_frame() {
     std::printf("UDP transport — raw frame over localhost:\n");
+    // The promise + named receiver lambda live BEFORE the transports: the slot
+    // binds the callable by address, and ~udp_transport_t joins the recv thread.
+    std::promise<std::vector<std::byte>> got;
+    auto fut = got.get_future();
+    auto rx = [&](std::span<const std::byte> f) {
+        got.set_value(std::vector<std::byte>(f.begin(), f.end()));
+    };
     tr::net::udp_transport_t a(47100, "127.0.0.1", 47101);
     tr::net::udp_transport_t b(47101, "127.0.0.1", 47100);
     check(a.ok() && b.ok(), "both UDP sockets bound");
 
-    std::promise<std::vector<std::byte>> got;
-    auto fut = got.get_future();
-    b.set_receiver([&](std::span<const std::byte> f) {
-        got.set_value(std::vector<std::byte>(f.begin(), f.end()));
-    });
+    b.set_receiver(rx);
 
     const std::array<std::byte, 5> frame{std::byte{0x09}, std::byte{0xAB}, std::byte{0xCD},
                                          std::byte{0xEF}, std::byte{0x42}};
@@ -132,15 +135,16 @@ void test_two_nodes_over_udp() {
 
 void test_scatter_gather() {
     std::printf("UDP transport — scatter-gather send (rope -> one datagram, no flatten):\n");
+    std::promise<std::vector<std::byte>> got;
+    auto fut = got.get_future();
+    auto rx = [&](std::span<const std::byte> f) {
+        got.set_value(std::vector<std::byte>(f.begin(), f.end()));
+    };
     tr::net::udp_transport_t a(47104, "127.0.0.1", 47105);
     tr::net::udp_transport_t b(47105, "127.0.0.1", 47104);
     check(a.ok() && b.ok(), "both UDP sockets bound");
 
-    std::promise<std::vector<std::byte>> got;
-    auto fut = got.get_future();
-    b.set_receiver([&](std::span<const std::byte> f) {
-        got.set_value(std::vector<std::byte>(f.begin(), f.end()));
-    });
+    b.set_receiver(rx);
 
     // A 3-segment rope (the "rope we put into tx"), sent via one sendmsg(iovec).
     const std::array<std::byte, 2> s0{std::byte{0x01}, std::byte{0x02}};
@@ -197,16 +201,17 @@ class recording_backend_t final : public tr::mem::mem_backend_t {
 // datagram as a view over a fresh refcounted segment from the injected backend.
 void test_view_delivery() {
     std::printf("UDP transport — owning view delivery (ADR-0042 receiver seam):\n");
+    std::promise<tr::view::view_t> got;
+    auto fut = got.get_future();
+    auto rope_rx = [&](tr::view::rope_t f) {
+        if (f.link_count() == 1) got.set_value(f.links()[0]);  // single-link: the trivial rope
+    };
     tr::net::udp_transport_t a(47106, "127.0.0.1", 47107);
     tr::net::udp_transport_t b(47107, "127.0.0.1", 47106);
     check(a.ok() && b.ok(), "both UDP sockets bound");
     check(b.delivers_ropes(), "udp_transport_t::delivers_ropes() is true");
 
-    std::promise<tr::view::view_t> got;
-    auto fut = got.get_future();
-    b.set_rope_receiver([&](tr::view::rope_t f) {
-        if (f.link_count() == 1) got.set_value(f.links()[0]);  // single-link: the trivial rope
-    });
+    b.set_rope_receiver(rope_rx);
 
     const std::array<std::byte, 5> frame{std::byte{0x09}, std::byte{0xAB}, std::byte{0xCD},
                                          std::byte{0xEF}, std::byte{0x42}};
@@ -238,12 +243,13 @@ void test_view_pool_exhaustion() {
     tr::mem::pool_t pool(slab, tr::net::udp_transport_t::kMaxDatagram);
     check(pool.capacity() == 0, "pool carves no kMaxDatagram slot from a 256-byte slab");
 
+    std::atomic<int> delivered{0};
+    auto rope_rx = [&](tr::view::rope_t) { delivered.fetch_add(1); };
     tr::net::udp_transport_t a(47110, "127.0.0.1", 47111);
     tr::net::udp_transport_t b(47111, "127.0.0.1", 47110, &pool);
     check(a.ok() && b.ok(), "both UDP sockets bound");
 
-    std::atomic<int> delivered{0};
-    b.set_rope_receiver([&](const tr::view::rope_t&) { delivered.fetch_add(1); });
+    b.set_rope_receiver(rope_rx);
 
     const std::array<std::byte, 4> frame{std::byte{0x01}, std::byte{0x02}, std::byte{0x03},
                                          std::byte{0x04}};

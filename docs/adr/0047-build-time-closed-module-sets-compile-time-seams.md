@@ -65,3 +65,22 @@ The re-examination (against §1's own "hot **or** size-critical" test and the ma
 - **But that cost is unmeasured on any gated profile.** The receiver/delivery path (`fwd_router`, `transport_*`, the graph runtime) is **not** part of the ≤16 KB Cortex-M0 P0 sentinel (`sentinel_node.cpp` is L0/L1 + codec + path only). No sentinel or CI gate currently measures a graph+transport MCU node, so the fn-ptr saving is speculative for every profile we referee — while the ergonomic cost (each install site becomes a static trampoline + context, and can no longer be a capturing lambda) is paid everywhere, immediately.
 
 Per §1's own rule ("size-critical" must be *demonstrated*, not assumed) and the measurement-first doctrine, the conversion is not justified today. **Re-open it** when a graph+transport footprint gate exists and shows `std::function` pushing that node over its budget; until then `std::function` stays — it is speed-equal, heap-free for the captures in use, ergonomic, and binds a method (via `ctx`) as readily as a free function.
+
+## Amendment (2026-07-08): §3 realized for the receiver seam via `receiver_slot_t`
+
+The 2026-07-05 deferral is **superseded for the transport receiver seam** — not by a
+new footprint measurement, but because the 2026-07-08 architecture review (maintainer-
+grilled) surfaced what the deferral's accounting had missed: every adapter was paying a
+**mechanism cost** to keep `std::function` viable on the delivery path. The installed
+router closure exceeds the SBO (it captures the router *and* the child name), so all
+six adapters carried a per-adapter `rx_dirty_` snapshot dance (mutex + atomic flag +
+loop-thread-local copies) purely to dodge the per-frame heap copy — six divergent
+implementations of one concept, and a residual "loop must re-snapshot" invariant in
+every adapter's interface. With the seam deepened into one `receiver_slot_t`
+(`libtracer/receiver_slot.hpp`) holding trivially-copyable `{fn-ptr, ctx}` pairs, the
+dance is not centralized but **deleted** — a per-frame snapshot is a four-word copy
+under an uncontended lock — and the ergonomic objection is answered by a template
+lvalue-callable sugar on the setters (call sites keep writing lambdas; the slot binds
+them by address, zero erasure). The rest of the 2026-07-05 analysis stands: this is
+not a speed argument, and `std::function` remains appropriate elsewhere (the router's
+`on_reply`/`on_inbound` hooks, wiring-frequency callbacks).

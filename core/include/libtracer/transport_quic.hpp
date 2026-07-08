@@ -147,19 +147,6 @@ class quic_transport_t : public transport_t {
      */
     void send(std::span<const std::span<const std::byte>> iov) override;
 
-    void set_receiver(receiver_t receiver) override;
-
-    /**
-     * @brief Install the owning inbound sink (ADR-0042): one frame = one
-     *        refcounted segment from the injected backend, handed up as a view.
-     *
-     * Set before frames flow (the @ref set_receiver contract); fires on an
-     * msquic worker thread. When installed it takes precedence over the span
-     * receiver; when absent, the span receiver gets a borrowed span over the
-     * same segment bytes (the segment is released when the callback returns).
-     */
-    void set_rope_receiver(rope_receiver_t receiver) override;
-
     /** @brief True — this transport honors @ref set_rope_receiver (ADR-0042). */
     [[nodiscard]] bool delivers_ropes() const override { return true; }
 

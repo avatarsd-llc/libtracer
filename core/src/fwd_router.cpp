@@ -242,21 +242,40 @@ void fwd_router_t::add_child(std::string name, transport_t& link) {
     if (bus_link_t* const bus = link.bus()) {
         // A reassembling bus that delivers ropes (ADR-0053 §5) hands its group up
         // as-is — zero-copy; a span-only bus keeps the borrowed peer-named path.
+        // A bus frame arrives tagged with the sending peer's name, so the ctx is
+        // just the router itself.
         if (bus->delivers_ropes()) {
-            bus->set_peer_rope_receiver([this](std::string_view peer, view::rope_t frame) {
-                on_frame_rope(peer, std::move(frame));
-            });
+            bus->set_peer_rope_receiver(
+                [](void* c, std::string_view peer, view::rope_t frame) {
+                    static_cast<fwd_router_t*>(c)->on_frame_rope(peer, std::move(frame));
+                },
+                this);
         } else {
-            bus->set_peer_receiver([this](std::string_view peer, std::span<const std::byte> frame) {
-                on_frame(peer, frame);
-            });
+            bus->set_peer_receiver(
+                [](void* c, std::string_view peer, std::span<const std::byte> frame) {
+                    static_cast<fwd_router_t*>(c)->on_frame(peer, frame);
+                },
+                this);
         }
-    } else if (link.delivers_ropes()) {
+        return;
+    }
+    // Point-to-point: the inbound NAME is fixed per child, carried by a stable
+    // per-child ctx (child_rx_ holds the address for the transport's lifetime).
+    child_rx_ctx_t& ctx = child_rx_.emplace_back(this, std::move(name));
+    if (link.delivers_ropes()) {
         link.set_rope_receiver(
-            [this, name](view::rope_t frame) { on_frame_rope(name, std::move(frame)); });
+            [](void* c, view::rope_t frame) {
+                auto* const cc = static_cast<child_rx_ctx_t*>(c);
+                cc->self->on_frame_rope(cc->name, std::move(frame));
+            },
+            &ctx);
     } else {
         link.set_receiver(
-            [this, name](std::span<const std::byte> frame) { on_frame(name, frame); });
+            [](void* c, std::span<const std::byte> frame) {
+                auto* const cc = static_cast<child_rx_ctx_t*>(c);
+                cc->self->on_frame(cc->name, frame);
+            },
+            &ctx);
     }
 }
 

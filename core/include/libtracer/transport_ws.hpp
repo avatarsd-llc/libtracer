@@ -70,20 +70,10 @@ class transport_ws_server : public transport_t, private posix_endpoint_t {
      */
     void send(std::span<const std::byte> frame) override;
 
-    /**
-     * @brief Register the sink for inbound frames (one per BINARY message).
-     *
-     * @param receiver Callback invoked on the recv thread with unmasked payloads.
-     */
-    void set_receiver(receiver_t receiver) override;
-
-    /**
-     * @brief Register the OWNING inbound sink (ADR-0053 §5): each message is a
-     *        `rope_t` — one owning link per WS fragment (a single link for an
-     *        unfragmented message), chained by reassembly, never memcpy'd flat.
-     */
-    void set_rope_receiver(rope_receiver_t receiver) override;
-    /** @brief True — WS reassembles fragmented messages into ropes. */
+    /** @brief True — WS reassembles fragmented messages into ropes (ADR-0053 §5):
+     *         each message crosses the seam as a `rope_t`, one owning link per WS
+     *         fragment (a single link for an unfragmented message), chained by
+     *         reassembly, never memcpy'd flat. */
     [[nodiscard]] bool delivers_ropes() const override { return true; }
 
     /** @brief True if the listen socket is bound and listening. */
@@ -101,14 +91,6 @@ class transport_ws_server : public transport_t, private posix_endpoint_t {
     int listen_fd_ = -1;
     std::uint16_t bound_port_ = 0;
 
-    receiver_t receiver_;            // guarded by m_
-    rope_receiver_t rope_receiver_;  // guarded by m_; preferred when set
-    std::mutex m_;                   // guards the receivers
-    // Set by set_receiver/set_rope_receiver; the recv loop re-snapshots the receivers
-    // ONLY when this flag is set — never per frame (the fwd_router closure exceeds the
-    // std::function SBO, so a per-frame copy heap-allocated). Starts true so the first
-    // data frame takes its one snapshot.
-    std::atomic<bool> rx_dirty_{true};
     std::mutex write_m_;              // serializes writes to client_fd_
     std::atomic<int> client_fd_{-1};  // the connected client (-1 = none)
 };
@@ -157,20 +139,10 @@ class transport_ws_client : public transport_t, private posix_endpoint_t {
      */
     void send(std::span<const std::byte> frame) override;
 
-    /**
-     * @brief Register the sink for inbound frames (one per BINARY message).
-     *
-     * @param receiver Callback invoked on the recv thread with unmasked payloads.
-     */
-    void set_receiver(receiver_t receiver) override;
-
-    /**
-     * @brief Register the OWNING inbound sink (ADR-0053 §5): each message is a
-     *        `rope_t` — one owning link per WS fragment (a single link for an
-     *        unfragmented message), chained by reassembly, never memcpy'd flat.
-     */
-    void set_rope_receiver(rope_receiver_t receiver) override;
-    /** @brief True — WS reassembles fragmented messages into ropes. */
+    /** @brief True — WS reassembles fragmented messages into ropes (ADR-0053 §5):
+     *         each message crosses the seam as a `rope_t`, one owning link per WS
+     *         fragment (a single link for an unfragmented message), chained by
+     *         reassembly, never memcpy'd flat. */
     [[nodiscard]] bool delivers_ropes() const override { return true; }
 
     /** @brief True if the connection handshake succeeded and the link is up. */
@@ -182,14 +154,6 @@ class transport_ws_client : public transport_t, private posix_endpoint_t {
     void write_all(int fd, std::span<const std::byte> bytes);
     std::uint32_t next_mask_key();  // per-frame masking key (varied, not crypto)
 
-    receiver_t receiver_;            // guarded by m_
-    rope_receiver_t rope_receiver_;  // guarded by m_; preferred when set
-    std::mutex m_;                   // guards the receivers
-    // Set by set_receiver/set_rope_receiver; the recv loop re-snapshots the receivers
-    // ONLY when this flag is set — never per frame (the fwd_router closure exceeds the
-    // std::function SBO, so a per-frame copy heap-allocated). Starts true so the first
-    // data frame takes its one snapshot.
-    std::atomic<bool> rx_dirty_{true};
     std::mutex write_m_;            // serializes writes to conn_fd_
     std::atomic<int> conn_fd_{-1};  // the live connection (-1 = torn down)
     std::atomic<std::uint64_t> mask_state_{0};

@@ -144,12 +144,15 @@ bool raw_handshake(int cfd) {
 void test_fragmented_message_rope() {
     std::printf("transport_ws server — fragmented message -> rope (ADR-0053):\n");
 
+    // The promise + named receiver lambda live BEFORE the transport: the slot
+    // binds the callable by address, and the server dtor joins the recv thread.
+    std::promise<tr::view::rope_t> got;
+    auto fut = got.get_future();
+    auto rope_rx = [&](tr::view::rope_t msg) { got.set_value(std::move(msg)); };
     tr::net::transport_ws_server server(0);
     check(server.ok() && server.delivers_ropes(), "server up; delivers_ropes() is true");
 
-    std::promise<tr::view::rope_t> got;
-    auto fut = got.get_future();
-    server.set_rope_receiver([&](tr::view::rope_t msg) { got.set_value(std::move(msg)); });
+    server.set_rope_receiver(rope_rx);
 
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client connected + 101 handshake");
@@ -188,14 +191,15 @@ void test_fragmented_message_rope() {
 void test_fragmented_message_span() {
     std::printf("transport_ws server — fragmented message -> span tier:\n");
 
+    std::promise<std::vector<std::byte>> got;
+    auto fut = got.get_future();
+    auto rx = [&](std::span<const std::byte> f) {
+        got.set_value(std::vector<std::byte>(f.begin(), f.end()));
+    };
     tr::net::transport_ws_server server(0);
     check(server.ok(), "server up");
 
-    std::promise<std::vector<std::byte>> got;
-    auto fut = got.get_future();
-    server.set_receiver([&](std::span<const std::byte> f) {
-        got.set_value(std::vector<std::byte>(f.begin(), f.end()));
-    });
+    server.set_receiver(rx);
 
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client connected + 101 handshake");
@@ -221,16 +225,17 @@ void test_fragmented_message_span() {
 void test_handshake_and_frames() {
     std::printf("transport_ws server — handshake + masked recv + server send:\n");
 
+    std::promise<std::vector<std::byte>> got;
+    auto fut = got.get_future();
+    auto rx = [&](std::span<const std::byte> f) {
+        got.set_value(std::vector<std::byte>(f.begin(), f.end()));
+    };
     tr::net::transport_ws_server server(0);
     check(server.ok(), "listen socket bound");
     const std::uint16_t port = server.local_port();
     check(port != 0, "ephemeral port resolved");
 
-    std::promise<std::vector<std::byte>> got;
-    auto fut = got.get_future();
-    server.set_receiver([&](std::span<const std::byte> f) {
-        got.set_value(std::vector<std::byte>(f.begin(), f.end()));
-    });
+    server.set_receiver(rx);
 
     const int cfd = tcp_connect(port);
     check(cfd >= 0, "raw TCP client connected");
@@ -307,25 +312,28 @@ void test_handshake_and_frames() {
 void test_client_server_roundtrip() {
     std::printf("transport_ws client <-> server — full round trip:\n");
 
+    std::promise<std::vector<std::byte>> srv_got;
+    auto srv_fut = srv_got.get_future();
+    auto srv_rx = [&](std::span<const std::byte> f) {
+        srv_got.set_value(std::vector<std::byte>(f.begin(), f.end()));
+    };
+    std::promise<std::vector<std::byte>> cli_got;
+    auto cli_fut = cli_got.get_future();
+    auto cli_rx = [&](std::span<const std::byte> f) {
+        cli_got.set_value(std::vector<std::byte>(f.begin(), f.end()));
+    };
+
     tr::net::transport_ws_server server(0);
     check(server.ok(), "server listen socket bound");
     const std::uint16_t port = server.local_port();
     check(port != 0, "ephemeral port resolved");
 
-    std::promise<std::vector<std::byte>> srv_got;
-    auto srv_fut = srv_got.get_future();
-    server.set_receiver([&](std::span<const std::byte> f) {
-        srv_got.set_value(std::vector<std::byte>(f.begin(), f.end()));
-    });
+    server.set_receiver(srv_rx);
 
     tr::net::transport_ws_client client("127.0.0.1", port);
     check(client.ok(), "client connected + 101 Sec-WebSocket-Accept verified");
 
-    std::promise<std::vector<std::byte>> cli_got;
-    auto cli_fut = cli_got.get_future();
-    client.set_receiver([&](std::span<const std::byte> f) {
-        cli_got.set_value(std::vector<std::byte>(f.begin(), f.end()));
-    });
+    client.set_receiver(cli_rx);
 
     // --- client → server: client.send() emits a MASKED BINARY frame ---
     const std::array<std::byte, 5> c2s{std::byte{0x01}, std::byte{0x07}, std::byte{0xDE},

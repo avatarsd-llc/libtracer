@@ -165,6 +165,10 @@ void run_contract() {
     // one check's frames are fully drained before the next clears and reuses `coll`.
     collector_t coll;
     owning_capture_t own;
+    // The named receiver lambdas live with their collectors, BEFORE the pair:
+    // the slot binds each callable by address, so it too must outlive delivery.
+    auto to_coll = [&coll](std::span<const std::byte> f) { coll.on_frame(f); };
+    auto to_own = [&own](tr::view::rope_t f) { own.on_rope(std::move(f)); };
     Pair pair;
     if (!pair.ok()) {
         check(false, "endpoints did not come up (ok())");
@@ -173,7 +177,7 @@ void run_contract() {
     check(true, "both endpoints report ok()");
 
     // 1. A single frame sent a()->b() arrives byte-identical.
-    pair.b().set_receiver([&coll](std::span<const std::byte> f) { coll.on_frame(f); });
+    pair.b().set_receiver(to_coll);
     const bytes_t one = frame_of({0x09, 0xAB, 0xCD, 0xEF, 0x42});
     pair.a().send(one);
     check(coll.wait_for(1, kWait), "single frame delivered a->b");
@@ -197,7 +201,7 @@ void run_contract() {
 
     // 3. Bidirectional: a frame b()->a() arrives too (the FWD reply plane relies on
     //    the return leg of the same link). Safe after (1): b has accepted/served.
-    pair.a().set_receiver([&coll](std::span<const std::byte> f) { coll.on_frame(f); });
+    pair.a().set_receiver(to_coll);
     coll.clear();
     const bytes_t rev = frame_of({0x55, 0x66, 0x77});
     pair.b().send(rev);
@@ -226,7 +230,7 @@ void run_contract() {
     //    arrives as a rope whose single link OWNS a refcounted segment (the receiver
     //    may keep it beyond the callback), byte-identical to what was sent.
     if (pair.b().delivers_ropes()) {
-        pair.b().set_rope_receiver([&own](tr::view::rope_t f) { own.on_rope(std::move(f)); });
+        pair.b().set_rope_receiver(to_own);
         const bytes_t frame = frame_of({0x11, 0x22, 0x33, 0x44});
         pair.a().send(frame);
         const bool arrived = own.wait(kWait);

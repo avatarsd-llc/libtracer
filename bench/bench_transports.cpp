@@ -55,14 +55,18 @@ std::unique_ptr<transport_t> make_endpoint(std::string_view proto, bool sub, std
 }
 
 void run_sub(std::string_view proto, std::uint16_t port) {
-    auto ep = make_endpoint(proto, true, port);
-    if (!ep) return;
+    // Collector state + the named receiver lambda live BEFORE the endpoint:
+    // the slot binds the callable by address, and the transport dtor joins its
+    // recv thread.
     net::SubState state("libtracer", "net-" + std::string(proto));
     std::atomic<std::uint64_t> last_recv{0};
-    ep->set_receiver([&](std::span<const std::byte> f) {
+    auto rx = [&](std::span<const std::byte> f) {
         state.on_payload(f);
         last_recv.store(now_ns(), std::memory_order_relaxed);
-    });
+    };
+    auto ep = make_endpoint(proto, true, port);
+    if (!ep) return;
+    ep->set_receiver(rx);
     // Wait for the first frame, then finish once the stream goes quiet (the publisher
     // has sent its EOF markers per size and stopped).
     while (last_recv.load(std::memory_order_relaxed) == 0) std::this_thread::sleep_for(10ms);

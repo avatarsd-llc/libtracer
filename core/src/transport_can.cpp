@@ -90,30 +90,14 @@ transport_can::transport_can(std::unique_ptr<can_link_t> link, transport_can_con
 }
 
 transport_can::~transport_can() {
-    // Drop the receivers first; then releasing the link stops its receive thread,
-    // which can no longer re-enter a half-destroyed transport.
-    {
-        const std::lock_guard lock(m_);
-        receiver_ = nullptr;
-        peer_receiver_ = nullptr;
-        peer_rope_receiver_ = nullptr;
-    }
+    // Drop the receivers first (both the peer-named slot and the flat fallback);
+    // then releasing the link stops its receive thread, which can no longer
+    // re-enter a half-destroyed transport.
+    peer_rx_.set(nullptr, nullptr);
+    peer_rx_.set_rope(nullptr, nullptr);
+    rx_.set(nullptr, nullptr);
+    rx_.set_rope(nullptr, nullptr);
     link_.reset();
-}
-
-void transport_can::set_receiver(receiver_t receiver) {
-    const std::lock_guard lock(m_);
-    receiver_ = std::move(receiver);
-}
-
-void transport_can::set_peer_rope_receiver(peer_rope_receiver_t receiver) {
-    const std::lock_guard lock(m_);
-    peer_rope_receiver_ = std::move(receiver);
-}
-
-void transport_can::set_peer_receiver(peer_receiver_t receiver) {
-    const std::lock_guard lock(m_);
-    peer_receiver_ = std::move(receiver);
 }
 
 std::optional<can::advertise_t> transport_can::learned_binding(std::uint32_t base_can_id) const {
@@ -381,32 +365,22 @@ void transport_can::process_data(const can_frame_data_t& frame) {
 }
 
 void transport_can::deliver(std::uint16_t src_node, tr::view::rope_t frame) {
-    receiver_t receiver;
-    peer_receiver_t peer_receiver;
-    peer_rope_receiver_t peer_rope_receiver;
-    {
-        const std::lock_guard lock(m_);
-        receiver = receiver_;
-        peer_receiver = peer_receiver_;
-        peer_rope_receiver = peer_rope_receiver_;
-    }
-    // The peer-named sinks win (ADR-0044): the sender's bus name becomes the FWD
-    // hop's inbound NAME, so a reply routes back to exactly that peer, directed.
-    // The OWNING sink is preferred (ADR-0053 §5): the reassembled rope crosses the
-    // seam as-is, zero-copy. Only a span-tier sink pays the single flatten (its
-    // borrowed span must be contiguous — the legitimate bridge-boundary copy).
-    if (peer_rope_receiver) {
+    // The sender's bus name becomes the FWD hop's inbound NAME (ADR-0044), so a
+    // reply routes back to exactly that peer, directed. The slot performs the
+    // tier select (ADR-0053 §5): a rope sink takes the reassembled rope as-is,
+    // zero-copy; a span-only sink pays the single materialize into the heap
+    // backend (its borrowed span must be contiguous — the legitimate
+    // bridge-boundary copy).
+    //
+    // Precedence per the bus_link_t contract: the peer-named slot when any peer
+    // sink is installed; otherwise the flat transport_t slot (the frame without
+    // its peer name) — a single-peer consumer needs no bus facet.
+    if (peer_rx_.has_any()) {
         const peer_name_buf_t name = format_peer_name(src_node);
-        peer_rope_receiver(name.view(), std::move(frame));
+        peer_rx_.deliver_rope(name.view(), std::move(frame));
         return;
     }
-    const tr::view::view_t flat = frame.flatten();
-    if (peer_receiver) {
-        const peer_name_buf_t name = format_peer_name(src_node);
-        peer_receiver(name.view(), flat.bytes());
-        return;
-    }
-    if (receiver) receiver(flat.bytes());
+    rx_.deliver_rope(std::move(frame));
 }
 
 // --- the `can` catalog factory (ADR-0027 / ADR-0043 §5 / ADR-0044) -----------
