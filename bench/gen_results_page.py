@@ -61,8 +61,9 @@ def perf_block() -> str:
         return "_(bench not built — `cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release && cmake --build bench/build --target bench_libtracer`)_"
     out = run([str(BENCH)])
     rows = []
-    want = {("inproc", 64, 1, 1): "in-process (zero-copy dispatch)",
-            ("inproc-borrow", 64, 1, 1): "in-process, zero-alloc loaned path",
+    want = {("inproc", 64, 1, 1): "in-process write (store+notify+deliver)",
+            ("inproc-deliver", 64, 1, 1): "in-process deliver-only (`propagate`)",
+            ("inproc-borrow", 64, 1, 1): "in-process, zero-alloc loaned path (borrowed view)",
             ("inproc-path", 64, 1, 1): "write-by-path (registry lookup)"}
     seen = {}
     for ln in out.splitlines():
@@ -158,8 +159,18 @@ mode). Two surfaces: three **in-process** axes — subscriber **fan-out**, **pay
 and **topic count** — and a **network** comparison over the real loopback kernel path. Both engines are built
 `-O3` and measured in the **same pass on the same runner**, so the numbers are directly
 comparable on identical hardware. The charts plot **absolute** throughput / latency /
-bandwidth — libtracer and Zenoh as two series on shared axes — so you read the real
+bandwidth — libtracer and Zenoh as series on shared axes — so you read the real
 numbers off the graph; there are no speed-up ratios.
+
+**Semantic fairness.** libtracer's `write` row also **persists** the value (it becomes
+the vertex's last-known-value) and bumps the `await`/readiness sequence on every op;
+Zenoh's `put` is transient delivery only — so the libtracer write row does **strictly
+more semantic work** per op than the Zenoh row it is charted against. The
+**deliver-only (`propagate`)** series is the apples-to-apples counterpart: the value is
+stored once and each op only delivers, matching Zenoh's put semantics. Note also that
+**ACL enforcement is disabled** in the comparison rows (no subject resolver installed,
+so the gate is a single null check); the gated cost is measured separately by the
+`acl-inherit-d4` rows on this page.
 
 Network **throughput** is charted against **composition size K**, because throughput here
 comes from *batching*, and the two engines batch differently. libtracer batches by
