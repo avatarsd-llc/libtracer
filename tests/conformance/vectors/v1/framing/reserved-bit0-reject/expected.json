@@ -1,0 +1,9 @@
+{
+  "name": "reserved-bit0-reject",
+  "category": "framing",
+  "hex": "01010100AA",
+  "total_bytes": 5,
+  "reject": "FRAME_INVALID",
+  "decoded": null,
+  "meaning": "opt=0x01 sets reserved bit 0. Receivers MUST reject reserved-bit-non-zero as INVALID (docs/reference/01-data-format.md §Options bitfield; RFC-0002 tr::frame::invalid). A successful decode of this frame is a conformance FAILURE."
+}
