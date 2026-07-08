@@ -145,6 +145,23 @@ jobs:
       # at the site root) is always first.
       - name: Generate the docs version manifest (versions.json)
         run: python3 tools/gen_versions_json.py docs/_build/html
+      # Mirror the benchmark-history chart into the deployed site. The trend store
+      # (benchmark-action/github-action-benchmark, written ONLY by perf.yml) lives on
+      # the machine-maintained `gh-pages` BRANCH, but Pages source is this workflow's
+      # artifact — the branch itself is never served. Copying its dev/bench/ tree into
+      # the artifact serves the interactive chart at <site>/dev/bench/ (linked and
+      # embedded from the Performance page). Best-effort: a missing branch (fresh fork)
+      # must never break a docs deploy. Freshness: the mirror updates on each docs
+      # deploy; perf.yml and docs.yml share the core/** + bench/** push triggers, so
+      # the served chart tracks main closely (at most one docs deploy behind).
+      - name: Mirror the perf-history chart (gh-pages branch -> /dev/bench/)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          if git fetch --no-tags --depth=1 origin gh-pages; then
+            git archive FETCH_HEAD dev | tar -x -C docs/_build/html/
+          else
+            echo "gh-pages branch not found — perf-history chart omitted from this deploy"
+          fi
       - name: Upload Pages artifact
         if: github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v3
