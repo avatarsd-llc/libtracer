@@ -12,6 +12,16 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Removed
+
+- **`wire::view_as_tlv` — folded into a `wire::decode(const view::view_t&)`
+  overload (frame.hpp).** The function was a pure alias (`return
+  decode(v.bytes());`) that failed the deletion test. The overload keeps the
+  identical contract (the L1↔L2 cast lives at L2 because it produces a `tlv_t`;
+  the returned tree borrows the view's bytes, so keep the view — and its
+  segment — alive) under the codec's own name. Migration: replace
+  `wire::view_as_tlv(v)` with `wire::decode(v)`.
+
 ### Added
 
 - **`length_prefix_framer::kDefaultMaxFrame` — one home for the 16 MiB default

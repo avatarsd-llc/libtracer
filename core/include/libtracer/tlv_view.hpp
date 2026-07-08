@@ -167,7 +167,7 @@ class tlv_view_t {
      *
      * `root` borrows `flat`'s segment bytes (stable across moves — the segment
      * is refcounted heap memory), so keep the pair together, exactly like
-     * `view_as_tlv`'s "keep the view alive" contract.
+     * `decode(view_t)`'s "keep the view alive" contract.
      */
     struct materialized_t {
         view::view_t flat; /**< @brief The single contiguous copy of the wire bytes. */

@@ -185,7 +185,7 @@ std::vector<std::byte> b_fwd(tr::graph::fwd_op_t op, const std::vector<std::byte
 
 // Decode the u32 out of a stored VALUE TLV (a vertex's last-known value).
 std::uint32_t value_u32_of(const view_t& lkv) {
-    const auto t = tr::wire::view_as_tlv(lkv);
+    const auto t = tr::wire::decode(lkv);
     if (!t || t->type != type_t::VALUE || t->payload.size() != 4) return 0;
     return tr::detail::load_le<std::uint32_t>(t->payload);
 }

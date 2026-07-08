@@ -213,7 +213,7 @@ void test_write() {
     const auto rd = g.read(v);
     check(rd.has_value() && rd->only().bytes().size() == 5 /*VALUE 01 00 01 00 2A*/,
           "vertex LKV updated by the WRITE");
-    const auto inner = tr::wire::view_as_tlv(rd->only());
+    const auto inner = tr::wire::decode(rd->only());
     check(inner && inner->type == type_t::VALUE && value_u8(*inner) == 0x2A,
           "stored value decodes to the written byte 0x2A");
 }
@@ -344,7 +344,7 @@ void test_write_trailer_sliced() {
     const auto rd = g.read(v);
     check(rd.has_value() && rd->only().bytes().size() == 6,
           "stored LKV excludes the trailer (6 bytes, not 10)");
-    const auto inner = tr::wire::view_as_tlv(rd->only());
+    const auto inner = tr::wire::decode(rd->only());
     check(inner.has_value() && inner->type == type_t::VALUE && !inner->opt.cr &&
               !inner->trailer.has_value() && inner->payload.size() == 2,
           "stored value decodes trailer-less with the CR bit cleared");
@@ -464,7 +464,7 @@ void test_store_ref_threshold() {
         const auto rd = g.read(v);
         check(rd.has_value() && rd->only().owner.get() != crc_frame.owner.get(),
               "trailered payload => falls back to the one-copy store (no reference)");
-        const auto inner = tr::wire::view_as_tlv(rd->only());
+        const auto inner = tr::wire::decode(rd->only());
         check(inner.has_value() && !inner->opt.cr && !inner->trailer.has_value(),
               "trailered fallback stays trailer-sliced at rest (ADR-0041 §4)");
     }
