@@ -12,6 +12,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **`vertex_t::snapshot_edges` now fills a `graph::edge_snapshot_t` (new type)
+  instead of a `std::span<edge_view_t>` inline buffer.** The snapshot buffer is
+  raw stack storage that placement-constructs ONLY the views actually
+  snapshotted; default-constructing a `std::array<edge_view_t, 8>` per publish
+  zeroed ~900 bytes of dead stack (GCC lowers it to eight `rep stos` blocks),
+  a fixed ~18 ns/op on the fan-out hot path — the post-v0.3.0 `inproc 64B fan1`
+  delivery regression (126→144 ns/op; back to ~105 ns/op with the fix).
+  `vertex_t::kInlineFanout` is now an alias of `edge_snapshot_t::kCapacity`
+  (same value, 8). Migration: declare `edge_snapshot_t buf;` where you declared
+  the `std::array`; indexing and the overflow-vector contract are unchanged.
+
 ### Removed
 
 - **`wire::view_as_tlv` — folded into a `wire::decode(const view::view_t&)`
