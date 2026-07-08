@@ -84,10 +84,11 @@ int main() {
     (void)g.register_vertex(path_t("/log/temp"), role_t::HANDLER, std::move(sink));
 
     // subscriber_t 1 — direct in-process callback.
-    (void)g.subscribe(path_t("/sensor/temp"), [&cb_got](const tr::view::rope_t& v) {
+    auto on_temp = [&cb_got](const tr::view::rope_t& v) {
         cb_got = as_u32(v.only());
         std::printf("  [callback sub] received %u\n", cb_got);
-    });
+    };
+    (void)g.subscribe(path_t("/sensor/temp"), on_temp);
     // subscriber_t 2 — spec-faithful target-path subscription -> /log/temp.
     (void)g.subscribe(path_t("/sensor/temp"), path_t("/log/temp"));
 

@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <concepts>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -291,17 +292,35 @@ class graph_t {
      */
     [[nodiscard]] result_t<void> subscribe(const path_t& src, const path_t& target);
     /**
-     * @brief Subscribe @p src to an in-process @p callback (sugar; fires inline on each
-     *        delivery to src with a cloned view).
+     * @brief Subscribe @p src to an in-process `{fn, ctx}` callback (sugar; fires inline
+     *        on each delivery to src with the rope value).
      *
-     * Delivery is value-agnostic (RFC-0008): WHICH vertices a sweep propagates is the
-     * source vertex's delivery_mode, not a per-edge policy. A `std::function` cannot ride
-     * a TLV, so this overload skips the door's parse — but it enters the SAME single
-     * admission step (SUBSCRIBE gate → append → durability latch, ADR-0049) as every
-     * other door.
+     * The per-edge sink is a plain function-pointer pair (ADR-0047 hot-path shape, like
+     * `transport_t::set_receiver`), so the per-publish edge snapshot is a trivial copy —
+     * no `std::function` clone. Delivery is value-agnostic (RFC-0008): WHICH vertices a
+     * sweep propagates is the source vertex's delivery_mode, not a per-edge policy. A
+     * callback cannot ride a TLV, so this overload skips the door's parse — but it enters
+     * the SAME single admission step (SUBSCRIBE gate → append → durability latch,
+     * ADR-0049) as every other door.
+     * @param fn  The per-delivery sink; @p ctx is passed back as its first argument.
+     * @param ctx Caller-owned context; must outlive every possible delivery (edges are
+     *            never destroyed while the graph lives — an unsubscribe only deactivates
+     *            the slot, but an in-flight delivery may still be running).
      */
-    [[nodiscard]] result_t<void> subscribe(const path_t& src,
-                                           std::function<void(const rope_t&)> callback);
+    [[nodiscard]] result_t<void> subscribe(const path_t& src, subscriber_fn_t fn, void* ctx);
+
+    /**
+     * @brief Subscribe @p src to a caller-owned callable (sugar over the `{fn, ctx}` form).
+     *
+     * Zero-erasure sugar mirroring `transport_t::set_receiver`: @p callback is bound by
+     * address (lvalues only — a temporary would dangle) and MUST outlive every delivery.
+     */
+    template <typename F>
+        requires std::invocable<F&, const view::rope_t&>
+    [[nodiscard]] result_t<void> subscribe(const path_t& src, F& callback) {
+        return subscribe(
+            src, [](void* c, const view::rope_t& v) { (*static_cast<F*>(c))(v); }, &callback);
+    }
 
     /**
      * @brief Install the sink the producer fan-out hands each REMOTE subscriber's delivery
@@ -435,6 +454,10 @@ class graph_t {
     result_t<void> write_branch(vertex_t* v, const rope_t& value, int depth,
                                 std::string_view caller, bool notify);
     void fan_out(vertex_t* v, const rope_t& value, int depth);
+    // The ONE dispatch of a subscription edge's three legs (in-process callback, local
+    // target re-dispatch, remote sink) — shared by fan_out and the admission durability
+    // latch (ADR-0049), always called OUTSIDE the vertex lock.
+    void dispatch_edge(const edge_view_t& e, const rope_t& value, int depth);
     // Vertical bubbling (RFC-0005): fan `value` out to every registered ancestor's
     // subscribers. Called only when v->listeners_above_ says someone is listening.
     void bubble_up(vertex_t* v, const rope_t& value, int depth);
