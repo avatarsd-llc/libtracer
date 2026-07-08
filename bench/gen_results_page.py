@@ -230,6 +230,122 @@ READING_BLOCK = """\
   compare against those, not `inproc-path`, when judging dispatch cost."""
 
 
+def _load_history() -> dict | None:
+    """@brief Load the benchmark-action store (gh-pages `dev/bench/data.js`) as JSON.
+
+    Source order: a local `dev/bench/data.js` (present when a caller pre-mirrored the
+    branch), else a best-effort shallow fetch of `origin/gh-pages` + `git show`.
+    Returns None (a note, not a crash) when the store is unreachable — e.g. a fork
+    without the branch or an offline build.
+    """
+    import json
+    raw = None
+    local = REPO / "dev" / "bench" / "data.js"
+    if local.exists():
+        raw = local.read_text()
+    else:
+        subprocess.run(["git", "fetch", "--depth=1", "origin", "gh-pages"],
+                       capture_output=True, cwd=REPO)
+        for ref in ("FETCH_HEAD", "origin/gh-pages"):
+            p = subprocess.run(["git", "show", f"{ref}:dev/bench/data.js"],
+                               capture_output=True, text=True, cwd=REPO)
+            if p.returncode == 0 and p.stdout:
+                raw = p.stdout
+                break
+    if not raw:
+        return None
+    raw = raw.strip()
+    raw = raw.removeprefix("window.BENCHMARK_DATA = ").rstrip(";")
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
+
+
+def _spark(vals: list[float]) -> str:
+    """@brief Render a min-max-normalized unicode sparkline for a value series."""
+    bars = "▁▂▃▄▅▆▇█"
+    lo, hi = min(vals), max(vals)
+    if hi <= lo:
+        return bars[0] * len(vals)
+    return "".join(bars[min(7, int((v - lo) / (hi - lo) * 7.999))] for v in vals)
+
+
+def _fmt_val(v: float) -> str:
+    """@brief Human-compact number: 12.3M / 4.5k / 929 / 23.8."""
+    a = abs(v)
+    if a >= 1e6:
+        return f"{v / 1e6:.3g}M"
+    if a >= 1e4:
+        return f"{v / 1e3:.3g}k"
+    return f"{v:.4g}"
+
+
+def history_tables_block() -> str:
+    """@brief The IN-PAGE per-commit history: every tracked series across every
+    `main` commit in the store, as compact tables (first→last, extremes, sparkline).
+
+    This is the same data the interactive chart plots, embedded as text so the
+    history survives wherever the iframe cannot (PDF export, RSS scrapers, a
+    momentarily unpublished `/dev/bench/`), and so one page carries current
+    numbers, their full history, and the Zenoh comparison side by side.
+    """
+    data = _load_history()
+    if not data:
+        return ("_(per-commit history store unreachable in this build — the interactive"
+                " chart link above still serves it once published)_")
+    out: list[str] = []
+    for suite, entries in data.get("entries", {}).items():
+        if not entries:
+            continue
+        first_c = entries[0]["commit"]["id"][:7]
+        last_c = entries[-1]["commit"]["id"][:7]
+        series: dict[str, list[float]] = {}
+        for e in entries:
+            for b in e.get("benches", []):
+                series.setdefault(b["name"], []).append(float(b["value"]))
+        unit = entries[-1]["benches"][0].get("unit", "") if entries[-1].get("benches") else ""
+        out.append(f"### {suite}")
+        out.append("")
+        out.append(f"{len(entries)} tracked commit(s), `{first_c}` → `{last_c}`; unit: {unit}.")
+        out.append("")
+        out.append("| series | pts | first → last | Δ | min … max | trend |")
+        out.append("| --- | --- | --- | --- | --- | --- |")
+        for name in sorted(series):
+            v = series[name]
+            delta = f"{(v[-1] - v[0]) / v[0] * 100:+.1f}%" if len(v) > 1 and v[0] else "—"
+            out.append(f"| {name} | {len(v)} | {_fmt_val(v[0])} → {_fmt_val(v[-1])} | {delta} "
+                       f"| {_fmt_val(min(v))} … {_fmt_val(max(v))} | `{_spark(v)}` |")
+        out.append("")
+    return "\n".join(out).rstrip()
+
+
+def tests_block() -> str:
+    """@brief The unified test rollup: live ctest summary inline on this page,
+    with the per-suite detail remaining on the Test report page."""
+    try:
+        import gen_test_report as tr
+        results = tr.run_ctest_junit(tr.BUILD)
+    except Exception:
+        results = []
+    if not results:
+        return ("_(the Release test build was not available in this pass — see the"
+                " [full test report](test-report.md))_")
+    total = len(results)
+    passed = sum(1 for _, s, _ in results if s == "pass")
+    wall = sum(t for _, _, t in results)
+    cats: dict[str, list[int]] = {}
+    for name, s, _ in results:
+        c = cats.setdefault(tr.category_of(name), [0, 0])
+        c[0] += 1
+        c[1] += 1 if s == "pass" else 0
+    verdict = "✅ all green" if passed == total else f"❌ {total - passed} failing"
+    rows = " · ".join(f"{k} {v[1]}/{v[0]}" for k, v in sorted(cats.items()))
+    return (f"| suites | passing | wall time | verdict |\n| --- | --- | --- | --- |\n"
+            f"| {total} | {passed}/{total} | {wall:.2f}s | {verdict} |\n\n"
+            f"By area: {rows}. Full per-suite detail: [Test report](test-report.md).")
+
+
 def zenoh_compare_block() -> str:
     """Run both grids and render the absolute-value comparison charts. Degrades to a
     note (never a crash) if the bench isn't built or Zenoh isn't vendored."""
@@ -301,7 +417,19 @@ Canonical points from `bench_libtracer` (the µs-latency / zero-copy thesis, ADR
 
 {HISTORY_BLOCK}
 
+### Full history, in-page (every tracked series, all recorded `main` commits)
+
+{history_tables_block()}
+
 {READING_BLOCK}
+
+{COMPARE_INTRO}
+
+{zenoh_compare_block()}
+
+## Test rollup (live ctest, unified with the perf surface)
+
+{tests_block()}
 
 ## Cross-core codec performance (decode→encode roundtrip, same v1 vectors)
 
@@ -312,10 +440,6 @@ Figures are the **median across all v1 vectors** (one decode + one encode == one
 roundtrip); a core whose toolchain is absent in this build degrades to a note.
 
 {codec_block()}
-
-{COMPARE_INTRO}
-
-{zenoh_compare_block()}
 """
     OUT.write_text(page)
     print(f"wrote {OUT.relative_to(REPO)} ({'conformance PASS' if passed else 'conformance check ran'})")
