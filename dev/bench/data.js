@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783464960115,
+  "lastUpdate": 1783487977238,
   "repoUrl": "https://github.com/avatarsd-llc/libtracer",
   "entries": {
     "libtracer in-process latency (ns, smaller is better)": [
@@ -917,6 +917,60 @@ window.BENCHMARK_DATA = {
           {
             "name": "inproc-borrow 64B/fan1/1ep ns/delivery",
             "value": 206.8,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "15184545+AvatarSD@users.noreply.github.com",
+            "name": "avatarsd",
+            "username": "AvatarSD"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "fdf49f2ea5d9831561e22c8cb4c2782e39e7bb06",
+          "message": "Merge pull request #332 from avatarsd-llc/feat/platformio-esp32-can\n\nfeat(platformio): best-effort ESP32 CAN via build.extraScript + integration-status honesty",
+          "timestamp": "2026-07-08T08:18:49+03:00",
+          "tree_id": "a53540c4833d92bab9c765bb5fed3ebe333ccaba",
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/fdf49f2ea5d9831561e22c8cb4c2782e39e7bb06"
+        },
+        "date": 1783487976613,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "inproc 64B/fan1/1ep p50 latency",
+            "value": 275,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan1/1ep p99 latency",
+            "value": 300,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan1/1ep ns/delivery",
+            "value": 238.4,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep p50 latency",
+            "value": 221,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep p99 latency",
+            "value": 241,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep ns/delivery",
+            "value": 206.2,
             "unit": "ns"
           }
         ]
