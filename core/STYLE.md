@@ -53,6 +53,22 @@ The trailing `_t` is safe under `tr::`: C/POSIX reserves global trailing-`_t`, b
 
 Every **public** declaration carries a `/** … */` Doxygen block. Use `/** … */` block comments **exclusively** — never `///` line comments; trailing member docs use the `/**< … */` form. The rule balances strictness against boilerplate: `@brief` is mandatory; the argument/return tags appear **only when they add information** the name and type don't already give.
 
+**Scope — doxygen-capable comments EVERYWHERE (maintainer directive, 2026-07-08).** The
+`/** @brief … */` form is not just for CI-gated public headers: it applies to every
+**entity-attached** comment in the codebase —
+
+- `.cpp` implementation files: the file header is a `/** @file @brief … */` block; every
+  function definition, file-local type, anonymous-namespace helper, and static table gets a
+  `/** @brief … */` block; logical section dividers use `/** @name … */`-style blocks.
+- The other-language cores follow the same doctrine in their native doc syntax that is
+  `/** */`-shaped: **Rust** uses `/** … */` rustdoc block comments (never `///`),
+  **TypeScript** uses JSDoc `/** … */`.
+
+The one exception: **statement-level comments inside function bodies stay `//`** — a
+free-floating `/** */` block attaches to no entity, and orphan doc blocks trip
+`WARN_AS_ERROR` once a file enters the Doxyfile INPUT. If a body comment documents a
+*member or variable declaration*, prefer the trailing `/**< … */` form.
+
 ```cpp
 /**
  * @brief Allocate a fresh segment of at least @p size bytes (refcount = 1).
