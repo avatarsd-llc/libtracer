@@ -6,7 +6,9 @@
 // Mirrors core/tests/conformance_runner.cpp --tap: for every vector directory
 // containing an input.bin, it checks the round-trip
 //     encode(decode(input.bin)) == input.bin   (byte-for-byte)
-// and emits TAP version 13 to stdout (see tests/conformance/HARNESS.md). Exit 0
+// and for every directory containing a reject.bin (negative case), that
+//     decode(reject.bin) FAILS with the error named by expected.json's "reject"
+// then emits TAP version 13 to stdout (see tests/conformance/HARNESS.md). Exit 0
 // iff every vector is `ok`. Node/stdlib only — no build step, no dependencies.
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -62,16 +64,40 @@ function runRoundtrip() {
   process.stdout.write(out.join('\n') + '\n');
 }
 
-/** @param {string} dir @returns {string[]} absolute paths to every input.bin under dir */
+/** @param {string} dir @returns {string[]} absolute paths to every input.bin / reject.bin under dir */
 function findInputs(dir) {
   /** @type {string[]} */
   const out = [];
   for (const entry of readdirSync(dir)) {
     const p = join(dir, entry);
     if (statSync(p).isDirectory()) out.push(...findInputs(p));
-    else if (entry === 'input.bin') out.push(p);
+    else if (entry === 'input.bin' || entry === 'reject.bin') out.push(p);
   }
   return out;
+}
+
+/**
+ * One negative case: decode(reject.bin) MUST fail with exactly the error named
+ * by the sibling expected.json's top-level "reject" field.
+ *
+ * @param {string} rejectBin absolute path to the case's reject.bin
+ * @returns {{ok: boolean, diag: string}}
+ */
+function checkReject(rejectBin) {
+  const expected = JSON.parse(readFileSync(join(rejectBin, '..', 'expected.json'), 'utf8'));
+  const want = expected.reject;
+  if (typeof want !== 'string' || want === '') {
+    return { ok: false, diag: 'reject.bin without a "reject" expectation in expected.json' };
+  }
+  try {
+    decode(new Uint8Array(readFileSync(rejectBin)));
+  } catch (err) {
+    const got = err && err.code ? err.code : String(err && err.message ? err.message : err);
+    return got === want
+      ? { ok: true, diag: '' }
+      : { ok: false, diag: `decode failed with ${got}, expected ${want}` };
+  }
+  return { ok: false, diag: `decode succeeded, expected ${want}` };
 }
 
 /** @param {Uint8Array} a @param {Uint8Array} b */
@@ -109,9 +135,13 @@ function main() {
     let ok = false;
     let diag = '';
     try {
-      const input = new Uint8Array(readFileSync(abs));
-      ok = bytesEqual(encode(decode(input)), input);
-      if (!ok) diag = 'round-trip differs from input.bin';
+      if (abs.endsWith('reject.bin')) {
+        ({ ok, diag } = checkReject(abs));
+      } else {
+        const input = new Uint8Array(readFileSync(abs));
+        ok = bytesEqual(encode(decode(input)), input);
+        if (!ok) diag = 'round-trip differs from input.bin';
+      }
     } catch (err) {
       diag = err && err.code ? err.code : String(err && err.message ? err.message : err);
     }

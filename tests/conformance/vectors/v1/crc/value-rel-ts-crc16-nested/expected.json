@@ -1,0 +1,60 @@
+{
+  "name": "value-rel-ts-crc16-nested",
+  "category": "crc",
+  "hex": "07600D0001360300AABBCC18FCFFFF4A520807060504030201",
+  "total_bytes": 25,
+  "decoded": {
+    "type": "0x07 POINT",
+    "opt": {
+      "raw": "0x60",
+      "PL": 1,
+      "TS": 1,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 13,
+    "trailer": {
+      "ts": {
+        "form": "absolute u64 ns",
+        "value": 72623859790382856,
+        "bytes_le": "0807060504030201"
+      },
+      "crc": null
+    },
+    "children": [
+      {
+        "type": "0x01 VALUE",
+        "opt": {
+          "raw": "0x36",
+          "PL": 0,
+          "TS": 1,
+          "CR": 1,
+          "LL": 0,
+          "CW": 1,
+          "TF": 1,
+          "reserved_bit7": 0,
+          "reserved_bit0": 0
+        },
+        "length": 3,
+        "payload": "AABBCC",
+        "trailer": {
+          "ts": {
+            "form": "relative i32 ns",
+            "value": -1000,
+            "bytes_le": "18FCFFFF"
+          },
+          "crc": {
+            "width": "CRC-16-CCITT",
+            "value": "0x524A",
+            "bytes_le": "4A52"
+          }
+        }
+      }
+    ],
+    "meaning": "combined TS+CR+CW+TF on the child (opt=0x36): relative i32 ts (negative, -1000 ns before the parent's absolute ts) plus CRC-16-CCITT over payload ++ trailer_ts (AABBCC ++ 18FCFFFF). One frame exercises four opt bits at once — a shifted mask breaks trailer sizing, CRC width, or ts form."
+  }
+}
