@@ -126,15 +126,11 @@ class fake_link_t : public transport_t {
     void send(std::span<const std::byte> frame) override {
         sent_.emplace_back(frame.begin(), frame.end());
     }
-    void set_receiver(receiver_t receiver) override { receiver_ = std::move(receiver); }
-    void inject(std::span<const std::byte> frame) {
-        if (receiver_) receiver_(frame);
-    }
+    void inject(std::span<const std::byte> frame) { rx_.deliver_borrowed(frame); }
     std::vector<std::vector<std::byte>>& sent() { return sent_; }
 
    private:
     std::vector<std::vector<std::byte>> sent_;
-    receiver_t receiver_;
 };
 
 // A rope-delivering link (ADR-0053 §5): hands the frame up as the rope it is,
@@ -142,15 +138,8 @@ class fake_link_t : public transport_t {
 class fake_rope_link_t : public transport_t {
    public:
     void send(std::span<const std::byte>) override {}  // unused inbound-only link
-    void set_receiver(receiver_t) override {}          // never installed (delivers ropes)
-    void set_rope_receiver(rope_receiver_t receiver) override { rope_rx_ = std::move(receiver); }
     [[nodiscard]] bool delivers_ropes() const override { return true; }
-    void inject(tr::view::rope_t frame) {
-        if (rope_rx_) rope_rx_(std::move(frame));
-    }
-
-   private:
-    rope_receiver_t rope_rx_;
+    void inject(tr::view::rope_t frame) { rx_.deliver_rope(std::move(frame)); }
 };
 
 // Route `frame` (as a rope, split at `cuts`) through a fresh forwarder and return

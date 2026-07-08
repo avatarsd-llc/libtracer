@@ -128,14 +128,19 @@ std::vector<std::byte> test_frame(std::size_t len, std::uint8_t seed) {
 
 void test_raw_frame_duplex() {
     std::printf("TCP transport — raw frames both ways over localhost:\n");
+    // Sinks + named receiver lambdas BEFORE the transports: the slot binds the
+    // callable by address, and ~tcp_transport_t joins the recv thread, so the
+    // callable must outlive the transport.
+    sink_t at_listener, at_dialer;
+    auto listener_rx = [&](std::span<const std::byte> f) { at_listener.push(f); };
+    auto dialer_rx = [&](std::span<const std::byte> f) { at_dialer.push(f); };
     tcp_transport_t listener(std::uint16_t{0});
     check(listener.ok(), "listener bound (ephemeral port)");
     tcp_transport_t dialer("127.0.0.1", listener.local_port());
     check(dialer.ok(), "dialer connected");
 
-    sink_t at_listener, at_dialer;
-    listener.set_receiver([&](std::span<const std::byte> f) { at_listener.push(f); });
-    dialer.set_receiver([&](std::span<const std::byte> f) { at_dialer.push(f); });
+    listener.set_receiver(listener_rx);
+    dialer.set_receiver(dialer_rx);
 
     const auto f1 = test_frame(5, 0x10);
     dialer.send(f1);
@@ -151,9 +156,10 @@ void test_raw_frame_duplex() {
 
 void test_partial_and_coalesced() {
     std::printf("TCP transport — split writes reassemble, coalesced writes split:\n");
-    tcp_transport_t listener(std::uint16_t{0});
     sink_t sink;
-    listener.set_receiver([&](std::span<const std::byte> f) { sink.push(f); });
+    auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
+    tcp_transport_t listener(std::uint16_t{0});
+    listener.set_receiver(rx);
 
     raw_client_t client(listener.local_port());
     check(client.fd >= 0, "raw client connected");
@@ -188,9 +194,10 @@ void test_partial_and_coalesced() {
 
 void test_oversize_prefix() {
     std::printf("TCP transport — an oversize length prefix is malformed:\n");
-    tcp_transport_t listener(std::uint16_t{0});
     std::atomic<int> delivered{0};
-    listener.set_receiver([&](std::span<const std::byte>) { delivered.fetch_add(1); });
+    auto rx = [&](std::span<const std::byte>) { delivered.fetch_add(1); };
+    tcp_transport_t listener(std::uint16_t{0});
+    listener.set_receiver(rx);
 
     raw_client_t client(listener.local_port());
     std::vector<std::byte> prefix;
@@ -215,9 +222,10 @@ void test_oversize_prefix() {
 // rejected as malformed (kMaxFrame→:settings; behavior-preserving default when 0).
 void test_settings_max_frame() {
     std::printf("TCP transport — a :settings max_frame tightens the receive cap:\n");
-    tcp_transport_t listener(std::uint16_t{0}, &tr::mem::heap_backend(), /*max_frame=*/64);
     std::atomic<int> delivered{0};
-    listener.set_receiver([&](std::span<const std::byte>) { delivered.fetch_add(1); });
+    auto rx = [&](std::span<const std::byte>) { delivered.fetch_add(1); };
+    tcp_transport_t listener(std::uint16_t{0}, &tr::mem::heap_backend(), /*max_frame=*/64);
+    listener.set_receiver(rx);
 
     raw_client_t client(listener.local_port());
     std::vector<std::byte> prefix;
@@ -271,15 +279,16 @@ class recording_backend_t final : public tr::mem::mem_backend_t {
 void test_view_delivery_segment_identity() {
     std::printf("TCP transport — owning view delivery (ADR-0042 receiver seam):\n");
     recording_backend_t rec;
+    std::promise<tr::view::view_t> got;
+    auto fut = got.get_future();
+    auto rope_rx = [&](tr::view::rope_t f) {
+        if (f.link_count() == 1) got.set_value(f.links()[0]);  // single-link: the trivial rope
+    };
     tcp_transport_t listener(std::uint16_t{0}, &rec);
     check(listener.delivers_ropes(), "tcp_transport_t::delivers_ropes() is true");
     tcp_transport_t dialer("127.0.0.1", listener.local_port());
 
-    std::promise<tr::view::view_t> got;
-    auto fut = got.get_future();
-    listener.set_rope_receiver([&](tr::view::rope_t f) {
-        if (f.link_count() == 1) got.set_value(f.links()[0]);  // single-link: the trivial rope
-    });
+    listener.set_rope_receiver(rope_rx);
 
     const auto frame = test_frame(48, 0x21);
     dialer.send(frame);
@@ -308,9 +317,10 @@ void test_view_delivery_segment_identity() {
 void test_backpressure_drain() {
     std::printf("TCP transport — backend exhaustion drains the frame, sync survives:\n");
     recording_backend_t rec(2);  // the first two allocations fail
-    tcp_transport_t listener(std::uint16_t{0}, &rec);
     sink_t sink;
-    listener.set_rope_receiver([&](tr::view::rope_t f) { sink.push(f.links()[0].bytes()); });
+    auto rope_rx = [&](tr::view::rope_t f) { sink.push(f.links()[0].bytes()); };
+    tcp_transport_t listener(std::uint16_t{0}, &rec);
+    listener.set_rope_receiver(rope_rx);
     tcp_transport_t dialer("127.0.0.1", listener.local_port());
 
     const auto f1 = test_frame(8192, 0x01);  // bigger than the drain scratch (4 KiB)
@@ -329,9 +339,10 @@ void test_backpressure_drain() {
 
 void test_scatter_gather() {
     std::printf("TCP transport — scatter-gather send (rope -> one record, no flatten):\n");
-    tcp_transport_t listener(std::uint16_t{0});
     sink_t sink;
-    listener.set_receiver([&](std::span<const std::byte> f) { sink.push(f); });
+    auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
+    tcp_transport_t listener(std::uint16_t{0});
+    listener.set_receiver(rx);
     tcp_transport_t dialer("127.0.0.1", listener.local_port());
 
     // A 3-segment rope (the "rope we put into tx"), one writev with the prefix in

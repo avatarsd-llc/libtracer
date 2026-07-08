@@ -27,13 +27,13 @@ using namespace bench;
 namespace {
 
 void run(std::size_t S, std::size_t K) {
-    tr::net::udp_transport_t sub(49000, "127.0.0.1", 49001);
-    tr::net::udp_transport_t pub(49001, "127.0.0.1", 49000);
-
+    // Collector state + the named receiver lambda live BEFORE the transports:
+    // the slot binds the callable by address, and ~udp_transport_t joins the
+    // recv thread.
     std::atomic<std::uint64_t> datagrams{0};
     std::mutex latm;
     Latency lat;
-    sub.set_receiver([&](std::span<const std::byte> f) {
+    auto rx = [&](std::span<const std::byte> f) {
         datagrams.fetch_add(1, std::memory_order_relaxed);
         if (f.size() >= 8) {
             std::uint64_t ts = 0;
@@ -45,7 +45,11 @@ void run(std::size_t S, std::size_t K) {
                 lat.add(l);
             }
         }
-    });
+    };
+    tr::net::udp_transport_t sub(49000, "127.0.0.1", 49001);
+    tr::net::udp_transport_t pub(49001, "127.0.0.1", 49000);
+
+    sub.set_receiver(rx);
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
     // K segments of S bytes — the composite rope put into tx (seg0 holds a ts).

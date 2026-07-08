@@ -65,20 +65,10 @@ class udp_transport_t : public transport_t, private posix_endpoint_t {
 
     void send(std::span<const std::byte> frame) override;                 // sendto(peer)
     void send(std::span<const std::span<const std::byte>> iov) override;  // sendmsg(iovec)
-    void set_receiver(receiver_t receiver) override;
 
-    /**
-     * @brief Install the owning inbound sink (ADR-0042): one datagram = one frame =
-     *        one refcounted segment from the injected backend, handed up as a view.
-     *
-     * Set before frames flow (the @ref set_receiver contract); fires on the recv
-     * thread. When installed it takes precedence over the span receiver for every
-     * subsequent datagram; when absent, delivery is the borrowed-span path,
-     * byte-identical to a backend-less transport.
-     */
-    void set_rope_receiver(rope_receiver_t receiver) override;
-
-    /** @brief True — this transport honors @ref set_rope_receiver (ADR-0042 §2). */
+    /** @brief True — this transport honors @ref set_rope_receiver (ADR-0042 §2):
+     *         one datagram = one frame = one refcounted segment from the injected
+     *         backend, handed up owning; span-only sinks keep the borrowed path. */
     [[nodiscard]] bool delivers_ropes() const override { return true; }
 
     /** @brief True iff the socket bound successfully. */
@@ -110,15 +100,6 @@ class udp_transport_t : public transport_t, private posix_endpoint_t {
     // drop counter (backpressure, never OOM).
     mem::mem_backend_t* backend_;
     std::atomic<std::uint64_t> dropped_rx_{0};
-
-    receiver_t receiver_;            // guarded by m_
-    rope_receiver_t rope_receiver_;  // guarded by m_; installed => owning delivery path
-    std::mutex m_;
-    // Set by set_receiver/set_rope_receiver; the recv loop re-snapshots the receivers
-    // ONLY when this flag is set — never per datagram (the fwd_router closure exceeds
-    // the std::function SBO, so a per-datagram copy heap-allocated). Starts true so the
-    // first datagram takes its one snapshot.
-    std::atomic<bool> rx_dirty_{true};
 };
 
 }  // namespace tr::net

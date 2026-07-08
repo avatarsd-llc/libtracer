@@ -216,14 +216,17 @@ void test_roundtrip(tr::view::can_frame_mode_t mode, std::size_t payload_len, co
     std::printf("transport_can round trip (%s, %zu bytes):\n", label, payload_len);
 
     fake_can_bus_t bus;
+    // Sink + named receiver lambda BEFORE the transports: the slot binds the
+    // callable by address, and ~transport_can joins its receive thread.
+    sink_t sink;
+    auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
     auto link_a = std::make_unique<fake_link_t>(bus);
     auto link_b = std::make_unique<fake_link_t>(bus);
 
     tr::net::transport_can tx_a(std::move(link_a), {0, 1, mode, "sensor/temp"});
     tr::net::transport_can tx_b(std::move(link_b), {0, 2, mode, "actuator/valve"});
 
-    sink_t sink;
-    tx_b.set_receiver([&](std::span<const std::byte> f) { sink.on(f); });
+    tx_b.set_receiver(rx);
 
     const std::vector<std::byte> payload = make_payload(payload_len);
     tx_a.send(payload);
@@ -247,6 +250,8 @@ void test_fd_dlc_padding() {
     std::printf("transport_can CAN-FD DLC padding:\n");
 
     fake_can_bus_t bus;
+    sink_t sink;
+    auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
     auto link_a = std::make_unique<fake_link_t>(bus);
     auto link_b = std::make_unique<fake_link_t>(bus);
     frame_tap_t tap(bus);  // records every frame on the bus
@@ -254,8 +259,7 @@ void test_fd_dlc_padding() {
     tr::net::transport_can tx_a(std::move(link_a), {0, 1, tr::view::can_frame_mode_t::FD, "p"});
     tr::net::transport_can tx_b(std::move(link_b), {0, 2, tr::view::can_frame_mode_t::FD, "q"});
 
-    sink_t sink;
-    tx_b.set_receiver([&](std::span<const std::byte> f) { sink.on(f); });
+    tx_b.set_receiver(rx);
 
     // 100 bytes in FD: windows 64 + 36; the 36-byte tail pads up to DLC 48.
     const std::vector<std::byte> payload = make_payload(100);
@@ -292,6 +296,8 @@ void test_control_stream_resync() {
     std::printf("transport_can control-stream resync (mid-stream join):\n");
 
     fake_can_bus_t bus;
+    sink_t sink;
+    auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
     auto link_b = std::make_unique<fake_link_t>(bus);
     fake_link_t injector(bus);  // stands in for the tail of an in-flight advertise
 
@@ -301,8 +307,7 @@ void test_control_stream_resync() {
     // permanently and A's later traffic is never delivered.
     tr::net::transport_can tx_b(std::move(link_b),
                                 {0, 2, tr::view::can_frame_mode_t::CLASSIC, "q"});
-    sink_t sink;
-    tx_b.set_receiver([&](std::span<const std::byte> f) { sink.on(f); });
+    tx_b.set_receiver(rx);
 
     tr::net::can_frame_data_t fragment;
     fragment.id = can::encode_can_id({0, 1, tr::net::kCanControlEndpoint});
@@ -327,14 +332,15 @@ void test_lifecycle() {
     std::printf("transport_can lifecycle (construct/send/destruct):\n");
     fake_can_bus_t bus;
     for (int i = 0; i < 8; ++i) {
+        sink_t sink;
+        auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
         auto link_a = std::make_unique<fake_link_t>(bus);
         auto link_b = std::make_unique<fake_link_t>(bus);
         tr::net::transport_can tx_a(std::move(link_a),
                                     {0, 1, tr::view::can_frame_mode_t::CLASSIC, "a"});
         tr::net::transport_can tx_b(std::move(link_b),
                                     {0, 2, tr::view::can_frame_mode_t::CLASSIC, "b"});
-        sink_t sink;
-        tx_b.set_receiver([&](std::span<const std::byte> f) { sink.on(f); });
+        tx_b.set_receiver(rx);
         tx_a.send(make_payload(30));
         sink.wait_for_count(1, 1s);
     }
@@ -345,14 +351,15 @@ void test_lifecycle() {
 void test_single_value() {
     std::printf("transport_can single value (one frame):\n");
     fake_can_bus_t bus;
+    sink_t sink;
+    auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
     auto link_a = std::make_unique<fake_link_t>(bus);
     auto link_b = std::make_unique<fake_link_t>(bus);
     tr::net::transport_can tx_a(std::move(link_a),
                                 {0, 1, tr::view::can_frame_mode_t::CLASSIC, "p"});
     tr::net::transport_can tx_b(std::move(link_b),
                                 {0, 2, tr::view::can_frame_mode_t::CLASSIC, "q"});
-    sink_t sink;
-    tx_b.set_receiver([&](std::span<const std::byte> f) { sink.on(f); });
+    tx_b.set_receiver(rx);
     const std::vector<std::byte> payload = make_payload(5);
     tx_a.send(payload);
     check(sink.wait_for_count(1, 2s), "single-frame value delivered");
@@ -368,6 +375,18 @@ void test_rope_delivery() {
     std::printf("transport_can owning rope delivery (ADR-0053):\n");
 
     fake_can_bus_t bus;
+    // Capture state + named peer-rope lambda BEFORE the transports (the slot
+    // binds the callable by address; ~transport_can joins its receive thread).
+    std::mutex m;
+    std::condition_variable cv;
+    std::string peer;
+    std::optional<tr::view::rope_t> got;
+    auto peer_rope_rx = [&](std::string_view name, tr::view::rope_t frame) {
+        const std::lock_guard lock(m);
+        peer = name;
+        got = std::move(frame);  // the refcounted links outlive the callback
+        cv.notify_all();
+    };
     auto link_a = std::make_unique<fake_link_t>(bus);
     auto link_b = std::make_unique<fake_link_t>(bus);
 
@@ -376,16 +395,7 @@ void test_rope_delivery() {
 
     check(tx_b.delivers_ropes(), "transport_can::delivers_ropes() is true");
 
-    std::mutex m;
-    std::condition_variable cv;
-    std::string peer;
-    std::optional<tr::view::rope_t> got;
-    tx_b.set_peer_rope_receiver([&](std::string_view name, tr::view::rope_t frame) {
-        const std::lock_guard lock(m);
-        peer = name;
-        got = std::move(frame);  // the refcounted links outlive the callback
-        cv.notify_all();
-    });
+    tx_b.set_peer_rope_receiver(peer_rope_rx);
 
     // 100 bytes in FD: slices 64 + 36; the 36-byte tail was padded to DLC 48 on
     // the wire, so the trim must SHORTEN the second link back to 36.

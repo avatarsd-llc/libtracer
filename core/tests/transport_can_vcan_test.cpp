@@ -94,14 +94,18 @@ int main() {
     auto link_b = std::make_unique<tr::net::socketcan_link_t>("vcan0");
     check(link_a->ok() && link_b->ok(), "two CAN_RAW sockets bound to vcan0");
 
+    // Sinks + named receiver lambdas BEFORE the transports: the slot binds the
+    // callable by address, and ~transport_can joins its receive thread.
+    sink_t sink_a, sink_b;
+    auto rx_a = [&](std::span<const std::byte> f) { sink_a.on(f); };
+    auto rx_b = [&](std::span<const std::byte> f) { sink_b.on(f); };
     tr::net::transport_can tx_a(std::move(link_a),
                                 {0, 1, tr::view::can_frame_mode_t::CLASSIC, "a/p"});
     tr::net::transport_can tx_b(std::move(link_b),
                                 {0, 2, tr::view::can_frame_mode_t::CLASSIC, "b/q"});
 
-    sink_t sink_a, sink_b;
-    tx_a.set_receiver([&](std::span<const std::byte> f) { sink_a.on(f); });
-    tx_b.set_receiver([&](std::span<const std::byte> f) { sink_b.on(f); });
+    tx_a.set_receiver(rx_a);
+    tx_b.set_receiver(rx_b);
 
     // A -> B (a 20-byte payload spans 3 classic CAN data frames).
     const std::vector<std::byte> a2b = payload(20, 0x11);
@@ -131,10 +135,11 @@ int main() {
     // vcan0; a frame A sends via its n2 peer endpoint reaches B and NOT C.
     auto link_c = std::make_unique<tr::net::socketcan_link_t>("vcan0");
     check(link_c->ok(), "third CAN_RAW socket bound to vcan0");
+    sink_t sink_c;
+    auto rx_c = [&](std::span<const std::byte> f) { sink_c.on(f); };
     tr::net::transport_can tx_c(std::move(link_c),
                                 {0, 3, tr::view::can_frame_mode_t::CLASSIC, "c/r"});
-    sink_t sink_c;
-    tx_c.set_receiver([&](std::span<const std::byte> f) { sink_c.on(f); });
+    tx_c.set_receiver(rx_c);
 
     tr::net::transport_t* const to_b = tx_a.peer_link("n2");
     check(to_b != nullptr, "A resolves peer n2 to a directed endpoint");

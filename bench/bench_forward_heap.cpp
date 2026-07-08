@@ -113,7 +113,6 @@ struct capture_transport_t : transport_t {
         ++sends;
         last_len = total;
     }
-    void set_receiver(receiver_t) override {}
 };
 
 // Append a NAME-only PATH TLV over `segs`.

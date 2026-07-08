@@ -40,8 +40,6 @@ class loopback_endpoint_t final : public transport_t {
    public:
     /** @brief Send one frame — delivered to the peer endpoint's receiver on its recv thread. */
     void send(std::span<const std::byte> frame) override;
-    /** @brief Register the inbound-frame sink for this endpoint. */
-    void set_receiver(receiver_t receiver) override;
 
    private:
     friend class loopback_channel_t;
@@ -54,7 +52,6 @@ class loopback_endpoint_t final : public transport_t {
 
     loopback_endpoint_t* peer_ = nullptr;
     std::deque<std::vector<std::byte>> inbox_;
-    receiver_t receiver_;  // guarded by m_
     std::mutex m_;
     std::condition_variable cv_;
     bool stop_ = false;

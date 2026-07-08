@@ -58,8 +58,13 @@ int main(int argc, char** argv) {
     }
 
     // Echo: hand each inbound libtracer TLV straight back as one BINARY frame.
-    // This fires on the server recv thread; send() is thread-safe.
-    server.set_receiver([&server](std::span<const std::byte> frame) { server.send(frame); });
+    // This fires on the server recv thread; send() is thread-safe. The raw
+    // {fn, ctx} form: the sink cannot outlive its context (the server itself).
+    server.set_receiver(
+        [](void* ctx, std::span<const std::byte> frame) {
+            static_cast<tr::net::transport_ws_server*>(ctx)->send(frame);
+        },
+        &server);
 
     // Announce the bound port on a single parseable line, then flush so the
     // parent (the TS test) can read it immediately and never block on buffering.
