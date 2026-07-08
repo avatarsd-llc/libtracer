@@ -218,9 +218,10 @@ void test_local_path_untouched() {
 
     (void)node.register_vertex(path_t("/sensor"), role_t::STORED_VALUE);
     std::atomic<int> hits{0};
-    (void)node.subscribe(path_t("/sensor"), [&hits](const tr::view::rope_t&) {
+    auto on_sensor = [&hits](const tr::view::rope_t&) {
         hits.fetch_add(1, std::memory_order_relaxed);
-    });
+    };
+    (void)node.subscribe(path_t("/sensor"), on_sensor);
 
     const std::byte b{0x7B};
     (void)node.write(path_t("/sensor"), owned(std::span<const std::byte>(&b, 1)));

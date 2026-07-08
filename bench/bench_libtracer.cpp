@@ -196,9 +196,12 @@ void run_inproc_mt(std::size_t T) {
         auto w = std::make_unique<worker_t>();
         w->buf = tlv;  // per-thread copy => per-thread segment, no shared refcount
         w->v = w->g.register_vertex(*path_t::parse("/bench/mt"), role_t::STORED_VALUE);
-        (void)w->g.subscribe(*path_t::parse("/bench/mt"), [p = w.get()](const rope_t&) {
-            p->recv.fetch_add(1, std::memory_order_relaxed);
-        });
+        (void)w->g.subscribe(
+            *path_t::parse("/bench/mt"),
+            [](void* ctx, const rope_t&) {
+                static_cast<worker_t*>(ctx)->recv.fetch_add(1, std::memory_order_relaxed);
+            },
+            w.get());
         w->view = borrowed_view(w->buf);
         ws.push_back(std::move(w));
     }
@@ -292,7 +295,8 @@ void run_eptype_stream() {
     const path_t path = *path_t::parse("/bench/stream");
     auto v = g.register_vertex(path, role_t::STREAM, {}, st);
     std::atomic<std::uint64_t> recv{0};
-    (void)g.subscribe(path, [&](const rope_t&) { recv.fetch_add(1, std::memory_order_relaxed); });
+    auto cb = [&](const rope_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
+    (void)g.subscribe(path, cb);
 
     const std::vector<std::byte> tlv = value_tlv(S);
     const auto put = [&]() { (void)g.write(v, owned_view(tlv)); };  // heap view: lean parity
