@@ -7,7 +7,14 @@ versioning/publish strategy.
 
 ## Unreleased
 
-_Nothing yet._
+### Removed
+
+- **BREAKING — `MAX_DEPTH` is removed from `@avatarsd-llc/libtracer` (RFC-0006).**
+  Nesting depth is receiver-resource-bounded, never a constant: `decode()`'s
+  explicit work stack is a growable array, so the depth-cap reject is gone.
+  `ERROR.TLV_NESTING_TOO_DEEP` remains registered ("exceeds the receiver's
+  decode resources") for harness parity and peers' ERROR frames; `decode()`
+  itself no longer throws it.
 
 ## [0.3.0] — 2026-07-07
 

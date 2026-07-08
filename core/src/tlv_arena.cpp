@@ -5,6 +5,8 @@
 
 #include "libtracer/tlv_arena.hpp"
 
+#include <array>
+
 #include "libtracer/grammar.hpp"
 
 namespace tr::wire {
@@ -35,7 +37,7 @@ struct arena_sink {
 
     arena_sink(std::pmr::vector<arena_tlv_t>& nodes, std::pmr::memory_resource& mr)
         : nodes_(nodes), open_(&mr) {
-        open_.reserve(8);  // typical FWD nesting; deeper frames grow (bounded by the cap)
+        open_.reserve(8);  // typical FWD nesting; deeper frames grow (bounded by mr)
     }
 
     void push(const grammar::header_t& h, std::span<const std::byte> bytes) {
@@ -76,12 +78,15 @@ struct arena_sink {
 std::expected<tlv_arena_t, err_t> decode_into(std::span<const std::byte> input,
                                               std::pmr::memory_resource& mr) {
     // The one structural descent lives in grammar::walk (ADR-0048 §1); this sink
-    // appends the pre-order arena nodes. The walk's cursor stack + the sink's
-    // open-node stack both draw from `mr`, so a slab-bound terminus decode stays
-    // heap-free (ADR-0041 terminus-arena span contract).
+    // appends the pre-order arena nodes. The walk stack spills to `mr` past its
+    // inline slots, and the sink's open-node stack draws from `mr` too, so a
+    // slab-bound terminus decode stays heap-free (ADR-0041 terminus-arena span
+    // contract) and the caller's arena is the nesting-depth bound (RFC-0006).
     tlv_arena_t arena(mr);
     arena_sink sink(arena.nodes_, mr);
-    const auto r = grammar::walk(grammar::span_cursor{input}, sink, mr, kMaxDepth);
+    std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;
+    grammar::walk_stack_t<grammar::span_cursor> stack(slots, &mr);
+    const auto r = grammar::walk(grammar::span_cursor{input}, sink, stack);
     if (!r) return std::unexpected(r.error());
     return arena;
 }

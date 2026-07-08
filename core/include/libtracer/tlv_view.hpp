@@ -178,9 +178,8 @@ class tlv_view_t {
      * @brief The single explicit copy point (ADR-0053 §1): flatten + eager decode.
      *
      * Everything lazy access deferred is paid here, once, by the consumer that
-     * asked for it: one contiguous copy, the full grammar walk INCLUDING every
-     * CRC trailer, and the `kMaxDepth` cap — byte-identical to
-     * `decode(flatten(wire()))`.
+     * asked for it: one contiguous copy and the full grammar walk INCLUDING
+     * every CRC trailer — byte-identical to `decode(flatten(wire()))`.
      *
      * @param backend Where the flat segment is allocated.
      * @return The flat copy + eager tree, or the grammar's `err_t`

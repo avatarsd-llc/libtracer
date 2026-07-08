@@ -28,7 +28,7 @@ There is **no wildcard grammar**. Subscriptions do not need one: every subscript
 - All names are UTF-8, case-sensitive, **case-folded NOT performed** (Unicode normalization is the application's responsibility — `/Sensor/temp` and `/sensor/temp` are different paths).
 - Maximum **single-name** length: 64 bytes (UTF-8 encoded).
 - Maximum **total path** length: 1024 bytes.
-- Maximum **segment depth**: 32 (matches the iterative-parser depth cap from [01-data-format.md](01-data-format.md)).
+- Maximum **segment depth**: 32 (an addressing limit on PATH construction; the TLV parser itself has no depth cap — nesting is receiver-resource-bounded per [RFC-0006](../spec/rfcs/0006-resource-bounded-nesting-depth.md)).
 - Maximum **field-chain depth**: 8 (e.g., `:settings.transport_tcp.tls.cipher.suite` is at the limit).
 - Maximum **index value**: 65535 (fits in u16).
 

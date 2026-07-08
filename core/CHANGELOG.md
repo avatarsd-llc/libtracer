@@ -12,8 +12,33 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`wire::check_frame(const view::rope_t&)` — the cheap ingress check
+  (CONTEXT.md §Validation timing).** Top-level `parse_header` + the
+  `total == size` anchor + the whole-frame trailer CRC when `opt.CR` (a linear
+  link-by-link scan) — and nothing more. No tree walk at ingress: a malformed
+  child TLV surfaces its error where that level is CONSUMED (per-TLV
+  verify-at-access, ADR-0053). `wire::validate_rope` keeps its strict whole-tree
+  semantics as the opt-in eager validator; the rope terminus now verifies only
+  the root (`tlv_view_t::over` + `verify()`), its recursive whole-tree
+  `verify_view_tree` pre-pass deleted.
+
 ### Changed
 
+- **BREAKING — `wire::kMaxDepth` is deleted; nesting depth is
+  receiver-resource-bounded (RFC-0006).** `grammar::walk` no longer takes
+  `(std::pmr::memory_resource&, std::size_t max_depth)`: it takes a
+  `grammar::walk_stack_t<Cursor>&` — inline caller-provided
+  `walk_frame_t<Cursor>` slots (a tuning knob, not a limit) that spill into
+  geometrically grown blocks drawn from a `std::pmr::memory_resource*`. A null
+  spill makes the inline span the receiver's whole decode budget: exhaustion is
+  a clean non-throwing reject with `TLV_NESTING_TOO_DEEP`, whose meaning is
+  amended to "exceeds this receiver's decode resources". `decode` /
+  `validate_rope` spill to the default (heap) resource; `decode_into` spills to
+  the caller's arena, so the arena IS the depth bound. `graph_t`'s branch-write
+  decomposition walk is now iterative (an explicit open-node stack) — no
+  recursion over wire-derived structure remains behind the removed cap.
 - **BREAKING — the in-process subscription callback is `{fn-ptr, ctx}`-based, and
   `vertex_t` grows a verb interface.** `subscriber_t::callback` is no longer a
   `std::function<void(const rope_t&)>` but a plain `{subscriber_fn_t, void* ctx}` pair
