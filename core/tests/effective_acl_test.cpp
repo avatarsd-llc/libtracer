@@ -173,9 +173,9 @@ void test_ordering() {
     {  // per-bit: a DENY on WRITE leaves READ to fall through to a later ALLOW
         effective_acl_t eff;
         const std::vector<ace_t> own{ace("alice", bit(acl_right_t::WRITE), ace_type_t::DENY)};
-        const std::vector<ace_t> parent{
-            ace("EVERYONE@", bit(acl_right_t::READ) | bit(acl_right_t::WRITE), ace_type_t::ALLOW,
-                kAceInherit)};
+        const std::vector<ace_t> parent{ace("EVERYONE@",
+                                            bit(acl_right_t::READ) | bit(acl_right_t::WRITE),
+                                            ace_type_t::ALLOW, kAceInherit)};
         eff.append_own(own);
         eff.append_ancestor(parent);
         check(eff.allows<full_acl_policy_t>(alice, bit(acl_right_t::READ), kNow),
