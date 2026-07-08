@@ -123,7 +123,15 @@ same class of bug as the route_handle `clear_link` dangling ref fixed in #220.
   vs main): fan-out 8/128/1024/8192 within ±3% (noise floor ~4%), multi-thread rows +4–6%,
   `bench_fanout_clone_storm` flat; write-**by-path** at 128–1024 distinct endpoints is the one
   measurable trade, ~−9…−13% (per-level sorted-child binary search vs one hash) — acceptable
-  because per-publish resolution is exactly what ADR-0056 handles exist to avoid.
+  because the pattern it measures is non-idiomatic at that scale (maintainer ruling,
+  2026-07-08). The doctrine already provides three one-resolution paths that make per-write
+  string resolution over hundreds of distinct endpoints unnecessary: (a) **handles**
+  (load-bearing claim 6) — resolve once at wiring, write forever; (b) a producer updating a
+  whole subtree writes a **branch POINT through ONE resolved parent path** — the decomposition
+  lands every descendant without further resolution (RFC-0005 §branch write); (c) a consumer
+  covers the whole subtree with **one SUBSCRIBER edge at the parent** — every subscription is
+  a subtree subscription, so deliveries arrive with zero per-leaf resolution (RFC-0005). The
+  bench row is kept as a regression canary for the resolver, not as a supported hot pattern.
 - **Memory: segment-per-node vs full-key-per-node.** Removed per vertex: the map node allocation,
   the map's duplicate `path_key_t` (24 B + full key bytes), and the vertex's own full-key heap
   bytes beyond its last record. Added per vertex: parent pointer + inline child slots + spill
