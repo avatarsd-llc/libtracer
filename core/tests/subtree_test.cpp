@@ -125,18 +125,14 @@ void test_bubbling_and_idle_walk() {
 
     std::vector<std::vector<std::byte>> at_a;
     std::vector<std::vector<std::byte>> at_x;
-    check(g.subscribe(path_t("/a"),
-                      [&](const rope_t& v) {
-                          at_a.emplace_back(v.only().bytes().begin(), v.only().bytes().end());
-                      })
-              .has_value(),
-          "subscribe callback at ancestor /a");
-    check(g.subscribe(path_t("/x"),
-                      [&](const rope_t& v) {
-                          at_x.emplace_back(v.only().bytes().begin(), v.only().bytes().end());
-                      })
-              .has_value(),
-          "subscribe callback at unrelated /x");
+    auto on_a = [&](const rope_t& v) {
+        at_a.emplace_back(v.only().bytes().begin(), v.only().bytes().end());
+    };
+    auto on_x = [&](const rope_t& v) {
+        at_x.emplace_back(v.only().bytes().begin(), v.only().bytes().end());
+    };
+    check(g.subscribe(path_t("/a"), on_a).has_value(), "subscribe callback at ancestor /a");
+    check(g.subscribe(path_t("/x"), on_x).has_value(), "subscribe callback at unrelated /x");
 
     const std::vector<std::byte> written{std::byte{0x01}, std::byte{0x00}, std::byte{0x02},
                                          std::byte{0x00}, std::byte{0xAB}, std::byte{0xCD}};
@@ -166,8 +162,8 @@ void test_bubbling_to_late_created_descendant() {
     graph_t g;
     (void)g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
     std::size_t hits = 0;
-    check(g.subscribe(path_t("/a"), [&](const rope_t&) { ++hits; }).has_value(),
-          "subscribe at /a first");
+    auto on_hit = [&](const rope_t&) { ++hits; };
+    check(g.subscribe(path_t("/a"), on_hit).has_value(), "subscribe at /a first");
     // The descendant is created afterwards (write-creates) — its creation-time
     // ancestor-listener sum must still route its writes up.
     check(g.write(path_t("/a/new/leaf"), make_value({0x42})).has_value(),
@@ -214,15 +210,12 @@ void test_branch_write_decomposition() {
 
     std::vector<std::vector<std::byte>> at_s;
     std::vector<view_t> at_st;
-    check(g.subscribe(path_t("/s"),
-                      [&](const rope_t& v) {
-                          at_s.emplace_back(v.only().bytes().begin(), v.only().bytes().end());
-                      })
-              .has_value(),
-          "subscribe at the branch root /s");
-    check(g.subscribe(path_t("/s/t"), [&](const rope_t& v) { at_st.push_back(v.only()); })
-              .has_value(),
-          "subscribe at the leaf /s/t");
+    auto on_s = [&](const rope_t& v) {
+        at_s.emplace_back(v.only().bytes().begin(), v.only().bytes().end());
+    };
+    auto on_st = [&](const rope_t& v) { at_st.push_back(v.only()); };
+    check(g.subscribe(path_t("/s"), on_s).has_value(), "subscribe at the branch root /s");
+    check(g.subscribe(path_t("/s/t"), on_st).has_value(), "subscribe at the leaf /s/t");
 
     // POINT{ NAME "s", VALUE 07, POINT{ NAME "t", VALUE AA BB },
     //                            POINT{ NAME "u", VALUE CC } }  — /s/u not yet registered.
@@ -286,7 +279,8 @@ void test_branch_write_strictness() {
 
     // A value-free branch is a no-op write (nothing stored, nothing delivered).
     std::size_t hits = 0;
-    check(g.subscribe(path_t("/s"), [&](const rope_t&) { ++hits; }).has_value(), "subscribe at /s");
+    auto on_hit = [&](const rope_t&) { ++hits; };
+    check(g.subscribe(path_t("/s"), on_hit).has_value(), "subscribe at /s");
     check(g.write(s, make_value(point_tlv("s", point_tlv("t", {})))).has_value(),
           "value-free branch write is accepted");
     check(hits == 0, "value-free branch delivers nothing");

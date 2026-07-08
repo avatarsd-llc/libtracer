@@ -562,10 +562,11 @@ void test_two_nodes_over_quic() {
 
     std::promise<std::vector<std::byte>> got;
     auto fut = got.get_future();
-    (void)node_b.subscribe(path_t("/sensor/temp"), [&got](const tr::view::rope_t& v) {
+    auto on_temp = [&got](const tr::view::rope_t& v) {
         const auto b = v.only().bytes();
         got.set_value(std::vector<std::byte>(b.begin(), b.end()));
-    });
+    };
+    (void)node_b.subscribe(path_t("/sensor/temp"), on_temp);
 
     std::vector<std::byte> payload;
     const std::array<std::byte, 2> pv{std::byte{0x2A}, std::byte{0x2B}};
