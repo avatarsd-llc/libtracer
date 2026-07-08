@@ -9,8 +9,10 @@
 //
 // Two modes:
 //   <vectors-dir> (default / --tap): for every vector directory containing an
-//       input.bin, check encode(decode(input.bin)) == input.bin (byte-for-byte)
-//       and emit TAP version 13 to stdout. Exit 0 iff every vector is `ok`.
+//       input.bin, check encode(decode(input.bin)) == input.bin (byte-for-byte);
+//       for every directory containing a reject.bin (negative case), check that
+//       decode(reject.bin) FAILS with the error named by expected.json's "reject"
+//       field. Emit TAP version 13 to stdout. Exit 0 iff every vector is `ok`.
 //   --roundtrip: read one hex frame per stdin line; for each, print
 //       encode(decode(hex)) as hex, or `ERR:<reason>` on a decode failure. Exactly
 //       one output line per input line. This feeds diff_fuzz.py.
@@ -92,7 +94,48 @@ fn run_roundtrip() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Recursively collect (relative-posix-path, absolute-path) for every input.bin.
+/**
+ * @brief Extract the expected decode-error name from a case's expected.json —
+ * the value of its top-level `"reject"` field (scan-to-quote, mirroring
+ * tests/conformance_vectors.rs `json_str`; the field is machine-written ASCII).
+ */
+fn reject_expectation(case_dir: &Path) -> Option<String> {
+    let text = fs::read_to_string(case_dir.join("expected.json")).ok()?;
+    let key = text.find("\"reject\"")?;
+    let colon = key + text[key..].find(':')?;
+    let q1 = colon + 1 + text[colon + 1..].find('"')?;
+    let q2 = q1 + 1 + text[q1 + 1..].find('"')?;
+    Some(text[q1 + 1..q2].to_string())
+}
+
+/**
+ * @brief One negative case: decode(reject.bin) MUST fail with exactly the
+ * expected error. Returns `(ok, diagnostic)`.
+ */
+fn check_reject(reject_bin: &Path) -> (bool, String) {
+    let Some(want) = reject_bin.parent().and_then(reject_expectation) else {
+        return (
+            false,
+            "reject.bin without a \"reject\" expectation in expected.json".to_string(),
+        );
+    };
+    match fs::read(reject_bin) {
+        Err(e) => (false, e.to_string()),
+        Ok(bytes) => match decode(&bytes) {
+            Ok(_) => (false, format!("decode succeeded, expected {}", want)),
+            Err(e) if e.name() == want => (true, String::new()),
+            Err(e) => (
+                false,
+                format!("decode failed with {}, expected {}", e.name(), want),
+            ),
+        },
+    }
+}
+
+/**
+ * @brief Recursively collect (relative-posix-path, absolute-path) for every
+ * input.bin and reject.bin.
+ */
 fn find_inputs(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
     let mut entries: Vec<PathBuf> = match fs::read_dir(dir) {
         Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.path())).collect(),
@@ -102,7 +145,11 @@ fn find_inputs(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
     for p in entries {
         if p.is_dir() {
             find_inputs(root, &p, out);
-        } else if p.file_name().map(|n| n == "input.bin").unwrap_or(false) {
+        } else if p
+            .file_name()
+            .map(|n| n == "input.bin" || n == "reject.bin")
+            .unwrap_or(false)
+        {
             let rel = p
                 .parent()
                 .unwrap()
@@ -133,17 +180,21 @@ fn run_tap(vectors_dir: &Path) -> ExitCode {
         n += 1;
         let mut ok = false;
         let mut diag = String::new();
-        match fs::read(abs) {
-            Ok(input) => match decode(&input) {
-                Ok(tlv) => {
-                    ok = encode(&tlv) == input;
-                    if !ok {
-                        diag = "round-trip differs from input.bin".to_string();
+        if abs.file_name().map(|f| f == "reject.bin").unwrap_or(false) {
+            (ok, diag) = check_reject(abs);
+        } else {
+            match fs::read(abs) {
+                Ok(input) => match decode(&input) {
+                    Ok(tlv) => {
+                        ok = encode(&tlv) == input;
+                        if !ok {
+                            diag = "round-trip differs from input.bin".to_string();
+                        }
                     }
-                }
-                Err(e) => diag = e.name().to_string(),
-            },
-            Err(e) => diag = e.to_string(),
+                    Err(e) => diag = e.name().to_string(),
+                },
+                Err(e) => diag = e.to_string(),
+            }
         }
         lines.push(format!(
             "{} {} - {}",

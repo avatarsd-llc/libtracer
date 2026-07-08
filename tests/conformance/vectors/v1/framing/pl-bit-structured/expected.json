@@ -1,0 +1,38 @@
+{
+  "name": "pl-bit-structured",
+  "category": "framing",
+  "hex": "07400C0001000200ABCD020002006F6B",
+  "total_bytes": 16,
+  "decoded": {
+    "type": "0x07 POINT",
+    "opt": {
+      "raw": "0x40",
+      "PL": 1,
+      "TS": 0,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 12,
+    "children": [
+      {
+        "type": "0x01 VALUE",
+        "length": 2,
+        "payload": "ABCD"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 2,
+        "payload_utf8": "ok"
+      }
+    ],
+    "trailer": {
+      "ts": null,
+      "crc": null
+    },
+    "meaning": "PL=1: the 12 payload bytes are two concatenated child TLVs. Pairs with framing/pl-bit-opaque, whose payload is BYTE-IDENTICAL but opt.PL=0 — the single-bit flip a shifted opt mask cannot survive."
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "pl-bit-opaque",
+  "category": "framing",
+  "hex": "07000C0001000200ABCD020002006F6B",
+  "total_bytes": 16,
+  "decoded": {
+    "type": "0x07 POINT",
+    "opt": {
+      "raw": "0x00",
+      "PL": 0,
+      "TS": 0,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 12,
+    "payload": "01000200ABCD020002006F6B",
+    "trailer": {
+      "ts": null,
+      "crc": null
+    },
+    "meaning": "PL=0: the same 12 bytes as framing/pl-bit-structured stay one opaque payload — no children. Only bit 6 of opt differs between the pair."
+  }
+}
