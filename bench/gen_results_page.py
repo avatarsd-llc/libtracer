@@ -177,6 +177,59 @@ a published latency chart misleading, and QUIC needs the `-DLIBTRACER_WITH_QUIC`
 [`bench/`](https://github.com/avatarsd-llc/libtracer/tree/main/bench)."""
 
 
+HISTORY_BLOCK = """\
+## History & trends (per-commit, `main`)
+
+The table above is one run; the trend is the durable signal. Every push to `main`
+runs the full bench once, archives the raw transcript as a per-commit CI artifact
+(`bench-results-<sha>`, on the `perf` workflow run), and records **every**
+`(mode, size, fanout, endpoints)` point — latency (p50/p99 ns), throughput
+(deliveries/s), and memory footprint (heap-probe bytes per hop, whole-run max RSS)
+as **separate series** — to a persisted build-to-build history
+([benchmark-action/github-action-benchmark](https://github.com/benchmark-action/github-action-benchmark),
+stored on the machine-maintained `gh-pages` branch). A commit that drifts a series
+past **125 %** of the previous point gets an automatic soft-alert comment; the hard
+per-PR gate stays in `bench/perf_gate.py`.
+
+**[Open the interactive trend charts ↗](https://libtracer.avatarsd.com/dev/bench/)**
+— every series across all `main` commits, zoomable, with per-point commit links.
+
+:::{raw} html
+<iframe src="/dev/bench/index.html" title="libtracer benchmark history (per-commit trends)"
+        loading="lazy"
+        style="width:100%;height:70vh;border:1px solid var(--color-background-border,#d0d0d0);border-radius:6px;background:#fff">
+</iframe>
+:::"""
+
+
+READING_BLOCK = """\
+## Reading these numbers
+
+- **Sign conventions.** The history store charts one direction per suite: the
+  *latency* suite is smaller-is-better nanoseconds — throughput also appears there
+  inverted as `ns/delivery` (`1e9 / deliveries-per-second`) so a slowdown always
+  charts as a rise — and memory-footprint metrics (bytes, KB) live in the same
+  smaller-is-better suite. The *throughput* suite is bigger-is-better, natural
+  `deliveries/s`. On this page, throughput is shown in natural units.
+- **Two thresholds, two jobs.** The **hard gate** (`bench/perf_gate.py`, per-PR)
+  fails a PR whose p50 exceeds **150 %** of its own same-runner `main` baseline (or
+  whose throughput drops below 66 %). The **soft alert** (trend tracker, per `main`
+  commit) is tighter — **125 %** commit-to-commit — but only comments; it exists to
+  catch slow creep that stays under the hard gate across many commits. An alert is
+  a prompt to look at the trend, not a failure.
+- **Noise floor.** Each recorded point is the **median of the repeated RESULT
+  rows** one run emits, so single-iteration jitter does not move the series — but
+  shared CI runners still vary ~2× in absolute speed. Read trends across several
+  commits, not the third digit of one point. Reproducing locally: build Release
+  (`-O3`), pin the bench to a core (`taskset -c N`), take the best of several runs,
+  and compare only numbers measured on the same machine in the same session.
+- **`inproc-path` is a resolver canary, not a hot pattern.** The write-by-path
+  rows exercise the registry lookup on every write *on purpose*, so a resolver-cost
+  regression is visible as its own series. Hot paths resolve the path once and
+  write through the held vertex handle (the `inproc` / `inproc-borrow` rows) —
+  compare against those, not `inproc-path`, when judging dispatch cost."""
+
+
 def zenoh_compare_block() -> str:
     """Run both grids and render the absolute-value comparison charts. Degrades to a
     note (never a crash) if the bench isn't built or Zenoh isn't vendored."""
@@ -245,6 +298,10 @@ fails CI (ADR-0028). Live driver summary:
 Canonical points from `bench_libtracer` (the µs-latency / zero-copy thesis, ADR-0031):
 
 {perf_block()}
+
+{HISTORY_BLOCK}
+
+{READING_BLOCK}
 
 ## Cross-core codec performance (decode→encode roundtrip, same v1 vectors)
 
