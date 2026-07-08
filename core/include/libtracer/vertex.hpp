@@ -482,18 +482,25 @@ class vertex_t {
      * slot cost (ADR-0053 §6). The LKV publish happens BEFORE the lock; only the
      * ring trim + seq bump + notify run under it. Not for Handler-role writes —
      * the graph runs `handlers().on_write` and calls @ref note_write instead.
+     * @return The published LKV pointer — exactly what a concurrent @ref read_stored
+     *         observes — so the write path can deliver the stored value (RFC-0008 §D
+     *         "deliver exactly what was stored") without recloning the rope.
      */
-    void store(rope_t value) {
+    std::shared_ptr<const rope_t> store(rope_t value) {
         auto sp = std::make_shared<const rope_t>(std::move(value));
         lkv_.store(sp);  // lock-free publish of the new last-known-value
-        const std::lock_guard lock(m_);
-        if (role_ == role_t::STREAM) {
-            history_.push_back(std::move(sp));
-            const std::size_t keep = settings_.history_keep_last ? settings_.history_keep_last : 1;
-            while (history_.size() > keep) history_.pop_front();
+        {
+            const std::lock_guard lock(m_);
+            if (role_ == role_t::STREAM) {
+                history_.push_back(sp);  // refcount bump — the caller keeps the returned sp
+                const std::size_t keep =
+                    settings_.history_keep_last ? settings_.history_keep_last : 1;
+                while (history_.size() > keep) history_.pop_front();
+            }
+            ++write_seq_;
+            cv_.notify_all();
         }
-        ++write_seq_;
-        cv_.notify_all();
+        return sp;
     }
 
     /**

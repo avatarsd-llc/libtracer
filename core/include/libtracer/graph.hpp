@@ -442,7 +442,10 @@ class graph_t {
     result_t<void> write_impl(vertex_t* v, rope_t value, int depth, std::string_view caller);
     // The store half of a write (LKV/history/handler + seq bump + await wake),
     // WITHOUT fan-out — shared by write_impl and the branch-write apply (RFC-0005).
-    result_t<void> store_value(vertex_t* v, rope_t value);
+    // Hands back the exact published LKV pointer (null for a Handler-role write —
+    // the user handler consumed the value, nothing was stored), so the eager write
+    // path delivers precisely what was stored (RFC-0008 §D) without a rope reclone.
+    result_t<std::shared_ptr<const rope_t>> store_value(vertex_t* v, rope_t value);
     // Branch-write decomposition (RFC-0005): a POINT payload written to `v` lands
     // each value-carrying node at the corresponding descendant vertex as a
     // refcount SUBVIEW of the written frame (creating missing vertices, CREATE-
