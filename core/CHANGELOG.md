@@ -14,6 +14,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`length_prefix_framer::kDefaultMaxFrame` — one home for the 16 MiB default
+  receive cap.** The default that applies when `:settings max_frame` is unset,
+  previously duplicated as a literal `static constexpr kMaxFrame` in
+  `transport_tcp.hpp`, `transport_quic.hpp`, and `transport_webtransport.hpp`.
+  The three per-class `kMaxFrame` constants remain (tests and callers keep
+  their spelling) but are now aliases of the shared default — same value, no
+  behavior change.
+
 - **`graph::effective_acl_t` (`security_acl.hpp`) + the ADR-0050 cached
   effective-ACE merge.** The effective-ACL semantics that lived inline in
   `graph_t::acl_allows` — own ACEs before ancestors, nearest-first, ancestor
