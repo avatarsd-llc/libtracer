@@ -59,6 +59,10 @@ for s in sizes:
             print(f"{str(s) + 'B':>12} {r['sys'] + '/' + r['mode']:<22} {n(r['pub']):>13} "
                   f"{r['mbps']:>12.1f} {us(r['p50']):>10} {us(r['p99']):>10}")
     print()
+if any(r["mode"] == "inproc-borrow" for r in rows):
+    print("  note: inproc-borrow is libtracer-only semantics (a borrowed view, refcount")
+    print("  handoff); the zenoh rows above use its copying put — Zenoh's non-copying")
+    print("  path is not exercised, so borrow rows have no matched zenoh counterpart.")
 
 # 3. Endpoint (topic) scaling: fanout=1, size=64, write-by-path.
 eps = sorted({r["ep"] for r in rows if r["mode"] == "inproc-path"})

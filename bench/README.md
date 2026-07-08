@@ -113,8 +113,9 @@ craft libtracer":
 
 | mode | what it exercises |
 | --- | --- |
-| `inproc` | zero-copy graph dispatch (`write` → subscriber callback), heap-allocated view per message. |
-| `inproc-borrow` | the **zero-copy loaned path** — a borrowed view, *zero alloc, zero copy*. |
+| `inproc` | **write (store+notify+deliver)**: `write` → subscriber callback. Per message this pays one segment alloc + one memcpy (the owned view) + one LKV `make_shared` store + the await/readiness sequence bump, then delivers. *Not* zero-copy per message — that is `inproc-borrow`. |
+| `inproc-deliver` | **deliver-only (`propagate`)**: the value is stored once, then each op is `graph_t::propagate(v)` — deliver the current LKV to the subscribers, no per-op store/alloc/copy. The semantic analogue of Zenoh's transient put (RFC-0008 edge transition). |
+| `inproc-borrow` | the **zero-copy loaned path** — a borrowed view, *zero alloc, zero copy* (a refcount handoff). libtracer-only semantics: Zenoh's matched rows use its copying put. |
 | `inproc-path` | write **by path** (registry hash + lookup per publish) — the "many topics" cost. |
 | `loopback` | the M4 bridge: encode + ROUTER-wrap + cross-thread queue + decode. |
 | `mixed` | 128 topics, varied fan-out + payloads. |
@@ -225,11 +226,18 @@ Run `./grid.sh` to reproduce the same charts locally in `preview.html`.
   runner, so the two curves are directly comparable; you read the real numbers off the
   axes rather than trusting a single speed-up figure. Shared-runner variance is real —
   read trends and orders of magnitude, not the third digit.
-- **In-process, why the shapes differ:** libtracer's TLV bytes are the wire encoding
-  *and* the in-memory value *and* the graph node, so a publish moves **zero bytes** (a
-  refcount bump); zenoh's intra-session path, though well-tuned, runs its full sample
-  machinery. This shows up most on the **fan-out** axis; on the **topic-count** axis the
-  two are close — the charts show exactly where each holds.
+- **In-process, what each mode actually does:** the charted `inproc` row is libtracer's
+  `write` — per message it heap-allocates one segment, memcpys the payload into it,
+  stores it as the last-known-value (one `make_shared`), bumps the await/readiness
+  sequence, then delivers. It is **not** a zero-byte publish. The zero-copy claims are
+  the *other* modes, each measured separately: `inproc-borrow` hands off a borrowed
+  view (refcount only, zero alloc / zero copy), and fan-out beyond 1 clones views by
+  refcount (subscribers share the segment — no per-subscriber copy). `inproc-deliver`
+  (`propagate`) moves no bytes per op because the value is already stored — the
+  semantic match for Zenoh's transient put, which runs its full sample machinery but
+  neither persists the value nor bumps a readiness sequence. The differences show up
+  most on the **fan-out** axis; on the **topic-count** axis the engines are close —
+  the charts show exactly where each holds.
 - **Network transports:** CI also publishes a **UDP** and **TCP** comparison — a separate
   publisher and subscriber **process** per engine over the real loopback path (the same
   two-process topology for both, so it is fair). **WebSocket** is built but held out of the
