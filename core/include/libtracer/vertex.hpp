@@ -13,6 +13,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -279,22 +280,140 @@ class vertex_t {
    public:
     /** @brief The no-heap small-fan-out snapshot width (@ref snapshot_edges buffer size). */
     static constexpr std::size_t kInlineFanout = 8;
+    /** @brief Inline child slots before the child list spills to the sorted heap vector
+     *         (ADR-0057 Composite tree — most vertices are leaves or narrow composites). */
+    static constexpr std::size_t kInlineChildren = 2;
 
-    /** @brief Construct a vertex with its role, canonical key, QoS settings, and handlers. */
-    vertex_t(role_t role, path_key_t key, settings_t settings, handlers_t handlers)
-        : role_(role), key_(std::move(key)), settings_(settings), handlers_(std::move(handlers)) {}
+    /** @brief Construct a vertex with its role, own canonical NAME record (ADR-0057 — one
+     *         segment, not the full key), QoS settings, and handlers. */
+    vertex_t(role_t role, path_key_t name, settings_t settings, handlers_t handlers)
+        : role_(role),
+          name_(std::move(name)),
+          settings_(settings),
+          handlers_(std::move(handlers)) {}
 
     vertex_t(const vertex_t&) = delete;
     vertex_t& operator=(const vertex_t&) = delete;
 
     /** @brief This vertex's behavioral role. */
     [[nodiscard]] role_t role() const noexcept { return role_; }
-    /** @brief This vertex's canonical PATH-payload key (the vertex-map key). */
-    [[nodiscard]] const path_key_t& key() const noexcept { return key_; }
+    /** @brief This vertex's own canonical NAME record (its single path segment, ADR-0057);
+     *         empty at the root. The full key is a parent-walk concatenation
+     *         (`graph_t`'s `build_key`). */
+    [[nodiscard]] const path_key_t& name() const noexcept { return name_; }
     /** @brief This vertex's QoS settings. */
     [[nodiscard]] const settings_t& settings() const noexcept { return settings_; }
     /** @brief This vertex's user handlers (Handler role behavior + the `on_children` seam). */
     [[nodiscard]] const handlers_t& handlers() const noexcept { return handlers_; }
+
+    // -- Composite tree links (ADR-0057) -------------------------------------------------
+    //
+    // The graph is a Composite of vertices: each node owns its children (one non-moving
+    // unique_ptr allocation per child, so vertex_t* stay stable for the graph's lifetime)
+    // and points at its parent. Children/registered are guarded by graph_t's map lock
+    // (unique for mutation, shared for walks); the parent pointer and name bytes are
+    // immutable after construction, so parent-chain walks (bubbling, the ACL inheritance
+    // walk) run LOCK-FREE.
+
+    /** @brief The owning parent node (`nullptr` only at the graph root).
+     *  @note Immutable once linked — safe to walk without any lock. */
+    [[nodiscard]] vertex_t* parent() const noexcept { return parent_; }
+
+    /** @brief True once a registration filled this node; false for a placeholder — a
+     *         structural intermediate level that `find` / `read_children` must not surface
+     *         (matching the flat-map behavior where missing intermediates did not exist).
+     *  @note Read/written under the graph's map lock. */
+    [[nodiscard]] bool registered() const noexcept { return registered_; }
+
+    /**
+     * @brief Fill this node with a registration's identity: set the role, QoS settings, and
+     *        handlers, and mark it @ref registered.
+     *
+     * Called under the graph's UNIQUE map lock — either on a freshly constructed node or on
+     * a placeholder being registered in place (the allocation never moves, ADR-0057).
+     */
+    void fill(role_t role, settings_t settings, handlers_t handlers) {
+        role_ = role;
+        settings_ = settings;
+        handlers_ = std::move(handlers);
+        registered_ = true;
+    }
+
+    /**
+     * @brief Adopt @p child into this node's children container and link its parent pointer.
+     *
+     * Small-vector-style storage: the first @ref kInlineChildren land in inline slots
+     * (no heap block for narrow composites); the first spill moves ALL children into a heap
+     * vector kept sorted by name record, so a wide composite resolves a child in
+     * O(log children). The `vertex_t` itself never moves (only owning pointers do).
+     * @note Called under the graph's UNIQUE map lock.
+     * @return The adopted child (its stable address).
+     */
+    vertex_t* add_child(std::unique_ptr<vertex_t> child) {
+        child->parent_ = this;
+        vertex_t* raw = child.get();
+        if (child_spill_.empty() && child_count_ < kInlineChildren) {
+            child_inline_[child_count_] = std::move(child);
+        } else {
+            if (child_spill_.empty()) {  // first spill: migrate the inline slots, then sort
+                child_spill_.reserve(child_count_ + 1);
+                for (std::unique_ptr<vertex_t>& c : child_inline_)
+                    if (c) child_spill_.push_back(std::move(c));
+                std::sort(
+                    child_spill_.begin(), child_spill_.end(),
+                    [](const std::unique_ptr<vertex_t>& a, const std::unique_ptr<vertex_t>& b) {
+                        return std::ranges::lexicographical_compare(a->name().bytes,
+                                                                    b->name().bytes);
+                    });
+            }
+            const auto pos = std::lower_bound(
+                child_spill_.begin(), child_spill_.end(), child->name().bytes,
+                [](const std::unique_ptr<vertex_t>& c, const std::vector<std::byte>& n) {
+                    return std::ranges::lexicographical_compare(c->name().bytes, n);
+                });
+            child_spill_.insert(pos, std::move(child));
+        }
+        ++child_count_;
+        return raw;
+    }
+
+    /**
+     * @brief The child whose own NAME record equals @p record byte-for-byte, or `nullptr` —
+     *        one level of the O(segments) resolution walk (ADR-0057).
+     * @note Called under the graph's map lock (shared suffices).
+     */
+    [[nodiscard]] vertex_t* child_by_record(std::span<const std::byte> record) const noexcept {
+        const auto matches = [&](const std::unique_ptr<vertex_t>& c) {
+            const std::vector<std::byte>& n = c->name().bytes;
+            return n.size() == record.size() && std::equal(n.begin(), n.end(), record.begin());
+        };
+        if (child_spill_.empty()) {
+            for (std::size_t i = 0; i < child_count_; ++i)
+                if (matches(child_inline_[i])) return child_inline_[i].get();
+            return nullptr;
+        }
+        const auto it =
+            std::lower_bound(child_spill_.begin(), child_spill_.end(), record,
+                             [](const std::unique_ptr<vertex_t>& c, std::span<const std::byte> r) {
+                                 return std::ranges::lexicographical_compare(c->name().bytes, r);
+                             });
+        return (it != child_spill_.end() && matches(*it)) ? it->get() : nullptr;
+    }
+
+    /**
+     * @brief Run @p f over every child (placeholders included), in container order —
+     *        member enumeration and the RFC-0005 subtree-counter walks.
+     * @note Called under the graph's map lock (shared suffices); @p f must not mutate
+     *       the tree.
+     */
+    template <typename F>
+    void for_each_child(F&& f) const {
+        if (child_spill_.empty()) {
+            for (std::size_t i = 0; i < child_count_; ++i) f(*child_inline_[i]);
+            return;
+        }
+        for (const std::unique_ptr<vertex_t>& c : child_spill_) f(*c);
+    }
 
     // -- storage & readiness ----------------------------------------------------------
 
@@ -576,7 +695,8 @@ class vertex_t {
     }
 
     role_t role_;
-    path_key_t key_;
+    path_key_t name_;  // own canonical NAME record (one segment; empty at the root) — the
+                       // full key is rendered on demand by walking parent_ (ADR-0057)
     settings_t settings_;
     handlers_t handlers_;
 
@@ -615,6 +735,20 @@ class vertex_t {
     // what the subtree walk and the creation-time sum read.
     std::atomic<std::uint32_t> own_subs_{0};
     std::atomic<std::uint32_t> listeners_above_{0};
+
+    // Composite tree links (ADR-0057), kept at the COLD tail so the write hot path's
+    // members (LKV slot, mutex, seq, counters) stay on the front cache lines.
+    // parent_/name_ are immutable once the node is linked (lock-free parent walks);
+    // children/registered_ are guarded by graph_t's map lock. Children are owned via
+    // non-moving unique_ptr allocations — vertex_t* stay stable for the graph's lifetime
+    // (the insert-only invariant vertex_handle_t relies on): inline slots first, then one
+    // sorted heap vector (O(log children) resolution under wide composites). Vertices are
+    // never erased (retire-LIST deferred; see ADR-0057 lifetime).
+    vertex_t* parent_ = nullptr;
+    std::array<std::unique_ptr<vertex_t>, kInlineChildren> child_inline_{};
+    std::vector<std::unique_ptr<vertex_t>> child_spill_;
+    std::uint32_t child_count_ = 0;
+    bool registered_ = false;  // false => placeholder intermediate (invisible to find)
 };
 
 }  // namespace tr::graph
