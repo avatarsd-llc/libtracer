@@ -1,29 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-//
-// Rust codec perf bench — the `lang` axis (Rust core) of the ranged cross-core
-// perf matrix (ADR-0032, issue #96). It measures decode+encode roundtrip latency
-// and throughput over the SHARED conformance vectors under
-// tests/conformance/vectors/v1/ (the "vector data" workload — real structured
-// TLVs, not synthetic scalars), so a C++-vs-TS-vs-Rust surface can be rendered
-// over the SAME inputs.
-//
-// Output: one machine-parseable RESULT line per vector, in the SAME
-// tab-separated column contract as the C++ bench (bench/bench_common.hpp) and the
-// TS bench (bindings/typescript/packages/core/bench/perf.mjs):
-//
-//   RESULT \t system \t mode \t size \t fanout \t endpoints \t pub_s \t
-//          deliv_s \t mb_s \t p50ns \t p99ns \t meanns
-//
-// with system="rust-core", mode="codec", fanout=1, endpoints=1. pub_s and deliv_s
-// are roundtrips/sec (one roundtrip == one decode + one encode); mb_s is
-// bytes/sec/1e6; p50/p99/mean are per-roundtrip nanoseconds. A human-readable
-// per-vector ns/op footer follows on stderr for readability.
-//
-// Run headlessly with the release profile (representative numbers):
-//   cargo run --release --example perf -- tests/conformance/vectors/v1
-// The vectors dir is taken from argv, else defaults relative to CARGO_MANIFEST_DIR
-// (mirrors examples/conformance.rs).
+/*!
+ * @brief Rust codec perf bench — the `lang` axis (Rust core) of the ranged cross-core
+ * perf matrix (ADR-0032, issue #96). It measures decode+encode roundtrip latency
+ * and throughput over the SHARED conformance vectors under
+ * tests/conformance/vectors/v1/ (the "vector data" workload — real structured
+ * TLVs, not synthetic scalars), so a C++-vs-TS-vs-Rust surface can be rendered
+ * over the SAME inputs.
+ *
+ * Output: one machine-parseable RESULT line per vector, in the SAME
+ * tab-separated column contract as the C++ bench (bench/bench_common.hpp) and the
+ * TS bench (bindings/typescript/packages/core/bench/perf.mjs):
+ *
+ *   RESULT \t system \t mode \t size \t fanout \t endpoints \t pub_s \t
+ *          deliv_s \t mb_s \t p50ns \t p99ns \t meanns
+ *
+ * with system="rust-core", mode="codec", fanout=1, endpoints=1. pub_s and deliv_s
+ * are roundtrips/sec (one roundtrip == one decode + one encode); mb_s is
+ * bytes/sec/1e6; p50/p99/mean are per-roundtrip nanoseconds. A human-readable
+ * per-vector ns/op footer follows on stderr for readability.
+ *
+ * Run headlessly with the release profile (representative numbers):
+ *   cargo run --release --example perf -- tests/conformance/vectors/v1
+ * The vectors dir is taken from argv, else defaults relative to CARGO_MANIFEST_DIR
+ * (mirrors examples/conformance.rs).
+ */
 
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
@@ -31,14 +32,16 @@ use std::time::Instant;
 
 use libtracer::{decode, encode};
 
-/// Target per-vector throughput-phase wall time, so each ns/op is stable.
+/** @brief Target per-vector throughput-phase wall time, so each ns/op is stable. */
 const TARGET_NS: u128 = 100_000_000; // 100 ms throughput phase
 const LATENCY_SAMPLES: usize = 20_000; // individual timed roundtrips for percentiles
 const WARMUP: usize = 5_000;
 const PROBE_N: usize = 2_000;
 
-/// One decode+encode roundtrip on the given bytes (the unit of work). The result
-/// is fed through `black_box` so the optimizer cannot elide the work.
+/**
+ * @brief One decode+encode roundtrip on the given bytes (the unit of work). The result
+ * is fed through `black_box` so the optimizer cannot elide the work.
+ */
 fn roundtrip(input: &[u8]) {
     let tlv = decode(input).expect("conformance vector must decode");
     black_box(encode(black_box(&tlv)));
@@ -52,8 +55,10 @@ struct Measure {
     mean: u64,
 }
 
-/// Measure a single vector: a tight throughput loop (>= TARGET_NS) for the rate,
-/// then a batch of individually-timed roundtrips for the latency percentiles.
+/**
+ * @brief Measure a single vector: a tight throughput loop (>= TARGET_NS) for the rate,
+ * then a batch of individually-timed roundtrips for the latency percentiles.
+ */
 fn measure(input: &[u8]) -> Measure {
     // Warm up branch predictors / caches before any timing.
     for _ in 0..WARMUP {
@@ -108,7 +113,7 @@ fn measure(input: &[u8]) -> Measure {
     }
 }
 
-/// Recursively collect (relative-posix-path, absolute-path) for every input.bin.
+/** @brief Recursively collect (relative-posix-path, absolute-path) for every input.bin. */
 fn find_inputs(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
     let mut entries: Vec<PathBuf> = match std::fs::read_dir(dir) {
         Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.path())).collect(),
@@ -133,7 +138,7 @@ fn find_inputs(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
     }
 }
 
-/// Default vectors dir relative to CARGO_MANIFEST_DIR (mirrors conformance.rs).
+/** @brief Default vectors dir relative to CARGO_MANIFEST_DIR (mirrors conformance.rs). */
 fn default_vectors_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/conformance/vectors/v1")
 }

@@ -1,23 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-//
-// Conformance harness for the shared vectors under tests/conformance/vectors/v1/.
-// Mirrors core/tests/conformance_runner.cpp and
-// bindings/typescript/packages/core/conformance/harness.mjs byte-for-byte, so the polyglot
-// driver (tests/conformance/run-all.py) and the differential fuzzer
-// (tests/conformance/diff_fuzz.py) can treat all three cores identically.
-//
-// Two modes:
-//   <vectors-dir> (default / --tap): for every vector directory containing an
-//       input.bin, check encode(decode(input.bin)) == input.bin (byte-for-byte);
-//       for every directory containing a reject.bin (negative case), check that
-//       decode(reject.bin) FAILS with the error named by expected.json's "reject"
-//       field. Emit TAP version 13 to stdout. Exit 0 iff every vector is `ok`.
-//   --roundtrip: read one hex frame per stdin line; for each, print
-//       encode(decode(hex)) as hex, or `ERR:<reason>` on a decode failure. Exactly
-//       one output line per input line. This feeds diff_fuzz.py.
-//
-// Needs std (it does file/stdin I/O); the library crate stays #![no_std].
+/*!
+ * @brief Conformance harness for the shared vectors under tests/conformance/vectors/v1/.
+ * Mirrors core/tests/conformance_runner.cpp and
+ * bindings/typescript/packages/core/conformance/harness.mjs byte-for-byte, so the polyglot
+ * driver (tests/conformance/run-all.py) and the differential fuzzer
+ * (tests/conformance/diff_fuzz.py) can treat all three cores identically.
+ *
+ * Two modes:
+ *   <vectors-dir> (default / --tap): for every vector directory containing an
+ *       input.bin, check encode(decode(input.bin)) == input.bin (byte-for-byte);
+ *       for every directory containing a reject.bin (negative case), check that
+ *       decode(reject.bin) FAILS with the error named by expected.json's "reject"
+ *       field. Emit TAP version 13 to stdout. Exit 0 iff every vector is `ok`.
+ *   --roundtrip: read one hex frame per stdin line; for each, print
+ *       encode(decode(hex)) as hex, or `ERR:<reason>` on a decode failure. Exactly
+ *       one output line per input line. This feeds diff_fuzz.py.
+ *
+ * Needs std (it does file/stdin I/O); the library crate stays #![no_std].
+ */
 
 use std::fs;
 use std::io::Read;
@@ -26,7 +27,7 @@ use std::process::ExitCode;
 
 use libtracer::{decode, encode};
 
-/// Decode a hex string to bytes, or `None` on odd length / non-hex digit.
+/** @brief Decode a hex string to bytes, or `None` on odd length / non-hex digit. */
 fn from_hex(s: &str) -> Option<Vec<u8>> {
     if s.len() % 2 != 0 {
         return None;
@@ -51,7 +52,7 @@ fn from_hex(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Lowercase hex encoding of `bytes`.
+/** @brief Lowercase hex encoding of `bytes`. */
 fn to_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -62,8 +63,10 @@ fn to_hex(bytes: &[u8]) -> String {
     s
 }
 
-/// `--roundtrip`: differential-fuzz batch mode. One re-encoded hex line (or
-/// `ERR:<reason>`) per stdin line. Mirrors harness.mjs `runRoundtrip`.
+/**
+ * @brief `--roundtrip`: differential-fuzz batch mode. One re-encoded hex line (or
+ * `ERR:<reason>`) per stdin line. Mirrors harness.mjs `runRoundtrip`.
+ */
 fn run_roundtrip() -> ExitCode {
     let mut text = String::new();
     if std::io::stdin().read_to_string(&mut text).is_err() {
@@ -164,7 +167,7 @@ fn find_inputs(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
     }
 }
 
-/// Default / `--tap`: emit TAP version 13 for the round-trip of every vector.
+/** @brief Default / `--tap`: emit TAP version 13 for the round-trip of every vector. */
 fn run_tap(vectors_dir: &Path) -> ExitCode {
     let mut cases: Vec<(String, PathBuf)> = Vec::new();
     find_inputs(vectors_dir, vectors_dir, &mut cases);
@@ -216,8 +219,10 @@ fn run_tap(vectors_dir: &Path) -> ExitCode {
     }
 }
 
-/// Locate the vectors dir from argv; fall back to the repo tree relative to
-/// CARGO_MANIFEST_DIR so the example is runnable standalone (`cargo run`).
+/**
+ * @brief Locate the vectors dir from argv; fall back to the repo tree relative to
+ * CARGO_MANIFEST_DIR so the example is runnable standalone (`cargo run`).
+ */
 fn default_vectors_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/conformance/vectors/v1")
 }
