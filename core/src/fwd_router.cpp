@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/fwd_frame_view.hpp"
 #include "libtracer/grammar.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/path.hpp"
@@ -33,174 +34,15 @@ using wire::type_t;
 
 namespace {
 
+/** @brief The unsigned value of one byte. */
 constexpr std::uint8_t u8(std::byte b) noexcept { return std::to_integer<std::uint8_t>(b); }
 
-// One top-level TLV header read in isolation (NO descent) — the byte offsets the
-// zero-copy forward rebuild needs, kept as ABSOLUTE offsets into the source so the
-// rebuild can re-slice src/payload as views (no copy). It is a thin ADAPTER over the
-// ONE wire grammar (`grammar::parse_header`, ADR-0048 §1 / finding #7): the length math
-// is no longer mirrored here — this only turns the grammar's relative `header_t` into the
-// absolute `body_off = pos + header` the forward plane reads by. CRC is DEFERRED (the
-// forward hop never walks a payload; the terminus / next hop verifies), matching the old
-// reader's offset-only behavior. One deliberate difference: the grammar rejects a
-// `type == 0x00` or reserved-opt-bit header up front, so a malformed frame is dropped at
-// this hop instead of forwarded — every caller already rejected such a header by its type
-// check, so well-formed traffic is byte-identical.
-struct hdr_t {
-    type_t type{};
-    opt_t opt{};
-    std::size_t header_len = 0;  // 4 (u16 length) or 6 (u32 length)
-    std::size_t body_off = 0;    // absolute offset of the body within the source
-    std::size_t body_len = 0;    // body (children/payload) length, trailer excluded
-    std::size_t total = 0;       // header_len + body_len + trailer
-};
-
-// Templated over the grammar `Cursor` concept (ADR-0053 ④b): the forward plane reads
-// its dispatch offsets through the SAME byte-source seam the one grammar validates
-// through — `span_cursor` for the contiguous path (byte-identical to before), the rope
-// cursor for a scatter-gather frame, with no per-cursor offset math. `cur.region(pos, …)`
-// narrows either source in O(1) before the header parse.
-template <class Cursor>
-[[nodiscard]] std::optional<hdr_t> read_header(const Cursor& cur, std::size_t pos) {
-    if (pos > cur.size()) return std::nullopt;
-    const auto h = wire::grammar::parse_header(cur.region(pos, cur.size() - pos),
-                                               wire::grammar::crc_check_t::DEFER);
-    if (!h) return std::nullopt;
-    return hdr_t{.type = h->type,
-                 .opt = h->opt,
-                 .header_len = h->header,
-                 .body_off = pos + h->header,
-                 .body_len = h->length,
-                 .total = h->total};
-}
-
-// The forward dispatch decision, read by OFFSET with no allocation (ADR-0038 inv. #1,
-// ADR-0039): a FWD whose first `dst` segment names a transport child is a forward hop
-// that never needs the decoded tree. Returns the `[body_off, body_len)` of the first
-// dst-segment NAME iff the frame is a structured FWD with an op VALUE + a non-empty dst
-// PATH; nullopt otherwise (malformed, non-FWD, or empty dst ⇒ fall back to the
-// full-decode terminus path). Offsets, not a span, so the result is source-agnostic —
-// the caller re-slices the segment bytes from its own cursor (contiguous or rope).
-template <class Cursor>
-[[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> peek_fwd_first_dst_seg(
-    const Cursor& cur) {
-    const auto fwd_h = read_header(cur, 0);
-    if (!fwd_h || fwd_h->type != type_t::FWD || !fwd_h->opt.pl) return std::nullopt;
-    const std::size_t body_end = fwd_h->body_off + fwd_h->body_len;
-    // child[0] = op VALUE
-    const auto op_h = read_header(cur, fwd_h->body_off);
-    if (!op_h || op_h->type != type_t::VALUE) return std::nullopt;
-    // child[1] = dst PATH
-    const std::size_t dst_pos = fwd_h->body_off + op_h->total;
-    if (dst_pos >= body_end) return std::nullopt;
-    const auto dst_h = read_header(cur, dst_pos);
-    if (!dst_h || dst_h->type != type_t::PATH || dst_h->body_len == 0) return std::nullopt;
-    // dst.child[0] = first segment NAME
-    const auto seg_h = read_header(cur, dst_h->body_off);
-    if (!seg_h || seg_h->type != type_t::NAME) return std::nullopt;
-    return std::pair{seg_h->body_off, seg_h->body_len};
-}
-
-// Read the FWD op discriminant (child[0], a VALUE u8) by OFFSET — the terminus
-// split (REPLY → originator sink vs request → arena resolve) without a decode.
-template <class Cursor>
-[[nodiscard]] std::optional<graph::fwd_op_t> peek_fwd_op(const Cursor& cur) {
-    const auto fwd_h = read_header(cur, 0);
-    if (!fwd_h || fwd_h->type != type_t::FWD || !fwd_h->opt.pl) return std::nullopt;
-    const auto op_h = read_header(cur, fwd_h->body_off);
-    if (!op_h || op_h->type != type_t::VALUE || op_h->body_len == 0) return std::nullopt;
-    return static_cast<fwd_op_t>(cur.byte_at(op_h->body_off));
-}
-
-// A control frame (ADVERTISE / COMPACT / HANDLE_NACK) peeked off any cursor without a
-// decoded tree: `type`, the `u16` label (child[0] VALUE, LE), and the `[off, total)` of
-// child[1] — the route (ADVERTISE) / payload (COMPACT) sub-TLV, or `{0, 0}` for a
-// bare-label HANDLE_NACK. nullopt for malformed / non-control frames. Source-agnostic
-// (offsets, not spans), so the caller re-slices from its own cursor (ADR-0053 ④b/⑥).
-struct control_head_t {
-    type_t type = type_t::VALUE;
-    std::uint16_t label = 0;
-    std::size_t child1_off = 0;    // 0 ⇒ no child[1] (a bare-label NACK)
-    std::size_t child1_total = 0;  // header + body + trailer of child[1]
-};
-template <class Cursor>
-[[nodiscard]] std::optional<control_head_t> peek_control(const Cursor& cur) {
-    const auto outer = read_header(cur, 0);
-    if (!outer || !outer->opt.pl) return std::nullopt;
-    if (outer->type != type_t::ADVERTISE && outer->type != type_t::COMPACT &&
-        outer->type != type_t::HANDLE_NACK)
-        return std::nullopt;
-    const std::size_t body_end = outer->body_off + outer->body_len;
-    const auto label_h = read_header(cur, outer->body_off);
-    if (!label_h || label_h->type != type_t::VALUE || label_h->body_len < 2) return std::nullopt;
-    // The label VALUE is a 2-byte LE u16; stitch it a byte at a time so a value that
-    // straddles a link boundary reads the same as a contiguous one.
-    const auto label = static_cast<std::uint16_t>(
-        cur.byte_at(label_h->body_off) |
-        (static_cast<std::uint16_t>(cur.byte_at(label_h->body_off + 1)) << 8));
-    control_head_t head{outer->type, label, 0, 0};
-    const std::size_t c1 = outer->body_off + label_h->total;
-    if (c1 < body_end) {
-        if (const auto c1_h = read_header(cur, c1)) {
-            head.child1_off = c1;
-            head.child1_total = c1_h->total;
-        }
-    }
-    return head;
-}
-
-// A fixed-capacity stack byte-writer — the zero-heap counterpart of the old
-// vector-based header builder for the forward hop (ADR-0038 inv. #2: "the fresh header bytes ... a
-// stack std::array, not a std::vector"). Bounded by the wire header widths + one NAME
-// (kMaxSegmentBytes), so `N` is a small compile-time constant; a write past capacity
-// clamps to empty (the caller treats an empty head as a drop — never a buffer overrun).
-template <std::size_t N>
-class stack_writer {
-   public:
-    void header(type_t type, std::size_t body_len) {
-        opt_t opt{.pl = true};
-        if (body_len > 0xFFFFu) opt.ll = true;
-        const std::size_t width = opt.ll ? 4u : 2u;
-        if (len_ + 2 + width > N) {
-            overflow_ = true;
-            return;
-        }
-        buf_[len_++] = static_cast<std::byte>(std::to_underlying(type));
-        buf_[len_++] = static_cast<std::byte>(opt.encode());
-        for (std::size_t i = 0; i < width; ++i)
-            buf_[len_++] = static_cast<std::byte>((body_len >> (8 * i)) & 0xFF);
-    }
-    void name(std::string_view s) {  // a NAME TLV over `s` (type, opt=0, u16 len, bytes)
-        if (len_ + 4 + s.size() > N || s.size() > 0xFFFFu) {
-            overflow_ = true;
-            return;
-        }
-        buf_[len_++] = static_cast<std::byte>(std::to_underlying(type_t::NAME));
-        buf_[len_++] = std::byte{0};
-        buf_[len_++] = static_cast<std::byte>(s.size() & 0xFF);
-        buf_[len_++] = static_cast<std::byte>((s.size() >> 8) & 0xFF);
-        for (char c : s) buf_[len_++] = static_cast<std::byte>(c);
-    }
-    void raw(std::span<const std::byte> bytes) {  // copy opaque bytes (the op TLV)
-        if (len_ + bytes.size() > N) {
-            overflow_ = true;
-            return;
-        }
-        for (std::byte b : bytes) buf_[len_++] = b;
-    }
-    [[nodiscard]] std::span<const std::byte> span() const {
-        return overflow_ ? std::span<const std::byte>{}
-                         : std::span<const std::byte>(buf_.data(), len_);
-    }
-    [[nodiscard]] bool ok() const noexcept { return !overflow_; }
-
-   private:
-    std::array<std::byte, N> buf_{};
-    std::size_t len_ = 0;
-    bool overflow_ = false;
-};
-
 }  // namespace
+
+// The FWD offset-dispatch cluster — fwd_hdr_t/read_fwd_header, the forward/op/control
+// peeks, stack_writer, and the shrunk-dst/grown-src head rebuild — lives in the public
+// fwd_frame_view.hpp (unit-tested directly, the length_prefix_framer precedent); this
+// TU delegates mechanically. Frames are byte-identical.
 
 void fwd_router_t::add_child(std::string name, transport_t& link) {
     // Populate the registry BEFORE wiring the receiver: an async transport (UDP/ws) may
@@ -438,105 +280,35 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
 template <class Cursor>
 void fwd_router_t::route_fwd_forward(std::string_view inbound_name, const Cursor& cur_src,
                                      transport_t& child) {
-    // All offsets, no decoded tree. Layout: FWD{ op VALUE, dst PATH, FIELD? sel, src
-    // PATH, tail } — strip dst's leading segment, grow src by the inbound NAME (unless
-    // REPLY), scatter-gather the fresh heads + the untouched inbound regions onward.
-    // Reads AND the egress go through the grammar `Cursor` seam (ADR-0053 ④b): the same
-    // code serves a contiguous `span_cursor` (each region is one sub-span) and a
-    // link-walking `rope_cursor` (a region yields one sub-span per link it crosses).
-    const auto fwd_h = read_header(cur_src, 0);
-    if (!fwd_h || fwd_h->type != type_t::FWD) return;
-    const std::size_t body_end = fwd_h->body_off + fwd_h->body_len;
-
-    std::size_t cur = fwd_h->body_off;
-    const auto op_h = read_header(cur_src, cur);
-    if (!op_h || op_h->type != type_t::VALUE || op_h->body_len == 0) return;
-    const std::size_t op_pos = cur;
-    const bool is_reply = static_cast<fwd_op_t>(cur_src.byte_at(op_h->body_off)) == fwd_op_t::REPLY;
-    cur += op_h->total;
-
-    const auto dst_h = read_header(cur_src, cur);
-    if (!dst_h || dst_h->type != type_t::PATH) return;
-    cur += dst_h->total;
-
-    std::size_t sel_pos = 0;
-    std::size_t sel_total = 0;
-    if (cur < body_end) {
-        const auto peek = read_header(cur_src, cur);
-        if (peek && peek->type == type_t::FIELD) {
-            sel_pos = cur;
-            sel_total = peek->total;
-            cur += peek->total;
-        }
-    }
-
-    const auto src_h = read_header(cur_src, cur);
-    if (!src_h || src_h->type != type_t::PATH) return;
-    cur += src_h->total;
-
-    const std::size_t tail_off = cur;
-    const std::size_t tail_len = body_end > cur ? body_end - cur : 0;
-
-    // The leading dst segment (a NAME) to strip.
-    const auto seg_h = read_header(cur_src, dst_h->body_off);
-    if (!seg_h || seg_h->type != type_t::NAME) return;
-    const std::size_t rem_dst_off = dst_h->body_off + seg_h->total;
-    const std::size_t rem_dst_len = dst_h->body_len - seg_h->total;
-
-    // The inbound NAME appended to src (grow) — empty for a REPLY (no accumulation).
-    const std::size_t inbound_name_len = is_reply ? 0u : (4u + inbound_name.size());
-
-    const std::size_t new_dst_body = rem_dst_len;
-    const std::size_t new_src_body = src_h->body_len + inbound_name_len;
-    const std::size_t new_dst_total = (new_dst_body > 0xFFFFu ? 6u : 4u) + new_dst_body;
-    const std::size_t new_src_total = (new_src_body > 0xFFFFu ? 6u : 4u) + new_src_body;
-    const std::size_t new_fwd_body =
-        op_h->total + new_dst_total + sel_total + new_src_total + tail_len;
-
-    // head1: FWD header + op (copied) + new (shrunk) dst header. head2: new (grown) src
-    // header + the prepended inbound NAME. Both fixed stack buffers — ZERO heap on the
-    // forward hop (ADR-0038 inv. #2). Bounds: head1 = FWD hdr(≤6) + op TLV(small) + PATH
-    // hdr(≤6); head2 = PATH hdr(≤6) + one NAME(≤4+kMaxSegmentBytes). An overflow (a
-    // malformed op TLV larger than the buffer) yields an empty span ⇒ drop, never a
-    // buffer overrun.
-    stack_writer<64> head1;
-    head1.header(type_t::FWD, new_fwd_body);
-    cur_src.for_each_span(op_pos, op_h->total, [&](std::span<const std::byte> s) { head1.raw(s); });
-    head1.header(type_t::PATH, new_dst_body);
-
-    stack_writer<96> head2;
-    head2.header(type_t::PATH, new_src_body);
-    if (!is_reply) head2.name(inbound_name);
-
-    if (!head1.ok() || !head2.ok()) return;  // malformed oversized op ⇒ drop, no overrun
+    // All offsets, no decoded tree: the shrunk-dst / grown-src head rebuild lives in
+    // fwd_frame_view.hpp (rebuild_fwd_forward — unit-tested directly); this hop only
+    // resolves the child and scatter-gathers the result. Reads AND the egress go
+    // through the grammar `Cursor` seam (ADR-0053 ④b): the same code serves a
+    // contiguous `span_cursor` (each region is one sub-span) and a link-walking
+    // `rope_cursor` (a region yields one sub-span per link it crosses).
+    const auto rebuilt = rebuild_fwd_forward(cur_src, inbound_name);
+    if (!rebuilt) return;        // not a forwardable FWD ⇒ drop (callers pre-peeked)
+    if (!rebuilt->ok()) return;  // malformed oversized op ⇒ drop, no overrun
 
     // Scatter-gather egress: the small stack heads interleaved with the untouched inbound
     // regions (remaining dst, selector, original src bytes, payload) — no payload copy. The
-    // gather is written ONCE over the cursor seam; each region is emitted via
-    // `for_each_span`, which yields exactly one sub-span for a contiguous source and one per
-    // straddled link for a rope. So the container is the only thing that varies: a stack
-    // `std::array` for the span path (ZERO heap, ADR-0038 inv. #2) vs a `std::pmr::vector`
-    // over the injected @ref mr_ for the rope path (a link count is only known at run time).
-    const auto gather = [&](auto&& push) {
-        push(head1.span());
-        if (rem_dst_len > 0) cur_src.for_each_span(rem_dst_off, rem_dst_len, push);
-        if (sel_total > 0) cur_src.for_each_span(sel_pos, sel_total, push);
-        push(head2.span());
-        if (src_h->body_len > 0) cur_src.for_each_span(src_h->body_off, src_h->body_len, push);
-        if (tail_len > 0) cur_src.for_each_span(tail_off, tail_len, push);
-    };
-
+    // gather is written ONCE over the cursor seam (fwd_rebuild_t::gather); each region is
+    // emitted via `for_each_span`, which yields exactly one sub-span for a contiguous source
+    // and one per straddled link for a rope. So the container is the only thing that varies:
+    // a stack `std::array` for the span path (ZERO heap, ADR-0038 inv. #2) vs a
+    // `std::pmr::vector` over the injected @ref mr_ for the rope path (a link count is only
+    // known at run time).
     if constexpr (std::is_same_v<Cursor, wire::grammar::span_cursor>) {
         // Contiguous source: at most 6 regions, each a single sub-span — a stack array.
         std::array<std::span<const std::byte>, 6> iov;
         std::size_t n = 0;
-        gather([&](std::span<const std::byte> s) { iov[n++] = s; });
+        rebuilt->gather(cur_src, [&](std::span<const std::byte> s) { iov[n++] = s; });
         child.send(std::span<const std::span<const std::byte>>(iov.data(), n));
     } else {
         // Rope source: a region may cross several links — gather into a pmr vector drawn
         // from the terminus arena's resource (the forward hop still copies no payload).
         std::pmr::vector<std::span<const std::byte>> iov{mr_};
-        gather([&](std::span<const std::byte> s) { iov.push_back(s); });
+        rebuilt->gather(cur_src, [&](std::span<const std::byte> s) { iov.push_back(s); });
         child.send(std::span<const std::span<const std::byte>>(iov.data(), iov.size()));
     }
 }
