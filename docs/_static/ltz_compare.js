@@ -33,7 +33,7 @@
     return t;
   }
 
-  var COL = { libtracer: "var(--ltz-lt)", zenoh: "var(--ltz-zn)" };
+  var COL = { libtracer: "var(--ltz-lt)", "libtracer-deliver": "var(--ltz-ltd)", zenoh: "var(--ltz-zn)" };
 
   function chart(cfg) {
     var W = 560, H = 350, m = { l: 66, r: 18, t: 14, b: 46 };
@@ -99,7 +99,7 @@
 
   var host = document.getElementById("ltz-charts");
   if (host) DATA.charts.forEach(function (c) {
-    var series = ["libtracer", "zenoh"].map(function (sys) {
+    var series = ["libtracer", "libtracer-deliver", "zenoh"].map(function (sys) {
       return { name: sys, color: COL[sys], pts: (c.series[sys] || []) };
     }).filter(function (s) { return s.pts.length; });
     var xvals = (c.series.libtracer || c.series.zenoh || []).map(function (p) { return p[0]; });

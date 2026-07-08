@@ -78,3 +78,4 @@ docs/performance.md
 # dist/ for a self-contained registry archive — CI-only, never committed.
 integrations/esp-idf/libtracer/core/
 integrations/esp-idf/libtracer/dist/
+bench/vendor
