@@ -101,7 +101,7 @@ class bus_link_t {
      * (lvalues only — a temporary would dangle) and MUST outlive every delivery.
      */
     template <typename F>
-    requires std::invocable<F&, std::string_view, std::span<const std::byte>>
+        requires std::invocable<F&, std::string_view, std::span<const std::byte>>
     void set_peer_receiver(F& sink) noexcept {
         peer_rx_.set([](void* c, std::string_view peer,
                         std::span<const std::byte> f) { (*static_cast<F*>(c))(peer, f); },
@@ -131,7 +131,7 @@ class bus_link_t {
      * (lvalues only — a temporary would dangle) and MUST outlive every delivery.
      */
     template <typename F>
-    requires std::invocable<F&, std::string_view, view::rope_t>
+        requires std::invocable<F&, std::string_view, view::rope_t>
     void set_peer_rope_receiver(F& sink) noexcept {
         peer_rx_.set_rope([](void* c, std::string_view peer,
                              view::rope_t f) { (*static_cast<F*>(c))(peer, std::move(f)); },
@@ -212,7 +212,7 @@ class transport_t {
      * (lvalues only — a temporary would dangle) and MUST outlive every delivery.
      */
     template <typename F>
-    requires std::invocable<F&, std::span<const std::byte>>
+        requires std::invocable<F&, std::span<const std::byte>>
     void set_receiver(F& sink) noexcept {
         rx_.set([](void* c, std::span<const std::byte> f) { (*static_cast<F*>(c))(f); }, &sink);
     }
@@ -248,7 +248,7 @@ class transport_t {
      * (lvalues only — a temporary would dangle) and MUST outlive every delivery.
      */
     template <typename F>
-    requires std::invocable<F&, view::rope_t>
+        requires std::invocable<F&, view::rope_t>
     void set_rope_receiver(F& sink) noexcept {
         rx_.set_rope([](void* c, view::rope_t f) { (*static_cast<F*>(c))(std::move(f)); }, &sink);
     }
