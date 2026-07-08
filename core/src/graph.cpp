@@ -500,18 +500,17 @@ void graph_t::fan_out(vertex_t* v, const rope_t& value, int depth) {
         for (const edge_view_t& e : heap_buf) dispatch_edge(e, value, depth);
 }
 
-result_t<void> graph_t::store_value(vertex_t* v, rope_t value) {
+result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t value) {
     if (v->role() == role_t::HANDLER) {
         if (!v->handlers().on_write) return std::unexpected(status_t::NOT_FOUND);
         result_t<void> r = v->handlers().on_write(value);
-        if (!r) return r;
+        if (!r) return std::unexpected(r.error());
         v->note_write();
-        return {};
+        return std::shared_ptr<const rope_t>{};  // handler consumed it — nothing stored
     }
     // The storage verb owns the invariant order: LKV publish (lock-free) BEFORE the
     // lock; ring append + keep-last trim + seq bump + await wake under it.
-    v->store(std::move(value));
-    return {};
+    return v->store(std::move(value));
 }
 
 void graph_t::bubble_up(vertex_t* v, const rope_t& value, int depth) {
@@ -552,15 +551,27 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, int depth, std::st
     // a subtree sweep. propagate(v) is the separate accumulate-then-flush primitive.
     if (is_branch_point(value, v->role()))
         return write_branch(v, value, depth, caller, /*notify=*/true);
-    const rope_t notify = value;  // refcount clone — store_value consumes `value`
-    result_t<void> stored = store_value(v, std::move(value));
-    if (!stored) return stored;
+    if (v->role() == role_t::HANDLER) {
+        // A handler stores no LKV (the user handler consumes the value), so the
+        // delivery clone survives here — the cold path only. The hot roles below
+        // deliver the exact published pointer store_value hands back instead.
+        const rope_t notify = value;  // refcount clone — store_value consumes `value`
+        const result_t<std::shared_ptr<const rope_t>> stored = store_value(v, std::move(value));
+        if (!stored) return std::unexpected(stored.error());
+        deliver_vertex(v, notify, depth);
+        clear_pending(v);  // eager delivery flushes any pending mark a prior assign left
+        return {};
+    }
+    const result_t<std::shared_ptr<const rope_t>> stored = store_value(v, std::move(value));
+    if (!stored) return std::unexpected(stored.error());
     if (v->role() == role_t::STREAM) {
         // Deliver the just-appended ring entry and advance the drain cursor, so a later
         // propagate on this stream does not re-deliver it (RFC-0008 §E).
         deliver_current(v, depth);
     } else {
-        deliver_vertex(v, notify, depth);
+        // Deliver exactly what was stored (RFC-0008 §D): the published LKV pointer —
+        // no notify reclone of the rope on the hot write path.
+        deliver_vertex(v, **stored, depth);
     }
     clear_pending(v);  // eager delivery flushes any pending mark a prior assign left
     return {};
@@ -575,8 +586,8 @@ result_t<void> graph_t::assign(vertex_handle_t vh, rope_t value, std::string_vie
     // sweep. A branch POINT assigns each descendant the same way. Sends nothing.
     if (is_branch_point(value, v->role()))
         return write_branch(v, value, 0, caller, /*notify=*/false);
-    result_t<void> stored = store_value(v, std::move(value));
-    if (!stored) return stored;
+    const result_t<std::shared_ptr<const rope_t>> stored = store_value(v, std::move(value));
+    if (!stored) return std::unexpected(stored.error());
     mark_pending(v);
     return {};
 }

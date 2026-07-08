@@ -14,6 +14,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`vertex_t::store` now returns the published `std::shared_ptr<const rope_t>`**
+  (previously `void`) — the exact LKV pointer a concurrent `read_stored` observes.
+  The eager write path delivers `*sp` instead of a pre-store rope clone (RFC-0008
+  §D "deliver exactly what was stored"), removing one rope clone+destroy per write
+  (`inproc 64B fan1` ~101→~92 ns/op). Migration: callers that ignored the old
+  `void` result need no change; the return value may be discarded.
+
 - **`vertex_t::snapshot_edges` now fills a `graph::edge_snapshot_t` (new type)
   instead of a `std::span<edge_view_t>` inline buffer.** The snapshot buffer is
   raw stack storage that placement-constructs ONLY the views actually
