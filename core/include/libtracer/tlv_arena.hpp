@@ -104,8 +104,10 @@ class tlv_arena_t {
  * @brief Decode exactly one TLV filling @p input into a flat arena drawn from @p mr.
  *
  * The terminus-side counterpart of `decode` (ADR-0041 §1): identical
- * validation (bounds, reserved bits, type 0x00, `kMaxDepth`, trailer CRC,
- * trailing bytes ⇒ FRAME_INVALID), iterative (no recursion), but the result is
+ * validation (bounds, reserved bits, type 0x00, trailer CRC, trailing bytes ⇒
+ * FRAME_INVALID), iterative (no recursion) with the walk stack drawn from
+ * @p mr — so the caller's arena IS the nesting-depth bound (RFC-0006; no
+ * depth constant exists) — but the result is
  * a pre-order @ref arena_tlv_t array of spans into @p input instead of an
  * owning `tlv_t` tree — zero heap when @p mr is a stack-buffer
  * `monotonic_buffer_resource`. @p input and @p mr must outlive the arena.

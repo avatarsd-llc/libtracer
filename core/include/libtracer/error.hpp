@@ -22,10 +22,12 @@ namespace tr::wire {
  *        first-child VALUE.
  */
 enum class err_t : std::uint16_t {
-    FRAME_TRUNCATED = 0x0001,        /**< `tr::frame::truncated` */
-    FRAME_INVALID = 0x0002,          /**< `tr::frame::invalid` */
-    FRAME_CRC_FAIL = 0x0003,         /**< `tr::frame::crc_fail` */
-    TLV_NESTING_TOO_DEEP = 0x0010,   /**< `tr::tlv::nesting_too_deep` */
+    FRAME_TRUNCATED = 0x0001, /**< `tr::frame::truncated` */
+    FRAME_INVALID = 0x0002,   /**< `tr::frame::invalid` */
+    FRAME_CRC_FAIL = 0x0003,  /**< `tr::frame::crc_fail` */
+    /** @brief `tr::tlv::nesting_too_deep` — exceeds this RECEIVER's decode
+     *  resources (RFC-0006; depth is resource-bounded, never a constant). */
+    TLV_NESTING_TOO_DEEP = 0x0010,
     PATH_NOT_FOUND = 0x0020,         /**< `tr::path::not_found` */
     PATH_INVALID = 0x0021,           /**< `tr::path::invalid` */
     PATH_IN_USE = 0x0022,            /**< `tr::path::in_use` */

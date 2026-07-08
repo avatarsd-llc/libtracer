@@ -88,54 +88,91 @@ struct branch_node_t {
     bool subtree_has_value = false;
 };
 
-// Parse one POINT node of a branch write into `out` (post-order; children precede
-// their parent). `key` is this node's canonical vertex key — the caller already
-// folded the node's leading NAME into it. STRICT (like parse_acl): children are
-// the leading NAME, at most one VALUE (the node's own value), and POINT
-// sub-branches; anything else — or any trailer-carrying node — is TYPE_MISMATCH,
-// so a stored slice never carries semantics the decomposition would silently
-// mangle. Returns whether a VALUE lands at-or-below this node. Recursion depth is
-// bounded by the codec's kMaxDepth (32) — the arena would not have decoded deeper.
-[[nodiscard]] result_t<bool> parse_branch_node(const wire::tlv_arena_t& a, std::uint32_t node,
+/**
+ * @brief Parse the POINT tree of a branch write into @p out (post-order;
+ *        children precede their parent).
+ *
+ * @p key is the root node's canonical vertex key — the caller already folded
+ * the root's leading NAME into it. STRICT (like parse_acl): children are the
+ * leading NAME, at most one VALUE (the node's own value), and POINT
+ * sub-branches; anything else — or any trailer-carrying node — is
+ * TYPE_MISMATCH, so a stored slice never carries semantics the decomposition
+ * would silently mangle. ITERATIVE (an explicit open-node stack): nesting depth
+ * is bounded only by the receiver's decode resources (RFC-0006), so a recursive
+ * walk over wire-derived structure could overflow the call stack on a
+ * deep-but-admitted frame.
+ *
+ * @return Whether a VALUE lands anywhere in the tree, or the strict-shape error.
+ */
+[[nodiscard]] result_t<bool> parse_branch_node(const wire::tlv_arena_t& a, std::uint32_t root,
                                                const view_t& frame_view, std::vector<std::byte> key,
                                                std::vector<branch_node_t>& out) {
-    if (!a[node].opt.pl || !trailer_less(a[node])) return std::unexpected(status_t::TYPE_MISMATCH);
-    const std::uint32_t end = a[node].end;
-    std::uint32_t i = wire::tlv_arena_t::first_child(node);
-    if (i >= end || a[i].type != type_t::NAME) return std::unexpected(status_t::TYPE_MISMATCH);
-    view_t store{};
-    bool has_value = false;
-    bool has_point_child = false;
-    bool subtree_value = false;
-    for (i = a.next_sibling(i); i < end; i = a.next_sibling(i)) {
-        const wire::arena_tlv_t& c = a[i];
+    /**
+     * @brief One open POINT node: its arena index, the sibling cursor over its
+     *        remaining children, its key, and the strict-shape accumulators.
+     */
+    struct open_t {
+        std::uint32_t node = 0;       /**< @brief This node's arena pre-order index. */
+        std::uint32_t next = 0;       /**< @brief Next unvisited child (arena pre-order index). */
+        std::vector<std::byte> key;   /**< @brief This node's canonical vertex key. */
+        view_t store{};               /**< @brief The node's own VALUE slice, if any. */
+        bool has_value = false;       /**< @brief A VALUE child was seen. */
+        bool has_point_child = false; /**< @brief A POINT sub-branch was seen. */
+        bool subtree_value = false;   /**< @brief A VALUE landed below this node. */
+    };
+
+    std::vector<open_t> stack;
+    // Validate a POINT node's shape (structured, trailer-less, leading NAME) and
+    // open it with the sibling cursor past that NAME.
+    const auto open = [&a, &stack](std::uint32_t node, std::vector<std::byte> k) -> result_t<void> {
+        if (!a[node].opt.pl || !trailer_less(a[node]))
+            return std::unexpected(status_t::TYPE_MISMATCH);
+        const std::uint32_t cn = wire::tlv_arena_t::first_child(node);
+        if (cn >= a[node].end || a[cn].type != type_t::NAME)
+            return std::unexpected(status_t::TYPE_MISMATCH);
+        stack.push_back(open_t{.node = node, .next = a.next_sibling(cn), .key = std::move(k)});
+        return {};
+    };
+    if (const result_t<void> o = open(root, std::move(key)); !o) return std::unexpected(o.error());
+
+    for (;;) {
+        open_t& top = stack.back();
+        if (top.next >= a[top.node].end) {
+            // Node complete — emit its landing site (post-order) and fold its
+            // subtree-has-value into the parent.
+            const bool subtree_value = top.subtree_value || top.has_value;
+            branch_node_t bn;
+            bn.notify = top.has_point_child ? slice_of(frame_view, a[top.node].wire) : top.store;
+            bn.store = std::move(top.store);
+            bn.subtree_has_value = subtree_value;
+            bn.key = std::move(top.key);
+            out.push_back(std::move(bn));
+            stack.pop_back();
+            if (stack.empty()) return subtree_value;
+            stack.back().subtree_value = stack.back().subtree_value || subtree_value;
+            continue;
+        }
+        const std::uint32_t ci = top.next;
+        const wire::arena_tlv_t& c = a[ci];
+        top.next = a.next_sibling(ci);
         if (c.type == type_t::VALUE) {
-            if (has_value || !trailer_less(c)) return std::unexpected(status_t::TYPE_MISMATCH);
-            has_value = true;
-            store = slice_of(frame_view, c.wire);
+            if (top.has_value || !trailer_less(c)) return std::unexpected(status_t::TYPE_MISMATCH);
+            top.has_value = true;
+            top.store = slice_of(frame_view, c.wire);
         } else if (c.type == type_t::POINT) {
-            has_point_child = true;
-            const std::uint32_t cn = wire::tlv_arena_t::first_child(i);
+            top.has_point_child = true;
+            const std::uint32_t cn = wire::tlv_arena_t::first_child(ci);
             if (cn >= c.end || a[cn].type != type_t::NAME)
                 return std::unexpected(status_t::TYPE_MISMATCH);
-            std::vector<std::byte> child_key = key;
+            std::vector<std::byte> child_key = top.key;
             wire::emit_name(child_key, a[cn].body);
-            const result_t<bool> sub =
-                parse_branch_node(a, i, frame_view, std::move(child_key), out);
-            if (!sub) return std::unexpected(sub.error());
-            subtree_value = subtree_value || *sub;
+            // `top` is invalidated by the push inside open().
+            if (const result_t<void> o = open(ci, std::move(child_key)); !o)
+                return std::unexpected(o.error());
         } else {
             return std::unexpected(status_t::TYPE_MISMATCH);
         }
     }
-    subtree_value = subtree_value || has_value;
-    branch_node_t bn;
-    bn.notify = has_point_child ? slice_of(frame_view, a[node].wire) : store;
-    bn.store = std::move(store);
-    bn.subtree_has_value = subtree_value;
-    bn.key = std::move(key);
-    out.push_back(std::move(bn));
-    return subtree_value;
 }
 
 // One Composite child record of `key` starting at `i` (ADR-0057 decomposition): the end
