@@ -25,7 +25,9 @@ namespace tr::wire {
 // Decode failures reuse the RFC-0002 registry codes (error.hpp) directly — the
 // grammar returns `err_t` (ADR-0048), so `err_path`/severity/disposition come
 // for free and there is no parallel decode-only error vocabulary. Decode only
-// ever yields FRAME_TRUNCATED / FRAME_INVALID / FRAME_CRC_FAIL / TLV_NESTING_TOO_DEEP.
+// ever yields FRAME_TRUNCATED / FRAME_INVALID / FRAME_CRC_FAIL /
+// TLV_NESTING_TOO_DEEP ("exceeds this receiver's decode resources", RFC-0006 —
+// never reached by this heap-spilled decode, only by a null-spill grammar walk).
 
 /** @brief A decoded trailer CRC: its width and the (zero-extended) checksum value. */
 struct crc_t {
@@ -71,9 +73,6 @@ struct tlv_t {
     std::vector<tlv_t> children{}; /**< @brief Parsed sub-TLVs; empty when opaque. */
     std::optional<trailer_t> trailer{}; /**< @brief The decoded trailer, if present. */
 };
-
-/** @brief The iterative-parser nesting-depth cap (docs/reference/01 §two parser contexts). */
-inline constexpr std::size_t kMaxDepth = 32;
 
 /** @brief Structural + byte-content equality (spans compared by content, recursively). */
 [[nodiscard]] bool equal(const tlv_t& a, const tlv_t& b) noexcept;
