@@ -90,10 +90,6 @@ pub mod type_code {
     pub const FIELD: u8 = 0x10;
 }
 
-/// The iterative-parser depth cap (docs/reference/01 §iterative parsing). A frame
-/// nested deeper than this is rejected rather than overflowing the call stack.
-pub const MAX_DEPTH: usize = 32;
-
 /// Reserved bits 7 and 0; a set reserved bit makes a frame invalid.
 const RESERVED_MASK: u8 = 0b1000_0001;
 
@@ -107,7 +103,14 @@ pub enum Error {
     FrameInvalid,
     /// Trailer CRC did not match the recomputed value.
     FrameCrcFail,
-    /// Nesting exceeded [`MAX_DEPTH`].
+    /**
+     * @brief Nesting exceeded the receiver's decode resources (RFC-0006 —
+     * depth is resource-bounded, never a constant).
+     *
+     * This binding's [`decode`] keeps its work stack in a growable `Vec` (the
+     * host heap is its resource), so it never produces this itself; the name
+     * remains for harness parity and for peers' `ERROR` frames.
+     */
     TlvNestingTooDeep,
 }
 
@@ -401,10 +404,15 @@ struct Open<'a> {
     total: usize,
 }
 
-/// Decode exactly one TLV that fills `input` into a TLV tree. Nesting is parsed
-/// ITERATIVELY with an explicit stack (recursion is forbidden so a maliciously
-/// deep frame cannot overflow a small MCU call stack) and capped at [`MAX_DEPTH`].
-/// Trailing bytes after the root make the frame [`Error::FrameInvalid`].
+/**
+ * @brief Decode exactly one TLV that fills `input` into a TLV tree.
+ *
+ * Nesting is parsed ITERATIVELY with an explicit stack (recursion is forbidden
+ * so a maliciously deep frame cannot overflow a small MCU call stack); the
+ * stack is a growable `Vec`, so nesting depth is bounded only by this
+ * receiver's memory (RFC-0006 — no depth constant). Trailing bytes after the
+ * root make the frame [`Error::FrameInvalid`].
+ */
 pub fn decode(input: &[u8]) -> Result<Tlv, Error> {
     let (root_node, root_total, root_children) = parse_one(input)?;
     if root_total != input.len() {
@@ -435,10 +443,6 @@ pub fn decode(input: &[u8]) -> Result<Tlv, Error> {
                 }
             }
             continue;
-        }
-        // A child of `top` sits at depth == stack.len(); reject at the cap.
-        if stack.len() >= MAX_DEPTH {
-            return Err(Error::TlvNestingTooDeep);
         }
         // Copy out the slice/cursor before mutating the stack (the returned refs
         // borrow `input`, not the stack).

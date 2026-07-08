@@ -17,8 +17,8 @@ Design (deterministic + reproducible):
      *canonical* wire bytes of one random valid frame: a nonzero type code, a
      random legal opt-bit combo (reserved bits 0; TF only with TS and only on a
      nested node under an absolute-ts parent; LL/CW/CR/TS independent), correct
-     length fields, random opaque payloads, and PL nesting kept well under the
-     depth cap. The generator is a further, independent codec — it computes its
+     length fields, random opaque payloads, and shallow PL nesting (every core
+     parses it at any declared decode budget, RFC-0006). The generator is a further, independent codec — it computes its
      own CRCs — so agreeing with it proves the cores agree with each other AND
      with the spec's canonical form, not merely with one another.
 
@@ -69,8 +69,9 @@ CXX_FALLBACKS = [
 # structured TLVs the codec round-trips like any other, so adding them here fuzzes
 # all three cores on FWD/FIELD-shaped frames (ADR-0035 slice 1).
 REGISTRY_TYPES = [0x01, 0x02, 0x03, 0x04, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10]
-MAX_DEPTH = 32  # codec depth cap; generated nesting stays well under it.
-MAX_GEN_DEPTH = 6  # how deep this generator nests (must be < MAX_DEPTH).
+# Depth is receiver-resource-bounded (RFC-0006, no codec cap); the generator
+# nests shallowly so every core parses these frames at any declared budget.
+MAX_GEN_DEPTH = 6  # how deep this generator nests
 
 # ------------------------------------------------------------------ crc ---
 _CRC32C_TABLE = []

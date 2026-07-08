@@ -124,11 +124,16 @@ split_rope_t split_into(const std::vector<std::byte>& flat, const std::vector<st
     return out;
 }
 
-// A FULL lazy walk over the view tier (ADR-0053): over() -> verify(root) ->
-// DFS children, verifying each child right after its header parse — the same
-// node order as decode()'s parse_one-then-descend, with the same kMaxDepth cap
-// applied before a child parse. When everything is accessed, lazy defers
-// nothing, so the verdict must equal decode's.
+/**
+ * @brief A FULL lazy walk over the view tier (ADR-0053): over() -> verify(root)
+ * -> DFS children, verifying each child right after its header parse — the same
+ * node order as decode()'s parse_one-then-descend.
+ *
+ * Its explicit stack grows on the heap, matching decode's heap-spilled walk
+ * stack (RFC-0006 — depth is resource-bounded on both sides, no constant). When
+ * everything is accessed, lazy defers nothing, so the verdict must equal
+ * decode's.
+ */
 std::expected<void, tr::wire::err_t> lazy_full_walk(const tr::view::rope_t& r) {
     auto root = tr::wire::tlv_view_t::over(r);
     if (!root) return std::unexpected(root.error());
@@ -139,10 +144,6 @@ std::expected<void, tr::wire::err_t> lazy_full_walk(const tr::view::rope_t& r) {
         if (stack.back().exhausted()) {
             stack.pop_back();
             continue;
-        }
-        // Mirror decode(): a child of stack.back() sits at depth == stack.size().
-        if (stack.size() >= tr::wire::kMaxDepth) {
-            return std::unexpected(tr::wire::err_t::TLV_NESTING_TOO_DEEP);
         }
         auto nx = stack.back().next();
         if (!nx) return std::unexpected(nx.error());
