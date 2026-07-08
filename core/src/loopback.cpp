@@ -9,11 +9,6 @@
 
 namespace tr::net {
 
-void loopback_endpoint_t::set_receiver(receiver_t receiver) {
-    const std::lock_guard lock(m_);
-    receiver_ = std::move(receiver);
-}
-
 void loopback_endpoint_t::send(std::span<const std::byte> frame) {
     if (peer_) peer_->enqueue(std::vector<std::byte>(frame.begin(), frame.end()));
 }
@@ -42,16 +37,16 @@ void loopback_endpoint_t::stop() {
 void loopback_endpoint_t::run() {
     for (;;) {
         std::vector<std::byte> frame;
-        receiver_t receiver;
         {
             std::unique_lock lock(m_);
             cv_.wait(lock, [this] { return stop_ || !inbox_.empty(); });
             if (inbox_.empty()) return;  // woken to stop with nothing left to drain
             frame = std::move(inbox_.front());
             inbox_.pop_front();
-            receiver = receiver_;  // copy under the lock (TSan-safe vs set_receiver)
         }
-        if (receiver) receiver(frame);
+        // The slot snapshots its {fn, ctx} pair under its own lock and dispatches
+        // outside it (TSan-safe vs a concurrent set_receiver).
+        rx_.deliver_borrowed(frame);
     }
 }
 

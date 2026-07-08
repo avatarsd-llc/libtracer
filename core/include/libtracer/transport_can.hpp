@@ -239,12 +239,6 @@ class transport_can : public transport_t, public bus_link_t {
     void send(std::span<const std::byte> frame) override;
 
     /**
-     * @brief Register the sink for reassembled inbound frames.
-     * @param receiver Callback invoked on the link's receive thread with byte-exact frames.
-     */
-    void set_receiver(receiver_t receiver) override;
-
-    /**
      * @brief Look up a learned `id ↔ path` binding by its base CAN ID (test/introspection hook).
      * @param base_can_id The advertised group's base 29-bit CAN ID.
      * @return The learned @ref tr::net::can::advertise_t, or `std::nullopt` if unknown.
@@ -272,23 +266,6 @@ class transport_can : public transport_t, public bus_link_t {
      */
     [[nodiscard]] transport_t* peer_link(std::string_view peer) override;
 
-    /**
-     * @brief Register the peer-named inbound sink (preferred over @ref set_receiver).
-     * @param receiver Invoked on the link's receive thread with the SENDER's peer
-     *                 name (`n<node-id>`) and the byte-exact reassembled frame.
-     */
-    void set_peer_receiver(peer_receiver_t receiver) override;
-
-    /**
-     * @brief Register the OWNING peer-named sink: the reassembled group crosses
-     *        this seam as the rope its slices already are (ADR-0053 §5).
-     * @param receiver Invoked on the link's receive thread with the SENDER's peer
-     *                 name (`n<node-id>`) and the frame as a rope of the group's
-     *                 owning slice views — CAN-FD DLC padding already trimmed by
-     *                 shortening the tail link, never by flattening.
-     */
-    void set_peer_rope_receiver(peer_rope_receiver_t receiver) override;
-
     /** @brief True — the CAN bus reassembles into ropes and delivers them as-is. */
     [[nodiscard]] bool delivers_ropes() const override { return true; }
 
@@ -300,8 +277,8 @@ class transport_can : public transport_t, public bus_link_t {
     class peer_endpoint_t final : public transport_t {
        public:
         void send(std::span<const std::byte> frame) override;
-        void set_receiver(receiver_t receiver) override { (void)receiver; }  // ingress
-        // is the owning transport's (set_peer_receiver) — a documented no-op.
+        // Ingress is the owning transport's (its peer-named slot); the inherited
+        // receiver slot of this directed facade is never delivered to.
 
        private:
         friend class transport_can;
@@ -356,11 +333,8 @@ class transport_can : public transport_t, public bus_link_t {
     mutable std::mutex peers_m_;
     std::map<std::uint16_t, peer_entry_t> peers_;
 
-    // receivers (peer-named preferred; the flat receiver is the fallback)
-    std::mutex m_;
-    receiver_t receiver_;
-    peer_receiver_t peer_receiver_;
-    peer_rope_receiver_t peer_rope_receiver_;
+    // Inbound delivery goes through the inherited peer-named slot (bus_link_t::
+    // peer_rx_) — the ONE tier-select mechanism; no transport-local receivers.
 };
 
 /**

@@ -70,8 +70,13 @@ int main(int argc, char** argv) {
     }
 
     // Echo: hand each inbound frame straight back on the session's frame
-    // stream. Fires on an msquic worker thread; send() is thread-safe.
-    server.set_receiver([&server](std::span<const std::byte> frame) { server.send(frame); });
+    // stream. Fires on an msquic worker thread; send() is thread-safe. The raw
+    // {fn, ctx} form: the sink cannot outlive its context (the server itself).
+    server.set_receiver(
+        [](void* ctx, std::span<const std::byte> frame) {
+            static_cast<tr::net::webtransport_transport_t*>(ctx)->send(frame);
+        },
+        &server);
 
     // Announce the bound port on a single parseable line, then flush so the
     // parent (the TS test) can read it immediately.

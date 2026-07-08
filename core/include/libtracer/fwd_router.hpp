@@ -31,6 +31,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory_resource>
 #include <span>
@@ -323,11 +324,21 @@ class fwd_router_t {
      */
     void deliver_remote(const graph::remote_delivery_t& sub, const view::rope_t& value);
 
+    // The {fn, ctx} context a point-to-point child's receiver is bound with: the
+    // router plus the child's inbound NAME (a bus link tags frames with the peer
+    // name itself, so its ctx is just the router). Deque for pointer stability —
+    // insert-only, like registry_ (the transport holds the address for its life).
+    struct child_rx_ctx_t {
+        fwd_router_t* self;
+        std::string name;
+    };
+
     graph::graph_t& graph_;
     graph::op_resolver_t resolver_;
-    std::pmr::memory_resource* mr_;  // terminus-arena spill resource (ADR-0039 §1)
-    child_registry_t registry_;      // the one NAME→link demux table (Brick 3a, ADR-0037)
-    route_handle_t handles_;         // per-link label tables (compact flows only)
+    std::pmr::memory_resource* mr_;        // terminus-arena spill resource (ADR-0039 §1)
+    child_registry_t registry_;            // the one NAME→link demux table (Brick 3a, ADR-0037)
+    route_handle_t handles_;               // per-link label tables (compact flows only)
+    std::deque<child_rx_ctx_t> child_rx_;  // stable receiver contexts, one per child
     std::function<void(const view::rope_t&)> reply_cb_;
     std::function<void(std::string_view, const wire::tlv_t&)> inbound_cb_;
     std::function<void(std::string_view, std::span<const std::byte>)> raw_cb_;

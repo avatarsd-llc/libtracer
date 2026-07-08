@@ -134,19 +134,17 @@ tr::view::view_t make_value(std::span<const std::byte> bytes) {
     return tr::view::view_t::over(std::move(seg));
 }
 
-// An in-memory transport that records every frame send()'s; the router wires its
-// receiver, which the test pokes to inject inbound frames. Mutex-guarded so the
-// concurrent (TSan) sub-test can capture sends from the writer thread safely.
+// An in-memory transport that records every frame send()'s; the router installs
+// its receiver into the base slot, which the test pokes to inject inbound frames.
+// Mutex-guarded so the concurrent (TSan) sub-test can capture sends from the
+// writer thread safely.
 class fake_link_t : public transport_t {
    public:
     void send(std::span<const std::byte> frame) override {
         const std::lock_guard lock(m_);
         sent_.emplace_back(frame.begin(), frame.end());
     }
-    void set_receiver(receiver_t receiver) override { receiver_ = std::move(receiver); }
-    void inject(std::span<const std::byte> frame) {
-        if (receiver_) receiver_(frame);
-    }
+    void inject(std::span<const std::byte> frame) { rx_.deliver_borrowed(frame); }
     std::vector<std::vector<std::byte>> drain() {
         const std::lock_guard lock(m_);
         return std::exchange(sent_, {});
@@ -159,7 +157,6 @@ class fake_link_t : public transport_t {
    private:
     std::mutex m_;
     std::vector<std::vector<std::byte>> sent_;
-    receiver_t receiver_;
 };
 
 // --- decode helpers ----------------------------------------------------------

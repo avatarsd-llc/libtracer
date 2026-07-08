@@ -8,7 +8,8 @@
  * library carries no reference). Threading model: msquic invokes all callbacks on its worker
  * threads and serializes them per connection, so the RX reassembly state needs
  * no lock (one connection, one stream, one callback at a time); the handle
- * slots and receivers are mutex-guarded exactly like tcp_transport_t.
+ * slots are mutex-guarded exactly like tcp_transport_t, and the receivers live
+ * in the outer transport_t's receiver_slot_t (which does its own locking).
  *
  * Teardown ordering (the msquic contract, ASan-audited): close the listener
  * first (blocks until listener callbacks drain — no new peer can slip in),
@@ -131,9 +132,9 @@ struct quic_transport_t::impl_t {
     std::atomic<std::uint64_t> dropped_rx{0};
     std::atomic<std::uint64_t> malformed_rx{0};
 
-    receiver_t receiver;            // guarded by m
-    rope_receiver_t rope_receiver;  // guarded by m; installed => owning delivery
-    std::mutex m;                   // guards the receivers
+    // The outer transport's delivery-tier slot (receiver_slot.hpp): tier select
+    // and its own locking live there. Wired to &rx_ at construction.
+    receiver_slot_t<>* rx = nullptr;
 
     // The single live peer: its connection + frame stream. conn_m guards the
     // slots (send/replace/teardown); the handles are only CLOSED by the
@@ -166,32 +167,19 @@ struct quic_transport_t::impl_t {
         wait_cv.notify_all();
     }
 
-    // Hand one reassembled frame up: OWNING via the view receiver when
-    // installed, else the borrowed span over the same segment bytes.
-    void deliver(view::segment_ptr_t seg, std::size_t len) {
-        rope_receiver_t vr;
-        receiver_t r;
-        {
-            const std::lock_guard lock(m);
-            vr = rope_receiver;
-            r = receiver;
-        }
-        if (vr) {
-            vr(view::view_t::over(std::move(seg)).subview(0, len));
-        } else if (r) {
-            r(std::span<const std::byte>(seg->bytes.data(), len));
-        }
-    }
-
     // Feed one msquic RECEIVE chunk through the shared length-prefix reassembler
     // (length_prefix_framer — the state machine transport_quic and
-    // transport_webtransport once open-coded). Returns false when the connection
-    // was shut down (malformed prefix) — the caller stops consuming this event's
-    // remaining chunks.
+    // transport_webtransport once open-coded). Each reassembled frame goes up
+    // through the slot: tier select (owning rope sink, else the same segment
+    // bytes borrowed) lives in receiver_slot.hpp. Returns false when the
+    // connection was shut down (malformed prefix) — the caller stops consuming
+    // this event's remaining chunks.
     bool on_rx_chunk(const std::uint8_t* p, std::size_t n) {
-        const auto res = framer_.feed(
-            *backend, max_frame, reinterpret_cast<const std::byte*>(p), n,
-            [this](view::segment_ptr_t seg, std::size_t len) { deliver(std::move(seg), len); });
+        const auto res =
+            framer_.feed(*backend, max_frame, reinterpret_cast<const std::byte*>(p), n,
+                         [this](view::segment_ptr_t seg, std::size_t len) {
+                             rx->deliver(view::view_t::over(std::move(seg)).subview(0, len));
+                         });
         if (res.dropped != 0) dropped_rx.fetch_add(res.dropped, std::memory_order_relaxed);
         if (res.malformed) {
             // A desynced stream cannot be re-framed: count it and shut the peer down.
@@ -326,6 +314,7 @@ quic_transport_t::quic_transport_t(const std::string& peer_host, std::uint16_t p
                                    std::size_t max_frame)
     : impl_(std::make_unique<impl_t>()) {
     impl_t& i = *impl_;
+    i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
     i.backend = backend;
     if (max_frame != 0) i.max_frame = max_frame;
 
@@ -385,6 +374,7 @@ quic_transport_t::quic_transport_t(std::uint16_t bind_port, const std::string& c
                                    std::size_t max_frame)
     : impl_(std::make_unique<impl_t>()) {
     impl_t& i = *impl_;
+    i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
     i.backend = backend;
     if (max_frame != 0) i.max_frame = max_frame;
     i.listen = true;
@@ -453,16 +443,6 @@ quic_transport_t::~quic_transport_t() {
     // Every callback has drained (the Closes above block on that) — take their
     // published writes before the members (framer_ et al.) destruct.
     tsan_acquire(&i);
-}
-
-void quic_transport_t::set_receiver(receiver_t receiver) {
-    const std::lock_guard lock(impl_->m);
-    impl_->receiver = std::move(receiver);
-}
-
-void quic_transport_t::set_rope_receiver(rope_receiver_t receiver) {
-    const std::lock_guard lock(impl_->m);
-    impl_->rope_receiver = std::move(receiver);
 }
 
 void quic_transport_t::send(std::span<const std::byte> frame) {

@@ -296,13 +296,16 @@ void test_enumeration_and_forwarding() {
     fwd_router_t router_t(graph_t_);
     transport_vertex_t net_t(graph_t_, router_t);
 
-    // The client link: a raw loopback endpoint on the far side.
+    // The client link: a raw loopback endpoint on the far side. The named
+    // receiver lambda is declared before the channel it is installed on (the
+    // slot binds it by address).
     mailbox_t inbox;
+    auto cli_rx = [&](std::span<const std::byte> f) {
+        inbox.push(std::vector<std::byte>(f.begin(), f.end()));
+    };
     tr::net::loopback_channel_t channel;
     router_t.add_child("cli", channel.a());
-    channel.b().set_receiver([&](std::span<const std::byte> f) {
-        inbox.push(std::vector<std::byte>(f.begin(), f.end()));
-    });
+    channel.b().set_receiver(cli_rx);
 
     tr::net::transport_can tcan_t(std::make_unique<fake_link_t>(bus),
                                   {0, 1, tr::view::can_frame_mode_t::CLASSIC, "transit"});
@@ -322,9 +325,10 @@ void test_enumeration_and_forwarding() {
 
     // ----- bystander Q (CAN node 7): same bus, must never deliver n5 traffic. -
     std::atomic<int> q_deliveries{0};
+    auto q_rx = [&](std::span<const std::byte>) { ++q_deliveries; };
     tr::net::transport_can tcan_q(std::make_unique<fake_link_t>(bus),
                                   {0, 7, tr::view::can_frame_mode_t::CLASSIC, "boardC"});
-    tcan_q.set_receiver([&](std::span<const std::byte>) { ++q_deliveries; });
+    tcan_q.set_receiver(q_rx);
 
     // ----- 1) local enumeration: /net/can0:children[] == {n5, n7}. ------------
     const bool heard = wait_until(

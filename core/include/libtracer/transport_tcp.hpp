@@ -117,20 +117,9 @@ class tcp_transport_t : public transport_t, private posix_endpoint_t {
      */
     void send(std::span<const std::span<const std::byte>> iov) override;
 
-    void set_receiver(receiver_t receiver) override;
-
-    /**
-     * @brief Install the owning inbound sink (ADR-0042): one frame = one
-     *        refcounted segment from the injected backend, handed up as a view.
-     *
-     * Set before frames flow (the @ref set_receiver contract); fires on the
-     * receive thread. When installed it takes precedence over the span receiver;
-     * when absent, the span receiver gets a borrowed span over the same segment
-     * bytes (the segment is released when the callback returns).
-     */
-    void set_rope_receiver(rope_receiver_t receiver) override;
-
-    /** @brief True — this transport honors @ref set_rope_receiver (ADR-0042). */
+    /** @brief True — this transport honors @ref set_rope_receiver (ADR-0042):
+     *         one frame = one refcounted segment from the injected backend,
+     *         handed up owning; a span-only sink gets the same bytes borrowed. */
     [[nodiscard]] bool delivers_ropes() const override { return true; }
 
     /** @brief DIAL: the connect succeeded; LISTEN: the listen socket is bound. */
@@ -169,14 +158,6 @@ class tcp_transport_t : public transport_t, private posix_endpoint_t {
     std::atomic<std::uint64_t> dropped_rx_{0};
     std::atomic<std::uint64_t> malformed_rx_{0};
 
-    receiver_t receiver_;            // guarded by m_
-    rope_receiver_t rope_receiver_;  // guarded by m_; installed => owning delivery
-    std::mutex m_;                   // guards the receivers
-    // Set by set_receiver/set_rope_receiver; the recv loop re-snapshots the receivers
-    // ONLY when this flag is set — never per frame (the fwd_router closure exceeds the
-    // std::function SBO, so a per-frame copy heap-allocated). Starts true so the first
-    // frame takes its one snapshot.
-    std::atomic<bool> rx_dirty_{true};
     std::mutex write_m_;            // serializes writes to conn_fd_
     std::atomic<int> conn_fd_{-1};  // the live peer connection (-1 = none)
 };

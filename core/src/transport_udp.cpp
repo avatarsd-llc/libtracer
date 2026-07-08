@@ -70,18 +70,6 @@ udp_transport_t::~udp_transport_t() {
     if (fd_ >= 0) ::close(fd_);
 }
 
-void udp_transport_t::set_receiver(receiver_t receiver) {
-    const std::lock_guard lock(m_);
-    receiver_ = std::move(receiver);
-    rx_dirty_.store(true, std::memory_order_release);  // recv loop re-snapshots next datagram
-}
-
-void udp_transport_t::set_rope_receiver(rope_receiver_t receiver) {
-    const std::lock_guard lock(m_);
-    rope_receiver_ = std::move(receiver);
-    rx_dirty_.store(true, std::memory_order_release);  // recv loop re-snapshots next datagram
-}
-
 void udp_transport_t::send(std::span<const std::byte> frame) {
     const std::uint64_t p = peer();
     if (fd_ < 0 || p == 0) return;  // no peer (learned or configured) => nobody to send to
@@ -145,28 +133,13 @@ void udp_transport_t::run() {
     const std::size_t rx_cap = std::min(kMaxDatagram, backend_->max_segment_size());
     view::segment_ptr_t rx_seg;  // pending RX segment, reused across recv timeouts
 
-    // Snapshot the receivers into locals and re-copy them ONLY when set_receiver /
-    // set_rope_receiver marked rx_dirty_ — never per datagram (and never on an idle-
-    // timeout wakeup): the installed fwd_router closure exceeds the std::function SBO,
-    // so a per-datagram copy heap-allocated on EVERY inbound frame. The dirty flag
-    // starts true so the first iteration snapshots. The owning-vs-span path is decided
-    // from the snapshot BEFORE the blocking recvfrom (the segment must exist to receive
-    // into); the span path re-checks the flag AFTER recvfrom so a rope_receiver
+    // The owning-vs-span RECEIVE STRATEGY is decided per iteration off the slot's
+    // rx_.has_rope() — BEFORE the blocking recvfrom (the segment must exist to
+    // receive into); the span path re-checks AFTER recvfrom so a rope sink
     // installed DURING the blocking call still delivers that datagram owning.
-    rope_receiver_t rope_receiver;
-    receiver_t receiver;
-    const auto resnapshot = [&] {
-        if (!rx_dirty_.load(std::memory_order_acquire)) return;
-        rx_dirty_.store(false, std::memory_order_release);  // clear BEFORE copy — re-armable
-        const std::lock_guard lock(m_);
-        rope_receiver = rope_receiver_;
-        receiver = receiver_;
-    };
-
+    // Sink snapshot/tier-select itself lives in the slot (receiver_slot.hpp).
     while (!stop_.load(std::memory_order_relaxed)) {
-        resnapshot();
-
-        if (rope_receiver) {
+        if (rx_.has_rope()) {
             // ADR-0042 §2: one datagram = one frame = one segment — recvfrom straight
             // into a fresh refcounted segment from the injected backend; no library
             // buffer, no copy. The pending segment is reused across recv timeouts
@@ -189,7 +162,7 @@ void udp_transport_t::run() {
             }
             // Narrow the whole-segment view to the received length and hand it up
             // owning — the receiver may pin/subview it beyond this call.
-            rope_receiver(
+            rx_.deliver(
                 view::view_t::over(std::move(rx_seg)).subview(0, static_cast<std::size_t>(n)));
             continue;
         }
@@ -206,23 +179,21 @@ void udp_transport_t::run() {
         if (learn_peer_)
             peer_.store(pack_peer(from.sin_addr.s_addr, ntohs(from.sin_port)),
                         std::memory_order_relaxed);
-        // A rope_receiver may have been installed while we were blocked in recvfrom
+        // A rope sink may have been installed while we were blocked in recvfrom
         // above with the span decision already made — re-check and, if so, deliver this
         // datagram owning via a one-time copy into a backend segment (race-window
         // datagrams only; every subsequent datagram takes the zero-copy path above).
-        resnapshot();
-        if (rope_receiver) {
+        if (rx_.has_rope()) {
             view::segment_ptr_t seg = view::segment_ptr_t::adopt(backend_->alloc(rx_cap));
             if (!seg || static_cast<std::size_t>(n) > seg->bytes.size()) {
                 dropped_rx_.fetch_add(1, std::memory_order_relaxed);
                 continue;
             }
             std::memcpy(seg->bytes.data(), buf, static_cast<std::size_t>(n));
-            rope_receiver(
-                view::view_t::over(std::move(seg)).subview(0, static_cast<std::size_t>(n)));
+            rx_.deliver(view::view_t::over(std::move(seg)).subview(0, static_cast<std::size_t>(n)));
             continue;
         }
-        if (receiver) receiver(std::span<const std::byte>(buf, static_cast<std::size_t>(n)));
+        rx_.deliver_borrowed(std::span<const std::byte>(buf, static_cast<std::size_t>(n)));
     }
 }
 

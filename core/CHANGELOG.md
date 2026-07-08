@@ -12,6 +12,24 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING — the transport receiver seam is `{fn-ptr, ctx}`-based and lives in the
+  base (`receiver_slot_t`).** `transport_t::set_receiver` / `set_rope_receiver` and
+  `bus_link_t::set_peer_receiver` / `set_peer_rope_receiver` are now NON-virtual base
+  functions storing plain `{function pointer, void* context}` pairs in a shared
+  `tr::net::receiver_slot_t` (new header `libtracer/receiver_slot.hpp`) — the one home
+  of the owning-rope-vs-borrowed-span tier select every adapter used to re-implement.
+  The `std::function` aliases `transport_t::receiver_t` / `rope_receiver_t` /
+  `bus_link_t::peer_receiver_t` / `peer_rope_receiver_t` are **removed**; new fn-ptr
+  aliases are `receiver_fn_t` / `rope_receiver_fn_t` / `peer_receiver_fn_t` /
+  `peer_rope_receiver_fn_t`. A template lvalue-callable sugar keeps call sites terse
+  (`auto rx = [&](...){...}; t.set_receiver(rx);`) — the callable is bound by address
+  and must outlive delivery (temporaries no longer compile). Adapter authors: dispatch
+  inbound frames via the protected `rx_` / `peer_rx_` slot (`deliver` /
+  `deliver_rope` / `deliver_borrowed`, strategy query `has_rope()`); the per-adapter
+  receiver members, setter overrides, and `rx_dirty_` snapshot dances are gone.
+
 ## [0.3.0] — 2026-07-08
 
 <!-- The following subsections are the work landed after the initial

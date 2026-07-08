@@ -200,6 +200,11 @@ void test_wt_h3_field_sections() {
 
 void test_session_and_raw_duplex() {
     std::printf("WebTransport — session establishment + raw frames both ways:\n");
+    // Sinks + named receiver lambdas BEFORE the transports: the slot binds the
+    // callable by address, and the transport dtor drains msquic callbacks.
+    sink_t at_listener, at_dialer;
+    auto listener_rx = [&](std::span<const std::byte> f) { at_listener.push(f); };
+    auto dialer_rx = [&](std::span<const std::byte> f) { at_dialer.push(f); };
     webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
     check(listener.ok(), "listener started (ALPN h3, ephemeral port, dev cert)");
     webtransport_transport_t dialer("127.0.0.1", listener.local_port(), "/", dev_tls());
@@ -213,9 +218,8 @@ void test_session_and_raw_duplex() {
         std::this_thread::sleep_for(5ms);
     check(listener.session_up(), "server reports the session up (CONNECT validated, 200 sent)");
 
-    sink_t at_listener, at_dialer;
-    listener.set_receiver([&](std::span<const std::byte> f) { at_listener.push(f); });
-    dialer.set_receiver([&](std::span<const std::byte> f) { at_dialer.push(f); });
+    listener.set_receiver(listener_rx);
+    dialer.set_receiver(dialer_rx);
 
     const auto f1 = test_frame(5, 0x10);
     dialer.send(f1);
@@ -230,9 +234,10 @@ void test_session_and_raw_duplex() {
 
 void test_big_frame_chunking() {
     std::printf("WebTransport — a big frame arrives through many RECEIVE chunks:\n");
-    webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
     sink_t sink;
-    listener.set_receiver([&](std::span<const std::byte> f) { sink.push(f); });
+    auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
+    webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
+    listener.set_receiver(rx);
     webtransport_transport_t dialer("127.0.0.1", listener.local_port(), "/", dev_tls());
 
     const auto small1 = test_frame(3, 0x07);
@@ -285,15 +290,16 @@ class recording_backend_t final : public tr::mem::mem_backend_t {
 void test_view_delivery_and_backpressure() {
     std::printf("WebTransport — owning view delivery (ADR-0042) + backpressure drain:\n");
     recording_backend_t rec;
+    std::promise<tr::view::view_t> got;
+    auto fut = got.get_future();
+    auto rope_rx = [&](tr::view::rope_t f) {
+        if (f.link_count() == 1) got.set_value(f.links()[0]);  // single-link: the trivial rope
+    };
     webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key, &rec);
     check(listener.delivers_ropes(), "webtransport_transport_t::delivers_ropes() is true");
     webtransport_transport_t dialer("127.0.0.1", listener.local_port(), "/", dev_tls());
 
-    std::promise<tr::view::view_t> got;
-    auto fut = got.get_future();
-    listener.set_rope_receiver([&](tr::view::rope_t f) {
-        if (f.link_count() == 1) got.set_value(f.links()[0]);  // single-link: the trivial rope
-    });
+    listener.set_rope_receiver(rope_rx);
 
     const auto frame = test_frame(48, 0x21);
     dialer.send(frame);
@@ -316,9 +322,10 @@ void test_view_delivery_and_backpressure() {
 
     // Backpressure: the first two allocations fail; the third frame delivers.
     recording_backend_t starved(2);
-    webtransport_transport_t listener2(std::uint16_t{0}, g_cert, g_key, &starved);
     sink_t sink;
-    listener2.set_rope_receiver([&](tr::view::rope_t f) { sink.push(f.links()[0].bytes()); });
+    auto rope_rx2 = [&](tr::view::rope_t f) { sink.push(f.links()[0].bytes()); };
+    webtransport_transport_t listener2(std::uint16_t{0}, g_cert, g_key, &starved);
+    listener2.set_rope_receiver(rope_rx2);
     webtransport_transport_t dialer2("127.0.0.1", listener2.local_port(), "/", dev_tls());
     const auto d1 = test_frame(8192, 0x01);
     const auto d2 = test_frame(16, 0x50);

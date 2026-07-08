@@ -175,9 +175,9 @@ struct webtransport_transport_t::impl_t {
     std::atomic<std::uint64_t> dropped_rx{0};
     std::atomic<std::uint64_t> malformed_rx{0};
 
-    receiver_t receiver;            // guarded by m
-    rope_receiver_t rope_receiver;  // guarded by m; installed => owning delivery
-    std::mutex m;                   // guards the receivers
+    // The outer transport's delivery-tier slot (receiver_slot.hpp): tier select
+    // and its own locking live there. Wired to &rx_ at construction.
+    receiver_slot_t<>* rx = nullptr;
 
     // The single live session: its connection, every stream context, and the
     // adopted frame channel. conn_m guards the slots; handles are only CLOSED
@@ -233,29 +233,17 @@ struct webtransport_transport_t::impl_t {
         if (c != nullptr) api->ConnectionShutdown(c, QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, code);
     }
 
-    // Hand one reassembled frame up (owning when a view receiver is installed).
-    void deliver(view::segment_ptr_t seg, std::size_t len) {
-        rope_receiver_t vr;
-        receiver_t r;
-        {
-            const std::lock_guard lock(m);
-            vr = rope_receiver;
-            r = receiver;
-        }
-        if (vr) {
-            vr(view::view_t::over(std::move(seg)).subview(0, len));
-        } else if (r) {
-            r(std::span<const std::byte>(seg->bytes.data(), len));
-        }
-    }
-
     // The length-prefix reassembly, delegated to the shared length_prefix_framer
     // (one exactly-sized segment per frame, backpressure drain, malformed oversize
-    // prefix => connection shutdown). Returns false once shut down.
+    // prefix => connection shutdown). Each reassembled frame goes up through the
+    // slot: tier select (owning rope sink, else the same segment bytes borrowed)
+    // lives in receiver_slot.hpp. Returns false once shut down.
     bool on_rx_chunk(const std::uint8_t* p, std::size_t n) {
-        const auto res = framer_.feed(
-            *backend, max_frame, reinterpret_cast<const std::byte*>(p), n,
-            [this](view::segment_ptr_t seg, std::size_t len) { deliver(std::move(seg), len); });
+        const auto res =
+            framer_.feed(*backend, max_frame, reinterpret_cast<const std::byte*>(p), n,
+                         [this](view::segment_ptr_t seg, std::size_t len) {
+                             rx->deliver(view::view_t::over(std::move(seg)).subview(0, len));
+                         });
         if (res.dropped != 0) dropped_rx.fetch_add(res.dropped, std::memory_order_relaxed);
         if (res.malformed) {
             malformed_rx.fetch_add(1, std::memory_order_relaxed);
@@ -658,6 +646,7 @@ webtransport_transport_t::webtransport_transport_t(const std::string& peer_host,
                                                    std::size_t max_frame)
     : impl_(std::make_unique<impl_t>()) {
     impl_t& i = *impl_;
+    i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
     i.backend = backend;
     if (max_frame != 0) i.max_frame = max_frame;
     i.authority = peer_host + ":" + std::to_string(peer_port);
@@ -753,6 +742,7 @@ webtransport_transport_t::webtransport_transport_t(std::uint16_t bind_port,
                                                    std::size_t max_frame)
     : impl_(std::make_unique<impl_t>()) {
     impl_t& i = *impl_;
+    i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
     i.backend = backend;
     if (max_frame != 0) i.max_frame = max_frame;
     i.listen = true;
@@ -818,16 +808,6 @@ webtransport_transport_t::~webtransport_transport_t() {
     // Every callback has drained — take their published writes before the
     // members (framer_ et al.) destruct.
     tsan_acquire(&i);
-}
-
-void webtransport_transport_t::set_receiver(receiver_t receiver) {
-    const std::lock_guard lock(impl_->m);
-    impl_->receiver = std::move(receiver);
-}
-
-void webtransport_transport_t::set_rope_receiver(rope_receiver_t receiver) {
-    const std::lock_guard lock(impl_->m);
-    impl_->rope_receiver = std::move(receiver);
 }
 
 void webtransport_transport_t::send(std::span<const std::byte> frame) {
