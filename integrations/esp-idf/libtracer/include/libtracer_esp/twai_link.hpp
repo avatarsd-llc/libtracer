@@ -1,4 +1,8 @@
-/*
+/**
+ * @file
+ * @brief `twai_link_t` — the ESP-IDF `can_link_t` over the on-chip TWAI
+ *        controller.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
@@ -81,16 +85,17 @@ class twai_link_t : public can_link_t {
     [[nodiscard]] bool ok() const noexcept { return node_ != nullptr; }
 
    private:
-    // ISR-context RX-done hook: copy the frame out of the driver and queue it.
+    /** @brief ISR-context RX-done hook: copy the frame out of the driver and queue it. */
     static bool on_rx_done_isr(twai_node_handle_t node, const twai_rx_done_event_data_t* edata,
                                void* user_ctx);
-    void run();  // dispatch thread: queue -> registered rx_fn_t
+    /** @brief Dispatch thread: queue -> registered rx_fn_t. */
+    void run();
 
     twai_node_handle_t node_ = nullptr;
-    QueueHandle_t rx_queue_ = nullptr;  // of can_frame_data_t, ISR -> dispatch
-    rx_fn_t rx_;                        // guarded by m_
-    std::mutex m_;                      // guards rx_
-    std::mutex write_m_;                // serializes writes / teardown
+    QueueHandle_t rx_queue_ = nullptr; /**< @brief Of can_frame_data_t, ISR -> dispatch. */
+    rx_fn_t rx_;                       /**< @brief Guarded by m_. */
+    std::mutex m_;                     /**< @brief Guards rx_. */
+    std::mutex write_m_;               /**< @brief Serializes writes / teardown. */
     std::atomic<bool> stop_{false};
     std::thread thread_;
 };
