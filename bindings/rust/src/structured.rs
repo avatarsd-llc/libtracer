@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
-//! Structured-TLV typed accessors + builders (Unit 6).
-//!
-//! Typed read/build for the core structured containers: POINT (`0x07`), SETTINGS
-//! (`0x0B`), ACL (`0x0A`, NFSv4-style ACEs), SUBSCRIBER (`0x04`), SPEC (`0x0E`),
-//! plus a generic NAME-tagged field reader that also covers the ROUTER (`0x0D`)
-//! envelope. Byte layouts per reference/05. Vector-pinned: `settings-reliability`,
-//! `subscriber-path`, `router-wrapped`, `acl-aces`.
+/*!
+ * @brief Structured-TLV typed accessors + builders (Unit 6).
+ *
+ * Typed read/build for the core structured containers: POINT (`0x07`), SETTINGS
+ * (`0x0B`), ACL (`0x0A`, NFSv4-style ACEs), SUBSCRIBER (`0x04`), SPEC (`0x0E`),
+ * plus a generic NAME-tagged field reader that also covers the ROUTER (`0x0D`)
+ * envelope. Byte layouts per reference/05. Vector-pinned: `settings-reliability`,
+ * `subscriber-path`, `router-wrapped`, `acl-aces`.
+ */
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -22,22 +24,26 @@ fn named_value(key: &str, val: Tlv) -> Result<[Tlv; 2], BuildError> {
 
 /* -------------------------------------------------------------- NAME-tagged --- */
 
-/// A NAME-tagged field: a NAME key paired with the TLV that follows it. The
-/// generic shape of SETTINGS, SPEC, an ACE's fields, and the ROUTER envelope.
+/**
+ * @brief A NAME-tagged field: a NAME key paired with the TLV that follows it. The
+ * generic shape of SETTINGS, SPEC, an ACE's fields, and the ROUTER envelope.
+ */
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamedField {
-    /// The field key (the NAME child's UTF-8 payload).
+    /** @brief The field key (the NAME child's UTF-8 payload). */
     pub key: String,
-    /// The value TLV that follows the NAME key.
+    /** @brief The value TLV that follows the NAME key. */
     pub value: Tlv,
 }
 
-/// Read the NAME-tagged fields of any structured TLV: each `NAME` child is paired
-/// with the immediately-following child as its value. A trailing `NAME` with no
-/// following value is skipped. Covers `router-wrapped`, SETTINGS, SPEC.
-///
-/// # Errors
-/// [`BuildError::InvalidUtf8`] on a non-UTF-8 NAME key.
+/**
+ * @brief Read the NAME-tagged fields of any structured TLV: each `NAME` child is paired
+ * with the immediately-following child as its value. A trailing `NAME` with no
+ * following value is skipped. Covers `router-wrapped`, SETTINGS, SPEC.
+ *
+ * # Errors
+ * [`BuildError::InvalidUtf8`] on a non-UTF-8 NAME key.
+ */
 pub fn named_fields(tlv: &Tlv) -> Result<Vec<NamedField>, BuildError> {
     let mut out = Vec::new();
     let ch = &tlv.children;
@@ -56,21 +62,28 @@ pub fn named_fields(tlv: &Tlv) -> Result<Vec<NamedField>, BuildError> {
     Ok(out)
 }
 
-/// The value TLV of the first NAME-tagged field with the given key, or `None`.
-///
-/// # Errors
-/// [`BuildError::InvalidUtf8`] on a non-UTF-8 NAME key while scanning.
+/**
+ * @brief The value TLV of the first NAME-tagged field with the given key, or `None`.
+ *
+ * # Errors
+ * [`BuildError::InvalidUtf8`] on a non-UTF-8 NAME key while scanning.
+ */
 pub fn named_field(tlv: &Tlv, key: &str) -> Result<Option<Tlv>, BuildError> {
-    Ok(named_fields(tlv)?.into_iter().find(|f| f.key == key).map(|f| f.value))
+    Ok(named_fields(tlv)?
+        .into_iter()
+        .find(|f| f.key == key)
+        .map(|f| f.value))
 }
 
 /* ---------------------------------------------------------------- SETTINGS --- */
 
-/// Build a SETTINGS TLV (`type=0x0B`, `PL=1`) from `NAME`→opaque-VALUE pairs.
-/// Vector-pinned: `settings-reliability` (`SETTINGS{ NAME "reliability", VALUE u8=1 }`).
-///
-/// # Errors
-/// A per-key segment error from [`name`].
+/**
+ * @brief Build a SETTINGS TLV (`type=0x0B`, `PL=1`) from `NAME`→opaque-VALUE pairs.
+ * Vector-pinned: `settings-reliability` (`SETTINGS{ NAME "reliability", VALUE u8=1 }`).
+ *
+ * # Errors
+ * A per-key segment error from [`name`].
+ */
 pub fn settings(pairs: &[(&str, &[u8])]) -> Result<Tlv, BuildError> {
     let mut children = Vec::with_capacity(pairs.len() * 2);
     for (key, val) in pairs {
@@ -87,10 +100,12 @@ pub fn settings(pairs: &[(&str, &[u8])]) -> Result<Tlv, BuildError> {
     })
 }
 
-/// The opaque value bytes of a SETTINGS key, or `None`.
-///
-/// # Errors
-/// [`BuildError::TypeMismatch`] if the TLV is not a SETTINGS, or a non-UTF-8 key.
+/**
+ * @brief The opaque value bytes of a SETTINGS key, or `None`.
+ *
+ * # Errors
+ * [`BuildError::TypeMismatch`] if the TLV is not a SETTINGS, or a non-UTF-8 key.
+ */
 pub fn settings_get(tlv: &Tlv, key: &str) -> Result<Option<Vec<u8>>, BuildError> {
     if tlv.type_code != type_code::SETTINGS {
         return Err(BuildError::TypeMismatch);
@@ -100,10 +115,12 @@ pub fn settings_get(tlv: &Tlv, key: &str) -> Result<Option<Vec<u8>>, BuildError>
 
 /* -------------------------------------------------------------- SUBSCRIBER --- */
 
-/// The target PATH TLV of a SUBSCRIBER (`0x04`), or `None`.
-///
-/// # Errors
-/// [`BuildError::TypeMismatch`] if the TLV is not a SUBSCRIBER.
+/**
+ * @brief The target PATH TLV of a SUBSCRIBER (`0x04`), or `None`.
+ *
+ * # Errors
+ * [`BuildError::TypeMismatch`] if the TLV is not a SUBSCRIBER.
+ */
 pub fn subscriber_target(tlv: &Tlv) -> Result<Option<&Tlv>, BuildError> {
     if tlv.type_code != type_code::SUBSCRIBER {
         return Err(BuildError::TypeMismatch);
@@ -111,12 +128,14 @@ pub fn subscriber_target(tlv: &Tlv) -> Result<Option<&Tlv>, BuildError> {
     Ok(tlv.first_child(type_code::PATH))
 }
 
-/// The target path of a SUBSCRIBER in string form (`"/sensor/temp"`), or `None`
-/// when the subscriber has no target PATH (the unsubscribe sentinel).
-///
-/// # Errors
-/// [`BuildError::TypeMismatch`] if the TLV is not a SUBSCRIBER, or a PATH-decode
-/// error.
+/**
+ * @brief The target path of a SUBSCRIBER in string form (`"/sensor/temp"`), or `None`
+ * when the subscriber has no target PATH (the unsubscribe sentinel).
+ *
+ * # Errors
+ * [`BuildError::TypeMismatch`] if the TLV is not a SUBSCRIBER, or a PATH-decode
+ * error.
+ */
 pub fn subscriber_target_path(tlv: &Tlv) -> Result<Option<String>, BuildError> {
     match subscriber_target(tlv)? {
         Some(p) => Ok(Some(tlv_to_path(p)?)),
@@ -126,13 +145,19 @@ pub fn subscriber_target_path(tlv: &Tlv) -> Result<Option<String>, BuildError> {
 
 /* -------------------------------------------------------------------- POINT --- */
 
-/// Build a POINT TLV (`type=0x07`, `PL=1`): a leading `NAME`, an optional own
-/// `VALUE`, then any extra children (DESCRIPTION / SETTINGS / SUBSCRIBER / nested
-/// POINT) in caller order (reference/05 §0x07).
-///
-/// # Errors
-/// A segment error from building the leading [`name`].
-pub fn point(vertex_name: &str, own_value: Option<&[u8]>, extra: &[Tlv]) -> Result<Tlv, BuildError> {
+/**
+ * @brief Build a POINT TLV (`type=0x07`, `PL=1`): a leading `NAME`, an optional own
+ * `VALUE`, then any extra children (DESCRIPTION / SETTINGS / SUBSCRIBER / nested
+ * POINT) in caller order (reference/05 §0x07).
+ *
+ * # Errors
+ * A segment error from building the leading [`name`].
+ */
+pub fn point(
+    vertex_name: &str,
+    own_value: Option<&[u8]>,
+    extra: &[Tlv],
+) -> Result<Tlv, BuildError> {
     let mut children = Vec::new();
     children.push(name(vertex_name)?);
     if let Some(v) = own_value {
@@ -148,10 +173,12 @@ pub fn point(vertex_name: &str, own_value: Option<&[u8]>, extra: &[Tlv]) -> Resu
     })
 }
 
-/// The vertex name of a POINT (its first NAME child), or `None`.
-///
-/// # Errors
-/// [`BuildError::TypeMismatch`] if the TLV is not a POINT, or a non-UTF-8 name.
+/**
+ * @brief The vertex name of a POINT (its first NAME child), or `None`.
+ *
+ * # Errors
+ * [`BuildError::TypeMismatch`] if the TLV is not a POINT, or a non-UTF-8 name.
+ */
 pub fn point_name(tlv: &Tlv) -> Result<Option<String>, BuildError> {
     if tlv.type_code != type_code::POINT {
         return Err(BuildError::TypeMismatch);
@@ -162,10 +189,12 @@ pub fn point_name(tlv: &Tlv) -> Result<Option<String>, BuildError> {
     }
 }
 
-/// The own VALUE payload of a POINT (its first VALUE child), or `None`.
-///
-/// # Errors
-/// [`BuildError::TypeMismatch`] if the TLV is not a POINT.
+/**
+ * @brief The own VALUE payload of a POINT (its first VALUE child), or `None`.
+ *
+ * # Errors
+ * [`BuildError::TypeMismatch`] if the TLV is not a POINT.
+ */
 pub fn point_value(tlv: &Tlv) -> Result<Option<Vec<u8>>, BuildError> {
     if tlv.type_code != type_code::POINT {
         return Err(BuildError::TypeMismatch);
@@ -173,10 +202,12 @@ pub fn point_value(tlv: &Tlv) -> Result<Option<Vec<u8>>, BuildError> {
     Ok(tlv.first_child(type_code::VALUE).map(|v| v.payload.clone()))
 }
 
-/// The nested child POINTs of a POINT (recursive vertex structure).
-///
-/// # Errors
-/// [`BuildError::TypeMismatch`] if the TLV is not a POINT.
+/**
+ * @brief The nested child POINTs of a POINT (recursive vertex structure).
+ *
+ * # Errors
+ * [`BuildError::TypeMismatch`] if the TLV is not a POINT.
+ */
 pub fn point_children(tlv: &Tlv) -> Result<Vec<&Tlv>, BuildError> {
     if tlv.type_code != type_code::POINT {
         return Err(BuildError::TypeMismatch);
@@ -186,25 +217,29 @@ pub fn point_children(tlv: &Tlv) -> Result<Vec<&Tlv>, BuildError> {
 
 /* ---------------------------------------------------------------------- ACL --- */
 
-/// One NFSv4-style access-control entry (ADR-0020, reference/05 §0x0A). The wire
-/// form is an inner `ACL` TLV of NAME-tagged fields.
+/**
+ * @brief One NFSv4-style access-control entry (ADR-0020, reference/05 §0x0A). The wire
+ * form is an inner `ACL` TLV of NAME-tagged fields.
+ */
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ace {
-    /// `type`: 0 = ALLOW, 1 = DENY.
+    /** @brief `type`: 0 = ALLOW, 1 = DENY. */
     pub ace_type: u8,
-    /// `flags` bitfield (INHERIT=0x1, INHERIT_ONLY=0x2, NO_PROPAGATE=0x4, GROUP=0x8).
+    /** @brief `flags` bitfield (INHERIT=0x1, INHERIT_ONLY=0x2, NO_PROPAGATE=0x4, GROUP=0x8). */
     pub flags: u8,
-    /// `subject` token bytes (e.g. `"peer-a"`, or special `"EVERYONE@"` / `"OWNER@"`).
+    /** @brief `subject` token bytes (e.g. `"peer-a"`, or special `"EVERYONE@"` / `"OWNER@"`). */
     pub subject: Vec<u8>,
-    /// `access_mask` u16 bitfield (READ=0x01, WRITE=0x02, SUBSCRIBE=0x04, …).
+    /** @brief `access_mask` u16 bitfield (READ=0x01, WRITE=0x02, SUBSCRIBE=0x04, …). */
     pub access_mask: u16,
-    /// Optional `expires_ns` u64 (absent ⇒ never expires).
+    /** @brief Optional `expires_ns` u64 (absent ⇒ never expires). */
     pub expires_ns: Option<u64>,
 }
 
 impl Ace {
-    /// Build the inner ACL TLV (one ACE): NAME-tagged `type`, `flags`, `subject`,
-    /// `access_mask`, and optional `expires_ns`, in that order.
+    /**
+     * @brief Build the inner ACL TLV (one ACE): NAME-tagged `type`, `flags`, `subject`,
+     * `access_mask`, and optional `expires_ns`, in that order.
+     */
     fn to_tlv(&self) -> Tlv {
         let mut children = Vec::new();
         push_named(&mut children, "type", value_u8(self.ace_type));
@@ -231,8 +266,10 @@ fn push_named(children: &mut Vec<Tlv>, key: &str, val: Tlv) {
     children.push(val);
 }
 
-/// Build an ACL TLV (`type=0x0A`, `PL=1`): the outer ACE collection whose children
-/// are inner ACL ACEs. Vector-pinned: `acl-aces`.
+/**
+ * @brief Build an ACL TLV (`type=0x0A`, `PL=1`): the outer ACE collection whose children
+ * are inner ACL ACEs. Vector-pinned: `acl-aces`.
+ */
 pub fn acl(aces: &[Ace]) -> Tlv {
     Tlv {
         type_code: type_code::ACL,
@@ -243,11 +280,13 @@ pub fn acl(aces: &[Ace]) -> Tlv {
     }
 }
 
-/// Parse an ACL TLV into its ACEs (each inner ACL a NAME-tagged ACE record).
-///
-/// # Errors
-/// [`BuildError::TypeMismatch`] if the TLV is not an ACL or an ACE lacks the
-/// required `type` / `subject` / `access_mask` fields.
+/**
+ * @brief Parse an ACL TLV into its ACEs (each inner ACL a NAME-tagged ACE record).
+ *
+ * # Errors
+ * [`BuildError::TypeMismatch`] if the TLV is not an ACL or an ACE lacks the
+ * required `type` / `subject` / `access_mask` fields.
+ */
 pub fn acl_aces(tlv: &Tlv) -> Result<Vec<Ace>, BuildError> {
     if tlv.type_code != type_code::ACL {
         return Err(BuildError::TypeMismatch);
@@ -258,8 +297,13 @@ pub fn acl_aces(tlv: &Tlv) -> Result<Vec<Ace>, BuildError> {
         let get = |k: &str| fields.iter().find(|f| f.key == k).map(|f| &f.value);
         let ace_type = get("type").ok_or(BuildError::TypeMismatch)?.payload_uint() as u8;
         let flags = get("flags").map(|v| v.payload_uint() as u8).unwrap_or(0);
-        let subject = get("subject").ok_or(BuildError::TypeMismatch)?.payload.clone();
-        let access_mask = get("access_mask").ok_or(BuildError::TypeMismatch)?.payload_uint() as u16;
+        let subject = get("subject")
+            .ok_or(BuildError::TypeMismatch)?
+            .payload
+            .clone();
+        let access_mask = get("access_mask")
+            .ok_or(BuildError::TypeMismatch)?
+            .payload_uint() as u16;
         let expires_ns = get("expires_ns").map(|v| v.payload_uint());
         out.push(Ace {
             ace_type,
@@ -274,12 +318,14 @@ pub fn acl_aces(tlv: &Tlv) -> Result<Vec<Ace>, BuildError> {
 
 /* --------------------------------------------------------------------- SPEC --- */
 
-/// Build a SPEC TLV (`type=0x0E`, `PL=1`) for in-band vertex creation
-/// (reference/05 §0x0E): NAME-tagged `type` (catalog selector) and `name` (the
-/// new child's path component), plus an optional `config` SETTINGS child.
-///
-/// # Errors
-/// A segment error from a NAME key.
+/**
+ * @brief Build a SPEC TLV (`type=0x0E`, `PL=1`) for in-band vertex creation
+ * (reference/05 §0x0E): NAME-tagged `type` (catalog selector) and `name` (the
+ * new child's path component), plus an optional `config` SETTINGS child.
+ *
+ * # Errors
+ * A segment error from a NAME key.
+ */
 pub fn spec(type_sel: &str, child_name: &str, config: Option<Tlv>) -> Result<Tlv, BuildError> {
     let mut children = Vec::new();
     let [k1, v1] = named_value("type", value(type_sel.as_bytes()))?;
@@ -301,11 +347,13 @@ pub fn spec(type_sel: &str, child_name: &str, config: Option<Tlv>) -> Result<Tlv
     })
 }
 
-/// The `type` (catalog selector) and `name` (child component) of a SPEC, as a
-/// pair of UTF-8 strings; either is `None` when its field is absent.
-///
-/// # Errors
-/// [`BuildError::TypeMismatch`] if the TLV is not a SPEC, or a non-UTF-8 field.
+/**
+ * @brief The `type` (catalog selector) and `name` (child component) of a SPEC, as a
+ * pair of UTF-8 strings; either is `None` when its field is absent.
+ *
+ * # Errors
+ * [`BuildError::TypeMismatch`] if the TLV is not a SPEC, or a non-UTF-8 field.
+ */
 pub fn spec_type_name(tlv: &Tlv) -> Result<(Option<String>, Option<String>), BuildError> {
     if tlv.type_code != type_code::SPEC {
         return Err(BuildError::TypeMismatch);

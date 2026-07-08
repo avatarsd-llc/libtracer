@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-//
-// Unit 10 — in-crate conformance tests over the SHARED vectors
-// (tests/conformance/vectors/v1/). The `conformance` example already checks
-// encode(decode(input)) == input for every vector (round-trip only); this suite
-// closes that gap by loading BOTH input.bin AND expected.json and asserting the
-// DECODED STRUCTURE matches — the typed-tier builders/parsers (Units 1-6) must
-// reproduce and interpret every vector byte-for-byte, exactly like the C++ core
-// and the TypeScript client.
-//
-// Tests link std (file I/O). The library crate stays #![no_std]. Zero runtime
-// deps are preserved: the tiny JSON reader below extracts the `hex` /
-// `total_bytes` fields without pulling in serde.
+/*!
+ * @brief Unit 10 — in-crate conformance tests over the SHARED vectors
+ * (tests/conformance/vectors/v1/). The `conformance` example already checks
+ * encode(decode(input)) == input for every vector (round-trip only); this suite
+ * closes that gap by loading BOTH input.bin AND expected.json and asserting the
+ * DECODED STRUCTURE matches — the typed-tier builders/parsers (Units 1-6) must
+ * reproduce and interpret every vector byte-for-byte, exactly like the C++ core
+ * and the TypeScript client.
+ *
+ * Tests link std (file I/O). The library crate stays #![no_std]. Zero runtime
+ * deps are preserved: the tiny JSON reader below extracts the `hex` /
+ * `total_bytes` fields without pulling in serde.
+ */
 
 use std::fs;
 use std::path::PathBuf;
@@ -32,11 +33,11 @@ fn vectors_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/conformance/vectors/v1")
 }
 
-/// Read a vector's raw input bytes and its expected.json text.
+/** @brief Read a vector's raw input bytes and its expected.json text. */
 fn load(name: &str) -> (Vec<u8>, String) {
     let dir = vectors_dir().join(name);
-    let bin = fs::read(dir.join("input.bin"))
-        .unwrap_or_else(|e| panic!("read {name}/input.bin: {e}"));
+    let bin =
+        fs::read(dir.join("input.bin")).unwrap_or_else(|e| panic!("read {name}/input.bin: {e}"));
     let json = fs::read_to_string(dir.join("expected.json"))
         .unwrap_or_else(|e| panic!("read {name}/expected.json: {e}"));
     (bin, json)
@@ -54,8 +55,10 @@ fn from_hex(s: &str) -> Vec<u8> {
     b.chunks(2).map(|p| (n(p[0]) << 4) | n(p[1])).collect()
 }
 
-/// Extract a JSON string value by top-level-ish key (`"key": "value"`). The
-/// vector `hex` fields are pure hex with no escapes, so a scan-to-quote suffices.
+/**
+ * @brief Extract a JSON string value by top-level-ish key (`"key": "value"`). The
+ * vector `hex` fields are pure hex with no escapes, so a scan-to-quote suffices.
+ */
 fn json_str(text: &str, key: &str) -> String {
     let needle = format!("\"{key}\"");
     let start = text.find(&needle).unwrap_or_else(|| panic!("no key {key}"));
@@ -66,7 +69,7 @@ fn json_str(text: &str, key: &str) -> String {
     after[q1..q2].to_string()
 }
 
-/// Extract a JSON unsigned-integer value by key (`"key": 123`).
+/** @brief Extract a JSON unsigned-integer value by key (`"key": 123`). */
 fn json_uint(text: &str, key: &str) -> u64 {
     let needle = format!("\"{key}\"");
     let start = text.find(&needle).unwrap_or_else(|| panic!("no key {key}"));
@@ -81,11 +84,17 @@ fn json_uint(text: &str, key: &str) -> u64 {
         .unwrap()
 }
 
-/// Assert a vector's `hex` == input.bin, `total_bytes` == len, and that the codec
-/// round-trips it (the shared invariant every vector satisfies).
+/**
+ * @brief Assert a vector's `hex` == input.bin, `total_bytes` == len, and that the codec
+ * round-trips it (the shared invariant every vector satisfies).
+ */
 fn assert_vector_consistent(name: &str) -> Vec<u8> {
     let (bin, json) = load(name);
-    assert_eq!(from_hex(&json_str(&json, "hex")), bin, "{name}: hex != input.bin");
+    assert_eq!(
+        from_hex(&json_str(&json, "hex")),
+        bin,
+        "{name}: hex != input.bin"
+    );
     assert_eq!(
         json_uint(&json, "total_bytes") as usize,
         bin.len(),
@@ -98,7 +107,7 @@ fn assert_vector_consistent(name: &str) -> Vec<u8> {
 
 /* --------------------------------------------------- all-vectors structural --- */
 
-/// Every vector: hex-field consistency + codec round-trip, over the whole corpus.
+/** @brief Every vector: hex-field consistency + codec round-trip, over the whole corpus. */
 #[test]
 fn all_vectors_hex_and_roundtrip() {
     let mut count = 0;
@@ -154,7 +163,10 @@ fn value_crc32c() {
         crc: true,
         ..Default::default()
     };
-    assert_eq!(encode(&value_opts(&[0xAA, 0xBB, 0xCC, 0xDD, 0xEE], &opts)), bin);
+    assert_eq!(
+        encode(&value_opts(&[0xAA, 0xBB, 0xCC, 0xDD, 0xEE], &opts)),
+        bin
+    );
 }
 
 #[test]
@@ -192,17 +204,29 @@ fn path_sensor_temp() {
     assert_eq!(encode(&tlv), bin);
     // parse: TLV -> string
     let decoded = decode(&bin).unwrap();
-    assert_eq!(libtracer::path::tlv_to_path(&decoded).unwrap(), "/sensor/temp");
+    assert_eq!(
+        libtracer::path::tlv_to_path(&decoded).unwrap(),
+        "/sensor/temp"
+    );
     assert_eq!(decoded.children.len(), 2);
     // segments builder equivalence
-    assert_eq!(encode(&libtracer::tlv_builders::path(&["sensor", "temp"]).unwrap()), bin);
+    assert_eq!(
+        encode(&libtracer::tlv_builders::path(&["sensor", "temp"]).unwrap()),
+        bin
+    );
 }
 
 #[test]
 fn path_split_and_root() {
-    assert_eq!(libtracer::path::split_path("/sensor/temp").unwrap(), vec!["sensor", "temp"]);
+    assert_eq!(
+        libtracer::path::split_path("/sensor/temp").unwrap(),
+        vec!["sensor", "temp"]
+    );
     assert!(libtracer::path::split_path("/").unwrap().is_empty());
-    assert_eq!(libtracer::path::split_path("/a/b/").unwrap(), vec!["a", "b"]);
+    assert_eq!(
+        libtracer::path::split_path("/a/b/").unwrap(),
+        vec!["a", "b"]
+    );
 }
 
 #[test]
@@ -217,14 +241,26 @@ fn path_rejects_reserved_and_overlong() {
     }
     // over-length single segment (> 64 bytes)
     let long = format!("/{}", "x".repeat(65));
-    assert_eq!(libtracer::path::path_to_tlv(&long).unwrap_err(), BuildError::SegmentLength);
+    assert_eq!(
+        libtracer::path::path_to_tlv(&long).unwrap_err(),
+        BuildError::SegmentLength
+    );
     // not rooted
-    assert_eq!(libtracer::path::path_to_tlv("sensor/temp").unwrap_err(), BuildError::NotRooted);
+    assert_eq!(
+        libtracer::path::path_to_tlv("sensor/temp").unwrap_err(),
+        BuildError::NotRooted
+    );
     // too many segments (> 32)
     let many = format!("/{}", vec!["a"; 33].join("/"));
-    assert_eq!(libtracer::path::split_path(&many).unwrap_err(), BuildError::TooManySegments);
+    assert_eq!(
+        libtracer::path::split_path(&many).unwrap_err(),
+        BuildError::TooManySegments
+    );
     // empty segment
-    assert_eq!(libtracer::path::split_path("/a//b").unwrap_err(), BuildError::SegmentLength);
+    assert_eq!(
+        libtracer::path::split_path("/a//b").unwrap_err(),
+        BuildError::SegmentLength
+    );
 }
 
 /* -------------------------------------------------- Unit 3 — ERROR + STATUS --- */
@@ -243,7 +279,10 @@ fn error_registered_code() {
 #[test]
 fn error_registered_detail() {
     let bin = assert_vector_consistent("errors/error-registered-detail");
-    assert_eq!(encode(&error_code(ErrCode::FlowTimeout, Some("deadline exceeded"))), bin);
+    assert_eq!(
+        encode(&error_code(ErrCode::FlowTimeout, Some("deadline exceeded"))),
+        bin
+    );
     let parsed = parse_error(&decode(&bin).unwrap()).unwrap();
     assert_eq!(parsed.err_code(), Some(ErrCode::FlowTimeout));
     assert_eq!(parsed.description.as_deref(), Some("deadline exceeded"));
@@ -326,9 +365,15 @@ fn field_nested() {
 #[test]
 fn settings_reliability() {
     let bin = assert_vector_consistent("tlv-types/settings-reliability");
-    assert_eq!(encode(&structured::settings(&[("reliability", &[1])]).unwrap()), bin);
+    assert_eq!(
+        encode(&structured::settings(&[("reliability", &[1])]).unwrap()),
+        bin
+    );
     let t = decode(&bin).unwrap();
-    assert_eq!(structured::settings_get(&t, "reliability").unwrap(), Some(vec![1u8]));
+    assert_eq!(
+        structured::settings_get(&t, "reliability").unwrap(),
+        Some(vec![1u8])
+    );
 }
 
 #[test]
@@ -336,7 +381,10 @@ fn subscriber_path() {
     let bin = assert_vector_consistent("tlv-types/subscriber-path");
     assert_eq!(encode(&subscriber(&["sensor", "temp"]).unwrap()), bin);
     let t = decode(&bin).unwrap();
-    assert_eq!(structured::subscriber_target_path(&t).unwrap(), Some("/sensor/temp".to_string()));
+    assert_eq!(
+        structured::subscriber_target_path(&t).unwrap(),
+        Some("/sensor/temp".to_string())
+    );
 }
 
 #[test]
@@ -345,7 +393,10 @@ fn router_wrapped_named_fields() {
     let t = decode(&bin).unwrap();
     let fields = structured::named_fields(&t).unwrap();
     let keys: Vec<&str> = fields.iter().map(|f| f.key.as_str()).collect();
-    assert_eq!(keys, vec!["origin_peer_id", "origin_timestamp", "hop_count", "data"]);
+    assert_eq!(
+        keys,
+        vec!["origin_peer_id", "origin_timestamp", "hop_count", "data"]
+    );
     // the wrapped "data" VALUE is 0xABCD
     let data = structured::named_field(&t, "data").unwrap().unwrap();
     assert_eq!(data.payload, vec![0xAB, 0xCD]);
@@ -442,13 +493,20 @@ fn fwd_write_subscriber_field() {
     let f = decode_fwd(&bin).unwrap();
     assert_eq!(f.op, fwd_op::WRITE);
     assert!(f.field.is_some());
-    assert_eq!(f.payload.unwrap().type_code, libtracer::type_code::SUBSCRIBER);
+    assert_eq!(
+        f.payload.unwrap().type_code,
+        libtracer::type_code::SUBSCRIBER
+    );
 }
 
 #[test]
 fn fwd_reply_result() {
     let bin = assert_vector_consistent("fwd/fwd-reply-result");
-    let mut req = FwdRequest::new(fwd_op::REPLY, &["via_board", "via_net", "reply-ep"], &["sensor"]);
+    let mut req = FwdRequest::new(
+        fwd_op::REPLY,
+        &["via_board", "via_net", "reply-ep"],
+        &["sensor"],
+    );
     req.kind = Some(fwd_kind::RESULT);
     req.payload = Some(value_u32(1234));
     assert_eq!(encode(&encode_fwd(&req).unwrap()), bin);
@@ -461,14 +519,24 @@ fn fwd_reply_result() {
 #[test]
 fn fwd_reply_error() {
     let bin = assert_vector_consistent("fwd/fwd-reply-error");
-    let mut req = FwdRequest::new(fwd_op::REPLY, &["via_board", "via_net", "reply-ep"], &["sensor"]);
+    let mut req = FwdRequest::new(
+        fwd_op::REPLY,
+        &["via_board", "via_net", "reply-ep"],
+        &["sensor"],
+    );
     req.kind = Some(fwd_kind::ERROR);
-    req.payload = Some(status_with_errors(&[error_code(ErrCode::PathNotFound, None)]));
+    req.payload = Some(status_with_errors(&[error_code(
+        ErrCode::PathNotFound,
+        None,
+    )]));
     assert_eq!(encode(&encode_fwd(&req).unwrap()), bin);
     let f = decode_fwd(&bin).unwrap();
     assert_eq!(f.kind, Some(fwd_kind::ERROR));
     assert_eq!(reply_error_code(&f), 0x0020);
-    assert_eq!(ErrCode::from_code(reply_error_code(&f)), Some(ErrCode::PathNotFound));
+    assert_eq!(
+        ErrCode::from_code(reply_error_code(&f)),
+        Some(ErrCode::PathNotFound)
+    );
 }
 
 #[test]
@@ -481,7 +549,10 @@ fn fwd_routed_multihop() {
     );
     assert_eq!(encode(&encode_fwd(&req).unwrap()), bin);
     let f = decode_fwd(&bin).unwrap();
-    assert_eq!(libtracer::fwd::fwd_dst_path(&f).unwrap(), "/net/board/can0/ow/sensor");
+    assert_eq!(
+        libtracer::fwd::fwd_dst_path(&f).unwrap(),
+        "/net/board/can0/ow/sensor"
+    );
 }
 
 #[test]
@@ -495,7 +566,10 @@ fn fwd_src_accumulated() {
     assert_eq!(encode(&encode_fwd(&req).unwrap()), bin);
     let f = decode_fwd(&bin).unwrap();
     assert_eq!(libtracer::fwd::fwd_dst_path(&f).unwrap(), "/can0/ow/sensor");
-    assert_eq!(libtracer::fwd::fwd_src_path(&f).unwrap(), "/via_board/via_net/reply-ep");
+    assert_eq!(
+        libtracer::fwd::fwd_src_path(&f).unwrap(),
+        "/via_board/via_net/reply-ep"
+    );
 }
 
 #[test]
