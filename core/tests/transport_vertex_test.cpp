@@ -297,7 +297,7 @@ void test_config_constructed_udp() {
     const auto lv = node_a.read(path_t("/net/b"));
     bool up = false;
     if (lv) {
-        const auto t = tr::wire::view_as_tlv(lv->only());
+        const auto t = tr::wire::decode(lv->only());
         up = t.has_value() && t->type == type_t::VALUE && t->payload.size() == 1 &&
              t->payload[0] == std::byte{0x01};
     }

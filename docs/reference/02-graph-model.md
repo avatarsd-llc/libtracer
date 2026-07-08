@@ -50,7 +50,7 @@ flowchart BT
     L4["L4 — Graph endpoint logic<br/><i>vertices, paths, subscriptions, forwarding</i>"]
     L5["L5 — Application semantics<br/><i>what the bytes mean</i>"]
     L0 -- "alloc / release / cache hooks" --> L1
-    L1 -- "view_as_tlv (zero-copy cast)" --> L2
+    L1 -- "decode(view_t) (zero-copy cast)" --> L2
     L2 -- "type byte + opt.PL" --> L3
     L3 -- "TLV registry: VALUE, PATH, FWD…" --> L4
     L4 -- "read / write / await on handle" --> L5

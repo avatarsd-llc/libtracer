@@ -254,7 +254,7 @@ g.write(tr::graph::path_t("/adc/raw:subscribers[]"), subscriber_value);   // sub
 
 // In the dsp-pipeline handler, the delivered view borrows the producer's bytes.
 void on_adc_slice(const tr::view::view_t& delivered) {
-    auto t = tr::wire::view_as_tlv(delivered);        // zero-copy decode
+    auto t = tr::wire::decode(delivered);             // zero-copy decode
     std::span<const std::byte> bytes = t->payload;    // spans borrow the buffer
     process_adc_slice(bytes);                          // FIR filter, FFT, whatever
 }

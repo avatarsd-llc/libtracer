@@ -16,7 +16,7 @@ flowchart TD
     TVERT["transport-vertex<br/><small>transport_vertex_t (/net)</small>"]
     TRANSPORT["transport<br/><small>transport_t · loopback/UDP/WS/CAN</small>"]
     FRAME["frame-codec<br/><small>tlv_t · decode/encode · crc</small>"]
-    VIEWS["views<br/><small>view_t · rope_t · view_as_tlv</small>"]
+    VIEWS["views<br/><small>view_t · rope_t · decode(view_t)</small>"]
     SEG["segment<br/><small>segment_t · segment_ptr_t</small>"]
     BACK["backends<br/><small>mem_backend_t · heap/borrow/pool</small>"]
     STATUS["status<br/><small>status_t · result_t&lt;T&gt;</small>"]
@@ -71,7 +71,7 @@ flowchart LR
 | [status](#) | `enum class status_t`; `template<class T> using result_t = std::expected<T, status_t>` |
 | [backends](backends.md) | `class mem_backend_t { alloc(); destroy(); alignment(); … }` · `view::heap_alloc()` · `view::borrow()` · `mem::pool_t` |
 | [segment](segment.md) | `struct segment_t{ ref_count_t; mem_backend_t*; span<byte> }` · `class segment_ptr_t{ adopt/retain; copy=clone; reset() }` |
-| [views](views.md) | `struct view_t{ owner; offset; length; bytes(); subview() }` · `class rope_t{ append; concat; to_iovec; flatten }` · `tr::wire::view_as_tlv(view_t)→std::expected<tlv_t, err_t>` |
+| [views](views.md) | `struct view_t{ owner; offset; length; bytes(); subview() }` · `class rope_t{ append; concat; to_iovec; flatten }` · `tr::wire::decode(view_t)→std::expected<tlv_t, err_t>` |
 | [frame-codec](frame-codec.md) | `enum class type_t` · `struct opt_t` · `struct tlv_t{ type; opt; payload; children; trailer }` · `decode()` · `encode()` · `decode_into(span, pmr)→tlv_arena_t` · `struct arena_tlv_t` · `crc::crc32c/crc16_ccitt` |
 | [path](path.md) | `class path_t{ parse(); key(); field() }` · `struct path_key_t` + `path_key_hash_t` |
 | [graph](graph.md) | `class graph_t{ register_vertex→vertex_handle_t; read; write; await; history; subscribe; subscribe_wire(vertex_handle_t, view_t source_view, …) }` · `class vertex_handle_t` · `enum class role_t` · `struct settings_t` · `struct handlers_t` |
@@ -81,7 +81,7 @@ flowchart LR
 
 ## Two contracts hold the stack together
 
-1. **A TLV is a cast from a `view_t`** — `view_as_tlv` = `decode(view.bytes())`. The
+1. **A TLV is a cast from a `view_t`** — the `decode(view_t)` overload = `decode(view.bytes())`. The
    decoder borrows; the `view_t`'s `segment_ptr_t` owns. So L2 (bytes) and L1 (ownership)
    meet with no copy.
 2. **A `segment_t` is reclaimed by its backend** — the only `mem_backend_t`→`segment_t` edge

@@ -102,14 +102,17 @@ struct tlv_t {
 [[nodiscard]] std::vector<std::byte> path_key(const tlv_t& path);
 
 /**
- * @brief Cast a flat view to a TLV (the M1 decoder, zero-copy).
+ * @brief Decode exactly one TLV from a flat view (the L1↔L2 cast, zero-copy).
  *
  * The L1↔L2 cast — "a TLV is a cast from a view." It lives at L2 (it produces a
  * @ref tlv_t) and consumes an L1 @ref view::view_t. The returned `tlv_t` borrows
  * the view's bytes, so keep the view — and thus its segment — alive while using
  * it.
+ *
+ * @param v The view whose bytes are exactly one TLV.
+ * @return The decoded @ref tlv_t (borrowing @p v's bytes), or an `err_t` on failure.
  */
-[[nodiscard]] inline std::expected<tlv_t, err_t> view_as_tlv(const view::view_t& v) {
+[[nodiscard]] inline std::expected<tlv_t, err_t> decode(const view::view_t& v) {
     return decode(v.bytes());
 }
 

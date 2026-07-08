@@ -246,7 +246,7 @@ int main() {
         const auto stored = g.read(v);
         check(stored.has_value(), "/sensor readable after a multi-link rope WRITE terminus");
         if (stored) {
-            const auto inner = tr::wire::view_as_tlv(stored->only());
+            const auto inner = tr::wire::decode(stored->only());
             check(inner && inner->type == type_t::VALUE && inner->payload.size() == 4 &&
                       tr::detail::load_le<std::uint32_t>(inner->payload) == kWritten,
                   "LKV updated to the forwarded value (view resolver decoded correctly)");
@@ -289,7 +289,7 @@ int main() {
         const auto stored = g.read(v);
         check(stored.has_value(), "intact-CRC multi-link WRITE applies");
         if (stored) {
-            const auto inner = tr::wire::view_as_tlv(stored->only());
+            const auto inner = tr::wire::decode(stored->only());
             check(inner && inner->type == type_t::VALUE && inner->payload.size() == 4 &&
                       tr::detail::load_le<std::uint32_t>(inner->payload) == kWritten,
                   "LKV updated to the CRC-verified value");
@@ -347,7 +347,7 @@ int main() {
         const auto stored = g.read(v);
         check(stored.has_value(), "/sensor written by a multi-link COMPACT terminus");
         if (stored) {
-            const auto inner = tr::wire::view_as_tlv(stored->only());
+            const auto inner = tr::wire::decode(stored->only());
             check(inner && inner->type == type_t::VALUE && inner->payload.size() == 4 &&
                       tr::detail::load_le<std::uint32_t>(inner->payload) == kVal,
                   "LKV updated to the label-compacted value (payload sub-rope decoded)");
