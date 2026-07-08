@@ -24,6 +24,15 @@ target_link_libraries(length_prefix_framer_test PRIVATE libtracer)
 libtracer_test_warnings(length_prefix_framer_test)
 add_test(NAME length_prefix_framer COMMAND length_prefix_framer_test)
 
+# FWD offset-dispatch frame view (fwd_frame_view.hpp) — the extracted fwd_router
+# forward-plane cluster, tested directly over hand-built frames (span + rope
+# cursors): dst-seg / op / control peeks, the shrunk-dst/grown-src head rebuild
+# proved byte-exact vs a reference re-encode, and malformed rejects.
+add_executable(fwd_frame_view_test fwd_frame_view_test.cpp)
+target_link_libraries(fwd_frame_view_test PRIVATE libtracer)
+libtracer_test_warnings(fwd_frame_view_test)
+add_test(NAME fwd_frame_view COMMAND fwd_frame_view_test)
+
 # Canonical-key NAME navigation (key_view.hpp) — the locus the graph walks funnel through.
 add_executable(key_view_test key_view_test.cpp)
 target_link_libraries(key_view_test PRIVATE libtracer)
