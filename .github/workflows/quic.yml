@@ -25,6 +25,7 @@ on:
       - "core/src/transport_webtransport.cpp"
       - "core/include/libtracer/transport_webtransport.hpp"
       - "core/src/wt_h3.hpp"
+      - "core/src/msquic_endpoint.hpp"  # the shared msquic-mechanical base of both transports
       - "core/include/libtracer/frame.hpp"  # quic/webtransport TUs decode through it
       - "core/include/libtracer/grammar.hpp"  # the one wire grammar frame decoding walks
       - "core/include/libtracer/length_prefix_framer.hpp"  # quic/webtransport RX reassembler
