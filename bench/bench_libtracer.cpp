@@ -590,8 +590,6 @@ int main(int argc, char** argv) {
     }
     for (std::size_t F : kFanouts)
         run_inproc(kRefSize, F, kRefEndpoints, alloc_t::HEAP, false, "inproc");
-    // Deliver-only (propagate) fan sweep — the store-free counterpart of the row above.
-    for (std::size_t F : kFanouts) run_inproc_deliver(kRefSize, F);
     for (std::size_t S : kSizes)
         run_inproc(S, kRefFanout, kRefEndpoints, alloc_t::HEAP, false, "inproc");
     for (std::size_t S : kSizes)
@@ -612,9 +610,16 @@ int main(int argc, char** argv) {
     // (The `loopback` and n-routers `routers-hN` modes benchmarked the ROUTER-flood
     // bridge, retired in ADR-0040 — the net plane is explicit-source-routed FWD only.
     // FWD forward cost is measured by bench_forward_heap + the fwd_* tests.)
-    // n-layer-folded (fold-depth) axis — the LAST axis: same total bytes folded
-    // across N segments (N=1 flat .. N=8 rope); cost rises with the view-chain walk.
+    // n-layer-folded (fold-depth) axis — same total bytes folded across N
+    // segments (N=1 flat .. N=8 rope); cost rises with the view-chain walk.
     for (std::size_t N : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}})
         run_fold(N);
+    // Deliver-only (propagate) fan sweep — the store-free counterpart of the
+    // inproc fan sweep. Deliberately LAST: perf_gate.py medians duplicate row
+    // instances from this default run, and inserting a new sweep ahead of the
+    // gated rows shifts their thermal/turbo position on small shared runners
+    // (a deterministic ~+100 ns on 2-vCPU CI — observed on PR #353's gate).
+    // New sweeps append here, after every pre-existing row, for the same reason.
+    for (std::size_t F : kFanouts) run_inproc_deliver(kRefSize, F);
     return 0;
 }
