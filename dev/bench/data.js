@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783488391667,
+  "lastUpdate": 1783538384662,
   "repoUrl": "https://github.com/avatarsd-llc/libtracer",
   "entries": {
     "libtracer in-process latency (ns, smaller is better)": [
@@ -1025,6 +1025,60 @@ window.BENCHMARK_DATA = {
           {
             "name": "inproc-borrow 64B/fan1/1ep ns/delivery",
             "value": 193,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "15184545+AvatarSD@users.noreply.github.com",
+            "name": "avatarsd",
+            "username": "AvatarSD"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c17aef77a2642f80a1487bb24b14ecedc6e8ec97",
+          "message": "Merge pull request #337 from avatarsd-llc/feat/receiver-slot\n\nrefactor(net): receiver_slot_t — one delivery-tier slot, fn-ptr receivers",
+          "timestamp": "2026-07-08T22:18:57+03:00",
+          "tree_id": "9313dcf7c34ebda347dd7bb3750134988fd233d9",
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/c17aef77a2642f80a1487bb24b14ecedc6e8ec97"
+        },
+        "date": 1783538384238,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "inproc 64B/fan1/1ep p50 latency",
+            "value": 231,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan1/1ep p99 latency",
+            "value": 316,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc 64B/fan1/1ep ns/delivery",
+            "value": 219.6,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep p50 latency",
+            "value": 210,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep p99 latency",
+            "value": 250,
+            "unit": "ns"
+          },
+          {
+            "name": "inproc-borrow 64B/fan1/1ep ns/delivery",
+            "value": 191.1,
             "unit": "ns"
           }
         ]
