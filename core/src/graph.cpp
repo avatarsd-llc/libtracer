@@ -138,9 +138,27 @@ struct branch_node_t {
     return subtree_value;
 }
 
+// One Composite child record of `key` starting at `i` (ADR-0057 decomposition): the end
+// of the well-framed NAME record at `i`, EXTENDED to the key's end when the record itself
+// or the remainder after it is ragged — mirroring key_view_t::parent()'s framing (a ragged
+// tail glues onto the last well-framed record), so tree decomposition and byte navigation
+// (ancestor keys, bubbling order) agree even on malformed register_vertex_key blobs.
+[[nodiscard]] std::size_t segment_end(std::span<const std::byte> key, std::size_t i) noexcept {
+    const auto record_end = [&key](std::size_t p) noexcept -> std::size_t {  // 0 => ragged
+        if (p + 4 > key.size()) return 0;
+        const std::size_t len = detail::load_le<std::uint16_t>(key.subspan(p + 2, 2));
+        return p + 4 + len > key.size() ? 0 : p + 4 + len;
+    };
+    const std::size_t e = record_end(i);
+    if (e == 0 || e == key.size()) return key.size();
+    return record_end(e) == 0 ? key.size() : e;  // ragged remainder: glue it onto this record
+}
+
 }  // namespace
 
-graph_t::graph_t() {
+graph_t::graph_t()
+    : root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, settings_t{},
+                                       handlers_t{})) {
     // The one built-in creation-catalog type (#82, ADR-0017): `stored_value` makes a
     // plain last-writer-wins vertex at the composed child key. Its optional SPEC
     // `config` SETTINGS is ignored for now (a stored-value has no instantiation params
@@ -176,28 +194,36 @@ result_t<vertex_handle_t> graph_t::try_register_vertex(const path_t& path, role_
 
 result_t<vertex_handle_t> graph_t::register_vertex_key(std::vector<std::byte> key, role_t role,
                                                        handlers_t handlers, settings_t settings) {
-    path_key_t k{std::move(key)};
     const std::unique_lock lock(map_mutex_);
-    if (vertices_.find(k) != vertices_.end()) return std::unexpected(status_t::PATH_IN_USE);
-    auto vertex = std::make_unique<vertex_t>(role, k, settings, std::move(handlers));
-    // Subtree-subscription init (RFC-0005): a vertex born under a subscribed
-    // ancestor starts with the ancestor-listener count already summed — O(depth)
-    // lookups here (under the same unique lock note_subscriber_* excludes, so the
-    // sum and a concurrent subscribe walk never double-count) keep the write
-    // path's is-anyone-listening check a single relaxed load.
-    std::uint32_t above = 0;
-    key_view_t kk{k.bytes};
-    while (!kk.empty()) {
-        kk = kk.parent();
-        // Heterogeneous by-span lookup — no owned path_key_t copy per ancestor level.
-        const auto pit = vertices_.find(kk.bytes());
-        if (pit != vertices_.end()) above += pit->second->own_subs();
-        if (kk.empty()) break;
+    // Descend the Composite tree (ADR-0057), creating unregistered PLACEHOLDER nodes for
+    // missing intermediate levels — invisible to find/read_children until a registration
+    // fills them in place (matching the flat map, where intermediates did not exist).
+    vertex_t* node = root_.get();
+    std::size_t i = 0;
+    while (i < key.size()) {
+        const std::size_t e = segment_end(key, i);
+        const std::span<const std::byte> record{key.data() + i, e - i};
+        vertex_t* child = node->child_by_record(record);
+        if (child == nullptr) {
+            auto fresh = std::make_unique<vertex_t>(
+                role_t::STORED_VALUE,
+                path_key_t{std::vector<std::byte>(record.begin(), record.end())}, settings_t{},
+                handlers_t{});
+            // Subtree-subscription init (RFC-0005): a vertex born under a subscribed
+            // ancestor starts with the ancestor-listener count already summed — O(1) from
+            // the parent's maintained counters (under the same unique lock the
+            // note_subscriber_* walks exclude, so the sum and a concurrent subscribe walk
+            // never double-count); the write path's is-anyone-listening check stays a
+            // single relaxed load.
+            fresh->init_listeners_above(node->listeners_above() + node->own_subs());
+            child = node->add_child(std::move(fresh));
+        }
+        node = child;
+        i = e;
     }
-    vertex->init_listeners_above(above);
-    vertex_t* ptr = vertex.get();
-    vertices_.emplace(std::move(k), std::move(vertex));
-    return vertex_handle_t{ptr};
+    if (node->registered()) return std::unexpected(status_t::PATH_IN_USE);
+    node->fill(role, settings, std::move(handlers));
+    return vertex_handle_t{node};
 }
 
 result_t<vertex_handle_t> graph_t::ensure_vertex(std::span<const std::byte> key,
@@ -255,40 +281,66 @@ std::uint64_t graph_t::ancestor_walks() const noexcept {
     return ancestor_walks_.load(std::memory_order_relaxed);
 }
 
+void graph_t::bump_subtree_listeners(vertex_t* v, std::int32_t delta) {
+    v->for_each_child([delta](vertex_t& c) {
+        c.bump_listeners_above(delta);
+        bump_subtree_listeners(&c, delta);
+    });
+}
+
 void graph_t::note_subscriber_added(vertex_t* v) {
     // Shared map lock: excludes concurrent vertex creation (unique lock), so a
     // newborn either sees the bumped own_subs_ in its creation-time sum or is
-    // already enumerable by this walk — never both. Counters are atomics; a
-    // byte-prefix of concatenated NAME encodings can only match on a segment
-    // boundary (the length header differs otherwise), so prefix ⇒ descendant.
+    // already linked and walked here — never both. Counters are atomics. The
+    // descendants are exactly v's child-link subtree (ADR-0057) — placeholders
+    // included, so a later fill inherits a correct count.
     const std::shared_lock lock(map_mutex_);
     v->bump_own_subs(+1);
-    const key_view_t prefix{v->key().bytes};
-    for (const auto& [key, vert] : vertices_) {
-        if (prefix.is_ancestor_of(key_view_t{key.bytes})) vert->bump_listeners_above(+1);
-    }
+    bump_subtree_listeners(v, +1);
 }
 
 void graph_t::note_subscriber_removed(vertex_t* v) {
     const std::shared_lock lock(map_mutex_);
     v->bump_own_subs(-1);
-    const key_view_t prefix{v->key().bytes};
-    for (const auto& [key, vert] : vertices_) {
-        if (prefix.is_ancestor_of(key_view_t{key.bytes})) vert->bump_listeners_above(-1);
-    }
+    bump_subtree_listeners(v, -1);
 }
 
 vertex_t* graph_t::find_ptr(std::span<const std::byte> key) const {
     const std::shared_lock lock(map_mutex_);
-    // Heterogeneous lookup (path_key_hash_t / path_key_eq_t are is_transparent): key the
-    // map straight off the span — NO owned path_key_t copy, no re-hash of a fresh vector.
-    const auto it = vertices_.find(key);
+    // O(segments) Composite child walk from the root (ADR-0057); a placeholder terminus
+    // (an unregistered intermediate) is "no such vertex", as under the flat map.
+    vertex_t* node = root_.get();
+    std::size_t i = 0;
+    while (i < key.size()) {
+        const std::size_t e = segment_end(key, i);
+        node = node->child_by_record(key.subspan(i, e - i));
+        if (node == nullptr) return nullptr;
+        i = e;
+    }
     // The returned raw pointer is used by callers OUTSIDE this shared_lock. That is
-    // sound only because `vertices_` is insert-only (see its declaration): the
-    // heap-owned vertex_t is pointer-stable across rehash and is never destroyed
-    // while the graph lives. Do NOT add vertex erasure/retirement without first
-    // giving vertices a lifetime scheme — a bare erase would dangle these pointers.
-    return it == vertices_.end() ? nullptr : it->second.get();
+    // sound only because the tree is insert-only (see root_'s declaration): each
+    // vertex_t is owned by its parent via a non-moving unique_ptr allocation and is
+    // never destroyed while the graph lives. Do NOT add vertex erasure/retirement
+    // without first giving vertices a lifetime scheme — a bare detach would dangle
+    // these pointers.
+    return node->registered() ? node : nullptr;
+}
+
+std::vector<std::byte> graph_t::build_key(const vertex_t* v) {
+    // Render-on-demand full key (ADR-0057): ancestors' NAME records concatenated
+    // root-down. Parent links and name bytes are immutable — no lock. Two passes: size,
+    // then a single exact allocation filled deepest-record-last.
+    std::size_t total = 0;
+    for (const vertex_t* n = v; n->parent() != nullptr; n = n->parent())
+        total += n->name().bytes.size();
+    std::vector<std::byte> key(total);
+    std::size_t w = total;
+    for (const vertex_t* n = v; n->parent() != nullptr; n = n->parent()) {
+        const std::vector<std::byte>& rec = n->name().bytes;
+        w -= rec.size();
+        std::copy(rec.begin(), rec.end(), key.begin() + static_cast<std::ptrdiff_t>(w));
+    }
+    return key;
 }
 
 std::optional<vertex_handle_t> graph_t::find(std::span<const std::byte> key) const {
@@ -328,10 +380,12 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
         if (verdict == acl_verdict_t::ALLOW) return true;
         if (verdict == acl_verdict_t::DENY) return false;
     }
-    key_view_t key{v->key().bytes};
-    while (!(key = key.parent()).empty()) {
-        vertex_t* ancestor = find_ptr(key.bytes());
-        if (!ancestor) continue;  // an unregistered intermediate level holds no ACL
+    // Strict ancestors via parent pointers (ADR-0057 — no per-level map+lock hop), root
+    // excluded (the flat-map walk never evaluated the empty key). A placeholder
+    // intermediate holds an empty ACE list, so evaluating it is the no-op the old walk's
+    // skip was.
+    for (vertex_t* ancestor = v->parent(); ancestor != nullptr && ancestor->parent() != nullptr;
+         ancestor = ancestor->parent()) {
         const acl_verdict_t verdict = ancestor->with_aces([&](const std::vector<ace_t>& aces) {
             for (const ace_t& ace : aces) {
                 if ((ace.flags & kAceInherit) != 0) {  // non-INHERIT: that vertex only
@@ -363,29 +417,38 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, std::string_view caller) cons
                  // copy)
 }
 
-void graph_t::dispatch_edge(const edge_view_t& e, const rope_t& value, int depth) {
+void graph_t::dispatch_edge_target(const edge_view_t& e, const rope_t& value, int depth) {
+    if (vertex_t* target = find_ptr(e.target_key)) {
+        // Fan-in gate (#81, ADR-0026): the re-dispatch is an ordinary write to
+        // the target, gated inside write_impl by the TARGET's :acl WRITE right
+        // under the edge's stored caller context. Denial drops this delivery.
+        (void)write_impl(target, value, depth + 1, e.caller);  // value cloned
+    }
+}
+
+void graph_t::dispatch_edge_remote(const edge_view_t& e, const rope_t& value) {
+    // Remote delivery (#136): a write fans out to a remote subscriber as a
+    // FWD{WRITE} (or auto-promoted COMPACT) via the injected sink — outside the
+    // vertex lock, like every other dispatch leg, since the sink does transport I/O.
+    remote_sink_(
+        remote_delivery_t{
+            .link = e.link, .return_route = e.return_route, .delivery_compact = e.delivery_compact},
+        value);
+}
+
+// `inline` (linkage no-op for a single-TU member; an inliner hint): the wide fan-out
+// loop's per-edge cost is this function's body, so it must stay inlined in that loop —
+// the target/remote legs live in the two helpers above precisely to keep this body's
+// inline estimate small (the callback leg is the in-process hot case).
+inline void graph_t::dispatch_edge(const edge_view_t& e, const rope_t& value, int depth) {
     // The ONE dispatch of a subscription edge's three legs — shared by the per-write
     // fan_out and the admission durability latch (ADR-0049), so the legs cannot diverge.
     // Always called OUTSIDE the vertex lock (each leg may re-enter the graph or do I/O).
     if (e.callback != nullptr)
         e.callback(e.callback_ctx, value);  // the rope by const ref (sink may clone links)
-    if (!e.target_key.empty() && depth + 1 < kMaxDispatchDepth) {
-        if (vertex_t* target = find_ptr(e.target_key)) {
-            // Fan-in gate (#81, ADR-0026): the re-dispatch is an ordinary write to
-            // the target, gated inside write_impl by the TARGET's :acl WRITE right
-            // under the edge's stored caller context. Denial drops this delivery.
-            (void)write_impl(target, value, depth + 1, e.caller);  // value cloned
-        }
-    }
-    // Remote delivery (#136): a write fans out to a remote subscriber as a
-    // FWD{WRITE} (or auto-promoted COMPACT) via the injected sink — outside the
-    // vertex lock, like every other dispatch leg, since the sink does transport I/O.
-    if (!e.link.empty() && remote_sink_) {
-        remote_sink_(remote_delivery_t{.link = e.link,
-                                       .return_route = e.return_route,
-                                       .delivery_compact = e.delivery_compact},
-                     value);
-    }
+    if (!e.target_key.empty() && depth + 1 < kMaxDispatchDepth)
+        dispatch_edge_target(e, value, depth);
+    if (!e.link.empty() && remote_sink_) dispatch_edge_remote(e, value);
 }
 
 void graph_t::fan_out(vertex_t* v, const rope_t& value, int depth) {
@@ -423,12 +486,12 @@ void graph_t::bubble_up(vertex_t* v, const rope_t& value, int depth) {
     // the idle write path never walks (RFC-0005 §near-free-when-idle; the counter
     // below is what tests/benches assert on via ancestor_walks()).
     ancestor_walks_.fetch_add(1, std::memory_order_relaxed);
-    key_view_t key{v->key().bytes};
-    while (!key.empty()) {
-        key = key.parent();
-        if (vertex_t* ancestor = find_ptr(key.bytes())) fan_out(ancestor, value, depth);
-        if (key.empty()) break;  // the root vertex (empty key) was just visited
-    }
+    // Parent pointers are immutable once linked (ADR-0057), so the walk takes NO lock —
+    // the old per-ancestor find_ptr (a shared-lock + hash lookup per level) is gone. A
+    // placeholder ancestor holds no edges, so its fan_out is the no-op the old walk's
+    // lookup miss was; the root node is the final (empty-key) stop, as before.
+    for (vertex_t* ancestor = v->parent(); ancestor != nullptr; ancestor = ancestor->parent())
+        fan_out(ancestor, value, depth);
 }
 
 namespace {
@@ -504,12 +567,15 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, int depth
     const std::uint32_t n0 = wire::tlv_arena_t::first_child(0);
     if (n0 >= a.root().end || a[n0].type != type_t::NAME)
         return std::unexpected(status_t::TYPE_MISMATCH);
-    if (!std::ranges::equal(a[n0].body, key_view_t{v->key().bytes}.last_segment()))
+    if (!std::ranges::equal(a[n0].body, key_view_t{v->name().bytes}.last_segment()))
         return std::unexpected(status_t::INVALID_PATH);
 
+    // The written tree is rooted AT `v`: render its full key once (ADR-0057
+    // render-on-demand) — the node-key prefix of the whole decomposition plan.
+    const std::vector<std::byte> root_key = build_key(v);
     std::vector<branch_node_t> plan;  // post-order; plan.back() is the root
     const result_t<bool> parsed =
-        parse_branch_node(a, 0, head, std::vector<std::byte>(v->key().bytes), plan);
+        parse_branch_node(a, 0, head, std::vector<std::byte>(root_key), plan);
     if (!parsed) return std::unexpected(parsed.error());
     if (!*parsed) return {};  // a value-free branch is a no-op write
 
@@ -526,7 +592,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, int depth
     for (const branch_node_t& node : plan) {
         if (node.store.empty()) continue;
         vertex_t* vx = nullptr;
-        if (std::ranges::equal(node.key, v->key().bytes)) {
+        if (std::ranges::equal(node.key, root_key)) {
             vx = v;  // the root value — `v` itself, already WRITE-gated by write_impl
         } else {
             const result_t<vertex_t*> ensured = ensure_vertex_ptr(node.key, caller);
@@ -607,7 +673,7 @@ void graph_t::propagate_impl(vertex_t* v, int depth) {
     // and ITERATE the UNCONDITIONAL set over it. A subtree is a contiguous prefix range of
     // the key order (RFC-0008 §B). Snapshot the keys under sweep_mutex_, then deliver
     // outside it — delivery re-enters the graph (fan_out/re-dispatch), like fan_out itself.
-    const std::vector<std::byte> lo(v->key().bytes.begin(), v->key().bytes.end());
+    const std::vector<std::byte> lo = build_key(v);
     const auto in_subtree = [&lo](const std::vector<std::byte>& k) {
         return k.size() >= lo.size() && std::equal(lo.begin(), lo.end(), k.begin());
     };
@@ -617,6 +683,7 @@ void graph_t::propagate_impl(vertex_t* v, int depth) {
         for (auto it = pending_.lower_bound(lo); it != pending_.end() && in_subtree(*it);) {
             if (it->size() != lo.size()) to_deliver.push_back(*it);  // strict descendant
             it = pending_.erase(it);  // drain (v itself, if present, was delivered above)
+            pending_count_.fetch_sub(1, std::memory_order_relaxed);
         }
         for (auto it = unconditional_.lower_bound(lo);
              it != unconditional_.end() && in_subtree(*it); ++it) {
@@ -635,28 +702,38 @@ void graph_t::mark_pending(vertex_t* v) {
     // unobserved write off the shared lock, RFC-0005 listeners gate).
     if (v->delivery_mode() != delivery_mode_t::IF_NEWER) return;
     if (v->own_subs() == 0 && v->listeners_above() == 0) return;
+    std::vector<std::byte> key = build_key(v);  // outside the lock (a lock-free parent walk)
     const std::lock_guard lock(sweep_mutex_);
-    pending_.emplace(v->key().bytes.begin(), v->key().bytes.end());
+    if (pending_.insert(std::move(key)).second)
+        pending_count_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void graph_t::clear_pending(vertex_t* v) {
     // Same idle fast path as mark_pending: an unobserved vertex was never marked.
     if (v->own_subs() == 0 && v->listeners_above() == 0) return;
+    // Empty-set fast path (the per-eager-write case when nobody uses assign+propagate):
+    // no key render, no sweep lock. Racing a concurrent mark_pending here leaves the mark
+    // for the next covering sweep — an ordering the locked erase already permitted.
+    if (pending_count_.load(std::memory_order_relaxed) == 0) return;
+    const std::vector<std::byte> key = build_key(v);  // outside the lock
     const std::lock_guard lock(sweep_mutex_);
-    pending_.erase(std::vector<std::byte>(v->key().bytes.begin(), v->key().bytes.end()));
+    if (pending_.erase(key) != 0) pending_count_.fetch_sub(1, std::memory_order_relaxed);
 }
 
 void graph_t::set_delivery_mode(vertex_handle_t vh, delivery_mode_t mode) {
     vertex_t* v = vh.get();
-    const std::vector<std::byte> key(v->key().bytes.begin(), v->key().bytes.end());
+    const std::vector<std::byte> key = build_key(v);
     const std::lock_guard lock(sweep_mutex_);
     v->set_delivery_mode(mode);
     if (mode == delivery_mode_t::UNCONDITIONAL) {
         unconditional_.insert(key);
-        pending_.erase(key);  // swept via unconditional_ now — avoid double membership
+        // Swept via unconditional_ now — avoid double membership.
+        if (pending_.erase(key) != 0) pending_count_.fetch_sub(1, std::memory_order_relaxed);
     } else {
         unconditional_.erase(key);
-        if (mode == delivery_mode_t::EXPLICIT) pending_.erase(key);  // never ancestor-swept
+        if (mode == delivery_mode_t::EXPLICIT &&  // never ancestor-swept
+            pending_.erase(key) != 0)
+            pending_count_.fetch_sub(1, std::memory_order_relaxed);
     }
 }
 
@@ -928,7 +1005,7 @@ result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value)
 
     // Compose the child key = parent's canonical PATH-payload + one NAME(child_name).
     // The graph owns this addressing; the factory only sees the finished key.
-    std::vector<std::byte> child_key = parent->key().bytes;
+    std::vector<std::byte> child_key = build_key(parent);
     wire::emit_name(child_key, child_name);
 
     result_t<vertex_handle_t> made = it->second(*this, std::move(child_key), config);
@@ -947,7 +1024,7 @@ result_t<view_t> graph_t::read_schema(vertex_t* v) const {
     emit_value(settings_children, s.history_keep_last, 4);
 
     std::vector<std::byte> point_body;
-    wire::emit_name(point_body, key_view_t{v->key().bytes}.last_segment());
+    wire::emit_name(point_body, key_view_t{v->name().bytes}.last_segment());
     wire::emit_tlv(point_body, type_t::SETTINGS, opt_t{.pl = true},
                    settings_children);  // SETTINGS
 
@@ -984,14 +1061,14 @@ result_t<view_t> graph_t::read_children(vertex_t* v) const {
     std::vector<std::byte> members;
     {
         const std::shared_lock lock(map_mutex_);
-        const key_view_t pk{v->key().bytes};
-        for (const auto& [key, vert] : vertices_) {
-            (void)vert;
-            // A direct child is `pk` plus exactly one more NAME record; that record
-            // IS the child's canonical NAME encoding — the POINT body verbatim.
-            if (const auto rec = key_view_t{key.bytes}.child_record_under(pk))
-                wire::emit_tlv(members, type_t::POINT, opt_t{.pl = true}, *rec);
-        }
+        // A direct child's own NAME record IS the POINT body verbatim (ADR-0057 — one
+        // child-list walk, no whole-map prefix scan). Placeholders (unregistered
+        // intermediate levels) are not members, matching the flat map where they did
+        // not exist.
+        v->for_each_child([&members](const vertex_t& c) {
+            if (c.registered())
+                wire::emit_tlv(members, type_t::POINT, opt_t{.pl = true}, c.name().bytes);
+        });
     }
     std::vector<std::byte> out;
     wire::emit_tlv(out, type_t::POINT, opt_t{.pl = true}, members);
