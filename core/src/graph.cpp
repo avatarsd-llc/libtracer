@@ -487,9 +487,11 @@ void graph_t::fan_out(vertex_t* v, const rope_t& value, int depth) {
     // dispatch OUTSIDE it (callbacks / re-dispatch may re-enter the graph). Delivery is
     // value-agnostic — no per-subscriber comparison — so every active edge receives
     // `value`; WHICH vertices propagate is the per-vertex delivery_mode decided by the
-    // sweep (RFC-0008). Small fan-out (the common case) fills a stack buffer — no
-    // per-publish heap allocation — and large fan-out reserves the heap vector once.
-    std::array<edge_view_t, vertex_t::kInlineFanout> inline_buf;
+    // sweep (RFC-0008). Small fan-out (the common case) placement-constructs into a RAW
+    // stack buffer — no per-publish heap allocation and no dead stack zeroing (an
+    // edge_view_t array default-construct cost ~18 ns/op of rep-stos zeroing here) —
+    // and large fan-out reserves the heap vector once.
+    edge_snapshot_t inline_buf;
     std::vector<edge_view_t> heap_buf;
     const std::size_t n = v->snapshot_edges(inline_buf, heap_buf);
     if (heap_buf.empty())

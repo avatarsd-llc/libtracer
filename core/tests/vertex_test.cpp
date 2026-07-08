@@ -31,6 +31,7 @@ namespace {
 using namespace std::chrono_literals;
 using tr::graph::ace_t;
 using tr::graph::edge_latch_t;
+using tr::graph::edge_snapshot_t;
 using tr::graph::edge_view_t;
 using tr::graph::path_key_t;
 using tr::graph::role_t;
@@ -143,7 +144,7 @@ void test_edges_snapshot_clear_latch() {
     check(latch2.edge.callback != nullptr && latch2.edge.callback_ctx == &hits,
           "the latch carries the admitted edge's {fn, ctx} dispatch view");
 
-    std::array<edge_view_t, vertex_t::kInlineFanout> buf;
+    edge_snapshot_t buf;
     std::vector<edge_view_t> heap;
     check(v.snapshot_edges(buf, heap) == 2 && heap.empty(),
           "2 active edges snapshot into the inline buffer (no heap)");
@@ -185,7 +186,7 @@ void test_snapshot_under_concurrent_add() {
     bool monotonic = true;
     std::size_t last = 0;
     go.store(true, std::memory_order_release);
-    std::array<edge_view_t, vertex_t::kInlineFanout> buf;
+    edge_snapshot_t buf;
     std::vector<edge_view_t> heap;
     for (int i = 0; i < 2000; ++i) {
         const std::size_t n = v.snapshot_edges(buf, heap);
