@@ -1,9 +1,12 @@
-/*
+/**
+ * @file
+ * @brief C++ codec perf bench — the `lang` axis (C++ core, cpp-core) of the ranged cross-core perf
+ *        matrix (ADR-0032, issue #96).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * C++ codec perf bench — the `lang` axis (C++ core, cpp-core) of the ranged
- * cross-core perf matrix (ADR-0032, issue #96). It measures decode+encode
+ * It measures decode+encode
  * roundtrip latency and throughput over the SHARED conformance vectors under
  * tests/conformance/vectors/v1/ (the "vector data" workload — real structured
  * TLVs, not synthetic scalars), so a C++-vs-TS-vs-Rust surface can be rendered
@@ -52,7 +55,7 @@ namespace {
 
 namespace fs = std::filesystem;
 
-// Methodology constants — identical to perf.mjs / perf.rs so the cores compare.
+/** @brief Methodology constants — identical to perf.mjs / perf.rs so the cores compare. */
 constexpr std::uint64_t kTargetNs = 100'000'000;  // ~100 ms throughput phase
 constexpr std::size_t kLatencySamples = 20'000;   // individually-timed roundtrips
 constexpr std::size_t kWarmup = 5'000;
@@ -70,8 +73,12 @@ std::vector<std::byte> read_file(const fs::path& p) {
     return out;
 }
 
-// One decode+encode roundtrip (the unit of work). Returns the re-encoded size so
-// the caller can fold it into a sink the optimizer cannot elide.
+/**
+ * @brief One decode+encode roundtrip (the unit of work).
+ *
+ * Returns the re-encoded size so
+ * the caller can fold it into a sink the optimizer cannot elide.
+ */
 [[nodiscard]] std::size_t roundtrip(std::span<const std::byte> input) {
     const auto dec = tr::wire::decode(input);
     if (!dec) return 0;  // conformance vectors decode; guard keeps the bench honest
@@ -84,8 +91,10 @@ struct measure_t {
     Latency::Summary lat;
 };
 
-// Measure a single vector: a tight throughput loop (>= kTargetNs) for the rate,
-// then a batch of individually-timed roundtrips for the latency percentiles.
+/**
+ * @brief Measure a single vector: a tight throughput loop (>= kTargetNs) for the rate, then a batch
+ *        of individually-timed roundtrips for the latency percentiles.
+ */
 measure_t measure(std::span<const std::byte> input) {
     volatile std::size_t sink = 0;
 
@@ -117,7 +126,7 @@ measure_t measure(std::span<const std::byte> input) {
     return {pub_s, mb_s, lat.summarize()};
 }
 
-// Recursively collect (relative-posix-path, absolute-path) for every input.bin.
+/** @brief Recursively collect (relative-posix-path, absolute-path) for every input.bin. */
 std::vector<std::pair<std::string, fs::path>> find_inputs(const fs::path& root) {
     std::vector<std::pair<std::string, fs::path>> cases;
     for (const auto& e : fs::recursive_directory_iterator(root)) {

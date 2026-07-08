@@ -1,8 +1,11 @@
-/*
+/**
+ * @file
+ * @brief The build-time-closed module-set destroy dispatch (ADR-0047 §2).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * The build-time-closed module-set destroy dispatch (ADR-0047 §2). This is the
+ * This is the
  * one TU that includes every fast-set backend's concrete type, so
  * segment_ptr_t::reset (segment.hpp) can reclaim a segment by its backend_tag —
  * a switch to a devirtualized direct call — while keeping the L0 seam

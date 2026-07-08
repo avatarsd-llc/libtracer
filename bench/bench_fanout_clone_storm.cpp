@@ -1,8 +1,9 @@
-/*
+/**
+ * @file
+ * @brief Fan-out clone storm — the segment-refcount contention microbenchmark.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
- *
- * Fan-out clone storm — the segment-refcount contention microbenchmark.
  *
  * The load-bearing claim of libtracer fan-out (README, ADR-0038): delivering one
  * value to N subscribers is N refcount bumps, not N copies. On a many-core host a
@@ -42,21 +43,33 @@ using tr::view::view_t;
 
 namespace {
 
-// Fan-out widths to sweep. Fixed (not clamped to hardware_concurrency) so the run
-// on a real 128-core host measures the tail; on a small CI runner the high points
-// show the oversubscribed regime, and the 1->cores points show contention onset.
+/**
+ * @brief Fan-out widths to sweep.
+ *
+ * Fixed (not clamped to hardware_concurrency) so the run
+ * on a real 128-core host measures the tail; on a small CI runner the high points
+ * show the oversubscribed regime, and the 1->cores points show contention onset.
+ */
 constexpr std::size_t kFanouts[] = {1, 2, 4, 8, 16, 32, 64, 128};
 
-// Wall-clock per fan-out point. Time-boxed (not a fixed op count) so the total run
-// stays bounded regardless of how slow contention makes each op.
+/**
+ * @brief Wall-clock per fan-out point.
+ *
+ * Time-boxed (not a fixed op count) so the total run
+ * stays bounded regardless of how slow contention makes each op.
+ */
 constexpr auto kWindow = std::chrono::milliseconds(250);
 
 constexpr std::size_t kSegBytes = 64;  // one representative sample segment.
 
-// Sink for the clones' field reads: keeps the loop body (and thus the clone) live
-// past the optimizer. The refcount RMWs are atomics on a shared object and are not
-// removable on their own, but this makes the intent explicit and defeats hoisting.
-// Atomic (not a bare `volatile`) so the once-per-thread fold is race-free under TSan.
+/**
+ * @brief Sink for the clones' field reads: keeps the loop body (and thus the clone) live past the
+ *        optimizer.
+ *
+ * The refcount RMWs are atomics on a shared object and are not
+ * removable on their own, but this makes the intent explicit and defeats hoisting.
+ * Atomic (not a bare `volatile`) so the once-per-thread fold is race-free under TSan.
+ */
 std::atomic<std::size_t> g_sink{0};
 
 }  // namespace

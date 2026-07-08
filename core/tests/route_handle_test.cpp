@@ -1,9 +1,12 @@
-/*
+/**
+ * @file
+ * @brief route_handle_t unit test (Brick 4, ADR-0038 §3 / ADR-0039): the label state is per-
+ *        connection — pmr-backed tables with a per-link mutex.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * route_handle_t unit test (Brick 4, ADR-0038 §3 / ADR-0039): the label state is
- * per-connection — pmr-backed tables with a per-link mutex. Covers: bind/lookup,
+ * Covers: bind/lookup,
  * rebind-replaces, stale lookup, per-link label-space isolation, ensure_egress
  * reuse vs fresh, egress_route retention (NACK re-advertise), clear_link resets
  * one link only (allocator included), counts, and a whole-lifecycle run inside a

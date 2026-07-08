@@ -1,9 +1,11 @@
-/*
+/**
+ * @file
+ * @brief vertex_t verb-interface unit tests — a BARE vertex, no graph_t (the point of the verb
+ *        seam: the vertex's storage/readiness/edge/ACL state is testable in isolation).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * vertex_t verb-interface unit tests — a BARE vertex, no graph_t (the point of the
- * verb seam: the vertex's storage/readiness/edge/ACL state is testable in isolation).
  * Covers: store/read_stored (LKV + seq bump), the STREAM ring keep-last trim and the
  * RFC-0008 §E drain cursor, wait_for_change wake/timeout, snapshot_edges under a
  * concurrent add_edge storm (inline→heap crossover included), clear_edge, the
@@ -47,7 +49,7 @@ void check(bool ok, std::string_view what) {
     if (!ok) ++g_failures;
 }
 
-// A single-link rope over a fresh owned heap segment holding one byte `b`.
+/** @brief A single-link rope over a fresh owned heap segment holding one byte `b`. */
 rope_t make_value(std::uint8_t b) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(1);
     seg->bytes[0] = std::byte{b};

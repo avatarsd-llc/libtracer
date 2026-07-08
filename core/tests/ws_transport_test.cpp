@@ -1,8 +1,11 @@
-/*
+/**
+ * @file
+ * @brief #54 — transport_ws SERVER socket-layer tests.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * #54 — transport_ws SERVER socket-layer tests. A transport_ws_server binds an
+ * A transport_ws_server binds an
  * ephemeral localhost port; the test drives it with a raw TCP client: send a
  * correct RFC 6455 Upgrade request, verify the 101 response carries the right
  * Sec-WebSocket-Accept (cross-checked with ws::accept_key), then (a) send a
@@ -49,7 +52,11 @@ void check(bool ok, std::string_view what) {
     if (!ok) ++g_failures;
 }
 
-// Connect a raw TCP client to 127.0.0.1:port. Returns the fd, or -1.
+/**
+ * @brief Connect a raw TCP client to 127.0.0.1:port.
+ *
+ * Returns the fd, or -1.
+ */
 int tcp_connect(std::uint16_t port) {
     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
@@ -82,8 +89,12 @@ void write_bytes(int fd, std::span<const std::byte> b) {
     }
 }
 
-// Read up to `cap` bytes with a per-read poll timeout; stops when `done(buf)` is
-// true or the deadline passes. Keeps the test deterministic.
+/**
+ * @brief Read up to `cap` bytes with a per-read poll timeout; stops when `done(buf)` is true or the
+ *        deadline passes.
+ *
+ * Keeps the test deterministic.
+ */
 template <typename Done>
 std::vector<std::byte> read_until(int fd, Done done, std::chrono::milliseconds budget) {
     std::vector<std::byte> buf;
@@ -99,8 +110,12 @@ std::vector<std::byte> read_until(int fd, Done done, std::chrono::milliseconds b
     return buf;
 }
 
-// Build a MASKED client→server frame (RFC 6455 §5.3): FIN=1, given opcode, the
-// MASK bit set with a 4-byte key, payload XOR-masked. Small payloads only (<126).
+/**
+ * @brief Build a MASKED client→server frame (RFC 6455 §5.3): FIN=1, given opcode, the MASK bit set
+ *        with a 4-byte key, payload XOR-masked.
+ *
+ * Small payloads only (<126).
+ */
 std::vector<std::byte> masked_client_frame(ws::opcode_t op, std::span<const std::byte> payload,
                                            std::array<std::uint8_t, 4> mask, bool fin = true) {
     std::vector<std::byte> out;
@@ -115,7 +130,11 @@ std::vector<std::byte> masked_client_frame(ws::opcode_t op, std::span<const std:
     return out;
 }
 
-// Drive the RFC 6455 opening handshake on a raw client fd. Returns true on 101.
+/**
+ * @brief Drive the RFC 6455 opening handshake on a raw client fd.
+ *
+ * Returns true on 101.
+ */
 bool raw_handshake(int cfd) {
     const std::string client_key = "dGhlIHNhbXBsZSBub25jZQ==";
     std::string upgrade =
@@ -138,9 +157,11 @@ bool raw_handshake(int cfd) {
     return resp.find("101 Switching Protocols") != std::string::npos;
 }
 
-// A fragmented message reaches the OWNING sink as the rope its fragments already
-// are — one owning link per fragment, chained, never memcpy'd flat (ADR-0053 §5)
-// — with an interleaved control frame (PING) handled mid-message per RFC 6455.
+/**
+ * @brief A fragmented message reaches the OWNING sink as the rope its fragments already are — one
+ *        owning link per fragment, chained, never memcpy'd flat (ADR-0053 §5) — with an interleaved
+ *        control frame (PING) handled mid-message per RFC 6455.
+ */
 void test_fragmented_message_rope() {
     std::printf("transport_ws server — fragmented message -> rope (ADR-0053):\n");
 
@@ -186,8 +207,10 @@ void test_fragmented_message_rope() {
     ::close(cfd);
 }
 
-// The same fragmented message on the SPAN tier: delivered once, byte-exact
-// (the borrowed tier pays the single flatten inside the transport).
+/**
+ * @brief The same fragmented message on the SPAN tier: delivered once, byte-exact (the borrowed
+ *        tier pays the single flatten inside the transport).
+ */
 void test_fragmented_message_span() {
     std::printf("transport_ws server — fragmented message -> span tier:\n");
 
@@ -303,12 +326,16 @@ void test_handshake_and_frames() {
     ::close(cfd);
 }
 
-// Two real transport_t endpoints over a live WS connection: a transport_ws_server
-// and a transport_ws_client dialing into it. Asserts a FULL round trip — the
-// client's MASKED BINARY frame surfaces at the server's receiver as exact bytes,
-// and the server's UNMASKED BINARY frame surfaces at the client's receiver as
-// exact bytes. Deterministic via futures with a deadline. This is the real
-// integration test for the dial-out (client) half (#54).
+/**
+ * @brief Two real transport_t endpoints over a live WS connection: a transport_ws_server and a
+ *        transport_ws_client dialing into it.
+ *
+ * Asserts a FULL round trip — the
+ * client's MASKED BINARY frame surfaces at the server's receiver as exact bytes,
+ * and the server's UNMASKED BINARY frame surfaces at the client's receiver as
+ * exact bytes. Deterministic via futures with a deadline. This is the real
+ * integration test for the dial-out (client) half (#54).
+ */
 void test_client_server_roundtrip() {
     std::printf("transport_ws client <-> server — full round trip:\n");
 

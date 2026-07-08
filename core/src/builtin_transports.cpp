@@ -1,8 +1,11 @@
-/*
+/**
+ * @file
+ * @brief The FULL-NODE built-in transport registration (udp + tcp + ws).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * The FULL-NODE built-in transport registration (udp + tcp + ws). This hand-written
+ * This hand-written
  * dispatcher is what a full node compiles: the default core CMake build, the PlatformIO
  * portable set (library.json globs core/src), and the ESP-IDF component. A core build
  * that DROPS a transport compiles a CMake-GENERATED variant from builtin_transports.cpp.in

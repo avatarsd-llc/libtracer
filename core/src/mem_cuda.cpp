@@ -1,9 +1,12 @@
-/*
+/**
+ * @file
+ * @brief mem_cuda implementation — CUDA *runtime* API only (no kernels), so a host C++ compiler +
+ *        libcudart builds it.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * mem_cuda implementation — CUDA *runtime* API only (no kernels), so a host C++
- * compiler + libcudart builds it. Built only with LIBTRACER_WITH_CUDA.
+ * Built only with LIBTRACER_WITH_CUDA.
  */
 
 #include "libtracer/mem_cuda.hpp"
@@ -36,20 +39,26 @@ class cuda_backend_t final : public mem_backend_t {
         delete seg;
     }
 
-    // Device memory is not host-cached; the cache hooks reduce to a stream barrier.
+    /** @brief Device memory is not host-cached; the cache hooks reduce to a stream barrier. */
     void after_io(view::segment_t* /*seg*/, io_dir_t /*dir*/) noexcept override {
         (void)cudaDeviceSynchronize();
     }
 
     [[nodiscard]] mem_space_t space() const noexcept override { return mem_space_t::DEVICE; }
-    // TU-local (LIBTRACER_WITH_CUDA only): tagged CUDA, but not in backend_set.cpp's
-    // fast switch, so destroy_dispatch routes it through the virtual `destroy` above
-    // and mem::transfer routes it through cuda_transfer (below).
+    /**
+     * @brief TU-local (LIBTRACER_WITH_CUDA only): tagged CUDA, but not in backend_set.cpp's fast
+     *        switch, so destroy_dispatch routes it through the virtual `destroy` above and
+     *        mem::transfer routes it through cuda_transfer (below).
+     */
     [[nodiscard]] backend_tag tag() const noexcept override { return backend_tag::CUDA; }
 
-    // Module-set traits (ADR-0047 §2). Device memory is not host-cached; the copy
-    // and its stream barrier live in cuda_transfer, so `needs_cache_ops` is not
-    // read on the CUDA path — set true for an honest, non-trivial cache contract.
+    /**
+     * @brief Module-set traits (ADR-0047 §2).
+     *
+     * Device memory is not host-cached; the copy
+     * and its stream barrier live in cuda_transfer, so `needs_cache_ops` is not
+     * read on the CUDA path — set true for an honest, non-trivial cache contract.
+     */
     static constexpr bool needs_cache_ops =
         true; /**< @brief The cache hooks reduce to a CUDA stream barrier (after_io). */
     static constexpr bool is_isr_safe =

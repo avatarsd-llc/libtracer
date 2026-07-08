@@ -1,11 +1,13 @@
-/*
+/**
+ * @file
+ * @brief Rope-source differential FUZZER for the wire grammar (ADR-0048 §consequences: "the
+ *        differential fuzzers gain a rope-source mode — same bytes split at adversarial link
+ *        boundaries MUST decode identically to the contiguous case, including mid-header splits").
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Rope-source differential FUZZER for the wire grammar (ADR-0048 §consequences:
- * "the differential fuzzers gain a rope-source mode — same bytes split at
- * adversarial link boundaries MUST decode identically to the contiguous case,
- * including mid-header splits"). Where rope_decode_test pins a handful of crafted
+ * Where rope_decode_test pins a handful of crafted
  * frames, this sweeps thousands of deterministic seeds: each seed yields one byte
  * buffer — a codec-built valid frame, a mutated near-valid frame, or pure random
  * bytes — and the INVARIANT checked for every buffer is
@@ -38,7 +40,7 @@
 
 namespace {
 
-// Deterministic xorshift64 — reproducible, no wall-clock or global rand().
+/** @brief Deterministic xorshift64 — reproducible, no wall-clock or global rand(). */
 struct rng_t {
     std::uint64_t s;
     std::uint64_t next() noexcept {
@@ -51,9 +53,13 @@ struct rng_t {
     std::uint32_t below(std::uint32_t n) noexcept { return n ? u32() % n : 0; }
 };
 
-// Build a random, well-formed tlv_t. Payload buffers are parked in `store` (a
-// std::deque — stable element addresses across growth) so the borrowed
-// tlv_t::payload spans stay valid until encode() reads them.
+/**
+ * @brief Build a random, well-formed tlv_t.
+ *
+ * Payload buffers are parked in `store` (a
+ * std::deque — stable element addresses across growth) so the borrowed
+ * tlv_t::payload spans stay valid until encode() reads them.
+ */
 tr::wire::tlv_t gen_tlv(rng_t& r, int depth, std::deque<std::vector<std::byte>>& store) {
     tr::wire::tlv_t t;
     t.type = static_cast<tr::wire::type_t>(1 + r.below(0xFE));  // nonzero type code
@@ -102,7 +108,7 @@ std::vector<std::byte> gen_buffer(rng_t& r) {
     return f;
 }
 
-// Own the per-link byte copies + the rope viewing them (the links borrow `parts`).
+/** @brief Own the per-link byte copies + the rope viewing them (the links borrow `parts`). */
 struct split_rope_t {
     std::vector<std::vector<std::byte>> parts;
     tr::view::rope_t rope;
@@ -155,12 +161,15 @@ std::expected<void, tr::wire::err_t> lazy_full_walk(const tr::view::rope_t& r) {
     return {};
 }
 
-// The invariant for one split: BOTH rope-tier readers must agree with decode.
-// One documented divergence: over() anchors bounds BEFORE any CRC (ADR-0053 §4),
-// while decode checks the root CRC before its trailing-bytes check — so a frame
-// with BOTH defects yields FRAME_CRC_FAIL eagerly but FRAME_INVALID lazily.
-// That exact err_t pair (same reject verdict) is accepted; everything else must
-// match exactly.
+/**
+ * @brief The invariant for one split: BOTH rope-tier readers must agree with decode.
+ *
+ * One documented divergence: over() anchors bounds BEFORE any CRC (ADR-0053 §4),
+ * while decode checks the root CRC before its trailing-bytes check — so a frame
+ * with BOTH defects yields FRAME_CRC_FAIL eagerly but FRAME_INVALID lazily.
+ * That exact err_t pair (same reject verdict) is accepted; everything else must
+ * match exactly.
+ */
 bool split_agrees(const std::vector<std::byte>& buf, const std::vector<std::size_t>& cuts,
                   bool expect_ok, tr::wire::err_t expect_err, tr::wire::err_t& got_err) {
     split_rope_t sr = split_into(buf, cuts);

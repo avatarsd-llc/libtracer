@@ -1,10 +1,13 @@
-/*
+/**
+ * @file
+ * @brief M5 UDP transport tests: raw frame delivery over a real localhost UDP socket, and an end-
+ *        to-end two-node FWD delivery through graph_t + fwd_router_t over UDP (the explicit-source-
+ *        routed net plane, ADR-0040 — no bridge_t/ROUTER).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * M5 UDP transport tests: raw frame delivery over a real localhost UDP socket,
- * and an end-to-end two-node FWD delivery through graph_t + fwd_router_t over UDP
- * (the explicit-source-routed net plane, ADR-0040 — no bridge_t/ROUTER). Built
+ * Built
  * under TSan (the recv thread + receiver handoff) and ASan+UBSan. Uses fixed
  * loopback ports; SO_REUSEADDR is set on the sockets.
  */
@@ -76,8 +79,10 @@ void test_raw_frame() {
     }
 }
 
-// Build FWD{ op=WRITE, dst=<segs...>, src=<empty PATH>, payload=<VALUE> } — a remote
-// write routed by explicit source route (RFC-0004 §D, ADR-0040).
+/**
+ * @brief Build FWD{ op=WRITE, dst=<segs...>, src=<empty PATH>, payload=<VALUE> } — a remote write
+ *        routed by explicit source route (RFC-0004 §D, ADR-0040).
+ */
 std::vector<std::byte> fwd_write(std::initializer_list<std::string_view> dst,
                                  std::span<const std::byte> payload_value_tlv) {
     std::vector<std::byte> body;
@@ -167,10 +172,13 @@ void test_scatter_gather() {
     }
 }
 
-// A heap-delegating backend that RECORDS every segment it hands out, so a test can
-// prove segment identity end to end (the RX frame segment IS the stored segment).
-// destroy is delegated too, though the heap's alloc stamps itself as the segment's
-// reclaimer, so this override is exercised only if that ever changes.
+/**
+ * @brief A heap-delegating backend that RECORDS every segment it hands out, so a test can prove
+ *        segment identity end to end (the RX frame segment IS the stored segment).
+ *
+ * destroy is delegated too, though the heap's alloc stamps itself as the segment's
+ * reclaimer, so this override is exercised only if that ever changes.
+ */
 class recording_backend_t final : public tr::mem::mem_backend_t {
    public:
     recording_backend_t() : mem_backend_t("rec_heap") {}
@@ -198,8 +206,10 @@ class recording_backend_t final : public tr::mem::mem_backend_t {
     std::vector<tr::view::segment_t*> segments_;
 };
 
-// ADR-0042 §2 — the owning delivery path: an installed view receiver gets each
-// datagram as a view over a fresh refcounted segment from the injected backend.
+/**
+ * @brief ADR-0042 §2 — the owning delivery path: an installed view receiver gets each datagram as a
+ *        view over a fresh refcounted segment from the injected backend.
+ */
 void test_view_delivery() {
     std::printf("UDP transport — owning view delivery (ADR-0042 receiver seam):\n");
     std::promise<tr::view::view_t> got;
@@ -234,8 +244,10 @@ void test_view_delivery() {
     check(b.dropped_rx() == 0, "no backpressure drops on the heap backend");
 }
 
-// ADR-0042 §2 — pool exhaustion is backpressure: alloc == nullptr drops the
-// datagram and ticks dropped_rx(); never an OOM, never a crash.
+/**
+ * @brief ADR-0042 §2 — pool exhaustion is backpressure: alloc == nullptr drops the datagram and
+ *        ticks dropped_rx(); never an OOM, never a crash.
+ */
 void test_view_pool_exhaustion() {
     std::printf("UDP transport — exhausted pool backend drops cleanly (backpressure):\n");
     // A slab far too small for even one kMaxDatagram slot => capacity 0 => every
@@ -264,9 +276,11 @@ void test_view_pool_exhaustion() {
     check(delivered.load() == 0, "nothing delivered while the pool is exhausted");
 }
 
-// ADR-0042 end to end: two nodes over real UDP with owning view delivery and a
-// store_ref_min_bytes opt-in — the WRITE lands ZERO-copy (the graph's stored
-// segment IS the RX frame segment, proven by pointer identity through graph read).
+/**
+ * @brief ADR-0042 end to end: two nodes over real UDP with owning view delivery and a
+ *        store_ref_min_bytes opt-in — the WRITE lands ZERO-copy (the graph's stored segment IS the
+ *        RX frame segment, proven by pointer identity through graph read).
+ */
 void test_two_nodes_zero_copy_store() {
     std::printf("Two nodes over UDP — view delivery + store_ref_min_bytes zero-copy WRITE:\n");
     recording_backend_t rec;

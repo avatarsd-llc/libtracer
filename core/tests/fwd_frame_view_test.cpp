@@ -1,13 +1,14 @@
-/*
+/**
+ * @file
+ * @brief fwd_frame_view unit test — drives the FWD offset-dispatch cluster directly (no router, no
+ *        transports), the point of extracting it from fwd_router.cpp (the length_prefix_framer
+ *        precedent): first-dst-seg / op / control peeks over BOTH cursors (contiguous span +
+ *        adversarially split rope), the shrunk-dst / grown-src head rebuild proved BYTE-EXACT
+ *        against a reference re-encode, stack_writer clamp-to-empty overflow, and malformed
+ *        rejects.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
- *
- * fwd_frame_view unit test — drives the FWD offset-dispatch cluster directly
- * (no router, no transports), the point of extracting it from fwd_router.cpp
- * (the length_prefix_framer precedent): first-dst-seg / op / control peeks over
- * BOTH cursors (contiguous span + adversarially split rope), the shrunk-dst /
- * grown-src head rebuild proved BYTE-EXACT against a reference re-encode,
- * stack_writer clamp-to-empty overflow, and malformed rejects.
  */
 #include "libtracer/fwd_frame_view.hpp"
 

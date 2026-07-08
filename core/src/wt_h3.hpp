@@ -1,9 +1,12 @@
-/*
+/**
+ * @file
+ * @brief wt_h3 — the MODULE-PRIVATE minimal HTTP/3 + QPACK codec the WebTransport endpoint needs
+ *        (ADR-0043 Phase B), and nothing more.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * wt_h3 — the MODULE-PRIVATE minimal HTTP/3 + QPACK codec the WebTransport
- * endpoint needs (ADR-0043 Phase B), and nothing more. This header lives under
+ * This header lives under
  * src/ (not include/): it is shared by transport_webtransport.cpp and the
  * webtransport tests, and is NOT public API.
  *

@@ -1,9 +1,11 @@
-/*
+/**
+ * @file
+ * @brief ADR-0043 Phase B — webtransport_transport_t tests (a consumer of the separate
+ *        libtracer_quic module target; configured only with LIBTRACER_WITH_QUIC).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * ADR-0043 Phase B — webtransport_transport_t tests (a consumer of the separate
- * libtracer_quic module target; configured only with LIBTRACER_WITH_QUIC).
  * Self-contained end-to-end coverage WITHOUT a browser: the module's DIAL mode
  * implements the client half of the minimal H3 handshake, so a C++
  * WebTransport client establishes a real session (SETTINGS exchange, extended
@@ -55,7 +57,7 @@ void check(bool ok, std::string_view what) {
     if (!ok) ++g_failures;
 }
 
-// Dev cert paths — generated once in main() by tools/gen-dev-cert.sh.
+/** @brief Dev cert paths — generated once in main() by tools/gen-dev-cert.sh. */
 std::string g_cert;
 std::string g_key;
 
@@ -63,8 +65,9 @@ webtransport_dial_tls_t dev_tls() {
     return webtransport_dial_tls_t{.ca_file = {}, .insecure_no_verify = true};
 }
 
-// A collecting sink: frames delivered on an msquic worker thread, read from the
-// test thread.
+/**
+ * @brief A collecting sink: frames delivered on an msquic worker thread, read from the test thread.
+ */
 struct sink_t {
     std::mutex m;
     std::vector<std::vector<std::byte>> frames;

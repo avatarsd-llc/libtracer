@@ -1,8 +1,9 @@
-/*
+/**
+ * @file
+ * @brief The 16KB-RAM zero-heap forward-path bench (ADR-0038 §16KB-RAM feasibility gate).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
- *
- * The 16KB-RAM zero-heap forward-path bench (ADR-0038 §16KB-RAM feasibility gate).
  *
  * Two armed windows: (1) one FWD *forward hop* — offset-dispatch + stack heads +
  * stack iov (ADR-0038 invariants #1/#2), hard-gated at ZERO allocations by CI
@@ -94,8 +95,10 @@ using tr::net::transport_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
 
-// A transport that only records the bytes it is asked to send (no I/O, no alloc while
-// armed beyond what the router hands it — the send itself is the measured egress).
+/**
+ * @brief A transport that only records the bytes it is asked to send (no I/O, no alloc while armed
+ *        beyond what the router hands it — the send itself is the measured egress).
+ */
 struct capture_transport_t : transport_t {
     std::size_t sends = 0;
     std::size_t last_len = 0;
@@ -103,10 +106,14 @@ struct capture_transport_t : transport_t {
         ++sends;
         last_len = f.size();
     }
-    // Override the scatter-gather send so the measured window sees the ROUTER's cost,
-    // not the base class's flatten-into-a-temp-vector (which would add a measurement
-    // artifact alloc). A real zero-copy transport (sendmsg/writev/RDMA) overrides this
-    // exactly this way — sum the spans, no copy, no heap.
+    /**
+     * @brief Override the scatter-gather send so the measured window sees the ROUTER's cost, not
+     *        the base class's flatten-into-a-temp-vector (which would add a measurement artifact
+     *        alloc).
+     *
+     * A real zero-copy transport (sendmsg/writev/RDMA) overrides this
+     * exactly this way — sum the spans, no copy, no heap.
+     */
     void send(std::span<const std::span<const std::byte>> iov) override {
         std::size_t total = 0;
         for (const auto& s : iov) total += s.size();
@@ -115,15 +122,17 @@ struct capture_transport_t : transport_t {
     }
 };
 
-// Append a NAME-only PATH TLV over `segs`.
+/** @brief Append a NAME-only PATH TLV over `segs`. */
 void emit_path(std::vector<std::byte>& out, std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
     for (std::string_view s : segs) tr::wire::emit_name(body, s);
     tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
 }
 
-// Build FWD{ op=WRITE, dst=<dst...>, src=<src...>, VALUE payload } — the frame a
-// forward hop shrinks (dst) and grows (src).
+/**
+ * @brief Build FWD{ op=WRITE, dst=<dst...>, src=<src...>, VALUE payload } — the frame a forward hop
+ *        shrinks (dst) and grows (src).
+ */
 std::vector<std::byte> make_fwd(std::initializer_list<std::string_view> dst,
                                 std::initializer_list<std::string_view> src,
                                 std::span<const std::byte> payload) {

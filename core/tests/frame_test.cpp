@@ -1,8 +1,11 @@
-/*
+/**
+ * @file
+ * @brief Frame-codec nesting test.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Frame-codec nesting test. Locks the docs/reference/01 §"Iterative parsing
+ * Locks the docs/reference/01 §"Iterative parsing
  * requirement" under RFC-0006: nested TLVs are parsed iteratively (no
  * recursion) and depth is bounded by the RECEIVER'S decode resources, never a
  * constant. A heap-resourced decode parses a frame far deeper than the old cap

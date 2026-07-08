@@ -22,9 +22,11 @@ namespace tr::net {
 
 namespace {
 
-// The canonical bus-peer name (ADR-0044): 'n' + the node id in decimal, no
-// leading zeros — deterministic, collision-safe within the bus, and small enough
-// for a stack buffer (13-bit node => at most 4 digits).
+/**
+ * @brief The canonical bus-peer name (ADR-0044): 'n' + the node id in decimal, no leading zeros —
+ *        deterministic, collision-safe within the bus, and small enough for a stack buffer (13-bit
+ *        node => at most 4 digits).
+ */
 struct peer_name_buf_t {
     std::array<char, 8> buf{};
     std::size_t len = 0;
@@ -41,8 +43,10 @@ struct peer_name_buf_t {
     return out;
 }
 
-// The exact inverse of format_peer_name: nullopt for anything non-canonical
-// (wrong prefix, empty digits, leading zero, non-digit, out of the node range).
+/**
+ * @brief The exact inverse of format_peer_name: nullopt for anything non-canonical (wrong prefix,
+ *        empty digits, leading zero, non-digit, out of the node range).
+ */
 [[nodiscard]] std::optional<std::uint16_t> parse_peer_name(std::string_view name) {
     if (name.size() < 2 || name.front() != 'n') return std::nullopt;
     const std::string_view digits = name.substr(1);
@@ -56,10 +60,13 @@ struct peer_name_buf_t {
     return static_cast<std::uint16_t>(v);
 }
 
-// Reassembly identity for a group is derived purely from the CAN ID: the `node`
-// sub-field becomes the 16-byte origin and the group's base endpoint becomes the
-// `ts`. Both peers compute it the same way from the same id, so no per-frame
-// origin/ts ever rides the constrained bus (header-elided).
+/**
+ * @brief Reassembly identity for a group is derived purely from the CAN ID: the `node` sub-field
+ *        becomes the 16-byte origin and the group's base endpoint becomes the `ts`.
+ *
+ * Both peers compute it the same way from the same id, so no per-frame
+ * origin/ts ever rides the constrained bus (header-elided).
+ */
 tr::net::can_origin_id_t origin_of(std::uint16_t node) {
     tr::net::can_origin_id_t o{};
     o[0] = static_cast<std::uint8_t>(node & 0xFFu);

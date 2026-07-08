@@ -1,11 +1,14 @@
-/*
+/**
+ * @file
+ * @brief Differential test for the rope-aware grammar (ADR-0048 §1): wire::validate_rope over a
+ *        scatter-gather rope MUST reach the exact same verdict as wire::decode over the equivalent
+ *        flat bytes — for every adversarial split, including splits that fall mid-header, mid-
+ *        trailer, and mid-payload.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Differential test for the rope-aware grammar (ADR-0048 §1): wire::validate_rope
- * over a scatter-gather rope MUST reach the exact same verdict as wire::decode over
- * the equivalent flat bytes — for every adversarial split, including splits that
- * fall mid-header, mid-trailer, and mid-payload. This is the proof obligation
+ * This is the proof obligation
  * ADR-0048 §consequences names: "same bytes split at adversarial link boundaries
  * MUST decode identically to the contiguous case." Valid frames validate; every
  * corruption is rejected with the identical err_t no matter where the rope is cut.
@@ -31,16 +34,22 @@ void check(bool ok, std::string_view what) {
     if (!ok) ++g_failures;
 }
 
-// Owns the per-link byte copies and the rope viewing them (borrowed, not copied
-// again) — the rope's links point into `parts`, which must outlive it.
+/**
+ * @brief Owns the per-link byte copies and the rope viewing them (borrowed, not copied again) — the
+ *        rope's links point into `parts`, which must outlive it.
+ */
 struct split_rope_t {
     std::vector<std::vector<std::byte>> parts;
     tr::view::rope_t rope;
 };
 
-// Split `flat` into contiguous links at `cuts` (strictly increasing, interior
-// offsets) and view each as a borrowed rope link. Builds all parts first (reserved,
-// no realloc) so the borrowed pointers stay valid.
+/**
+ * @brief Split `flat` into contiguous links at `cuts` (strictly increasing, interior offsets) and
+ *        view each as a borrowed rope link.
+ *
+ * Builds all parts first (reserved,
+ * no realloc) so the borrowed pointers stay valid.
+ */
 split_rope_t split_into(const std::vector<std::byte>& flat, const std::vector<std::size_t>& cuts) {
     split_rope_t out;
     out.parts.reserve(cuts.size() + 1);
@@ -57,9 +66,12 @@ split_rope_t split_into(const std::vector<std::byte>& flat, const std::vector<st
     return out;
 }
 
-// The core obligation: for EVERY single cut 1..n-1 (2-link ropes) and a few 3-link
-// ropes, validate_rope's ok/err verdict — and its err_t on failure — matches
-// decode(flat). `name` labels the frame; `expect_ok` is decode's own verdict.
+/**
+ * @brief The core obligation: for EVERY single cut 1..n-1 (2-link ropes) and a few 3-link ropes,
+ *        validate_rope's ok/err verdict — and its err_t on failure — matches decode(flat).
+ *
+ * `name` labels the frame; `expect_ok` is decode's own verdict.
+ */
 void assert_matches_decode(std::string_view name, const std::vector<std::byte>& flat) {
     const auto flat_decoded = tr::wire::decode(flat);
     const bool expect_ok = flat_decoded.has_value();
