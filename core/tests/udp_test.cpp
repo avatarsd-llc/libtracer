@@ -113,10 +113,11 @@ void test_two_nodes_over_udp() {
 
     std::promise<std::vector<std::byte>> got;
     auto fut = got.get_future();
-    (void)node_b.subscribe(path_t("/sensor/temp"), [&got](const tr::view::rope_t& v) {
+    auto on_temp = [&got](const tr::view::rope_t& v) {
         const auto b = v.only().bytes();
         got.set_value(std::vector<std::byte>(b.begin(), b.end()));
-    });
+    };
+    (void)node_b.subscribe(path_t("/sensor/temp"), on_temp);
 
     // A client FWD{WRITE dst=/b/sensor/temp} handed to A's router: A strips "b" and
     // forwards /sensor/temp over real UDP to B, whose terminus writes it locally.
@@ -285,8 +286,8 @@ void test_two_nodes_zero_copy_store() {
 
     std::promise<void> written;
     auto fut = written.get_future();
-    (void)node_b.subscribe(path_t("/sensor/blob"),
-                           [&written](const tr::view::rope_t&) { written.set_value(); });
+    auto on_blob = [&written](const tr::view::rope_t&) { written.set_value(); };
+    (void)node_b.subscribe(path_t("/sensor/blob"), on_blob);
 
     // A 64-byte payload => a 68-byte trailer-less VALUE TLV, well over the threshold.
     std::vector<std::byte> pb(64);

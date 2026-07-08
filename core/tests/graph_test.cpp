@@ -256,9 +256,10 @@ void test_subscribe_callback() {
     auto seen = std::make_shared<int>(-1);
     tr::graph::vertex_handle_t src =
         g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
-    (void)g.subscribe(path_t("/sensor/temp"), [seen](const tr::view::rope_t& v) {
+    auto on_temp = [seen](const tr::view::rope_t& v) {
         *seen = std::to_integer<int>(v.only().bytes()[0]);
-    });
+    };
+    (void)g.subscribe(path_t("/sensor/temp"), on_temp);
     (void)g.write(src, make_value({0x42}));
     check(*seen == 0x42, "callback fires on write with the delivered value");
 }
@@ -381,9 +382,10 @@ void test_admission_door_uniformity() {
         (void)g.write(src, make_value({0x5A}));  // seed the LKV BEFORE subscribing
 
         auto seen = std::make_shared<int>(-1);
-        (void)g.subscribe(path_t("/tl"), [seen](const tr::view::rope_t& v) {
+        auto on_latch = [seen](const tr::view::rope_t& v) {
             *seen = std::to_integer<int>(v.only().bytes()[0]);
-        });
+        };
+        (void)g.subscribe(path_t("/tl"), on_latch);
         check(*seen == 0x5A, "callback door: the LKV latches at subscribe");
 
         tr::graph::vertex_handle_t tgt = g.register_vertex(path_t("/tgt"), role_t::STORED_VALUE);
@@ -399,7 +401,8 @@ void test_admission_door_uniformity() {
         tr::graph::vertex_handle_t src = g.register_vertex(path_t("/vol"), role_t::STORED_VALUE);
         (void)g.write(src, make_value({0x77}));
         auto fired = std::make_shared<int>(0);
-        (void)g.subscribe(path_t("/vol"), [fired](const tr::view::rope_t&) { ++*fired; });
+        auto on_vol = [fired](const tr::view::rope_t&) { ++*fired; };
+        (void)g.subscribe(path_t("/vol"), on_vol);
         check(*fired == 0, "no latch on a volatile vertex");
     }
 }
@@ -413,8 +416,9 @@ void test_dispatch_cycle_cap() {
     // Mutual target subscriptions form a cycle; a counter callback on each level.
     (void)g.subscribe(path_t("/a"), path_t("/b"));
     (void)g.subscribe(path_t("/b"), path_t("/a"));
-    (void)g.subscribe(path_t("/a"), [count](const tr::view::rope_t&) { ++*count; });
-    (void)g.subscribe(path_t("/b"), [count](const tr::view::rope_t&) { ++*count; });
+    auto on_hop = [count](const tr::view::rope_t&) { ++*count; };
+    (void)g.subscribe(path_t("/a"), on_hop);
+    (void)g.subscribe(path_t("/b"), on_hop);
 
     (void)g.write(a, make_value({0x01}));  // must terminate, not infinite-loop / stack-overflow
     check(*count > 1, "the cycle did dispatch (callbacks fired both ways)");
@@ -435,9 +439,12 @@ void test_assign_propagate() {
     auto ca = std::make_shared<int>(0);
     auto cb = std::make_shared<int>(0);
     auto cc = std::make_shared<int>(0);
-    (void)g.subscribe(path_t("/r/a"), [ca](const tr::view::rope_t&) { ++*ca; });
-    (void)g.subscribe(path_t("/r/b"), [cb](const tr::view::rope_t&) { ++*cb; });
-    (void)g.subscribe(path_t("/r/c"), [cc](const tr::view::rope_t&) { ++*cc; });
+    auto on_a = [ca](const tr::view::rope_t&) { ++*ca; };
+    auto on_b = [cb](const tr::view::rope_t&) { ++*cb; };
+    auto on_c = [cc](const tr::view::rope_t&) { ++*cc; };
+    (void)g.subscribe(path_t("/r/a"), on_a);
+    (void)g.subscribe(path_t("/r/b"), on_b);
+    (void)g.subscribe(path_t("/r/c"), on_c);
 
     // assign is state-only: it delivers nothing, and repeated assigns coalesce.
     (void)g.assign(a, make_value({0x01}));
@@ -478,7 +485,8 @@ void test_assign_propagate() {
     // write() remains the eager §D composition (assign then deliver the vertex).
     auto cw = std::make_shared<int>(0);
     auto w = g.register_vertex(path_t("/w"), role_t::STORED_VALUE);
-    (void)g.subscribe(path_t("/w"), [cw](const tr::view::rope_t&) { ++*cw; });
+    auto on_w = [cw](const tr::view::rope_t&) { ++*cw; };
+    (void)g.subscribe(path_t("/w"), on_w);
     (void)g.write(w, make_value({0x77}));
     check(*cw == 1, "write() delivers immediately (assign + targeted propagate)");
 }

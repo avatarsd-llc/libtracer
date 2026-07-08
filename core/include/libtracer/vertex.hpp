@@ -12,13 +12,17 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -150,6 +154,16 @@ enum class delivery_mode_t : std::uint8_t {
 };
 
 /**
+ * @brief The in-process per-edge delivery sink: a plain `{fn, ctx}` pair (the ADR-0047
+ *        hot-path shape, same doctrine as `tr::net::receiver_slot_t`).
+ *
+ * Snapshotting one under the fan-out lock is a trivial copy — no per-publish
+ * `std::function` copy (which heap-allocates once captures exceed the SBO). The value
+ * crosses as the rope it is (ADR-0053 §6); the sink may clone links (refcount bumps).
+ */
+using subscriber_fn_t = void (*)(void* ctx, const rope_t& value);
+
+/**
  * @brief One subscription edge (M3b).
  *
  * A write to the owning vertex fans out to a target vertex (@ref target_key —
@@ -158,9 +172,11 @@ enum class delivery_mode_t : std::uint8_t {
  * (a cleared `:subscribers[N]`).
  */
 struct subscriber_t {
-    std::vector<std::byte> target_key; /**< @brief Canonical PATH key (empty ⇒ callback-only). */
-    std::function<void(const rope_t&)>
-        callback; /**< @brief In-process sink; null ⇒ target-only (ADR-0053 §6 rope value). */
+    std::vector<std::byte> target_key;  /**< @brief Canonical PATH key (empty ⇒ callback-only). */
+    subscriber_fn_t callback = nullptr; /**< @brief In-process sink fn; null ⇒ target-only
+                                             (ADR-0053 §6 rope value). */
+    void* callback_ctx = nullptr;       /**< @brief Caller-owned context passed back to
+                                             @ref callback; must outlive every delivery. */
     /** @brief Active flag; an active edge receives every propagated value (delivery is
      *         value-agnostic — WHICH vertices a sweep propagates is the vertex's
      *         `delivery_mode_t`, never a per-subscriber byte comparison). */
@@ -213,6 +229,37 @@ struct subscriber_t {
 };
 
 /**
+ * @brief The dispatch-relevant snapshot of one ACTIVE subscription edge.
+ *
+ * What @ref vertex_t::snapshot_edges copies out under the vertex lock so the graph can
+ * dispatch OUTSIDE it (callbacks / re-dispatch re-enter the graph): the `{fn, ctx}`
+ * callback pair, owning copies of the target key / link / caller (the slot may be
+ * cleared concurrently once dispatch runs outside the lock), and a refcount CLONE of
+ * the stored return route (ADR-0041 §2 — a bump, not a byte copy; the clone keeps the
+ * route alive across a concurrent unsubscribe).
+ */
+struct edge_view_t {
+    subscriber_fn_t callback = nullptr; /**< @brief The in-process sink fn (null ⇒ none). */
+    void* callback_ctx = nullptr;       /**< @brief The sink's caller-owned context. */
+    std::vector<std::byte> target_key;  /**< @brief Local re-dispatch target (owning copy). */
+    std::string link;      /**< @brief Remote-delivery link NAME (owning copy; empty ⇒ local). */
+    view_t return_route{}; /**< @brief Consumer return route (refcount clone). */
+    bool delivery_compact = false; /**< @brief RFC-0004 §E.1 label-compaction opt-in. */
+    std::string caller; /**< @brief The edge's stored ACL fan-in context (#81, owning copy). */
+};
+
+/**
+ * @brief A transient-local durability latch (RFC-0004 §D / Q4): the LKV plus the freshly
+ *        admitted edge's dispatch view, both snapshotted atomically with the append.
+ *
+ * @ref value stays null when no latch fired (volatile producer, or no LKV yet).
+ */
+struct edge_latch_t {
+    std::shared_ptr<const rope_t> value; /**< @brief The latched LKV; null ⇒ no latch. */
+    edge_view_t edge;                    /**< @brief The admitted edge's dispatch view. */
+};
+
+/**
  * @brief An L4 graph vertex: a named, addressable position holding a value, a bounded
  *        history, or a user handler (docs/reference/11 §roles).
  *
@@ -220,9 +267,19 @@ struct subscriber_t {
  * always handled via a `vertex_handle_t` returned by `graph_t::register_vertex` (ADR-0056). The
  * read/write hot path is lock-free (an atomic shared_ptr swap); the mutex guards only the
  * history ring, the subscriber list, and the await waiter accounting. Non-copyable.
+ *
+ * The public surface is a VERB interface — storage (@ref store / @ref read_stored),
+ * readiness (@ref note_write / @ref wait_for_change / the seq cursors), edges
+ * (@ref add_edge / @ref clear_edge / @ref snapshot_edges), and ACL state (@ref set_acl /
+ * @ref with_aces) — each verb taking the vertex mutex internally (the LKV slot stays
+ * lock-free). `graph_t` keeps what SPANS vertices: routing, ancestor walks, fan-out
+ * dispatch legs, the effective-ACL walk, admission, and the field surface.
  */
 class vertex_t {
    public:
+    /** @brief The no-heap small-fan-out snapshot width (@ref snapshot_edges buffer size). */
+    static constexpr std::size_t kInlineFanout = 8;
+
     /** @brief Construct a vertex with its role, canonical key, QoS settings, and handlers. */
     vertex_t(role_t role, path_key_t key, settings_t settings, handlers_t handlers)
         : role_(role), key_(std::move(key)), settings_(settings), handlers_(std::move(handlers)) {}
@@ -236,9 +293,287 @@ class vertex_t {
     [[nodiscard]] const path_key_t& key() const noexcept { return key_; }
     /** @brief This vertex's QoS settings. */
     [[nodiscard]] const settings_t& settings() const noexcept { return settings_; }
+    /** @brief This vertex's user handlers (Handler role behavior + the `on_children` seam). */
+    [[nodiscard]] const handlers_t& handlers() const noexcept { return handlers_; }
+
+    // -- storage & readiness ----------------------------------------------------------
+
+    /**
+     * @brief Store @p value as this vertex's state: publish the last-known-value
+     *        (lock-free), append the STREAM ring (keep-last trim), bump the write
+     *        sequence, and wake awaiters.
+     *
+     * One allocation (`make_shared`): the rope's inline small-buffer holds the
+     * single-link trivial case, so a scalar write costs exactly what the `view_t`
+     * slot cost (ADR-0053 §6). The LKV publish happens BEFORE the lock; only the
+     * ring trim + seq bump + notify run under it. Not for Handler-role writes —
+     * the graph runs `handlers().on_write` and calls @ref note_write instead.
+     */
+    void store(rope_t value) {
+        auto sp = std::make_shared<const rope_t>(std::move(value));
+        lkv_.store(sp);  // lock-free publish of the new last-known-value
+        const std::lock_guard lock(m_);
+        if (role_ == role_t::STREAM) {
+            history_.push_back(std::move(sp));
+            const std::size_t keep = settings_.history_keep_last ? settings_.history_keep_last : 1;
+            while (history_.size() > keep) history_.pop_front();
+        }
+        ++write_seq_;
+        cv_.notify_all();
+    }
+
+    /**
+     * @brief Record a Handler-role write: bump the write sequence and wake awaiters
+     *        (the vertex stores no value — the user handler consumed it).
+     */
+    void note_write() {
+        const std::lock_guard lock(m_);
+        ++write_seq_;
+        cv_.notify_all();
+    }
+
+    /** @brief The stored last-known-value (lock-free; null ⇒ never assigned / Handler role). */
+    [[nodiscard]] std::shared_ptr<const rope_t> read_stored() const { return lkv_.load(); }
+
+    /**
+     * @brief Block until the write sequence moves past @p seq0 or @p timeout elapses.
+     * @param seq0    The @ref current_seq snapshot the caller waits to see surpassed.
+     * @param timeout The maximum wait.
+     * @return true iff a change was observed (`write_seq_ != seq0`); false on timeout.
+     */
+    [[nodiscard]] bool wait_for_change(std::uint64_t seq0, std::chrono::nanoseconds timeout) {
+        std::unique_lock lock(m_);
+        return cv_.wait_for(lock, timeout, [&] { return write_seq_ != seq0; });
+    }
+
+    /** @brief The current write sequence (bumped per assign — the await predicate base). */
+    [[nodiscard]] std::uint64_t current_seq() {
+        const std::lock_guard lock(m_);
+        return write_seq_;
+    }
+
+    /**
+     * @brief Advance the STREAM drain cursor to "now" WITHOUT draining (RFC-0008 §E):
+     *        an eager delivery already flushed the ring, so a later sweep must not
+     *        re-deliver.
+     */
+    void mark_flushed() {
+        const std::lock_guard lock(m_);
+        last_flushed_seq_ = write_seq_;
+    }
+
+    /**
+     * @brief Drain the STREAM ring entries appended since the last flush, in order —
+     *        a queue, not a coalesce (RFC-0008 §E) — and advance the drain cursor.
+     *
+     * Snapshots under the lock into @p out (caller storage; overwritten); the caller
+     * delivers OUTSIDE the lock. Entries trimmed out of the keep-last ring before this
+     * drain are lost (bounded history).
+     * @return The number of entries drained (0 ⇒ nothing appended since the last flush).
+     */
+    std::size_t drain_unflushed(std::vector<std::shared_ptr<const rope_t>>& out) {
+        const std::lock_guard lock(m_);
+        const std::uint64_t now = write_seq_;
+        if (now == last_flushed_seq_) return 0;
+        const std::uint64_t n_new = now - last_flushed_seq_;
+        last_flushed_seq_ = now;
+        const auto take =
+            static_cast<std::ptrdiff_t>(std::min<std::uint64_t>(n_new, history_.size()));
+        out.assign(history_.end() - take, history_.end());
+        return out.size();
+    }
+
+    /** @brief The STREAM ring contents, oldest first — each entry a rope clone (refcount
+     *         bumps, no byte copy). */
+    [[nodiscard]] std::vector<rope_t> history_snapshot() {
+        const std::lock_guard lock(m_);
+        std::vector<rope_t> out;
+        out.reserve(history_.size());
+        for (const auto& sp : history_) out.push_back(*sp);
+        return out;
+    }
+
+    // -- subscription edges -----------------------------------------------------------
+
+    /**
+     * @brief Append a subscription edge; atomically snapshot the transient-local
+     *        durability latch when @p latch is non-null.
+     *
+     * Under ONE lock hold: the slot is appended, and — iff this vertex is
+     * transient-local (`settings.durability == 1`) and already holds an LKV — the
+     * value plus the new edge's dispatch view are snapshotted into @p latch, so a
+     * concurrent `clear_edge` can never slip between append and latch. The caller
+     * dispatches the latch OUTSIDE the lock (RFC-0004 §D / ADR-0049).
+     * @return The appended slot's index (the `:subscribers[N]` slot number).
+     */
+    std::size_t add_edge(subscriber_t s, edge_latch_t* latch = nullptr) {
+        const std::lock_guard lock(m_);
+        subs_.push_back(std::move(s));
+        const std::size_t idx = subs_.size() - 1;
+        if (latch != nullptr && settings_.durability == 1) {
+            if (std::shared_ptr<const rope_t> lkv = lkv_.load()) {
+                latch->value = std::move(lkv);
+                latch->edge = edge_view_of(subs_.back());
+            }
+        }
+        return idx;
+    }
+
+    /**
+     * @brief Deactivate the edge slot @p idx (unsubscribe — a cleared `:subscribers[N]`).
+     * @return true iff the slot existed and was active (the caller then adjusts the
+     *         RFC-0005 listener bookkeeping).
+     */
+    bool clear_edge(std::size_t idx) {
+        const std::lock_guard lock(m_);
+        if (idx >= subs_.size() || !subs_[idx].active) return false;
+        subs_[idx].active = false;
+        return true;
+    }
+
+    /**
+     * @brief Snapshot every ACTIVE edge's dispatch view into caller storage — the
+     *        snapshot-under-lock half of the snapshot/dispatch-outside discipline.
+     *
+     * Small fan-out (the common case, ≤ @p inline_buf's size) fills @p inline_buf —
+     * no heap allocation per publish; a larger subscriber list reserves @p overflow
+     * once and fills it instead (then @p overflow is non-empty and holds ALL views).
+     * @param inline_buf The caller's stack buffer (typically `kInlineFanout` wide).
+     * @param overflow   The heap fallback for large fan-out (cleared on entry).
+     * @return The number of views snapshotted (into whichever buffer was used).
+     */
+    std::size_t snapshot_edges(std::span<edge_view_t> inline_buf,
+                               std::vector<edge_view_t>& overflow) {
+        overflow.clear();
+        const std::lock_guard lock(m_);
+        const bool use_heap = subs_.size() > inline_buf.size();
+        if (use_heap) overflow.reserve(subs_.size());
+        std::size_t n = 0;
+        for (const subscriber_t& s : subs_) {
+            if (!s.active) continue;
+            if (use_heap)
+                overflow.push_back(edge_view_of(s));
+            else
+                inline_buf[n] = edge_view_of(s);
+            ++n;
+        }
+        return n;
+    }
+
+    /**
+     * @brief The stored SUBSCRIBER TLV view of the active slot @p idx (a `:subscribers[N]`
+     *        read) — a refcount clone, no byte copy; `nullopt` for a missing / inactive /
+     *        TLV-less (in-process sugar) slot.
+     */
+    [[nodiscard]] std::optional<view_t> edge_source(std::size_t idx) {
+        const std::lock_guard lock(m_);
+        if (idx < subs_.size() && subs_[idx].active && subs_[idx].source_view.owner)
+            return subs_[idx].source_view;  // clone (refcount bump)
+        return std::nullopt;
+    }
+
+    /** @brief Every active slot's stored SUBSCRIBER view, in slot order (the
+     *         `:subscribers[]` array read) — each a refcount clone. */
+    [[nodiscard]] std::vector<view_t> edge_sources() {
+        const std::lock_guard lock(m_);
+        std::vector<view_t> out;
+        out.reserve(subs_.size());
+        for (const subscriber_t& s : subs_)
+            if (s.active && s.source_view.owner) out.push_back(s.source_view);
+        return out;
+    }
+
+    // -- ACL state (#81, ADR-0018/0020) -------------------------------------------------
+
+    /**
+     * @brief Store this vertex's `:acl`: the raw TLV bytes (served back verbatim by an
+     *        `:acl` read) plus the same bytes parsed into typed ACEs (what evaluation
+     *        walks). Storing replaces; empty ⇒ no restrictions.
+     */
+    void set_acl(std::span<const std::byte> raw, std::vector<ace_t> aces) {
+        const std::lock_guard lock(m_);
+        acl_.assign(raw.begin(), raw.end());
+        aces_ = std::move(aces);
+    }
+
+    /** @brief A copy of the stored raw `:acl` TLV bytes (empty ⇒ no `:acl` set). */
+    [[nodiscard]] std::vector<std::byte> acl_bytes() {
+        const std::lock_guard lock(m_);
+        return acl_;
+    }
+
+    /**
+     * @brief Run @p f over this vertex's parsed ACE list under the vertex lock — the
+     *        zero-copy evaluation accessor (`graph_t::acl_allows` hands the list to the
+     *        pure ADR-0050 policy without snapshotting subject bytes per gated op).
+     *
+     * @p f must not re-enter this vertex (the lock is held) — it is a pure evaluation
+     * over the list, per the ADR-0050 policy contract (no locks/clock/graph inside).
+     * @return Whatever @p f returns.
+     */
+    template <typename F>
+    auto with_aces(F&& f) -> decltype(f(std::declval<const std::vector<ace_t>&>())) {
+        const std::lock_guard lock(m_);
+        return f(static_cast<const std::vector<ace_t>&>(aces_));
+    }
+
+    // -- settings & propagation policy --------------------------------------------------
+
+    /** @brief A consistent copy of the QoS settings (taken under the vertex lock). */
+    [[nodiscard]] settings_t settings_snapshot() {
+        const std::lock_guard lock(m_);
+        return settings_;
+    }
+
+    /**
+     * @brief Mutate the QoS settings under the vertex lock: @p f receives `settings_t&`;
+     *        its return value is passed through (the `:settings.<field>` write surface —
+     *        concurrent single-field writes both land, no read-modify-write clobber).
+     */
+    template <typename F>
+    auto update_settings(F&& f) -> decltype(f(std::declval<settings_t&>())) {
+        const std::lock_guard lock(m_);
+        return f(settings_);
+    }
+
+    /** @brief How this vertex participates in an ANCESTOR's propagate sweep (RFC-0008 §C). */
+    [[nodiscard]] delivery_mode_t delivery_mode() const noexcept { return delivery_mode_; }
+    /** @brief Set the propagation policy — wiring-time, via `graph_t::set_delivery_mode`
+     *         (which also maintains the sweep's UNCONDITIONAL membership). */
+    void set_delivery_mode(delivery_mode_t mode) noexcept { delivery_mode_ = mode; }
+
+    // -- RFC-0005 listener bookkeeping (lock-free counters) ------------------------------
+
+    /** @brief This vertex's own active-slot count (what a subtree walk sums). */
+    [[nodiscard]] std::uint32_t own_subs() const noexcept {
+        return own_subs_.load(std::memory_order_relaxed);
+    }
+    /** @brief Adjust the own active-slot count by @p delta (subscribe/unsubscribe). */
+    void bump_own_subs(std::int32_t delta) noexcept {
+        own_subs_.fetch_add(static_cast<std::uint32_t>(delta), std::memory_order_relaxed);
+    }
+    /** @brief The active subscriber slots on strict ancestors — the one relaxed load the
+     *         write hot path pays before deciding whether to walk ancestors at all. */
+    [[nodiscard]] std::uint32_t listeners_above() const noexcept {
+        return listeners_above_.load(std::memory_order_relaxed);
+    }
+    /** @brief Adjust the ancestor-listener count by @p delta (an ancestor's edge came/went). */
+    void bump_listeners_above(std::int32_t delta) noexcept {
+        listeners_above_.fetch_add(static_cast<std::uint32_t>(delta), std::memory_order_relaxed);
+    }
+    /** @brief Seed the ancestor-listener count at creation (the newborn's O(depth) sum). */
+    void init_listeners_above(std::uint32_t count) noexcept {
+        listeners_above_.store(count, std::memory_order_relaxed);
+    }
 
    private:
-    friend class graph_t;
+    // The dispatch view of one slot; call with m_ held. Owning copies of the byte/string
+    // fields (the slot may be cleared while dispatch runs outside the lock); the route
+    // copy is a refcount clone (ADR-0041 §2 — keeps it alive across an unsubscribe).
+    [[nodiscard]] edge_view_t edge_view_of(const subscriber_t& s) const {
+        return edge_view_t{s.callback,     s.callback_ctx,     s.target_key, s.link,
+                           s.return_route, s.delivery_compact, s.caller};
+    }
 
     role_t role_;
     path_key_t key_;
