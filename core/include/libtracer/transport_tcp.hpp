@@ -29,6 +29,7 @@
 #include <span>
 #include <string>
 
+#include "libtracer/length_prefix_framer.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/posix_endpoint.hpp"
 #include "libtracer/transport.hpp"
@@ -47,10 +48,12 @@ namespace tr::net {
  */
 class tcp_transport_t : public transport_t, private stream_endpoint_t {
    public:
-    /** @brief The largest frame the length prefix may announce (16 MiB). A larger
-     *         prefix is malformed — counted via @ref malformed_rx and the
-     *         connection is closed (a desynced stream cannot be trusted again). */
-    static constexpr std::size_t kMaxFrame = 16u * 1024u * 1024u;
+    /** @brief The largest frame the length prefix may announce — the shared
+     *         length_prefix_framer::kDefaultMaxFrame (16 MiB) unless `:settings
+     *         max_frame` tightens it. A larger prefix is malformed — counted via
+     *         @ref malformed_rx and the connection is closed (a desynced stream
+     *         cannot be trusted again). */
+    static constexpr std::size_t kMaxFrame = length_prefix_framer::kDefaultMaxFrame;
 
     /**
      * @brief DIAL mode: connect to @p peer_host:@p peer_port (synchronous).
