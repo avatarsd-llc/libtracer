@@ -505,13 +505,19 @@ class graph_t {
     // The ACL gate (#81, ADR-0018/0020): true iff `caller` may exercise `right` on
     // `v`. True with no resolver installed (one null check — enforcement off), for a
     // trusted caller (resolver returns nullopt), or when the effective ACL (own ACEs
-    // + INHERIT-flagged ancestor ACEs, walked at check time) is empty; otherwise the
-    // verdict of the pure per-target policy (ADR-0050 acl_policy_t, own list before
-    // ancestors). Takes each vertex's mutex one at a time (never nested). NOTE: runs
-    // on EVERY gated data op (read/write/await), not just the control plane — the
-    // ADR-0050 cached effective-ACE merge is the follow-up that removes the
-    // per-operation ancestor walk from the data plane.
+    // + INHERIT-flagged ancestor ACEs) is empty; otherwise the verdict of the pure
+    // per-target policy over the CACHED effective-ACE merge (ADR-0050
+    // effective_acl_t — own list before ancestors, pre-merged per vertex). Runs on
+    // EVERY gated data op (read/write/await), and evaluates ONE list under one
+    // vertex mutex — the ancestor mutex-walk happens only inside the lazy rebuild
+    // of a dirty cache (after a :acl write marked the written vertex's subtree).
     [[nodiscard]] bool acl_allows(vertex_t* v, std::string_view caller, acl_right_t right) const;
+    // Subtree-precise ADR-0050 cache invalidation: mark `v` and every descendant's
+    // cached effective-ACE merge stale (release stores) after a :acl write on `v`,
+    // via the ADR-0057 child links — wiring-frequency. Call with map_mutex_ held
+    // (shared suffices; the walk only excludes concurrent vertex creation, and a
+    // vertex created after the mark starts dirty anyway).
+    static void mark_subtree_acl_dirty(vertex_t* v);
     // ":children[]" append: instantiate a child from a SPEC via the type catalog (#82,
     // ADR-0017). Composes the child key (parent key + the SPEC `name` NAME), dispatches
     // on the SPEC `type`. Unknown type => SCHEMA_NOT_FOUND; duplicate name => PATH_IN_USE.
