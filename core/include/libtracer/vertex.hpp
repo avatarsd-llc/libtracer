@@ -272,7 +272,8 @@ struct edge_latch_t {
  * The public surface is a VERB interface — storage (@ref store / @ref read_stored),
  * readiness (@ref note_write / @ref wait_for_change / the seq cursors), edges
  * (@ref add_edge / @ref clear_edge / @ref snapshot_edges), and ACL state (@ref set_acl /
- * @ref with_aces) — each verb taking the vertex mutex internally (the LKV slot stays
+ * @ref with_aces / @ref with_effective_aces) — each verb taking the vertex mutex
+ * internally (the LKV slot stays
  * lock-free). `graph_t` keeps what SPANS vertices: routing, ancestor walks, fan-out
  * dispatch legs, the effective-ACL walk, admission, and the field surface.
  */
@@ -613,6 +614,10 @@ class vertex_t {
         const std::lock_guard lock(m_);
         acl_.assign(raw.begin(), raw.end());
         aces_ = std::move(aces);
+        // Publish-then-mark (ADR-0050 cache protocol): the new ACEs are visible
+        // under m_ BEFORE the dirty flag is raised, so a rebuild that observes the
+        // flag always reads the new list (or leaves the flag set for the next one).
+        acl_cache_dirty_.store(true, std::memory_order_release);
     }
 
     /** @brief A copy of the stored raw `:acl` TLV bytes (empty ⇒ no `:acl` set). */
@@ -634,6 +639,55 @@ class vertex_t {
     auto with_aces(F&& f) -> decltype(f(std::declval<const std::vector<ace_t>&>())) {
         const std::lock_guard lock(m_);
         return f(static_cast<const std::vector<ace_t>&>(aces_));
+    }
+
+    /**
+     * @brief Mark this vertex's cached effective-ACE merge stale (ADR-0050).
+     *
+     * Raised by the graph on every `:acl` write for the WRITTEN vertex's whole
+     * subtree (subtree-precise invalidation via the ADR-0057 child links —
+     * wiring-frequency); @ref set_acl raises it for the written vertex itself.
+     * The next @ref with_effective_aces on a marked vertex rebuilds lazily.
+     * @note Lock-free (a release store) — callable under the graph's map lock
+     *       during the subtree walk without touching any vertex mutex.
+     */
+    void mark_acl_cache_dirty() noexcept {
+        acl_cache_dirty_.store(true, std::memory_order_release);
+    }
+
+    /**
+     * @brief Evaluate against this vertex's cached effective-ACE merge, rebuilding
+     *        it first iff it is stale — the ADR-0050 cached-merge verb.
+     *
+     * Under ONE hold of the vertex mutex: when the dirty flag is raised it is
+     * lowered (an acquire-release exchange) and @p rebuild produces a fresh merged
+     * list from this vertex's own parsed ACEs (passed in) — the graph's rebuild
+     * walks the immutable parent chain and takes each ancestor's @ref with_aces,
+     * nesting locks strictly LEAF-TO-ROOT along one parent chain (every other
+     * holder takes a single vertex mutex, so the ordering is acyclic — no
+     * deadlock). Then @p eval runs over the (now-current) cached list and its
+     * result is returned.
+     *
+     * Race resolution (rebuild vs concurrent `:acl` write): the writer publishes
+     * ACEs BEFORE raising the flag (@ref set_acl / graph subtree mark), and this
+     * verb lowers the flag BEFORE @p rebuild reads — so a write landing after the
+     * exchange leaves the flag raised and the possibly-stale cache is rebuilt on
+     * the NEXT check; a stale-forever cache is impossible. Concurrent rebuilds are
+     * serialized by the vertex mutex.
+     *
+     * @param rebuild `std::vector<ace_t>(const std::vector<ace_t>& own)` — the
+     *                fresh merge; must not re-enter THIS vertex (its lock is held).
+     * @param eval    Pure evaluation over the cached merged list (the ADR-0050
+     *                policy contract: no locks/clock/graph inside).
+     * @return Whatever @p eval returns.
+     */
+    template <typename Rebuild, typename Eval>
+    auto with_effective_aces(Rebuild&& rebuild, Eval&& eval)
+        -> decltype(eval(std::declval<const std::vector<ace_t>&>())) {
+        const std::lock_guard lock(m_);
+        if (acl_cache_dirty_.exchange(false, std::memory_order_acq_rel))
+            eff_aces_ = rebuild(static_cast<const std::vector<ace_t>&>(aces_));
+        return eval(static_cast<const std::vector<ace_t>&>(eff_aces_));
     }
 
     // -- settings & propagation policy --------------------------------------------------
@@ -710,6 +764,14 @@ class vertex_t {
     std::vector<ace_t> aces_;     // the :acl bytes parsed into core-subset ACEs at write time
                                   // (#81, ALLOW-only + INHERIT); guarded by m_. graph_t's
                                   // acl_allows evaluates these when a subject resolver is set.
+    // The ADR-0050 cached effective-ACE merge: own + INHERIT-flagged ancestor ACEs,
+    // pre-merged in evaluation order, so a gated op evaluates ONE list with no
+    // ancestor walk. Guarded by m_; rebuilt lazily by with_effective_aces when
+    // acl_cache_dirty_ is raised (any :acl write on this vertex or an ancestor —
+    // subtree-precise via the ADR-0057 child links). Only the MERGE is cached,
+    // never a verdict: expiry is evaluated at check time against the caller's now.
+    std::vector<ace_t> eff_aces_;
+    std::atomic<bool> acl_cache_dirty_{true};  // raised => eff_aces_ is stale (rebuild lazily)
     std::mutex m_;
     std::condition_variable cv_;
     std::uint64_t write_seq_ = 0;  // bumped per assign; await waits for an increment, and it is

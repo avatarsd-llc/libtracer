@@ -1,16 +1,20 @@
-/*
+/**
+ * @file
+ * @brief webtransport_transport_t (ADR-0043 Phase B) — the
+ *        WebTransport-over-HTTP/3 endpoint inside the SEPARATE libtracer_quic
+ *        module.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * webtransport_transport_t (ADR-0043 Phase B) — the WebTransport-over-HTTP/3
- * endpoint inside the SEPARATE libtracer_quic module (the same msquic
- * investment as Phase A; the core library never references any of this). The
- * H3/QPACK surface is the deliberately minimal subset in src/wt_h3.hpp (see
- * its header for exactly what is implemented and why it suffices); everything
- * QUIC-mechanical — handle ownership, teardown ordering, the per-connection
- * callback serialization and its TSan annotations, the RX length-prefix
- * reassembly and the one-copy TX contract — is the transport_quic.cpp model,
- * restated here over a session with MULTIPLE streams:
+ * The same msquic investment as Phase A; the core library never references any
+ * of this. The H3/QPACK surface is the deliberately minimal subset in
+ * src/wt_h3.hpp (see its header for exactly what is implemented and why it
+ * suffices); everything QUIC-mechanical — handle ownership, teardown ordering,
+ * the per-connection callback serialization and its TSan annotations, the RX
+ * length-prefix reassembly and the one-copy TX contract — lives in the shared
+ * msquic_endpoint_t base (src/msquic_endpoint.hpp). This transport keeps ONLY
+ * its variance points, a session with MULTIPLE streams:
  *
  *   - LISTEN: on CONNECTED the server opens its control stream (SETTINGS:
  *     extended CONNECT + H3 datagrams + ENABLE_WEBTRANSPORT/WT_MAX_SESSIONS)
@@ -30,20 +34,15 @@
  *
  * Callbacks never close handles (they only flip flags and adopt streams); the
  * destructor and the listener's one-peer replacement path own every close,
- * exactly the Phase A discipline.
+ * exactly the Phase A discipline (both now enforced by the base).
  */
 
 #include "libtracer/transport_webtransport.hpp"
 
 #include <msquic.h>
 
-#include <array>
-#include <atomic>
-#include <chrono>
-#include <condition_variable>
 #include <cstring>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -51,169 +50,83 @@
 
 #include "libtracer/byteorder.hpp"
 #include "libtracer/frame.hpp"
-#include "libtracer/length_prefix_framer.hpp"
+#include "msquic_endpoint.hpp"
 #include "wt_h3.hpp"
-
-// msquic is not TSan-instrumented — restate its two happens-before contracts
-// (StreamSend -> SEND_COMPLETE buffer ownership, per-connection callback
-// serialization) for TSan. See transport_quic.cpp for the full rationale.
-#if defined(__SANITIZE_THREAD__)
-#define LIBTRACER_TSAN 1
-#elif defined(__has_feature)
-#if __has_feature(thread_sanitizer)
-#define LIBTRACER_TSAN 1
-#endif
-#endif
-#ifdef LIBTRACER_TSAN
-#include <sanitizer/tsan_interface.h>
-#endif
 
 namespace tr::net {
 
 namespace {
 
-inline void tsan_release(void* p) {
-#ifdef LIBTRACER_TSAN
-    __tsan_release(p);
-#else
-    (void)p;
-#endif
-}
+/** @brief App-layer connection-shutdown code: not a WebTransport extended
+ *         CONNECT. */
+constexpr std::uint64_t kAppErrBadRequest = 0x2;
+/** @brief Per-stream classification/HEADERS accumulation cap (DoS bound). */
+constexpr std::size_t kMaxHandshakeBytes = 16'384;
 
-inline void tsan_acquire(void* p) {
-#ifdef LIBTRACER_TSAN
-    __tsan_acquire(p);
-#else
-    (void)p;
-#endif
-}
-
-// RAII edge for one msquic callback invocation (the transport_quic.cpp
-// tsan_cb_guard_t): acquire on entry, release on exit.
-struct tsan_cb_guard_t {
-    void* p;
-    explicit tsan_cb_guard_t(void* ptr) : p(ptr) { tsan_acquire(p); }
-    ~tsan_cb_guard_t() { tsan_release(p); }
-};
-
-constexpr std::size_t kPrefixBytes = 4;             // the u32-LE length prefix (transport framing)
-constexpr std::uint64_t kAppErrMalformed = 0x1;     // framing lost on the frame stream
-constexpr std::uint64_t kAppErrBadRequest = 0x2;    // not a WebTransport extended CONNECT
-constexpr std::uint32_t kHandshakeWaitMs = 10'000;  // dial ctor budget per stage
-constexpr std::size_t kMaxHandshakeBytes = 16'384;  // per-stream classification/HEADERS cap
-
-// The HTTP/3 ALPN every WebTransport endpoint negotiates.
+/** @brief The HTTP/3 ALPN every WebTransport endpoint negotiates. */
 const QUIC_BUFFER kAlpnH3{sizeof("h3") - 1, reinterpret_cast<uint8_t*>(const_cast<char*>("h3"))};
-
-// One in-flight send: the QUIC_BUFFER msquic reads from plus the owned bytes.
-// msquic owns the bytes until SEND_COMPLETE (Canceled included) — the only
-// library-held buffer (the transport_quic.cpp TX contract). Used both for
-// length-prefixed frame records and for raw handshake bytes.
-struct send_ctx_t {
-    QUIC_BUFFER buf{};
-    std::vector<std::byte> bytes;
-
-    // A length-prefixed frame record: prefix ++ frame (frame filled by caller).
-    explicit send_ctx_t(std::size_t frame_len) : bytes(kPrefixBytes + frame_len) {
-        detail::store_le(std::span(bytes).first(kPrefixBytes),
-                         static_cast<std::uint32_t>(frame_len));
-        arm();
-    }
-    // Raw bytes (H3 handshake material) — no prefix.
-    explicit send_ctx_t(std::vector<std::uint8_t> raw)
-        : bytes(reinterpret_cast<std::byte*>(raw.data()),
-                reinterpret_cast<std::byte*>(raw.data()) + raw.size()) {
-        arm();
-    }
-
-    void arm() {
-        buf.Length = static_cast<std::uint32_t>(bytes.size());
-        buf.Buffer = reinterpret_cast<uint8_t*>(bytes.data());
-    }
-};
 
 }  // namespace
 
-struct webtransport_transport_t::impl_t {
-    // ---- per-stream state (classification + handshake accumulation) ----
-    // Touched only on that stream's callback (msquic serializes per-connection
-    // callbacks); the ctx LIST is guarded by conn_m. Contexts are deleted only
-    // by the destructor / the listener replacement path — never by callbacks.
+/**
+ * @brief The pimpl: the msquic-mechanical base plus this transport's variance
+ *        points — per-stream classification contexts and the H3 handshake.
+ */
+struct webtransport_transport_t::impl_t : msquic_endpoint_t {
+    /**
+     * @brief Per-stream state (classification + handshake accumulation).
+     *
+     * Touched only on that stream's callback (msquic serializes per-connection
+     * callbacks); the ctx LIST is guarded by conn_m. Contexts are deleted only
+     * by the destructor / the listener replacement path — never by callbacks.
+     */
     struct stream_ctx_t {
+        /** @brief What the stream is (or is still being classified as). */
         enum class kind_t {
-            CLASSIFY_UNI,    // inbound unidirectional: awaiting its stream-type varint
-            CLASSIFY_BIDI,   // inbound bidirectional: HEADERS(CONNECT) or 0x41 frame channel
-            CONNECT_CLIENT,  // DIAL: our CONNECT stream, awaiting the 200 response
-            SESSION,         // the accepted CONNECT stream — the session's lifetime handle
-            FRAME,           // the adopted WebTransport frame channel
-            DRAIN,           // classified, contents irrelevant — discard
-            LOCAL,           // locally-opened control/QPACK stream (sends only)
+            CLASSIFY_UNI,   /**< @brief Inbound unidirectional: awaiting its stream-type
+                                        varint. */
+            CLASSIFY_BIDI,  /**< @brief Inbound bidirectional: HEADERS(CONNECT) or 0x41 frame
+                                        channel. */
+            CONNECT_CLIENT, /**< @brief DIAL: our CONNECT stream, awaiting the 200 response. */
+            SESSION,        /**< @brief The accepted CONNECT stream — the session's lifetime
+                                        handle. */
+            FRAME,          /**< @brief The adopted WebTransport frame channel. */
+            DRAIN,          /**< @brief Classified, contents irrelevant — discard. */
+            LOCAL,          /**< @brief Locally-opened control/QPACK stream (sends only). */
         };
-        impl_t* owner = nullptr;
-        HQUIC h = nullptr;
-        kind_t kind = kind_t::DRAIN;
-        std::vector<std::uint8_t> acc;  // bounded by kMaxHandshakeBytes
-        bool harvested = false;         // guarded by conn_m: the dtor/replacement path took
-                                        // this handle for closing — never re-adopt it
+        impl_t* owner = nullptr;       /**< @brief The owning endpoint. */
+        HQUIC h = nullptr;             /**< @brief The stream handle. */
+        kind_t kind = kind_t::DRAIN;   /**< @brief The classification state. */
+        std::vector<std::uint8_t> acc; /**< @brief Handshake bytes, bounded by
+                                                   kMaxHandshakeBytes. */
+        bool harvested = false;        /**< @brief Guarded by conn_m: the dtor/replacement path
+                                                   took this handle for closing — never
+                                                   re-adopt it. */
     };
 
-    // msquic object tree — owned here (see file header for teardown ordering).
-    const QUIC_API_TABLE* api = nullptr;
-    HQUIC reg = nullptr;
-    HQUIC config = nullptr;
-    HQUIC listener = nullptr;  // LISTEN mode only
-    bool listen = false;
-    bool open_ok = false;
-    std::uint16_t bound_port = 0;
-    std::string authority;  // DIAL: the CONNECT :authority
-    std::string path;       // DIAL: the CONNECT :path
+    std::string authority; /**< @brief DIAL: the CONNECT :authority. */
+    std::string path;      /**< @brief DIAL: the CONNECT :path. */
 
-    // RX segment source for frame reassembly (ADR-0042 §2) + counters.
-    mem::mem_backend_t* backend = nullptr;
-    std::size_t max_frame =
-        webtransport_transport_t::kMaxFrame;  // per-connection RX cap (:settings)
-    std::atomic<std::uint64_t> dropped_rx{0};
-    std::atomic<std::uint64_t> malformed_rx{0};
-
-    // The outer transport's delivery-tier slot (receiver_slot.hpp): tier select
-    // and its own locking live there. Wired to &rx_ at construction.
-    receiver_slot_t<>* rx = nullptr;
-
-    // The single live session: its connection, every stream context, and the
-    // adopted frame channel. conn_m guards the slots; handles are only CLOSED
-    // by the destructor or the listener replacement path.
-    std::mutex conn_m;
-    HQUIC conn = nullptr;
-    HQUIC frame_stream = nullptr;
+    /** @brief Every stream context of the live session (guarded by conn_m). */
     std::vector<stream_ctx_t*> ctxs;
-    std::atomic<bool> up{false};       // QUIC CONNECTED .. shutdown
-    std::atomic<bool> session{false};  // extended CONNECT accepted (200)
+    /** @brief Extended CONNECT accepted (200) — the session state. */
+    std::atomic<bool> session{false};
+    /** @brief The CONNECT stream's id (the 0x41 preamble references it). */
     std::uint64_t connect_stream_id = 0;
 
-    // DIAL rendezvous, two stages: QUIC CONNECTED, then session established.
-    std::mutex wait_m;
-    std::condition_variable wait_cv;
-    bool handshake_done = false;
-    bool handshake_ok = false;
-    bool session_done = false;
-    bool session_ok = false;
+    /**
+     * @name DIAL rendezvous stage 2: session established (stage 1, the QUIC
+     *       handshake, lives in the base).
+     * @{
+     */
+    bool session_done = false; /**< @brief Session stage resolved. */
+    bool session_ok = false;   /**< @brief Session stage outcome. */
+    /** @} */
 
-    // RX frame reassembly across msquic RECEIVE chunks — the shared
-    // length_prefix_framer, touched only on the frame stream's callback.
-    length_prefix_framer framer_;
+    /** @brief Teardown-first destructor (the msquic_endpoint_t contract). */
+    ~impl_t() { teardown(); }
 
-    void reset_rx() { framer_.reset(); }
-
-    void signal_handshake(bool ok) {
-        {
-            const std::lock_guard lock(wait_m);
-            if (handshake_done) return;
-            handshake_done = true;
-            handshake_ok = ok;
-        }
-        wait_cv.notify_all();
-    }
-
+    /** @brief Resolve the session rendezvous stage (idempotent). */
     void signal_session(bool ok) {
         {
             const std::lock_guard lock(wait_m);
@@ -224,49 +137,14 @@ struct webtransport_transport_t::impl_t {
         wait_cv.notify_all();
     }
 
-    void shutdown_conn(std::uint64_t code) {
-        HQUIC c = nullptr;
-        {
-            const std::lock_guard lock(conn_m);
-            c = conn;
-        }
-        if (c != nullptr) api->ConnectionShutdown(c, QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, code);
-    }
-
-    // The length-prefix reassembly, delegated to the shared length_prefix_framer
-    // (one exactly-sized segment per frame, backpressure drain, malformed oversize
-    // prefix => connection shutdown). Each reassembled frame goes up through the
-    // slot: tier select (owning rope sink, else the same segment bytes borrowed)
-    // lives in receiver_slot.hpp. Returns false once shut down.
-    bool on_rx_chunk(const std::uint8_t* p, std::size_t n) {
-        const auto res =
-            framer_.feed(*backend, max_frame, reinterpret_cast<const std::byte*>(p), n,
-                         [this](view::segment_ptr_t seg, std::size_t len) {
-                             rx->deliver(view::view_t::over(std::move(seg)).subview(0, len));
-                         });
-        if (res.dropped != 0) dropped_rx.fetch_add(res.dropped, std::memory_order_relaxed);
-        if (res.malformed) {
-            malformed_rx.fetch_add(1, std::memory_order_relaxed);
-            shutdown_conn(kAppErrMalformed);
-            return false;
-        }
-        return true;
-    }
-
-    // ---- raw byte sends (H3 handshake material) ----
-
-    void send_raw(HQUIC stream, std::vector<std::uint8_t> bytes) {
-        auto ctx = std::make_unique<send_ctx_t>(std::move(bytes));
-        tsan_release(ctx.get());  // pairs with SEND_COMPLETE's acquire
-        if (QUIC_SUCCEEDED(api->StreamSend(stream, &ctx->buf, 1, QUIC_SEND_FLAG_NONE, ctx.get())))
-            (void)ctx.release();
-    }
-
-    // Open a local unidirectional stream on @p on_conn and write @p bytes on
-    // it (the control and QPACK encoder/decoder streams). Runs entirely under
-    // conn_m and only while @p on_conn is STILL the live connection, so a
-    // teardown/replacement racing this open can never orphan the handle: the
-    // ctx joins ctxs under the same lock the harvester takes.
+    /**
+     * @brief Open a local unidirectional stream on @p on_conn and write
+     *        @p bytes on it (the control and QPACK encoder/decoder streams).
+     *
+     * Runs entirely under conn_m and only while @p on_conn is STILL the live
+     * connection, so a teardown/replacement racing this open can never orphan
+     * the handle: the ctx joins ctxs under the same lock the harvester takes.
+     */
     void open_local_uni(HQUIC on_conn, std::vector<std::uint8_t> bytes) {
         const std::lock_guard lock(conn_m);
         if (conn != on_conn || on_conn == nullptr) return;  // tearing down / replaced
@@ -278,7 +156,7 @@ struct webtransport_transport_t::impl_t {
                                         ctx.get(), &s)))
             return;
         ctx->h = s;
-        tsan_release(ctx.get());  // publish the ctx to its callbacks (see file top)
+        tsan_release(ctx.get());  // publish the ctx to its callbacks (see the base header)
         if (QUIC_FAILED(api->StreamStart(s, QUIC_STREAM_START_FLAG_NONE))) {
             api->StreamClose(s);
             return;
@@ -287,9 +165,10 @@ struct webtransport_transport_t::impl_t {
         ctxs.push_back(ctx.release());
     }
 
-    // The endpoint's H3 face on @p on_conn: the control stream (SETTINGS) plus
-    // the two mandatory QPACK streams (RFC 9204 §4.2 — empty beyond their type
-    // byte, since the dynamic table stays at capacity 0).
+    /** @brief The endpoint's H3 face on @p on_conn: the control stream
+     *         (SETTINGS) plus the two mandatory QPACK streams (RFC 9204 §4.2 —
+     *         empty beyond their type byte, since the dynamic table stays at
+     *         capacity 0). */
     void open_h3_face(HQUIC on_conn) {
         open_local_uni(on_conn, wt_h3::control_stream_bytes());
         std::vector<std::uint8_t> enc;
@@ -302,7 +181,8 @@ struct webtransport_transport_t::impl_t {
 
     // ---- inbound stream classification + the H3 handshake ----
 
-    // Accumulate handshake bytes with the DoS cap. False => connection down.
+    /** @brief Accumulate handshake bytes with the DoS cap. False => connection
+     *         down. */
     bool accumulate(stream_ctx_t& c, const std::uint8_t* p, std::size_t n) {
         if (c.acc.size() + n > kMaxHandshakeBytes) {
             shutdown_conn(kAppErrBadRequest);
@@ -312,9 +192,10 @@ struct webtransport_transport_t::impl_t {
         return true;
     }
 
-    // A peer unidirectional stream: its first varint is the stream type; every
-    // type (control / QPACK / push / WT-uni) is drained — the SETTINGS the peer
-    // sends are not needed (we are lenient; ours are always advertised).
+    /** @brief A peer unidirectional stream: its first varint is the stream
+     *         type; every type (control / QPACK / push / WT-uni) is drained —
+     *         the SETTINGS the peer sends are not needed (we are lenient; ours
+     *         are always advertised). */
     void classify_uni(stream_ctx_t& c) {
         if (wt_h3::read_varint(c.acc)) {
             c.kind = stream_ctx_t::kind_t::DRAIN;
@@ -323,9 +204,10 @@ struct webtransport_transport_t::impl_t {
         }
     }
 
-    // A peer bidirectional stream on the LISTEN side: either the extended
-    // CONNECT request (HEADERS) or the WebTransport frame channel (0x41).
-    // Returns false when the connection was shut down.
+    /** @brief A peer bidirectional stream on the LISTEN side: either the
+     *         extended CONNECT request (HEADERS) or the WebTransport frame
+     *         channel (0x41). Returns false when the connection was shut
+     *         down. */
     bool classify_bidi(stream_ctx_t& c) {
         const std::span<const std::uint8_t> in(c.acc);
         const auto t = wt_h3::read_varint(in);
@@ -401,7 +283,8 @@ struct webtransport_transport_t::impl_t {
         return false;
     }
 
-    // The DIAL side's CONNECT stream: parse the response HEADERS, demand 200.
+    /** @brief The DIAL side's CONNECT stream: parse the response HEADERS,
+     *         demand 200. */
     void parse_connect_response(stream_ctx_t& c) {
         const std::span<const std::uint8_t> in(c.acc);
         const auto t = wt_h3::read_varint(in);
@@ -442,8 +325,9 @@ struct webtransport_transport_t::impl_t {
         }
     }
 
-    // Route one RECEIVE chunk to the stream's state. False => stop consuming
-    // this event's remaining chunks (the connection was shut down).
+    /** @brief Route one RECEIVE chunk to the stream's state. False => stop
+     *         consuming this event's remaining chunks (the connection was shut
+     *         down). */
     bool on_stream_rx(stream_ctx_t& c, const std::uint8_t* p, std::size_t n) {
         using kind_t = stream_ctx_t::kind_t;
         switch (c.kind) {
@@ -468,11 +352,13 @@ struct webtransport_transport_t::impl_t {
         return true;
     }
 
-    // ---- msquic callbacks (worker threads; serialized per connection) ----
-
+    /** @brief The msquic stream callback (worker threads; serialized per
+     *         connection): routes RX by the ctx's classification, frees send
+     *         buffers on SEND_COMPLETE, and flips the session flags when the
+     *         CONNECT or frame stream goes down. */
     static QUIC_STATUS QUIC_API stream_cb(HQUIC /*stream*/, void* ctx, QUIC_STREAM_EVENT* ev) {
         auto* c = static_cast<stream_ctx_t*>(ctx);
-        // Two TSan edges (see file top): the ctx guard pairs with the
+        // Two TSan edges (see the base header): the ctx guard pairs with the
         // publication release where the ctx was handed to msquic (and with the
         // acquire before the harvester deletes it); the impl guard restates
         // msquic's per-connection callback serialization.
@@ -487,8 +373,7 @@ struct webtransport_transport_t::impl_t {
                 }
                 return QUIC_STATUS_SUCCESS;  // every byte consumed
             case QUIC_STREAM_EVENT_SEND_COMPLETE:
-                tsan_acquire(ev->SEND_COMPLETE.ClientContext);  // pairs with send's release
-                delete static_cast<send_ctx_t*>(ev->SEND_COMPLETE.ClientContext);
+                complete_send(ev->SEND_COMPLETE.ClientContext);
                 return QUIC_STATUS_SUCCESS;
             case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
             case QUIC_STREAM_EVENT_PEER_SEND_ABORTED:
@@ -507,116 +392,101 @@ struct webtransport_transport_t::impl_t {
         }
     }
 
-    static QUIC_STATUS QUIC_API conn_cb(HQUIC conn, void* ctx, QUIC_CONNECTION_EVENT* ev) {
-        auto* self = static_cast<impl_t*>(ctx);
-        const tsan_cb_guard_t guard(self);  // msquic serializes callbacks (see file top)
-        switch (ev->Type) {
-            case QUIC_CONNECTION_EVENT_CONNECTED:
-                self->up.store(true, std::memory_order_relaxed);
-                // The server presents its H3 face as soon as QUIC is up — the
-                // browser waits for SETTINGS before sending extended CONNECT.
-                // (The dial side sends its face from the constructor thread.)
-                if (self->listen) self->open_h3_face(conn);
-                self->signal_handshake(true);
-                return QUIC_STATUS_SUCCESS;
-            case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED: {
-                // Classify lazily from the stream's first bytes; the context
-                // joins the session's ctx list for teardown. Adoption is
-                // conditional on this STILL being the live connection, under
-                // conn_m: the destructor (and the listener replacement path)
-                // harvests the ctx list under the same lock, so a stream that
-                // arrives after the harvest must be REFUSED — msquic then
-                // closes it itself — or its handle would never be closed and
-                // RegistrationClose would wait on the connection forever.
-                const std::lock_guard lock(self->conn_m);
-                if (self->conn != conn) return QUIC_STATUS_ABORTED;  // tearing down / replaced
-                auto* c = new stream_ctx_t{};
-                c->owner = self;
-                c->h = ev->PEER_STREAM_STARTED.Stream;
-                c->kind =
-                    (ev->PEER_STREAM_STARTED.Flags & QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL) != 0
-                        ? stream_ctx_t::kind_t::CLASSIFY_UNI
-                        : stream_ctx_t::kind_t::CLASSIFY_BIDI;
-                tsan_release(c);  // publish the ctx to its callbacks (see file top)
-                self->api->SetCallbackHandler(ev->PEER_STREAM_STARTED.Stream,
-                                              reinterpret_cast<void*>(&impl_t::stream_cb), c);
-                self->ctxs.push_back(c);
-                return QUIC_STATUS_SUCCESS;
-            }
-            case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
-            case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
-            case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
-                // Link down. Handles are NOT closed here (callbacks never
-                // close) — the destructor or the listener replacement owns it.
-                self->up.store(false, std::memory_order_relaxed);
-                self->session.store(false, std::memory_order_relaxed);
-                self->signal_handshake(false);
-                self->signal_session(false);
-                return QUIC_STATUS_SUCCESS;
-            default:
-                return QUIC_STATUS_SUCCESS;
-        }
+    /** @brief CONNECTED hook: the server presents its H3 face as soon as QUIC
+     *         is up — the browser waits for SETTINGS before sending extended
+     *         CONNECT. (The dial side sends its face from the constructor
+     *         thread.) */
+    void on_connected(HQUIC c) override {
+        if (listen) open_h3_face(c);
     }
 
-    static QUIC_STATUS QUIC_API listener_cb(HQUIC /*listener*/, void* ctx,
-                                            QUIC_LISTENER_EVENT* ev) {
-        auto* self = static_cast<impl_t*>(ctx);
-        const tsan_cb_guard_t guard(self);  // msquic serializes callbacks (see file top)
-        if (ev->Type != QUIC_LISTENER_EVENT_NEW_CONNECTION) return QUIC_STATUS_SUCCESS;
+    /** @brief Connection-down hook: the session falls with the connection. */
+    void on_conn_down() override {
+        session.store(false, std::memory_order_relaxed);
+        signal_session(false);
+    }
 
-        // ONE session at a time (the quic_transport_t one-peer model): refuse a
-        // second while the first is up; a departed peer's handles are closed
-        // here (this thread, a different connection — legal) and replaced.
-        std::vector<stream_ctx_t*> old_ctxs;
-        HQUIC old_conn = nullptr;
-        {
-            const std::lock_guard lock(self->conn_m);
-            if (self->conn != nullptr && self->up.load(std::memory_order_relaxed))
-                return QUIC_STATUS_CONNECTION_REFUSED;
-            old_ctxs = std::exchange(self->ctxs, {});
-            for (stream_ctx_t* c : old_ctxs) c->harvested = true;  // never re-adopted
-            old_conn = std::exchange(self->conn, nullptr);
-            self->frame_stream = nullptr;
-        }
-        // Closing blocks until each handle's callbacks drain, so after this
-        // point nothing touches the RX state — safe to reset for the new peer.
-        for (stream_ctx_t* c : old_ctxs) {
-            if (c->h != nullptr) self->api->StreamClose(c->h);
-            tsan_acquire(c);  // its callbacks have drained — take their writes
-            delete c;
-        }
-        if (old_conn != nullptr) self->api->ConnectionClose(old_conn);
-        self->reset_rx();
-        self->session.store(false, std::memory_order_relaxed);
-
-        HQUIC c = ev->NEW_CONNECTION.Connection;
-        self->api->SetCallbackHandler(c, reinterpret_cast<void*>(&impl_t::conn_cb), self);
-        const QUIC_STATUS st = self->api->ConnectionSetConfiguration(c, self->config);
-        if (QUIC_FAILED(st)) return st;  // msquic tears the rejected connection down
-        const std::lock_guard lock(self->conn_m);
-        self->conn = c;
+    /**
+     * @brief A peer stream arrived: classify lazily from its first bytes; the
+     *        context joins the session's ctx list for teardown.
+     *
+     * Adoption is conditional on this STILL being the live connection, under
+     * conn_m: the destructor (and the listener replacement path) harvests the
+     * ctx list under the same lock, so a stream that arrives after the harvest
+     * must be REFUSED — msquic then closes it itself — or its handle would
+     * never be closed and RegistrationClose would wait on the connection
+     * forever.
+     */
+    QUIC_STATUS on_peer_stream_started(HQUIC c_h, QUIC_CONNECTION_EVENT* ev) override {
+        const std::lock_guard lock(conn_m);
+        if (conn != c_h) return QUIC_STATUS_ABORTED;  // tearing down / replaced
+        auto* c = new stream_ctx_t{};
+        c->owner = this;
+        c->h = ev->PEER_STREAM_STARTED.Stream;
+        c->kind = (ev->PEER_STREAM_STARTED.Flags & QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL) != 0
+                      ? stream_ctx_t::kind_t::CLASSIFY_UNI
+                      : stream_ctx_t::kind_t::CLASSIFY_BIDI;
+        tsan_release(c);  // publish the ctx to its callbacks (see the base header)
+        api->SetCallbackHandler(ev->PEER_STREAM_STARTED.Stream,
+                                reinterpret_cast<void*>(&impl_t::stream_cb), c);
+        ctxs.push_back(c);
         return QUIC_STATUS_SUCCESS;
     }
 
-    // Shared bring-up: api table, registration, configuration + credential.
-    bool open_common(const QUIC_SETTINGS& settings, const QUIC_CREDENTIAL_CONFIG& cred) {
-        if (QUIC_FAILED(MsQuicOpen2(&api))) {
-            api = nullptr;
-            return false;
+    /** @brief One-peer replacement harvest: detach and close every departed
+     *         stream ctx + the connection (refuse while the peer is up). */
+    bool replace_peer() override {
+        std::vector<stream_ctx_t*> old_ctxs;
+        HQUIC old_conn = nullptr;
+        {
+            const std::lock_guard lock(conn_m);
+            if (conn != nullptr && up.load(std::memory_order_relaxed)) return false;
+            old_ctxs = std::exchange(ctxs, {});
+            for (stream_ctx_t* c : old_ctxs) c->harvested = true;  // never re-adopted
+            old_conn = std::exchange(conn, nullptr);
+            frame_stream = nullptr;
         }
-        const QUIC_REGISTRATION_CONFIG reg_cfg{"libtracer_wt", QUIC_EXECUTION_PROFILE_LOW_LATENCY};
-        if (QUIC_FAILED(api->RegistrationOpen(&reg_cfg, &reg))) return false;
-        if (QUIC_FAILED(api->ConfigurationOpen(reg, &kAlpnH3, 1, &settings, sizeof(settings),
-                                               nullptr, &config)))
-            return false;
-        return !QUIC_FAILED(api->ConfigurationLoadCredential(config, &cred));
+        // Closing blocks until each handle's callbacks drain — after this,
+        // nothing touches the RX state (the base resets it for the new peer).
+        for (stream_ctx_t* c : old_ctxs) {
+            if (c->h != nullptr) api->StreamClose(c->h);
+            tsan_acquire(c);  // its callbacks have drained — take their writes
+            delete c;
+        }
+        if (old_conn != nullptr) api->ConnectionClose(old_conn);
+        session.store(false, std::memory_order_relaxed);
+        return true;
     }
 
-    // Fill the QUIC_SETTINGS both roles share: no idle teardown (#66 owns link
-    // lifecycle), room for the session's streams (CONNECT + frame channel +
-    // slack bidi; control + 2 QPACK + WT-uni slack), and datagram receive
-    // support (H3 datagrams are advertised in SETTINGS; browsers expect the
-    // transport parameter even for a streams-only session).
+    /** @brief Teardown harvest: detach every stream ctx + the connection under
+     *         conn_m, abort+close each stream, hand the connection back. */
+    HQUIC harvest_and_close_streams() override {
+        std::vector<stream_ctx_t*> old_ctxs;
+        HQUIC c = nullptr;
+        {
+            const std::lock_guard lock(conn_m);
+            old_ctxs = std::exchange(ctxs, {});
+            for (stream_ctx_t* sc : old_ctxs) sc->harvested = true;  // never re-adopted
+            frame_stream = nullptr;
+            c = std::exchange(conn, nullptr);
+        }
+        for (stream_ctx_t* sc : old_ctxs) {
+            if (sc->h != nullptr) {
+                api->StreamShutdown(sc->h, QUIC_STREAM_SHUTDOWN_FLAG_ABORT, 0);
+                api->StreamClose(sc->h);
+            }
+            tsan_acquire(sc);  // its callbacks have drained — take their writes
+            delete sc;
+        }
+        return c;
+    }
+
+    /** @brief Fill the QUIC_SETTINGS both roles share: no idle teardown (#66
+     *         owns link lifecycle), room for the session's streams (CONNECT +
+     *         frame channel + slack bidi; control + 2 QPACK + WT-uni slack),
+     *         and datagram receive support (H3 datagrams are advertised in
+     *         SETTINGS; browsers expect the transport parameter even for a
+     *         streams-only session). */
     static QUIC_SETTINGS session_settings() {
         QUIC_SETTINGS s{};
         s.IdleTimeoutMs = 0;
@@ -628,14 +498,6 @@ struct webtransport_transport_t::impl_t {
         s.DatagramReceiveEnabled = TRUE;
         s.IsSet.DatagramReceiveEnabled = TRUE;
         return s;
-    }
-
-    // Wait for a two-stage rendezvous flag (dial ctor). Returns the ok flag.
-    bool wait_stage(bool& done, bool& ok) {
-        std::unique_lock lock(wait_m);
-        wait_cv.wait_for(lock, std::chrono::milliseconds(kHandshakeWaitMs),
-                         [&done] { return done; });
-        return done && ok;
     }
 };
 
@@ -652,29 +514,10 @@ webtransport_transport_t::webtransport_transport_t(const std::string& peer_host,
     i.authority = peer_host + ":" + std::to_string(peer_port);
     i.path = path.empty() ? "/" : path;
 
-    QUIC_CREDENTIAL_CONFIG cred{};
-    cred.Type = QUIC_CREDENTIAL_TYPE_NONE;
-    unsigned flags = QUIC_CREDENTIAL_FLAG_CLIENT;
-    if (tls.insecure_no_verify) {
-        flags |= QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;  // DEV ONLY (self-signed)
-    } else if (!tls.ca_file.empty()) {
-        flags |= QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
-        cred.CaCertificateFile = tls.ca_file.c_str();
-    }
-    cred.Flags = static_cast<QUIC_CREDENTIAL_FLAGS>(flags);
-    if (!i.open_common(impl_t::session_settings(), cred)) return;
-
-    if (QUIC_FAILED(i.api->ConnectionOpen(i.reg, &impl_t::conn_cb, &i, &i.conn))) {
-        i.conn = nullptr;
+    // Stage 1: the QUIC handshake (the transport_quic.cpp dial shape — base).
+    if (!i.dial("libtracer_wt", kAlpnH3, impl_t::session_settings(), tls.ca_file,
+                tls.insecure_no_verify, peer_host, peer_port))
         return;
-    }
-    tsan_release(&i);  // publish the constructed impl to the callbacks (see file top)
-    if (QUIC_FAILED(i.api->ConnectionStart(i.conn, i.config, QUIC_ADDRESS_FAMILY_UNSPEC,
-                                           peer_host.c_str(), peer_port)))
-        return;
-
-    // Stage 1: the QUIC handshake (the transport_quic.cpp dial shape).
-    if (!i.wait_stage(i.handshake_done, i.handshake_ok)) return;
 
     // Our H3 face (control + QPACK streams), then the extended CONNECT.
     i.open_h3_face(i.conn);
@@ -686,7 +529,7 @@ webtransport_transport_t::webtransport_transport_t(const std::string& peer_host,
                                       connect_ctx.get(), &connect_stream)))
         return;
     connect_ctx->h = connect_stream;
-    tsan_release(connect_ctx.get());  // publish the ctx to its callbacks (see file top)
+    tsan_release(connect_ctx.get());  // publish the ctx to its callbacks (see the base header)
     if (QUIC_FAILED(i.api->StreamStart(connect_stream, QUIC_STREAM_START_FLAG_NONE))) {
         i.api->StreamClose(connect_stream);
         return;
@@ -718,7 +561,7 @@ webtransport_transport_t::webtransport_transport_t(const std::string& peer_host,
                                       frame_ctx.get(), &fs)))
         return;
     frame_ctx->h = fs;
-    tsan_release(frame_ctx.get());  // publish the ctx to its callbacks (see file top)
+    tsan_release(frame_ctx.get());  // publish the ctx to its callbacks (see the base header)
     if (QUIC_FAILED(i.api->StreamStart(fs, QUIC_STREAM_START_FLAG_NONE))) {
         i.api->StreamClose(fs);
         return;
@@ -745,106 +588,19 @@ webtransport_transport_t::webtransport_transport_t(std::uint16_t bind_port,
     i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
     i.backend = backend;
     if (max_frame != 0) i.max_frame = max_frame;
-    i.listen = true;
 
-    QUIC_CERTIFICATE_FILE cert{};
-    cert.PrivateKeyFile = key_file.c_str();
-    cert.CertificateFile = cert_file.c_str();
-    QUIC_CREDENTIAL_CONFIG cred{};
-    cred.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
-    cred.Flags = QUIC_CREDENTIAL_FLAG_NONE;
-    cred.CertificateFile = &cert;
-    if (!i.open_common(impl_t::session_settings(), cred)) return;  // bad cert/key fails HERE
-
-    if (QUIC_FAILED(i.api->ListenerOpen(i.reg, &impl_t::listener_cb, &i, &i.listener))) {
-        i.listener = nullptr;
-        return;
-    }
-    QUIC_ADDR addr{};
-    QuicAddrSetFamily(&addr, QUIC_ADDRESS_FAMILY_UNSPEC);
-    QuicAddrSetPort(&addr, bind_port);
-    tsan_release(&i);  // publish the constructed impl to the callbacks (see file top)
-    if (QUIC_FAILED(i.api->ListenerStart(i.listener, &kAlpnH3, 1, &addr))) return;
-
-    std::uint32_t len = sizeof(addr);
-    if (QUIC_SUCCEEDED(i.api->GetParam(i.listener, QUIC_PARAM_LISTENER_LOCAL_ADDRESS, &len, &addr)))
-        i.bound_port = QuicAddrGetPort(&addr);
-    i.open_ok = true;
+    // Listener bring-up (base) — bad cert/key paths fail in there; the session
+    // peer opens the frame stream.
+    (void)i.listen_start("libtracer_wt", kAlpnH3, impl_t::session_settings(), cert_file, key_file,
+                         bind_port);
 }
 
-webtransport_transport_t::~webtransport_transport_t() {
-    impl_t& i = *impl_;
-    if (i.api == nullptr) return;  // MsQuicOpen2 failed — nothing to unwind
-    // 1. Stop accepting: ListenerClose blocks until listener callbacks drain.
-    if (i.listener != nullptr) i.api->ListenerClose(i.listener);
-    // 2. Take the live session's handles (send() sees null and no-ops).
-    std::vector<impl_t::stream_ctx_t*> ctxs;
-    HQUIC conn = nullptr;
-    {
-        const std::lock_guard lock(i.conn_m);
-        ctxs = std::exchange(i.ctxs, {});
-        for (impl_t::stream_ctx_t* c : ctxs) c->harvested = true;  // never re-adopted
-        i.frame_stream = nullptr;
-        conn = std::exchange(i.conn, nullptr);
-    }
-    // 3. Close every stream, then the connection: each Close blocks until that
-    //    handle's callbacks drain (in-flight sends complete Canceled).
-    for (impl_t::stream_ctx_t* c : ctxs) {
-        if (c->h != nullptr) {
-            i.api->StreamShutdown(c->h, QUIC_STREAM_SHUTDOWN_FLAG_ABORT, 0);
-            i.api->StreamClose(c->h);
-        }
-        tsan_acquire(c);  // its callbacks have drained — take their writes
-        delete c;
-    }
-    if (conn != nullptr) {
-        i.api->ConnectionShutdown(conn, QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, 0);
-        i.api->ConnectionClose(conn);
-    }
-    // 4. Parents last: configuration, registration, then the api table.
-    if (i.config != nullptr) i.api->ConfigurationClose(i.config);
-    if (i.reg != nullptr) i.api->RegistrationClose(i.reg);
-    MsQuicClose(i.api);
-    // Every callback has drained — take their published writes before the
-    // members (framer_ et al.) destruct.
-    tsan_acquire(&i);
-}
+webtransport_transport_t::~webtransport_transport_t() = default;  // ~impl_t runs teardown()
 
-void webtransport_transport_t::send(std::span<const std::byte> frame) {
-    if (frame.size() > kMaxFrame) return;  // the peer would reject it as malformed
-    auto ctx = std::make_unique<send_ctx_t>(frame.size());
-    if (!frame.empty()) std::memcpy(ctx->bytes.data() + kPrefixBytes, frame.data(), frame.size());
-    impl_t& i = *impl_;
-    const std::lock_guard lock(i.conn_m);
-    if (i.frame_stream == nullptr) return;  // no session frame stream (yet / anymore) — drop
-    tsan_release(ctx.get());                // pairs with SEND_COMPLETE's acquire (see file top)
-    if (QUIC_SUCCEEDED(
-            i.api->StreamSend(i.frame_stream, &ctx->buf, 1, QUIC_SEND_FLAG_NONE, ctx.get())))
-        (void)ctx.release();
-}
+void webtransport_transport_t::send(std::span<const std::byte> frame) { impl_->send_frame(frame); }
 
 void webtransport_transport_t::send(std::span<const std::span<const std::byte>> iov) {
-    std::size_t total = 0;
-    for (const auto& s : iov) total += s.size();
-    if (total > kMaxFrame) return;  // the peer would reject it as malformed
-
-    // ONE gather copy (the transport_quic.cpp rationale: every QUIC_BUFFER
-    // must outlive the call until SEND_COMPLETE; the seam's spans are borrowed
-    // only for this call).
-    auto ctx = std::make_unique<send_ctx_t>(total);
-    std::size_t off = kPrefixBytes;
-    for (const auto& s : iov) {
-        if (s.empty()) continue;
-        std::memcpy(ctx->bytes.data() + off, s.data(), s.size());
-        off += s.size();
-    }
-    impl_t& i = *impl_;
-    const std::lock_guard lock(i.conn_m);
-    if (i.frame_stream == nullptr) return;
-    tsan_release(ctx.get());  // pairs with SEND_COMPLETE's acquire (see file top)
-    if (QUIC_SUCCEEDED(
-            i.api->StreamSend(i.frame_stream, &ctx->buf, 1, QUIC_SEND_FLAG_NONE, ctx.get())))
-        (void)ctx.release();
+    impl_->send_frame(iov);
 }
 
 bool webtransport_transport_t::ok() const noexcept { return impl_->open_ok; }
@@ -869,14 +625,18 @@ std::uint64_t webtransport_transport_t::malformed_rx() const noexcept {
 
 namespace {
 
-// The webtransport kind's PRIVATE config keys, parsed module-side from the raw
-// SPEC config SETTINGS TLV (ADR-0043 §5 leanness — identical to the quic kind):
-// NAME "cert" NAME <path>, NAME "key" NAME <path>; unknown pairs ignored.
+/**
+ * @brief The webtransport kind's PRIVATE config keys, parsed module-side from
+ *        the raw SPEC config SETTINGS TLV (ADR-0043 §5 leanness — identical to
+ *        the quic kind): NAME "cert" NAME <path>, NAME "key" NAME <path>;
+ *        unknown pairs ignored.
+ */
 struct wt_private_cfg_t {
-    std::string cert;  // PEM server-certificate path (LISTEN)
-    std::string key;   // PEM private-key path matching cert (LISTEN)
+    std::string cert; /**< @brief PEM server-certificate path (LISTEN). */
+    std::string key;  /**< @brief PEM private-key path matching cert (LISTEN). */
 };
 
+/** @brief The positional NAME-key / value-pair walk over the raw config TLV. */
 [[nodiscard]] wt_private_cfg_t parse_wt_config(const wire::tlv_t* raw_config) {
     wt_private_cfg_t out;
     if (raw_config == nullptr) return out;

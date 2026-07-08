@@ -25,6 +25,22 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   mechanically — forwarded frames are byte-identical. Cursor-templated
   (ADR-0053 ④b), so span and rope sources share the identical logic; covered
   directly by `fwd_frame_view_test` (the `length_prefix_framer` precedent).
+- **`graph::effective_acl_t` (`security_acl.hpp`) + the ADR-0050 cached
+  effective-ACE merge.** The effective-ACL semantics that lived inline in
+  `graph_t::acl_allows` — own ACEs before ancestors, nearest-first, ancestor
+  ACEs filtered to `kAceInherit`, open-by-default over an empty merge,
+  any-present-ACE-closes (even expired), verdicts via the ADR-0050 policy — are
+  now a pure, graph-free class (`append_own` / `append_ancestor` / `merged` /
+  `release` / `allows`). On top, the graph caches the merged list per vertex
+  (`vertex_t::with_effective_aces` + `mark_acl_cache_dirty`; `set_acl` now marks
+  its own cache stale), so a gated read/write/await evaluates ONE pre-merged
+  list under the target's own lock — the per-operation ancestor mutex-walk
+  leaves the data plane. Invalidation is subtree-precise via the ADR-0057 child
+  links: a `:acl` write re-marks the written vertex's subtree dirty
+  (wiring-frequency); the rebuild is lazy on the next check. Verdicts are
+  bit-identical — the cache is a pure optimization (~3.5× aggregate throughput
+  and ~10× p99 latency on the new contended `acl-inherit-d4-mt4` bench row;
+  single-threaded parity).
 
 - **`wire::check_frame(const view::rope_t&)` — the cheap ingress check
   (CONTEXT.md §Validation timing).** Top-level `parse_header` + the
