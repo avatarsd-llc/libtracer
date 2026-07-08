@@ -51,6 +51,20 @@ class length_prefix_framer {
     static constexpr std::size_t kPrefixBytes = 4;
 
     /**
+     * @brief The default receive frame cap when `:settings max_frame` is unset
+     *        (16 MiB) — one home for the default every u32-length-prefixed
+     *        stream transport (tcp / quic / webtransport) restates as its
+     *        `kMaxFrame`.
+     *
+     * A prefix announcing more is malformed (corrupt or hostile): the stream
+     * has lost framing sync and the connection is torn down. A per-connection
+     * `:settings max_frame` may TIGHTEN the cap below this default, never
+     * raise it; the effective cap is further bounded by the injected backend's
+     * real capacity (@ref effective_cap — the no-synthetic-limits doctrine).
+     */
+    static constexpr std::size_t kDefaultMaxFrame = 16u * 1024u * 1024u;
+
+    /**
      * @brief What one length prefix means under the shared framing rules.
      *
      * The single home for the per-prefix decisions every u32-length-prefixed

@@ -12,6 +12,7 @@
 
 #include "libtracer/builtin_transports.hpp"
 #include "libtracer/byteorder.hpp"
+#include "libtracer/config_reader.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/path.hpp"
@@ -43,34 +44,20 @@ namespace {
     return std::string(detail::as_string_view(last));
 }
 
-// Parse the optional SPEC `config` SETTINGS: positional NAME-key / value pairs —
+// Parse the optional SPEC `config` SETTINGS (the shared config_reader_t walk):
 // NAME "addr" NAME <utf8>, NAME "kind" NAME <utf8>, NAME "port" VALUE u16, NAME "role"
 // VALUE u8 (overrides the type default), NAME "keepalive" VALUE u32. ONLY the universal
 // keys land here (ADR-0043 §5 leanness): kind-private pairs (e.g. quic's `cert`/`key`)
 // are the kind's factory's business — it parses them from the raw config TLV it
 // receives. Unknown pairs are ignored (forward-compat).
 void parse_config(const tlv_t* config, conn_settings_t& s) {
-    if (config == nullptr) return;
-    const std::vector<tlv_t>& ch = config->children;
-    for (std::size_t i = 0; i + 1 < ch.size(); ++i) {
-        if (ch[i].type != type_t::NAME) continue;
-        const std::string_view key = detail::as_string_view(ch[i].payload);
-        const tlv_t& val = ch[i + 1];
-        if (key == "addr" && val.type == type_t::NAME) {
-            s.addr = std::string(detail::as_string_view(val.payload));
-        } else if (key == "kind" && val.type == type_t::NAME) {
-            s.kind = std::string(detail::as_string_view(val.payload));
-        } else if (key == "port" && val.type == type_t::VALUE && !val.payload.empty()) {
-            s.port = detail::load_le<std::uint16_t>(val.payload);
-        } else if (key == "role" && val.type == type_t::VALUE && !val.payload.empty()) {
-            s.role = detail::load_le<std::uint8_t>(val.payload) == 0 ? conn_role_t::DIAL
-                                                                     : conn_role_t::LISTEN;
-        } else if (key == "keepalive" && val.type == type_t::VALUE && !val.payload.empty()) {
-            s.keepalive_ms = detail::load_le<std::uint32_t>(val.payload);
-        } else if (key == "max_frame" && val.type == type_t::VALUE && !val.payload.empty()) {
-            s.max_frame = detail::load_le<std::uint32_t>(val.payload);
-        }
-    }
+    const config_reader_t cfg(config);
+    if (const auto v = cfg.name("addr")) s.addr = std::string(*v);
+    if (const auto v = cfg.name("kind")) s.kind = std::string(*v);
+    if (const auto v = cfg.u16("port")) s.port = *v;
+    if (const auto v = cfg.u8("role")) s.role = *v == 0 ? conn_role_t::DIAL : conn_role_t::LISTEN;
+    if (const auto v = cfg.u32("keepalive")) s.keepalive_ms = *v;
+    if (const auto v = cfg.u32("max_frame")) s.max_frame = *v;
 }
 
 // A 1-byte link-state VALUE TLV (0x00 down / 0x01 up) as an owned view.

@@ -28,6 +28,7 @@
 #include <memory>
 #include <string>
 
+#include "libtracer/length_prefix_framer.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/transport_vertex.hpp"
@@ -69,10 +70,11 @@ struct webtransport_dial_tls_t {
  */
 class webtransport_transport_t : public transport_t {
    public:
-    /** @brief The largest frame the length prefix may announce (16 MiB — the
-     *         tcp_transport_t cap). A larger prefix is malformed: counted via
+    /** @brief The largest frame the length prefix may announce — the shared
+     *         length_prefix_framer::kDefaultMaxFrame (16 MiB) unless `:settings
+     *         max_frame` tightens it. A larger prefix is malformed: counted via
      *         @ref malformed_rx and the session's connection is shut down. */
-    static constexpr std::size_t kMaxFrame = 16u * 1024u * 1024u;
+    static constexpr std::size_t kMaxFrame = length_prefix_framer::kDefaultMaxFrame;
 
     /**
      * @brief DIAL mode: establish a WebTransport session to

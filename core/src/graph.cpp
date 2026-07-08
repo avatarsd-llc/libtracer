@@ -33,7 +33,6 @@ using wire::key_view_t;
 using wire::opt_t;
 using wire::tlv_t;
 using wire::type_t;
-using wire::view_as_tlv;
 namespace {
 
 // Emit a VALUE TLV holding a `width`-byte little-endian integer — the one bespoke
@@ -900,7 +899,7 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view_t source_view, v
     // Parse the owned SUBSCRIBER copy ONCE (ADR-0049) — delivery_compact comes from this
     // parse (the resolver's parallel subscriber_compact() is retired); the tlv_t borrows
     // source_view's bytes, which the slot then retains zero-copy.
-    const auto sub = view_as_tlv(source_view);
+    const auto sub = wire::decode(source_view);
     if (!sub || sub->type != type_t::SUBSCRIBER) return std::unexpected(status_t::TYPE_MISMATCH);
     subscriber_t s;
     parse_subscriber_tlv(*sub, s);
@@ -922,7 +921,7 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
 
     if (step0.name == "subscribers") {
         if (step0.append) {
-            const auto sub = view_as_tlv(value);
+            const auto sub = wire::decode(value);
             if (!sub || sub->type != type_t::SUBSCRIBER)
                 return std::unexpected(status_t::TYPE_MISMATCH);
             subscriber_t s;
@@ -952,7 +951,7 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
         // verbatim by read_acl) and the parsed list (evaluated by acl_allows).
         if (!acl_allows(v, caller, acl_right_t::WRITE_ACL))
             return std::unexpected(status_t::PERMISSION_DENIED);
-        const auto acl = view_as_tlv(value);
+        const auto acl = wire::decode(value);
         if (!acl || acl->type != type_t::ACL) return std::unexpected(status_t::TYPE_MISMATCH);
         result_t<std::vector<ace_t>> aces = parse_acl(*acl);
         if (!aces) return std::unexpected(aces.error());
@@ -987,7 +986,7 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
     if (step0.name == "settings" && field.steps.size() >= 2) {
         if (!acl_allows(v, caller, acl_right_t::WRITE))  // QoS knobs are control writes
             return std::unexpected(status_t::PERMISSION_DENIED);
-        const auto tlv = view_as_tlv(value);
+        const auto tlv = wire::decode(value);
         if (!tlv || tlv->type != type_t::VALUE) return std::unexpected(status_t::TYPE_MISMATCH);
         const std::uint64_t n = detail::load_le(tlv->payload);
         const std::string& f = field.steps[1].name;
@@ -1020,7 +1019,7 @@ result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value)
     // Parse SPEC{ NAME "type" <sel>, NAME "name" <seg>, SETTINGS "config"? } — the
     // creation spec of docs/reference/05 §0x0E. The two NAMEs are positional pairs
     // (NAME key, NAME/SETTINGS value), same shape as the qos_settings parse above.
-    const auto spec = view_as_tlv(spec_value);
+    const auto spec = wire::decode(spec_value);
     if (!spec || spec->type != type_t::SPEC) return std::unexpected(status_t::TYPE_MISMATCH);
 
     std::string_view type_sel;

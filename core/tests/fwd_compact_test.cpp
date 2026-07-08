@@ -327,7 +327,7 @@ int main() {
         const auto stored = graph_c.read(vC);
         bool ok = stored.has_value();
         if (ok) {
-            const auto inner = tr::wire::view_as_tlv(stored->only());
+            const auto inner = tr::wire::decode(stored->only());
             ok = inner && inner->type == type_t::VALUE &&
                  tr::detail::load_le<std::uint32_t>(inner->payload) == kBase + (kN - 1);
         }

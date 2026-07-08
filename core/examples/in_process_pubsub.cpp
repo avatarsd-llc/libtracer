@@ -116,8 +116,7 @@ int main() {
     auto schema = g.read(path_t("/sensor/temp:schema"));
     std::size_t schema_children = 0;
     if (schema) {
-        if (auto point = tr::wire::view_as_tlv(schema->only()))
-            schema_children = point->children.size();
+        if (auto point = tr::wire::decode(schema->only())) schema_children = point->children.size();
     }
     std::printf(":schema is a POINT with %zu children\n", schema_children);
 

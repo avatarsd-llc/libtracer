@@ -26,10 +26,10 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <mutex>
 #include <span>
 #include <string>
 
+#include "libtracer/length_prefix_framer.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/posix_endpoint.hpp"
 #include "libtracer/transport.hpp"
@@ -46,12 +46,14 @@ namespace tr::net {
  * segment). With a view receiver installed the frame is handed up OWNING; the
  * span receiver otherwise gets a borrowed span over the same segment bytes.
  */
-class tcp_transport_t : public transport_t, private posix_endpoint_t {
+class tcp_transport_t : public transport_t, private stream_endpoint_t {
    public:
-    /** @brief The largest frame the length prefix may announce (16 MiB). A larger
-     *         prefix is malformed — counted via @ref malformed_rx and the
-     *         connection is closed (a desynced stream cannot be trusted again). */
-    static constexpr std::size_t kMaxFrame = 16u * 1024u * 1024u;
+    /** @brief The largest frame the length prefix may announce — the shared
+     *         length_prefix_framer::kDefaultMaxFrame (16 MiB) unless `:settings
+     *         max_frame` tightens it. A larger prefix is malformed — counted via
+     *         @ref malformed_rx and the connection is closed (a desynced stream
+     *         cannot be trusted again). */
+    static constexpr std::size_t kMaxFrame = length_prefix_framer::kDefaultMaxFrame;
 
     /**
      * @brief DIAL mode: connect to @p peer_host:@p peer_port (synchronous).
@@ -157,9 +159,7 @@ class tcp_transport_t : public transport_t, private posix_endpoint_t {
     std::size_t max_frame_ = kMaxFrame;  // per-connection receive cap (:settings; 0 => kMaxFrame)
     std::atomic<std::uint64_t> dropped_rx_{0};
     std::atomic<std::uint64_t> malformed_rx_{0};
-
-    std::mutex write_m_;            // serializes writes to conn_fd_
-    std::atomic<int> conn_fd_{-1};  // the live peer connection (-1 = none)
+    // conn_fd_ + write_m_ (and their teardown discipline) live in stream_endpoint_t.
 };
 
 }  // namespace tr::net

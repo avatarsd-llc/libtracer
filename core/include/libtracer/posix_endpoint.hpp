@@ -6,12 +6,19 @@
  * transport shares (udp / tcp / ws server / ws client). One home for the
  * stop-flag + receive-thread lifecycle and the 100 ms poll/timeout idioms that
  * let a blocking socket loop notice a clean shutdown; the transports keep what
- * is genuinely theirs (fds, receivers, counters, write mutexes, framing).
+ * is genuinely theirs (fds, receivers, counters, framing). The STREAM
+ * transports additionally share the one-peer fd/teardown discipline —
+ * stream_endpoint_t below owns that layer (the peer-fd atomic, the write
+ * mutex, the teardown-under-write-lock ordering, the one-peer accept loop);
+ * udp keeps its datagram shape (one connectionless fd, no peer teardown).
  */
 #pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <functional>
+#include <mutex>
+#include <span>
 #include <thread>
 
 namespace tr::net {
@@ -28,13 +35,9 @@ namespace tr::net {
  * FIRST, before releasing ANY resource the thread body touches (sockets,
  * receivers, buffers) — the thread may be mid-loop until the join returns.
  *
- * **Teardown-under-write-lock invariant (derived recv loops):** a transport
- * whose recv thread closes a peer fd that a concurrent `send()` may use MUST
- * reset the fd atomic under the transport's own write mutex before
- * `::close()`, and `send()` must read the fd inside that same mutex — so a
- * sender never writes to (or reads) a closed/reused fd. The fd and the write
- * mutex stay in the derived class; the discipline is documented here because
- * every stream transport built on this base must follow it.
+ * Stream transports (tcp / ws) layer the shared one-peer fd/teardown
+ * discipline on top via @ref stream_endpoint_t — the write-serialization and
+ * teardown-under-write-lock invariants live there, with the code.
  */
 class posix_endpoint_t {
    protected:
@@ -119,6 +122,108 @@ class posix_endpoint_t {
 
    private:
     std::thread thread_; /**< @brief The receive thread (joined by stop_and_join). */
+};
+
+/**
+ * @brief The one-peer fd/teardown discipline every POSIX STREAM transport
+ *        shares (tcp dial+listen, ws server, ws client).
+ *
+ * Owns the live peer fd (@ref conn_fd_) and the write mutex (@ref write_m_),
+ * and is the ONE home of the invariants that keep a concurrent `send()` and
+ * the recv thread's connection teardown safe against each other:
+ *
+ * **Write-serialization invariant:** every write to the peer fd happens with
+ * @ref write_m_ held across the WHOLE write — so (a) two senders can never
+ * interleave their records on the stream, and (b) the recv thread cannot
+ * close and reset the fd underneath an in-flight write. `send()` reads
+ * @ref conn_fd_ INSIDE the lock, pairing with the teardown below.
+ *
+ * **Teardown-under-write-lock invariant:** a recv thread that closes the peer
+ * fd MUST reset @ref conn_fd_ to -1 under @ref write_m_ BEFORE `::close()`
+ * (@ref teardown_peer) — so a sender never writes to (or reads) a
+ * closed/reused fd.
+ *
+ * The one-peer accept loop shape (poll-100ms-recheck accept → per-peer setup
+ * → serve → teardown → re-accept) shared by tcp's LISTEN mode and the ws
+ * server lives here too (@ref run_accept_loop). A protected base, inherited
+ * privately by the concrete stream transports; udp stays on plain
+ * posix_endpoint_t — a datagram socket has no per-peer fd to tear down and
+ * its single-syscall sends need no serialization.
+ */
+class stream_endpoint_t : protected posix_endpoint_t {
+   protected:
+    /** @brief Constructs with no peer connected (@ref conn_fd_ = -1). */
+    stream_endpoint_t() = default;
+
+    /**
+     * @brief Closes a leftover peer fd (one the recv thread never tore down).
+     *
+     * Runs AFTER the derived destructor, whose first act was stop_and_join
+     * (the posix_endpoint_t teardown invariant) — so no thread can race this.
+     * A normally-torn-down connection already reset @ref conn_fd_ to -1 and
+     * this is a no-op; it only catches a never-spawned thread (a failed dial /
+     * handshake left the fd parked) so nothing double-closes.
+     */
+    ~stream_endpoint_t();
+
+    stream_endpoint_t(const stream_endpoint_t&) = delete;
+    stream_endpoint_t& operator=(const stream_endpoint_t&) = delete;
+
+    /**
+     * @brief Write @p bytes to @p fd completely, resuming partial writes.
+     *
+     * A stream write may stop anywhere; loops `::send` (MSG_NOSIGNAL — a
+     * vanished peer must not SIGPIPE the process) until done. Peer-gone /
+     * error drops the rest silently (link-down is #66 lifecycle). The caller
+     * holds @ref write_m_ per the write-serialization invariant.
+     *
+     * @param fd    The destination fd; a negative fd is a no-op.
+     * @param bytes The bytes to write.
+     */
+    static void write_all(int fd, std::span<const std::byte> bytes);
+
+    /**
+     * @brief Write @p bytes to the live peer as one serialized record.
+     *
+     * The whole write-serialization invariant in one call: takes
+     * @ref write_m_, reads @ref conn_fd_ inside the lock, and @ref write_all
+     * s the bytes. No-op while no peer is connected.
+     *
+     * @param bytes One complete encoded record's bytes.
+     */
+    void send_all_locked(std::span<const std::byte> bytes);
+
+    /**
+     * @brief Tear the peer connection down (recv-thread side).
+     *
+     * The teardown-under-write-lock invariant as code: resets @ref conn_fd_
+     * to -1 under @ref write_m_, THEN `::close(fd)` — a concurrent `send()`
+     * either finished against the still-open fd or reads -1 and no-ops.
+     *
+     * @param fd The peer fd the recv loop was serving.
+     */
+    void teardown_peer(int fd);
+
+    /**
+     * @brief The one-peer accept loop (tcp LISTEN / ws server shape).
+     *
+     * Until @ref stop_: one poll-100ms-recheck accept pass (@ref poll_accept);
+     * on a new connection run @p on_accept (per-peer setup — socket options,
+     * handshake; return false to reject: the fd is closed and the loop
+     * re-accepts), publish the fd to @ref conn_fd_, run @p serve_peer, then
+     * @ref teardown_peer and re-accept the next peer.
+     *
+     * @param listen_fd  The bound+listening socket.
+     * @param on_accept  Per-peer setup; false rejects the connection.
+     * @param serve_peer The per-connection recv loop; returns on peer
+     *                   departure or @ref stop_.
+     */
+    void run_accept_loop(int listen_fd, const std::function<bool(int)>& on_accept,
+                         const std::function<void(int)>& serve_peer);
+
+    std::mutex write_m_;           /**< @brief Serializes writes to @ref conn_fd_ (see the
+                                               write-serialization invariant). */
+    std::atomic<int> conn_fd_{-1}; /**< @brief The live peer connection (-1 = none). */
 };
 
 }  // namespace tr::net

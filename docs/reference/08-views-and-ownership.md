@@ -216,10 +216,10 @@ The publisher and the transport never wait for subscribers; back-pressure surfac
 Given a view whose bytes hold an L2 TLV, the cast decodes and **validates** it. Because it produces a `tlv_t`, the cast itself lives at L2 (`tr::wire`, not `tr::view`) — L1 never depends upward:
 
 ```cpp
-std::expected<tlv_t, tr::wire::err_t> tlv = tr::wire::view_as_tlv(v);
+std::expected<tlv_t, tr::wire::err_t> tlv = tr::wire::decode(v);
 ```
 
-`view_as_tlv(v)` is exactly `decode(v.bytes())`: it **validates** the framing (minimum size, reserved-bit and type-`0x00` rejects, the `LL` length width, trailer sizing, CRC verification, and the nesting-depth cap) and, on success, materializes an owning `tlv_t` tree. The decoded payload spans (and every child's) **borrow** `v`'s bytes, so the view — and thus its refcounted segment (§refcount) — must outlive the returned `tlv_t`. On malformed input it yields the `err_t` the grammar rejected with (`FRAME_TRUNCATED` / `FRAME_INVALID` / `FRAME_CRC_FAIL` / `TLV_NESTING_TOO_DEEP`).
+The cast is a `decode` overload over the view — `decode(v)` is exactly `decode(v.bytes())`: it **validates** the framing (minimum size, reserved-bit and type-`0x00` rejects, the `LL` length width, trailer sizing, CRC verification, and the nesting-depth cap) and, on success, materializes an owning `tlv_t` tree. The decoded payload spans (and every child's) **borrow** `v`'s bytes, so the view — and thus its refcounted segment (§refcount) — must outlive the returned `tlv_t`. On malformed input it yields the `err_t` the grammar rejected with (`FRAME_TRUNCATED` / `FRAME_INVALID` / `FRAME_CRC_FAIL` / `TLV_NESTING_TOO_DEEP`).
 
 There is **no** separate non-validating cast. The earlier draft's split — "the cast trusts the bytes; call `view_validate_as_tlv` first" — was dropped ([ADR-0048](../adr/0048-one-wire-grammar-chunk-cursor-rope-aware-decode.md) §4): the receive path always validates, and a non-validating lazy accessor had no consumer (the forwarder's hand-tuned offset peeks over already-validated framing are a net-plane optimization, not a public cast).
 
@@ -259,7 +259,7 @@ while (link_idx < rope.link_count()) {
     const view_t& link  = rope.links()[link_idx];
     auto          bytes = link.bytes();
     while (in_link < bytes.size()) {
-        auto         maybe = view_as_tlv(link.subview(in_link, bytes.size() - in_link));
+        auto         maybe = decode(link.subview(in_link, bytes.size() - in_link));
         const tlv_t& t     = *maybe;   // std::expected<tlv_t, err_t>; borrows the link's bytes
         std::size_t  total = tlv_total_size(t);
         if (in_link + total <= bytes.size()) {
