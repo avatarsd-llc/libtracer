@@ -39,6 +39,28 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   the caller's arena, so the arena IS the depth bound. `graph_t`'s branch-write
   decomposition walk is now iterative (an explicit open-node stack) — no
   recursion over wire-derived structure remains behind the removed cap.
+- **BREAKING — the in-process subscription callback is `{fn-ptr, ctx}`-based, and
+  `vertex_t` grows a verb interface.** `subscriber_t::callback` is no longer a
+  `std::function<void(const rope_t&)>` but a plain `{subscriber_fn_t, void* ctx}` pair
+  (the same ADR-0047 hot-path shape as the transport `receiver_slot_t` seam), so the
+  per-publish edge snapshot is a trivial copy — no `std::function` clone (which
+  heap-allocates once captures exceed the SBO). `graph_t::subscribe(path, callback)`
+  becomes `subscribe(path, subscriber_fn_t, void* ctx)` plus a template lvalue-callable
+  sugar mirroring `transport_t::set_receiver`: the callable is bound by address and
+  must outlive every delivery — **temporaries no longer compile**
+  (`auto cb = [&](const rope_t&){...}; g.subscribe(path, cb);`). `vertex_t` now exposes
+  its state behind public verbs — `store` / `note_write` / `read_stored` /
+  `wait_for_change` / `current_seq` / `mark_flushed` / `drain_unflushed` /
+  `history_snapshot`, edge verbs `add_edge` / `clear_edge` / `snapshot_edges` (with the
+  new `edge_view_t` dispatch view and `edge_latch_t` durability latch) / `edge_source` /
+  `edge_sources`, ACL verbs `set_acl` / `acl_bytes` / `with_aces`, settings accessors
+  `settings_snapshot` / `update_settings`, `delivery_mode` / `set_delivery_mode`,
+  `handlers`, and the RFC-0005 counter accessors — and the `friend class graph_t` grant
+  is deleted; `graph_t` goes through the verbs only. Behavior-preserving: store order
+  (LKV publish before the lock), ring keep-last trim, await predicate, the
+  snapshot-under-lock/dispatch-outside discipline, and the `kInlineFanout` no-heap
+  small-fan-out path are unchanged. The duplicated three-leg delivery (per-write
+  fan-out vs. the admission durability latch) now shares ONE `dispatch_edge` helper.
 
 - **BREAKING — the transport receiver seam is `{fn-ptr, ctx}`-based and lives in the
   base (`receiver_slot_t`).** `transport_t::set_receiver` / `set_rope_receiver` and

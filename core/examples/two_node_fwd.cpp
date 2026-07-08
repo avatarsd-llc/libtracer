@@ -96,13 +96,14 @@ int main() {
     std::condition_variable cv;
     std::uint64_t delivered = 0;
     std::vector<std::byte> last;
-    (void)node_b.subscribe(path_t("/sensor/temp"), [&](const tr::view::rope_t& v) {
+    auto on_temp = [&](const tr::view::rope_t& v) {
         const auto b = v.only().bytes();
         std::lock_guard<std::mutex> lk(m);
         last.assign(b.begin(), b.end());
         ++delivered;
         cv.notify_one();
-    });
+    };
+    (void)node_b.subscribe(path_t("/sensor/temp"), on_temp);
 
     bool ok = true;
     const auto payload = value_tlv({0x2A, 0x2B});

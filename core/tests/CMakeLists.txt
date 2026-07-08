@@ -156,6 +156,13 @@ target_compile_definitions(substrate_test PRIVATE
     LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME substrate COMMAND substrate_test)
 
+# vertex_t verb interface — a BARE vertex (no graph_t): store/LKV, STREAM ring trim +
+# drain cursor, await wake, edge snapshot under concurrent add, ACL verbs.
+add_executable(vertex_test vertex_test.cpp)
+target_link_libraries(vertex_test PRIVATE libtracer)
+libtracer_test_warnings(vertex_test)
+add_test(NAME vertex COMMAND vertex_test)
+
 # M3 — L4 graph-runtime harness (single-threaded checks + multithreaded stress).
 add_executable(graph_test graph_test.cpp)
 target_link_libraries(graph_test PRIVATE libtracer)
