@@ -1,15 +1,18 @@
-/*
+/**
+ * @file
+ * @brief Platform seam, chip targets: minimal menuconfig-driven Wi-Fi station
+ *        bring-up (NVS + esp_netif + esp_wifi).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * platform seam, chip targets: minimal menuconfig-driven Wi-Fi station bring-up
- * (NVS + esp_netif + esp_wifi). If no SSID is configured (the CI build-gate
- * default) Wi-Fi is skipped entirely — the self-proof runs over lwIP's loopback
- * netif, no radio needed. With credentials set, the node joins the LAN and its
- * UDP listener is reachable by a real host peer (the on-silicon FWD e2e).
+ * If no SSID is configured (the CI build-gate default) Wi-Fi is skipped
+ * entirely — the self-proof runs over lwIP's loopback netif, no radio needed.
+ * With credentials set, the node joins the LAN and its UDP listener is
+ * reachable by a real host peer (the on-silicon FWD e2e).
  *
  * Selected by the build system (main/CMakeLists.txt); the linux host target
- * links platform_linux.cpp instead. This is example code: plain comments.
+ * links platform_linux.cpp instead.
  */
 
 #include <cstring>
