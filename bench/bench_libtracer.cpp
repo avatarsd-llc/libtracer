@@ -26,6 +26,7 @@
 
 #include "bench_common.hpp"
 #include "libtracer/rope.hpp"
+#include "libtracer/security_acl.hpp"
 #include "libtracer/tracer.hpp"
 
 using namespace bench;
@@ -383,11 +384,157 @@ void run_fold(std::size_t N) {
     emit("libtracer", mode.c_str(), kFoldTotal, 1, 1, pub_s, deliv_s, mb_s, lat.summarize());
 }
 
+// ACL-gated data ops with inheritance (ADR-0050): a depth-4 tree whose root and
+// mid level carry INHERIT ACEs, a subject resolver installed, and every op arriving
+// under a granted caller context — so each op pays the full effective-ACL check.
+// The measured op is the GATED READ (the gate plus the lock-free LKV load — the
+// leanest gated data op, so the gate's cost is what the row sees). Two modes:
+//
+//   acl-inherit-d4      one thread, one leaf — the uncontended gate cost.
+//   acl-inherit-d4-mtT  T threads, each gating reads on its OWN leaf under the
+//                       SHARED ancestor chain — what the ADR-0050 cached merge
+//                       buys: pre-cache every op locked each shared ancestor's
+//                       mutex (cross-core cacheline traffic on hot composites);
+//                       post-cache an op touches only its own vertex's lock.
+namespace acl_bench {
+
+/** @brief Install a subject resolver mapping a non-empty caller to its own bytes. */
+void install_resolver(graph_t& g) {
+    g.set_subject_resolver([](std::string_view caller) -> std::optional<std::vector<std::byte>> {
+        if (caller.empty()) return std::nullopt;  // trusted local (the setup writes)
+        std::vector<std::byte> token(caller.size());
+        std::memcpy(token.data(), caller.data(), caller.size());
+        return token;
+    });
+}
+
+/** @brief Write a single INHERIT ALLOW ACE for subject "peer" onto `path`:acl. */
+void install_acl(graph_t& g, const char* path, std::uint32_t mask) {
+    const std::vector<tr::graph::ace_t> aces{
+        tr::graph::ace_t{.type = tr::graph::ace_type_t::ALLOW,
+                         .flags = tr::graph::kAceInherit,
+                         .subject = {reinterpret_cast<const std::byte*>("peer"),
+                                     reinterpret_cast<const std::byte*>("peer") + 4},
+                         .access_mask = mask,
+                         .expires_ns = 0}};
+    (void)g.write(*path_t::parse(path), owned_view(tr::graph::encode_acl(aces)));
+}
+
+/** @brief Build the depth-4 gated tree: /acl(/hub(/dev(/leaf0..N-1))) + INHERIT ACEs. */
+std::vector<vertex_handle_t> build_tree(graph_t& g, std::size_t leaves) {
+    using tr::graph::acl_right_t;
+    (void)g.register_vertex(*path_t::parse("/acl"), role_t::STORED_VALUE);
+    (void)g.register_vertex(*path_t::parse("/acl/hub"), role_t::STORED_VALUE);
+    (void)g.register_vertex(*path_t::parse("/acl/hub/dev"), role_t::STORED_VALUE);
+    std::vector<vertex_handle_t> out;
+    out.reserve(leaves);
+    for (std::size_t i = 0; i < leaves; ++i)
+        out.push_back(g.register_vertex(*path_t::parse("/acl/hub/dev/leaf" + std::to_string(i)),
+                                        role_t::STORED_VALUE));
+    // INHERIT grants on the root and the mid level, so the effective merge spans
+    // multiple ancestor lists (READ for the measured op, WRITE for the seeds).
+    install_acl(g, "/acl:acl",
+                static_cast<std::uint32_t>(acl_right_t::READ) |
+                    static_cast<std::uint32_t>(acl_right_t::WRITE));
+    install_acl(g, "/acl/hub:acl", static_cast<std::uint32_t>(acl_right_t::READ));
+    const std::vector<std::byte> tlv = value_tlv(64);
+    for (vertex_handle_t v : out) (void)g.write(v, owned_view(tlv), "peer");  // seed via the gate
+    return out;
+}
+
+}  // namespace acl_bench
+
+// The single-threaded row: the uncontended per-op gate cost (mode acl-inherit-d4).
+void run_acl_gated() {
+    constexpr std::size_t S = 64;
+    graph_t g;
+    acl_bench::install_resolver(g);
+    const vertex_handle_t leaf = acl_bench::build_tree(g, 1)[0];
+
+    volatile std::size_t sink = 0;
+    const auto get = [&]() { sink += g.read(leaf, "peer").has_value() ? 1u : 0u; };
+
+    constexpr std::size_t MSGS = 2'000'000;
+    constexpr std::size_t LATN = 200'000;
+    for (std::size_t i = 0; i < 1000; ++i) get();  // warmup
+
+    const auto t0 = now_ns();
+    for (std::size_t i = 0; i < MSGS; ++i) get();
+    const double ops_s = MSGS / ((now_ns() - t0) / 1e9);
+
+    Latency lat;
+    for (std::size_t i = 0; i < LATN; ++i) {
+        const auto a = now_ns();
+        get();
+        lat.add(now_ns() - a);
+    }
+    (void)sink;
+    emit("libtracer", "acl-inherit-d4", S, 1, 1, ops_s, ops_s, ops_s * static_cast<double>(S) / 1e6,
+         lat.summarize());
+}
+
+// The contended row (mode acl-inherit-d4-mtT): T reader threads, one leaf each,
+// all gated through the SAME ancestor chain — the shared-composite hot case.
+void run_acl_gated_mt(std::size_t T) {
+    constexpr std::size_t S = 64;
+    graph_t g;
+    acl_bench::install_resolver(g);
+    const std::vector<vertex_handle_t> leaves = acl_bench::build_tree(g, T);
+
+    constexpr std::size_t MSGS = 1'000'000;  // per-thread fixed work (throughput phase)
+    constexpr std::size_t LATN = 100'000;    // per-thread samples (latency phase)
+
+    std::atomic<std::size_t> ready{0};
+    std::atomic<bool> go{false};
+    std::vector<std::vector<std::uint64_t>> lats(T);
+    std::vector<std::thread> threads;
+    threads.reserve(T);
+    for (std::size_t t = 0; t < T; ++t) {
+        threads.emplace_back([&, t]() {
+            const vertex_handle_t leaf = leaves[t];
+            volatile std::size_t sink = 0;
+            const auto get = [&]() { sink += g.read(leaf, "peer").has_value() ? 1u : 0u; };
+            for (std::size_t i = 0; i < 1000; ++i) get();  // warmup
+            ready.fetch_add(1, std::memory_order_acq_rel);
+            while (!go.load(std::memory_order_acquire)) { /* spin until released */
+            }
+            for (std::size_t i = 0; i < MSGS; ++i) get();
+            lats[t].reserve(LATN);
+            for (std::size_t i = 0; i < LATN; ++i) {
+                const auto a = now_ns();
+                get();
+                lats[t].push_back(now_ns() - a);
+            }
+            (void)sink;
+        });
+    }
+    while (ready.load(std::memory_order_acquire) < T) { /* wait for warmup */
+    }
+    const auto t0 = now_ns();
+    go.store(true, std::memory_order_release);
+    for (std::thread& th : threads) th.join();
+    // Throughput counts the fixed MSGS phase plus the latency samples (all gated ops).
+    const double secs = (now_ns() - t0) / 1e9;
+    const double ops_s = static_cast<double>(T) * (MSGS + LATN) / secs;
+
+    Latency lat;
+    for (const std::vector<std::uint64_t>& per : lats)
+        for (std::uint64_t ns : per) lat.add(ns);
+    const std::string mode = "acl-inherit-d4-mt" + std::to_string(T);
+    emit("libtracer", mode.c_str(), S, 1, T, ops_s, ops_s, ops_s * static_cast<double>(S) / 1e6,
+         lat.summarize());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     if (argc > 1 && std::string_view(argv[1]) == "grid") {
         run_grid();
+        return 0;
+    }
+    if (argc > 1 && std::string_view(argv[1]) == "acl") {  // the ACL rows alone (A/B runs)
+        run_acl_gated();
+        run_acl_gated_mt(4);
         return 0;
     }
     for (std::size_t F : kFanouts)
@@ -405,6 +552,10 @@ int main(int argc, char** argv) {
         if (T <= hw) run_inproc_mt(T);
     // ep-type (endpoint-dispatch-class) axis: lean / lean-cached / stream.
     run_eptype();
+    // ACL-gated reads with inheritance (ADR-0050 cached effective-ACE merge):
+    // the uncontended gate cost + the shared-ancestor contended case.
+    run_acl_gated();
+    if (hw >= 4) run_acl_gated_mt(4);
     // (The `loopback` and n-routers `routers-hN` modes benchmarked the ROUTER-flood
     // bridge, retired in ADR-0040 — the net plane is explicit-source-routed FWD only.
     // FWD forward cost is measured by bench_forward_heap + the fwd_* tests.)

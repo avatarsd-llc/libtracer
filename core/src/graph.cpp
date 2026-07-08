@@ -56,8 +56,10 @@ void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
 
 // ACE evaluation and the typed :acl parse live in security_acl.hpp (ADR-0050):
 // a pure per-target policy (acl_policy_t — ALLOW-only MCU profile by default,
-// the full first-match-per-bit host policy under LIBTRACER_ACL_FULL) plus
-// parse_acl/encode_acl. The graph keeps only the effective-ACE walk below.
+// the full first-match-per-bit host policy under LIBTRACER_ACL_FULL), the
+// effective-ACL merge semantics (effective_acl_t), and parse_acl/encode_acl.
+// The graph keeps only the ancestor walk (inside the lazy per-vertex cache
+// rebuild) and the subtree-precise invalidation below.
 
 // True iff the node's opt byte carries no trailer bits. A branch write (RFC-0005)
 // stores refcount subviews of the written frame, so a trailer inside the tree
@@ -400,44 +402,37 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     if (!subject) return true;  // trusted caller (no subject) — e.g. a local API call
     const auto bit = static_cast<std::uint32_t>(right);
     const std::uint64_t now = now_ns();
-    // Effective ACL = own ACEs + INHERIT-flagged ancestor ACEs (ADR-0020). The graph
-    // owns this walk; each list is handed to the PURE per-target policy (ADR-0050 —
-    // no locks, clock reads, or graph access inside it), own list first so the full
-    // policy's first-match-per-bit ordering follows the effective-ACL definition.
-    // NOTE this runs on EVERY gated data op, not just the control plane; the ADR-0050
-    // per-vertex merge cache (generation-bumped by :acl writes) is the follow-up that
-    // takes the ancestor mutex-walk off the data plane. Locks are taken one vertex at
-    // a time — own first, then each ancestor — never nested, so no ordering hazard.
-    bool effective_nonempty = false;
-    {
-        const acl_verdict_t verdict = v->with_aces([&](const std::vector<ace_t>& aces) {
-            effective_nonempty |= !aces.empty();
-            return acl_policy_t::allows(*subject, bit, aces, now);
-        });
-        if (verdict == acl_verdict_t::ALLOW) return true;
-        if (verdict == acl_verdict_t::DENY) return false;
-    }
-    // Strict ancestors via parent pointers (ADR-0057 — no per-level map+lock hop), root
-    // excluded (the flat-map walk never evaluated the empty key). A placeholder
-    // intermediate holds an empty ACE list, so evaluating it is the no-op the old walk's
-    // skip was.
-    for (vertex_t* ancestor = v->parent(); ancestor != nullptr && ancestor->parent() != nullptr;
-         ancestor = ancestor->parent()) {
-        const acl_verdict_t verdict = ancestor->with_aces([&](const std::vector<ace_t>& aces) {
-            for (const ace_t& ace : aces) {
-                if ((ace.flags & kAceInherit) != 0) {  // non-INHERIT: that vertex only
-                    effective_nonempty = true;
-                    break;
-                }
+    // The ADR-0050 cached effective-ACE merge: the data-plane check evaluates ONE
+    // pre-merged list (own ACEs + INHERIT-flagged ancestor ACEs, evaluation order)
+    // through the pure effective_acl_t semantics — no per-operation ancestor
+    // mutex-walk. The walk runs only inside the rebuild lambda, on the first check
+    // after a :acl write marked this vertex dirty (subtree-precise via the ADR-0057
+    // child links — see field_write's "acl" branch). Rebuild locking: v's mutex is
+    // held (with_effective_aces), each ancestor's is taken one at a time inside it —
+    // strictly leaf-to-root along the immutable parent chain, so the nesting is
+    // acyclic. Root excluded (the flat-map walk never evaluated the empty key);
+    // placeholder intermediates hold empty ACE lists, so merging them is the no-op
+    // the old walk's skip was.
+    return v->with_effective_aces(
+        [&](const std::vector<ace_t>& own) {
+            effective_acl_t eff;
+            eff.append_own(own);
+            for (vertex_t* ancestor = v->parent();
+                 ancestor != nullptr && ancestor->parent() != nullptr;
+                 ancestor = ancestor->parent()) {
+                ancestor->with_aces(
+                    [&](const std::vector<ace_t>& aces) { eff.append_ancestor(aces); });
             }
-            return acl_policy_t::allows(*subject, bit, aces, now, kAceInherit);
+            return std::move(eff).release();
+        },
+        [&](const std::vector<ace_t>& merged) {
+            return effective_acl_t::allows(merged, *subject, bit, now);
         });
-        if (verdict == acl_verdict_t::ALLOW) return true;
-        if (verdict == acl_verdict_t::DENY) return false;
-    }
-    // Open by default: no effective ACE at all => allowed (enforcement is opt-in via
-    // ACL presence). Any present ACE — even an expired one — closes the vertex.
-    return !effective_nonempty;
+}
+
+void graph_t::mark_subtree_acl_dirty(vertex_t* v) {
+    v->mark_acl_cache_dirty();
+    v->for_each_child([](vertex_t& child) { mark_subtree_acl_dirty(&child); });
 }
 
 result_t<rope_t> graph_t::read(vertex_handle_t vh, std::string_view caller) const {
@@ -963,6 +958,16 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
         if (!aces) return std::unexpected(aces.error());
         v->set_acl(value.bytes(), std::move(*aces));  // storing replaces; empty => no
                                                       // restrictions
+        {
+            // Subtree-precise cache invalidation (ADR-0050 via the ADR-0057 child
+            // links): every descendant's effective merge embeds this vertex's
+            // INHERIT ACEs, so mark the whole subtree dirty (v itself was marked by
+            // set_acl; re-marking is idempotent). Wiring-frequency — :acl writes
+            // are control-plane-rare. Shared map lock: the walk only excludes
+            // concurrent vertex creation; the marks are release stores.
+            const std::shared_lock lock(map_mutex_);
+            mark_subtree_acl_dirty(v);
+        }
         return {};
     }
 

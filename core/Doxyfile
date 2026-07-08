@@ -37,6 +37,7 @@ INPUT                  = core/include/libtracer/backend.hpp \
                          core/include/libtracer/frame.hpp \
                          core/include/libtracer/graph.hpp \
                          core/include/libtracer/vertex.hpp \
+                         core/include/libtracer/security_acl.hpp \
                          core/include/libtracer/status.hpp \
                          core/include/libtracer/error.hpp \
                          core/include/libtracer/tlv.hpp \

@@ -141,6 +141,89 @@ using acl_policy_t = allow_only_policy_t;
 #endif
 
 /**
+ * @brief One vertex's EFFECTIVE ACL (ADR-0020/0050): its own ACEs plus the
+ *        INHERIT-flagged ancestor ACEs, pre-merged in evaluation order.
+ *
+ * The pure owner of the effective-ACL semantics that previously lived inline in
+ * `graph_t::acl_allows`: build the merged list with @ref append_own (the target's
+ * ACEs, stored order) followed by one @ref append_ancestor per ancestor,
+ * NEAREST-FIRST (which filters to `kAceInherit` — a non-INHERIT ancestor ACE
+ * applies to that vertex only), then evaluate with @ref allows. Pure like the
+ * policies it drives: no graph access, no locks, no clock reads of its own —
+ * unit-testable with synthetic ACE lists.
+ *
+ * The merged list is what the graph caches per vertex (the ADR-0050 cached
+ * effective-ACE merge): only the MERGE is cached, never a verdict — `expires_ns`
+ * is evaluated against the caller's `now` at check time, so expiry needs no
+ * invalidation.
+ */
+class effective_acl_t {
+   public:
+    /** @brief Append the target vertex's own ACEs (all of them, stored order).
+     *  @note Call BEFORE any @ref append_ancestor — own ACEs evaluate first
+     *        (the effective-ACL ordering of ADR-0020). */
+    void append_own(std::span<const ace_t> aces) {
+        merged_.insert(merged_.end(), aces.begin(), aces.end());
+    }
+
+    /**
+     * @brief Append one ancestor's ACEs, keeping only the `kAceInherit`-flagged
+     *        ones (a non-INHERIT ACE applies to that vertex only, ADR-0020).
+     *
+     * Call once per strict ancestor, NEAREST-FIRST, so the full policy's
+     * first-match-per-bit ordering follows the effective-ACL definition.
+     */
+    void append_ancestor(std::span<const ace_t> aces) {
+        for (const ace_t& ace : aces)
+            if ((ace.flags & kAceInherit) != 0) merged_.push_back(ace);
+    }
+
+    /** @brief The merged effective-ACE list, in evaluation order. */
+    [[nodiscard]] const std::vector<ace_t>& merged() const noexcept { return merged_; }
+
+    /** @brief Move the merged list out (what the graph stores in its per-vertex cache). */
+    [[nodiscard]] std::vector<ace_t> release() noexcept { return std::move(merged_); }
+
+    /**
+     * @brief The final ACL verdict over a pre-merged effective-ACE list.
+     *
+     * Hands @p merged to the pure @p Policy ONCE (the merge already applied the
+     * per-list `required_flags` filtering and the own-before-ancestors order, so
+     * one pass is verdict-identical to the per-list walk) and applies the
+     * open-by-default rule: no effective ACE at all ⇒ allowed (enforcement is
+     * opt-in via ACL presence); ANY present ACE — even an expired one — closes
+     * the vertex, so `NO_MATCH` over a non-empty list denies.
+     *
+     * @param merged  A list built by @ref append_own / @ref append_ancestor
+     *                (or this instance's @ref merged, via the member overload).
+     * @param subject The resolved subject token bytes (ADR-0018).
+     * @param bit     The requested right (one `acl_right_t` bit).
+     * @param now     Check-time wall clock, ns since the UNIX epoch.
+     * @return true iff @p subject may exercise @p bit.
+     */
+    template <class Policy = acl_policy_t>
+    [[nodiscard]] static bool allows(std::span<const ace_t> merged,
+                                     std::span<const std::byte> subject, std::uint32_t bit,
+                                     std::uint64_t now) noexcept {
+        const acl_verdict_t verdict = Policy::allows(subject, bit, merged, now);
+        if (verdict == acl_verdict_t::ALLOW) return true;
+        if (verdict == acl_verdict_t::DENY) return false;
+        return merged.empty();  // open by default; any present ACE closes
+    }
+
+    /** @brief The final ACL verdict over THIS instance's merged list (the static
+     *         @ref allows over @ref merged). */
+    template <class Policy = acl_policy_t>
+    [[nodiscard]] bool allows(std::span<const std::byte> subject, std::uint32_t bit,
+                              std::uint64_t now) const noexcept {
+        return allows<Policy>(merged_, subject, bit, now);
+    }
+
+   private:
+    std::vector<ace_t> merged_; /**< @brief Effective ACEs, evaluation order. */
+};
+
+/**
  * @brief Parse a decoded `:acl` ACL TLV into typed ACEs (docs/reference/05 §0x0A).
  *
  * STRICT per the selected @p Policy: an ACE whose semantics the policy would
