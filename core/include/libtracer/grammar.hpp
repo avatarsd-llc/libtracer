@@ -20,10 +20,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <expected>
 #include <memory_resource>
 #include <span>
-#include <vector>
+#include <type_traits>
 
 #include "libtracer/byteorder.hpp"
 #include "libtracer/crc.hpp"
@@ -194,6 +195,98 @@ template <class Cursor>
 }
 
 /**
+ * @brief One open structured node's traversal state in `walk`: a cursor over
+ *        its children region and the walk position within it.
+ *
+ * @tparam Cursor A byte-source cursor (@ref span_cursor, or the rope cursor).
+ */
+template <class Cursor>
+struct walk_frame_t {
+    Cursor body{};       /**< @brief Cursor over the open node's children region. */
+    std::size_t pos = 0; /**< @brief Walk position within @ref body. */
+};
+
+/**
+ * @brief The walk's open-node stack — the RFC-0006 receiver-resource depth bound.
+ *
+ * Nesting depth is bounded by the receiver's decode resources, never by a
+ * constant. The stack starts in the caller-provided @p inline_slots span — a
+ * TUNING knob, not a limit: overflowing it changes cost, not behavior — and,
+ * once those are exhausted, relocates into geometrically grown blocks drawn
+ * from @p spill (one open-node record per open level, RFC-0006).
+ *
+ * A null @p spill makes the inline span the receiver's whole decode budget:
+ * exhaustion makes @ref push return false, which `walk` maps to
+ * `TLV_NESTING_TOO_DEEP` ("exceeds this receiver's decode resources") — a clean
+ * reject, no throw, safe under `-fno-exceptions`. A non-null @p spill allocates
+ * with the resource's own exhaustion behavior: hosts pass
+ * `std::pmr::get_default_resource()` (effectively unbounded); the terminus
+ * arena passes ITS resource so the caller's arena is the real bound. An MCU
+ * profile whose arena has a null upstream should pass a null spill instead,
+ * keeping the reject non-throwing.
+ */
+template <class Cursor>
+class walk_stack_t {
+   public:
+    /** @brief A stack over @p inline_slots, spilling to @p spill when they run out. */
+    walk_stack_t(std::span<walk_frame_t<Cursor>> inline_slots,
+                 std::pmr::memory_resource* spill) noexcept
+        : data_(inline_slots.data()), cap_(inline_slots.size()), spill_(spill) {}
+
+    /** @brief Releases the spill block, if any (the inline slots are the caller's). */
+    ~walk_stack_t() {
+        if (spilled_) spill_->deallocate(data_, cap_ * sizeof(walk_frame_t<Cursor>), kAlign);
+    }
+
+    /** @brief Non-copyable (one walk, one stack — the spill block has one owner). */
+    walk_stack_t(const walk_stack_t&) = delete;
+    /** @brief Non-assignable. */
+    walk_stack_t& operator=(const walk_stack_t&) = delete;
+
+    /**
+     * @brief Open one node. False ⇔ the receiver's decode resources are exhausted
+     *        (inline slots full and no spill) — never throws in that case.
+     */
+    [[nodiscard]] bool push(const walk_frame_t<Cursor>& f) {
+        if (size_ == cap_ && !grow()) return false;
+        data_[size_++] = f;
+        return true;
+    }
+    /** @brief True when no node is open. */
+    [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
+    /** @brief The innermost open node. */
+    [[nodiscard]] walk_frame_t<Cursor>& back() noexcept { return data_[size_ - 1]; }
+    /** @brief Close the innermost open node. */
+    void pop() noexcept { --size_; }
+
+   private:
+    static constexpr std::size_t kAlign = alignof(walk_frame_t<Cursor>);
+
+    // Relocate into a spill block ~2x the current capacity. walk_frame_t is
+    // trivially copyable (both cursors are span/offset records), so relocation
+    // is a memcpy and the vacated inline slots / old block need no destruction.
+    [[nodiscard]] bool grow() {
+        static_assert(std::is_trivially_copyable_v<walk_frame_t<Cursor>>);
+        if (spill_ == nullptr) return false;
+        const std::size_t new_cap = cap_ < 4 ? 8 : cap_ * 2;
+        auto* fresh = static_cast<walk_frame_t<Cursor>*>(
+            spill_->allocate(new_cap * sizeof(walk_frame_t<Cursor>), kAlign));
+        if (size_ > 0) std::memcpy(fresh, data_, size_ * sizeof(walk_frame_t<Cursor>));
+        if (spilled_) spill_->deallocate(data_, cap_ * sizeof(walk_frame_t<Cursor>), kAlign);
+        data_ = fresh;
+        cap_ = new_cap;
+        spilled_ = true;
+        return true;
+    }
+
+    walk_frame_t<Cursor>* data_;
+    std::size_t cap_;
+    std::size_t size_ = 0;
+    std::pmr::memory_resource* spill_;
+    bool spilled_ = false;
+};
+
+/**
  * @brief Drive the iterative TLV descent, modelling each node through @p sink
  *        (ADR-0048 §1 — the ONE structural walk).
  *
@@ -207,10 +300,13 @@ template <class Cursor>
  *
  * Recursion is forbidden (a malicious deep frame must not overflow a small MCU
  * call stack, docs/reference/01 §Iterative parsing requirement): the walk keeps
- * an explicit cursor/pos stack drawn from @p stack_mr, so a slab-bound decode
- * (the terminus arena) stays heap-free by passing its own resource.
+ * its open-node state in @p stack, whose inline-slots + spill shape IS the
+ * receiver's nesting-depth bound (RFC-0006 — no depth constant exists). A frame
+ * that exhausts the stack is rejected with `TLV_NESTING_TOO_DEEP`, amended to
+ * mean "exceeds this receiver's decode resources".
  *
- * The sink models each node through three hooks (all balanced LIFO):
+ * The sink models each node through three hooks (balanced LIFO on success; a
+ * rejected frame abandons the sink mid-walk):
  * - `on_open(const header_t&, const Cursor& node)` — a structured TLV opens;
  * - `on_leaf(const header_t&, const Cursor& node)` — an opaque TLV;
  * - `on_close()`                                    — the current open node's
@@ -223,19 +319,16 @@ template <class Cursor>
  * @tparam Sink   A type providing the three hooks above.
  * @param root      The cursor positioned at the frame's first byte.
  * @param sink      The node model (built as the walk visits).
- * @param stack_mr  Backs the walk's internal cursor stack (pass the arena's
- *                  resource to keep a slab-bound decode heap-free; the default
- *                  resource for an ordinary heap decode).
- * @param max_depth The nesting cap: a child at depth `>= max_depth` is rejected
- *                  with `TLV_NESTING_TOO_DEEP` (callers pass `wire::kMaxDepth`).
+ * @param stack     The open-node stack (must be fresh/empty) — the caller's
+ *                  decode-resource bound (@ref walk_stack_t).
  * @param crc_policy CRC-trailer policy forwarded to @ref parse_header.
  * @return Nothing on success, or the first `err_t` the grammar rejects with
- *         (including `FRAME_INVALID` for trailing bytes after the root).
+ *         (including `FRAME_INVALID` for trailing bytes after the root, and
+ *         `TLV_NESTING_TOO_DEEP` on stack exhaustion).
  */
 template <class Cursor, class Sink>
 [[nodiscard]] std::expected<void, err_t> walk(const Cursor& root, Sink& sink,
-                                              std::pmr::memory_resource& stack_mr,
-                                              std::size_t max_depth,
+                                              walk_stack_t<Cursor>& stack,
                                               crc_check_t crc_policy = crc_check_t::VERIFY) {
     const auto rh = parse_header(root, crc_policy);
     if (!rh) return std::unexpected(rh.error());
@@ -245,29 +338,17 @@ template <class Cursor, class Sink>
         return {};
     }
     sink.on_open(*rh, root);
-
-    // One open structured node's traversal state: a cursor over its children
-    // region and the walk position within it.
-    struct frame_t {
-        Cursor body;
-        std::size_t pos = 0;
-    };
-    std::pmr::vector<frame_t> stack(&stack_mr);
-    // Reserve for the typical FWD nesting (~3-4), not max_depth: a full-depth
-    // reserve would draw ~1 KiB on EVERY decode, which a 16 KB-slab arena cannot
-    // spare; deeper frames grow (bounded by the cap).
-    stack.reserve(8);
-    stack.push_back(frame_t{root.region(rh->header, rh->length), 0});
+    if (!stack.push({root.region(rh->header, rh->length), 0})) {
+        return std::unexpected(err_t::TLV_NESTING_TOO_DEEP);  // exceeds decode resources
+    }
 
     while (!stack.empty()) {
-        frame_t& top = stack.back();
+        walk_frame_t<Cursor>& top = stack.back();
         if (top.pos == top.body.size()) {
             sink.on_close();  // node complete — seal / graft
-            stack.pop_back();
+            stack.pop();
             continue;
         }
-        // A child of the open node sits at depth == stack.size(); reject at the cap.
-        if (stack.size() >= max_depth) return std::unexpected(err_t::TLV_NESTING_TOO_DEEP);
         const auto ch =
             parse_header(top.body.region(top.pos, top.body.size() - top.pos), crc_policy);
         if (!ch) return std::unexpected(ch.error());
@@ -275,7 +356,9 @@ template <class Cursor, class Sink>
         top.pos += ch->total;
         if (ch->opt.pl) {
             sink.on_open(*ch, node);
-            stack.push_back(frame_t{node.region(ch->header, ch->length), 0});
+            if (!stack.push({node.region(ch->header, ch->length), 0})) {
+                return std::unexpected(err_t::TLV_NESTING_TOO_DEEP);  // exceeds decode resources
+            }
         } else {
             sink.on_leaf(*ch, node);
         }

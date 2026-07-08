@@ -8,7 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Removed
+
+- **BREAKING — `MAX_DEPTH` is removed (RFC-0006).** Nesting depth is
+  receiver-resource-bounded, never a constant: `decode`'s explicit work stack is
+  a growable `Vec` (the host heap is this binding's decode resource), so the
+  depth-cap reject is gone. `Error::TlvNestingTooDeep` remains registered
+  ("exceeds the receiver's decode resources") for harness parity and peers'
+  `ERROR` frames; `decode` itself no longer produces it.
 
 ## [0.3.0] — 2026-07-07
 

@@ -35,28 +35,6 @@ namespace {
 
 constexpr std::uint8_t u8(std::byte b) noexcept { return std::to_integer<std::uint8_t>(b); }
 
-// Verify a lazy rope-tier frame to the same accept/reject decision the arena
-// terminus reaches (ADR-0053 §4). The arena path flattens then `decode_into` with
-// `crc_check_t::VERIFY`, checking EVERY CR-bearing TLV; the lazy `tlv_view_t`
-// defers CRC, so the rope terminus verifies here — verify-all-then-apply, before
-// the op mutates state. A forward recursive walk: `verify()` checks THIS TLV's own
-// CRC trailer (trivial when absent, whole-body when present), and recursion reaches
-// every CR-bearing descendant a root-only verify would miss. A child grammar error
-// surfaces via `next()` (as a failed decode would); depth is capped at the shared
-// `kMaxDepth` exactly as the eager decoders reject `TLV_NESTING_TOO_DEEP` (a node at
-// `kMaxDepth` ancestors is rejected — tlv_arena.cpp / frame.cpp). Allocation-free.
-[[nodiscard]] bool verify_view_tree(const wire::tlv_view_t& node, std::size_t depth) {
-    if (depth >= wire::kMaxDepth) return false;  // parity with the decoders' cap
-    if (!node.verify()) return false;            // this TLV's CRC trailer
-    auto children = node.children();
-    for (;;) {
-        const std::expected<std::optional<wire::tlv_view_t>, wire::err_t> child = children.next();
-        if (!child) return false;              // malformed child header ⇒ reject the frame
-        if (!child->has_value()) return true;  // region cleanly exhausted
-        if (!verify_view_tree(**child, depth + 1)) return false;
-    }
-}
-
 // One top-level TLV header read in isolation (NO descent) — the byte offsets the
 // zero-copy forward rebuild needs, kept as ABSOLUTE offsets into the source so the
 // rebuild can re-slice src/payload as views (no copy). It is a thin ADAPTER over the
@@ -586,12 +564,15 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
 
 void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::rope_t frame) {
     // ADR-0053 3c-iii: the multi-link request terminus, resolved straight off the
-    // rope — the interim flatten is gone. Adopt the frame as a lazy view (bounds
-    // anchored, CRC deferred), then verify integrity to the arena terminus's
-    // accept/reject (verify-all-then-apply, §4) before the op mutates state.
+    // rope — the interim flatten is gone. Adopt the frame as a lazy view: over()
+    // anchors the root header + total-size bounds, and verify() adds the root
+    // trailer-CRC linear scan. Ingress checks END there (CONTEXT.md §Validation
+    // timing) — no whole-tree walk: a malformed or CRC-failing interior TLV
+    // surfaces its error where the resolver CONSUMES that level (per-TLV
+    // verify-at-access, ADR-0053 §4).
     const auto view = wire::tlv_view_t::over(std::move(frame));
     if (!view) return;                        // malformed root ⇒ drop (as a decode error)
-    if (!verify_view_tree(*view, 0)) return;  // CRC / grammar / depth failure ⇒ drop
+    if (!view->verify().has_value()) return;  // root CRC failure ⇒ drop
     // The rope tier stores its one ownership copy (own_tlv) — the ADR-0042 §3
     // referenced store needs a contiguous frame view, absent for a scatter-gather
     // rope, so no frame_view is threaded. Reply routes back over the inbound link,

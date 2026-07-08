@@ -10,7 +10,6 @@
 export {
   TYPE,
   ERROR,
-  MAX_DEPTH,
   CodecError,
   decode,
   encode,

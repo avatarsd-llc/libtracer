@@ -11,7 +11,7 @@ import assert from "node:assert";
 import * as lt from "@avatarsd-llc/libtracer";
 import * as wire from "@avatarsd-llc/libtracer/wire";
 
-const need = ["decode", "encode", "equal", "crc32c", "crc16ccitt", "TYPE", "ERROR", "MAX_DEPTH", "SPEC_VERSION"];
+const need = ["decode", "encode", "equal", "crc32c", "crc16ccitt", "TYPE", "ERROR", "SPEC_VERSION"];
 for (const k of need) assert.ok(k in lt, `@avatarsd-llc/libtracer is missing export: ${k}`);
 assert.strictEqual(typeof lt.decode, "function", "decode is not a function");
 assert.strictEqual(typeof lt.encode, "function", "encode is not a function");

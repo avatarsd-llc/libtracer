@@ -53,11 +53,14 @@ export const ERROR = Object.freeze({
   FRAME_TRUNCATED: 'FRAME_TRUNCATED', // ran out of bytes
   FRAME_INVALID: 'FRAME_INVALID', // reserved bit, type 0x00, trailing bytes
   FRAME_CRC_FAIL: 'FRAME_CRC_FAIL', // trailer CRC mismatch
-  TLV_NESTING_TOO_DEEP: 'TLV_NESTING_TOO_DEEP', // depth cap exceeded
+  /**
+   * @brief Exceeds the receiver's decode resources (RFC-0006 — depth is
+   * resource-bounded, never a constant). This codec's work stack is a growable
+   * array, so decode() never throws it; the name remains for harness parity
+   * and for peers' ERROR frames.
+   */
+  TLV_NESTING_TOO_DEEP: 'TLV_NESTING_TOO_DEEP',
 });
-
-/** The iterative-parser depth cap (docs/reference/01 §iterative parsing). */
-export const MAX_DEPTH = 32;
 
 /** Reserved bits 7 and 0; non-zero => FRAME_INVALID. */
 const RESERVED_MASK = 0b1000_0001;
@@ -340,9 +343,12 @@ function parseOne(buf) {
 }
 
 /**
- * Decode exactly one TLV that fills `input` into a TLV tree. Nesting is parsed
- * ITERATIVELY with an explicit stack (recursion is forbidden) and capped at
- * {@link MAX_DEPTH}. Trailing bytes after the root => FRAME_INVALID.
+ * @brief Decode exactly one TLV that fills `input` into a TLV tree.
+ *
+ * Nesting is parsed ITERATIVELY with an explicit stack (recursion is
+ * forbidden); the stack is a growable array, so depth is bounded only by this
+ * receiver's memory (RFC-0006 — no depth constant). Trailing bytes after the
+ * root => FRAME_INVALID.
  *
  * @param {Uint8Array} input
  * @returns {Tlv}
@@ -368,8 +374,6 @@ export function decode(input) {
       parent.pos += done.total;
       continue;
     }
-    // A child of `top` sits at depth == stack.length; reject at the cap.
-    if (stack.length >= MAX_DEPTH) throw new CodecError(ERROR.TLV_NESTING_TOO_DEEP);
     const child = parseOne(top.payload.subarray(top.pos));
     if (child.tlv.opt.pl) {
       stack.push({ node: child.tlv, payload: child.children, pos: 0, total: child.total });

@@ -55,6 +55,9 @@ namespace tr::wire::grammar {
  */
 class rope_cursor {
    public:
+    /** @brief An empty cursor (zero bytes) — the walk-stack inline-slot default. */
+    rope_cursor() noexcept = default;
+
     /** @brief A cursor over the whole of rope @p r. */
     explicit rope_cursor(const view::rope_t& r) noexcept
         : links_(r.links()), end_(r.total_length()) {}
@@ -138,14 +141,37 @@ class rope_cursor {
 namespace tr::wire {
 
 /**
- * @brief Validate one whole TLV frame delivered as a scatter-gather rope (ADR-0048 §1).
+ * @brief The cheap INGRESS check (CONTEXT.md §Validation timing): top-level
+ *        header + total-size anchor + the whole-frame trailer CRC, one linear scan.
+ *
+ * Everything ingress is allowed to verify, and nothing more: `parse_header` on
+ * the root (bounds, `type == 0x00` reject, reserved-bit reject, `LL` width,
+ * trailer sizing, and — when `opt.CR` is set — the trailer CRC, a LINEAR
+ * link-by-link scan that never needs the tree) plus the `total == size` anchor.
+ * No descent: a malformed child TLV surfaces its error where that level is
+ * CONSUMED (per-TLV verify-at-access, ADR-0053), never at ingress. The strict
+ * whole-tree walk remains available as the opt-in `validate_rope`.
+ *
+ * @param r The reassembled frame. Every link MUST be HOST (@ref
+ *          view::rope_t::all_host) — a device link cannot be CPU-read to verify a
+ *          CRC and is rejected with `FRAME_INVALID`.
+ * @return `{}` when the root header, size anchor and (if present) root CRC hold;
+ *         otherwise the `err_t` the grammar rejects with.
+ */
+[[nodiscard]] std::expected<void, err_t> check_frame(const view::rope_t& r);
+
+/**
+ * @brief STRICTLY validate one whole TLV frame delivered as a scatter-gather rope
+ *        (ADR-0048 §1) — the opt-in eager whole-tree walk.
  *
  * Applies the exact `grammar::parse_header` grammar — bounds, `type == 0x00`
- * reject, reserved-bit reject, `LL` width, trailer sizing, the two-region CRC, the
- * `kMaxDepth` cap, and trailing-bytes reject — over the rope's links WITHOUT
- * flattening, so CAN/WS ingress can reject a malformed reassembled frame before
- * paying the single flatten copy. Iterative (no recursion), mirroring
- * `decode_into`'s walk.
+ * reject, reserved-bit reject, `LL` width, trailer sizing, the two-region CRC,
+ * and trailing-bytes reject — over EVERY level of the rope's links WITHOUT
+ * flattening. Iterative (no recursion) via the one `grammar::walk`; nesting
+ * depth is bounded by this host validator's heap-spilled walk stack (RFC-0006 —
+ * no depth constant). NOT an ingress step (ingress is `check_frame`): this is
+ * the strict mode a verify-all-then-apply consumer or a differential test opts
+ * into (ADR-0053 §4).
  *
  * @param r The reassembled frame. Every link MUST be HOST (@ref
  *          view::rope_t::all_host) — a device link cannot be CPU-read to verify a
