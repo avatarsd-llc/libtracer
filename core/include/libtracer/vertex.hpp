@@ -348,21 +348,61 @@ class edge_snapshot_t {
  * with a PER-VERTEX predicate (`write_seq_`), so a collision costs a spurious
  * wake + re-check, never a correctness change.
  */
-struct vertex_stripe_t {
-    std::mutex m;               /**< @brief Serializes the stripe's vertices' verbs. */
-    std::condition_variable cv; /**< @brief Wakes the stripe's `await` waiters. */
+struct alignas(64) vertex_stripe_t {  // one cache line per stripe: adjacent stripes must
+                                      // never false-share under multi-threaded publish
+    std::mutex m;                     /**< @brief Serializes the stripe's vertices' verbs. */
+    /** @brief Live `await` waiters on this stripe — mutated ONLY under @ref m, so the
+     *         notify side (also under @ref m) reads it race-free and can skip the
+     *         condvar call entirely on the waiterless hot path (issue #370). */
+    int waiters = 0;
 };
 
 /**
- * @brief The stripe a vertex rides: a process-wide static table indexed by a
- *        mixed vertex address (vertices are pinned — ADR-0056/0057 — so the
- *        address is a stable identity). Same vertex ⇒ same stripe, always.
+ * @brief The stripe table: `constinit` where the platform's `std::mutex` is
+ *        constexpr-constructible, so the per-verb lookup is a plain indexed load with
+ *        NO function-local-static init-guard check on the hot path (#370). libstdc++
+ *        makes the ctor constexpr only when its gthreads port supports static mutex
+ *        init (`__GTHREAD_MUTEX_INIT`) — ESP-IDF's does NOT — and libc++'s always is;
+ *        the fallback is a guarded function-local static (one predicted branch per
+ *        verb — the MCU's constraint is RAM, not that branch). The condvars live in a
+ *        separate guarded table (`vertex_stripe_cv`) because `std::condition_variable`
+ *        can never be constant-initialized — only the cold await/wake paths reach it.
  */
-inline vertex_stripe_t& vertex_stripe_of(const void* v) noexcept {
-    static std::array<vertex_stripe_t, LIBTRACER_VERTEX_LOCK_STRIPES> stripes;
+#if defined(__GTHREAD_MUTEX_INIT) || defined(_LIBCPP_VERSION)
+inline constinit std::array<vertex_stripe_t, LIBTRACER_VERTEX_LOCK_STRIPES> vertex_stripes{};
+
+/** @brief The stripe at table slot @p idx (guard-free constant-initialized table). */
+inline vertex_stripe_t& vertex_stripe_at(std::size_t idx) noexcept { return vertex_stripes[idx]; }
+#else
+/** @brief The stripe at table slot @p idx (guarded-static fallback: this platform's
+ *         `std::mutex` has no constexpr ctor, so the table cannot be `constinit`). */
+inline vertex_stripe_t& vertex_stripe_at(std::size_t idx) noexcept {
+    static std::array<vertex_stripe_t, LIBTRACER_VERTEX_LOCK_STRIPES> stripes{};
+    return stripes[idx];
+}
+#endif
+
+/** @brief The stripe slot of a pinned vertex address (ADR-0056/0057 — the address is a
+ *         stable identity). Same vertex ⇒ same slot, always. */
+inline std::size_t vertex_stripe_index(const void* v) noexcept {
     std::uintptr_t h = reinterpret_cast<std::uintptr_t>(v);
     h ^= h >> 9;  // fold higher entropy into the allocation-aligned low bits
-    return stripes[(h >> 6) % LIBTRACER_VERTEX_LOCK_STRIPES];
+    return (h >> 6) % LIBTRACER_VERTEX_LOCK_STRIPES;
+}
+
+/** @brief The stripe a vertex rides (mutex + waiter count). */
+inline vertex_stripe_t& vertex_stripe_of(const void* v) noexcept {
+    return vertex_stripe_at(vertex_stripe_index(v));
+}
+
+/**
+ * @brief The stripe's condvar — a SEPARATE guarded-static table, reached only from
+ *        `vertex_t::wait_for_change` and from a publish that saw `waiters != 0`:
+ *        the waiterless publish (the hot path) never pays this table's init guard.
+ */
+inline std::condition_variable& vertex_stripe_cv(std::size_t idx) {
+    static std::array<std::condition_variable, LIBTRACER_VERTEX_LOCK_STRIPES> cvs;
+    return cvs[idx];
 }
 
 /**
@@ -603,7 +643,8 @@ class vertex_t {
                             std::pmr::polymorphic_allocator<rope_t>(mr), std::move(value));
         lkv_.store(sp);  // lock-free publish of the new last-known-value
         {
-            const std::lock_guard lock(vertex_stripe_of(this).m);
+            vertex_stripe_t& st = vertex_stripe_of(this);  // one lookup per verb (#370)
+            const std::lock_guard lock(st.m);
             vertex_ext_t* e = ext_.load(std::memory_order_acquire);
             if (role_ == role_t::STREAM && e != nullptr) {  // STREAM identity always has ext
                 e->history.push_back(sp);  // refcount bump — the caller keeps the returned sp
@@ -612,7 +653,9 @@ class vertex_t {
                 while (e->history.size() > keep) e->history.pop_front();
             }
             ++write_seq_;
-            vertex_stripe_of(this).cv.notify_all();
+            // Waiterless publish skips the condvar entirely (#370): `waiters` only
+            // changes under st.m, which we hold — no lost-wakeup window exists.
+            if (st.waiters != 0) vertex_stripe_cv(vertex_stripe_index(this)).notify_all();
         }
         return sp;
     }
@@ -622,9 +665,11 @@ class vertex_t {
      *        (the vertex stores no value — the user handler consumed it).
      */
     void note_write() {
-        const std::lock_guard lock(vertex_stripe_of(this).m);
+        vertex_stripe_t& st = vertex_stripe_of(this);  // one lookup per verb (#370)
+        const std::lock_guard lock(st.m);
         ++write_seq_;
-        vertex_stripe_of(this).cv.notify_all();
+        if (st.waiters != 0)  // waiterless skip, as @ref store
+            vertex_stripe_cv(vertex_stripe_index(this)).notify_all();
     }
 
     /** @brief The stored last-known-value (lock-free; null ⇒ never assigned / Handler role). */
@@ -637,9 +682,19 @@ class vertex_t {
      * @return true iff a change was observed (`write_seq_ != seq0`); false on timeout.
      */
     [[nodiscard]] bool wait_for_change(std::uint64_t seq0, std::chrono::nanoseconds timeout) {
-        vertex_stripe_t& st = vertex_stripe_of(this);
+        const std::size_t idx = vertex_stripe_index(this);
+        vertex_stripe_t& st = vertex_stripe_at(idx);
         std::unique_lock lock(st.m);
-        return st.cv.wait_for(lock, timeout, [&] { return write_seq_ != seq0; });
+        // Register on the stripe's waiter count (under st.m — the notify side reads it
+        // under the same mutex, so a publish either sees us and notifies, or happened
+        // before we locked and the predicate below observes its seq bump). RAII so a
+        // throwing wait can never leak a phantom waiter.
+        struct waiter_scope_t {
+            int& n;
+            explicit waiter_scope_t(int& c) : n(c) { ++n; }
+            ~waiter_scope_t() { --n; }
+        } scope(st.waiters);
+        return vertex_stripe_cv(idx).wait_for(lock, timeout, [&] { return write_seq_ != seq0; });
     }
 
     /** @brief The current write sequence (bumped per assign — the await predicate base). */

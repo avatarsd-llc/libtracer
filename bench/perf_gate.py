@@ -73,6 +73,9 @@ MEAN_REGRESS = 1.12  # fail if mean > baseline * 1.12 — the mean is NOT tick-
                      # quantized (it averages many iterations), so it catches a
                      # one-tick p50 pullback (~10% at 100 ns) the p50 gate cannot
 TPUT_REGRESS = 0.88  # fail if deliv_s < baseline * 0.88 (throughput pullback)
+LAT_TICK_NS = 25     # sub-100ns baselines: one ~10ns clock tick already exceeds 15%,
+                     # so grain alone could fail the gate — such points must ALSO
+                     # regress by ~2 ticks in absolute ns before they count
 FLOOR_P50_NS = 1000  # absolute backstop if no baseline (canonical is ~100 ns)
 FLOOR_DELIV = 1_000_000
 DEFAULT_RUNS = 3
@@ -140,10 +143,15 @@ def main() -> int:
                 f"deliv/s={v['deliv_s']:>14,.0f}")
         if base and k in base:
             b = base[k]
-            if v["p50_ns"] > b["p50_ns"] * LAT_REGRESS:
+
+            def lat_fails(cur: int, ref: int, factor: float) -> bool:
+                """Relative pullback, tick-guarded for sub-100ns points."""
+                return cur > ref * factor and (ref >= 100 or cur - ref > LAT_TICK_NS)
+
+            if lat_fails(v["p50_ns"], b["p50_ns"], LAT_REGRESS):
                 fails.append(f"{k} latency pullback: {v['p50_ns']}ns vs base {b['p50_ns']}ns "
                              f"(+{(v['p50_ns'] / b['p50_ns'] - 1) * 100:.0f}%)")
-            if "mean_ns" in b and v["mean_ns"] > b["mean_ns"] * MEAN_REGRESS:
+            if "mean_ns" in b and lat_fails(v["mean_ns"], b["mean_ns"], MEAN_REGRESS):
                 fails.append(f"{k} mean-latency pullback: {v['mean_ns']}ns vs base "
                              f"{b['mean_ns']}ns (+{(v['mean_ns'] / b['mean_ns'] - 1) * 100:.0f}%)")
             if v["deliv_s"] < b["deliv_s"] * TPUT_REGRESS:
