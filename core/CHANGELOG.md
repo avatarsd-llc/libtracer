@@ -12,6 +12,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **Stripe-lock hot path recovered to pre-stripe latency (#370)** — the #361 §2
+  striped locks had cost ~10 ns on the 1:1 write. The stripe table is now
+  `constinit` (guard-free lookup: `vertex_stripes` / `vertex_stripe_index`), the
+  condvars moved to a separate cold table (`vertex_stripe_cv`), stripes are
+  `alignas(64)` (no false sharing between adjacent stripes), and a **waiterless
+  publish skips the condvar call entirely** (per-stripe waiter count, mutated
+  only under the stripe mutex). Measured interleaved vs the pre-stripe build:
+  parity on p50, better mean/throughput. `vertex_stripe_t` lost its `cv` member
+  (use `vertex_stripe_cv(vertex_stripe_index(v))` — the stripe machinery is an
+  implementation detail exposed in the header, not a supported API).
+
 ### Added
 
 - **`graph_t` now takes an ADR-0039 §1 injected `std::pmr::memory_resource*`
