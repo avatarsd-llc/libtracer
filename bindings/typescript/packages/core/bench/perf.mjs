@@ -1,32 +1,35 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-//
-// TypeScript codec perf bench — the `lang` axis (TS core) of the ranged
-// cross-core perf matrix (ADR-0032, issue #96). It measures decode+encode
-// roundtrip latency and throughput over the SHARED conformance vectors under
-// tests/conformance/vectors/v1/ (the "vector data" workload — real structured
-// TLVs, not synthetic scalars), so a C++-vs-TS surface can later be rendered
-// over the SAME inputs.
-//
-// Output: one machine-parseable RESULT line per vector, in the SAME
-// tab-separated column contract as the C++ bench (bench/bench_common.hpp,
-// consumed by bench/collate.py):
-//
-//   RESULT \t system \t mode \t size \t fanout \t endpoints \t pub_s \t
-//          deliv_s \t mb_s \t p50ns \t p99ns \t meanns
-//
-// with system="ts-core", mode="codec", fanout=1, endpoints=1. pub_s and deliv_s
-// are roundtrips/sec (one roundtrip == one decode + one encode); mb_s is
-// bytes/sec/1e6; p50/p99/mean are per-roundtrip nanoseconds. A human-readable
-// per-vector ns/op footer follows for readability. Node/stdlib only — no deps.
+
+/**
+ * @brief TypeScript codec perf bench — the `lang` axis (TS core) of the ranged
+ * cross-core perf matrix (ADR-0032, issue #96).
+ *
+ * It measures decode+encode roundtrip latency and throughput over the SHARED
+ * conformance vectors under tests/conformance/vectors/v1/ (the "vector data"
+ * workload — real structured TLVs, not synthetic scalars), so a C++-vs-TS
+ * surface can later be rendered over the SAME inputs.
+ *
+ * Output: one machine-parseable RESULT line per vector, in the SAME
+ * tab-separated column contract as the C++ bench (bench/bench_common.hpp,
+ * consumed by bench/collate.py):
+ *
+ *   RESULT \t system \t mode \t size \t fanout \t endpoints \t pub_s \t
+ *          deliv_s \t mb_s \t p50ns \t p99ns \t meanns
+ *
+ * with system="ts-core", mode="codec", fanout=1, endpoints=1. pub_s and deliv_s
+ * are roundtrips/sec (one roundtrip == one decode + one encode); mb_s is
+ * bytes/sec/1e6; p50/p99/mean are per-roundtrip nanoseconds. A human-readable
+ * per-vector ns/op footer follows for readability. Node/stdlib only — no deps.
+ */
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, sep, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { decode, encode } from '../src/codec.mjs';
 
-/** @param {string} dir @returns {string[]} absolute paths to every input.bin under dir */
+/** @brief Recursively collect vector inputs. @param {string} dir @returns {string[]} absolute paths to every input.bin under dir */
 function findInputs(dir) {
   /** @type {string[]} */
   const out = [];
@@ -38,13 +41,14 @@ function findInputs(dir) {
   return out;
 }
 
-/** Target per-vector throughput-phase wall time, so each ns/op is stable. */
-const TARGET_NS = 100_000_000n; // 100 ms throughput phase
-const LATENCY_SAMPLES = 20_000; // individual timed roundtrips for percentiles
+/** @brief Target per-vector throughput-phase wall time (100 ms), so each ns/op is stable. */
+const TARGET_NS = 100_000_000n;
+/** @brief Individually timed roundtrips for the latency percentiles. */
+const LATENCY_SAMPLES = 20_000;
 const WARMUP = 5_000;
 
 /**
- * One decode+encode roundtrip on the given bytes (the unit of work).
+ * @brief One decode+encode roundtrip on the given bytes (the unit of work).
  *
  * @param {Uint8Array} input
  */
@@ -53,7 +57,7 @@ function roundtrip(input) {
 }
 
 /**
- * Measure a single vector: a tight throughput loop (>= TARGET_NS) for the rate,
+ * @brief Measure a single vector: a tight throughput loop (>= TARGET_NS) for the rate,
  * then a batch of individually-timed roundtrips for the latency percentiles.
  *
  * @param {Uint8Array} input

@@ -1,25 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-//
-// C++ <-> BROWSER WebTransport interop harness (ADR-0043 Phase B). Node has no
-// native WebTransport client, so unlike transport-ws's interop this cannot run
-// in-process: it drives a real chrome-headless (via puppeteer) against the C++
-// `webtransport_transport_t` echo harness (CMake target `wt_interop_server`,
-// built with LIBTRACER_WITH_QUIC): a genuine HTTP/3 extended-CONNECT session
-// with `serverCertificateHashes` dev trust, one browser
-// `createBidirectionalStream()`, a length-prefixed record out, the echoed
-// record back — end-to-end validation of the browser <-> device path.
-//
-// It SKIPS gracefully (never fails) unless BOTH are present:
-//   - LIBTRACER_WT_INTEROP_SERVER: path to the built wt_interop_server binary;
-//   - puppeteer: installed (`npm i -D puppeteer` where the harness should run —
-//     it is deliberately NOT a devDependency; the mocked-WebTransport unit
-//     tests cover the transport logic, and core/tests/webtransport_test.cpp
-//     covers the wire end-to-end in C++).
-//
-// The dev certificate is generated here: `serverCertificateHashes` is only
-// honored by browsers for an ECDSA certificate valid <= 14 days (a browser
-// rule) — tools/gen-dev-cert.sh's RSA/365d pair would be rejected.
+
+/**
+ * @brief C++ <-> BROWSER WebTransport interop harness (ADR-0043 Phase B).
+ *
+ * Node has no native WebTransport client, so unlike transport-ws's interop
+ * this cannot run in-process: it drives a real chrome-headless (via puppeteer)
+ * against the C++ `webtransport_transport_t` echo harness (CMake target
+ * `wt_interop_server`, built with LIBTRACER_WITH_QUIC): a genuine HTTP/3
+ * extended-CONNECT session with `serverCertificateHashes` dev trust, one
+ * browser `createBidirectionalStream()`, a length-prefixed record out, the
+ * echoed record back — end-to-end validation of the browser <-> device path.
+ *
+ * It SKIPS gracefully (never fails) unless BOTH are present:
+ *   - LIBTRACER_WT_INTEROP_SERVER: path to the built wt_interop_server binary;
+ *   - puppeteer: installed (`npm i -D puppeteer` where the harness should run —
+ *     it is deliberately NOT a devDependency; the mocked-WebTransport unit
+ *     tests cover the transport logic, and core/tests/webtransport_test.cpp
+ *     covers the wire end-to-end in C++).
+ *
+ * The dev certificate is generated here: `serverCertificateHashes` is only
+ * honored by browsers for an ECDSA certificate valid <= 14 days (a browser
+ * rule) — tools/gen-dev-cert.sh's RSA/365d pair would be rejected.
+ */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -45,7 +48,7 @@ const skip =
       ? 'puppeteer is not installed (npm i -D puppeteer to run the browser interop)'
       : false;
 
-/** Generate an ECDSA P-256 self-signed cert valid 10 days (the browser rule). */
+/** @brief Generate an ECDSA P-256 self-signed cert valid 10 days (the browser rule). */
 function genBrowserDevCert(dir) {
   const r = spawnSync(
     'openssl',
@@ -62,7 +65,7 @@ function genBrowserDevCert(dir) {
   return { cert: join(dir, 'cert.pem'), key: join(dir, 'key.pem') };
 }
 
-/** SHA-256 of the certificate's DER bytes (what serverCertificateHashes pins). */
+/** @brief SHA-256 of the certificate's DER bytes (what serverCertificateHashes pins). */
 function certSha256(certPem) {
   const pem = readFileSync(certPem, 'utf8');
   const b64 = pem
@@ -72,7 +75,7 @@ function certSha256(certPem) {
   return createHash('sha256').update(Buffer.from(b64, 'base64')).digest();
 }
 
-/** Spawn wt_interop_server; resolve `{ child, port }` on its PORT= line. */
+/** @brief Spawn wt_interop_server; resolve `{ child, port }` on its PORT= line. */
 function startServer(cert, key, deadlineMs = 8000) {
   return new Promise((resolve, reject) => {
     const child = spawn(

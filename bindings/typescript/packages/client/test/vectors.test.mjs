@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-//
-// Vector-level correctness (ADR-0034 "the gate"): the client's outbound payload
-// builders MUST produce the shared conformance vectors byte-for-byte, and the
-// inbound path MUST decode VALUE vectors into the right payload. This pins
-// wire-compatibility WITHOUT a live peer.
+
+/**
+ * @brief Vector-level correctness (ADR-0034 "the gate"): the client's outbound
+ * payload builders MUST produce the shared conformance vectors byte-for-byte,
+ * and the inbound path MUST decode VALUE vectors into the right payload.
+ *
+ * This pins wire-compatibility WITHOUT a live peer.
+ */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -27,15 +30,15 @@ import {
 } from '../dist/index.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-// test/ -> client -> packages -> typescript -> bindings -> repo root
+/** @brief test/ -> client -> packages -> typescript -> bindings -> repo root. */
 const VECTORS = join(HERE, '..', '..', '..', '..', '..', 'tests', 'conformance', 'vectors', 'v1');
 
-/** Read a vector's canonical `input.bin` bytes. */
+/** @brief Read a vector's canonical `input.bin` bytes. */
 function vector(rel) {
   return new Uint8Array(readFileSync(join(VECTORS, ...rel.split('/'), 'input.bin')));
 }
 
-/** @param {Uint8Array} a @param {Uint8Array} b */
+/** @brief Byte-for-byte equality. @param {Uint8Array} a @param {Uint8Array} b */
 function sameBytes(a, b) {
   return a.length === b.length && a.every((x, i) => x === b[i]);
 }

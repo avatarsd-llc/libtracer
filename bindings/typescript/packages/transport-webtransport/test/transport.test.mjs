@@ -1,21 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
-// TransportWebTransport over a MOCKED WebTransport (Node has no native
-// WebTransport client, so the browser session object is simulated with web
-// streams — which Node >= 18 provides globally). This covers the transport's
-// own logic end to end: option pass-through (serverCertificateHashes), the
-// frame-channel framing both directions across split/coalesced reads, the
-// ClientTransport seam (send/onFrame/onClose), close semantics, and the
-// connect deadline. The REAL browser <-> C++ server path is covered by
-// interop-browser.test.mjs (puppeteer, when available) and — entirely in C++ —
-// by core/tests/webtransport_test.cpp's client half.
+/**
+ * @brief TransportWebTransport over a MOCKED WebTransport (Node has no native
+ * WebTransport client, so the browser session object is simulated with web
+ * streams — which Node >= 18 provides globally).
+ *
+ * This covers the transport's own logic end to end: option pass-through
+ * (serverCertificateHashes), the frame-channel framing both directions across
+ * split/coalesced reads, the ClientTransport seam (send/onFrame/onClose),
+ * close semantics, and the connect deadline. The REAL browser <-> C++ server
+ * path is covered by interop-browser.test.mjs (puppeteer, when available) and
+ * — entirely in C++ — by core/tests/webtransport_test.cpp's client half.
+ */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { TransportWebTransport, encodeRecord } from '../dist/index.js';
 
-/** A mock WebTransport session: TransformStreams stand in for the QUIC stream. */
+/** @brief A mock WebTransport session: TransformStreams stand in for the QUIC stream. */
 class MockWebTransport {
   static last = null;
 
@@ -31,7 +34,7 @@ class MockWebTransport {
     // client -> server, and server -> client.
     this._c2s = new TransformStream();
     this._s2c = new TransformStream();
-    /** The "server" side: read what the client wrote, write toward it. */
+    /** @brief The "server" side: read what the client wrote, write toward it. */
     this.serverReader = this._c2s.readable.getReader();
     this.serverWriter = this._s2c.writable.getWriter();
   }
@@ -44,13 +47,13 @@ class MockWebTransport {
     this._resolveClosed({});
   }
 
-  /** Simulate a remote/session error. */
+  /** @brief Simulate a remote/session error. */
   fail(err) {
     this._rejectClosed(err);
   }
 }
 
-/** A WebTransport whose session never becomes ready (for the deadline test). */
+/** @brief A WebTransport whose session never becomes ready (for the deadline test). */
 class NeverReadyWebTransport {
   constructor() {
     this.ready = new Promise(() => {});

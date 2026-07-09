@@ -1,22 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-//
-// #56 / RFC-0004 — END-TO-END client interop: the TypeScript LibtracerClient
-// drives all five path-addressed operations over real `FWD` frames against a live
-// C++ graph-backed node (`fwd_node_server`) over a genuine ws socket, and decodes
-// the source-routed `FWD{REPLY}` / delivery. This is the web-UI<->device proof:
-//   - read           -> RESULT carries the seeded VALUE
-//   - write + read    -> the value is stored and reads back
-//   - subscribe       -> the REAL producer fan-out (#136): the transient-local LATCH
-//                        delivers the current value, then a fresh producer WRITE fans
-//                        out a live delivery — both via fwd_router's sink, no fake
-//   - readField :subscribers[] -> a POINT wrapper of the registered SUBSCRIBER
-//   - await (timeout) -> a typed FwdError(TIMEOUT) when the deadline elapses
-//
-// GUARDED on LIBTRACER_FWD_NODE_SERVER pointing at the built `fwd_node_server`
-// binary (a CMake target). Plain `npm test` without it SKIPS gracefully; the CI
-// `fwd-interop` job builds the binary and sets the env var. No fixed sleeps: the
-// PORT= line and every reply/delivery are awaited behind deadlines.
+
+/**
+ * @brief #56 / RFC-0004 — END-TO-END client interop: the TypeScript
+ * LibtracerClient drives all five path-addressed operations over real `FWD`
+ * frames against a live C++ graph-backed node (`fwd_node_server`) over a
+ * genuine ws socket, and decodes the source-routed `FWD{REPLY}` / delivery.
+ *
+ * This is the web-UI<->device proof:
+ *   - read           -> RESULT carries the seeded VALUE
+ *   - write + read    -> the value is stored and reads back
+ *   - subscribe       -> the REAL producer fan-out (#136): the transient-local LATCH
+ *                        delivers the current value, then a fresh producer WRITE fans
+ *                        out a live delivery — both via fwd_router's sink, no fake
+ *   - readField :subscribers[] -> a POINT wrapper of the registered SUBSCRIBER
+ *   - await (timeout) -> a typed FwdError(TIMEOUT) when the deadline elapses
+ *
+ * GUARDED on LIBTRACER_FWD_NODE_SERVER pointing at the built `fwd_node_server`
+ * binary (a CMake target). Plain `npm test` without it SKIPS gracefully; the CI
+ * `fwd-interop` job builds the binary and sets the env var. No fixed sleeps: the
+ * PORT= line and every reply/delivery are awaited behind deadlines.
+ */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -30,30 +34,34 @@ import { LibtracerClient, FwdError, encodeValue } from '../dist/index.js';
 const SERVER = process.env.LIBTRACER_FWD_NODE_SERVER;
 const skip = !SERVER || !existsSync(SERVER);
 
-// Constants the C++ harness pins (keep in sync with fwd_node_server.cpp).
+/** @brief Constants the C++ harness pins (keep in sync with fwd_node_server.cpp). */
 const SEEDED_TEMP = 0x1234abcd;
 const WRITTEN = 0x00c0ffee;
-// The producer's current sample (latched on subscribe) and a later sample (write-driven
-// fan-out). These are written by the client; the server only seeds SEEDED_TEMP.
+/**
+ * @brief The producer's current sample (latched on subscribe) and a later
+ * sample (write-driven fan-out). These are written by the client; the server
+ * only seeds SEEDED_TEMP.
+ */
 const PUSHED_SAMPLE = 0xcafebabe;
 const SECOND_SAMPLE = 0xfeed0bad;
 
-/** Little-endian u32 bytes. */
+/** @brief Little-endian u32 bytes. */
 function le32(v) {
   const b = new Uint8Array(4);
   new DataView(b.buffer).setUint32(0, v >>> 0, true);
   return b;
 }
 
-/** @param {Uint8Array} a @param {Uint8Array} b */
+/** @brief Byte-for-byte equality. @param {Uint8Array} a @param {Uint8Array} b */
 function sameBytes(a, b) {
   return a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
 /**
- * Spawn the C++ fwd_node_server and resolve `{ child, port }` once its `PORT=<n>`
- * line lands on stdout, behind a deadline. Rejects (and kills) if the line never
- * arrives or the process dies first.
+ * @brief Spawn the C++ fwd_node_server and resolve `{ child, port }` once its
+ * `PORT=<n>` line lands on stdout, behind a deadline.
+ *
+ * Rejects (and kills) if the line never arrives or the process dies first.
  */
 function startServer(deadlineMs = 8000) {
   return new Promise((resolve, reject) => {
@@ -93,7 +101,7 @@ function startServer(deadlineMs = 8000) {
   });
 }
 
-/** Resolve once the child has fully exited, behind a deadline. */
+/** @brief Resolve once the child has fully exited, behind a deadline. */
 function waitExit(child, ms = 4000) {
   return new Promise((resolve) => {
     if (child.exitCode !== null || child.signalCode !== null) {
