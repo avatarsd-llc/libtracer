@@ -12,6 +12,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`graph_t` now takes an ADR-0039 §1 injected `std::pmr::memory_resource*`
+  (#361 §5)** — `graph_t(mr)`, defaulting to `std::pmr::get_default_resource()`
+  (zero churn for existing callers). Every `assign`'s LKV allocation (control
+  block + rope, the per-write heap churn) draws from it; an MCU node installs a
+  pool/slab resource over a static arena and per-write allocations stop
+  fragmenting the global heap. `vertex_t::store` gained the corresponding
+  defaulted `mr` parameter. Contract: the resource outlives the graph and every
+  value handle obtained from it.
+
 ### Changed
 
 - **Per-vertex `std::mutex` + `std::condition_variable` replaced by a process-wide

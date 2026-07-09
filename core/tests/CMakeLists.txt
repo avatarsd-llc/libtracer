@@ -189,6 +189,14 @@ target_link_libraries(vertex_size_test PRIVATE libtracer)
 libtracer_test_warnings(vertex_size_test)
 add_test(NAME vertex_size COMMAND vertex_size_test)
 
+# #361 §5 / ADR-0039 §1 — graph_t's injected memory_resource: per-write LKV
+# allocations route through it (counting pass-through), released in full at
+# graph destruction; a default graph never touches a foreign resource.
+add_executable(graph_pmr_test graph_pmr_test.cpp)
+target_link_libraries(graph_pmr_test PRIVATE libtracer)
+libtracer_test_warnings(graph_pmr_test)
+add_test(NAME graph_pmr COMMAND graph_pmr_test)
+
 add_executable(graph_test graph_test.cpp)
 target_link_libraries(graph_test PRIVATE libtracer)
 libtracer_test_warnings(graph_test)

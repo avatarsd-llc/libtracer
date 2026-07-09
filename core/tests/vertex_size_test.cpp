@@ -16,10 +16,10 @@
  */
 
 #include <array>
-#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <span>
 
@@ -33,6 +33,15 @@ using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::settings_t;
 using tr::graph::vertex_t;
+
+/** @brief Assert-independent check (RelWithDebInfo defines NDEBUG — a plain `assert`
+ *         would silently skip the probes there): print and hard-exit on failure. */
+void require(bool ok, const char* what) {
+    if (!ok) {
+        std::printf("  [FAIL] %s\n", what);
+        std::exit(1);
+    }
+}
 
 /** @brief The 64-bit hot-core ceiling (measured 160 B post-#361-§2 striped locks;
  *         248 B post-§1, 536 B pre-split). */
@@ -65,7 +74,8 @@ tr::view::view_t value_tlv(std::span<const std::byte> payload) {
 void default_leaf_shares_default_settings() {
     graph_t g;
     const auto h = g.register_vertex(path_t("/diet/leaf"), role_t::STORED_VALUE);
-    assert(&g.settings(h) == &tr::graph::kDefaultSettings);
+    require(&g.settings(h) == &tr::graph::kDefaultSettings,
+            "&g.settings(h) == &tr::graph::kDefaultSettings");
 }
 
 /** @brief Non-default QoS at registration must yield a private settings copy (the cold
@@ -76,9 +86,11 @@ void non_default_settings_get_private_copy() {
     s.durability = 1;
     const auto h =
         g.register_vertex(path_t("/diet/durable"), role_t::STORED_VALUE, handlers_t{}, s);
-    assert(&g.settings(h) != &tr::graph::kDefaultSettings);
-    assert(g.settings(h).durability == 1);
-    assert(tr::graph::kDefaultSettings.durability == 0);
+    require(&g.settings(h) != &tr::graph::kDefaultSettings,
+            "&g.settings(h) != &tr::graph::kDefaultSettings");
+    require(g.settings(h).durability == 1, "g.settings(h).durability == 1");
+    require(tr::graph::kDefaultSettings.durability == 0,
+            "tr::graph::kDefaultSettings.durability == 0");
 }
 
 /** @brief A `:settings` field write on a default leaf must transparently allocate the cold
@@ -86,12 +98,14 @@ void non_default_settings_get_private_copy() {
 void late_settings_write_allocates_lazily() {
     graph_t g;
     const auto h = g.register_vertex(path_t("/diet/late"), role_t::STORED_VALUE);
-    assert(&g.settings(h) == &tr::graph::kDefaultSettings);
+    require(&g.settings(h) == &tr::graph::kDefaultSettings,
+            "&g.settings(h) == &tr::graph::kDefaultSettings");
     const auto payload = std::array<std::byte, 1>{std::byte{7}};
     const auto w = g.write(path_t("/diet/late:settings.priority"), value_tlv(payload));
-    assert(w.has_value());
-    assert(g.settings(h).priority == 7);
-    assert(&g.settings(h) != &tr::graph::kDefaultSettings);
+    require(w.has_value(), "w.has_value()");
+    require(g.settings(h).priority == 7, "g.settings(h).priority == 7");
+    require(&g.settings(h) != &tr::graph::kDefaultSettings,
+            "&g.settings(h) != &tr::graph::kDefaultSettings");
 }
 
 }  // namespace

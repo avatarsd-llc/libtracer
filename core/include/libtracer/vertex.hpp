@@ -22,6 +22,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <memory_resource>
 #include <mutex>
 #include <new>
 #include <optional>
@@ -584,12 +585,22 @@ class vertex_t {
      * slot cost (ADR-0053 §6). The LKV publish happens BEFORE the lock; only the
      * ring trim + seq bump + notify run under it. Not for Handler-role writes —
      * the graph runs `handlers().on_write` and calls @ref note_write instead.
+     * @param value The value to publish (moved into the LKV slot).
+     * @param mr    The ADR-0039 injected resource the LKV control block + rope are
+     *              allocated from (#361 §5) — the graph passes its own; `nullptr`
+     *              (the default, and every direct caller) keeps plain `make_shared`.
+     *              Lifetime: the resource must outlive every `shared_ptr` obtained
+     *              from this vertex — the same "handles do not outlive the graph's
+     *              memory" contract the injection seam already imposes.
      * @return The published LKV pointer — exactly what a concurrent @ref read_stored
      *         observes — so the write path can deliver the stored value (RFC-0008 §D
      *         "deliver exactly what was stored") without recloning the rope.
      */
-    std::shared_ptr<const rope_t> store(rope_t value) {
-        auto sp = std::make_shared<const rope_t>(std::move(value));
+    std::shared_ptr<const rope_t> store(rope_t value, std::pmr::memory_resource* mr = nullptr) {
+        auto sp = mr == nullptr
+                      ? std::make_shared<const rope_t>(std::move(value))
+                      : std::allocate_shared<const rope_t>(
+                            std::pmr::polymorphic_allocator<rope_t>(mr), std::move(value));
         lkv_.store(sp);  // lock-free publish of the new last-known-value
         {
             const std::lock_guard lock(vertex_stripe_of(this).m);
