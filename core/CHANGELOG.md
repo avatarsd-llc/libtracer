@@ -12,6 +12,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **`vertex_t` hot/cold split (#361 §1)**: the cold, conditionally-needed members —
+  `handlers_t`, the STREAM history ring, the `:acl` state + ADR-0050 effective-merge
+  cache, non-default QoS `settings_t`, and the stream drain cursor — moved behind one
+  lazily-allocated `vertex_ext_t` block (`new` `vertex_ext_t`, public in `vertex.hpp`).
+  A default STORED_VALUE leaf allocates no block; `sizeof(vertex_t)` drops 536 → 248 B
+  on x86-64. Behavior-preserving: `settings()` / `settings_snapshot()` return the shared
+  `kDefaultSettings` (new public constant) when no block exists, and the first `:acl` /
+  `:settings` write allocates transparently. `settings_t` gained defaulted `operator==`.
+  A new `vertex_size_test` gates `sizeof(vertex_t)` at compile time per ABI.
+
 ## [0.4.0] — 2026-07-09
 
 ### Changed
