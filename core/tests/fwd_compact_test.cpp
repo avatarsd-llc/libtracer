@@ -1,9 +1,12 @@
-/*
+/**
+ * @file
+ * @brief RFC-0004 / ADR-0035 slice 4 — the route-handle: ws delivery-compaction, proven over LIVE
+ *        transport_ws.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * RFC-0004 / ADR-0035 slice 4 — the route-handle: ws delivery-compaction, proven
- * over LIVE transport_ws. A 3-party chain
+ * A 3-party chain
  *
  *     consumer C  --ws-->  forwarder A  --ws-->  producer B
  *
@@ -99,7 +102,10 @@ std::vector<std::byte> b_value_u8(std::uint8_t v) {
 void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
     dst.insert(dst.end(), src.begin(), src.end());
 }
-// FIELD{ NAME "subscribers", VALUE u8 index_mode=ELEMENT } — the ":subscribers[]" append selector.
+/**
+ * @brief FIELD{ NAME "subscribers", VALUE u8 index_mode=ELEMENT } — the ":subscribers[]" append
+ *        selector.
+ */
 std::vector<std::byte> b_field_subscribers_append() {
     std::vector<std::byte> body;
     append(body, b_name("subscribers"));
@@ -108,7 +114,7 @@ std::vector<std::byte> b_field_subscribers_append() {
     tr::wire::emit_tlv(out, type_t::FIELD, opt_t{.pl = true}, body);
     return out;
 }
-// SUBSCRIBER{ PATH target, SETTINGS qos{ NAME "delivery_compact" VALUE u8 } }.
+/** @brief SUBSCRIBER{ PATH target, SETTINGS qos{ NAME "delivery_compact" VALUE u8 } }. */
 std::vector<std::byte> b_subscriber(const std::vector<std::byte>& target, bool compact) {
     std::vector<std::byte> body;
     append(body, target);
@@ -143,7 +149,7 @@ tr::view::view_t make_value(std::span<const std::byte> bytes) {
     return tr::view::view_t::over(std::move(seg));
 }
 
-// An ordered, bounded mailbox: a receive thread pushes; the test waits with a deadline.
+/** @brief An ordered, bounded mailbox: a receive thread pushes; the test waits with a deadline. */
 struct mailbox_t {
     std::mutex m;
     std::condition_variable cv;
@@ -156,7 +162,7 @@ struct mailbox_t {
         }
         cv.notify_all();
     }
-    // Wait until at least `n` items have arrived (or the deadline lapses); returns size.
+    /** @brief Wait until at least `n` items have arrived (or the deadline lapses); returns size. */
     std::size_t wait_for_count(std::size_t n, std::chrono::milliseconds budget) {
         std::unique_lock lock(m);
         cv.wait_for(lock, budget, [&] { return q.size() >= n; });

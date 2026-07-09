@@ -1,8 +1,11 @@
-/*
+/**
+ * @file
+ * @brief The built-in `udp` transport-factory registration.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * The built-in `udp` transport-factory registration. Compiled only when the
+ * Compiled only when the
  * LIBTRACER_TRANSPORT_UDP module option (and the net plane) is ON; the full-node /
  * generated register_builtin_transports() calls register_udp_transport only then, so a
  * UDP-less build carries no reference to udp_transport_t. See builtin_transports.hpp.

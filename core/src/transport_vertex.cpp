@@ -30,8 +30,12 @@ using wire::type_t;
 
 namespace {
 
-// The last NAME segment of a canonical PATH-payload key = the connection's NAME. The
-// key is `<...prior NAMEs...><NAME len-prefixed name>`; walk the len-prefixed records.
+/**
+ * @brief The last NAME segment of a canonical PATH-payload key = the connection's NAME.
+ *
+ * The
+ * key is `<...prior NAMEs...><NAME len-prefixed name>`; walk the len-prefixed records.
+ */
 [[nodiscard]] std::string last_segment(std::span<const std::byte> key) {
     std::span<const std::byte> last;
     std::size_t i = 0;
@@ -44,12 +48,16 @@ namespace {
     return std::string(detail::as_string_view(last));
 }
 
-// Parse the optional SPEC `config` SETTINGS (the shared config_reader_t walk):
-// NAME "addr" NAME <utf8>, NAME "kind" NAME <utf8>, NAME "port" VALUE u16, NAME "role"
-// VALUE u8 (overrides the type default), NAME "keepalive" VALUE u32. ONLY the universal
-// keys land here (ADR-0043 §5 leanness): kind-private pairs (e.g. quic's `cert`/`key`)
-// are the kind's factory's business — it parses them from the raw config TLV it
-// receives. Unknown pairs are ignored (forward-compat).
+/**
+ * @brief Parse the optional SPEC `config` SETTINGS (the shared config_reader_t walk): NAME "addr"
+ *        NAME <utf8>, NAME "kind" NAME <utf8>, NAME "port" VALUE u16, NAME "role" VALUE u8
+ *        (overrides the type default), NAME "keepalive" VALUE u32.
+ *
+ * ONLY the universal
+ * keys land here (ADR-0043 §5 leanness): kind-private pairs (e.g. quic's `cert`/`key`)
+ * are the kind's factory's business — it parses them from the raw config TLV it
+ * receives. Unknown pairs are ignored (forward-compat).
+ */
 void parse_config(const tlv_t* config, conn_settings_t& s) {
     const config_reader_t cfg(config);
     if (const auto v = cfg.name("addr")) s.addr = std::string(*v);
@@ -60,7 +68,7 @@ void parse_config(const tlv_t* config, conn_settings_t& s) {
     if (const auto v = cfg.u32("max_frame")) s.max_frame = *v;
 }
 
-// A 1-byte link-state VALUE TLV (0x00 down / 0x01 up) as an owned view.
+/** @brief A 1-byte link-state VALUE TLV (0x00 down / 0x01 up) as an owned view. */
 [[nodiscard]] view_t link_state_value(bool up) {
     std::vector<std::byte> out;
     const std::byte b{static_cast<std::uint8_t>(up ? 1 : 0)};

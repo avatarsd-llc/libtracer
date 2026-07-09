@@ -1,13 +1,15 @@
-/*
+/**
+ * @file
+ * @brief effective_acl_t unit test (ADR-0050, the previously-untested half) — the pure effective-
+ *        ACL merge semantics driven directly with synthetic ACE lists (no graph, no locks, no wall
+ *        clock): own-before-ancestors ordering, nearest-first ancestor order, INHERIT gating at
+ *        merge time, any-present-ACE-closes (even expired), open-by-default over an empty merge,
+ *        and DENY first-match-per-bit ordering under the full policy.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * effective_acl_t unit test (ADR-0050, the previously-untested half) — the pure
- * effective-ACL merge semantics driven directly with synthetic ACE lists (no
- * graph, no locks, no wall clock): own-before-ancestors ordering, nearest-first
- * ancestor order, INHERIT gating at merge time, any-present-ACE-closes (even
- * expired), open-by-default over an empty merge, and DENY first-match-per-bit
- * ordering under the full policy. Plus the graph-side cached-merge behavior the
+ * Plus the graph-side cached-merge behavior the
  * pure tests cannot see: subtree-precise invalidation on :acl writes (ADR-0057
  * child links), placeholder skip semantics, and a TSan-facing dirty-flag race
  * (:acl rewrites vs concurrent gated ops — the recheck-after-publish protocol).

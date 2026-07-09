@@ -1,9 +1,11 @@
-/*
+/**
+ * @file
+ * @brief RFC-0004 / ADR-0035 — op_resolver_t host tests, over the ADR-0041 terminus arena.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * RFC-0004 / ADR-0035 — op_resolver_t host tests, over the ADR-0041 terminus
- * arena. A node arena-decodes a FWD, resolves it against a LOCAL vertex, applies
+ * A node arena-decodes a FWD, resolves it against a LOCAL vertex, applies
  * READ / WRITE / AWAIT (+ a FIELD :field selector), and builds the FWD{REPLY} as
  * a zero-copy rope. The load-bearing check (like graph_test's "read is a clone")
  * is that the reply payload SHARES the vertex's stored segment — proven via
@@ -90,7 +92,11 @@ void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
     dst.insert(dst.end(), src.begin(), src.end());
 }
 
-// Assemble a FWD frame (RFC-0004 §B child order). `selector`/`payload` optional.
+/**
+ * @brief Assemble a FWD frame (RFC-0004 §B child order).
+ *
+ * `selector`/`payload` optional.
+ */
 std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
                              const std::vector<std::byte>& src,
                              const std::vector<std::byte>& selector = {},
@@ -106,8 +112,10 @@ std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
     return out;
 }
 
-// Arena-decode + resolve (ADR-0041): mirrors fwd_router_t's terminus wiring —
-// decode_into from the (default) resource, resolve over the arena.
+/**
+ * @brief Arena-decode + resolve (ADR-0041): mirrors fwd_router_t's terminus wiring — decode_into
+ *        from the (default) resource, resolve over the arena.
+ */
 tr::graph::result_t<tr::view::rope_t> resolve_bytes(op_resolver_t& resolver,
                                                     std::span<const std::byte> fwd,
                                                     std::string_view inbound_link = {}) {
@@ -116,21 +124,23 @@ tr::graph::result_t<tr::view::rope_t> resolve_bytes(op_resolver_t& resolver,
     return resolver.resolve(*arena, inbound_link);
 }
 
-// A view_t over a fresh owned heap segment holding `bytes` (graph_test idiom).
+/** @brief A view_t over a fresh owned heap segment holding `bytes` (graph_test idiom). */
 tr::view::view_t make_value(std::span<const std::byte> bytes) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
     if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
     return tr::view::view_t::over(std::move(seg));
 }
 
-// A decoded reply: the flattened backing view kept alongside the tlv whose spans
-// borrow it (the tlv must not outlive the view).
+/**
+ * @brief A decoded reply: the flattened backing view kept alongside the tlv whose spans borrow it
+ *        (the tlv must not outlive the view).
+ */
 struct decoded_reply_t {
     tr::view::view_t flat;
     tlv_t tlv;
 };
 
-// Decode a reply rope (flatten then decode — the one allowed copy, at the consumer).
+/** @brief Decode a reply rope (flatten then decode — the one allowed copy, at the consumer). */
 decoded_reply_t decode_reply(const tr::view::rope_t& reply) {
     tr::view::view_t flat = reply.flatten();
     const auto dec = tr::wire::decode(flat.bytes());
@@ -139,8 +149,10 @@ decoded_reply_t decode_reply(const tr::view::rope_t& reply) {
 
 std::uint8_t value_u8(const tlv_t& v) { return tr::detail::load_le<std::uint8_t>(v.payload); }
 
-// The registered u16 error code of a STATUS{ ERROR{ VALUE u16 LE } } payload
-// (RFC-0002 §C) — 0 when the shape doesn't match.
+/**
+ * @brief The registered u16 error code of a STATUS{ ERROR{ VALUE u16 LE } } payload (RFC-0002 §C) —
+ *        0 when the shape doesn't match.
+ */
 std::uint16_t status_error_code(const tlv_t& status) {
     if (status.type != type_t::STATUS || status.children.size() != 1) return 0;
     const tlv_t& err = status.children[0];
@@ -383,11 +395,12 @@ void test_non_canonical_dst() {
           "reply payload is the stored value (0x2A)");
 }
 
-// ADR-0042 §3 — the per-vertex `store_ref_min_bytes` referenced WRITE store: a
-// view-delivered frame's big trailer-less payload stores as a SUBVIEW of the frame
-// (segment-pointer identity, zero copy, frame pinned); the default (0), a small
-// payload, a trailered payload, and a span-delivered frame all keep the ADR-0041
-// one-copy trailer-sliced store.
+/**
+ * @brief ADR-0042 §3 — the per-vertex `store_ref_min_bytes` referenced WRITE store: a view-
+ *        delivered frame's big trailer-less payload stores as a SUBVIEW of the frame (segment-
+ *        pointer identity, zero copy, frame pinned); the default (0), a small payload, a trailered
+ *        payload, and a span-delivered frame all keep the ADR-0041 one-copy trailer-sliced store.
+ */
 void test_store_ref_threshold() {
     std::printf("store_ref_min_bytes — referenced vs copied WRITE store (ADR-0042 §3):\n");
     graph_t g;
@@ -484,9 +497,11 @@ void test_store_ref_threshold() {
     }
 }
 
-// TSan case: concurrent writers replace the LKV while a REFERENCED frame is pinned
-// by a reader's clone — the frame segment's refcount drop races across threads and
-// the pinned bytes must stay intact.
+/**
+ * @brief TSan case: concurrent writers replace the LKV while a REFERENCED frame is pinned by a
+ *        reader's clone — the frame segment's refcount drop races across threads and the pinned
+ *        bytes must stay intact.
+ */
 void test_store_ref_concurrent() {
     std::printf("referenced store under concurrent writes (TSan — pinned frame stays valid):\n");
     graph_t g;

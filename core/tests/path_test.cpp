@@ -1,8 +1,11 @@
-/*
+/**
+ * @file
+ * @brief Path parsing / validation (docs/reference/03-addressing.md).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Path parsing / validation (docs/reference/03-addressing.md). Focus: reserved-
+ * Focus: reserved-
  * character rejection in NAME segments (§Reserved characters), the structural
  * limits, and that the field tail (dot-separated, with [N]/[]) still parses.
  */

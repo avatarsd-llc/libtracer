@@ -1,8 +1,10 @@
-/*
+/**
+ * @file
+ * @brief ADR-0053 ④b — the FWD forward hop over a MULTI-LINK rope, WITHOUT flattening.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * ADR-0053 ④b — the FWD forward hop over a MULTI-LINK rope, WITHOUT flattening.
  * A frame delivered as a scatter-gather rope (CAN reassembly / fragmented WS) is
  * routed by reading its dispatch offsets through the link-walking grammar cursor
  * and scatter-gathering the untouched links onward — no interim flatten copy.
@@ -101,9 +103,12 @@ tr::view::view_t make_value(std::span<const std::byte> bytes) {
     return tr::view::view_t::over(std::move(seg));
 }
 
-// Build a rope over `bytes` split at the given cut points (each cut is a link
-// boundary). Every link owns its own heap segment — a genuine scatter-gather
-// frame the router must walk without flattening.
+/**
+ * @brief Build a rope over `bytes` split at the given cut points (each cut is a link boundary).
+ *
+ * Every link owns its own heap segment — a genuine scatter-gather
+ * frame the router must walk without flattening.
+ */
 tr::view::rope_t rope_split(std::span<const std::byte> bytes, std::span<const std::size_t> cuts) {
     tr::view::rope_t r;
     std::size_t prev = 0;
@@ -120,7 +125,7 @@ tr::view::rope_t rope_split(std::span<const std::byte> bytes, std::span<const st
 }
 
 // --- fake transports ----------------------------------------------------------
-// A span link: records every send()'s bytes (the downstream egress under test).
+/** @brief A span link: records every send()'s bytes (the downstream egress under test). */
 class fake_link_t : public transport_t {
    public:
     void send(std::span<const std::byte> frame) override {
@@ -133,8 +138,10 @@ class fake_link_t : public transport_t {
     std::vector<std::vector<std::byte>> sent_;
 };
 
-// A rope-delivering link (ADR-0053 §5): hands the frame up as the rope it is,
-// exercising the router's no-flatten forward path.
+/**
+ * @brief A rope-delivering link (ADR-0053 §5): hands the frame up as the rope it is, exercising the
+ *        router's no-flatten forward path.
+ */
 class fake_rope_link_t : public transport_t {
    public:
     void send(std::span<const std::byte>) override {}  // unused inbound-only link
@@ -142,8 +149,12 @@ class fake_rope_link_t : public transport_t {
     void inject(tr::view::rope_t frame) { rx_.deliver_rope(std::move(frame)); }
 };
 
-// Route `frame` (as a rope, split at `cuts`) through a fresh forwarder and return
-// what the "up" child received. An empty graph — this node only forwards.
+/**
+ * @brief Route `frame` (as a rope, split at `cuts`) through a fresh forwarder and return what the
+ *        "up" child received.
+ *
+ * An empty graph — this node only forwards.
+ */
 std::vector<std::vector<std::byte>> forward_as_rope(std::span<const std::byte> frame,
                                                     std::span<const std::size_t> cuts) {
     graph_t g;
@@ -156,7 +167,7 @@ std::vector<std::vector<std::byte>> forward_as_rope(std::span<const std::byte> f
     return std::move(up.sent());
 }
 
-// The oracle: route the identical `frame` contiguously (the span-cursor path).
+/** @brief The oracle: route the identical `frame` contiguously (the span-cursor path). */
 std::vector<std::vector<std::byte>> forward_contiguous(std::span<const std::byte> frame) {
     graph_t g;
     fwd_router_t router(g);

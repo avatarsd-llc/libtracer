@@ -1,9 +1,12 @@
-/*
+/**
+ * @file
+ * @brief ADR-0053 §7 (3c-ii) — the DIFFERENTIAL ORACLE for the two terminus-resolver
+ *        instantiations.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * ADR-0053 §7 (3c-ii) — the DIFFERENTIAL ORACLE for the two terminus-resolver
- * instantiations. The SAME logical request FWD is resolved twice against two
+ * The SAME logical request FWD is resolved twice against two
  * identically-seeded graphs: once through the span-tier `arena_node` reader (the
  * arena decode of the flattened frame — `op_resolver_t::resolve(tlv_arena_t)`),
  * and once through the owning rope-tier `view_node` reader (`resolve(tlv_view_t)`
@@ -105,15 +108,17 @@ std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
     return out;
 }
 
-// A view_t over a fresh owned heap segment holding `bytes`.
+/** @brief A view_t over a fresh owned heap segment holding `bytes`. */
 tr::view::view_t make_value(std::span<const std::byte> bytes) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
     if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
     return tr::view::view_t::over(std::move(seg));
 }
 
-// Build a rope over `bytes` split at the given cut points (each cut a link
-// boundary) — every link its own heap segment, a genuine scatter-gather frame.
+/**
+ * @brief Build a rope over `bytes` split at the given cut points (each cut a link boundary) — every
+ *        link its own heap segment, a genuine scatter-gather frame.
+ */
 tr::view::rope_t rope_split(std::span<const std::byte> bytes, std::span<const std::size_t> cuts) {
     tr::view::rope_t r;
     std::size_t prev = 0;
@@ -131,8 +136,11 @@ tr::view::rope_t rope_split(std::span<const std::byte> bytes, std::span<const st
 
 using seed_fn = std::function<void(graph_t&)>;
 
-// Resolve `frame` through the SPAN tier: arena-decode the contiguous bytes and
-// resolve. Returns the flattened reply bytes ("" marks a hard error side).
+/**
+ * @brief Resolve `frame` through the SPAN tier: arena-decode the contiguous bytes and resolve.
+ *
+ * Returns the flattened reply bytes ("" marks a hard error side).
+ */
 std::vector<std::byte> resolve_arena_flat(const seed_fn& seed, std::span<const std::byte> frame,
                                           std::string_view inbound_link) {
     graph_t g;
@@ -147,8 +155,12 @@ std::vector<std::byte> resolve_arena_flat(const seed_fn& seed, std::span<const s
     return std::vector<std::byte>(b.begin(), b.end());
 }
 
-// Resolve the SAME frame through the OWNING rope tier: adopt the rope as a lazy
-// `tlv_view_t` and resolve. Returns the flattened reply bytes.
+/**
+ * @brief Resolve the SAME frame through the OWNING rope tier: adopt the rope as a lazy `tlv_view_t`
+ *        and resolve.
+ *
+ * Returns the flattened reply bytes.
+ */
 std::vector<std::byte> resolve_view_flat(const seed_fn& seed, tr::view::rope_t rope,
                                          std::string_view inbound_link) {
     graph_t g;
@@ -163,10 +175,14 @@ std::vector<std::byte> resolve_view_flat(const seed_fn& seed, tr::view::rope_t r
     return std::vector<std::byte>(b.begin(), b.end());
 }
 
-// The core assertion: for `frame`, the view-tier reply equals the arena-tier
-// reply (the oracle) for a single-link rope, every 2-link interior split, and the
-// one-link-per-byte rope. Also asserts the oracle itself is non-empty (a real
-// reply, not two matching error sides) unless `expect_reply` is false.
+/**
+ * @brief The core assertion: for `frame`, the view-tier reply equals the arena-tier reply (the
+ *        oracle) for a single-link rope, every 2-link interior split, and the one-link-per-byte
+ *        rope.
+ *
+ * Also asserts the oracle itself is non-empty (a real
+ * reply, not two matching error sides) unless `expect_reply` is false.
+ */
 void differential(std::string_view name, const seed_fn& seed, const std::vector<std::byte>& frame,
                   std::string_view inbound_link = {}) {
     std::printf("%.*s:\n", static_cast<int>(name.size()), name.data());
@@ -208,8 +224,10 @@ void seed_temp_value(graph_t& g) {
 void seed_temp_empty(graph_t& g) {
     (void)g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
 }
-// Register /sensor/temp and bind two REMOTE subscribers (via the resolver itself,
-// so both graphs reach byte-identical slot state) for the :subscribers[] read.
+/**
+ * @brief Register /sensor/temp and bind two REMOTE subscribers (via the resolver itself, so both
+ *        graphs reach byte-identical slot state) for the :subscribers[] read.
+ */
 void seed_temp_with_remote_subs(graph_t& g) {
     (void)g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     op_resolver_t r(g);

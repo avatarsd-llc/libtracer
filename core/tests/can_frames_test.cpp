@@ -1,8 +1,11 @@
-/*
+/**
+ * @file
+ * @brief transport_can PURE framing-layer test (#55).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * transport_can PURE framing-layer test (#55). Host-testable, no SocketCAN, no
+ * Host-testable, no SocketCAN, no
  * real socket. Asserts:
  *   - the 29-bit structured CAN-ID codec against an explicit bit-layout vector,
  *   - header-elided view_can_frames split + reassembly (classic 8B + CAN-FD 64B),
@@ -42,14 +45,14 @@ std::vector<std::byte> bytes_of(std::initializer_list<std::uint8_t> vals) {
     return v;
 }
 
-// A heap segment holding a copy of `src` (so views over it can be reassembled).
+/** @brief A heap segment holding a copy of `src` (so views over it can be reassembled). */
 tr::view::view_t view_over(const std::vector<std::byte>& src) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(src.size());
     for (std::size_t i = 0; i < src.size(); ++i) seg->bytes[i] = src[i];
     return tr::view::view_t::over(std::move(seg));
 }
 
-// Flatten a rope's logical bytes into a contiguous vector for comparison.
+/** @brief Flatten a rope's logical bytes into a contiguous vector for comparison. */
 std::vector<std::byte> rope_bytes(const tr::view::rope_t& r) {
     std::vector<std::byte> out;
     r.walk([&](std::span<const std::byte> chunk) {

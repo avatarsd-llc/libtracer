@@ -1,8 +1,11 @@
-/*
+/**
+ * @file
+ * @brief transport_ws PROTOCOL-layer test (#54).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * transport_ws PROTOCOL-layer test (#54). Asserts the hand-written RFC 6455
+ * Asserts the hand-written RFC 6455
  * codec against the standard's known vectors:
  *   - the Sec-WebSocket-Accept derivation from RFC 6455 §1.3,
  *   - the masked client "Hello" data frame from RFC 6455 §5.7,

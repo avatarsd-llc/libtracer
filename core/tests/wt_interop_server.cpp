@@ -1,14 +1,15 @@
-/*
+/**
+ * @file
+ * @brief ADR-0043 Phase B (interop) — a standalone webtransport_transport_t echo harness for the
+ *        TypeScript transport-webtransport browser interop test
+ *        (bindings/typescript/packages/transport-webtransport/test/interop-browser.test.mjs): a
+ *        real browser (chrome-headless via puppeteer, when available) dials
+ *        `https://127.0.0.1:<port>/` with `serverCertificateHashes`, opens the bidirectional frame
+ *        stream, and every length-prefixed frame it sends is echoed back — end-to-end validation of
+ *        the browser <-> device path.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
- *
- * ADR-0043 Phase B (interop) — a standalone webtransport_transport_t echo
- * harness for the TypeScript transport-webtransport browser interop test
- * (bindings/typescript/packages/transport-webtransport/test/interop-browser.test.mjs):
- * a real browser (chrome-headless via puppeteer, when available) dials
- * `https://127.0.0.1:<port>/` with `serverCertificateHashes`, opens the
- * bidirectional frame stream, and every length-prefixed frame it sends is
- * echoed back — end-to-end validation of the browser <-> device path.
  *
  * Like ws_interop_server this is NOT an add_test() unit test — it is a helper
  * binary the TS test spawns (only built with LIBTRACER_WITH_QUIC). It serves
@@ -32,8 +33,10 @@ namespace {
 
 using namespace std::chrono_literals;
 
-// Minimal argv parsing: --port N (default 0 = ephemeral), --cert/--key PEM
-// paths (required), --timeout-ms N.
+/**
+ * @brief Minimal argv parsing: --port N (default 0 = ephemeral), --cert/--key PEM paths (required),
+ *        --timeout-ms N.
+ */
 std::uint16_t g_port = 0;
 std::string g_cert;
 std::string g_key;

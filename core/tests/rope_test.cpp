@@ -1,8 +1,9 @@
-/*
+/**
+ * @file
+ * @brief rope_t small-buffer storage + the value-consumption accessors (ADR-0053 §6).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
- *
- * rope_t small-buffer storage + the value-consumption accessors (ADR-0053 §6).
  *
  * The acceptance gate for rope-valued vertices: a 1- or 2-link rope keeps its links
  * in INLINE storage — no heap allocation for the chain — so a rope-valued vertex slot
@@ -34,14 +35,20 @@ void check(bool ok, std::string_view what) {
 using tr::view::rope_t;
 using tr::view::view_t;
 
-// A borrowed one-byte view over `b` (the segment wraps existing bytes; `b` must
-// outlive the view). Isolates the rope's chain storage from any value allocation.
+/**
+ * @brief A borrowed one-byte view over `b` (the segment wraps existing bytes; `b` must outlive the
+ *        view).
+ *
+ * Isolates the rope's chain storage from any value allocation.
+ */
 view_t byte_view(std::byte& b) {
     return view_t::over(tr::view::borrow(std::span<std::byte>(&b, 1)));
 }
 
-// True iff the rope keeps its links in inline small-buffer storage: the chain's
-// data() lies within the rope object itself, so there is no heap chain allocation.
+/**
+ * @brief True iff the rope keeps its links in inline small-buffer storage: the chain's data() lies
+ *        within the rope object itself, so there is no heap chain allocation.
+ */
 bool links_inline(const rope_t& r) {
     const auto* obj = reinterpret_cast<const std::byte*>(&r);
     const auto* data = reinterpret_cast<const std::byte*>(r.links().data());

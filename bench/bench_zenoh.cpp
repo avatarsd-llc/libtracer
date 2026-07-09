@@ -1,9 +1,11 @@
-/*
+/**
+ * @file
+ * @brief Zenoh side of the comparison: in-process (peer) pub/sub via zenoh-cpp over zenoh-c.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Zenoh side of the comparison: in-process (peer) pub/sub via zenoh-cpp over
- * zenoh-c. Sweeps the same matrix as bench_libtracer — fan-out (F subscribers on
+ * Sweeps the same matrix as bench_libtracer — fan-out (F subscribers on
  * one key expression), payload size, and endpoint count (E key expressions) —
  * and emits the same RESULT line. Intra-session local delivery is the closest
  * Zenoh analogue to libtracer's in-process path. See bench/README.md.
@@ -90,9 +92,13 @@ void run(Session& session, std::size_t S, std::size_t F, std::size_t E, const ch
          lat.summarize());
 }
 
-// Response-surface grid matching bench_libtracer's grid: size x fanout (mode
-// `inproc`) and size x endpoints (mode `inproc-path`). Emits the same mode-tagged
-// RESULT line as the default run so one parser feeds the docs comparison charts.
+/**
+ * @brief Response-surface grid matching bench_libtracer's grid: size x fanout (mode `inproc`) and
+ *        size x endpoints (mode `inproc-path`).
+ *
+ * Emits the same mode-tagged
+ * RESULT line as the default run so one parser feeds the docs comparison charts.
+ */
 void run_grid(Session& session) {
     for (std::size_t S : kGridSizes)
         for (std::size_t F : kGridFanouts)
@@ -102,11 +108,15 @@ void run_grid(Session& session) {
             run(session, S, 1, E, "inproc-path", kGridBudget, kGridLatBudget);
 }
 
-// Egress-throughput reference for the composition (K) axis. Zenoh has no composite send:
-// its throughput comes from the transport's put-batching timer, which is independent of
-// any application grouping — so its effective values/s is essentially FLAT across K. We
-// measure the raw put egress rate once and report it at every K, as the flat reference the
-// libtracer scatter curve (one sendmsg for K values) is plotted against (bench_scatter).
+/**
+ * @brief Egress-throughput reference for the composition (K) axis.
+ *
+ * Zenoh has no composite send:
+ * its throughput comes from the transport's put-batching timer, which is independent of
+ * any application grouping — so its effective values/s is essentially FLAT across K. We
+ * measure the raw put egress rate once and report it at every K, as the flat reference the
+ * libtracer scatter curve (one sendmsg for K values) is plotted against (bench_scatter).
+ */
 void run_scatter(Session& session) {
     auto pub = session.declare_publisher(KeyExpr("bench/scatter"));
     const std::vector<std::uint8_t> payload(kRefSize, 0xAB);

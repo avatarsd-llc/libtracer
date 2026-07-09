@@ -1,8 +1,10 @@
-/*
+/**
+ * @file
+ * @brief Unit tests for the little-endian (de)serialization primitive (byteorder.hpp).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Unit tests for the little-endian (de)serialization primitive (byteorder.hpp).
  * The codec/runtime sites that funnel through it are covered end-to-end by the
  * conformance vectors; this pins the helper's own contract (LE order, the
  * short-span zero-extension tolerance, width truncation, constexpr-ness).
@@ -29,7 +31,7 @@ std::uint8_t at(const std::vector<std::byte>& v, std::size_t i) {
     return std::to_integer<std::uint8_t>(v[i]);
 }
 
-// load_le is usable in a constant expression.
+/** @brief load_le is usable in a constant expression. */
 constexpr std::array<std::byte, 4> kFour{std::byte{0x01}, std::byte{0x02}, std::byte{0x03},
                                          std::byte{0x04}};
 static_assert(load_le<std::uint32_t>(kFour) == 0x04030201u, "load_le is constexpr + little-endian");
