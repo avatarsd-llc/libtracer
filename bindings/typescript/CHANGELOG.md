@@ -7,6 +7,8 @@ versioning/publish strategy.
 
 ## Unreleased
 
+## [0.4.0] — 2026-07-09
+
 ### Removed
 
 - **BREAKING — `MAX_DEPTH` is removed from `@avatarsd-llc/libtracer` (RFC-0006).**

@@ -12,6 +12,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-09
+
 ### Changed
 
 - **`vertex_t::store` now returns the published `std::shared_ptr<const rope_t>`**
