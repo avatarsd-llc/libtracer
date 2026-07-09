@@ -27,14 +27,18 @@
 
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <future>
+#include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "libtracer/rope.hpp"
@@ -387,6 +391,151 @@ void test_client_server_roundtrip() {
     }
 }
 
+/** @brief A collecting span sink with a deadline wait (multi-shot, unlike a promise). */
+struct frame_sink_t {
+    std::mutex m;
+    std::condition_variable cv;
+    std::vector<std::vector<std::byte>> frames;
+
+    /** @brief The receiver callable (bound by address via set_receiver(F&)). */
+    void operator()(std::span<const std::byte> f) {
+        {
+            const std::lock_guard lock(m);
+            frames.emplace_back(f.begin(), f.end());
+        }
+        cv.notify_all();
+    }
+    /** @brief True once at least @p n frames arrived before @p timeout. */
+    bool wait_count(std::size_t n, std::chrono::milliseconds timeout) {
+        std::unique_lock lock(m);
+        return cv.wait_for(lock, timeout, [&] { return frames.size() >= n; });
+    }
+};
+
+/** @brief The peer-named twin of @ref frame_sink_t (the bus_link_t sink shape). */
+struct peer_sink_t {
+    std::mutex m;
+    std::condition_variable cv;
+    std::vector<std::pair<std::string, std::vector<std::byte>>> frames;
+
+    /** @brief The peer-named receiver callable. */
+    void operator()(std::string_view peer, std::span<const std::byte> f) {
+        {
+            const std::lock_guard lock(m);
+            frames.emplace_back(std::string(peer), std::vector<std::byte>(f.begin(), f.end()));
+        }
+        cv.notify_all();
+    }
+    /** @brief True once at least @p n frames arrived before @p timeout. */
+    bool wait_count(std::size_t n, std::chrono::milliseconds timeout) {
+        std::unique_lock lock(m);
+        return cv.wait_for(lock, timeout, [&] { return frames.size() >= n; });
+    }
+};
+
+/**
+ * @brief #362 — the multi-peer server: two concurrent clients, peer-named inbound
+ *        delivery through the bus_link_t facet, broadcast send, a DIRECTED
+ *        peer_link send reaching exactly one peer, and live peer enumeration
+ *        tracking a departure.
+ */
+void test_multi_peer_bus() {
+    std::printf("transport_ws server — multi-peer (#362, bus facet):\n");
+
+    tr::net::transport_ws_server server(0, /*max_peers=*/0, /*peer_named=*/true);
+    check(server.ok(), "listen socket bound");
+    const std::uint16_t port = server.local_port();
+    check(server.bus() != nullptr, "peer_named server exposes the bus_link_t facet (ADR-0044)");
+
+    peer_sink_t srv_sink;
+    server.bus()->set_peer_receiver(srv_sink);
+
+    tr::net::transport_ws_client a("127.0.0.1", port);
+    frame_sink_t a_sink;
+    a.set_receiver(a_sink);
+    std::optional<tr::net::transport_ws_client> b;
+    b.emplace("127.0.0.1", port);
+    frame_sink_t b_sink;
+    b->set_receiver(b_sink);
+    check(a.ok() && b->ok(), "TWO clients connected concurrently (listen(fd,1) era over)");
+
+    // --- inbound: each client's frame arrives tagged with a DISTINCT peer name ---
+    const std::array<std::byte, 2> pa{std::byte{0x01}, std::byte{0xA1}};
+    const std::array<std::byte, 2> pb{std::byte{0x01}, std::byte{0xB1}};
+    a.send(pa);
+    b->send(pb);
+    check(srv_sink.wait_count(2, 2s), "server got both clients' frames");
+    std::string name_a;
+    {
+        const std::lock_guard lock(srv_sink.m);
+        check(srv_sink.frames[0].first != srv_sink.frames[1].first,
+              "the two deliveries carry two distinct peer names");
+        for (const auto& [peer, bytes] : srv_sink.frames)
+            if (bytes == std::vector<std::byte>(pa.begin(), pa.end())) name_a = peer;
+    }
+    check(!name_a.empty(), "client a's frame is identifiable by its peer tag");
+
+    // --- enumeration: both peers audible ---
+    std::size_t n_peers = 0;
+    server.bus()->enumerate_peers([&](std::string_view) { ++n_peers; });
+    check(n_peers == 2, "enumerate_peers lists both open peers");
+
+    // --- broadcast: the flat send() reaches every open peer ---
+    const std::array<std::byte, 2> bc{std::byte{0x01}, std::byte{0xCC}};
+    server.send(bc);
+    check(a_sink.wait_count(1, 2s) && b_sink.wait_count(1, 2s),
+          "flat server.send() broadcast to both clients");
+
+    // --- directed: peer_link(name)->send() reaches exactly that peer ---
+    tr::net::transport_t* const link_a = server.bus()->peer_link(name_a);
+    check(link_a != nullptr, "peer_link resolves client a's name");
+    const std::array<std::byte, 2> da{std::byte{0x01}, std::byte{0xDA}};
+    if (link_a != nullptr) link_a->send(da);
+    check(a_sink.wait_count(2, 2s), "directed send reached client a");
+    check(!b_sink.wait_count(2, std::chrono::milliseconds(300)),
+          "directed send did NOT reach client b");
+
+    // --- departure: closing b frees its slot; enumeration tracks it ---
+    b.reset();
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    std::size_t live = 2;
+    while (std::chrono::steady_clock::now() < deadline) {
+        live = 0;
+        server.bus()->enumerate_peers([&](std::string_view) { ++live; });
+        if (live == 1) break;
+        std::this_thread::sleep_for(20ms);
+    }
+    check(live == 1, "departed peer left enumeration (slot recycled)");
+    check(server.bus()->peer_link(name_a) != nullptr, "surviving peer still resolves");
+}
+
+/** @brief #362 — the max_peers deployment cap: a peer beyond it is refused cleanly,
+ *         and a departure frees the slot for the next connection. */
+void test_max_peers_cap() {
+    std::printf("transport_ws server — max_peers admission cap (#362):\n");
+
+    tr::net::transport_ws_server server(0, /*max_peers=*/1);
+    check(server.ok(), "capped server bound");
+    const std::uint16_t port = server.local_port();
+
+    std::optional<tr::net::transport_ws_client> a;
+    a.emplace("127.0.0.1", port);
+    check(a->ok(), "first client admitted");
+
+    const tr::net::transport_ws_client b("127.0.0.1", port);
+    check(!b.ok(), "second client refused cleanly at the cap (handshake never completes)");
+
+    a.reset();  // departure frees the slot...
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    bool readmitted = false;
+    while (!readmitted && std::chrono::steady_clock::now() < deadline) {
+        const tr::net::transport_ws_client c("127.0.0.1", port);
+        readmitted = c.ok();
+        if (!readmitted) std::this_thread::sleep_for(50ms);
+    }
+    check(readmitted, "...and the next client is admitted into the recycled slot");
+}
+
 }  // namespace
 
 int main() {
@@ -394,6 +543,8 @@ int main() {
     test_fragmented_message_rope();
     test_fragmented_message_span();
     test_client_server_roundtrip();
+    test_multi_peer_bus();
+    test_max_peers_cap();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

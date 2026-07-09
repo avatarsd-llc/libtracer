@@ -7,6 +7,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -107,7 +108,29 @@ std::string header_value(std::string_view request, std::string_view name) {
 
 }  // namespace
 
-transport_ws_server::transport_ws_server(std::uint16_t bind_port) {
+/**
+ * @brief One peer slot: the connection state of a single inbound WebSocket client.
+ *
+ * Slots are recycled in place across connections (the header's bounded-steady-state
+ * contract) and never freed before the server, so the @ref endpoint facade
+ * `peer_link` hands out stays pointer-valid for the server's lifetime. Threading:
+ * @ref fd / @ref open are atomics (senders read them under `write_m_`); @ref name
+ * is guarded by `peers_m_` (cross-thread reads from `peer_link`/`enumerate_peers`);
+ * the buffers and the assembler are recv-thread-only.
+ */
+struct transport_ws_server::session_t {
+    std::atomic<int> fd{-1};       /**< @brief The peer socket; -1 ⇒ free slot. */
+    std::atomic<bool> open{false}; /**< @brief True once the 101 handshake completed. */
+    std::string name;              /**< @brief The peer's name, `<ip>:<port>`. */
+    std::string hs_buf;            /**< @brief HTTP Upgrade request accumulation. */
+    std::vector<std::byte> buf;    /**< @brief Stream bytes → frame reassembly. */
+    ws_assembler_t assembler;      /**< @brief RFC 6455 fragment reassembly. */
+    peer_endpoint_t endpoint;      /**< @brief The directed facade `peer_link` returns. */
+};
+
+transport_ws_server::transport_ws_server(std::uint16_t bind_port, std::size_t max_peers,
+                                         bool peer_named)
+    : max_peers_(max_peers), peer_named_(peer_named) {
     listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd_ < 0) return;
 
@@ -118,8 +141,10 @@ transport_ws_server::transport_ws_server(std::uint16_t bind_port) {
     local.sin_family = AF_INET;
     local.sin_addr.s_addr = htonl(INADDR_ANY);
     local.sin_port = htons(bind_port);
+    // SOMAXCONN: the OS's own accept-queue bound — admission is per-connection in
+    // accept_peer (the max_peers deployment cap), never a synthetic backlog of 1.
     if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&local), sizeof(local)) < 0 ||
-        ::listen(listen_fd_, 1) < 0) {
+        ::listen(listen_fd_, SOMAXCONN) < 0) {
         ::close(listen_fd_);
         listen_fd_ = -1;
         return;
@@ -133,117 +158,244 @@ transport_ws_server::transport_ws_server(std::uint16_t bind_port) {
 }
 
 transport_ws_server::~transport_ws_server() {
-    stop_and_join();  // FIRST: the run()/serve() thread touches the fds closed below
+    stop_and_join();  // FIRST: the run() thread touches the fds closed below
     if (listen_fd_ >= 0) ::close(listen_fd_);
+    for (const std::unique_ptr<session_t>& s : slots_) {  // thread joined — nothing races
+        const int fd = s->fd.exchange(-1, std::memory_order_acq_rel);
+        if (fd >= 0) ::close(fd);
+    }
 }
 
 void transport_ws_server::send(std::span<const std::byte> frame) {
-    // One serialized record under write_m_ (the stream_endpoint_t
-    // write-serialization invariant).
-    send_all_locked(ws::encode_frame(ws::opcode_t::BINARY, frame));
+    // Encode ONCE, then one serialized record per open peer. Lock order per the
+    // header contract: peers_m_ (slot list stable) → write_m_ (the stream
+    // write-serialization invariant, now covering every peer fd).
+    const std::vector<std::byte> encoded = ws::encode_frame(ws::opcode_t::BINARY, frame);
+    const std::lock_guard plock(peers_m_);
+    const std::lock_guard wlock(write_m_);
+    for (const std::unique_ptr<session_t>& s : slots_) {
+        if (!s->open.load(std::memory_order_relaxed)) continue;
+        write_all(s->fd.load(std::memory_order_relaxed), encoded);
+    }
 }
 
-bool transport_ws_server::handshake(int fd) {
-    std::string req;
-    std::array<char, 1024> chunk;
-    // Read until the end of the HTTP header block (CRLFCRLF), bounded.
-    while (req.find("\r\n\r\n") == std::string::npos) {
-        if (stop_.load(std::memory_order_relaxed)) return false;
-        const int pr = poll_readable(fd);  // one bounded 100 ms readability wait
-        if (pr < 0) return false;
-        if (pr == 0) continue;  // timeout → re-check stop_
-        const ssize_t n = ::recv(fd, chunk.data(), chunk.size(), 0);
-        if (n <= 0) return false;  // peer closed / error
-        req.append(chunk.data(), static_cast<std::size_t>(n));
-        if (req.size() > 16384) return false;  // runaway request guard
-    }
+void transport_ws_server::peer_endpoint_t::send(std::span<const std::byte> frame) {
+    if (owner_ == nullptr || slot_ == nullptr) return;
+    const std::vector<std::byte> encoded = ws::encode_frame(ws::opcode_t::BINARY, frame);
+    const std::lock_guard lock(owner_->write_m_);
+    if (!slot_->open.load(std::memory_order_relaxed)) return;  // departed ⇒ no-op
+    write_all(slot_->fd.load(std::memory_order_relaxed), encoded);
+}
 
-    const std::string key = header_value(req, "sec-websocket-key");
-    if (key.empty()) return false;
+void transport_ws_server::enumerate_peers(const peer_visitor_t& visit) const {
+    const std::lock_guard lock(peers_m_);
+    for (const std::unique_ptr<session_t>& s : slots_)
+        if (s->open.load(std::memory_order_relaxed) && !s->name.empty()) visit(s->name);
+}
 
-    std::string resp =
-        "HTTP/1.1 101 Switching Protocols\r\n"
-        "Upgrade: websocket\r\n"
-        "Connection: Upgrade\r\n"
-        "Sec-WebSocket-Accept: ";
-    resp += ws::accept_key(key);
-    resp += "\r\n\r\n";
+transport_t* transport_ws_server::peer_link(std::string_view peer) {
+    const std::lock_guard lock(peers_m_);
+    for (const std::unique_ptr<session_t>& s : slots_)
+        if (s->open.load(std::memory_order_relaxed) && s->name == peer) return &s->endpoint;
+    return nullptr;
+}
 
-    std::vector<std::byte> bytes(resp.size());
-    for (std::size_t i = 0; i < resp.size(); ++i) bytes[i] = static_cast<std::byte>(resp[i]);
+void transport_ws_server::accept_peer() {
+    sockaddr_in remote{};
+    socklen_t rlen = sizeof(remote);
+    const int fd = ::accept(listen_fd_, reinterpret_cast<sockaddr*>(&remote), &rlen);
+    if (fd < 0) return;
+
+    session_t* slot = nullptr;
     {
-        const std::lock_guard lock(write_m_);
-        write_all(fd, bytes);
+        const std::lock_guard lock(peers_m_);
+        for (const std::unique_ptr<session_t>& s : slots_)
+            if (s->fd.load(std::memory_order_relaxed) < 0) {
+                slot = s.get();
+                break;
+            }
+        if (slot == nullptr) {
+            if (max_peers_ != 0 && slots_.size() >= max_peers_) {
+                ::close(fd);  // clean refusal at the deployment cap, not a hung SYN
+                return;
+            }
+            slots_.push_back(std::make_unique<session_t>());
+            slot = slots_.back().get();
+            slot->endpoint.owner_ = this;
+            slot->endpoint.slot_ = slot;
+        }
+        char ip[INET_ADDRSTRLEN] = {};
+        ::inet_ntop(AF_INET, &remote.sin_addr, ip, sizeof(ip));
+        slot->name = std::string(ip) + ':' + std::to_string(ntohs(remote.sin_port));
     }
-    return true;
+    slot->hs_buf.clear();
+    slot->buf.clear();
+    slot->assembler.reset();
+    slot->open.store(false, std::memory_order_relaxed);
+    slot->fd.store(fd, std::memory_order_release);  // publish LAST — the slot is now live
 }
 
-void transport_ws_server::serve(int fd) {
-    ws_assembler_t asm_state;  // per-connection fragment assembly (recv thread only)
-    std::vector<std::byte> buf;
+void transport_ws_server::service_peer(session_t& s) {
+    const int fd = s.fd.load(std::memory_order_relaxed);
+    if (fd < 0) return;
     std::array<std::byte, 4096> chunk;
+    const ssize_t n = ::recv(fd, chunk.data(), chunk.size(), 0);
+    if (n <= 0) {  // peer closed the TCP connection, or error
+        teardown_slot(s);
+        return;
+    }
 
-    while (!stop_.load(std::memory_order_relaxed)) {
-        const int pr = poll_readable(fd);  // one bounded 100 ms readability wait
-        if (pr < 0) return;
-        if (pr == 0) continue;  // timeout → re-check stop_
+    if (!s.open.load(std::memory_order_relaxed)) {
+        // Opening handshake: accumulate the HTTP Upgrade request until CRLFCRLF.
+        s.hs_buf.append(reinterpret_cast<const char*>(chunk.data()), static_cast<std::size_t>(n));
+        if (s.hs_buf.size() > 16384) {  // runaway request guard
+            teardown_slot(s);
+            return;
+        }
+        const std::size_t hdr_end = s.hs_buf.find("\r\n\r\n");
+        if (hdr_end == std::string::npos) return;  // keep accumulating
 
-        const ssize_t n = ::recv(fd, chunk.data(), chunk.size(), 0);
-        if (n == 0) return;  // peer closed the TCP connection
-        if (n < 0) return;   // error
-        buf.insert(buf.end(), chunk.data(), chunk.data() + n);
+        const std::string key =
+            header_value(std::string_view(s.hs_buf.data(), hdr_end + 4), "sec-websocket-key");
+        if (key.empty()) {
+            teardown_slot(s);
+            return;
+        }
+        std::string resp =
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            "Sec-WebSocket-Accept: ";
+        resp += ws::accept_key(key);
+        resp += "\r\n\r\n";
+        std::vector<std::byte> bytes(resp.size());
+        for (std::size_t i = 0; i < resp.size(); ++i) bytes[i] = static_cast<std::byte>(resp[i]);
+        {
+            const std::lock_guard lock(write_m_);
+            write_all(fd, bytes);
+        }
+        // Bytes pipelined past the header are the start of the frame stream —
+        // the old one-peer server dropped them; carry them over.
+        const auto* rest = reinterpret_cast<const std::byte*>(s.hs_buf.data()) + hdr_end + 4;
+        s.buf.assign(rest, rest + (s.hs_buf.size() - hdr_end - 4));
+        s.hs_buf.clear();
+        s.hs_buf.shrink_to_fit();
+        s.open.store(true, std::memory_order_release);
+        if (!drain_frames(s)) teardown_slot(s);
+        return;
+    }
 
-        // Drain every complete frame currently in the buffer; leftover partial
-        // bytes stay for the next read.
-        while (true) {
-            auto decoded = ws::decode_frame(buf);
-            if (!decoded) break;
-            ws::frame_t frame = std::move(decoded->first);
-            const std::size_t consumed = decoded->second;
-            buf.erase(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(consumed));
+    s.buf.insert(s.buf.end(), chunk.data(), chunk.data() + n);
+    if (!drain_frames(s)) teardown_slot(s);
+}
 
-            switch (frame.op) {
-                case ws::opcode_t::BINARY:
-                case ws::opcode_t::CONT: {
-                    // Sink snapshot/tier select lives in the slot (receiver_slot.hpp);
-                    // rx_.has_rope() is the per-frame tier query, so a sink installed
-                    // mid-stream takes effect on the next data frame.
-                    // Unfragmented fast path on the span tier: the borrowed
-                    // payload is delivered directly, no owning copy (as before).
-                    if (frame.op == ws::opcode_t::BINARY && frame.fin && !asm_state.assembling &&
-                        !rx_.has_rope()) {
-                        rx_.deliver_borrowed(std::span<const std::byte>(frame.payload));
-                        break;
-                    }
-                    auto msg = asm_state.on_data(frame.op, frame.fin, frame.payload);
-                    if (!msg) break;  // mid-message (or dropped)
-                    // The reassembled message IS a rope — one owning link per
-                    // fragment (ADR-0053 §5): the rope sink takes it as-is; only
-                    // a span-only sink pays the one materialize (in the slot).
+bool transport_ws_server::drain_frames(session_t& s) {
+    // Drain every complete frame currently buffered; leftover partial bytes stay
+    // for the next read. Returns false when the peer sent CLOSE.
+    while (true) {
+        auto decoded = ws::decode_frame(s.buf);
+        if (!decoded) return true;
+        ws::frame_t frame = std::move(decoded->first);
+        const std::size_t consumed = decoded->second;
+        s.buf.erase(s.buf.begin(), s.buf.begin() + static_cast<std::ptrdiff_t>(consumed));
+
+        switch (frame.op) {
+            case ws::opcode_t::BINARY:
+            case ws::opcode_t::CONT: {
+                // Peer-named slot first (the ADR-0044 bus precedence — the router's
+                // wiring), flat transport_t slot as the point-to-point fallback.
+                // Tier select per frame (receiver_slot.hpp), so a sink installed
+                // mid-stream takes effect on the next data frame. Unfragmented
+                // fast path on the span tier: borrowed payload, no owning copy.
+                const bool peer_named = peer_rx_.has_any();
+                const bool want_rope = peer_named ? peer_rx_.has_rope() : rx_.has_rope();
+                if (frame.op == ws::opcode_t::BINARY && frame.fin && !s.assembler.assembling &&
+                    !want_rope) {
+                    const std::span<const std::byte> payload(frame.payload);
+                    if (peer_named)
+                        peer_rx_.deliver_borrowed(s.name, payload);
+                    else
+                        rx_.deliver_borrowed(payload);
+                    break;
+                }
+                auto msg = s.assembler.on_data(frame.op, frame.fin, frame.payload);
+                if (!msg) break;  // mid-message (or dropped)
+                // The reassembled message IS a rope — one owning link per
+                // fragment (ADR-0053 §5): the rope sink takes it as-is; only
+                // a span-only sink pays the one materialize (in the slot).
+                if (peer_named)
+                    peer_rx_.deliver_rope(s.name, std::move(*msg));
+                else
                     rx_.deliver_rope(std::move(*msg));
-                    break;
-                }
-                case ws::opcode_t::PING: {
-                    const std::vector<std::byte> pong =
-                        ws::encode_frame(ws::opcode_t::PONG, frame.payload);
-                    const std::lock_guard lock(write_m_);
-                    write_all(fd, pong);
-                    break;
-                }
-                case ws::opcode_t::CLOSE:
-                    return;  // tear the connection down
-                default:
-                    break;  // TEXT / PONG: ignored
+                break;
             }
+            case ws::opcode_t::PING: {
+                const std::vector<std::byte> pong =
+                    ws::encode_frame(ws::opcode_t::PONG, frame.payload);
+                const std::lock_guard lock(write_m_);
+                write_all(s.fd.load(std::memory_order_relaxed), pong);
+                break;
+            }
+            case ws::opcode_t::CLOSE:
+                return false;  // tear this one connection down
+            default:
+                break;  // TEXT / PONG: ignored
         }
     }
 }
 
+void transport_ws_server::teardown_slot(session_t& s) {
+    {
+        // Stop peer_link/enumerate resolution FIRST, so no new sender targets
+        // the dying slot by name.
+        const std::lock_guard lock(peers_m_);
+        s.name.clear();
+    }
+    int fd;
+    {
+        // The stream teardown-under-write-lock invariant, per slot: reset the fd
+        // and the open flag under write_m_ BEFORE ::close, so an in-flight send
+        // either finished against the still-open fd or observes the reset.
+        const std::lock_guard lock(write_m_);
+        s.open.store(false, std::memory_order_relaxed);
+        fd = s.fd.exchange(-1, std::memory_order_acq_rel);
+    }
+    if (fd >= 0) ::close(fd);
+    s.buf.clear();
+    s.buf.shrink_to_fit();
+    s.hs_buf.clear();
+    s.assembler.reset();
+}
+
 void transport_ws_server::run() {
-    // The one-peer accept/serve/teardown shape is stream_endpoint_t's; only
-    // the opening handshake is WS's.
-    run_accept_loop(
-        listen_fd_, [this](int fd) { return handshake(fd); }, [this](int fd) { serve(fd); });
+    // ONE poll pass multiplexes the listen socket and every live peer — no
+    // per-peer thread (the MCU-shaped choice, #362), bounded to 100 ms so the
+    // loop stays shutdown-responsive (the posix_endpoint_t idiom).
+    std::vector<pollfd> pfds;
+    std::vector<session_t*> pslots;
+    while (!stop_.load(std::memory_order_relaxed)) {
+        pfds.clear();
+        pslots.clear();
+        pfds.push_back(pollfd{listen_fd_, POLLIN, 0});
+        {
+            const std::lock_guard lock(peers_m_);
+            for (const std::unique_ptr<session_t>& s : slots_) {
+                const int fd = s->fd.load(std::memory_order_relaxed);
+                if (fd >= 0) {
+                    pfds.push_back(pollfd{fd, POLLIN, 0});
+                    pslots.push_back(s.get());
+                }
+            }
+        }
+        const int pr = ::poll(pfds.data(), static_cast<nfds_t>(pfds.size()), 100);
+        if (pr <= 0) continue;  // timeout or transient error → re-check stop_
+        if (stop_.load(std::memory_order_relaxed)) break;
+        // Peers first (their events are bound to this pass's fd list), then the
+        // accept (which may add a slot).
+        for (std::size_t i = 1; i < pfds.size(); ++i)
+            if ((pfds[i].revents & (POLLIN | POLLHUP | POLLERR)) != 0) service_peer(*pslots[i - 1]);
+        if ((pfds[0].revents & POLLIN) != 0) accept_peer();
+    }
 }
 
 // ---------------------------------------------------------------------------

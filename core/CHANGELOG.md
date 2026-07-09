@@ -14,6 +14,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`transport_ws_server` serves MANY concurrent inbound peers (#362)** — the
+  `listen(fd, 1)` single-client-per-boot limit is gone. One poll-based thread
+  multiplexes the listen socket and every peer (no per-peer thread). New
+  constructor parameters `max_peers` (admission cap, 0 = unbounded) and
+  `peer_named` (both defaulted — source-compatible). `send()` now fans out to
+  every open peer. With `peer_named = true` the server exposes the ADR-0044
+  `bus_link_t` facet: inbound frames are tagged per peer (`<ip>:<port>`), so
+  each browser tab gets its own return-route identity, `peer_link(name)` gives
+  a directed per-peer sender, and the connection vertex's `:children[]` lists
+  the live peers. Default (point-to-point naming) behavior is unchanged.
+  Handshake fix: bytes pipelined after the HTTP Upgrade header are now carried
+  into the frame stream instead of dropped.
+
 - **`vertex_t` hot/cold split (#361 §1)**: the cold, conditionally-needed members —
   `handlers_t`, the STREAM history ring, the `:acl` state + ADR-0050 effective-merge
   cache, non-default QoS `settings_t`, and the stream drain cursor — moved behind one
