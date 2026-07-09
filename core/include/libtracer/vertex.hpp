@@ -403,7 +403,7 @@ class vertex_t {
      *         empty at the root. The full key is a parent-walk concatenation
      *         (`graph_t`'s `build_key`). */
     [[nodiscard]] const path_key_t& name() const noexcept { return name_; }
-    /** @brief This vertex's QoS settings (@ref kDefaultSettings when no extension block —
+    /** @brief This vertex's QoS settings (`kDefaultSettings` when no extension block —
      *         a default-QoS vertex stores no copy of them). */
     [[nodiscard]] const settings_t& settings() const noexcept {
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
@@ -826,7 +826,7 @@ class vertex_t {
     // -- settings & propagation policy --------------------------------------------------
 
     /** @brief A consistent copy of the QoS settings (taken under the vertex lock;
-     *         @ref kDefaultSettings when no extension block). */
+     *         `kDefaultSettings` when no extension block). */
     [[nodiscard]] settings_t settings_snapshot() {
         const std::lock_guard lock(m_);
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
