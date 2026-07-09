@@ -166,7 +166,7 @@ class transport_ws_server : public transport_t, public bus_link_t, private strea
     /**
      * @brief Guards the slot vector and every slot's NAME (the cross-thread
      *        reads: enumerate_peers / peer_link vs the recv thread's
-     *        accept/teardown). Per-slot fds are atomics read under @ref write_m_
+     *        accept/teardown). Per-slot fds are atomics read under `write_m_`
      *        by senders; buffers/assembler are recv-thread-only. Lock order
      *        where nested: peers_m_ → write_m_.
      */

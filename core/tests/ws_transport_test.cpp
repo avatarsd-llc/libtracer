@@ -442,20 +442,22 @@ struct peer_sink_t {
 void test_multi_peer_bus() {
     std::printf("transport_ws server — multi-peer (#362, bus facet):\n");
 
+    // Sinks live BEFORE the transports (the file's destruction-order idiom):
+    // every transport joins its recv thread before the sink it delivers to dies.
+    peer_sink_t srv_sink;
+    frame_sink_t a_sink;
+    frame_sink_t b_sink;
+
     tr::net::transport_ws_server server(0, /*max_peers=*/0, /*peer_named=*/true);
     check(server.ok(), "listen socket bound");
     const std::uint16_t port = server.local_port();
     check(server.bus() != nullptr, "peer_named server exposes the bus_link_t facet (ADR-0044)");
-
-    peer_sink_t srv_sink;
     server.bus()->set_peer_receiver(srv_sink);
 
     tr::net::transport_ws_client a("127.0.0.1", port);
-    frame_sink_t a_sink;
     a.set_receiver(a_sink);
     std::optional<tr::net::transport_ws_client> b;
     b.emplace("127.0.0.1", port);
-    frame_sink_t b_sink;
     b->set_receiver(b_sink);
     check(a.ok() && b->ok(), "TWO clients connected concurrently (listen(fd,1) era over)");
 
