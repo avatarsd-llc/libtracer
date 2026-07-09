@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-//
-// Session-hardening gate (v0.1 must-fix): pending requests reject when the
-// transport closes mid-flight; a per-request timeout fires (and a late reply
-// still consumes its FIFO slot so later requests stay correlated); inbound
-// ADVERTISE/COMPACT frames surface a loud CompactFlowError instead of a silent
-// drop; and the RFC-0002 error registry is complete — registered codes AND
-// string-form (NAME tr::… path) identities surface typed on FwdError.
+
+/**
+ * @brief Session-hardening gate (v0.1 must-fix).
+ *
+ * Pending requests reject when the transport closes mid-flight; a per-request
+ * timeout fires (and a late reply still consumes its FIFO slot so later
+ * requests stay correlated); inbound ADVERTISE/COMPACT frames surface a loud
+ * CompactFlowError instead of a silent drop; and the RFC-0002 error registry
+ * is complete — registered codes AND string-form (NAME tr::… path) identities
+ * surface typed on FwdError.
+ */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -25,7 +29,7 @@ import {
   FWD_KIND,
 } from '../dist/index.js';
 
-/** An in-memory ClientTransport with a close hook, mirroring TransportWs's seam. */
+/** @brief An in-memory ClientTransport with a close hook, mirroring TransportWs's seam. */
 class FakeTransport {
   constructor() {
     this.sent = [];
@@ -41,17 +45,17 @@ class FakeTransport {
   onClose(handler) {
     this.closeHandler = handler;
   }
-  /** Simulate one inbound frame arriving from the wire. */
+  /** @brief Simulate one inbound frame arriving from the wire. */
   inject(frame) {
     if (this.receiver) this.receiver(new Uint8Array(frame));
   }
-  /** Simulate the connection closing (optionally with a cause). */
+  /** @brief Simulate the connection closing (optionally with a cause). */
   close(cause) {
     if (this.closeHandler) this.closeHandler(cause);
   }
 }
 
-/** A source-routed FWD{REPLY, RESULT} back to the default reply-ep "client". */
+/** @brief A source-routed FWD{REPLY, RESULT} back to the default reply-ep "client". */
 function resultReply(payload) {
   return encodeFwd({ op: FWD_OP.REPLY, dst: ['client'], src: ['sensor'], kind: FWD_KIND.RESULT, payload });
 }
@@ -64,7 +68,7 @@ const bare = (type, payload, children = []) => ({
   trailer: null,
 });
 
-/** STATUS{ ERROR{ <identity child> } } reply payload bytes. */
+/** @brief STATUS{ ERROR{ <identity child> } } reply payload bytes. */
 function statusError(identityChild) {
   return encode(bare(TYPE.STATUS, new Uint8Array(0), [bare(TYPE.ERROR, new Uint8Array(0), [identityChild])]));
 }
@@ -99,8 +103,11 @@ test('transport close mid-request rejects every pending promise with "transport 
 
 /* ------------------------------------------------------ request timeout --- */
 
-// The client's deadline timer is unref'd (it must not hold a real app's event
-// loop open), so tests that WAIT for it to fire keep the loop alive themselves.
+/**
+ * @brief The client's deadline timer is unref'd (it must not hold a real app's
+ * event loop open), so tests that WAIT for it to fire keep the loop alive
+ * themselves.
+ */
 async function withLiveLoop(fn) {
   const hold = setInterval(() => {}, 1000);
   try {

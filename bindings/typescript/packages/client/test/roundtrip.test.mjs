@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-//
-// Mock-transport round-trip (the client "gate", now over RFC-0004 FWD): drive
-// LibtracerClient over an in-memory fake ClientTransport — no socket. Assert the
-// exact FWD frame bytes `write`/`subscribe` emit, that a source-routed FWD{REPLY}
-// resolves the pending op, and that an inbound delivery (a FWD{WRITE} carrying a
-// VALUE — delivery-is-a-write, RFC-0004 §D — and a bare / ROUTER-wrapped VALUE)
-// fires the handler with the decoded payload. A final test drives a REAL
-// TransportWs against a local `ws` echo server to prove the seam is structurally
-// satisfied end to end.
+
+/**
+ * @brief Mock-transport round-trip (the client "gate", now over RFC-0004 FWD):
+ * drive LibtracerClient over an in-memory fake ClientTransport — no socket.
+ *
+ * Assert the exact FWD frame bytes `write`/`subscribe` emit, that a
+ * source-routed FWD{REPLY} resolves the pending op, and that an inbound
+ * delivery (a FWD{WRITE} carrying a VALUE — delivery-is-a-write, RFC-0004 §D —
+ * and a bare / ROUTER-wrapped VALUE) fires the handler with the decoded
+ * payload. A final test drives a REAL TransportWs against a local `ws` echo
+ * server to prove the seam is structurally satisfied end to end.
+ */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -24,7 +27,7 @@ import {
   FWD_KIND,
 } from '../dist/index.js';
 
-/** An in-memory ClientTransport: records sent frames, lets a test inject inbound ones. */
+/** @brief An in-memory ClientTransport: records sent frames, lets a test inject inbound ones. */
 class FakeTransport {
   constructor() {
     this.sent = [];
@@ -36,18 +39,18 @@ class FakeTransport {
   onFrame(receiver) {
     this.receiver = receiver;
   }
-  /** Simulate one inbound frame arriving from the wire. */
+  /** @brief Simulate one inbound frame arriving from the wire. */
   inject(frame) {
     if (this.receiver) this.receiver(new Uint8Array(frame));
   }
 }
 
-/** @param {Uint8Array} a @param {Uint8Array} b */
+/** @brief Byte-for-byte equality. @param {Uint8Array} a @param {Uint8Array} b */
 function sameBytes(a, b) {
   return a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
-/** A source-routed FWD{REPLY, RESULT} the responder sends back (default reply-ep "client"). */
+/** @brief A source-routed FWD{REPLY, RESULT} the responder sends back (default reply-ep "client"). */
 function resultReply(payload) {
   return encodeFwd({
     op: FWD_OP.REPLY,
@@ -58,7 +61,7 @@ function resultReply(payload) {
   });
 }
 
-/** A delivery: a FWD{WRITE} carrying a VALUE, addressed back to the reply endpoint. */
+/** @brief A delivery: a FWD{WRITE} carrying a VALUE, addressed back to the reply endpoint. */
 function delivery(valueBytes) {
   return encodeFwd({
     op: FWD_OP.WRITE,
@@ -68,7 +71,7 @@ function delivery(valueBytes) {
   });
 }
 
-/** Build a ROUTER{ …, NAME "data", <wrapped> } TLV (the wrapped data is the last child). */
+/** @brief Build a ROUTER{ …, NAME "data", <wrapped> } TLV (the wrapped data is the last child). */
 function routerWrap(dataTlv) {
   const name = (s) => ({
     type: TYPE.NAME,
