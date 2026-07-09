@@ -24,6 +24,13 @@ Usage::
 
   tools/sync-version.py           # rewrite every artifact to match VERSION
   tools/sync-version.py --check   # exit 1 if anything drifts (the CI gate)
+  tools/sync-version.py X.Y.Z     # stamp VERSION itself + every artifact to X.Y.Z
+
+The explicit-version form is how the tag-driven release pipeline works: release.yml
+derives ``X.Y.Z`` from the pushed ``vX.Y.Z`` tag and each publish job stamps the
+checked-out tree with it before packaging, so the git tag — not the committed
+manifests — is the version every registry sees. ``X.Y.Z --check`` verifies the
+tree (including ``VERSION``) already matches an explicit version.
 
 Substitutions are targeted (only the version substring / dep-range value is
 replaced), so comments, key order, and formatting are preserved.
@@ -60,7 +67,12 @@ RUST_CARGO = ROOT / "bindings/rust/Cargo.toml"
 CARGO_VERSION = re.compile(r'(?m)^version\s*=\s*"(?P<ver>[^"]*)"')
 
 
-def read_version():
+def read_version(explicit=None):
+    """Resolve the target version: an explicit ``X.Y.Z`` wins over the VERSION file."""
+    if explicit is not None:
+        if not SEMVER.match(explicit):
+            sys.exit(f"error: explicit version {explicit!r} is not MAJOR.MINOR.PATCH[-suffix]")
+        return explicit
     if not VERSION_FILE.exists():
         sys.exit(f"error: {VERSION_FILE.relative_to(ROOT)} not found")
     version = VERSION_FILE.read_text(encoding="utf-8").strip()
@@ -81,11 +93,23 @@ def dep_range(version):
     return f">={version} <{upper}"
 
 
-def run(check):
-    version = read_version()
+def run(check, explicit=None):
+    version = read_version(explicit)
     rng = dep_range(version)
     drift = []  # (label, current, expected)
     changed = []  # (label, old, new)
+
+    # 0. an explicit version stamps (or checks) the VERSION file itself, so a
+    #    tag-driven release leaves the packaged tree internally consistent
+    #    (core/CMakeLists.txt and any tooling that reads VERSION see X.Y.Z too).
+    if explicit is not None:
+        cur = VERSION_FILE.read_text(encoding="utf-8").strip() if VERSION_FILE.exists() else "<missing>"
+        if cur != version:
+            if check:
+                drift.append(("VERSION", cur, version))
+            else:
+                VERSION_FILE.write_text(version + "\n", encoding="utf-8")
+                changed.append(("VERSION", cur, version))
 
     def stamp_span(path, pattern, target, label):
         if not path.exists():
@@ -141,7 +165,7 @@ def run(check):
             print(f"version drift from VERSION={version}:")
             for label, cur, exp in drift:
                 print(f"  - {label}: has {cur!r}, expected {exp!r}")
-            print("\nfix: python3 tools/sync-version.py")
+            print("\nfix: python3 tools/sync-version.py" + (f" {version}" if explicit else ""))
             sys.exit(1)
         print(f"ok: every artifact matches VERSION={version} (internal deps at {rng!r})")
     else:
@@ -152,6 +176,6 @@ def run(check):
 
 if __name__ == "__main__":
     extra = [a for a in sys.argv[1:] if a != "--check"]
-    if extra:
-        sys.exit(f"usage: {sys.argv[0]} [--check]  (unexpected: {' '.join(extra)})")
-    run(check="--check" in sys.argv[1:])
+    if len(extra) > 1 or any(a.startswith("-") for a in extra):
+        sys.exit(f"usage: {sys.argv[0]} [X.Y.Z] [--check]  (unexpected: {' '.join(extra)})")
+    run(check="--check" in sys.argv[1:], explicit=extra[0] if extra else None)

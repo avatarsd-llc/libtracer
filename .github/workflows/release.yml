@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 #
-# Unified release-on-tag. Pushing a signed `vX.Y.Z` tag (per .github/RELEASING.md)
-# fires this workflow, which — after asserting the tag matches the VERSION file —
-# creates the GitHub Release (AI-written summary + CHANGELOG) and publishes every
-# packaged artifact at X.Y.Z in lockstep: npm, crates.io, PlatformIO, ESP.
+# Unified release-on-tag. Pushing a `vX.Y.Z` tag (per .github/RELEASING.md)
+# fires this workflow. THE TAG IS THE SINGLE SOURCE OF TRUTH for the version:
+# every publish job stamps the checked-out tree to X.Y.Z with
+# `tools/sync-version.py X.Y.Z` before packaging, so the committed manifests
+# never need a pre-tag bump PR (drift from VERSION only produces a warning).
+# It creates the GitHub Release (AI-written summary + CHANGELOG) and publishes
+# every packaged artifact at X.Y.Z in lockstep: npm, crates.io, PlatformIO, ESP.
 #
 # Each publish is an INDEPENDENT job that no-ops with a warning when its secret is
 # absent, so tokens can be added incrementally and one missing registry never
@@ -41,17 +44,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: v
-        name: Assert the tag matches the VERSION file
+        name: Derive the release version from the tag (the tag is authoritative)
         run: |
           tag="${{ github.event.inputs.tag || github.ref_name }}"
-          ver="$(tr -d '[:space:]' < VERSION)"
-          if [ "${tag#v}" != "$ver" ]; then
-            echo "::error::tag '$tag' does not match VERSION '$ver' — bump VERSION (tools/sync-version.py) before tagging"
+          ver="${tag#v}"
+          if ! echo "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+.][0-9A-Za-z.-]+)?$'; then
+            echo "::error::tag '$tag' is not vMAJOR.MINOR.PATCH[-suffix]"
             exit 1
+          fi
+          committed="$(tr -d '[:space:]' < VERSION)"
+          if [ "$ver" != "$committed" ]; then
+            echo "::warning::tag '$tag' differs from committed VERSION '$committed' — fine: publish jobs stamp every manifest from the tag; reconcile the repo later with 'tools/sync-version.py ${ver}'"
           fi
           echo "version=$ver" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "Releasing $tag (VERSION=$ver)"
+          echo "Releasing $tag as $ver"
 
   # Re-run the cross-implementation compatibility suite AT THE TAG before any
   # publish — nothing ships unless the tagged tree is green (belt-and-suspenders
@@ -139,11 +146,18 @@ jobs:
       - name: Skip note (no NPM_TOKEN)
         if: ${{ env.NPM_TOKEN == '' }}
         run: echo "::warning::NPM_TOKEN not set — skipping npm publish"
-      - name: Install + build
+      # npm ci runs BEFORE stamping: the lockfile matches the committed
+      # manifests, and npm publish never consults it.
+      - name: Install (pristine lockfile)
         if: ${{ env.NPM_TOKEN != '' }}
-        run: |
-          npm ci
-          npm run build
+        run: npm ci
+      - name: Stamp package versions from the tag
+        if: ${{ env.NPM_TOKEN != '' }}
+        working-directory: ${{ github.workspace }}
+        run: python3 tools/sync-version.py "${{ needs.verify.outputs.version }}"
+      - name: Build
+        if: ${{ env.NPM_TOKEN != '' }}
+        run: npm run build
       - name: Publish to npm
         if: ${{ env.NPM_TOKEN != '' }}
         run: npm publish --workspaces --access public --provenance
@@ -161,9 +175,13 @@ jobs:
       - name: Skip note (no CARGO_REGISTRY_TOKEN)
         if: ${{ env.CARGO_REGISTRY_TOKEN == '' }}
         run: echo "::warning::CARGO_REGISTRY_TOKEN not set — skipping crates.io publish"
+      - name: Stamp crate version from the tag
+        if: ${{ env.CARGO_REGISTRY_TOKEN != '' }}
+        run: python3 tools/sync-version.py "${{ needs.verify.outputs.version }}"
+      # --allow-dirty: the stamp step above rewrites Cargo.toml in the checkout.
       - name: Publish libtracer to crates.io
         if: ${{ env.CARGO_REGISTRY_TOKEN != '' }}
-        run: cargo publish --manifest-path bindings/rust/Cargo.toml
+        run: cargo publish --manifest-path bindings/rust/Cargo.toml --allow-dirty
 
   platformio:
     needs: [verify, preflight]
@@ -178,6 +196,9 @@ jobs:
       - name: Skip note (no PLATFORMIO_AUTH_TOKEN)
         if: ${{ env.PLATFORMIO_AUTH_TOKEN == '' }}
         run: echo "::warning::PLATFORMIO_AUTH_TOKEN not set — skipping PlatformIO publish"
+      - name: Stamp library.json version from the tag
+        if: ${{ env.PLATFORMIO_AUTH_TOKEN != '' }}
+        run: python3 tools/sync-version.py "${{ needs.verify.outputs.version }}"
       - name: Publish to the PlatformIO registry
         if: ${{ env.PLATFORMIO_AUTH_TOKEN != '' }}
         run: |
@@ -203,6 +224,9 @@ jobs:
       # Vendor core/ INTO the component so the published archive is self-contained
       # (the component's CMakeLists reaches up to core/ in-repo; a registry consumer
       # only gets the component). The CMakeLists prefers this local copy when present.
+      - name: Stamp idf_component.yml version from the tag
+        if: ${{ env.IDF_COMPONENT_API_TOKEN != '' }}
+        run: python3 tools/sync-version.py "${{ needs.verify.outputs.version }}"
       - name: Vendor core into the component (self-contained archive)
         if: ${{ env.IDF_COMPONENT_API_TOKEN != '' }}
         run: |
