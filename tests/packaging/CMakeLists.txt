@@ -11,7 +11,12 @@
 cmake_minimum_required(VERSION 3.16)
 project(libtracer_packaging_consumer LANGUAGES CXX)
 
-find_package(libtracer 0.3 REQUIRED)
+# Request the repo's own MAJOR.MINOR (the export ships SameMinorVersion
+# compatibility), read from VERSION so a release bump never breaks this fixture.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../../VERSION" _libtracer_version)
+string(STRIP "${_libtracer_version}" _libtracer_version)
+string(REGEX MATCH "^[0-9]+\\.[0-9]+" _libtracer_find_version "${_libtracer_version}")
+find_package(libtracer ${_libtracer_find_version} REQUIRED)
 
 add_executable(app main.cpp)
 target_link_libraries(app PRIVATE libtracer::libtracer)
