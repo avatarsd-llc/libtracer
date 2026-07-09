@@ -7,8 +7,10 @@
 
 namespace tr::mem {
 
-// heap_backend_t is defined in the header (mem_heap.hpp) so the module-set
-// destroy dispatch (backend_set.cpp, ADR-0047 §2) can see the concrete type.
+/**
+ * @brief heap_backend_t is defined in the header (mem_heap.hpp) so the module-set destroy dispatch
+ *        (backend_set.cpp, ADR-0047 §2) can see the concrete type.
+ */
 mem_backend_t& heap_backend() noexcept {
     static heap_backend_t backend;
     return backend;

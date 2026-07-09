@@ -1,9 +1,12 @@
-/*
+/**
+ * @file
+ * @brief RFC-0004 / ADR-0035 slice 3 — multi-hop FWD forwarding + zero-copy `src` accumulation,
+ *        proven over LIVE transport_ws links.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * RFC-0004 / ADR-0035 slice 3 — multi-hop FWD forwarding + zero-copy `src`
- * accumulation, proven over LIVE transport_ws links. A 3-party chain
+ * A 3-party chain
  *
  *     client  --ws-->  node A (forwarder)  --ws-->  node B (terminus)
  *
@@ -116,8 +119,12 @@ tr::view::view_t make_value(std::span<const std::byte> bytes) {
 
 std::uint8_t value_u8(const tlv_t& v) { return tr::detail::load_le<std::uint8_t>(v.payload); }
 
-// A bounded reply mailbox: the client's reply sink pushes the encoded REPLY here;
-// the test thread waits with a deadline. No fixed sleeps.
+/**
+ * @brief A bounded reply mailbox: the client's reply sink pushes the encoded REPLY here; the test
+ *        thread waits with a deadline.
+ *
+ * No fixed sleeps.
+ */
 struct mailbox_t {
     std::mutex m;
     std::condition_variable cv;
@@ -139,8 +146,10 @@ struct mailbox_t {
     }
 };
 
-// What B saw inbound for the last request — captured byte-exact for the
-// dst-shrink / src-grow assertion (guarded; B observes on its recv thread).
+/**
+ * @brief What B saw inbound for the last request — captured byte-exact for the dst-shrink / src-
+ *        grow assertion (guarded; B observes on its recv thread).
+ */
 struct observed_t {
     std::mutex m;
     std::vector<std::byte> dst;

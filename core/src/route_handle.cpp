@@ -151,8 +151,12 @@ std::size_t route_handle_t::egress_count() const {
 
 namespace {
 
-// A 2-byte little-endian VALUE TLV carrying a u16 label (the FIRST child of every
-// route-handle frame). Opaque (opt.PL=0), 2-byte length: 6 bytes on the wire.
+/**
+ * @brief A 2-byte little-endian VALUE TLV carrying a u16 label (the FIRST child of every route-
+ *        handle frame).
+ *
+ * Opaque (opt.PL=0), 2-byte length: 6 bytes on the wire.
+ */
 void emit_label(std::vector<std::byte>& out, std::uint16_t label) {
     std::array<std::byte, 2> p{};
     detail::store_le<std::uint16_t>(p, label);

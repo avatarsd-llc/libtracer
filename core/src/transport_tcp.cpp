@@ -25,23 +25,29 @@ namespace tr::net {
 
 namespace {
 
-// SIGPIPE would otherwise kill the process if the peer vanishes mid-write.
 #ifndef MSG_NOSIGNAL
+/** @brief SIGPIPE would otherwise kill the process if the peer vanishes mid-write. */
 constexpr int MSG_NOSIGNAL = 0;
 #endif
 
-// The u32-LE length prefix (transport framing) — the framer's, shared verbatim.
+/** @brief The u32-LE length prefix (transport framing) — the framer's, shared verbatim. */
 constexpr std::size_t kPrefixBytes = length_prefix_framer::kPrefixBytes;
 
-// Frames are small and latency-sensitive (a READ round-trip is two tiny records);
-// Nagle coalescing would serialize them behind ACKs.
+/**
+ * @brief Frames are small and latency-sensitive (a READ round-trip is two tiny records); Nagle
+ *        coalescing would serialize them behind ACKs.
+ */
 void set_nodelay(int fd) {
     const int one = 1;
     ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 }
 
-// Write the gathered iovec entries completely, resuming partial writes (a stream
-// write may stop anywhere). sendmsg for MSG_NOSIGNAL; `vec` is consumed (advanced).
+/**
+ * @brief Write the gathered iovec entries completely, resuming partial writes (a stream write may
+ *        stop anywhere).
+ *
+ * sendmsg for MSG_NOSIGNAL; `vec` is consumed (advanced).
+ */
 void writev_all(int fd, ::iovec* vec, std::size_t count) {
     if (fd < 0) return;
     while (count > 0) {

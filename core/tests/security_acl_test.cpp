@@ -1,12 +1,12 @@
-/*
+/**
+ * @file
+ * @brief security_acl unit test (ADR-0050) — drives the PURE ACL policy seam directly, no graph, no
+ *        locks, no wall clock: both adapters (allow_only / full), the ACE edge cases (expiry,
+ *        EVERYONE@, per-bit matching, INHERIT-flag filtering, first-match-per-bit DENY ordering),
+ *        and the typed parse/build round-trip that replaces the per-test byte builders.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
- *
- * security_acl unit test (ADR-0050) — drives the PURE ACL policy seam directly,
- * no graph, no locks, no wall clock: both adapters (allow_only / full), the ACE
- * edge cases (expiry, EVERYONE@, per-bit matching, INHERIT-flag filtering,
- * first-match-per-bit DENY ordering), and the typed parse/build round-trip that
- * replaces the per-test byte builders.
  */
 #include "libtracer/security_acl.hpp"
 

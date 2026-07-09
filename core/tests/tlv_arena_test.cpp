@@ -1,8 +1,11 @@
-/*
+/**
+ * @file
+ * @brief Terminus arena decoder test (ADR-0041).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Terminus arena decoder test (ADR-0041). Three pillars:
+ * Three pillars:
  *   (1) equivalence — for EVERY conformance vector under
  *       tests/conformance/vectors/v1/, decode() and decode_into() must agree
  *       node-for-node (type, opt, body bytes, structure) and error-for-error,
@@ -57,8 +60,10 @@ std::vector<std::byte> read_file(const fs::path& p) {
 
 // ---- equivalence: the arena and the tree decoder must agree ----------------
 
-// Compare one tlv_t subtree against the arena subtree rooted at `idx`; returns
-// one past the subtree (the node's `end`) or 0 on mismatch.
+/**
+ * @brief Compare one tlv_t subtree against the arena subtree rooted at `idx`; returns one past the
+ *        subtree (the node's `end`) or 0 on mismatch.
+ */
 std::uint32_t match_subtree(const tlv_t& t, const tlv_arena_t& a, std::uint32_t idx) {
     const arena_tlv_t& n = a[idx];
     if (n.type != t.type || n.opt != t.opt) return 0;
@@ -85,8 +90,10 @@ std::pmr::monotonic_buffer_resource fresh_heap_resource() {
     return std::pmr::monotonic_buffer_resource(std::pmr::get_default_resource());
 }
 
-// Run both decoders over `bytes`; check same accept/reject, same error, and —
-// on accept — node-for-node agreement.
+/**
+ * @brief Run both decoders over `bytes`; check same accept/reject, same error, and — on accept —
+ *        node-for-node agreement.
+ */
 bool equivalent(std::span<const std::byte> bytes, std::string_view label) {
     const auto tree = decode(bytes);
     auto mr = fresh_heap_resource();

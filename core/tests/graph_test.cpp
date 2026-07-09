@@ -1,8 +1,11 @@
-/*
+/**
+ * @file
+ * @brief L4 graph-runtime tests.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * L4 graph-runtime tests. M3a: path parse/canonicalize, the three vertex roles
+ * M3a: path parse/canonicalize, the three vertex roles
  * (stored-value, stream, handler), read/write/await, lock-free LKV clone-on-read,
  * and a multithreaded stress over a shared vertex. M3b: subscribe (callback +
  * spec-faithful target), field-write (:settings.*, :subscribers[]) + unsubscribe,
@@ -44,7 +47,7 @@ void check(bool ok, std::string_view what) {
     if (!ok) ++g_failures;
 }
 
-// A view_t over a fresh, owned heap segment holding `bytes`.
+/** @brief A view_t over a fresh, owned heap segment holding `bytes`. */
 tr::view::view_t make_value(std::span<const std::byte> bytes) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
     if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
@@ -229,13 +232,13 @@ void test_concurrent_stress() {
           "final read returns a valid 8-byte value");
 }
 
-// A VALUE TLV wrapping `payload` (01 00 <len> <payload>), as an owned view_t.
+/** @brief A VALUE TLV wrapping `payload` (01 00 <len> <payload>), as an owned view_t. */
 tr::view::view_t value_tlv(std::span<const std::byte> payload) {
     tr::wire::tlv_t t{.type = tr::wire::type_t::VALUE, .payload = payload};
     return make_value(tr::wire::encode(t));
 }
 
-// A SUBSCRIBER TLV naming a single-segment target path, as an owned view_t.
+/** @brief A SUBSCRIBER TLV naming a single-segment target path, as an owned view_t. */
 tr::view::view_t subscriber_tlv(std::string_view target_segment) {
     std::vector<std::byte> name_bytes;
     for (char c : target_segment)

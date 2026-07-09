@@ -35,8 +35,10 @@ using wire::tlv_t;
 using wire::type_t;
 namespace {
 
-// Emit a VALUE TLV holding a `width`-byte little-endian integer — the one bespoke
-// emitter for building a :schema POINT; NAME/SETTINGS/POINT use wire::emit_*.
+/**
+ * @brief Emit a VALUE TLV holding a `width`-byte little-endian integer — the one bespoke emitter
+ *        for building a :schema POINT; NAME/SETTINGS/POINT use wire::emit_*.
+ */
 void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
     std::vector<std::byte> payload(static_cast<std::size_t>(width));
     detail::store_le(payload, value, static_cast<std::size_t>(width));
@@ -46,7 +48,7 @@ void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
 // Canonical-key NAME navigation (last segment, parent, ancestor/child, level
 // split) lives in one locus: tr::wire::key_view_t (key_view.hpp).
 
-// Absolute wall-clock ns since the UNIX epoch — the ACE `expires_ns` reference clock.
+/** @brief Absolute wall-clock ns since the UNIX epoch — the ACE `expires_ns` reference clock. */
 [[nodiscard]] std::uint64_t now_ns() {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                           std::chrono::system_clock::now().time_since_epoch())
@@ -60,28 +62,38 @@ void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
 // The graph keeps only the ancestor walk (inside the lazy per-vertex cache
 // rebuild) and the subtree-precise invalidation below.
 
-// True iff the node's opt byte carries no trailer bits. A branch write (RFC-0005)
-// stores refcount subviews of the written frame, so a trailer inside the tree
-// cannot be sliced off without a copy — trailer-carrying nodes are rejected
-// (TYPE_MISMATCH), keeping stored values trailer-less at rest (ADR-0041 §4).
+/**
+ * @brief True iff the node's opt byte carries no trailer bits.
+ *
+ * A branch write (RFC-0005)
+ * stores refcount subviews of the written frame, so a trailer inside the tree
+ * cannot be sliced off without a copy — trailer-carrying nodes are rejected
+ * (TYPE_MISMATCH), keeping stored values trailer-less at rest (ADR-0041 §4).
+ */
 [[nodiscard]] bool trailer_less(const wire::arena_tlv_t& node) noexcept {
     const opt_t& o = node.opt;
     return !o.ts && !o.cr && !o.cw && !o.tf;
 }
 
-// The subview of `frame_view` covering `span` — a refcount bump on the written
-// frame's segment, never a byte copy (RFC-0005 §decomposition). Precondition:
-// `span` points into `frame_view.bytes()` (it is an arena span over that frame).
+/**
+ * @brief The subview of `frame_view` covering `span` — a refcount bump on the written frame's
+ *        segment, never a byte copy (RFC-0005 §decomposition).
+ *
+ * Precondition:
+ * `span` points into `frame_view.bytes()` (it is an arena span over that frame).
+ */
 [[nodiscard]] view_t slice_of(const view_t& frame_view, std::span<const std::byte> span) {
     const std::size_t off = static_cast<std::size_t>(span.data() - frame_view.bytes().data());
     return frame_view.subview(off, span.size());
 }
 
-// One landing site of a branch write (RFC-0005): the vertex key, the VALUE slice
-// that lands there (empty when the node carries no value of its own), and the
-// slice this vertex's subscribers are notified with (the VALUE for a leaf node,
-// the node's whole POINT subtree for an interior node — the smallest subview
-// covering every write at-or-below the subscription point).
+/**
+ * @brief One landing site of a branch write (RFC-0005): the vertex key, the VALUE slice that lands
+ *        there (empty when the node carries no value of its own), and the slice this vertex's
+ *        subscribers are notified with (the VALUE for a leaf node, the node's whole POINT subtree
+ *        for an interior node — the smallest subview covering every write at-or-below the
+ *        subscription point).
+ */
 struct branch_node_t {
     std::vector<std::byte> key;
     view_t store{};
@@ -176,11 +188,13 @@ struct branch_node_t {
     }
 }
 
-// One Composite child record of `key` starting at `i` (ADR-0057 decomposition): the end
-// of the well-framed NAME record at `i`, EXTENDED to the key's end when the record itself
-// or the remainder after it is ragged — mirroring key_view_t::parent()'s framing (a ragged
-// tail glues onto the last well-framed record), so tree decomposition and byte navigation
-// (ancestor keys, bubbling order) agree even on malformed register_vertex_key blobs.
+/**
+ * @brief One Composite child record of `key` starting at `i` (ADR-0057 decomposition): the end of
+ *        the well-framed NAME record at `i`, EXTENDED to the key's end when the record itself or
+ *        the remainder after it is ragged — mirroring key_view_t::parent()'s framing (a ragged tail
+ *        glues onto the last well-framed record), so tree decomposition and byte navigation
+ *        (ancestor keys, bubbling order) agree even on malformed register_vertex_key blobs.
+ */
 [[nodiscard]] std::size_t segment_end(std::span<const std::byte> key, std::size_t i) noexcept {
     const auto record_end = [&key](std::size_t p) noexcept -> std::size_t {  // 0 => ragged
         if (p + 4 > key.size()) return 0;
@@ -467,10 +481,12 @@ void graph_t::dispatch_edge_remote(const edge_view_t& e, const rope_t& value) {
         value);
 }
 
-// `inline` (linkage no-op for a single-TU member; an inliner hint): the wide fan-out
-// loop's per-edge cost is this function's body, so it must stay inlined in that loop —
-// the target/remote legs live in the two helpers above precisely to keep this body's
-// inline estimate small (the callback leg is the in-process hot case).
+/**
+ * @brief `inline` (linkage no-op for a single-TU member; an inliner hint): the wide fan-out loop's
+ *        per-edge cost is this function's body, so it must stay inlined in that loop — the
+ *        target/remote legs live in the two helpers above precisely to keep this body's inline
+ *        estimate small (the callback leg is the in-process hot case).
+ */
 inline void graph_t::dispatch_edge(const edge_view_t& e, const rope_t& value, int depth) {
     // The ONE dispatch of a subscription edge's three legs — shared by the per-write
     // fan_out and the admission durability latch (ADR-0049), so the legs cannot diverge.
@@ -527,11 +543,15 @@ void graph_t::bubble_up(vertex_t* v, const rope_t& value, int depth) {
 }
 
 namespace {
-// A branch write: a POINT payload (type 0x07, opt.PL=1) written to a value vertex
-// decomposes across descendants (RFC-0005 §decomposition); anything else — VALUE,
-// user-range records, other structured TLVs — stores as-is. The header sits at the
-// start of the first link (a decomposable POINT is contiguous); a device-memory link
-// is never dereferenced (and never decomposes).
+/**
+ * @brief A branch write: a POINT payload (type 0x07, opt.PL=1) written to a value vertex decomposes
+ *        across descendants (RFC-0005 §decomposition); anything else — VALUE, user-range records,
+ *        other structured TLVs — stores as-is.
+ *
+ * The header sits at the
+ * start of the first link (a decomposable POINT is contiguous); a device-memory link
+ * is never dereferenced (and never decomposes).
+ */
 [[nodiscard]] bool is_branch_point(const rope_t& value, role_t role) {
     if (role == role_t::HANDLER || value.link_count() < 1 || !value.links()[0].is_host())
         return false;
@@ -818,13 +838,17 @@ result_t<std::vector<rope_t>> graph_t::history(vertex_handle_t vh) const {
 
 namespace {
 
-// Parse a SUBSCRIBER TLV into slot fields — the ONE parse every admission door shares
-// (ADR-0049; the resolver's parallel subscriber_compact() parse is retired). Extracts
-// the first PATH child's target key (may stay empty — the wire door ignores it) and
-// the optional qos_settings `delivery_compact` opt-in (NAME "delivery_compact" VALUE
-// u8, RFC-0004 §E.1 / docs/reference/05). Back-compat: a SUBSCRIBER without it (or an
-// older parser) just keeps the full-route delivery path — existing conformance vectors
-// unaffected.
+/**
+ * @brief Parse a SUBSCRIBER TLV into slot fields — the ONE parse every admission door shares
+ *        (ADR-0049; the resolver's parallel subscriber_compact() parse is retired).
+ *
+ * Extracts
+ * the first PATH child's target key (may stay empty — the wire door ignores it) and
+ * the optional qos_settings `delivery_compact` opt-in (NAME "delivery_compact" VALUE
+ * u8, RFC-0004 §E.1 / docs/reference/05). Back-compat: a SUBSCRIBER without it (or an
+ * older parser) just keeps the full-route delivery path — existing conformance vectors
+ * unaffected.
+ */
 void parse_subscriber_tlv(const tlv_t& sub, subscriber_t& s) {
     for (const tlv_t& child : sub.children) {
         if (child.type == type_t::PATH && s.target_key.empty()) {

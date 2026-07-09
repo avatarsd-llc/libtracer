@@ -1,8 +1,11 @@
-/*
+/**
+ * @file
+ * @brief The built-in `tcp` transport-factory registration.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * The built-in `tcp` transport-factory registration. Compiled only when the
+ * Compiled only when the
  * LIBTRACER_TRANSPORT_TCP module option (and the net plane) is ON; the full-node /
  * generated register_builtin_transports() calls register_tcp_transport only then, so a
  * TCP-less build carries no reference to tcp_transport_t. See builtin_transports.hpp.

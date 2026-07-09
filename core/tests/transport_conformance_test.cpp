@@ -1,8 +1,11 @@
-/*
+/**
+ * @file
+ * @brief Transport seam-conformance suite.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Transport seam-conformance suite. The `transport_t` contract — send/receive
+ * The `transport_t` contract — send/receive
  * delivery, byte-identity, scatter-gather gather-send, bidirectional delivery,
  * multi-frame delivery, and the ADR-0042 owning-view seam — was re-proved bespoke
  * in each per-transport *_test.cpp. This drives ONE parameterized contract body
@@ -54,8 +57,10 @@ bytes_t frame_of(std::initializer_list<std::uint8_t> bytes) {
     return v;
 }
 
-// A thread-safe sink that records each delivered frame's bytes and lets a test
-// wait for an expected count (delivery lands on the transport's recv thread).
+/**
+ * @brief A thread-safe sink that records each delivered frame's bytes and lets a test wait for an
+ *        expected count (delivery lands on the transport's recv thread).
+ */
 struct collector_t {
     std::mutex m;
     std::condition_variable cv;
@@ -86,9 +91,13 @@ struct collector_t {
     }
 };
 
-// The ADR-0042 owning-view seam's capture state (a rope receiver holds an OWNING
-// view past the callback). Like @ref collector_t it must outlive the pair whose
-// recv thread delivers into it.
+/**
+ * @brief The ADR-0042 owning-view seam's capture state (a rope receiver holds an OWNING view past
+ *        the callback).
+ *
+ * Like @ref collector_t it must outlive the pair whose
+ * recv thread delivers into it.
+ */
 struct owning_capture_t {
     std::mutex m;
     std::condition_variable cv;
@@ -132,8 +141,10 @@ struct udp_pair {
 };
 
 struct tcp_pair {
-    // Declaration order = construction order: the listener binds first, then the
-    // dialer's synchronous connect completes the link.
+    /**
+     * @brief Declaration order = construction order: the listener binds first, then the dialer's
+     *        synchronous connect completes the link.
+     */
     tr::net::tcp_transport_t listener_{47211};
     tr::net::tcp_transport_t dialer_{"127.0.0.1", 47211};
     [[nodiscard]] bool ok() const { return listener_.ok() && dialer_.ok(); }
@@ -144,7 +155,7 @@ struct tcp_pair {
 
 struct ws_pair {
     tr::net::transport_ws_server server_{47221};
-    tr::net::transport_ws_client client_{"127.0.0.1", 47221};  // handshake in the ctor
+    tr::net::transport_ws_client client_{"127.0.0.1", 47221}; /**< handshake in the ctor */
     [[nodiscard]] bool ok() const { return server_.ok() && client_.ok(); }
     [[nodiscard]] transport_t& a() { return client_; }
     [[nodiscard]] transport_t& b() { return server_; }

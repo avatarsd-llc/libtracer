@@ -1,9 +1,12 @@
-/*
+/**
+ * @file
+ * @brief #55 (increment 2) — transport_can SocketCAN-binding tests over an in-memory fake link, so
+ *        they pass in plain Docker with NO kernel CAN (vcan).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * #55 (increment 2) — transport_can SocketCAN-binding tests over an in-memory
- * fake link, so they pass in plain Docker with NO kernel CAN (vcan). A
+ * A
  * fake_can_bus_t wires two (or three) fake_link_t endpoints; each endpoint drains
  * its inbound queue on a worker thread, so the transport's receive path is genuinely
  * cross-thread (TSan-meaningful), mirroring socketcan_link_t's real recv thread.
@@ -140,7 +143,7 @@ void fake_can_bus_t::broadcast(fake_link_t* from, const tr::net::can_frame_data_
     }
 }
 
-// A passive endpoint that records every frame it sees on the bus (a sniffer).
+/** @brief A passive endpoint that records every frame it sees on the bus (a sniffer). */
 class frame_tap_t {
    public:
     explicit frame_tap_t(fake_can_bus_t& bus) : link_(bus) {
@@ -153,8 +156,10 @@ class frame_tap_t {
         const std::lock_guard lock(m_);
         return frames_;
     }
-    // Poll until at least `n` frames have been recorded (the tap drains on its own
-    // worker thread, so it may lag the data path that already delivered).
+    /**
+     * @brief Poll until at least `n` frames have been recorded (the tap drains on its own worker
+     *        thread, so it may lag the data path that already delivered).
+     */
     void wait_for_count(std::size_t n, std::chrono::milliseconds budget) {
         const auto deadline = std::chrono::steady_clock::now() + budget;
         while (std::chrono::steady_clock::now() < deadline) {
@@ -172,7 +177,7 @@ class frame_tap_t {
     std::vector<tr::net::can_frame_data_t> frames_;
 };
 
-// A receiver sink that captures delivered frames for the test thread.
+/** @brief A receiver sink that captures delivered frames for the test thread. */
 class sink_t {
    public:
     void on(std::span<const std::byte> f) {
@@ -181,7 +186,7 @@ class sink_t {
         ++count_;
         cv_.notify_all();
     }
-    // Wait until at least `n` frames have been delivered (or the deadline passes).
+    /** @brief Wait until at least `n` frames have been delivered (or the deadline passes). */
     bool wait_for_count(std::size_t n, std::chrono::milliseconds budget) {
         std::unique_lock lock(m_);
         return cv_.wait_for(lock, budget, [&] { return count_ >= n; });
@@ -347,7 +352,7 @@ void test_lifecycle() {
     check(true, "8 construct/send/destruct cycles completed without crash");
 }
 
-// A single-frame value should also self-deliver via its advertise (slice_count 1).
+/** @brief A single-frame value should also self-deliver via its advertise (slice_count 1). */
 void test_single_value() {
     std::printf("transport_can single value (one frame):\n");
     fake_can_bus_t bus;
@@ -368,9 +373,11 @@ void test_single_value() {
 
 }  // namespace
 
-// ADR-0053 §5: the owning peer-named sink receives the reassembled group AS THE
-// ROPE IT ALREADY IS — one link per slice, CAN-FD DLC padding trimmed by
-// SHORTENING the tail link (never a flatten), bytes byte-exact, zero-copy.
+/**
+ * @brief ADR-0053 §5: the owning peer-named sink receives the reassembled group AS THE ROPE IT
+ *        ALREADY IS — one link per slice, CAN-FD DLC padding trimmed by SHORTENING the tail link
+ *        (never a flatten), bytes byte-exact, zero-copy.
+ */
 void test_rope_delivery() {
     std::printf("transport_can owning rope delivery (ADR-0053):\n");
 

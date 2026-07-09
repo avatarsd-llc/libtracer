@@ -15,19 +15,23 @@ using wire::opt_t;
 using wire::type_t;
 namespace {
 
-// reference/03 §Reserved characters: a NAME segment MUST NOT contain `/ : . [ ] *`
-// or the reserved-for-future `?`, rejected with INVALID_PATH. `/` and `:` are
-// separators (stripped before this runs) and are kept in the set defensively.
-// `[` / `]` are deliberately NOT rejected here: they delimit an address index
-// suffix (`/camera/frame[7]`, reference/03 §Index forms / ADR-0008), and address-
-// segment index parsing is not yet implemented — rejecting brackets would break
-// that documented form. So this enforces the unambiguous subset (`. * ?`) now;
-// bracket handling lands with address-index parsing.
+/**
+ * @brief reference/03 §Reserved characters: a NAME segment MUST NOT contain `/ : . [ ] *`
+ *        or the reserved-for-future `?`, rejected with INVALID_PATH.
+ *
+ * `/` and `:` are
+ * separators (stripped before this runs) and are kept in the set defensively.
+ * `[` / `]` are deliberately NOT rejected here: they delimit an address index
+ * suffix (`/camera/frame[7]`, reference/03 §Index forms / ADR-0008), and address-
+ * segment index parsing is not yet implemented — rejecting brackets would break
+ * that documented form. So this enforces the unambiguous subset (`. * ?`) now;
+ * bracket handling lands with address-index parsing.
+ */
 [[nodiscard]] bool has_reserved_char(std::string_view seg) noexcept {
     return seg.find_first_of("/:.*?") != std::string_view::npos;
 }
 
-// Parse one field step: "name", "name[3]", or "name[]".
+/** @brief Parse one field step: "name", "name[3]", or "name[]". */
 [[nodiscard]] result_t<field_step_t> parse_step(std::string_view step) {
     field_step_t fs;
     const std::size_t br = step.find('[');
@@ -111,12 +115,16 @@ result_t<path_t> path_t::parse(std::string_view text) {
 }
 
 namespace {
-// FNV-1a 64-bit over the canonical payload bytes. The 64-bit offset basis and prime
-// can't live in a std::size_t on a 32-bit target (std::size_t is unsigned int on
-// RISC-V MCUs), so accumulate in std::uint64_t and narrow to std::size_t for the
-// bucket index via an explicit cast — the 64-bit state keeps the avalanche, and the
-// cast avoids -Woverflow (GCC 15, newly strict) on 32-bit. The owned-key and by-span
-// hashers share this so a heterogeneous lookup hashes identically to the stored key.
+/**
+ * @brief FNV-1a 64-bit over the canonical payload bytes.
+ *
+ * The 64-bit offset basis and prime
+ * can't live in a std::size_t on a 32-bit target (std::size_t is unsigned int on
+ * RISC-V MCUs), so accumulate in std::uint64_t and narrow to std::size_t for the
+ * bucket index via an explicit cast — the 64-bit state keeps the avalanche, and the
+ * cast avoids -Woverflow (GCC 15, newly strict) on 32-bit. The owned-key and by-span
+ * hashers share this so a heterogeneous lookup hashes identically to the stored key.
+ */
 [[nodiscard]] std::size_t fnv1a_key(std::span<const std::byte> bytes) noexcept {
     std::uint64_t h = 1469598103934665603ull;
     for (std::byte b : bytes) {

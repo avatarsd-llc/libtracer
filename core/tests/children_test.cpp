@@ -1,9 +1,12 @@
-/*
+/**
+ * @file
+ * @brief #82 — in-band vertex creation via a `:children[]` SPEC write (ADR-0017, ADR-0021;
+ *        docs/reference/05 §0x0E).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * #82 — in-band vertex creation via a `:children[]` SPEC write (ADR-0017, ADR-0021;
- * docs/reference/05 §0x0E). A SPEC{ type, name, config? } appended to a parent's
+ * A SPEC{ type, name, config? } appended to a parent's
  * `:children[]` instantiates a child of a device-catalog type. Covers: create +
  * resolve the child, the built-in `stored_value` type, an unknown type =>
  * SCHEMA_NOT_FOUND, a duplicate name => PATH_IN_USE, a non-SPEC value =>
@@ -39,14 +42,14 @@ void check(bool ok, std::string_view what) {
     if (!ok) ++g_failures;
 }
 
-// A view_t over fresh owned bytes.
+/** @brief A view_t over fresh owned bytes. */
 view_t owned(std::span<const std::byte> bytes) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
     if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
     return view_t::over(std::move(seg));
 }
 
-// Build a SPEC{ NAME "type" <type>, NAME "name" <name> } as an owned VALUE view.
+/** @brief Build a SPEC{ NAME "type" <type>, NAME "name" <name> } as an owned VALUE view. */
 view_t spec(std::string_view type, std::string_view name) {
     std::vector<std::byte> body;
     tr::wire::emit_name(body, "type");
@@ -58,7 +61,7 @@ view_t spec(std::string_view type, std::string_view name) {
     return owned(out);
 }
 
-// A bare VALUE TLV (not a SPEC) — for the TYPE_MISMATCH case.
+/** @brief A bare VALUE TLV (not a SPEC) — for the TYPE_MISMATCH case. */
 view_t bare_value() {
     std::vector<std::byte> out;
     const std::byte b{0x2A};

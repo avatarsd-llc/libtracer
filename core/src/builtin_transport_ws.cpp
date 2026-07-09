@@ -1,8 +1,11 @@
-/*
+/**
+ * @file
+ * @brief The built-in `ws` transport-factory registration.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * The built-in `ws` transport-factory registration. Compiled only when the
+ * Compiled only when the
  * LIBTRACER_TRANSPORT_WS module option (and the net plane) is ON; the full-node /
  * generated register_builtin_transports() calls register_ws_transport only then, so a
  * WS-less build carries no reference to the ws transports. See builtin_transports.hpp.

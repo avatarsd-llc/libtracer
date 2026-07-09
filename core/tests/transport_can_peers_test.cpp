@@ -1,9 +1,10 @@
-/*
+/**
+ * @file
+ * @brief ADR-0044 — stateless transport-peer enumeration + transparent per-peer FWD over the CAN
+ *        bus binding, proven over the in-memory fake link (no kernel CAN):
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
- *
- * ADR-0044 — stateless transport-peer enumeration + transparent per-peer FWD over
- * the CAN bus binding, proven over the in-memory fake link (no kernel CAN):
  *
  *     client --loopback--> transit T (node 1) --CAN bus--> peer P (node 5)
  *                                             \--(same bus)-- bystander Q (node 7)
@@ -180,8 +181,10 @@ std::vector<std::byte> b_value_u32(std::uint32_t v) {
     return out;
 }
 
-// A FIELD selector for the whole-array ":children[]" (RFC-0004 §C: NAME +
-// index_mode VALUE u8 = ELEMENT with no index — the append/whole-array form).
+/**
+ * @brief A FIELD selector for the whole-array ":children[]" (RFC-0004 §C: NAME + index_mode VALUE
+ *        u8 = ELEMENT with no index — the append/whole-array form).
+ */
 std::vector<std::byte> b_field_children() {
     std::vector<std::byte> body;
     tr::wire::emit_name(body, "children");
@@ -212,7 +215,7 @@ view_t owned(std::span<const std::byte> bytes) {
     return view_t::over(std::move(seg));
 }
 
-// SPEC{ type, name } with no config — the provide_link-staged connection form.
+/** @brief SPEC{ type, name } with no config — the provide_link-staged connection form. */
 view_t conn_spec(std::string_view type, std::string_view name) {
     std::vector<std::byte> body;
     tr::wire::emit_name(body, "type");
@@ -224,7 +227,7 @@ view_t conn_spec(std::string_view type, std::string_view name) {
     return owned(out);
 }
 
-// The peer names inside a members POINT (POINT{ POINT{NAME}... }) view/TLV.
+/** @brief The peer names inside a members POINT (POINT{ POINT{NAME}... }) view/TLV. */
 std::set<std::string> member_names(const tlv_t& point) {
     std::set<std::string> names;
     for (const tlv_t& m : point.children) {
@@ -243,8 +246,10 @@ std::set<std::string> enumerate_local(graph_t& g, const char* path) {
     return member_names(*dec);
 }
 
-// Poll until `pred` holds (the enumeration is fed by live announce traffic on
-// worker threads) — deadline-bounded, no fixed sleeps on the success path.
+/**
+ * @brief Poll until `pred` holds (the enumeration is fed by live announce traffic on worker
+ *        threads) — deadline-bounded, no fixed sleeps on the success path.
+ */
 template <typename Pred>
 bool wait_until(Pred pred, std::chrono::milliseconds budget) {
     const auto deadline = std::chrono::steady_clock::now() + budget;
@@ -255,7 +260,7 @@ bool wait_until(Pred pred, std::chrono::milliseconds budget) {
     return pred();
 }
 
-// A bounded reply mailbox for the raw loopback client.
+/** @brief A bounded reply mailbox for the raw loopback client. */
 struct mailbox_t {
     std::mutex m;
     std::condition_variable cv;

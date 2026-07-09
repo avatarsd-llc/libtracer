@@ -10,8 +10,10 @@
 
 namespace tr::mem {
 
-// The sanctioned L0↔L1 boundary type (docs/adr/0016 §2): a backend constructs
-// and reclaims segments, so it names this one `tr::view` symbol.
+/**
+ * @brief The sanctioned L0↔L1 boundary type (docs/adr/0016 §2): a backend constructs and reclaims
+ *        segments, so it names this one `tr::view` symbol.
+ */
 using view::segment_t;
 
 namespace {

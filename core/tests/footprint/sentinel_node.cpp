@@ -1,12 +1,14 @@
-/*
+/**
+ * @file
+ * @brief The Cortex-M0 footprint sentinel's fixed workload — the "required modules" a minimum-
+ *        feature (P0) libtracer node links: the L0/L1 substrate (bounded pool backend +
+ *        segment/view/rope), the L2/L3 wire codec (frame encode/decode plus the ADR-0041 terminus
+ *        arena decode), and L4 addressing (canonical PATH validation).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * The Cortex-M0 footprint sentinel's fixed workload — the "required modules" a
- * minimum-feature (P0) libtracer node links: the L0/L1 substrate (bounded pool
- * backend + segment/view/rope), the L2/L3 wire codec (frame encode/decode plus
- * the ADR-0041 terminus arena decode), and L4 addressing (canonical PATH
- * validation). No graph runtime, no transports, no threads — the surface
+ * No graph runtime, no transports, no threads — the surface
  * docs/spec/v1.md §3.1 guarantees an MCU can carry.
  *
  * This is a *fixture*, not a demo: it is cross-compiled bare-metal
@@ -37,10 +39,10 @@
 
 namespace {
 
-// The MCU backend of record (ADR-0016): a caller-owned static slab, no heap.
+/** @brief The MCU backend of record (ADR-0016): a caller-owned static slab, no heap. */
 alignas(std::max_align_t) std::array<std::byte, 4096> g_slab{};
 
-// Fold bytes into an accumulator so the optimizer cannot elide the work above.
+/** @brief Fold bytes into an accumulator so the optimizer cannot elide the work above. */
 std::uint32_t fold(std::uint32_t acc, std::span<const std::byte> bytes) noexcept {
     for (const std::byte b : bytes) acc = acc * 131u + static_cast<std::uint8_t>(b);
     return acc;

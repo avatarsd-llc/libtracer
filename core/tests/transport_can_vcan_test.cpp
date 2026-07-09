@@ -1,8 +1,10 @@
-/*
+/**
+ * @file
+ * @brief #55 (increment 2) — REAL-bus smoke test for transport_can over Linux SocketCAN.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * #55 (increment 2) — REAL-bus smoke test for transport_can over Linux SocketCAN.
  * It drives two transport_can instances over an actual `vcan0` virtual CAN device
  * via socketcan_link_t (the genuine PF_CAN / SOCK_RAW path) and asserts a byte-exact
  * frame round-trips each way.

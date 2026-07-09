@@ -1,9 +1,11 @@
-/*
+/**
+ * @file
+ * @brief socketcan_link_t — the Linux `PF_CAN`/`SOCK_RAW` implementation of the `can_link_t` seam.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * socketcan_link_t — the Linux `PF_CAN`/`SOCK_RAW` implementation of the
- * `can_link_t` seam. This TU is Linux-ONLY and is selected by the build system
+ * This TU is Linux-ONLY and is selected by the build system
  * (core/CMakeLists.txt compiles it when CMAKE_SYSTEM_NAME is Linux; every other
  * platform compiles src/socketcan_link_stub.cpp instead). No in-source #ifdefs:
  * platform selection is a build-system concern, per the no-feature-macro ruling.
