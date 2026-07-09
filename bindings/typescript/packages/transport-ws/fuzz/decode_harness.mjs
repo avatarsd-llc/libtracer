@@ -1,24 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-//
-// ws differential-fuzz harness (#60 / hardening) — the TypeScript side of the RFC
-// 6455 WebSocket frame-decoder differential fuzzer. The twin of the C++
-// core/tests/ws_fuzz_harness.cpp: it reads one hex-encoded frame per stdin line
-// and prints the BYTE-IDENTICAL canonical decode result, so
-// tests/conformance/ws_diff_fuzz.py can compare the two cores line-for-line.
-//
-// Contract (one deterministic line of stdout per stdin line):
-//   - OK\t<opcode>\t<fin>\t<consumed>\t<payload-hex>  on a full decode, where
-//     <opcode> is the raw 4-bit opcode (decimal), <fin> is 0/1, <consumed> is the
-//     bytes consumed from the front of the buffer, and <payload-hex> is the
-//     unmasked payload as lowercase hex (empty for a zero-length payload);
-//   - NEED_MORE                                        on decodeFrame() -> null
-//     (truncated header/length/mask/payload, or a 64-bit over-long length on a
-//     short buffer);
-//   - ERR:<reason>                                     on a non-hex / empty line.
-//
-// Imports the compiled codec from dist/ (run `npm run build` first), matching the
-// other transport-ws tests which import from ../dist/ws.js.
+
+/**
+ * @brief ws differential-fuzz harness (#60 / hardening) — the TypeScript side
+ * of the RFC 6455 WebSocket frame-decoder differential fuzzer.
+ *
+ * The twin of the C++ core/tests/ws_fuzz_harness.cpp: it reads one hex-encoded
+ * frame per stdin line and prints the BYTE-IDENTICAL canonical decode result,
+ * so tests/conformance/ws_diff_fuzz.py can compare the two cores line-for-line.
+ *
+ * Contract (one deterministic line of stdout per stdin line):
+ *   - OK\t<opcode>\t<fin>\t<consumed>\t<payload-hex>  on a full decode, where
+ *     <opcode> is the raw 4-bit opcode (decimal), <fin> is 0/1, <consumed> is the
+ *     bytes consumed from the front of the buffer, and <payload-hex> is the
+ *     unmasked payload as lowercase hex (empty for a zero-length payload);
+ *   - NEED_MORE                                        on decodeFrame() -> null
+ *     (truncated header/length/mask/payload, or a 64-bit over-long length on a
+ *     short buffer);
+ *   - ERR:<reason>                                     on a non-hex / empty line.
+ *
+ * Imports the compiled codec from dist/ (run `npm run build` first), matching the
+ * other transport-ws tests which import from ../dist/ws.js.
+ */
 
 import { decodeFrame } from '../dist/ws.js';
 

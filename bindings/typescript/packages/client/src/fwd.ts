@@ -1,25 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
-// FWD (0x0F) / FIELD (0x10) builders + decoder for the libtracer client SDK
-// (#56, RFC-0004, ADR-0034/0035). RFC-0004 §3 pins the remote-operation envelope
-// the conservative ADR-0034 slice deferred: a self-describing FWD frame carries a
-// `read`/`write`/`await`/`subscribe` to a path-as-route, and a FWD{REPLY} routes
-// the result back. These builders produce the EXACT bytes the shared conformance
-// vectors pin (`tests/conformance/vectors/v1/fwd/`, `.../field/`) via the
-// cross-validated core codec — nothing here invents wire structure.
-//
-// Child order (RFC-0004 §B): op, dst (PATH), FIELD? selector, src (PATH), then
-//   - REPLY:  kind (VALUE u8), payload?
-//   - WRITE:  payload?
-//   - AWAIT:  await_timeout? (VALUE u64 ns)
-//   - READ :  nothing
+/**
+ * @brief FWD (0x0F) / FIELD (0x10) builders + decoder for the libtracer client
+ * SDK (#56, RFC-0004, ADR-0034/0035).
+ *
+ * RFC-0004 §3 pins the remote-operation envelope the conservative ADR-0034
+ * slice deferred: a self-describing FWD frame carries a
+ * `read`/`write`/`await`/`subscribe` to a path-as-route, and a FWD{REPLY}
+ * routes the result back. These builders produce the EXACT bytes the shared
+ * conformance vectors pin (`tests/conformance/vectors/v1/fwd/`, `.../field/`)
+ * via the cross-validated core codec — nothing here invents wire structure.
+ *
+ * Child order (RFC-0004 §B): op, dst (PATH), FIELD? selector, src (PATH), then
+ *   - REPLY:  kind (VALUE u8), payload?
+ *   - WRITE:  payload?
+ *   - AWAIT:  await_timeout? (VALUE u64 ns)
+ *   - READ :  nothing
+ */
 
 import { TYPE, encode, decode } from '@avatarsd-llc/libtracer';
 import type { Opt, Tlv } from '@avatarsd-llc/libtracer';
 import { opt, pathTlv, nameTlv } from './tlv.js';
 
-/** FWD `op` discriminant (RFC-0004 §B — the first child, a VALUE u8). */
+/** @brief FWD `op` discriminant (RFC-0004 §B — the first child, a VALUE u8). */
 export const FWD_OP = Object.freeze({
   READ: 0,
   WRITE: 1,
@@ -27,40 +31,44 @@ export const FWD_OP = Object.freeze({
   REPLY: 3,
 } as const);
 
-/** FWD{REPLY} `kind` discriminant (RFC-0004 §D — a VALUE u8 after `src`). */
+/** @brief FWD{REPLY} `kind` discriminant (RFC-0004 §D — a VALUE u8 after `src`). */
 export const FWD_KIND = Object.freeze({
   RESULT: 0,
   ERROR: 1,
 } as const);
 
 /**
- * Registered wire ERROR codes for a `kind=ERROR` reply's
+ * @brief Registered wire ERROR codes for a `kind=ERROR` reply's
  * `STATUS{ ERROR{ VALUE u16 } }` payload (RFC-0002 §D registry — the u16 LE
- * identity of each built-in `tr::…` error path). Mirrors the C++ reference
- * `error.hpp` registry / `op_resolve.cpp` `error_code()` map.
+ * identity of each built-in `tr::…` error path).
+ *
+ * Mirrors the C++ reference `error.hpp` registry / `op_resolve.cpp`
+ * `error_code()` map.
  */
 export const FWD_ERROR = Object.freeze({
-  FRAME_TRUNCATED: 0x0001, // tr::frame::truncated
-  FRAME_INVALID: 0x0002, // tr::frame::invalid
-  FRAME_CRC_FAIL: 0x0003, // tr::frame::crc_fail
-  TLV_NESTING_TOO_DEEP: 0x0010, // tr::tlv::nesting_too_deep
-  NOT_FOUND: 0x0020, // tr::path::not_found
-  INVALID_PATH: 0x0021, // tr::path::invalid
-  PATH_IN_USE: 0x0022, // tr::path::in_use
-  TYPE_MISMATCH: 0x0030, // tr::schema::type_mismatch
-  SCHEMA_NOT_FOUND: 0x0031, // tr::schema::not_found
-  BACKPRESSURE: 0x0040, // tr::flow::backpressure
-  TIMEOUT: 0x0041, // tr::flow::timeout
-  ADDRESS_SHIFT_GAP: 0x0042, // tr::flow::address_shift_gap
-  PERMISSION_DENIED: 0x0050, // tr::access::denied
-  TRANSPORT_DOWN: 0x0060, // tr::transport::down
-  VERSION_MISMATCH: 0x0070, // tr::version::mismatch
+  FRAME_TRUNCATED: 0x0001 /**< @brief tr::frame::truncated */,
+  FRAME_INVALID: 0x0002 /**< @brief tr::frame::invalid */,
+  FRAME_CRC_FAIL: 0x0003 /**< @brief tr::frame::crc_fail */,
+  TLV_NESTING_TOO_DEEP: 0x0010 /**< @brief tr::tlv::nesting_too_deep */,
+  NOT_FOUND: 0x0020 /**< @brief tr::path::not_found */,
+  INVALID_PATH: 0x0021 /**< @brief tr::path::invalid */,
+  PATH_IN_USE: 0x0022 /**< @brief tr::path::in_use */,
+  TYPE_MISMATCH: 0x0030 /**< @brief tr::schema::type_mismatch */,
+  SCHEMA_NOT_FOUND: 0x0031 /**< @brief tr::schema::not_found */,
+  BACKPRESSURE: 0x0040 /**< @brief tr::flow::backpressure */,
+  TIMEOUT: 0x0041 /**< @brief tr::flow::timeout */,
+  ADDRESS_SHIFT_GAP: 0x0042 /**< @brief tr::flow::address_shift_gap */,
+  PERMISSION_DENIED: 0x0050 /**< @brief tr::access::denied */,
+  TRANSPORT_DOWN: 0x0060 /**< @brief tr::transport::down */,
+  VERSION_MISMATCH: 0x0070 /**< @brief tr::version::mismatch */,
 } as const);
 
 /**
- * The canonical `tr::<concept>::<error>` namespace path of each registered code
- * (RFC-0002 §A/§D) — the string identity a NAME-form ERROR carries. Mirrors the
- * C++ reference `error.hpp` `err_path()`.
+ * @brief The canonical `tr::<concept>::<error>` namespace path of each
+ * registered code (RFC-0002 §A/§D) — the string identity a NAME-form ERROR
+ * carries.
+ *
+ * Mirrors the C++ reference `error.hpp` `err_path()`.
  */
 export const FWD_ERROR_PATH: Readonly<Record<number, string>> = Object.freeze({
   [FWD_ERROR.FRAME_TRUNCATED]: 'tr::frame::truncated',
@@ -88,19 +96,19 @@ const FWD_ERROR_CODE_BY_PATH: Readonly<Record<string, number>> = Object.freeze(
   Object.fromEntries(Object.entries(FWD_ERROR_PATH).map(([code, path]) => [path, Number(code)])),
 );
 
-/** The human name of a wire ERROR code (or `UNKNOWN(0x..)`). */
+/** @brief The human name of a wire ERROR code (or `UNKNOWN(0x..)`). */
 export function fwdErrorName(code: number): string {
   return FWD_ERROR_NAME[code] ?? `UNKNOWN(0x${code.toString(16)})`;
 }
 
-/** The canonical `tr::…` path of a wire ERROR code (or `null` when unregistered). */
+/** @brief The canonical `tr::…` path of a wire ERROR code (or `null` when unregistered). */
 export function fwdErrorPath(code: number): string | null {
   return FWD_ERROR_PATH[code] ?? null;
 }
 
 /**
- * The registered u16 code of a `tr::…` error path (RFC-0002 §A/§D), or 0 when
- * the path is not in the frozen registry.
+ * @brief The registered u16 code of a `tr::…` error path (RFC-0002 §A/§D), or
+ * 0 when the path is not in the frozen registry.
  */
 export function fwdErrorCodeForPath(path: string): number {
   return FWD_ERROR_CODE_BY_PATH[path] ?? 0;
@@ -108,19 +116,19 @@ export function fwdErrorCodeForPath(path: string): number {
 
 /* ----------------------------------------------------------- value nodes --- */
 
-/** A 1-byte VALUE TLV node (the op / kind discriminants). */
+/** @brief A 1-byte VALUE TLV node (the op / kind discriminants). */
 function valueU8(v: number): Tlv {
   return { type: TYPE.VALUE, opt: opt(), payload: Uint8Array.of(v & 0xff), children: [], trailer: null };
 }
 
-/** A little-endian u32 VALUE TLV node (a FIELD `[N]` index). */
+/** @brief A little-endian u32 VALUE TLV node (a FIELD `[N]` index). */
 function valueU32(v: number): Tlv {
   const p = new Uint8Array(4);
   new DataView(p.buffer).setUint32(0, v >>> 0, true);
   return { type: TYPE.VALUE, opt: opt(), payload: p, children: [], trailer: null };
 }
 
-/** A little-endian u64 VALUE TLV node (the AWAIT `await_timeout` ns). */
+/** @brief A little-endian u64 VALUE TLV node (the AWAIT `await_timeout` ns). */
 function valueU64(v: bigint): Tlv {
   const p = new Uint8Array(8);
   new DataView(p.buffer).setBigUint64(0, v, true);
@@ -129,26 +137,29 @@ function valueU64(v: bigint): Tlv {
 
 /* ----------------------------------------------------------- FIELD (0x10) --- */
 
-/** One level of a `:field` selector chain (RFC-0004 §C, one NAME + optional index). */
+/** @brief One level of a `:field` selector chain (RFC-0004 §C, one NAME + optional index). */
 export interface FieldLevel {
-  /** The level's field name (e.g. `"subscribers"`, `"settings"`). */
+  /** @brief The level's field name (e.g. `"subscribers"`, `"settings"`). */
   readonly name: string;
   /**
-   * The index when this level is an element selector (`[N]`). When set, the level
-   * is encoded as `ELEMENT` regardless of {@link FieldLevel.mode}.
+   * @brief The index when this level is an element selector (`[N]`).
+   *
+   * When set, the level is encoded as `ELEMENT` regardless of
+   * {@link FieldLevel.mode}.
    */
   readonly index?: number;
   /**
-   * `SCALAR` (no brackets, default), `ELEMENT` (`[N]` / append `[]`), or `WILDCARD`
-   * (`[*]` — subscriber-path targets only).
+   * @brief `SCALAR` (no brackets, default), `ELEMENT` (`[N]` / append `[]`), or
+   * `WILDCARD` (`[*]` — subscriber-path targets only).
    */
   readonly mode?: 'SCALAR' | 'ELEMENT' | 'WILDCARD';
 }
 
 /**
- * Parse a `:field` selector string into its levels. Accepts an optional leading
- * `:`; levels are split on `.`; each level may carry a trailing `[N]`, `[]`
- * (append), or `[*]` (wildcard).
+ * @brief Parse a `:field` selector string into its levels.
+ *
+ * Accepts an optional leading `:`; levels are split on `.`; each level may
+ * carry a trailing `[N]`, `[]` (append), or `[*]` (wildcard).
  *
  * `":subscribers[]"` → `[{ name: "subscribers", mode: "ELEMENT" }]`;
  * `":subscribers[3]"` → `[{ name: "subscribers", index: 3, mode: "ELEMENT" }]`;
@@ -172,7 +183,7 @@ export function parseField(field: string): FieldLevel[] {
   });
 }
 
-/** Build a FIELD TLV node from its levels (RFC-0004 §C). */
+/** @brief Build a FIELD TLV node from its levels (RFC-0004 §C). */
 function fieldTlv(levels: FieldLevel[]): Tlv {
   if (levels.length < 1) throw new RangeError('a FIELD selector needs at least one level');
   if (levels.length > 8) throw new RangeError(`a FIELD selector may have at most 8 levels (got ${levels.length})`);
@@ -192,8 +203,10 @@ function fieldTlv(levels: FieldLevel[]): Tlv {
 }
 
 /**
- * Build a FIELD TLV (`type=0x10`, PL=1) from a selector string or pre-parsed
- * levels. Vector-pinned: `field-indexed`, `field-nested`, `field-append`.
+ * @brief Build a FIELD TLV (`type=0x10`, PL=1) from a selector string or
+ * pre-parsed levels.
+ *
+ * Vector-pinned: `field-indexed`, `field-nested`, `field-append`.
  *
  * @param field a `:field` string (see {@link parseField}) or its levels
  * @returns the encoded FIELD TLV bytes
@@ -204,35 +217,37 @@ export function encodeField(field: string | FieldLevel[]): Uint8Array {
 
 /* ------------------------------------------------------------- FWD (0x0F) --- */
 
-/** Request to build a {@link encodeFwd} frame. `op` selects the child layout. */
+/** @brief Request to build a {@link encodeFwd} frame. `op` selects the child layout. */
 export interface FwdRequest {
-  /** The operation (a {@link FWD_OP} value). */
+  /** @brief The operation (a {@link FWD_OP} value). */
   readonly op: number;
-  /** Forward route: the unresolved destination path segments (the PATH `dst`). */
+  /** @brief Forward route: the unresolved destination path segments (the PATH `dst`). */
   readonly dst: string[];
-  /** Accumulated return route: the originator's reply endpoint segments (the PATH `src`). */
+  /** @brief Accumulated return route: the originator's reply endpoint segments (the PATH `src`). */
   readonly src: string[];
-  /** Optional `:field` selector (string or levels). */
+  /** @brief Optional `:field` selector (string or levels). */
   readonly field?: string | FieldLevel[];
   /**
-   * Optional payload — a complete TLV's encoded bytes (a VALUE to WRITE, a
-   * SUBSCRIBER to subscribe, the RESULT/STATUS of a REPLY). Embedded verbatim.
+   * @brief Optional payload — a complete TLV's encoded bytes (a VALUE to WRITE,
+   * a SUBSCRIBER to subscribe, the RESULT/STATUS of a REPLY). Embedded verbatim.
    */
   readonly payload?: Uint8Array;
-  /** REPLY only — the reply {@link FWD_KIND}. */
+  /** @brief REPLY only — the reply {@link FWD_KIND}. */
   readonly kind?: number;
-  /** AWAIT only — the `await_timeout` in ns (absent ⇒ the responder's 1 s default). */
+  /** @brief AWAIT only — the `await_timeout` in ns (absent ⇒ the responder's 1 s default). */
   readonly awaitTimeoutNs?: bigint;
 }
 
-/** Build the FWD child node for an embedded payload (decode the caller's TLV bytes). */
+/** @brief Build the FWD child node for an embedded payload (decode the caller's TLV bytes). */
 function payloadNode(payload: Uint8Array): Tlv {
   return decode(payload);
 }
 
 /**
- * Build a FWD TLV (`type=0x0F`, PL=1) — the remote-operation envelope (RFC-0004
- * §B). The children are assembled in the normative order for the request's `op`.
+ * @brief Build a FWD TLV (`type=0x0F`, PL=1) — the remote-operation envelope
+ * (RFC-0004 §B).
+ *
+ * The children are assembled in the normative order for the request's `op`.
  * Vector-pinned: `fwd-read`, `fwd-write-value`, `fwd-await-timeout`,
  * `fwd-write-subscriber-field`, `fwd-reply-result`, `fwd-reply-error`.
  *
@@ -267,27 +282,27 @@ export function encodeFwd(req: FwdRequest): Uint8Array {
 
 /* --------------------------------------------------------------- decoding --- */
 
-/** A decoded FWD frame, its children parsed positionally (RFC-0004 §B order). */
+/** @brief A decoded FWD frame, its children parsed positionally (RFC-0004 §B order). */
 export interface ParsedFwd {
-  /** The operation (a {@link FWD_OP} value). */
+  /** @brief The operation (a {@link FWD_OP} value). */
   readonly op: number;
-  /** The `dst` PATH child. */
+  /** @brief The `dst` PATH child. */
   readonly dst: Tlv;
-  /** The optional FIELD selector child (or `null`). */
+  /** @brief The optional FIELD selector child (or `null`). */
   readonly field: Tlv | null;
-  /** The `src` PATH child. */
+  /** @brief The `src` PATH child. */
   readonly src: Tlv;
-  /** The reply {@link FWD_KIND} (REPLY frames only, else `null`). */
+  /** @brief The reply {@link FWD_KIND} (REPLY frames only, else `null`). */
   readonly kind: number | null;
-  /** The payload TLV child (WRITE payload / REPLY result / RESULT VALUE), or `null`. */
+  /** @brief The payload TLV child (WRITE payload / REPLY result / RESULT VALUE), or `null`. */
   readonly payload: Tlv | null;
-  /** The AWAIT `await_timeout` ns (else `null`). */
+  /** @brief The AWAIT `await_timeout` ns (else `null`). */
   readonly awaitTimeoutNs: bigint | null;
 }
 
 const u8 = (t: Tlv): number => (t.payload.length > 0 ? t.payload[0] : 0);
 
-/** Parse an already-decoded FWD {@link Tlv} positionally (RFC-0004 §B). */
+/** @brief Parse an already-decoded FWD {@link Tlv} positionally (RFC-0004 §B). */
 export function parseFwdTlv(fwd: Tlv): ParsedFwd {
   if (fwd.type !== TYPE.FWD) throw new RangeError(`not a FWD TLV (type 0x${fwd.type.toString(16)})`);
   const ch = fwd.children;
@@ -319,7 +334,7 @@ export function parseFwdTlv(fwd: Tlv): ParsedFwd {
 }
 
 /**
- * Decode a complete FWD frame's bytes into its parsed children.
+ * @brief Decode a complete FWD frame's bytes into its parsed children.
  *
  * @param bytes one complete FWD TLV frame
  * @returns the parsed FWD
@@ -329,7 +344,7 @@ export function decodeFwd(bytes: Uint8Array): ParsedFwd {
   return parseFwdTlv(decode(bytes));
 }
 
-/** The ERROR TLV of a `kind=ERROR` reply's STATUS payload, or `null`. */
+/** @brief The ERROR TLV of a `kind=ERROR` reply's STATUS payload, or `null`. */
 function replyErrorTlv(reply: ParsedFwd): Tlv | null {
   const status = reply.payload;
   if (status && status.type === TYPE.STATUS && status.children[0]?.type === TYPE.ERROR) {
@@ -339,7 +354,7 @@ function replyErrorTlv(reply: ParsedFwd): Tlv | null {
 }
 
 /**
- * The registered wire ERROR code of a `kind=ERROR` reply's
+ * @brief The registered wire ERROR code of a `kind=ERROR` reply's
  * `STATUS{ ERROR{ VALUE u16 } }` payload per RFC-0002 (or 0 when absent, or
  * when the ERROR carries the string-form NAME identity — see
  * {@link replyErrorPath}).
@@ -354,7 +369,7 @@ export function replyErrorCode(reply: ParsedFwd): number {
 }
 
 /**
- * The string-form `tr::…` identity of a `kind=ERROR` reply's
+ * @brief The string-form `tr::…` identity of a `kind=ERROR` reply's
  * `STATUS{ ERROR{ NAME utf8-path } }` payload per RFC-0002 (or `null` when the
  * reply carries no ERROR, or a registered-code identity — see
  * {@link replyErrorCode}).
@@ -366,5 +381,5 @@ export function replyErrorPath(reply: ParsedFwd): string | null {
   return null;
 }
 
-// (re-export Opt so consumers building raw nodes do not need the core import.)
+/** @brief Re-export Opt so consumers building raw nodes do not need the core import. */
 export type { Opt };

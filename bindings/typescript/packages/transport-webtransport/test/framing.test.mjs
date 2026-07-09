@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
-// The pure length-prefix record codec (ADR-0043 Phase B). The wire vectors
-// here pin the format the C++ side speaks (tcp_transport_t /
-// quic_transport_t / webtransport_transport_t: `u32-LE length ++ frame`),
-// including the split/coalesced chunk behavior of a real QUIC stream.
+/**
+ * @brief The pure length-prefix record codec (ADR-0043 Phase B).
+ *
+ * The wire vectors here pin the format the C++ side speaks (tcp_transport_t /
+ * quic_transport_t / webtransport_transport_t: `u32-LE length ++ frame`),
+ * including the split/coalesced chunk behavior of a real QUIC stream.
+ */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

@@ -24,5 +24,52 @@
     "@avatarsd-llc/libtracer": {
       "Tlv": "https://www.npmjs.com/package/@avatarsd-llc/libtracer"
     }
+  },
+  "packageOptions": {
+    "blockTags": [
+      "@defaultValue",
+      "@deprecated",
+      "@example",
+      "@jsx",
+      "@param",
+      "@privateRemarks",
+      "@remarks",
+      "@returns",
+      "@see",
+      "@throws",
+      "@typeParam",
+      "@author",
+      "@callback",
+      "@category",
+      "@categoryDescription",
+      "@default",
+      "@document",
+      "@extends",
+      "@augments",
+      "@yields",
+      "@group",
+      "@groupDescription",
+      "@import",
+      "@inheritDoc",
+      "@license",
+      "@module",
+      "@mergeModuleWith",
+      "@prop",
+      "@property",
+      "@return",
+      "@satisfies",
+      "@since",
+      "@sortStrategy",
+      "@template",
+      "@this",
+      "@type",
+      "@typedef",
+      "@summary",
+      "@preventInline",
+      "@inlineType",
+      "@preventExpand",
+      "@expandType",
+      "@brief"
+    ]
   }
 }

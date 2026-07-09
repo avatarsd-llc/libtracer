@@ -1,26 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
-// RFC 6455 WebSocket frame codec — a pure-TS port of the C++ reference codec in
-// core/include/libtracer/ws.hpp (`tr::net::ws`). It is socket-free and has no
-// I/O; correctness is gated byte-for-byte against the same known vectors the C++
-// codec is tested with (core/tests/ws_test.cpp). This is the cross-implementation
-// agreement layer: a TS client framed by this codec interoperates with the C++
-// `tr::net::transport_ws` server, and vice versa.
-//
-// Reachable only via the `./ws` subpath export (`@avatarsd-llc/libtracer-ws/ws`) —
-// deliberately NOT re-exported from the package barrel. Production `TransportWs`
-// frames over the runtime's own WebSocket and never imports this, so a consumer that
-// only wants the transport tree-shakes the codec (SHA-1, base64, frame (de)coder) out
-// of its bundle. Its consumers are the interop oracle (ws_diff_fuzz, ws-codec tests)
-// and runtimes without a native WebSocket.
-//
-// Two concerns only, mirroring the C++ header:
-//   1. the opening-handshake key derivation (SHA-1 + base64 -> Sec-WebSocket-Accept), and
-//   2. the data-frame codec (decode one masked/unmasked frame; encode one
-//      server frame unmasked, or one client frame masked, FIN=1).
+/**
+ * @brief RFC 6455 WebSocket frame codec — a pure-TS port of the C++ reference
+ * codec in core/include/libtracer/ws.hpp (`tr::net::ws`).
+ *
+ * It is socket-free and has no I/O; correctness is gated byte-for-byte against
+ * the same known vectors the C++ codec is tested with (core/tests/ws_test.cpp).
+ * This is the cross-implementation agreement layer: a TS client framed by this
+ * codec interoperates with the C++ `tr::net::transport_ws` server, and vice versa.
+ *
+ * Reachable only via the `./ws` subpath export (`@avatarsd-llc/libtracer-ws/ws`) —
+ * deliberately NOT re-exported from the package barrel. Production `TransportWs`
+ * frames over the runtime's own WebSocket and never imports this, so a consumer that
+ * only wants the transport tree-shakes the codec (SHA-1, base64, frame (de)coder) out
+ * of its bundle. Its consumers are the interop oracle (ws_diff_fuzz, ws-codec tests)
+ * and runtimes without a native WebSocket.
+ *
+ * Two concerns only, mirroring the C++ header:
+ *   1. the opening-handshake key derivation (SHA-1 + base64 -> Sec-WebSocket-Accept), and
+ *   2. the data-frame codec (decode one masked/unmasked frame; encode one
+ *      server frame unmasked, or one client frame masked, FIN=1).
+ */
 
-/** RFC 6455 frame opcodes (the subset libtracer cares about). */
+/** @brief RFC 6455 frame opcodes (the subset libtracer cares about). */
 export enum Opcode {
   CONT = 0x0,
   TEXT = 0x1,
@@ -30,13 +33,13 @@ export enum Opcode {
   PONG = 0xa,
 }
 
-/** One decoded RFC 6455 data/control frame (payload already unmasked). */
+/** @brief One decoded RFC 6455 data/control frame (payload already unmasked). */
 export interface Frame {
-  /** Frame opcode. */
+  /** @brief Frame opcode. */
   op: Opcode;
-  /** FIN bit (true = final fragment). */
+  /** @brief FIN bit (true = final fragment). */
   fin: boolean;
-  /** Unmasked application payload. */
+  /** @brief Unmasked application payload. */
   payload: Uint8Array;
 }
 
@@ -47,8 +50,9 @@ function rotl32(v: number, n: number): number {
 }
 
 /**
- * Standard SHA-1 over an arbitrary byte array (RFC 3174 / FIPS 180-1). Returns
- * the 20-byte digest. Used by {@link acceptKey} for the RFC 6455 opening
+ * @brief Standard SHA-1 over an arbitrary byte array (RFC 3174 / FIPS 180-1).
+ *
+ * Returns the 20-byte digest. Used by {@link acceptKey} for the RFC 6455 opening
  * handshake; SHA-1 is required there for protocol compatibility, not security.
  */
 export function sha1(data: Uint8Array): Uint8Array {
@@ -139,7 +143,7 @@ export function sha1(data: Uint8Array): Uint8Array {
 
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
-/** Standard base64 encoding (RFC 4648, with '=' padding). */
+/** @brief Standard base64 encoding (RFC 4648, with '=' padding). */
 export function base64(data: Uint8Array): string {
   let out = '';
   let i = 0;
@@ -163,9 +167,11 @@ export function base64(data: Uint8Array): string {
 const ACCEPT_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
 /**
- * Compute the RFC 6455 Sec-WebSocket-Accept value for a client key:
- * `base64(sha1(clientKey + GUID))`. The server returns this in the 101 Switching
- * Protocols response to prove it spoke RFC 6455.
+ * @brief Compute the RFC 6455 Sec-WebSocket-Accept value for a client key:
+ * `base64(sha1(clientKey + GUID))`.
+ *
+ * The server returns this in the 101 Switching Protocols response to prove it
+ * spoke RFC 6455.
  *
  * @param clientKey The raw Sec-WebSocket-Key header value sent by the client.
  */
@@ -179,7 +185,8 @@ export function acceptKey(clientKey: string): string {
 /* ------------------------------------------------------------- framing --- */
 
 /**
- * Encode one server->client RFC 6455 frame: FIN=1, given opcode, UNMASKED.
+ * @brief Encode one server->client RFC 6455 frame: FIN=1, given opcode, UNMASKED.
+ *
  * Server frames MUST NOT be masked (RFC 6455 §5.1). The length uses the smallest
  * legal encoding (7-bit, then 126 + 2-byte marker, then 127 + 8-byte marker).
  */
@@ -202,7 +209,8 @@ export function encodeFrame(op: Opcode, payload: Uint8Array): Uint8Array {
 }
 
 /**
- * Encode one client->server RFC 6455 frame: FIN=1, given opcode, MASKED.
+ * @brief Encode one client->server RFC 6455 frame: FIN=1, given opcode, MASKED.
+ *
  * Client frames MUST be masked (RFC 6455 §5.1): the MASK bit is set, a 4-byte
  * masking key is emitted big-endian after the length, and every payload byte is
  * XOR'd with `maskKey[i % 4]`. `maskKey` is a 32-bit value whose 4 big-endian
@@ -235,8 +243,9 @@ export function encodeClientFrame(op: Opcode, payload: Uint8Array, maskKey: numb
 }
 
 /**
- * Decode exactly one RFC 6455 frame from the front of `buf`. Handles the FIN
- * bit, opcode, the MASK bit with its 4-byte key (client->server frames are
+ * @brief Decode exactly one RFC 6455 frame from the front of `buf`.
+ *
+ * Handles the FIN bit, opcode, the MASK bit with its 4-byte key (client->server frames are
  * masked; the payload is unmasked here), and the 7 / 16 / 64-bit extended length
  * encodings. Overflow-safe: a 64-bit over-long length on a short buffer yields
  * need-more (`null`), never an out-of-bounds read.
@@ -288,7 +297,7 @@ export function decodeFrame(buf: Uint8Array): { frame: Frame; consumed: number }
   return { frame: { op, fin, payload }, consumed: pos + len };
 }
 
-/** Append the 8 big-endian bytes of a (<= 2^53) length to `out`. */
+/** @brief Append the 8 big-endian bytes of a (<= 2^53) length to `out`. */
 function pushU64Be(out: number[], len: number): void {
   const hi = Math.floor(len / 0x100000000);
   const lo = len >>> 0;

@@ -1,22 +1,26 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-//
-// Conformance harness for the shared vectors under tests/conformance/vectors/v1/.
-// Mirrors core/tests/conformance_runner.cpp --tap: for every vector directory
-// containing an input.bin, it checks the round-trip
-//     encode(decode(input.bin)) == input.bin   (byte-for-byte)
-// and for every directory containing a reject.bin (negative case), that
-//     decode(reject.bin) FAILS with the error named by expected.json's "reject"
-// then emits TAP version 13 to stdout (see tests/conformance/HARNESS.md). Exit 0
-// iff every vector is `ok`. Node/stdlib only — no build step, no dependencies.
+
+/**
+ * @brief Conformance harness for the shared vectors under
+ * tests/conformance/vectors/v1/.
+ *
+ * Mirrors core/tests/conformance_runner.cpp --tap: for every vector directory
+ * containing an input.bin, it checks the round-trip
+ *     encode(decode(input.bin)) == input.bin   (byte-for-byte)
+ * and for every directory containing a reject.bin (negative case), that
+ *     decode(reject.bin) FAILS with the error named by expected.json's "reject"
+ * then emits TAP version 13 to stdout (see tests/conformance/HARNESS.md). Exit 0
+ * iff every vector is `ok`. Node/stdlib only — no build step, no dependencies.
+ */
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { decode, encode } from '../src/codec.mjs';
 
-/** @param {string} hex @returns {Uint8Array} */
+/** @brief Parse a lowercase/uppercase hex string into bytes. @param {string} hex @returns {Uint8Array} */
 function fromHex(hex) {
   if (hex.length % 2 !== 0) throw new Error('BAD_HEX');
   const out = new Uint8Array(hex.length / 2);
@@ -28,7 +32,7 @@ function fromHex(hex) {
   return out;
 }
 
-/** @param {Uint8Array} bytes @returns {string} */
+/** @brief Render bytes as lowercase hex. @param {Uint8Array} bytes @returns {string} */
 function toHex(bytes) {
   let s = '';
   for (let i = 0; i < bytes.length; i++) s += bytes[i].toString(16).padStart(2, '0');
@@ -36,7 +40,9 @@ function toHex(bytes) {
 }
 
 /**
- * `--roundtrip`: differential-fuzz batch mode. Read one hex frame per stdin line;
+ * @brief `--roundtrip`: differential-fuzz batch mode.
+ *
+ * Read one hex frame per stdin line;
  * for each, print decode->encode re-encoded as hex, or `ERR:<reason>` on a decode
  * failure. One output line per input line. The driver (tests/conformance/diff_fuzz.py)
  * compares these against the C++ core + the canonical generator, byte-for-byte.
@@ -64,7 +70,7 @@ function runRoundtrip() {
   process.stdout.write(out.join('\n') + '\n');
 }
 
-/** @param {string} dir @returns {string[]} absolute paths to every input.bin / reject.bin under dir */
+/** @brief Recursively collect vector case files. @param {string} dir @returns {string[]} absolute paths to every input.bin / reject.bin under dir */
 function findInputs(dir) {
   /** @type {string[]} */
   const out = [];
@@ -77,8 +83,8 @@ function findInputs(dir) {
 }
 
 /**
- * One negative case: decode(reject.bin) MUST fail with exactly the error named
- * by the sibling expected.json's top-level "reject" field.
+ * @brief One negative case: decode(reject.bin) MUST fail with exactly the error
+ * named by the sibling expected.json's top-level "reject" field.
  *
  * @param {string} rejectBin absolute path to the case's reject.bin
  * @returns {{ok: boolean, diag: string}}
@@ -100,7 +106,7 @@ function checkReject(rejectBin) {
   return { ok: false, diag: `decode succeeded, expected ${want}` };
 }
 
-/** @param {Uint8Array} a @param {Uint8Array} b */
+/** @brief Byte-for-byte equality. @param {Uint8Array} a @param {Uint8Array} b */
 function bytesEqual(a, b) {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;

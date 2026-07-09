@@ -1,31 +1,37 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
-// Pure, side-effect-free TLV builders for the libtracer client SDK (#56,
-// ADR-0034). Each function produces the EXACT wire bytes the shared conformance
-// vectors pin (`tests/conformance/vectors/v1/`) via the cross-validated core
-// codec (`@avatarsd-llc/libtracer`) — nothing here invents wire structure:
-//
-//   - encodeValue      -> VALUE TLV (0x01)        : value-bool-true / value-ll-u32 / value-ts-abs
-//   - encodePath       -> PATH TLV (0x06, PL=1)   : path-sensor-temp + spec/v1.md §3.1
-//   - encodeSubscriber -> SUBSCRIBER TLV (0x04)   : subscriber-path  (the subscribe-write payload)
-//
-// These are the payload TLVs. The path-ADDRESSED request envelope (verb +
-// destination vertex:field) is the FWD/FIELD frame RFC-0004 (spec §3) fixes — it
-// is built in `./fwd.ts`, not here; these payloads ride inside it.
+/**
+ * @brief Pure, side-effect-free TLV builders for the libtracer client SDK
+ * (#56, ADR-0034).
+ *
+ * Each function produces the EXACT wire bytes the shared conformance vectors
+ * pin (`tests/conformance/vectors/v1/`) via the cross-validated core codec
+ * (`@avatarsd-llc/libtracer`) — nothing here invents wire structure:
+ *
+ *   - encodeValue      -> VALUE TLV (0x01)        : value-bool-true / value-ll-u32 / value-ts-abs
+ *   - encodePath       -> PATH TLV (0x06, PL=1)   : path-sensor-temp + spec/v1.md §3.1
+ *   - encodeSubscriber -> SUBSCRIBER TLV (0x04)   : subscriber-path  (the subscribe-write payload)
+ *
+ * These are the payload TLVs. The path-ADDRESSED request envelope (verb +
+ * destination vertex:field) is the FWD/FIELD frame RFC-0004 (spec §3) fixes —
+ * it is built in `./fwd.ts`, not here; these payloads ride inside it.
+ */
 
 import { TYPE, encode } from '@avatarsd-llc/libtracer';
 import type { Opt, Tlv } from '@avatarsd-llc/libtracer';
 
-/** Path-segment constraints from reference/03-addressing.md §path syntax. */
+/** @brief Path-segment constraints from reference/03-addressing.md §path syntax. */
 const MAX_SEGMENT_BYTES = 64;
-/** Reserved characters that MUST NOT appear inside a NAME segment (reference/03, /05 §NAME). */
+/** @brief Reserved characters that MUST NOT appear inside a NAME segment (reference/03, /05 §NAME). */
 const RESERVED_SEGMENT_CHARS = /[/:.[\]*?]/;
 
 const utf8 = new TextEncoder();
 
 /**
- * A fully-cleared option byte (all flags false), with selected flags overridden.
+ * @brief A fully-cleared option byte (all flags false), with selected flags
+ * overridden.
+ *
  * Shared by the payload builders here and the FWD/FIELD builders in `./fwd.ts`.
  *
  * @param over flags to set true (e.g. `{ pl: true }` for a structured TLV)
@@ -35,22 +41,23 @@ export function opt(over: Partial<Opt> = {}): Opt {
   return { pl: false, ts: false, cr: false, ll: false, cw: false, tf: false, ...over };
 }
 
-/** Options for {@link encodeValue}. Mirror the wire opt/trailer fields the codec pins. */
+/** @brief Options for {@link encodeValue}. Mirror the wire opt/trailer fields the codec pins. */
 export interface ValueOptions {
-  /** Use the 32-bit length field (opt.LL=1, 6-byte header). Default: 16-bit. */
+  /** @brief Use the 32-bit length field (opt.LL=1, 6-byte header). Default: 16-bit. */
   longLength?: boolean;
-  /** Emit a CRC trailer over the payload (+ timestamp bytes). Default: none. */
+  /** @brief Emit a CRC trailer over the payload (+ timestamp bytes). Default: none. */
   crc?: boolean;
-  /** With {@link ValueOptions.crc}, use CRC-16-CCITT (opt.CW=1) instead of CRC-32C. */
+  /** @brief With {@link ValueOptions.crc}, use CRC-16-CCITT (opt.CW=1) instead of CRC-32C. */
   crc16?: boolean;
-  /** Absolute u64 wire timestamp (ns since epoch) → opt.TS=1, TF=0 (absolute). */
+  /** @brief Absolute u64 wire timestamp (ns since epoch) → opt.TS=1, TF=0 (absolute). */
   timestampNs?: bigint;
-  /** Relative i32 wire timestamp (ns) → opt.TS=1, TF=1 (relative). Ignored if {@link ValueOptions.timestampNs} is set. */
+  /** @brief Relative i32 wire timestamp (ns) → opt.TS=1, TF=1 (relative). Ignored if {@link ValueOptions.timestampNs} is set. */
   timestampRelNs?: number;
 }
 
 /**
- * Build a VALUE TLV (`type=0x01`) carrying an opaque application payload.
+ * @brief Build a VALUE TLV (`type=0x01`) carrying an opaque application payload.
+ *
  * Vector-pinned: `value-bool-true`, `value-ll-u32`, `value-ts-abs`.
  *
  * @param value the opaque payload bytes (the publisher/subscriber agree on the shape out-of-band)
@@ -80,8 +87,8 @@ export function encodeValue(value: Uint8Array, opts: ValueOptions = {}): Uint8Ar
 }
 
 /**
- * Build a NAME TLV (`type=0x02`) for one path segment, after validating it
- * against the addressing rules (1..64 UTF-8 bytes, no reserved characters).
+ * @brief Build a NAME TLV (`type=0x02`) for one path segment, after validating
+ * it against the addressing rules (1..64 UTF-8 bytes, no reserved characters).
  *
  * @param segment the segment text
  * @returns a NAME TLV node (no trailer)
@@ -99,8 +106,10 @@ export function nameTlv(segment: string): Tlv {
 }
 
 /**
- * Build a PATH TLV (`type=0x06`, PL=1) from path segments — a NAME child per
- * segment. Vector-pinned: `path-sensor-temp`; normative byte layout: spec/v1.md §3.1.
+ * @brief Build a PATH TLV (`type=0x06`, PL=1) from path segments — a NAME child
+ * per segment.
+ *
+ * Vector-pinned: `path-sensor-temp`; normative byte layout: spec/v1.md §3.1.
  *
  * @param segments the path segments, e.g. `["sensor", "temp"]` for `/sensor/temp`
  * @returns the encoded PATH TLV bytes
@@ -110,7 +119,7 @@ export function encodePath(segments: string[]): Uint8Array {
   return encode(pathTlv(segments));
 }
 
-/** The PATH TLV node (shared by {@link encodePath}, {@link encodeSubscriber}, and `./fwd.ts`). */
+/** @brief The PATH TLV node (shared by {@link encodePath}, {@link encodeSubscriber}, and `./fwd.ts`). */
 export function pathTlv(segments: string[]): Tlv {
   if (segments.length < 1) throw new RangeError('a path must have at least one segment');
   if (segments.length > 32) throw new RangeError(`a path may have at most 32 segments (got ${segments.length})`);
@@ -123,7 +132,7 @@ export function pathTlv(segments: string[]): Tlv {
   };
 }
 
-/** Options for {@link encodeSubscriber}. Optional QoS/ACL/id children are deferred (ADR-0034). */
+/** @brief Options for {@link encodeSubscriber}. Optional QoS/ACL/id children are deferred (ADR-0034). */
 export interface SubscriberOptions {
   // Intentionally empty for the conservative slice. The optional SUBSCRIBER
   // children (SETTINGS qos, ACL capability, NAME subscriber_id — reference/05
@@ -131,8 +140,10 @@ export interface SubscriberOptions {
 }
 
 /**
- * Build a SUBSCRIBER TLV (`type=0x04`, PL=1) wrapping a target PATH — the
- * payload of a subscribe-write (reference/04 §Subscribe). Vector-pinned:
+ * @brief Build a SUBSCRIBER TLV (`type=0x04`, PL=1) wrapping a target PATH —
+ * the payload of a subscribe-write (reference/04 §Subscribe).
+ *
+ * Vector-pinned:
  * `subscriber-path` = `SUBSCRIBER{ PATH{ NAME "sensor", NAME "temp" } }`.
  *
  * The `targetPath` is the SUBSCRIBER's `target_path` child: where the producer
