@@ -2,17 +2,22 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * transport_ws server (#54) — the connection layer on top of the RFC 6455
- * PROTOCOL layer (ws.hpp). A board accepts ONE inbound WebSocket connection
- * (the headline browser↔board link): bind+listen on a TCP port, accept, run the
- * opening handshake (parse the HTTP Upgrade request, reply 101 Switching
- * Protocols with ws::accept_key), then a recv loop that ws::decode_frame()s the
- * TCP byte stream into complete frames. Each BINARY message is one libtracer
- * frame (one TLV) handed to the registered receiver; PING is answered with PONG,
- * CLOSE tears the connection down. send(frame) ws::encode_frame(BINARY, …)s and
- * writes the whole frame to the client.
+ * transport_ws server (#54, multi-peer per #362) — the connection layer on top
+ * of the RFC 6455 PROTOCOL layer (ws.hpp). A board accepts MANY concurrent
+ * inbound WebSocket connections (the headline browser↔board link — an SPA plus
+ * a peer node, or several tabs): bind+listen on a TCP port, then ONE poll-based
+ * thread multiplexes the listen socket and every peer socket (no per-peer
+ * thread — FreeRTOS stacks are the scarce resource on the MCU target). Each
+ * peer runs the opening handshake (parse the HTTP Upgrade request, reply 101
+ * Switching Protocols with ws::accept_key), then its byte stream is
+ * ws::decode_frame()d into complete frames. Each BINARY message is one
+ * libtracer frame (one TLV) handed to the receiver — tagged with the SENDING
+ * peer's name through the bus_link_t facet (ADR-0044), so return routes name
+ * the right browser tab; PING is answered with PONG, CLOSE tears that one
+ * connection down. send(frame) broadcasts to every open peer (the flat
+ * point-to-point surface); a directed per-peer send is peer_link(name)->send().
  *
- * Both roles live here: transport_ws_server (accept an inbound peer) and
+ * Both roles live here: transport_ws_server (accept inbound peers) and
  * transport_ws_client (dial out to a ws:// peer — device-to-device / NAT egress),
  * the latter sending MASKED client frames per RFC 6455 §5.1. POSIX sockets;
  * mirrors transport_udp's lifecycle (a recv thread polled for a clean shutdown).
@@ -23,8 +28,12 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <span>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "libtracer/posix_endpoint.hpp"
 #include "libtracer/transport.hpp"
@@ -32,24 +41,43 @@
 namespace tr::net {
 
 /**
- * @brief A WebSocket (RFC 6455) server transport_t — accepts one inbound peer.
+ * @brief A WebSocket (RFC 6455) server transport_t — accepts many inbound peers
+ *        and exposes them through the @ref bus_link_t facet (ADR-0044).
  *
- * Binds and listens on a TCP port (localhost is fine for tests), accepts a
- * single client, performs the opening handshake, then runs a receive loop that
- * delivers each inbound BINARY message's unmasked payload to the receiver. The
- * dial-out counterpart is transport_ws_client below.
+ * Binds and listens on a TCP port (localhost is fine for tests); one poll-based
+ * thread accepts clients and serves every open connection concurrently. Each
+ * inbound BINARY message is delivered tagged with its peer's name
+ * (`<ip>:<port>` of the far side) when a peer-named sink is installed (the
+ * router's bus wiring), or to the flat @ref transport_t receiver otherwise —
+ * so a single-client deployment behaves exactly as the point-to-point server
+ * always did. The dial-out counterpart is transport_ws_client below.
+ *
+ * Peer lifecycle: peers occupy SLOTS. A departed peer's slot is recycled for
+ * the next accept, so steady-state memory is bounded by the maximum number of
+ * CONCURRENT peers ever reached (or by @p max_peers when set — the RFC-0006
+ * injected bound), never by the number of connections ever served.
  */
-class transport_ws_server : public transport_t, private stream_endpoint_t {
+class transport_ws_server : public transport_t, public bus_link_t, private stream_endpoint_t {
    public:
     /**
      * @brief Bind+listen on @p bind_port (0 = ephemeral; see local_port()).
      *
-     * Spawns the accept/recv thread immediately. Use ok() to confirm the listen
+     * Spawns the poll/serve thread immediately. Use ok() to confirm the listen
      * socket bound. The bound port is observable via local_port().
      *
      * @param bind_port TCP port to listen on (host byte order; 0 → ephemeral).
+     * @param max_peers Concurrent-peer admission cap; 0 = unbounded (host
+     *                  default). A deployment-injected bound (RFC-0006) —
+     *                  a connection beyond it is accepted and immediately
+     *                  closed (a clean refusal, not a hung SYN).
+     * @param peer_named Expose the @ref bus_link_t facet (see @ref bus). A
+     *                   wiring-time deployment choice: the browser-SPA/tabs
+     *                   server sets it so each tab gets its own return route;
+     *                   a point-to-point link keeps the default (its registered
+     *                   child NAME stays the hop name, as tcp/quic).
      */
-    explicit transport_ws_server(std::uint16_t bind_port);
+    explicit transport_ws_server(std::uint16_t bind_port, std::size_t max_peers = 0,
+                                 bool peer_named = false);
 
     /** @brief Stop the recv thread and close all sockets. */
     ~transport_ws_server() override;
@@ -58,11 +86,13 @@ class transport_ws_server : public transport_t, private stream_endpoint_t {
     transport_ws_server& operator=(const transport_ws_server&) = delete;
 
     /**
-     * @brief Send @p frame as one server→client BINARY WebSocket message.
+     * @brief Send @p frame as one server→client BINARY WebSocket message to
+     *        EVERY open peer (the flat point-to-point surface).
      *
-     * Encodes via ws::encode_frame(BINARY, frame) (FIN=1, unmasked) and writes
-     * the whole frame to the connected client. No-op until a client is
-     * connected. Thread-safe (the socket write is guarded).
+     * Encodes once via ws::encode_frame(BINARY, frame) (FIN=1, unmasked) and
+     * writes the whole frame to each connected client. No-op until a client is
+     * connected. Thread-safe (socket writes are guarded). A directed
+     * single-peer send is `peer_link(name)->send(frame)`.
      *
      * @param frame A complete TLV's bytes.
      */
@@ -71,8 +101,31 @@ class transport_ws_server : public transport_t, private stream_endpoint_t {
     /** @brief True — WS reassembles fragmented messages into ropes (ADR-0053 §5):
      *         each message crosses the seam as a `rope_t`, one owning link per WS
      *         fragment (a single link for an unfragmented message), chained by
-     *         reassembly, never memcpy'd flat. */
+     *         reassembly, never memcpy'd flat. Covers both the transport_t and
+     *         bus_link_t facets (one override, same contract). */
     [[nodiscard]] bool delivers_ropes() const override { return true; }
+
+    /** @brief The @ref bus_link_t facet (ADR-0044) when constructed `peer_named`,
+     *         else `nullptr`. With the facet, the router tags inbound frames per
+     *         peer (each browser tab gets its own return-route identity and the
+     *         registry routes a `dst` segment to that one tab); without it, this
+     *         link keeps point-to-point hop naming — inbound frames carry the
+     *         registered child NAME, and `send()` fans out to every open peer. */
+    [[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }
+
+    /** @brief Visit the currently-OPEN (handshaken) peers' names, `<ip>:<port>`. */
+    void enumerate_peers(const peer_visitor_t& visit) const override;
+
+    /**
+     * @brief Resolve an open peer's name to its directed sending endpoint.
+     *
+     * The returned endpoint sends to THAT peer only; it is owned by the peer's
+     * slot and stays pointer-valid for this server's lifetime (slots are never
+     * freed, only recycled). After the peer departs, its sends no-op until the
+     * slot is reused.
+     * @retval nullptr @p peer names no currently-open connection.
+     */
+    [[nodiscard]] transport_t* peer_link(std::string_view peer) override;
 
     /** @brief True if the listen socket is bound and listening. */
     [[nodiscard]] bool ok() const noexcept { return listen_fd_ >= 0; }
@@ -81,14 +134,46 @@ class transport_ws_server : public transport_t, private stream_endpoint_t {
     [[nodiscard]] std::uint16_t local_port() const noexcept { return bound_port_; }
 
    private:
-    void run();              // accept + recv thread
-    bool handshake(int fd);  // read Upgrade, reply 101
-    void serve(int fd);      // frame recv loop
+    struct session_t;  // one peer slot's connection state (defined in the .cpp)
+
+    /**
+     * @brief The directed per-peer sending endpoint @ref peer_link hands out:
+     *        `send()` writes a server BINARY frame to that peer's socket only.
+     *        Ingress stays on the owning server's peer-named slot — this
+     *        facade's own inherited receiver is never delivered to.
+     */
+    class peer_endpoint_t final : public transport_t {
+       public:
+        /** @brief Send @p frame to this facade's peer only (no-op once departed). */
+        void send(std::span<const std::byte> frame) override;
+
+       private:
+        friend class transport_ws_server;
+        transport_ws_server* owner_ = nullptr; /**< @brief The owning server. */
+        session_t* slot_ = nullptr;            /**< @brief The peer slot this sends to. */
+    };
+
+    void run();                        // the ONE poll/accept/serve thread
+    void accept_peer();                // admit into a free (or new) slot
+    void service_peer(session_t& s);   // one readable pass: recv + drain frames
+    bool drain_frames(session_t& s);   // decode buffered frames; false ⇒ teardown
+    void teardown_slot(session_t& s);  // close + free the slot for reuse
 
     int listen_fd_ = -1;
     std::uint16_t bound_port_ = 0;
-    // The connected client's fd + write mutex (and their teardown discipline)
-    // live in stream_endpoint_t (conn_fd_ / write_m_).
+    std::size_t max_peers_ = 0;  // 0 = unbounded (deployment-injected, RFC-0006)
+    bool peer_named_ = false;    // expose bus() — wiring-time deployment choice
+    /**
+     * @brief Guards the slot vector and every slot's NAME (the cross-thread
+     *        reads: enumerate_peers / peer_link vs the recv thread's
+     *        accept/teardown). Per-slot fds are atomics read under `write_m_`
+     *        by senders; buffers/assembler are recv-thread-only. Lock order
+     *        where nested: peers_m_ → write_m_.
+     */
+    mutable std::mutex peers_m_;
+    std::vector<std::unique_ptr<session_t>> slots_;  // insert-only; recycled in place
+    // write_m_ (stream_endpoint_t) serializes ALL socket writes (any peer);
+    // conn_fd_ is unused by the multi-peer server (each slot owns its fd).
 };
 
 /**
