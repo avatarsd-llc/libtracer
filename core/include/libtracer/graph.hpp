@@ -130,7 +130,14 @@ using subject_resolver_t = std::function<std::optional<subject_token_t>(std::str
 class graph_t {
    public:
     /** @brief Construct an empty graph (registers the built-in `stored_value` child type). */
-    graph_t();
+    /**
+     * @brief Construct a graph drawing its per-write allocations from @p mr —
+     *        the ADR-0039 §1 injection seam (#361 §5). A 16 KB node installs a
+     *        pool/monotonic resource over a static arena; a host passes nothing
+     *        and gets the standard heap (zero churn). The resource must outlive
+     *        the graph and every value handle obtained from it.
+     */
+    explicit graph_t(std::pmr::memory_resource* mr = std::pmr::get_default_resource());
     graph_t(const graph_t&) = delete;
     graph_t& operator=(const graph_t&) = delete;
 
@@ -559,6 +566,10 @@ class graph_t {
     // route_handle clear_link dangling-ref class, fixed in #220); it needs a vertex
     // lifetime scheme (refcount / epoch reclamation, or a tombstone) first. Registering
     // the empty key fills this node in place (the "root vertex" the flat map allowed).
+    /** @brief The ADR-0039 injected resource per-write allocations draw from (#361 §5):
+     *         the LKV control block + rope of every `assign`. Host-owned; outlives the
+     *         graph. Defaults to the standard heap. */
+    std::pmr::memory_resource* mr_ = std::pmr::get_default_resource();
     std::unique_ptr<vertex_t> root_;
     // The device creation catalog (#82, ADR-0017): SPEC `type` -> factory. Populated at
     // setup (register_child_type), read-only once frames flow, so no lock (same contract

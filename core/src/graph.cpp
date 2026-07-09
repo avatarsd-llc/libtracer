@@ -208,8 +208,9 @@ struct branch_node_t {
 
 }  // namespace
 
-graph_t::graph_t()
-    : root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, settings_t{},
+graph_t::graph_t(std::pmr::memory_resource* mr)
+    : mr_(mr),
+      root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, settings_t{},
                                        handlers_t{})) {
     // The one built-in creation-catalog type (#82, ADR-0017): `stored_value` makes a
     // plain last-writer-wins vertex at the composed child key. Its optional SPEC
@@ -538,7 +539,7 @@ result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t
     }
     // The storage verb owns the invariant order: LKV publish (lock-free) BEFORE the
     // lock; ring append + keep-last trim + seq bump + await wake under it.
-    return v->store(std::move(value));
+    return v->store(std::move(value), mr_);
 }
 
 void graph_t::bubble_up(vertex_t* v, const rope_t& value, int depth) {
