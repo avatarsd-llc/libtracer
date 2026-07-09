@@ -390,6 +390,11 @@ struct vertex_ext_t {
      *         when @ref acl_cache_dirty is raised. Only the MERGE is cached, never a
      *         verdict — expiry evaluates at check time against the caller's now. */
     std::vector<ace_t> eff_aces;
+    /** @brief The `kAceInherit`-flagged projection of @ref eff_aces (#361 §3): what a
+     *         BARE descendant (no own ACEs) evaluates against — the filter of a bearing
+     *         vertex's merge IS the descendant's effective list (idempotent, ordered).
+     *         Rebuilt together with @ref eff_aces. */
+    std::vector<ace_t> eff_aces_inherit;
     /** @brief Raised ⇒ @ref eff_aces is stale (rebuild lazily; ADR-0050 cache protocol). */
     std::atomic<bool> acl_cache_dirty{true};
     settings_t settings{}; /**< @brief QoS settings; single-field mutation under the vertex
@@ -782,6 +787,10 @@ class vertex_t {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         e.acl.assign(raw.begin(), raw.end());
         e.aces = std::move(aces);
+        // Lock-free bearing flag (#361 §3): the graph's nearest-bearing-ancestor walk
+        // reads it without touching any stripe. Publish under the lock, before the
+        // dirty flag, same ordering discipline as the ACE list itself.
+        has_own_aces_.store(!e.aces.empty(), std::memory_order_release);
         // Publish-then-mark (ADR-0050 cache protocol): the new ACEs are visible
         // under m_ BEFORE the dirty flag is raised, so a rebuild that observes the
         // flag always reads the new list (or leaves the flag set for the next one).
@@ -854,23 +863,31 @@ class vertex_t {
      * @param rebuild `std::vector<ace_t>(const std::vector<ace_t>& own)` — the
      *                fresh merge over a snapshot of this vertex's own ACEs; runs
      *                UNLOCKED (it may take other vertices' stripes freely).
-     * @param eval    Pure evaluation over the cached merged list (the ADR-0050
-     *                policy contract: no locks/clock/graph inside).
+     * @param eval    Pure evaluation over `(merged, inherited)` — the cached merge
+     *                and its `kAceInherit` projection (#361 §3: a bare descendant
+     *                evaluates the latter). ADR-0050 policy contract: no
+     *                locks/clock/graph inside.
      * @return Whatever @p eval returns.
      */
     template <typename Rebuild, typename Eval>
     auto with_effective_aces(Rebuild&& rebuild, Eval&& eval)
-        -> decltype(eval(std::declval<const std::vector<ace_t>&>())) {
+        -> decltype(eval(std::declval<const std::vector<ace_t>&>(),
+                         std::declval<const std::vector<ace_t>&>())) {
         vertex_ext_t& e = ensure_ext();  // gated eval caches its merge here (fresh ⇒ dirty)
         std::unique_lock lock(vertex_stripe_of(this).m);
         if (e.acl_cache_dirty.exchange(false, std::memory_order_acq_rel)) {
             const std::vector<ace_t> own = e.aces;  // snapshot; rebuild runs unlocked
             lock.unlock();
             std::vector<ace_t> merged = rebuild(static_cast<const std::vector<ace_t>&>(own));
+            std::vector<ace_t> inherit;
+            for (const ace_t& a : merged)
+                if ((a.flags & kAceInherit) != 0) inherit.push_back(a);
             lock.lock();
             e.eff_aces = std::move(merged);
+            e.eff_aces_inherit = std::move(inherit);
         }
-        return eval(static_cast<const std::vector<ace_t>&>(e.eff_aces));
+        return eval(static_cast<const std::vector<ace_t>&>(e.eff_aces),
+                    static_cast<const std::vector<ace_t>&>(e.eff_aces_inherit));
     }
 
     // -- settings & propagation policy --------------------------------------------------
@@ -903,6 +920,14 @@ class vertex_t {
     void set_delivery_mode(delivery_mode_t mode) noexcept { delivery_mode_ = mode; }
 
     // -- RFC-0005 listener bookkeeping (lock-free counters) ------------------------------
+
+    /** @brief True iff this vertex has its OWN parsed ACEs (#361 §3) — the lock-free
+     *         predicate of the graph's nearest-bearing-ancestor walk. Relaxed read: a
+     *         racing `:acl` write is observed by the next gated op at worst, the same
+     *         window the dirty-flag protocol already tolerates. */
+    [[nodiscard]] bool has_own_aces() const noexcept {
+        return has_own_aces_.load(std::memory_order_relaxed);
+    }
 
     /** @brief This vertex's own active-slot count (what a subtree walk sums). */
     [[nodiscard]] std::uint32_t own_subs() const noexcept {
@@ -984,6 +1009,9 @@ class vertex_t {
     // Null for the common default leaf. Published once by ensure_ext (CAS), never
     // cleared; freed by the destructor.
     std::atomic<vertex_ext_t*> ext_{nullptr};
+    // True iff ext_ holds a non-empty own-ACE list (#361 §3): maintained by set_acl,
+    // read lock-free by the graph's bearing-ancestor walk on every gated op.
+    std::atomic<bool> has_own_aces_{false};
     std::uint64_t write_seq_ = 0;  // bumped per assign; await waits for an increment, and it is
                                    // the value-agnostic "newer" signal a sweep reads (RFC-0008 §B).
                                    // Guarded by m_.
