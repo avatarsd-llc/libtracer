@@ -66,7 +66,15 @@ struct settings_t {
      *        amplification is a per-vertex deployment call.
      */
     std::uint32_t store_ref_min_bytes = 0;
+
+    /** @brief Memberwise equality — lets registration detect all-defaults settings (which
+     *         need no @ref vertex_ext_t allocation, ADR-0021 pay-for-what-you-use). */
+    bool operator==(const settings_t&) const = default;
 };
+
+/** @brief The all-defaults @ref settings_t a vertex without a @ref vertex_ext_t reports —
+ *         one shared constant, never a per-vertex copy. */
+inline constexpr settings_t kDefaultSettings{};
 
 /**
  * @brief User behavior for a Handler-role vertex.
@@ -315,6 +323,42 @@ class edge_snapshot_t {
 };
 
 /**
+ * @brief The lazily-allocated COLD half of a vertex (issue #361 §1): every member a plain
+ *        STORED_VALUE leaf with default QoS, no handlers, and no `:acl` never touches.
+ *
+ * ADR-0021 rule 2 ("the machinery is pay-for-what-you-use") applied to RAM: the common
+ * MCU leaf keeps `vertex_t::ext_` null and pays nothing here. Allocated at most once —
+ * at registration when the identity needs it (STREAM role, user handlers, non-default
+ * settings), or later under the vertex mutex on the first `:acl` / `:settings` write —
+ * and never freed before the vertex (the insert-only ADR-0057 lifetime), so a published
+ * pointer stays valid for every reader.
+ */
+struct vertex_ext_t {
+    handlers_t handlers{}; /**< @brief User behavior (Handler role + the `on_children` seam). */
+    /** @brief STREAM ring (docs/reference/11 role 2); guarded by the vertex mutex. */
+    std::deque<std::shared_ptr<const rope_t>> history;
+    /** @brief Raw `:acl` TLV bytes, served back verbatim (#81-A, ADR-0018/0020); guarded by
+     *         the vertex mutex. Empty ⇒ no `:acl` set. */
+    std::vector<std::byte> acl;
+    /** @brief The `:acl` bytes parsed into core-subset ACEs at write time (#81); guarded by
+     *         the vertex mutex. `graph_t::acl_allows` evaluates these. */
+    std::vector<ace_t> aces;
+    /** @brief The ADR-0050 cached effective-ACE merge (own + INHERIT-flagged ancestor ACEs,
+     *         pre-merged in evaluation order); guarded by the vertex mutex, rebuilt lazily
+     *         when @ref acl_cache_dirty is raised. Only the MERGE is cached, never a
+     *         verdict — expiry evaluates at check time against the caller's now. */
+    std::vector<ace_t> eff_aces;
+    /** @brief Raised ⇒ @ref eff_aces is stale (rebuild lazily; ADR-0050 cache protocol). */
+    std::atomic<bool> acl_cache_dirty{true};
+    settings_t settings{}; /**< @brief QoS settings; single-field mutation under the vertex
+                                mutex (`vertex_t::update_settings`). */
+    /** @brief STREAM drain cursor (RFC-0008 §E): the write seq at the last flush, so a
+     *         propagate drains only the entries appended since; guarded by the vertex
+     *         mutex. */
+    std::uint64_t last_flushed_seq = 0;
+};
+
+/**
  * @brief An L4 graph vertex: a named, addressable position holding a value, a bounded
  *        history, or a user handler (docs/reference/11 §roles).
  *
@@ -340,15 +384,18 @@ class vertex_t {
     static constexpr std::size_t kInlineChildren = 2;
 
     /** @brief Construct a vertex with its role, own canonical NAME record (ADR-0057 — one
-     *         segment, not the full key), QoS settings, and handlers. */
+     *         segment, not the full key), QoS settings, and handlers. The cold extension
+     *         block is allocated only if this identity needs one (#361 §1). */
     vertex_t(role_t role, path_key_t name, settings_t settings, handlers_t handlers)
-        : role_(role),
-          name_(std::move(name)),
-          settings_(settings),
-          handlers_(std::move(handlers)) {}
+        : role_(role), name_(std::move(name)) {
+        adopt_identity(role, settings, std::move(handlers));
+    }
 
     vertex_t(const vertex_t&) = delete;
     vertex_t& operator=(const vertex_t&) = delete;
+
+    /** @brief Free the cold extension block (allocated at most once, ADR-0057 lifetime). */
+    ~vertex_t() { delete ext_.load(std::memory_order_acquire); }
 
     /** @brief This vertex's behavioral role. */
     [[nodiscard]] role_t role() const noexcept { return role_; }
@@ -356,10 +403,19 @@ class vertex_t {
      *         empty at the root. The full key is a parent-walk concatenation
      *         (`graph_t`'s `build_key`). */
     [[nodiscard]] const path_key_t& name() const noexcept { return name_; }
-    /** @brief This vertex's QoS settings. */
-    [[nodiscard]] const settings_t& settings() const noexcept { return settings_; }
-    /** @brief This vertex's user handlers (Handler role behavior + the `on_children` seam). */
-    [[nodiscard]] const handlers_t& handlers() const noexcept { return handlers_; }
+    /** @brief This vertex's QoS settings (@ref kDefaultSettings when no extension block —
+     *         a default-QoS vertex stores no copy of them). */
+    [[nodiscard]] const settings_t& settings() const noexcept {
+        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        return e != nullptr ? e->settings : kDefaultSettings;
+    }
+    /** @brief This vertex's user handlers (Handler role behavior + the `on_children` seam);
+     *         an all-empty shared constant when no extension block. */
+    [[nodiscard]] const handlers_t& handlers() const noexcept {
+        static const handlers_t kNoHandlers{};
+        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        return e != nullptr ? e->handlers : kNoHandlers;
+    }
 
     // -- Composite tree links (ADR-0057) -------------------------------------------------
     //
@@ -389,8 +445,7 @@ class vertex_t {
      */
     void fill(role_t role, settings_t settings, handlers_t handlers) {
         role_ = role;
-        settings_ = settings;
-        handlers_ = std::move(handlers);
+        adopt_identity(role, settings, std::move(handlers));
         registered_ = true;
     }
 
@@ -491,11 +546,12 @@ class vertex_t {
         lkv_.store(sp);  // lock-free publish of the new last-known-value
         {
             const std::lock_guard lock(m_);
-            if (role_ == role_t::STREAM) {
-                history_.push_back(sp);  // refcount bump — the caller keeps the returned sp
+            vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+            if (role_ == role_t::STREAM && e != nullptr) {  // STREAM identity always has ext
+                e->history.push_back(sp);  // refcount bump — the caller keeps the returned sp
                 const std::size_t keep =
-                    settings_.history_keep_last ? settings_.history_keep_last : 1;
-                while (history_.size() > keep) history_.pop_front();
+                    e->settings.history_keep_last ? e->settings.history_keep_last : 1;
+                while (e->history.size() > keep) e->history.pop_front();
             }
             ++write_seq_;
             cv_.notify_all();
@@ -540,7 +596,8 @@ class vertex_t {
      */
     void mark_flushed() {
         const std::lock_guard lock(m_);
-        last_flushed_seq_ = write_seq_;
+        if (vertex_ext_t* e = ext_.load(std::memory_order_acquire))
+            e->last_flushed_seq = write_seq_;
     }
 
     /**
@@ -554,13 +611,15 @@ class vertex_t {
      */
     std::size_t drain_unflushed(std::vector<std::shared_ptr<const rope_t>>& out) {
         const std::lock_guard lock(m_);
+        vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        if (e == nullptr) return 0;  // no ring — nothing was ever appended
         const std::uint64_t now = write_seq_;
-        if (now == last_flushed_seq_) return 0;
-        const std::uint64_t n_new = now - last_flushed_seq_;
-        last_flushed_seq_ = now;
+        if (now == e->last_flushed_seq) return 0;
+        const std::uint64_t n_new = now - e->last_flushed_seq;
+        e->last_flushed_seq = now;
         const auto take =
-            static_cast<std::ptrdiff_t>(std::min<std::uint64_t>(n_new, history_.size()));
-        out.assign(history_.end() - take, history_.end());
+            static_cast<std::ptrdiff_t>(std::min<std::uint64_t>(n_new, e->history.size()));
+        out.assign(e->history.end() - take, e->history.end());
         return out.size();
     }
 
@@ -569,8 +628,10 @@ class vertex_t {
     [[nodiscard]] std::vector<rope_t> history_snapshot() {
         const std::lock_guard lock(m_);
         std::vector<rope_t> out;
-        out.reserve(history_.size());
-        for (const auto& sp : history_) out.push_back(*sp);
+        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        if (e == nullptr) return out;
+        out.reserve(e->history.size());
+        for (const auto& sp : e->history) out.push_back(*sp);
         return out;
     }
 
@@ -591,7 +652,8 @@ class vertex_t {
         const std::lock_guard lock(m_);
         subs_.push_back(std::move(s));
         const std::size_t idx = subs_.size() - 1;
-        if (latch != nullptr && settings_.durability == 1) {
+        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        if (latch != nullptr && e != nullptr && e->settings.durability == 1) {
             if (std::shared_ptr<const rope_t> lkv = lkv_.load()) {
                 latch->value = std::move(lkv);
                 latch->edge = edge_view_of(subs_.back());
@@ -673,19 +735,21 @@ class vertex_t {
      *        walks). Storing replaces; empty ⇒ no restrictions.
      */
     void set_acl(std::span<const std::byte> raw, std::vector<ace_t> aces) {
+        vertex_ext_t& e = ensure_ext();
         const std::lock_guard lock(m_);
-        acl_.assign(raw.begin(), raw.end());
-        aces_ = std::move(aces);
+        e.acl.assign(raw.begin(), raw.end());
+        e.aces = std::move(aces);
         // Publish-then-mark (ADR-0050 cache protocol): the new ACEs are visible
         // under m_ BEFORE the dirty flag is raised, so a rebuild that observes the
         // flag always reads the new list (or leaves the flag set for the next one).
-        acl_cache_dirty_.store(true, std::memory_order_release);
+        e.acl_cache_dirty.store(true, std::memory_order_release);
     }
 
     /** @brief A copy of the stored raw `:acl` TLV bytes (empty ⇒ no `:acl` set). */
     [[nodiscard]] std::vector<std::byte> acl_bytes() {
         const std::lock_guard lock(m_);
-        return acl_;
+        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        return e != nullptr ? e->acl : std::vector<std::byte>{};
     }
 
     /**
@@ -699,8 +763,10 @@ class vertex_t {
      */
     template <typename F>
     auto with_aces(F&& f) -> decltype(f(std::declval<const std::vector<ace_t>&>())) {
+        static const std::vector<ace_t> kNoAces{};
         const std::lock_guard lock(m_);
-        return f(static_cast<const std::vector<ace_t>&>(aces_));
+        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        return f(e != nullptr ? e->aces : kNoAces);
     }
 
     /**
@@ -714,7 +780,11 @@ class vertex_t {
      *       during the subtree walk without touching any vertex mutex.
      */
     void mark_acl_cache_dirty() noexcept {
-        acl_cache_dirty_.store(true, std::memory_order_release);
+        // No extension block ⇒ no cached merge exists to invalidate; a block created
+        // later starts dirty, so a concurrent first-gated-op cannot miss this mark
+        // (its rebuild reads ancestor ACEs already published before this walk).
+        if (vertex_ext_t* e = ext_.load(std::memory_order_acquire))
+            e->acl_cache_dirty.store(true, std::memory_order_release);
     }
 
     /**
@@ -746,29 +816,34 @@ class vertex_t {
     template <typename Rebuild, typename Eval>
     auto with_effective_aces(Rebuild&& rebuild, Eval&& eval)
         -> decltype(eval(std::declval<const std::vector<ace_t>&>())) {
+        vertex_ext_t& e = ensure_ext();  // gated eval caches its merge here (fresh ⇒ dirty)
         const std::lock_guard lock(m_);
-        if (acl_cache_dirty_.exchange(false, std::memory_order_acq_rel))
-            eff_aces_ = rebuild(static_cast<const std::vector<ace_t>&>(aces_));
-        return eval(static_cast<const std::vector<ace_t>&>(eff_aces_));
+        if (e.acl_cache_dirty.exchange(false, std::memory_order_acq_rel))
+            e.eff_aces = rebuild(static_cast<const std::vector<ace_t>&>(e.aces));
+        return eval(static_cast<const std::vector<ace_t>&>(e.eff_aces));
     }
 
     // -- settings & propagation policy --------------------------------------------------
 
-    /** @brief A consistent copy of the QoS settings (taken under the vertex lock). */
+    /** @brief A consistent copy of the QoS settings (taken under the vertex lock;
+     *         @ref kDefaultSettings when no extension block). */
     [[nodiscard]] settings_t settings_snapshot() {
         const std::lock_guard lock(m_);
-        return settings_;
+        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        return e != nullptr ? e->settings : kDefaultSettings;
     }
 
     /**
      * @brief Mutate the QoS settings under the vertex lock: @p f receives `settings_t&`;
      *        its return value is passed through (the `:settings.<field>` write surface —
      *        concurrent single-field writes both land, no read-modify-write clobber).
+     *        Allocates the extension block on a default-QoS vertex's first write.
      */
     template <typename F>
     auto update_settings(F&& f) -> decltype(f(std::declval<settings_t&>())) {
+        vertex_ext_t& e = ensure_ext();
         const std::lock_guard lock(m_);
-        return f(settings_);
+        return f(e.settings);
     }
 
     /** @brief How this vertex participates in an ANCESTOR's propagate sweep (RFC-0008 §C). */
@@ -810,30 +885,55 @@ class vertex_t {
                            s.return_route, s.delivery_compact, s.caller};
     }
 
+    /**
+     * @brief The extension block, creating it on first need (race-free CAS publish).
+     *
+     * Callable under any lock regime: allocation races between the registration path
+     * (graph map lock) and the field-write verbs (vertex mutex) resolve by
+     * compare-exchange — the loser frees its candidate and adopts the winner's block.
+     * The pointer is never cleared once published (ADR-0057 insert-only lifetime), so
+     * lock-free readers (@ref settings / @ref handlers) stay valid forever.
+     */
+    vertex_ext_t& ensure_ext() {
+        vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        if (e != nullptr) return *e;
+        auto fresh = std::make_unique<vertex_ext_t>();
+        vertex_ext_t* expected = nullptr;
+        if (ext_.compare_exchange_strong(expected, fresh.get(), std::memory_order_acq_rel,
+                                         std::memory_order_acquire))
+            return *fresh.release();
+        return *expected;  // another thread won the publish; fresh is freed here
+    }
+
+    /**
+     * @brief Install a registration's identity (constructor + @ref fill): allocate the
+     *        extension block iff this identity needs one — STREAM role (history ring),
+     *        any user handler, or non-default QoS — and store the cold members there.
+     *        A plain default leaf allocates nothing (#361 §1).
+     */
+    void adopt_identity(role_t role, const settings_t& settings, handlers_t handlers) {
+        const bool has_handlers = handlers.on_read || handlers.on_write || handlers.on_children;
+        if (role != role_t::STREAM && !has_handlers && settings == kDefaultSettings &&
+            ext_.load(std::memory_order_acquire) == nullptr)
+            return;
+        vertex_ext_t& e = ensure_ext();
+        e.settings = settings;
+        e.handlers = std::move(handlers);
+    }
+
     role_t role_;
     path_key_t name_;  // own canonical NAME record (one segment; empty at the root) — the
                        // full key is rendered on demand by walking parent_ (ADR-0057)
-    settings_t settings_;
-    handlers_t handlers_;
 
     // The stored value is a rope (ADR-0053 §6): a contiguous scalar is a single-link
     // rope (small-buffer inline, no extra alloc), a chunked stream keeps its links.
-    std::atomic<std::shared_ptr<const rope_t>> lkv_{};   // lock-free read/write hot path
-    std::deque<std::shared_ptr<const rope_t>> history_;  // Stream ring; guarded by m_
-    std::vector<subscriber_t> subs_;                     // fan-out edges; guarded by m_
-    std::vector<std::byte> acl_;  // raw :acl TLV bytes, served back verbatim; guarded by m_
-                                  // (#81-A, ADR-0018/0020). Empty => no :acl set.
-    std::vector<ace_t> aces_;     // the :acl bytes parsed into core-subset ACEs at write time
-                                  // (#81, ALLOW-only + INHERIT); guarded by m_. graph_t's
-                                  // acl_allows evaluates these when a subject resolver is set.
-    // The ADR-0050 cached effective-ACE merge: own + INHERIT-flagged ancestor ACEs,
-    // pre-merged in evaluation order, so a gated op evaluates ONE list with no
-    // ancestor walk. Guarded by m_; rebuilt lazily by with_effective_aces when
-    // acl_cache_dirty_ is raised (any :acl write on this vertex or an ancestor —
-    // subtree-precise via the ADR-0057 child links). Only the MERGE is cached,
-    // never a verdict: expiry is evaluated at check time against the caller's now.
-    std::vector<ace_t> eff_aces_;
-    std::atomic<bool> acl_cache_dirty_{true};  // raised => eff_aces_ is stale (rebuild lazily)
+    std::atomic<std::shared_ptr<const rope_t>> lkv_{};  // lock-free read/write hot path
+    std::vector<subscriber_t> subs_;                    // fan-out edges; guarded by m_
+    // The lazily-allocated cold half (#361 §1): handlers, STREAM ring, the ACL state +
+    // ADR-0050 effective-merge cache, non-default settings, and the stream drain cursor.
+    // Null for the common default leaf. Published once by ensure_ext (CAS), never
+    // cleared; freed by the destructor.
+    std::atomic<vertex_ext_t*> ext_{nullptr};
     std::mutex m_;
     std::condition_variable cv_;
     std::uint64_t write_seq_ = 0;  // bumped per assign; await waits for an increment, and it is
@@ -841,12 +941,8 @@ class vertex_t {
                                    // Guarded by m_.
     // How this vertex participates in an ANCESTOR's propagate sweep (RFC-0008 §C).
     // Set at wiring time via graph_t::set_delivery_mode (the "configure before frames
-    // flow" contract, like settings_); read on the assign path. Default IF_NEWER.
+    // flow" contract, like the QoS settings); read on the assign path. Default IF_NEWER.
     delivery_mode_t delivery_mode_ = delivery_mode_t::IF_NEWER;
-    // STREAM drain cursor (RFC-0008 §E): write_seq_ at the last flush of this stream, so
-    // a propagate drains the ring entries appended since — a queue, not a coalesce.
-    // Guarded by m_.
-    std::uint64_t last_flushed_seq_ = 0;
 
     // Subtree-subscription bookkeeping (RFC-0005): every subscription observes its
     // vertex AND all descendants, so a write must fan out to ancestor subscribers

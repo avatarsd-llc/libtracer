@@ -181,6 +181,14 @@ libtracer_test_warnings(vertex_test)
 add_test(NAME vertex COMMAND vertex_test)
 
 # M3 — L4 graph-runtime harness (single-threaded checks + multithreaded stress).
+# The vertex RAM-diet regression gate (#361): compile-time sizeof(vertex_t) ceilings
+# plus runtime probes of the lazy cold-extension allocation. static_asserts fire at
+# build time; the runtime half runs as an ordinary ctest.
+add_executable(vertex_size_test vertex_size_test.cpp)
+target_link_libraries(vertex_size_test PRIVATE libtracer)
+libtracer_test_warnings(vertex_size_test)
+add_test(NAME vertex_size COMMAND vertex_size_test)
+
 add_executable(graph_test graph_test.cpp)
 target_link_libraries(graph_test PRIVATE libtracer)
 libtracer_test_warnings(graph_test)
