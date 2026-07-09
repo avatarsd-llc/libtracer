@@ -11,8 +11,10 @@
 #     recorded as the baseline; the PR's are gated against it. GitHub-hosted runners vary
 #     ~2x in speed, so a baseline recorded on a fast runner vs a slow PR runner used to
 #     false-fail; measuring both here makes absolute-ns speed cancel — only a real
-#     relative regression (p50 up >50% / throughput down >34%) fails. perf_gate.py keeps
-#     its absolute-floor backstop. No Actions cache feeds the gate any more.
+#     relative regression (p50 up >15% / throughput down >12%, best-of-3 runs) fails.
+#     perf_gate.py keeps its absolute-floor backstop. No Actions cache feeds the gate.
+#     Push runs ratchet HEAD against its PARENT commit the same way, so a pullback
+#     that lands anyway turns main red immediately.
 name: perf
 
 on:
@@ -78,10 +80,34 @@ jobs:
           echo "== gate PR candidate against the same-runner baseline =="
           python3 bench/perf_gate.py
 
-      # --- main push: refresh the absolute-floor backstop -------------------------
-      - name: Performance gate (absolute floors)
+      # --- main push: no-pullback ratchet (same-runner, HEAD vs parent) ------------
+      # The PR gate above catches a pullback before merge; this re-verifies it AFTER
+      # merge against the actual parent commit on one runner — a merge that raises
+      # p50 >15% or drops deliveries/s >12% vs its parent turns main red. Same-runner
+      # comparison is the only noise-immune signal available (shared runners vary ~2x
+      # in absolute speed, which is why the raw ns history chart alone can't gate).
+      - name: Build the parent commit's benchmark on this runner (ratchet baseline)
         if: github.event_name == 'push'
-        run: python3 bench/perf_gate.py --update-baseline
+        run: |
+          if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            git worktree add --detach ../parent-baseline HEAD^
+            cmake -S ../parent-baseline/bench -B ../parent-baseline/bench/build -DCMAKE_BUILD_TYPE=Release
+            cmake --build ../parent-baseline/bench/build --target bench_libtracer -j
+          else
+            echo "root commit — no parent to ratchet against"
+          fi
+      - name: No-pullback ratchet (HEAD vs parent)
+        if: github.event_name == 'push'
+        run: |
+          if [ -x ../parent-baseline/bench/build/bench_libtracer ]; then
+            echo "== record the parent (ratchet baseline) on this runner =="
+            python3 bench/perf_gate.py --bench ../parent-baseline/bench/build/bench_libtracer --update-baseline
+            echo "== gate HEAD against its parent on the same runner =="
+            python3 bench/perf_gate.py
+          else
+            echo "== no parent build — absolute floors only =="
+            python3 bench/perf_gate.py --update-baseline
+          fi
 
       # --- main push: persist the build-to-build ns history -----------------------
       # perf_gate.py above is the HARD, per-PR relative gate (fails a PR at >50%
