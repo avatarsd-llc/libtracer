@@ -358,13 +358,29 @@ struct alignas(64) vertex_stripe_t {  // one cache line per stripe: adjacent str
 };
 
 /**
- * @brief The stripe table: `constinit` (a `std::mutex` is constexpr-constructible), so
- *        the per-verb lookup is a plain indexed load with NO function-local-static
- *        init-guard check on the hot path (#370). The condvars live in a separate,
- *        guarded table (@ref vertex_stripe_cv) because `std::condition_variable`
- *        cannot be constant-initialized — and only the cold await/wake paths reach it.
+ * @brief The stripe table: `constinit` where the platform's `std::mutex` is
+ *        constexpr-constructible, so the per-verb lookup is a plain indexed load with
+ *        NO function-local-static init-guard check on the hot path (#370). libstdc++
+ *        makes the ctor constexpr only when its gthreads port supports static mutex
+ *        init (`__GTHREAD_MUTEX_INIT`) — ESP-IDF's does NOT — and libc++'s always is;
+ *        the fallback is a guarded function-local static (one predicted branch per
+ *        verb — the MCU's constraint is RAM, not that branch). The condvars live in a
+ *        separate guarded table (`vertex_stripe_cv`) because `std::condition_variable`
+ *        can never be constant-initialized — only the cold await/wake paths reach it.
  */
+#if defined(__GTHREAD_MUTEX_INIT) || defined(_LIBCPP_VERSION)
 inline constinit std::array<vertex_stripe_t, LIBTRACER_VERTEX_LOCK_STRIPES> vertex_stripes{};
+
+/** @brief The stripe at table slot @p idx (guard-free constant-initialized table). */
+inline vertex_stripe_t& vertex_stripe_at(std::size_t idx) noexcept { return vertex_stripes[idx]; }
+#else
+/** @brief The stripe at table slot @p idx (guarded-static fallback: this platform's
+ *         `std::mutex` has no constexpr ctor, so the table cannot be `constinit`). */
+inline vertex_stripe_t& vertex_stripe_at(std::size_t idx) noexcept {
+    static std::array<vertex_stripe_t, LIBTRACER_VERTEX_LOCK_STRIPES> stripes{};
+    return stripes[idx];
+}
+#endif
 
 /** @brief The stripe slot of a pinned vertex address (ADR-0056/0057 — the address is a
  *         stable identity). Same vertex ⇒ same slot, always. */
@@ -374,14 +390,14 @@ inline std::size_t vertex_stripe_index(const void* v) noexcept {
     return (h >> 6) % LIBTRACER_VERTEX_LOCK_STRIPES;
 }
 
-/** @brief The stripe a vertex rides (mutex + waiter count; guard-free lookup). */
+/** @brief The stripe a vertex rides (mutex + waiter count). */
 inline vertex_stripe_t& vertex_stripe_of(const void* v) noexcept {
-    return vertex_stripes[vertex_stripe_index(v)];
+    return vertex_stripe_at(vertex_stripe_index(v));
 }
 
 /**
  * @brief The stripe's condvar — a SEPARATE guarded-static table, reached only from
- *        @ref vertex_t::wait_for_change and from a publish that saw `waiters != 0`:
+ *        `vertex_t::wait_for_change` and from a publish that saw `waiters != 0`:
  *        the waiterless publish (the hot path) never pays this table's init guard.
  */
 inline std::condition_variable& vertex_stripe_cv(std::size_t idx) {
@@ -667,7 +683,7 @@ class vertex_t {
      */
     [[nodiscard]] bool wait_for_change(std::uint64_t seq0, std::chrono::nanoseconds timeout) {
         const std::size_t idx = vertex_stripe_index(this);
-        vertex_stripe_t& st = vertex_stripes[idx];
+        vertex_stripe_t& st = vertex_stripe_at(idx);
         std::unique_lock lock(st.m);
         // Register on the stripe's waiter count (under st.m — the notify side reads it
         // under the same mutex, so a publish either sees us and notifies, or happened
