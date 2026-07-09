@@ -1042,11 +1042,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "c17aef77a2642f80a1487bb24b14ecedc6e8ec97",
+          "id": "d115aa09b444980b47a91c03ac2f74b93799f746",
           "message": "Merge pull request #337 from avatarsd-llc/feat/receiver-slot\n\nrefactor(net): receiver_slot_t — one delivery-tier slot, fn-ptr receivers",
           "timestamp": "2026-07-08T22:18:57+03:00",
           "tree_id": "9313dcf7c34ebda347dd7bb3750134988fd233d9",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/c17aef77a2642f80a1487bb24b14ecedc6e8ec97"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/d115aa09b444980b47a91c03ac2f74b93799f746"
         },
         "date": 1783538384238,
         "tool": "customSmallerIsBetter",
@@ -1096,11 +1096,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "effacc445a48c4299b75cbf657c081d493450d77",
+          "id": "5d5e7f3ff8b070e20a9a92ac6deae80fa6fbc872",
           "message": "Merge pull request #338 from avatarsd-llc/feat/vertex-verbs\n\nrefactor(graph): vertex_t verb interface — storage/readiness/edges behind one seam",
           "timestamp": "2026-07-08T22:40:47+03:00",
           "tree_id": "c8cf3e9f72ebe73a47f2022ee639c98b6c1ed2e0",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/effacc445a48c4299b75cbf657c081d493450d77"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/5d5e7f3ff8b070e20a9a92ac6deae80fa6fbc872"
         },
         "date": 1783539695566,
         "tool": "customSmallerIsBetter",
@@ -1150,11 +1150,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "00b68fdab591b1cba4437579a1115f84336eb6ed",
+          "id": "98be7c941ecdb4264eb0cf8fd1b7d1359a539b41",
           "message": "Merge pull request #339 from avatarsd-llc/docs/doxygen-everywhere\n\ndocs(style): doxygen-capable /** @brief */ comments everywhere — .cpp and bindings too",
           "timestamp": "2026-07-08T22:50:47+03:00",
           "tree_id": "3482d218fa99543fb25b85a70851d5fe2d9c24dd",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/00b68fdab591b1cba4437579a1115f84336eb6ed"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/98be7c941ecdb4264eb0cf8fd1b7d1359a539b41"
         },
         "date": 1783540296358,
         "tool": "customSmallerIsBetter",
@@ -1204,11 +1204,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "ff1993946363167890298222138e6fa6d1d3e339",
+          "id": "fc89040a0144e2175464ba0387a998917109ed0f",
           "message": "Merge pull request #340 from avatarsd-llc/feat/lazy-validation\n\nrefactor(wire): resource-bounded walk stack, lazy ingress, kMaxDepth deleted (RFC-0006)",
           "timestamp": "2026-07-08T23:14:06+03:00",
           "tree_id": "3034a17491017a183a02c0645fe9085db53bce36",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/ff1993946363167890298222138e6fa6d1d3e339"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/fc89040a0144e2175464ba0387a998917109ed0f"
         },
         "date": 1783541712998,
         "tool": "customSmallerIsBetter",
@@ -1258,11 +1258,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "16c667f24589c5e6555c269c7d0e8a19cc287ef7",
+          "id": "65f0b8f0eabb27135726acbd9193f9b6edb8b3a1",
           "message": "Merge pull request #342 from avatarsd-llc/feat/graph-composite\n\nrefactor(graph): Composite vertex tree replaces the flat full-key map (ADR-0057)",
           "timestamp": "2026-07-08T23:29:49+03:00",
           "tree_id": "10d15fe995cf37c215d88d3e7f57195775a74da5",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/16c667f24589c5e6555c269c7d0e8a19cc287ef7"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/65f0b8f0eabb27135726acbd9193f9b6edb8b3a1"
         },
         "date": 1783542630068,
         "tool": "customSmallerIsBetter",
@@ -1312,11 +1312,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "47a01ba032a9c9dccfae02bd9e07e7193f78bcf4",
+          "id": "199d2158e39d738691fd115626ce4334e6ce01f4",
           "message": "Merge pull request #343 from avatarsd-llc/feat/perf-docs-history\n\nci(perf)+docs: benchmark history surfaced in the docs site; rich per-commit results",
           "timestamp": "2026-07-08T23:44:08+03:00",
           "tree_id": "5e0eb1bd63f01c152351e14a571d94710749b2ba",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/47a01ba032a9c9dccfae02bd9e07e7193f78bcf4"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/199d2158e39d738691fd115626ce4334e6ce01f4"
         },
         "date": 1783543491925,
         "tool": "customSmallerIsBetter",
@@ -1811,11 +1811,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "706fd475b91c4f258d6c2bc64500b8df659191e8",
+          "id": "fd1fb2da688d6cd15439bf797a001f49c1d3fb5b",
           "message": "Merge pull request #344 from avatarsd-llc/feat/effective-acl\n\nfeat(graph): effective_acl_t + subtree-precise cached ACE merge (ADR-0050 completed)",
           "timestamp": "2026-07-09T00:13:52+03:00",
           "tree_id": "6c591495ed2a558c02f393e552652f6142b77571",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/706fd475b91c4f258d6c2bc64500b8df659191e8"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/fd1fb2da688d6cd15439bf797a001f49c1d3fb5b"
         },
         "date": 1783545281813,
         "tool": "customSmallerIsBetter",
@@ -2340,11 +2340,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "7910d52853052cc9acc1e488beec05b3d9fc63b6",
+          "id": "97070b0fc341b4948646ae2f924c649c730cdc5b",
           "message": "Merge pull request #346 from avatarsd-llc/feat/msquic-endpoint-base\n\nrefactor(net): msquic_endpoint_t — the QUIC-mechanical layer extracted from both msquic transports",
           "timestamp": "2026-07-09T00:13:56+03:00",
           "tree_id": "b1e512fe1c24d54f9d9a6cacaf7f45ae93477653",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/7910d52853052cc9acc1e488beec05b3d9fc63b6"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/97070b0fc341b4948646ae2f924c649c730cdc5b"
         },
         "date": 1783545303589,
         "tool": "customSmallerIsBetter",
@@ -2869,11 +2869,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "3459caf31b65b97e7666c6b6a32f766620436aa0",
+          "id": "c9481238532063d902ec50a63910dcca7c72d643",
           "message": "Merge pull request #348 from avatarsd-llc/feat/perf-page-unified-history\n\ndocs(perf): unified performance page — in-page all-commit history alongside Zenoh + live test rollup",
           "timestamp": "2026-07-09T00:22:58+03:00",
           "tree_id": "ea6f4f662cb463bbdc9f0707bd66af833bc8fae8",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/3459caf31b65b97e7666c6b6a32f766620436aa0"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/c9481238532063d902ec50a63910dcca7c72d643"
         },
         "date": 1783545829829,
         "tool": "customSmallerIsBetter",
@@ -3398,11 +3398,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "b594e5d414391c5ef0a5f44ea596fb23b902a9fb",
+          "id": "6a55d902cd9aaa00cae86cc759d0da91a06fb974",
           "message": "Merge pull request #347 from avatarsd-llc/feat/fwd-frame-view\n\nrefactor(net): fwd_frame_view — the FWD offset-dispatch cluster becomes a unit-testable public header",
           "timestamp": "2026-07-09T00:23:20+03:00",
           "tree_id": "7d59c421e52d4882e7d43ffcf09dc7fab3d9995c",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/b594e5d414391c5ef0a5f44ea596fb23b902a9fb"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/6a55d902cd9aaa00cae86cc759d0da91a06fb974"
         },
         "date": 1783545852806,
         "tool": "customSmallerIsBetter",
@@ -3927,11 +3927,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "65bcace0896c025f7583b1508585727f1356664c",
+          "id": "c15f7087aaba0b9775dbe421ffa0ace6053aa2d6",
           "message": "Merge pull request #349 from avatarsd-llc/feat/grab-bag-smalls\n\nrefactor: grab-bag — stream_endpoint_t, config_reader_t, kMaxFrame dedup, view_as_tlv fold",
           "timestamp": "2026-07-09T01:07:46+03:00",
           "tree_id": "dd5e9db4cde5bfc0849817ea9e53c9d7fed6a13b",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/65bcace0896c025f7583b1508585727f1356664c"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/c15f7087aaba0b9775dbe421ffa0ace6053aa2d6"
         },
         "date": 1783548514715,
         "tool": "customSmallerIsBetter",
@@ -4456,11 +4456,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "77e26b404d004be5e5bb60464b85745ad413c837",
+          "id": "757d15858ca9a9b7243a9933a1a6215ad784e24a",
           "message": "Merge pull request #350 from avatarsd-llc/feat/perf-charts-unified\n\ndocs(perf): unified family trend charts with release markers (trend/sweep/heatmap/3D)",
           "timestamp": "2026-07-09T01:29:29+03:00",
           "tree_id": "55b46771d5d1869da788c9db38c6c8d1b15341b5",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/77e26b404d004be5e5bb60464b85745ad413c837"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/757d15858ca9a9b7243a9933a1a6215ad784e24a"
         },
         "date": 1783549818654,
         "tool": "customSmallerIsBetter",
@@ -4985,11 +4985,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "80524a352c52deac034b54b08eb1b941339e731e",
+          "id": "1c0d0e8d530902c6d96bf057b352d6e3915a8910",
           "message": "Merge pull request #351 from avatarsd-llc/test/conformance-opt-bit-vectors\n\ntest(conformance): opt-bit position coverage + negative-vector harness contract",
           "timestamp": "2026-07-09T01:35:55+03:00",
           "tree_id": "5f7d85ba8c58d4d449e0ebab731f0ff2d812cf3a",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/80524a352c52deac034b54b08eb1b941339e731e"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/1c0d0e8d530902c6d96bf057b352d6e3915a8910"
         },
         "date": 1783550204937,
         "tool": "customSmallerIsBetter",
@@ -5514,11 +5514,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "ed6a32e9941e7c4421e15576a4f7e27d88477374",
+          "id": "17e2250a685bd5ce0814128fe45de88c188b8191",
           "message": "Merge pull request #352 from avatarsd-llc/fix/fan1-delivery-regression\n\nfix(graph): eliminate the fan-out snapshot zeroing stall — fan1 dispatch 143→103 ns",
           "timestamp": "2026-07-09T01:44:02+03:00",
           "tree_id": "8df984784af06b23abcfef1463380bdbb6795f97",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/ed6a32e9941e7c4421e15576a4f7e27d88477374"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/17e2250a685bd5ce0814128fe45de88c188b8191"
         },
         "date": 1783550687283,
         "tool": "customSmallerIsBetter",
@@ -6043,11 +6043,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "0a2fd9bf89f4d1f96242bd8263691933803259ce",
+          "id": "0d032f9b5e1c58785b2976ad8ab644a845c75e5e",
           "message": "Merge pull request #354 from avatarsd-llc/perf/write-path-reductions\n\nperf(graph): deliver the published LKV pointer — fan1 dispatch ~101→~90 ns",
           "timestamp": "2026-07-09T02:13:55+03:00",
           "tree_id": "002b72020ff8fe2061b936da8db1080e03173092",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/0a2fd9bf89f4d1f96242bd8263691933803259ce"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/0d032f9b5e1c58785b2976ad8ab644a845c75e5e"
         },
         "date": 1783552475994,
         "tool": "customSmallerIsBetter",
@@ -6572,11 +6572,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "53f1143c1ca9812f5b3684f5f26f682c95d5fbc6",
+          "id": "36a9c7d8369f49dfc8b5cb1891a92aed136ec1fc",
           "message": "Merge pull request #353 from avatarsd-llc/bench/comparison-fairness\n\nbench: honest zenoh comparison — deliver-only row, symmetric bracketing, corrected narrative",
           "timestamp": "2026-07-09T02:44:16+03:00",
           "tree_id": "b38d8f566185f022d69f62e15aec3b81036e5132",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/53f1143c1ca9812f5b3684f5f26f682c95d5fbc6"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/36a9c7d8369f49dfc8b5cb1891a92aed136ec1fc"
         },
         "date": 1783554301796,
         "tool": "customSmallerIsBetter",
@@ -7176,11 +7176,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "a2c79483031d48d7cd6bfa1fb1b7a295412bf235",
+          "id": "ee71f0bc6e544ac64a13b9925109c35bfbd3b4ab",
           "message": "Merge pull request #357 from avatarsd-llc/docs/doxygen-sweep-core\n\ndocs(core): doxygen /** @brief */ sweep — src, tests, bench",
           "timestamp": "2026-07-09T03:07:17+03:00",
           "tree_id": "b6f12e980d6e5756044ec44c3fd821a768115190",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/a2c79483031d48d7cd6bfa1fb1b7a295412bf235"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/ee71f0bc6e544ac64a13b9925109c35bfbd3b4ab"
         },
         "date": 1783555686644,
         "tool": "customSmallerIsBetter",
@@ -7780,11 +7780,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "9aeb5bd202757232fbd4c05445bd299f15856c6f",
+          "id": "94fc98d85dd5ddfc17262c59b6546c72e1fb4f97",
           "message": "Merge pull request #360 from avatarsd-llc/release/0.4.0-changelog-cut\n\nrelease: v0.4.0 changelog cut + version reconcile",
           "timestamp": "2026-07-09T09:39:43+03:00",
           "tree_id": "c7ebe15478d6901fe16c845711726e5d6cecff9c",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/9aeb5bd202757232fbd4c05445bd299f15856c6f"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/94fc98d85dd5ddfc17262c59b6546c72e1fb4f97"
         },
         "date": 1783579240653,
         "tool": "customSmallerIsBetter",
@@ -8990,11 +8990,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "47a01ba032a9c9dccfae02bd9e07e7193f78bcf4",
+          "id": "199d2158e39d738691fd115626ce4334e6ce01f4",
           "message": "Merge pull request #343 from avatarsd-llc/feat/perf-docs-history\n\nci(perf)+docs: benchmark history surfaced in the docs site; rich per-commit results",
           "timestamp": "2026-07-08T23:44:08+03:00",
           "tree_id": "5e0eb1bd63f01c152351e14a571d94710749b2ba",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/47a01ba032a9c9dccfae02bd9e07e7193f78bcf4"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/199d2158e39d738691fd115626ce4334e6ce01f4"
         },
         "date": 1783543493732,
         "tool": "customBiggerIsBetter",
@@ -9164,11 +9164,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "706fd475b91c4f258d6c2bc64500b8df659191e8",
+          "id": "fd1fb2da688d6cd15439bf797a001f49c1d3fb5b",
           "message": "Merge pull request #344 from avatarsd-llc/feat/effective-acl\n\nfeat(graph): effective_acl_t + subtree-precise cached ACE merge (ADR-0050 completed)",
           "timestamp": "2026-07-09T00:13:52+03:00",
           "tree_id": "6c591495ed2a558c02f393e552652f6142b77571",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/706fd475b91c4f258d6c2bc64500b8df659191e8"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/fd1fb2da688d6cd15439bf797a001f49c1d3fb5b"
         },
         "date": 1783545284500,
         "tool": "customBiggerIsBetter",
@@ -9348,11 +9348,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "7910d52853052cc9acc1e488beec05b3d9fc63b6",
+          "id": "97070b0fc341b4948646ae2f924c649c730cdc5b",
           "message": "Merge pull request #346 from avatarsd-llc/feat/msquic-endpoint-base\n\nrefactor(net): msquic_endpoint_t — the QUIC-mechanical layer extracted from both msquic transports",
           "timestamp": "2026-07-09T00:13:56+03:00",
           "tree_id": "b1e512fe1c24d54f9d9a6cacaf7f45ae93477653",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/7910d52853052cc9acc1e488beec05b3d9fc63b6"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/97070b0fc341b4948646ae2f924c649c730cdc5b"
         },
         "date": 1783545306910,
         "tool": "customBiggerIsBetter",
@@ -9532,11 +9532,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "3459caf31b65b97e7666c6b6a32f766620436aa0",
+          "id": "c9481238532063d902ec50a63910dcca7c72d643",
           "message": "Merge pull request #348 from avatarsd-llc/feat/perf-page-unified-history\n\ndocs(perf): unified performance page — in-page all-commit history alongside Zenoh + live test rollup",
           "timestamp": "2026-07-09T00:22:58+03:00",
           "tree_id": "ea6f4f662cb463bbdc9f0707bd66af833bc8fae8",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/3459caf31b65b97e7666c6b6a32f766620436aa0"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/c9481238532063d902ec50a63910dcca7c72d643"
         },
         "date": 1783545831642,
         "tool": "customBiggerIsBetter",
@@ -9716,11 +9716,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "b594e5d414391c5ef0a5f44ea596fb23b902a9fb",
+          "id": "6a55d902cd9aaa00cae86cc759d0da91a06fb974",
           "message": "Merge pull request #347 from avatarsd-llc/feat/fwd-frame-view\n\nrefactor(net): fwd_frame_view — the FWD offset-dispatch cluster becomes a unit-testable public header",
           "timestamp": "2026-07-09T00:23:20+03:00",
           "tree_id": "7d59c421e52d4882e7d43ffcf09dc7fab3d9995c",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/b594e5d414391c5ef0a5f44ea596fb23b902a9fb"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/6a55d902cd9aaa00cae86cc759d0da91a06fb974"
         },
         "date": 1783545855837,
         "tool": "customBiggerIsBetter",
@@ -9900,11 +9900,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "65bcace0896c025f7583b1508585727f1356664c",
+          "id": "c15f7087aaba0b9775dbe421ffa0ace6053aa2d6",
           "message": "Merge pull request #349 from avatarsd-llc/feat/grab-bag-smalls\n\nrefactor: grab-bag — stream_endpoint_t, config_reader_t, kMaxFrame dedup, view_as_tlv fold",
           "timestamp": "2026-07-09T01:07:46+03:00",
           "tree_id": "dd5e9db4cde5bfc0849817ea9e53c9d7fed6a13b",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/65bcace0896c025f7583b1508585727f1356664c"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/c15f7087aaba0b9775dbe421ffa0ace6053aa2d6"
         },
         "date": 1783548515997,
         "tool": "customBiggerIsBetter",
@@ -10084,11 +10084,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "77e26b404d004be5e5bb60464b85745ad413c837",
+          "id": "757d15858ca9a9b7243a9933a1a6215ad784e24a",
           "message": "Merge pull request #350 from avatarsd-llc/feat/perf-charts-unified\n\ndocs(perf): unified family trend charts with release markers (trend/sweep/heatmap/3D)",
           "timestamp": "2026-07-09T01:29:29+03:00",
           "tree_id": "55b46771d5d1869da788c9db38c6c8d1b15341b5",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/77e26b404d004be5e5bb60464b85745ad413c837"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/757d15858ca9a9b7243a9933a1a6215ad784e24a"
         },
         "date": 1783549820608,
         "tool": "customBiggerIsBetter",
@@ -10268,11 +10268,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "80524a352c52deac034b54b08eb1b941339e731e",
+          "id": "1c0d0e8d530902c6d96bf057b352d6e3915a8910",
           "message": "Merge pull request #351 from avatarsd-llc/test/conformance-opt-bit-vectors\n\ntest(conformance): opt-bit position coverage + negative-vector harness contract",
           "timestamp": "2026-07-09T01:35:55+03:00",
           "tree_id": "5f7d85ba8c58d4d449e0ebab731f0ff2d812cf3a",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/80524a352c52deac034b54b08eb1b941339e731e"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/1c0d0e8d530902c6d96bf057b352d6e3915a8910"
         },
         "date": 1783550207646,
         "tool": "customBiggerIsBetter",
@@ -10452,11 +10452,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "ed6a32e9941e7c4421e15576a4f7e27d88477374",
+          "id": "17e2250a685bd5ce0814128fe45de88c188b8191",
           "message": "Merge pull request #352 from avatarsd-llc/fix/fan1-delivery-regression\n\nfix(graph): eliminate the fan-out snapshot zeroing stall — fan1 dispatch 143→103 ns",
           "timestamp": "2026-07-09T01:44:02+03:00",
           "tree_id": "8df984784af06b23abcfef1463380bdbb6795f97",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/ed6a32e9941e7c4421e15576a4f7e27d88477374"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/17e2250a685bd5ce0814128fe45de88c188b8191"
         },
         "date": 1783550689299,
         "tool": "customBiggerIsBetter",
@@ -10636,11 +10636,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "0a2fd9bf89f4d1f96242bd8263691933803259ce",
+          "id": "0d032f9b5e1c58785b2976ad8ab644a845c75e5e",
           "message": "Merge pull request #354 from avatarsd-llc/perf/write-path-reductions\n\nperf(graph): deliver the published LKV pointer — fan1 dispatch ~101→~90 ns",
           "timestamp": "2026-07-09T02:13:55+03:00",
           "tree_id": "002b72020ff8fe2061b936da8db1080e03173092",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/0a2fd9bf89f4d1f96242bd8263691933803259ce"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/0d032f9b5e1c58785b2976ad8ab644a845c75e5e"
         },
         "date": 1783552477868,
         "tool": "customBiggerIsBetter",
@@ -10820,11 +10820,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "53f1143c1ca9812f5b3684f5f26f682c95d5fbc6",
+          "id": "36a9c7d8369f49dfc8b5cb1891a92aed136ec1fc",
           "message": "Merge pull request #353 from avatarsd-llc/bench/comparison-fairness\n\nbench: honest zenoh comparison — deliver-only row, symmetric bracketing, corrected narrative",
           "timestamp": "2026-07-09T02:44:16+03:00",
           "tree_id": "b38d8f566185f022d69f62e15aec3b81036e5132",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/53f1143c1ca9812f5b3684f5f26f682c95d5fbc6"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/36a9c7d8369f49dfc8b5cb1891a92aed136ec1fc"
         },
         "date": 1783554304426,
         "tool": "customBiggerIsBetter",
@@ -11029,11 +11029,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "a2c79483031d48d7cd6bfa1fb1b7a295412bf235",
+          "id": "ee71f0bc6e544ac64a13b9925109c35bfbd3b4ab",
           "message": "Merge pull request #357 from avatarsd-llc/docs/doxygen-sweep-core\n\ndocs(core): doxygen /** @brief */ sweep — src, tests, bench",
           "timestamp": "2026-07-09T03:07:17+03:00",
           "tree_id": "b6f12e980d6e5756044ec44c3fd821a768115190",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/a2c79483031d48d7cd6bfa1fb1b7a295412bf235"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/ee71f0bc6e544ac64a13b9925109c35bfbd3b4ab"
         },
         "date": 1783555689297,
         "tool": "customBiggerIsBetter",
@@ -11238,11 +11238,11 @@ window.BENCHMARK_DATA = {
             "username": "web-flow"
           },
           "distinct": true,
-          "id": "9aeb5bd202757232fbd4c05445bd299f15856c6f",
+          "id": "94fc98d85dd5ddfc17262c59b6546c72e1fb4f97",
           "message": "Merge pull request #360 from avatarsd-llc/release/0.4.0-changelog-cut\n\nrelease: v0.4.0 changelog cut + version reconcile",
           "timestamp": "2026-07-09T09:39:43+03:00",
           "tree_id": "c7ebe15478d6901fe16c845711726e5d6cecff9c",
-          "url": "https://github.com/avatarsd-llc/libtracer/commit/9aeb5bd202757232fbd4c05445bd299f15856c6f"
+          "url": "https://github.com/avatarsd-llc/libtracer/commit/94fc98d85dd5ddfc17262c59b6546c72e1fb4f97"
         },
         "date": 1783579242631,
         "tool": "customBiggerIsBetter",
