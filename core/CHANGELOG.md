@@ -14,6 +14,32 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **Per-vertex `std::mutex` + `std::condition_variable` replaced by a process-wide
+  striped lock table (#361 §2)** — `vertex_stripe_of(vertex*)` hashes the pinned
+  vertex address into `LIBTRACER_VERTEX_LOCK_STRIPES` (default 16, a per-target
+  compile definition) shared `{mutex, condvar}` stripes. `sizeof(vertex_t)` drops
+  248 → 160 B on x86-64; on ESP-IDF this also removes the lazily-allocated
+  per-vertex FreeRTOS mutex/condvar (~150–200 B heap per touched vertex) — the
+  largest single on-device win of the diet. `await` waits on the stripe condvar
+  with the per-vertex `write_seq_` predicate (a stripe collision costs a spurious
+  wake + re-check, never a semantic change). `with_effective_aces` now snapshots
+  the vertex's own ACEs and runs the ancestor-merge rebuild UNLOCKED (one stripe
+  at a time, never nested) — required because an ancestor may share the stripe —
+  with the same dirty-flag convergence guarantee.
+
+- **ACL state evaluates at the nearest BEARING ancestor (#361 §3)** — a vertex
+  with no own ACEs no longer builds or caches an effective merge (previously
+  every gated descendant allocated its extension block and duplicated the
+  merged ancestor list). `acl_allows` walks the immutable parent chain
+  lock-free (new `vertex_t::has_own_aces()` atomic) to the nearest vertex with
+  own ACEs and evaluates its cached merge through the `kAceInherit` projection
+  (new `vertex_ext_t::eff_aces_inherit`, rebuilt with the merge) — which is
+  exactly the descendant's effective list. Verdicts are unchanged; RAM stops
+  scaling as ancestors × descendants. `with_effective_aces`'s `eval` now
+  receives `(merged, inherited)`.
+
+### Changed
+
 - **`transport_ws_server` serves MANY concurrent inbound peers (#362)** — the
   `listen(fd, 1)` single-client-per-boot limit is gone. One poll-based thread
   multiplexes the listen socket and every peer (no per-peer thread). New

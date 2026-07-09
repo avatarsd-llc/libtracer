@@ -4,11 +4,12 @@
  *
  * An L4 graph vertex: a named, addressable position holding a value, a bounded
  * history, or a user handler (docs/reference/11 §roles). Pinned in place (the
- * atomic LKV slot + mutex + condvar are non-movable); always handled via a
+ * atomic LKV slot is non-movable, and the address indexes the lock-stripe
+ * table); always handled via a
  * vertex_handle_t returned by graph_t::register_vertex (ADR-0056). The read/write LKV hot path is
  * lock-free (an atomic shared_ptr swap, the orderings M2 already pays for); the
- * mutex guards only the history ring, the subscriber list (M3b), and the await
- * waiter accounting.
+ * shared lock STRIPE (#361 §2, `vertex_stripe_of`) guards only the history ring,
+ * the subscriber list (M3b), the ACL state, and the await waiter accounting.
  */
 #pragma once
 
@@ -323,6 +324,47 @@ class edge_snapshot_t {
 };
 
 /**
+ * @brief The number of lock stripes shared by every vertex in the process
+ *        (#361 §2). A per-target config knob (RFC-0006: bounds are injected or
+ *        per-target config, never magic): override with a compile definition,
+ *        e.g. `-DLIBTRACER_VERTEX_LOCK_STRIPES=8` for a small MCU node.
+ */
+#ifndef LIBTRACER_VERTEX_LOCK_STRIPES
+#define LIBTRACER_VERTEX_LOCK_STRIPES 16
+#endif
+
+/**
+ * @brief One shared lock stripe: the mutex + condvar a SET of vertices ride
+ *        (#361 §2), replacing a per-vertex `std::mutex` + `std::condition_variable`.
+ *
+ * Why: the blocking primitives were the single largest per-vertex RAM cost on
+ * the MCU target — ESP-IDF pthreads lazily allocate a FreeRTOS mutex (~90 B)
+ * plus condvar state PER VERTEX on first touch, and the host paid 88 B of
+ * struct. The LKV read/write hot path is lock-free (the atomic shared_ptr
+ * swap), so a stripe serializes only control-plane verbs (ring trim, edge
+ * mutation, ACL state, seq/notify) — cross-vertex contention is
+ * wiring-frequency, not per-publish. `await` waits on the stripe's condvar
+ * with a PER-VERTEX predicate (`write_seq_`), so a collision costs a spurious
+ * wake + re-check, never a correctness change.
+ */
+struct vertex_stripe_t {
+    std::mutex m;               /**< @brief Serializes the stripe's vertices' verbs. */
+    std::condition_variable cv; /**< @brief Wakes the stripe's `await` waiters. */
+};
+
+/**
+ * @brief The stripe a vertex rides: a process-wide static table indexed by a
+ *        mixed vertex address (vertices are pinned — ADR-0056/0057 — so the
+ *        address is a stable identity). Same vertex ⇒ same stripe, always.
+ */
+inline vertex_stripe_t& vertex_stripe_of(const void* v) noexcept {
+    static std::array<vertex_stripe_t, LIBTRACER_VERTEX_LOCK_STRIPES> stripes;
+    std::uintptr_t h = reinterpret_cast<std::uintptr_t>(v);
+    h ^= h >> 9;  // fold higher entropy into the allocation-aligned low bits
+    return stripes[(h >> 6) % LIBTRACER_VERTEX_LOCK_STRIPES];
+}
+
+/**
  * @brief The lazily-allocated COLD half of a vertex (issue #361 §1): every member a plain
  *        STORED_VALUE leaf with default QoS, no handlers, and no `:acl` never touches.
  *
@@ -348,6 +390,11 @@ struct vertex_ext_t {
      *         when @ref acl_cache_dirty is raised. Only the MERGE is cached, never a
      *         verdict — expiry evaluates at check time against the caller's now. */
     std::vector<ace_t> eff_aces;
+    /** @brief The `kAceInherit`-flagged projection of @ref eff_aces (#361 §3): what a
+     *         BARE descendant (no own ACEs) evaluates against — the filter of a bearing
+     *         vertex's merge IS the descendant's effective list (idempotent, ordered).
+     *         Rebuilt together with @ref eff_aces. */
+    std::vector<ace_t> eff_aces_inherit;
     /** @brief Raised ⇒ @ref eff_aces is stale (rebuild lazily; ADR-0050 cache protocol). */
     std::atomic<bool> acl_cache_dirty{true};
     settings_t settings{}; /**< @brief QoS settings; single-field mutation under the vertex
@@ -545,7 +592,7 @@ class vertex_t {
         auto sp = std::make_shared<const rope_t>(std::move(value));
         lkv_.store(sp);  // lock-free publish of the new last-known-value
         {
-            const std::lock_guard lock(m_);
+            const std::lock_guard lock(vertex_stripe_of(this).m);
             vertex_ext_t* e = ext_.load(std::memory_order_acquire);
             if (role_ == role_t::STREAM && e != nullptr) {  // STREAM identity always has ext
                 e->history.push_back(sp);  // refcount bump — the caller keeps the returned sp
@@ -554,7 +601,7 @@ class vertex_t {
                 while (e->history.size() > keep) e->history.pop_front();
             }
             ++write_seq_;
-            cv_.notify_all();
+            vertex_stripe_of(this).cv.notify_all();
         }
         return sp;
     }
@@ -564,9 +611,9 @@ class vertex_t {
      *        (the vertex stores no value — the user handler consumed it).
      */
     void note_write() {
-        const std::lock_guard lock(m_);
+        const std::lock_guard lock(vertex_stripe_of(this).m);
         ++write_seq_;
-        cv_.notify_all();
+        vertex_stripe_of(this).cv.notify_all();
     }
 
     /** @brief The stored last-known-value (lock-free; null ⇒ never assigned / Handler role). */
@@ -579,13 +626,14 @@ class vertex_t {
      * @return true iff a change was observed (`write_seq_ != seq0`); false on timeout.
      */
     [[nodiscard]] bool wait_for_change(std::uint64_t seq0, std::chrono::nanoseconds timeout) {
-        std::unique_lock lock(m_);
-        return cv_.wait_for(lock, timeout, [&] { return write_seq_ != seq0; });
+        vertex_stripe_t& st = vertex_stripe_of(this);
+        std::unique_lock lock(st.m);
+        return st.cv.wait_for(lock, timeout, [&] { return write_seq_ != seq0; });
     }
 
     /** @brief The current write sequence (bumped per assign — the await predicate base). */
     [[nodiscard]] std::uint64_t current_seq() {
-        const std::lock_guard lock(m_);
+        const std::lock_guard lock(vertex_stripe_of(this).m);
         return write_seq_;
     }
 
@@ -595,7 +643,7 @@ class vertex_t {
      *        re-deliver.
      */
     void mark_flushed() {
-        const std::lock_guard lock(m_);
+        const std::lock_guard lock(vertex_stripe_of(this).m);
         if (vertex_ext_t* e = ext_.load(std::memory_order_acquire))
             e->last_flushed_seq = write_seq_;
     }
@@ -610,7 +658,7 @@ class vertex_t {
      * @return The number of entries drained (0 ⇒ nothing appended since the last flush).
      */
     std::size_t drain_unflushed(std::vector<std::shared_ptr<const rope_t>>& out) {
-        const std::lock_guard lock(m_);
+        const std::lock_guard lock(vertex_stripe_of(this).m);
         vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         if (e == nullptr) return 0;  // no ring — nothing was ever appended
         const std::uint64_t now = write_seq_;
@@ -626,7 +674,7 @@ class vertex_t {
     /** @brief The STREAM ring contents, oldest first — each entry a rope clone (refcount
      *         bumps, no byte copy). */
     [[nodiscard]] std::vector<rope_t> history_snapshot() {
-        const std::lock_guard lock(m_);
+        const std::lock_guard lock(vertex_stripe_of(this).m);
         std::vector<rope_t> out;
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         if (e == nullptr) return out;
@@ -649,7 +697,7 @@ class vertex_t {
      * @return The appended slot's index (the `:subscribers[N]` slot number).
      */
     std::size_t add_edge(subscriber_t s, edge_latch_t* latch = nullptr) {
-        const std::lock_guard lock(m_);
+        const std::lock_guard lock(vertex_stripe_of(this).m);
         subs_.push_back(std::move(s));
         const std::size_t idx = subs_.size() - 1;
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
@@ -668,7 +716,7 @@ class vertex_t {
      *         RFC-0005 listener bookkeeping).
      */
     bool clear_edge(std::size_t idx) {
-        const std::lock_guard lock(m_);
+        const std::lock_guard lock(vertex_stripe_of(this).m);
         if (idx >= subs_.size() || !subs_[idx].active) return false;
         subs_[idx].active = false;
         return true;
@@ -689,7 +737,7 @@ class vertex_t {
     std::size_t snapshot_edges(edge_snapshot_t& inline_buf, std::vector<edge_view_t>& overflow) {
         inline_buf.clear();
         overflow.clear();
-        const std::lock_guard lock(m_);
+        const std::lock_guard lock(vertex_stripe_of(this).m);
         const bool use_heap = subs_.size() > edge_snapshot_t::kCapacity;
         if (use_heap) overflow.reserve(subs_.size());
         std::size_t n = 0;
@@ -710,7 +758,7 @@ class vertex_t {
      *        TLV-less (in-process sugar) slot.
      */
     [[nodiscard]] std::optional<view_t> edge_source(std::size_t idx) {
-        const std::lock_guard lock(m_);
+        const std::lock_guard lock(vertex_stripe_of(this).m);
         if (idx < subs_.size() && subs_[idx].active && subs_[idx].source_view.owner)
             return subs_[idx].source_view;  // clone (refcount bump)
         return std::nullopt;
@@ -719,7 +767,7 @@ class vertex_t {
     /** @brief Every active slot's stored SUBSCRIBER view, in slot order (the
      *         `:subscribers[]` array read) — each a refcount clone. */
     [[nodiscard]] std::vector<view_t> edge_sources() {
-        const std::lock_guard lock(m_);
+        const std::lock_guard lock(vertex_stripe_of(this).m);
         std::vector<view_t> out;
         out.reserve(subs_.size());
         for (const subscriber_t& s : subs_)
@@ -736,9 +784,13 @@ class vertex_t {
      */
     void set_acl(std::span<const std::byte> raw, std::vector<ace_t> aces) {
         vertex_ext_t& e = ensure_ext();
-        const std::lock_guard lock(m_);
+        const std::lock_guard lock(vertex_stripe_of(this).m);
         e.acl.assign(raw.begin(), raw.end());
         e.aces = std::move(aces);
+        // Lock-free bearing flag (#361 §3): the graph's nearest-bearing-ancestor walk
+        // reads it without touching any stripe. Publish under the lock, before the
+        // dirty flag, same ordering discipline as the ACE list itself.
+        has_own_aces_.store(!e.aces.empty(), std::memory_order_release);
         // Publish-then-mark (ADR-0050 cache protocol): the new ACEs are visible
         // under m_ BEFORE the dirty flag is raised, so a rebuild that observes the
         // flag always reads the new list (or leaves the flag set for the next one).
@@ -747,7 +799,7 @@ class vertex_t {
 
     /** @brief A copy of the stored raw `:acl` TLV bytes (empty ⇒ no `:acl` set). */
     [[nodiscard]] std::vector<std::byte> acl_bytes() {
-        const std::lock_guard lock(m_);
+        const std::lock_guard lock(vertex_stripe_of(this).m);
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         return e != nullptr ? e->acl : std::vector<std::byte>{};
     }
@@ -764,7 +816,7 @@ class vertex_t {
     template <typename F>
     auto with_aces(F&& f) -> decltype(f(std::declval<const std::vector<ace_t>&>())) {
         static const std::vector<ace_t> kNoAces{};
-        const std::lock_guard lock(m_);
+        const std::lock_guard lock(vertex_stripe_of(this).m);
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         return f(e != nullptr ? e->aces : kNoAces);
     }
@@ -791,36 +843,51 @@ class vertex_t {
      * @brief Evaluate against this vertex's cached effective-ACE merge, rebuilding
      *        it first iff it is stale — the ADR-0050 cached-merge verb.
      *
-     * Under ONE hold of the vertex mutex: when the dirty flag is raised it is
-     * lowered (an acquire-release exchange) and @p rebuild produces a fresh merged
-     * list from this vertex's own parsed ACEs (passed in) — the graph's rebuild
-     * walks the immutable parent chain and takes each ancestor's @ref with_aces,
-     * nesting locks strictly LEAF-TO-ROOT along one parent chain (every other
-     * holder takes a single vertex mutex, so the ordering is acyclic — no
-     * deadlock). Then @p eval runs over the (now-current) cached list and its
-     * result is returned.
+     * When the dirty flag is raised it is lowered (an acquire-release exchange),
+     * this vertex's own parsed ACEs are SNAPSHOTTED, and @p rebuild runs with the
+     * stripe lock RELEASED (#361 §2): the graph's rebuild walks the immutable
+     * parent chain taking each ancestor's @ref with_aces — one stripe lock at a
+     * time, never nested — so an ancestor sharing this vertex's stripe cannot
+     * self-deadlock, and no cross-stripe ordering exists at all. The merge is
+     * then stored under a re-acquired lock and @p eval runs over the cached list.
      *
      * Race resolution (rebuild vs concurrent `:acl` write): the writer publishes
      * ACEs BEFORE raising the flag (@ref set_acl / graph subtree mark), and this
      * verb lowers the flag BEFORE @p rebuild reads — so a write landing after the
-     * exchange leaves the flag raised and the possibly-stale cache is rebuilt on
-     * the NEXT check; a stale-forever cache is impossible. Concurrent rebuilds are
-     * serialized by the vertex mutex.
+     * exchange (including during the unlocked rebuild window) leaves the flag
+     * raised and the possibly-stale cache is rebuilt on the NEXT check; a
+     * stale-forever cache is impossible. Concurrent rebuilds may interleave in
+     * the window; each stores a valid merge of some recent state, and the flag
+     * protocol converges the cache.
      *
      * @param rebuild `std::vector<ace_t>(const std::vector<ace_t>& own)` — the
-     *                fresh merge; must not re-enter THIS vertex (its lock is held).
-     * @param eval    Pure evaluation over the cached merged list (the ADR-0050
-     *                policy contract: no locks/clock/graph inside).
+     *                fresh merge over a snapshot of this vertex's own ACEs; runs
+     *                UNLOCKED (it may take other vertices' stripes freely).
+     * @param eval    Pure evaluation over `(merged, inherited)` — the cached merge
+     *                and its `kAceInherit` projection (#361 §3: a bare descendant
+     *                evaluates the latter). ADR-0050 policy contract: no
+     *                locks/clock/graph inside.
      * @return Whatever @p eval returns.
      */
     template <typename Rebuild, typename Eval>
     auto with_effective_aces(Rebuild&& rebuild, Eval&& eval)
-        -> decltype(eval(std::declval<const std::vector<ace_t>&>())) {
+        -> decltype(eval(std::declval<const std::vector<ace_t>&>(),
+                         std::declval<const std::vector<ace_t>&>())) {
         vertex_ext_t& e = ensure_ext();  // gated eval caches its merge here (fresh ⇒ dirty)
-        const std::lock_guard lock(m_);
-        if (e.acl_cache_dirty.exchange(false, std::memory_order_acq_rel))
-            e.eff_aces = rebuild(static_cast<const std::vector<ace_t>&>(e.aces));
-        return eval(static_cast<const std::vector<ace_t>&>(e.eff_aces));
+        std::unique_lock lock(vertex_stripe_of(this).m);
+        if (e.acl_cache_dirty.exchange(false, std::memory_order_acq_rel)) {
+            const std::vector<ace_t> own = e.aces;  // snapshot; rebuild runs unlocked
+            lock.unlock();
+            std::vector<ace_t> merged = rebuild(static_cast<const std::vector<ace_t>&>(own));
+            std::vector<ace_t> inherit;
+            for (const ace_t& a : merged)
+                if ((a.flags & kAceInherit) != 0) inherit.push_back(a);
+            lock.lock();
+            e.eff_aces = std::move(merged);
+            e.eff_aces_inherit = std::move(inherit);
+        }
+        return eval(static_cast<const std::vector<ace_t>&>(e.eff_aces),
+                    static_cast<const std::vector<ace_t>&>(e.eff_aces_inherit));
     }
 
     // -- settings & propagation policy --------------------------------------------------
@@ -828,7 +895,7 @@ class vertex_t {
     /** @brief A consistent copy of the QoS settings (taken under the vertex lock;
      *         `kDefaultSettings` when no extension block). */
     [[nodiscard]] settings_t settings_snapshot() {
-        const std::lock_guard lock(m_);
+        const std::lock_guard lock(vertex_stripe_of(this).m);
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         return e != nullptr ? e->settings : kDefaultSettings;
     }
@@ -842,7 +909,7 @@ class vertex_t {
     template <typename F>
     auto update_settings(F&& f) -> decltype(f(std::declval<settings_t&>())) {
         vertex_ext_t& e = ensure_ext();
-        const std::lock_guard lock(m_);
+        const std::lock_guard lock(vertex_stripe_of(this).m);
         return f(e.settings);
     }
 
@@ -853,6 +920,14 @@ class vertex_t {
     void set_delivery_mode(delivery_mode_t mode) noexcept { delivery_mode_ = mode; }
 
     // -- RFC-0005 listener bookkeeping (lock-free counters) ------------------------------
+
+    /** @brief True iff this vertex has its OWN parsed ACEs (#361 §3) — the lock-free
+     *         predicate of the graph's nearest-bearing-ancestor walk. Relaxed read: a
+     *         racing `:acl` write is observed by the next gated op at worst, the same
+     *         window the dirty-flag protocol already tolerates. */
+    [[nodiscard]] bool has_own_aces() const noexcept {
+        return has_own_aces_.load(std::memory_order_relaxed);
+    }
 
     /** @brief This vertex's own active-slot count (what a subtree walk sums). */
     [[nodiscard]] std::uint32_t own_subs() const noexcept {
@@ -934,8 +1009,9 @@ class vertex_t {
     // Null for the common default leaf. Published once by ensure_ext (CAS), never
     // cleared; freed by the destructor.
     std::atomic<vertex_ext_t*> ext_{nullptr};
-    std::mutex m_;
-    std::condition_variable cv_;
+    // True iff ext_ holds a non-empty own-ACE list (#361 §3): maintained by set_acl,
+    // read lock-free by the graph's bearing-ancestor walk on every gated op.
+    std::atomic<bool> has_own_aces_{false};
     std::uint64_t write_seq_ = 0;  // bumped per assign; await waits for an increment, and it is
                                    // the value-agnostic "newer" signal a sweep reads (RFC-0008 §B).
                                    // Guarded by m_.

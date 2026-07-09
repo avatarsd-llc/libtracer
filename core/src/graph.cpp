@@ -415,22 +415,34 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     if (!subject) return true;  // trusted caller (no subject) — e.g. a local API call
     const auto bit = static_cast<std::uint32_t>(right);
     const std::uint64_t now = now_ns();
-    // The ADR-0050 cached effective-ACE merge: the data-plane check evaluates ONE
-    // pre-merged list (own ACEs + INHERIT-flagged ancestor ACEs, evaluation order)
-    // through the pure effective_acl_t semantics — no per-operation ancestor
-    // mutex-walk. The walk runs only inside the rebuild lambda, on the first check
-    // after a :acl write marked this vertex dirty (subtree-precise via the ADR-0057
-    // child links — see field_write's "acl" branch). Rebuild locking: v's mutex is
-    // held (with_effective_aces), each ancestor's is taken one at a time inside it —
-    // strictly leaf-to-root along the immutable parent chain, so the nesting is
-    // acyclic. Root excluded (the flat-map walk never evaluated the empty key);
+    // #361 §3: ACL state lives only on BEARING vertices (those with own ACEs). A bare
+    // vertex walks the immutable parent chain LOCK-FREE (has_own_aces is an atomic;
+    // parent links never change) to its nearest bearing ancestor and evaluates that
+    // vertex's cached merge through the kAceInherit projection — which IS the bare
+    // vertex's effective list (the filter is idempotent and order-preserving over
+    // "own + inherited-ancestors"). No cache, no ext block, is ever allocated on the
+    // bare descendant; RAM stops scaling as ancestors x descendants.
+    vertex_t* bearer = v;
+    while (bearer != nullptr && bearer->parent() != nullptr && !bearer->has_own_aces())
+        bearer = bearer->parent();
+    if (bearer == nullptr || bearer->parent() == nullptr)
+        return true;  // no ACL anywhere up the chain (root excluded) — open by default
+    const bool self = bearer == v;
+
+    // The ADR-0050 cached effective-ACE merge, now held by the BEARER: the data-plane
+    // check evaluates ONE pre-merged list (own ACEs + INHERIT-flagged ancestor ACEs,
+    // evaluation order) — no per-operation ancestor rebuild. The walk runs only inside
+    // the rebuild lambda, on the first check after a :acl write marked the bearer dirty
+    // (subtree-precise via the ADR-0057 child links — see field_write's "acl" branch).
+    // The rebuild runs UNLOCKED (#361 §2 striped locks), taking each ancestor's stripe
+    // one at a time. Root excluded (the flat-map walk never evaluated the empty key);
     // placeholder intermediates hold empty ACE lists, so merging them is the no-op
     // the old walk's skip was.
-    return v->with_effective_aces(
+    return bearer->with_effective_aces(
         [&](const std::vector<ace_t>& own) {
             effective_acl_t eff;
             eff.append_own(own);
-            for (vertex_t* ancestor = v->parent();
+            for (vertex_t* ancestor = bearer->parent();
                  ancestor != nullptr && ancestor->parent() != nullptr;
                  ancestor = ancestor->parent()) {
                 ancestor->with_aces(
@@ -438,8 +450,8 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
             }
             return std::move(eff).release();
         },
-        [&](const std::vector<ace_t>& merged) {
-            return effective_acl_t::allows(merged, *subject, bit, now);
+        [&](const std::vector<ace_t>& merged, const std::vector<ace_t>& inherited) {
+            return effective_acl_t::allows(self ? merged : inherited, *subject, bit, now);
         });
 }
 
