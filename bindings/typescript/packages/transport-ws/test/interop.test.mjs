@@ -1,17 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-//
-// C++ <-> TypeScript transport_ws INTEROP test (#54). Unlike roundtrip.test.mjs
-// (which echoes against a pure-Node `ws` server), this drives the real C++
-// `tr::net::transport_ws_server` over a live socket: a genuine RFC 6455 101
-// handshake, a MASKED TS client BINARY frame in, an UNMASKED C++ server BINARY
-// frame back — end-to-end validation of the web-UI <-> device path.
-//
-// It is GUARDED on the LIBTRACER_WS_INTEROP_SERVER env var pointing at the built
-// `ws_interop_server` binary (CMake target). Plain `npm test` without it SKIPS
-// gracefully rather than failing — the CI `ws-interop` job builds the binary and
-// sets the env var. No fixed sleeps: the PORT= line, the frame event, and the
-// child's stdout are all awaited behind deadlines.
+
+/**
+ * @brief C++ <-> TypeScript transport_ws INTEROP test (#54).
+ *
+ * Unlike roundtrip.test.mjs (which echoes against a pure-Node `ws` server),
+ * this drives the real C++ `tr::net::transport_ws_server` over a live socket:
+ * a genuine RFC 6455 101 handshake, a MASKED TS client BINARY frame in, an
+ * UNMASKED C++ server BINARY frame back — end-to-end validation of the
+ * web-UI <-> device path.
+ *
+ * It is GUARDED on the LIBTRACER_WS_INTEROP_SERVER env var pointing at the built
+ * `ws_interop_server` binary (CMake target). Plain `npm test` without it SKIPS
+ * gracefully rather than failing — the CI `ws-interop` job builds the binary and
+ * sets the env var. No fixed sleeps: the PORT= line, the frame event, and the
+ * child's stdout are all awaited behind deadlines.
+ */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -24,7 +28,7 @@ import { encode, decode, equal, TYPE } from '@avatarsd-llc/libtracer';
 const SERVER = process.env.LIBTRACER_WS_INTEROP_SERVER;
 const skip = !SERVER || !existsSync(SERVER);
 
-/** A simple opaque NAME TLV built via the cross-validated core codec. */
+/** @brief A simple opaque NAME TLV built via the cross-validated core codec. */
 function buildTlv(text) {
   return {
     type: TYPE.NAME,
@@ -36,9 +40,11 @@ function buildTlv(text) {
 }
 
 /**
- * Spawn the C++ ws_interop_server and resolve with `{ child, port }` once its
- * `PORT=<n>` line lands on stdout, behind a deadline. Rejects (and kills the
- * child) if the line never arrives or the process dies first.
+ * @brief Spawn the C++ ws_interop_server and resolve with `{ child, port }`
+ * once its `PORT=<n>` line lands on stdout, behind a deadline.
+ *
+ * Rejects (and kills the child) if the line never arrives or the process dies
+ * first.
  */
 function startServer(deadlineMs = 8000) {
   return new Promise((resolve, reject) => {
@@ -80,7 +86,7 @@ function startServer(deadlineMs = 8000) {
   });
 }
 
-/** Resolve once the child process has fully exited, behind a deadline. */
+/** @brief Resolve once the child process has fully exited, behind a deadline. */
 function waitExit(child, ms = 4000) {
   return new Promise((resolve) => {
     if (child.exitCode !== null || child.signalCode !== null) {

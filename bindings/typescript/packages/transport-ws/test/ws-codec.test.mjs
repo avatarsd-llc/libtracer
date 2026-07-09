@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-//
-// RFC 6455 vector-agreement test. Every assertion here mirrors a known vector in
-// the C++ codec test (core/tests/ws_test.cpp). Matching these byte-for-byte is
-// the cross-implementation agreement guarantee: the TS codec produces/accepts the
-// SAME bytes as the C++ `tr::net::ws` codec, so a TS client interoperates with
-// the C++ transport_ws server.
+
+/**
+ * @brief RFC 6455 vector-agreement test.
+ *
+ * Every assertion here mirrors a known vector in the C++ codec test
+ * (core/tests/ws_test.cpp). Matching these byte-for-byte is the
+ * cross-implementation agreement guarantee: the TS codec produces/accepts the
+ * SAME bytes as the C++ `tr::net::ws` codec, so a TS client interoperates with
+ * the C++ transport_ws server.
+ */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

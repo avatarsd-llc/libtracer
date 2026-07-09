@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
-// The L2/L3 wire codec layer (`tr::wire` in the C++ reference) — exposed as the
-// tree-shakeable subpath entry `@avatarsd-llc/libtracer/wire`. It is a pure-TS
-// port of core/src/frame.cpp, gated byte-for-byte by the shared conformance
-// vectors. This is the only layer the TS core implements today; the L0/L1/L4
-// subpaths (./mem, ./view, ./graph) are reserved for when those layers land in
-// TS — see docs/adr/0033-npm-subpackage-monorepo.md.
+/**
+ * @brief The L2/L3 wire codec layer (`tr::wire` in the C++ reference) — exposed
+ * as the tree-shakeable subpath entry `@avatarsd-llc/libtracer/wire`.
+ *
+ * It is a pure-TS port of core/src/frame.cpp, gated byte-for-byte by the shared
+ * conformance vectors. This is the only layer the TS core implements today; the
+ * L0/L1/L4 subpaths (./mem, ./view, ./graph) are reserved for when those layers
+ * land in TS — see docs/adr/0033-npm-subpackage-monorepo.md.
+ */
 export {
   TYPE,
   ERROR,

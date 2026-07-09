@@ -2,10 +2,11 @@
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 /**
- * libtracer core wire codec — a pure-TypeScript/JavaScript port of the C++
- * reference codec in `core/src/frame.cpp`. It must match that implementation
- * byte-for-byte; correctness is gated by the SHARED conformance vectors under
- * `tests/conformance/vectors/v1/`.
+ * @brief libtracer core wire codec — a pure-TypeScript/JavaScript port of the
+ * C++ reference codec in `core/src/frame.cpp`.
+ *
+ * It must match that implementation byte-for-byte; correctness is gated by the
+ * SHARED conformance vectors under `tests/conformance/vectors/v1/`.
  *
  * The wire format is documented in `docs/reference/01-data-format.md`:
  *   header (4 or 6 bytes) + payload + optional trailer (timestamp then CRC).
@@ -17,7 +18,9 @@
  */
 
 /**
- * Core type-code registry (0x01-0x10). 0x05 is retired (was LIST, ADR-0003).
+ * @brief Core type-code registry (0x01-0x10).
+ *
+ * 0x05 is retired (was LIST, ADR-0003).
  * 0x0E SPEC is the in-band vertex-creation spec. 0x0F FWD and 0x10 FIELD are the
  * remote-operation frames (RFC-0004 / ADR-0035, the v1 fast-track range
  * 0x0F-0x1F). All are structured (opt.PL=1) and handled generically by the codec.
@@ -44,15 +47,15 @@ export const TYPE = Object.freeze({
 });
 
 /**
- * Decode failure reasons, named after the C++ `tr::wire::error_t` enum.
+ * @brief Decode failure reasons, named after the C++ `tr::wire::error_t` enum.
  *
  * @readonly
  * @enum {string}
  */
 export const ERROR = Object.freeze({
-  FRAME_TRUNCATED: 'FRAME_TRUNCATED', // ran out of bytes
-  FRAME_INVALID: 'FRAME_INVALID', // reserved bit, type 0x00, trailing bytes
-  FRAME_CRC_FAIL: 'FRAME_CRC_FAIL', // trailer CRC mismatch
+  FRAME_TRUNCATED: 'FRAME_TRUNCATED' /**< @brief Ran out of bytes. */,
+  FRAME_INVALID: 'FRAME_INVALID' /**< @brief Reserved bit, type 0x00, trailing bytes. */,
+  FRAME_CRC_FAIL: 'FRAME_CRC_FAIL' /**< @brief Trailer CRC mismatch. */,
   /**
    * @brief Exceeds the receiver's decode resources (RFC-0006 — depth is
    * resource-bounded, never a constant). This codec's work stack is a growable
@@ -62,14 +65,17 @@ export const ERROR = Object.freeze({
   TLV_NESTING_TOO_DEEP: 'TLV_NESTING_TOO_DEEP',
 });
 
-/** Reserved bits 7 and 0; non-zero => FRAME_INVALID. */
+/** @brief Reserved bits 7 and 0; non-zero => FRAME_INVALID. */
 const RESERVED_MASK = 0b1000_0001;
 
 /**
- * A decode/encode error carrying one of {@link ERROR} as `.code`.
+ * @brief A decode/encode error carrying one of {@link ERROR} as `.code`.
  */
 export class CodecError extends Error {
-  /** @param {string} code one of {@link ERROR} */
+  /**
+   * @brief Construct with the failure reason as message and `.code`.
+   * @param {string} code one of {@link ERROR}
+   */
   constructor(code) {
     super(code);
     this.name = 'CodecError';
@@ -79,7 +85,9 @@ export class CodecError extends Error {
 }
 
 /**
- * The 1-byte `opt` field, unpacked. Bits MSB->LSB: R | PL | TS | CR | LL | CW | TF | R.
+ * @brief The 1-byte `opt` field, unpacked.
+ *
+ * Bits MSB->LSB: R | PL | TS | CR | LL | CW | TF | R.
  *
  * @typedef {object} Opt
  * @property {boolean} pl  bit 6: payload is structured (children, not opaque)
@@ -91,8 +99,10 @@ export class CodecError extends Error {
  */
 
 /**
- * A decoded wire timestamp. Absolute form is a u64 (BigInt) of ns since the Unix
- * epoch; relative form is a signed i32 ns offset from the parent timestamp.
+ * @brief A decoded wire timestamp.
+ *
+ * Absolute form is a u64 (BigInt) of ns since the Unix epoch; relative form is
+ * a signed i32 ns offset from the parent timestamp.
  *
  * @typedef {object} Timestamp
  * @property {boolean} relative  false = absolute u64 ns; true = relative i32 ns
@@ -100,7 +110,7 @@ export class CodecError extends Error {
  */
 
 /**
- * A decoded CRC. 16-bit values are zero-extended into `value`.
+ * @brief A decoded CRC. 16-bit values are zero-extended into `value`.
  *
  * @typedef {object} Crc
  * @property {'CRC32C'|'CRC16_CCITT'} width
@@ -108,15 +118,19 @@ export class CodecError extends Error {
  */
 
 /**
+ * @brief A decoded TLV trailer: an optional timestamp and/or CRC.
+ *
  * @typedef {object} Trailer
  * @property {Timestamp|null} ts
  * @property {Crc|null} crc
  */
 
 /**
- * A decoded TLV. For opaque TLVs (opt.PL=0) `payload` holds the bytes and
- * `children` is empty; for structured TLVs (opt.PL=1) `children` holds the
- * parsed sub-TLVs and `payload` is empty.
+ * @brief A decoded TLV.
+ *
+ * For opaque TLVs (opt.PL=0) `payload` holds the bytes and `children` is empty;
+ * for structured TLVs (opt.PL=1) `children` holds the parsed sub-TLVs and
+ * `payload` is empty.
  *
  * @typedef {object} Tlv
  * @property {number} type        a {@link TYPE} code (or a user/unknown code)
@@ -129,6 +143,7 @@ export class CodecError extends Error {
 /* ------------------------------------------------------------------ opt --- */
 
 /**
+ * @brief Whether a reserved opt bit is set.
  * @param {number} b raw opt byte
  * @returns {boolean} true if a reserved bit (7 or 0) is set
  */
@@ -137,6 +152,7 @@ function reservedSet(b) {
 }
 
 /**
+ * @brief Unpack a raw opt byte into its flags.
  * @param {number} b raw opt byte
  * @returns {Opt}
  */
@@ -152,6 +168,7 @@ function decodeOpt(b) {
 }
 
 /**
+ * @brief Pack the flags back into the wire opt byte.
  * @param {Opt} o
  * @returns {number} packed opt byte
  */
@@ -169,7 +186,7 @@ function encodeOpt(o) {
 /* --------------------------------------------------------------- endian --- */
 
 /**
- * Read `n` (<= 4) little-endian bytes at `off` as an unsigned Number.
+ * @brief Read `n` (<= 4) little-endian bytes at `off` as an unsigned Number.
  *
  * @param {Uint8Array} b
  * @param {number} off
@@ -183,7 +200,7 @@ function readLe(b, off, n) {
 }
 
 /**
- * Read 8 little-endian bytes at `off` as an unsigned BigInt.
+ * @brief Read 8 little-endian bytes at `off` as an unsigned BigInt.
  *
  * @param {Uint8Array} b
  * @param {number} off
@@ -196,7 +213,7 @@ function readLe64(b, off) {
 }
 
 /**
- * Append `n` (<= 4) little-endian bytes of unsigned Number `v`.
+ * @brief Append `n` (<= 4) little-endian bytes of unsigned Number `v`.
  *
  * @param {number[]} out
  * @param {number} v
@@ -207,7 +224,7 @@ function writeLe(out, v, n) {
 }
 
 /**
- * Append 8 little-endian bytes of unsigned BigInt `v`.
+ * @brief Append 8 little-endian bytes of unsigned BigInt `v`.
  *
  * @param {number[]} out
  * @param {bigint} v
@@ -243,7 +260,7 @@ const CRC16_TABLE = (() => {
 })();
 
 /**
- * CRC-32C (Castagnoli): reflected poly 0x82F63B78, init/xor 0xFFFFFFFF.
+ * @brief CRC-32C (Castagnoli): reflected poly 0x82F63B78, init/xor 0xFFFFFFFF.
  *
  * @param {Uint8Array} data
  * @returns {number} unsigned 32-bit
@@ -255,7 +272,7 @@ export function crc32c(data) {
 }
 
 /**
- * CRC-16-CCITT (FALSE): poly 0x1021, MSB-first, init 0xFFFF, no final xor.
+ * @brief CRC-16-CCITT (FALSE): poly 0x1021, MSB-first, init 0xFFFF, no final xor.
  *
  * @param {Uint8Array} data
  * @returns {number} unsigned 16-bit
@@ -272,8 +289,8 @@ export function crc16ccitt(data) {
 /* --------------------------------------------------------------- decode --- */
 
 /**
- * Parse exactly one TLV at the front of `buf`, WITHOUT recursing into children.
- * Mirrors `parse_one` in frame.cpp.
+ * @brief Parse exactly one TLV at the front of `buf`, WITHOUT recursing into
+ * children. Mirrors `parse_one` in frame.cpp.
  *
  * @param {Uint8Array} buf
  * @returns {{tlv: Tlv, total: number, children: Uint8Array}}
@@ -387,8 +404,8 @@ export function decode(input) {
 /* --------------------------------------------------------------- encode --- */
 
 /**
- * Encode a TLV tree back to wire bytes, recomputing the trailer CRC from the
- * body (+ timestamp bytes) when opt.CR is set. Mirrors `encode` in frame.cpp.
+ * @brief Encode a TLV tree back to wire bytes, recomputing the trailer CRC from
+ * the body (+ timestamp bytes) when opt.CR is set. Mirrors `encode` in frame.cpp.
  *
  * @param {Tlv} tlv
  * @returns {Uint8Array}
@@ -435,7 +452,7 @@ export function encode(tlv) {
 }
 
 /**
- * Structural + byte-content equality of two TLV trees.
+ * @brief Structural + byte-content equality of two TLV trees.
  *
  * @param {Tlv} a
  * @param {Tlv} b
@@ -453,6 +470,7 @@ export function equal(a, b) {
 }
 
 /**
+ * @brief Value equality of two (nullable) trailers.
  * @param {Trailer|null} a
  * @param {Trailer|null} b
  * @returns {boolean}

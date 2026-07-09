@@ -1,28 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
-// LibtracerClient — the experimental browser/Node client SDK (#56, ADR-0034).
-//
-// It composes the cross-validated codec (@avatarsd-llc/libtracer) over an
-// INJECTED transport seam (`@avatarsd-llc/libtracer-ws`'s TransportWs satisfies
-// it structurally), so it is browser/Node-agnostic and testable against an
-// in-memory fake with no live socket.
-//
-// Now that RFC-0004 fills spec §3 (the remote-operation envelope ADR-0034
-// deferred), the client speaks the path-addressed higher operations over `FWD`:
-//   - read(path)            — FWD{ op=READ,  dst=path, src=<reply-ep> }
-//   - write(path, valueTLV) — FWD{ op=WRITE, dst=path, src=…, payload }
-//   - await(path, ns?)      — FWD{ op=AWAIT, dst=path, src=…, await_timeout? }
-//   - readField(path, sel)  — FWD{ op=READ,  dst=path, FIELD=sel, src=… }
-//   - subscribe(prod, h)    — FWD{ op=WRITE, dst=prod, FIELD=:subscribers[],
-//                                  src=…, payload=SUBSCRIBER{ target=<reply-ep> } }
-// Each one-shot op sends a FWD and resolves the FWD{REPLY} the responder
-// source-routes back (RESULT → the value, ERROR → a typed {@link FwdError}).
-//
-// Reply correlation is the transport's concern (RFC-0004 §D): over a single ws
-// link the responder replies in request order, so a simple per-link FIFO of
-// pending requests matches each REPLY to its request. `FWD` stays pure — no
-// end-to-end correlation id.
+/**
+ * @brief LibtracerClient — the experimental browser/Node client SDK (#56,
+ * ADR-0034).
+ *
+ * It composes the cross-validated codec (@avatarsd-llc/libtracer) over an
+ * INJECTED transport seam (`@avatarsd-llc/libtracer-ws`'s TransportWs satisfies
+ * it structurally), so it is browser/Node-agnostic and testable against an
+ * in-memory fake with no live socket.
+ *
+ * Now that RFC-0004 fills spec §3 (the remote-operation envelope ADR-0034
+ * deferred), the client speaks the path-addressed higher operations over `FWD`:
+ *   - read(path)            — FWD{ op=READ,  dst=path, src=<reply-ep> }
+ *   - write(path, valueTLV) — FWD{ op=WRITE, dst=path, src=…, payload }
+ *   - await(path, ns?)      — FWD{ op=AWAIT, dst=path, src=…, await_timeout? }
+ *   - readField(path, sel)  — FWD{ op=READ,  dst=path, FIELD=sel, src=… }
+ *   - subscribe(prod, h)    — FWD{ op=WRITE, dst=prod, FIELD=:subscribers[],
+ *                                  src=…, payload=SUBSCRIBER{ target=<reply-ep> } }
+ * Each one-shot op sends a FWD and resolves the FWD{REPLY} the responder
+ * source-routes back (RESULT → the value, ERROR → a typed {@link FwdError}).
+ *
+ * Reply correlation is the transport's concern (RFC-0004 §D): over a single ws
+ * link the responder replies in request order, so a simple per-link FIFO of
+ * pending requests matches each REPLY to its request. `FWD` stays pure — no
+ * end-to-end correlation id.
+ */
 
 import { TYPE, decode, CodecError } from '@avatarsd-llc/libtracer';
 import type { Tlv } from '@avatarsd-llc/libtracer';
@@ -42,17 +45,18 @@ import {
 import type { ParsedFwd, FieldLevel } from './fwd.js';
 
 /**
- * The minimal connection seam the client drives. `TransportWs` from
- * `@avatarsd-llc/libtracer-ws` satisfies this structurally (so the client never
- * imports it — keeping the transport an optional peer).
+ * @brief The minimal connection seam the client drives.
+ *
+ * `TransportWs` from `@avatarsd-llc/libtracer-ws` satisfies this structurally
+ * (so the client never imports it — keeping the transport an optional peer).
  */
 export interface ClientTransport {
-  /** Put one complete libtracer TLV frame on the wire. */
+  /** @brief Put one complete libtracer TLV frame on the wire. */
   send(frame: Uint8Array): void;
-  /** Register (or clear with `null`) the inbound-frame receiver. */
+  /** @brief Register (or clear with `null`) the inbound-frame receiver. */
   onFrame(receiver: ((bytes: Uint8Array) => void) | null): void;
   /**
-   * Register (or clear with `null`) the connection-closed notifier — invoked once
+   * @brief Register (or clear with `null`) the connection-closed notifier — invoked once
    * when the underlying connection closes or errors out, with the cause when one
    * is known. OPTIONAL: a transport without it never notifies the client of a
    * close, so pending requests only fail by timeout.
@@ -60,23 +64,23 @@ export interface ClientTransport {
   onClose?(handler: ((cause?: Error) => void) | null): void;
 }
 
-/** A delivered VALUE: its opaque payload bytes plus the decoded TLV it came from. */
+/** @brief A delivered VALUE: its opaque payload bytes plus the decoded TLV it came from. */
 export type ValueHandler = (value: Uint8Array, tlv: Tlv) => void;
 
-/** Detach a {@link LibtracerClient.subscribe} handler (a local detach — see its docs). */
+/** @brief Detach a {@link LibtracerClient.subscribe} handler (a local detach — see its docs). */
 export type Unsubscribe = () => void;
 
-/** Options for {@link LibtracerClient}. */
+/** @brief Options for {@link LibtracerClient}. */
 export interface ClientOptions {
   /**
-   * The originator's reply endpoint, as path segments — the `src` route seeded on
+   * @brief The originator's reply endpoint, as path segments — the `src` route seeded on
    * every outbound FWD and the SUBSCRIBER `target` on a subscribe. Over a single
    * ws hop the responder replies back over the same link, so any 1+-segment path
    * is fine; default `["client"]`.
    */
   readonly replyEndpoint?: string[];
   /**
-   * Per-request deadline in milliseconds: a one-shot op whose FWD{REPLY} has not
+   * @brief Per-request deadline in milliseconds: a one-shot op whose FWD{REPLY} has not
    * arrived within this window rejects with a timeout {@link Error}. Default
    * 10 000 ms; pass `0` (or `Infinity`) to disable the deadline.
    */
@@ -84,22 +88,24 @@ export interface ClientOptions {
 }
 
 /**
- * A `kind=ERROR` FWD reply, surfaced as a typed rejection. `.code` is the
- * registered u16 wire ERROR code (see {@link FWD_ERROR}); `.codeName` its
- * symbolic name.
+ * @brief A `kind=ERROR` FWD reply, surfaced as a typed rejection.
+ *
+ * `.code` is the registered u16 wire ERROR code (see {@link FWD_ERROR});
+ * `.codeName` its symbolic name.
  */
 export class FwdError extends Error {
-  /** The registered u16 wire ERROR code (a {@link FWD_ERROR} value). */
+  /** @brief The registered u16 wire ERROR code (a {@link FWD_ERROR} value). */
   readonly code: number;
-  /** The symbolic ERROR name (e.g. `"NOT_FOUND"`, `"TIMEOUT"`). */
+  /** @brief The symbolic ERROR name (e.g. `"NOT_FOUND"`, `"TIMEOUT"`). */
   readonly codeName: string;
   /**
-   * The canonical `tr::<concept>::<error>` namespace path (RFC-0002 §A) — from
+   * @brief The canonical `tr::<concept>::<error>` namespace path (RFC-0002 §A) — from
    * the frozen registry for a registered code, or carried verbatim by a
    * string-form (NAME identity) ERROR reply. `null` when neither is known.
    */
   readonly path: string | null;
   /**
+   * @brief Build the typed rejection from either wire identity form.
    * @param code the registered u16 code carried in the reply's
    *   `STATUS{ ERROR{ VALUE u16 } }` per RFC-0002 (0 when absent)
    * @param path the string-form `tr::…` identity when the reply carried a
@@ -119,21 +125,26 @@ export class FwdError extends Error {
   }
 }
 
-/** ADVERTISE (`0x11`) — a route-handle label binding (RFC-0004 route handles). */
+/** @brief ADVERTISE (`0x11`) — a route-handle label binding (RFC-0004 route handles). */
 const TYPE_ADVERTISE = 0x11;
-/** COMPACT (`0x12`) — a label-compacted delivery (RFC-0004 route handles). */
+/** @brief COMPACT (`0x12`) — a label-compacted delivery (RFC-0004 route handles). */
 const TYPE_COMPACT = 0x12;
 
 /**
- * An inbound ADVERTISE (`0x11`) / COMPACT (`0x12`) frame reached this client,
- * which does not implement the RFC-0004 compact (route-handle) delivery flow
- * yet. Routed to {@link LibtracerClient.onError} so the failure is diagnosable
+ * @brief An inbound ADVERTISE (`0x11`) / COMPACT (`0x12`) frame reached this
+ * client, which does not implement the RFC-0004 compact (route-handle) delivery
+ * flow yet.
+ *
+ * Routed to {@link LibtracerClient.onError} so the failure is diagnosable
  * instead of a silent drop; the sender should fall back to plain FWD delivery.
  */
 export class CompactFlowError extends Error {
-  /** The offending wire type code (`0x11` ADVERTISE or `0x12` COMPACT). */
+  /** @brief The offending wire type code (`0x11` ADVERTISE or `0x12` COMPACT). */
   readonly frameType: number;
-  /** @param frameType the inbound frame's wire type code */
+  /**
+   * @brief Name the offending frame kind in the error message.
+   * @param frameType the inbound frame's wire type code
+   */
   constructor(frameType: number) {
     const kind = frameType === TYPE_ADVERTISE ? 'ADVERTISE' : 'COMPACT';
     super(
@@ -145,21 +156,22 @@ export class CompactFlowError extends Error {
   }
 }
 
-/** A pending one-shot request awaiting its FWD{REPLY} (FIFO per link). */
+/** @brief A pending one-shot request awaiting its FWD{REPLY} (FIFO per link). */
 interface Pending {
   resolve(reply: ParsedFwd): void;
   reject(err: Error): void;
   /**
-   * True once the promise has settled (timed out / transport closed). A settled
-   * entry stays in the FIFO so a late REPLY still consumes its slot — keeping
-   * every later request correlated to the right reply.
+   * @brief True once the promise has settled (timed out / transport closed).
+   *
+   * A settled entry stays in the FIFO so a late REPLY still consumes its slot —
+   * keeping every later request correlated to the right reply.
    */
   settled: boolean;
-  /** The per-request deadline timer (cleared on settle), when one is armed. */
+  /** @brief The per-request deadline timer (cleared on settle), when one is armed. */
   timer: ReturnType<typeof setTimeout> | null;
 }
 
-/** Settle a pending entry: clear its deadline and mark it consumed. */
+/** @brief Settle a pending entry: clear its deadline and mark it consumed. */
 function settle(p: Pending): void {
   p.settled = true;
   if (p.timer !== null) {
@@ -169,7 +181,8 @@ function settle(p: Pending): void {
 }
 
 /**
- * A WebSocket/transport-agnostic libtracer client over the RFC-0004 `FWD` plane.
+ * @brief A WebSocket/transport-agnostic libtracer client over the RFC-0004
+ * `FWD` plane.
  *
  * Construct over any {@link ClientTransport}; issue {@link read} / {@link write} /
  * {@link await_} / {@link readField} (resolving the responder's FWD{REPLY}), or
@@ -187,6 +200,7 @@ export class LibtracerClient {
   private closed: Error | null = null;
 
   /**
+   * @brief Bind to the injected transport and start receiving frames.
    * @param transport the injected connection seam (e.g. a connected `TransportWs`).
    * @param options   optional reply-endpoint / request-timeout overrides.
    */
@@ -198,7 +212,7 @@ export class LibtracerClient {
     transport.onClose?.((cause) => this.handleClose(cause));
   }
 
-  /** Reject every pending request when the transport closes; fail-fast afterwards. */
+  /** @brief Reject every pending request when the transport closes; fail-fast afterwards. */
   private handleClose(cause?: Error): void {
     this.closed = new Error('transport closed' + (cause ? `: ${cause.message}` : ''));
     for (const p of this.pending) {
@@ -212,20 +226,22 @@ export class LibtracerClient {
   /* ---------------------------------------------------------- inbound --- */
 
   /**
-   * Register a handler for inbound VALUE deliveries. A delivery is a FWD{WRITE}
-   * (delivery-is-a-write, RFC-0004 §D); a bare VALUE or a single ROUTER wrapper is
-   * also accepted. Multiple handlers may be registered; each receives every delivery.
+   * @brief Register a handler for inbound VALUE deliveries.
+   *
+   * A delivery is a FWD{WRITE} (delivery-is-a-write, RFC-0004 §D); a bare VALUE
+   * or a single ROUTER wrapper is also accepted. Multiple handlers may be
+   * registered; each receives every delivery.
    */
   onValue(handler: ValueHandler): void {
     this.valueHandlers.add(handler);
   }
 
-  /** Register the sink for inbound decode failures and other client-side errors. */
+  /** @brief Register the sink for inbound decode failures and other client-side errors. */
   onError(handler: (err: Error) => void): void {
     this.errorHandler = handler;
   }
 
-  /** Decode one inbound frame: correlate a REPLY, deliver a write, or shed/deliver a VALUE. */
+  /** @brief Decode one inbound frame: correlate a REPLY, deliver a write, or shed/deliver a VALUE. */
   private dispatch(bytes: Uint8Array): void {
     let tlv: Tlv;
     try {
@@ -282,7 +298,7 @@ export class LibtracerClient {
     if (this.errorHandler) this.errorHandler(err);
   }
 
-  /** Send a one-shot FWD and resolve its FWD{REPLY} (FIFO correlation). */
+  /** @brief Send a one-shot FWD and resolve its FWD{REPLY} (FIFO correlation). */
   private request(frame: Uint8Array): Promise<ParsedFwd> {
     return new Promise<ParsedFwd>((resolve, reject) => {
       if (this.closed) {
@@ -311,7 +327,7 @@ export class LibtracerClient {
     });
   }
 
-  /** Turn a RESULT reply into its payload TLV; throw {@link FwdError} on ERROR. */
+  /** @brief Turn a RESULT reply into its payload TLV; throw {@link FwdError} on ERROR. */
   private result(reply: ParsedFwd): Tlv | null {
     if (reply.kind === FWD_KIND.ERROR) {
       // Registered-code and string-form (NAME tr::… path) identities both
@@ -324,7 +340,7 @@ export class LibtracerClient {
   /* --------------------------------------------------------- one-shot --- */
 
   /**
-   * Read a remote vertex's value: `FWD{ op=READ, dst=path, src=<reply-ep> }`.
+   * @brief Read a remote vertex's value: `FWD{ op=READ, dst=path, src=<reply-ep> }`.
    *
    * @param path the destination path (a `/`-string like `"/sensor/temp"`, or segments)
    * @returns the RESULT's value TLV (decoded)
@@ -340,7 +356,9 @@ export class LibtracerClient {
   }
 
   /**
-   * Read a remote vertex's `:field`: `FWD{ op=READ, dst=path, FIELD=selector, src=… }`.
+   * @brief Read a remote vertex's `:field`: `FWD{ op=READ, dst=path,
+   * FIELD=selector, src=… }`.
+   *
    * A whole-array field (e.g. `:subscribers[]`) resolves to a POINT of the slot TLVs.
    *
    * @param path     the destination path (string or segments)
@@ -358,7 +376,7 @@ export class LibtracerClient {
   }
 
   /**
-   * Write a value to a remote vertex: `FWD{ op=WRITE, dst=path, src=…, payload }`.
+   * @brief Write a value to a remote vertex: `FWD{ op=WRITE, dst=path, src=…, payload }`.
    *
    * @param path     the destination path (string or segments)
    * @param valueTLV a complete VALUE TLV's bytes (e.g. from {@link encodeValue})
@@ -373,9 +391,11 @@ export class LibtracerClient {
   }
 
   /**
-   * Block for the next write to a remote vertex: `FWD{ op=AWAIT, dst=path, src=…,
-   * await_timeout? }`. Named `await_` because `await` is reserved; an `await`
-   * alias is installed on the prototype for the RFC-0004-spelled call site.
+   * @brief Block for the next write to a remote vertex: `FWD{ op=AWAIT,
+   * dst=path, src=…, await_timeout? }`.
+   *
+   * Named `await_` because `await` is reserved; an `await` alias is installed
+   * on the prototype for the RFC-0004-spelled call site.
    *
    * @param path        the destination path (string or segments)
    * @param timeoutNs   the await timeout in ns (absent ⇒ the responder's 1 s default)
@@ -397,8 +417,10 @@ export class LibtracerClient {
   }
 
   /**
-   * Subscribe to a remote producer: a `WRITE` of a `SUBSCRIBER{ target=<reply-ep> }`
-   * into `producer:subscribers[]` (RFC-0004 §C/§D — subscribe is a field-write).
+   * @brief Subscribe to a remote producer: a `WRITE` of a `SUBSCRIBER{
+   * target=<reply-ep> }` into `producer:subscribers[]` (RFC-0004 §C/§D —
+   * subscribe is a field-write).
+   *
    * Once the responder acks, `handler` fires for every inbound VALUE delivery.
    *
    * SCOPE: this issues the SUBSCRIBER and receives VALUEs the producer directly
@@ -441,24 +463,27 @@ export class LibtracerClient {
 
   /* ------------------------------------------- pure builders (static) --- */
 
-  /** {@link encodeValue} — the exact VALUE TLV bytes, independently of any transport. */
+  /** @brief {@link encodeValue} — the exact VALUE TLV bytes, independently of any transport. */
   static encodeValue(value: Uint8Array, opts?: ValueOptions): Uint8Array {
     return encodeValue(value, opts);
   }
 
-  /** {@link encodePath} — the exact PATH TLV bytes. */
+  /** @brief {@link encodePath} — the exact PATH TLV bytes. */
   static encodePath(segments: string[]): Uint8Array {
     return encodePath(segments);
   }
 
-  /** {@link encodeSubscriber} — the exact SUBSCRIBER TLV bytes. */
+  /** @brief {@link encodeSubscriber} — the exact SUBSCRIBER TLV bytes. */
   static encodeSubscriber(targetPath: string[], opts?: SubscriberOptions): Uint8Array {
     return encodeSubscriber(targetPath, opts);
   }
 }
 
-// `await` is a reserved word, so the method is `await_`; expose `client.await(...)`
-// too (a member name may be a keyword) for the RFC-0004-spelled ergonomic call.
+/**
+ * @brief `await` is a reserved word, so the method is `await_`; expose
+ * `client.await(...)` too (a member name may be a keyword) for the
+ * RFC-0004-spelled ergonomic call.
+ */
 Object.defineProperty(LibtracerClient.prototype, 'await', {
   value: LibtracerClient.prototype.await_,
   writable: true,
@@ -466,7 +491,7 @@ Object.defineProperty(LibtracerClient.prototype, 'await', {
   enumerable: false,
 });
 
-/** Normalize a `/`-path string (or segment array) into validated segments. */
+/** @brief Normalize a `/`-path string (or segment array) into validated segments. */
 function splitPath(path: string | string[]): string[] {
   if (Array.isArray(path)) return path;
   const segs = path.split('/').filter((s) => s.length > 0);

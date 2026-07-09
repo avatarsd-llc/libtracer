@@ -1,26 +1,33 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
-// The stream framing shared by every libtracer byte-stream transport (M6):
-// each libtracer TLV frame travels as `u32-LE length ++ frame bytes`. This
-// module is the pure, socket-free codec — byte-identical to the C++
-// `tcp_transport_t` / `quic_transport_t` / `webtransport_transport_t` framing
-// (the prefix is TRANSPORT framing, not part of the TLV).
+/**
+ * @brief The stream framing shared by every libtracer byte-stream transport
+ * (M6): each libtracer TLV frame travels as `u32-LE length ++ frame bytes`.
+ *
+ * This module is the pure, socket-free codec — byte-identical to the C++
+ * `tcp_transport_t` / `quic_transport_t` / `webtransport_transport_t` framing
+ * (the prefix is TRANSPORT framing, not part of the TLV).
+ */
 
-/** The length prefix: 4 bytes, u32 little-endian. */
+/** @brief The length prefix: 4 bytes, u32 little-endian. */
 export const PREFIX_BYTES = 4;
 
 /**
- * The largest frame the prefix may announce (16 MiB — the C++ `kMaxFrame`
- * cap). A larger prefix is malformed: the stream has lost framing sync and
- * cannot be trusted again.
+ * @brief The largest frame the prefix may announce (16 MiB — the C++
+ * `kMaxFrame` cap).
+ *
+ * A larger prefix is malformed: the stream has lost framing sync and cannot be
+ * trusted again.
  */
 export const MAX_FRAME = 16 * 1024 * 1024;
 
-/** Thrown by {@link FrameReassembler.push} on a prefix announcing more than
- *  {@link MAX_FRAME} bytes — the stream is desynced and must be torn down. */
+/**
+ * @brief Thrown by {@link FrameReassembler.push} on a prefix announcing more
+ * than {@link MAX_FRAME} bytes — the stream is desynced and must be torn down.
+ */
 export class MalformedPrefixError extends Error {
-  /** The length the malformed prefix announced. */
+  /** @brief The length the malformed prefix announced. */
   readonly announced: number;
 
   constructor(announced: number) {
@@ -30,7 +37,7 @@ export class MalformedPrefixError extends Error {
   }
 }
 
-/** Encode one frame as a length-prefixed record: `u32-LE length ++ frame`. */
+/** @brief Encode one frame as a length-prefixed record: `u32-LE length ++ frame`. */
 export function encodeRecord(frame: Uint8Array): Uint8Array {
   if (frame.byteLength > MAX_FRAME) {
     throw new RangeError(`frame of ${frame.byteLength} bytes exceeds MAX_FRAME (${MAX_FRAME})`);
@@ -42,9 +49,9 @@ export function encodeRecord(frame: Uint8Array): Uint8Array {
 }
 
 /**
- * Reassemble length-prefixed records from arbitrary stream chunks (a QUIC
- * stream delivers reads at transport-chosen boundaries: prefixes split across
- * chunks, records coalesced into one chunk — both are normal).
+ * @brief Reassemble length-prefixed records from arbitrary stream chunks (a
+ * QUIC stream delivers reads at transport-chosen boundaries: prefixes split
+ * across chunks, records coalesced into one chunk — both are normal).
  *
  * `push(chunk)` returns every COMPLETE frame the chunk finished; partial bytes
  * are buffered for the next push. A zero-length record is a no-op (skipped,
@@ -55,7 +62,7 @@ export function encodeRecord(frame: Uint8Array): Uint8Array {
 export class FrameReassembler {
   private pending: Uint8Array = new Uint8Array(0);
 
-  /** Feed one stream chunk; returns the frames it completed (possibly none). */
+  /** @brief Feed one stream chunk; returns the frames it completed (possibly none). */
   push(chunk: Uint8Array): Uint8Array[] {
     if (this.pending.byteLength === 0) {
       this.pending = chunk;
@@ -86,7 +93,7 @@ export class FrameReassembler {
     return frames;
   }
 
-  /** Bytes buffered awaiting the rest of a prefix/body (diagnostics). */
+  /** @brief Bytes buffered awaiting the rest of a prefix/body (diagnostics). */
   get buffered(): number {
     return this.pending.byteLength;
   }

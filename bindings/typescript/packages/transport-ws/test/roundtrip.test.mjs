@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-//
-// Node round-trip test: stand up a local `ws` echo server, dial it with the
-// TransportWs client, send a libtracer TLV (built with the core package
-// @avatarsd-llc/libtracer) as one BINARY frame, and assert the echoed bytes are
-// byte-identical and decode back to the same TLV. No fixed sleeps — everything is
-// event-driven behind a deadline.
+
+/**
+ * @brief Node round-trip test: stand up a local `ws` echo server, dial it with
+ * the TransportWs client, send a libtracer TLV (built with the core package
+ * @avatarsd-llc/libtracer) as one BINARY frame, and assert the echoed bytes
+ * are byte-identical and decode back to the same TLV.
+ *
+ * No fixed sleeps — everything is event-driven behind a deadline.
+ */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -13,7 +16,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { TransportWs } from '../dist/index.js';
 import { encode, decode, equal, TYPE } from '@avatarsd-llc/libtracer';
 
-/** A simple opaque NAME TLV built via the cross-validated core codec. */
+/** @brief A simple opaque NAME TLV built via the cross-validated core codec. */
 function buildTlv(text) {
   return {
     type: TYPE.NAME,
@@ -24,7 +27,7 @@ function buildTlv(text) {
   };
 }
 
-/** Resolve when an EventEmitter emits `event`, behind a deadline. */
+/** @brief Resolve when an EventEmitter emits `event`, behind a deadline. */
 function once(emitter, event, ms) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`timed out waiting for ${event}`)), ms);
