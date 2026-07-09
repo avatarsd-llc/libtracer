@@ -5,11 +5,14 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Two armed windows: (1) one FWD *forward hop* — offset-dispatch + stack heads +
+ * Three armed windows: (1) one FWD *forward hop* — offset-dispatch + stack heads +
  * stack iov (ADR-0038 invariants #1/#2), hard-gated at ZERO allocations by CI
  * (`ZEROHEAP_MAX=0`); (2) one *terminus* resolve (ADR-0041) — REPORT-ONLY, since a
  * terminus may allocate (ADR-0039): the arena draws from the router's injected
- * memory_resource (the default heap here, so every draw is counted and visible).
+ * memory_resource (the default heap here, so every draw is counted and visible);
+ * (3) the *per-vertex steady-heap* probe (#361 §8) — REPORT-ONLY, LIVE usable-size
+ * bytes a default STORED_VALUE leaf holds at steady state, and the increment one
+ * small LKV write adds — the diet trend the gh-pages history tracks.
  *
  * This TU owns the global operator-new/delete override (probe/heap_probe.hpp): all
  * allocation variants — plain, sized, aligned (what `heap_alloc`'s `operator new(size,
@@ -31,6 +34,11 @@
 #include <string_view>
 #include <vector>
 
+#if __has_include(<malloc.h>)
+#include <malloc.h>  // malloc_usable_size: feeds the live-bytes (steady-heap) balance
+#define BENCH_HAS_USABLE_SIZE 1
+#endif
+
 #include "heap_probe.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
@@ -42,17 +50,28 @@
 
 namespace {
 void* counted_alloc(std::size_t size) {
-    if (probe::g_armed.load(std::memory_order_relaxed)) {
+    const bool armed = probe::g_armed.load(std::memory_order_relaxed);
+    if (armed) {
         probe::g_allocs.fetch_add(1, std::memory_order_relaxed);
         probe::g_bytes.fetch_add(size, std::memory_order_relaxed);
     }
     void* p = std::malloc(size ? size : 1);
+#ifdef BENCH_HAS_USABLE_SIZE
+    if (armed && p != nullptr)
+        probe::g_live_bytes.fetch_add(static_cast<long long>(malloc_usable_size(p)),
+                                      std::memory_order_relaxed);
+#endif
     return p;
 }
 void counted_free(void* p) {
     if (p == nullptr) return;
-    if (probe::g_armed.load(std::memory_order_relaxed))
+    if (probe::g_armed.load(std::memory_order_relaxed)) {
         probe::g_frees.fetch_add(1, std::memory_order_relaxed);
+#ifdef BENCH_HAS_USABLE_SIZE
+        probe::g_live_bytes.fetch_sub(static_cast<long long>(malloc_usable_size(p)),
+                                      std::memory_order_relaxed);
+#endif
+    }
     std::free(p);
 }
 }  // namespace
@@ -224,6 +243,68 @@ int main() {
             tc.allocs, tc.frees, tc.bytes, in_link.last_len, replied ? 1 : 0);
         if (!replied) {
             std::printf("FAIL: the READ terminus did not reply — fixture broken\n");
+            return 2;
+        }
+    }
+
+    // --- per-vertex steady-heap probe (#361 §8, REPORT-ONLY) -------------------
+    // The vertex-diet trend: LIVE usable-size bytes a default STORED_VALUE leaf
+    // holds at steady state (struct + name key + child-link slot), and the
+    // increment one small LKV write adds (shared_ptr control block + rope). The
+    // live balance nets out transient churn (path-parse temporaries, container
+    // regrowth), so it IS the number an MCU's heap watermark moves by per
+    // endpoint. `bytes=` in these two lines therefore reports the live balance
+    // per vertex, not gross alloc bytes; the gross figure rides in the tail.
+    {
+        graph_t diet_graph;
+        if (const auto warm = tr::graph::path_t::parse("/ep/warm"))
+            (void)diet_graph.register_vertex(*warm, tr::graph::role_t::STORED_VALUE);
+
+        // The write payload + view are built OUTSIDE the armed windows: only the
+        // graph's own cost is measured, not the fixture's frame construction.
+        std::vector<std::byte> diet_stored;
+        tr::wire::emit_tlv(diet_stored, type_t::VALUE, opt_t{},
+                           std::span<const std::byte>(payload, 4));
+        const tr::view::view_t diet_sv =
+            tr::view::over_bytes(diet_stored).value_or(tr::view::view_t{});
+
+        constexpr std::size_t kDietN = 512;
+        bool diet_ok = true;
+        probe::reset();
+        probe::arm();
+        for (std::size_t i = 0; i < kDietN; ++i) {
+            char pb[24];
+            std::snprintf(pb, sizeof pb, "/ep/v%04zu", i);
+            const auto p = tr::graph::path_t::parse(pb);
+            diet_ok = diet_ok && p.has_value();
+            if (p) (void)diet_graph.register_vertex(*p, tr::graph::role_t::STORED_VALUE);
+        }
+        const probe::counts_t reg = probe::snapshot();
+        for (std::size_t i = 0; i < kDietN; ++i) {
+            char pb[24];
+            std::snprintf(pb, sizeof pb, "/ep/v%04zu", i);
+            if (const auto p = tr::graph::path_t::parse(pb))
+                diet_ok = diet_ok && diet_graph.write(*p, diet_sv).has_value();
+        }
+        const probe::counts_t wrt = probe::snapshot();
+        probe::disarm();
+
+        const auto per = [](long long total) {
+            return total > 0 ? static_cast<std::size_t>(total) / kDietN : std::size_t{0};
+        };
+        std::printf(
+            "RESULT zeroheap vertex allocs=%zu frees=%zu bytes=%zu n=%zu gross_bytes=%zu "
+            "ok=%d (report-only — live usable-size bytes per default leaf, #361 §8)\n",
+            reg.allocs / kDietN, reg.frees / kDietN, per(reg.live_bytes), kDietN,
+            reg.bytes / kDietN, diet_ok ? 1 : 0);
+        std::printf(
+            "RESULT zeroheap vertex_value allocs=%zu frees=%zu bytes=%zu n=%zu gross_bytes=%zu "
+            "ok=%d (report-only — live bytes one 4B LKV write adds per vertex)\n",
+            (wrt.allocs - reg.allocs) / kDietN, (wrt.frees - reg.frees) / kDietN,
+            per(wrt.live_bytes - reg.live_bytes), kDietN, (wrt.bytes - reg.bytes) / kDietN,
+            diet_ok ? 1 : 0);
+        if (!diet_ok) {
+            std::printf("FAIL: vertex-diet fixture did not register/write — not a heap result\n");
             return 2;
         }
     }

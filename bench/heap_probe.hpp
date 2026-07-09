@@ -32,12 +32,20 @@ inline std::atomic<bool> g_armed{false};
 inline std::atomic<std::size_t> g_allocs{0};
 inline std::atomic<std::size_t> g_frees{0};
 inline std::atomic<std::size_t> g_bytes{0};
+/**
+ * @brief LIVE (usable-size) byte balance while armed: allocations add their usable size,
+ *        frees subtract it — so transient churn (vector regrowth, parse temporaries)
+ *        cancels and the balance reads STEADY-STATE heap growth across the window.
+ *        Stays 0 when the overriding TU cannot query usable sizes.
+ */
+inline std::atomic<long long> g_live_bytes{0};
 
 /** @brief One measurement window's result. */
 struct counts_t {
-    std::size_t allocs = 0; /**< number of operator-new calls while armed */
-    std::size_t frees = 0;  /**< number of operator-delete calls while armed */
-    std::size_t bytes = 0;  /**< total bytes requested by those allocs */
+    std::size_t allocs = 0;   /**< number of operator-new calls while armed */
+    std::size_t frees = 0;    /**< number of operator-delete calls while armed */
+    std::size_t bytes = 0;    /**< total bytes requested by those allocs */
+    long long live_bytes = 0; /**< usable-size balance: bytes still held at snapshot */
 };
 
 /** @brief Zero the counters (call before arming a fresh window). */
@@ -45,6 +53,7 @@ inline void reset() {
     g_allocs.store(0, std::memory_order_relaxed);
     g_frees.store(0, std::memory_order_relaxed);
     g_bytes.store(0, std::memory_order_relaxed);
+    g_live_bytes.store(0, std::memory_order_relaxed);
 }
 
 /**
@@ -57,9 +66,9 @@ inline void disarm() { g_armed.store(false, std::memory_order_seq_cst); }
 
 /** @brief Read the counters (typically after disarm()). */
 [[nodiscard]] inline counts_t snapshot() {
-    return counts_t{g_allocs.load(std::memory_order_relaxed),
-                    g_frees.load(std::memory_order_relaxed),
-                    g_bytes.load(std::memory_order_relaxed)};
+    return counts_t{
+        g_allocs.load(std::memory_order_relaxed), g_frees.load(std::memory_order_relaxed),
+        g_bytes.load(std::memory_order_relaxed), g_live_bytes.load(std::memory_order_relaxed)};
 }
 
 /** @brief RAII window: reset + arm on construction, disarm on scope exit; read via .result(). */
