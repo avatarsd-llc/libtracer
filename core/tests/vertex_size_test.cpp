@@ -34,10 +34,11 @@ using tr::graph::role_t;
 using tr::graph::settings_t;
 using tr::graph::vertex_t;
 
-/** @brief The 64-bit hot-core ceiling (measured 248 B post-#361-§1; pre-split was 536 B). */
-constexpr std::size_t kMax64 = 288;
+/** @brief The 64-bit hot-core ceiling (measured 160 B post-#361-§2 striped locks;
+ *         248 B post-§1, 536 B pre-split). */
+constexpr std::size_t kMax64 = 192;
 /** @brief The 32-bit (MCU target) hot-core ceiling — pointer-halved with the same headroom. */
-constexpr std::size_t kMax32 = 176;
+constexpr std::size_t kMax32 = 128;
 
 static_assert(sizeof(void*) != 8 || sizeof(vertex_t) <= kMax64,
               "vertex_t grew past the 64-bit RAM-diet gate (#361) — move the new member "
