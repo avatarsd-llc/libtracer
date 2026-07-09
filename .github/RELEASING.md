@@ -27,9 +27,16 @@ SHOULD NOT: freeze `v1.md` first (see the gate below).
 
 ## Source of truth for the version
 
-There is **one hand-edited version for the core release axis**: the repo-root
-[`VERSION`](../VERSION) file. Everything else derives from it or is checked
-against it, so the number cannot drift:
+**At release time, the pushed `vX.Y.Z` git tag is authoritative.**
+[`release.yml`](workflows/release.yml) derives `X.Y.Z` from the tag and every
+publish job stamps the checked-out tree with
+`tools/sync-version.py X.Y.Z` before packaging — so what npm / crates.io /
+PlatformIO / ESP see is always the tag's version, regardless of what the
+committed manifests say (a mismatch is a workflow **warning**, not an error).
+
+**Between releases**, the repo-root [`VERSION`](../VERSION) file is the one
+hand-edited version, and everything else derives from it or is checked against
+it, so the number cannot drift inside the tree:
 
 - **`core/CMakeLists.txt`** reads `VERSION` for its `project(VERSION …)` — except
   when building at a release **git tag `vMAJOR.MINOR.PATCH`**, which wins, so a
@@ -55,9 +62,19 @@ against it, so the number cannot drift:
   runs `python3 tools/sync-version.py --check` and fails any PR where an artifact
   has drifted from `VERSION`, so a bump can never land half-applied.
 
-To bump the version: edit `VERSION`, run `python3 tools/sync-version.py`, refresh
-the lockfiles (`cd bindings/typescript && npm install --package-lock-only`;
+To reconcile the tree to a version: run `python3 tools/sync-version.py X.Y.Z`
+(stamps `VERSION` **and** every manifest), refresh the lockfiles
+(`cd bindings/typescript && npm install --package-lock-only`;
 `cd bindings/rust && cargo update -p libtracer`), and commit them together.
+
+**One consumer bypasses the pipeline:** the Arduino Library Registry indexes
+[`library.properties`](../integrations/arduino/library.properties) directly
+from the **tagged tree** — no CI job stamps it on the way. So reconciling the
+committed manifests before (or promptly after) tagging is still **recommended**;
+tag-time stamping makes it non-blocking for the four CI-published registries,
+not unnecessary. The same applies to anyone consuming the raw tagged tree by
+git pin (CMake `FetchContent` is covered — `core/CMakeLists.txt` prefers the
+git tag over `VERSION`).
 
 ## Pre-release gates
 
@@ -77,19 +94,22 @@ the lockfiles (`cd bindings/typescript && npm install --package-lock-only`;
 
 ## Steps
 
-1. **Bump + changelog PR.** In one PR: edit [`VERSION`](../VERSION) to `X.Y.Z`, run
-   `python3 tools/sync-version.py` (stamps **every** manifest — the
-   `version-consistency` gate verifies no drift) and refresh the lockfiles
-   (`npm install --package-lock-only`, `cargo update -p libtracer`), and move
-   `core/CHANGELOG.md`'s `[Unreleased]` entries under a new
-   `## [X.Y.Z] — YYYY-MM-DD` heading. Merge it (signed, per DCO).
+1. **Changelog-cut PR (+ recommended version reconcile).** In one PR: move each
+   `CHANGELOG.md`'s `[Unreleased]` entries under a new `## [X.Y.Z] — YYYY-MM-DD`
+   heading. Recommended in the same PR (required only for the Arduino registry,
+   see "Source of truth" above): `python3 tools/sync-version.py X.Y.Z` and
+   refresh the lockfiles (`npm install --package-lock-only`,
+   `cargo update -p libtracer`). Merge it (signed, per DCO).
 2. **Tag + push — this triggers the whole release.** On the merge commit:
    ```sh
    git tag -s vX.Y.Z -m "libtracer vX.Y.Z"
    git push origin vX.Y.Z
    ```
-   [`release.yml`](workflows/release.yml) fires on the `v*` tag, first **asserts
-   the tag == `VERSION`**, then does all of the following automatically. Each
+   [`release.yml`](workflows/release.yml) fires on the `v*` tag, derives
+   `X.Y.Z` **from the tag** (the tag is authoritative — each publish job stamps
+   the tree with `tools/sync-version.py X.Y.Z` before packaging; a committed
+   `VERSION` that disagrees is only a warning), then does all of the following
+   automatically. Each
    publish is an **independent job**: a missing secret **skips** that registry
    with a warning (add tokens incrementally) rather than failing the release.
    - **GitHub Release** — an AI-written summary (from the CHANGELOG + commits)
