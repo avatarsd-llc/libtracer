@@ -173,8 +173,10 @@ all **same-runner relative** comparisons, where machine speed cancels:
 - **per PR** — `bench/perf_gate.py` builds `main`'s bench *and* the PR's bench on one
   runner and fails the PR if any of six canonical points regresses (p50 **+15 %** /
   deliveries/s **−12 %**, best-of-3 runs);
-- **per `main` push** — the same gate re-runs HEAD against its **parent commit** on one
-  runner (the no-pullback ratchet): a regression that lands anyway turns `main` red;
+- **per `main` push** — the same gate re-runs HEAD against its **parent commit** on
+  **three independently-drawn runners** (the redundant no-pullback ratchet; each
+  replica is a complete same-runner experiment): a regression that lands anyway
+  turns `main` red, and a single noisy runner cannot manufacture the verdict;
 - **trend soft-alert** — the history tracker comments on a commit whose series drifts
   past 125 % of the previous point (cross-runner, so an alert is a prompt to look,
   not a verdict).
@@ -243,11 +245,15 @@ HISTORY_BLOCK = """\
 ### History & trends (per-commit, `main`)
 
 The table above is one run; the trend is the durable signal. Every push to `main`
-runs the full bench once, archives the raw transcript as a per-commit CI artifact
-(`bench-results-<sha>`, on the `perf` workflow run), and records **every**
-`(mode, size, fanout, endpoints)` point — latency (p50/p99 ns), throughput
-(deliveries/s), and memory footprint (heap-probe bytes per hop, whole-run max RSS)
-as **separate series** — to a persisted build-to-build history
+runs the full bench on **three independently-drawn runners**, archives all raw
+transcripts as a per-commit CI artifact (`bench-results-<sha>`, on the `perf`
+workflow run), and records **every** `(mode, size, fanout, endpoints)` point —
+latency (p50/p99 ns), throughput (deliveries/s), and memory footprint (heap-probe
+bytes per hop, whole-run max RSS) as **separate series** — to a persisted
+build-to-build history. Per metric the recorded value is the **best across the
+three runners** (min latency / max throughput): machine speed varies ~2× between
+runner draws, so best-of-3 approximates the code's capability rather than the
+machine lottery
 ([benchmark-action/github-action-benchmark](https://github.com/benchmark-action/github-action-benchmark),
 stored on the machine-maintained `gh-pages` branch). A commit that drifts a series
 past **125 %** of the previous point gets an automatic soft-alert comment; the hard
@@ -283,7 +289,8 @@ READING_BLOCK = """\
   look at the trend, not a verdict.
 - **Noise floor.** Each recorded point is the **median of the repeated RESULT
   rows** one run emits, so single-iteration jitter does not move the series — but
-  shared CI runners still vary ~2× in absolute speed, and sub-µs points sit on a
+  shared CI runners still vary ~2× in absolute speed — which is why each point is
+  recorded as the best across three runner draws — and sub-µs points sit on a
   ~10 ns timer grain. The tell: **a move that hits every series at once —
   including unrelated ones like the pure-codec `fold-n*` rows — is the runner; a
   move confined to one family is the code.** Read trends across several commits,

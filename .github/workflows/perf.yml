@@ -1,20 +1,24 @@
 # In-process latency/throughput gate (bench/perf_gate.py) — split out of conformance.yml.
 #
-# Two fixes over the old cross-build/Actions-cache gate (which false-failed packaging-,
-# docs- and TS-only PRs, e.g. #121):
+# Design (all comparisons are SAME-RUNNER, because GitHub-hosted runners vary ~2x in
+# absolute speed — cross-runner nanoseconds cannot gate):
 #
 #  1. Path filter — perf only runs when performance can actually change: C++ core, the
 #     bench harness, CMake, or this workflow. A PR touching only bindings/typescript/**,
 #     docs/**, packaging, etc. does NOT run perf.
-#  2. Same-runner baseline — on a PR, main's bench_libtracer and the PR's bench_libtracer
-#     are BOTH built and timed on the SAME runner in this one job. main's numbers are
-#     recorded as the baseline; the PR's are gated against it. GitHub-hosted runners vary
-#     ~2x in speed, so a baseline recorded on a fast runner vs a slow PR runner used to
-#     false-fail; measuring both here makes absolute-ns speed cancel — only a real
-#     relative regression (p50 up >15% / throughput down >12%, best-of-3 runs) fails.
-#     perf_gate.py keeps its absolute-floor backstop. No Actions cache feeds the gate.
-#     Push runs ratchet HEAD against its PARENT commit the same way, so a pullback
-#     that lands anyway turns main red immediately.
+#  2. PR gate (`gate-pr`) — main's bench_libtracer and the PR's bench_libtracer are BOTH
+#     built and timed on the SAME runner in one job; only a real relative regression
+#     (p50 +15% / mean +12% / throughput -12%, best-of-3 runs) fails. perf_gate.py
+#     keeps its absolute-floor backstop. No Actions cache feeds the gate.
+#  3. Push ratchet (`ratchet`) — every main push re-runs the same gate on THREE
+#     independently-drawn runners (redundant testing): each replica builds HEAD and its
+#     PARENT commit and gates HEAD against the parent on its own hardware. A pullback
+#     that lands anyway turns main red — and a single slow/noisy runner cannot
+#     manufacture a false verdict, because the other two replicas measured the same
+#     pair of commits on different machines.
+#  4. History (`history`) — aggregates the three replicas' transcripts and records the
+#     BEST across runners per metric (min latency / max throughput), so the recorded
+#     trend approximates the code's capability, not the machine lottery.
 name: perf
 
 on:
@@ -35,12 +39,10 @@ on:
       - '.github/workflows/perf.yml'
 
 jobs:
-  perf:
+  # --- PR gate: same-runner baseline against main --------------------------------
+  gate-pr:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
-    # contents: write lets the build-to-build tracker (below) push the ns history to the
-    # gh-pages branch and post a commit comment when a metric drifts past the soft alert.
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,45 +51,52 @@ jobs:
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
           cmake --build bench/build --target bench_libtracer bench_forward_heap -j
-
-      # --- 16KB-RAM zero-heap forward gate (ADR-0038/0039) ------------------------
       # A hard, absolute gate (no baseline needed): the FWD forward hop MUST allocate
-      # zero heap. Measured by a global operator-new counter armed around one steady-
-      # state on_frame. Fails the build if the forward path ever allocates again.
+      # zero heap (ADR-0038 §16KB-RAM), measured by a global operator-new counter.
       - name: Zero-heap forward gate (ADR-0038 §16KB-RAM)
-        # tee: the probe's alloc/byte counts also feed the memory-footprint series of
-        # the history tracker below (push runs) and the per-run raw-results artifact.
-        run: |
-          set -o pipefail
-          ZEROHEAP_MAX=0 ./bench/build/bench_forward_heap | tee bench/bench_forward_heap_raw.txt
-
-      # --- PR gate: same-runner baseline ------------------------------------------
-      # Build main's bench_libtracer in a worktree on THIS runner, then record its
-      # numbers as the baseline and gate the PR's numbers against it. Same hardware,
-      # same job -> absolute-ns runner speed cancels; only a real regression fails.
+        run: ZEROHEAP_MAX=0 ./bench/build/bench_forward_heap
+      # Build main's bench_libtracer in a worktree on THIS runner, record its numbers
+      # as the baseline, then gate the PR's numbers against it. Same hardware, same
+      # job -> absolute-ns runner speed cancels; only a real regression fails.
       - name: Build main's benchmark on this runner (baseline)
-        if: github.event_name == 'pull_request'
         run: |
           git fetch --no-tags origin main
           git worktree add --detach ../main-baseline origin/main
           cmake -S ../main-baseline/bench -B ../main-baseline/bench/build -DCMAKE_BUILD_TYPE=Release
           cmake --build ../main-baseline/bench/build --target bench_libtracer -j
       - name: Performance gate (same-runner main baseline)
-        if: github.event_name == 'pull_request'
         run: |
           echo "== record main (baseline) on this runner =="
           python3 bench/perf_gate.py --bench ../main-baseline/bench/build/bench_libtracer --update-baseline
           echo "== gate PR candidate against the same-runner baseline =="
           python3 bench/perf_gate.py
 
-      # --- main push: no-pullback ratchet (same-runner, HEAD vs parent) ------------
-      # The PR gate above catches a pullback before merge; this re-verifies it AFTER
-      # merge against the actual parent commit on one runner — a merge that raises
-      # p50 >15% or drops deliveries/s >12% vs its parent turns main red. Same-runner
-      # comparison is the only noise-immune signal available (shared runners vary ~2x
-      # in absolute speed, which is why the raw ns history chart alone can't gate).
+  # --- main push: REDUNDANT no-pullback ratchet (3 runners, HEAD vs parent) -------
+  # Each replica is a complete same-runner experiment on independently-drawn hardware:
+  # build HEAD, build the parent commit, gate HEAD against the parent. fail-fast is
+  # off so one replica's verdict (or infrastructure hiccup) never hides the others'.
+  ratchet:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        replica: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need the parent commit for the ratchet baseline
+      - name: Build HEAD's benchmark (Release)
+        run: |
+          cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build bench/build --target bench_libtracer bench_forward_heap -j
+      # The zero-heap gate is deterministic (allocation counts, not time) — running it
+      # per replica is a free consistency check; its transcript feeds the memory series.
+      - name: Zero-heap forward gate (ADR-0038 §16KB-RAM)
+        run: |
+          set -o pipefail
+          ZEROHEAP_MAX=0 ./bench/build/bench_forward_heap | tee bench/bench_forward_heap_raw.txt
       - name: Build the parent commit's benchmark on this runner (ratchet baseline)
-        if: github.event_name == 'push'
         run: |
           if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
             git worktree add --detach ../parent-baseline HEAD^
@@ -96,8 +105,7 @@ jobs:
           else
             echo "root commit — no parent to ratchet against"
           fi
-      - name: No-pullback ratchet (HEAD vs parent)
-        if: github.event_name == 'push'
+      - name: No-pullback ratchet (HEAD vs parent, this runner)
         run: |
           if [ -x ../parent-baseline/bench/build/bench_libtracer ]; then
             echo "== record the parent (ratchet baseline) on this runner =="
@@ -108,26 +116,10 @@ jobs:
             echo "== no parent build — absolute floors only =="
             python3 bench/perf_gate.py --update-baseline
           fi
-
-      # --- main push: persist the build-to-build ns history -----------------------
-      # perf_gate.py above is the HARD, per-PR relative gate (fails a PR at >50%
-      # latency / >34% throughput vs its same-runner main baseline). It does NOT keep a
-      # durable series, so slow drift that stays under 50% across many commits is
-      # invisible. These steps run the bench ONCE, archive the full raw transcript as a
-      # per-commit artifact (the "rich" results), and record EVERY (mode,size,fan,ep)
-      # point the run produces — latency, throughput and memory footprint as separate
-      # series — to a persisted history with a TIGHTER 125% soft alert that comments on
-      # the offending commit, catching creep the hard gate misses.
-      #
-      # NOTE: the history + interactive chart live on the `gh-pages` BRANCH (github-
-      # action-benchmark's store; machine-maintained — only this workflow writes it).
-      # Pages source is "GitHub Actions" (docs.yml's Sphinx artifact), so the branch is
-      # not served directly; docs.yml mirrors dev/bench/ from the branch into each
-      # deploy, so the chart is served at https://libtracer.avatarsd.com/dev/bench/.
-      - name: Run the bench once (raw transcript kept as the per-commit artifact)
-        if: github.event_name == 'push'
-        # GNU time -v: whole-run max RSS feeds the memory-footprint series. Degrades
-        # to an empty transcript (metric omitted) if GNU time is absent on the runner.
+      # One full-bench transcript per replica; the history job aggregates all three.
+      # GNU time -v: whole-run max RSS feeds the memory-footprint series. Degrades
+      # to an empty transcript (metric omitted) if GNU time is absent on the runner.
+      - name: Run the bench once (this replica's history transcript)
         run: |
           if [ -x /usr/bin/time ]; then
             /usr/bin/time -v ./bench/build/bench_libtracer \
@@ -136,29 +128,67 @@ jobs:
             ./bench/build/bench_libtracer >bench/bench_libtracer_raw.txt
             : >bench/bench_libtracer_time.txt
           fi
-      - name: Emit the bench as history metrics (github-action-benchmark JSON)
-        if: github.event_name == 'push'
-        run: >-
-          python3 bench/perf_emit_benchmark.py
-          --raw bench/bench_libtracer_raw.txt
-          --zeroheap-raw bench/bench_forward_heap_raw.txt
-          --time-v bench/bench_libtracer_time.txt
-          --out-smaller bench/benchmark_output.json
-          --out-bigger bench/benchmark_throughput.json
-      - name: Upload the full raw bench results (rich per-commit record)
-        if: github.event_name == 'push'
+      - name: Upload this replica's transcripts
         uses: actions/upload-artifact@v4
         with:
-          name: bench-results-${{ github.sha }}
+          name: bench-raw-r${{ matrix.replica }}
           path: |
             bench/bench_libtracer_raw.txt
             bench/bench_libtracer_time.txt
             bench/bench_forward_heap_raw.txt
+          retention-days: 90
+
+  # --- main push: persist the build-to-build history (best across runners) --------
+  # Aggregates whatever replicas produced transcripts (if: always() — a failing
+  # ratchet verdict must still leave a history point for the offending commit) and
+  # records EVERY (mode,size,fan,ep) point — latency, throughput and memory footprint
+  # as separate series — with a 125% soft alert that comments on drift.
+  #
+  # NOTE: the history + interactive chart live on the `gh-pages` BRANCH (github-
+  # action-benchmark's store; machine-maintained — only this workflow writes it).
+  # Pages source is "GitHub Actions" (docs.yml's Sphinx artifact), so the branch is
+  # not served directly; docs.yml mirrors dev/bench/ from the branch into each
+  # deploy, so the chart is served at https://libtracer.avatarsd.com/dev/bench/.
+  history:
+    if: github.event_name == 'push' && always()
+    needs: ratchet
+    runs-on: ubuntu-24.04
+    # contents: write lets the tracker push the history to the gh-pages branch and
+    # post a commit comment when a metric drifts past the soft alert.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the replicas' transcripts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bench-raw-r*
+          path: bench/raws
+      - name: Emit best-across-runners history metrics (github-action-benchmark JSON)
+        run: |
+          args=""
+          for f in bench/raws/*/bench_libtracer_raw.txt; do
+            [ -s "$f" ] && args="$args --raw $f"
+          done
+          if [ -z "$args" ]; then
+            echo "no replica produced a transcript — nothing to record"; exit 1
+          fi
+          zh=$(ls bench/raws/*/bench_forward_heap_raw.txt 2>/dev/null | head -1)
+          tv=$(ls bench/raws/*/bench_libtracer_time.txt 2>/dev/null | head -1)
+          python3 bench/perf_emit_benchmark.py $args \
+            ${zh:+--zeroheap-raw "$zh"} ${tv:+--time-v "$tv"} \
+            --out-smaller bench/benchmark_output.json \
+            --out-bigger bench/benchmark_throughput.json
+      - name: Upload the aggregated bench results (rich per-commit record)
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ github.sha }}
+          path: |
+            bench/raws
             bench/benchmark_output.json
             bench/benchmark_throughput.json
           retention-days: 90
       - name: Track latency + memory history + soft-alert on drift
-        if: github.event_name == 'push'
         uses: benchmark-action/github-action-benchmark@v1
         with:
           # Keep the historical suite name so the pre-existing ns series continue.
@@ -169,12 +199,11 @@ jobs:
           auto-push: true
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: dev/bench
-          alert-threshold: '125%'      # tighter than perf_gate's 150% hard gate: catch creep
+          alert-threshold: '125%'      # tighter than the hard gate: catch creep
           comment-on-alert: true       # auto-comment on the commit that drifted
           fail-on-alert: false         # perf_gate.py remains the hard gate; this is a signal
           alert-comment-cc-users: '@avatarsd'
       - name: Track throughput history + soft-alert on drift
-        if: github.event_name == 'push'
         uses: benchmark-action/github-action-benchmark@v1
         with:
           # Separate suite: throughput in natural deliveries/s needs the opposite

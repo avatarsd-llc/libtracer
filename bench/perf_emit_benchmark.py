@@ -24,10 +24,14 @@ one direction per suite:
 
 Medians the repeated RESULT rows, exactly as the gate does, so run-to-run jitter
 does not move the recorded point. `--raw` consumes a pre-captured bench transcript
-(CI runs the bench once, archives the transcript as the per-commit artifact, and
-feeds this emitter from it) instead of re-running the binary.
+instead of re-running the binary, and **may repeat**: CI runs the bench on THREE
+independently-drawn runners and feeds all transcripts here; per metric the emitter
+records the BEST across runners (min latency / max throughput), so the recorded
+history point approximates the code's capability, not the machine lottery
+(GitHub-hosted runners vary ~2x in absolute speed).
 
-  ./perf_emit_benchmark.py --raw raw.txt --zeroheap-raw zh.txt --time-v time.txt \\
+  ./perf_emit_benchmark.py --raw r1.txt --raw r2.txt --raw r3.txt \\
+      --zeroheap-raw zh.txt --time-v time.txt \\
       --out-smaller benchmark_ns.json --out-bigger benchmark_throughput.json
 
 Stdlib only. The RESULT columns (tab-separated, from bench_libtracer):
@@ -110,8 +114,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--bench", default=str(HERE / "build" / "bench_libtracer"),
                     help="path to the bench_libtracer binary (used when --raw is absent)")
-    ap.add_argument("--raw", help="pre-captured bench_libtracer stdout to parse "
-                                  "instead of re-running the binary")
+    ap.add_argument("--raw", action="append",
+                    help="pre-captured bench_libtracer stdout to parse instead of "
+                         "re-running the binary; repeatable — one per runner, the "
+                         "emitter records the best across them per metric")
     ap.add_argument("--zeroheap-raw", help="pre-captured bench_forward_heap stdout: "
                                            "heap-probe bytes become memory-footprint metrics")
     ap.add_argument("--time-v", help="pre-captured `/usr/bin/time -v` stderr of the bench "
@@ -124,14 +130,22 @@ def main() -> int:
                          "(omitted if not given)")
     args = ap.parse_args()
 
-    out = (pathlib.Path(args.raw).read_text() if args.raw
-           else run_bench(pathlib.Path(args.bench).resolve()))
-    rows = parse_rows(out)
+    texts = [pathlib.Path(r).read_text() for r in (args.raw or [])
+             if pathlib.Path(r).exists()]
+    if not texts:
+        texts = [run_bench(pathlib.Path(args.bench).resolve())]
+    per_runner = [parse_rows(t) for t in texts]
+    all_rows = [r for rows in per_runner for r in rows]
     smaller: list[dict] = []
     bigger: list[dict] = []
-    for key in points(rows):
+    for key in points(all_rows):
         mode, size, fan, ep = key
-        v = median_point(rows, key)
+        # Best across runners: each runner contributes its own median for the
+        # point; min latency / max throughput wins (machine speed cancels).
+        cands = [m for m in (median_point(rows, key) for rows in per_runner) if m]
+        v = {"p50_ns": min(m["p50_ns"] for m in cands),
+             "p99_ns": min(m["p99_ns"] for m in cands),
+             "deliv_s": max(m["deliv_s"] for m in cands)}
         tag = f"{mode} {size}B/fan{fan}/{ep}ep"
         smaller.append({"name": f"{tag} p50 latency", "unit": "ns", "value": v["p50_ns"]})
         smaller.append({"name": f"{tag} p99 latency", "unit": "ns", "value": v["p99_ns"]})
