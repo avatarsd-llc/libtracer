@@ -15,6 +15,7 @@
  * remote-path pattern).
  */
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -487,6 +488,56 @@ void test_table_replace() {
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// ADR-0058 — the borrowed (static-storage) install path is wire-invariant with the
+// owning one (identical :schema and value bytes) while storing views, not copies.
+void test_borrowed_static_install() {
+    std::printf("borrowed static install, wire-invariant (ADR-0058):\n");
+    graph_t g;
+    const vertex_handle_t owning = g.register_vertex(path_t("/x/pid"), role_t::STORED_VALUE);
+    const vertex_handle_t borrow = g.register_vertex(path_t("/y/pid"), role_t::STORED_VALUE);
+
+    // Declaration storage the caller guarantees outlives the vertices (outlives g here) —
+    // the borrowed overload stores VIEWS into exactly these bytes, never a copy.
+    const std::vector<std::byte> kp_desc = dtype_desc("f32");
+
+    std::vector<app_field_t> owned;
+    owned.push_back(app_field_t{.name = "kp", .access = app_access_t::RW, .descriptor = kp_desc});
+    owned.push_back(app_field_t{.name = "secret", .access = app_access_t::WO});
+    g.set_app_fields(owning, std::move(owned));
+
+    const std::array<tr::graph::app_field_static_t, 2> borrowed{{
+        tr::graph::app_field_static_t{
+            .name = "kp", .access = app_access_t::RW, .descriptor = kp_desc},
+        tr::graph::app_field_static_t{.name = "secret", .access = app_access_t::WO},
+    }};
+    g.set_app_fields_static(borrow, borrowed);
+
+    // :schema is byte-identical across the two install paths (the ADR's wire-invariance).
+    const std::optional<decoded_t> da = decode_read(g.read(path_t("/x/pid:schema")));
+    const std::optional<decoded_t> db = decode_read(g.read(path_t("/y/pid:schema")));
+    check(da.has_value() && db.has_value(), "borrowed: both :schema reads decode");
+    check(da && db && da->bytes == db->bytes,
+          "borrowed vs owning :schema bytes are identical (wire-invariant)");
+
+    // Declared-but-unset reads NOT_FOUND; a write lands in the lazily-allocated value store
+    // and reads back verbatim; the undeclared sibling stays SCHEMA_NOT_FOUND.
+    check(fails_with(g.read(path_t("/y/pid:settings.app.kp")), status_t::NOT_FOUND),
+          "borrowed: declared-but-unwritten field reads NOT_FOUND");
+    const std::vector<std::byte> written = value_tlv("kp1");
+    check(g.write(path_t("/y/pid:settings.app.kp"), make_value(written)).has_value(),
+          "borrowed: owner write to the RW field succeeds");
+    check(reads_back(g.read(path_t("/y/pid:settings.app.kp")), written),
+          "borrowed: written bytes read back verbatim (lazy value store)");
+    check(fails_with(g.read(path_t("/y/pid:settings.app.nope")), status_t::SCHEMA_NOT_FOUND),
+          "borrowed: undeclared sibling stays SCHEMA_NOT_FOUND");
+
+    // Empty table uninstalls, reverting to the closed pre-RFC surface.
+    g.set_app_fields_static(borrow, {});
+    check(fails_with(g.read(path_t("/y/pid:settings.app.kp")), status_t::SCHEMA_NOT_FOUND),
+          "borrowed: empty table uninstalls (back to SCHEMA_NOT_FOUND)");
+}
+
 int main() {
     test_declare_read_write();
     test_undeclared_enotty();
@@ -497,6 +548,7 @@ int main() {
     test_container_reads();
     test_apply_seam();
     test_table_replace();
+    test_borrowed_static_install();
     std::printf(g_failures == 0 ? "\napp_fields: PASS\n" : "\napp_fields: FAIL (%d)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

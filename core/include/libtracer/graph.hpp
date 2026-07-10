@@ -350,6 +350,21 @@ class graph_t {
     void set_app_fields(vertex_handle_t v, std::vector<app_field_t> table);
 
     /**
+     * @brief Install (or replace) @p v's field descriptor table from BORROWED, static-storage
+     *        declarations (ADR-0058) — the same owner-facing semantics as @ref set_app_fields,
+     *        but the `name`/`descriptor` bytes are VIEWED, never copied.
+     *
+     * For an MCU owner whose field table is `constexpr` in flash, this costs **zero
+     * declaration RAM**: the runtime stores views into @p table's `name`/`descriptor`
+     * storage, so the caller MUST keep that storage alive for the vertex's lifetime (pass
+     * pointers into flash / `.rodata`, never into stack or a soon-freed heap). Declaration
+     * only — no initial value; write values later through the field-write surface. Empty
+     * @p table uninstalls, exactly as @ref set_app_fields. Wire-invariant: `:schema` serves
+     * the same verbatim bytes as the owning overload.
+     */
+    void set_app_fields_static(vertex_handle_t v, std::span<const app_field_static_t> table);
+
+    /**
      * @brief Install the sink the producer fan-out hands each REMOTE subscriber's delivery
      *        to (#136, RFC-0004 §D/§E.1).
      *

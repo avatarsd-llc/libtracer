@@ -12,7 +12,31 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **Borrowed (static-storage) app-field install: `graph_t::set_app_fields_static`
+  (#388, ADR-0058)** — a non-owning overload beside the owning
+  `set_app_fields(std::vector<app_field_t>)`, taking
+  `std::span<const app_field_static_t>` whose `name`/`descriptor` are
+  `std::string_view`/`std::span` **views into caller storage that must outlive the
+  vertex** (pass pointers into flash/`.rodata`). An MCU owner whose field table is
+  `constexpr` in flash now installs it at **zero declaration RAM** — the runtime
+  stores views, never a heap copy of `.rodata`. The owning overload stays the safe
+  default for runtime-formed tables. Wire-invariant (`:schema` serves the same
+  verbatim bytes either way), so no RFC.
+
 ### Changed
+
+- **RFC-0010 app-field storage is now view-slots + a lazy value store (#388,
+  ADR-0058)** — the resident table dropped from an owning `std::vector<app_field_t>`
+  (each ≈ 88 B, plus a per-field descriptor allocation) to a `std::vector` of
+  view-shaped slots (`{string_view name; app_access_t; span descriptor}`). The
+  owning `set_app_fields` copies the runtime table's declaration bytes into **one
+  backing buffer** (one allocation for the whole table, not N); field **values**
+  moved to a separately, lazily-allocated index-keyed store that stays null until
+  the first field write — a declared-but-never-written table costs zero value RAM.
+  The `:schema`/settings read surface (`app_fields_snapshot()` and the emitted
+  bytes) is unchanged.
 
 - **STREAM history ring is lazily allocated (#388)** — `vertex_ext_t::history`
   is now a pointer-to-deque, allocated on the first STREAM append: an empty

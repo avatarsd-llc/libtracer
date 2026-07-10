@@ -976,6 +976,12 @@ void graph_t::set_app_fields(vertex_handle_t v, std::vector<app_field_t> table) 
     v.get()->set_app_fields(std::move(table));
 }
 
+void graph_t::set_app_fields_static(vertex_handle_t v, std::span<const app_field_static_t> table) {
+    // Borrowed-declaration install (ADR-0058): same owner-facing, no-ACL-gate semantics as
+    // set_app_fields; the vertex verb stores views into the caller's static storage.
+    v.get()->set_app_fields_static(table);
+}
+
 void graph_t::set_remote_delivery_sink(
     std::function<void(const remote_delivery_t&, const rope_t&)> sink) {
     remote_sink_ = std::move(sink);
