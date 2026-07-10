@@ -1113,8 +1113,9 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
         // graph (apply the config, restructure children, then ANNOUNCE per §C). The
         // field write itself deliberately neither wakes `await` nor propagates:
         // the property plane is silent (ADR-0021 / RFC-0010 §C).
-        if (const handlers_t& h = v->handlers(); h.on_app_field_write)
-            h.on_app_field_write(key, value);
+        // Snapshot the seam under the vertex lock (ADR-0058 Step 2 moved it to the lazy
+        // app-field group), then fire the copy here, unlocked.
+        if (auto seam = v->on_app_field_write(); seam) seam(key, value);
         return {};
     }
 

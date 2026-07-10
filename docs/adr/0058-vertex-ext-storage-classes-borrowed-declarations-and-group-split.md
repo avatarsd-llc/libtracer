@@ -47,14 +47,19 @@ The bytes a vertex holds fall into three residence/mutability classes, and the o
 
 ### Step 2 — Co-occurrence group-split of `vertex_ext_t`
 
-Split the monolithic block into feature groups, each behind its own lazy pointer inside a slim `vertex_ext_t`, so first-use of one feature allocates only that group:
+Move the two independently-sheddable feature groups behind their own lazy pointers, so first-use of one allocates only that group:
 
-- **value-seam handlers** `{on_read, on_write, on_children}` — HANDLER-role vertices (transports/connections/synthesized listings)
-- **app-field** `{view slots, backing, lazy value store, on_app_field_write}`
-- **acl** `{acl bytes, aces, eff_aces, eff_aces_inherit, dirty}`
-- **stream** `{history, settings, last_flushed_seq}`
+- **value-seam handlers** `{on_read, on_write, on_children}` → `std::unique_ptr<value_handlers_t>` — HANDLER-role vertices only (transports/connections/synthesized listings). Set once at registration, read lock-free (the pointer never changes after adopt).
+- **app-field** `{view slots, backing, lazy value store, on_app_field_write}` → `std::unique_ptr<app_field_group_t>` — RFC-0010 vertices only.
 
-`on_app_field_write` **moves out of `handlers_t` into the app-field group** — it is the *apply seam of app fields* (co-occurs with the table), not part of the value seam of a HANDLER-role vertex. An app-field-only leaf then allocates the app-field group and nothing else.
+`on_app_field_write` **moves out of the public `handlers_t` input into the app-field group's storage** — it is the *apply seam of app fields* (co-occurs with the table), not part of the value seam of a HANDLER-role vertex. `handlers_t` stays the 4-member install input; `adopt_identity` splits it into the two groups. An app-field-only leaf then allocates the app-field group and sheds the ~96 B value seam entirely.
+
+**Amendment (2026-07-10, at implementation):** `acl` and `stream` (`settings`/`history`/`last_flushed_seq`) **stay inline**, not split as the original sketch above proposed:
+
+- **ACL is not sheddable per-vertex.** The ADR-0050 effective-ACE cache (`eff_aces`/`eff_aces_inherit`) is stored on **every gated vertex, including bare descendants** — a leaf with no own ACEs still caches its inherited merge, and `mark_acl_cache_dirty` is a *lock-free* release-store on the hot subtree-invalidation walk. Behind a lazy pointer, any gated leaf would allocate the group anyway (so no RAM is saved for the app-field-leaf case that motivates this ADR), and the lock-free dirty-mark would have to allocate-or-skip on a null group — real concurrency risk for zero benefit. The inline ACL cost is load-bearing, not dead weight.
+- **`settings` stays inline** because `settings()` is a lock-free `const settings_t&` reader; keeping it inline avoids a second pointer-hop on that path, and `settings_t` is small and common. `history` is already lazy (#389); `last_flushed_seq` is 8 B.
+
+So Step 2 as shipped is the two *unconditionally-dead-for-a-leaf* groups (value handlers, app-field), which is where the entire measured #388 win lives.
 
 ## Consequences
 
