@@ -291,10 +291,8 @@ result_t<vertex_handle_t> graph_t::register_vertex_key(std::vector<std::byte> ke
         const std::span<const std::byte> record{key.data() + i, e - i};
         vertex_t* child = node->child_by_record(record);
         if (child == nullptr) {
-            auto fresh = std::make_unique<vertex_t>(
-                role_t::STORED_VALUE,
-                path_key_t{std::vector<std::byte>(record.begin(), record.end())}, settings_t{},
-                handlers_t{});
+            auto fresh = std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{record},
+                                                    settings_t{}, handlers_t{});
             // Subtree-subscription init (RFC-0005): a vertex born under a subscribed
             // ancestor starts with the ancestor-listener count already summed — O(1) from
             // the parent's maintained counters (under the same unique lock the
@@ -417,12 +415,11 @@ std::vector<std::byte> graph_t::build_key(const vertex_t* v) {
     // root-down. Parent links and name bytes are immutable — no lock. Two passes: size,
     // then a single exact allocation filled deepest-record-last.
     std::size_t total = 0;
-    for (const vertex_t* n = v; n->parent() != nullptr; n = n->parent())
-        total += n->name().bytes.size();
+    for (const vertex_t* n = v; n->parent() != nullptr; n = n->parent()) total += n->name().size();
     std::vector<std::byte> key(total);
     std::size_t w = total;
     for (const vertex_t* n = v; n->parent() != nullptr; n = n->parent()) {
-        const std::vector<std::byte>& rec = n->name().bytes;
+        const std::span<const std::byte> rec = n->name().bytes();
         w -= rec.size();
         std::copy(rec.begin(), rec.end(), key.begin() + static_cast<std::ptrdiff_t>(w));
     }
@@ -677,7 +674,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, int depth
     const std::uint32_t n0 = wire::tlv_arena_t::first_child(0);
     if (n0 >= a.root().end || a[n0].type != type_t::NAME)
         return std::unexpected(status_t::TYPE_MISMATCH);
-    if (!std::ranges::equal(a[n0].body, key_view_t{v->name().bytes}.last_segment()))
+    if (!std::ranges::equal(a[n0].body, key_view_t{v->name().bytes()}.last_segment()))
         return std::unexpected(status_t::INVALID_PATH);
 
     // The written tree is rooted AT `v`: render its full key once (ADR-0057
@@ -1197,7 +1194,7 @@ result_t<view_t> graph_t::read_schema(vertex_t* v) const {
     emit_value(settings_children, s.history_keep_last, 4);
 
     std::vector<std::byte> point_body;
-    wire::emit_name(point_body, key_view_t{v->name().bytes}.last_segment());
+    wire::emit_name(point_body, key_view_t{v->name().bytes()}.last_segment());
     wire::emit_tlv(point_body, type_t::SETTINGS, opt_t{.pl = true},
                    settings_children);  // SETTINGS
 
@@ -1321,7 +1318,7 @@ result_t<view_t> graph_t::read_children(vertex_t* v) const {
         // not exist.
         v->for_each_child([&members](const vertex_t& c) {
             if (c.registered())
-                wire::emit_tlv(members, type_t::POINT, opt_t{.pl = true}, c.name().bytes);
+                wire::emit_tlv(members, type_t::POINT, opt_t{.pl = true}, c.name().bytes());
         });
     }
     std::vector<std::byte> out;

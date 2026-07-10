@@ -14,6 +14,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`path_key_t` is now a small-buffer type (#380 §2)** — records ≤ 16 B (names up
+  to 12 characters) live inline; a named vertex no longer allocates a ~32 B heap
+  block for its NAME record (per-leaf live heap 160 → 136 B in the steady-heap
+  probe). The `bytes` member became a `bytes()` span accessor; construction from a
+  span or byte vector copies. Move-only spill ownership; moved-from keys read empty.
+
 - **Subscription-edge wire state split to a lazily-allocated cold half (#380 §3)** —
   `subscriber_t` is now 80 B (was 160) and **move-only**: `return_route`, `link`,
   `caller`, and `delivery_compact` moved to `subscriber_remote_t` behind a

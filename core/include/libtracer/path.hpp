@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <span>
 #include <string>
 #include <string_view>
@@ -131,11 +132,95 @@ inline path_t::path_t(std::string_view text) {
     *this = std::move(*p);
 }
 
-/** @brief Owned byte key for the vertex map (a copy of a path's canonical payload). */
-struct path_key_t {
-    std::vector<std::byte> bytes; /**< @brief The owned canonical PATH payload bytes. */
+/**
+ * @brief Owned byte key (a copy of a path's canonical payload / one NAME record).
+ *
+ * Small-buffer type (#380 §2): records up to @ref kInlineBytes live inline — a NAME
+ * record is a 4-byte TLV header plus the segment text, so virtually every vertex name
+ * fits and costs NO heap block (a `std::vector` here allocated ~32 B per named
+ * vertex). Longer records spill to one owned heap allocation. Immutable after
+ * construction/assignment (matches its use: a vertex's name never changes,
+ * ADR-0057). Move leaves the source empty.
+ */
+class path_key_t {
+   public:
+    /** @brief Records at or under this many bytes are stored inline (no heap): a NAME
+     *         record is a 4-byte TLV header + the segment text, so names up to 12
+     *         characters — the overwhelming norm — never allocate. */
+    static constexpr std::size_t kInlineBytes = 16;
+
+    path_key_t() noexcept = default;
+    /** @brief Copy @p b into the key (inline when it fits, else one heap block). */
+    explicit path_key_t(std::span<const std::byte> b) { assign(b); }
+    /** @brief Copy the vector's bytes (compat shape for `path_key_t{vector}` callers). */
+    explicit path_key_t(const std::vector<std::byte>& b) { assign(b); }
+
+    /** @brief Deep-copy @p o's bytes (inline or one spill block, as the length needs). */
+    path_key_t(const path_key_t& o) { assign(o.bytes()); }
+    /** @brief Replace this key with a deep copy of @p o's bytes. */
+    path_key_t& operator=(const path_key_t& o) {
+        if (this != &o) {
+            release();
+            assign(o.bytes());
+        }
+        return *this;
+    }
+    /** @brief Take over @p o's bytes (and spill block, if any); @p o reads empty after. */
+    path_key_t(path_key_t&& o) noexcept { take(o); }
+    /** @brief Release this key's bytes and take over @p o's; @p o reads empty after. */
+    path_key_t& operator=(path_key_t&& o) noexcept {
+        if (this != &o) {
+            release();
+            take(o);
+        }
+        return *this;
+    }
+    /** @brief Free the spill block, if this key owns one. */
+    ~path_key_t() { release(); }
+
+    /** @brief The key's canonical bytes (inline or heap — one uniform window). */
+    [[nodiscard]] std::span<const std::byte> bytes() const noexcept {
+        return {len_ > kInlineBytes ? heap_ : inline_, len_};
+    }
+    /** @brief The key's byte length. */
+    [[nodiscard]] std::size_t size() const noexcept { return len_; }
+    /** @brief True for the empty key (the root vertex's name). */
+    [[nodiscard]] bool empty() const noexcept { return len_ == 0; }
+
     /** @brief Value equality over the key bytes. */
-    bool operator==(const path_key_t&) const noexcept = default;
+    bool operator==(const path_key_t& o) const noexcept {
+        return std::ranges::equal(bytes(), o.bytes());
+    }
+
+   private:
+    /** @brief Store @p b (callers guarantee the key currently owns nothing). */
+    void assign(std::span<const std::byte> b) {
+        len_ = static_cast<std::uint32_t>(b.size());
+        std::byte* dst = inline_;
+        if (b.size() > kInlineBytes) dst = heap_ = new std::byte[b.size()];
+        if (!b.empty()) std::memcpy(dst, b.data(), b.size());
+    }
+    /** @brief Free the spill block if this key owns one. */
+    void release() noexcept {
+        if (len_ > kInlineBytes) delete[] heap_;
+    }
+    /** @brief Move @p o's storage into this key (which must own nothing); member-wise —
+     *         a whole-object memcpy trips -Werror=class-memaccess on the ESP-IDF gcc. */
+    void take(path_key_t& o) noexcept {
+        len_ = o.len_;
+        if (len_ > kInlineBytes)
+            heap_ = o.heap_;
+        else if (len_ != 0)
+            std::memcpy(inline_, o.inline_, len_);  // a trivial byte array — memcpy is fine
+        o.len_ = 0;                                 // the moved-from key reads empty, owns nothing
+    }
+
+    union {
+        std::byte inline_[kInlineBytes]; /**< @brief In-place record storage (the norm). */
+        std::byte* heap_;                /**< @brief The spill block when `len_ > kInlineBytes`. */
+    };
+    std::uint32_t len_ = 0; /**< @brief Record length; doubles as the inline/heap tag. */
+    static_assert(kInlineBytes >= sizeof(std::byte*), "the union must fit the spill pointer");
 };
 
 /**
@@ -163,17 +248,17 @@ struct path_key_eq_t {
     using is_transparent = void; /**< @brief Enables heterogeneous (by-span) map lookup. */
     /** @brief True iff the two owned keys hold identical bytes. */
     [[nodiscard]] bool operator()(const path_key_t& a, const path_key_t& b) const noexcept {
-        return a.bytes == b.bytes;
+        return a == b;
     }
     /** @brief True iff the owned key's bytes equal the span's bytes. */
     [[nodiscard]] bool operator()(const path_key_t& a,
                                   std::span<const std::byte> b) const noexcept {
-        return a.bytes.size() == b.size() && std::equal(a.bytes.begin(), a.bytes.end(), b.begin());
+        return std::ranges::equal(a.bytes(), b);
     }
     /** @brief True iff the span's bytes equal the owned key's bytes. */
     [[nodiscard]] bool operator()(std::span<const std::byte> a,
                                   const path_key_t& b) const noexcept {
-        return a.size() == b.bytes.size() && std::equal(a.begin(), a.end(), b.bytes.begin());
+        return std::ranges::equal(a, b.bytes());
     }
     /** @brief True iff the two spans hold identical bytes. */
     [[nodiscard]] bool operator()(std::span<const std::byte> a,
