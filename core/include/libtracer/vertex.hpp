@@ -502,8 +502,12 @@ inline std::condition_variable& vertex_stripe_cv(std::size_t idx) {
  */
 struct vertex_ext_t {
     handlers_t handlers{}; /**< @brief User behavior (Handler role + the `on_children` seam). */
-    /** @brief STREAM ring (docs/reference/11 role 2); guarded by the vertex mutex. */
-    std::deque<std::shared_ptr<const rope_t>> history;
+    /** @brief STREAM ring (docs/reference/11 role 2), LAZILY allocated on the first
+     *         append (#388): an empty libstdc++ `std::deque` allocates its ~512 B map
+     *         node at CONSTRUCTION, which every ext-bearing vertex (handlers, app
+     *         fields, `:acl`, non-default settings) paid even though only the STREAM
+     *         role ever appends. Null ⇒ empty ring. Guarded by the vertex mutex. */
+    std::unique_ptr<std::deque<std::shared_ptr<const rope_t>>> history;
     /** @brief Raw `:acl` TLV bytes, served back verbatim (#81-A, ADR-0018/0020); guarded by
      *         the vertex mutex. Empty ⇒ no `:acl` set. */
     std::vector<std::byte> acl;
@@ -711,10 +715,12 @@ class vertex_t {
             const std::lock_guard lock(st.m);
             vertex_ext_t* e = ext_.load(std::memory_order_acquire);
             if (role_ == role_t::STREAM && e != nullptr) {  // STREAM identity always has ext
-                e->history.push_back(sp);  // refcount bump — the caller keeps the returned sp
+                if (!e->history)  // first append allocates the ring (#388 lazy deque)
+                    e->history = std::make_unique<std::deque<std::shared_ptr<const rope_t>>>();
+                e->history->push_back(sp);  // refcount bump — the caller keeps the returned sp
                 const std::size_t keep =
                     e->settings.history_keep_last ? e->settings.history_keep_last : 1;
-                while (e->history.size() > keep) e->history.pop_front();
+                while (e->history->size() > keep) e->history->pop_front();
             }
             ++write_seq_;
             // Waiterless publish skips the condvar entirely (#370): `waiters` only
@@ -795,9 +801,10 @@ class vertex_t {
         if (now == e->last_flushed_seq) return 0;
         const std::uint64_t n_new = now - e->last_flushed_seq;
         e->last_flushed_seq = now;
+        if (!e->history) return 0;  // seq advanced but no ring — nothing to drain
         const auto take =
-            static_cast<std::ptrdiff_t>(std::min<std::uint64_t>(n_new, e->history.size()));
-        out.assign(e->history.end() - take, e->history.end());
+            static_cast<std::ptrdiff_t>(std::min<std::uint64_t>(n_new, e->history->size()));
+        out.assign(e->history->end() - take, e->history->end());
         return out.size();
     }
 
@@ -807,9 +814,9 @@ class vertex_t {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         std::vector<rope_t> out;
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        if (e == nullptr) return out;
-        out.reserve(e->history.size());
-        for (const auto& sp : e->history) out.push_back(*sp);
+        if (e == nullptr || !e->history) return out;
+        out.reserve(e->history->size());
+        for (const auto& sp : *e->history) out.push_back(*sp);
         return out;
     }
 
