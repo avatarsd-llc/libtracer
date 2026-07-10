@@ -131,6 +131,59 @@ struct app_field_t {
 };
 
 /**
+ * @brief A borrowed (static-storage) declaration of one app field (ADR-0058) — the
+ *        install-time shape for a `constexpr`/flash-resident field table on an MCU.
+ *
+ * Unlike @ref app_field_t this owns NOTHING: `name` and `descriptor` are VIEWS the
+ * runtime stores as-is (@ref graph_t::set_app_fields_static). The caller therefore
+ * guarantees the pointed-to bytes **outlive the vertex** — pass pointers into static
+ * storage (flash / `.rodata`), never into stack or a soon-freed heap. Declaration only:
+ * no initial value (write the value after install via the field-write surface).
+ */
+struct app_field_static_t {
+    std::string_view name;                   /**< @brief Field key below `settings.app.` (§A.1). */
+    app_access_t access = app_access_t::RO;  /**< @brief Owner-declared remote writability. */
+    std::span<const std::byte> descriptor{}; /**< @brief §B.1 descriptor bytes, served verbatim. */
+};
+
+/**
+ * @brief The runtime's per-field DECLARATION storage (ADR-0058, class ②): view-shaped,
+ *        owning nothing itself. The views point into @ref app_field_table_t::backing (an
+ *        owning install) or into caller flash (a borrowed install) — both immutable for
+ *        the table's lifetime, so the views stay valid.
+ */
+struct app_field_slot_t {
+    std::string_view name;                   /**< @brief Field key (into backing / flash). */
+    app_access_t access = app_access_t::RO;  /**< @brief Owner-declared remote writability. */
+    std::span<const std::byte> descriptor{}; /**< @brief Descriptor bytes (into backing / flash). */
+};
+
+/**
+ * @brief A vertex's RFC-0010 field descriptor table (ADR-0058): the immutable declaration
+ *        (class ②) split from the per-vertex mutable values (class ③).
+ *
+ * Both install overloads converge here. `set_app_fields_static` leaves `backing` empty and
+ * points the slots at caller flash (zero declaration RAM). The owning `set_app_fields`
+ * packs the runtime table's name+descriptor bytes into `backing` — ONE allocation for the
+ * whole table — and points the slots into it. `backing` is never mutated or reallocated
+ * while `slots` reference it (a re-install replaces the whole table under the vertex mutex).
+ */
+struct app_field_table_t {
+    /** @brief Per-field declaration views, in owner install order. Empty ⇒ no table
+     *         installed (the closed `ENOTTY` default). Guarded by the vertex mutex. */
+    std::vector<app_field_slot_t> slots{};
+    /** @brief Owned copy of the declaration bytes for the owning install (name then
+     *         descriptor, concatenated per field); empty for a borrowed install whose
+     *         slots view caller storage. */
+    std::vector<std::byte> backing{};
+    /** @brief Class-③ per-field values, index-aligned with @ref slots — LAZILY allocated,
+     *         null until the first field write on this vertex (#389 pattern). A
+     *         declared-but-never-written table costs zero value RAM. `(*values)[i]` empty
+     *         ⇒ field i unset. */
+    std::unique_ptr<std::vector<std::vector<std::byte>>> values{};
+};
+
+/**
  * @brief User behavior for a Handler-role vertex.
  *
  * `on_children` additionally applies to ANY role: when set, a read of the vertex's
@@ -528,11 +581,11 @@ struct vertex_ext_t {
     std::atomic<bool> acl_cache_dirty{true};
     settings_t settings{}; /**< @brief QoS settings; single-field mutation under the vertex
                                 mutex (`vertex_t::update_settings`). */
-    /** @brief The RFC-0010 field descriptor table — owner app fields under
-     *         `settings.app.`, in owner install order; guarded by the vertex mutex.
-     *         Empty ⇒ no table installed (the closed `ENOTTY` default, including the
-     *         pre-RFC synthesized `:schema` shape). */
-    std::vector<app_field_t> app_fields;
+    /** @brief The RFC-0010 field descriptor table (ADR-0058) — owner app fields under
+     *         `settings.app.`, view-slots + a lazy value store; guarded by the vertex
+     *         mutex. Empty slots ⇒ no table installed (the closed `ENOTTY` default,
+     *         including the pre-RFC synthesized `:schema` shape). */
+    app_field_table_t app_table;
     /** @brief STREAM drain cursor (RFC-0008 §E): the write seq at the last flush, so a
      *         propagate drains only the entries appended since; guarded by the vertex
      *         mutex. */
@@ -1042,18 +1095,38 @@ class vertex_t {
      */
     void set_app_fields(std::vector<app_field_t> table) {
         if (table.empty() && ext_.load(std::memory_order_acquire) == nullptr) return;
+        app_field_table_t built = build_owning_table(std::move(table));
         vertex_ext_t& e = ensure_ext();
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        e.app_fields = std::move(table);
+        e.app_table = std::move(built);
+    }
+
+    /**
+     * @brief Install a BORROWED descriptor table (ADR-0058): the slots view the caller's
+     *        @p table storage directly — zero declaration RAM. The `name` and `descriptor`
+     *        bytes MUST outlive the vertex (static/flash storage). Declaration only; values
+     *        are written later via the field-write surface. Same uninstall-on-empty and
+     *        allocate-nothing-on-empty-leaf semantics as @ref set_app_fields.
+     */
+    void set_app_fields_static(std::span<const app_field_static_t> table) {
+        if (table.empty() && ext_.load(std::memory_order_acquire) == nullptr) return;
+        app_field_table_t built;
+        built.slots.reserve(table.size());
+        for (const app_field_static_t& f : table)
+            built.slots.push_back(app_field_slot_t{f.name, f.access, f.descriptor});
+        vertex_ext_t& e = ensure_ext();
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        e.app_table = std::move(built);
     }
 
     /** @brief The declared access of the app field @p name (`nullopt` ⇒ undeclared —
      *         the graph's `SCHEMA_NOT_FOUND`). */
     [[nodiscard]] std::optional<app_access_t> app_field_access(std::string_view name) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        const app_field_t* f = find_app_field(ext_.load(std::memory_order_acquire), name);
-        if (f == nullptr) return std::nullopt;
-        return f->access;
+        vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        const std::ptrdiff_t i = find_app_slot(e, name);
+        if (i < 0) return std::nullopt;
+        return e->app_table.slots[static_cast<std::size_t>(i)].access;
     }
 
     /**
@@ -1065,9 +1138,15 @@ class vertex_t {
      */
     bool app_field_store(std::string_view name, std::span<const std::byte> bytes) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        app_field_t* f = find_app_field(ext_.load(std::memory_order_acquire), name);
-        if (f == nullptr) return false;
-        f->value.assign(bytes.begin(), bytes.end());
+        vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        const std::ptrdiff_t i = find_app_slot(e, name);
+        if (i < 0) return false;
+        app_field_table_t& t = e->app_table;
+        // Class-③ value store: allocated on the FIRST write to any field on this vertex
+        // (#389 lazy pattern) — a declared-but-never-written table never pays for it.
+        if (t.values == nullptr)
+            t.values = std::make_unique<std::vector<std::vector<std::byte>>>(t.slots.size());
+        (*t.values)[static_cast<std::size_t>(i)].assign(bytes.begin(), bytes.end());
         return true;
     }
 
@@ -1084,11 +1163,14 @@ class vertex_t {
      *         @p out is written only on @ref app_read_t::OK. */
     [[nodiscard]] app_read_t app_field_get(std::string_view name, std::vector<std::byte>& out) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        const app_field_t* f = find_app_field(ext_.load(std::memory_order_acquire), name);
-        if (f == nullptr) return app_read_t::UNDECLARED;
-        if (f->access == app_access_t::WO) return app_read_t::WRITE_ONLY;
-        if (f->value.empty()) return app_read_t::UNSET;
-        out = f->value;
+        vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        const std::ptrdiff_t i = find_app_slot(e, name);
+        if (i < 0) return app_read_t::UNDECLARED;
+        const app_field_table_t& t = e->app_table;
+        const std::size_t idx = static_cast<std::size_t>(i);
+        if (t.slots[idx].access == app_access_t::WO) return app_read_t::WRITE_ONLY;
+        if (t.values == nullptr || (*t.values)[idx].empty()) return app_read_t::UNSET;
+        out = (*t.values)[idx];
         return app_read_t::OK;
     }
 
@@ -1098,7 +1180,23 @@ class vertex_t {
     [[nodiscard]] std::vector<app_field_t> app_fields_snapshot() {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        return e != nullptr ? e->app_fields : std::vector<app_field_t>{};
+        if (e == nullptr) return {};
+        const app_field_table_t& t = e->app_table;
+        std::vector<app_field_t> out;
+        out.reserve(t.slots.size());
+        // Materialise an OWNING copy under the lock (ADR-0058): the resident table is
+        // view-slots, but the emit/`:schema` path uses the snapshot AFTER releasing the
+        // lock, so it must own its bytes. Cold control-plane copy, freed immediately —
+        // the RAM win is in the resident storage, not this transient.
+        for (std::size_t i = 0; i < t.slots.size(); ++i) {
+            app_field_t f;
+            f.name.assign(t.slots[i].name);
+            f.access = t.slots[i].access;
+            f.descriptor.assign(t.slots[i].descriptor.begin(), t.slots[i].descriptor.end());
+            if (t.values != nullptr && i < t.values->size()) f.value = (*t.values)[i];
+            out.push_back(std::move(f));
+        }
+        return out;
     }
 
     // -- settings & propagation policy --------------------------------------------------
@@ -1174,14 +1272,55 @@ class vertex_t {
         return edge_view_t{s.callback, s.callback_ctx, s.target_key, {}, {}, false, {}};
     }
 
-    /** @brief The descriptor-table entry named @p name, or `nullptr` (no table entry / no
-     *         extension block). Call with the stripe lock held. Linear: an owner's table
-     *         is small (RFC-0010 targets MCU vertices), and field ops are control-plane. */
-    [[nodiscard]] static app_field_t* find_app_field(vertex_ext_t* e, std::string_view name) {
-        if (e == nullptr) return nullptr;
-        for (app_field_t& f : e->app_fields)
-            if (f.name == name) return &f;
-        return nullptr;
+    /** @brief The slot index of the descriptor-table entry named @p name, or `-1` (no
+     *         entry / no extension block). Call with the stripe lock held. Linear: an
+     *         owner's table is small (RFC-0010 targets MCU vertices), field ops are
+     *         control-plane. */
+    [[nodiscard]] static std::ptrdiff_t find_app_slot(vertex_ext_t* e, std::string_view name) {
+        if (e == nullptr) return -1;
+        const std::vector<app_field_slot_t>& slots = e->app_table.slots;
+        for (std::size_t i = 0; i < slots.size(); ++i)
+            if (slots[i].name == name) return static_cast<std::ptrdiff_t>(i);
+        return -1;
+    }
+
+    /** @brief Pack an owning @p table into one @ref app_field_table_t (ADR-0058): the
+     *         name+descriptor bytes are concatenated into a single `backing` buffer (one
+     *         allocation for the whole table) with the slots viewing into it; any initial
+     *         values are moved into the lazy value store. `backing`'s address is stable
+     *         across the table's moves, so the slot views stay valid. */
+    [[nodiscard]] static app_field_table_t build_owning_table(std::vector<app_field_t> table) {
+        app_field_table_t t;
+        if (table.empty()) return t;
+        std::size_t total = 0;
+        bool any_value = false;
+        for (const app_field_t& f : table) {
+            total += f.name.size() + f.descriptor.size();
+            any_value = any_value || !f.value.empty();
+        }
+        t.backing.resize(total);
+        t.slots.reserve(table.size());
+        std::size_t off = 0;
+        for (const app_field_t& f : table) {
+            const std::size_t noff = off;
+            std::copy(f.name.begin(), f.name.end(),
+                      reinterpret_cast<char*>(t.backing.data()) + noff);
+            off += f.name.size();
+            const std::size_t doff = off;
+            std::copy(f.descriptor.begin(), f.descriptor.end(), t.backing.data() + doff);
+            off += f.descriptor.size();
+            t.slots.push_back(app_field_slot_t{
+                std::string_view(reinterpret_cast<const char*>(t.backing.data()) + noff,
+                                 f.name.size()),
+                f.access,
+                std::span<const std::byte>(t.backing.data() + doff, f.descriptor.size())});
+        }
+        if (any_value) {
+            t.values = std::make_unique<std::vector<std::vector<std::byte>>>(table.size());
+            for (std::size_t i = 0; i < table.size(); ++i)
+                (*t.values)[i] = std::move(table[i].value);
+        }
+        return t;
     }
 
     /**
