@@ -92,7 +92,7 @@ enum class app_access_t : std::uint8_t {
     WO = 2, /**< @brief Remote write only — no read surface: a secret never mirrors back. */
 };
 
-/** @brief The stable `:schema` spelling of an @ref app_access_t (`"ro"` / `"rw"` / `"wo"`). */
+/** @brief The stable `:schema` spelling of an `app_access_t` (`"ro"` / `"rw"` / `"wo"`). */
 [[nodiscard]] constexpr std::string_view to_string(app_access_t a) noexcept {
     switch (a) {
         case app_access_t::RO:

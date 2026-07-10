@@ -338,7 +338,7 @@ class graph_t {
      * A local, owner-facing host API, the mirror of @ref register_vertex (the RFC-0009
      * §A.1 doctrine: the field catalog is device state, so there is no wire operation
      * that declares a field) — remote peers write DECLARED fields, per their declared
-     * @ref app_access_t and under the vertex WRITE right, never invent them; every
+     * `app_access_t` and under the vertex WRITE right, never invent them; every
      * undeclared name keeps `SCHEMA_NOT_FOUND` (the `ENOTTY` default). Entries may carry
      * an initial value and the §B.1 descriptor bytes `read :schema` serves verbatim
      * (after the runtime-projected `access` member). Replacing the table is atomic with
