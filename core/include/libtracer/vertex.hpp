@@ -43,8 +43,9 @@ using view::rope_t;
 using view::segment_ptr_t;
 using view::view_t;
 
-/** @brief A vertex's behavioral role (docs/reference/11 §roles). */
-enum class role_t {
+/** @brief A vertex's behavioral role (docs/reference/11 §roles). Byte-wide: it packs
+ *         into `vertex_t`'s flag byte group (#361 diet — 3 values need no int). */
+enum class role_t : std::uint8_t {
     STORED_VALUE, /**< @brief Role 1: last-writer-wins; holds the last-written value. */
     STREAM,       /**< @brief Role 2: bounded history ring sized by `settings.history_keep_last`. */
     HANDLER,      /**< @brief Roles 3-7: user `on_read` / `on_write` supplies the behavior. */
@@ -475,7 +476,7 @@ class vertex_t {
      *         segment, not the full key), QoS settings, and handlers. The cold extension
      *         block is allocated only if this identity needs one (#361 §1). */
     vertex_t(role_t role, path_key_t name, settings_t settings, handlers_t handlers)
-        : role_(role), name_(std::move(name)) {
+        : name_(std::move(name)), role_(role) {
         adopt_identity(role, settings, std::move(handlers));
     }
 
@@ -1062,9 +1063,14 @@ class vertex_t {
         e.handlers = std::move(handlers);
     }
 
-    role_t role_;
+    // Members are laid out in descending-alignment groups (#361 diet: zero interior
+    // padding — 8-byte, then 4-byte, then flag bytes), with everything the write hot
+    // path touches (LKV slot, subs, ext, seq, counters, mode flags) in the first ~96
+    // bytes and the wide Composite child storage at the tail.
+
     path_key_t name_;  // own canonical NAME record (one segment; empty at the root) — the
-                       // full key is rendered on demand by walking parent_ (ADR-0057)
+                       // full key is rendered on demand by walking parent_ (ADR-0057);
+                       // immutable once the node is linked (lock-free parent walks)
 
     // The stored value is a rope (ADR-0053 §6): a contiguous scalar is a single-link
     // rope (small-buffer inline, no extra alloc), a chunked stream keeps its links.
@@ -1075,16 +1081,9 @@ class vertex_t {
     // Null for the common default leaf. Published once by ensure_ext (CAS), never
     // cleared; freed by the destructor.
     std::atomic<vertex_ext_t*> ext_{nullptr};
-    // True iff ext_ holds a non-empty own-ACE list (#361 §3): maintained by set_acl,
-    // read lock-free by the graph's bearing-ancestor walk on every gated op.
-    std::atomic<bool> has_own_aces_{false};
     std::uint64_t write_seq_ = 0;  // bumped per assign; await waits for an increment, and it is
                                    // the value-agnostic "newer" signal a sweep reads (RFC-0008 §B).
                                    // Guarded by m_.
-    // How this vertex participates in an ANCESTOR's propagate sweep (RFC-0008 §C).
-    // Set at wiring time via graph_t::set_delivery_mode (the "configure before frames
-    // flow" contract, like the QoS settings); read on the assign path. Default IF_NEWER.
-    delivery_mode_t delivery_mode_ = delivery_mode_t::IF_NEWER;
 
     // Subtree-subscription bookkeeping (RFC-0005): every subscription observes its
     // vertex AND all descendants, so a write must fan out to ancestor subscribers
@@ -1097,20 +1096,29 @@ class vertex_t {
     // what the subtree walk and the creation-time sum read.
     std::atomic<std::uint32_t> own_subs_{0};
     std::atomic<std::uint32_t> listeners_above_{0};
+    std::uint32_t child_count_ = 0;  // inline+spill total; guarded by graph_t's map lock
 
-    // Composite tree links (ADR-0057), kept at the COLD tail so the write hot path's
-    // members (LKV slot, mutex, seq, counters) stay on the front cache lines.
-    // parent_/name_ are immutable once the node is linked (lock-free parent walks);
-    // children/registered_ are guarded by graph_t's map lock. Children are owned via
-    // non-moving unique_ptr allocations — vertex_t* stay stable for the graph's lifetime
-    // (the insert-only invariant vertex_handle_t relies on): inline slots first, then one
-    // sorted heap vector (O(log children) resolution under wide composites). Vertices are
-    // never erased (retire-LIST deferred; see ADR-0057 lifetime).
+    // -- flag bytes (one 4-byte group; all byte-wide by design) ------------------------
+    role_t role_;  // behavioral role (byte-wide enum)
+    // How this vertex participates in an ANCESTOR's propagate sweep (RFC-0008 §C).
+    // Set at wiring time via graph_t::set_delivery_mode (the "configure before frames
+    // flow" contract, like the QoS settings); read on the assign path. Default IF_NEWER.
+    delivery_mode_t delivery_mode_ = delivery_mode_t::IF_NEWER;
+    // True iff ext_ holds a non-empty own-ACE list (#361 §3): maintained by set_acl,
+    // read lock-free by the graph's bearing-ancestor walk on every gated op.
+    std::atomic<bool> has_own_aces_{false};
+    bool registered_ = false;  // false => placeholder intermediate (invisible to find)
+
+    // Composite tree links (ADR-0057) at the cold tail. parent_ is immutable once the
+    // node is linked (lock-free parent walks); children/registered_ are guarded by
+    // graph_t's map lock. Children are owned via non-moving unique_ptr allocations —
+    // vertex_t* stay stable for the graph's lifetime (the insert-only invariant
+    // vertex_handle_t relies on): inline slots first, then one sorted heap vector
+    // (O(log children) resolution under wide composites). Vertices are never erased
+    // (retire-LIST deferred; see ADR-0057 lifetime).
     vertex_t* parent_ = nullptr;
     std::array<std::unique_ptr<vertex_t>, kInlineChildren> child_inline_{};
     std::vector<std::unique_ptr<vertex_t>> child_spill_;
-    std::uint32_t child_count_ = 0;
-    bool registered_ = false;  // false => placeholder intermediate (invisible to find)
 };
 
 }  // namespace tr::graph
