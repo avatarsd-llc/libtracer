@@ -1211,9 +1211,9 @@ result_t<view_t> graph_t::read_schema(vertex_t* v) const {
             std::vector<std::byte> desc;
             wire::emit_name(desc, "access");
             const std::string_view a = to_string(f.access);
-            wire::emit_tlv(desc, type_t::VALUE, opt_t{},
-                           std::span<const std::byte>(
-                               reinterpret_cast<const std::byte*>(a.data()), a.size()));
+            wire::emit_tlv(
+                desc, type_t::VALUE, opt_t{},
+                std::span<const std::byte>(reinterpret_cast<const std::byte*>(a.data()), a.size()));
             desc.insert(desc.end(), f.descriptor.begin(), f.descriptor.end());
             wire::emit_name(app_children, f.name);
             wire::emit_tlv(app_children, type_t::SETTINGS, opt_t{.pl = true}, desc);

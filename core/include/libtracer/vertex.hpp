@@ -1204,8 +1204,8 @@ class vertex_t {
      *        A plain default leaf allocates nothing (#361 §1).
      */
     void adopt_identity(role_t role, const settings_t& settings, handlers_t handlers) {
-        const bool has_handlers = handlers.on_read || handlers.on_write ||
-                                  handlers.on_children || handlers.on_app_field_write;
+        const bool has_handlers = handlers.on_read || handlers.on_write || handlers.on_children ||
+                                  handlers.on_app_field_write;
         if (role != role_t::STREAM && !has_handlers && settings == kDefaultSettings &&
             ext_.load(std::memory_order_acquire) == nullptr)
             return;

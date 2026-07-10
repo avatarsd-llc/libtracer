@@ -118,8 +118,7 @@ std::vector<std::byte> dtype_desc(std::string_view tag) {
 bool name_at(const tlv_t& parent, std::size_t idx, std::string_view text) {
     if (idx >= parent.children.size()) return false;
     const tlv_t& c = parent.children[idx];
-    return c.type == type_t::NAME &&
-           tr::detail::as_string_view(c.payload) == text;
+    return c.type == type_t::NAME && tr::detail::as_string_view(c.payload) == text;
 }
 
 /** @brief A decoded read result that OWNS its bytes — `tlv_t` payloads are spans into
@@ -239,9 +238,9 @@ void test_gating() {
                   make_value(allow_acl("linkA", bit(acl_right_t::READ) | bit(acl_right_t::WRITE))))
               .has_value(),
           ":acl granting linkA READ|WRITE lands");
-    check(fails_with(g.write(v, p_kp.field(), make_value(val), "linkB"),
-                     status_t::PERMISSION_DENIED),
-          "remote rw write without the WRITE right: PERMISSION_DENIED (gate 2)");
+    check(
+        fails_with(g.write(v, p_kp.field(), make_value(val), "linkB"), status_t::PERMISSION_DENIED),
+        "remote rw write without the WRITE right: PERMISSION_DENIED (gate 2)");
     check(g.write(v, p_kp.field(), make_value(val), "linkA").has_value(),
           "remote rw write with the WRITE right succeeds");
     check(reads_back(g.read(v, p_kp.field(), "linkA"), val),
@@ -270,9 +269,8 @@ void test_schema_merge() {
           "no table: POINT{NAME, SETTINGS} — today's synthesized shape, no app member");
 
     std::vector<app_field_t> table;
-    table.push_back(app_field_t{.name = "kp",
-                                .access = app_access_t::RW,
-                                .descriptor = dtype_desc("f32")});
+    table.push_back(
+        app_field_t{.name = "kp", .access = app_access_t::RW, .descriptor = dtype_desc("f32")});
     table.push_back(app_field_t{.name = "secret", .access = app_access_t::WO});
     g.set_app_fields(v, std::move(table));
 
@@ -307,8 +305,7 @@ void test_schema_merge() {
     // Uninstall (empty table) restores today's shape byte-for-byte.
     g.set_app_fields(v, {});
     const std::optional<decoded_t> cleared = decode_read(g.read(path_t("/dev/z:schema")));
-    check(cleared.has_value() &&
-              tr::wire::encode(cleared->tlv) == tr::wire::encode(before->tlv),
+    check(cleared.has_value() && tr::wire::encode(cleared->tlv) == tr::wire::encode(before->tlv),
           "empty table uninstalls: schema byte-identical to the pre-install read");
 }
 
@@ -326,9 +323,10 @@ void test_announce_flow() {
     g.set_app_fields(temp, std::move(table));
 
     int deliveries = 0;
-    check(g.subscribe(path_t("/unit"), [](void* ctx, const rope_t&) {
-                          ++*static_cast<int*>(ctx);
-                      }, &deliveries).has_value(),
+    check(g.subscribe(
+               path_t("/unit"), [](void* ctx, const rope_t&) { ++*static_cast<int*>(ctx); },
+               &deliveries)
+              .has_value(),
           "subtree subscriber above the vertex lands");
 
     const path_t p("/unit/temp:settings.app.offset");
@@ -388,19 +386,19 @@ void test_container_reads() {
 
     check(fails_with(g.read(path_t("/dev/bare:settings.app")), status_t::SCHEMA_NOT_FOUND),
           ":settings.app on a table-less vertex stays closed (SCHEMA_NOT_FOUND)");
-    const std::optional<decoded_t> bare_settings = decode_read(g.read(path_t("/dev/bare:settings")));
+    const std::optional<decoded_t> bare_settings =
+        decode_read(g.read(path_t("/dev/bare:settings")));
     check(bare_settings.has_value() && bare_settings->tlv.type == type_t::SETTINGS &&
-              bare_settings->tlv.children.size() == 14 && name_at(bare_settings->tlv, 0, "reliability"),
+              bare_settings->tlv.children.size() == 14 &&
+              name_at(bare_settings->tlv, 0, "reliability"),
           ":settings on a table-less vertex: the 7 protocol knobs, no app member");
 
     std::vector<app_field_t> table;
-    table.push_back(app_field_t{.name = "written",
-                                .access = app_access_t::RW,
-                                .value = value_tlv("w")});
+    table.push_back(
+        app_field_t{.name = "written", .access = app_access_t::RW, .value = value_tlv("w")});
     table.push_back(app_field_t{.name = "unwritten", .access = app_access_t::RW});
-    table.push_back(app_field_t{.name = "secret",
-                                .access = app_access_t::WO,
-                                .value = value_tlv("s")});
+    table.push_back(
+        app_field_t{.name = "secret", .access = app_access_t::WO, .value = value_tlv("s")});
     g.set_app_fields(v, std::move(table));
 
     const std::optional<decoded_t> app = decode_read(g.read(path_t("/dev/c:settings.app")));
@@ -499,7 +497,6 @@ int main() {
     test_container_reads();
     test_apply_seam();
     test_table_replace();
-    std::printf(g_failures == 0 ? "\napp_fields: PASS\n" : "\napp_fields: FAIL (%d)\n",
-                g_failures);
+    std::printf(g_failures == 0 ? "\napp_fields: PASS\n" : "\napp_fields: FAIL (%d)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
