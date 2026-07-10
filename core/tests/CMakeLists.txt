@@ -108,6 +108,15 @@ target_link_libraries(transport_can_vcan_test PRIVATE libtracer)
 libtracer_test_warnings(transport_can_vcan_test)
 add_test(NAME transport_can_vcan COMMAND transport_can_vcan_test)
 
+# #383 — owned in-flight TX storage for asynchronous can_link_t backends (the
+# TWAI UAF fix's host-testable half): ownership/exhaustion/reuse invariants,
+# the acquirer-vs-tx-done-ISR cross-thread contract (TSan-meaningful), and the
+# FULL policy — bounded backpressure loses nothing, zero-wait drops are counted.
+add_executable(can_tx_pool_test can_tx_pool_test.cpp)
+target_link_libraries(can_tx_pool_test PRIVATE libtracer)
+libtracer_test_warnings(can_tx_pool_test)
+add_test(NAME can_tx_pool COMMAND can_tx_pool_test)
+
 # ADR-0050 — the pure ACL policy seam: both adapters + typed parse/build, no graph.
 add_executable(security_acl_test security_acl_test.cpp)
 target_link_libraries(security_acl_test PRIVATE libtracer)
