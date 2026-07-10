@@ -53,6 +53,7 @@ INPUT                  = core/include/libtracer/backend.hpp \
                          core/include/libtracer/transport_tcp.hpp \
                          core/include/libtracer/transport_udp.hpp \
                          core/include/libtracer/transport_can.hpp \
+                         core/include/libtracer/can_tx_pool.hpp \
                          core/include/libtracer/transport_quic.hpp \
                          core/include/libtracer/transport_webtransport.hpp \
                          core/include/libtracer/transport_ws.hpp \
