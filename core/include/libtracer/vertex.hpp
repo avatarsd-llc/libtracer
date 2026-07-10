@@ -238,23 +238,36 @@ enum class delivery_mode_t : std::uint8_t {
 using subscriber_fn_t = void (*)(void* ctx, const rope_t& value);
 
 /**
- * @brief One subscription edge (M3b).
- *
- * A write to the owning vertex fans out to a target vertex (@ref target_key —
- * spec-faithful re-dispatch) and/or an in-process @ref callback (sugar), per
- * docs/reference/02 §dispatch + 04 §write fanout. An inactive slot models an unsubscribe
- * (a cleared `:subscribers[N]`).
+ * @brief The COLD wire/gate half of a subscription edge (#380 §3), lazily allocated:
+ *        the in-process edge — the common MCU wiring shape (callback or local target,
+ *        empty caller) — keeps `subscriber_t::remote` null and pays one pointer
+ *        instead of ~90 B of route/link/caller state per edge.
  */
-struct subscriber_t {
-    std::vector<std::byte> target_key;  /**< @brief Canonical PATH key (empty ⇒ callback-only). */
-    subscriber_fn_t callback = nullptr; /**< @brief In-process sink fn; null ⇒ target-only
-                                             (ADR-0053 §6 rope value). */
-    void* callback_ctx = nullptr;       /**< @brief Caller-owned context passed back to
-                                             @ref callback; must outlive every delivery. */
-    /** @brief Active flag; an active edge receives every propagated value (delivery is
-     *         value-agnostic — WHICH vertices a sweep propagates is the vertex's
-     *         `delivery_mode_t`, never a per-subscriber byte comparison). */
-    bool active = true;
+struct subscriber_remote_t {
+    /**
+     * @brief The consumer's accumulated return route (a complete PATH TLV's bytes — the FWD
+     *        `src` the subscribe arrived with).
+     *
+     * Populated ⇒ a REMOTE subscriber: a write hands (@ref link, this route,
+     * @ref delivery_compact, value) to the graph's injected remote-delivery sink,
+     * which emits the `FWD{WRITE}` (or auto-promoted COMPACT) back over the link (RFC-0004
+     * §D/§E.1, ADR-0035 slice 4 / #136). Held as a view over a REFCOUNTED segment (ADR-0041
+     * §2): copied once at subscribe, then every delivery snapshot is a refcount clone —
+     * O(1) copies over the subscription's life, and an in-flight delivery keeps the route
+     * alive across a concurrent unsubscribe. An opaque view, so L4 never depends on tr::net.
+     */
+    view_t return_route{};
+    std::string link; /**< @brief This node's NAME for the link the subscribe arrived on. */
+    /**
+     * @brief The caller context this edge was created under (#81, ADR-0026 fan-in gate).
+     *
+     * The inbound link NAME for a remote subscribe, empty for a locally-wired edge. A
+     * fan-out re-dispatch into a LOCAL target vertex is gated by the TARGET's `:acl` WRITE
+     * right under this context — the subscription's creator is the "writer" the target
+     * authorizes. A REMOTE subscriber's fan-in gate runs on the peer instead (its
+     * `FWD{WRITE}` terminus checks the same right).
+     */
+    std::string caller;
     /**
      * @brief Route-handle opt-in (`SUBSCRIBER.qos_settings.delivery_compact`, RFC-0004
      *        §E.1 / ADR-0035 slice 4).
@@ -266,40 +279,49 @@ struct subscriber_t {
      * state.
      */
     bool delivery_compact = false;
-    /**
-     * @brief The consumer's accumulated return route (a complete PATH TLV's bytes — the FWD
-     *        `src` the subscribe arrived with).
-     *
-     * Empty together with @ref link ⇒ an in-process slot (callback/target sugar), ignored
-     * for remote delivery. Populated ⇒ a REMOTE subscriber: a write hands (@ref link, this
-     * route, @ref delivery_compact, value) to the graph's injected remote-delivery sink,
-     * which emits the `FWD{WRITE}` (or auto-promoted COMPACT) back over the link (RFC-0004
-     * §D/§E.1, ADR-0035 slice 4 / #136). Held as a view over a REFCOUNTED segment (ADR-0041
-     * §2): copied once at subscribe, then every delivery snapshot is a refcount clone —
-     * O(1) copies over the subscription's life, and an in-flight delivery keeps the route
-     * alive across a concurrent unsubscribe. An opaque view, so L4 never depends on tr::net.
-     */
-    view_t return_route{};
-    std::string link; /**< @brief This node's NAME for the link the subscribe arrived on. */
+};
+
+/**
+ * @brief One subscription edge (M3b).
+ *
+ * A write to the owning vertex fans out to a target vertex (@ref target_key —
+ * spec-faithful re-dispatch) and/or an in-process @ref callback (sugar), per
+ * docs/reference/02 §dispatch + 04 §write fanout. An inactive slot models an unsubscribe
+ * (a cleared `:subscribers[N]`). The wire/gate members live in the lazily-allocated
+ * @ref remote half (#380 §3), so the plain in-process edge costs 80 B, not 160.
+ */
+struct subscriber_t {
+    std::vector<std::byte> target_key;  /**< @brief Canonical PATH key (empty ⇒ callback-only). */
+    subscriber_fn_t callback = nullptr; /**< @brief In-process sink fn; null ⇒ target-only
+                                             (ADR-0053 §6 rope value). */
+    void* callback_ctx = nullptr;       /**< @brief Caller-owned context passed back to
+                                             @ref callback; must outlive every delivery. */
     /**
      * @brief The original SUBSCRIBER TLV view this slot was written from, retained zero-copy
      *        (a refcount clone of the field-write payload).
      *
-     * Empty for in-process callback/target sugar that carries no TLV. A `:subscribers[]`
-     * read ropes these slot views into the `FWD{REPLY}` with no byte copy (RFC-0004 §D /
-     * ADR-0035 slice 2 zero-copy reply rule).
+     * Empty for in-process callback sugar that carries no TLV (the local target sugar DOES
+     * carry one — ADR-0049 encodes through the field-write door). A `:subscribers[]` read
+     * ropes these slot views into the `FWD{REPLY}` with no byte copy (RFC-0004 §D /
+     * ADR-0035 slice 2 zero-copy reply rule). Stays HOT (outside @ref remote) precisely
+     * because local field-write-door edges carry it.
      */
     view_t source_view{};
-    /**
-     * @brief The caller context this edge was created under (#81, ADR-0026 fan-in gate).
-     *
-     * The inbound link NAME for a remote subscribe, empty for a locally-wired edge. A
-     * fan-out re-dispatch into a LOCAL target vertex is gated by the TARGET's `:acl` WRITE
-     * right under this context — the subscription's creator is the "writer" the target
-     * authorizes. A REMOTE subscriber's fan-in gate runs on the peer instead (its
-     * `FWD{WRITE}` terminus checks the same right).
-     */
-    std::string caller;
+    /** @brief The cold wire/gate half (#380 §3) — null for the plain in-process edge;
+     *         allocated by @ref ensure_remote when a route/link/caller/compact-flag is
+     *         stored (pay-for-what-you-use, ADR-0021). */
+    std::unique_ptr<subscriber_remote_t> remote;
+    /** @brief Active flag; an active edge receives every propagated value (delivery is
+     *         value-agnostic — WHICH vertices a sweep propagates is the vertex's
+     *         `delivery_mode_t`, never a per-subscriber byte comparison). */
+    bool active = true;
+
+    /** @brief The cold half, allocated on first use (admission-time only — never on a
+     *         dispatch path). */
+    subscriber_remote_t& ensure_remote() {
+        if (!remote) remote = std::make_unique<subscriber_remote_t>();
+        return *remote;
+    }
 };
 
 /**
@@ -1140,8 +1162,11 @@ class vertex_t {
     // fields (the slot may be cleared while dispatch runs outside the lock); the route
     // copy is a refcount clone (ADR-0041 §2 — keeps it alive across an unsubscribe).
     [[nodiscard]] edge_view_t edge_view_of(const subscriber_t& s) const {
-        return edge_view_t{s.callback,     s.callback_ctx,     s.target_key, s.link,
-                           s.return_route, s.delivery_compact, s.caller};
+        if (s.remote != nullptr)
+            return edge_view_t{s.callback,      s.callback_ctx,         s.target_key,
+                               s.remote->link,  s.remote->return_route, s.remote->delivery_compact,
+                               s.remote->caller};
+        return edge_view_t{s.callback, s.callback_ctx, s.target_key, {}, {}, false, {}};
     }
 
     /** @brief The descriptor-table entry named @p name, or `nullptr` (no table entry / no

@@ -14,6 +14,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **Subscription-edge wire state split to a lazily-allocated cold half (#380 §3)** —
+  `subscriber_t` is now 80 B (was 160) and **move-only**: `return_route`, `link`,
+  `caller`, and `delivery_compact` moved to `subscriber_remote_t` behind a
+  `unique_ptr` that stays null for plain in-process edges (callback or local
+  target under the empty caller context) — the common MCU wiring shape halves
+  its per-edge RAM. Wire subscribers and caller-gated edges allocate the cold
+  half at admission time (never on a dispatch path); `edge_view_t` (the
+  dispatch snapshot) is unchanged.
+
 - **Vertex child storage collapsed to one lazily-allocated sorted list (#380 §1)** —
   a leaf (the common MCU vertex) now pays exactly one null pointer for child
   storage instead of 40 B of inline slots + spill vector; `sizeof(vertex_t)`

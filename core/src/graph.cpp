@@ -903,8 +903,9 @@ void parse_subscriber_tlv(const tlv_t& sub, subscriber_t& s) {
             const std::vector<tlv_t>& q = child.children;
             for (std::size_t i = 0; i + 1 < q.size(); ++i) {
                 if (q[i].type != type_t::NAME || q[i + 1].type != type_t::VALUE) continue;
-                if (detail::as_string_view(q[i].payload) == "delivery_compact")
-                    s.delivery_compact = detail::load_le<std::uint8_t>(q[i + 1].payload) != 0;
+                if (detail::as_string_view(q[i].payload) == "delivery_compact" &&
+                    detail::load_le<std::uint8_t>(q[i + 1].payload) != 0)
+                    s.ensure_remote().delivery_compact = true;  // cold half only when opted in
             }
         }
     }
@@ -996,11 +997,12 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view_t source_view, v
     // A PATH child names the consumer at ITS origin — never a local re-dispatch target;
     // remote delivery rides the return route over the link (RFC-0004 §D).
     s.target_key.clear();
-    s.caller = link;  // the fan-in gate context this edge's deliveries run under (#81)
-    s.return_route = std::move(return_route);
+    subscriber_remote_t& r = s.ensure_remote();  // a wire subscriber always carries the cold half
+    r.caller = link;  // the fan-in gate context this edge's deliveries run under (#81)
+    r.return_route = std::move(return_route);
     s.source_view = std::move(source_view);
-    s.link = std::move(link);
-    const std::string gate_ctx = s.caller;  // survives the move below (the SUBSCRIBE gate
+    r.link = std::move(link);
+    const std::string gate_ctx = r.caller;  // survives the move above (the SUBSCRIBE gate
                                             // runs under the inbound link, #81/ADR-0026)
     return admit_subscriber(v, std::move(s), gate_ctx);
 }
@@ -1019,7 +1021,9 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
             if (s.target_key.empty()) return std::unexpected(status_t::TYPE_MISMATCH);
             s.source_view = value;  // retain the SUBSCRIBER TLV zero-copy (refcount clone) so a
                                     // later :subscribers[] read ropes it into the REPLY (ADR-0035).
-            s.caller.assign(caller);  // the fan-in gate context for this edge's deliveries (#81)
+            if (!caller.empty())    // the fan-in gate context for this edge's deliveries (#81);
+                                    // the empty (local) context needs no cold half
+                s.ensure_remote().caller.assign(caller);
             // The single admission step (ADR-0049): SUBSCRIBE gate → append → latch.
             return admit_subscriber(v, std::move(s), caller);
         }

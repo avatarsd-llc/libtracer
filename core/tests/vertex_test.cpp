@@ -131,16 +131,20 @@ void test_edges_snapshot_clear_latch() {
     vertex_t v{role_t::STORED_VALUE, key_of({0x04}), st, {}};
 
     int hits = 0;
-    subscriber_t s0;
-    s0.callback = [](void* ctx, const rope_t&) { ++*static_cast<int*>(ctx); };
-    s0.callback_ctx = &hits;
+    // subscriber_t is move-only (#380 §3 cold-half unique_ptr): mint a fresh edge per add.
+    const auto mk_edge = [&hits] {
+        subscriber_t s;
+        s.callback = [](void* ctx, const rope_t&) { ++*static_cast<int*>(ctx); };
+        s.callback_ctx = &hits;
+        return s;
+    };
     edge_latch_t latch;
-    check(v.add_edge(s0, &latch) == 0, "the first edge lands in slot 0");
+    check(v.add_edge(mk_edge(), &latch) == 0, "the first edge lands in slot 0");
     check(latch.value == nullptr, "no LKV yet => no latch");
 
     v.store(make_value(0x11));
     edge_latch_t latch2;
-    check(v.add_edge(s0, &latch2) == 1, "the second edge lands in slot 1");
+    check(v.add_edge(mk_edge(), &latch2) == 1, "the second edge lands in slot 1");
     check(latch2.value != nullptr && first_byte(*latch2.value) == 0x11,
           "transient-local + LKV => the latch snapshots the value");
     check(latch2.edge.callback != nullptr && latch2.edge.callback_ctx == &hits,
@@ -158,7 +162,7 @@ void test_edges_snapshot_clear_latch() {
     check(!v.clear_edge(99), "clearing an out-of-range slot reports false");
     check(v.snapshot_edges(buf, heap) == 1, "a cleared edge vanishes from the snapshot");
 
-    for (int i = 0; i < 12; ++i) (void)v.add_edge(s0);
+    for (int i = 0; i < 12; ++i) (void)v.add_edge(mk_edge());
     const std::size_t n = v.snapshot_edges(buf, heap);
     check(n == 13 && heap.size() == 13, "a >kInlineFanout subscriber list overflows to the heap");
 }
@@ -167,11 +171,14 @@ void test_snapshot_under_concurrent_add() {
     std::printf("snapshot_edges under a concurrent add_edge storm:\n");
     vertex_t v{role_t::STORED_VALUE, key_of({0x05}), settings_t{}, {}};
     std::atomic<int> dummy{0};
-    subscriber_t proto;
-    proto.callback = [](void* ctx, const rope_t&) {
-        static_cast<std::atomic<int>*>(ctx)->fetch_add(1, std::memory_order_relaxed);
+    const auto mk_proto = [&dummy] {
+        subscriber_t s;
+        s.callback = [](void* ctx, const rope_t&) {
+            static_cast<std::atomic<int>*>(ctx)->fetch_add(1, std::memory_order_relaxed);
+        };
+        s.callback_ctx = &dummy;
+        return s;
     };
-    proto.callback_ctx = &dummy;
 
     constexpr int kThreads = 4;
     constexpr int kPerThread = 64;
@@ -182,7 +189,7 @@ void test_snapshot_under_concurrent_add() {
         adders.emplace_back([&] {
             while (!go.load(std::memory_order_acquire)) {
             }
-            for (int i = 0; i < kPerThread; ++i) (void)v.add_edge(proto);
+            for (int i = 0; i < kPerThread; ++i) (void)v.add_edge(mk_proto());
         });
     }
     bool monotonic = true;
