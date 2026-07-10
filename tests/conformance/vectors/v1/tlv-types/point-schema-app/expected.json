@@ -1,0 +1,12 @@
+{
+  "name": "point-schema-app",
+  "category": "tlv-types",
+  "hex": "074079000200040074656D700B40380002000B00646561646C696E655F6E7301000800000000000000000002001100686973746F72795F6B6565705F6C6173740100040001000000020003006170700B402A00020002006B700B4020000200060061636365737301000200727702000500647479706502000300663332",
+  "total_bytes": 125,
+  "decoded": {
+    "type": "0x07 POINT",
+    "structured": true,
+    "meaning": "POINT{ NAME \"temp\", SETTINGS{ deadline_ns u64=0, history_keep_last u32=1 }, NAME \"app\", SETTINGS{ NAME \"kp\" SETTINGS{ NAME \"access\" VALUE \"rw\", NAME \"dtype\" NAME \"f32\" } } } — the RFC-0010 §B.2 two-part :schema read (synthesized protocol part + owner part)",
+    "note": "bytes emitted by the libtracer reference encoder (read_schema on a vertex with an installed field descriptor table); the owner part leads each field's record with the runtime-projected `access` member, then the owner descriptor bytes verbatim"
+  }
+}
