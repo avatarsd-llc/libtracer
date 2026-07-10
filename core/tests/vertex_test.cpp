@@ -63,7 +63,7 @@ std::uint8_t first_byte(const rope_t& r) {
 path_key_t key_of(std::initializer_list<std::uint8_t> bytes) {
     std::vector<std::byte> k;
     for (std::uint8_t b : bytes) k.push_back(std::byte{b});
-    return path_key_t{std::move(k)};
+    return path_key_t{k};
 }
 
 void test_store_and_lkv() {

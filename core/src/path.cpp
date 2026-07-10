@@ -136,7 +136,7 @@ namespace {
 }  // namespace
 
 std::size_t path_key_hash_t::operator()(const path_key_t& k) const noexcept {
-    return fnv1a_key(k.bytes);
+    return fnv1a_key(k.bytes());
 }
 
 std::size_t path_key_hash_t::operator()(std::span<const std::byte> k) const noexcept {

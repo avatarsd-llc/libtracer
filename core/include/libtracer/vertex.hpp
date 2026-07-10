@@ -638,11 +638,11 @@ class vertex_t {
         vertex_t* raw = child.get();
         if (!children_) children_ = std::make_unique<children_t>();
         std::vector<std::unique_ptr<vertex_t>>& sorted = children_->sorted;
-        const auto pos = std::lower_bound(
-            sorted.begin(), sorted.end(), child->name().bytes,
-            [](const std::unique_ptr<vertex_t>& c, const std::vector<std::byte>& n) {
-                return std::ranges::lexicographical_compare(c->name().bytes, n);
-            });
+        const auto pos =
+            std::lower_bound(sorted.begin(), sorted.end(), child->name().bytes(),
+                             [](const std::unique_ptr<vertex_t>& c, std::span<const std::byte> n) {
+                                 return std::ranges::lexicographical_compare(c->name().bytes(), n);
+                             });
         sorted.insert(pos, std::move(child));
         return raw;
     }
@@ -658,12 +658,10 @@ class vertex_t {
         const auto it =
             std::lower_bound(sorted.begin(), sorted.end(), record,
                              [](const std::unique_ptr<vertex_t>& c, std::span<const std::byte> r) {
-                                 return std::ranges::lexicographical_compare(c->name().bytes, r);
+                                 return std::ranges::lexicographical_compare(c->name().bytes(), r);
                              });
         if (it == sorted.end()) return nullptr;
-        const std::vector<std::byte>& n = (*it)->name().bytes;
-        const bool matches =
-            n.size() == record.size() && std::equal(n.begin(), n.end(), record.begin());
+        const bool matches = std::ranges::equal((*it)->name().bytes(), record);
         return matches ? it->get() : nullptr;
     }
 
