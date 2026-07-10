@@ -534,9 +534,6 @@ class vertex_t {
    public:
     /** @brief The no-heap small-fan-out snapshot width (@ref snapshot_edges buffer size). */
     static constexpr std::size_t kInlineFanout = edge_snapshot_t::kCapacity;
-    /** @brief Inline child slots before the child list spills to the sorted heap vector
-     *         (ADR-0057 Composite tree — most vertices are leaves or narrow composites). */
-    static constexpr std::size_t kInlineChildren = 2;
 
     /** @brief Construct a vertex with its role, own canonical NAME record (ADR-0057 — one
      *         segment, not the full key), QoS settings, and handlers. The cold extension
@@ -605,11 +602,11 @@ class vertex_t {
     }
 
     /**
-     * @brief Adopt @p child into this node's children container and link its parent pointer.
+     * @brief Adopt @p child into this node's child list and link its parent pointer.
      *
-     * Small-vector-style storage: the first @ref kInlineChildren land in inline slots
-     * (no heap block for narrow composites); the first spill moves ALL children into a heap
-     * vector kept sorted by name record, so a wide composite resolves a child in
+     * The list block is lazily allocated on the FIRST child (#380 §1): a leaf — the
+     * common MCU vertex — keeps `children_` null and pays exactly one pointer. The
+     * list stays sorted by name record, so a wide composite resolves a child in
      * O(log children). The `vertex_t` itself never moves (only owning pointers do).
      * @note Called under the graph's UNIQUE map lock.
      * @return The adopted child (its stable address).
@@ -617,28 +614,14 @@ class vertex_t {
     vertex_t* add_child(std::unique_ptr<vertex_t> child) {
         child->parent_ = this;
         vertex_t* raw = child.get();
-        if (child_spill_.empty() && child_count_ < kInlineChildren) {
-            child_inline_[child_count_] = std::move(child);
-        } else {
-            if (child_spill_.empty()) {  // first spill: migrate the inline slots, then sort
-                child_spill_.reserve(child_count_ + 1);
-                for (std::unique_ptr<vertex_t>& c : child_inline_)
-                    if (c) child_spill_.push_back(std::move(c));
-                std::sort(
-                    child_spill_.begin(), child_spill_.end(),
-                    [](const std::unique_ptr<vertex_t>& a, const std::unique_ptr<vertex_t>& b) {
-                        return std::ranges::lexicographical_compare(a->name().bytes,
-                                                                    b->name().bytes);
-                    });
-            }
-            const auto pos = std::lower_bound(
-                child_spill_.begin(), child_spill_.end(), child->name().bytes,
-                [](const std::unique_ptr<vertex_t>& c, const std::vector<std::byte>& n) {
-                    return std::ranges::lexicographical_compare(c->name().bytes, n);
-                });
-            child_spill_.insert(pos, std::move(child));
-        }
-        ++child_count_;
+        if (!children_) children_ = std::make_unique<children_t>();
+        std::vector<std::unique_ptr<vertex_t>>& sorted = children_->sorted;
+        const auto pos = std::lower_bound(
+            sorted.begin(), sorted.end(), child->name().bytes,
+            [](const std::unique_ptr<vertex_t>& c, const std::vector<std::byte>& n) {
+                return std::ranges::lexicographical_compare(c->name().bytes, n);
+            });
+        sorted.insert(pos, std::move(child));
         return raw;
     }
 
@@ -648,36 +631,30 @@ class vertex_t {
      * @note Called under the graph's map lock (shared suffices).
      */
     [[nodiscard]] vertex_t* child_by_record(std::span<const std::byte> record) const noexcept {
-        const auto matches = [&](const std::unique_ptr<vertex_t>& c) {
-            const std::vector<std::byte>& n = c->name().bytes;
-            return n.size() == record.size() && std::equal(n.begin(), n.end(), record.begin());
-        };
-        if (child_spill_.empty()) {
-            for (std::size_t i = 0; i < child_count_; ++i)
-                if (matches(child_inline_[i])) return child_inline_[i].get();
-            return nullptr;
-        }
+        if (!children_) return nullptr;
+        const std::vector<std::unique_ptr<vertex_t>>& sorted = children_->sorted;
         const auto it =
-            std::lower_bound(child_spill_.begin(), child_spill_.end(), record,
+            std::lower_bound(sorted.begin(), sorted.end(), record,
                              [](const std::unique_ptr<vertex_t>& c, std::span<const std::byte> r) {
                                  return std::ranges::lexicographical_compare(c->name().bytes, r);
                              });
-        return (it != child_spill_.end() && matches(*it)) ? it->get() : nullptr;
+        if (it == sorted.end()) return nullptr;
+        const std::vector<std::byte>& n = (*it)->name().bytes;
+        const bool matches =
+            n.size() == record.size() && std::equal(n.begin(), n.end(), record.begin());
+        return matches ? it->get() : nullptr;
     }
 
     /**
-     * @brief Run @p f over every child (placeholders included), in container order —
-     *        member enumeration and the RFC-0005 subtree-counter walks.
+     * @brief Run @p f over every child (placeholders included), in sorted name-record
+     *        order — member enumeration and the RFC-0005 subtree-counter walks.
      * @note Called under the graph's map lock (shared suffices); @p f must not mutate
      *       the tree.
      */
     template <typename F>
     void for_each_child(F&& f) const {
-        if (child_spill_.empty()) {
-            for (std::size_t i = 0; i < child_count_; ++i) f(*child_inline_[i]);
-            return;
-        }
-        for (const std::unique_ptr<vertex_t>& c : child_spill_) f(*c);
+        if (!children_) return;
+        for (const std::unique_ptr<vertex_t>& c : children_->sorted) f(*c);
     }
 
     // -- storage & readiness ----------------------------------------------------------
@@ -1247,7 +1224,6 @@ class vertex_t {
     // what the subtree walk and the creation-time sum read.
     std::atomic<std::uint32_t> own_subs_{0};
     std::atomic<std::uint32_t> listeners_above_{0};
-    std::uint32_t child_count_ = 0;  // inline+spill total; guarded by graph_t's map lock
 
     // -- flag bytes (one 4-byte group; all byte-wide by design) ------------------------
     role_t role_;  // behavioral role (byte-wide enum)
@@ -1264,12 +1240,18 @@ class vertex_t {
     // node is linked (lock-free parent walks); children/registered_ are guarded by
     // graph_t's map lock. Children are owned via non-moving unique_ptr allocations —
     // vertex_t* stay stable for the graph's lifetime (the insert-only invariant
-    // vertex_handle_t relies on): inline slots first, then one sorted heap vector
-    // (O(log children) resolution under wide composites). Vertices are never erased
-    // (retire-LIST deferred; see ADR-0057 lifetime).
+    // vertex_handle_t relies on) — in ONE sorted heap list (O(log children)
+    // resolution), whose block is lazily allocated on the first child so a LEAF pays
+    // exactly one null pointer (#380 §1). Vertices are never erased (retire-LIST
+    // deferred; see ADR-0057 lifetime).
     vertex_t* parent_ = nullptr;
-    std::array<std::unique_ptr<vertex_t>, kInlineChildren> child_inline_{};
-    std::vector<std::unique_ptr<vertex_t>> child_spill_;
+
+    /** @brief The lazily-allocated child list (null for every leaf): the owned children,
+     *         sorted by their canonical NAME record bytes. */
+    struct children_t {
+        std::vector<std::unique_ptr<vertex_t>> sorted; /**< @brief Sorted owned children. */
+    };
+    std::unique_ptr<children_t> children_;
 };
 
 }  // namespace tr::graph
