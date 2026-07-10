@@ -309,6 +309,60 @@ int main() {
         }
     }
 
+    // --- per-vertex APP-FIELD-TABLE steady-heap probe (#388, REPORT-ONLY) ------
+    // The RFC-0010 economy trend: LIVE bytes a representative 5-field owner
+    // descriptor table adds per vertex (the extension block + the table's own
+    // storage) — the number that decides whether per-endpoint app-field schemas
+    // beat the /meta child-vertex workaround on the MCU (#388's ask for a gate
+    // row alongside the per-leaf number).
+    {
+        graph_t app_graph;
+        const auto mk_table = [] {
+            std::vector<tr::graph::app_field_t> table;
+            table.reserve(5);
+            static constexpr const char* kNames[5] = {"kp", "ki", "kd", "mode", "label"};
+            for (const char* name : kNames) {
+                tr::graph::app_field_t f;
+                f.name = name;
+                f.access = tr::graph::app_access_t::RW;
+                f.descriptor.assign(16, std::byte{0x11});  // a §B.1-sized record stand-in
+                table.push_back(std::move(f));
+            }
+            return table;
+        };
+        if (const auto warm = tr::graph::path_t::parse("/app/warm")) {
+            const auto h = app_graph.register_vertex(*warm, tr::graph::role_t::STORED_VALUE);
+            app_graph.set_app_fields(h, mk_table());
+        }
+        constexpr std::size_t kAppN = 256;
+        bool app_ok = true;
+        probe::reset();
+        probe::arm();
+        for (std::size_t i = 0; i < kAppN; ++i) {
+            char pb[24];
+            std::snprintf(pb, sizeof pb, "/app/v%04zu", i);
+            const auto p = tr::graph::path_t::parse(pb);
+            app_ok = app_ok && p.has_value();
+            if (p) {
+                const auto h = app_graph.register_vertex(*p, tr::graph::role_t::STORED_VALUE);
+                app_graph.set_app_fields(h, mk_table());
+            }
+        }
+        const probe::counts_t app = probe::snapshot();
+        probe::disarm();
+        const std::size_t leaf_and_table =
+            app.live_bytes > 0 ? static_cast<std::size_t>(app.live_bytes) / kAppN : 0;
+        std::printf(
+            "RESULT zeroheap vertex_app5 allocs=%zu frees=%zu bytes=%zu n=%zu gross_bytes=%zu "
+            "ok=%d (report-only — live bytes per leaf WITH a 5-field app table, #388)\n",
+            app.allocs / kAppN, app.frees / kAppN, leaf_and_table, kAppN, app.bytes / kAppN,
+            app_ok ? 1 : 0);
+        if (!app_ok) {
+            std::printf("FAIL: app-field fixture did not register — not a heap result\n");
+            return 2;
+        }
+    }
+
     // Optional hard gate: `ZEROHEAP_MAX=N` fails the run if FORWARD allocs>N (the
     // terminus window above stays report-only). CI runs `ZEROHEAP_MAX=0`.
     if (const char* cap = std::getenv("ZEROHEAP_MAX")) {

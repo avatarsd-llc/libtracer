@@ -14,6 +14,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **STREAM history ring is lazily allocated (#388)** — `vertex_ext_t::history`
+  is now a pointer-to-deque, allocated on the first STREAM append: an empty
+  libstdc++ `std::deque` allocates its ~512 B map node at construction, which
+  every extension-bearing vertex (handlers, RFC-0010 app fields, `:acl`,
+  non-default settings) paid despite only the STREAM role using the ring.
+  Measured: a leaf with a 5-field app table drops 1664 → 1008 live B (64-bit
+  host); the new `vertex_app5` heap-probe row tracks this economy in CI.
+
 - **`path_key_t` is now a small-buffer type (#380 §2)** — records ≤ 16 B (names up
   to 12 characters) live inline; a named vertex no longer allocates a ~32 B heap
   block for its NAME record (per-leaf live heap 160 → 136 B in the steady-heap
