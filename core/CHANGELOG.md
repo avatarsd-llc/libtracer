@@ -49,6 +49,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`can_tx_pool_t` — owned in-flight TX frame storage for asynchronous
+  `can_link_t` backends (#383).** New header `can_tx_pool.hpp`: a
+  fixed-capacity slot pool (non-blocking acquire, lock-free ISR-safe release)
+  in which a link whose driver transmits asynchronously — queues the frame
+  POINTER and formats it later, like ESP-IDF's `esp_driver_twai` — owns each
+  frame until the driver's tx-done callback returns it. The
+  `can_link_t::write_raw` contract now states the lifetime rule explicitly:
+  `frame` is borrowed only for the duration of the call; an async
+  implementation must copy into link-owned storage (the ESP component's
+  `twai_link_t` was handing the driver `write_raw`'s stack — a use-after-free
+  formatted from the tx-done ISR). The pool is mechanism-only; the FULL
+  policy (bounded backpressure, then a counted — never silent — drop) lives
+  in the owning link.
+
 - **RFC-0010 owner app fields — the field descriptor table, `:settings.app.*`, and
   the two-part `:schema`.** New types `app_access_t` / `app_field_t` and the owner
   declaration API `graph_t::set_app_fields(vertex_handle_t, std::vector<app_field_t>)`

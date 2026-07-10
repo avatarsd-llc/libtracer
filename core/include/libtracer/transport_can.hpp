@@ -106,7 +106,18 @@ class can_link_t {
 
     virtual ~can_link_t() = default;
 
-    /** @brief Emit one raw CAN frame onto the bus. */
+    /**
+     * @brief Emit one raw CAN frame onto the bus.
+     *
+     * @p frame is only BORROWED for the duration of the call. An
+     * implementation whose driver transmits asynchronously (queues the frame
+     * pointer and formats the buffer later, possibly from a tx-done ISR —
+     * e.g. ESP-IDF's `esp_driver_twai` behind the component's `twai_link_t`)
+     * must copy the frame into storage the LINK owns until the driver signals
+     * completion (#383; `can_tx_pool.hpp` is that storage). A synchronous
+     * link (`socketcan_link_t`: the kernel copies inside the write(2) call)
+     * may use @p frame directly.
+     */
     virtual void write_raw(const can_frame_data_t& frame) = 0;
 
     /** @brief Register the sink for inbound raw frames; set before frames flow. */
