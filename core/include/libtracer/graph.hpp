@@ -332,6 +332,24 @@ class graph_t {
     }
 
     /**
+     * @brief Install (or replace) @p v's field descriptor table — the OWNER declaring its
+     *        application property fields under `:settings.app.` (RFC-0010 §A).
+     *
+     * A local, owner-facing host API, the mirror of @ref register_vertex (the RFC-0009
+     * §A.1 doctrine: the field catalog is device state, so there is no wire operation
+     * that declares a field) — remote peers write DECLARED fields, per their declared
+     * `app_access_t` and under the vertex WRITE right, never invent them; every
+     * undeclared name keeps `SCHEMA_NOT_FOUND` (the `ENOTTY` default). Entries may carry
+     * an initial value and the §B.1 descriptor bytes `read :schema` serves verbatim
+     * (after the runtime-projected `access` member). Replacing the table is atomic with
+     * respect to concurrent field operations on @p v; an empty table uninstalls (back to
+     * the closed pre-RFC surface). Callable at any time — declaration is not one-shot.
+     * App-field writes never wake `await` and never propagate (§C): a change consumers
+     * should notice is followed by the owner's ordinary announce write.
+     */
+    void set_app_fields(vertex_handle_t v, std::vector<app_field_t> table);
+
+    /**
      * @brief Install the sink the producer fan-out hands each REMOTE subscriber's delivery
      *        to (#136, RFC-0004 §D/§E.1).
      *
@@ -509,7 +527,8 @@ class graph_t {
     // the local `:subscribers[]` field-write, and the wire subscribe_wire — ends here,
     // so gate and latch semantics cannot diverge per entry point.
     result_t<void> admit_subscriber(vertex_t* v, subscriber_t s, std::string_view caller);
-    // Field surface: ":settings.<f>", ":subscribers[]" / "[N]", ":children[]".
+    // Field surface: ":settings.<f>", ":settings.app.<name…>" (RFC-0010),
+    // ":subscribers[]" / "[N]", ":children[]".
     result_t<void> field_write(vertex_t* v, const field_path_t& field, const view_t& value,
                                std::string_view caller);
     // The ACL gate (#81, ADR-0018/0020): true iff `caller` may exercise `right` on
@@ -543,6 +562,14 @@ class graph_t {
     // ":acl" read => the raw stored ACL TLV bytes verbatim (#81-A, ADR-0018/0020). The
     // caller-facing gate (READ_ACL) runs in read(v, field, caller) before reaching here.
     [[nodiscard]] result_t<view_t> read_acl(vertex_t* v) const;
+    // Bare ":settings" read (RFC-0010 §A.4) => the full settings container: the
+    // implemented protocol QoS knobs, plus the nested `app` record iff a descriptor
+    // table is installed — the one-traversal property tree a generic renderer walks.
+    [[nodiscard]] result_t<view_t> read_settings(vertex_t* v) const;
+    // ":settings.app" read (RFC-0010 §A.4) => the app container alone: declared,
+    // non-`wo` fields that hold a value, in table order, values verbatim.
+    // SCHEMA_NOT_FOUND when no table is installed (the closed default).
+    [[nodiscard]] result_t<view_t> read_settings_app(vertex_t* v) const;
 
     // The full canonical key of `v` — its ancestors' NAME records concatenated root-down
     // (ADR-0057 render-on-demand: vertices store one segment, not the full key). Walks

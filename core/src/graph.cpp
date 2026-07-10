@@ -45,6 +45,39 @@ void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
     wire::emit_tlv(out, type_t::VALUE, opt_t{}, payload);
 }
 
+/**
+ * @brief The flat descriptor-table key of an app-field path — field steps [2..) dot-joined
+ *        (RFC-0010 §A.1: nesting below `settings.app.` is the owner's; the runtime keys the
+ *        joined spelling as one flat string). Empty ⇒ a `[...]` selector step was present
+ *        (no app field has an indexed surface — the caller maps that to SCHEMA_NOT_FOUND).
+ */
+[[nodiscard]] std::string app_field_key(const field_path_t& field) {
+    std::string key;
+    for (std::size_t i = 2; i < field.steps.size(); ++i) {
+        const field_step_t& s = field.steps[i];
+        if (s.indexed || s.append || s.wildcard) return {};
+        if (i > 2) key += '.';
+        key += s.name;
+    }
+    return key;
+}
+
+/** @brief True iff @p s is a plain NAME step (no `[N]` / `[]` / `[*]` selector). */
+[[nodiscard]] bool plain_step(const field_step_t& s) noexcept {
+    return !s.indexed && !s.append && !s.wildcard;
+}
+
+/** @brief Emit the RFC-0010 §A.4 app-container members into @p out: each declared,
+ *         non-`wo` field HOLDING a value, in table order — `NAME <name>` then the stored
+ *         TLV bytes verbatim (`wo` has no read surface; unset fields are omitted). */
+void emit_app_container(std::vector<std::byte>& out, const std::vector<app_field_t>& table) {
+    for (const app_field_t& f : table) {
+        if (f.access == app_access_t::WO || f.value.empty()) continue;
+        wire::emit_name(out, f.name);
+        out.insert(out.end(), f.value.begin(), f.value.end());
+    }
+}
+
 // Canonical-key NAME navigation (last segment, parent, ancestor/child, level
 // split) lives in one locus: tr::wire::key_view_t (key_view.hpp).
 
@@ -938,6 +971,13 @@ result_t<void> graph_t::subscribe(const path_t& src, subscriber_fn_t fn, void* c
     return admit_subscriber(v, std::move(s), {});
 }
 
+void graph_t::set_app_fields(vertex_handle_t v, std::vector<app_field_t> table) {
+    // Owner-facing declaration (RFC-0010 §A.2) — a local host API like register_vertex,
+    // so no ACL gate: the owner is updating its own projection. The vertex verb replaces
+    // the table atomically with respect to concurrent field operations.
+    v.get()->set_app_fields(std::move(table));
+}
+
 void graph_t::set_remote_delivery_sink(
     std::function<void(const remote_delivery_t&, const rope_t&)> sink) {
     remote_sink_ = std::move(sink);
@@ -1033,6 +1073,44 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
         return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     }
 
+    if (step0.name == "settings" && field.steps.size() >= 2 && field.steps[1].name == "app") {
+        // Owner-declared application fields under the reserved `app` subkey (RFC-0010
+        // §A). This branch owns the whole `settings.app.` subtree — the protocol never
+        // minted (and per the RFC must never mint) a knob named `app`. A bare
+        // `:settings.app` container write and any `[...]`-selector step have no write
+        // surface.
+        if (field.steps.size() < 3 || !plain_step(field.steps[1]))
+            return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        const std::string key = app_field_key(field);
+        if (key.empty()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        const std::optional<app_access_t> access = v->app_field_access(key);
+        if (!access)  // undeclared stays ENOTTY — the table opens only its own names
+            return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        if (!caller.empty()) {
+            // A caller-attributed (remote) write, gated in RFC-0010 §A.3 order. Gate 1:
+            // a field not declared remotely writable has NO write surface — the
+            // caller-INDEPENDENT identity (the ENOTTY of writing a read-only ioctl),
+            // checked before the per-caller ACL right. Gate 2: the ordinary vertex
+            // WRITE right, like any control write. The owner (empty caller) skips
+            // both — it is updating its own projection, not a caller.
+            if (*access == app_access_t::RO) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+            if (!acl_allows(v, caller, acl_right_t::WRITE))
+                return std::unexpected(status_t::PERMISSION_DENIED);
+        }
+        // Store verbatim (§D — bytes in, bytes out; the descriptor is consumer
+        // self-description, never a runtime validation schema). A false return means a
+        // concurrent table replacement un-declared the name between gate and store.
+        if (!v->app_field_store(key, value.bytes()))
+            return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        // The owner apply seam (§A.3), OUTSIDE the vertex lock — it may re-enter the
+        // graph (apply the config, restructure children, then ANNOUNCE per §C). The
+        // field write itself deliberately neither wakes `await` nor propagates:
+        // the property plane is silent (ADR-0021 / RFC-0010 §C).
+        if (const handlers_t& h = v->handlers(); h.on_app_field_write)
+            h.on_app_field_write(key, value);
+        return {};
+    }
+
     if (step0.name == "settings" && field.steps.size() >= 2) {
         if (!acl_allows(v, caller, acl_right_t::WRITE))  // QoS knobs are control writes
             return std::unexpected(status_t::PERMISSION_DENIED);
@@ -1119,6 +1197,31 @@ result_t<view_t> graph_t::read_schema(vertex_t* v) const {
     wire::emit_tlv(point_body, type_t::SETTINGS, opt_t{.pl = true},
                    settings_children);  // SETTINGS
 
+    // The owner part (RFC-0010 §B.2), present iff a descriptor table is installed —
+    // `NAME "app" SETTINGS{ NAME <field> SETTINGS{…} … }` appended AFTER the synthesized
+    // protocol part (precedence by position, zero merge logic; the two parts describe
+    // disjoint namespaces by the §A.1 reservation). Each field's record leads with the
+    // runtime-projected `access` member — the one §B.1 datum the runtime holds natively,
+    // so the schema can never contradict the write gate — then the owner's descriptor
+    // bytes verbatim. A vertex without a table keeps today's POINT byte-for-byte.
+    const std::vector<app_field_t> table = v->app_fields_snapshot();
+    if (!table.empty()) {
+        std::vector<std::byte> app_children;
+        for (const app_field_t& f : table) {
+            std::vector<std::byte> desc;
+            wire::emit_name(desc, "access");
+            const std::string_view a = to_string(f.access);
+            wire::emit_tlv(
+                desc, type_t::VALUE, opt_t{},
+                std::span<const std::byte>(reinterpret_cast<const std::byte*>(a.data()), a.size()));
+            desc.insert(desc.end(), f.descriptor.begin(), f.descriptor.end());
+            wire::emit_name(app_children, f.name);
+            wire::emit_tlv(app_children, type_t::SETTINGS, opt_t{.pl = true}, desc);
+        }
+        wire::emit_name(point_body, "app");
+        wire::emit_tlv(point_body, type_t::SETTINGS, opt_t{.pl = true}, app_children);
+    }
+
     std::vector<std::byte> point;
     wire::emit_tlv(point, type_t::POINT, opt_t{.pl = true}, point_body);  // POINT
 
@@ -1127,6 +1230,62 @@ result_t<view_t> graph_t::read_schema(vertex_t* v) const {
     const auto out = view::over_bytes(point);
     if (!out) return std::unexpected(status_t::BACKPRESSURE);
     return *out;
+}
+
+result_t<view_t> graph_t::read_settings(vertex_t* v) const {
+    // The full settings container (RFC-0010 §A.4): the implemented protocol QoS knobs —
+    // in the docs/reference/05 §0x0B payload-layout order, each `NAME <knob> VALUE <int>`
+    // — plus the nested `app` record iff a descriptor table is installed. One traversal
+    // serves a generic settings renderer protocol knobs and app config in one record,
+    // distinguished by the reserved subkey.
+    const settings_t s = v->settings_snapshot();
+    std::vector<std::byte> children;
+    wire::emit_name(children, "reliability");
+    emit_value(children, s.reliability, 1);
+    wire::emit_name(children, "durability");
+    emit_value(children, s.durability, 1);
+    wire::emit_name(children, "history_keep_last");
+    emit_value(children, s.history_keep_last, 4);
+    wire::emit_name(children, "deadline_ns");
+    emit_value(children, s.deadline_ns, 8);
+    wire::emit_name(children, "priority");
+    emit_value(children, s.priority, 1);
+    wire::emit_name(children, "queue_max_bytes");
+    emit_value(children, s.queue_max_bytes, 4);
+    wire::emit_name(children, "store_ref_min_bytes");
+    emit_value(children, s.store_ref_min_bytes, 4);
+    const std::vector<app_field_t> table = v->app_fields_snapshot();
+    if (!table.empty()) {
+        std::vector<std::byte> app_children;
+        emit_app_container(app_children, table);
+        wire::emit_name(children, "app");
+        wire::emit_tlv(children, type_t::SETTINGS, opt_t{.pl = true}, app_children);
+    }
+    std::vector<std::byte> out;
+    wire::emit_tlv(out, type_t::SETTINGS, opt_t{.pl = true}, children);
+    // `out` is non-empty by construction; `nullopt` is exactly an alloc failure
+    // → BACKPRESSURE (the audited alloc/copy/over locus).
+    const auto res = view::over_bytes(out);
+    if (!res) return std::unexpected(status_t::BACKPRESSURE);
+    return *res;
+}
+
+result_t<view_t> graph_t::read_settings_app(vertex_t* v) const {
+    // The app container alone (RFC-0010 §A.4). No installed table ⇒ the surface stays
+    // closed (SCHEMA_NOT_FOUND — byte-for-byte the pre-RFC vertex); an installed table
+    // serves the declared, non-`wo`, value-holding fields verbatim (possibly an empty
+    // SETTINGS when nothing has been written yet).
+    const std::vector<app_field_t> table = v->app_fields_snapshot();
+    if (table.empty()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    std::vector<std::byte> children;
+    emit_app_container(children, table);
+    std::vector<std::byte> out;
+    wire::emit_tlv(out, type_t::SETTINGS, opt_t{.pl = true}, children);
+    // `out` is non-empty by construction (the SETTINGS header at minimum); `nullopt` is
+    // exactly an alloc failure → BACKPRESSURE (the audited alloc/copy/over locus).
+    const auto res = view::over_bytes(out);
+    if (!res) return std::unexpected(status_t::BACKPRESSURE);
+    return *res;
 }
 
 result_t<view_t> graph_t::read_acl(vertex_t* v) const {
@@ -1187,6 +1346,36 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
         if (!acl_allows(v, caller, acl_right_t::READ))
             return std::unexpected(status_t::PERMISSION_DENIED);
         if (field.steps.size() == 1 && field.steps[0].name == "schema") return read_schema(v);
+        if (field.steps[0].name == "settings" && plain_step(field.steps[0])) {
+            // The RFC-0010 §A.4 read surfaces. Bare ":settings" — the full container
+            // (protocol knobs + the nested app record); ":settings.app" — the app
+            // container alone; ":settings.app.<name…>" — one declared field's stored
+            // TLV verbatim. Per-knob protocol reads (":settings.deadline_ns") remain
+            // unimplemented and fall through to SCHEMA_NOT_FOUND, as before.
+            if (field.steps.size() == 1) return read_settings(v);
+            if (field.steps[1].name == "app" && plain_step(field.steps[1])) {
+                if (field.steps.size() == 2) return read_settings_app(v);
+                const std::string key = app_field_key(field);
+                if (key.empty()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+                std::vector<std::byte> bytes;
+                switch (v->app_field_get(key, bytes)) {
+                    case vertex_t::app_read_t::UNDECLARED:  // ENOTTY (undeclared) …
+                    case vertex_t::app_read_t::WRITE_ONLY:  // … and `wo` has no read
+                        // surface either (the secret never mirrors back) — the same
+                        // caller-independent identity, deliberately indistinguishable.
+                        return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+                    case vertex_t::app_read_t::UNSET:  // declared but empty — distinct
+                        return std::unexpected(status_t::NOT_FOUND);
+                    case vertex_t::app_read_t::OK:
+                        break;
+                }
+                // `bytes` is a non-empty stored TLV; `nullopt` is exactly an alloc
+                // failure → BACKPRESSURE (the audited alloc/copy/over locus).
+                const auto out = view::over_bytes(bytes);
+                if (!out) return std::unexpected(status_t::BACKPRESSURE);
+                return *out;
+            }
+        }
         // ":children[]" (or bare ":children") — member enumeration, the read dual of
         // the SPEC-creating append. A single "[N]" slot has no meaning here (members
         // are named, not indexed) and falls through to SCHEMA_NOT_FOUND.

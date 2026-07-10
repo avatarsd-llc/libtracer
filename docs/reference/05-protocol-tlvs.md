@@ -399,8 +399,31 @@ Subscribers and children appear as direct children of POINT, identified by their
 
 - Returned by `read("/some/parent")` to enumerate children.
 - **Written to a vertex as a branch write** (below) — the write-side dual of the snapshot.
+- Returned by `read(<vertex>:schema)` — the **two-part schema read** (below).
 - Used by the future recorder/replay module to snapshot vertex state.
 - Used by discovery modules announcing exported vertex trees.
+
+### The `:schema` read — two parts, defined precedence ([RFC-0010](../spec/rfcs/0010-owner-app-fields-and-schema.md) §B.2)
+
+`read <vertex>:schema` serves one POINT holding the **synthesized protocol part** and — iff the owner installed a field descriptor table — the **owner part**, appended verbatim:
+
+```
+POINT (PL=1) {
+  NAME      <vertex name>            ; as today
+  SETTINGS  <protocol part>          ; synthesized by the runtime — authoritative for
+                                     ; protocol fields; the owner part is never consulted
+  NAME "app"  SETTINGS (PL=1) {      ; owner part — present iff a table is installed
+    NAME <field-name>  SETTINGS (PL=1) {
+      NAME "access" VALUE <"ro"|"rw"|"wo">  ; runtime-projected from the table — the one
+                                            ; member the runtime owns (it cannot be lied about)
+      <owner descriptor bytes, verbatim>    ; SHOULD-level vocabulary: dtype/unit/min/max/label…
+    }
+    ...
+  }
+}
+```
+
+Precedence is by position, with zero merge logic: the two parts describe disjoint namespaces (flat protocol knobs vs the reserved `app` subtree, §`0x0B`), so a name collision cannot occur by construction. A vertex without a table serves the pre-RFC POINT byte-for-byte.
 
 ### Branch write — decomposition ([RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md))
 
@@ -607,11 +630,15 @@ SETTINGS (PL=1) {
   NAME "queue_max_bytes"   VALUE <u32>
   ; module-namespaced fields use a nested SETTINGS:
   NAME "transport_tcp"     SETTINGS (PL=1) { NAME "send_buf_kb" VALUE <u32> ... }
+  ; the application's own fields use the same shape under the RESERVED key `app`:
+  NAME "app"               SETTINGS (PL=1) { NAME <owner-defined> <owner-defined TLV> ... }
   ...
 }
 ```
 
 Nested SETTINGS for module namespacing (instead of an unnamed structured wrapper) keeps the type byte semantically meaningful at every level.
+
+**The `app` key is reserved** ([RFC-0010](../spec/rfcs/0010-owner-app-fields-and-schema.md) §A.1): the protocol MUST never mint a QoS or machinery knob named `app`, and implementations MUST NOT accept `settings.app` as a protocol knob. Everything below `settings.app.` is **owner-defined** — names, nesting (the module-namespacing shape above), and value bytes are the application's, opaque to the runtime. Fields there are writable only where the owner's field descriptor table declares them (`ro`/`rw`/`wo`); undeclared names return `ERROR{tr::schema::not_found}` on read and write. One reservation, collision-proof both ways: the protocol keeps minting flat knob names forever; applications only ever mint below `.app.`.
 
 ### Header settings
 
@@ -619,8 +646,9 @@ Nested SETTINGS for module namespacing (instead of an unnamed structured wrapper
 
 ### Where it appears
 
-- `<vertex>:settings` for atomic multi-field reads/writes.
+- `<vertex>:settings` for atomic multi-field reads/writes; a bare `:settings` read serves the full container — the protocol knobs plus the nested `app` record when a descriptor table is installed — and `:settings.app` serves the app record alone ([RFC-0010](../spec/rfcs/0010-owner-app-fields-and-schema.md) §A.4).
 - Inside SUBSCRIBER as the `qos_settings` sub-field for per-subscription overrides.
+- Inside the `:schema` POINT (§`0x07`): the synthesized protocol part, and one `SETTINGS` per declared app field inside the owner part.
 
 ### Validation
 
