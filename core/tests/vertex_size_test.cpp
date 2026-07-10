@@ -43,12 +43,11 @@ void require(bool ok, const char* what) {
     }
 }
 
-/** @brief The 64-bit hot-core ceiling (measured 144 B post-packing — descending-alignment
- *         member groups + byte-wide role_t; 168 B post-§3, 160 post-§2, 248 post-§1,
- *         536 pre-split). */
-constexpr std::size_t kMax64 = 152;
+/** @brief The 64-bit hot-core ceiling (measured 112 B post-#380-§1 children collapse;
+ *         144 post-packing, 168 post-§3, 160 post-§2, 248 post-§1, 536 pre-split). */
+constexpr std::size_t kMax64 = 120;
 /** @brief The 32-bit (MCU target) hot-core ceiling — pointer-halved with the same headroom. */
-constexpr std::size_t kMax32 = 96;
+constexpr std::size_t kMax32 = 72;
 
 static_assert(sizeof(void*) != 8 || sizeof(vertex_t) <= kMax64,
               "vertex_t grew past the 64-bit RAM-diet gate (#361) — move the new member "

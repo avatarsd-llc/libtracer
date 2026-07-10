@@ -14,6 +14,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **Vertex child storage collapsed to one lazily-allocated sorted list (#380 §1)** —
+  a leaf (the common MCU vertex) now pays exactly one null pointer for child
+  storage instead of 40 B of inline slots + spill vector; `sizeof(vertex_t)`
+  112 B (144 post-#377). `vertex_t::kInlineChildren` is removed; child
+  enumeration (`for_each_child`, `:children[]` listings) is now always in
+  sorted name-record order (previously insertion order for ≤2 children).
+
 - **Stripe-lock hot path recovered to pre-stripe latency (#370)** — the #361 §2
   striped locks had cost ~10 ns on the 1:1 write. The stripe table is now
   `constinit` (guard-free lookup: `vertex_stripes` / `vertex_stripe_index`), the
