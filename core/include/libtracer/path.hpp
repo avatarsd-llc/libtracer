@@ -166,16 +166,12 @@ class path_key_t {
         return *this;
     }
     /** @brief Take over @p o's bytes (and spill block, if any); @p o reads empty after. */
-    path_key_t(path_key_t&& o) noexcept {
-        std::memcpy(this, &o, sizeof(*this));  // trivially relocatable: raw storage + len
-        o.len_ = 0;                            // the moved-from key reads empty, owns nothing
-    }
+    path_key_t(path_key_t&& o) noexcept { take(o); }
     /** @brief Release this key's bytes and take over @p o's; @p o reads empty after. */
     path_key_t& operator=(path_key_t&& o) noexcept {
         if (this != &o) {
             release();
-            std::memcpy(this, &o, sizeof(*this));
-            o.len_ = 0;
+            take(o);
         }
         return *this;
     }
@@ -207,6 +203,16 @@ class path_key_t {
     /** @brief Free the spill block if this key owns one. */
     void release() noexcept {
         if (len_ > kInlineBytes) delete[] heap_;
+    }
+    /** @brief Move @p o's storage into this key (which must own nothing); member-wise —
+     *         a whole-object memcpy trips -Werror=class-memaccess on the ESP-IDF gcc. */
+    void take(path_key_t& o) noexcept {
+        len_ = o.len_;
+        if (len_ > kInlineBytes)
+            heap_ = o.heap_;
+        else if (len_ != 0)
+            std::memcpy(inline_, o.inline_, len_);  // a trivial byte array — memcpy is fine
+        o.len_ = 0;                                 // the moved-from key reads empty, owns nothing
     }
 
     union {
