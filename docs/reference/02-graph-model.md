@@ -14,7 +14,7 @@
 
 - **Path**: an ordered list of UTF-8 NAME segments rooted at `/`, addressing a vertex (or a field on a vertex). Syntax in [03-addressing.md](03-addressing.md).
 
-- **Schema**: a structured TLV (typically a `POINT` or a `SETTINGS`-shaped record) returned at `<vertex>:schema`, enumerating the writable fields the vertex exposes. Includes the core fields (`:subscribers[]`, `:settings.*`, `:liveness.*`, `:acl`) plus any module-namespaced fields. Read-only.
+- **Schema**: a structured TLV (typically a `POINT` or a `SETTINGS`-shaped record) returned at `<vertex>:schema`, enumerating the writable fields the vertex exposes. Two parts with defined precedence ([RFC-0010](../spec/rfcs/0010-owner-app-fields-and-schema.md) §B.2): a **synthesized protocol part** — the core fields (`:subscribers[]`, `:settings.*`, `:liveness.*`, `:acl`) plus any module-namespaced fields, authoritative for protocol machinery — and, when the owner installed a field descriptor table, an **owner part** (`NAME "app" SETTINGS{…}`) served verbatim, authoritative for `settings.app.*`. Read-only.
 
 - **Forwarder** (router): the stateless component (`fwd_router_t`) that routes `FWD` frames between a node's local graph and its named transport links — each hop strips the leading `dst` segment and grows `src` with the way back. To a downstream subscriber a forwarded delivery is indistinguishable from a local write.
 
@@ -382,12 +382,24 @@ A vertex exposes a **schema** describing every writable field. The schema lives 
 | `:settings.deadline_ns` | u64 | yes | Max time between writes before liveness fault |
 | `:settings.priority` | u8 | yes | `0=low ... 255=critical` (transport hint) |
 | `:settings.queue_max_bytes` | u32 | yes | Per-subscriber queue cap (back-pressure threshold) |
+| `:settings.app.<name…>` | owner-defined TLV | owner-declared (`ro`/`rw`/`wo`) | Application property field ([RFC-0010](../spec/rfcs/0010-owner-app-fields-and-schema.md)): declared by the vertex owner in its field descriptor table; undeclared names stay `SCHEMA_NOT_FOUND` |
 | `:liveness.heartbeat_hz` | u8 | yes | Subscriber heartbeat rate; 0 = no liveness check |
 | `:liveness.last_seen_ns` | u64 | read-only | Wall-clock of last write observed |
 | `:liveness.missed_deadlines` | u32 | read-only | Counter |
 | `:schema` | structured TLV | read-only | Self-describing schema of fields and types |
 | `:description` | UTF-8 | yes (with permission) | Human-readable description |
 | `:acl` | ACL | yes (with permission) | Access control list |
+
+### Owner-declared application fields (`settings.app`) — RFC-0010
+
+The `app` key is **reserved inside the vertex `SETTINGS` namespace** ([05 §`0x0B`](05-protocol-tlvs.md)): the protocol MUST never mint a QoS or machinery knob named `app`, and everything below `settings.app.` is **owner-defined** — names, nesting, and value bytes are the application's, opaque to the runtime. This is the substrate for the device-private half of the field discipline ([ADR-0021](../adr/0021-vertex-field-list-with-standard-and-device-specific-fields.md) rule 3: fields are standard *and* device-private, like ioctls; the device owns the catalog of what each field accepts):
+
+- **Declaration is owner-initiated and local** ([RFC-0010](../spec/rfcs/0010-owner-app-fields-and-schema.md) §A.2, the [RFC-0009](../spec/rfcs/0009-vertex-removal-and-subscriber-eviction.md) §A.1 doctrine): the owner installs, through the local host API, a per-vertex **field descriptor table** — `{ name, access ∈ {ro, rw, wo}, descriptor bytes, initial value? }` per field. There is **no wire operation that declares a field**; a remote peer writes declared fields, never invents them. Undeclared names — under `settings.app.` and everywhere else — keep `SCHEMA_NOT_FOUND` (the `ENOTTY` default survives; the table opens only the holes the owner named).
+- **Writes**: the owner always reads and writes its own declared fields (`ro`/`wo` constrain remote callers). A caller-attributed write is admitted iff the field is declared `rw`/`wo` — otherwise `SCHEMA_NOT_FOUND`, caller-independent, before any ACL evaluation — and the caller holds the ordinary WRITE right on the vertex (otherwise `tr::access::denied`). The value is stored **verbatim**: the runtime performs no dtype/range validation against the descriptor (self-description for consumers; semantic validation is the owner's, in its apply step). Field writes to a nonexistent vertex do not create it.
+- **Reads**: a declared field serves its stored TLV verbatim, gated by the vertex READ right. A `wo` field has **no read surface** (`SCHEMA_NOT_FOUND` — a secret never mirrors back). A declared field never written reads `NOT_FOUND` (distinct from undeclared) and is omitted from container reads. `read <v>:settings.app` serves the app container; `read <v>:settings` serves the full settings container — protocol knobs and the nested `app` record in one traversal.
+- **Storage**: a declared field's value is a **bare TLV riding the vertex** — no subscriber list, no ACL slot, no vertex-map entry; cost = its bytes plus one table slot. A config datum that genuinely needs independent subscribers is **promoted to a child vertex** (field promotion, [CONTEXT.md](../../CONTEXT.md)) — that trade is the schema author's, per datum.
+
+**Change notification — the announce-write convention** ([RFC-0010](../spec/rfcs/0010-owner-app-fields-and-schema.md) §C). A field write — protocol or app, local or remote — does **not** wake `await`, does **not** advance the vertex's write sequence, and does **not** propagate along subscription edges: the property plane is silent by design. A property change consumers should notice is followed by an ordinary **announce write at the vertex** — the owner assigns + propagates once the change is actually applied (for a remote app-field write, in its apply handler; the graph never announces on the writer's behalf). Subscribers receive one ordinary delivery and re-read the property tree if they care which knob moved. Consumers MUST NOT poll fields for change detection and MUST NOT expect per-field wakeups.
 
 ### Stale and invalid values
 
@@ -414,13 +426,14 @@ Watching a parent's child set change (devices appearing, a scanner discovering a
 A transport module like `transport_tcp` MAY add per-subscriber settings such as `:subscribers[N].settings.transport_tcp.send_buf_kb`. Rules:
 
 - Module fields MUST live under their own module name (here, `transport_tcp`).
+- The name `app` inside vertex `SETTINGS` is **reserved for the application** ([RFC-0010](../spec/rfcs/0010-owner-app-fields-and-schema.md) §A.1): no module or future protocol knob may claim it. The application is one more namespace owner under the same nesting shape; `app` is its name.
 - Module names MUST match the module's directory in `libtracer/modules/` for the reference implementation; cross-implementation module-name uniqueness is a registry concern.
 - Module fields MUST appear in the vertex's `:schema` output if they apply to that vertex.
 - Reading a module field on a vertex where that module is not active returns `ERROR{tr::schema::not_found}`.
 
 ### The graph imposes no shape
 
-A vertex's writable fields are **whatever the schema says**. The protocol specifies a small set of mandatory core fields and a namespacing rule for extensions; it does NOT specify:
+A vertex's writable fields are **whatever the schema says** — for the application namespace, whatever the owner's field descriptor table declares ([RFC-0010](../spec/rfcs/0010-owner-app-fields-and-schema.md) §B: the table *is* the app part of the schema, so the two cannot drift). The protocol specifies a small set of mandatory core fields and a namespacing rule for extensions; it does NOT specify:
 
 - How many subscribers a vertex may have.
 - How many child vertices a parent vertex may have.
