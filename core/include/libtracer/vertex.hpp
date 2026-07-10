@@ -184,6 +184,24 @@ struct app_field_table_t {
 };
 
 /**
+ * @brief The lazily-allocated APP-FIELD group of the extension block (ADR-0058 Step 2):
+ *        the RFC-0010 descriptor table plus its owner apply seam, together.
+ *
+ * `on_app_field_write` co-occurs with the field table (it is the table's apply seam), NOT
+ * with the value seam of a HANDLER-role vertex — so it lives here, not in
+ * @ref value_handlers_t. A vertex with no app fields and no apply seam keeps this group
+ * null and pays neither the table nor the ~32 B `std::function`. Allocated on the first of
+ * either `set_app_fields*` (the table) or an `on_app_field_write` at registration; guarded
+ * by the vertex mutex, insert-only (never freed before the vertex).
+ */
+struct app_field_group_t {
+    app_field_table_t table; /**< @brief The view-slot descriptor table + lazy value store. */
+    /** @brief The owner apply seam (RFC-0010 §A.3): fires after a declared field write
+     *         stored its bytes, OUTSIDE the vertex lock. Unset ⇒ bytes just store. */
+    std::function<void(std::string_view name, const view_t& value)> on_app_field_write;
+};
+
+/**
  * @brief User behavior for a Handler-role vertex.
  *
  * `on_children` additionally applies to ANY role: when set, a read of the vertex's
@@ -209,6 +227,24 @@ struct handlers_t {
      *        metadata field).
      */
     std::function<void(std::string_view name, const view_t& value)> on_app_field_write;
+};
+
+/**
+ * @brief The internal, lazily-allocated STORAGE of a Handler-role vertex's VALUE seam
+ *        (ADR-0058 Step 2) — the three seams `handlers_t` carries minus `on_app_field_write`.
+ *
+ * Split off from the public @ref handlers_t input so a plain STORED_VALUE or app-field
+ * vertex never allocates these ~96 B of `std::function`: the value seam is HANDLER-role
+ * only (transports / connections / synthesized listings), so it lives behind a
+ * `unique_ptr` in the extension block, null for every other role. `on_app_field_write`
+ * co-occurs with app fields, not the value seam, so it moved to @ref app_field_group_t.
+ * Set once at registration (`vertex_t::adopt_identity`), read lock-free thereafter.
+ */
+struct value_handlers_t {
+    std::function<result_t<rope_t>()> on_read; /**< @brief Supplies the vertex value on read. */
+    std::function<result_t<void>(const rope_t&)>
+        on_write;                                  /**< @brief Receives the written value. */
+    std::function<result_t<view_t>()> on_children; /**< @brief Synthesized `:children[]` listing. */
 };
 
 /**
@@ -554,7 +590,10 @@ inline std::condition_variable& vertex_stripe_cv(std::size_t idx) {
  * pointer stays valid for every reader.
  */
 struct vertex_ext_t {
-    handlers_t handlers{}; /**< @brief User behavior (Handler role + the `on_children` seam). */
+    /** @brief The VALUE seam (on_read/on_write/on_children), LAZILY allocated (ADR-0058
+     *         Step 2): HANDLER-role only, so a plain leaf / app-field vertex keeps this
+     *         null and never pays the ~96 B. Set once at registration, read lock-free. */
+    std::unique_ptr<value_handlers_t> handlers;
     /** @brief STREAM ring (docs/reference/11 role 2), LAZILY allocated on the first
      *         append (#388): an empty libstdc++ `std::deque` allocates its ~512 B map
      *         node at CONSTRUCTION, which every ext-bearing vertex (handlers, app
@@ -581,11 +620,11 @@ struct vertex_ext_t {
     std::atomic<bool> acl_cache_dirty{true};
     settings_t settings{}; /**< @brief QoS settings; single-field mutation under the vertex
                                 mutex (`vertex_t::update_settings`). */
-    /** @brief The RFC-0010 field descriptor table (ADR-0058) — owner app fields under
-     *         `settings.app.`, view-slots + a lazy value store; guarded by the vertex
-     *         mutex. Empty slots ⇒ no table installed (the closed `ENOTTY` default,
-     *         including the pre-RFC synthesized `:schema` shape). */
-    app_field_table_t app_table;
+    /** @brief The RFC-0010 APP-FIELD group (ADR-0058 Step 2) — the descriptor table plus
+     *         its `on_app_field_write` apply seam, LAZILY allocated: a vertex with no app
+     *         fields and no apply seam keeps this null. Guarded by the vertex mutex,
+     *         insert-only. Null ⇒ the closed `ENOTTY` default (pre-RFC `:schema` shape). */
+    std::unique_ptr<app_field_group_t> app;
     /** @brief STREAM drain cursor (RFC-0008 §E): the write seq at the last flush, so a
      *         propagate drains only the entries appended since; guarded by the vertex
      *         mutex. */
@@ -642,10 +681,23 @@ class vertex_t {
     }
     /** @brief This vertex's user handlers (Handler role behavior + the `on_children` seam);
      *         an all-empty shared constant when no extension block. */
-    [[nodiscard]] const handlers_t& handlers() const noexcept {
-        static const handlers_t kNoHandlers{};
+    [[nodiscard]] const value_handlers_t& handlers() const noexcept {
+        static const value_handlers_t kNoHandlers{};
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        return e != nullptr ? e->handlers : kNoHandlers;
+        // The value-seam group is set once at registration (before this vertex is
+        // reachable), then insert-only — so this lock-free load of the unique_ptr is
+        // safe: no concurrent writer, the pointer value never changes after adopt.
+        return (e != nullptr && e->handlers) ? *e->handlers : kNoHandlers;
+    }
+
+    /** @brief A copy of this vertex's owner apply seam (RFC-0010 §A.3), or empty when none —
+     *         taken under the vertex lock so the caller can fire it OUTSIDE the lock (the
+     *         seam may re-enter the graph). Empty ⇒ declared field writes just store. */
+    [[nodiscard]] std::function<void(std::string_view, const view_t&)> on_app_field_write() {
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        return (e != nullptr && e->app) ? e->app->on_app_field_write
+                                        : std::function<void(std::string_view, const view_t&)>{};
     }
 
     // -- Composite tree links (ADR-0057) -------------------------------------------------
@@ -1098,7 +1150,7 @@ class vertex_t {
         app_field_table_t built = build_owning_table(std::move(table));
         vertex_ext_t& e = ensure_ext();
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        e.app_table = std::move(built);
+        install_app_table(e, std::move(built));
     }
 
     /**
@@ -1116,7 +1168,7 @@ class vertex_t {
             built.slots.push_back(app_field_slot_t{f.name, f.access, f.descriptor});
         vertex_ext_t& e = ensure_ext();
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        e.app_table = std::move(built);
+        install_app_table(e, std::move(built));
     }
 
     /** @brief The declared access of the app field @p name (`nullopt` ⇒ undeclared —
@@ -1126,7 +1178,7 @@ class vertex_t {
         vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         const std::ptrdiff_t i = find_app_slot(e, name);
         if (i < 0) return std::nullopt;
-        return e->app_table.slots[static_cast<std::size_t>(i)].access;
+        return e->app->table.slots[static_cast<std::size_t>(i)].access;
     }
 
     /**
@@ -1141,7 +1193,7 @@ class vertex_t {
         vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         const std::ptrdiff_t i = find_app_slot(e, name);
         if (i < 0) return false;
-        app_field_table_t& t = e->app_table;
+        app_field_table_t& t = e->app->table;
         // Class-③ value store: allocated on the FIRST write to any field on this vertex
         // (#389 lazy pattern) — a declared-but-never-written table never pays for it.
         if (t.values == nullptr)
@@ -1166,7 +1218,7 @@ class vertex_t {
         vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         const std::ptrdiff_t i = find_app_slot(e, name);
         if (i < 0) return app_read_t::UNDECLARED;
-        const app_field_table_t& t = e->app_table;
+        const app_field_table_t& t = e->app->table;
         const std::size_t idx = static_cast<std::size_t>(i);
         if (t.slots[idx].access == app_access_t::WO) return app_read_t::WRITE_ONLY;
         if (t.values == nullptr || (*t.values)[idx].empty()) return app_read_t::UNSET;
@@ -1180,8 +1232,8 @@ class vertex_t {
     [[nodiscard]] std::vector<app_field_t> app_fields_snapshot() {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        if (e == nullptr) return {};
-        const app_field_table_t& t = e->app_table;
+        if (e == nullptr || e->app == nullptr) return {};
+        const app_field_table_t& t = e->app->table;
         std::vector<app_field_t> out;
         out.reserve(t.slots.size());
         // Materialise an OWNING copy under the lock (ADR-0058): the resident table is
@@ -1277,11 +1329,22 @@ class vertex_t {
      *         owner's table is small (RFC-0010 targets MCU vertices), field ops are
      *         control-plane. */
     [[nodiscard]] static std::ptrdiff_t find_app_slot(vertex_ext_t* e, std::string_view name) {
-        if (e == nullptr) return -1;
-        const std::vector<app_field_slot_t>& slots = e->app_table.slots;
+        if (e == nullptr || e->app == nullptr) return -1;
+        const std::vector<app_field_slot_t>& slots = e->app->table.slots;
         for (std::size_t i = 0; i < slots.size(); ++i)
             if (slots[i].name == name) return static_cast<std::ptrdiff_t>(i);
         return -1;
+    }
+
+    /** @brief Install @p built as this vertex's descriptor table (ADR-0058 Step 2). Call
+     *         with the stripe lock held. Allocates the lazy app-field group iff needed —
+     *         an empty table on a vertex with no group is a no-op (nothing to uninstall),
+     *         so a group is never created just to hold an empty table; an existing group's
+     *         `on_app_field_write` apply seam is preserved across a table replacement. */
+    void install_app_table(vertex_ext_t& e, app_field_table_t built) {
+        if (built.slots.empty() && e.app == nullptr) return;
+        if (e.app == nullptr) e.app = std::make_unique<app_field_group_t>();
+        e.app->table = std::move(built);
     }
 
     /** @brief Pack an owning @p table into one @ref app_field_table_t (ADR-0058): the
@@ -1357,7 +1420,17 @@ class vertex_t {
             return;
         vertex_ext_t& e = ensure_ext();
         e.settings = settings;
-        e.handlers = std::move(handlers);
+        // Split the public input into its two lazy groups (ADR-0058 Step 2): the value
+        // seam only when one of its three is set; the app-field group's apply seam only
+        // when given. Registration is single-threaded for this vertex, so no lock here.
+        if (handlers.on_read || handlers.on_write || handlers.on_children)
+            e.handlers = std::make_unique<value_handlers_t>(
+                value_handlers_t{std::move(handlers.on_read), std::move(handlers.on_write),
+                                 std::move(handlers.on_children)});
+        if (handlers.on_app_field_write) {
+            if (e.app == nullptr) e.app = std::make_unique<app_field_group_t>();
+            e.app->on_app_field_write = std::move(handlers.on_app_field_write);
+        }
     }
 
     // Members are laid out in descending-alignment groups (#361 diet: zero interior

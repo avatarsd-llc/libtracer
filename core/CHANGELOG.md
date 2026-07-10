@@ -27,6 +27,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`vertex_ext_t` value-seam handlers and app-field table are now lazily-allocated
+  groups (#388, ADR-0058 Step 2)** — the value seam (`on_read`/`on_write`/
+  `on_children`) moved behind a `std::unique_ptr<value_handlers_t>` (HANDLER-role
+  only) and the RFC-0010 table + its `on_app_field_write` apply seam behind a
+  `std::unique_ptr<app_field_group_t>`. A plain STORED_VALUE or app-field-only
+  vertex no longer pays the ~96 B of value-seam `std::function`s the extension
+  block carried inline for every role. `on_app_field_write` moved out of the
+  stored handler block into the app-field group (it co-occurs with the table, not
+  the value seam); the public `handlers_t` install input is unchanged (still its
+  four seams — `graph_t::register_vertex` splits them). `acl`, `settings`, and
+  `history`/`last_flushed_seq` stay inline (the effective-ACL cache is stored per
+  gated vertex, so the ACL group is not sheddable — see ADR-0058). Behaviour and
+  wire output unchanged.
+
 - **RFC-0010 app-field storage is now view-slots + a lazy value store (#388,
   ADR-0058)** — the resident table dropped from an owning `std::vector<app_field_t>`
   (each ≈ 88 B, plus a per-field descriptor allocation) to a `std::vector` of
