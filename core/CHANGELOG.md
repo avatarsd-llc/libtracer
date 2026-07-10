@@ -27,6 +27,25 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **RFC-0010 owner app fields — the field descriptor table, `:settings.app.*`, and
+  the two-part `:schema`.** New types `app_access_t` / `app_field_t` and the owner
+  declaration API `graph_t::set_app_fields(vertex_handle_t, std::vector<app_field_t>)`
+  (mirrored by `vertex_t::set_app_fields` and the `app_field_access` /
+  `app_field_store` / `app_field_get` / `app_fields_snapshot` verbs on the #338 seam).
+  `field_write` admits declared `:settings.app.<name…>` writes (owner always; remote
+  callers per the declared `ro`/`rw`/`wo` access, then the vertex WRITE right — the
+  RFC's gate order); reads serve stored bytes verbatim (`wo` has no read surface;
+  declared-but-unset reads `NOT_FOUND`); undeclared names keep `SCHEMA_NOT_FOUND`.
+  New read surfaces: bare `:settings` (protocol knobs + nested `app` record) and
+  `:settings.app` (the app container). `read :schema` appends the owner part —
+  `NAME "app" SETTINGS{…}` with the runtime-projected `access` member leading each
+  field's descriptor, owner bytes verbatim. `handlers_t` gained the owner apply seam
+  `on_app_field_write(name, value)`, fired outside the vertex lock after the store.
+  Field writes still never wake `await` and never propagate (the RFC-0010 §C
+  announce-write convention). Storage rides the lazy cold block: `sizeof(vertex_t)`
+  unchanged (168 B x86-64, gate 192/128 holds); `vertex_ext_t` +56 B, and a leaf
+  with no app fields (and no other ext trigger) still allocates nothing.
+
 - **`graph_t` now takes an ADR-0039 §1 injected `std::pmr::memory_resource*`
   (#361 §5)** — `graph_t(mr)`, defaulting to `std::pmr::get_default_resource()`
   (zero churn for existing callers). Every `assign`'s LKV allocation (control
