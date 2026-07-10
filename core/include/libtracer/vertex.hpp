@@ -28,6 +28,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -80,6 +81,56 @@ struct settings_t {
 inline constexpr settings_t kDefaultSettings{};
 
 /**
+ * @brief Owner-declared REMOTE writability of one application property field (RFC-0010
+ *        §A.2): what a caller-attributed field write/read may do. The OWNER — a local,
+ *        caller-less host API call — always reads and writes its own declared fields;
+ *        `ro`/`wo` constrain remote callers only.
+ */
+enum class app_access_t : std::uint8_t {
+    RO = 0, /**< @brief Remote read only — a remote write has no surface (`SCHEMA_NOT_FOUND`). */
+    RW = 1, /**< @brief Remote read + write (a write still passes the vertex WRITE gate). */
+    WO = 2, /**< @brief Remote write only — no read surface: a secret never mirrors back. */
+};
+
+/** @brief The stable `:schema` spelling of an @ref app_access_t (`"ro"` / `"rw"` / `"wo"`). */
+[[nodiscard]] constexpr std::string_view to_string(app_access_t a) noexcept {
+    switch (a) {
+        case app_access_t::RO:
+            return "ro";
+        case app_access_t::RW:
+            return "rw";
+        case app_access_t::WO:
+            return "wo";
+    }
+    return "ro";
+}
+
+/**
+ * @brief One entry of a vertex's field descriptor table (RFC-0010 §A.2/§B): declaration,
+ *        remote-writability, self-description, and current value of ONE application field
+ *        under `:settings.app.` — one record, so the schema can never drift from the gate.
+ *
+ * The value and descriptor bytes are OPAQUE to the runtime (stored and served verbatim,
+ * the `set_acl`/`acl_bytes` store-verbatim pattern): dtype/range validation is the
+ * owner's, in its apply seam (@ref handlers_t::on_app_field_write) — the runtime
+ * validates only addressing (declared / undeclared, writability): one table lookup.
+ */
+struct app_field_t {
+    /** @brief The field's key below `settings.app.` — a `.`-joined spelling of the field
+     *         steps (`"kp"`, `"wifi.ssid"`); the runtime keys the joined string flat. */
+    std::string name{};
+    app_access_t access = app_access_t::RO; /**< @brief Owner-declared remote writability. */
+    /** @brief The §B.1 descriptor record members (dtype/unit/min/max/label…, concatenated
+     *         child TLVs) served inside this field's `:schema` entry VERBATIM, after the
+     *         runtime-projected `access` member. Never parsed by the runtime. */
+    std::vector<std::byte> descriptor{};
+    /** @brief The field's current TLV bytes, stored and served verbatim (§D). Empty ⇒
+     *         never written (reads `NOT_FOUND`; omitted from container reads). An install
+     *         MAY carry an initial value here. */
+    std::vector<std::byte> value{};
+};
+
+/**
  * @brief User behavior for a Handler-role vertex.
  *
  * `on_children` additionally applies to ANY role: when set, a read of the vertex's
@@ -95,6 +146,16 @@ struct handlers_t {
     std::function<result_t<void>(const rope_t&)>
         on_write;                                  /**< @brief Receives the written value. */
     std::function<result_t<view_t>()> on_children; /**< @brief Synthesized `:children[]` listing. */
+    /**
+     * @brief The owner apply seam (RFC-0010 §A.3): fires after a declared
+     *        `:settings.app.<name>` field write stored its bytes, with the field's key
+     *        (below `settings.app.`) and the written TLV — OUTSIDE the vertex lock, so it
+     *        may re-enter the graph (apply the config, restructure children, then ANNOUNCE
+     *        the change with an ordinary data write per §C — the field write itself never
+     *        wakes `await` and never propagates). Unset ⇒ the bytes just store (a passive
+     *        metadata field).
+     */
+    std::function<void(std::string_view name, const view_t& value)> on_app_field_write;
 };
 
 /**
@@ -441,6 +502,11 @@ struct vertex_ext_t {
     std::atomic<bool> acl_cache_dirty{true};
     settings_t settings{}; /**< @brief QoS settings; single-field mutation under the vertex
                                 mutex (`vertex_t::update_settings`). */
+    /** @brief The RFC-0010 field descriptor table — owner app fields under
+     *         `settings.app.`, in owner install order; guarded by the vertex mutex.
+     *         Empty ⇒ no table installed (the closed `ENOTTY` default, including the
+     *         pre-RFC synthesized `:schema` shape). */
+    std::vector<app_field_t> app_fields;
     /** @brief STREAM drain cursor (RFC-0008 §E): the write seq at the last flush, so a
      *         propagate drains only the entries appended since; guarded by the vertex
      *         mutex. */
@@ -957,6 +1023,80 @@ class vertex_t {
                     static_cast<const std::vector<ace_t>&>(e.eff_aces_inherit));
     }
 
+    // -- application property fields (RFC-0010) ------------------------------------------
+
+    /**
+     * @brief Install (or replace) the field descriptor table — the OWNER naming the holes
+     *        in the closed `ENOTTY` default (RFC-0010 §A.2), one more store-verbatim verb
+     *        on this seam (the `set_acl` pattern).
+     *
+     * Replacement takes effect atomically with respect to concurrent field operations on
+     * this vertex (one lock hold). An empty @p table uninstalls — the vertex reverts to
+     * the closed surface, including the pre-RFC synthesized `:schema` shape — and, on a
+     * vertex that never had an extension block, allocates nothing (#361 §1: a leaf with
+     * no app fields pays nothing).
+     */
+    void set_app_fields(std::vector<app_field_t> table) {
+        if (table.empty() && ext_.load(std::memory_order_acquire) == nullptr) return;
+        vertex_ext_t& e = ensure_ext();
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        e.app_fields = std::move(table);
+    }
+
+    /** @brief The declared access of the app field @p name (`nullopt` ⇒ undeclared —
+     *         the graph's `SCHEMA_NOT_FOUND`). */
+    [[nodiscard]] std::optional<app_access_t> app_field_access(std::string_view name) {
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        const app_field_t* f = find_app_field(ext_.load(std::memory_order_acquire), name);
+        if (f == nullptr) return std::nullopt;
+        return f->access;
+    }
+
+    /**
+     * @brief Store @p bytes verbatim into the DECLARED app field @p name (RFC-0010 §D —
+     *        bytes in, bytes out; no dtype/range validation, the descriptor is consumer
+     *        self-description).
+     * @return false iff @p name is not declared (e.g. a concurrent table replacement
+     *         removed it between the caller's gate and this store).
+     */
+    bool app_field_store(std::string_view name, std::span<const std::byte> bytes) {
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        app_field_t* f = find_app_field(ext_.load(std::memory_order_acquire), name);
+        if (f == nullptr) return false;
+        f->value.assign(bytes.begin(), bytes.end());
+        return true;
+    }
+
+    /** @brief One app-field read outcome — the graph maps these onto the RFC-0002
+     *         identities (`SCHEMA_NOT_FOUND` / `NOT_FOUND`). */
+    enum class app_read_t {
+        UNDECLARED, /**< @brief No such field in the table (or no table) — `ENOTTY`. */
+        WRITE_ONLY, /**< @brief Declared `wo` — no read surface (RFC-0010 §A.4). */
+        UNSET,      /**< @brief Declared but never written and no initial value. */
+        OK,         /**< @brief Value copied out. */
+    };
+
+    /** @brief Read the app field @p name into @p out (the stored TLV bytes, verbatim);
+     *         @p out is written only on @ref app_read_t::OK. */
+    [[nodiscard]] app_read_t app_field_get(std::string_view name, std::vector<std::byte>& out) {
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        const app_field_t* f = find_app_field(ext_.load(std::memory_order_acquire), name);
+        if (f == nullptr) return app_read_t::UNDECLARED;
+        if (f->access == app_access_t::WO) return app_read_t::WRITE_ONLY;
+        if (f->value.empty()) return app_read_t::UNSET;
+        out = f->value;
+        return app_read_t::OK;
+    }
+
+    /** @brief A consistent copy of the whole descriptor table, in install order — the
+     *         container-read / `:schema` snapshot (control-plane cold; empty ⇒ no table
+     *         installed). */
+    [[nodiscard]] std::vector<app_field_t> app_fields_snapshot() {
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        return e != nullptr ? e->app_fields : std::vector<app_field_t>{};
+    }
+
     // -- settings & propagation policy --------------------------------------------------
 
     /** @brief A consistent copy of the QoS settings (taken under the vertex lock;
@@ -1027,6 +1167,16 @@ class vertex_t {
                            s.return_route, s.delivery_compact, s.caller};
     }
 
+    /** @brief The descriptor-table entry named @p name, or `nullptr` (no table entry / no
+     *         extension block). Call with the stripe lock held. Linear: an owner's table
+     *         is small (RFC-0010 targets MCU vertices), and field ops are control-plane. */
+    [[nodiscard]] static app_field_t* find_app_field(vertex_ext_t* e, std::string_view name) {
+        if (e == nullptr) return nullptr;
+        for (app_field_t& f : e->app_fields)
+            if (f.name == name) return &f;
+        return nullptr;
+    }
+
     /**
      * @brief The extension block, creating it on first need (race-free CAS publish).
      *
@@ -1054,7 +1204,8 @@ class vertex_t {
      *        A plain default leaf allocates nothing (#361 §1).
      */
     void adopt_identity(role_t role, const settings_t& settings, handlers_t handlers) {
-        const bool has_handlers = handlers.on_read || handlers.on_write || handlers.on_children;
+        const bool has_handlers = handlers.on_read || handlers.on_write ||
+                                  handlers.on_children || handlers.on_app_field_write;
         if (role != role_t::STREAM && !has_handlers && settings == kDefaultSettings &&
             ext_.load(std::memory_order_acquire) == nullptr)
             return;
