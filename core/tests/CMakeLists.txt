@@ -204,6 +204,13 @@ target_compile_definitions(graph_test PRIVATE
     LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME graph COMMAND graph_test)
 
+# RFC-0010 - owner app fields: the field descriptor table, `:settings.app.*` gating,
+# the two-part `:schema`, container reads, and the announce-write convention.
+add_executable(app_fields_test app_fields_test.cpp)
+target_link_libraries(app_fields_test PRIVATE libtracer)
+libtracer_test_warnings(app_fields_test)
+add_test(NAME app_fields COMMAND app_fields_test)
+
 # RFC-0004 / ADR-0035 slice 2 — local FWD operation resolution + zero-copy FWD{REPLY}.
 add_executable(op_resolve_test op_resolve_test.cpp)
 target_link_libraries(op_resolve_test PRIVATE libtracer)
