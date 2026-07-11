@@ -230,18 +230,49 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     // Resolve the slot (peer name for the bus tag + the reassembly buffer). Copy the
     // name out under the lock — the deliver below is synchronous, so a local string
     // outlives the whole in-call servicing.
+    // esp_http_server responds the WS handshake INTERNALLY and (IDF v6) does NOT call the
+    // URI handler for the opening GET — so on_handshake never fires. Claim the peer LAZILY
+    // here, on its first data frame; an existing slot for `fd` is reused (idempotent, so the
+    // on_handshake path still works on any IDF that does call the GET handler).
     session_t* slot = nullptr;
     std::string peer;
+    bool newly_claimed = false;
     {
         const std::lock_guard lock(peers_m_);
         for (const auto& s : slots_)
-            if (s->open && s->fd == fd) {
-                slot = s.get();
-                break;
+            if (s->open && s->fd == fd) { slot = s.get(); break; }
+        if (slot == nullptr) {
+            // Admission cap: refuse cleanly (ESP_FAIL => httpd closes the socket).
+            if (max_peers_ != 0) {
+                std::size_t open_n = 0;
+                for (const auto& s : slots_) if (s->open) ++open_n;
+                if (open_n >= max_peers_) {
+                    ESP_LOGW(kTag, "peer refused: at max_peers=%u", (unsigned)max_peers_);
+                    return ESP_FAIL;
+                }
             }
-        if (slot != nullptr) peer = slot->name;
+            for (const auto& s : slots_)
+                if (s->fd < 0) { slot = s.get(); break; }  // reuse a departed slot
+            if (slot == nullptr) {
+                auto s = std::make_unique<session_t>();
+                slot = s.get();
+                slot->owner = this;
+                slot->endpoint.owner_ = this;
+                slot->endpoint.slot_ = slot;
+                slots_.push_back(std::move(s));
+            }
+            slot->name = peer_name(fd);
+            slot->asm_buf.clear();
+            slot->fd = fd;
+            slot->open = true;
+            newly_claimed = true;
+        }
+        peer = slot->name;
     }
-    if (slot == nullptr) return ESP_OK;  // frame for an unknown/closing slot: ignore
+    // Reclaim the slot on close — armed once, when first claimed (the free_ctx fires on the
+    // httpd task at close). Outside peers_m_ so no httpd lock nests under ours.
+    if (newly_claimed)
+        httpd_sess_set_ctx(req->handle, fd, slot, &httpd_ws_link_t::on_session_closed);
 
     // Reassembly — asm_buf is httpd-task-only, so no lock. The SPA sends one whole TLV
     // per unfragmented BINARY frame (the fast path); a fragmented message chains here.
