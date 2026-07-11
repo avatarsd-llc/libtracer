@@ -97,7 +97,10 @@ probes:
 - **per-vertex steady heap** — the **live usable-size bytes** a default leaf vertex
   holds at rest (measured against `malloc_usable_size`, so it is the real resident
   cost, not the requested size), plus the increment one small last-known-value write
-  adds. This is the vertex-diet trend.
+  adds. This is the vertex-diet trend, and the per-vertex figure is now **gated
+  same-runner** (a >2% growth fails the build): the count is exact — the allocator
+  wrapper is deterministic, not sampled — so a few bytes per vertex is a hard
+  regression, not noise, on the constrained target's budget.
 - **whole-run max RSS** — the coarse process-level footprint, read from
   `/usr/bin/time -v`.
 
@@ -134,7 +137,7 @@ distinct instrument, and a distinct rule for *what a "worse" number means*.
 | **latency** | ns (p50 / p99 / mean) | wall-clock per op, `bench_libtracer` | lower better | gated ✅ per-PR + push |
 | **throughput** | deliveries/s, publishes/s | ops / elapsed, `bench_libtracer` | higher better | gated ✅ per-PR + push |
 | **alloc bytes** | bytes & count per op | counting allocator, `bench_forward_heap` | lower better | forward hop gated ✅ = 0; other probes tracked |
-| **memory footprint** | live bytes / vertex, max RSS | `malloc_usable_size` balance + `/usr/bin/time` | lower better | tracked (per-vertex trend + RSS) |
+| **memory footprint** | live bytes / vertex, max RSS | `malloc_usable_size` balance + `/usr/bin/time` | lower better | gated ✅ per-vertex (+2% same-runner); RSS tracked |
 | **wire bytes** | encoded frame bytes | TLV frame size over the v1 vectors, codec surface | lower better | being promoted to a first-class series |
 | **CPU** | work per op | per-op cost on a pinned core | lower better | latency is today's proxy; dedicated counter planned |
 
@@ -165,7 +168,7 @@ thresholds, one hard invariant:
 
 | mechanism | when | comparison | threshold | effect |
 | --- | --- | --- | --- | --- |
-| **per-PR hard gate** ([`perf_gate.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/perf_gate.py)) | every PR | PR build vs `main` build, **one runner** | p50 **+15%** · mean **+12%** · deliveries/s **−12%** | fails the PR |
+| **per-PR hard gate** ([`perf_gate.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/perf_gate.py)) | every PR | PR build vs `main` build, **one runner** | p50 **+15%** · mean **+12%** · deliveries/s **−12%** · per-vertex bytes **+2%** | fails the PR |
 | **push ratchet** | every `main` push | HEAD vs its parent, **three independently-drawn runners** | same as above | turns `main` red |
 | **forward-hop zero-alloc gate** | every CI run | absolute | `> 0` allocations on the forward hop | fails the build |
 | **soft trend alert** | per `main` commit | vs previous point, **cross-runner** | series drifts past **125%** | a comment, *not* a verdict |
@@ -177,6 +180,11 @@ Details that make these trustworthy:
   **best of three runs** (min p50 / max deliveries) so single-iteration jitter
   cannot manufacture a failure. Because the baseline is *the same PR's `main`
   rebuilt on the same runner in the same pass*, the comparison is machine-neutral.
+  The same gate additionally checks **three memory probes** — per-vertex live bytes,
+  the increment one LKV write adds, and a leaf carrying a five-field app-field table.
+  These come from the counting allocator (`bench_forward_heap`), so they are exact
+  rather than sampled: they need no best-of-N and ratchet tightly at **+2%**, with
+  the baseline binary's bytes recorded same-runner via `--bench-fwd`.
 - The **push ratchet** re-runs that gate on **three separate runner draws** and
   requires the regression to reproduce — one noisy machine cannot fail `main`, and a
   regression that slips through the PR gate still gets caught the moment it lands.
