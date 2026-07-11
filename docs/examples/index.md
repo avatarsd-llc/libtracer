@@ -13,6 +13,7 @@ verbatim from that file, so it cannot drift from what actually compiles.
 | [Wire codec deep-dive & throughput](wire-codec.md) | L2/L3 codec | frame anatomy + encode/decode/round-trip throughput |
 | [Rope scatter-gather](rope-scatter.md) | L1 views | compose a multi-link `rope_t`; `to_iovec` (zero copy) vs `flatten` (one copy) |
 | [Two nodes over a wire — FWD delivery](two-node-fwd.md) | L4 + transport | `fwd_router_t` source-routing across a channel; cross-wire latency |
+| [Tree of ropes, not rope of ropes](tree-of-ropes.md) | L1 + L4 + transport | the three orthogonal compositions; rope over two backends; mount = identity, not memory |
 
 Several examples print a `RESULT …` line with **latency and throughput** numbers. Those are
 informational (measured on whatever build ran — CI builds the examples in debug), so CI never
@@ -51,4 +52,5 @@ Wire codec round-trip <wire-roundtrip>
 Wire codec deep-dive & throughput <wire-codec>
 Rope scatter-gather <rope-scatter>
 Two nodes over a wire — FWD delivery <two-node-fwd>
+Tree of ropes, not rope of ropes <tree-of-ropes>
 ```
