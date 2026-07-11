@@ -299,8 +299,9 @@ class graph_t {
      * materialized `read_children` serialize, which `folded_children_test` gates over many
      * graph shapes. The rope is valid while the graph (and its insert-only, pointer-stable
      * vertices) outlive it. The synthesized-listing case (ADR-0044) has nothing to gather
-     * and crosses as a single-link rope. This is the beachhead the value/zero-copy fold
-     * slices extend; today's members are owned links, later borrowed in place.
+     * and crosses as a single-link rope. Each member's NAME bytes are borrowed IN PLACE
+     * (zero copy, @ref view::borrow_const) over the pinned child vertex — only the tiny
+     * POINT headers are emitted — so the listing is never copied whole.
      */
     [[nodiscard]] result_t<rope_t> read_children_folded(vertex_handle_t v) const;
 

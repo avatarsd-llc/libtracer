@@ -99,8 +99,8 @@ void assert_parent(graph_t& g, std::string_view parent) {
     const long n_children = walk_point_children(*materialized);
     check(n_children >= 0, "materialized listing walks as a POINT of POINT children");
     if (n_children >= 0)
-        check(folded->link_count() == static_cast<std::size_t>(n_children) + 1,
-              "folded rope is N+1 links (header + one per member), not one flat buffer");
+        check(folded->link_count() == 2 * static_cast<std::size_t>(n_children) + 1,
+              "folded rope is 2N+1 links (outer header + per-child header + borrowed name)");
 
     // The lazy cursor walks the FOLDED ROPE itself (not a flattened copy) to the same shape.
     const long n_folded = walk_point_children(*folded);

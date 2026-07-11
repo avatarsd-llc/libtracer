@@ -19,6 +19,7 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/frame.hpp"
 #include "libtracer/key_view.hpp"
+#include "libtracer/mem_borrowed.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv.hpp"
@@ -1353,10 +1354,13 @@ result_t<rope_t> graph_t::read_children_folded(vertex_handle_t vh) const {
         return rope_t{*sv};
     }
     // The folded projection of read_children: instead of concatenating every member into
-    // one buffer and copying it whole, gather one rope LINK per registered child over its
-    // own POINT{NAME} bytes, then prepend the outer POINT header. flatten() is byte-
-    // identical to read_children by construction — same emit primitives, same child order,
-    // and the outer length auto-widens (opt.ll) at the same 0xFFFF boundary emit_tlv uses.
+    // one buffer and copying the whole listing (twice — into `out`, then into a segment),
+    // gather each POINT{NAME} member as TWO scatter-gather links — the emitted POINT
+    // header, then the child's own NAME-record bytes borrowed IN PLACE (zero copy). The
+    // child vertex is pinned and insert-only and its `name_` is immutable once linked, so
+    // the borrowed bytes outlive this rope. flatten() is byte-identical to read_children:
+    // same header (opt.ll auto-widened at the same 0xFFFF boundary) followed by the same
+    // name bytes, in the same child order.
     rope_t members;
     std::size_t members_len = 0;
     bool oom = false;
@@ -1364,15 +1368,20 @@ result_t<rope_t> graph_t::read_children_folded(vertex_handle_t vh) const {
         const std::shared_lock lock(map_mutex_);
         v->for_each_child([&members, &members_len, &oom](const vertex_t& c) {
             if (oom || !c.registered()) return;
-            std::vector<std::byte> member;
-            wire::emit_tlv(member, type_t::POINT, opt_t{.pl = true}, c.name().bytes());
-            members_len += member.size();
-            const auto mv = view::over_bytes(member);
-            if (!mv) {
+            const std::span<const std::byte> name = c.name().bytes();
+            opt_t mo{.pl = true};
+            if (name.size() > 0xFFFFu) mo.ll = true;  // mirror emit_tlv's auto-widen
+            std::vector<std::byte> mhdr;
+            wire::emit_header(mhdr, type_t::POINT, mo, name.size());
+            const auto mhv = view::over_bytes(mhdr);
+            view::segment_ptr_t nseg = view::borrow_const(name);
+            if (!mhv || !nseg) {
                 oom = true;
                 return;
             }
-            members.append(*mv);
+            members.append(*mhv);                         // owned POINT header
+            members.append(view::view_t::over(std::move(nseg)));  // borrowed name (zero copy)
+            members_len += mhdr.size() + name.size();
         });
     }
     if (oom) return std::unexpected(status_t::BACKPRESSURE);
