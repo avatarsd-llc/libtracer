@@ -493,6 +493,9 @@ build (`bench/gen_results_page.py`, ADR-0032). It is the published response surf
 not a hand-edited snapshot. All rates and latencies are **absolute measured values**,
 representative of the CI runner (shared-runner variance is real — read trends, not the
 third digit); the libtracer-vs-Zenoh charts below plot both engines on the same axes.
+How these numbers are produced — the measurement surfaces, the metrics, and the
+gating discipline — is documented on the [Test & benchmark methodology](methodology.md)
+page.
 
 {provenance()}
 ```
