@@ -27,6 +27,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **In-process SUBSCRIBER delivery now terminates at its target (ADR-0051 /
+  RFC-0007); the dispatch-depth cap `kMaxDispatchDepth` is deleted with no
+  replacement.** A delivery into a target vertex applies exactly the target-local
+  effects of a write — store (LKV/history per role), `await` wake, and the target's
+  own handler reaction — gated by the target's `WRITE` `:acl`, and **never**
+  re-dispatches to the target's own `:subscribers[]`. Propagation past a target is
+  exclusively the target's own logic (a controller re-emits on its execution; a
+  handler re-emits when it chooses), so a dispatch-level subscription cycle is
+  impossible **by construction** — no cap, no dedup, no drain queue, and the
+  internal `depth` parameter threads out of the graph runtime entirely.
+  **Behavior change (interop-visible):** chained plain-vertex subscriptions
+  (`A→B`, `B→C`) no longer relay `A`'s writes onward to `C` — the write is still
+  *stored* at `B`, but `B`'s subscribers are not notified. Migration: subscribe the
+  final consumer directly to the source (subtree subscriptions make this cheap), or
+  make the intermediary a `HANDLER` that re-emits. Suspicious topologies (cycles,
+  dead relay chains) are a design-time analyzer/reconciler concern, never runtime
+  enforcement.
 - **`vertex_ext_t` value-seam handlers and app-field table are now lazily-allocated
   groups (#388, ADR-0058 Step 2)** — the value seam (`on_read`/`on_write`/
   `on_children`) moved behind a `std::unique_ptr<value_handlers_t>` (HANDLER-role

@@ -9,7 +9,8 @@
  * (stored-value, stream, handler), read/write/await, lock-free LKV clone-on-read,
  * and a multithreaded stress over a shared vertex. M3b: subscribe (callback +
  * spec-faithful target), field-write (:settings.*, :subscribers[]) + unsubscribe,
- * :schema, and the in-process dispatch-depth cycle cap. The stress is the
+ * :schema, and delivery-terminates-at-target (ADR-0051: no chained relay, cycles
+ * loop-free by construction). The stress is the
  * verification M2 deferred: under TSan it proves the lock-free LKV + atomic
  * segment refcounts race-free, and under ASan+UBSan leak/UB-free.
  */
@@ -268,7 +269,7 @@ void test_subscribe_callback() {
 }
 
 void test_subscribe_target() {
-    std::printf("subscribe(src, target) — spec-faithful re-dispatch to a vertex:\n");
+    std::printf("subscribe(src, target) — delivery runs the target vertex's on_write:\n");
     graph_t g;
     auto sink_seen = std::make_shared<int>(-1);
     tr::graph::handlers_t h;
@@ -281,7 +282,7 @@ void test_subscribe_target() {
         g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     (void)g.subscribe(path_t("/sensor/temp"), path_t("/log/temp"));
     (void)g.write(src, make_value({0x55}));
-    check(*sink_seen == 0x55, "write re-dispatches to the target vertex's on_write");
+    check(*sink_seen == 0x55, "delivery terminates at the target, running its on_write");
 }
 
 void test_field_write_settings() {
@@ -410,22 +411,58 @@ void test_admission_door_uniformity() {
     }
 }
 
-void test_dispatch_cycle_cap() {
-    std::printf("dispatch-depth cycle cap (in-process A->B->A terminates):\n");
+void test_delivery_terminates_at_target() {
+    std::printf("delivery terminates at the target (ADR-0051): no chained relay, no cycle:\n");
     graph_t g;
-    auto count = std::make_shared<int>(0);
+
+    // A -> B chained plain vertices: a write to A is DELIVERED (stored) at B, but B's own
+    // subscribers are NOT notified — delivery terminates at B (RFC-0007). Pure relay is
+    // wired as a direct subscription to the source, never a chain of plain vertices.
     tr::graph::vertex_handle_t a = g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
     (void)g.register_vertex(path_t("/b"), role_t::STORED_VALUE);
-    // Mutual target subscriptions form a cycle; a counter callback on each level.
-    (void)g.subscribe(path_t("/a"), path_t("/b"));
-    (void)g.subscribe(path_t("/b"), path_t("/a"));
-    auto on_hop = [count](const tr::view::rope_t&) { ++*count; };
-    (void)g.subscribe(path_t("/a"), on_hop);
-    (void)g.subscribe(path_t("/b"), on_hop);
+    auto b_relayed = std::make_shared<int>(0);
+    auto on_b = [b_relayed](const tr::view::rope_t&) { ++*b_relayed; };
+    (void)g.subscribe(path_t("/a"), path_t("/b"));  // A -> B target edge
+    (void)g.subscribe(path_t("/b"), on_b);          // an observer on B's own subscribers
+    (void)g.write(a, make_value({0x55}));
+    const auto rb = g.find(path_t("/b").key());
+    const auto b_val = rb.has_value() ? g.read(*rb) : tr::graph::result_t<tr::view::rope_t>{};
+    check(b_val.has_value() && std::to_integer<int>(b_val->only().bytes()[0]) == 0x55,
+          "the delivery stored A's write AT B (delivery IS a write to the target)");
+    check(*b_relayed == 0, "but B does NOT relay to its own subscribers (terminates at B)");
 
-    (void)g.write(a, make_value({0x01}));  // must terminate, not infinite-loop / stack-overflow
-    check(*count > 1, "the cycle did dispatch (callbacks fired both ways)");
-    check(*count <= tr::graph::kMaxDispatchDepth + 4, "re-dispatch is bounded by the depth cap");
+    // A mutual X <-> Y cycle cannot loop: each delivery is store-only, so no re-dispatch —
+    // the write fires exactly one hop (X's own subscriber) and stops, by construction.
+    tr::graph::vertex_handle_t x = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/y"), role_t::STORED_VALUE);
+    auto hops = std::make_shared<int>(0);
+    auto on_hop = [hops](const tr::view::rope_t&) { ++*hops; };
+    (void)g.subscribe(path_t("/x"), path_t("/y"));
+    (void)g.subscribe(path_t("/y"), path_t("/x"));
+    (void)g.subscribe(path_t("/x"), on_hop);
+    (void)g.subscribe(path_t("/y"), on_hop);
+    (void)g.write(x, make_value({0x01}));  // must NOT loop / stack-overflow
+    check(*hops == 1, "the cycle fires exactly one hop (X's own subscriber); no transitive relay");
+
+    // A controller re-emits by its OWN logic: a HANDLER whose on_write writes an output
+    // port DOES reach that port's subscribers — propagation past a target is the target's
+    // logic, not the runtime's.
+    (void)g.register_vertex(path_t("/out"), role_t::STORED_VALUE);
+    auto sink_seen = std::make_shared<int>(-1);
+    auto on_out = [sink_seen](const tr::view::rope_t& in) {
+        *sink_seen = std::to_integer<int>(in.only().bytes()[0]);
+    };
+    (void)g.subscribe(path_t("/out"), on_out);
+    tr::graph::handlers_t hc;
+    hc.on_write = [&g](const tr::view::rope_t& in) -> tr::graph::result_t<void> {
+        return g.write(path_t("/out"), in);  // re-emit on the controller's own execution
+    };
+    (void)g.register_vertex(path_t("/ctrl"), role_t::HANDLER, std::move(hc));
+    tr::graph::vertex_handle_t ctrl_src =
+        g.register_vertex(path_t("/ctrl_src"), role_t::STORED_VALUE);
+    (void)g.subscribe(path_t("/ctrl_src"), path_t("/ctrl"));
+    (void)g.write(ctrl_src, make_value({0x63}));
+    check(*sink_seen == 0x63, "a controller handler re-emits to its output port's subscribers");
 }
 
 }  // namespace
@@ -508,7 +545,7 @@ int main() {
     test_subscribe_via_field_write_and_unsubscribe();
     test_admission_door_uniformity();
     test_schema_read();
-    test_dispatch_cycle_cap();
+    test_delivery_terminates_at_target();
     test_concurrent_stress();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,

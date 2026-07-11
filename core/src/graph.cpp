@@ -505,13 +505,21 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, std::string_view caller) cons
                  // copy)
 }
 
-void graph_t::dispatch_edge_target(const edge_view_t& e, const rope_t& value, int depth) {
-    if (vertex_t* target = find_ptr(e.target_key)) {
-        // Fan-in gate (#81, ADR-0026): the re-dispatch is an ordinary write to
-        // the target, gated inside write_impl by the TARGET's :acl WRITE right
-        // under the edge's stored caller context. Denial drops this delivery.
-        (void)write_impl(target, value, depth + 1, e.caller);  // value cloned
-    }
+void graph_t::dispatch_edge_target(const edge_view_t& e, const rope_t& value) {
+    vertex_t* target = find_ptr(e.target_key);
+    if (target == nullptr) return;
+    // Fan-in gate (#81, ADR-0026): the delivery is an ordinary write to the target,
+    // gated by the TARGET's :acl WRITE right under the edge's stored caller context.
+    // Denial drops this delivery.
+    if (!acl_allows(target, e.caller, acl_right_t::WRITE)) return;
+    // Delivery TERMINATES at the target (ADR-0051 / RFC-0007): apply exactly the
+    // target-local effects of a write — store (LKV/history per role), await wake, and the
+    // target's own handler reaction (all inside store_value) — and NEVER re-dispatch to the
+    // target's own :subscribers[], never bubble. Propagation past a target is exclusively
+    // the target's own logic (a controller re-emits on its execution; a handler re-emits
+    // when it chooses), so a dispatch-level subscription cycle cannot form — no depth cap,
+    // no dedup, no drain queue. An app wanting pure relay subscribes the consumer directly.
+    (void)store_value(target, value);  // value cloned (const ref -> store_value's by-value)
 }
 
 void graph_t::dispatch_edge_remote(const edge_view_t& e, const rope_t& value) {
@@ -530,18 +538,17 @@ void graph_t::dispatch_edge_remote(const edge_view_t& e, const rope_t& value) {
  *        target/remote legs live in the two helpers above precisely to keep this body's inline
  *        estimate small (the callback leg is the in-process hot case).
  */
-inline void graph_t::dispatch_edge(const edge_view_t& e, const rope_t& value, int depth) {
+inline void graph_t::dispatch_edge(const edge_view_t& e, const rope_t& value) {
     // The ONE dispatch of a subscription edge's three legs — shared by the per-write
     // fan_out and the admission durability latch (ADR-0049), so the legs cannot diverge.
     // Always called OUTSIDE the vertex lock (each leg may re-enter the graph or do I/O).
     if (e.callback != nullptr)
         e.callback(e.callback_ctx, value);  // the rope by const ref (sink may clone links)
-    if (!e.target_key.empty() && depth + 1 < kMaxDispatchDepth)
-        dispatch_edge_target(e, value, depth);
+    if (!e.target_key.empty()) dispatch_edge_target(e, value);
     if (!e.link.empty() && remote_sink_) dispatch_edge_remote(e, value);
 }
 
-void graph_t::fan_out(vertex_t* v, const rope_t& value, int depth) {
+void graph_t::fan_out(vertex_t* v, const rope_t& value) {
     // Snapshot every active edge UNDER the vertex lock (vertex_t::snapshot_edges), then
     // dispatch OUTSIDE it (callbacks / re-dispatch may re-enter the graph). Delivery is
     // value-agnostic — no per-subscriber comparison — so every active edge receives
@@ -554,9 +561,9 @@ void graph_t::fan_out(vertex_t* v, const rope_t& value, int depth) {
     std::vector<edge_view_t> heap_buf;
     const std::size_t n = v->snapshot_edges(inline_buf, heap_buf);
     if (heap_buf.empty())
-        for (std::size_t i = 0; i < n; ++i) dispatch_edge(inline_buf[i], value, depth);
+        for (std::size_t i = 0; i < n; ++i) dispatch_edge(inline_buf[i], value);
     else
-        for (const edge_view_t& e : heap_buf) dispatch_edge(e, value, depth);
+        for (const edge_view_t& e : heap_buf) dispatch_edge(e, value);
 }
 
 result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t value) {
@@ -572,7 +579,7 @@ result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t
     return v->store(std::move(value), mr_);
 }
 
-void graph_t::bubble_up(vertex_t* v, const rope_t& value, int depth) {
+void graph_t::bubble_up(vertex_t* v, const rope_t& value) {
     // Entered only when v->listeners_above() says an ancestor subscriber exists —
     // the idle write path never walks (RFC-0005 §near-free-when-idle; the counter
     // below is what tests/benches assert on via ancestor_walks()).
@@ -582,7 +589,7 @@ void graph_t::bubble_up(vertex_t* v, const rope_t& value, int depth) {
     // placeholder ancestor holds no edges, so its fan_out is the no-op the old walk's
     // lookup miss was; the root node is the final (empty-key) stop, as before.
     for (vertex_t* ancestor = v->parent(); ancestor != nullptr; ancestor = ancestor->parent())
-        fan_out(ancestor, value, depth);
+        fan_out(ancestor, value);
 }
 
 namespace {
@@ -605,15 +612,14 @@ namespace {
 }
 }  // namespace
 
-result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, int depth, std::string_view caller) {
+result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view caller) {
     if (!acl_allows(v, caller, acl_right_t::WRITE))
         return std::unexpected(status_t::PERMISSION_DENIED);
     // `write` is the RFC-0008 §D composition — assign the vertex, then deliver exactly
     // what it stored (a leaf VALUE, or each landed descendant of a branch POINT). This is
     // the FWD{WRITE}-terminus behavior: a TARGETED delivery of the written vertex(es), not
     // a subtree sweep. propagate(v) is the separate accumulate-then-flush primitive.
-    if (is_branch_point(value, v->role()))
-        return write_branch(v, value, depth, caller, /*notify=*/true);
+    if (is_branch_point(value, v->role())) return write_branch(v, value, caller, /*notify=*/true);
     if (v->role() == role_t::HANDLER) {
         // A handler stores no LKV (the user handler consumes the value), so the
         // delivery clone survives here — the cold path only. The hot roles below
@@ -621,7 +627,7 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, int depth, std::st
         const rope_t notify = value;  // refcount clone — store_value consumes `value`
         const result_t<std::shared_ptr<const rope_t>> stored = store_value(v, std::move(value));
         if (!stored) return std::unexpected(stored.error());
-        deliver_vertex(v, notify, depth);
+        deliver_vertex(v, notify);
         clear_pending(v);  // eager delivery flushes any pending mark a prior assign left
         return {};
     }
@@ -630,11 +636,11 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, int depth, std::st
     if (v->role() == role_t::STREAM) {
         // Deliver the just-appended ring entry and advance the drain cursor, so a later
         // propagate on this stream does not re-deliver it (RFC-0008 §E).
-        deliver_current(v, depth);
+        deliver_current(v);
     } else {
         // Deliver exactly what was stored (RFC-0008 §D): the published LKV pointer —
         // no notify reclone of the rope on the hot write path.
-        deliver_vertex(v, **stored, depth);
+        deliver_vertex(v, **stored);
     }
     clear_pending(v);  // eager delivery flushes any pending mark a prior assign left
     return {};
@@ -647,16 +653,15 @@ result_t<void> graph_t::assign(vertex_handle_t vh, rope_t value, std::string_vie
     // The STATE half only (RFC-0008 §A): swap the last-known-value / append the stream
     // ring / bump the write sequence (waking await), then mark v for the next covering
     // sweep. A branch POINT assigns each descendant the same way. Sends nothing.
-    if (is_branch_point(value, v->role()))
-        return write_branch(v, value, 0, caller, /*notify=*/false);
+    if (is_branch_point(value, v->role())) return write_branch(v, value, caller, /*notify=*/false);
     const result_t<std::shared_ptr<const rope_t>> stored = store_value(v, std::move(value));
     if (!stored) return std::unexpected(stored.error());
     mark_pending(v);
     return {};
 }
 
-result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, int depth,
-                                     std::string_view caller, bool notify) {
+result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::string_view caller,
+                                     bool notify) {
     // A decomposable POINT is contiguous, so decode reads the materialized head:
     // single-link (the ④a case — ingress values are single-link until ④b), that is
     // the sole link with zero copy; a multi-link POINT pays one flatten here (the
@@ -733,9 +738,9 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, int depth
         const view_t& slice = is_root ? head : node.notify;
         if (slice.empty()) continue;
         vertex_t* vx = is_root ? v : find_ptr(node.key);
-        if (vx != nullptr) fan_out(vx, slice, depth);
+        if (vx != nullptr) fan_out(vx, slice);
     }
-    if (v->listeners_above() > 0) bubble_up(v, value, depth);
+    if (v->listeners_above() > 0) bubble_up(v, value);
     // Eager branch delivered these landing sites — clear any pending mark (a prior assign)
     // and advance stream drain cursors so a later sweep does not re-deliver (RFC-0008 §E).
     for (const site_t& site : sites) {
@@ -745,37 +750,37 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, int depth
     return {};
 }
 
-void graph_t::deliver_vertex(vertex_t* v, const rope_t& value, int depth) {
-    fan_out(v, value, depth);
+void graph_t::deliver_vertex(vertex_t* v, const rope_t& value) {
+    fan_out(v, value);
     // Vertical bubbling (RFC-0005): every subscription observes its vertex AND all
     // descendants, so a delivery also fans out to each ancestor's subscribers. Gated on
     // one relaxed load when nobody listens above.
-    if (v->listeners_above() > 0) bubble_up(v, value, depth);
+    if (v->listeners_above() > 0) bubble_up(v, value);
 }
 
-void graph_t::deliver_current(vertex_t* v, int depth) {
+void graph_t::deliver_current(vertex_t* v) {
     if (v->role() == role_t::STREAM) {
         // A stream is a queue (RFC-0008 §E): drain the ring entries appended since the
         // last flush, in order — NOT a coalesce. Snapshot under the lock
         // (vertex_t::drain_unflushed), deliver outside.
         std::vector<std::shared_ptr<const rope_t>> batch;
         if (v->drain_unflushed(batch) == 0) return;  // nothing appended since the last flush
-        for (const std::shared_ptr<const rope_t>& sp : batch) deliver_vertex(v, *sp, depth);
+        for (const std::shared_ptr<const rope_t>& sp : batch) deliver_vertex(v, *sp);
         return;
     }
     // STORED_VALUE: the last-known-value, once. HANDLER / never-assigned: null LKV, nothing.
     const std::shared_ptr<const rope_t> sp = v->read_stored();
     if (!sp) return;
-    deliver_vertex(v, *sp, depth);
+    deliver_vertex(v, *sp);
 }
 
-void graph_t::propagate(vertex_handle_t v) { propagate_impl(v.get(), 0); }
+void graph_t::propagate(vertex_handle_t v) { propagate_impl(v.get()); }
 
-void graph_t::propagate_impl(vertex_t* v, int depth) {
+void graph_t::propagate_impl(vertex_t* v) {
     // The argument is always delivered — a direct propagate is never gated by the vertex's
     // own delivery_mode (RFC-0008 §C, the EXPLICIT escape hatch, and "notify its own subs"
     // is policy-independent).
-    deliver_current(v, depth);
+    deliver_current(v);
     // Sweep the strict descendants: DRAIN the IF_NEWER pending set over v's prefix range,
     // and ITERATE the UNCONDITIONAL set over it. A subtree is a contiguous prefix range of
     // the key order (RFC-0008 §B). Snapshot the keys under sweep_mutex_, then deliver
@@ -798,7 +803,7 @@ void graph_t::propagate_impl(vertex_t* v, int depth) {
         }
     }
     for (const std::vector<std::byte>& k : to_deliver) {
-        if (vertex_t* u = find_ptr(k)) deliver_current(u, depth);
+        if (vertex_t* u = find_ptr(k)) deliver_current(u);
     }
 }
 
@@ -845,13 +850,13 @@ void graph_t::set_delivery_mode(vertex_handle_t vh, delivery_mode_t mode) {
 }
 
 result_t<void> graph_t::write(vertex_handle_t v, rope_t value, std::string_view caller) {
-    return write_impl(v.get(), std::move(value), 0, caller);
+    return write_impl(v.get(), std::move(value), caller);
 }
 
 result_t<void> graph_t::write(vertex_handle_t vh, const field_path_t& field, rope_t value,
                               std::string_view caller) {
     vertex_t* v = vh.get();
-    if (field.empty()) return write_impl(v, std::move(value), 0, caller);
+    if (field.empty()) return write_impl(v, std::move(value), caller);
     // A field write targets a contiguous control TLV (settings / acl / subscribers);
     // materialize it (single-link: zero copy) before the field surface parses it.
     return field_write(v, field, value.materialize(), caller);
@@ -930,7 +935,7 @@ result_t<void> graph_t::admit_subscriber(vertex_t* v, subscriber_t s, std::strin
     (void)v->add_edge(std::move(s), &latch);
     note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
 
-    if (latch.value) dispatch_edge(latch.edge, *latch.value, 0);
+    if (latch.value) dispatch_edge(latch.edge, *latch.value);
     return {};
 }
 
