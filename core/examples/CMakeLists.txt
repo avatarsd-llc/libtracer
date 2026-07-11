@@ -67,6 +67,21 @@ if(LIBTRACER_NET_PLANE)
     endif()
 endif()
 
+# The three composition axes (L1 rope / L4 vertex tree / transport-as-identity) —
+# why a node is a *tree of ropes*, not a *rope of ropes*. The transport-mount axis
+# uses the in-process loopback link, so it needs the FWD net plane (fwd_router_t).
+if(LIBTRACER_NET_PLANE)
+    add_executable(tree_of_ropes tree_of_ropes.cpp)
+    target_link_libraries(tree_of_ropes PRIVATE libtracer)
+    find_package(Threads REQUIRED)
+    target_link_libraries(tree_of_ropes PRIVATE Threads::Threads)
+    if(MSVC)
+        target_compile_options(tree_of_ropes PRIVATE /W4)
+    else()
+        target_compile_options(tree_of_ropes PRIVATE -Wall -Wextra)
+    endif()
+endif()
+
 # Run the examples as smoke tests when testing is enabled (they self-check and
 # return non-zero on any mismatch, so the smoke tests guard behavior).
 if(BUILD_TESTING)
@@ -77,5 +92,6 @@ if(BUILD_TESTING)
     add_test(NAME example_wire_codec COMMAND wire_codec)
     if(LIBTRACER_NET_PLANE)
         add_test(NAME example_two_node_fwd COMMAND two_node_fwd)
+        add_test(NAME example_tree_of_ropes COMMAND tree_of_ropes)
     endif()
 endif()
