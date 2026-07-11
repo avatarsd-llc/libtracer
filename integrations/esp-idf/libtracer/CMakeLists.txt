@@ -84,13 +84,21 @@ if(IDF_TARGET STREQUAL "linux")
     # POSIX host: the real SocketCAN link (glibc ships <linux/can.h>).
     list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/socketcan_link.cpp")
 else()
-    # Chip targets: SocketCAN stub + the TWAI-backed can_link_t.
+    # Chip targets: SocketCAN stub + the TWAI-backed can_link_t, plus the
+    # esp_http_server-backed WS transport link (httpd_ws_link_t) — the embedded-native
+    # replacement for core's raw-socket transport_ws_server. Both are platform links,
+    # picked by which TU compiles (never an in-source #ifdef). transport_ws.cpp stays
+    # in LIBTRACER_SRCS above: it compiles but a node that binds this httpd link instead
+    # references it nowhere, so --gc-sections drops it from the image (the linux VB,
+    # which HAS no esp_http_server, keeps it).
     list(APPEND LIBTRACER_SRCS
         "${LIBTRACER_ROOT}/core/src/socketcan_link_stub.cpp"
         "twai_link.cpp"
+        "httpd_ws_link.cpp"
     )
     # esp_driver_gpio: twai_link.cpp names its pins via <driver/gpio.h> types.
-    list(APPEND LIBTRACER_PRIV_REQUIRES lwip esp_driver_twai esp_driver_gpio)
+    # esp_http_server: httpd_ws_link.cpp is built on its native WebSocket support.
+    list(APPEND LIBTRACER_PRIV_REQUIRES lwip esp_driver_twai esp_driver_gpio esp_http_server)
     # compat/include: POSIX headers IDF's libc spells differently (<poll.h> ->
     # <sys/poll.h>) — private, so core sources stay pure POSIX and dependents
     # never see the shim.
