@@ -29,7 +29,7 @@ Follow the standard-library / kernel aesthetic, not Google/PascalCase.
 | Enum values | `SCREAMING_SNAKE`, scoped (`enum class`) | `io_dir_t::DEVICE_TO_CPU`, `alloc_hint_t::NONE` |
 | Functions / methods | `snake_case` | `alloc`, `destroy`, `before_io`, `after_io`, `subview` |
 | Member variables | `snake_case_` trailing underscore | `slab_`, `free_head_`, `count_` |
-| Constants / `constexpr` | `kCamelCase` (existing) | `kMaxDispatchDepth`, `kNil` |
+| Constants / `constexpr` | `kCamelCase` (existing) | `kInline`, `kNil` |
 | Macros (rare; build-config only) | `LIBTRACER_SCREAMING` | `LIBTRACER_NO_ATOMIC` |
 
 The trailing `_t` is safe under `tr::`: C/POSIX reserves global trailing-`_t`, but a namespaced `tr::mem::pool_t` cannot collide with anything POSIX.

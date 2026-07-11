@@ -73,11 +73,12 @@ class vertex_handle_t {
 static_assert(std::is_trivially_copyable_v<vertex_handle_t>);
 static_assert(sizeof(vertex_handle_t) == sizeof(vertex_t*));
 
-// In-process fan-out cycle bound: a re-dispatch chain deeper than this is dropped
-// (Backpressure). This is the in-process analogue of the wire hop_count/MAX_HOPS
-// (ADR-0014); an A->B->A subscriber loop terminates here instead of recursing
-// forever. See ADR-0015.
-inline constexpr int kMaxDispatchDepth = 32;
+// There is no in-process dispatch-depth cap: a SUBSCRIBER delivery TERMINATES at its
+// target (ADR-0051 / RFC-0007) — store + notify, never a re-dispatch to the target's
+// own :subscribers[] — so a dispatch-level cycle cannot form and there is nothing to
+// bound. Propagation past a target is exclusively the target's own logic (a controller
+// re-emitting on its execution). The former kMaxDispatchDepth (ADR-0014/0015) is deleted
+// with nothing replacing it (the no-synthetic-limits principle, RFC-0006).
 
 /**
  * @brief What the producer fan-out hands a remote subscriber's delivery sink (#136).
@@ -476,10 +477,10 @@ class graph_t {
     [[nodiscard]] result_t<vertex_t*> ensure_vertex_ptr(std::span<const std::byte> key,
                                                         std::string_view caller);
     // Update the vertex value (LKV/history/handler), then fan out to subscribers.
-    // `depth` bounds in-process re-dispatch cycles (kMaxDispatchDepth). `caller` is
-    // the ACL caller context gating the WRITE right: the API caller's at depth 0,
-    // the subscription edge's stored context on a fan-out re-dispatch (fan-in gate).
-    result_t<void> write_impl(vertex_t* v, rope_t value, int depth, std::string_view caller);
+    // `caller` is the ACL caller context gating the WRITE right (the API caller's
+    // for a direct write; a delivered subscription's stored context terminates at
+    // its target instead — see dispatch_edge_target, ADR-0051).
+    result_t<void> write_impl(vertex_t* v, rope_t value, std::string_view caller);
     // The store half of a write (LKV/history/handler + seq bump + await wake),
     // WITHOUT fan-out — shared by write_impl and the branch-write apply (RFC-0005).
     // Hands back the exact published LKV pointer (null for a Handler-role write —
@@ -496,32 +497,38 @@ class graph_t {
     // value-carrying node at the corresponding descendant vertex. `notify` picks the
     // half: true (the `write` path) delivers each covered site + bubbles; false (the
     // `assign` path) marks each landed vertex for the next sweep and delivers nothing.
-    result_t<void> write_branch(vertex_t* v, const rope_t& value, int depth,
-                                std::string_view caller, bool notify);
-    void fan_out(vertex_t* v, const rope_t& value, int depth);
+    result_t<void> write_branch(vertex_t* v, const rope_t& value, std::string_view caller,
+                                bool notify);
+    void fan_out(vertex_t* v, const rope_t& value);
     // The ONE dispatch of a subscription edge's three legs (in-process callback, local
     // target re-dispatch, remote sink) — shared by fan_out and the admission durability
     // latch (ADR-0049), always called OUTSIDE the vertex lock. The target/remote legs
     // are split out so the per-edge body stays small enough to inline into the fan-out
     // loop (the wide-fan-out hot loop; the callback leg is the in-process hot case).
-    void dispatch_edge(const edge_view_t& e, const rope_t& value, int depth);
-    void dispatch_edge_target(const edge_view_t& e, const rope_t& value, int depth);
+    void dispatch_edge(const edge_view_t& e, const rope_t& value);
+    // A SUBSCRIBER delivery TERMINATES at its target (ADR-0051 / RFC-0007): apply the
+    // target-local effects of a write — store (LKV/history per role) + await wake + the
+    // target's own handler reaction — gated by the TARGET's WRITE :acl, and NEVER
+    // re-dispatch to the target's own :subscribers[]. Propagation past a target is the
+    // target's own logic; a dispatch cycle is impossible by construction (no depth cap).
+    void dispatch_edge_target(const edge_view_t& e, const rope_t& value);
     void dispatch_edge_remote(const edge_view_t& e, const rope_t& value);
     // Vertical bubbling (RFC-0005): fan `value` out to every registered ancestor's
     // subscribers. Called only when v->listeners_above_ says someone is listening.
-    void bubble_up(vertex_t* v, const rope_t& value, int depth);
+    void bubble_up(vertex_t* v, const rope_t& value);
     // Deliver `value` as `v`'s value to v's full observer set: v's own edges (fan_out)
     // + every ancestor subtree subscriber (bubble_up, gated on listeners_above_). The
     // per-vertex delivery unit both `write` (eager) and `propagate` (sweep) build on.
-    void deliver_vertex(vertex_t* v, const rope_t& value, int depth);
+    void deliver_vertex(vertex_t* v, const rope_t& value);
     // Deliver v's CURRENT stored value (propagate reads the LKV — no value argument).
     // STORED_VALUE: the last-known-value once; STREAM: drains the ring entries appended
     // since the last flush, in order (RFC-0008 §E — a queue, not a coalesce); HANDLER /
     // never-assigned (null LKV): nothing.
-    void deliver_current(vertex_t* v, int depth);
-    // The propagate(v) sweep body at an explicit recursion depth (cycle-bounded like a
-    // write re-dispatch). Delivers v then its qualifying descendants (RFC-0008 §B/§C).
-    void propagate_impl(vertex_t* v, int depth);
+    void deliver_current(vertex_t* v);
+    // The propagate(v) sweep body: delivers v then its qualifying descendants
+    // (RFC-0008 §B/§C). Loop-free by construction (each delivery terminates at its
+    // target — ADR-0051), so no recursion depth to thread.
+    void propagate_impl(vertex_t* v);
     // Record v as assigned-since-last-sweep so a covering propagate flushes it (RFC-0008
     // §B). No-op for EXPLICIT (never ancestor-swept), for UNCONDITIONAL (already a
     // permanent sweep member), and — the idle-write fast path — when nothing observes at
