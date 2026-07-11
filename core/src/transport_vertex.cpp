@@ -79,8 +79,14 @@ void parse_config(const tlv_t* config, conn_settings_t& s) {
 
 }  // namespace
 
+// SLIM target ctor (@ref slim_net_t): member init + the graph-side catalog wiring,
+// but NO built-in factory registration. This TU-locus deliberately does NOT name
+// register_builtin_transports, so a consumer that only ever calls THIS ctor lets the
+// linker garbage-collect the udp/tcp/ws factories (and the transport TUs nothing else
+// references). The full ctor below delegates here and adds the builtins.
 transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& router,
-                                       std::string net_root, mem::mem_backend_t* rx_backend)
+                                       std::string net_root, mem::mem_backend_t* rx_backend,
+                                       slim_net_t)
     : graph_(graph), router_(router), net_root_(std::move(net_root)), rx_backend_(rx_backend) {
     // Register the `/net` parent if it isn't already (it is the `:children[]` target).
     if (!graph_.find(path_t::parse(net_root_)->key())) {
@@ -96,16 +102,25 @@ transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& rout
         "listener", [this](graph::graph_t&, std::vector<std::byte> key, const tlv_t* config) {
             return make_connection(std::move(key), config, conn_role_t::LISTEN);
         });
-    // Register the built-in transport-factory catalog entries (config `kind` selectors)
-    // that this build compiled in — udp / tcp / ws, each from its own translation unit
-    // gated by a per-module CMake option (register_builtin_transports is the full-node or
-    // CMake-generated dispatcher; see builtin_transports.hpp). Keeping the concrete
-    // transport references out of this file lets a build DROP a transport without leaving
-    // a dangling reference — module selection is by compiled TU, no preprocessor macros.
-    register_builtin_transports(*this, rx_backend_);
     // The `quic` kind is NOT a builtin: it lives in the separate libtracer_quic
     // module (ADR-0043), which extends this catalog through register_transport_type
     // (quic_transport_factory) — this file never learns about msquic (open/closed).
+    // A slim node likewise registers whatever factories it wants after construction.
+}
+
+// FULL (default) ctor: the slim wiring PLUS the built-in transport-factory catalog
+// entries (config `kind` selectors) this build compiled in — udp / tcp / ws, each
+// from its own TU gated by a per-module CMake option (register_builtin_transports is
+// the full-node or CMake-generated dispatcher; see builtin_transports.hpp). Keeping the
+// concrete transport references out of this file lets a build DROP a transport without
+// a dangling reference — module selection is by compiled TU, no preprocessor macros.
+// Delegating to the slim ctor keeps the catalog wiring in one place; the extra call
+// here is the ONLY reference to register_builtin_transports, so it (and the builtins)
+// stay linked exactly when this ctor is reachable — @ref slim_net_t sheds them.
+transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& router,
+                                       std::string net_root, mem::mem_backend_t* rx_backend)
+    : transport_vertex_t(graph, router, std::move(net_root), rx_backend, slim_net) {
+    register_builtin_transports(*this, rx_backend_);
 }
 
 void transport_vertex_t::register_transport_type(std::string kind, transport_factory_t factory) {
