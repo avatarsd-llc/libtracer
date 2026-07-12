@@ -288,6 +288,24 @@ class graph_t {
     [[nodiscard]] result_t<std::vector<rope_t>> history(vertex_handle_t v) const;
 
     /**
+     * @brief FOLDED projection of the `:children` listing (L4 fold, Slice 0) — the SAME
+     *        `POINT{ POINT{NAME}… }` that the materialized `read_children` serializes, but
+     *        produced as a scatter-gather **rope** (an outer POINT header link plus one
+     *        link per registered child) instead of one flat buffer.
+     *
+     * A read-only projection over the materialized tree — the tree stays the source of
+     * truth; this walks it and gathers rather than copying the whole listing into a
+     * single allocation. `read_children_folded(v).flatten()` is **byte-identical** to the
+     * materialized `read_children` serialize, which `folded_children_test` gates over many
+     * graph shapes. The rope is valid while the graph (and its insert-only, pointer-stable
+     * vertices) outlive it. The synthesized-listing case (ADR-0044) has nothing to gather
+     * and crosses as a single-link rope. Each member's NAME bytes are borrowed IN PLACE
+     * (zero copy, @ref view::borrow_const) over the pinned child vertex — only the tiny
+     * POINT headers are emitted — so the listing is never copied whole.
+     */
+    [[nodiscard]] result_t<rope_t> read_children_folded(vertex_handle_t v) const;
+
+    /**
      * @brief Subscribe @p src to a @p target vertex — a write to src re-dispatches the
      *        cloned value to target (spec-faithful). `NOT_FOUND` if src is unknown.
      *

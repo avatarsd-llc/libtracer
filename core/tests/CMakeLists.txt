@@ -143,6 +143,13 @@ target_link_libraries(children_test PRIVATE libtracer)
 libtracer_test_warnings(children_test)
 add_test(NAME children COMMAND children_test)
 
+# L4 fold, Slice 0 — folded :children projection is byte-identical to the materialized
+# serialize and is a genuine scatter-gather rope the tlv_view cursor walks.
+add_executable(folded_children_test folded_children_test.cpp)
+target_link_libraries(folded_children_test PRIVATE libtracer)
+libtracer_test_warnings(folded_children_test)
+add_test(NAME folded_children COMMAND folded_children_test)
+
 # RFC-0005 — subtree subscriptions (vertical bubbling), branch-write (POINT)
 # decomposition, and write-creates (mkdir-p, CREATE-gated).
 add_executable(subtree_test subtree_test.cpp)

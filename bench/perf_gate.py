@@ -26,23 +26,28 @@ The --bench override drives the same-runner comparisons (CI):
   ./perf_gate.py                     # run + validate (records baseline on first run)
   ./perf_gate.py --update-baseline   # accept current numbers as the new baseline
   ./perf_gate.py --bench PATH        # time PATH instead of the default build output
+  ./perf_gate.py --bench-fwd PATH    # gate PATH's per-vertex memory bytes (baseline binary)
   ./perf_gate.py --runs N            # best-of-N bench executions (default 3)
 
-Exit 0 = PERF: PASS, 1 = PERF: FAIL (p50 up >15%, mean up >12%, or deliveries/s
-down >12% vs the
-same-runner baseline, or — with no baseline — past the absolute floors).
+Exit 0 = PERF: PASS, 1 = PERF: FAIL (p50 up >15%, mean up >12%, deliveries/s down
+>12%, or per-vertex live bytes up >2%, vs the same-runner baseline, or — with no
+baseline — past the absolute floors). The memory points come from bench_forward_heap
+(counting allocator, deterministic); pass --bench-fwd to record the baseline binary's
+bytes same-runner, mirroring --bench for latency.
 Stdlib only; no zenoh needed.
 """
 from __future__ import annotations
 
 import json
 import pathlib
+import re
 import statistics
 import subprocess
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 BENCH = HERE / "build" / "bench_libtracer"
+BENCH_FWD = HERE / "build" / "bench_forward_heap"
 BASELINE = HERE / "perf_baseline.json"
 
 # Canonical points: (mode, size, fanout, endpoints). RESULT cols (collate.py):
@@ -79,6 +84,19 @@ LAT_TICK_NS = 25     # sub-100ns baselines: one ~10ns clock tick already exceeds
 FLOOR_P50_NS = 1000  # absolute backstop if no baseline (canonical is ~100 ns)
 FLOOR_DELIV = 1_000_000
 DEFAULT_RUNS = 3
+
+# --- memory footprint gate (bench_forward_heap counting-allocator probes) --------
+# The live usable-size bytes a default leaf vertex holds at rest, plus the increment
+# an LKV write / a 5-field app table adds. These are EXACT — the counting allocator
+# is deterministic, not timed — so unlike latency they need no best-of-N and ratchet
+# tightly: a few bytes per vertex is real on the constrained target's ~16 KB budget.
+# Same-runner correctness comes from --bench-fwd (record the baseline binary's bytes),
+# mirroring --bench for the latency binary; keys are `mem:`-namespaced so they never
+# collide with the latency points.
+MEM_POINTS = ["vertex", "vertex_value", "vertex_app5"]
+MEM_REGRESS = 1.02   # fail if live bytes/vertex > baseline * 1.02 ...
+MEM_TICK_B = 1       # ... AND grew by more than one byte (ignore a lone bucket flip)
+_MEM_RE = re.compile(r"^RESULT zeroheap (\w+) allocs=\d+ frees=\d+ bytes=(\d+)")
 
 
 def run_bench_once(bench: pathlib.Path) -> list[tuple]:
@@ -126,6 +144,21 @@ def best_of(bench: pathlib.Path, runs: int) -> dict[str, dict]:
     return cur
 
 
+def mem_probe(bench_fwd: pathlib.Path) -> dict[str, dict]:
+    """Live usable-size bytes per vertex from the counting-allocator probes — one run
+    (deterministic). Returns {"mem:<what>": {"bytes": N}}; empty when the binary is
+    absent or emits no probe rows, so memory gating degrades to a note, never a crash."""
+    if not bench_fwd.exists():
+        return {}
+    out = subprocess.run([str(bench_fwd)], capture_output=True, text=True, timeout=180).stdout
+    got: dict[str, dict] = {}
+    for line in out.splitlines():
+        m = _MEM_RE.match(line)
+        if m and m.group(1) in MEM_POINTS:
+            got[f"mem:{m.group(1)}"] = {"bytes": int(m.group(2))}
+    return got
+
+
 def main() -> int:
     args = sys.argv[1:]
     bench = BENCH
@@ -133,12 +166,27 @@ def main() -> int:
         bench = pathlib.Path(args[args.index("--bench") + 1]).resolve()
     runs = int(args[args.index("--runs") + 1]) if "--runs" in args else DEFAULT_RUNS
     cur = best_of(bench, runs)
+    bench_fwd = BENCH_FWD
+    if "--bench-fwd" in args:
+        bench_fwd = pathlib.Path(args[args.index("--bench-fwd") + 1]).resolve()
+    cur.update(mem_probe(bench_fwd))  # fold the mem:* points into the same baseline dict
     base = json.loads(BASELINE.read_text()) if BASELINE.exists() else None
     fails = []
+    mem_hdr = f" / mem +{(MEM_REGRESS - 1) * 100:.0f}%" if any(k.startswith("mem:") for k in cur) else ""
     print(f"Per-loop perf gate (libtracer in-process, best of {runs} run(s), "
           f"fail: p50 +{(LAT_REGRESS - 1) * 100:.0f}% / mean +{(MEAN_REGRESS - 1) * 100:.0f}% / "
-          f"deliv -{(1 - TPUT_REGRESS) * 100:.0f}%):")
+          f"deliv -{(1 - TPUT_REGRESS) * 100:.0f}%{mem_hdr}):")
     for k, v in cur.items():
+        if "bytes" in v:  # memory footprint point (mem:*) — exact, deterministic
+            line = f"  {k:<22} live={v['bytes']:>6} B/vertex"
+            b = base.get(k) if base else None
+            if b and "bytes" in b:
+                if v["bytes"] > b["bytes"] * MEM_REGRESS and v["bytes"] - b["bytes"] > MEM_TICK_B:
+                    fails.append(f"{k} memory pullback: {v['bytes']}B vs base {b['bytes']}B "
+                                 f"(+{(v['bytes'] / b['bytes'] - 1) * 100:.1f}%)")
+                line += f"   (base {b['bytes']}B)"
+            print(line)
+            continue
         line = (f"  {k:<22} p50={v['p50_ns']:>7}ns mean={v['mean_ns']:>7}ns "
                 f"deliv/s={v['deliv_s']:>14,.0f}")
         if base and k in base:

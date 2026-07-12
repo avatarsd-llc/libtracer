@@ -63,12 +63,13 @@ jobs:
           git fetch --no-tags origin main
           git worktree add --detach ../main-baseline origin/main
           cmake -S ../main-baseline/bench -B ../main-baseline/bench/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build ../main-baseline/bench/build --target bench_libtracer -j
+          cmake --build ../main-baseline/bench/build --target bench_libtracer bench_forward_heap -j
       - name: Performance gate (same-runner main baseline)
         run: |
           echo "== record main (baseline) on this runner =="
-          python3 bench/perf_gate.py --bench ../main-baseline/bench/build/bench_libtracer --update-baseline
-          echo "== gate PR candidate against the same-runner baseline =="
+          python3 bench/perf_gate.py --bench ../main-baseline/bench/build/bench_libtracer \
+            --bench-fwd ../main-baseline/bench/build/bench_forward_heap --update-baseline
+          echo "== gate PR candidate against the same-runner baseline (latency + per-vertex memory) =="
           python3 bench/perf_gate.py
 
   # --- main push: REDUNDANT no-pullback ratchet (3 runners, HEAD vs parent) -------
@@ -101,7 +102,7 @@ jobs:
           if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
             git worktree add --detach ../parent-baseline HEAD^
             cmake -S ../parent-baseline/bench -B ../parent-baseline/bench/build -DCMAKE_BUILD_TYPE=Release
-            cmake --build ../parent-baseline/bench/build --target bench_libtracer -j
+            cmake --build ../parent-baseline/bench/build --target bench_libtracer bench_forward_heap -j
           else
             echo "root commit — no parent to ratchet against"
           fi
@@ -109,8 +110,9 @@ jobs:
         run: |
           if [ -x ../parent-baseline/bench/build/bench_libtracer ]; then
             echo "== record the parent (ratchet baseline) on this runner =="
-            python3 bench/perf_gate.py --bench ../parent-baseline/bench/build/bench_libtracer --update-baseline
-            echo "== gate HEAD against its parent on the same runner =="
+            python3 bench/perf_gate.py --bench ../parent-baseline/bench/build/bench_libtracer \
+              --bench-fwd ../parent-baseline/bench/build/bench_forward_heap --update-baseline
+            echo "== gate HEAD against its parent on the same runner (latency + per-vertex memory) =="
             python3 bench/perf_gate.py
           else
             echo "== no parent build — absolute floors only =="
