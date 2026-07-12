@@ -289,9 +289,9 @@ class graph_t {
 
     /**
      * @brief FOLDED projection of the `:children` listing (L4 fold, Slice 0) — the SAME
-     *        `POINT{ POINT{NAME}… }` that @ref read_children serializes, produced as a
-     *        scatter-gather **rope** (an outer POINT header link plus one link per
-     *        registered child) instead of one flat buffer.
+     *        `POINT{ POINT{NAME}… }` that the materialized `read_children` serializes, but
+     *        produced as a scatter-gather **rope** (an outer POINT header link plus one
+     *        link per registered child) instead of one flat buffer.
      *
      * A read-only projection over the materialized tree — the tree stays the source of
      * truth; this walks it and gathers rather than copying the whole listing into a

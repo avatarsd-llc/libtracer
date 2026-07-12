@@ -1379,7 +1379,7 @@ result_t<rope_t> graph_t::read_children_folded(vertex_handle_t vh) const {
                 oom = true;
                 return;
             }
-            members.append(*mhv);                         // owned POINT header
+            members.append(*mhv);                                 // owned POINT header
             members.append(view::view_t::over(std::move(nseg)));  // borrowed name (zero copy)
             members_len += mhdr.size() + name.size();
         });

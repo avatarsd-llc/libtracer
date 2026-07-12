@@ -55,8 +55,8 @@ long walk_point_children(const rope_t& r) {
     long n = 0;
     for (;;) {
         auto next = kids.next();
-        if (!next) return -1;                 // grammar error mid-walk
-        if (!next->has_value()) break;        // region cleanly exhausted
+        if (!next) return -1;           // grammar error mid-walk
+        if (!next->has_value()) break;  // region cleanly exhausted
         if ((*next)->type() != type_t::POINT) return -1;
         ++n;
     }
@@ -82,7 +82,7 @@ void assert_parent(graph_t& g, std::string_view parent) {
     std::string field(parent);
     field += ":children";
     const auto materialized = g.read(path_t(field));  // the flat oracle (single-link rope)
-    const auto folded = g.read_children_folded(*h);    // the folded projection
+    const auto folded = g.read_children_folded(*h);   // the folded projection
     if (!materialized || !folded) {
         check(materialized.has_value(), "materialized :children read succeeds");
         check(folded.has_value(), "folded :children read succeeds");
@@ -113,7 +113,8 @@ void test_several_children() {
     (void)g.register_vertex(path_t("/a/x"), role_t::STORED_VALUE);
     (void)g.register_vertex(path_t("/a/y"), role_t::STORED_VALUE);
     (void)g.register_vertex(path_t("/a/z"), role_t::STORED_VALUE);
-    (void)g.register_vertex(path_t("/a/x/deep"), role_t::STORED_VALUE);  // only DIRECT children list
+    (void)g.register_vertex(path_t("/a/x/deep"),
+                            role_t::STORED_VALUE);  // only DIRECT children list
     assert_parent(g, "/a");
 }
 
