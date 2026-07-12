@@ -1343,6 +1343,12 @@ result_t<view_t> graph_t::read_children(vertex_t* v) const {
     return *res;
 }
 
+result_t<rope_t> graph_t::read_children_materialized(vertex_handle_t vh) const {
+    const result_t<view_t> mv = read_children(vh.get());
+    if (!mv) return std::unexpected(mv.error());
+    return rope_t{*mv};
+}
+
 result_t<rope_t> graph_t::read_children_folded(vertex_handle_t vh) const {
     vertex_t* v = vh.get();
     // Synthesized listing (ADR-0044): a live bus-peer snapshot, already one contiguous
@@ -1400,6 +1406,19 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
                                std::string_view caller) const {
     vertex_t* v = vh.get();
     if (field.empty()) return read(vh, caller);  // value read → the stored rope
+    // ":children[]" (or bare ":children") — member enumeration, the read dual of the
+    // SPEC-creating append — is served FOLDED (L4 fold, Slice 0): a scatter-gather rope
+    // (outer POINT header + per-child borrowed NAME), byte-identical on flatten() to the
+    // materialized listing (`folded_children_test` gates the differential against
+    // `read_children_materialized`). It bypasses the single-view wrap below, which would
+    // re-flatten the fold back into one buffer. A single "[N]" slot has no meaning here
+    // (members are named, not indexed) and falls through to SCHEMA_NOT_FOUND.
+    if (field.steps.size() == 1 && field.steps[0].name == "children" && !field.steps[0].wildcard &&
+        (field.steps[0].append || !field.steps[0].indexed)) {
+        if (!acl_allows(v, caller, acl_right_t::READ))
+            return std::unexpected(status_t::PERMISSION_DENIED);
+        return read_children_folded(vh);
+    }
     // A field read serves a contiguous control TLV; it crosses back as a single-link
     // rope (ADR-0053 §6 — the data API returns ropes). Compute the control view, then
     // wrap once. Field reads are gated like data reads (#81): READ for the control
@@ -1443,13 +1462,7 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
                 return *out;
             }
         }
-        // ":children[]" (or bare ":children") — member enumeration, the read dual of
-        // the SPEC-creating append. A single "[N]" slot has no meaning here (members
-        // are named, not indexed) and falls through to SCHEMA_NOT_FOUND.
-        if (field.steps.size() == 1 && field.steps[0].name == "children" &&
-            !field.steps[0].wildcard && (field.steps[0].append || !field.steps[0].indexed)) {
-            return read_children(v);
-        }
+        // ":children" is handled above the lambda (folded rope — see read_children_folded).
         // A single slot ":subscribers[N]" — serve the stored SUBSCRIBER view (clone).
         if (field.steps.size() == 1 && field.steps[0].name == "subscribers" &&
             field.steps[0].indexed && !field.steps[0].append && !field.steps[0].wildcard) {
