@@ -40,7 +40,7 @@ on:
 # whole app image. To re-baseline after intentional growth: read the measured
 # numbers from the full-node job step summary / footprint-<target> artifact.
 env:
-  LIBTRACER_MAX_FLASH_BYTES: 98304 # 96 KiB — the full_node example builds -Os (COMPILER_OPTIMIZATION_SIZE); the -Os libtracer component sits well under this ceiling. Current measured values are in each run's footprint step / footprint-<target> artifact. (-Og baseline 2026-07-03 was 78,825 B (c3) / 82,861 B (c6); the ADR-0053 two-tier terminus is what -Os keeps in budget.)
+  LIBTRACER_MAX_FLASH_BYTES: 102400 # 100 KiB — the full_node example builds -Os (COMPILER_OPTIMIZATION_SIZE); the -Os libtracer component sits under this ceiling (96.6 KiB on c6 since the L4 fold went production-reachable in #397 — deliberate growth, +642 B over the old 96 KiB gate). Current measured values are in each run's footprint step / footprint-<target> artifact. (-Og baseline 2026-07-03 was 78,825 B (c3) / 82,861 B (c6); the ADR-0053 two-tier terminus is what -Os keeps in budget.)
   LIBTRACER_MAX_STATIC_RAM_BYTES: 4096 # measured 2026-07-03: 16 B — the tight ceiling ENFORCES the no-internal-buffers ruling (ADR-0041 §5)
   LIBTRACER_SENTINEL_MODE: fail # thresholds are measured (see above); a breach is a real regression
 
