@@ -79,14 +79,25 @@ void assert_parent(graph_t& g, std::string_view parent) {
         return;
     }
 
-    std::string field(parent);
-    field += ":children";
-    const auto materialized = g.read(path_t(field));  // the flat oracle (single-link rope)
-    const auto folded = g.read_children_folded(*h);   // the folded projection
+    const auto materialized = g.read_children_materialized(*h);  // the flat oracle
+    const auto folded = g.read_children_folded(*h);              // the folded projection
     if (!materialized || !folded) {
         check(materialized.has_value(), "materialized :children read succeeds");
         check(folded.has_value(), "folded :children read succeeds");
         return;
+    }
+
+    // The PRODUCTION field read serves the fold (not the flat oracle): same links,
+    // same bytes as read_children_folded.
+    std::string field(parent);
+    field += ":children";
+    const auto production = g.read(path_t(field));
+    check(production.has_value(), "production :children read succeeds");
+    if (production) {
+        check(production->link_count() == folded->link_count(),
+              "production :children read IS the folded rope (link count)");
+        check(same_bytes(production->flatten(), folded->flatten()),
+              "production :children read matches the fold byte-for-byte");
     }
 
     const view_t mv = materialized->flatten();

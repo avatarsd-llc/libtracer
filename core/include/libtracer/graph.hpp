@@ -306,6 +306,17 @@ class graph_t {
     [[nodiscard]] result_t<rope_t> read_children_folded(vertex_handle_t v) const;
 
     /**
+     * @brief MATERIALIZED `:children` listing — the flat single-link serialize of the same
+     *        `POINT{ POINT{NAME}… }` the fold gathers.
+     *
+     * The production field read serves the FOLDED rope; this flat form exists as the
+     * independent oracle `folded_children_test` diffs the fold against (byte identity on
+     * flatten() over many graph shapes) — without it the differential would be
+     * tautological.
+     */
+    [[nodiscard]] result_t<rope_t> read_children_materialized(vertex_handle_t v) const;
+
+    /**
      * @brief Subscribe @p src to a @p target vertex — a write to src re-dispatches the
      *        cloned value to target (spec-faithful). `NOT_FOUND` if src is unknown.
      *

@@ -241,7 +241,10 @@ std::set<std::string> member_names(const tlv_t& point) {
 std::set<std::string> enumerate_local(graph_t& g, const char* path) {
     const auto r = g.read(*path_t::parse(path));
     if (!r) return {};
-    const auto dec = tr::wire::decode(r->only());
+    // A generic member listing is a FOLDED scatter-gather rope (L4 fold); flatten to
+    // decode. The synthesized (on_children) listing stays single-link either way.
+    const tr::view::view_t flat = r->flatten();
+    const auto dec = tr::wire::decode(flat.bytes());
     if (!dec || dec->type != type_t::POINT) return {};
     return member_names(*dec);
 }
