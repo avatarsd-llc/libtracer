@@ -85,6 +85,23 @@ class bus_link_t {
     [[nodiscard]] virtual transport_t* peer_link(std::string_view peer) = 0;
 
     /**
+     * @brief Close one peer's connection by NAME, freeing its slot for reuse.
+     *
+     * Tears down exactly the peer @p peer names, exactly as a remote hangup would:
+     * the recycle is asynchronous (the link's own receive loop observes the close
+     * and reclaims the slot), so @ref enumerate_peers stops listing it shortly
+     * after this returns true. A point-to-point kind (the default) has no
+     * per-peer teardown and returns false; a bus link that supports directed
+     * teardown overrides this.
+     * @retval true  @p peer named an open connection and its teardown was initiated.
+     * @retval false @p peer names no open peer, or this kind cannot close one peer.
+     */
+    [[nodiscard]] virtual bool close_peer(std::string_view peer) {
+        (void)peer;
+        return false;
+    }
+
+    /**
      * @brief Register the peer-named inbound sink (used INSTEAD of `set_receiver`).
      *
      * Must be set before frames flow; delivery may occur on an internal transport

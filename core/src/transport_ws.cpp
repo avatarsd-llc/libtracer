@@ -200,6 +200,24 @@ transport_t* transport_ws_server::peer_link(std::string_view peer) {
     return nullptr;
 }
 
+bool transport_ws_server::close_peer(std::string_view peer) {
+    // Find the named open peer under the same lock order senders use
+    // (peers_m_ → write_m_), then ::shutdown its socket. We deliberately do NOT
+    // call teardown_slot here: it clears the recv-thread-only buffers/assembler,
+    // so it must run only on the recv thread. The shutdown wakes that thread's
+    // next poll, ::recv returns 0, and the IDENTICAL remote-FIN path recycles the
+    // slot — no duplicate teardown logic, no off-thread buffer touch.
+    const std::lock_guard plock(peers_m_);
+    for (const std::unique_ptr<session_t>& s : slots_) {
+        if (!s->open.load(std::memory_order_relaxed) || s->name != peer) continue;
+        const std::lock_guard wlock(write_m_);
+        const int fd = s->fd.load(std::memory_order_relaxed);
+        if (fd >= 0) ::shutdown(fd, SHUT_RDWR);
+        return true;
+    }
+    return false;
+}
+
 void transport_ws_server::accept_peer() {
     sockaddr_in remote{};
     socklen_t rlen = sizeof(remote);

@@ -538,6 +538,78 @@ void test_max_peers_cap() {
     check(readmitted, "...and the next client is admitted into the recycled slot");
 }
 
+/** @brief #374 — close_peer tears down exactly one named peer, recycling its slot
+ *         precisely as a remote FIN would: the survivor stays resolvable, an unknown
+ *         name is refused, and a fresh client is admitted into the freed slot. */
+void test_close_peer() {
+    std::printf("transport_ws server — single-peer close_peer (#374):\n");
+
+    peer_sink_t srv_sink;
+    frame_sink_t a_sink;
+    frame_sink_t b_sink;
+
+    tr::net::transport_ws_server server(0, /*max_peers=*/2, /*peer_named=*/true);
+    check(server.ok(), "listen socket bound");
+    const std::uint16_t port = server.local_port();
+    server.bus()->set_peer_receiver(srv_sink);
+
+    tr::net::transport_ws_client a("127.0.0.1", port);
+    a.set_receiver(a_sink);
+    std::optional<tr::net::transport_ws_client> b;
+    b.emplace("127.0.0.1", port);
+    b->set_receiver(b_sink);
+    check(a.ok() && b->ok(), "two clients connected");
+
+    // Drive one frame each so the server learns both peer names.
+    const std::array<std::byte, 2> pa{std::byte{0x01}, std::byte{0xA1}};
+    const std::array<std::byte, 2> pb{std::byte{0x01}, std::byte{0xB1}};
+    a.send(pa);
+    b->send(pb);
+    check(srv_sink.wait_count(2, 2s), "server got both clients' frames");
+    std::string name_a;
+    std::string name_b;
+    {
+        const std::lock_guard lock(srv_sink.m);
+        for (const auto& [peer, bytes] : srv_sink.frames) {
+            if (bytes == std::vector<std::byte>(pa.begin(), pa.end())) name_a = peer;
+            if (bytes == std::vector<std::byte>(pb.begin(), pb.end())) name_b = peer;
+        }
+    }
+    check(!name_a.empty() && !name_b.empty(), "both peers identifiable by tag");
+
+    std::size_t n_peers = 0;
+    server.bus()->enumerate_peers([&](std::string_view) { ++n_peers; });
+    check(n_peers == 2, "enumerate_peers lists both open peers");
+
+    // Close b via the bus facet; its slot recycles asynchronously (one poll bound).
+    check(server.bus()->close_peer(name_b), "close_peer(name_b) reports the peer was closed");
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    std::size_t live = 2;
+    while (std::chrono::steady_clock::now() < deadline) {
+        live = 0;
+        server.bus()->enumerate_peers([&](std::string_view) { ++live; });
+        if (live == 1) break;
+        std::this_thread::sleep_for(20ms);
+    }
+    check(live == 1, "close_peer recycled the slot (departed peer left enumeration)");
+    check(server.bus()->peer_link(name_a) != nullptr, "surviving peer still resolves");
+    check(server.bus()->peer_link(name_b) == nullptr, "closed peer no longer resolves");
+    check(!server.bus()->close_peer("0.0.0.0:1"), "close_peer of an unknown name returns false");
+
+    // A fresh client is admitted into the recycled slot (proves it freed like a FIN,
+    // under max_peers=2 with one survivor still occupying a slot).
+    const auto rd = std::chrono::steady_clock::now() + 2s;
+    bool readmitted = false;
+    while (!readmitted && std::chrono::steady_clock::now() < rd) {
+        const tr::net::transport_ws_client c("127.0.0.1", port);
+        readmitted = c.ok();
+        if (!readmitted) std::this_thread::sleep_for(50ms);
+    }
+    check(readmitted, "a new client is admitted into the recycled slot");
+
+    b.reset();
+}
+
 }  // namespace
 
 int main() {
@@ -547,6 +619,7 @@ int main() {
     test_client_server_roundtrip();
     test_multi_peer_bus();
     test_max_peers_cap();
+    test_close_peer();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

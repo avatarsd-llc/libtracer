@@ -184,6 +184,18 @@ class transport_vertex_t {
     /** @brief The parsed transport-private settings of connection @p name (nullptr if none). */
     [[nodiscard]] const conn_settings_t* settings_of(std::string_view name) const;
 
+    /**
+     * @brief The OWNED transport of connection @p name — the config-constructed socket.
+     *
+     * The seam for reaching a SPEC-constructed listener/server after creation (e.g.
+     * to enumerate its peers via `link_of(name)->bus()` or close one via
+     * `link_of(name)->bus()->close_peer(peer)`). Returns nullptr for a connection
+     * whose link was staged with @ref provide_link (the caller already owns that
+     * link) and for an unknown NAME.
+     * @param name The connection's NAME (the `/net/<name>` segment).
+     */
+    [[nodiscard]] transport_t* link_of(std::string_view name) const;
+
    private:
     // One connection leaf: the graph identity vertex, its transport-private config, and —
     // when config-constructed — the OWNED transport (`owned` empty for a provided link).

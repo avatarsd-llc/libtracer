@@ -127,6 +127,19 @@ class transport_ws_server : public transport_t, public bus_link_t, private strea
      */
     [[nodiscard]] transport_t* peer_link(std::string_view peer) override;
 
+    /**
+     * @brief Close the open peer named @p peer, freeing its slot for the next accept.
+     *
+     * Shuts the peer's socket down (`SHUT_RDWR`); the recv thread's next poll pass
+     * observes the close and runs the SAME teardown as a remote hangup — so the
+     * recycle is asynchronous (the slot leaves @ref enumerate_peers within one poll
+     * bound) and never touches the recv-thread-only buffers off-thread. A subsequent
+     * accept reuses exactly the freed slot.
+     * @retval true  @p peer named an open connection and its socket was shut down.
+     * @retval false @p peer names no currently-open connection.
+     */
+    [[nodiscard]] bool close_peer(std::string_view peer) override;
+
     /** @brief True if the listen socket is bound and listening. */
     [[nodiscard]] bool ok() const noexcept { return listen_fd_ >= 0; }
 
