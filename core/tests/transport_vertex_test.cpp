@@ -31,6 +31,7 @@
 
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "libtracer/transport_ws.hpp"
 
 namespace {
 
@@ -381,6 +382,27 @@ void test_creation_errors() {
           "no kind + no provide_link => NOT_FOUND");
 }
 
+void test_link_of_accessor() {
+    std::printf("link_of reaches a SPEC-constructed owned transport (#374):\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+
+    // A ws LISTENER built purely from config — the owned server socket is otherwise
+    // unreachable by the app (no accessor existed before #374).
+    const auto w = node.write(path_t("/net:children[]"),
+                              conn_spec("listener", "srv", conn_role_t::LISTEN, 47131, "ws"));
+    check(w.has_value(), "SPEC{listener, kind=ws} constructs the owned server");
+
+    tr::net::transport_t* const link = net.link_of("srv");
+    check(link != nullptr, "link_of resolves the owned transport (previously unreachable)");
+    auto* const srv = dynamic_cast<tr::net::transport_ws_server*>(link);
+    check(srv != nullptr, "the owned transport is a transport_ws_server");
+    if (srv != nullptr)
+        check(srv->ok() && srv->local_port() != 0, "it is the live, bound owned socket");
+    check(net.link_of("absent") == nullptr, "link_of of an unknown NAME is nullptr");
+}
+
 }  // namespace
 
 int main() {
@@ -391,6 +413,7 @@ int main() {
     test_config_constructed_udp();
     test_provide_link_wins();
     test_creation_errors();
+    test_link_of_accessor();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");

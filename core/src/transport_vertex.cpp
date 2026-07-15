@@ -209,4 +209,9 @@ const conn_settings_t* transport_vertex_t::settings_of(std::string_view name) co
     return it == conns_.end() ? nullptr : &it->second.settings;
 }
 
+transport_t* transport_vertex_t::link_of(std::string_view name) const {
+    const auto it = conns_.find(name);
+    return it == conns_.end() ? nullptr : it->second.owned.get();
+}
+
 }  // namespace tr::net
