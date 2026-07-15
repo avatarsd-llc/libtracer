@@ -238,14 +238,21 @@ void test_subset_rejections() {
     (void)g.register_vertex(*path, role_t::STORED_VALUE);
     const auto acl_field = path_t::parse("/x:acl");
 
-    {  // DENY is beyond the ALLOW-only subset — rejected at write, not parse-but-ignored
+    {  // DENY handling depends on the compiled policy (ADR-0020 subset vs full)
         const auto w = g.write(*acl_field, make_value(make_acl({
                                                {.type = 1,  // DENY
                                                 .subject = "peer-a",
                                                 .mask = bit(acl_right_t::READ)},
                                            })));
-        check(!w.has_value() && w.error() == status_t::TYPE_MISMATCH,
-              "an ACL carrying a DENY ACE is rejected with TYPE_MISMATCH");
+        if constexpr (tr::graph::acl_policy_t::kAcceptsDeny) {
+            // full host policy (LIBTRACER_ACL_FULL): DENY is a first-class ACE, stored + evaluated
+            check(w.has_value(), "the full policy stores an ACL carrying a DENY ACE");
+        } else {
+            // ALLOW-only subset: DENY is beyond the profile — rejected at write, not
+            // parse-but-ignored
+            check(!w.has_value() && w.error() == status_t::TYPE_MISMATCH,
+                  "an ACL carrying a DENY ACE is rejected with TYPE_MISMATCH");
+        }
     }
     {  // flags beyond the single INHERIT bit (e.g. INHERIT_ONLY=0x2) — rejected
         const auto w = g.write(
@@ -269,10 +276,33 @@ void test_subset_rejections() {
         check(!w.has_value() && w.error() == status_t::TYPE_MISMATCH,
               "an ACE missing access_mask is rejected with TYPE_MISMATCH");
     }
-    {  // rejected writes never installed anything
+    {  // rejected writes never installed anything (the DENY write only stores under the full
+       // policy)
         const auto r = g.read(*acl_field);
-        check(!r.has_value() && r.error() == status_t::NOT_FOUND,
-              "no rejected ACL was stored (:acl still NOT_FOUND)");
+        if constexpr (tr::graph::acl_policy_t::kAcceptsDeny) {
+            check(r.has_value(), "the full policy stored the DENY-carrying ACL on :acl");
+        } else {
+            check(!r.has_value() && r.error() == status_t::NOT_FOUND,
+                  "no rejected ACL was stored (:acl still NOT_FOUND)");
+        }
+    }
+
+    if constexpr (tr::graph::acl_policy_t::kAcceptsDeny) {
+        // the full policy actually EVALUATES DENY: an ordered [DENY, ALLOW] on the same bit
+        // denies (first-match-per-bit), proving a DENY overrides a later ALLOW — not just parse
+        // acceptance but real ADR-0020 evaluation coverage for the LIBTRACER_ACL_FULL config.
+        graph_t gf;
+        const vertex_handle_t v = gf.register_vertex(path_t("/d"), role_t::STORED_VALUE);
+        gf.set_subject_resolver(caller_is_subject);
+        const auto w = gf.write(
+            path_t("/d:acl"),
+            make_value(make_acl({
+                {.type = 1, .subject = "peer-a", .mask = bit(acl_right_t::READ)},  // DENY first
+                {.type = 0, .subject = "peer-a", .mask = bit(acl_right_t::READ)},  // then ALLOW
+            })));
+        check(w.has_value(), "the full policy stores an ordered DENY-before-ALLOW ACL");
+        check(denied(gf.read(v, "peer-a")),
+              "a first-match DENY overrides a later ALLOW on the same bit (READ denied)");
     }
 }
 

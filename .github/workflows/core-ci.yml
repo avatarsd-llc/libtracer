@@ -16,11 +16,19 @@ on:
 jobs:
   build-test:
     runs-on: ubuntu-24.04
+    # Build + ctest under BOTH ACL policy configs: the default ALLOW-only MCU
+    # subset (acl_full=OFF) and the full security_acl host policy with DENY
+    # (acl_full=ON). LIBTRACER_ACL_FULL swaps acl_policy_t at compile time, so
+    # the full config is a distinct compilation the default job never covers (#345).
+    strategy:
+      matrix:
+        acl_full: [OFF, ON]
+    name: build-test (acl_full=${{ matrix.acl_full }})
     steps:
       - uses: actions/checkout@v4
       - name: Configure + build (C++23) + ctest
         run: |
-          cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLIBTRACER_ACL_FULL=${{ matrix.acl_full }}
           cmake --build core/build -j
           ctest --test-dir core/build --output-on-failure
 
