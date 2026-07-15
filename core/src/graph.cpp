@@ -433,6 +433,14 @@ std::optional<vertex_handle_t> graph_t::find(std::span<const std::byte> key) con
     return vertex_handle_t{p};
 }
 
+bool graph_t::has_first_level_child(std::span<const std::byte> record) const {
+    const std::shared_lock lock(map_mutex_);
+    // Placeholder-inclusive, unlike find_ptr (which excludes unregistered intermediates):
+    // the router shadows a first-level segment whether the top-level vertex is registered
+    // or a mere structural parent, so the shadow test must see both.
+    return root_->child_by_record(record) != nullptr;
+}
+
 const settings_t& graph_t::settings(vertex_handle_t v) const noexcept {
     return v.get()->settings();
 }

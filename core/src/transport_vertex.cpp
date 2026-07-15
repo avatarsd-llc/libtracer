@@ -122,6 +122,14 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
     const std::string name = last_segment(child_key);
     if (name.empty()) return std::unexpected(status_t::INVALID_PATH);
     if (conns_.contains(name)) return std::unexpected(status_t::PATH_IN_USE);
+    // Bug #373: the router resolves a FWD's first dst segment against the child-link
+    // registry BEFORE the local graph (fwd_router_t::on_frame_impl / on_frame_rope), so a
+    // link named the same as a first-level vertex silently black-holes every /name/... read
+    // onto the transport (no wire error; the local subtree is never reached, reads time out).
+    // Reject the collision at registration, before any side effect leaves the wiring half-set.
+    std::vector<std::byte> seg_key;
+    wire::emit_name(seg_key, name);
+    if (graph_.has_first_level_child(seg_key)) return std::unexpected(status_t::PATH_IN_USE);
 
     conn_settings_t settings;
     settings.role = role;  // the type default; config may override
