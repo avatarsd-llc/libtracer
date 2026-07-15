@@ -14,6 +14,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **First-level-child existence test: `graph_t::has_first_level_child`
+  (#373)** — a placeholder-inclusive predicate (`std::span<const std::byte>` NAME
+  record → `bool`) reporting whether the graph root has a top-level child by that
+  name, whether it is a registered vertex or a mere structural placeholder (unlike
+  `find`, which excludes placeholders). The transport plane uses it to reject a
+  child-link name that would shadow a first-level subtree: a FWD's first `dst`
+  segment resolves against the child-link registry before the local graph, so a
+  link named e.g. `system` otherwise black-holes every `/system/...` read onto the
+  transport. Non-wire, no RFC.
 - **Borrowed (static-storage) app-field install: `graph_t::set_app_fields_static`
   (#388, ADR-0058)** — a non-owning overload beside the owning
   `set_app_fields(std::vector<app_field_t>)`, taking

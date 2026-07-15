@@ -355,7 +355,7 @@ class graph_t {
      * address (lvalues only — a temporary would dangle) and MUST outlive every delivery.
      */
     template <typename F>
-        requires std::invocable<F&, const view::rope_t&>
+    requires std::invocable<F&, const view::rope_t&>
     [[nodiscard]] result_t<void> subscribe(const path_t& src, F& callback) {
         return subscribe(
             src, [](void* c, const view::rope_t& v) { (*static_cast<F*>(c))(v); }, &callback);
@@ -465,6 +465,19 @@ class graph_t {
     /** @brief Resolve a canonical PATH-payload @p key to its vertex handle (`nullopt` if
      *         unknown). */
     [[nodiscard]] std::optional<vertex_handle_t> find(std::span<const std::byte> key) const;
+
+    /**
+     * @brief Does the root have a first-level child whose NAME record equals @p record?
+     *
+     * The placeholder-inclusive existence test `find` cannot give: it matches a top-level
+     * vertex whether it is `registered()` or a structural placeholder (an intermediate whose
+     * only registered members are deeper, e.g. `/system/mode` with `/system` unfilled).
+     * Used by the transport plane to reject a child-link name that would shadow a first-level
+     * subtree, since a FWD's first `dst` segment resolves against the child-link registry
+     * before the local graph (a link named `system` otherwise black-holes every `/system/...`
+     * read onto the transport). @p record is a single canonical NAME record (`wire::emit_name`).
+     */
+    [[nodiscard]] bool has_first_level_child(std::span<const std::byte> record) const;
 
     /**
      * @brief The QoS settings of the vertex @p v names (ADR-0056).

@@ -403,6 +403,58 @@ void test_link_of_accessor() {
     check(net.link_of("absent") == nullptr, "link_of of an unknown NAME is nullptr");
 }
 
+void test_link_name_collision_rejected() {
+    std::printf("Bug #373: a link name shadowing a first-level vertex is rejected:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    // A first-level vertex the link would shadow.
+    (void)node.register_vertex(path_t("/system"), role_t::STORED_VALUE);
+
+    tr::net::loopback_channel_t channel;
+    net.provide_link("system", channel.a());  // stage a link named exactly "system"
+    const auto w = node.write(path_t("/net:children[]"),
+                              conn_spec("listener", "system", conn_role_t::LISTEN, 0));
+    check(!w.has_value() && w.error() == status_t::PATH_IN_USE,
+          "a link name colliding with a first-level vertex is rejected (PATH_IN_USE)");
+    check(!node.find(path_t::parse("/net/system")->key()).has_value(),
+          "no /net/system vertex was created");
+    check(router.registry().by_name("system") == nullptr,
+          "the colliding link was NOT wired into the router");
+
+    // Control: a non-colliding name still works end-to-end.
+    net.provide_link("uplink", channel.a());
+    const auto w2 = node.write(path_t("/net:children[]"),
+                               conn_spec("listener", "uplink", conn_role_t::LISTEN, 0));
+    check(w2.has_value(), "a non-colliding link name still registers");
+    check(node.find(path_t::parse("/net/uplink")->key()).has_value() &&
+              router.registry().by_name("uplink") == &channel.a(),
+          "the non-colliding connection resolves and is wired into the router");
+    channel.shutdown();
+}
+
+void test_link_name_collision_placeholder_parent() {
+    std::printf("Bug #373: a link name shadowing a PLACEHOLDER first-level parent is rejected:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    // Only /system/mode is registered — /system stays a structural placeholder, but the
+    // router still shadows its first segment, so the collision must be caught here too.
+    (void)node.register_vertex(path_t("/system/mode"), role_t::STORED_VALUE);
+    check(!node.find(path_t::parse("/system")->key()).has_value(),
+          "/system is a placeholder (find sees no registered vertex there)");
+
+    tr::net::loopback_channel_t channel;
+    net.provide_link("system", channel.a());
+    const auto w = node.write(path_t("/net:children[]"),
+                              conn_spec("listener", "system", conn_role_t::LISTEN, 0));
+    check(!w.has_value() && w.error() == status_t::PATH_IN_USE,
+          "a link name shadowing a placeholder first-level parent is rejected (PATH_IN_USE)");
+    check(router.registry().by_name("system") == nullptr,
+          "the colliding link was NOT wired into the router");
+    channel.shutdown();
+}
+
 }  // namespace
 
 int main() {
@@ -414,6 +466,8 @@ int main() {
     test_provide_link_wins();
     test_creation_errors();
     test_link_of_accessor();
+    test_link_name_collision_rejected();
+    test_link_name_collision_placeholder_parent();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
