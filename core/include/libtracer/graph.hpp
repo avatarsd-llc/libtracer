@@ -355,7 +355,7 @@ class graph_t {
      * address (lvalues only — a temporary would dangle) and MUST outlive every delivery.
      */
     template <typename F>
-    requires std::invocable<F&, const view::rope_t&>
+        requires std::invocable<F&, const view::rope_t&>
     [[nodiscard]] result_t<void> subscribe(const path_t& src, F& callback) {
         return subscribe(
             src, [](void* c, const view::rope_t& v) { (*static_cast<F*>(c))(v); }, &callback);
