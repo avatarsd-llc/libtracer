@@ -126,6 +126,8 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers,
         handle_ = nullptr;  // ok() stays false
         return;
     }
+    uri_ = "/";            // owns_httpd_ stays true; the dtor stops the server, but keep uri_
+                           // coherent with the adopting path (both register the same handler).
     httpd_uri_t uri = {};  // zero-init, then set fields by name (robust to optional
     uri.uri = "/";         // ws_pre/post_handshake_cb members behind extra Kconfig)
     uri.method = HTTP_GET;
@@ -139,11 +141,43 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers,
     }
 }
 
+httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_pattern,
+                                 std::size_t max_peers, bool peer_named)
+    : max_peers_(max_peers), peer_named_(peer_named) {
+    // Adopt an already-running server (the firmware's :80 SPA httpd): register the WS URI
+    // as one more handler on it rather than standing up a second esp_http_server. We do
+    // NOT own the server, so port_ is 0 (no bind of ours) and the dtor must never
+    // httpd_stop it — only unregister the URI. No cfg / ctrl_port / httpd_start here: with
+    // one server the control-UDP-port clash the owning ctor guards against cannot arise.
+    handle_ = external;
+    owns_httpd_ = false;
+    port_ = 0;
+    uri_ = uri_pattern;
+
+    httpd_uri_t uri = {};    // zero-init, then set fields by name (robust to optional
+    uri.uri = uri_.c_str();  // ws_pre/post_handshake_cb members behind extra Kconfig)
+    uri.method = HTTP_GET;
+    uri.handler = &httpd_ws_link_t::ws_handler;
+    uri.user_ctx = this;
+    uri.is_websocket = true;
+    uri.handle_ws_control_frames = false;  // httpd answers PING/PONG and tracks CLOSE
+    if (httpd_register_uri_handler(external, &uri) != ESP_OK) {
+        handle_ = nullptr;  // ok() stays false; do NOT httpd_stop — we do not own the server
+    }
+}
+
 httpd_ws_link_t::~httpd_ws_link_t() {
-    // Stop the task first so no handler / queued work touches slots being freed. On
-    // device the node leaks this object (recv path lives for the process), so this
-    // only runs in a host teardown — but keep it correct.
-    if (handle_ != nullptr) httpd_stop(handle_);
+    // Owning mode: stop the task first so no handler / queued work touches slots being
+    // freed. On device the node leaks this object (recv path lives for the process), so
+    // this only runs in a host teardown — but keep it correct. Adopted mode: only
+    // unregister our WS URI and leave the caller's server running — never stop a server
+    // this link did not start.
+    if (handle_ != nullptr) {
+        if (owns_httpd_)
+            httpd_stop(handle_);
+        else
+            httpd_unregister_uri_handler(handle_, uri_.c_str(), HTTP_GET);
+    }
     handle_ = nullptr;
 }
 
