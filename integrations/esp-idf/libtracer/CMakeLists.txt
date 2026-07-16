@@ -103,10 +103,21 @@ else()
     # not use the WS link builds without it (transport_ws.cpp still --gc-sections out).
     if(CONFIG_HTTPD_WS_SUPPORT)
         list(APPEND LIBTRACER_SRCS "httpd_ws_link.cpp")
-        list(APPEND LIBTRACER_PRIV_REQUIRES esp_http_server)
     endif()
     # esp_driver_gpio: twai_link.cpp names its pins via <driver/gpio.h> types.
-    list(APPEND LIBTRACER_PRIV_REQUIRES lwip esp_driver_twai esp_driver_gpio)
+    # esp_http_server: httpd_ws_link.cpp rides its native WS API. It MUST be an
+    # UNCONDITIONAL requirement — NOT gated on CONFIG_HTTPD_WS_SUPPORT like the TU
+    # above. IDF resolves component requirements in an early-expansion pass where
+    # CONFIG_* symbols are not yet defined, so a Kconfig-gated REQUIRES silently
+    # evaluates false there and never propagates the component's include dir; the
+    # TU (correctly gated on the same config in the second pass) then compiles
+    # WITHOUT <esp_http_server.h> and dies with "No such file" on any node that
+    # enables WS support (the strawberry-fw prod build hit exactly this). The header
+    # is a base IDF component present on every chip target, so requiring it always is
+    # safe and free when the TU is absent — nothing references its symbols, so
+    # --gc-sections drops the link dep and libtracer.a is byte-identical (no footprint
+    # change to the WS-off examples the sentinel measures).
+    list(APPEND LIBTRACER_PRIV_REQUIRES lwip esp_driver_twai esp_driver_gpio esp_http_server)
     # compat/include: POSIX headers IDF's libc spells differently (<poll.h> ->
     # <sys/poll.h>) — private, so core sources stay pure POSIX and dependents
     # never see the shim.
