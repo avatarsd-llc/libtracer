@@ -94,11 +94,19 @@ else()
     list(APPEND LIBTRACER_SRCS
         "${LIBTRACER_ROOT}/core/src/socketcan_link_stub.cpp"
         "twai_link.cpp"
-        "httpd_ws_link.cpp"
     )
+    # httpd_ws_link.cpp is built on esp_http_server's native WebSocket API
+    # (httpd_ws_frame_t, HTTPD_WS_TYPE_*, httpd_uri_t::is_websocket, ...), which the
+    # component ships ONLY when CONFIG_HTTPD_WS_SUPPORT is enabled. Select the TU in
+    # CMake on that config (never an in-source #ifdef, per the platform-link rule
+    # above): a node that binds this link enables WS support; an example that does
+    # not use the WS link builds without it (transport_ws.cpp still --gc-sections out).
+    if(CONFIG_HTTPD_WS_SUPPORT)
+        list(APPEND LIBTRACER_SRCS "httpd_ws_link.cpp")
+        list(APPEND LIBTRACER_PRIV_REQUIRES esp_http_server)
+    endif()
     # esp_driver_gpio: twai_link.cpp names its pins via <driver/gpio.h> types.
-    # esp_http_server: httpd_ws_link.cpp is built on its native WebSocket support.
-    list(APPEND LIBTRACER_PRIV_REQUIRES lwip esp_driver_twai esp_driver_gpio esp_http_server)
+    list(APPEND LIBTRACER_PRIV_REQUIRES lwip esp_driver_twai esp_driver_gpio)
     # compat/include: POSIX headers IDF's libc spells differently (<poll.h> ->
     # <sys/poll.h>) — private, so core sources stay pure POSIX and dependents
     # never see the shim.
