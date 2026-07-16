@@ -12,3 +12,13 @@
 # Give app_main a little extra stack — the in-process graph touches std::
 # containers (unordered_map / vector) during register/write.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# CI compile-coverage for the esp_http_server-backed WS link. This example does
+# not USE httpd_ws_link_t (it is an in-process/loopback smoke app), but enabling
+# WS support makes the component CMakeLists compile httpd_ws_link.cpp here — the
+# ONLY CI build that exercises the WS-on path (full_node keeps it off so its
+# footprint sentinel is not charged for a TU it does not bind). Without this,
+# httpd_ws_link.cpp compiles nowhere in CI and a break in it (or in the
+# esp_http_server requirement wiring) is only caught by a downstream firmware
+# build. inprocess_mirror has no footprint gate, so the extra TU costs nothing here.
+CONFIG_HTTPD_WS_SUPPORT=y
