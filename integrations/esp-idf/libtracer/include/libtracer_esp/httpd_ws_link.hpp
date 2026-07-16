@@ -11,10 +11,12 @@
  * ::socket/::listen/::accept, hand-rolls the RFC 6455 handshake + frame codec +
  * fragment reassembly, and runs a dedicated poll thread — ~16 KB of flash and an
  * extra task on a chip that ALREADY links `esp_http_server` (the SPA is served
- * from it on :80). This link instead stands up a SECOND `esp_http_server`
- * instance on the node's WS port and lets the tested platform stack own the
- * listen socket, the handshake, the masking/framing and the recv task — the same
- * "platform link" split as `twai_link_t` is for CAN. The portable
+ * from it on :80). This link instead rides `esp_http_server`: it EITHER stands up
+ * its own instance on the node's WS port (the port-binding ctor) OR adopts the
+ * firmware's already-running :80 SPA server and registers its WS URI on it (the
+ * external-handle ctor — no second server), letting the tested platform stack own
+ * the listen socket, the handshake, the masking/framing and the recv task — the
+ * same "platform link" split as `twai_link_t` is for CAN. The portable
  * `transport_ws_server` stays for the linux virtual board, which has no
  * `esp_http_server` (it uses glibc sockets); the two are picked by which TU the
  * build compiles, never an in-source `#ifdef`.
@@ -92,7 +94,34 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     explicit httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers = 0,
                              bool peer_named = false);
 
-    /** @brief Stop the httpd instance and release all peer slots. */
+    /**
+     * @brief Adopt an already-running `esp_http_server` and register the WebSocket URI
+     *        handler on it at @p uri (no second server is started); confirm with @ref ok.
+     *
+     * The non-owning counterpart to the port-binding ctor: instead of standing up a
+     * second `esp_http_server`, this registers the WS handler as one more `httpd_uri_t`
+     * on the firmware's existing `:80` SPA server, so a same-origin browser reaches the
+     * graph over the one port. The dtor unregisters that URI and leaves the server
+     * running — this link never stops a server it did not start.
+     *
+     * @param external   A started `esp_http_server` handle to host the WS URI on; the
+     *                   caller retains ownership and must outlive this link.
+     * @param uri        WS URI pattern to register the handler at (e.g. "/ws"). Register
+     *                   it BEFORE any wildcard route so registration-order precedence
+     *                   routes it to the WS handler; keep it an exact literal.
+     * @param max_peers  Concurrent-peer admission cap; 0 = unbounded. Beyond it a
+     *                   new handshake is refused (the handler fails, httpd closes
+     *                   the socket) — a clean refusal, mirroring transport_ws_server.
+     * @param peer_named Expose the @ref bus_link_t facet: each inbound peer gets its
+     *                   own `<ip>:<port>` return-route identity (the browser-tabs
+     *                   deployment). Off keeps point-to-point hop naming (send()
+     *                   fans out; inbound arrives as the registered child NAME).
+     */
+    httpd_ws_link_t(httpd_handle_t external, const char* uri, std::size_t max_peers = 0,
+                    bool peer_named = false);
+
+    /** @brief Stop the owned httpd instance (or unregister the adopted WS URI) and release
+     *         all peer slots. */
     ~httpd_ws_link_t() override;
 
     httpd_ws_link_t(const httpd_ws_link_t&) = delete;
@@ -118,7 +147,8 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     /** @brief True if the httpd instance started and the WS handler registered. */
     [[nodiscard]] bool ok() const noexcept { return handle_ != nullptr; }
 
-    /** @brief The bound WS port (the value passed to the ctor). */
+    /** @brief The bound WS port (the value passed to the port-binding ctor; 0 when this link
+     *         adopts an external server). */
     [[nodiscard]] std::uint16_t local_port() const noexcept { return port_; }
 
    private:
@@ -155,6 +185,8 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     std::uint16_t port_;
     std::size_t max_peers_;
     bool peer_named_;
+    bool owns_httpd_ = true;  // false when adopting an external server (dtor must not httpd_stop)
+    std::string uri_;         // the WS URI registered (unregistered by the adopting dtor)
     /** @brief Guards the slot vector and each slot's name/fd/open — the cross-thread
      *         reads (enumerate_peers / peer_link / a send's fd snapshot) against the
      *         httpd task's accept/close. The reassembly buffer is httpd-task-only. */
