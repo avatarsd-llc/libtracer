@@ -1483,7 +1483,19 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
         // would deadlock first contact (the default ACL ships closed). It discloses
         // nothing the Noise handshake would not present as its static key anyway.
         // Node-scoped: it takes no vertex, and every vertex answers identically (§C.1).
-        if (field.steps.size() == 1 && field.steps[0].name == "identity") return read_identity();
+        // The WHOLE `identity` namespace resolves here, not just the bare spelling: the
+        // record is served whole and has no member or indexed addressing (§C.4), so any
+        // other shape names nothing and is SCHEMA_NOT_FOUND — caller-independent, like
+        // any unknown field. Resolving the namespace (rather than falling through) is
+        // what makes that answer caller-independent: below this point sits the READ
+        // gate, which would answer a denied caller PERMISSION_DENIED and so contradict
+        // §C.4. Nothing is disclosed by the narrower answer — the record itself is
+        // world-readable by design one line down.
+        if (field.steps[0].name == "identity") {
+            if (field.steps.size() != 1 || !plain_step(field.steps[0]))
+                return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+            return read_identity();
+        }
         if (!acl_allows(v, caller, acl_right_t::READ))
             return std::unexpected(status_t::PERMISSION_DENIED);
         if (field.steps.size() == 1 && field.steps[0].name == "schema") return read_schema(v);

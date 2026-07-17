@@ -31,6 +31,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   unauthenticated peer must obtain to TOFU-pin and to verify the ADR-0045 challenge;
   gating it would deadlock first contact against the closed default ACL. There is
   **no write surface** — the identity is the owner's, installed locally.
+  **The record is served whole** (RFC-0011 §C.4): the entire `identity` field namespace
+  resolves above the READ gate, so `:identity.key` (member addressing) and
+  `:identity[0]` (indexed addressing) are `SCHEMA_NOT_FOUND` for **every** caller —
+  sub-addressing buys nothing and costs a resolver branch on MCU-class nodes. Resolving
+  the whole namespace, not just the bare spelling, is what makes that refusal
+  caller-independent as §C.4 requires; it discloses nothing, since the record itself is
+  world-readable by design.
   **No crypto is involved:** the facet stores and serves a *claim*; proving a node
   holds the key is authentication and lives elsewhere. A node without a keypair keeps
   today's `SCHEMA_NOT_FOUND` byte-for-byte (the surface is absent, not empty).
