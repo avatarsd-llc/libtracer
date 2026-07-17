@@ -710,9 +710,18 @@ class graph_t {
     // RFC-0009 §B.6: pre-order re-virginize of @p v's subtree — unwind each vertex's
     // subscriber contribution to its descendants' listeners_above_, revert it to a
     // placeholder, and flip it unregistered. Collects each retired vertex's key into
-    // @p keys for the caller's sweep-set cleanup. Call with map_mutex_ held UNIQUE (it
-    // flips registered_ and parks handler blocks, both map-lock-guarded).
+    // @p keys for the caller's sweep-set cleanup, and parks each detached value-seam block
+    // into @ref retired_seams_. Call with map_mutex_ held UNIQUE (it flips registered_ and
+    // appends to retired_seams_, both map-lock-guarded).
     void retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& keys);
+
+    // Value-seam blocks detached by retirement (RFC-0009 §B.6). A seam is read lock-free,
+    // so a swapped-out block cannot be freed while a reader might still hold the old
+    // pointer — it is parked here and reclaimed only at graph teardown (ADR-0057 insert-
+    // only, applied to the seam). Kept on the GRAPH, not per-vertex, so an app-field / leaf
+    // vertex pays zero extra bytes. Appended only under map_mutex_ (unique); bounded by the
+    // node's total retire count — the "memory is not reclaimed under churn" trade §B books.
+    std::vector<std::unique_ptr<value_handlers_t>> retired_seams_;
 
     mutable std::shared_mutex map_mutex_;
     // The Composite vertex tree's root (ADR-0057): an unregistered structural node whose

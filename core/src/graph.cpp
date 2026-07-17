@@ -361,7 +361,9 @@ void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& k
     const std::uint32_t k = v->own_subs();
     if (k > 0) bump_subtree_listeners(v, -static_cast<std::int32_t>(k));
     keys.push_back(build_key(v));
-    v->revert_to_placeholder();
+    // Park the detached value seam (if any): a lock-free reader may still hold the old
+    // pointer, so it is reclaimed only at teardown, never freed here. Under map_mutex_.
+    if (value_handlers_t* seam = v->revert_to_placeholder()) retired_seams_.emplace_back(seam);
     v->mark_unregistered();
     v->for_each_child([this, &keys](vertex_t& c) { retire_subtree(&c, keys); });
 }
