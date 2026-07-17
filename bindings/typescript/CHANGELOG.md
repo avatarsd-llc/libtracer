@@ -9,6 +9,29 @@ versioning/publish strategy.
 
 ### Added
 
+- **`walkTopology(client, opts)` + `routeKey()` in
+  `@avatarsd-llc/libtracer-client` (#409, ADR-0044 pt 3)** — the client-side
+  projection of the decentralized graph. A libtracer node's graph is rooted at
+  the node you ask; the whole-network view is assembled by a **client**, by
+  descending through transport vertices and composing routes. ADR-0044 pt 3
+  states that the deduplicated "real graph" is client/app logic keyed by an
+  identity **it** chooses — the core never matches device identities across
+  paths, at any layer. This is that logic: it reads each node's connections at
+  `[...route, 'net']:children[]`, treats each connection NAME as the next `dst`
+  segment, and stitches nodes + edges for a renderer.
+  **Termination is the load-bearing caveat:** without a node identity a cyclic
+  topology cannot terminate (`/b`, `/b/a`, `/b/a/b`, … are all distinct routes,
+  and nothing reveals they are one device), so the walk is bounded only by
+  `maxDepth` and reports `authoritative: false` — a shape, not a map. Supply
+  `identify()` (the `:identity` facet of #406 / RFC-0011, once it exists) and
+  nodes collapse, the cycle closes, and the walk self-terminates. The degraded
+  mode is kept honest rather than papered over with a heuristic: guessing that
+  two routes are one device is precisely the identity-matching ADR-0044 forbids.
+  A **bus** link (a `peer_named` ws listener, a CAN segment) is reported via
+  `busLinks` and never descended — routing through its connection NAME
+  broadcasts to every peer, and its per-peer directed hop is not addressable
+  when the transport names peers `<ip>:<port>` (reserved characters).
+
 - **`LibtracerClient.writeField(path, selector, valueTLV)` in
   `@avatarsd-llc/libtracer-client` (#408)** — the write counterpart of
   `readField`, emitting `FWD{op=WRITE, dst, field, src, payload}`

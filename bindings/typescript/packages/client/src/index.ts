@@ -30,6 +30,15 @@ export type {
 export { encodeValue, encodePath, encodeSubscriber, encodeConnSpec } from './tlv.js';
 export type { ValueOptions, SubscriberOptions, ConnSpecOptions, ConnRole } from './tlv.js';
 
+export { walkTopology, routeKey } from './topology.js';
+export type {
+  TopologyGraph,
+  TopologyNode,
+  TopologyEdge,
+  TopologyBusPeers,
+  WalkOptions,
+} from './topology.js';
+
 export {
   FWD_OP,
   FWD_KIND,

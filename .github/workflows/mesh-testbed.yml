@@ -81,6 +81,16 @@ jobs:
           LIBTRACER_MESH_PEERS: "a=172.28.0.11:47311,b=172.28.0.12:47311,c=172.28.0.13:47311,hub=172.28.0.14:47320"
         run: node --test test/mesh-testbed.test.mjs
 
+      # Runs SECOND, and only against a mesh the step above already formed: the walk is
+      # a read-only projection of whatever links exist. It is the executable argument
+      # for #406 — the same ring yields ~170 nodes for 4 devices without an identity,
+      # and exactly 4 with one.
+      - name: Project the formed mesh with the topology walk (#409)
+        working-directory: bindings/typescript/packages/client
+        env:
+          LIBTRACER_MESH_CTRL: "a=127.0.0.1:47301,b=127.0.0.1:47302,c=127.0.0.1:47303,hub=127.0.0.1:47304"
+        run: node --test test/topology.test.mjs
+
       - name: Dump every node's log on failure
         if: failure()
         run: docker compose -f tests/testbed/compose.yml logs --no-color
