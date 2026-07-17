@@ -9,11 +9,11 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0010 |
 | **Title** | Owner-writable application property fields: the field descriptor table, the reserved `settings.app` namespace, and owner-defined `:schema` |
-| **Status** | **draft** (consumer-driven; strawberry-fw cutover measurement 2026-07-09) |
+| **Status** | **in-comment** (window opened 2026-07-17; was draft since the strawberry-fw cutover measurement 2026-07-09) |
 | **Author(s)** | strawberry-fw integration (drafted for maintainer review) |
 | **Created** | 2026-07-09 |
-| **Comment window closes** | opens with the tracking PR (GOVERNANCE.md §Spec changes) |
-| **Tracking issue** | a dedicated `rfc` issue to be opened with this PR |
+| **Comment window closes** | 2026-07-31 (≥ 14 days per GOVERNANCE.md §Spec changes) |
+| **Tracking issue** | [#411](https://github.com/avatarsd-llc/libtracer/issues/411) |
 | **Target spec version** | v1 (draft refinement — no released v1 yet, so no v2 needed) |
 | **Roadmap item** | this RFC is the specification of the **"field descriptor table"** item of the 2026-07-08 architecture-review backlog (the vertex-verbs / lazy-validation / field-descriptor-table cluster; item 2 of that backlog — the `vertex_t` verb seam — shipped as [#338](https://github.com/avatarsd-llc/libtracer/pull/338), and is the seam §D slots behind) |
 
