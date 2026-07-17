@@ -14,6 +14,35 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`graph_t::retire(vertex_handle_t)` — owner-facing vertex retirement (#407,
+  RFC-0009 §B/§C/§E.6)** — the mirror of `register_vertex`. Marks a vertex and its
+  whole subtree **logically absent**: invisible to `find` / `read` / `:children[]`,
+  reading `tr::path::not_found` exactly like a never-built path. The allocation is
+  **not freed** and every `vertex_handle_t` stays dereferenceable (ADR-0057
+  insert-only — the vertex is *emptied*, never erased). Retirement **re-virginizes**
+  each vertex: it clears the previous owner's `:acl`, value seam, stored value,
+  history, app-field table, subscribers, settings, and delivery mode, so a later
+  write-creates revive of the same address inherits **nothing** — in particular the
+  revived path inherits its live ancestor's ACL policy, never the retired owner's
+  (an ACL does not survive churn). `write_seq_` survives (monotonic per address).
+  Retirement delivers nothing and wakes no `await`; it is idempotent; the root cannot
+  be retired. There is **no wire operation** that reaches it — a peer goes through the
+  device's own logic (RFC-0009 §A.1).
+  Two defects a naive `registered_ = false` would have shipped are closed by
+  construction, and pinned by `retire_test` (including a ThreadSanitizer read-vs-retire
+  race): a **confused-deputy** (the retired owner's ACEs stayed live to the gate — the
+  effective-ACL walk climbs on `has_own_aces()`, not `registered()`) and a
+  **use-after-free** on the value seam (read lock-free, so retirement swaps the pointer
+  atomically and **parks** the old block rather than freeing it under a concurrent
+  reader).
+- **`vertex_t` value-seam pointer is now atomic (`std::atomic<value_handlers_t*>`)** —
+  the `on_read`/`on_write`/`on_children` group was a `unique_ptr` read lock-free under a
+  "set once, never changes" contract. Retirement needs to clear it, so it became an
+  atomic published with `store(release)` and swapped with `exchange(acq_rel)`; a
+  swapped-out block is parked in `vertex_ext_t::retired_handlers` and reclaimed only by
+  the destructor. The `handlers()` accessor is unchanged (still returns a stable
+  `const value_handlers_t&`); no call site changed. Cold-block (`vertex_ext_t`) growth
+  only — `sizeof(vertex_t)` is unaffected.
 - **Node identity facet: `graph_t::set_identity` / `clear_identity`, serving
   `read <vertex>:identity` (#406, RFC-0011, ADR-0045 decision 3)** — a node-scoped
   identity record, synthesized on read at **every** vertex (the `read_schema`

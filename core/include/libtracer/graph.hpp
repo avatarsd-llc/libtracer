@@ -181,6 +181,29 @@ class graph_t {
                                                                 settings_t settings = {});
 
     /**
+     * @brief Retire a vertex and its whole subtree — the owner-facing mirror of
+     *        @ref register_vertex
+     * (RFC-0009 §A.1 / §B).
+     *
+     * Marks @p vh (and, per §B.3, every descendant) **logically absent**: invisible to
+     * `find` / `read` / `:children[]`, reading `tr::path::not_found` exactly like a
+     * never-built path (§C). The allocation is NOT freed and the handle stays
+     * dereferenceable forever (ADR-0057 insert-only) — the vertex is *emptied*, not
+     * erased. Retirement **re-virginizes** each vertex (§B.6): it clears the previous
+     * owner's `:acl`, value seam, stored value, history, app-field table, subscribers,
+     * settings, and delivery mode, so a later write-creates revive of the same address
+     * inherits **nothing** of the retired owner — in particular the revived path inherits
+     * its live ancestor's ACL policy, never the retired one's (the §Discussion-7 ruling:
+     * an ACL does not survive churn). `write_seq_` survives (monotonic per address).
+     *
+     * Delivers nothing and wakes no `await` (§B.5). Idempotent (§B.4): retiring an
+     * already-retired or unregistered vertex succeeds and does nothing. The root cannot be
+     * retired. There is **no wire operation** that reaches here — a peer goes through the
+     * device's own logic (§A.1 / §A.1.1), which is what calls this.
+     */
+    result_t<void> retire(vertex_handle_t vh);
+
+    /**
      * @brief A child-vertex factory: the device-catalog entry ADR-0017 makes concrete.
      *
      * Given the composed child key (parent key + the SPEC's `name` NAME) and the optional
@@ -683,6 +706,22 @@ class graph_t {
     // a child-link subtree walk (placeholders included, so a later fill inherits a
     // correct count). Call with map_mutex_ held (shared suffices; counters are atomics).
     static void bump_subtree_listeners(vertex_t* v, std::int32_t delta);
+
+    // RFC-0009 §B.6: pre-order re-virginize of @p v's subtree — unwind each vertex's
+    // subscriber contribution to its descendants' listeners_above_, revert it to a
+    // placeholder, and flip it unregistered. Collects each retired vertex's key into
+    // @p keys for the caller's sweep-set cleanup, and parks each detached value-seam block
+    // into @ref retired_seams_. Call with map_mutex_ held UNIQUE (it flips registered_ and
+    // appends to retired_seams_, both map-lock-guarded).
+    void retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& keys);
+
+    // Value-seam blocks detached by retirement (RFC-0009 §B.6). A seam is read lock-free,
+    // so a swapped-out block cannot be freed while a reader might still hold the old
+    // pointer — it is parked here and reclaimed only at graph teardown (ADR-0057 insert-
+    // only, applied to the seam). Kept on the GRAPH, not per-vertex, so an app-field / leaf
+    // vertex pays zero extra bytes. Appended only under map_mutex_ (unique); bounded by the
+    // node's total retire count — the "memory is not reclaimed under churn" trade §B books.
+    std::vector<std::unique_ptr<value_handlers_t>> retired_seams_;
 
     mutable std::shared_mutex map_mutex_;
     // The Composite vertex tree's root (ADR-0057): an unregistered structural node whose

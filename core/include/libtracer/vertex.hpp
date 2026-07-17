@@ -592,8 +592,19 @@ inline std::condition_variable& vertex_stripe_cv(std::size_t idx) {
 struct vertex_ext_t {
     /** @brief The VALUE seam (on_read/on_write/on_children), LAZILY allocated (ADR-0058
      *         Step 2): HANDLER-role only, so a plain leaf / app-field vertex keeps this
-     *         null and never pays the ~96 B. Set once at registration, read lock-free. */
-    std::unique_ptr<value_handlers_t> handlers;
+     *         null and never pays the ~96 B.
+     *
+     *         **Read lock-free** (@ref vertex_t::handlers loads it with no stripe lock,
+     *         on the hot path). It is therefore an ATOMIC pointer, not a `unique_ptr`:
+     *         registration publishes with `store(release)` and retirement
+     *         (`vertex_t::revert_to_placeholder`) swaps it to `nullptr` with
+     *         `exchange(acq_rel)`. A swapped-out
+     *         block is **never freed under a concurrent reader** — the graph parks it and
+     *         reclaims it only at teardown (`graph_t::retired_seams_`; ADR-0057's
+     *         insert-only discipline extended to the seam: emptied, never dangled). Keeping
+     *         the park OFF the per-vertex block costs an app-field / leaf vertex zero extra
+     *         bytes. The live block here is freed by this ext's destructor. */
+    std::atomic<value_handlers_t*> handlers{nullptr};
     /** @brief STREAM ring (docs/reference/11 role 2), LAZILY allocated on the first
      *         append (#388): an empty libstdc++ `std::deque` allocates its ~512 B map
      *         node at CONSTRUCTION, which every ext-bearing vertex (handlers, app
@@ -629,6 +640,15 @@ struct vertex_ext_t {
      *         propagate drains only the entries appended since; guarded by the vertex
      *         mutex. */
     std::uint64_t last_flushed_seq = 0;
+
+    /** @brief Free the live handler block. `handlers` is a raw atomic pointer (for
+     *         lock-free reads) so it no longer self-frees; this closes that. Blocks parked
+     *         by retirement live on the graph, not here. Runs from `~vertex_t`'s
+     *         `delete ext_`. */
+    ~vertex_ext_t() { delete handlers.load(std::memory_order_acquire); }
+    vertex_ext_t() = default;
+    vertex_ext_t(const vertex_ext_t&) = delete;
+    vertex_ext_t& operator=(const vertex_ext_t&) = delete;
 };
 
 /**
@@ -684,10 +704,15 @@ class vertex_t {
     [[nodiscard]] const value_handlers_t& handlers() const noexcept {
         static const value_handlers_t kNoHandlers{};
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        // The value-seam group is set once at registration (before this vertex is
-        // reachable), then insert-only — so this lock-free load of the unique_ptr is
-        // safe: no concurrent writer, the pointer value never changes after adopt.
-        return (e != nullptr && e->handlers) ? *e->handlers : kNoHandlers;
+        if (e == nullptr) return kNoHandlers;
+        // Lock-free acquire load of the atomic seam pointer. It is published once at
+        // registration and, on retirement, swapped to nullptr — the swapped-out block is
+        // parked (never freed) so the reference we return here stays valid even if a
+        // concurrent retire fires between this load and the caller's deref. A load that
+        // races the swap sees either the old block (still alive, parked) or nullptr; both
+        // are safe.
+        const value_handlers_t* h = e->handlers.load(std::memory_order_acquire);
+        return h != nullptr ? *h : kNoHandlers;
     }
 
     /** @brief A copy of this vertex's owner apply seam (RFC-0010 §A.3), or empty when none —
@@ -731,6 +756,12 @@ class vertex_t {
         adopt_identity(role, settings, std::move(handlers));
         registered_ = true;
     }
+
+    /** @brief Flip this vertex back to a placeholder (invisible to `find`) — retirement's
+     *         inverse of the `registered_ = true` in @ref fill. Map-lock state; the caller
+     *         (`graph_t::retire`) MUST hold the graph map lock, same as @ref fill's writer.
+     *         Pairs with @ref revert_to_placeholder, which clears the vertex's own state. */
+    void mark_unregistered() noexcept { registered_ = false; }
 
     /**
      * @brief Adopt @p child into this node's child list and link its parent pointer.
@@ -1018,6 +1049,67 @@ class vertex_t {
     }
 
     // -- ACL state (#81, ADR-0018/0020) -------------------------------------------------
+
+    /**
+     * @brief Restore this vertex to the state an unregistered PLACEHOLDER carries — the
+     *        `unregistered ⇒ carries no state` invariant retirement re-establishes
+     *        (RFC-0009
+     *        §B.6). Clears **everything a `fill()` installs plus everything it leaves
+     *        behind**, so a later revive of this address inherits nothing of the retired
+     *        owner: the value seam (swap-and-park, never freed — a lock-free reader may
+     *        still hold the old pointer), the stored value and history, the `:acl` (own
+     *        ACEs + the cached merge), the app-field table, the QoS settings, the role,
+     *        and the delivery mode. **Survives** by design: `write_seq_` (monotonic per
+     *        address; a reset would regress the readiness cursors), `listeners_above_`
+     *        (counts ANCESTOR subscribers, which retiring THIS vertex never touched — the
+     *        graph adjusts it for cleared descendant edges), and the allocation / name /
+     *        links (ADR-0057 insert-only — emptied, never freed or detached).
+     *
+     * @note `registered_` is NOT touched here — it is map-lock state the graph flips. The
+     *       caller MUST hold the graph map lock. This RETURNS the swapped-out value-seam
+     *       block (or nullptr) rather than freeing it: a lock-free reader may still hold
+     *       the old pointer, so the graph parks it (`graph_t::retired_seams_`) and frees
+     *       it at teardown. The per-vertex stripe lock is taken internally.
+     *
+     * @return the detached seam block to park, or nullptr if this vertex had none.
+     */
+    [[nodiscard]] value_handlers_t* revert_to_placeholder() {
+        // Atomics first — no lock needed, and clearing own ACEs before anything else is
+        // fail-closed: the graph's bearing-ancestor walk (has_own_aces_) skips this vertex
+        // immediately, so a concurrent gated op on a descendant stops seeing the retired
+        // owner's policy at once (it climbs to the live ancestor instead).
+        has_own_aces_.store(false, std::memory_order_release);
+        lkv_.store({}, std::memory_order_release);  // atomic<shared_ptr>: a mid-read reader
+                                                    // holds its own refcount — safe.
+        own_subs_.store(0, std::memory_order_relaxed);
+        role_ = role_t::STORED_VALUE;                // the placeholder default (see graph.cpp)
+        delivery_mode_ = delivery_mode_t::IF_NEWER;  // graph drops the unconditional_ entry
+        value_handlers_t* detached = nullptr;
+        if (vertex_ext_t* e = ext_.load(std::memory_order_acquire); e != nullptr) {
+            // The value seam is read lock-free — swap it out atomically and hand the old
+            // block back to the caller to PARK (never free it under a possible concurrent
+            // reader). The remaining ext fields are mutated under the stripe lock.
+            detached = e->handlers.exchange(nullptr, std::memory_order_acq_rel);
+            const std::lock_guard lock(vertex_stripe_of(this).m);
+            e->history.reset();
+            e->acl.clear();
+            e->aces.clear();
+            e->eff_aces.clear();
+            e->eff_aces_inherit.clear();
+            e->acl_cache_dirty.store(true, std::memory_order_release);
+            e->settings = kDefaultSettings;
+            e->app.reset();
+            e->last_flushed_seq = 0;
+        }
+        // subs_ is stripe-guarded; clear it in its own critical section (the ext block may
+        // be absent, but subs_ always exists). The graph has already adjusted descendant
+        // listeners_above_ for these edges before calling us.
+        {
+            const std::lock_guard lock(vertex_stripe_of(this).m);
+            subs_.clear();
+        }
+        return detached;
+    }
 
     /**
      * @brief Store this vertex's `:acl`: the raw TLV bytes (served back verbatim by an
@@ -1423,10 +1515,18 @@ class vertex_t {
         // Split the public input into its two lazy groups (ADR-0058 Step 2): the value
         // seam only when one of its three is set; the app-field group's apply seam only
         // when given. Registration is single-threaded for this vertex, so no lock here.
-        if (handlers.on_read || handlers.on_write || handlers.on_children)
-            e.handlers = std::make_unique<value_handlers_t>(
-                value_handlers_t{std::move(handlers.on_read), std::move(handlers.on_write),
-                                 std::move(handlers.on_children)});
+        if (handlers.on_read || handlers.on_write || handlers.on_children) {
+            // Publish the seam atomically. `fill` only ever runs on an UNREGISTERED node
+            // (register_vertex_key returns PATH_IN_USE otherwise), and such a node's seam
+            // is null — a fresh placeholder never had one, and retirement already swapped a
+            // retired node's out. So the prior is provably null and a plain release store
+            // suffices; the store races only the lock-free reader, which the release
+            // ordering covers.
+            e.handlers.store(
+                new value_handlers_t{std::move(handlers.on_read), std::move(handlers.on_write),
+                                     std::move(handlers.on_children)},
+                std::memory_order_release);
+        }
         if (handlers.on_app_field_write) {
             if (e.app == nullptr) e.app = std::make_unique<app_field_group_t>();
             e.app->on_app_field_write = std::move(handlers.on_app_field_write);

@@ -137,6 +137,12 @@ target_link_libraries(acl_test PRIVATE libtracer)
 libtracer_test_warnings(acl_test)
 add_test(NAME acl COMMAND acl_test)
 
+# #407 — graph_t::retire() vertex retirement (RFC-0009 §B/§C/§E.6).
+add_executable(retire_test retire_test.cpp)
+target_link_libraries(retire_test PRIVATE libtracer)
+libtracer_test_warnings(retire_test)
+add_test(NAME retire COMMAND retire_test)
+
 # #82 — in-band :children[] SPEC vertex creation (ADR-0017).
 add_executable(children_test children_test.cpp)
 target_link_libraries(children_test PRIVATE libtracer)

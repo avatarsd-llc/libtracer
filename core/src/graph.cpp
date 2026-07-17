@@ -346,6 +346,57 @@ result_t<vertex_handle_t> graph_t::register_vertex_key(std::vector<std::byte> ke
     return vertex_handle_t{node};
 }
 
+void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& keys) {
+    // Pre-order, under the UNIQUE map lock. Order within a vertex matters:
+    //  (1) read its active-edge count and unwind exactly that contribution from every
+    //      descendant's listeners_above_ BEFORE revert zeroes own_subs_ — the mirror of
+    //      note_subscriber_removed, done inline because we already hold the unique lock
+    //      its shared lock only needed to exclude vertex creation;
+    //  (2) record the key for the caller's sweep-set cleanup;
+    //  (3) revert the vertex's own state (fail-closed: clears own ACEs first, so the
+    //      bearing-ancestor walk stops seeing this vertex before anything else changes);
+    //  (4) flip it unregistered (map-lock state — invisible to find from here on);
+    //  (5) recurse. Placeholders are walked too (§B.3): reverting one is a harmless no-op,
+    //      but a registered descendant may hang below it.
+    const std::uint32_t k = v->own_subs();
+    if (k > 0) bump_subtree_listeners(v, -static_cast<std::int32_t>(k));
+    keys.push_back(build_key(v));
+    // Park the detached value seam (if any): a lock-free reader may still hold the old
+    // pointer, so it is reclaimed only at teardown, never freed here. Under map_mutex_.
+    if (value_handlers_t* seam = v->revert_to_placeholder()) retired_seams_.emplace_back(seam);
+    v->mark_unregistered();
+    v->for_each_child([this, &keys](vertex_t& c) { retire_subtree(&c, keys); });
+}
+
+result_t<void> graph_t::retire(vertex_handle_t vh) {
+    vertex_t* root = vh.get();
+    // The graph root has no parent and is not a retirable vertex.
+    if (root == nullptr || root->parent() == nullptr)
+        return std::unexpected(status_t::INVALID_PATH);
+
+    std::vector<std::vector<std::byte>> retired_keys;
+    {
+        const std::unique_lock lock(map_mutex_);
+        // Idempotent (§B.4): an already-retired / never-filled placeholder is a no-op.
+        if (!root->registered()) return {};
+        retire_subtree(root, retired_keys);
+    }
+    // Drop the retired vertices from the sweep sets — AFTER releasing the map lock, so no
+    // map⊃sweep nesting is introduced. A stale entry would otherwise (a) leak, and worse
+    // (b) silently re-enroll a revived vertex into UNCONDITIONAL sweeping through the
+    // leaked key, overriding the IF_NEWER reset revert_to_placeholder just applied. A
+    // concurrent sweep tolerates a not-yet-erased key: find_ptr skips the unregistered
+    // vertex, so delivery never lands on a retired one either way.
+    if (!retired_keys.empty()) {
+        const std::lock_guard slock(sweep_mutex_);
+        for (const std::vector<std::byte>& key : retired_keys) {
+            unconditional_.erase(key);
+            if (pending_.erase(key) != 0) pending_count_.fetch_sub(1, std::memory_order_relaxed);
+        }
+    }
+    return {};
+}
+
 result_t<vertex_handle_t> graph_t::ensure_vertex(std::span<const std::byte> key,
                                                  std::string_view caller) {
     result_t<vertex_t*> p = ensure_vertex_ptr(key, caller);
@@ -440,9 +491,10 @@ vertex_t* graph_t::find_ptr(std::span<const std::byte> key) const {
     // The returned raw pointer is used by callers OUTSIDE this shared_lock. That is
     // sound only because the tree is insert-only (see root_'s declaration): each
     // vertex_t is owned by its parent via a non-moving unique_ptr allocation and is
-    // never destroyed while the graph lives. Do NOT add vertex erasure/retirement
-    // without first giving vertices a lifetime scheme — a bare detach would dangle
-    // these pointers.
+    // never destroyed while the graph lives. `retire()` (RFC-0009) upholds this — it
+    // marks a vertex unregistered and EMPTIES it (re-virginize), but never detaches or
+    // frees, so a held handle stays dereferenceable. Any future reclamation still needs
+    // a real lifetime scheme (refcount / epoch); a bare detach would dangle these.
     return node->registered() ? node : nullptr;
 }
 
@@ -540,7 +592,12 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, std::string_view caller) cons
     if (!acl_allows(v, caller, acl_right_t::READ))
         return std::unexpected(status_t::PERMISSION_DENIED);
     if (v->role() == role_t::HANDLER) {
-        if (v->handlers().on_read) return v->handlers().on_read();
+        // Load the seam ONCE: it is an atomic pointer a concurrent retire may swap to
+        // null (RFC-0009 §B.6), so a check-then-call across two loads would race — the
+        // second load could see the cleared seam and throw bad_function_call. The parked
+        // block keeps this reference valid even if the swap fires right after the load.
+        const value_handlers_t& h = v->handlers();
+        if (h.on_read) return h.on_read();
         return std::unexpected(status_t::NOT_FOUND);
     }
     const std::shared_ptr<const rope_t> sp = v->read_stored();  // lock-free
@@ -612,8 +669,9 @@ void graph_t::fan_out(vertex_t* v, const rope_t& value) {
 
 result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t value) {
     if (v->role() == role_t::HANDLER) {
-        if (!v->handlers().on_write) return std::unexpected(status_t::NOT_FOUND);
-        result_t<void> r = v->handlers().on_write(value);
+        const value_handlers_t& h = v->handlers();  // load once — a retire may swap it out
+        if (!h.on_write) return std::unexpected(status_t::NOT_FOUND);
+        result_t<void> r = h.on_write(value);
         if (!r) return std::unexpected(r.error());
         v->note_write();
         return std::shared_ptr<const rope_t>{};  // handler consumed it — nothing stored
@@ -1424,7 +1482,8 @@ result_t<view_t> graph_t::read_acl(vertex_t* v) const {
 result_t<view_t> graph_t::read_children(vertex_t* v) const {
     // The synthesized listing wins (ADR-0044): a transport/connection vertex serves
     // its live bus peers here — a snapshot of traffic, never stored graph structure.
-    if (v->handlers().on_children) return v->handlers().on_children();
+    // Load once — a concurrent retire may swap the seam out between check and call.
+    if (const value_handlers_t& h = v->handlers(); h.on_children) return h.on_children();
     // Generic member enumeration (reference 05 §SPEC read-members): the DIRECT
     // children of v in the vertex map — keys of the form <v.key><one NAME record>.
     // Each member is a minimal POINT{NAME} descriptor; order is unspecified.
@@ -1460,8 +1519,8 @@ result_t<rope_t> graph_t::read_children_folded(vertex_handle_t vh) const {
     // Synthesized listing (ADR-0044): a live bus-peer snapshot, already one contiguous
     // view — a fold has nothing to gather, so it crosses as a single-link rope,
     // byte-identical to the read_children path.
-    if (v->handlers().on_children) {
-        const result_t<view_t> sv = v->handlers().on_children();
+    if (const value_handlers_t& h = v->handlers(); h.on_children) {
+        const result_t<view_t> sv = h.on_children();
         if (!sv) return std::unexpected(sv.error());
         return rope_t{*sv};
     }
