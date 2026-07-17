@@ -346,6 +346,55 @@ result_t<vertex_handle_t> graph_t::register_vertex_key(std::vector<std::byte> ke
     return vertex_handle_t{node};
 }
 
+void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& keys) {
+    // Pre-order, under the UNIQUE map lock. Order within a vertex matters:
+    //  (1) read its active-edge count and unwind exactly that contribution from every
+    //      descendant's listeners_above_ BEFORE revert zeroes own_subs_ — the mirror of
+    //      note_subscriber_removed, done inline because we already hold the unique lock
+    //      its shared lock only needed to exclude vertex creation;
+    //  (2) record the key for the caller's sweep-set cleanup;
+    //  (3) revert the vertex's own state (fail-closed: clears own ACEs first, so the
+    //      bearing-ancestor walk stops seeing this vertex before anything else changes);
+    //  (4) flip it unregistered (map-lock state — invisible to find from here on);
+    //  (5) recurse. Placeholders are walked too (§B.3): reverting one is a harmless no-op,
+    //      but a registered descendant may hang below it.
+    const std::uint32_t k = v->own_subs();
+    if (k > 0) bump_subtree_listeners(v, -static_cast<std::int32_t>(k));
+    keys.push_back(build_key(v));
+    v->revert_to_placeholder();
+    v->mark_unregistered();
+    v->for_each_child([this, &keys](vertex_t& c) { retire_subtree(&c, keys); });
+}
+
+result_t<void> graph_t::retire(vertex_handle_t vh) {
+    vertex_t* root = vh.get();
+    // The graph root has no parent and is not a retirable vertex.
+    if (root == nullptr || root->parent() == nullptr)
+        return std::unexpected(status_t::INVALID_PATH);
+
+    std::vector<std::vector<std::byte>> retired_keys;
+    {
+        const std::unique_lock lock(map_mutex_);
+        // Idempotent (§B.4): an already-retired / never-filled placeholder is a no-op.
+        if (!root->registered()) return {};
+        retire_subtree(root, retired_keys);
+    }
+    // Drop the retired vertices from the sweep sets — AFTER releasing the map lock, so no
+    // map⊃sweep nesting is introduced. A stale entry would otherwise (a) leak, and worse
+    // (b) silently re-enroll a revived vertex into UNCONDITIONAL sweeping through the
+    // leaked key, overriding the IF_NEWER reset revert_to_placeholder just applied. A
+    // concurrent sweep tolerates a not-yet-erased key: find_ptr skips the unregistered
+    // vertex, so delivery never lands on a retired one either way.
+    if (!retired_keys.empty()) {
+        const std::lock_guard slock(sweep_mutex_);
+        for (const std::vector<std::byte>& key : retired_keys) {
+            unconditional_.erase(key);
+            if (pending_.erase(key) != 0) pending_count_.fetch_sub(1, std::memory_order_relaxed);
+        }
+    }
+    return {};
+}
+
 result_t<vertex_handle_t> graph_t::ensure_vertex(std::span<const std::byte> key,
                                                  std::string_view caller) {
     result_t<vertex_t*> p = ensure_vertex_ptr(key, caller);
@@ -440,9 +489,10 @@ vertex_t* graph_t::find_ptr(std::span<const std::byte> key) const {
     // The returned raw pointer is used by callers OUTSIDE this shared_lock. That is
     // sound only because the tree is insert-only (see root_'s declaration): each
     // vertex_t is owned by its parent via a non-moving unique_ptr allocation and is
-    // never destroyed while the graph lives. Do NOT add vertex erasure/retirement
-    // without first giving vertices a lifetime scheme — a bare detach would dangle
-    // these pointers.
+    // never destroyed while the graph lives. `retire()` (RFC-0009) upholds this — it
+    // marks a vertex unregistered and EMPTIES it (re-virginize), but never detaches or
+    // frees, so a held handle stays dereferenceable. Any future reclamation still needs
+    // a real lifetime scheme (refcount / epoch); a bare detach would dangle these.
     return node->registered() ? node : nullptr;
 }
 
