@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# Decentralized multi-node MESH testbed (#408). Brings up FOUR real libtracer host
+# nodes in docker-compose — each its own container, network namespace and IP — forms
+# every inter-node link the real way (an in-band `write /net:children[] += SPEC{…}`
+# issued REMOTELY by the TypeScript client SDK, no provide_link seam anywhere), and
+# then routes across the mesh it just made: remote read/write/subscribe through TWO
+# forwarding hops, ADR-0044 `:children[]` peer enumeration on a peer_named listener,
+# and per-op loop safety over a deliberate physical cycle (a->b->c->a).
+#
+# WHY IT EARNS ITS KEEP: every existing FWD test has exactly ONE forwarder
+# (fwd_multihop_test, fwd_compact_test, fwd_rope_forward_test), and the conformance
+# vectors are static fixtures nothing routes. This is the repo's first two-forwarder
+# coverage — which is precisely how it caught the /net routing-prefix divergence
+# between the impl, reference/03+/07 and the vectors (#419).
+#
+# SEPARATE from core-ci on purpose (mirroring can-vcan-e2e.yml / ws-interop.yml): the
+# required core gates (build-test / sanitizers / tsan / format / doxygen) must never
+# depend on Docker or a Node toolchain, and a mesh failure must read distinctly from a
+# core failure.
+#
+# ADVISORY BY DESIGN — do NOT add this to the required-checks ruleset. It is
+# path-filtered, so a PR that touches neither core/ nor the TS workspace would never
+# report it, and a required-but-never-reported context blocks a merge forever.
+#
+# RUNNER: ubuntu-24.04, the house default (32 of 35 jobs). There are no self-hosted
+# runners on this repo (`actions/runners` -> total_count: 0), and none are needed:
+# libtracer is public, so GitHub-hosted minutes are free, and the image ships Docker
+# Engine + compose v2 preinstalled.
+name: mesh-testbed
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "core/**"
+      - "bindings/typescript/**"
+      - "tests/testbed/**"
+      - ".github/workflows/mesh-testbed.yml"
+  pull_request:
+    paths:
+      - "core/**"
+      - "bindings/typescript/**"
+      - "tests/testbed/**"
+      - ".github/workflows/mesh-testbed.yml"
+  workflow_dispatch:
+
+jobs:
+  mesh-testbed:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # `--wait` here only waits for the containers to be RUNNING (the services declare
+      # no healthcheck, deliberately — see compose.yml). The real readiness gate is the
+      # driver's ctrl-connect retry loop: a node binds its link listeners BEFORE its
+      # ctrl listener, so ctrl-reachable implies every listener is bound.
+      - name: Build the node image and bring the four-node mesh up
+        run: docker compose -f tests/testbed/compose.yml up -d --build --wait
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: bindings/typescript/package-lock.json
+
+      - name: Install + build the TypeScript workspace
+        working-directory: bindings/typescript
+        run: |
+          npm ci
+          npm run build
+
+      # CTRL = each node's published ctrl port, reached from the runner host.
+      # PEERS = each node's link listener, reached from INSIDE the mesh — static IPs,
+      # because the built-in factories are inet_pton-only (no DNS).
+      - name: Drive the mesh from the TS client SDK and assert multi-hop routing
+        working-directory: bindings/typescript/packages/client
+        env:
+          LIBTRACER_MESH_CTRL: "a=127.0.0.1:47301,b=127.0.0.1:47302,c=127.0.0.1:47303,hub=127.0.0.1:47304"
+          LIBTRACER_MESH_PEERS: "a=172.28.0.11:47311,b=172.28.0.12:47311,c=172.28.0.13:47311,hub=172.28.0.14:47320"
+        run: node --test test/mesh-testbed.test.mjs
+
+      - name: Dump every node's log on failure
+        if: failure()
+        run: docker compose -f tests/testbed/compose.yml logs --no-color
+
+      - name: Tear the testbed down
+        if: always()
+        run: docker compose -f tests/testbed/compose.yml down -v

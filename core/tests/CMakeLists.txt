@@ -331,6 +331,17 @@ add_executable(fwd_node_server fwd_node_server.cpp)
 target_link_libraries(fwd_node_server PRIVATE libtracer)
 libtracer_test_warnings(fwd_node_server)
 
+# #408 — one node of the containerized decentralized mesh testbed: a real host
+# node (graph_t + fwd_router_t + transport_vertex_t with the built-in socket
+# factories) that creates only its own LISTENERS in band and waits, while the TS
+# driver DIALS every inter-node link by writing a SPEC into its /net:children[]
+# remotely (tests/testbed/ + the mesh-testbed CI job). Like the two helpers above
+# it is a binary the driver spawns via docker compose, NOT an add_test() — it
+# would otherwise block the ctest suite on its deadline.
+add_executable(mesh_node mesh_node.cpp)
+target_link_libraries(mesh_node PRIVATE libtracer)
+libtracer_test_warnings(mesh_node)
+
 # #60 (hardening) — ws frame-decoder differential-fuzz harness. Reads one hex
 # frame per stdin line and prints a canonical decode result (OK/NEED_MORE/ERR),
 # byte-identical to the TS twin (transport-ws/fuzz/decode_harness.mjs), so

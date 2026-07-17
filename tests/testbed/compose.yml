@@ -1,0 +1,81 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# The #408 decentralized mesh testbed: four real libtracer nodes, each in its own
+# container with its own network namespace and IP.
+#
+#      a ──dial──▶ b ──dial──▶ c ──dial──▶ a       (the ring closes: a physical CYCLE)
+#      a ──dial──▶ hub ◀──dial── b                 (two peers on ONE peer_named listener)
+#
+# NOTHING HERE FORMS THE MESH. Each service creates only its own listeners; every
+# inter-node link is DIALLED by a SPEC the TypeScript driver writes into that node's
+# /net:children[] remotely (the web-ui-as-setup-edge story — reference/13 §2). The
+# driver runs on the host and reaches each node through its published ctrl port.
+#
+# STATIC IPs ARE MANDATORY, not a style choice: the built-in socket factories resolve
+# a peer with `inet_pton` only (transport_ws.cpp) — there is no DNS anywhere, so a
+# compose service name in a SPEC's `addr` would simply fail to dial.
+#
+# NO HEALTHCHECKS, deliberately. Readiness is structural: a node binds its link
+# listeners BEFORE its ctrl listener (core/tests/mesh_node.cpp), so ctrl-reachable
+# implies every listener on that node is bound. The driver retries the ctrl connect
+# until all four answer and only then issues a dial, which is what a healthcheck would
+# have to approximate anyway. `depends_on` would add nothing: it waits for container
+# start, not for a bound socket.
+
+name: libtracer-mesh
+
+networks:
+  mesh:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+x-node: &node
+  build:
+    context: ../..
+    dockerfile: tests/testbed/Dockerfile
+  # The unconditional CI backstop (core/tests/mesh_node.cpp's contract): a node exits
+  # cleanly at its deadline even if the driver dies without tearing the stack down.
+  init: true
+
+services:
+  a:
+    <<: *node
+    networks:
+      mesh:
+        ipv4_address: 172.28.0.11
+    ports: ["47301:47300"]
+    # Listener "c" — the naming rule: every node names every link after the node at the
+    # FAR end, which is what lets a reply retrace hop by hop. c dials in here.
+    command: ["--name", "a", "--ctrl-port", "47300", "--listen", "c:47311", "--timeout-ms", "300000"]
+
+  b:
+    <<: *node
+    networks:
+      mesh:
+        ipv4_address: 172.28.0.12
+    ports: ["47302:47300"]
+    command: ["--name", "b", "--ctrl-port", "47300", "--listen", "a:47311", "--timeout-ms", "300000"]
+
+  c:
+    <<: *node
+    networks:
+      mesh:
+        ipv4_address: 172.28.0.13
+    ports: ["47303:47300"]
+    command: ["--name", "c", "--ctrl-port", "47300", "--listen", "b:47311", "--timeout-ms", "300000"]
+
+  # The Brick C node: ONE peer_named ws listener serving MANY peers, so
+  # /net/mesh:children[] synthesizes the live peer listing (ADR-0044). Its peer_named /
+  # max_peers keys are ws-private config the ws factory parses (ADR-0043 §5), so this
+  # listener is created in band like every other — no direct construction, no
+  # provide_link.
+  hub:
+    <<: *node
+    networks:
+      mesh:
+        ipv4_address: 172.28.0.14
+    ports: ["47304:47300"]
+    command:
+      ["--name", "hub", "--ctrl-port", "47300", "--peer-named-listen", "mesh:47320", "--timeout-ms", "300000"]
