@@ -154,7 +154,8 @@ class transport_vertex_t {
      * port, peer = `addr:port`; LISTEN: bind `port`, peer learned from inbound
      * datagrams) and `ws` (DIAL: `transport_ws_client(addr, port)` — a synchronous
      * connect + RFC 6455 handshake at creation time; LISTEN: `transport_ws_server(port)`
-     * — accepts one inbound peer).
+     * — accepts MANY concurrent inbound peers (#362), with the ws-private `peer_named` /
+     * `max_peers` config keys selecting the ADR-0044 bus facet and the admission cap).
      * @param net_root   The parent path for connection vertices (default "/net").
      * @param rx_backend The RX memory seam config-constructed view-delivering
      *                   transports draw their inbound frame segments from

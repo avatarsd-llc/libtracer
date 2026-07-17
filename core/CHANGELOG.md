@@ -14,6 +14,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **ws-private `peer_named` / `max_peers` connection-config keys (#408, ADR-0043 §5,
+  ADR-0044)** — the built-in `ws` factory now parses two LISTEN-side kind-private keys
+  from the SPEC's raw config TLV (as `quic` does for `cert`/`key` and `can` for
+  `ifname`/`node`); neither lands on the shared `conn_settings_t`, and both are ignored
+  on a DIAL. `peer_named` (`VALUE` u8, nonzero = true; default **false**, so existing
+  behaviour is unchanged) constructs the server with the ADR-0044 `bus_link_t` facet, so
+  each inbound peer gets its own return-route identity and `make_connection` installs the
+  synthesized `:children[]` peer listing on the connection vertex. `max_peers` (`VALUE`
+  u32; default 0 = unbounded) is the concurrent-peer admission cap. Previously a
+  SPEC-created ws listener was *always* constructed `peer_named=false`, so its `bus()` was
+  null and ADR-0044's peer enumeration was reachable only by direct construction +
+  `provide_link` — i.e. not at all to the in-band creator (a web UI forming a link on a
+  remote device) that ADR-0027 exists for. Non-wire (a kind-private config key, not a
+  protocol change), no RFC.
 - **First-level-child existence test: `graph_t::has_first_level_child`
   (#373)** — a placeholder-inclusive predicate (`std::span<const std::byte>` NAME
   record → `bool`) reporting whether the graph root has a top-level child by that
