@@ -85,6 +85,24 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   Non-breaking: the default full-node ctor is unchanged; only a node opting in
   with the tag sheds the builtins. Non-wire, no RFC.
 
+### Fixed
+
+- **`write <vertex>:acl.<anything>` and `write <vertex>:acl[N]` no longer REPLACE the
+  vertex's entire ACL** — the `:acl` write branch matched on the name alone, with no
+  step bound and no selector check, so every unresolved shape fell through to
+  `set_acl()`, which replaces wholesale. A caller holding `WRITE_ACL` who typoed the
+  field name, or emitted a stray selector, **silently swapped the vertex's whole
+  access-control list for the payload** — and if the new list did not grant them,
+  locked themselves out. Now `SCHEMA_NOT_FOUND`, resolved before the gate. The ACL is
+  addressed whole; an ACE is not separately writable.
+  **Not a privilege escalation** — the `WRITE_ACL` gate always ran, so only a caller
+  already entitled to replace the ACL could trip this. It is an integrity and
+  typo-safety fix. Reads are bounded to match: `:acl[N]` and `:schema[N]` served the
+  *entire* record under an OK status and are now `SCHEMA_NOT_FOUND` (the schema is one
+  synthesized POINT, not an array).
+  Found by a systematic sweep for the defect class behind the `:settings` and
+  `:identity` fixes below: *a field branch that matches on NAME but not SHAPE.*
+
 ### Changed
 
 - **A `write <vertex>:settings.<knob>` now resolves the knob NAME *before* the `:acl`
