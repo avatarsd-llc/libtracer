@@ -17,6 +17,7 @@
  * machinery lives only under `/net` and is never on the local hot path.
  */
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -24,7 +25,9 @@
 #include <cstdio>
 #include <cstring>
 #include <future>
+#include <set>
 #include <span>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -455,6 +458,140 @@ void test_link_name_collision_placeholder_parent() {
     channel.shutdown();
 }
 
+/**
+ * @brief A ws LISTENER spec carrying the ws-private `peer_named` / `max_peers` keys.
+ *
+ * SPEC{ NAME "type" "listener", NAME "name" <name>, SETTINGS "config"{ NAME "role" VALUE u8=1,
+ *       NAME "port" VALUE u16, NAME "kind" NAME "ws", NAME "peer_named" VALUE u8,
+ *       NAME "max_peers" VALUE u32 } }
+ */
+view_t ws_listener_spec(std::string_view name, std::uint16_t port, bool peer_named,
+                        std::uint32_t max_peers) {
+    std::vector<std::byte> cfg;
+    tr::wire::emit_name(cfg, "role");
+    const std::byte r{static_cast<std::uint8_t>(conn_role_t::LISTEN)};
+    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&r, 1));
+    tr::wire::emit_name(cfg, "port");
+    std::vector<std::byte> pb(2);
+    tr::detail::store_le(pb, port, 2);
+    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, pb);
+    tr::wire::emit_name(cfg, "kind");
+    tr::wire::emit_name(cfg, "ws");
+    tr::wire::emit_name(cfg, "peer_named");
+    const std::byte pn{static_cast<std::uint8_t>(peer_named ? 1 : 0)};
+    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, std::span<const std::byte>(&pn, 1));
+    tr::wire::emit_name(cfg, "max_peers");
+    std::vector<std::byte> mb(4);
+    tr::detail::store_le(mb, max_peers, 4);
+    tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, mb);
+
+    std::vector<std::byte> body;
+    tr::wire::emit_name(body, "type");
+    tr::wire::emit_name(body, "listener");
+    tr::wire::emit_name(body, "name");
+    tr::wire::emit_name(body, name);
+    tr::wire::emit_name(body, "config");
+    tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, cfg);
+
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
+    return owned(out);
+}
+
+/** @brief The NAME of every POINT member of a synthesized listing. */
+std::set<std::string> member_names(const tr::wire::tlv_t& point) {
+    std::set<std::string> names;
+    for (const auto& m : point.children) {
+        if (m.type != type_t::POINT) continue;
+        for (const auto& f : m.children)
+            if (f.type == type_t::NAME)
+                names.insert(std::string(tr::detail::as_string_view(f.payload)));
+    }
+    return names;
+}
+
+/** @brief Decode a connection vertex's synthesized `:children[]` peer listing. */
+std::set<std::string> enumerate_peers(graph_t& g, const char* path) {
+    const auto r = g.read(*path_t::parse(path));
+    if (!r) return {};
+    const tr::view::view_t flat = r->flatten();
+    const auto dec = tr::wire::decode(flat.bytes());
+    if (!dec || dec->type != type_t::POINT) return {};
+    return member_names(*dec);
+}
+
+/** @brief Poll until `pred` holds — the peer table is fed by the server's accept thread. */
+template <typename Pred>
+bool wait_until(Pred pred, std::chrono::milliseconds budget) {
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) return true;
+        std::this_thread::sleep_for(5ms);
+    }
+    return pred();
+}
+
+/**
+ * @brief #408 / ADR-0043 §5 / ADR-0044: the ws-private `peer_named` config key makes the
+ *        Brick-C peer listing reachable from a purely IN-BAND SPEC write.
+ *
+ * Before this key a SPEC-created ws listener was always constructed `peer_named=false`, so
+ * its `bus()` was null, `make_connection` never installed `on_children`, and ADR-0044's peer
+ * enumeration was creatable ONLY by direct construction + provide_link — unreachable to the
+ * in-band creator (a web UI forming a link on a remote device) that ADR-0027 exists for.
+ */
+void test_ws_peer_named_config() {
+    std::printf("#408: the ws-private peer_named key wires ADR-0044 peer enumeration in-band:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+
+    // ----- the CONTROL: no peer_named => a plain point-to-point link, no listing. -----
+    const auto plain = node.write(path_t("/net:children[]"),
+                                  conn_spec("listener", "plain", conn_role_t::LISTEN, 47140, "ws"));
+    check(plain.has_value(), "SPEC{listener, kind=ws} with no peer_named constructs the server");
+    auto* const plain_srv = dynamic_cast<tr::net::transport_ws_server*>(net.link_of("plain"));
+    check(plain_srv != nullptr && plain_srv->bus() == nullptr,
+          "without the key the SPEC-created server has a NULL bus (no ADR-0044 facet)");
+
+    // ----- the SUBJECT: peer_named=1 => the bus facet, hence the synthesized listing. -----
+    const auto w = node.write(path_t("/net:children[]"),
+                              ws_listener_spec("hub", 47141, /*peer_named=*/true, /*max_peers=*/8));
+    check(w.has_value(), "SPEC{listener, kind=ws, peer_named=1} constructs the owned server");
+    auto* const srv = dynamic_cast<tr::net::transport_ws_server*>(net.link_of("hub"));
+    check(srv != nullptr && srv->ok(), "the owned transport is a live transport_ws_server");
+    check(srv != nullptr && srv->bus() != nullptr,
+          "the ws-private key exposed the bus_link_t facet on a CONFIG-constructed link");
+
+    // A fresh listener is audible to nobody.
+    check(enumerate_peers(node, "/net/hub:children[]").empty(),
+          "/net/hub:children[] is empty before any peer dials in");
+
+    // Two real ws clients dial the SPEC-created listener; each completes an RFC 6455
+    // handshake, so each becomes an audible peer of the bus.
+    tr::net::transport_ws_client c1("127.0.0.1", 47141);
+    tr::net::transport_ws_client c2("127.0.0.1", 47141);
+    check(c1.ok() && c2.ok(), "both ws clients handshook against the in-band-created listener");
+
+    const bool listed =
+        wait_until([&] { return enumerate_peers(node, "/net/hub:children[]").size() == 2; }, 2s);
+    check(listed, "/net/hub:children[] synthesizes exactly the 2 live peers (ADR-0044 Brick C)");
+
+    // The peer names are the far side's <ip>:<port> — the source port is ephemeral, so
+    // assert the shape, never a literal.
+    const auto peers = enumerate_peers(node, "/net/hub:children[]");
+    const bool shaped = std::all_of(peers.begin(), peers.end(), [](const std::string& p) {
+        return p.starts_with("127.0.0.1:") && p.size() > std::string_view("127.0.0.1:").size();
+    });
+    check(shaped, "each synthesized peer name is the far side's <ip>:<port>");
+
+    // NO vertex is created for a peer — the listing is synthesized on every read, so the
+    // /net subtree still holds exactly the two CONNECTIONS (ADR-0044: peers are never
+    // registered; a peer name is not even a legal path segment).
+    check(enumerate_peers(node, "/net:children[]") == std::set<std::string>{"hub", "plain"},
+          "/net:children[] still lists only the two connections — no vertex per peer");
+}
+
 }  // namespace
 
 int main() {
@@ -468,6 +605,7 @@ int main() {
     test_link_of_accessor();
     test_link_name_collision_rejected();
     test_link_name_collision_placeholder_parent();
+    test_ws_peer_named_config();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
