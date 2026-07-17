@@ -281,6 +281,50 @@ void test_no_write_surface() {
           "and the record is unchanged by the attempt");
 }
 
+/**
+ * @brief RFC-0011 §C.4: the record is served WHOLE — no member addressing, no indexed
+ *        addressing — and the refusal is caller-independent.
+ *
+ * `:identity` is served pre-auth (§C.2), so the whole `identity` field namespace must
+ * resolve above the READ gate: anything below it would answer a denied caller
+ * PERMISSION_DENIED, contradicting §C.4's "returns `ERROR{tr::schema::not_found}`", which
+ * carries no caller qualifier. The discriminating case is therefore a DENIED caller —
+ * a granted one took the not_found path even before the namespace was resolved as a whole.
+ *
+ * The narrower refusal discloses nothing: `:identity` itself is world-readable by design,
+ * so there is no secret for a not_found-vs-denied distinction to protect.
+ */
+void test_record_has_no_sub_addressing() {
+    std::printf("RFC-0011 §C.4: served whole — no member or indexed addressing:\n");
+    graph_t g;
+    g.set_subject_resolver(caller_is_subject);
+    check(g.set_identity(0x01, demo_key()).has_value(), "identity installed");
+    (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
+
+    // Close /dev to everyone but alice — mallory is the caller the ACL denies.
+    const std::vector<ace_t> grant{
+        ace_t{.type = tr::graph::ace_type_t::ALLOW,
+              .flags = 0,
+              .subject = as_bytes("alice"),
+              .access_mask = static_cast<std::uint32_t>(acl_right_t::READ),
+              .expires_ns = 0}};
+    check(g.write(path_t("/dev:acl"), make_value(tr::graph::encode_acl(grant))).has_value(),
+          "an ACL granting only alice is installed on /dev");
+
+    // The bare field still serves, to both — the §C.2 exemption is untouched.
+    check(read_identity_bytes(g, "/dev:identity", "mallory").size() == 60,
+          "the bare :identity still serves pre-auth (§C.2 unchanged)");
+
+    for (const char* caller : {"mallory", "alice"}) {
+        const auto member = read_as(g, "/dev:identity.key", caller);
+        check(!member.has_value() && member.error() == status_t::SCHEMA_NOT_FOUND,
+              ":identity.key is SCHEMA_NOT_FOUND — no member addressing, either caller");
+        const auto indexed = read_as(g, "/dev:identity[0]", caller);
+        check(!indexed.has_value() && indexed.error() == status_t::SCHEMA_NOT_FOUND,
+              ":identity[0] is SCHEMA_NOT_FOUND — the record has no indexed surface");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -290,6 +334,7 @@ int main() {
     test_keyless_node_is_enotty();
     test_registry_validation();
     test_no_write_surface();
+    test_record_has_no_sub_addressing();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
