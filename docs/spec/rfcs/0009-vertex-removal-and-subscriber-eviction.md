@@ -280,6 +280,63 @@ lifetime scheme ADR-0057 defers (refcount / epoch reclamation) and is **explicit
 out of scope** (§Discussion 3) — but note that retirement is what makes such a
 scheme *possible* later: it is the point at which a refcount could begin draining.
 
+#### B.6 Retirement re-virginizes: it restores the invariant `unregistered ⇒ carries no state`
+
+This is the subtle rule, and getting it wrong is a **security defect**, not a
+cosmetic one. Marking `registered_ = false` is **not sufficient**. In the reference
+implementation, registration (`fill` / `adopt_identity`) sets a vertex's role,
+settings, and handlers but **leaves almost everything else in place**; a naive
+"retire = flip the flag" therefore leaves a fully-armed vertex that is invisible to
+`find` yet **still live to the ACL gate, still holds the previous owner's handlers,
+and still serves the previous owner's last value**. The codebase already banks on
+the opposite — a comment on the effective-ACL walk states that "*placeholder
+intermediates hold empty ACE lists, so merging them is the no-op the old walk's skip
+was*", and the fan-out walk relies on "*a placeholder ancestor holds no edges, so
+its fan_out is the no-op*". Retirement-without-reset mints the first counterexample
+to both.
+
+**B.6.1** — `retire(v)` MUST restore `v` to the state an **unregistered placeholder**
+carries: as if `fill` had never run. It MUST clear, at retire time:
+
+- **the vertex's own ACEs** (and invalidate the cached effective-ACL merge for the
+  whole subtree). This is the concrete meaning of §C's "indistinguishable from
+  never-built" and §E.1's "fresh": a never-built path has no own ACEs and **inherits
+  its nearest bearing ancestor's policy**. After retire, the revived path inherits
+  exactly that — the parent's policy, never the retired owner's. *(Maintainer ruling
+  2026-07-17: an ACL does not survive churn; the revived path inherits the parent.
+  §Discussion 7.)*
+- **the value seam** — `on_read` / `on_write` / `on_children` — so a revived vertex
+  runs none of the previous owner's logic. Because a reader may dereference the
+  handler pointer without a lock (the value seam is read on the hot path), an
+  implementation MUST NOT free the old handler block under a concurrent reader; the
+  ADR-0057-consistent discipline is to swap the pointer and **leak** the old block
+  (bounded by retire count, the same trade §B already books).
+- **the stored last-known-value and history**, so a `read` of the revived path is
+  `not_found` until the new owner writes (§C.2), not the retired owner's last value.
+- **the owner app-field descriptor table and its apply seam**, so the retired
+  owner's declared field names are no longer a writable surface on the revived
+  vertex.
+- **the subscriber edge list**, with the ancestor-listener bookkeeping the ordinary
+  unsubscribe path performs, so no dangling fan-out target and no inflated
+  listener counts survive (this generalizes §D.3).
+- **the delivery-mode membership**, so the revived vertex does not inherit the
+  retired one's sweep participation.
+
+**B.6.2** — Exactly one piece of per-vertex state MUST **survive**: the **write
+sequence** (`write_seq_`). It is monotonic per address for the graph's lifetime;
+resetting it would break the readiness cursors that assume it never regresses. It is
+**not** wire-observable (it feeds only the local `await` predicate), so keeping it
+does not re-distinguish a retired path from a never-built one on the wire — §C.4's
+collapse is preserved. The vertex's allocation, its extension block, its name, and
+its parent/child links also survive, by §B.1 / ADR-0057 (the block is emptied, never
+freed).
+
+**B.6.3** — The reset happens **at retire, not at revive.** Revival is an ordinary
+`register_vertex` that finds an unregistered placeholder and fills it; it inherits
+nothing because retire already left nothing. Resetting at retire is fail-closed: the
+retired window (invisible to `find`, live to the gate) is never left holding stale
+authority, and no revival path can forget to clean up.
+
 ### C. Observation — the retired path is `not_found`, indistinguishable from never-built
 
 **C.1 — no delivery, no marker, no new code.** Retirement is **not observable as a
@@ -406,7 +463,12 @@ papered over.
 the nearest existing ancestor. A retired vertex is not resolvable (§B.2), so a data
 write to its path **revives it** — a fresh, valueless vertex at the same address,
 subject to the same `CREATE` gate that would have permitted creating it in the first
-place.
+place. "Fresh" is load-bearing and is **exactly** what §B.6 guarantees: because
+retire re-virginized the vertex, the revived one carries no ACEs, no handlers, no
+value, and no subscribers of the retired owner — it inherits its parent's ACL policy
+and is byte-for-byte a never-built path. Without §B.6 this sentence would be false
+(the reference `fill` does not clear those), which is the class of defect —
+normative text outrunning the code — this RFC exists partly to stop.
 
 This is the coherent reading: **retirement removes the current projection; it is not
 a permanent claim on the name.** A peer that could have created the vertex can
@@ -608,3 +670,27 @@ Open points the author wants comment on:
    its parent retire it. Should retiring the *last live descendant* of a placeholder
    also retire the placeholder? Proposed: **no** — placeholders are structure, not
    state, and reaping them is a reclamation question (point 3).
+7. **Does an ACL survive retire/revive?** (§B.6, the sharp case of
+   [#407](https://github.com/avatarsd-llc/libtracer/issues/407)) ✅ **RESOLVED
+   2026-07-17 — the maintainer rules it does NOT: the revived path inherits its
+   parent's policy.** A design panel confirmed against the code that the two readings
+   are genuinely lossy in opposite directions, and that the code cannot tell them
+   apart (ACEs carry no provenance; there is no path-keyed policy store):
+   - **Clear own ACEs (ruled):** the revived vertex has no own ACEs, so the
+     effective-ACL bearer walk climbs to the nearest live ancestor — it inherits the
+     *parent's* policy, exactly as a never-built path does. This is what §C's
+     "indistinguishable from never-built" and §E.1's "fresh" already imply; §B.6 now
+     states it. **Cost, recorded:** an operator who set a leaf ACL intending it as
+     durable *path* policy (whatever occupies this address is technician-serviceable)
+     loses it on churn, because clearing is the maximally-permissive reset (no own
+     ACE ⇒ fall back to the ancestor).
+   - **Rejected:** ACL-survives-churn. It contradicts §C, and it would need a **new
+     mechanism outside the vertex and outside this RFC** — a path-keyed policy store,
+     and ACE provenance to distinguish an operator's address-policy from a delegate's
+     self-grant. Neither exists. If a fleet genuinely needs durable path policy, that
+     is its own future RFC, not an inference from this one.
+
+   The confused-deputy this avoids: without the reset, retiring peer X's `/net/b`
+   and letting peer Y re-create it would leave Y's connection governed by X's stale
+   ACEs — Y's write authorized against `/net`'s policy but enforced under X's. §B.6
+   closes it.
