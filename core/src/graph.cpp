@@ -1254,6 +1254,45 @@ result_t<view_t> graph_t::read_schema(vertex_t* v) const {
     return *out;
 }
 
+result_t<void> graph_t::set_identity(std::uint8_t kind, std::span<const std::byte> key) {
+    // The RFC-0011 §B identity-kind registry. `0x00` is reserved-invalid; every other
+    // kind fixes its key length, so a length that contradicts the kind is a malformed
+    // record and never reaches the wire (§B: TYPE_MISMATCH). Additions here are
+    // RFC-gated, like the error registry.
+    constexpr std::uint8_t kKindEd25519 = 0x01;
+    constexpr std::size_t kEd25519KeyBytes = 32;
+    if (kind != kKindEd25519 || key.size() != kEd25519KeyBytes)
+        return std::unexpected(status_t::TYPE_MISMATCH);
+
+    // SETTINGS(PL=1){ NAME "kind" VALUE u8, NAME "key" VALUE <key> } — the two required
+    // members, in the fixed order §B pins. 60 bytes for ed25519.
+    std::vector<std::byte> members;
+    wire::emit_name(members, "kind");
+    emit_value(members, kind, 1);
+    wire::emit_name(members, "key");
+    wire::emit_tlv(members, type_t::VALUE, opt_t{}, key);
+
+    std::vector<std::byte> record;
+    wire::emit_tlv(record, type_t::SETTINGS, opt_t{.pl = true}, members);
+    identity_record_ = std::move(record);
+    return {};
+}
+
+void graph_t::clear_identity() { identity_record_.clear(); }
+
+result_t<view_t> graph_t::read_identity() const {
+    // No keypair => the facet is ABSENT, not empty (RFC-0011 §C.3): the ENOTTY of an
+    // unsupported field, byte-for-byte the pre-RFC behaviour. An empty record was
+    // rejected precisely because it would fabricate an "identity exists but is vacant"
+    // state no consumer can act on.
+    if (identity_record_.empty()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    // Pre-serialized at install, so every vertex of this node serves BYTE-IDENTICAL
+    // bytes (§C.1) — the invariant that makes the record a valid cross-path key.
+    const auto out = view::over_bytes(identity_record_);
+    if (!out) return std::unexpected(status_t::BACKPRESSURE);
+    return *out;
+}
+
 result_t<view_t> graph_t::read_settings(vertex_t* v) const {
     // The full settings container (RFC-0010 §A.4): the implemented protocol QoS knobs —
     // in the docs/reference/05 §0x0B payload-layout order, each `NAME <knob> VALUE <int>`
@@ -1437,6 +1476,14 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
                 return std::unexpected(status_t::PERMISSION_DENIED);
             return read_acl(v);
         }
+        // `:identity` (#406, RFC-0011 §C.2) is PRE-AUTH BY DESIGN, so it resolves ABOVE
+        // the READ gate — a narrow, named exemption that applies to this field alone.
+        // The public key is precisely what an unauthenticated peer must obtain in order
+        // to TOFU-pin and to verify the ADR-0045 challenge, so gating it behind READ
+        // would deadlock first contact (the default ACL ships closed). It discloses
+        // nothing the Noise handshake would not present as its static key anyway.
+        // Node-scoped: it takes no vertex, and every vertex answers identically (§C.1).
+        if (field.steps.size() == 1 && field.steps[0].name == "identity") return read_identity();
         if (!acl_allows(v, caller, acl_right_t::READ))
             return std::unexpected(status_t::PERMISSION_DENIED);
         if (field.steps.size() == 1 && field.steps[0].name == "schema") return read_schema(v);

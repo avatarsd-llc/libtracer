@@ -222,6 +222,15 @@ add_test(NAME graph COMMAND graph_test)
 
 # RFC-0010 - owner app fields: the field descriptor table, `:settings.app.*` gating,
 # the two-part `:schema`, container reads, and the announce-write convention.
+# #406 / RFC-0011 — the node identity facet: the byte-exact 60-byte ed25519 record,
+# served identically at EVERY vertex (the node-scoped cross-path key), PRE-AUTH through
+# a closed ACL (the key is what an unauthenticated peer needs to pin), and absent —
+# SCHEMA_NOT_FOUND — on a keyless node. No crypto: the record is a claim.
+add_executable(identity_test identity_test.cpp)
+target_link_libraries(identity_test PRIVATE libtracer)
+libtracer_test_warnings(identity_test)
+add_test(NAME identity COMMAND identity_test)
+
 add_executable(app_fields_test app_fields_test.cpp)
 target_link_libraries(app_fields_test PRIVATE libtracer)
 libtracer_test_warnings(app_fields_test)

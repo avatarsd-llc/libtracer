@@ -380,6 +380,41 @@ class graph_t {
     void set_app_fields(vertex_handle_t v, std::vector<app_field_t> table);
 
     /**
+     * @brief Install this NODE's identity — the key `read <vertex>:identity` serves
+     *        (#406, RFC-0011; ADR-0045 decision 3 "the public key *is* the identity").
+     *
+     * NODE-scoped, not per-vertex: a node is one path tree, so EVERY vertex of this graph
+     * answers `:identity` with the same byte-identical record. That invariant is the whole
+     * point — it is what makes the record a valid CROSS-PATH key, so a client walking
+     * `/b` and `/c/a/b` can prove they are one device (ADR-0044 point 3: the core never
+     * dedups; the client does, keyed by an identity it chooses — this is that key).
+     *
+     * NO CRYPTO IS INVOLVED HERE, deliberately. The record is a **claim**: this seam
+     * stores and serves bytes the owner supplies and verifies nothing. Proving a node
+     * HOLDS the key is authentication (the ADR-0045 challenge/Noise handshake) and lives
+     * elsewhere; a claim is nevertheless exactly what a TOFU peer needs to pin, and what
+     * a topology walk needs to dedup. Treat an unpinned identity accordingly.
+     *
+     * Idempotent and re-callable; the last install wins. Call before frames flow (the
+     * `register_child_type` thread contract).
+     *
+     * @param kind The RFC-0011 §B identity-kind (`0x01` = ed25519 raw public key).
+     * @param key  The raw public key. Length MUST match @p kind (ed25519 ⇒ exactly 32).
+     * @retval TYPE_MISMATCH `kind` is outside the registry (`0x00` is reserved-invalid),
+     *         or `key`'s length contradicts `kind`.
+     */
+    [[nodiscard]] result_t<void> set_identity(std::uint8_t kind, std::span<const std::byte> key);
+
+    /**
+     * @brief Drop this node's identity — `:identity` reverts to `SCHEMA_NOT_FOUND`.
+     *
+     * The keyless state is the surface being ABSENT, not empty (RFC-0011 §C.3): a node
+     * without a keypair genuinely has no identity facet, which is the `ENOTTY` of an
+     * unsupported field, byte-for-byte the pre-RFC behaviour.
+     */
+    void clear_identity();
+
+    /**
      * @brief Install (or replace) @p v's field descriptor table from BORROWED, static-storage
      *        declarations (ADR-0058) — the same owner-facing semantics as @ref set_app_fields,
      *        but the `name`/`descriptor` bytes are VIEWED, never copied.
@@ -617,6 +652,10 @@ class graph_t {
     result_t<void> create_child(vertex_t* parent, const view_t& spec_value);
     // ":schema" read => a POINT descriptor (name + settings).
     [[nodiscard]] result_t<view_t> read_schema(vertex_t* v) const;
+    // ":identity" read => the node-scoped SETTINGS{kind,key} record (RFC-0011 §B), or
+    // SCHEMA_NOT_FOUND when no keypair is installed. Takes no vertex: the identity is
+    // the NODE's, and every vertex serves the identical bytes.
+    [[nodiscard]] result_t<view_t> read_identity() const;
     // ":children[]" read => member enumeration (write-spec / read-members asymmetry,
     // reference 05 §SPEC): a POINT whose children are POINT{NAME} member descriptors.
     // A vertex carrying handlers.on_children serves that synthesized listing instead
@@ -673,6 +712,13 @@ class graph_t {
     // The pluggable subject resolver (#81, ADR-0018). Null (default) => ACL enforcement
     // disabled. Same set-once-before-frames-flow contract as remote_sink_.
     subject_resolver_t subject_resolver_;
+    // The NODE's identity record, pre-serialized (#406, RFC-0011 §B): the complete
+    // SETTINGS{kind,key} TLV, built once at install so every `:identity` read is a copy
+    // of settled bytes rather than a re-emit — the "all vertices return byte-identical
+    // records" invariant (§C.1) then holds by construction, not by discipline. Empty =
+    // no keypair installed => SCHEMA_NOT_FOUND (§C.3). Same set-before-frames-flow
+    // contract as subject_resolver_.
+    std::vector<std::byte> identity_record_;
     // Bubbling-walk instrumentation (RFC-0005) — see ancestor_walks().
     mutable std::atomic<std::uint64_t> ancestor_walks_{0};
 
