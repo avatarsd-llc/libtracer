@@ -209,6 +209,10 @@ bool denied(const tr::graph::result_t<T>& r) {
 bool fails_with(const tr::graph::result_t<void>& r, status_t s) {
     return !r.has_value() && r.error() == s;
 }
+template <class T>
+bool fails_with(const tr::graph::result_t<T>& r, status_t s) {
+    return !r.has_value() && r.error() == s;
+}
 
 // ---------------------------------------------------------------------------
 void test_storage_roundtrip() {
@@ -508,6 +512,64 @@ void test_flat_knob_name_before_acl() {
     check(g.settings(v).reliability == 0, "... and neither malformed write reached `reliability`");
 }
 
+/**
+ * @brief The `:acl` and `:schema` field surfaces are addressed WHOLE — a trailing step or
+ *        an `[N]`/`[]` selector names nothing, on read and on write.
+ *
+ * The write half is the one that bites: `set_acl` REPLACES, so an unresolved shape is not a
+ * harmless no-op. Before the bound, `write :acl.bogus` reached `set_acl` and silently
+ * swapped the vertex's entire access-control list for the payload — a caller with
+ * `WRITE_ACL` who typoed the field name, or emitted a stray selector, overwrote the ACL and
+ * (if the new list did not grant them) locked themselves out. That lockout is also what
+ * makes the bug easy to misdiagnose: reading `:acl` back as the ORIGINAL admin fails
+ * BECAUSE the defect fired, which reads like "the write did nothing". This test reads back
+ * as the subject the bogus payload grants, which is the only caller who can still see it.
+ */
+void test_acl_and_schema_are_addressed_whole() {
+    std::printf(":acl / :schema are addressed whole — no member or slot addressing:\n");
+    graph_t g;
+    g.set_subject_resolver(caller_is_subject);
+    vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
+
+    const std::vector<std::byte> original =
+        make_acl({{.subject = "admin",
+                   .mask = bit(acl_right_t::WRITE_ACL) | bit(acl_right_t::READ_ACL) |
+                           bit(acl_right_t::READ)}});
+    check(g.write(path_t("/x:acl"), make_value(original)).has_value(), "the real :acl lands");
+
+    // A DIFFERENT acl, granting someone else — if a bogus shape reaches set_acl, this
+    // replaces the list and hands /x to `usurper`.
+    const std::vector<std::byte> usurping =
+        make_acl({{.subject = "usurper",
+                   .mask = bit(acl_right_t::WRITE_ACL) | bit(acl_right_t::READ_ACL) |
+                           bit(acl_right_t::READ)}});
+
+    for (const char* p : {"/x:acl.bogus", "/x:acl[0]", "/x:acl[]"}) {
+        const auto fp = path_t::parse(p);
+        check(fp.has_value(), "the malformed :acl path parses (so the branch is reachable)");
+        if (!fp) continue;
+        check(fails_with(g.write(v, fp->field(), make_value(usurping), "admin"),
+                         status_t::SCHEMA_NOT_FOUND),
+              "a non-whole :acl write names nothing: SCHEMA_NOT_FOUND (it must NOT replace)");
+        // The decisive assertion: `usurper` was never granted anything, so if it can read
+        // the :acl, the bogus write replaced the list.
+        check(denied(g.read(v, path_t::parse("/x:acl")->field(), "usurper")),
+              "... and the usurping ACL did NOT take effect");
+    }
+    check(g.read(v, path_t::parse("/x:acl")->field(), "admin").has_value(),
+          "the original admin still holds READ_ACL — the list is intact");
+
+    // The read half: whole or nothing, for both fields.
+    check(fails_with(g.read(v, path_t::parse("/x:acl[7]")->field(), "admin"),
+                     status_t::SCHEMA_NOT_FOUND),
+          ":acl[7] is SCHEMA_NOT_FOUND — an ACE is not separately addressable");
+    check(fails_with(g.read(v, path_t::parse("/x:schema[7]")->field(), "admin"),
+                     status_t::SCHEMA_NOT_FOUND),
+          ":schema[7] is SCHEMA_NOT_FOUND — the schema is one POINT, not an array");
+    check(g.read(v, path_t::parse("/x:schema")->field(), "admin").has_value(),
+          "the bare :schema read still works");
+}
+
 void test_expiry() {
     std::printf("ACE expiry (expires_ns, absolute ns since epoch):\n");
     graph_t g;
@@ -702,6 +764,7 @@ int main() {
     test_open_by_default();
     test_gated_ops();
     test_flat_knob_name_before_acl();
+    test_acl_and_schema_are_addressed_whole();
     test_expiry();
     test_inheritance();
     test_two_acl_fan_in();

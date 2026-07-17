@@ -1095,6 +1095,14 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
         // follows the selected policy — the default ALLOW-only profile rejects DENY /
         // extra flags with TYPE_MISMATCH) and keep BOTH the raw bytes (served back
         // verbatim by read_acl) and the parsed list (evaluated by acl_allows).
+        // The ACL is written WHOLE: `:acl` and nothing else. `set_acl` REPLACES, so a
+        // shape this branch does not resolve is not a harmless no-op — before this
+        // bound, `:acl.bogus` / `:acl[0]` / `:acl[]` all reached `set_acl` and silently
+        // replaced the vertex's entire access-control list. There is no member or slot
+        // addressing (an ACE is not separately writable), so any other shape names
+        // nothing: SCHEMA_NOT_FOUND, resolved BEFORE the gate like any unknown field.
+        if (field.steps.size() != 1 || !plain_step(step0))
+            return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         if (!acl_allows(v, caller, acl_right_t::WRITE_ACL))
             return std::unexpected(status_t::PERMISSION_DENIED);
         const auto acl = wire::decode(value);
@@ -1522,7 +1530,10 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
     // wrap once. Field reads are gated like data reads (#81): READ for the control
     // surface, READ_ACL — its own right, distinct from acting on the vertex — for ":acl".
     const result_t<view_t> fv = [&]() -> result_t<view_t> {
-        if (field.steps.size() == 1 && field.steps[0].name == "acl") {
+        // Served whole — no member or slot addressing, so `:acl[N]` names nothing
+        // (an ACE is not separately addressable). Resolving the shape here keeps
+        // `:acl[7]` from being served the entire ACE collection under an OK status.
+        if (field.steps[0].name == "acl" && plain_step(field.steps[0]) && field.steps.size() == 1) {
             if (!acl_allows(v, caller, acl_right_t::READ_ACL))
                 return std::unexpected(status_t::PERMISSION_DENIED);
             return read_acl(v);
@@ -1549,7 +1560,10 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
         }
         if (!acl_allows(v, caller, acl_right_t::READ))
             return std::unexpected(status_t::PERMISSION_DENIED);
-        if (field.steps.size() == 1 && field.steps[0].name == "schema") return read_schema(v);
+        // One synthesized POINT, served whole — not an array field, so no `[N]` surface.
+        if (field.steps.size() == 1 && field.steps[0].name == "schema" &&
+            plain_step(field.steps[0]))
+            return read_schema(v);
         if (field.steps[0].name == "settings" && plain_step(field.steps[0])) {
             // The RFC-0010 §A.4 read surfaces. Bare ":settings" — the full container
             // (protocol knobs + the nested app record); ":settings.app" — the app
