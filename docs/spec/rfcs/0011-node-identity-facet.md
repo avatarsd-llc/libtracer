@@ -123,10 +123,19 @@ spent that was not already the protocol's).
 - **Cost.** Zero per-vertex bytes: the record is synthesized on read from one
   node-scoped keypair, the `read_schema` pattern. A node's field-resolution
   gains one branch beside the existing `schema` branch.
-- **Schema visibility.** When a keypair is installed, implementations SHOULD
-  list `identity` in the synthesized protocol part of `read :schema`
-  ([RFC-0010](0010-owner-app-fields-and-schema.md) §B.2 — the runtime, not the
-  owner, says which protocol fields exist).
+- **Schema visibility: none, deliberately.** `identity` is **not** listed in
+  `read :schema`, and this RFC does not ask for it. The synthesized protocol
+  part of the `:schema` POINT is a `SETTINGS` container of **QoS knobs** —
+  members of `:settings`. `identity` is a **top-level `:` field**, not a
+  settings member; listing it there would assert that `:settings.identity`
+  exists, which is false. There is no region of the POINT that enumerates the
+  `:` field plane at all: `:acl`, `:subscribers`, `:children` and `:schema`
+  itself are all unlisted. The `:` plane is not self-describing in v1 —
+  discovery is by attempting the read and treating `tr::schema::not_found` as
+  "absent" (the ENOTTY doctrine, §C.3) — and `identity` is not the field that
+  should force that to change. A client learns whether a node is identifiable
+  by reading `:identity`, which costs the same round-trip as reading `:schema`
+  would, and is pre-auth besides (§C.2) where `:schema` is READ-gated.
 
 ### B. The reply: a SETTINGS-shaped record with algorithm agility — byte-precise
 
@@ -212,10 +221,21 @@ buys a post-quantum or second-kind future without a surface break. The bare
    [RFC-0010](0010-owner-app-fields-and-schema.md) §A.3 / Discussion 2).
    Installing or rotating the keypair is a **local, owner-facing host API** —
    the owner-initiated doctrine: the graph is a projection of device state, and
-   the node's identity is device state. A member read (`:identity.key`) is not
-   defined in v1 and returns `ERROR{tr::schema::not_found}`; the record is
-   served whole (60 bytes — sub-addressing buys nothing and costs a resolver
-   branch on MCU-class nodes).
+   the node's identity is device state. A member read (`:identity.key`) or an
+   indexed read (`:identity[0]`) is not defined in v1 and returns
+   `ERROR{tr::schema::not_found}` — **for every caller, including one the
+   vertex's ACL denies**; the record is served whole (60 bytes —
+   sub-addressing buys nothing and costs a resolver branch on MCU-class nodes).
+   Because §C.2 places `:identity` above the READ gate, the *whole* `identity`
+   field namespace must resolve there: a shape left to fall through would meet
+   the gate and answer a denied caller `PERMISSION_DENIED`, contradicting this
+   clause. Nothing is disclosed by the narrower answer — the record itself is
+   world-readable by design. **Code-pinned** by
+   `test_record_has_no_sub_addressing`
+   ([#433](https://github.com/avatarsd-llc/libtracer/pull/433)), which found
+   both halves false as first shipped: `:identity.key` was `PERMISSION_DENIED`
+   for a denied caller, and `:identity[0]` **served the whole record to
+   anyone**.
 5. **The record is a claim; trust stays per-hop.** This RFC adds **no**
    cryptographic binding: a `:identity` record read over a multi-hop route is
    asserted by the terminus and relayed by every hop, and per
@@ -382,16 +402,33 @@ vector changes):
 
 Genuinely contentious points, flagged for the maintainer:
 
-1. **The pre-auth ACL exemption** (§C.2). A stable, unauthenticated-readable
-   32-byte identity is a fingerprinting/tracking primitive: any peer that can
-   reach a node can enumerate and recognize it forever. The RFC accepts this
-   because TOFU pairing structurally requires pre-auth key disclosure and the
-   target Noise handshake discloses the static key anyway — but the alternative
-   posture (a default-shipped `EVERYONE@ READ` ACE on the facet that a
-   deployment MAY delete) preserves walker behavior in the common case while
-   giving privacy-critical deployments an off switch, at the cost of walkers
-   having to treat `tr::access::denied` as a fourth outcome. Implementer input
-   wanted before the window closes.
+1. **The pre-auth ACL exemption** (§C.2). ✅ **RESOLVED 2026-07-17 — the
+   maintainer rules the hard MUST-serve posture, ratifying §C.2 as drafted and
+   as shipped; no code change.** A stable, unauthenticated-readable 32-byte
+   identity is a fingerprinting/tracking primitive: any peer that can reach a
+   node can enumerate and recognize it forever. The RFC accepts this because
+   TOFU pairing structurally requires pre-auth key disclosure and the target
+   Noise handshake discloses the static key anyway.
+
+   **The accepted cost, stated plainly: a node's identity is world-readable
+   pre-auth. A scanner can fingerprint devices, and there is no off switch.**
+
+   The rejected alternative — a default-shipped `EVERYONE@ READ` ACE on the
+   facet that a deployment MAY delete — would have preserved walker behavior in
+   the common case and given privacy-critical deployments that off switch. It
+   was rejected on two grounds: it forces every walker to handle
+   `tr::access::denied` as a **fourth outcome** beside record / not_found /
+   unreachable, and a node whose operator deleted the ACE becomes
+   **un-pinnable** — it cannot be TOFU'd, so it cannot participate in the
+   ADR-0045 challenge at all. That is not a privacy switch; it is an
+   unauthenticatable node. A deployment that genuinely must not be fingerprinted
+   is asking not to be reachable, which is a transport-layer or network-layer
+   posture, not a field-level ACE.
+
+   Recorded here per this section's own instruction ("Implementer input wanted
+   before the window closes") — the window stays open to 2026-07-31 and this
+   ruling is the maintainer's, not an implementer's, since
+   [`docs/implementations.md`](../../implementations.md) registers none.
 2. **Record vs bare VALUE** (§B): 60 vs 36 bytes per read. If the maintainer
    judges algorithm agility not worth 24 bytes on a control-plane read, the
    bare form needs a different agility story (a v2 surface, or kind-by-length
