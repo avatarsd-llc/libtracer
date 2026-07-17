@@ -25,18 +25,34 @@ a `/net/<conn>` connection — so a third party that forms a device-to-device li
 
 It proposes **retirement, not erasure**: the owner calls a local `retire()` — the
 mirror of `register_vertex` — which marks the vertex **logically absent while
-leaving its allocation intact**. That single choice discharges two independent
-constraints at once ([ADR-0057](../../adr/0057-graph-composite-vertex-tree.md)'s
-pointer-stability invariant and [RFC-0008](0008-vertex-operations-assign-propagate.md)'s
-operation-shaped-change doctrine), and it is the shape the codebase **already ships**
-for subscriber slots. Retirement is observed the way every other fault is: a
-`STATUS=ERROR` delivered in place of a VALUE at the retired path — [#66](https://github.com/avatarsd-llc/libtracer/issues/66)'s
-recommended option — but carrying a **new registry code `tr::path::retired`**
-rather than reusing `not_found`, because reusing it would make "deliberately
-removed", "never written" and "never existed" a single indistinguishable answer.
+leaving its allocation intact**, satisfying
+[ADR-0057](../../adr/0057-graph-composite-vertex-tree.md)'s pointer-stability
+invariant (a bare detach would dangle every outstanding `vertex_handle_t`). It is
+the shape the codebase **already ships** for subscriber slots.
+
+**A retired path reads `tr::path::not_found` (`0x0020`) — the same answer as never
+written and never existed.** Retirement is deliberately **not observable** as a
+distinct state: no new registry code, no delivered marker, no notification. A peer
+that cares learns by reading and finding nothing there.
+
+Removal is initiated one of two ways, and neither is a wire remove-verb: the owner
+calls `retire()` locally, or a peer **writes a request the device executes** —
+`write /net/unexport NAME{<name>}` on a creator endpoint
+([ADR-0059](../../adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md)),
+which is an ordinary write to an ordinary vertex whose owner's logic chooses to
+honour it. §A.1's rule is untouched: **no operation removes a vertex; a device
+removes a vertex.**
 
 Subscriber eviction turns out to be **already implemented and already normative**;
 this RFC settles the one place the reference and the implementation disagree.
+
+> **Rewritten 2026-07-17** after the maintainer's grill, which struck this RFC's
+> original centre: a `STATUS=ERROR` delivered in place of a VALUE, carrying a new
+> `tr::path::retired = 0x0023`. Both are gone — see §C, §Alternatives 5, and
+> §Discussion 6 for what was cut and why. The first draft rested on a **phantom**:
+> it cited [`reference/02:411`](../../reference/02-graph-model.md)'s
+> STATUS-in-place-of-a-VALUE as a "ratified, in-use pattern", and it is not in use
+> anywhere.
 
 ## Motivation
 
@@ -87,10 +103,33 @@ doctrine"*:
 [`reference/02:397`](../../reference/02-graph-model.md) corroborates: *"the
 owner-initiated doctrine of **the draft vertex-removal RFC-0009**"*.
 
-So §A.1 below is **not a proposal** — it is already normative by incorporation
-through a merged RFC, and this document is partly a repair of a forward reference
-that shipped ahead of its target. §A.1 is written to say exactly what RFC-0010
-already claims it says.
+So §A.1 below is **not a novel proposal** — it is a dangling forward reference
+that a sibling document already leans on, and this RFC is partly the repair of a
+citation that shipped ahead of its target. §A.1 is written to say exactly what
+RFC-0010 already claims it says.
+
+> **Corrected 2026-07-17.** This section previously said §A.1 "is already
+> **normative by incorporation** through a merged RFC." **That was false, twice
+> over**, and it is the error this RFC most needs to not make:
+>
+> 1. **RFC-0010's *file* is merged; its *Status* is `in-comment`, not `accepted`.**
+>    Merging a file is not accepting an RFC. **Nothing in RFC-0010 is normative**,
+>    so it cannot confer normativity on anything else.
+> 2. **"Normative by incorporation" is not a general-purpose phrase.** It is
+>    [ADR-0007](../../adr/0007-normative-wire-format-by-incorporation.md)'s term
+>    for one specific mechanism: how the **accepted spec** ([v1.md](../v1.md) §3)
+>    incorporates `reference/01` and `reference/05`. One draft citing another is
+>    not that.
+>
+> The claim also **closed a citation loop** — RFC-0009 §A.1 was justified by
+> RFC-0010:164, which was justified by RFC-0009 §A.1 — laundering a dangling
+> forward reference into authority neither document had. The **real** basis for
+> banning a wire remove-verb is [v1.md](../v1.md) §1 and
+> [ADR-0006](../../adr/0006-read-write-await-api-no-connect.md) (the
+> read/write/await API admits no third verb), which is what §A.1 now rests on.
+> Five citations from a sibling draft are **evidence that the doctrine is
+> load-bearing and relied upon** — a good reason to write it down — but they are
+> not authority. That distinction is the whole point of the comment window.
 
 ### The slot in the reference
 
@@ -125,8 +164,8 @@ byproduct is "gone."** That asymmetry — not a missing verb — is the whole pr
 - **There is no wire operation that removes a vertex.** No `DELETE` verb is added
   to `FWD`, no removal SPEC, no `:children[N]` clear. A remote peer can write
   vertices the owner declared (RFC-0005) and create them where it holds `CREATE`;
-  it can never retire one. A peer manipulating the projection **must go through
-  the device's own logic**.
+  it can never retire one **by addressing it**. A peer manipulating the projection
+  **must go through the device's own logic**.
 - Reference shape (normative for the reference implementation, informative for
   others): `graph_t::retire(vertex_handle_t)` — the exact counterpart of
   `register_vertex`, callable at any time the owner chooses.
@@ -134,6 +173,34 @@ byproduct is "gone."** That asymmetry — not a missing verb — is the whole pr
 > This mirrors RFC-0010 §A.2 for field declaration, which cites this section as
 > its precedent. The two RFCs state one doctrine: **structure is the device's; only
 > values cross the wire.**
+
+**A.1.1 — a peer may *ask*; the distinction is load-bearing.** The rule above bans
+a **removal operation**, not a **removal outcome**. A peer writes
+`/net/unexport` with `NAME{<name>}`
+([ADR-0059](../../adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md)),
+and the device's own logic may respond by calling `retire()`. This is **not** a
+loophole, and the difference is not a word game:
+
+| a wire remove-verb (banned) | a write the device executes (allowed) |
+| ---- | ---- |
+| addresses the **victim** (`retire /a/b`) | addresses a **creator endpoint** (`write /net/unexport`) |
+| the runtime removes, because the frame said so | the **owner's code** removes, if it agrees |
+| every vertex acquires a remove surface | only a vertex the owner *built to accept requests* has one |
+| the ACL gates the runtime's obedience | the device's logic decides, ACL-gated like any write |
+
+The test is *"who decides"*, not *"did bytes arrive"*. Under §A.1 the answer is
+always **the device**. A creator endpoint is a vertex whose declared purpose is to
+receive such requests — the device chose to have one, chose which names it will
+honour, and can refuse any of them. A device with no creator endpoint is
+untouched: every removal stays purely local, and `/net/unexport` is
+`PATH_NOT_FOUND` like any other unbuilt path.
+
+This is the shape §Discussion 1(a) of the first draft floated ("the device
+executes a written request") and the maintainer ratified in the 2026-07-17 grill.
+**The bytes are not settled here** — ADR-0059 deliberately specifies none, and the
+`unexport` payload, its gating right, and its reply belong to the forthcoming
+creator-endpoint RFC. What this section settles is only that such a write is
+**consistent with §A.1**, not an exception to it.
 
 #### A.2 The `DELETE` access bit is orphaned — and this RFC says so rather than inventing a use
 
@@ -181,21 +248,26 @@ Normative rules:
   descendants are unreachable by construction (they are addressed through it), so
   leaving them live would be a lie the enumeration could not tell.
 - **B.4** `retire` MUST be idempotent: retiring an already-retired vertex succeeds
-  and delivers nothing (§C fires once, on the transition).
-- **B.5** Retirement MUST bump the vertex's **write sequence** — it is an
-  `assign`-class operation in RFC-0008's model, so an ordinary `propagate` sweep
-  delivers it. **Removal is a thing the owner *does*, never a state the runtime
-  infers by comparison**, which is precisely the doctrine RFC-0008 established:
-  *"What 'changed' means is decided by which operations the caller performed, never
-  by comparing bytes."*
+  and delivers nothing.
+- **B.5** Retirement **delivers nothing and wakes nothing.** It MUST NOT deliver
+  along subscription edges, MUST NOT wake `await`, and MUST NOT bump the vertex's
+  write sequence. Retirement is not an `assign`: it publishes no value. A
+  subscriber learns of a retirement only by addressing the path and receiving
+  `tr::path::not_found` (§C).
 
-**Two independent constraints, one answer.** ADR-0057 demands a lifetime scheme;
-RFC-0008 demands an operation-shaped change. A tombstone is simultaneously the
-cheapest lifetime scheme (the node stays allocated, so handles stay valid; only its
-observable state changes) and a natural `assign`. They are not competing designs —
-**"tombstone" is the storage answer and `STATUS` (§C) is the delivery answer**, and
-this RFC needs both. RFC-0010:474 already anticipated *"RFC-0009's tombstone
-interim"*.
+**One constraint, one answer.** ADR-0057 demands a lifetime scheme, and retirement
+is the cheapest one available: the node stays allocated, so handles stay valid,
+and only its resolvability changes.
+
+> **Changed 2026-07-17.** B.5 previously required retirement to bump the write
+> sequence as an `assign`-class operation so an ordinary `propagate` sweep would
+> deliver it, and this section argued that "tombstone is the storage answer and
+> `STATUS` (§C) is the delivery answer, and this RFC needs both." With the §C
+> delivery struck, there is nothing to propagate, and an `assign` that assigns
+> nothing is a contradiction. The storage half — the only half ADR-0057 actually
+> demands — stands unchanged. Note RFC-0010:474's reference to *"RFC-0009's
+> tombstone interim"* now points at the storage mechanism only, not an observable
+> marker.
 
 **This shape already ships.** `vertex_t::clear_edge` retires a *subscriber slot*
 exactly this way — `subs_[idx].active = false`, in place, allocation and index
@@ -208,74 +280,75 @@ lifetime scheme ADR-0057 defers (refcount / epoch reclamation) and is **explicit
 out of scope** (§Discussion 3) — but note that retirement is what makes such a
 scheme *possible* later: it is the point at which a refcount could begin draining.
 
-### C. Observation — `STATUS=ERROR` at the retired path, with a distinct code
+### C. Observation — the retired path is `not_found`, indistinguishable from never-built
 
-**C.1 — the delivery.** On the `live → retired` transition the vertex MUST deliver
-a `STATUS` TLV carrying one `ERROR` child, **in place of a VALUE, at the retired
-vertex's own path**, along every subscription edge that observes it — its own
-subscribers and, by RFC-0005 vertical bubbling, every ancestor's subscribers. This
-is [#66](https://github.com/avatarsd-llc/libtracer/issues/66)'s **option 2**.
+**C.1 — no delivery, no marker, no new code.** Retirement is **not observable as a
+distinct state**. On the `live → retired` transition the vertex delivers
+**nothing**: no `STATUS`, no tombstone record, no notification of any kind along
+any subscription edge.
 
-It reuses a **ratified, in-use pattern** rather than inventing one
-([`reference/02:411`](../../reference/02-graph-model.md), settled by #67):
+**C.2 — reads and fields.** A `read` / `await` / `:field` operation addressing a
+retired vertex MUST reply exactly as one addressing a path that never existed:
+`kind=ERROR` with `STATUS{ ERROR{ VALUE u16 = 0x0020 } }` — `tr::path::not_found`,
+the ordinary [RFC-0004](0004-remote-operation-addressing.md) §D error shape. **No
+new registry code is minted.** `0x0023` stays free.
 
-> **Invalid / fault** ... is a **`STATUS=ERROR(<reason>)` delivered in place of a
-> VALUE** — the same pattern the transport plane uses to surface
-> `STATUS=ERROR(TRANSPORT_DOWN)`. ... a type-aware consumer distinguishes a
-> `STATUS` (type `0x09`) from a `VALUE` (type `0x01`) by its type code and reacts.
+**C.3 — enumeration.** A retired child MUST NOT appear in
+`read(<parent>:children[])` (§B.2) — again exactly as a child that was never
+created.
 
-It also fits RFC-0005 §A's delivery contract without amendment. That contract is
-strict — *"the delivered payload is the **written TLV as-is** — no re-encoding, no
-path-tagging envelope"* — and **a `STATUS` is a TLV a producer can write.** A
-tombstone *delta record* (option 1) could not ride that edge without inventing a
-notification envelope RFC-0005 deliberately does not have.
+**C.4 — the collapse, stated plainly.** After this RFC, `tr::path::not_found`
+carries **three** meanings that a peer cannot tell apart:
 
-**C.2 — a new registry code, `tr::path::retired = 0x0023`** (`tr::path::*` occupies
-`0x0020`–`0x0022`; `0x0023` is free):
+1. this path never existed;
+2. this path exists but was never written (no last-known-value);
+3. this path existed and was deliberately retired.
 
-| Code | Path | Severity | Disposition |
-| ---- | ---- | ---- | ---- |
-| `0x0023` | `tr::path::retired` | warn | permanent |
+**This is the accepted cost, ruled by the maintainer on 2026-07-17.** A control
+plane cannot distinguish *"this endpoint was removed"* from *"this endpoint has
+not published yet"*. A UI that must tell them apart has to carry its own
+expectation of what should exist — which, per
+[ADR-0044](../../adr/0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md)
+pt 3, is where such state already lives: the "real graph" is client logic keyed by
+an identity the client chooses, and the core never dedups or remembers on the
+client's behalf.
 
-This is the one place this RFC departs from #66's recommendation, which said
-`STATUS=ERROR(NOT_FOUND)` — *"reuses STATUS fault delivery, no new type"* — while
-conditioning it on *"unless DELTA subscribers need a distinct tombstone."* They do,
-for a reason #66 could not have seen at the time:
+**Why the collapse won.** The first draft minted `tr::path::retired = 0x0023` and
+delivered it, arguing that folding retirement into `not_found` "makes it a
+three-way collision, and the third meaning is the only one a control plane must act
+on." The grill rejected that on evidence:
 
-**`tr::path::not_found` is already overloaded twice over.** `status.hpp` reads it
-as *"Path doesn't resolve / **no last-known-value**"*, and a freshly-registered
-never-written vertex returns it (`core/tests/graph_test.cpp`). So on the wire
-today, **"registered but never written" and "never existed" are already
-indistinguishable** — both `0x0020`. Folding "deliberately retired" into the same
-code makes it a **three-way collision**, and the third meaning is the only one a
-control plane must act on: a UI that cannot distinguish *"this endpoint was
-removed"* from *"this endpoint has not published yet"* will either flap on startup
-or never notice a removal. A distinct code costs one registry row; the collision
-costs the feature.
+- **The delivery rested on a phantom.** §C.1 of the first draft called
+  `STATUS=ERROR` delivered in place of a VALUE a *"ratified, in-use pattern"*,
+  citing [`reference/02:411`](../../reference/02-graph-model.md) — *"the same
+  pattern the transport plane uses to surface `STATUS=ERROR(TRANSPORT_DOWN)`"*.
+  **It is not in use.** The transport plane emits a **`VALUE`**
+  (`transport_vertex.cpp` `link_state_value`); `TRANSPORT_DOWN` appears only in
+  `error.hpp`'s enum and switches and **is never emitted**; and the sole
+  `type_t::STATUS` emit in `core/` (`op_resolve_walk.hpp`) is the FWD error-**reply**
+  wrapper, not a delivery. The pattern the draft generalised from does not exist —
+  `reference/02:411` is itself a phantom, and building a new normative surface on
+  it would have made a second one.
+- **A distinct code is not free.** It obliges every implementation to distinguish
+  states the reference cannot yet produce, and pins an error identity — which, per
+  the clause-kind rule, MUST be code-pinned before acceptance. Nothing pins it.
+- **Nothing has proven it load-bearing.** The collision (2) vs (3) is real but
+  hypothetical: no shipped consumer distinguishes them, because no consumer can
+  retire anything yet.
 
-Note the disposition subtlety this exposes: `disposition` was designed for *"should
-the caller retry **this request**"* (RFC-0002 §D), but a delivery is not a request.
-`retired` is `permanent` in the sense `not_found` is — *do not retry this address*
-— and unlike `transport::down` (`transient`, "come back later"), a retirement is
-not a promise of return. §Discussion 4 records that the registry's disposition
-column is being read in a second sense here.
-
-**C.3 — reads and fields.** A `read` / `await` / `:field` operation addressing a
-retired vertex MUST reply `kind=ERROR` with `STATUS{ ERROR{ VALUE u16 = 0x0023 } }`
-— the ordinary RFC-0004 §D error shape, with `retired` where `not_found` would
-otherwise appear. An operation addressing a path that never existed keeps
-`0x0020`, unchanged.
-
-**C.4 — enumeration.** A retired child MUST NOT appear in `read(<parent>:children[])`
-(§B.2). The read-snapshot-then-subscribe pattern
-([`reference/02:421`](../../reference/02-graph-model.md)) therefore stays coherent:
-the snapshot omits it and the delta explains it.
+**Re-adding is cheap; un-adding is not.** `0x0023` stays free, and a future RFC may
+mint it **gated on landed code and a real consumer that demonstrates the need**.
+Shipping a code no implementation emits, into a wire format aiming at immutability,
+is the expensive direction. This is the RFC-0005 posture applied to ourselves: ship
+the smallest true thing.
 
 **C.5 — no `:status` facet is introduced.** [`reference/05:556`](../../reference/05-protocol-tlvs.md)
 mentions an *"asynchronous signal at `<vertex>:status`"*; **no such facet exists in
 the implementation** (`graph.cpp` dispatches `subscribers`, `acl`, `children`,
-`settings`, `schema` — there is no `status`). Retirement delivery MUST NOT depend
-on it. Whether `:status` should exist at all is out of scope here (§Discussion 5).
+`settings`, `schema`, `identity` — there is no `status`). It is another entry on
+the phantom ledger, recorded here and repaired nowhere. Retirement delivery does
+not depend on it — there is no retirement delivery. Whether `:status` should exist
+at all is out of scope (§Discussion 5).
 
 ### D. Subscriber eviction — settle what already ships
 
@@ -370,12 +443,10 @@ and dereferenceable (§B.1). Operations through them behave per §C.
 
 | Path | Change |
 | ---- | ---- |
-| `docs/spec/rfcs/0002-protocol-error-model.md` | §D registry: add `0x0023 tr::path::retired` |
-| `docs/reference/02-graph-model.md` | `:422` — replace the open question with §C; note the `DELETE` orphan at `:422` |
+| `docs/reference/02-graph-model.md` | `:422` — replace the open question with §C (answer: *snapshot-diff only; a retired path is `not_found`*); note the `DELETE` orphan at `:422`; **`:411` — strike the STATUS-in-place-of-a-VALUE claim, which nothing implements (§C.4)** |
 | `docs/reference/05-protocol-tlvs.md` | STATUS §Where-it-appears: the eviction sentinel per §D.1; `DELETE` bit reserved-unused per §A.2 |
 | `docs/reference/07-host-embedding.md` | connection teardown per §E.2 |
 | `docs/spec/rfcs/0005-subtree-subscriptions.md` | §E: mark the deferred child-removal point resolved here |
-| `core/include/libtracer/error.hpp` | `err_t::PATH_RETIRED = 0x0023` + the three switches |
 | `core/include/libtracer/graph.hpp`, `core/src/graph.cpp` | `retire()`; `find` excludes retired; `:children[]` excludes retired; §D.1 sentinel fix |
 | `core/include/libtracer/vertex.hpp` | the retired flag (beside `subs_[].active`) |
 | `core/include/libtracer/transport_vertex.hpp`, `core/src/transport_vertex.cpp` | §E.2 teardown |
@@ -386,14 +457,17 @@ and dereferenceable (§B.1). Operations through them behave per §C.
 
 **Does this break protocol-v1 implementations?** No. Every change is additive:
 
-- A **new error code** is additive by construction — RFC-0002 §D says *"the built-in
-  set below is frozen, and additions are RFC-gated"*, which is exactly this
-  procedure. A peer that does not know `0x0023` treats it as an unknown registered
-  code; RFC-0002's model already requires tolerating that.
-- **No new TLV type, no new verb, no frame-layout change.** `STATUS`/`ERROR` are
-  unchanged and already carried on this edge.
+- **No new error code.** The first draft minted `tr::path::retired = 0x0023`; §C
+  strikes it. `0x0023` stays free. A retired path answers `0x0020`
+  `tr::path::not_found` — a code every peer already knows and already handles.
+- **No new TLV type, no new verb, no frame-layout change, and no new delivery.**
+  Retirement is observed by a read returning what an unbuilt path returns.
 - An implementation with **no removal surface stays conforming** — it simply never
-  emits `0x0023`. Nothing here compels a device to support retirement.
+  retires anything, and no peer can tell the difference between a device that
+  cannot retire and one that has not. Nothing here compels a device to support
+  retirement.
+- **The wire is byte-for-byte unchanged.** This RFC's entire normative footprint is
+  *when* `0x0020` is returned — never *what* is on the wire.
 - **§D.1 is a conformance *repair*, not a break.** The reference already specifies
   the empty-STATUS sentinel; the reference implementation diverges from it. A client
   written against the spec is unaffected; one written against the C++ bug (writing
@@ -405,39 +479,70 @@ and dereferenceable (§B.1). Operations through them behave per §C.
 
 | Vector | Meaning |
 | ---- | ---- |
-| `errors/error-path-retired` | `STATUS{ ERROR{ VALUE u16 LE = 0x0023 } }` |
-| `fwd/fwd-reply-error-retired` | `FWD{ op=REPLY, kind=ERROR, STATUS{ ERROR{ 0x0023 } } }` — a read of a retired path |
-| `fwd/fwd-delivery-retired` | `FWD{ op=WRITE, payload = STATUS{ ERROR{ 0x0023 } } }` — the §C delivery, a STATUS where a VALUE would be |
 | `subscriber-clear-sentinel` | the 4-byte empty `STATUS` (`09 00 00 00`) as the §D.1 sentinel |
 
-**Migration.** Nothing deployed emits or expects `0x0023`, so there is no migration
-for existing devices. Consumers gain a distinction they did not have (retired vs
-never-was) and may ignore it — treating `0x0023` as `0x0020` reproduces today's
-behaviour exactly, which is the intended graceful degradation.
+The three `retired` vectors of the first draft (`errors/error-path-retired`,
+`fwd/fwd-reply-error-retired`, `fwd/fwd-delivery-retired`) are **withdrawn with the
+code they pinned**. Retirement needs no new vector: a read of a retired path is
+byte-identical to a read of a path that never existed, which existing vectors
+already cover. **That a feature needs no new conformance vector is the strongest
+evidence it adds nothing to the wire** — and the clearest statement of what §C
+chose.
+
+**Migration.** None, for anyone. Nothing on the wire changes. A consumer gains no
+distinction it must learn, and loses none it had: today a removed vertex is
+unobservable because removal does not exist; after this RFC it is unobservable
+because retirement is `not_found`. The *device-facing* API gains `retire()`; the
+*wire* gains nothing.
 
 ## Alternatives considered
 
 **Option 1 — a tombstone *delta record*** (#66's first option: a typed marker for
-the removed child at its concrete path). Rejected as a *delivery* mechanism: it needs
-a notification envelope RFC-0005 §A explicitly refuses (*"the written TLV as-is — no
-re-encoding, no path-tagging envelope"*), and it would be a second mechanism for
-what `STATUS`-in-place-of-VALUE already does (`reference/02:411`) — the same
-duplication argument that killed `:children_changed` in #66. Note the word
-"tombstone" survives in §B in its *other* sense (the storage/lifetime scheme), which
-is not what option 1 meant.
+the removed child at its concrete path). Rejected as a *delivery* mechanism: it
+needs a notification envelope RFC-0005 §A explicitly refuses (*"the written TLV
+as-is — no re-encoding, no path-tagging envelope"*). **The first draft also
+rejected it as "a second mechanism for what `STATUS`-in-place-of-VALUE already
+does (`reference/02:411`)" — that half of the argument is withdrawn**, because
+nothing does that (§C.4): there was no first mechanism for it to duplicate. The
+RFC-0005 envelope argument stands on its own and is sufficient. Note "tombstone"
+survives in §B in its *other* sense — the storage/lifetime scheme — which is not
+what option 1 meant.
+
+**Option 2 — `STATUS=ERROR` in place of a VALUE, with a distinct
+`tr::path::retired = 0x0023`.** **This was the first draft's proposal, and it is
+now rejected** — see §C.4. Two reasons, either sufficient: the pattern it
+generalised from is a phantom (the transport plane emits a `VALUE`, not a
+`STATUS`; `TRANSPORT_DOWN` is never emitted), and a minted error identity must be
+code-pinned before acceptance under the clause-kind rule, with nothing to pin it
+to. Kept here, as the option that lost, because the reasoning is the most
+instructive thing this RFC contains: **a draft that cites a doc claim without
+grepping for its implementation will manufacture a phantom of its own.**
 
 **Option 3 — snapshot-diff only** (#66's third option: removals observable solely by
-comparing successive `:children[]` reads). Rejected: it forces every consumer to poll
-to notice a removal, which contradicts the whole point of subscriptions, and it
-cannot express *when* a removal happened. It is what implementations are stuck with
-today, and it is why #407 exists.
+comparing successive `:children[]` reads). Rejected as a *specified mechanism*: it
+forces every consumer to poll to notice a removal, which contradicts the point of
+subscriptions, and it cannot express *when* a removal happened. **In practice it is
+what §C leaves consumers with** — the difference is that this RFC does not dress it
+up as a notification. It is what implementations are stuck with today, and it is
+why #407 exists; §C.4 records that as the accepted cost rather than pretending
+otherwise.
 
-**Reusing `tr::path::not_found` (0x0020)** — #66's literal recommendation. Rejected
-on the three-way-collision argument in §C.2, which #66 itself pre-authorized:
-*"unless DELTA subscribers need a distinct tombstone."*
+**Reusing `tr::path::not_found` (0x0020) — #66's literal recommendation. ADOPTED
+(§C.2).** The first draft rejected this on a three-way-collision argument, reading
+#66's *"unless DELTA subscribers need a distinct tombstone"* as pre-authorisation
+to mint one. The grill ruled the collision real but **not yet load-bearing**: no
+shipped consumer distinguishes the three meanings, because no consumer can retire
+anything yet. `0x0023` stays free and may be minted later, **gated on landed code
+and a consumer that demonstrates the need**. Shipping an error identity no
+implementation emits, into a wire format aiming at immutability, is the expensive
+direction.
 
-**A wire remove-verb** (`FWD{op=DELETE}` or a removal SPEC). Foreclosed by §A.1,
-which is already incorporated via merged RFC-0010 — not reopened here.
+**A wire remove-verb** (`FWD{op=DELETE}` or a removal SPEC). Foreclosed by §A.1 —
+whose basis is [v1.md](../v1.md) §1 and
+[ADR-0006](../../adr/0006-read-write-await-api-no-connect.md) (the read/write/await
+API admits no third verb), **not** RFC-0010, which is `in-comment` and confers no
+normativity (see the correction under §Motivation). Not reopened here. Note §A.1.1:
+a peer may *write a request* the device executes, which is not a remove-verb.
 
 **Real erasure with refcounting or epoch reclamation.** Deferred by
 [ADR-0057](../../adr/0057-graph-composite-vertex-tree.md) and still deferred: it is a
@@ -457,22 +562,37 @@ Record sustained objections and their resolution here.
 
 Open points the author wants comment on:
 
-1. **Does §A.1 leave the setup edge unable to do its job?** (§E.2) A web UI can form
-   a d2d link remotely but cannot tear one down remotely — arguably a control plane
-   with a missing half. Three readings: (a) accept it, and expose a device-side
-   surface (a physical button, a local rule, a device-catalog child type whose
-   creation means "retire that link" — keeping §A.1's letter while restoring the
-   capability); (b) treat `/net/<conn>` as special, since a connection is
-   infrastructure rather than device state; (c) revisit §A.1 for a `DELETE`-gated
-   remote retire — which would need RFC-0010 §A.2 revisited with it, since it cites
-   this doctrine. **The author leans (a)** but this is the decision most worth an
-   implementer's objection.
+1. **Does §A.1 leave the setup edge unable to do its job?** (§E.2) ✅ **RESOLVED
+   2026-07-17 — the maintainer rules (a), and it is now §A.1.1.** A web UI can form
+   a d2d link remotely but could not tear one down remotely — a control plane with
+   a missing half. Three readings were offered: (a) accept §A.1, and expose a
+   device-side surface — *"a device-catalog child type whose creation means 'retire
+   that link'"* — keeping §A.1's letter while restoring the capability; (b) treat
+   `/net/<conn>` as special, since a connection is infrastructure rather than
+   device state; (c) revisit §A.1 for a `DELETE`-gated remote retire.
+
+   **(a) is ratified**, and [ADR-0059](../../adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md)
+   is its concrete form: the device-side surface is a **creator endpoint vertex**,
+   and the request is `write /net/unexport NAME{<name>}` — the setup edge gets its
+   missing half, and §A.1 keeps not just its letter but its meaning, because the
+   **device still decides** (§A.1.1's table). (b) was rejected as a special case
+   with no principle behind it — `/net/<conn>` is device state like any other, per
+   [ADR-0027](../../adr/0027-transport-and-connections-are-vertices.md). (c) was
+   rejected because it would have forced RFC-0010 §A.2 to be revisited with it, and
+   because it inverts *who decides* — the thing §A.1 exists to protect.
+
 2. **Dangling edges to retired targets** (§D.4). A producer keeps fanning out to a
    retired target forever, wasting a delivery per write. Fixing it needs the
    *target* to tell the *producer*, i.e. a back-channel the protocol does not have
    (delivery is a one-way write). Options: leave it (proposed); let the delivering
-   side observe `0x0023` on the return path and self-evict (asymmetric, and only
-   works for remote edges); or give SUBSCRIBER a lease/TTL (a much larger change).
+   side observe `not_found` on the return path and self-evict; or give SUBSCRIBER a
+   lease/TTL (a much larger change). **The self-evict option got worse under §C**
+   and this discussion point should be re-read in that light: it was already
+   asymmetric and remote-only, but with the §C.4 collapse a `not_found` on the
+   return path no longer means "the target was retired" — it also means "the target
+   exists and has never been written." Self-evicting on it would tear down live
+   edges to not-yet-published targets. **Leave it** now looks less like the lazy
+   option and more like the only correct one short of a lease.
 3. **Unbounded growth under retire/create churn** (§B). Accepted for v1; a device
    that churns addresses will grow. Is that acceptable for the MCU class, or does
    retirement need reclamation *before* it is useful there?
