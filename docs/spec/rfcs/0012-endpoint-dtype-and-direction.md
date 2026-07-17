@@ -213,14 +213,32 @@ Clarifications, normative:
 #### A.4 No write surface
 
 `dtype` and `dir` have **no write surface**. A field write naming
-`settings.dtype` or `settings.dir` — per-field or inside an atomic
-multi-field `SETTINGS` write — MUST be rejected with
+`settings.dtype` or `settings.dir` MUST be rejected with
 `ERROR{tr::schema::not_found}` (`SCHEMA_NOT_FOUND`), **regardless of caller**:
 the same caller-independent "no surface exists" identity RFC-0010 §A.3 uses
-for `ro` app fields, and the behavior the §`0x0B` validation rule (unknown
-core-namespace NAMEs reject) already produces on today's implementations —
-old and new peers answer these writes identically. The owner changes the
-advertisement only through the local declaration API (§B).
+for `ro` app fields, and exactly what the §`0x0B` validation rule (unknown
+core-namespace NAMEs reject) produces — this RFC mints no rule of its own, it
+inherits one. The owner changes the advertisement only through the local
+declaration API (§B).
+
+**This clause is code-pinned, and pinning it changed the code.** The
+reference implementation gated the flat-knob write branch on the `:acl`
+`WRITE` right *before* resolving the NAME, so a caller lacking `WRITE`
+received `PERMISSION_DENIED` — not `SCHEMA_NOT_FOUND` — for a knob that does
+not exist. "Regardless of caller" was therefore **false** for precisely the
+callers it was written about. [#430](https://github.com/avatarsd-llc/libtracer/pull/430)
+hoists the NAME lookup above the gate, which makes this clause true with no
+`dtype`-specific code: `dtype` is simply a name the knob table does not carry.
+The pin is `test_flat_knob_name_before_acl` in `core/tests/acl_test.cpp`.
+
+**Interop note.** Implementations at **v0.4.0 and earlier** answer a
+`settings.dtype` write from a caller *without* the `WRITE` right with
+`PERMISSION_DENIED`; the `SCHEMA_NOT_FOUND` this clause requires arrives with
+#430. A caller *holding* `WRITE` — and any caller on an ACL-open vertex — has
+always received `SCHEMA_NOT_FOUND`, so the divergence is confined to the
+denied-caller case, and in both cases the write is refused and no
+advertisement changes. Nothing readable differs; only the refusal's identity
+does.
 
 ### B. Declaration: owner-initiated, local, SHOULD-level
 
@@ -284,8 +302,11 @@ The load-bearing rule, stated once, normatively:
 
 - `docs/reference/05-protocol-tlvs.md` — §`0x0B` SETTINGS: `dtype` and `dir`
   added to the payload layout as protocol-reserved **read-only advertisement
-  members** (their own table beside the five QoS knobs; validation rule: any
-  write naming them rejects `tr::schema::not_found`); §`0x07` POINT: the
+  members** (their own table beside the QoS knobs — whose own table is stale
+  and understates the implemented set at five;
+  [#431](https://github.com/avatarsd-llc/libtracer/issues/431) repairs it
+  independently of this RFC; validation rule: any write naming them rejects
+  `tr::schema::not_found`); §`0x07` POINT: the
   `:schema` read shape gains the two members in the synthesized protocol part
   (§A.1 layout).
 - `docs/reference/02-graph-model.md` — §Schema and field discipline: two new
@@ -317,10 +338,12 @@ New vectors under `tests/conformance/vectors/v1/` (additive):
    `read :settings` are byte-for-byte today's shapes — no members, no
    defaults; a vertex declaring only `dir` serves only `dir`.
 3. **`schema-dtype-dir-no-write-surface`** — a per-field write to
-   `:settings.dtype`, a per-field write to `:settings.dir`, and an atomic
-   `SETTINGS` write containing either NAME all return
-   `ERROR{tr::schema::not_found}` — local-wire and remote (`FWD{WRITE}`),
-   caller rights irrelevant; a subsequent read serves the declared tokens
+   `:settings.dtype` and a per-field write to `:settings.dir` both return
+   `ERROR{tr::schema::not_found}` — local-wire and remote (`FWD{WRITE}`), and
+   **from a caller the `:acl` denies as well as one it grants** (the
+   caller-rights-irrelevant half of §A.4 is the half that was not true before
+   [#430](https://github.com/avatarsd-llc/libtracer/pull/430), so it is the
+   half worth pinning); a subsequent read serves the declared tokens
    unchanged.
 4. **`value-opacity-under-dtype`** — vertex declared `dtype = "bool"`,
    `dir = "consume"`: a data write whose `VALUE` payload is 8 arbitrary bytes
@@ -341,7 +364,12 @@ New vectors under `tests/conformance/vectors/v1/` (additive):
   §A.1: apps mint only below `settings.app.`). Writes naming the new members
   were `tr::schema::not_found` on old implementations (unknown core NAME) and
   remain `tr::schema::not_found` on new ones (no write surface) — old and new
-  peers are indistinguishable on this path.
+  peers are indistinguishable on this path, **with one bounded exception**: a
+  caller the `:acl` denies received `PERMISSION_DENIED` from v0.4.0 and
+  earlier, because the flat-knob branch gated before it resolved the NAME
+  ([#430](https://github.com/avatarsd-llc/libtracer/pull/430) — §A.4). The
+  write is refused either way and no advertisement changes; only the
+  refusal's identity differs, and only for a caller that was denied anyway.
 - **New vectors:** the four listed above.
 - **Migration:** none required — deployed devices that declare nothing are
   conformant unchanged. The driving consumer (strawberry-fw) maps its
