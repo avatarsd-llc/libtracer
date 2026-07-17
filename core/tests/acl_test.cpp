@@ -18,6 +18,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -69,6 +70,13 @@ tr::view::view_t make_value(std::span<const std::byte> bytes) {
 std::vector<std::byte> as_bytes(std::string_view s) {
     std::vector<std::byte> out(s.size());
     std::memcpy(out.data(), s.data(), s.size());
+    return out;
+}
+
+/** @brief A VALUE TLV carrying @p payload verbatim. */
+std::vector<std::byte> value_tlv(std::span<const std::byte> payload) {
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, payload);
     return out;
 }
 
@@ -193,6 +201,13 @@ bool denied(const tr::graph::result_t<void>& r) {
 template <class T>
 bool denied(const tr::graph::result_t<T>& r) {
     return !r.has_value() && r.error() == status_t::PERMISSION_DENIED;
+}
+
+/** @brief True iff @p r failed with exactly @p s — the discriminating form: a gate-order
+ *         assertion must distinguish SCHEMA_NOT_FOUND from PERMISSION_DENIED, which a bare
+ *         "it failed" check cannot. */
+bool fails_with(const tr::graph::result_t<void>& r, status_t s) {
+    return !r.has_value() && r.error() == s;
 }
 
 // ---------------------------------------------------------------------------
@@ -428,6 +443,71 @@ void test_gated_ops() {
     }
 }
 
+/**
+ * @brief Gate order on the flat protocol-knob write surface: the NAME resolves BEFORE the
+ *        ACL right, so an unknown knob is SCHEMA_NOT_FOUND regardless of caller.
+ *
+ * The normative rule is the docs/reference/05 §`0x0B` validation clause — "unknown NAMEs
+ * MUST be ... rejected with `ERROR{tr::schema::not_found}` if in the core namespace" —
+ * which carries no caller qualifier, so a denied caller may not convert it into
+ * PERMISSION_DENIED. The `settings.app.` branch already resolves the name first (its own
+ * gate-1 test asserts the ENOTTY of an undeclared name), and the terminal branch has no
+ * gate at all; this pins the flat branch to the same order, which is what makes the rule
+ * hold uniformly across all three.
+ *
+ * The discriminating case is a caller the ACL DENIES writing a name that does not exist:
+ * only a name-first gate can answer SCHEMA_NOT_FOUND there. The converse — a known knob,
+ * denied caller — must still be PERMISSION_DENIED, or the hoist would have leaked the
+ * write itself.
+ */
+void test_flat_knob_name_before_acl() {
+    std::printf("flat protocol knobs: the NAME resolves before the ACL right:\n");
+    graph_t g;
+    g.set_subject_resolver(caller_is_subject);
+    vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
+    // peer-a holds WRITE; peer-none holds nothing. Installed by the trusted local caller.
+    check(g.write(path_t("/x:acl"),
+                  make_value(make_acl({{.subject = "peer-a", .mask = bit(acl_right_t::WRITE)}})))
+              .has_value(),
+          "trusted local caller installs the :acl");
+
+    const std::array<std::byte, 8> le{std::byte{0x88}, std::byte{0x13}};  // 5000 LE
+    const auto knob = path_t::parse("/x:settings.deadline_ns");
+    const auto unknown = path_t::parse("/x:settings.bogus");
+
+    // The property under test: an unknown NAME is caller-independent.
+    check(fails_with(g.write(v, unknown->field(), make_value(value_tlv(le)), "peer-none"),
+                     status_t::SCHEMA_NOT_FOUND),
+          "unknown knob + denied caller: SCHEMA_NOT_FOUND (the name gates first)");
+    check(fails_with(g.write(v, unknown->field(), make_value(value_tlv(le)), "peer-a"),
+                     status_t::SCHEMA_NOT_FOUND),
+          "unknown knob + granted caller: SCHEMA_NOT_FOUND");
+    check(fails_with(g.write(v, unknown->field(), make_value(value_tlv(le)), {}),
+                     status_t::SCHEMA_NOT_FOUND),
+          "unknown knob + trusted local caller: SCHEMA_NOT_FOUND (all three agree)");
+
+    // The ACL still gates every knob that DOES exist — the hoist reorders, it never opens.
+    check(denied(g.write(v, knob->field(), make_value(value_tlv(le)), "peer-none")),
+          "known knob + denied caller: PERMISSION_DENIED (the write stays gated)");
+    check(g.write(v, knob->field(), make_value(value_tlv(le)), "peer-a").has_value(),
+          "known knob + granted caller: the write lands");
+    check(g.settings(v).deadline_ns == 5000, "... and it actually took effect");
+
+    // A knob NAME is exactly two plain steps. `settings.reliability.bogus` and
+    // `settings.reliability[2]` name NO knob — the read surface already rejects both
+    // (it checks `plain_step` on every step), and before the name-first hoist the write
+    // surface silently ACCEPTED them as writes to `reliability`, ignoring the tail.
+    check(fails_with(g.write(v, path_t::parse("/x:settings.reliability.bogus")->field(),
+                             make_value(value_tlv(le)), "peer-a"),
+                     status_t::SCHEMA_NOT_FOUND),
+          "a trailing step names no knob: SCHEMA_NOT_FOUND (the tail is not ignored)");
+    check(fails_with(g.write(v, path_t::parse("/x:settings.reliability[2]")->field(),
+                             make_value(value_tlv(le)), "peer-a"),
+                     status_t::SCHEMA_NOT_FOUND),
+          "a selector step names no knob: SCHEMA_NOT_FOUND (no knob has an indexed surface)");
+    check(g.settings(v).reliability == 0, "... and neither malformed write reached `reliability`");
+}
+
 void test_expiry() {
     std::printf("ACE expiry (expires_ns, absolute ns since epoch):\n");
     graph_t g;
@@ -621,6 +701,7 @@ int main() {
     test_subset_rejections();
     test_open_by_default();
     test_gated_ops();
+    test_flat_knob_name_before_acl();
     test_expiry();
     test_inheritance();
     test_two_acl_fan_in();

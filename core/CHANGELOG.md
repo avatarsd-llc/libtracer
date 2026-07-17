@@ -80,6 +80,25 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **A `write <vertex>:settings.<knob>` now resolves the knob NAME *before* the `:acl`
+  WRITE right, and rejects a knob path that is not exactly two plain steps (#373
+  follow-up; `docs/reference/05` §`0x0B` validation).** The §`0x0B` rule — "unknown
+  NAMEs MUST be ... rejected with `ERROR{tr::schema::not_found}` if in the core
+  namespace" — carries **no caller qualifier**, but the flat-knob branch gated on the
+  ACL first, so a caller lacking `WRITE` received `PERMISSION_DENIED` for a knob that
+  does not exist. The `settings.app.` branch already resolved names first (an
+  undeclared field is ENOTTY before the ACL right) and the terminal branch has no gate
+  at all; all three now agree.
+  **Two interop-visible behavior changes**, both narrowing what is accepted:
+  1. `write :settings.<unknown>` is now `SCHEMA_NOT_FOUND` for **every** caller
+     (was `PERMISSION_DENIED` for a caller without the `WRITE` right).
+  2. `write :settings.<knob>.<tail>` and `write :settings.<knob>[N]` are now
+     `SCHEMA_NOT_FOUND`. **They previously succeeded**, silently ignoring the tail or
+     selector and writing `<knob>` — accepting a shape the read surface has always
+     rejected. No knob has a nested or indexed surface.
+  **Accepted cost:** a caller without the `WRITE` right can enumerate flat knob NAMES
+  by probing. Knob names are a fixed, published constant of the protocol, not a
+  per-node secret, and app fields already leak their names the same way.
 - **In-process SUBSCRIBER delivery now terminates at its target (ADR-0051 /
   RFC-0007); the dispatch-depth cap `kMaxDispatchDepth` is deleted with no
   replacement.** A delivery into a target vertex applies exactly the target-local

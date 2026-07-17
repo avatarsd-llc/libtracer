@@ -68,6 +68,41 @@ void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
     return !s.indexed && !s.append && !s.wildcard;
 }
 
+/** @brief The implemented flat protocol QoS knobs — the writable core-namespace names of the
+ *         vertex SETTINGS container (docs/reference/05 §`0x0B`). */
+enum class qos_knob_t : std::uint8_t {
+    RELIABILITY,
+    DURABILITY,
+    PRIORITY,
+    HISTORY_KEEP_LAST,
+    QUEUE_MAX_BYTES,
+    DEADLINE_NS,
+    STORE_REF_MIN_BYTES,
+};
+
+/**
+ * @brief Resolve a `settings.<knob>` field path to its knob, or nullopt when it names none.
+ *
+ * The core-namespace name lookup of the §`0x0B` validation rule, factored out so it can run
+ * BEFORE the ACL gate (an unknown name is caller-independent). A knob is addressed by exactly
+ * two plain steps: `settings` then the name. A trailing step (`settings.reliability.bogus`) or
+ * any `[...]` selector names no knob — no knob has a nested or indexed surface — which is the
+ * shape the read surface already requires.
+ */
+[[nodiscard]] std::optional<qos_knob_t> qos_knob(const field_path_t& field) noexcept {
+    if (field.steps.size() != 2 || !plain_step(field.steps[0]) || !plain_step(field.steps[1]))
+        return std::nullopt;
+    const std::string& f = field.steps[1].name;
+    if (f == "reliability") return qos_knob_t::RELIABILITY;
+    if (f == "durability") return qos_knob_t::DURABILITY;
+    if (f == "priority") return qos_knob_t::PRIORITY;
+    if (f == "history_keep_last") return qos_knob_t::HISTORY_KEEP_LAST;
+    if (f == "queue_max_bytes") return qos_knob_t::QUEUE_MAX_BYTES;
+    if (f == "deadline_ns") return qos_knob_t::DEADLINE_NS;
+    if (f == "store_ref_min_bytes") return qos_knob_t::STORE_REF_MIN_BYTES;
+    return std::nullopt;
+}
+
 /** @brief Emit the RFC-0010 §A.4 app-container members into @p out: each declared,
  *         non-`wo` field HOLDING a value, in table order — `NAME <name>` then the stored
  *         TLV bytes verbatim (`wo` has no read surface; unset fields are omitted). */
@@ -1134,29 +1169,45 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
     }
 
     if (step0.name == "settings" && field.steps.size() >= 2) {
+        // The flat protocol-knob surface. The NAME resolves FIRST: an unknown core-namespace
+        // name is `tr::schema::not_found` (docs/reference/05 §`0x0B` validation) — a rule
+        // stated with no caller qualifier, so a denied caller may not convert it into
+        // PERMISSION_DENIED. That order is what the `settings.app.` branch above already
+        // does (undeclared is ENOTTY before the ACL right) and what the terminal branch
+        // below does by having no gate at all; the three now agree. The accepted cost is
+        // narrow and deliberate: an unauthorized caller can enumerate flat knob NAMES by
+        // probing, exactly as it already can for app fields — knob names are a fixed,
+        // published constant of the protocol, not a per-node secret.
+        const std::optional<qos_knob_t> knob = qos_knob(field);
+        if (!knob) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         if (!acl_allows(v, caller, acl_right_t::WRITE))  // QoS knobs are control writes
             return std::unexpected(status_t::PERMISSION_DENIED);
         const auto tlv = wire::decode(value);
         if (!tlv || tlv->type != type_t::VALUE) return std::unexpected(status_t::TYPE_MISMATCH);
         const std::uint64_t n = detail::load_le(tlv->payload);
-        const std::string& f = field.steps[1].name;
         return v->update_settings([&](settings_t& st) -> result_t<void> {
-            if (f == "reliability") {
-                st.reliability = static_cast<std::uint8_t>(n);
-            } else if (f == "durability") {
-                st.durability = static_cast<std::uint8_t>(n);
-            } else if (f == "priority") {
-                st.priority = static_cast<std::uint8_t>(n);
-            } else if (f == "history_keep_last") {
-                st.history_keep_last = static_cast<std::uint32_t>(n);
-            } else if (f == "queue_max_bytes") {
-                st.queue_max_bytes = static_cast<std::uint32_t>(n);
-            } else if (f == "deadline_ns") {
-                st.deadline_ns = n;
-            } else if (f == "store_ref_min_bytes") {
-                st.store_ref_min_bytes = static_cast<std::uint32_t>(n);
-            } else {
-                return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+            switch (*knob) {
+                case qos_knob_t::RELIABILITY:
+                    st.reliability = static_cast<std::uint8_t>(n);
+                    break;
+                case qos_knob_t::DURABILITY:
+                    st.durability = static_cast<std::uint8_t>(n);
+                    break;
+                case qos_knob_t::PRIORITY:
+                    st.priority = static_cast<std::uint8_t>(n);
+                    break;
+                case qos_knob_t::HISTORY_KEEP_LAST:
+                    st.history_keep_last = static_cast<std::uint32_t>(n);
+                    break;
+                case qos_knob_t::QUEUE_MAX_BYTES:
+                    st.queue_max_bytes = static_cast<std::uint32_t>(n);
+                    break;
+                case qos_knob_t::DEADLINE_NS:
+                    st.deadline_ns = n;
+                    break;
+                case qos_knob_t::STORE_REF_MIN_BYTES:
+                    st.store_ref_min_bytes = static_cast<std::uint32_t>(n);
+                    break;
             }
             return {};
         });
