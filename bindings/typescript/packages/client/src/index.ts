@@ -27,8 +27,8 @@ export type {
   ClientOptions,
 } from './client.js';
 
-export { encodeValue, encodePath, encodeSubscriber } from './tlv.js';
-export type { ValueOptions, SubscriberOptions } from './tlv.js';
+export { encodeValue, encodePath, encodeSubscriber, encodeConnSpec } from './tlv.js';
+export type { ValueOptions, SubscriberOptions, ConnSpecOptions, ConnRole } from './tlv.js';
 
 export {
   FWD_OP,

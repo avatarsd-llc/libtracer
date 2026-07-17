@@ -132,6 +132,134 @@ export function pathTlv(segments: string[]): Tlv {
   };
 }
 
+/**
+ * @brief Build a NAME TLV (`type=0x02`) for FREE TEXT — a SETTINGS key or a string
+ * config value — WITHOUT the path-segment validation {@link nameTlv} applies.
+ *
+ * A NAME TLV is the wire's string carrier in two unrelated roles: a PATH's
+ * addressing segment, and a SETTINGS record's key / string value. Only the first is
+ * bound by the reference/03 segment rules — a config value legitimately holds the
+ * reserved characters an address may not, most obviously an `addr` dotted-quad
+ * (`"127.0.0.1"`), which {@link nameTlv} would reject outright. The C++ emitter draws
+ * the same line: `emit_name` writes the bytes and validates nothing.
+ *
+ * Still bounded by the 64-byte NAME budget the addressing rules set.
+ *
+ * @param text the key or value text
+ * @returns a NAME TLV node (no trailer)
+ * @throws {RangeError} if the text is empty or over 64 UTF-8 bytes
+ */
+function textTlv(text: string): Tlv {
+  const bytes = utf8.encode(text);
+  if (bytes.length < 1 || bytes.length > MAX_SEGMENT_BYTES) {
+    throw new RangeError(`NAME text ${JSON.stringify(text)} must be 1..${MAX_SEGMENT_BYTES} UTF-8 bytes (got ${bytes.length})`);
+  }
+  return { type: TYPE.NAME, opt: opt(), payload: bytes, children: [], trailer: null };
+}
+
+/** @brief A little-endian VALUE TLV (`type=0x01`) of `width` bytes — a SETTINGS integer value. */
+function valueLe(v: number, width: number): Tlv {
+  const bytes = new Uint8Array(width);
+  let rest = v;
+  for (let i = 0; i < width; i++) {
+    bytes[i] = rest & 0xff;
+    rest = Math.floor(rest / 256);
+  }
+  return { type: TYPE.VALUE, opt: opt(), payload: bytes, children: [], trailer: null };
+}
+
+/** @brief The link direction of a connection (`role`), per ADR-0027 / `conn_role_t`. */
+export type ConnRole = 'dial' | 'listen';
+
+/** @brief The connection SPEC a {@link encodeConnSpec} call describes (ADR-0027 / reference/13). */
+export interface ConnSpecOptions {
+  /** @brief The device-catalog child type: `client` (DIAL default) or `listener` (LISTEN default). */
+  readonly type: 'client' | 'listener';
+  /** @brief The connection NAME — the `/net/<name>` segment AND the routing key a `dst` hops through. */
+  readonly name: string;
+  /** @brief The link direction; overrides the type's default. */
+  readonly role: ConnRole;
+  /** @brief Peer port (DIAL) / bind port (LISTEN). Required — 0 is rejected by every built-in factory. */
+  readonly port: number;
+  /** @brief The transport-factory selector (`ws`, `tcp`, `udp`, …). Omit only for a pre-staged link. */
+  readonly kind?: string;
+  /** @brief Peer IPv4 dotted-quad. Required for DIAL; the built-ins are `inet_pton`-only (no DNS). */
+  readonly addr?: string;
+  /** @brief ws-private (LISTEN): expose the ADR-0044 bus facet, so `:children[]` lists live peers. */
+  readonly peerNamed?: boolean;
+  /** @brief ws-private (LISTEN): concurrent-peer admission cap (0/omitted = unbounded). */
+  readonly maxPeers?: number;
+}
+
+/**
+ * @brief Build a connection-creation SPEC TLV (`type=0x0e`, PL=1) — the payload of the
+ * in-band `write /net:children[] += SPEC{…}` that brings a transport link up (ADR-0027,
+ * reference/13 §2).
+ *
+ * This is the wire form of the formation write a third party (typically a web UI holding
+ * delegated admin) issues on a device to create a link — the mechanism that makes a
+ * device-to-device connection with no third party in the data path.
+ *
+ * ```
+ * SPEC{ NAME "type" NAME <type>, NAME "name" NAME <name>,
+ *       NAME "config" SETTINGS{ NAME "role"       VALUE u8   (0=DIAL, 1=LISTEN),
+ *                               NAME "port"       VALUE u16  (LE),
+ *                             [ NAME "kind"       NAME  <kind> ],
+ *                             [ NAME "addr"       NAME  <addr> ],
+ *                             [ NAME "peer_named" VALUE u8   ],
+ *                             [ NAME "max_peers"  VALUE u32  (LE) ] } }
+ * ```
+ *
+ * Key order matters only for readability — the C++ `config_reader_t` walk is
+ * order-insensitive and ignores unknown keys (forward-compat). `peer_named` / `max_peers`
+ * are **ws-private** keys parsed by the ws factory itself (ADR-0043 §5); they are ignored
+ * by other kinds and on a DIAL.
+ *
+ * Byte-pinned against the C++ emitter in `test/conn-spec.test.mjs`.
+ *
+ * @param o the connection to describe
+ * @returns the encoded SPEC TLV bytes — the payload of a `:children[]` field-write
+ * @throws {RangeError} on a DIAL with no `addr`, or a text field over 64 UTF-8 bytes
+ */
+export function encodeConnSpec(o: ConnSpecOptions): Uint8Array {
+  if (o.role === 'dial' && !o.addr) {
+    throw new RangeError('a DIAL connection requires an addr (the built-in factories reject it as TYPE_MISMATCH)');
+  }
+  const cfg: Tlv[] = [
+    textTlv('role'),
+    valueLe(o.role === 'listen' ? 1 : 0, 1),
+    textTlv('port'),
+    valueLe(o.port, 2),
+  ];
+  if (o.kind !== undefined) cfg.push(textTlv('kind'), textTlv(o.kind));
+  if (o.addr !== undefined) cfg.push(textTlv('addr'), textTlv(o.addr));
+  if (o.peerNamed !== undefined) cfg.push(textTlv('peer_named'), valueLe(o.peerNamed ? 1 : 0, 1));
+  if (o.maxPeers !== undefined) cfg.push(textTlv('max_peers'), valueLe(o.maxPeers, 4));
+
+  const settings: Tlv = {
+    type: TYPE.SETTINGS,
+    opt: opt({ pl: true }),
+    payload: new Uint8Array(0),
+    children: cfg,
+    trailer: null,
+  };
+  const spec: Tlv = {
+    type: TYPE.SPEC,
+    opt: opt({ pl: true }),
+    payload: new Uint8Array(0),
+    children: [
+      textTlv('type'),
+      textTlv(o.type),
+      textTlv('name'),
+      textTlv(o.name),
+      textTlv('config'),
+      settings,
+    ],
+    trailer: null,
+  };
+  return encode(spec);
+}
+
 /** @brief Options for {@link encodeSubscriber}. Optional QoS/ACL/id children are deferred (ADR-0034). */
 export interface SubscriberOptions {
   // Intentionally empty for the conservative slice. The optional SUBSCRIBER
