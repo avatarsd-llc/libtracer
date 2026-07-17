@@ -38,6 +38,35 @@ namespace tr::net {
 class fwd_router_t;
 
 /**
+ * @brief Tag selecting the SLIM @ref transport_vertex_t ctor — the one that does
+ *        NOT auto-register the built-in udp/tcp/ws transport factories.
+ *
+ * The default ctor is batteries-included: it registers the built-in socket
+ * factories so a full node can create udp/tcp/ws connections from a SPEC `kind`.
+ * A slim node binds its links DIRECTLY instead — @ref transport_vertex_t::provide_link stages a
+ * hand-constructed transport and a `:children[]` SPEC wires it in (the way the
+ * device/VB nodes stage their ws and CAN links) — so it never routes creation
+ * through the built-in factories. Yet while the ctor hard-references
+ * `register_builtin_transports`, the linker must keep udp+tcp+ws (and their
+ * factory glue) even on a node that binds none of them: constructing the `/net`
+ * vertex pulls all three in. Passing @ref slim_net_t selects a ctor whose
+ * translation-unit graph never names `register_builtin_transports`, so on a
+ * `--gc-sections` target the unbound factories — and the transport TUs nothing
+ * else references — garbage-collect. A slim node re-adds exactly the factories it
+ * wants via @ref transport_vertex_t::register_transport_type (or a hand-picked
+ * register_*_transport).
+ *
+ * NON-BREAKING: the default (full-node) ctor is unchanged, so existing consumers
+ * keep the auto-registered builtins; only a node that opts in with this tag sheds
+ * them. Compile-time (not a runtime flag) precisely so the reference is absent
+ * from the slim TU and the GC can fire.
+ */
+struct slim_net_t {
+    explicit slim_net_t() = default;
+};
+inline constexpr slim_net_t slim_net{};
+
+/**
  * @brief The connection's transport-private role (ADR-0027 §default link direction).
  *
  * `DIAL` = this node opens the link (the consumer-dials default); `LISTEN` = this node
@@ -138,6 +167,21 @@ class transport_vertex_t {
      */
     transport_vertex_t(graph::graph_t& graph, fwd_router_t& router, std::string net_root = "/net",
                        mem::mem_backend_t* rx_backend = &mem::heap_backend());
+
+    /**
+     * @brief SLIM ctor (@ref slim_net_t): bind to @p graph / @p router and register
+     *        the `client`/`listener` catalog types under `/net`, but DO NOT
+     *        auto-register the built-in udp/tcp/ws factories.
+     *
+     * Identical to the default ctor except it omits the `register_builtin_transports`
+     * call, so a node that binds its links directly (@ref provide_link) sheds the
+     * unused socket transports on a `--gc-sections` target (see @ref slim_net_t). The
+     * composition root registers whatever factories it does want afterward via
+     * @ref register_transport_type. All arguments are required (the tag is last, so
+     * there is nothing to default against).
+     */
+    transport_vertex_t(graph::graph_t& graph, fwd_router_t& router, std::string net_root,
+                       mem::mem_backend_t* rx_backend, slim_net_t);
 
     transport_vertex_t(const transport_vertex_t&) = delete;
     transport_vertex_t& operator=(const transport_vertex_t&) = delete;

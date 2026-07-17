@@ -84,13 +84,40 @@ if(IDF_TARGET STREQUAL "linux")
     # POSIX host: the real SocketCAN link (glibc ships <linux/can.h>).
     list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/socketcan_link.cpp")
 else()
-    # Chip targets: SocketCAN stub + the TWAI-backed can_link_t.
+    # Chip targets: SocketCAN stub + the TWAI-backed can_link_t, plus the
+    # esp_http_server-backed WS transport link (httpd_ws_link_t) — the embedded-native
+    # replacement for core's raw-socket transport_ws_server. Both are platform links,
+    # picked by which TU compiles (never an in-source #ifdef). transport_ws.cpp stays
+    # in LIBTRACER_SRCS above: it compiles but a node that binds this httpd link instead
+    # references it nowhere, so --gc-sections drops it from the image (the linux VB,
+    # which HAS no esp_http_server, keeps it).
     list(APPEND LIBTRACER_SRCS
         "${LIBTRACER_ROOT}/core/src/socketcan_link_stub.cpp"
         "twai_link.cpp"
     )
+    # httpd_ws_link.cpp is built on esp_http_server's native WebSocket API
+    # (httpd_ws_frame_t, HTTPD_WS_TYPE_*, httpd_uri_t::is_websocket, ...), which the
+    # component ships ONLY when CONFIG_HTTPD_WS_SUPPORT is enabled. Select the TU in
+    # CMake on that config (never an in-source #ifdef, per the platform-link rule
+    # above): a node that binds this link enables WS support; an example that does
+    # not use the WS link builds without it (transport_ws.cpp still --gc-sections out).
+    if(CONFIG_HTTPD_WS_SUPPORT)
+        list(APPEND LIBTRACER_SRCS "httpd_ws_link.cpp")
+    endif()
     # esp_driver_gpio: twai_link.cpp names its pins via <driver/gpio.h> types.
-    list(APPEND LIBTRACER_PRIV_REQUIRES lwip esp_driver_twai esp_driver_gpio)
+    # esp_http_server: httpd_ws_link.cpp rides its native WS API. It MUST be an
+    # UNCONDITIONAL requirement — NOT gated on CONFIG_HTTPD_WS_SUPPORT like the TU
+    # above. IDF resolves component requirements in an early-expansion pass where
+    # CONFIG_* symbols are not yet defined, so a Kconfig-gated REQUIRES silently
+    # evaluates false there and never propagates the component's include dir; the
+    # TU (correctly gated on the same config in the second pass) then compiles
+    # WITHOUT <esp_http_server.h> and dies with "No such file" on any node that
+    # enables WS support (the strawberry-fw prod build hit exactly this). The header
+    # is a base IDF component present on every chip target, so requiring it always is
+    # safe and free when the TU is absent — nothing references its symbols, so
+    # --gc-sections drops the link dep and libtracer.a is byte-identical (no footprint
+    # change to the WS-off examples the sentinel measures).
+    list(APPEND LIBTRACER_PRIV_REQUIRES lwip esp_driver_twai esp_driver_gpio esp_http_server)
     # compat/include: POSIX headers IDF's libc spells differently (<poll.h> ->
     # <sys/poll.h>) — private, so core sources stay pure POSIX and dependents
     # never see the shim.

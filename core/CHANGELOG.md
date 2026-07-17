@@ -33,6 +33,16 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   stores views, never a heap copy of `.rodata`. The owning overload stays the safe
   default for runtime-formed tables. Wire-invariant (`:schema` serves the same
   verbatim bytes either way), so no RFC.
+- **Slim `transport_vertex_t` ctor: the `slim_net` tag overload** — a fifth
+  constructor parameter (`slim_net_t`, via the `slim_net` inline tag) selects a
+  `transport_vertex_t` that registers the `client`/`listener` catalog types under
+  `/net` but omits the built-in udp/tcp/ws factory auto-registration. Because the
+  slim ctor's translation unit never names `register_builtin_transports`, a node
+  that binds its links directly (`provide_link`) sheds the unbound socket
+  transports under `--gc-sections` — a flash trim for slim device/VB nodes — and
+  re-adds exactly the factories it wants via `register_transport_type`.
+  Non-breaking: the default full-node ctor is unchanged; only a node opting in
+  with the tag sheds the builtins. Non-wire, no RFC.
 
 ### Changed
 
