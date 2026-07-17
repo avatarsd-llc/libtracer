@@ -1,6 +1,6 @@
 # A transport — and each connection within it — is a first-class `/` vertex, created and configured through the same in-band API as any other vertex
 
-Status: accepted
+Status: accepted. **Refined by [ADR-0059](0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md)** on one narrow point: the **`:children[]` spelling** of the §Decision worked example (`write /B/net/quic:children[] += SPEC{type=client, …}`, and "*its catalog is `{client, listener}`*") is superseded — creation is a write to a **creator endpoint vertex** (`write /net/export SPEC{type,name,config}`), and the catalog is that endpoint's own `:schema`. **This ADR's substance is untouched and is what ADR-0059 leans on**: transports and connections are `/` vertices, and distinct identity ⇒ `/`. Only the *spelling* of the creation write changes; what gets created, and that it is a vertex, does not.
 
 [ADR-0021](0021-colon-field-plane-is-the-vertex-ioctl.md) established the `:` field plane as a vertex's `ioctl` and **rejected** turning a vertex's *control facets* (`/v/acl`, `/v/subscribers`) into `/` sub-vertices, because that dissolves one-identity atomicity. [ADR-0017](0017-in-band-vertex-creation-controller-orchestration.md) made vertex creation an in-band, ACL-gated `:children[]` write. The open question for third-party network formation: **how does an orchestrator (typically a web UI) bring up a transport link — e.g. a QUIC connection from B to A?** A first sketch squeezed it into a `transport_quic:peers[]` field. This ADR rejects that and places the transport in the path tree.
 
