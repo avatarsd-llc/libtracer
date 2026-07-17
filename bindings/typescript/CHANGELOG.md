@@ -7,6 +7,27 @@ versioning/publish strategy.
 
 ## Unreleased
 
+### Added
+
+- **`LibtracerClient.writeField(path, selector, valueTLV)` in
+  `@avatarsd-llc/libtracer-client` (#408)** — the write counterpart of
+  `readField`, emitting `FWD{op=WRITE, dst, field, src, payload}`
+  (vector-pinned by `fwd-write-subscriber-field`). `write()` takes no
+  selector, so **every field-addressed write — the whole in-band formation
+  plane — was previously out of reach from this client**: neither
+  `:children[]` vertex creation (ADR-0017 / ADR-0027) nor a
+  `:subscribers[]` subscribe-write (ADR-0026) could be expressed at all.
+- **`encodeConnSpec(options)` in `@avatarsd-llc/libtracer-client` (#408,
+  ADR-0027)** — builds the connection-creation `SPEC` TLV that the in-band
+  `write /net:children[] += SPEC{…}` carries: the formation write a third
+  party (typically a web UI holding delegated admin) issues on a device to
+  bring a transport link up, leaving two devices talking with nothing in the
+  data path (reference/13 §2). Covers `type`/`name`/`role`/`port`/`kind`/`addr`
+  plus the ws-private `peerNamed`/`maxPeers` keys (ADR-0043 §5, ADR-0044).
+  **Byte-pinned against the C++ emitter** in `test/conn-spec.test.mjs` — the
+  SPEC is now built independently by two encoders and a device only forms the
+  link if they agree exactly, so the vectors are the real C++ output.
+
 ## [0.4.0] — 2026-07-09
 
 ### Removed

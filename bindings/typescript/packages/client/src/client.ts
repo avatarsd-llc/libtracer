@@ -391,6 +391,43 @@ export class LibtracerClient {
   }
 
   /**
+   * @brief Write into a remote vertex's FIELD: `FWD{ op=WRITE, dst=path, field=selector,
+   * src=…, payload }` — the write counterpart of {@link readField}.
+   *
+   * The append form (`":children[]"` — a whole-array ELEMENT selector with no index) is
+   * how a vertex is CREATED in band: `writeField('/net', ':children[]', encodeConnSpec(…))`
+   * brings a transport link up on a remote device (ADR-0017 / ADR-0027, reference/13 §2),
+   * and `writeField('/sensor/temp', ':subscribers[]', encodeSubscriber(…))` binds a
+   * consumer-initiated subscription (ADR-0026). Neither was expressible from this client
+   * before: {@link write} takes no selector, so every field-addressed write — the entire
+   * in-band formation plane — was out of reach.
+   *
+   * Vector-pinned by `fwd-write-subscriber-field`.
+   *
+   * @param path     the destination path (string or segments)
+   * @param selector the field selector (e.g. `":children[]"`, or parsed {@link FieldLevel}s)
+   * @param valueTLV a complete payload TLV's bytes (e.g. from {@link encodeConnSpec})
+   * @returns once the responder acks `kind=RESULT`
+   * @throws {FwdError} when the responder replies `kind=ERROR`
+   */
+  async writeField(
+    path: string | string[],
+    selector: string | FieldLevel[],
+    valueTLV: Uint8Array,
+  ): Promise<void> {
+    const reply = await this.request(
+      encodeFwd({
+        op: FWD_OP.WRITE,
+        dst: splitPath(path),
+        field: selector,
+        src: this.replyEndpoint,
+        payload: valueTLV,
+      }),
+    );
+    this.result(reply); // throws on ERROR; RESULT carries no payload
+  }
+
+  /**
    * @brief Block for the next write to a remote vertex: `FWD{ op=AWAIT,
    * dst=path, src=…, await_timeout? }`.
    *
