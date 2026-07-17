@@ -14,11 +14,11 @@
  *     `truncated` is true, `authoritative` is false, and node count grows with depth.
  *     That is the executable argument for #406.
  *   - **with identity** — nodes collapse, the cycle closes, and the walk terminates on
- *     its own. #406/RFC-0011's `:identity` facet does not exist yet, so this test
- *     supplies `identify()` from the testbed's seeded `/node/name` to prove the
- *     COLLAPSE MACHINERY works and slots straight in. `/node/name` is an application
- *     value, NOT an identity — a node can claim anything — which is why this stands in
- *     only inside a test whose nodes we ourselves configured.
+ *     its own. `identify()` reads the REAL RFC-0011 `:identity` facet (#406): each node
+ *     is started with a distinct `--identity` key, and the walk dedups on those bytes.
+ *     Note what it does NOT need: credentials. The facet is pre-auth (§C.2), which is
+ *     precisely the position a setup edge is in when it meets a network for the first
+ *     time.
  *
  * GUARDED on LIBTRACER_MESH_CTRL (the same env the mesh-testbed job sets); plain
  * `npm test` without it SKIPS.
@@ -69,22 +69,43 @@ async function connect(name, budgetMs = 60000) {
 }
 
 /**
- * @brief Stand-in identity: the testbed's seeded /node/name.
+ * @brief The REAL identity resolver: read the RFC-0011 `:identity` facet (#406).
  *
- * NOT an identity in any real sense (see the file header) — a stand-in that proves the
- * collapse machinery, pending #406.
+ * `SETTINGS{ NAME "kind" VALUE u8, NAME "key" VALUE <32 bytes> }`. The key bytes are the
+ * cross-path dedup key ADR-0044 pt 3 left to the client — this is the whole point of the
+ * facet. A keyless node returns `SCHEMA_NOT_FOUND`, which surfaces here as `null` and
+ * leaves that node route-distinct and the graph non-authoritative.
+ *
+ * Note it is served PRE-AUTH (RFC-0011 §C.2), so a walker needs no credentials to build
+ * the map — which is exactly what a setup edge meeting a network for the first time has.
  */
-async function identifyBySeededName(client, route) {
+async function identifyByFacet(client, route) {
+  let record;
   try {
-    const tlv = await client.read([...route, 'node', 'name']);
-    return 'seeded:' + utf8.decode(tlv.payload);
+    // ANY registered vertex answers — the record is the NODE's (RFC-0011 §C.1), which is
+    // exactly why a walker that has just crossed a link can identify where it landed
+    // without first discovering the peer's root. /node/name exists on every mesh node.
+    record = await client.readField([...route, 'node', 'name'], ':identity');
   } catch {
-    return null;
+    return null; // keyless node (SCHEMA_NOT_FOUND) or unreachable
   }
+  // Positional members, in the fixed order §B pins: kind/<u8>, key/<bytes>.
+  const kids = record.children ?? [];
+  if (kids.length < 4) return null;
+  const kind = kids[1].payload?.[0];
+  const key = kids[3].payload;
+  if (kind === undefined || !key) return null;
+  return `k${kind}:${Buffer.from(key).toString('hex')}`;
 }
 
 /** @brief The driver's own ctrl link — never walk back out of the node we came in on. */
 const skipCtrl = (name) => name === 'ctrl';
+
+/** @brief The identity each compose/local node is started with — its --identity key. */
+const A = 'k1:' + 'a1'.repeat(32);
+const B = 'k1:' + 'b2'.repeat(32);
+const C = 'k1:' + 'c3'.repeat(32);
+const H = 'k1:' + '40'.repeat(32);
 
 test('topology: WITHOUT identity the cyclic mesh cannot terminate — maxDepth is the only bound', { skip }, async (t) => {
   const { client, transport } = await connect('a');
@@ -128,7 +149,7 @@ test('topology: WITH identity the cycle closes, nodes collapse, and the walk sel
   // maxDepth well past the ring's circumference: a terminating walk stops on its own.
   const g = await walkTopology(client, {
     maxDepth: 12,
-    identify: identifyBySeededName,
+    identify: identifyByFacet,
     skipLink: skipCtrl,
   });
 
@@ -137,13 +158,13 @@ test('topology: WITH identity the cycle closes, nodes collapse, and the walk sel
 
   // Exactly the four devices the compose stack runs — no matter how many routes reach them.
   const ids = g.nodes.map((n) => n.id).sort();
-  assert.deepEqual(ids, ['seeded:a', 'seeded:b', 'seeded:c', 'seeded:hub']);
-  assert.equal(g.root, 'seeded:a', 'the vantage is node a');
+  assert.deepEqual(ids, [A, B, C, H].sort());
+  assert.equal(g.root, A, 'the vantage is node a — identified by its KEY, not a name');
 
   // The collapse itself: the vantage is reached again from BOTH its ring neighbours,
   // and the walk PROVED all three routes are one device. Pre-identity these were three
   // unrelated nodes (see the previous test).
-  const a = g.nodes.find((n) => n.id === 'seeded:a');
+  const a = g.nodes.find((n) => n.id === A);
   assert.deepEqual(a.routes.map(routeKey).sort(), ['/', '/b/a', '/c/a']);
 
   // Every link is seen from BOTH ends, because a link is bidirectional even though the
@@ -153,15 +174,15 @@ test('topology: WITH identity the cycle closes, nodes collapse, and the walk sel
   // peer_named `mesh` bus, which is not descendable (next test).
   const wire = g.edges.map((e) => `${e.from} -${e.name}-> ${e.to}`).sort();
   assert.deepEqual(wire, [
-    'seeded:a -b-> seeded:b',
-    'seeded:a -c-> seeded:c',
-    'seeded:a -hub-> seeded:hub',
-    'seeded:b -a-> seeded:a',
-    'seeded:b -c-> seeded:c',
-    'seeded:b -hub-> seeded:hub',
-    'seeded:c -a-> seeded:a',
-    'seeded:c -b-> seeded:b',
-  ]);
+    `${A} -b-> ${B}`,
+    `${A} -c-> ${C}`,
+    `${A} -hub-> ${H}`,
+    `${B} -a-> ${A}`,
+    `${B} -c-> ${C}`,
+    `${B} -hub-> ${H}`,
+    `${C} -a-> ${A}`,
+    `${C} -b-> ${B}`,
+  ].sort());
   t.diagnostic('with identity: 4 nodes, 8 edges, ring closed, walk self-terminated — the ADR-0044 pt-3 projection');
 });
 
@@ -169,26 +190,26 @@ test('topology: hub is reached by two independent routes and collapses to one no
   const { client, transport } = await connect('a');
   t.after(() => transport.close().catch(() => {}));
 
-  const g = await walkTopology(client, { maxDepth: 12, identify: identifyBySeededName, skipLink: skipCtrl });
-  const hub = g.nodes.find((n) => n.id === 'seeded:hub');
+  const g = await walkTopology(client, { maxDepth: 12, identify: identifyByFacet, skipLink: skipCtrl });
+  const hub = g.nodes.find((n) => n.id === H);
   const routes = hub.routes.map(routeKey).sort();
 
   // a->hub directly, and a->b->hub. Two paths, one device: the dedup ADR-0044 says the
   // core will never do and the client must.
   assert.deepEqual(routes, ['/b/hub', '/hub']);
-  assert.equal(g.edges.filter((e) => e.to === 'seeded:hub').length, 2, 'two distinct edges reach the one hub');
+  assert.equal(g.edges.filter((e) => e.to === H).length, 2, 'two distinct edges reach the one hub');
 });
 
 test('topology: a BUS link is reported with its peers, never descended', { skip }, async (t) => {
   const { client, transport } = await connect('a');
   t.after(() => transport.close().catch(() => {}));
 
-  const g = await walkTopology(client, { maxDepth: 12, identify: identifyBySeededName, skipLink: skipCtrl });
+  const g = await walkTopology(client, { maxDepth: 12, identify: identifyByFacet, skipLink: skipCtrl });
 
   // The hub's `mesh` listener is peer_named: ONE connection serving both a and b.
   const bus = g.busLinks.find((b) => b.name === 'mesh');
   assert.ok(bus, 'the peer_named listener is reported as a bus link');
-  assert.equal(bus.at, 'seeded:hub');
+  assert.equal(bus.at, H);
   assert.equal(bus.peers.length, 2, 'it hears exactly its two dialers');
   for (const p of bus.peers) assert.match(p, /^\d+\.\d+\.\d+\.\d+:\d+$/);
 

@@ -14,6 +14,26 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **Node identity facet: `graph_t::set_identity` / `clear_identity`, serving
+  `read <vertex>:identity` (#406, RFC-0011, ADR-0045 decision 3)** — a node-scoped
+  identity record, synthesized on read at **every** vertex (the `read_schema`
+  pattern: zero stored per-vertex bytes). `set_identity(kind, key)` installs the
+  RFC-0011 §B record — `SETTINGS{ NAME "kind" VALUE u8, NAME "key" VALUE <key> }`,
+  60 bytes for `kind=0x01` (ed25519) — pre-serialized at install so every vertex
+  returns **byte-identical** bytes by construction; that invariant is what makes the
+  record a valid **cross-path key**, letting a client prove `/b` and `/c/a/b` are one
+  device (ADR-0044 pt 3: the core never dedups; the client does, keyed by an identity
+  it chooses). A kind outside the registry, or a key length contradicting the kind,
+  is rejected `TYPE_MISMATCH`; `clear_identity()` returns the node to the keyless
+  surface.
+  **The read is pre-auth** (RFC-0011 §C.2) — a narrow, named exemption from the READ
+  gate applying to `:identity` alone, because the public key is precisely what an
+  unauthenticated peer must obtain to TOFU-pin and to verify the ADR-0045 challenge;
+  gating it would deadlock first contact against the closed default ACL. There is
+  **no write surface** — the identity is the owner's, installed locally.
+  **No crypto is involved:** the facet stores and serves a *claim*; proving a node
+  holds the key is authentication and lives elsewhere. A node without a keypair keeps
+  today's `SCHEMA_NOT_FOUND` byte-for-byte (the surface is absent, not empty).
 - **ws-private `peer_named` / `max_peers` connection-config keys (#408, ADR-0043 §5,
   ADR-0044)** — the built-in `ws` factory now parses two LISTEN-side kind-private keys
   from the SPEC's raw config TLV (as `quic` does for `cert`/`key` and `can` for

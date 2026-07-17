@@ -37,6 +37,10 @@
  * first-level vertex). So node A reaches C through B at `dst=/b/c/...`, NOT
  * `/net/b/net/c/...` as reference/03 and /07 currently claim.
  *
+ * IDENTITY: `--identity <64 hex>` installs the node's RFC-0011 `:identity` record, which
+ * is what lets the #409 topology walk collapse the ring instead of unrolling it. A real
+ * node loads a real keypair; either way the facet serves a CLAIM and signs nothing.
+ *
  * NAMING RULE: every node names every link after the node at the FAR end. That is what
  * makes the return route work — each forwarder prepends its own name for the ARRIVAL link
  * to `src`, so a reply retraces the request hop by hop (RFC-0004 §B; the terminus itself
@@ -177,6 +181,33 @@ std::string g_name;
 std::uint16_t g_ctrl_port = 47300;
 int g_timeout_ms = 180000;
 std::vector<listen_spec_t> g_listens;
+std::vector<std::byte> g_identity;  // 32 raw bytes when --identity was given
+
+/**
+ * @brief Parse 64 hex chars into the 32 raw bytes of an ed25519-shaped public key.
+ *
+ * A REAL node loads a real keypair; the testbed passes a fixed per-node key from argv
+ * so the topology walk has a stable cross-path identity to dedup by. The facet serves a
+ * CLAIM either way (RFC-0011 / ADR-0045 decision 3) — nothing here signs anything.
+ */
+bool parse_identity(std::string_view hex, std::vector<std::byte>& out) {
+    if (hex.size() != 64) return false;
+    out.assign(32, std::byte{});
+    for (std::size_t i = 0; i < 32; ++i) {
+        int hi = -1, lo = -1;
+        for (int p = 0; p < 2; ++p) {
+            const char ch = hex[i * 2 + static_cast<std::size_t>(p)];
+            const int v = (ch >= '0' && ch <= '9')   ? ch - '0'
+                          : (ch >= 'a' && ch <= 'f') ? ch - 'a' + 10
+                          : (ch >= 'A' && ch <= 'F') ? ch - 'A' + 10
+                                                     : -1;
+            if (v < 0) return false;
+            (p == 0 ? hi : lo) = v;
+        }
+        out[i] = static_cast<std::byte>((hi << 4) | lo);
+    }
+    return true;
+}
 
 /** @brief Parse `name:port` (e.g. `a:47311`); returns false on a malformed spec. */
 bool parse_listen(std::string_view arg, listen_spec_t& out) {
@@ -196,6 +227,11 @@ bool parse_args(int argc, char** argv) {
             g_ctrl_port = static_cast<std::uint16_t>(std::atoi(argv[++i]));
         } else if (a == "--timeout-ms" && i + 1 < argc) {
             g_timeout_ms = std::atoi(argv[++i]);
+        } else if (a == "--identity" && i + 1 < argc) {
+            if (!parse_identity(argv[++i], g_identity)) {
+                std::fprintf(stderr, "mesh_node: --identity wants 64 hex chars (32 bytes)\n");
+                return false;
+            }
         } else if ((a == "--listen" || a == "--peer-named-listen") && i + 1 < argc) {
             listen_spec_t ls;
             if (!parse_listen(argv[++i], ls)) {
@@ -229,6 +265,21 @@ int main(int argc, char** argv) {
     graph_t graph;
     tr::net::fwd_router_t router(graph);
     tr::net::transport_vertex_t net(graph, router);
+
+    // ----- the node's IDENTITY (#406 / RFC-0011), before anything is served ---------
+    // With this installed, `read <any-vertex>:identity` answers the same 60-byte record
+    // everywhere, so a topology walk can prove that /b and /c/a/b are ONE device and
+    // terminate on the ring (ADR-0044 pt 3: the core never dedups; the client does,
+    // keyed by an identity it chooses — this is that key). Without --identity the node
+    // stays keyless and the walk degrades to a bounded, non-authoritative shape.
+    if (!g_identity.empty()) {
+        const auto idres = graph.set_identity(0x01, g_identity);
+        if (!idres) {
+            std::fprintf(stderr, "mesh_node[%s]: set_identity FAILED (status %d)\n", g_name.c_str(),
+                         static_cast<int>(idres.error()));
+            return 1;
+        }
+    }
 
     // ----- the application surface every node exposes -----------------------------
     // /node/name is a SEEDED APPLICATION VALUE, *not* an identity: it proves which node a
@@ -273,8 +324,9 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::printf("READY name=%s ctrl=%u listens=%zu\n", g_name.c_str(),
-                static_cast<unsigned>(g_ctrl_port), g_listens.size());
+    std::printf("READY name=%s ctrl=%u listens=%zu identity=%s\n", g_name.c_str(),
+                static_cast<unsigned>(g_ctrl_port), g_listens.size(),
+                g_identity.empty() ? "none" : "ed25519");
     std::fflush(stdout);
 
     // Bounded run: exit cleanly at the deadline (RAII stops the recv threads, joins them,

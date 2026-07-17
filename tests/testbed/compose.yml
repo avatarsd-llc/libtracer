@@ -16,6 +16,11 @@
 # a peer with `inet_pton` only (transport_ws.cpp) — there is no DNS anywhere, so a
 # compose service name in a SPEC's `addr` would simply fail to dial.
 #
+# Each node carries a distinct `--identity` (RFC-0011): a real node loads a real keypair,
+# but a fixed per-node key is what lets the #409 topology walk collapse the ring into 4
+# devices instead of unrolling it into ~170 route-nodes. The facet serves a CLAIM and
+# signs nothing — proving a node HOLDS its key is authentication, which does not exist yet.
+#
 # NO HEALTHCHECKS, deliberately. Readiness is structural: a node binds its link
 # listeners BEFORE its ctrl listener (core/tests/mesh_node.cpp), so ctrl-reachable
 # implies every listener on that node is bound. The driver retries the ctrl connect
@@ -48,7 +53,9 @@ services:
     ports: ["47301:47300"]
     # Listener "c" — the naming rule: every node names every link after the node at the
     # FAR end, which is what lets a reply retrace hop by hop. c dials in here.
-    command: ["--name", "a", "--ctrl-port", "47300", "--listen", "c:47311", "--timeout-ms", "300000"]
+    command:
+      ["--name", "a", "--ctrl-port", "47300", "--listen", "c:47311",
+       "--identity", "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", "--timeout-ms", "300000"]
 
   b:
     <<: *node
@@ -56,7 +63,9 @@ services:
       mesh:
         ipv4_address: 172.28.0.12
     ports: ["47302:47300"]
-    command: ["--name", "b", "--ctrl-port", "47300", "--listen", "a:47311", "--timeout-ms", "300000"]
+    command:
+      ["--name", "b", "--ctrl-port", "47300", "--listen", "a:47311",
+       "--identity", "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2", "--timeout-ms", "300000"]
 
   c:
     <<: *node
@@ -64,7 +73,9 @@ services:
       mesh:
         ipv4_address: 172.28.0.13
     ports: ["47303:47300"]
-    command: ["--name", "c", "--ctrl-port", "47300", "--listen", "b:47311", "--timeout-ms", "300000"]
+    command:
+      ["--name", "c", "--ctrl-port", "47300", "--listen", "b:47311",
+       "--identity", "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3", "--timeout-ms", "300000"]
 
   # The Brick C node: ONE peer_named ws listener serving MANY peers, so
   # /net/mesh:children[] synthesizes the live peer listing (ADR-0044). Its peer_named /
@@ -78,4 +89,5 @@ services:
         ipv4_address: 172.28.0.14
     ports: ["47304:47300"]
     command:
-      ["--name", "hub", "--ctrl-port", "47300", "--peer-named-listen", "mesh:47320", "--timeout-ms", "300000"]
+      ["--name", "hub", "--ctrl-port", "47300", "--peer-named-listen", "mesh:47320",
+       "--identity", "4040404040404040404040404040404040404040404040404040404040404040", "--timeout-ms", "300000"]
