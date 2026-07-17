@@ -282,13 +282,15 @@ void test_idempotent_and_silent() {
 }
 
 // ---------------------------------------------------------------------------
-// The concurrency case the atomic-swap-and-park handler machinery exists for: a
-// lock-free :children reader racing a retire on the same vertex. Correctness is
-// asserted by "no crash / no UAF"; the value is under TSAN (the `tsan` CI gate).
+// The concurrency case the atomic-swap-and-park handler machinery exists for: lock-free
+// :children readers racing a retire on the same vertex. This must survive both the DATA
+// race (TSAN) and the logical race a naive caller has — a check-then-call across two
+// seam loads, where a swap between them throws std::bad_function_call. The window is
+// widened deliberately (many concurrent readers hammering with NO gating sleep, retire
+// mid-flight) so a regression aborts here rather than intermittently in CI.
 void test_concurrent_read_vs_retire() {
-    std::printf("TSAN: a lock-free :children reader races retire on the same vertex:\n");
-    for (int iter = 0; iter < 64; ++iter) {
-        graph_t g;
+    std::printf("TSAN: lock-free :children readers race retire on the same vertex:\n");
+    auto make_handler = [] {
         tr::graph::handlers_t h;
         h.on_children = []() -> tr::graph::result_t<tr::view::view_t> {
             std::vector<std::byte> pt;
@@ -297,22 +299,42 @@ void test_concurrent_read_vs_retire() {
             if (!v) return std::unexpected(status_t::BACKPRESSURE);
             return *v;
         };
-        (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
-        vertex_handle_t hv = g.register_vertex(path_t("/dev/h"), role_t::HANDLER, std::move(h));
+        return h;
+    };
+    graph_t g;
+    (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/dev/h"), role_t::HANDLER, make_handler());
 
-        std::atomic<bool> stop{false};
-        std::thread reader([&] {
+    std::atomic<bool> stop{false};
+    std::atomic<long> reads{0};
+    std::atomic<long> churns{0};
+    std::vector<std::thread> readers;
+    for (int t = 0; t < 4; ++t) {
+        readers.emplace_back([&] {
             while (!stop.load(std::memory_order_relaxed)) {
-                (void)g.read(path_t("/dev/h:children"));  // lock-free handler load inside
+                (void)g.read(path_t("/dev/h:children"));  // lock-free seam load inside
+                reads.fetch_add(1, std::memory_order_relaxed);
             }
         });
-        std::this_thread::sleep_for(std::chrono::microseconds(50));
-        (void)g.retire(hv);  // swaps the handler pointer out from under the reader
-        std::this_thread::sleep_for(std::chrono::microseconds(50));
-        stop.store(true, std::memory_order_relaxed);
-        reader.join();
     }
-    check(true, "64 read-vs-retire races completed without a crash / UAF (TSAN validates)");
+    // A churner that retires AND revives /dev/h in a tight loop: each cycle swaps the
+    // seam pointer to null (retire) then to a fresh block (revive), so thousands of swaps
+    // race the readers' seam loads. A between-loads swap on a naive check-then-call caller
+    // throws bad_function_call — this widens the window far past the single-retire form
+    // that only surfaced intermittently in CI.
+    std::thread churner([&] {
+        while (!stop.load(std::memory_order_relaxed)) {
+            if (auto vh = g.find(path_t("/dev/h").key()); vh.has_value()) (void)g.retire(*vh);
+            (void)g.try_register_vertex(path_t("/dev/h"), role_t::HANDLER, make_handler());
+            churns.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+    while (reads.load() < 20000 || churns.load() < 2000) { /* spin until well-mixed */
+    }
+    stop.store(true, std::memory_order_relaxed);
+    for (std::thread& r : readers) r.join();
+    churner.join();
+    check(true, "read-vs-retire/revive churn completed without a crash / bad_function_call / UAF");
 }
 
 }  // namespace

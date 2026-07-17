@@ -590,7 +590,12 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, std::string_view caller) cons
     if (!acl_allows(v, caller, acl_right_t::READ))
         return std::unexpected(status_t::PERMISSION_DENIED);
     if (v->role() == role_t::HANDLER) {
-        if (v->handlers().on_read) return v->handlers().on_read();
+        // Load the seam ONCE: it is an atomic pointer a concurrent retire may swap to
+        // null (RFC-0009 §B.6), so a check-then-call across two loads would race — the
+        // second load could see the cleared seam and throw bad_function_call. The parked
+        // block keeps this reference valid even if the swap fires right after the load.
+        const value_handlers_t& h = v->handlers();
+        if (h.on_read) return h.on_read();
         return std::unexpected(status_t::NOT_FOUND);
     }
     const std::shared_ptr<const rope_t> sp = v->read_stored();  // lock-free
@@ -662,8 +667,9 @@ void graph_t::fan_out(vertex_t* v, const rope_t& value) {
 
 result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t value) {
     if (v->role() == role_t::HANDLER) {
-        if (!v->handlers().on_write) return std::unexpected(status_t::NOT_FOUND);
-        result_t<void> r = v->handlers().on_write(value);
+        const value_handlers_t& h = v->handlers();  // load once — a retire may swap it out
+        if (!h.on_write) return std::unexpected(status_t::NOT_FOUND);
+        result_t<void> r = h.on_write(value);
         if (!r) return std::unexpected(r.error());
         v->note_write();
         return std::shared_ptr<const rope_t>{};  // handler consumed it — nothing stored
@@ -1474,7 +1480,8 @@ result_t<view_t> graph_t::read_acl(vertex_t* v) const {
 result_t<view_t> graph_t::read_children(vertex_t* v) const {
     // The synthesized listing wins (ADR-0044): a transport/connection vertex serves
     // its live bus peers here — a snapshot of traffic, never stored graph structure.
-    if (v->handlers().on_children) return v->handlers().on_children();
+    // Load once — a concurrent retire may swap the seam out between check and call.
+    if (const value_handlers_t& h = v->handlers(); h.on_children) return h.on_children();
     // Generic member enumeration (reference 05 §SPEC read-members): the DIRECT
     // children of v in the vertex map — keys of the form <v.key><one NAME record>.
     // Each member is a minimal POINT{NAME} descriptor; order is unspecified.
@@ -1510,8 +1517,8 @@ result_t<rope_t> graph_t::read_children_folded(vertex_handle_t vh) const {
     // Synthesized listing (ADR-0044): a live bus-peer snapshot, already one contiguous
     // view — a fold has nothing to gather, so it crosses as a single-link rope,
     // byte-identical to the read_children path.
-    if (v->handlers().on_children) {
-        const result_t<view_t> sv = v->handlers().on_children();
+    if (const value_handlers_t& h = v->handlers(); h.on_children) {
+        const result_t<view_t> sv = h.on_children();
         if (!sv) return std::unexpected(sv.error());
         return rope_t{*sv};
     }

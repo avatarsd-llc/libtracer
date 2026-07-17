@@ -1058,7 +1058,7 @@ class vertex_t {
     /**
      * @brief Restore this vertex to the state an unregistered PLACEHOLDER carries — the
      *        `unregistered ⇒ carries no state` invariant retirement re-establishes
-     *        ([RFC-0009](../../docs/spec/rfcs/0009-vertex-removal-and-subscriber-eviction.md)
+     *        (RFC-0009
      *        §B.6). Clears **everything a `fill()` installs plus everything it leaves
      *        behind**, so a later revive of this address inherits nothing of the retired
      *        owner: the value seam (swap-and-park, never freed — a lock-free reader may

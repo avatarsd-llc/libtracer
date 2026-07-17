@@ -183,7 +183,7 @@ class graph_t {
     /**
      * @brief Retire a vertex and its whole subtree — the owner-facing mirror of
      *        @ref register_vertex
-     * ([RFC-0009](../../docs/spec/rfcs/0009-vertex-removal-and-subscriber-eviction.md) §A.1 / §B).
+     * (RFC-0009 §A.1 / §B).
      *
      * Marks @p vh (and, per §B.3, every descendant) **logically absent**: invisible to
      * `find` / `read` / `:children[]`, reading `tr::path::not_found` exactly like a
