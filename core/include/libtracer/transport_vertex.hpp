@@ -43,17 +43,18 @@ class fwd_router_t;
  *
  * The default ctor is batteries-included: it registers the built-in socket
  * factories so a full node can create udp/tcp/ws connections from a SPEC `kind`.
- * A slim node binds its links DIRECTLY instead — @ref provide_link stages a
+ * A slim node binds its links DIRECTLY instead — @ref transport_vertex_t::provide_link stages a
  * hand-constructed transport and a `:children[]` SPEC wires it in (the way the
  * device/VB nodes stage their ws and CAN links) — so it never routes creation
  * through the built-in factories. Yet while the ctor hard-references
  * `register_builtin_transports`, the linker must keep udp+tcp+ws (and their
  * factory glue) even on a node that binds none of them: constructing the `/net`
- * vertex pulls all three in. Passing @ref slim_net selects a ctor whose
+ * vertex pulls all three in. Passing @ref slim_net_t selects a ctor whose
  * translation-unit graph never names `register_builtin_transports`, so on a
  * `--gc-sections` target the unbound factories — and the transport TUs nothing
  * else references — garbage-collect. A slim node re-adds exactly the factories it
- * wants via @ref register_transport_type (or a hand-picked register_*_transport).
+ * wants via @ref transport_vertex_t::register_transport_type (or a hand-picked
+ * register_*_transport).
  *
  * NON-BREAKING: the default (full-node) ctor is unchanged, so existing consumers
  * keep the auto-registered builtins; only a node that opts in with this tag sheds
