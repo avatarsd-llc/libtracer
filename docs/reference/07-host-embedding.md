@@ -279,9 +279,9 @@ The contract:
 
 When a remote link fails (transport disconnect, peer crash, network partition):
 
-- The transport-vertex emits `STATUS=ERROR(TRANSPORT_DOWN)` to its subscribers.
-- This is the **same API** as a local vertex going down (e.g., a sensor driver crashing).
-- Application failover logic doesn't have to distinguish remote-vs-local; it reacts to STATUS events on the paths it cares about.
+- The transport-vertex writes a **link-state VALUE** (`0x00` = link-down) to its subscribers.
+- This is the **same read/write/await API** as a local vertex going down (e.g., a sensor driver crashing — which may instead deliver a typed `STATUS=ERROR(<reason>)` in place of its VALUE).
+- Application failover logic doesn't have to distinguish remote-vs-local; it reacts to the delivered writes on the paths it cares about.
 
 ### The "address space" is global; the API is local
 

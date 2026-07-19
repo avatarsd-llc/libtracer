@@ -187,3 +187,8 @@ automatic**, with no coordinator present:
   rejoins. The reconciler is tooling over this wire model; it adds no wire behavior.
 - **PKI / key management** for a stronger subject-token (deferred `security_*`
   module; the ACL model is unchanged when it lands).
+- **Removal / teardown.** The five-step flow above (discover → delegate → create → bind →
+  run → depart) covers **formation**, not **teardown** — there is no in-band **removal** step
+  yet. Removal/teardown via the **creator endpoint** — shape in
+  [ADR-0059](../adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md);
+  wire bytes pending RFC-0009 ([#424](https://github.com/avatarsd-llc/libtracer/issues/424)).

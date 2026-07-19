@@ -308,7 +308,7 @@ Subscriber                         Publisher's vertex
    |                                       |── observe (now - last_seen_ns) > 3s
    |                                       |── mark subscriber slot stale
    |                                       |── clear :subscribers[N] (or mark inactive)
-   |                                       |── emit STATUS=ERROR(TRANSPORT_DOWN)
+   |                                       |── write link-state VALUE (down)
    |                                       |   to peer subscribers (if any)
 ```
 
@@ -330,7 +330,7 @@ Forwarder             Transport module      External peer
    |                       |── notify_disconnect(peer_id)
    |                       |─────────────────────>|
    |── for each path routed via this link:       |
-   |   emit STATUS=ERROR(TRANSPORT_DOWN) write   |
+   |   write link-state VALUE (down)             |
    |   to local subscribers                      |
    |                                              |
    ... time passes ...                            ...

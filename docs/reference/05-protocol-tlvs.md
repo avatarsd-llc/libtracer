@@ -747,7 +747,7 @@ SPEC (0x0E, PL=1) {
 
 ### Where it appears
 
-- Written into `<parent>:children[]` to create a child. The device validates `type` against its **catalog** (the `:children` field's `:schema`); an unknown type returns `ERROR{tr::schema::not_found}`. Reading `<parent>:children[]` returns the subtree **members**, not SPECs (write-spec / read-members asymmetry).
+- Written into `<parent>:children[]` to create a child. **Superseded (interim):** [ADR-0059](../adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md) §Decision 1 makes creation a `write /net/export SPEC{…}` to the **creator endpoint**; the `<parent>:children[]` spelling here is the earlier ADR-0017 / ADR-0027 model, and the replacement byte layout is held for the RFC-0013 (#417) window. The device validates `type` against its **catalog** (the `:children` field's `:schema`); an unknown type returns `ERROR{tr::schema::not_found}`. Reading `<parent>:children[]` returns the subtree **members**, not SPECs (write-spec / read-members asymmetry).
 - Creation requires the `CREATE` right in the parent's `:acl` ([ADR-0020](../adr/0020-acl-nfsv4-style-aces-with-inheritance.md)). The created controller exposes its own **port vertices**; wiring them is a *separate* binding step (SUBSCRIBER edges).
 
 ### Validation
