@@ -628,6 +628,7 @@ SETTINGS (PL=1) {
   NAME "deadline_ns"       VALUE <u64>
   NAME "priority"          VALUE <u8>
   NAME "queue_max_bytes"   VALUE <u32>
+  NAME "store_ref_min_bytes" VALUE <u32>
   ; module-namespaced fields use a nested SETTINGS:
   NAME "transport_tcp"     SETTINGS (PL=1) { NAME "send_buf_kb" VALUE <u32> ... }
   ; the application's own fields use the same shape under the RESERVED key `app`:
@@ -655,7 +656,7 @@ Nested SETTINGS for module namespacing (instead of an unnamed structured wrapper
 - Unknown NAMEs MUST be either (a) ignored if module-namespaced and the module is not loaded, or (b) rejected with `ERROR{tr::schema::not_found}` if in the core namespace.
 - Type mismatches (e.g., a u32 where u8 expected) MUST return `ERROR{tr::schema::type_mismatch}`.
 
-### The five core QoS knobs
+### The seven core QoS knobs
 
 (Full semantics in [04-communication-flows.md](04-communication-flows.md) §QoS knobs.)
 
@@ -664,8 +665,10 @@ Nested SETTINGS for module namespacing (instead of an unnamed structured wrapper
 | `reliability` | u8 | 0 (best-effort) | 1 = reliable, transport-dependent guarantee |
 | `durability` | u8 | 0 (volatile) | 1 = transient-local, late joiners see history |
 | `history_keep_last` | u32 | 1 | Samples retained for transient-local |
-| `deadline_ns` | u64 | unset | Maximum interval between writes; missed = STATUS=TIMEOUT |
-| `priority` | u8 | 128 | Transport hint; 0 = lowest, 255 = highest |
+| `deadline_ns` | u64 | 0 (off) | Maximum interval between writes; missed = STATUS=TIMEOUT |
+| `priority` | u8 | 0 (lowest) | Transport hint; 0 = lowest, 255 = highest |
+| `queue_max_bytes` | u32 | 0 (unbounded) | Per-subscriber back-pressure cap |
+| `store_ref_min_bytes` | u32 | 0 (disabled) | Store-by-reference threshold ([ADR-0042](../adr/0042-refcounted-receiver-seam-view-delivery.md) §3): a view-delivered WRITE whose payload is ≥ this many bytes (and carries no trailer) is stored as a zero-copy subview of the inbound frame; 0 disables referencing |
 
 ---
 
