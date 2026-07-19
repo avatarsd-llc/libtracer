@@ -9,11 +9,11 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0010 |
 | **Title** | Owner-writable application property fields: the field descriptor table, the reserved `settings.app` namespace, and owner-defined `:schema` |
-| **Status** | **draft** (consumer-driven; strawberry-fw cutover measurement 2026-07-09) |
+| **Status** | **in-comment** (window opened 2026-07-17; was draft since the strawberry-fw cutover measurement 2026-07-09) |
 | **Author(s)** | strawberry-fw integration (drafted for maintainer review) |
 | **Created** | 2026-07-09 |
-| **Comment window closes** | opens with the tracking PR (GOVERNANCE.md §Spec changes) |
-| **Tracking issue** | a dedicated `rfc` issue to be opened with this PR |
+| **Comment window closes** | 2026-07-31 (≥ 14 days per GOVERNANCE.md §Spec changes) |
+| **Tracking issue** | [#411](https://github.com/avatarsd-llc/libtracer/issues/411) |
 | **Target spec version** | v1 (draft refinement — no released v1 yet, so no v2 needed) |
 | **Roadmap item** | this RFC is the specification of the **"field descriptor table"** item of the 2026-07-08 architecture-review backlog (the vertex-verbs / lazy-validation / field-descriptor-table cluster; item 2 of that backlog — the `vertex_t` verb seam — shipped as [#338](https://github.com/avatarsd-llc/libtracer/pull/338), and is the seam §D slots behind) |
 
@@ -251,8 +251,8 @@ generic consumers (settings renderers, HA discovery walkers) converge:
 
 ```
 NAME <field-name>  SETTINGS (PL=1) {
+  ; NOTE: `access` is NOT here — the runtime projects it (see below).
   NAME "dtype"  VALUE <type tag>        ; SHOULD — value shape (bool/i32/u32/f32/utf8/rgb/…)
-  NAME "access" VALUE <ro|rw|wo>        ; MUST match the declared access (§A.2)
   NAME "unit"   NAME  <unit>            ; MAY  — display unit
   NAME "min"    VALUE …  NAME "max" VALUE … ; MAY — advisory range
   NAME "label"  NAME  <human label>     ; MAY
@@ -260,11 +260,30 @@ NAME <field-name>  SETTINGS (PL=1) {
 }
 ```
 
-The runtime enforces none of it except `access` (which it holds natively per
-§A.2/A.3 and projects here); everything else is self-description. This is the
-"lazy validation" of the backlog cluster: the runtime validates *addressing*
-(declared or not) eagerly and cheaply, and leaves *shape* validation to the
-consumers and the owner, who own the vocabulary.
+**The owner MUST NOT supply an `access` member; the runtime projects it.** The
+served record leads with a runtime-projected `access` — read from the
+descriptor table (§A.2), not from these bytes — and the owner's descriptor
+follows verbatim. `access` is the one member the runtime holds natively, which
+is exactly why it owns the spelling: a projected member **cannot contradict the
+write gate**, whereas an owner-supplied one could claim `rw` on a field the
+table declares `ro`. An owner that supplies `access` anyway does not override
+anything — it emits a **duplicate member**, and a consumer reading NAME-keyed
+members would see two.
+
+This is normative already: [docs/reference/05](../../reference/05-protocol-tlvs.md)
+§`0x07` fixes the record as `NAME "access" VALUE <"ro"|"rw"|"wo">` — "runtime-projected
+from the table — the one member the runtime owns (it cannot be lied about)" —
+followed by `<owner descriptor bytes, verbatim>`, and `read_schema` emits exactly
+that. An earlier draft of this section listed `access` inside the owner's
+descriptor with "MUST match the declared access (§A.2)", contradicting both; the
+projection is the design that survived contact with the compiler, and this RFC
+now says so.
+
+The runtime enforces none of the rest: everything but `access` is
+self-description. This is the "lazy validation" of the backlog cluster: the
+runtime validates *addressing* (declared or not) eagerly and cheaply, and
+leaves *shape* validation to the consumers and the owner, who own the
+vocabulary.
 
 #### B.2 `read :schema` — merge shape and precedence
 
@@ -520,13 +539,49 @@ Genuinely contentious points, flagged for the maintainer:
    convention. Freezing more buys cross-vendor renderer portability at the
    cost of the runtime owning application vocabulary; the HA-walker and
    generic-renderer consumers should weigh in before v1 freezes.
-5. **The unimplemented core-table fields**: reference/02's table also lists
+5. **The unimplemented core-table fields.** reference/02's table also lists
    `:description` and `:liveness.*`, which the reference implementation does
    not serve either. This RFC deliberately does not adopt them —
    `:description` in particular could become a conventional app field
    (`settings.app.label`) instead of core surface; the 02 table should be
    reconciled (trimmed or implemented) when this RFC's edits land, so the
    spec stops listing fields nothing serves.
+
+   **Audited 2026-07-17 — the debt is exactly four fields, all phantom:**
+
+   | `reference/02` row | implementation |
+   | --- | --- |
+   | `:liveness.heartbeat_hz` | none |
+   | `:liveness.last_seen_ns` | none |
+   | `:liveness.missed_deadlines` | none |
+   | `:description` | none |
+
+   Nothing anywhere serves a `:liveness` field; the only `liveness` in `core/`
+   is transport-internal (the QUIC idle timeout, the ADR-0044 CAN peer TTL) and
+   is unrelated to this surface. The whole `:liveness.*` family is a **design
+   that was never built**, not a partial one — there is no heartbeat plane to
+   report on. Note `deadline_ns` exists as a *knob* and its 02 row says "max
+   time between writes before liveness fault", but no code raises that fault
+   either, so the knob is stored and served and otherwise inert.
+
+   Because reference/02 is normative by incorporation
+   ([ADR-0007](../../adr/0007-normative-wire-format-by-incorporation.md)), trimming these
+   rows **is a spec change** and cannot be a drive-by docs fix — which is
+   precisely why it belongs to this RFC's edit list rather than to a bug.
+
+   **Recommendation: trim all four, adopt none.** `:liveness.*` presupposes a
+   runtime that polices timing, which is the posture
+   [RFC-0007](0007-delivery-terminates-at-target.md)/[ADR-0051](../../adr/0051-delivery-terminates-at-target-no-dispatch-limits.md)
+   deliberately removed ("analyzers police designs, not the runtime"); building
+   it now would re-mint the thing that was just deleted. `:description` is
+   pure self-description with no runtime role, which is exactly what
+   `settings.app.` is for — this RFC's own substrate — so it costs nothing to
+   drop and can be spelled `settings.app.label` today by any owner who wants
+   it. If a consumer later needs a liveness plane, it should arrive as its own
+   RFC with a design, not be inherited from a table row.
+
+   **The maintainer rules; this is not the author's to decide** — trimming
+   normative rows is a spec change with a live comment window.
 
 Per [GOVERNANCE.md](../../../.github/GOVERNANCE.md), the tracking issue stays
 open at least 14 days for implementer feedback before this document is merged
