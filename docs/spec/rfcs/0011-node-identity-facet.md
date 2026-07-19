@@ -331,8 +331,8 @@ vector changes):
 - **New conformance vectors:** the seven `tests/conformance/vectors/v1/identity/`
   cases above; no existing vector's bytes change.
 - **Migration:** none required. Deployments adopt by installing a keypair
-  through the host API when the ed25519 identity module lands; the strawberry-fw
-  SEC-001 HMAC bridge (ADR-0045 decision 3, "bridge now") is unaffected — a
+  through the host API when the ed25519 identity module lands; the origin
+  firmware's SEC-001 HMAC bridge (ADR-0045 decision 3, "bridge now") is unaffected — a
   node MAY serve `:identity` while its login dance is still HMAC, and clients
   MAY stitch on it before any login exists at all (unauthenticated stitching is
   best-effort per §C.5). The SPA topology walker replaces its interim

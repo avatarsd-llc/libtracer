@@ -249,7 +249,7 @@ POINT bh1750 ── /meta ─┼─► ONE shared folded blob (purple), refcount
 POINT hx711  ── /meta ─┘     each site = a 12 B view header onto the shared segment
 ```
 
-Byte counts on the real ~146-vertex strawberry-fw graph are being produced by the scoring workflow; the *rationale* for each is in §9.
+Byte counts on the real ~146-vertex graph of the originating production firmware (an ESP32-C6 smart-agriculture node) are being produced by the scoring workflow; the *rationale* for each is in §9.
 
 ---
 
@@ -284,9 +284,9 @@ The fold surfaces real conflicts with shipped/normative behavior. Each needs a r
 
 ## 9. Reason behind each folding (why C0…C3 exist)
 
-- **C0 (flat, no index) — the honest baseline.** It IS same-substrate with zero overhead, and it wins wherever fanout is small: most interior nodes have ≤ 8 children, where a handful of header-skips beats an index lookup, and every hot lookup goes through a handle that resolves **once** (K8). Reason to exist: it is the floor every other candidate must beat with real bytes, and for the strawberry-fw fanout distribution it may simply win.
+- **C0 (flat, no index) — the honest baseline.** It IS same-substrate with zero overhead, and it wins wherever fanout is small: most interior nodes have ≤ 8 children, where a handful of header-skips beats an index lookup, and every hot lookup goes through a handle that resolves **once** (K8). Reason to exist: it is the floor every other candidate must beat with real bytes, and for the origin firmware's fanout distribution it may simply win.
 - **C1 (fixed-stride index) — pays only at wide composites.** A parent with thousands of children (a scan target, a big fan-in) turns C0's O(fanout) walk into a cost even at wiring frequency; C1 buys O(log fanout) for 6 B/child. Reason to exist: the wide-composite tail ADR-0057's sorted-children vector was built for — but as folded bytes, not a C++ vector. Overhead is pure below the fanout threshold, so it's a per-container choice, not global.
-- **C2 (name-interning) — attacks duplication, risks the wire contract.** The strawberry-fw graph repeats a handful of NAMEs heavily (`meta`, `cfg`, `temp`, channel indices); interning stores each once and shrinks the index to u16 compares — the densest fast option. Reason to exist: name-repetition is the second-biggest byte term after `/meta`. Reason to be cautious: I4 — it may only be legal *below* the dispatch seam.
+- **C2 (name-interning) — attacks duplication, risks the wire contract.** The origin firmware's graph repeats a handful of NAMEs heavily (`meta`, `cfg`, `temp`, channel indices); interning stores each once and shrinks the index to u16 compares — the densest fast option. Reason to exist: name-repetition is the second-biggest byte term after `/meta`. Reason to be cautious: I4 — it may only be legal *below* the dispatch seam.
 - **C3 (subtree sharing) — kills the single biggest cold line item.** 59 structurally-identical `/meta` descriptor subtrees are the largest cold-vertex cost; refcount-sharing them (the rope's native trick applied to *structure*, purple) collapses them to one blob + N 12 B view headers. Reason to exist: it turns the doubling from a liability into ~zero, and composes with C0/C1/C2 as the inner layout. Reason to bound: it needs structural-identity detection + copy-on-write when one shared subtree diverges.
 
 ---

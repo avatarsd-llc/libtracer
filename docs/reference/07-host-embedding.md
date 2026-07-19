@@ -267,7 +267,8 @@ The contract:
 - **Capacity**: the protocol imposes no vertex-count cap; the map is bounded only
   by available memory. A constrained host MAY pre-size or cap it (e.g. a fixed
   arena) — that is a host policy, not a wire constraint. (A small numeric handle
-  space, such as strawberry-fw's 511-slot `io_layer` handle, is likewise a host
+  space, such as the 511-slot `io_layer` handle of the originating production
+  firmware (an ESP32-C6 smart-agriculture node), is likewise a host
   detail, not a libtracer limit — libtracer handles are pointers.)
 - **Memory policy is the host's.** The reference forwarder (`fwd_router_t`) takes
   a defaulted `std::pmr::memory_resource*`: the terminus arena draws from it

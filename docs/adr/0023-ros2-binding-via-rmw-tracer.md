@@ -34,7 +34,7 @@ ROS 2 is a first-class target. The decision is *where* libtracer plugs into the 
 ## Why RMW, and what it buys
 
 - **Transparent** — every existing ROS 2 node works unchanged (vs an `rclcpp` bridge that relays topics and needs per-app wiring, double-publishes, and breaks intra-process zero-copy).
-- **Zero-copy fan-out** — libtracer delivers a refcounted view to each subscriber instead of DDS's per-reader serialize+copy; the same copy-elimination win as the strawberry io_layer.
+- **Zero-copy fan-out** — libtracer delivers a refcounted view to each subscriber instead of DDS's per-reader serialize+copy; the same copy-elimination win as the `io_layer` of the originating production firmware (an ESP32-C6 smart-agriculture node).
 - **ROS over constrained transports** — because framing is a transport-adapter concern ([ADR-0022](0022-transport-framing-modes-elided-full-tlv-advertise.md)), `rmw_tracer` runs ROS 2 over **CAN / UART with header elision** — ROS topics on a microcontroller fleet at a fraction of micro-ROS/DDS-XRCE overhead. This is the differentiator: ROS 2 reaching down to a 16 KB MCU.
 
 ## Considered options

@@ -4,7 +4,7 @@ Status: proposed (the public-API surface of the browser/Node client SDK, **refer
 
 ## Context
 
-[#56](https://github.com/avatarsd-llc/libtracer/issues/56) asks for the **TypeScript client SDK** the strawberry web-UI builds against: a native pure-TS client (strategy A, [ADR-0028](0028-native-cores-kept-consistent-by-conformance-vectors.md)) that a browser uses to bind directly into a robot's graph over WebSocket ([ADR-0031](0031-direct-browser-to-robot-binding-and-webtransport.md)), issuing the consumer-initiated subscribe-write of [ADR-0026](0026-consumer-initiated-subscription-client-write.md).
+[#56](https://github.com/avatarsd-llc/libtracer/issues/56) asks for the **TypeScript client SDK** that the web-UI of the originating production firmware (an ESP32-C6 smart-agriculture node) builds against: a native pure-TS client (strategy A, [ADR-0028](0028-native-cores-kept-consistent-by-conformance-vectors.md)) that a browser uses to bind directly into a robot's graph over WebSocket ([ADR-0031](0031-direct-browser-to-robot-binding-and-webtransport.md)), issuing the consumer-initiated subscribe-write of [ADR-0026](0026-consumer-initiated-subscription-client-write.md).
 
 The TS workspace already has the two layers a client composes ([ADR-0033](0033-npm-subpackage-monorepo.md)):
 

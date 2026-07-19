@@ -112,7 +112,7 @@ else()
     # evaluates false there and never propagates the component's include dir; the
     # TU (correctly gated on the same config in the second pass) then compiles
     # WITHOUT <esp_http_server.h> and dies with "No such file" on any node that
-    # enables WS support (the strawberry-fw prod build hit exactly this). The header
+    # enables WS support (the origin firmware's prod build hit exactly this). The header
     # is a base IDF component present on every chip target, so requiring it always is
     # safe and free when the TU is absent — nothing references its symbols, so
     # --gc-sections drops the link dep and libtracer.a is byte-identical (no footprint

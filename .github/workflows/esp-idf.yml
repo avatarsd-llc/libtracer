@@ -48,7 +48,7 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     # Pinned ESP-IDF v6.0 release (GCC 15 RISC-V toolchain — C++23: std::expected,
-    # std::span; matches strawberry-fw's IDF v6.0-dev toolchain). Bumped from v5.3/GCC13.
+    # std::span; matches the origin firmware's IDF v6.0-dev toolchain). Bumped from v5.3/GCC13.
     container: espressif/idf:release-v6.0
     strategy:
       fail-fast: false

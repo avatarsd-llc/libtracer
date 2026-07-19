@@ -10,7 +10,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **RFC** | 0010 |
 | **Title** | Owner-writable application property fields: the field descriptor table, the reserved `settings.app` namespace, and owner-defined `:schema` |
 | **Status** | **accepted** (2026-07-19 — maintainer ruling, window waived; in-comment from 2026-07-17, draft since 2026-07-09) |
-| **Author(s)** | strawberry-fw integration (drafted for maintainer review) |
+| **Author(s)** | origin-firmware integration (drafted for maintainer review) |
 | **Created** | 2026-07-09 |
 | **Comment window closes** | 2026-07-31 (≥ 14 days per GOVERNANCE.md §Spec changes) |
 | **Tracking issue** | [#411](https://github.com/avatarsd-llc/libtracer/issues/411) |
@@ -63,7 +63,8 @@ inside the vertex `SETTINGS` namespace.
 
 ## Motivation
 
-1. **The measured gap (strawberry-fw F2 slice 1, pin `94fc98d`, 2026-07-09).**
+1. **The measured gap (F2 slice 1 of the originating production firmware — an
+   ESP32-C6 smart-agriculture node; pin `94fc98d`, 2026-07-09).**
    `core/src/graph.cpp` `field_write` is a closed set: `subscribers[]` /
    `acl` / `children[]` plus exactly seven `settings.*` QoS knobs
    (`reliability`, `durability`, `priority`, `history_keep_last`,
@@ -87,8 +88,8 @@ inside the vertex `SETTINGS` namespace.
    — while keeping the collision-proofing that motivated the closed set
    (§A.1) and the closed-by-default `ENOTTY` posture (§A.2).
 3. **A real consumer is blocked on it, and its workaround is the exact cost
-   this protocol exists to avoid.** strawberry-fw's device-graph schema
-   (fw `doc/adr/0076-device-graph-taxonomy-and-path-algebra.md`) rests on two
+   this protocol exists to avoid.** The origin firmware's device-graph schema
+   (its ADR-0076, device-graph taxonomy and path algebra) rests on two
    decisions with no upstream substrate: *properties are bare fields* (only
    subscribable things are vertices) and *app configuration lives under one
    property container, `:settings.*`, sibling to protocol-owned names*. Its

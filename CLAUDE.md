@@ -72,6 +72,6 @@ Until then, when exploring or producing output:
 1. Read **[CONTEXT.md](CONTEXT.md)** first — the canonical root glossary. Use its vocabulary; don't drift to synonyms.
 2. Read **[docs/reference/00-overview.md](docs/reference/00-overview.md)** for the six-layer model and load-bearing architectural commitments.
 3. Read **[docs/spec/v1.md](docs/spec/v1.md)** for normative behavior. When the spec and any other doc disagree, the spec wins.
-4. ADRs live under [docs/adr/](docs/adr/) — read them; `0001`–`0007` record the strawberry-fw extraction and the protocol-v1 wire/API commitments (versioning, retire-LIST, trailer-CRC, fixed-width length, read/write/await, normative-by-incorporation). They also carry the design *rationale* (the "why").
+4. ADRs live under [docs/adr/](docs/adr/) — read them; `0001`–`0007` record the extraction from the originating production firmware (an ESP32-C6 smart-agriculture node) and the protocol-v1 wire/API commitments (versioning, retire-LIST, trailer-CRC, fixed-width length, read/write/await, normative-by-incorporation). They also carry the design *rationale* (the "why").
 
 If your output contradicts an existing ADR or a load-bearing reference doc, surface the contradiction explicitly rather than silently overriding.

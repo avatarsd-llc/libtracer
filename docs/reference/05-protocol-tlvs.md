@@ -15,7 +15,7 @@
 
 Currently assigned: `0x01`–`0x04`, `0x06`–`0x0C`, `0x0E` (12 types). `0x05` is a **reserved code with no assigned meaning** in v1 (see §`0x05`); `0x0D` ROUTER is a **reserved, decodable codepoint with no implemented mechanism** (see §`0x0D`). `0x0E` is **SPEC** (vertex-creation spec, [ADR-0017](../adr/0017-in-band-vertex-creation-controller-orchestration.md)). The remaining `0x0F` – `0x1F` are reserved for v1 fast-track additions; `0x20` – `0x7F` is the long-term registry.
 
-The names below are the canonical type-code names; the reference implementation's C enum (header under `core/include/libtracer/`, pending the protocol-v1 rebuild — [ADR-0001](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0001-extract-reference-implementation-from-strawberry-fw.md)) matches them.
+The names below are the canonical type-code names; the reference implementation's C enum (header under `core/include/libtracer/`, pending the protocol-v1 rebuild — [ADR-0001](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0001-extraction-from-production-firmware.md)) matches them.
 
 ### Structured TLVs
 

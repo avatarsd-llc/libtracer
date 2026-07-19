@@ -1,10 +1,10 @@
 # Transport-peer enumeration is stateless and synthesized from live traffic; separate paths stay separate paths; matching device identities across paths is client-side logic, never core
 
-Status: accepted (maintainer-ratified 2026-07-03, strawberry-fw migration design grilling). Extends [ADR-0040](0040-net-plane-is-explicit-source-routed-only.md) (explicit-source-routed only) to the discovery/enumeration question; builds on [ADR-0027](0027-transport-and-connections-are-vertices.md) (path-as-route) and [ADR-0030](0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md) (in-transport advertise map). Companion to [ADR-0045](0045-in-graph-authentication-per-hop-ed25519-tofu-noise.md) and [ADR-0046](0046-bulk-transfer-is-ordinary-auth-gated-writes.md) — the three ADRs of the strawberry-fw network-rulings set.
+Status: accepted (maintainer-ratified 2026-07-03, migration design grilling for the originating production firmware — an ESP32-C6 smart-agriculture node). Extends [ADR-0040](0040-net-plane-is-explicit-source-routed-only.md) (explicit-source-routed only) to the discovery/enumeration question; builds on [ADR-0027](0027-transport-and-connections-are-vertices.md) (path-as-route) and [ADR-0030](0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md) (in-transport advertise map). Companion to [ADR-0045](0045-in-graph-authentication-per-hop-ed25519-tofu-noise.md) and [ADR-0046](0046-bulk-transfer-is-ordinary-auth-gated-writes.md) — the three ADRs of the origin-firmware network-rulings set.
 
 ## Context
 
-strawberry-fw is the first product adopting libtracer end-to-end: ESP32-C6 grow controllers, a Docker gateway, and an Angular SPA, all as libtracer nodes. Topology: browser ↔ WebSocket ↔ boards, boards ↔ CAN ↔ each other, and the single-IP-entry case — one board reachable over IP with its CAN peers *behind* it — must work.
+The origin firmware is the first product adopting libtracer end-to-end: ESP32-C6 smart-agriculture controllers, a Docker gateway, and an Angular SPA, all as libtracer nodes. Topology: browser ↔ WebSocket ↔ boards, boards ↔ CAN ↔ each other, and the single-IP-entry case — one board reachable over IP with its CAN peers *behind* it — must work.
 
 That topology forces two questions [ADR-0040](0040-net-plane-is-explicit-source-routed-only.md) left implicit:
 

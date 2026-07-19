@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 #
 # ESP-IDF project that builds the libtracer FULL-NODE profile (#183) — graph +
-# fwd_router + transport_vertex + config-created UDP sockets — in the strawberry
-# shape (strawberry-fw doc/libtracer-migration.md Phase 2): a sensor vertex, a
+# fwd_router + transport_vertex + config-created UDP sockets — in the
+# origin-firmware shape (the originating production firmware's
+# libtracer-migration plan Phase 2): a sensor vertex, a
 # `/net` listener created via a `:children[]` SPEC, and a remote subscriber
 # fanning out to a peer node over REAL datagrams.
 #

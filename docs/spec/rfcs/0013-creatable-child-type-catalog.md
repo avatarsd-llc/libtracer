@@ -121,8 +121,9 @@ faces**, and MUST agree.
    (`:children[]` `SPEC` writes), then binding them. Today the orchestrator
    must know each device's types **out of band**, or probe by writing — a
    side-effecting, `CREATE`-gated discovery on what should be the read plane. A
-   generic constructor UI (select-a-type-from-a-dropdown, the strawberry-fw
-   wiring-diagram pattern) has no dropdown source.
+   generic constructor UI (select-a-type-from-a-dropdown, the wiring-diagram
+   pattern of the originating production firmware — an ESP32-C6
+   smart-agriculture node) has no dropdown source.
 
 ## Proposed change
 

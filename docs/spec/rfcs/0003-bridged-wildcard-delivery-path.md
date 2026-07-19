@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0003 — Concrete-path delivery for bridged wildcard subscriptions
 
-> **Deferred (2026-07-07):** the design direction is sound, but this RFC governs *bridged* wildcard delivery, which no implementation exercises yet. Per the standing "stay 0.x DRAFT — don't lock a wire commitment before it is exercised" stance, it is **deferred** (tracked in [#303](https://github.com/avatarsd-llc/libtracer/issues/303)) rather than accepted-now or left to silently lapse. Re-open for comment when a real consumer (the strawberry-fw migration, or a second implementation) exercises the path and the three open sub-questions in [§Discussion](#discussion) are resolved.
+> **Deferred (2026-07-07):** the design direction is sound, but this RFC governs *bridged* wildcard delivery, which no implementation exercises yet. Per the standing "stay 0.x DRAFT — don't lock a wire commitment before it is exercised" stance, it is **deferred** (tracked in [#303](https://github.com/avatarsd-llc/libtracer/issues/303)) rather than accepted-now or left to silently lapse. Re-open for comment when a real consumer (the migration of the originating production firmware — an ESP32-C6 smart-agriculture node — or a second implementation) exercises the path and the three open sub-questions in [§Discussion](#discussion) are resolved.
 
 | Field | Value |
 | ---- | ---- |

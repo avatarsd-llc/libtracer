@@ -2,8 +2,8 @@
 
 Status: accepted (the use case as an architectural driver, and the WebTransport direction it
 implies). **Implementation is roadmap, not now**: rmw_tracer is parked ([ADR-0023](0023-ros2-binding-via-rmw-tracer.md),
-[ADR-0025](0025-rmw-tracer-end-to-end-zero-copy-rcl-over-rdma.md)) under the strawberry-first
-priority, and WebTransport follows `transport_ws` (#54). This ADR records the case so the
+[ADR-0025](0025-rmw-tracer-end-to-end-zero-copy-rcl-over-rdma.md)) under the origin-firmware-first
+priority (the originating production firmware — an ESP32-C6 smart-agriculture node — ships first), and WebTransport follows `transport_ws` (#54). This ADR records the case so the
 decisions it constrains are not re-litigated. Refines [ADR-0029](0029-websocket-first-transport-quic-deferred-per-link.md).
 
 ## Context — the corner case
@@ -80,7 +80,7 @@ controller pin to the browser**: no DDS CDR, no rosbridge, no JSON re-encode.
   cross-match (building now), and the swappable transport seam are exactly its prerequisites, and
   nothing in the current build forecloses it.
 - rmw_tracer stays parked, but the path to this case is **preserved and validated**; the
-  implementation is queued (see the linked issue) after the strawberry-first work and rmw_tracer.
+  implementation is queued (see the linked issue) after the origin-firmware-first work and rmw_tracer.
 
 ## Relates
 

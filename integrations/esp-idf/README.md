@@ -26,7 +26,7 @@ dependencies:
 
 ## What the component packages
 
-**The full node** ([#183](https://github.com/avatarsd-llc/libtracer/issues/183)) — everything a strawberry-shaped device needs to run libtracer as its MAIN transport:
+**The full node** ([#183](https://github.com/avatarsd-llc/libtracer/issues/183)) — everything a device shaped like the originating production firmware (an ESP32-C6 smart-agriculture node) needs to run libtracer as its MAIN transport:
 
 | Layer | Sources | Notes |
 | --- | --- | --- |
@@ -53,7 +53,7 @@ The transports compile against lwIP's BSD-socket layer **unmodified — no shim 
 | --- | --- | --- |
 | [`examples/inprocess_mirror/`](examples/inprocess_mirror/) | chips | P0 in-process profile: register / write / read / await on FreeRTOS |
 | [`examples/host_smoke/`](examples/host_smoke/) | `linux` | the component as a host_test dependency (no FreeRTOS tasks, no esp_log) |
-| [`examples/full_node/`](examples/full_node/) | chips + `linux` | **the strawberry shape**: one-slab recipe, sensor vertex, config-created UDP listener via `/net:children[]` SPEC, remote subscriber fan-out |
+| [`examples/full_node/`](examples/full_node/) | chips + `linux` | **the origin-firmware shape**: one-slab recipe, sensor vertex, config-created UDP listener via `/net:children[]` SPEC, remote subscriber fan-out |
 
 ### full_node (the #183 readiness example)
 
@@ -97,7 +97,7 @@ Steady-state heap is what you configure: the full_node example runs its RX segme
 
 ## Requirements
 
-- **ESP-IDF v6.0** (tested in CI; matches strawberry-fw's IDF v6.0-dev / GCC 15 toolchain) — libtracer's core is **C++23** (`std::expected`, `std::span`), which needs GCC 13+ (i.e. IDF ≥ 5.3); CI pins `release-v6.0`. The TWAI link uses the `esp_driver_twai` node API (IDF ≥ 5.5).
+- **ESP-IDF v6.0** (tested in CI; matches the origin firmware's IDF v6.0-dev / GCC 15 toolchain) — libtracer's core is **C++23** (`std::expected`, `std::span`), which needs GCC 13+ (i.e. IDF ≥ 5.3); CI pins `release-v6.0`. The TWAI link uses the `esp_driver_twai` node API (IDF ≥ 5.5).
 - `PRIV_REQUIRES pthread, lwip, esp_driver_twai` (chip targets) — all **private**: libtracer's public headers expose only libstdc++ headers, never `<pthread.h>` or lwIP/driver headers, so nothing propagates to dependents. On the `linux` target only pthread is required (sockets come from glibc).
 - **Exceptions / RTTI** stay at the ESP-IDF default (**OFF**): the core's data path is exception-free and RTTI-free (it returns `std::expected`, never throws; no `typeid`/`dynamic_cast`), and the full-node profile (including the examples) links clean under `-fno-exceptions -fno-rtti`.
 
