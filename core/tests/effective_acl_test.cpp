@@ -347,6 +347,62 @@ void test_concurrent_rewrite_race() {
           "the post-race rewrite is observed (dirty flag survived every race)");
 }
 
+/** @brief #425 regression: a DIFFERENT-valued ancestor `:acl` rewrite racing gated reads must
+ *  not be clobbered by a slow rebuilder into a stale, `dirty == false` cache — a PERSISTENT
+ *  fail-open that the same-grant storm above cannot surface (its stale clobber writes
+ *  byte-identical ACEs). The writer alternates the ancestor ACL between two grants and ends on
+ *  a KNOWN final grant; after the readers join, with NO further `:acl` write to heal a clobber,
+ *  the cached descendant verdict must match that final grant. The pre-#425 clear-after-publish
+ *  fix (which gated only the CLEAR on the generation, publishing unconditionally) fails this. */
+void test_concurrent_rewrite_stale_publish() {
+    std::printf("dirty-flag protocol — different-valued ancestor rewrites leave no stale cache:\n");
+    constexpr int kRounds = 300;
+    constexpr int kWriterLoops = 200;
+    const std::vector<ace_t> aces_reader{
+        ace("reader", bit(acl_right_t::READ), ace_type_t::ALLOW, kAceInherit)};
+    const std::vector<ace_t> aces_other{
+        ace("other", bit(acl_right_t::READ), ace_type_t::ALLOW, kAceInherit)};
+    const std::vector<std::byte> grant_reader = tr::graph::encode_acl(aces_reader);
+    const std::vector<std::byte> grant_other = tr::graph::encode_acl(aces_other);
+    std::uint64_t bad = 0;
+    for (int round = 0; round < kRounds; ++round) {
+        graph_t g;
+        g.set_subject_resolver(caller_is_subject);
+        (void)g.register_vertex(path_t("/r"), role_t::STORED_VALUE);
+        (void)g.register_vertex(path_t("/r/m"), role_t::STORED_VALUE);
+        vertex_handle_t leaf = g.register_vertex(path_t("/r/m/leaf"), role_t::STORED_VALUE);
+        (void)write_u8(g, leaf, 7);
+        (void)g.write(path_t("/r:acl"), make_value(grant_other));  // start on "other"
+
+        std::atomic<bool> stop{false};
+        // Writer alternates the ancestor grant, then lands a KNOWN final grant ("reader")
+        // as its last write before signalling stop — so the terminal mark, if clobbered by
+        // a slow rebuilder, is not healed by any later write.
+        std::thread writer([&] {
+            for (int i = 0; i < kWriterLoops; ++i)
+                (void)g.write(path_t("/r:acl"), make_value((i & 1) ? grant_reader : grant_other));
+            (void)g.write(path_t("/r:acl"), make_value(grant_reader));  // final = "reader"
+            stop.store(true, std::memory_order_release);
+        });
+        std::vector<std::thread> readers;
+        readers.reserve(3);
+        for (int t = 0; t < 3; ++t)
+            readers.emplace_back([&] {
+                while (!stop.load(std::memory_order_acquire)) {
+                    (void)g.read(leaf, "reader");
+                    (void)g.read(leaf, "other");
+                }
+            });
+        writer.join();
+        for (std::thread& th : readers) th.join();
+        // No further :acl write to re-mark the leaf: a stale-merge clobber (a slow rebuilder
+        // overwriting the fresh "reader" merge, leaving dirty==false) surfaces the OLD grant.
+        if (!g.read(leaf, "reader").has_value() || g.read(leaf, "other").has_value()) ++bad;
+    }
+    check(bad == 0, "no stale-merge clobber across " + std::to_string(kRounds) +
+                        " different-valued ancestor rewrite races (final grant survives)");
+}
+
 }  // namespace
 
 int main() {
@@ -356,6 +412,7 @@ int main() {
     test_cache_invalidation();
     test_placeholder_and_new_vertices();
     test_concurrent_rewrite_race();
+    test_concurrent_rewrite_stale_publish();
     std::printf(g_failures == 0 ? "\neffective_acl: PASS\n" : "\neffective_acl: FAIL (%d)\n",
                 g_failures);
     return g_failures == 0 ? 0 : 1;

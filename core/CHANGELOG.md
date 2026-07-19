@@ -116,6 +116,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **Gated reads no longer fail-open while an `:acl` rewrite is in flight**
+  — the ADR-0050 effective-ACE cache cleared its dirty flag at the *entry* of the lazy
+  rebuild (`vertex_t::with_effective_aces` did an `exchange(false)` before the fresh merge
+  was published), so a second reader arriving during the unlocked rebuild window saw
+  `dirty == false` and evaluated a not-yet-populated (empty ⇒ open-by-default) merge —
+  momentarily **allowing a caller that should have been denied**, on every gated op. The
+  rebuild is now **generation-gated**: a new per-vertex `acl_gen` counter is bumped — ahead
+  of the dirty flag — by every invalidator (`set_acl`, `mark_acl_cache_dirty` for the
+  ancestor-subtree fan-out, and the placeholder revert); the rebuild snapshots it before the
+  unlocked ancestor walk and, back under the stripe lock, **publishes AND clears only when
+  the generation is unchanged**, otherwise discarding the (stale or torn) merge and retrying.
+  So `dirty == false` under the lock now always means `eff_aces` holds a *current* published
+  merge, a slow rebuilder can never clobber a fresh merge a faster one published (a
+  *persistent* fail-open), and no `:acl` mark is ever lost (no stale-forever cache).
+  Reproduced at ~10% on a 2-core ASAN build; a new `effective_acl` subtest races
+  different-valued ancestor rewrites (which the prior same-grant storm could not surface).
+  0 failures after across ASAN/TSAN and the full suite (#425).
 - **`write <vertex>:acl.<anything>` and `write <vertex>:acl[N]` no longer REPLACE the
   vertex's entire ACL** — the `:acl` write branch matched on the name alone, with no
   step bound and no selector check, so every unresolved shape fell through to
