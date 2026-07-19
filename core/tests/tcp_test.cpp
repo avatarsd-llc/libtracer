@@ -520,24 +520,37 @@ void test_config_constructed_tcp() {
         }
     });
 
-    // B: a stored value at /temp and a tcp LISTENER on a fixed localhost port.
+    // Pick a fresh OS-assigned free localhost port for B's listener. A hardcoded port
+    // races leftover sockets across parallel/repeated runs and flakes (#440); a
+    // config-constructed listener requires an EXPLICIT port (the factory refuses
+    // port 0), so reserve a real free port via a throwaway ephemeral listener and
+    // release it (a listener that never accepts closes straight to CLOSED — no
+    // TIME_WAIT — so the port is immediately re-bindable below).
+    std::uint16_t port;
+    {
+        tcp_transport_t port_probe{std::uint16_t{0}};
+        port = port_probe.local_port();
+    }
+    check(port != 0, "reserved a free localhost port for the listener");
+
+    // B: a stored value at /temp and a tcp LISTENER on that free port.
     (void)node_b.register_vertex(path_t("/temp"), role_t::STORED_VALUE);
     std::vector<std::byte> tv;
     const std::byte tb{0x2A};
     tr::wire::emit_tlv(tv, type_t::VALUE, opt_t{}, std::span<const std::byte>(&tb, 1));
     (void)node_b.write(path_t("/temp"), owned(tv));
     const auto wb = node_b.write(path_t("/net:children[]"),
-                                 conn_spec("listener", "a", tr::net::conn_role_t::LISTEN, 47130));
+                                 conn_spec("listener", "a", tr::net::conn_role_t::LISTEN, port));
     check(wb.has_value(), "B: SPEC{listener, kind=tcp, port} constructs the bound socket");
     check(router_b.registry().by_name("a") != nullptr, "B: the socket is wired into the router");
 
     // A: a tcp CLIENT dialing B's port — a SYNCHRONOUS connect from config.
     const auto wa =
         node_a.write(path_t("/net:children[]"),
-                     conn_spec("client", "b", tr::net::conn_role_t::DIAL, 47130, "127.0.0.1"));
+                     conn_spec("client", "b", tr::net::conn_role_t::DIAL, port, "127.0.0.1"));
     check(wa.has_value(), "A: SPEC{client, kind=tcp, addr, port} constructs the dialing socket");
     const auto* s = net_a.settings_of("b");
-    check(s != nullptr && s->kind == "tcp" && s->addr == "127.0.0.1" && s->port == 47130,
+    check(s != nullptr && s->kind == "tcp" && s->addr == "127.0.0.1" && s->port == port,
           "A: the parsed :settings carry kind/addr/port");
 
     // End-to-end: FWD{READ dst=/b/temp} from A crosses A's config-created stream to
