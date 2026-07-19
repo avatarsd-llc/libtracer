@@ -52,7 +52,7 @@ sequenceDiagram
     participant A as Producer device A
     Note over O,A: 0. discover peers (mDNS / static)
     Note over O,B: 1. owner delegates admin → O
-    O->>B: 2. write /B/net/quic:children[] += SPEC{client, peer=A, role=DIAL}
+    O->>B: 2. write /B/net/export SPEC{quic-client, peer=A, role=DIAL}
     B->>A: QUIC dial (consumer dials)
     O->>A: 3. write /A/sensor:subscribers[] += SUBSCRIBER{target=/B/in}
     Note over A: A:acl authorizes the subscriber (fan-out gate)
@@ -79,14 +79,16 @@ orchestrator now holds delegated admin for the duration of its session.
 
 ### 2. Create — controllers *and* transport connections, one mechanism
 
-Creation is an in-band `:children[]` write of a `SPEC` naming a **device-catalog
-type** ([ADR-0017](../adr/0017-in-band-vertex-creation-controller-orchestration.md)).
+Creation is an in-band write of a `SPEC` — naming a **device-catalog type** — to
+the device's owner-designated **creator endpoint** (conventionally `/net/export`;
+[ADR-0059](../adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md),
+superseding the `:children[]` field-write of [ADR-0017](../adr/0017-in-band-vertex-creation-controller-orchestration.md)).
 The same mechanism brings up a transport link, because a transport — and each
 connection — is itself a vertex ([ADR-0027](../adr/0027-transport-and-connections-are-vertices.md)):
 
 ```
-write /B/ctrl:children[]    += SPEC{ type=pid,    path=/B/ctrl/0 }       # a controller
-write /B/net/quic:children[] += SPEC{ type=client, peer=A, addr=A_addr, role=DIAL }  # a link
+write /B/net/export SPEC{ type=pid,         path=/B/ctrl/0 }                    # a controller
+write /B/net/export SPEC{ type=quic-client, peer=A, addr=A_addr, role=DIAL }    # a link
 ```
 
 A controller exposes its own **input-port and output-port** vertices; it

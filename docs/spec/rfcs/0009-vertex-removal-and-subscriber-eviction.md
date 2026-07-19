@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0009 |
 | **Title** | Vertex removal and subscriber eviction |
-| **Status** | **in-comment** (window opened 2026-07-17) |
+| **Status** | **accepted** (2026-07-19 — maintainer ruling; the comment window is waived on this solo-maintained spec) |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-07-17 |
 | **Comment window closes** | 2026-07-31 |
