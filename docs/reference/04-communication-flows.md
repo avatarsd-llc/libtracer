@@ -237,7 +237,7 @@ sequenceDiagram
 Invariants:
 
 - **Forwarders are stateless.** There is no per-request table: the forward route is the shrinking `dst` and the return route is the growing `src`, both carried in the frame. A hop may reboot mid-operation and the reply still routes.
-- **Loop-free by construction.** `dst` is consumed monotonically per hop; a `dst` that revisits a node is malformed (`ERROR{tr::path::invalid}`). No dedup state exists anywhere on the path — parallel links to one peer are *different explicit addresses* (deliberate redundancy), not auto-multipath.
+- **Loop-free by construction.** `dst` is consumed monotonically per hop, so a delivery travels exactly as far as its explicit route and no further — a physical cycle is harmless per-op, not rejected (there is no revisit check). No dedup state exists anywhere on the path — parallel links to one peer are *different explicit addresses* (deliberate redundancy), not auto-multipath.
 - **The payload bytes never move on a forward hop.** Only the two route PATHs are rewritten; the rest of the frame is sent as views over the inbound bytes.
 - **A REPLY expects no reply** (RFC-0004 §B): it routes hop-by-hop along the return route without growing `src`, and terminates at the originator's reply sink.
 
