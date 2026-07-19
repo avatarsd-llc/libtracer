@@ -9,7 +9,7 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * The ceilings are per-pointer-width, with headroom over the measured value (post-split:
- * 248 B on x86-64) so routine churn passes but re-inlining a cold member (handlers,
+ * 112 B on x86-64) so routine churn passes but re-inlining a cold member (handlers,
  * history, the ACL trio) fails the build — the "silent regression" this gate exists to
  * catch. Tightening a ceiling after a diet increment is expected; RAISING one is a
  * reviewed decision (#361).
