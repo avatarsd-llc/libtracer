@@ -191,9 +191,9 @@ Two properties of this net plane worth knowing from day one:
 - **A forward hop never touches the heap.** The router reads three headers by offset,
   builds the shrunk-`dst`/grown-`src` heads on the stack, and scatter-gathers them with
   untouched views of the inbound frame — zero allocations, CI-gated.
-- **Routes cannot loop.** `dst` only ever shrinks; a `dst` that revisits a node is
-  malformed (`ERROR{tr::path::invalid}`). No dedup tables, no hop counters — loop-freedom is
-  by construction.
+- **Routes cannot loop.** `dst` only ever shrinks, one segment per hop, so a route is
+  finite and a physical cycle is harmless per-op (not rejected — there is no revisit
+  check). No dedup tables, no hop counters — loop-freedom is by construction.
 
 ## Where to go next
 

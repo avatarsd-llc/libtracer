@@ -487,7 +487,7 @@ At the **terminus** (the first `dst` segment names a local vertex):
 2. **Shed the `FWD` envelope** — the graph stores only the bare payload TLV, trailer-less at rest. No routing metadata lands in graph data.
 3. Reply with a **fresh `FWD{REPLY}`** whose `dst` is the accumulated `src` — the reply retraces the request's route hop-by-hop.
 
-Forwarding is **loop-free by construction**: `dst` is consumed monotonically per hop, and a `dst` that revisits a node is malformed (`ERROR{tr::path::invalid}`). There is no duplicate detection and no hop counter — none is needed, because every remote endpoint is addressed by an explicit source route. (`0x0D` ROUTER is a reserved, decodable wire code with no implemented mechanism.)
+Forwarding is **loop-free by construction**: `dst` is consumed monotonically per hop, so a delivery travels exactly as far as its explicit route and no further — a physical cycle is harmless per-op, not rejected. There is no revisit check, no duplicate detection, and no hop counter — none is needed, because every remote endpoint is addressed by an explicit source route. (`0x0D` ROUTER is a reserved, decodable wire code with no implemented mechanism.)
 
 ### Why this matters
 
@@ -514,6 +514,6 @@ sequenceDiagram
     LB-->>STM: FWD{ REPLY, dst=/stm }
 ```
 
-A `dst` that would route the frame back through a node it already crossed cannot be expressed by a well-formed shrinking route — a revisit is rejected with `ERROR{tr::path::invalid}`. **No cycle can persist.**
+A `dst` names its hops explicitly and is consumed one segment per hop, so even a route that re-enters a node it already crossed (`/b/c/a/b/c/…`) is finite: it simply terminates when the route is spent, delivering no further. **No cycle can persist** — loop-freedom is by construction, needing no revisit check.
 
 This shedding rule is what keeps the global topology safe for any shape — see [07-host-embedding.md](07-host-embedding.md).

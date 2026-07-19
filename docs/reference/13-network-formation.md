@@ -151,10 +151,14 @@ across framing modes. The bounds to design within:
 - **Depth is capped by the route** — a `FWD` frame's `dst` names every hop and is
   consumed monotonically, so a delivery can travel exactly as far as its explicit
   source route (segment count ≤ the PATH cap of 32).
-- **Loops cannot form** — a `dst` that revisits a node is malformed
-  (`ERROR{tr::path::invalid}`); there is no flooding, so no duplicate deliveries and no
+- **Loops cannot form** — `dst` is consumed monotonically (one segment per hop), so a
+  delivery travels exactly as far as its explicit route and no further; a physical cycle
+  is harmless per-op, not rejected. There is no revisit check — loop-freedom is
+  by-construction, not by-rejection — and no flooding, so no duplicate deliveries and no
   dedup state anywhere. Parallel links to one peer are distinct explicit addresses —
-  deliberate redundancy a consumer subscribes to knowingly.
+  deliberate redundancy a consumer subscribes to knowingly. (A recursive *topology walk*
+  is **not** protected by this: it must carry its own client-side, identity-keyed
+  visited-set — RFC-0011.)
 - **No global ordering across folds** — per-producer ordering only; cross-node
   coherence needs a coordinated trigger.
 

@@ -72,7 +72,9 @@ The protocol does not require a spanning tree, a designated root, or a routing e
 
 ## Loop safety (by construction)
 
-Explicit source routes cannot loop. An `FWD` frame carries its remaining route in `dst`, and every hop **consumes** the leading `dst` segment — `dst` shrinks monotonically, so a frame traverses at most `len(dst)` hops. A `dst` that revisits a node is malformed: the node answers `ERROR{tr::path::invalid}` and the frame stops there.
+Explicit source routes cannot loop. An `FWD` frame carries its remaining route in `dst`, and every hop **consumes** the leading `dst` segment — `dst` shrinks monotonically, so a frame traverses at most `len(dst)` hops and then terminates. A physical cycle in the topology is harmless per-op: a `dst` that spells one out (`/b/c/a/b/c/…`) routes around it exactly as many times as the route names, then stops. This is loop-freedom **by construction** — there is no revisit check, no visited-set, and no `ERROR` for a route that re-enters a node; the forwarder is stateless (see the dedup bullet below).
+
+> **This protects each delivery, not a client that walks the topology.** A recursive walk that *discovers* links and follows them (a decentralized topology render, say) gets no help from the router — it will orbit a physical cycle forever unless it carries its own visited-set, keyed by a node identity it chooses (dedup is client-side; ADR-0044 pt 3). The wire-readable node-identity surface that makes that reliable is future work (RFC-0011).
 
 Consequences:
 
