@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0010 |
 | **Title** | Owner-writable application property fields: the field descriptor table, the reserved `settings.app` namespace, and owner-defined `:schema` |
-| **Status** | **in-comment** (window opened 2026-07-17; was draft since the strawberry-fw cutover measurement 2026-07-09) |
+| **Status** | **accepted** (2026-07-19 — maintainer ruling, window waived; in-comment from 2026-07-17, draft since 2026-07-09) |
 | **Author(s)** | strawberry-fw integration (drafted for maintainer review) |
 | **Created** | 2026-07-09 |
 | **Comment window closes** | 2026-07-31 (≥ 14 days per GOVERNANCE.md §Spec changes) |

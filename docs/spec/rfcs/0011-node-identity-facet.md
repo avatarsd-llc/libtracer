@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0011 |
 | **Title** | Node identity facet: a wire-readable, pre-auth `:identity` field serving the ADR-0045 ed25519 TOFU public key at every vertex |
-| **Status** | **in-comment** |
+| **Status** | **accepted** (2026-07-19 — maintainer ruling, window waived) |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-07-17 |
 | **Comment window closes** | 2026-07-31 (≥ 14 days after opening) |
