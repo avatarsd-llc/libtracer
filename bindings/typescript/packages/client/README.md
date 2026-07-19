@@ -1,6 +1,7 @@
 # @avatarsd-llc/libtracer-client (EXPERIMENTAL)
 
-The libtracer **client SDK** the strawberry web-UI builds against
+The libtracer **client SDK** that the web-UI of the originating production
+firmware (an ESP32-C6 smart-agriculture node) builds against
 ([#56](https://github.com/avatarsd-llc/libtracer/issues/56),
 [ADR-0034](../../../../docs/adr/0034-typescript-client-sdk.md) /
 [ADR-0035](../../../../docs/adr/0035-implementing-rfc-0004-remote-operation-addressing.md)).

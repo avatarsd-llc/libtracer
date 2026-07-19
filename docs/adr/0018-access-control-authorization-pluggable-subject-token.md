@@ -16,7 +16,7 @@ The protocol reserves an `ACL` type code (`0x0A`) and a `PermissionDenied` statu
 
 ## Considered options
 
-- **Capabilities-first (signed tokens as the v1 model).** Rejected for v1: requires signing/verification crypto, too heavy for a Cortex-M0, and unnecessary for the trusted-fleet strawberry use case. Re-framed as a *stronger token* under the same ACL model, deferred to a security module.
+- **Capabilities-first (signed tokens as the v1 model).** Rejected for v1: requires signing/verification crypto, too heavy for a Cortex-M0, and unnecessary for the trusted-fleet use case of the originating production firmware (an ESP32-C6 smart-agriculture node). Re-framed as a *stronger token* under the same ACL model, deferred to a security module.
 - **Hardcode `origin_peer_id` as the subject.** Rejected: it forecloses the evolution to PKI; the subject must be a *token abstraction* so the identity layer can strengthen without touching authorization.
 - **Put authentication in the protocol core.** Rejected: authenticity is a transport/security-module concern (the protocol already takes no adversarial-integrity stance — CRC is a bit-flip check, not a MAC). Conflating authn into L4 would bloat the required modules and the MCU footprint.
 - **No access control (rely on network isolation).** Rejected: in-band creation ([ADR-0017](0017-in-band-vertex-creation-controller-orchestration.md)) makes "who may create a controller / subscribe a sensor" a real authorization question; an open creation field is a foot-gun.

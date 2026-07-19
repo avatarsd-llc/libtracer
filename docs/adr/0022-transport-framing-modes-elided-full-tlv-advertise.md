@@ -2,7 +2,7 @@
 
 Status: accepted
 
-"First-ready-to-strawberry" requires a **zero-overhead swap over the existing CAN and WebSocket buses**: drop libtracer in as the io_layer without regressing latency or bandwidth. The flagship — **100 ksps over CAN** — makes the constraint sharp: a 9-byte sample cannot afford a 4-byte TLV header (+44% on a bandwidth-bound bus). Yet load-bearing claim 4 says **bridges are core and transport choice is invisible** — the router must stay uniform. This ADR reconciles the two by making *framing* a transport-adapter concern with three coexisting modes.
+"First-ready-to-origin-firmware" — the milestone of dropping into the originating production firmware (an ESP32-C6 smart-agriculture node) — requires a **zero-overhead swap over the existing CAN and WebSocket buses**: drop libtracer in as the io_layer without regressing latency or bandwidth. The flagship — **100 ksps over CAN** — makes the constraint sharp: a 9-byte sample cannot afford a 4-byte TLV header (+44% on a bandwidth-bound bus). Yet load-bearing claim 4 says **bridges are core and transport choice is invisible** — the router must stay uniform. This ADR reconciles the two by making *framing* a transport-adapter concern with three coexisting modes.
 
 ## Decision
 
@@ -20,14 +20,14 @@ The modes **coexist**: **per-deployment** (an elided CAN leaf bridged to a full-
 
 ## Considered options
 
-- **Full-TLV on every transport.** Rejected: the +4-byte header makes 100 ksps-over-CAN infeasible and is not a *zero-overhead swap* of strawberry's existing frames — it re-frames them.
+- **Full-TLV on every transport.** Rejected: the +4-byte header makes 100 ksps-over-CAN infeasible and is not a *zero-overhead swap* of the origin firmware's existing frames — it re-frames them.
 - **Header-elided on every transport.** Rejected: loses self-description — no discovery, no dynamic paths, no in-band control surface. "Full caps" needs full-TLV somewhere.
 - **Put the identity↔path map in the bridge.** Rejected: makes the bridge stateful and transport-aware, directly violating claim 4. The map belongs in the adapter, which uniforms addressing *before* the bridge sees a frame.
 - **A separate, bespoke "compact" wire format.** Rejected: advertise+id-match reuses the existing PATH/manifest machinery and unifies single-value and rope cases; a second format would fork the protocol.
 
 ## Consequences
 
-- Strawberry's existing CAN/WS frames are swapped **without re-framing or added overhead** (header-elided); capable links keep **full caps** (full-TLV); both interoperate through the stateless bridge.
+- The origin firmware's existing CAN/WS frames are swapped **without re-framing or added overhead** (header-elided); capable links keep **full caps** (full-TLV); both interoperate through the stateless bridge.
 - The router/bridge stays **stateless and transport-agnostic** (claim 4 preserved); framing-mode + the `identity↔path` map are **transport-adapter** state, established statically (`discovery_static`) or dynamically (an advertise frame).
 - **One mechanism (advertise+id-match)** scales from a 9-byte elided value to a dynamic GB rope group; it **composes with the M6 view-delivering seam** for end-to-end zero-copy.
 - New per-transport responsibilities: a framing-mode selection and an `identity↔path` map; reference 10 (transports) and the deployment-profile doc record which transports default to which mode.

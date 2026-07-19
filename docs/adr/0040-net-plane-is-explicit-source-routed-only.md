@@ -32,7 +32,7 @@ There is also a code-vs-spec gap: `bridge_t` wraps a **bare data TLV**, whereas 
 4. **No loss of loop safety.** FWD's `dst`-monotonicity + `INVALID_PATH`-on-revisit is the loop bound for the source-routed plane, already in the code; deleting `bridge_t` removes no protection FWD relies on.
 5. **No loss of provenance.** RFC-0003's wildcard-provenance need is already served by RFC-0004 §B: when `dst` empties, the accumulated `src` *is* the complete reverse route, so the consumer receives the full source route inherently — no ROUTER PATH-child needed.
 
-This is a fresh-project foundational commitment: **explicit-source-routed-only, no flooding, no auto-multipath.** Every deployment in scope (strawberry: web-UI ↔ robot ↔ CAN, with explicit redundant links) is served by it, and the net plane becomes stateless and dedup-free.
+This is a fresh-project foundational commitment: **explicit-source-routed-only, no flooding, no auto-multipath.** Every deployment in scope (the originating production firmware — an ESP32-C6 smart-agriculture node: web-UI ↔ robot ↔ CAN, with explicit redundant links) is served by it, and the net plane becomes stateless and dedup-free.
 
 ## Considered options
 

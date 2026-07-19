@@ -5,8 +5,8 @@ IP, wired into a **cycle-containing** topology **the real way** — then routed 
 
 This is the first place libtracer is exercised as a *network* rather than as a pair of
 nodes. It exists because the d2d-hardening milestone (grill 2026-07-17) put one thing
-first: **prove decentralized graph formation on libtracer alone, before strawberry-fw
-wires device-to-device.**
+first: **prove decentralized graph formation on libtracer alone, before the originating
+production firmware (an ESP32-C6 smart-agriculture node) wires device-to-device.**
 
 ## The topology
 

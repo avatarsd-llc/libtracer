@@ -9,7 +9,8 @@
  * This is the on-silicon build/smoke target for the integrations/esp-idf
  * component. It links the libtracer reference core (L0/L1 substrate, L2/L3 wire
  * codec, L4 graph runtime) into a real ESP-IDF app and drives the in-process
- * mirror surface that strawberry-fw migration Phase 1 (ADR-0071) needs:
+ * mirror surface that migration Phase 1 (ADR-0071) of the originating
+ * production firmware (an ESP32-C6 smart-agriculture node) needs:
  *
  *   register a path  ->  write a value  ->  read it back  ->  await the next write
  *

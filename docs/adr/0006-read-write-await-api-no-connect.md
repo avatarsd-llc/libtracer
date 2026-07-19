@@ -10,5 +10,5 @@ The entire data API is **three calls — `read`, `write`, `await`** — plus ref
 
 ## Consequences
 
-- The pre-spec C++ in `core/` ships the exact inverse (`connect`/`disconnect` on `point_i`, and no `await` anywhere) and is discarded under [the rebuild decision](0001-extract-reference-implementation-from-strawberry-fw.md).
+- The pre-spec C++ in `core/` ships the exact inverse (`connect`/`disconnect` on `point_i`, and no `await` anywhere) and is discarded under [the rebuild decision](0001-extraction-from-production-firmware.md).
 - Bindings and integrations target `read`/`write`/`await` + field-write; `await`'s placement (per-vertex vs free `tracer_await()`) is the one open detail for the rewrite.

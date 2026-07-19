@@ -1,4 +1,4 @@
-# 1. Extract the reference implementation from strawberry-fw's `io_layer`
+# 1. Extract the reference implementation from the origin firmware's `io_layer`
 
 - **Date:** 2026-06-24
 - **Status:** Accepted
@@ -20,13 +20,13 @@ no-exceptions commitment). 47 modules are catalogued in
 [docs/reference/10-module-catalog.md](../reference/10-module-catalog.md); **zero** are
 implemented. The greenfield 8-week roadmap assumes building L0–L4 from scratch.
 
-In parallel, **`avatarsd-llc/strawberry-fw`** (the Strawberry 1170 / Gorshok-v4 grow
-controller, ESP-IDF, ~111 K LOC first-party, 70 ADRs) has — independently and without
+In parallel, **the originating production firmware** (an ESP32-C6 smart-agriculture node;
+ESP-IDF, ~111 K LOC first-party, 70 ADRs) has — independently and without
 reference to libtracer — **already built and shipped most of libtracer's core on real
 hardware**. A read-only architecture analysis of both repos (2026-06-24) found this
 correspondence:
 
-| libtracer concept | strawberry-fw equivalent | status |
+| libtracer concept | origin-firmware equivalent | status |
 | --- | --- | --- |
 | Vertex (addressable point) | `io_layer` endpoint + `io_descriptor_t` | shipping |
 | Path (canonical identity) | dotted-path string id → `io_handle_t` (16-bit generational) | shipping (string, not PATH-TLV) |
@@ -35,31 +35,31 @@ correspondence:
 | Subscription edge | `io_subscribe_*`, `IO_NOTIFY_ON_CHANGE` | shipping |
 | Bridge / ROUTER | `can_io_bridge` (TX/RX mirror over CAN) | shipping on CAN |
 | Discovery / ANNOUNCE | `can_sys` ANNOUNCE catalog; `mb`/`ow` scanners | shipping |
-| Transport-neutral egress | `egress_scheduler` (strawberry ADR-0056) | shipping (WS) |
+| Transport-neutral egress | `egress_scheduler` (origin-firmware ADR-0056) | shipping (WS) |
 | L0 memory substrate | static `.bss` + `heap_governor` + `osal_ring` | shipping |
 | Multi-target platform | `components/platform/` (ESP32 / STM32H563 / POSIX) | shipping |
 | **L1 zero-copy views** | — `io_sample_t` **copies** scalars/blobs | **gap** |
 | **L2 unified wire format** | per-transport: CAN scalar **or** protobuf **or** direct | **gap** |
 | Static path handles in `.rodata` | runtime string→handle resolution | partial |
 
-strawberry-fw's own ADRs name the same ideas libtracer's reference docs do: ADR-0006
+The origin firmware's own ADRs name the same ideas libtracer's reference docs do: ADR-0006
 ("the path is the identity"), ADR-0057 ("a unified typed Value seam — the wire carries
 type + ts"), ADR-0019/0056 (the CAN domain bus and a transport-neutral egress scheduler),
-ADR-0020 (the ESP32/STM32/POSIX platform split). Critically, strawberry is **already a
+ADR-0020 (the ESP32/STM32/POSIX platform split). Critically, the origin firmware is **already a
 decentralised graph across two MCUs**: an ESP32 owns the logic and the `io_layer`, an STM32
 satellite is a real-time I/O gateway, and `can_io_bridge` mirrors endpoints between them over
 a 29-bit CAN domain bus — i.e. libtracer's bridge model, in production.
 
-What strawberry does **not** have is the thing libtracer specifies: **one transport-agnostic
+What the origin firmware does **not** have is the thing libtracer specifies: **one transport-agnostic
 wire format**. Today its horizontal links (CAN, Modbus RTU, OneWire) and its vertical link
 (protobuf-over-WebSocket to cloud/CLI) are three separate codecs bolted onto one
 already-graph-shaped core (`io_layer`).
 
 ## Decision
 
-**Invert the build strategy. Extract libtracer's reference implementation from strawberry-fw's
+**Invert the build strategy. Extract libtracer's reference implementation from the origin firmware's
 proven `io_layer` + `can_io_bridge`, instead of authoring it greenfield — and use the
-extraction to collapse strawberry's three transport codecs into a single graph wire format.**
+extraction to collapse the origin firmware's three transport codecs into a single graph wire format.**
 Freeze wire format v1 from code that runs on hardware, not from the spec in the abstract.
 
 Concretely, four gaps close the distance between the shipping `io_layer` and libtracer:
@@ -76,14 +76,15 @@ Concretely, four gaps close the distance between the shipping `io_layer` and lib
 
 Sequenced ship-first, each phase with a checkpoint:
 
-- **Phase 0 — Workspace.** Side-by-side full-history clones of both repos under
-  `~/usr-prj/strawberry-tracer/`.
+- **Phase 0 — Workspace.** Side-by-side full-history clones of both repos under a local
+  extraction workspace.
 - **Phase 1 — Reconcile code to spec.** Make `core/` match `docs/spec/v1.md` (trailer CRC-32C,
   correct `opt` bits, retire `LIST`, no-RTTI/no-exceptions), compile, pass a single-TLV host
   round-trip. *Checkpoint: `core/` builds + round-trips.*
 - **Phase 2 — Host_test adapter spike.** libtracer TLV as an alternative encoding for `io_layer`
-  values, behind strawberry's existing transport seam; **byte-exact** round-trip via the
-  `components/proto/host_test/contract_lock` pattern. *Checkpoint: golden-vector green on POSIX.*
+  values, behind the origin firmware's existing transport seam; **byte-exact** round-trip via the
+  origin firmware's host-test contract-lock (golden-vector) pattern. *Checkpoint: golden-vector
+  green on POSIX.*
 - **Phase 3 — Collapse `can_io_bridge` onto libtracer.** CAN TX/RX mirroring as
   `PATH`+`VALUE`+`TIME` over `can_bus`; ANNOUNCE → libtracer discovery. Benchmark on real CAN
   (ESP32↔STM32): latency, bytes/frame, throughput. *Checkpoint (strategic gate): libtracer ≥
@@ -102,14 +103,14 @@ Sequenced ship-first, each phase with a checkpoint:
   protocol chicken-and-egg problem (a protocol with zero implementers has near-zero value).
 - The wire format is frozen from code proven on hardware, the central commitment of
   the original "vision and reality check" design plan (removed; see git history).
-- strawberry gains a unified "horizontal + vertical → graph" comms substrate, retiring two
-  bespoke codecs.
+- The origin firmware gains a unified "horizontal + vertical → graph" comms substrate, retiring
+  two bespoke codecs.
 - The static-graph / static-polymorphism thesis is validated (or falsified) on a real CAN link
   **before** broad investment — Phase 3 is an explicit go/no-go gate.
 
 **Negative / risks**
-- strawberry-fw becomes the de-facto spec author → bus-factor and single-product bias; the spec
-  must stay general enough for a genuine second implementer (the conformance gate in Phase 4).
+- The origin firmware becomes the de-facto spec author → bus-factor and single-product bias; the
+  spec must stay general enough for a genuine second implementer (the conformance gate in Phase 4).
 - Refactoring a shipping firmware's comms core is invasive. Mitigation: all work lands behind the
   existing `components/platform/transport` seam and is gated on the real-CAN benchmark; nothing
   ships until it matches the current scheme.
@@ -119,7 +120,7 @@ Sequenced ship-first, each phase with a checkpoint:
 **Relationship to existing docs**
 - Complements the "reality check" in the original design plans (removed; see git history).
 - Supersedes the *greenfield* framing of the original 8-week roadmap plan (removed; see git
-  history): the L0–L4 work is sourced from strawberry-fw's `io_layer` rather than written from
-  scratch.
+  history): the L0–L4 work is sourced from the origin firmware's `io_layer` rather than written
+  from scratch.
 - This is the **first ADR** in the repo; it establishes `docs/adr/` per
   [CLAUDE.md](../../CLAUDE.md).

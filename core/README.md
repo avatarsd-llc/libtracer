@@ -4,7 +4,7 @@ The reference implementation of the libtracer protocol. Targets ESP32, STM32, an
 
 ## Status: protocol-v1 rebuild in progress — M1 (codec) + M2 (substrate) + M3 (L4 graph) + M4 (loopback) + M5 (UDP transport) + M6 (TCP stream transport) landed
 
-> **2026-06-24.** The original headers under `include/libtracer/` were a pre-spec snapshot extracted from strawberry-fw (see [ADR-0001](../docs/adr/0001-extract-reference-implementation-from-strawberry-fw.md)). They did not compile and encoded the retired v0.0 wire model (in-header XOR-16 CRC, no `PL` bit, fixed `uint32` length, `connect`/`disconnect` API, NUL-terminated NAMEs). Per the protocol-v1 consistency consolidation they were **deleted, to be rebuilt fresh against the spec** rather than patched.
+> **2026-06-24.** The original headers under `include/libtracer/` were a pre-spec snapshot extracted from the originating production firmware, an ESP32-C6 smart-agriculture node (see [ADR-0001](../docs/adr/0001-extraction-from-production-firmware.md)). They did not compile and encoded the retired v0.0 wire model (in-header XOR-16 CRC, no `PL` bit, fixed `uint32` length, `connect`/`disconnect` API, NUL-terminated NAMEs). Per the protocol-v1 consistency consolidation they were **deleted, to be rebuilt fresh against the spec** rather than patched.
 
 The rebuild targets the protocol-v1 wire format and API as fixed in the ADRs:
 

@@ -29,14 +29,14 @@ Rung 0  +  one transport  +  its paired L0/L1 module
 
 The leaf publishes a few paths; a host subscribes. Framing is **header-elided** (the CAN ID *is* the path); ≤ 25 KB on a Cortex-M0.
 
-## Rung 2 — First-ready-to-strawberry (P2)
+## Rung 2 — First-ready-to-origin-firmware (P2)
 
-The milestone: **drop-in replacement for the strawberry-fw io_layer over its existing CAN + WebSocket buses, zero overhead.**
+The milestone: **drop-in replacement for the `io_layer` of the originating production firmware (an ESP32-C6 smart-agriculture node) over its existing CAN + WebSocket buses, zero overhead.**
 
 ```
 Rung 0  +  forwarder (P2)
-  transport_can  (header-elided)   ── strawberry's remote boards / sensors
-  transport_ws   (full-TLV)        ── strawberry's web-ui
+  transport_can  (header-elided)   ── the origin firmware's remote boards / sensors
+  transport_ws   (full-TLV)        ── the origin firmware's web-ui
   mem_borrowed (live IO values) · can_reassembly · mem_pool_class
   dispatcher: per-vertex delivery policy (value-agnostic delivery_mode ✓: UNCONDITIONAL/IF_NEWER/EXPLICIT — RFC-0008)
   schema_registry: :schema POINT (dtype/unit/range, the io_descriptor)
@@ -97,7 +97,7 @@ The differentiator: **ROS 2 over CAN/UART (header-elided)** — ROS on a 16 KB M
 | --- | --- | --- | --- |
 | 0 in-process | P0 | required only | — |
 | 1 leaf | P1 | one transport + paired L0/L1 | elided |
-| 2 **strawberry** | P2 | `transport_can`, `transport_ws`, `fwd_router`, dispatcher QoS, `:schema` | elided + full-TLV |
+| 2 **origin firmware** | P2 | `transport_can`, `transport_ws`, `fwd_router`, dispatcher QoS, `:schema` | elided + full-TLV |
 | 3 RTSP | P2+ | `rtsp` source, `mem_dma_buffer`, rope groups | + advertise |
 | 4 ROS | P3 | `rmw_tracer`, `discovery_mdns`, `executor_c` | + discovery |
 | 5 flagship | P3 | `mem_cuda` (+ `transport_rdma` for GPUDirect) | elided + advertise |

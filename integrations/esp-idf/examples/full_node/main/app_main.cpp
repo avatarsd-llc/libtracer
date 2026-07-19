@@ -1,15 +1,16 @@
 /**
  * @file
  * @brief full_node — the libtracer FULL-NODE profile on ESP-IDF, in the
- *        strawberry shape.
+ *        origin-firmware shape.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * full_node — the libtracer FULL-NODE profile on ESP-IDF, in the strawberry
- * shape (strawberry-fw doc/libtracer-migration.md Phase 2 / issue #183):
+ * full_node — the libtracer FULL-NODE profile on ESP-IDF, in the shape of the
+ * originating production firmware, an ESP32-C6 smart-agriculture node (its
+ * libtracer-migration plan Phase 2 / issue #183):
  *
- *   DEVICE node (what a strawberry board runs)
+ *   DEVICE node (what an origin-firmware board runs)
  *     - ONE static slab feeding both memory seams (ADR-0039 §one-slab):
  *       a `pool_t` region for RX segments (ADR-0042 owning delivery — every
  *       inbound datagram lands in a pool slot, exhaustion is backpressure) and
@@ -203,7 +204,7 @@ std::uint32_t reply_value_u32(const tr::wire::tlv_t& f) {
     return 0;
 }
 
-/** @name the device node (the strawberry shape) */
+/** @name the device node (the origin-firmware shape) */
 
 /**
  * @brief ADR-0039 one-slab recipe, concretely: ONE static slab, partitioned
