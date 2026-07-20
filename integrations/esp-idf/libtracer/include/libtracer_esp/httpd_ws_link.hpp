@@ -43,7 +43,10 @@
  *     interleave — the payload is heap-copied into the work item and freed after
  *     the send. send() may be called from any task (subscription pushes on the
  *     io/event threads, a reply on the httpd task itself); all funnel through the
- *     same queue.
+ *     same queue. TX failure is never silent: a failed socket send closes the
+ *     session (a peer that missed a frame is broken-by-contract — closing lets it
+ *     reconnect into clean state), and repeated enqueue drops (queue full / OOM)
+ *     close it after kMaxConsecutiveTxDrops in a row.
  *
  * NO fixed-size static buffers: peer slots and the per-frame payload copies are
  * heap; the slot vector is grown on demand and RECYCLED in place (never shrunk),
@@ -180,6 +183,15 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     void reclaim_slot(session_t* slot);
     void deliver(std::string_view peer, std::span<const std::byte> frame);
     void queue_send(int fd, std::span<const std::byte> frame);  // heap-copy + httpd_queue_work
+
+    /**
+     * @brief Per-session TX-enqueue accounting (takes @ref peers_m_ — callers must
+     *        not hold it): a successful enqueue resets the session's consecutive-drop
+     *        counter; a drop (work-item OOM or a refused httpd_queue_work) bumps it
+     *        and, once kMaxConsecutiveTxDrops is reached, triggers the session's
+     *        close so the peer reconnects instead of missing frames silently.
+     */
+    void note_tx_result(int fd, bool queued, std::size_t bytes);
 
     httpd_handle_t handle_ = nullptr;  // nullptr => the instance never started
     std::uint16_t port_;
