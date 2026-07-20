@@ -393,12 +393,12 @@ POINT (PL=1) {
 }
 ```
 
-Subscribers and children appear as direct children of POINT, identified by their type code. There is no intermediate "subscribers list" or "children list" wrapper — the type byte of each child tells its role. The optional `VALUE` child ([RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md)) carries the vertex's own value, making a POINT tree a value-bearing snapshot of a subtree — the read-side dual of the branch write below.
+Subscribers and children appear as direct children of POINT, identified by their type code. There is no intermediate "subscribers list" or "children list" wrapper — the type byte of each child tells its role. The optional `VALUE` child ([RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md)) carries the vertex's own value, making a POINT tree a value-bearing view of a subtree — the read-side dual of the branch write below. Since [RFC-0016](../spec/rfcs/0016-composed-branch-read.md), that dual is a served operation: a plain read of a vertex with ≥ 1 registered child returns exactly this shape — the **composed branch read**, a view composed over the live last-known values (per-node stored TLVs verbatim, READ-denied subtrees pruned, a names-only topology tree when the branch is value-free).
 
 ### Where it appears
 
-- Returned by `read("/some/parent")` to enumerate children.
-- **Written to a vertex as a branch write** (below) — the write-side dual of the snapshot.
+- Returned by `read("/some/parent")` — the **composed branch read** of the parent's registered subtree ([RFC-0016](../spec/rfcs/0016-composed-branch-read.md)); names-only member enumeration is `read(<parent>:children[])`.
+- **Written to a vertex as a branch write** (below) — the write-side dual of the composed branch read.
 - Returned by `read(<vertex>:schema)` — the **two-part schema read** (below).
 - Used by the future recorder/replay module to snapshot vertex state.
 - Used by discovery modules announcing exported vertex trees.
