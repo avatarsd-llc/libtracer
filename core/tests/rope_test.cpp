@@ -144,6 +144,17 @@ void test_nothrow_growth() {
     check(!imp.try_reserve(impossible), "try_reserve(impossible count) returns false (no abort)");
     check(imp.link_count() == 0, "a failed try_reserve leaves the rope untouched");
 
+    // Perf fast path: a reservation that fits the inline small-buffer storage takes NO
+    // heap allocation — the hot small-reply (assemble delivery) path stays zero-alloc.
+    rope_t small;
+    check(small.try_reserve(2), "try_reserve(2) on a fresh rope returns true");
+    check(small.link_count() == 0 && links_inline(small),
+          "try_reserve(2) leaves the rope INLINE — no heap spill (zero-alloc fast path)");
+    small.append(byte_view(buf[0]));
+    small.append(byte_view(buf[1]));
+    check(small.link_count() == 2 && links_inline(small),
+          "two appends after the inline try_reserve stay INLINE (still no allocation)");
+
     // A normal reservation: the reserved appends never reallocate the heap chain.
     rope_t r;
     check(r.try_reserve(buf.size()), "try_reserve(normal count) returns true");
