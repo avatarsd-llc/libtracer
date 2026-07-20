@@ -58,6 +58,20 @@ constexpr std::size_t kMaxFrameBytes = 32768;
  *         cleanly in the handshake handler rather than held in the SYN backlog. */
 constexpr std::size_t kInternalSockSlack = 3;
 
+/**
+ * @brief Consecutive TX-enqueue drops that mark a session broken (then close it).
+ *
+ * A single failed enqueue (httpd's control queue momentarily full, or the work-item
+ * copy failing to allocate) is transient backpressure — dropping that one frame is
+ * the lean response, and the next successful enqueue resets the count. But a session
+ * whose enqueues keep failing with no success in between is not riding out a burst:
+ * its peer is silently missing frames while the socket looks open. Three in a row
+ * distinguishes the two — one drop is noise, two can straddle a burst, three
+ * consecutive means the drain isn't keeping up at all. This is a brokenness
+ * detector, not a tunable, so it is a named constant and NOT a config knob.
+ */
+constexpr std::uint8_t kMaxConsecutiveTxDrops = 3;
+
 /** @brief `<ip>:<port>` of the far side of @p fd — the peer name (bus tag / census),
  *         byte-compatible with transport_ws_server's naming. Falls back to `fd<n>`. */
 [[nodiscard]] std::string peer_name(int fd) {
@@ -84,12 +98,13 @@ constexpr std::size_t kInternalSockSlack = 3;
  * task (RX reassembly). `owner`/`endpoint` are set once at creation.
  */
 struct httpd_ws_link_t::session_t {
-    httpd_ws_link_t* owner = nullptr;  /**< @brief Owning link (set once, for reclaim). */
-    int fd = -1;                       /**< @brief Peer socket; -1 => free slot. */
-    bool open = false;                 /**< @brief True between handshake and close. */
-    std::string name;                  /**< @brief `<ip>:<port>` of the peer. */
-    std::vector<std::byte> asm_buf;    /**< @brief RFC 6455 fragment reassembly. */
-    peer_endpoint_t endpoint;          /**< @brief The directed facade `peer_link` returns. */
+    httpd_ws_link_t* owner = nullptr; /**< @brief Owning link (set once, for reclaim). */
+    int fd = -1;                      /**< @brief Peer socket; -1 => free slot. */
+    bool open = false;                /**< @brief True between handshake and close. */
+    std::string name;                 /**< @brief `<ip>:<port>` of the peer. */
+    std::vector<std::byte> asm_buf;   /**< @brief RFC 6455 fragment reassembly. */
+    std::uint8_t tx_drops = 0;        /**< @brief Consecutive TX-enqueue drops (peers_m_). */
+    peer_endpoint_t endpoint;         /**< @brief The directed facade `peer_link` returns. */
 };
 
 namespace {
@@ -247,7 +262,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     // Pass 1 (max_len 0): read the header only — fills frame.len / frame.type. The
     // payload is NOT consumed off the socket here; pass 2 below does that.
     esp_err_t err = httpd_ws_recv_frame(req, &frame, 0);
-    if (err != ESP_OK) return err;  // socket error => httpd closes the session
+    if (err != ESP_OK) return err;                    // socket error => httpd closes the session
     if (frame.len > kMaxFrameBytes) return ESP_FAIL;  // abusive frame => drop the peer
 
     // Pass 2: ALWAYS drain the payload — even a frame type we ignore must be consumed,
@@ -261,8 +276,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     }
     // Only data frames carry a TLV (control frames are httpd's — handle_ws_control_frames
     // is off); a stray TEXT/PONG is now drained and ignored.
-    if (frame.type != HTTPD_WS_TYPE_BINARY && frame.type != HTTPD_WS_TYPE_CONTINUE)
-        return ESP_OK;
+    if (frame.type != HTTPD_WS_TYPE_BINARY && frame.type != HTTPD_WS_TYPE_CONTINUE) return ESP_OK;
 
     const int fd = httpd_req_to_sockfd(req);
     // Resolve the slot (peer name for the bus tag + the reassembly buffer). Copy the
@@ -278,19 +292,26 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     {
         const std::lock_guard lock(peers_m_);
         for (const auto& s : slots_)
-            if (s->open && s->fd == fd) { slot = s.get(); break; }
+            if (s->open && s->fd == fd) {
+                slot = s.get();
+                break;
+            }
         if (slot == nullptr) {
             // Admission cap: refuse cleanly (ESP_FAIL => httpd closes the socket).
             if (max_peers_ != 0) {
                 std::size_t open_n = 0;
-                for (const auto& s : slots_) if (s->open) ++open_n;
+                for (const auto& s : slots_)
+                    if (s->open) ++open_n;
                 if (open_n >= max_peers_) {
                     ESP_LOGW(kTag, "peer refused: at max_peers=%u", (unsigned)max_peers_);
                     return ESP_FAIL;
                 }
             }
             for (const auto& s : slots_)
-                if (s->fd < 0) { slot = s.get(); break; }  // reuse a departed slot
+                if (s->fd < 0) {
+                    slot = s.get();
+                    break;
+                }  // reuse a departed slot
             if (slot == nullptr) {
                 auto s = std::make_unique<session_t>();
                 slot = s.get();
@@ -354,6 +375,7 @@ void httpd_ws_link_t::reclaim_slot(session_t* slot) {
         slot->name.clear();
         slot->asm_buf.clear();
         slot->asm_buf.shrink_to_fit();
+        slot->tx_drops = 0;
     }
     // Departure seam (RFC-0009 §D extended to peer departure): a browser tab that
     // hung up leaves its subscriber edges behind — fire the routing plane's eviction
@@ -361,7 +383,10 @@ void httpd_ws_link_t::reclaim_slot(session_t* slot) {
     // released (the notifier re-enters router → graph locks). Only a session that
     // completed its handshake (open) can have flowed subscribes. Suppressed while the
     // link itself is being torn down (stopping_): the routing plane may already be
-    // gone, and whole-node teardown needs no per-peer eviction.
+    // gone, and whole-node teardown needs no per-peer eviction. A TX-failure-triggered
+    // close (tx_work / note_tx_result) arrives here through the same free_ctx path, so
+    // the departed peer's subscriber edges are evicted too; was_open (flipped under
+    // peers_m_ on the first pass) keeps the notifier single-fire per session.
     if (was_open && !departed.empty() && !stopping_.load(std::memory_order_relaxed)) {
         if (peer_named_)
             notify_peer_down(departed);
@@ -389,9 +414,43 @@ void httpd_ws_link_t::queue_send(int fd, std::span<const std::byte> frame) {
     // by the time the httpd task runs tx_work. Heap, never a fixed static buffer.
     auto* const work = new (std::nothrow)
         tx_work_t{handle_, fd, std::vector<std::byte>(frame.begin(), frame.end())};
-    if (work == nullptr) return;  // OOM: drop this frame (backpressure)
-    if (httpd_queue_work(handle_, &httpd_ws_link_t::tx_work, work) != ESP_OK)
-        delete work;  // could not enqueue — no leak
+    bool queued = false;
+    if (work != nullptr) {  // work == nullptr => OOM: drop this frame (backpressure)
+        queued = httpd_queue_work(handle_, &httpd_ws_link_t::tx_work, work) == ESP_OK;
+        if (!queued) delete work;  // could not enqueue — no leak
+    }
+    // Either drop kind is counted; kMaxConsecutiveTxDrops in a row closes the session.
+    note_tx_result(fd, queued, frame.size());
+}
+
+void httpd_ws_link_t::note_tx_result(int fd, bool queued, std::size_t bytes) {
+    bool close_now = false;
+    std::string peer;
+    {
+        const std::lock_guard lock(peers_m_);
+        session_t* slot = nullptr;
+        for (const auto& s : slots_)
+            if (s->open && s->fd == fd) {
+                slot = s.get();
+                break;
+            }
+        if (slot == nullptr) return;  // peer departed between the fd snapshot and now
+        if (queued) {
+            slot->tx_drops = 0;  // a drop streak is CONSECUTIVE — any success resets it
+            return;
+        }
+        if (slot->tx_drops < kMaxConsecutiveTxDrops) ++slot->tx_drops;
+        close_now = slot->tx_drops >= kMaxConsecutiveTxDrops;
+        peer = slot->name;
+    }
+    ESP_LOGW(kTag, "tx enqueue drop (queue full / OOM) peer=%s fd=%d len=%u%s", peer.c_str(), fd,
+             (unsigned)bytes, close_now ? " - closing session" : "");
+    // At the streak cap the session is broken, not bursty: close it so the peer's
+    // onclose fires and it reconnects, instead of silently missing frames forever.
+    // trigger_close rides the same control socket a full queue starves, so it can
+    // fail here too — the streak stays at the cap and the next drop re-triggers.
+    if (close_now && httpd_sess_trigger_close(handle_, fd) != ESP_OK)
+        ESP_LOGW(kTag, "trigger_close failed fd=%d (will retry on next drop)", fd);
 }
 
 void httpd_ws_link_t::tx_work(void* arg) {
@@ -405,16 +464,35 @@ void httpd_ws_link_t::tx_work(void* arg) {
         f.type = HTTPD_WS_TYPE_BINARY;
         f.payload = reinterpret_cast<std::uint8_t*>(work->payload.data());
         f.len = work->payload.size();
-        (void)httpd_ws_send_frame_async(work->handle, work->fd, &f);
+        const esp_err_t err = httpd_ws_send_frame_async(work->handle, work->fd, &f);
+        if (err != ESP_OK) {
+            // A failed send is broken-by-contract: the peer missed a frame it can never
+            // learn about, so the stream is no longer trustworthy (seen on-device: a
+            // fragmented ~12.7 KB reply timing out the 5 s SO_SNDTIMEO and leaving the
+            // tab deaf on an open socket). Close the session — teardown flows through
+            // free_ctx (on_session_closed -> reclaim_slot), so the peer slot is
+            // reclaimed AND the departure notifier evicts the session's subscriber
+            // edges; the client's onclose fires and it reconnects into clean state.
+            ESP_LOGW(kTag, "ws send failed (%s) fd=%d len=%u - closing session",
+                     esp_err_to_name(err), work->fd, (unsigned)work->payload.size());
+            if (httpd_sess_trigger_close(work->handle, work->fd) != ESP_OK)
+                ESP_LOGW(kTag, "trigger_close failed fd=%d", work->fd);
+        }
     }
     delete work;
 }
 
 void httpd_ws_link_t::send(std::span<const std::byte> frame) {
-    // Broadcast: one queued send per open peer (the flat point-to-point surface).
-    const std::lock_guard lock(peers_m_);
-    for (const auto& s : slots_)
-        if (s->open) queue_send(s->fd, frame);
+    // Broadcast: snapshot the open fds under the lock, then enqueue unlocked — the
+    // per-session drop accounting inside queue_send takes peers_m_ itself.
+    std::vector<int> fds;
+    {
+        const std::lock_guard lock(peers_m_);
+        fds.reserve(slots_.size());
+        for (const auto& s : slots_)
+            if (s->open) fds.push_back(s->fd);
+    }
+    for (const int fd : fds) queue_send(fd, frame);
 }
 
 void httpd_ws_link_t::peer_endpoint_t::send(std::span<const std::byte> frame) {
