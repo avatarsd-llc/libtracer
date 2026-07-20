@@ -234,6 +234,12 @@ class graph_t {
      * (#81): empty for a local API call (the default — zero churn), the inbound link NAME
      * when the FWD resolver drives the op. With no subject resolver installed it costs one
      * null check.
+     *
+     * A vertex with ≥ 1 registered child serves the COMPOSED BRANCH READ instead — the
+     * folded POINT tree of @ref read_subtree_folded (per-node stored TLVs verbatim,
+     * READ-denied subtrees pruned): a view over the existing last-known-value ropes, not
+     * a copy. Leaf reads are byte-identical to the pre-composed-read behavior, and a
+     * HANDLER target's `on_read` seam keeps precedence over the composed read.
      */
     [[nodiscard]] result_t<rope_t> read(vertex_handle_t v, std::string_view caller = {}) const;
     /**
@@ -338,6 +344,37 @@ class graph_t {
      * tautological.
      */
     [[nodiscard]] result_t<rope_t> read_children_materialized(vertex_handle_t v) const;
+
+    /**
+     * @brief COMPOSED BRANCH READ (RFC-0005 §C follow-on): the POINT tree of @p v's
+     *        registered subtree, folded as a scatter-gather **rope** of views over the
+     *        live last-known-value ropes (zero flatten, zero byte copies).
+     *
+     * `composed(target) = POINT{ [stored TLV of target]?, child_node* }` and
+     * `child_node(c) = POINT{ NAME(c), [stored TLV of c]?, child_node(grandchild)* }` —
+     * each node's value is that vertex's stored TLV **verbatim** (the landed LKV bytes,
+     * opaque: a non-VALUE TLV such as a STATUS composes as-is; descendant HANDLER `on_read`
+     * seams are **not** invoked). Unregistered placeholders are skipped exactly as
+     * `read_children` skips them; synthesized `on_children` transport listings are not
+     * graph children and are absent. A vertex the @p caller may not READ **prunes** its
+     * whole subtree (siblings unaffected). A branch with no descendant values folds to a
+     * names-only (topology) POINT tree.
+     *
+     * This is what a plain @ref read serves when the target has ≥ 1 registered child; it
+     * is public for the same oracle reason as @ref read_children_materialized's split.
+     * Per node: one atomic `read_stored()` load, LKV links refcount-**cloned** (no byte
+     * copy), the child's NAME record borrowed **in place** over the pinned vertex, and an
+     * owned per-level POINT header (`opt.ll` auto-widened at the same 0xFFFF boundary as
+     * `wire::emit_tlv`). The walk is an ITERATIVE stack machine (graph depth is
+     * `kMaxSegments`-bounded structurally — no synthetic cap); allocation failure is
+     * `BACKPRESSURE`.
+     *
+     * Resolver contract: with a subject resolver installed, `acl_allows` — and therefore
+     * the resolver callback — runs O(nodes) times per composed read **under the shared
+     * `map_mutex_`**; a resolver MUST NOT re-enter graph mutation APIs (self-deadlock).
+     */
+    [[nodiscard]] result_t<rope_t> read_subtree_folded(vertex_handle_t v,
+                                                       std::string_view caller = {}) const;
 
     /**
      * @brief Subscribe @p src to a @p target vertex — a write to src re-dispatches the
@@ -663,6 +700,11 @@ class graph_t {
     // vertex mutex — the ancestor mutex-walk happens only inside the lazy rebuild
     // of a dirty cache (after a :acl write marked the written vertex's subtree).
     [[nodiscard]] bool acl_allows(vertex_t* v, std::string_view caller, acl_right_t right) const;
+    /** @brief True iff `v` has at least one REGISTERED child — the branch/leaf fork of the
+     *         plain read surface (a branch serves the composed branch read; a leaf serves
+     *         its LKV byte-identically to before the composed read existed). Takes
+     *         map_mutex_ shared. */
+    [[nodiscard]] bool has_registered_child(vertex_t* v) const;
     // Subtree-precise ADR-0050 cache invalidation: mark `v` and every descendant's
     // cached effective-ACE merge stale (release stores) after a :acl write on `v`,
     // via the ADR-0057 child links — wiring-frequency. Call with map_mutex_ held
