@@ -604,7 +604,7 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, std::string_view caller) cons
     // serves the composed subtree snapshot — the folded POINT tree of its registered
     // descendants' landed LKVs. AFTER the handler seam (a HANDLER target's on_read keeps
     // precedence); a leaf falls through to the LKV path byte-identically to before.
-    if (has_registered_child(v)) return read_snapshot_folded(vh, caller);
+    if (has_registered_child(v)) return read_subtree_folded(vh, caller);
     const std::shared_ptr<const rope_t> sp = v->read_stored();  // lock-free
     if (!sp) return std::unexpected(status_t::NOT_FOUND);
     return *sp;  // copies the rope => clones each link's segment_ptr_t (refcount bump, no byte
@@ -1579,7 +1579,7 @@ result_t<rope_t> graph_t::read_children_folded(vertex_handle_t vh) const {
     return out;
 }
 
-result_t<rope_t> graph_t::read_snapshot_folded(vertex_handle_t vh, std::string_view caller) const {
+result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_view caller) const {
     vertex_t* root = vh.get();
     if (!acl_allows(root, caller, acl_right_t::READ))
         return std::unexpected(status_t::PERMISSION_DENIED);

@@ -235,10 +235,11 @@ class graph_t {
      * when the FWD resolver drives the op. With no subject resolver installed it costs one
      * null check.
      *
-     * A vertex with ≥ 1 registered child serves the composed SUBTREE SNAPSHOT instead —
-     * the folded POINT tree of @ref read_snapshot_folded (per-node stored TLVs verbatim,
-     * READ-denied subtrees pruned). Leaf reads are byte-identical to the pre-snapshot
-     * behavior, and a HANDLER target's `on_read` seam keeps precedence over the snapshot.
+     * A vertex with ≥ 1 registered child serves the COMPOSED BRANCH READ instead — the
+     * folded POINT tree of @ref read_subtree_folded (per-node stored TLVs verbatim,
+     * READ-denied subtrees pruned): a view over the existing last-known-value ropes, not
+     * a copy. Leaf reads are byte-identical to the pre-composed-read behavior, and a
+     * HANDLER target's `on_read` seam keeps precedence over the composed read.
      */
     [[nodiscard]] result_t<rope_t> read(vertex_handle_t v, std::string_view caller = {}) const;
     /**
@@ -345,10 +346,11 @@ class graph_t {
     [[nodiscard]] result_t<rope_t> read_children_materialized(vertex_handle_t v) const;
 
     /**
-     * @brief Composed SUBTREE-SNAPSHOT read (RFC-0005 §C follow-on): the POINT tree of
-     *        @p v's registered subtree, folded as a scatter-gather **rope** (zero flatten).
+     * @brief COMPOSED BRANCH READ (RFC-0005 §C follow-on): the POINT tree of @p v's
+     *        registered subtree, folded as a scatter-gather **rope** of views over the
+     *        live last-known-value ropes (zero flatten, zero byte copies).
      *
-     * `snapshot(target) = POINT{ [stored TLV of target]?, child_node* }` and
+     * `composed(target) = POINT{ [stored TLV of target]?, child_node* }` and
      * `child_node(c) = POINT{ NAME(c), [stored TLV of c]?, child_node(grandchild)* }` —
      * each node's value is that vertex's stored TLV **verbatim** (the landed LKV bytes,
      * opaque: a non-VALUE TLV such as a STATUS composes as-is; descendant HANDLER `on_read`
@@ -366,9 +368,13 @@ class graph_t {
      * `wire::emit_tlv`). The walk is an ITERATIVE stack machine (graph depth is
      * `kMaxSegments`-bounded structurally — no synthetic cap); allocation failure is
      * `BACKPRESSURE`.
+     *
+     * Resolver contract: with a subject resolver installed, `acl_allows` — and therefore
+     * the resolver callback — runs O(nodes) times per composed read **under the shared
+     * `map_mutex_`**; a resolver MUST NOT re-enter graph mutation APIs (self-deadlock).
      */
-    [[nodiscard]] result_t<rope_t> read_snapshot_folded(vertex_handle_t v,
-                                                        std::string_view caller = {}) const;
+    [[nodiscard]] result_t<rope_t> read_subtree_folded(vertex_handle_t v,
+                                                       std::string_view caller = {}) const;
 
     /**
      * @brief Subscribe @p src to a @p target vertex — a write to src re-dispatches the
@@ -695,8 +701,8 @@ class graph_t {
     // of a dirty cache (after a :acl write marked the written vertex's subtree).
     [[nodiscard]] bool acl_allows(vertex_t* v, std::string_view caller, acl_right_t right) const;
     /** @brief True iff `v` has at least one REGISTERED child — the branch/leaf fork of the
-     *         plain read surface (a branch serves the composed subtree snapshot; a leaf
-     *         serves its LKV byte-identically to before the snapshot read existed). Takes
+     *         plain read surface (a branch serves the composed branch read; a leaf serves
+     *         its LKV byte-identically to before the composed read existed). Takes
      *         map_mutex_ shared. */
     [[nodiscard]] bool has_registered_child(vertex_t* v) const;
     // Subtree-precise ADR-0050 cache invalidation: mark `v` and every descendant's

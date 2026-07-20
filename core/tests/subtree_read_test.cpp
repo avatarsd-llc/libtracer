@@ -7,14 +7,14 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * `snapshot(target) = POINT{ [stored TLV of target]?, child_node* }`,
+ * `composed(target) = POINT{ [stored TLV of target]?, child_node* }`,
  * `child_node(c) = POINT{ NAME(c), [stored TLV of c]?, child_node(grandchild)* }` — each
  * node's value is the vertex's stored TLV VERBATIM (opaque bytes; a non-VALUE TLV such as
  * a STATUS composes as-is). The battery (modeled on folded_children_test):
- * a seeded DIFFERENTIAL over randomized tree shapes (snapshot map == tracked writes ==
+ * a seeded DIFFERENTIAL over randomized tree shapes (composed-read map == tracked writes ==
  * per-leaf reads, order-independent), the branch-write ROUND-TRIP, ACL subtree PRUNING
  * (incl. allow-under-denied-ancestor, set-equivalent to the gated enumerate+read loop),
- * leaf/handler REGRESSION (byte-identical to the pre-snapshot read), the names-only
+ * leaf/handler REGRESSION (byte-identical to the pre-composed-read behavior), the names-only
  * topology tree, and the ZERO-COPY link-structure accounting (owned headers + borrowed
  * names + refcount-cloned LKV links — never one flattened buffer).
  */
@@ -303,7 +303,7 @@ void test_differential_random_trees() {
     check(leafless < kShapes, "the seed produced non-trivial tree shapes");
     check(bad_topology == 0, "snapshot topology == registered subtree, every shape");
     check(bad_values == 0, "snapshot value map == tracked writes, every shape");
-    check(bad_leaves == 0, "per-leaf read() matches the snapshot map, every shape");
+    check(bad_leaves == 0, "per-leaf read() matches the composed-read map, every shape");
 }
 
 // --- 2. ROUND-TRIP: branch-write then read back ------------------------------

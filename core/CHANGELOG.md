@@ -26,7 +26,7 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   value-free branch serves a names-only topology tree instead of `NOT_FOUND`. Leaf reads
   and HANDLER-target reads (`on_read` precedence, `NOT_FOUND` without one) are
   **byte-identical to before**; field reads (`read(v, field, caller)`) are unchanged.
-  The new public composer `graph_t::read_snapshot_folded(vertex_handle_t,
+  The new public composer `graph_t::read_subtree_folded(vertex_handle_t,
   string_view)` builds the reply as a scatter-gather rope — per-node owned POINT
   headers, borrowed NAME records, refcount-cloned LKV links, zero flatten
   (`subtree_snapshot_test` gates the differential, round-trip, prune, regression, and
