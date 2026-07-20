@@ -18,6 +18,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 > **Partially superseded by [RFC-0008](0008-vertex-operations-assign-propagate.md) (2026-07-06, amended 2026-07-06b):** the per-subscriber, value-based `delivery_mode` / ON_CHANGE byte-diff delivery filter (§A) is removed; selective propagation is now **structural** (`assign` advances a per-vertex write sequence, `propagate` sweeps and flushes the pending vertices), not value-based. `delivery_mode` survives redefined as a value-agnostic **per-vertex** policy (`UNCONDITIONAL`/`IF_NEWER` default/`EXPLICIT`) governing whether an ancestor sweep includes a vertex. The subtree-subscription, vertical-bubbling, branch-write-decomposition, and write-creates semantics all stand — RFC-0008 restates bubbling in terms of `propagate` over the write-sequence selection.
 
+> **§C/§E amended by [RFC-0016](0016-composed-branch-read.md) (2026-07-20):** the composed subtree-read this RFC deferred is now specified and accepted — a plain `READ` of a vertex with ≥ 1 registered child serves the **composed branch read**, the folded `POINT` tree of its registered subtree (landed stored TLVs verbatim), the read-side dual of the §B decomposition. §C's one-store invariant and cross-leaf atomicity non-promise stand unchanged and carry into RFC-0016.
+
 ## Summary
 
 Every subscription becomes a **subtree subscription**: a `SUBSCRIBER` edge on a
@@ -183,12 +185,18 @@ sequenceDiagram
   handler-role landing site may refuse its slice without un-landing the rest.
   Producers needing snapshot coherence use the existing coherent-sampling
   group identity (`(origin, ts)`, ADR-0019), not a transactional write.
-- `READ` of a vertex keeps its existing meaning: it returns **that vertex's**
+- ~~`READ` of a vertex keeps its existing meaning: it returns **that vertex's**
   stored value only. This RFC does **not** add a composed subtree-read
   operation (a read that re-assembles a `POINT` tree from descendant stores) —
   the existing `read(<parent>:children[])` member enumeration and per-leaf
   reads cover the current need. A composed subtree-read is a possible
-  follow-on RFC.
+  follow-on RFC.~~ **⚠ Superseded by
+  [RFC-0016](0016-composed-branch-read.md) (2026-07-20):** that follow-on
+  landed — a plain `READ` of a vertex with ≥ 1 registered child now serves the
+  **composed branch read** (the folded `POINT` tree of its registered subtree,
+  landed stored TLVs verbatim); a leaf read still returns that vertex's stored
+  value only, byte-identically. The invariant and the atomicity non-promise
+  above stand unchanged and carry into RFC-0016.
 
 ### D. Write-creates (`mkdir -p`, CREATE-gated)
 
@@ -219,9 +227,11 @@ a wire batch container). No per-subscriber QoS beyond the existing
 byte-agnostic delivery policy. **Deferred:** child-removal delivery semantics
 (#66's remaining open point — tied to a future vertex-delete surface);
 wire-level concrete-path tagging of remote deliveries (RFC-0003, draft);
-`delivery_scope = SNAPSHOT` producer-side re-aggregation (the snapshot remains
-available as a read; the default — and currently only — delivery is the written
-TLV as-is); a composed subtree-read op (§C).
+`delivery_scope = SNAPSHOT` producer-side re-aggregation (the aggregate remains
+available as a read — since 2026-07-20 the **composed branch read** of
+[RFC-0016](0016-composed-branch-read.md); the default — and currently only —
+delivery is the written TLV as-is); ~~a composed subtree-read op (§C)~~
+(specified and accepted 2026-07-20 as RFC-0016 — no longer deferred).
 
 ### Files this RFC edits
 
