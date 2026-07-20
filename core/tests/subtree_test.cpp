@@ -232,10 +232,17 @@ void test_branch_write_decomposition() {
     const view_t frame = make_value(branch);
     check(g.write(s, frame).has_value(), "branch write at /s succeeds");
 
-    // Values are the truth at the vertices where they land (one store per vertex).
+    // Values are the truth at the vertices where they land (one store per vertex). A
+    // branch read serves the COMPOSED SUBTREE SNAPSHOT (RFC-0005 §C follow-on): the
+    // written tree minus the root's leading NAME (the target's identity is the addressed
+    // vertex), the root's own VALUE TLV leading the root body.
     const auto r_s = g.read(s);
-    check(r_s.has_value() && same_bytes(r_s->only(), value_tlv({0x07})),
-          "read /s returns the root's own VALUE TLV");
+    std::vector<std::byte> snap;
+    tr::wire::emit_tlv(
+        snap, type_t::POINT, opt_t{.pl = true},
+        cat({value_tlv({0x07}), point_tlv("t", t_val), point_tlv("u", value_tlv({0xCC}))}));
+    check(r_s.has_value() && same_bytes(r_s->flatten(), snap),
+          "read /s serves the composed subtree snapshot (own VALUE TLV leading)");
     const auto r_t = g.read(st);
     check(r_t.has_value() && same_bytes(r_t->only(), t_val),
           "read /s/t returns the leaf's VALUE TLV");

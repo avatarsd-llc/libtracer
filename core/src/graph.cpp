@@ -600,10 +600,22 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, std::string_view caller) cons
         if (h.on_read) return h.on_read();
         return std::unexpected(status_t::NOT_FOUND);
     }
+    // The branch/leaf fork (RFC-0005 §C follow-on): a vertex with ≥ 1 registered child
+    // serves the composed subtree snapshot — the folded POINT tree of its registered
+    // descendants' landed LKVs. AFTER the handler seam (a HANDLER target's on_read keeps
+    // precedence); a leaf falls through to the LKV path byte-identically to before.
+    if (has_registered_child(v)) return read_snapshot_folded(vh, caller);
     const std::shared_ptr<const rope_t> sp = v->read_stored();  // lock-free
     if (!sp) return std::unexpected(status_t::NOT_FOUND);
     return *sp;  // copies the rope => clones each link's segment_ptr_t (refcount bump, no byte
                  // copy)
+}
+
+bool graph_t::has_registered_child(vertex_t* v) const {
+    bool has = false;
+    const std::shared_lock lock(map_mutex_);
+    v->for_each_child([&has](const vertex_t& c) { has = has || c.registered(); });
+    return has;
 }
 
 void graph_t::dispatch_edge_target(const edge_view_t& e, const rope_t& value) {
@@ -1564,6 +1576,103 @@ result_t<rope_t> graph_t::read_children_folded(vertex_handle_t vh) const {
     if (!ohv) return std::unexpected(status_t::BACKPRESSURE);
     rope_t out{*ohv};
     out.concat(members);  // empty members (no children) => header-only rope, len 0
+    return out;
+}
+
+result_t<rope_t> graph_t::read_snapshot_folded(vertex_handle_t vh, std::string_view caller) const {
+    vertex_t* root = vh.get();
+    if (!acl_allows(root, caller, acl_right_t::READ))
+        return std::unexpected(status_t::PERMISSION_DENIED);
+
+    /**
+     * @brief One included snapshot node, collected in PRE-ORDER (so the array order IS the
+     *        wire order: a node's POINT header precedes its NAME/value/children bytes).
+     */
+    struct snap_node_t {
+        const vertex_t* v = nullptr;       /**< @brief The pinned vertex (name bytes immutable). */
+        std::shared_ptr<const rope_t> lkv; /**< @brief Its landed LKV — loaded ONCE, atomically. */
+        std::size_t parent = 0;            /**< @brief Parent's index in the array (kNoParent at
+                                                       the root). */
+        std::size_t body_len = 0;          /**< @brief POINT body length, completed bottom-up. */
+    };
+    constexpr std::size_t kNoParent = static_cast<std::size_t>(-1);
+    // The POINT header size emit_header will produce for `body` — TYPE + OPT + the u16
+    // length, widening to u32 at the same 0xFFFF boundary emit_tlv auto-widens at.
+    const auto hdr_len = [](std::size_t body) noexcept -> std::size_t {
+        return body > 0xFFFFu ? 6u : 4u;
+    };
+
+    // Pass 1 — collect, under ONE shared map lock: an ITERATIVE pre-order stack machine
+    // (house style, parse_branch_node — graph depth is kMaxSegments-bounded structurally,
+    // so the heap-backed stack needs no synthetic cap). Per node: the ACL gate (a denied
+    // vertex PRUNES its whole subtree, siblings unaffected), the placeholder skip
+    // (unregistered levels are not members, exactly as read_children), one read_stored()
+    // load, and the node's OWN body contribution (its NAME record below the root; its
+    // stored TLV's total length verbatim). Descendant HANDLER on_read seams are NOT
+    // invoked — the snapshot serves landed LKVs only.
+    std::vector<snap_node_t> nodes;
+    {
+        /** @brief One unvisited subtree root: the vertex and its parent's array index. */
+        struct work_t {
+            vertex_t* v = nullptr;  /**< @brief The subtree root to collect. */
+            std::size_t parent = 0; /**< @brief Its parent's index in `nodes`. */
+        };
+        const std::shared_lock lock(map_mutex_);
+        std::vector<work_t> stack;
+        stack.push_back(work_t{.v = root, .parent = kNoParent});
+        while (!stack.empty()) {
+            const work_t w = stack.back();
+            stack.pop_back();
+            const std::size_t idx = nodes.size();
+            snap_node_t n;
+            n.v = w.v;
+            n.lkv = w.v->read_stored();  // ONE atomic load per node
+            n.parent = w.parent;
+            n.body_len = (w.parent == kNoParent ? 0 : w.v->name().bytes().size()) +
+                         (n.lkv ? n.lkv->total_length() : 0);
+            nodes.push_back(std::move(n));
+            // Push the children, then reverse the just-pushed run: the LIFO pop then
+            // visits siblings in for_each_child's sorted order, keeping the array's
+            // pre-order equal to the emitted wire order.
+            const auto first = static_cast<std::ptrdiff_t>(stack.size());
+            w.v->for_each_child([this, caller, idx, &stack](vertex_t& c) {
+                if (!c.registered()) return;  // placeholders are not members
+                if (!acl_allows(&c, caller, acl_right_t::READ)) return;  // PRUNE the subtree
+                stack.push_back(work_t{.v = &c, .parent = idx});
+            });
+            std::reverse(stack.begin() + first, stack.end());
+        }
+    }
+
+    // Pass 2 — body lengths bottom-up: reverse pre-order visits every child before its
+    // parent, so each node's completed wire size (header + body) folds into the parent.
+    for (std::size_t i = nodes.size(); i-- > 1;)
+        nodes[nodes[i].parent].body_len += hdr_len(nodes[i].body_len) + nodes[i].body_len;
+
+    // Pass 3 — emit, in array (= pre-order = wire) order. Per node: an OWNED POINT header
+    // link, the BORROWED NAME record link (below the root — the root's identity is the
+    // addressed vertex; its own stored TLV leads the root body), then the stored TLV's
+    // links refcount-CLONED (no byte copy). Zero flatten anywhere; a view allocation
+    // failure is the audited BACKPRESSURE pattern.
+    rope_t out;
+    for (const snap_node_t& n : nodes) {
+        opt_t o{.pl = true};
+        if (n.body_len > 0xFFFFu) o.ll = true;  // mirror emit_tlv's auto-widen exactly
+        std::vector<std::byte> hdr;
+        wire::emit_header(hdr, type_t::POINT, o, n.body_len);
+        const auto hv = view::over_bytes(hdr);
+        if (!hv) return std::unexpected(status_t::BACKPRESSURE);
+        out.append(*hv);  // owned POINT header
+        if (n.parent != kNoParent) {
+            // The child's own canonical NAME record IS the leading NAME TLV verbatim
+            // (ADR-0057), borrowed in place over the pinned, immutable name bytes —
+            // the read_children_folded lifetime argument.
+            view::segment_ptr_t nseg = view::borrow_const(n.v->name().bytes());
+            if (!nseg) return std::unexpected(status_t::BACKPRESSURE);
+            out.append(view::view_t::over(std::move(nseg)));  // borrowed name (zero copy)
+        }
+        if (n.lkv) out.concat(*n.lkv);  // stored TLV verbatim — links cloned, refcount bump
+    }
     return out;
 }
 

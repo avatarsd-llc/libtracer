@@ -163,6 +163,15 @@ target_link_libraries(subtree_test PRIVATE libtracer)
 libtracer_test_warnings(subtree_test)
 add_test(NAME subtree COMMAND subtree_test)
 
+# RFC-0005 §C follow-on — the composed subtree-snapshot read: a plain READ of a
+# branch serves the folded POINT tree (per-node stored TLVs verbatim, ACL-pruned,
+# zero flatten). Differential over randomized shapes, branch-write round-trip,
+# ACL prune, leaf/handler regression, and zero-copy link accounting.
+add_executable(subtree_snapshot_test subtree_snapshot_test.cpp)
+target_link_libraries(subtree_snapshot_test PRIVATE libtracer)
+libtracer_test_warnings(subtree_snapshot_test)
+add_test(NAME subtree_snapshot COMMAND subtree_snapshot_test)
+
 # ADR-0041 — terminus arena decoder: decode<->decode_into equivalence over every
 # conformance vector + the span/canonical/zero-spill contract.
 add_executable(tlv_arena_test tlv_arena_test.cpp)

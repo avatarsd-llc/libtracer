@@ -12,6 +12,26 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **A plain `read` of a vertex with ≥ 1 registered child now serves the composed
+  SUBTREE SNAPSHOT** (RFC-0005 §C follow-on) — the folded POINT tree of the target's
+  registered subtree: `snapshot(target) = POINT{ [stored TLV of target]?, child_node* }`,
+  `child_node(c) = POINT{ NAME(c), [stored TLV of c]?, child_node(grandchild)* }`. Each
+  node's value is that vertex's stored TLV **verbatim** (the landed LKV bytes, opaque —
+  a non-VALUE TLV such as a STATUS composes as-is; descendant HANDLER `on_read` seams
+  are **not** invoked). A vertex the caller may not READ **prunes** its whole subtree
+  (siblings unaffected); unregistered placeholders are skipped as in `:children[]`;
+  synthesized `on_children` transport listings are not graph children and are absent; a
+  value-free branch serves a names-only topology tree instead of `NOT_FOUND`. Leaf reads
+  and HANDLER-target reads (`on_read` precedence, `NOT_FOUND` without one) are
+  **byte-identical to before**; field reads (`read(v, field, caller)`) are unchanged.
+  The new public composer `graph_t::read_snapshot_folded(vertex_handle_t,
+  string_view)` builds the reply as a scatter-gather rope — per-node owned POINT
+  headers, borrowed NAME records, refcount-cloned LKV links, zero flatten
+  (`subtree_snapshot_test` gates the differential, round-trip, prune, regression, and
+  link-accounting batteries).
+
 ### Added
 
 - **`graph_t::retire(vertex_handle_t)` — owner-facing vertex retirement (#407,
