@@ -397,6 +397,47 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
     return {};
 }
 
+/**
+ * @brief Pre-order collect of every vertex holding at least one active subscriber slot —
+ *        the snapshot half of @ref graph_t::evict_link_edges. Call with `map_mutex_` held
+ *        (shared suffices: the walk only excludes concurrent vertex creation, `own_subs`
+ *        is a relaxed atomic, and vertex addresses are pinned for the graph's lifetime —
+ *        ADR-0057 — so the collected pointers stay valid past the lock).
+ */
+static void collect_subscribed(vertex_t* v, std::vector<vertex_t*>& out) {
+    if (v->own_subs() > 0) out.push_back(v);
+    v->for_each_child([&out](vertex_t& c) { collect_subscribed(&c, out); });
+}
+
+std::size_t graph_t::evict_link_edges(std::string_view link_name) {
+    // Two-phase, per the graph.hpp lock-order docs: snapshot the candidate vertices under
+    // ONE shared map hold (no stripe lock inside), then evict per vertex — each under its
+    // own stripe lock inside a FRESH shared map hold. The per-vertex hold makes the
+    // {clear edges, unwind counters} pair atomic against a concurrent retire() (unique
+    // map lock), which reads own_subs() before zeroing it — interleaving there would
+    // double-subtract descendants' listeners_above_. Between vertices everything may
+    // interleave: a vertex retired meanwhile has an empty edge list (k == 0, no-op), and
+    // a subscribe admitted meanwhile for a DEAD link is the pre-existing races' window,
+    // resolved by the transport calling this hook after the link stopped delivering.
+    std::vector<vertex_t*> candidates;
+    {
+        const std::shared_lock lock(map_mutex_);
+        collect_subscribed(root_.get(), candidates);
+    }
+    std::size_t total = 0;
+    for (vertex_t* v : candidates) {
+        const std::shared_lock lock(map_mutex_);
+        const std::size_t k = v->evict_link_edges(link_name);
+        if (k == 0) continue;
+        // The k-fold mirror of note_subscriber_removed, under the same shared hold as
+        // the clear (RFC-0005 bookkeeping: descendants' writes stop bubbling here).
+        v->bump_own_subs(-static_cast<std::int32_t>(k));
+        bump_subtree_listeners(v, -static_cast<std::int32_t>(k));
+        total += k;
+    }
+    return total;
+}
+
 result_t<vertex_handle_t> graph_t::ensure_vertex(std::span<const std::byte> key,
                                                  std::string_view caller) {
     result_t<vertex_t*> p = ensure_vertex_ptr(key, caller);

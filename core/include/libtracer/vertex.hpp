@@ -977,17 +977,33 @@ class vertex_t {
      * value plus the new edge's dispatch view are snapshotted into @p latch, so a
      * concurrent `clear_edge` can never slip between append and latch. The caller
      * dispatches the latch OUTSIDE the lock (RFC-0004 §D / ADR-0049).
-     * @return The appended slot's index (the `:subscribers[N]` slot number).
+     *
+     * An INACTIVE slot is REUSED before the list grows (RFC-0009 §D.2: "a cleared
+     * slot MAY be reused by a later append") — the reclamation half of eviction:
+     * a churning link (unsubscribe / peer departure, then re-subscribe) reoccupies
+     * its freed slots instead of growing `subs_` without bound. Slot indices of
+     * ACTIVE edges are never renumbered (§D.2 stability); only a slot already
+     * cleared can come to mean a new edge.
+     * @return The occupied slot's index (the `:subscribers[N]` slot number).
      */
     std::size_t add_edge(subscriber_t s, edge_latch_t* latch = nullptr) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        subs_.push_back(std::move(s));
-        const std::size_t idx = subs_.size() - 1;
+        std::size_t idx = subs_.size();
+        for (std::size_t i = 0; i < subs_.size(); ++i) {
+            if (!subs_[i].active) {
+                idx = i;
+                break;
+            }
+        }
+        if (idx == subs_.size())
+            subs_.push_back(std::move(s));
+        else
+            subs_[idx] = std::move(s);  // reuse frees the cleared slot's leftovers
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         if (latch != nullptr && e != nullptr && e->settings.durability == 1) {
             if (std::shared_ptr<const rope_t> lkv = lkv_.load()) {
                 latch->value = std::move(lkv);
-                latch->edge = edge_view_of(subs_.back());
+                latch->edge = edge_view_of(subs_[idx]);
             }
         }
         return idx;
@@ -1003,6 +1019,36 @@ class vertex_t {
         if (idx >= subs_.size() || !subs_[idx].active) return false;
         subs_[idx].active = false;
         return true;
+    }
+
+    /**
+     * @brief Deactivate AND reclaim every active subscriber edge stored against the
+     *        link @p link — the per-vertex half of peer-departure eviction (RFC-0009
+     *        §D, extended to link teardown).
+     *
+     * Matches each active slot whose cold half stores @p link as the link the
+     * subscribe arrived on (`subscriber_remote_t::link`); a local edge (no cold
+     * half, or an empty link) never matches. Unlike @ref clear_edge, a matched slot
+     * is RECLAIMED, not just flagged: the stored SUBSCRIBER view, the return-route
+     * refcount pin, the target key, and the whole `subscriber_remote_t` block are
+     * released in place (the slot shell stays — §D.2 index stability — and
+     * @ref add_edge reuses it). An in-flight delivery is unaffected: its
+     * @ref edge_view_t snapshot owns copies and a refcount CLONE of the route
+     * (ADR-0041 §2), so releasing the slot's pin here never dangles a dispatch.
+     * @return The number of edges evicted (the caller unwinds exactly this many
+     *         from the RFC-0005 listener bookkeeping).
+     */
+    std::size_t evict_link_edges(std::string_view link) {
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        std::size_t n = 0;
+        for (subscriber_t& s : subs_) {
+            if (!s.active || s.remote == nullptr || s.remote->link != link) continue;
+            subscriber_t reclaimed;    // an inert shell: no view, no route, no cold half
+            reclaimed.active = false;  // the slot is free for add_edge reuse
+            s = std::move(reclaimed);  // frees the old slot's retained state in place
+            ++n;
+        }
+        return n;
     }
 
     /**

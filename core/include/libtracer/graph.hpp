@@ -204,6 +204,32 @@ class graph_t {
     result_t<void> retire(vertex_handle_t vh);
 
     /**
+     * @brief Evict every subscriber edge a departed link left behind — the graph half
+     *        of link-teardown eviction (RFC-0009 §D, extended to peer departure).
+     *
+     * Walks the whole graph and deactivates + RECLAIMS each active subscriber edge
+     * whose stored link NAME equals @p link_name (the NAME this node addressed the
+     * link by — a bus peer's tag, or a point-to-point child's registered NAME),
+     * unwinding the RFC-0005 listener bookkeeping for each. Local edges and edges of
+     * other links are untouched; slot indices of surviving edges never renumber
+     * (§D.2), and the freed slots are reused by later appends (@ref vertex_t's
+     * add_edge reuse) — so a redialing peer's re-subscriptions reoccupy the memory
+     * its dead session held instead of growing every vertex's edge list forever.
+     *
+     * A local, host-facing API in the §A.1 sense: no wire operation reaches here —
+     * the transport plane calls it when it LEARNS a link died (`fwd_router_t::
+     * link_down`, the link-departure hook), exactly as the owner's own logic might.
+     * Concurrency: the vertex set is snapshotted under a shared `map_mutex_` hold,
+     * then each vertex is evicted under its own stripe lock inside a fresh shared
+     * hold (never across vertices), so concurrent writes/deliveries interleave
+     * freely; an in-flight delivery keeps its route alive by refcount clone
+     * (ADR-0041 §2). Safe to call for a link that never subscribed (a no-op).
+     * @param link_name This node's NAME for the departed link.
+     * @return The number of edges evicted, summed over the graph.
+     */
+    std::size_t evict_link_edges(std::string_view link_name);
+
+    /**
      * @brief A child-vertex factory: the device-catalog entry ADR-0017 makes concrete.
      *
      * Given the composed child key (parent key + the SPEC's `name` NAME) and the optional

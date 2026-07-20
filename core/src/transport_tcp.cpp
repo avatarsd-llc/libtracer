@@ -97,6 +97,9 @@ tcp_transport_t::tcp_transport_t(const std::string& peer_host, std::uint16_t pee
     start([this, fd] {
         serve(fd);
         teardown_peer(fd);  // reset-under-write_m_ then close (stream_endpoint_t)
+        // Departure seam (RFC-0009 §D extended): the one connection died under us —
+        // not a local stop — so report the link down (no locks held here).
+        if (!stop_.load(std::memory_order_relaxed)) notify_down();
     });
 }
 
@@ -262,7 +265,14 @@ void tcp_transport_t::run_listen() {
             set_nodelay(fd);
             return true;
         },
-        [this](int fd) { serve(fd); });
+        [this](int fd) {
+            serve(fd);
+            // Departure seam (RFC-0009 §D extended): serve only returns once the
+            // peer's connection is dead (or we are stopping); teardown_peer follows
+            // in the accept loop before the next peer can connect, so eviction
+            // never races a successor session on this single-peer link.
+            if (!stop_.load(std::memory_order_relaxed)) notify_down();
+        });
 }
 
 }  // namespace tr::net

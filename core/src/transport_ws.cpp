@@ -363,18 +363,23 @@ bool transport_ws_server::drain_frames(session_t& s) {
 }
 
 void transport_ws_server::teardown_slot(session_t& s) {
+    std::string departed;
     {
         // Stop peer_link/enumerate resolution FIRST, so no new sender targets
-        // the dying slot by name.
+        // the dying slot by name. Keep the name: it identifies the departed
+        // session to the eviction seam below.
         const std::lock_guard lock(peers_m_);
+        departed = std::move(s.name);
         s.name.clear();
     }
     int fd;
+    bool was_open;
     {
         // The stream teardown-under-write-lock invariant, per slot: reset the fd
         // and the open flag under write_m_ BEFORE ::close, so an in-flight send
         // either finished against the still-open fd or observes the reset.
         const std::lock_guard lock(write_m_);
+        was_open = s.open.load(std::memory_order_relaxed);
         s.open.store(false, std::memory_order_relaxed);
         fd = s.fd.exchange(-1, std::memory_order_acq_rel);
     }
@@ -383,6 +388,17 @@ void transport_ws_server::teardown_slot(session_t& s) {
     s.buf.shrink_to_fit();
     s.hs_buf.clear();
     s.assembler.reset();
+    // Departure seam (RFC-0009 §D extended to peer departure): only a session that
+    // completed its handshake can have flowed frames (subscriptions), and only then.
+    // Fired LAST, with no transport lock held — the notifier re-enters the routing
+    // plane (router → graph locks). Peer-named mode reports the peer's own name;
+    // flat mode reports the whole link down.
+    if (was_open && !departed.empty()) {
+        if (peer_rx_.has_any())
+            notify_peer_down(departed);
+        else
+            notify_down();
+    }
 }
 
 void transport_ws_server::run() {
@@ -582,6 +598,9 @@ void transport_ws_client::serve(int fd) {
 
 teardown:
     teardown_peer(fd);  // reset-under-write_m_ then close (stream_endpoint_t)
+    // Departure seam (RFC-0009 §D extended): the one connection died under us — not a
+    // local stop — so report the link down (after teardown, no locks held).
+    if (!stop_.load(std::memory_order_relaxed)) notify_down();
 }
 
 }  // namespace tr::net

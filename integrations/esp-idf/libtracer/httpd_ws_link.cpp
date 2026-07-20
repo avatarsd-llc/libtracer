@@ -172,6 +172,10 @@ httpd_ws_link_t::~httpd_ws_link_t() {
     // this only runs in a host teardown — but keep it correct. Adopted mode: only
     // unregister our WS URI and leave the caller's server running — never stop a server
     // this link did not start.
+    // Suppress departure notifications for the session closes THIS teardown provokes
+    // (httpd_stop closes every session, re-entering on_session_closed) — the routing
+    // plane the notifier targets may be tearing down alongside us.
+    stopping_.store(true, std::memory_order_relaxed);
     if (handle_ != nullptr) {
         if (owns_httpd_)
             httpd_stop(handle_);
@@ -339,12 +343,31 @@ void httpd_ws_link_t::on_session_closed(void* ctx) {
 }
 
 void httpd_ws_link_t::reclaim_slot(session_t* slot) {
-    const std::lock_guard lock(peers_m_);
-    slot->open = false;
-    slot->fd = -1;
-    slot->name.clear();
-    slot->asm_buf.clear();
-    slot->asm_buf.shrink_to_fit();
+    std::string departed;
+    bool was_open;
+    {
+        const std::lock_guard lock(peers_m_);
+        was_open = slot->open;
+        departed = std::move(slot->name);
+        slot->open = false;
+        slot->fd = -1;
+        slot->name.clear();
+        slot->asm_buf.clear();
+        slot->asm_buf.shrink_to_fit();
+    }
+    // Departure seam (RFC-0009 §D extended to peer departure): a browser tab that
+    // hung up leaves its subscriber edges behind — fire the routing plane's eviction
+    // hook (fwd_router_t::link_down via the installed notifier) LAST, with peers_m_
+    // released (the notifier re-enters router → graph locks). Only a session that
+    // completed its handshake (open) can have flowed subscribes. Suppressed while the
+    // link itself is being torn down (stopping_): the routing plane may already be
+    // gone, and whole-node teardown needs no per-peer eviction.
+    if (was_open && !departed.empty() && !stopping_.load(std::memory_order_relaxed)) {
+        if (peer_named_)
+            notify_peer_down(departed);
+        else
+            notify_down();
+    }
 }
 
 void httpd_ws_link_t::deliver(std::string_view peer, std::span<const std::byte> frame) {

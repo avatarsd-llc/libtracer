@@ -207,6 +207,31 @@ class fwd_router_t {
      */
     void clear_link(std::string_view link_name);
 
+    /**
+     * @brief The link-departure hook (RFC-0009 §D extended to peer departure): evict
+     *        everything the routing plane holds against a link that just died.
+     *
+     * Two halves, in order: `graph_t::evict_link_edges(link_name)` deactivates and
+     * reclaims every subscriber edge whose stored link is @p link_name (write fan-outs
+     * stop addressing the dead session, and its ~90 B/edge of route/link/caller state is
+     * released — the C6's measured ~27 KB/browser-session leak), then @ref clear_link
+     * drops the link's route-handle label state (unchanged self-heal semantics).
+     *
+     * `add_child` installs this automatically behind every child's departure notifier
+     * (`transport_t::set_down_notifier` with the child's registered NAME; the bus facet's
+     * `bus_link_t::set_peer_down_notifier` with the departed PEER's name — the same name
+     * inbound frames were tagged with, hence the name subscriber edges stored). A host
+     * that learns of a departure out-of-band (its own session manager) may call it
+     * directly; calling it for a live or unknown link is safe (the next delivery-compact
+     * flow re-advertises; eviction of nothing is a no-op).
+     *
+     * Runs on the calling thread (typically a transport receive/close thread) and takes
+     * graph locks — callers must hold no transport-internal locks (the
+     * `set_down_notifier` calling discipline).
+     * @param link_name The routing plane's inbound NAME for the departed link/peer.
+     */
+    void link_down(std::string_view link_name);
+
     /** @brief The route-handle label store (test introspection — assert statelessness). */
     [[nodiscard]] const route_handle_t& handles() const noexcept { return handles_; }
 
