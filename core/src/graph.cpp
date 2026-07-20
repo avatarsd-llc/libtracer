@@ -1660,7 +1660,13 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
         };
         const std::shared_lock lock(map_mutex_);
         std::vector<work_t> stack;
-        stack.push_back(work_t{.v = root, .parent = kNoParent});
+        // Every stack/nodes growth is a throwing std::vector spill that aborts under
+        // -fno-exceptions on OOM; route each through the nothrow try_push_back and drop
+        // the reply (BACKPRESSURE) on failure. A lambda cannot return the error, so the
+        // child push latches `oom` and the loop propagates it after each visit.
+        bool oom = false;
+        if (!detail::try_push_back(stack, work_t{.v = root, .parent = kNoParent}))
+            return std::unexpected(status_t::BACKPRESSURE);
         while (!stack.empty()) {
             const work_t w = stack.back();
             stack.pop_back();
@@ -1671,16 +1677,19 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
             n.parent = w.parent;
             n.body_len = (w.parent == kNoParent ? 0 : w.v->name().bytes().size()) +
                          (n.lkv ? n.lkv->total_length() : 0);
-            nodes.push_back(std::move(n));
+            if (!detail::try_push_back(nodes, std::move(n)))
+                return std::unexpected(status_t::BACKPRESSURE);
             // Push the children, then reverse the just-pushed run: the LIFO pop then
             // visits siblings in for_each_child's sorted order, keeping the array's
             // pre-order equal to the emitted wire order.
             const auto first = static_cast<std::ptrdiff_t>(stack.size());
-            w.v->for_each_child([this, caller, idx, &stack](vertex_t& c) {
+            w.v->for_each_child([this, caller, idx, &stack, &oom](vertex_t& c) {
+                if (oom) return;              // a prior sibling push failed — stop growing
                 if (!c.registered()) return;  // placeholders are not members
                 if (!acl_allows(&c, caller, acl_right_t::READ)) return;  // PRUNE the subtree
-                stack.push_back(work_t{.v = &c, .parent = idx});
+                if (!detail::try_push_back(stack, work_t{.v = &c, .parent = idx})) oom = true;
             });
+            if (oom) return std::unexpected(status_t::BACKPRESSURE);
             std::reverse(stack.begin() + first, stack.end());
         }
     }
@@ -1690,20 +1699,36 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
     for (std::size_t i = nodes.size(); i-- > 1;)
         nodes[nodes[i].parent].body_len += hdr_len(nodes[i].body_len) + nodes[i].body_len;
 
+    // Pass 3 preamble — the exact final link count, so the reply rope reserves its heap
+    // chain ONCE (nothrow) and every append/concat below is guaranteed non-reallocating:
+    // per node an owned POINT header (1) + the borrowed NAME below the root (0/1) + the
+    // stored TLV's links (0..). A composed-root reply is thousands of links on a
+    // fragmented heap — the un-reserved spill is exactly what aborted the node.
+    std::size_t total_links = 0;
+    for (const snap_node_t& n : nodes)
+        total_links += 1u + (n.parent != kNoParent ? 1u : 0u) + (n.lkv ? n.lkv->link_count() : 0u);
+    rope_t out;
+    if (!out.try_reserve(total_links)) return std::unexpected(status_t::BACKPRESSURE);
+
     // Pass 3 — emit, in array (= pre-order = wire) order. Per node: an OWNED POINT header
     // link, the BORROWED NAME record link (below the root — the root's identity is the
     // addressed vertex; its own stored TLV leads the root body), then the stored TLV's
     // links refcount-CLONED (no byte copy). Zero flatten anywhere; a view allocation
     // failure is the audited BACKPRESSURE pattern.
-    rope_t out;
     for (const snap_node_t& n : nodes) {
-        opt_t o{.pl = true};
-        if (n.body_len > 0xFFFFu) o.ll = true;  // mirror emit_tlv's auto-widen exactly
-        std::vector<std::byte> hdr;
-        wire::emit_header(hdr, type_t::POINT, o, n.body_len);
-        const auto hv = view::over_bytes(hdr);
-        if (!hv) return std::unexpected(status_t::BACKPRESSURE);
-        out.append(*hv);  // owned POINT header
+        const bool ll = n.body_len > 0xFFFFu;  // mirror emit_tlv's auto-widen exactly
+        // The POINT header as one exactly-sized OWNED segment, emitted by cursor straight
+        // into heap_alloc'd bytes (the op_resolve_walk assemble pattern) — no throwing
+        // std::vector<std::byte> transient sits on the reply path. Byte-identical to the
+        // retired wire::emit_header(type, {.pl, .ll}, body_len).
+        view::segment_ptr_t hseg = view::heap_alloc(hdr_len(n.body_len));
+        if (!hseg) return std::unexpected(status_t::BACKPRESSURE);
+        std::byte* p = hseg->bytes.data();
+        *p++ = static_cast<std::byte>(std::to_underlying(type_t::POINT));
+        *p++ = static_cast<std::byte>(opt_t{.pl = true, .ll = ll}.encode());
+        detail::store_le(std::span<std::byte>(p, ll ? 4u : 2u),
+                         static_cast<std::uint32_t>(n.body_len), ll ? 4u : 2u);
+        out.append(view::view_t::over(std::move(hseg)));  // owned POINT header
         if (n.parent != kNoParent) {
             // The child's own canonical NAME record IS the leading NAME TLV verbatim
             // (ADR-0057), borrowed in place over the pinned, immutable name bytes —

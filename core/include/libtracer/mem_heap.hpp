@@ -14,6 +14,7 @@
 #include <optional>
 #include <span>
 #include <utility>
+#include <vector>
 
 #include "libtracer/backend.hpp"
 #include "libtracer/segment.hpp"
@@ -21,8 +22,75 @@
 
 /**
  * @file
- * @brief The `mem_heap` L0 backend (`tr::mem`) and its L1 alloc helper (`tr::view`).
+ * @brief The `mem_heap` L0 backend (`tr::mem`) and its L1 alloc helper (`tr::view`),
+ *        plus the nothrow `std::vector` growth primitives (`tr::detail`).
  */
+
+namespace tr::detail {
+
+/**
+ * @brief Probe whether a @p bytes-sized heap allocation would succeed, nothrow — the ONE
+ *        locus of the nothrow `operator new` probe.
+ *
+ * Factored out of the `try_*` growth templates so the `new`/`delete` pair is emitted ONCE,
+ * not duplicated into every `T` instantiation (the esp32c6 footprint sentinel). A throwing
+ * `std::vector::reserve` would `abort()` under the MCU profile's `-fno-exceptions`; the
+ * caller probes here first, then runs the throwing grow only once it is known to succeed —
+ * on the single-threaded reply build the just-freed probe block is what the grow reclaims.
+ * @retval false The allocation would fail (OOM) — nothing was allocated.
+ */
+[[nodiscard]] inline bool probe_bytes(std::size_t bytes) noexcept {
+    void* p = ::operator new(bytes, std::nothrow);
+    if (p == nullptr) return false;
+    ::operator delete(p);
+    return true;
+}
+
+/**
+ * @brief The capacity-doubling grow target for a full vector (min 1) — a non-template
+ *        helper so the size math is not duplicated per `try_push_back<T>`.
+ */
+[[nodiscard]] inline std::size_t grow_capacity(std::size_t cap) noexcept {
+    return cap == 0 ? 1u : cap * 2u;
+}
+
+/**
+ * @brief Nothrow `std::vector::reserve`: grow @p v to hold at least @p n elements
+ *        WITHOUT ever aborting.
+ *
+ * Probes the exact target allocation via @ref probe_bytes first; if it fails (or @p n
+ * exceeds `max_size()`) the call soft-fails, and only on success is the throwing `reserve`
+ * run (which cannot throw — the just-freed probe block satisfies it).
+ * @retval false Allocation would fail / @p n is impossible — nothing changed.
+ * @retval true  @p v now has capacity for at least @p n elements.
+ */
+template <class T>
+[[nodiscard]] bool try_reserve(std::vector<T>& v, std::size_t n) noexcept {
+    if (n <= v.capacity()) return true;
+    if (n > v.max_size()) return false;  // impossible count — the reserve would throw length_error
+    if (!probe_bytes(n * sizeof(T))) return false;
+    v.reserve(n);  // nothrow now: the just-freed probe block satisfies it (single-threaded)
+    return true;
+}
+
+/**
+ * @brief Nothrow `std::vector::push_back`: append @p x, growing (capacity-doubling)
+ *        through @ref try_reserve so no reallocation can abort under `-fno-exceptions`.
+ *
+ * For a vector whose element count is not known up front (the composed-read pre-order
+ * collection stacks) — where @ref try_reserve cannot be called once with the final
+ * count. @p x is appended only when the growth (if any) succeeds; the just-reserved
+ * capacity guarantees the `push_back` itself never reallocates.
+ * @retval false The growth allocation failed — @p x was NOT appended.
+ */
+template <class T>
+[[nodiscard]] bool try_push_back(std::vector<T>& v, T&& x) noexcept {
+    if (v.size() == v.capacity() && !try_reserve(v, grow_capacity(v.capacity()))) return false;
+    v.push_back(std::move(x));  // guaranteed no reallocation now
+    return true;
+}
+
+}  // namespace tr::detail
 
 namespace tr::mem {
 

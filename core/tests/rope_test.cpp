@@ -9,18 +9,25 @@
  * in INLINE storage — no heap allocation for the chain — so a rope-valued vertex slot
  * (make_shared<rope_t>) costs exactly one allocation, what the old view_t slot cost;
  * the 3rd link spills the chain to the heap. Also covers only()/materialize(), the
- * accessors a contiguous-bytes consumer calls (single-link: zero copy; multi: flatten).
+ * accessors a contiguous-bytes consumer calls (single-link: zero copy; multi: flatten),
+ * and the nothrow soft-fail growth API (try_reserve / try_to_iovec and the
+ * tr::detail try_reserve / try_push_back primitives) that keeps the composed-reply path
+ * from abort()ing under -fno-exceptions on a fragmented heap.
  */
 
 #include "libtracer/rope.hpp"
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <span>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "libtracer/mem_borrowed.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/view.hpp"
 
 namespace {
@@ -120,11 +127,76 @@ void test_accessors() {
           "subrope covers the requested window across links");
 }
 
+/**
+ * @brief The nothrow soft-fail growth API: an impossible count returns false (never
+ *        abort()s), a normal reservation makes the following appends non-reallocating,
+ *        and try_to_iovec / the tr::detail primitives behave correctly.
+ */
+void test_nothrow_growth() {
+    std::printf("rope_t nothrow soft-fail growth (composed-reply OOM safety):\n");
+    std::array<std::byte, 12> buf{};
+    for (std::size_t i = 0; i < buf.size(); ++i)
+        buf[i] = static_cast<std::byte>(0xC0 + static_cast<int>(i));
+
+    // An impossible link count soft-fails instead of abort()ing in a throwing reserve.
+    rope_t imp;
+    const std::size_t impossible = SIZE_MAX / sizeof(view_t) + 1;
+    check(!imp.try_reserve(impossible), "try_reserve(impossible count) returns false (no abort)");
+    check(imp.link_count() == 0, "a failed try_reserve leaves the rope untouched");
+
+    // Perf fast path: a reservation that fits the inline small-buffer storage takes NO
+    // heap allocation — the hot small-reply (assemble delivery) path stays zero-alloc.
+    rope_t small;
+    check(small.try_reserve(2), "try_reserve(2) on a fresh rope returns true");
+    check(small.link_count() == 0 && links_inline(small),
+          "try_reserve(2) leaves the rope INLINE — no heap spill (zero-alloc fast path)");
+    small.append(byte_view(buf[0]));
+    small.append(byte_view(buf[1]));
+    check(small.link_count() == 2 && links_inline(small),
+          "two appends after the inline try_reserve stay INLINE (still no allocation)");
+
+    // A normal reservation: the reserved appends never reallocate the heap chain.
+    rope_t r;
+    check(r.try_reserve(buf.size()), "try_reserve(normal count) returns true");
+    for (std::size_t i = 0; i < 3; ++i) r.append(byte_view(buf[i]));  // spill to the heap chain
+    const view_t* anchor = r.links().data();
+    for (std::size_t i = 3; i < buf.size(); ++i) r.append(byte_view(buf[i]));
+    check(r.link_count() == buf.size(), "every reserved append lands");
+    check(r.links().data() == anchor, "reserved appends do not reallocate the chain (nothrow)");
+    bool order_ok = true;
+    for (std::size_t i = 0; i < buf.size(); ++i)
+        if (std::to_integer<int>(r.links()[i].bytes()[0]) != (0xC0 + static_cast<int>(i)))
+            order_ok = false;
+    check(order_ok, "reserved appends preserve link order and bytes");
+
+    // try_to_iovec: one span per link, pointing INTO the original segments (no copy).
+    std::vector<std::span<const std::byte>> iov;
+    check(r.try_to_iovec(iov), "try_to_iovec returns true on a normal rope");
+    bool spans_ok = iov.size() == r.link_count();
+    for (std::size_t i = 0; i < iov.size() && spans_ok; ++i)
+        if (iov[i].data() != r.links()[i].bytes().data()) spans_ok = false;
+    check(spans_ok, "try_to_iovec yields one zero-copy span per link");
+
+    // The generic nothrow vector primitives both APIs build on (tr::detail).
+    std::vector<int> v;
+    const std::size_t vimp = SIZE_MAX / sizeof(int) + 1;
+    check(!tr::detail::try_reserve(v, vimp), "detail::try_reserve(impossible) returns false");
+    check(tr::detail::try_reserve(v, 4), "detail::try_reserve(normal) returns true");
+    bool push_ok = true;
+    for (int i = 0; i < 10; ++i) push_ok = push_ok && tr::detail::try_push_back(v, std::move(i));
+    check(push_ok && v.size() == 10, "detail::try_push_back grows past capacity, all true");
+    bool vorder = true;
+    for (int i = 0; i < 10; ++i)
+        if (v[static_cast<std::size_t>(i)] != i) vorder = false;
+    check(vorder, "detail::try_push_back preserves order across the growth");
+}
+
 }  // namespace
 
 int main() {
     test_sbo_gate();
     test_accessors();
+    test_nothrow_growth();
     if (g_failures == 0) {
         std::printf("ALL PASS\n");
         return 0;

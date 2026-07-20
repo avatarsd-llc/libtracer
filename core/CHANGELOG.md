@@ -33,7 +33,42 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   (`subtree_read_test` gates the differential, round-trip, prune, regression, and
   link-accounting batteries).
 
+- **The composed-reply path is now NOTHROW / soft-fail — a heap-exhausted reply is
+  DROPPED, never an `abort()`.** Assembling a large composed `read` reply (the folded
+  POINT tree of RFC-0005 §C) on a fragmented heap used to grow several throwing
+  `std::vector` / rope transients whose `std::bad_alloc` is an `abort()` under the MCU
+  profile's `-fno-exceptions` — observed as an ESP32-C6 reboot when the ~12.7 KB
+  composed `/` reply was built low on memory. Every residual throwing allocation on the
+  reply path is converted to a nothrow soft-fail that drops the reply as
+  `status_t::BACKPRESSURE` (a dropped reply is already valid — the client retries), with
+  **no wire-behavior change** on the success path (byte-identical, `subtree_read_test` /
+  `folded_children_test` stay green): the `read_subtree_folded` pre-order `nodes` / work
+  `stack` growth (nothrow `try_push_back`), its per-node POINT header (emitted by cursor
+  into a nothrow `heap_alloc`, retiring the throwing `std::vector<std::byte>` +
+  `emit_header`), the reply rope's `heap_` chain spill (pre-`try_reserve`'d to the exact
+  final link count), the FWD{REPLY} `assemble` head+payload chain (pre-`try_reserve`'d;
+  an OOM yields an empty rope the router drops), and the `resolve_terminus` /
+  `resolve_terminus_rope` egress span table (`try_to_iovec`). This finishes the residual
+  half of the Gorshok OOM crash begun by the `assemble_result_rope` link-table fix.
+
 ### Added
+
+- **`rope_t` nothrow soft-fail growth API (`tr::view::rope_t`).** For assembling a
+  scatter-gather reply on a constrained/fragmented heap without an `-fno-exceptions`
+  `abort()`:
+  - `[[nodiscard]] bool rope_t::try_reserve(std::size_t links) noexcept` — reserve the
+    heap chain for `links` more `append`/`concat` links; after success those appends are
+    guaranteed non-reallocating (hence nothrow). Returns `false` (rope untouched) on OOM
+    or an impossible count.
+  - `[[nodiscard]] bool rope_t::try_to_iovec(std::vector<std::span<const std::byte>>&)
+    const noexcept` — the nothrow form of `to_iovec` (one zero-copy span per link);
+    returns `false` (output left empty) when the span table cannot be grown. The throwing
+    `to_iovec()` is unchanged for existing callers.
+  - `tr::detail::try_reserve(std::vector<T>&, std::size_t)` /
+    `tr::detail::try_push_back(std::vector<T>&, T&&)` (in `mem_heap.hpp`) — the generic
+    nothrow `std::vector` growth primitives both rope methods and the composed-read
+    collection stacks build on (probe with `operator new(..., std::nothrow)`, then the
+    throwing grow only once the allocation is known to succeed).
 
 - **Subscriber-edge eviction on peer departure (RFC-0009 §D, extended to link
   teardown) + edge-slot reuse.** Nothing evicted a departed link's subscriber edges:
