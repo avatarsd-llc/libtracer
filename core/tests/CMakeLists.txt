@@ -292,6 +292,15 @@ target_link_libraries(fwd_fanout_test PRIVATE libtracer)
 libtracer_test_warnings(fwd_fanout_test)
 add_test(NAME fwd_fanout COMMAND fwd_fanout_test)
 
+# RFC-0009 §D extended to peer departure — subscriber-edge eviction on link teardown:
+# evict_link_edges scoping + RFC-0005 counter unwind, §D.2 slot reuse/index stability,
+# fwd_router link_down (evict + clear_link), the add_child departure-notifier seam
+# (p2p down / bus peer-down), and a concurrent writer x evict race (the TSan gate).
+add_executable(edge_eviction_test edge_eviction_test.cpp)
+target_link_libraries(edge_eviction_test PRIVATE libtracer)
+libtracer_test_warnings(edge_eviction_test)
+add_test(NAME edge_eviction COMMAND edge_eviction_test)
+
 # ADR-0053 ④b — the FWD forward hop over a MULTI-LINK rope, without flattening: an oracle
 # equality that every adversarial split routes byte-identically to the contiguous path,
 # plus the terminus flatten fallback.

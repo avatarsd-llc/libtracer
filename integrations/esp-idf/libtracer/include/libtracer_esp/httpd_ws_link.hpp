@@ -186,7 +186,10 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     std::size_t max_peers_;
     bool peer_named_;
     bool owns_httpd_ = true;  // false when adopting an external server (dtor must not httpd_stop)
-    std::string uri_;         // the WS URI registered (unregistered by the adopting dtor)
+    /** @brief Set at destructor entry: suppresses the departure notifier for session
+     *         closes the teardown itself provokes (see reclaim_slot). */
+    std::atomic<bool> stopping_{false};
+    std::string uri_;  // the WS URI registered (unregistered by the adopting dtor)
     /** @brief Guards the slot vector and each slot's name/fd/open — the cross-thread
      *         reads (enumerate_peers / peer_link / a send's fd snapshot) against the
      *         httpd task's accept/close. The reassembly buffer is httpd-task-only. */

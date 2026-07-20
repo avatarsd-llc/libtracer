@@ -35,6 +35,29 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **Subscriber-edge eviction on peer departure (RFC-0009 §D, extended to link
+  teardown) + edge-slot reuse.** Nothing evicted a departed link's subscriber edges:
+  every browser session left its remote edges ACTIVE in every write fan-out (~27 KB
+  and ~70 orphaned edges per session measured on the C6), a redialed peer never
+  matched its old edges (new ephemeral port in the name), and `add_edge` never
+  reused a freed slot. New public API:
+  - `graph_t::evict_link_edges(std::string_view link_name)` — deactivates **and
+    reclaims** (releases route/link/caller state in place, slot shell kept) every
+    subscriber edge whose stored link is `link_name`, unwinding the RFC-0005
+    listener counters; returns the evicted count. Slot indices of survivors never
+    renumber (§D.2); local edges and other links are untouched.
+  - `vertex_t::add_edge` now **reuses the first inactive slot** before growing
+    `subs_` (a §D.2 "cleared slot MAY be reused" append); in-flight deliveries are
+    unaffected — their `edge_view_t` snapshots own copies/refcount clones.
+  - `fwd_router_t::link_down(std::string_view)` — the link-departure hook: graph
+    eviction + `clear_link` label-state drop, in that order.
+  - `transport_t::set_down_notifier` / `bus_link_t::set_peer_down_notifier` — the
+    teardown seam `fwd_router_t::add_child` now installs on every child;
+    `transport_ws_server` (peer-named and flat), `transport_ws_client`,
+    `tcp_transport_t` (both roles) and the ESP-IDF `httpd_ws_link_t` fire it when
+    a session dies. Connectionless kinds (UDP) and announce-census buses (CAN)
+    have no closure event and never fire it.
+
 - **`graph_t::retire(vertex_handle_t)` — owner-facing vertex retirement (#407,
   RFC-0009 §B/§C/§E.6)** — the mirror of `register_vertex`. Marks a vertex and its
   whole subtree **logically absent**: invisible to `find` / `read` / `:children[]`,

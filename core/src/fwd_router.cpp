@@ -64,6 +64,11 @@ void fwd_router_t::add_child(std::string name, transport_t& link) {
         // as-is — zero-copy; a span-only bus keeps the borrowed peer-named path.
         // A bus frame arrives tagged with the sending peer's name, so the ctx is
         // just the router itself.
+        // Departure seam (RFC-0009 §D extended): a bus peer that hangs up carries its
+        // own name, so link_down needs no per-child state either.
+        bus->set_peer_down_notifier(
+            [](void* c, std::string_view peer) { static_cast<fwd_router_t*>(c)->link_down(peer); },
+            this);
         if (bus->delivers_ropes()) {
             bus->set_peer_rope_receiver(
                 [](void* c, std::string_view peer, view::rope_t frame) {
@@ -82,6 +87,14 @@ void fwd_router_t::add_child(std::string name, transport_t& link) {
     // Point-to-point: the inbound NAME is fixed per child, carried by a stable
     // per-child ctx (child_rx_ holds the address for the transport's lifetime).
     child_rx_ctx_t& ctx = child_rx_.emplace_back(this, std::move(name));
+    // Departure seam (RFC-0009 §D extended): the same stable ctx carries the child's
+    // NAME to link_down when the transport reports its one connection dead.
+    link.set_down_notifier(
+        [](void* c) {
+            auto* const cc = static_cast<child_rx_ctx_t*>(c);
+            cc->self->link_down(cc->name);
+        },
+        &ctx);
     if (link.delivers_ropes()) {
         link.set_rope_receiver(
             [](void* c, view::rope_t frame) {
@@ -121,6 +134,17 @@ void fwd_router_t::on_stale_label(std::function<void(std::string_view, std::uint
 }
 
 void fwd_router_t::clear_link(std::string_view link_name) { handles_.clear_link(link_name); }
+
+/**
+ * @brief The link-departure hook body: graph eviction first (deliveries to the dead
+ *        session stop and its per-edge state is reclaimed), then the label-state drop
+ *        (@ref fwd_router_t::clear_link — reused, not duplicated). See the header doc
+ *        for the seam and threading contract.
+ */
+void fwd_router_t::link_down(std::string_view link_name) {
+    graph_.evict_link_edges(link_name);
+    clear_link(link_name);
+}
 
 std::uint16_t fwd_router_t::advertise(std::string_view link_name,
                                       std::span<const std::byte> route_path) {

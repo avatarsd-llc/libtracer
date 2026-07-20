@@ -101,6 +101,29 @@ class bus_link_t {
         return false;
     }
 
+    /** @brief The peer-departure notifier fn: (ctx, the departed peer's NAME). */
+    using peer_down_fn_t = void (*)(void* ctx, std::string_view peer);
+
+    /**
+     * @brief Register the peer-departure notifier — the bus half of the link-teardown
+     *        eviction seam (RFC-0009 §D extended to peer departure).
+     *
+     * The bus adapter invokes it (possibly on an internal transport thread) each time a
+     * peer's session dies — remote hangup, protocol CLOSE, or a teardown initiated by
+     * @ref close_peer — carrying the NAME the peer was audible under (the same NAME inbound
+     * frames were tagged with, i.e. the routing plane's inbound link name for that peer).
+     * `fwd_router_t::add_child` installs a notifier that evicts the departed peer's
+     * subscriber edges and label state (`fwd_router_t::link_down`). Must be set before
+     * frames flow, like the receivers; a kind with no departure concept simply never
+     * fires it.
+     * @param fn  The notifier; @p ctx is passed back as its first argument.
+     * @param ctx Caller-owned context; must outlive every possible notification.
+     */
+    void set_peer_down_notifier(peer_down_fn_t fn, void* ctx) noexcept {
+        peer_down_ctx_ = ctx;
+        peer_down_fn_ = fn;
+    }
+
     /**
      * @brief Register the peer-named inbound sink (used INSTEAD of `set_receiver`).
      *
@@ -162,9 +185,24 @@ class bus_link_t {
    protected:
     ~bus_link_t() = default;  // never deleted through this facet
 
+    /**
+     * @brief Fire the peer-departure notifier for @p peer (no-op when none installed).
+     *
+     * The bus adapter calls this from the thread that OBSERVED the departure, after its
+     * own slot bookkeeping is done and with none of its internal locks held — the
+     * notifier re-enters the routing plane (router → graph), which takes graph locks.
+     */
+    void notify_peer_down(std::string_view peer) const {
+        if (peer_down_fn_ != nullptr) peer_down_fn_(peer_down_ctx_, peer);
+    }
+
     /** @brief The peer-named delivery-tier slot (the ONE tier-select mechanism);
      *         the bus adapter's receive path dispatches through it. */
     receiver_slot_t<std::string_view> peer_rx_;
+
+   private:
+    peer_down_fn_t peer_down_fn_ = nullptr; /**< @brief Installed peer-departure sink. */
+    void* peer_down_ctx_ = nullptr;         /**< @brief Its caller-owned context. */
 };
 
 /**
@@ -276,13 +314,46 @@ class transport_t {
      */
     [[nodiscard]] virtual bool delivers_ropes() const { return false; }
 
+    /** @brief The link-down notifier fn: (ctx) — the link carries its own identity via ctx. */
+    using down_fn_t = void (*)(void* ctx);
+
+    /**
+     * @brief Register the link-down notifier — the point-to-point half of the
+     *        link-teardown eviction seam (RFC-0009 §D extended to peer departure).
+     *
+     * The transport invokes it (possibly on an internal transport thread) when its ONE
+     * connection dies — remote hangup, protocol CLOSE, or a fatal receive error.
+     * `fwd_router_t::add_child` installs a notifier that evicts the child's subscriber
+     * edges and label state under the child's registered NAME (`fwd_router_t::
+     * link_down`). Must be set before frames flow, like the receivers; a connectionless
+     * kind (UDP) has no closure concept and never fires it. Fire with no internal
+     * transport locks held — the notifier re-enters the routing plane, which takes
+     * graph locks.
+     * @param fn  The notifier; @p ctx is passed back as its first argument.
+     * @param ctx Caller-owned context; must outlive every possible notification.
+     */
+    void set_down_notifier(down_fn_t fn, void* ctx) noexcept {
+        down_ctx_ = ctx;
+        down_fn_ = fn;
+    }
+
    protected:
+    /** @brief Fire the link-down notifier (no-op when none installed) — see
+     *         @ref set_down_notifier for the calling discipline. */
+    void notify_down() const {
+        if (down_fn_ != nullptr) down_fn_(down_ctx_);
+    }
+
     /** @brief The delivery-tier slot (the ONE tier-select mechanism, ADR-0042 /
      *         ADR-0053): adapters dispatch inbound frames through it —
      *         `rx_.deliver(view)` for owning frames, `rx_.deliver_borrowed(span)`
      *         for borrowed ones — and key receive-buffer strategy off
      *         `rx_.has_rope()`. */
     receiver_slot_t<> rx_;
+
+   private:
+    down_fn_t down_fn_ = nullptr; /**< @brief Installed link-down sink. */
+    void* down_ctx_ = nullptr;    /**< @brief Its caller-owned context. */
 
    public:
     /**
