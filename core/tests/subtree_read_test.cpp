@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief RFC-0005 §C follow-on — the composed SUBTREE-SNAPSHOT read: a plain READ of a
+ * @brief RFC-0005 §C follow-on — the COMPOSED BRANCH READ: a plain READ of a
  *        vertex with ≥ 1 registered child serves the folded POINT tree of its registered
  *        subtree's landed LKVs.
  *
@@ -529,7 +529,7 @@ void test_zero_copy_link_structure() {
 }  // namespace
 
 int main() {
-    std::printf("libtracer subtree-snapshot read tests (RFC-0005 §C follow-on):\n");
+    std::printf("libtracer composed branch read tests (RFC-0005 §C follow-on):\n");
     test_differential_random_trees();
     test_branch_write_round_trip();
     test_acl_prune();

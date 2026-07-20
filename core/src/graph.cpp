@@ -601,7 +601,7 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, std::string_view caller) cons
         return std::unexpected(status_t::NOT_FOUND);
     }
     // The branch/leaf fork (RFC-0005 §C follow-on): a vertex with ≥ 1 registered child
-    // serves the composed subtree snapshot — the folded POINT tree of its registered
+    // serves the composed branch read — the folded POINT tree of its registered
     // descendants' landed LKVs. AFTER the handler seam (a HANDLER target's on_read keeps
     // precedence); a leaf falls through to the LKV path byte-identically to before.
     if (has_registered_child(v)) return read_subtree_folded(vh, caller);
@@ -1585,7 +1585,7 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
         return std::unexpected(status_t::PERMISSION_DENIED);
 
     /**
-     * @brief One included snapshot node, collected in PRE-ORDER (so the array order IS the
+     * @brief One included composed-read node, collected in PRE-ORDER (so the array order IS the
      *        wire order: a node's POINT header precedes its NAME/value/children bytes).
      */
     struct snap_node_t {
@@ -1609,7 +1609,7 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
     // (unregistered levels are not members, exactly as read_children), one read_stored()
     // load, and the node's OWN body contribution (its NAME record below the root; its
     // stored TLV's total length verbatim). Descendant HANDLER on_read seams are NOT
-    // invoked — the snapshot serves landed LKVs only.
+    // invoked — the composed read serves landed LKVs only.
     std::vector<snap_node_t> nodes;
     {
         /** @brief One unvisited subtree root: the vertex and its parent's array index. */

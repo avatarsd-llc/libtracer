@@ -14,9 +14,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
-- **A plain `read` of a vertex with ≥ 1 registered child now serves the composed
-  SUBTREE SNAPSHOT** (RFC-0005 §C follow-on) — the folded POINT tree of the target's
-  registered subtree: `snapshot(target) = POINT{ [stored TLV of target]?, child_node* }`,
+- **A plain `read` of a vertex with ≥ 1 registered child now serves the COMPOSED
+  BRANCH READ** (RFC-0005 §C follow-on) — the folded POINT tree of the target's
+  registered subtree, a view over the live last-known-value ropes (not a copy):
+  `composed(target) = POINT{ [stored TLV of target]?, child_node* }`,
   `child_node(c) = POINT{ NAME(c), [stored TLV of c]?, child_node(grandchild)* }`. Each
   node's value is that vertex's stored TLV **verbatim** (the landed LKV bytes, opaque —
   a non-VALUE TLV such as a STATUS composes as-is; descendant HANDLER `on_read` seams
@@ -29,7 +30,7 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   The new public composer `graph_t::read_subtree_folded(vertex_handle_t,
   string_view)` builds the reply as a scatter-gather rope — per-node owned POINT
   headers, borrowed NAME records, refcount-cloned LKV links, zero flatten
-  (`subtree_snapshot_test` gates the differential, round-trip, prune, regression, and
+  (`subtree_read_test` gates the differential, round-trip, prune, regression, and
   link-accounting batteries).
 
 ### Added
