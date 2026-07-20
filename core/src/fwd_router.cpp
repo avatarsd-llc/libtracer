@@ -351,9 +351,13 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
     const auto arena = wire::decode_into(frame, *mr_);
     if (!arena) return;  // malformed frame ⇒ drop
     auto reply = resolver_.resolve(*arena, inbound_name, frame_view);
-    if (!reply) return;  // structurally non-request ⇒ drop
+    if (!reply) return;                    // structurally non-request ⇒ drop
+    if (reply->link_count() == 0) return;  // assemble OOM ⇒ empty rope ⇒ drop (no garbage frame)
     if (transport_t* in = registry_.by_name(inbound_name)) {
-        const std::vector<std::span<const std::byte>> iov = reply->to_iovec();
+        // Nothrow scatter-gather egress: the span table growth would abort() under
+        // -fno-exceptions on a fragmented heap — drop the reply instead (the client retries).
+        std::vector<std::span<const std::byte>> iov;
+        if (!reply->try_to_iovec(iov)) return;
         in->send(std::span<const std::span<const std::byte>>(iov));
     }
 }
@@ -374,9 +378,13 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
     // rope, so no frame_view is threaded. Reply routes back over the inbound link,
     // its dst the request's accumulated src, exactly as the arena terminus.
     auto reply = resolver_.resolve(*view, inbound_name, nullptr);
-    if (!reply) return;  // structurally non-request ⇒ drop
+    if (!reply) return;                    // structurally non-request ⇒ drop
+    if (reply->link_count() == 0) return;  // assemble OOM ⇒ empty rope ⇒ drop (no garbage frame)
     if (transport_t* in = registry_.by_name(inbound_name)) {
-        const std::vector<std::span<const std::byte>> iov = reply->to_iovec();
+        // Nothrow scatter-gather egress (see resolve_terminus): drop rather than abort on
+        // a span-table growth failure.
+        std::vector<std::span<const std::byte>> iov;
+        if (!reply->try_to_iovec(iov)) return;
         in->send(std::span<const std::span<const std::byte>>(iov));
     }
 }

@@ -75,6 +75,35 @@ class rope_t {
         return *this;
     }
 
+    /**
+     * @brief Nothrow-reserve room for @p links more @ref append / @ref concat links —
+     *        the soft-fail growth the composed-reply builder needs.
+     *
+     * The chain's spill to `heap_` is a `std::vector` growth that throws `std::bad_alloc`
+     * on OOM, which under `-fno-exceptions` is an `abort()` — a node reboot when a large
+     * (e.g. composed-root) reply is assembled on a fragmented heap. A caller that knows
+     * its final link count reserves it here up front: on success the next @p links
+     * @ref append calls are guaranteed **non-reallocating hence nothrow** (this migrates
+     * the inline links into `heap_` so no `append` re-enters the inline→heap spill
+     * `reserve`; an empty rope stays inline, but the reserved capacity makes even that
+     * one spill `reserve` a no-op). On failure the rope is unchanged and the caller drops
+     * the reply (BACKPRESSURE) instead of aborting.
+     * @retval false Reservation failed (OOM / impossible count) — the rope is untouched.
+     */
+    [[nodiscard]] bool try_reserve(std::size_t links) noexcept {
+        const std::size_t have = link_count();
+        if (links > heap_.max_size() - have) return false;  // impossible count
+        if (!tr::detail::try_reserve(heap_, have + links)) return false;
+        // Force heap_ mode: migrate the inline links so subsequent append()s take the
+        // push_back fast path and never re-enter the inline→heap spill reserve.
+        for (std::size_t i = 0; i < inline_n_; ++i) heap_.push_back(std::move(inline_[i]));
+        if (inline_n_ > 0) {
+            inline_n_ = 0;
+            for (view_t& s : inline_) s = view_t{};
+        }
+        return true;
+    }
+
     /** @brief Number of links in the chain. */
     [[nodiscard]] std::size_t link_count() const noexcept {
         return heap_.empty() ? inline_n_ : heap_.size();
@@ -175,6 +204,23 @@ class rope_t {
         iov.reserve(link_count());
         for (const view_t& l : links()) iov.push_back(l.bytes());
         return iov;
+    }
+
+    /**
+     * @brief Nothrow @ref to_iovec — fill @p out with one span per link (no copy),
+     *        soft-failing instead of aborting when the span table cannot be grown.
+     *
+     * The `reserve` in @ref to_iovec throws on OOM (an `abort()` under
+     * `-fno-exceptions`); the terminus reply egress builds this table per send, so on
+     * a fragmented heap that aborted the node. This nothrow-reserves @p out to
+     * @ref link_count first and drops the reply on failure. @p out is cleared on entry.
+     * @retval false The span table could not be reserved — @p out is left empty.
+     */
+    [[nodiscard]] bool try_to_iovec(std::vector<std::span<const std::byte>>& out) const noexcept {
+        out.clear();
+        if (!tr::detail::try_reserve(out, link_count())) return false;
+        for (const view_t& l : links()) out.push_back(l.bytes());  // reserved — no reallocation
+        return true;
     }
 
     /**

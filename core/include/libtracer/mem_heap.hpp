@@ -14,6 +14,7 @@
 #include <optional>
 #include <span>
 #include <utility>
+#include <vector>
 
 #include "libtracer/backend.hpp"
 #include "libtracer/segment.hpp"
@@ -21,8 +22,58 @@
 
 /**
  * @file
- * @brief The `mem_heap` L0 backend (`tr::mem`) and its L1 alloc helper (`tr::view`).
+ * @brief The `mem_heap` L0 backend (`tr::mem`) and its L1 alloc helper (`tr::view`),
+ *        plus the nothrow `std::vector` growth primitives (`tr::detail`).
  */
+
+namespace tr::detail {
+
+/**
+ * @brief Nothrow `std::vector::reserve`: grow @p v to hold at least @p n elements
+ *        WITHOUT ever aborting.
+ *
+ * A throwing `std::vector::reserve` calls `operator new` and, on failure, throws
+ * `std::bad_alloc` — which under the MCU profile's `-fno-exceptions` is an
+ * `abort()` (core/STYLE.md §language profile). This probes the exact target
+ * allocation with a nothrow `operator new` first; if it fails (or @p n exceeds
+ * `max_size()`) the call soft-fails, and only on success is the throwing `reserve`
+ * run — which reclaims the just-freed probe block on the single-threaded reply
+ * build, so it cannot throw.
+ * @retval false Allocation would fail / @p n is impossible — nothing changed.
+ * @retval true  @p v now has capacity for at least @p n elements.
+ */
+template <class T>
+[[nodiscard]] bool try_reserve(std::vector<T>& v, std::size_t n) noexcept {
+    if (n <= v.capacity()) return true;
+    if (n > v.max_size()) return false;  // impossible count — the reserve would throw length_error
+    void* probe = ::operator new(n * sizeof(T), std::nothrow);
+    if (probe == nullptr) return false;
+    ::operator delete(probe);
+    v.reserve(n);  // nothrow now: the just-freed probe block satisfies it (single-threaded)
+    return true;
+}
+
+/**
+ * @brief Nothrow `std::vector::push_back`: append @p x, growing (capacity-doubling)
+ *        through @ref try_reserve so no reallocation can abort under `-fno-exceptions`.
+ *
+ * For a vector whose element count is not known up front (the composed-read pre-order
+ * collection stacks) — where @ref try_reserve cannot be called once with the final
+ * count. @p x is appended only when the growth (if any) succeeds; the just-reserved
+ * capacity guarantees the `push_back` itself never reallocates.
+ * @retval false The growth allocation failed — @p x was NOT appended.
+ */
+template <class T>
+[[nodiscard]] bool try_push_back(std::vector<T>& v, T&& x) noexcept {
+    if (v.size() == v.capacity()) {
+        const std::size_t grow = v.capacity() == 0 ? 1u : v.capacity() * 2u;
+        if (!try_reserve(v, grow)) return false;
+    }
+    v.push_back(std::move(x));  // guaranteed no reallocation now
+    return true;
+}
+
+}  // namespace tr::detail
 
 namespace tr::mem {
 

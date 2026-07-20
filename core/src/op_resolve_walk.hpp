@@ -421,6 +421,11 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
     const std::size_t head_len = (ll ? 6u : 4u) + children_len;
 
     rope_t rope;
+    // Reserve the reply chain (head + one link per shared payload view) up front so the
+    // appends below never spill through a throwing std::vector growth — an abort() under
+    // -fno-exceptions on a fragmented heap. On failure return an EMPTY rope: the caller's
+    // send site drops a link_count()==0 reply (never emits a malformed/garbage frame).
+    if (!rope.try_reserve(1 + shared.size())) return rope_t{};
     segment_ptr_t seg = view::heap_alloc(head_len);
     if (seg) {
         // A head-alloc failure degrades the reply (payload views only), never crashes.
