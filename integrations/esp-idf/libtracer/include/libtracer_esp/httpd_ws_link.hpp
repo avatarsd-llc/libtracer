@@ -133,6 +133,18 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     /** @brief Broadcast @p frame as one BINARY WebSocket message to every open peer. */
     void send(std::span<const std::byte> frame) override;
 
+    /**
+     * @brief Broadcast a scattered frame: gather @p iov once, straight into the
+     *        nothrow-allocated tx work buffer, one BINARY message per open peer.
+     *
+     * Overrides the base gather-into-a-temporary default: the reply rope's iovec is
+     * copied exactly ONCE (into the queued work item), so a large reply is never
+     * double-buffered (gather temp + tx copy) on the heap — the transient that
+     * exhausted the chip heap under concurrent SPA asset GETs. On allocation
+     * failure the frame is dropped (backpressure), never an abort.
+     */
+    void send(std::span<const std::span<const std::byte>> iov) override;
+
     /** @brief Span delivery: the router services each inbound frame in-call, so no
      *         frame outlives its callback (one override covers both bases). */
     [[nodiscard]] bool delivers_ropes() const override { return false; }
@@ -165,6 +177,10 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     class peer_endpoint_t final : public transport_t {
        public:
         void send(std::span<const std::byte> frame) override;
+        /** @brief Directed scatter-gather send: gathered once into the nothrow tx
+         *         work buffer (no intermediate flatten temporary — see the owning
+         *         link's iovec @ref httpd_ws_link_t::send). */
+        void send(std::span<const std::span<const std::byte>> iov) override;
 
        private:
         friend class httpd_ws_link_t;
@@ -182,7 +198,9 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     esp_err_t on_data_frame(httpd_req_t* req);  // recv one WS frame, (reassemble,) deliver
     void reclaim_slot(session_t* slot);
     void deliver(std::string_view peer, std::span<const std::byte> frame);
-    void queue_send(int fd, std::span<const std::byte> frame);  // heap-copy + httpd_queue_work
+    // ONE nothrow gather-copy + httpd_queue_work; drops the frame on OOM (never aborts)
+    void queue_send(int fd, std::span<const std::span<const std::byte>> iov);
+    void queue_send(int fd, std::span<const std::byte> frame);  // one-span sugar over the gather
 
     /**
      * @brief Per-session TX-enqueue accounting (takes @ref peers_m_ — callers must

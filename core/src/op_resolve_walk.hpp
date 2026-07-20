@@ -413,7 +413,7 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
 [[nodiscard]] rope_t assemble(std::span<const std::byte> reply_dst_wire,
                               std::span<const std::byte> reply_src_wire, reply_kind_t kind,
                               std::span<const std::byte> inline_tail,
-                              const std::vector<view_t>& shared, std::size_t shared_len) {
+                              std::span<const view_t> shared, std::size_t shared_len) {
     const std::size_t children_len = kU8ValueLen + reply_dst_wire.size() + reply_src_wire.size() +
                                      kU8ValueLen + inline_tail.size();
     const std::size_t body_len = children_len + shared_len;
@@ -472,9 +472,13 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
 [[nodiscard]] rope_t assemble_result_rope(std::span<const std::byte> reply_dst_wire,
                                           std::span<const std::byte> reply_src_wire,
                                           const rope_t& payload) {
-    const std::span<const view_t> links = payload.links();
-    const std::vector<view_t> shared(links.begin(), links.end());
-    return assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT, {}, shared,
+    // The links span feeds assemble directly — no heap copy of the link table. The
+    // old std::vector staging copy was a per-reply transient that scaled with the
+    // stored value's link count and ABORTED on heap exhaustion under -fno-exceptions
+    // (the throwing std::allocator has no failure path on an MCU) — observed as an
+    // OOM abort on a composed-root read's ~288-link reply. `payload` outlives the
+    // call, so borrowing its span is safe.
+    return assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT, {}, payload.links(),
                     payload.total_length());
 }
 

@@ -160,7 +160,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
-- **Gated reads no longer fail-open while an `:acl` rewrite is in flight**
+- **A read reply's link table is no longer heap-copied per reply (OOM-abort hardening,
+  on-device crash)** — `assemble_result_rope` staged the stored payload rope's links
+  through a fresh `std::vector<view_t>` before handing them to `assemble`, a per-reply
+  transient that scaled with the value's link count (~9 KB for a composed-root read) and,
+  on an `-fno-exceptions` MCU where the throwing `std::allocator` has no failure path,
+  turned heap exhaustion into `abort()` mid-request (decoded on-device: 3/3 Gorshok
+  browser-session crashes on the httpd task). `assemble` now takes
+  `std::span<const view_t>` and borrows the payload rope's own link span — zero staging
+  allocation. Internal helper (`core/src/`), no public-API change. The companion
+  `integrations/esp-idf` fix makes the WS link's TX/RX buffers nothrow end-to-end
+  (gather-once into the queued work item, drop-on-OOM backpressure per the existing
+  `note_tx_result` contract) instead of aborting.
   — the ADR-0050 effective-ACE cache cleared its dirty flag at the *entry* of the lazy
   rebuild (`vertex_t::with_effective_aces` did an `exchange(false)` before the fresh merge
   was published), so a second reader arriving during the unlocked rebuild window saw

@@ -17,6 +17,7 @@
 #include <sys/socket.h>
 
 #include <cstring>
+#include <memory>
 #include <new>
 #include <string>
 #include <utility>
@@ -85,6 +86,55 @@ constexpr std::uint8_t kMaxConsecutiveTxDrops = 3;
     return std::string("fd") + std::to_string(fd);
 }
 
+/**
+ * @brief Nothrow fragment-reassembly buffer: grows by exact-size `new (std::nothrow)`
+ *        reallocation, so heap exhaustion drops the in-flight message instead of
+ *        aborting the node.
+ *
+ * `std::vector` is unusable here: under `-fno-exceptions` its throwing allocator
+ * turns a failed growth into `abort()` via the bad_alloc stub — and the appended
+ * chunk is peer-controlled up to kMaxFrameBytes, so reassembly growth MUST be
+ * failure-capable (the same backpressure contract as the tx queue). Fragmentation
+ * is the rare path (the SPA sends one whole TLV per unfragmented frame) and the
+ * total is capped by kMaxFrameBytes, so exact-size regrow-and-copy is the lean
+ * choice over capacity doubling.
+ */
+struct asm_buf_t {
+    /** @brief True when no reassembly is in progress. */
+    [[nodiscard]] bool empty() const noexcept { return len_ == 0; }
+    /** @brief Assembled length so far, bytes. */
+    [[nodiscard]] std::size_t size() const noexcept { return len_; }
+    /** @brief The assembled bytes so far (valid until the next append/clear). */
+    [[nodiscard]] std::span<const std::byte> bytes() const noexcept { return {bytes_.get(), len_}; }
+    /** @brief Release the storage (post-deliver / slot-reclaim / drop reset). */
+    void clear() noexcept {
+        bytes_.reset();
+        len_ = 0;
+    }
+    /**
+     * @brief Append @p chunk, nothrow.
+     * @retval false Allocation failed — the buffer is cleared (the partial message is
+     *               unrecoverable) and the caller drops the message (backpressure).
+     */
+    [[nodiscard]] bool append(std::span<const std::byte> chunk) noexcept {
+        if (chunk.empty()) return true;
+        std::unique_ptr<std::byte[]> grown(new (std::nothrow) std::byte[len_ + chunk.size()]);
+        if (grown == nullptr) {
+            clear();
+            return false;
+        }
+        if (len_ != 0) std::memcpy(grown.get(), bytes_.get(), len_);
+        std::memcpy(grown.get() + len_, chunk.data(), chunk.size());
+        bytes_ = std::move(grown);
+        len_ += chunk.size();
+        return true;
+    }
+
+   private:
+    std::unique_ptr<std::byte[]> bytes_; /**< @brief Owned storage (exact-sized). */
+    std::size_t len_ = 0;                /**< @brief Assembled length, bytes. */
+};
+
 }  // namespace
 
 /**
@@ -102,19 +152,24 @@ struct httpd_ws_link_t::session_t {
     int fd = -1;                      /**< @brief Peer socket; -1 => free slot. */
     bool open = false;                /**< @brief True between handshake and close. */
     std::string name;                 /**< @brief `<ip>:<port>` of the peer. */
-    std::vector<std::byte> asm_buf;   /**< @brief RFC 6455 fragment reassembly. */
+    asm_buf_t asm_buf;                /**< @brief RFC 6455 fragment reassembly (nothrow). */
     std::uint8_t tx_drops = 0;        /**< @brief Consecutive TX-enqueue drops (peers_m_). */
     peer_endpoint_t endpoint;         /**< @brief The directed facade `peer_link` returns. */
 };
 
 namespace {
 
-/** @brief One queued outbound frame: the payload is copied so it outlives the
- *         send() caller's span until the httpd task drains the work item. */
+/** @brief One queued outbound frame: the payload is gather-copied ONCE, nothrow, so
+ *         it outlives the send() caller's spans until the httpd task drains the work
+ *         item. A `unique_ptr` buffer, never a `std::vector` — the vector's THROWING
+ *         allocator inside the braced initializer defeated the `new (std::nothrow)`
+ *         guard on the shell: under `-fno-exceptions` a reply-sized copy hitting heap
+ *         exhaustion aborted the node (the Gorshok browser-session crash). */
 struct tx_work_t {
-    httpd_handle_t handle;
-    int fd;
-    std::vector<std::byte> payload;
+    httpd_handle_t handle;                /**< @brief Owning httpd instance. */
+    int fd;                               /**< @brief Destination peer socket. */
+    std::unique_ptr<std::byte[]> payload; /**< @brief The gathered frame bytes. */
+    std::size_t len;                      /**< @brief Frame length, bytes. */
 };
 
 }  // namespace
@@ -267,13 +322,23 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
 
     // Pass 2: ALWAYS drain the payload — even a frame type we ignore must be consumed,
     // or its bytes stay in the stream and the next recv reads them as a frame header
-    // (TCP-stream misalignment). Only then decide what to do with it.
-    std::vector<std::byte> payload(frame.len);
+    // (TCP-stream misalignment). Only then decide what to do with it. The buffer is
+    // nothrow (frame.len is peer-controlled up to kMaxFrameBytes; a throwing
+    // std::vector would abort the node on heap exhaustion under -fno-exceptions);
+    // on OOM the payload cannot be drained, so fail the handler — httpd closes just
+    // this session (backpressure), never the whole node.
+    std::unique_ptr<std::byte[]> payload;
     if (frame.len != 0) {
-        frame.payload = reinterpret_cast<std::uint8_t*>(payload.data());
+        payload.reset(new (std::nothrow) std::byte[frame.len]);
+        if (payload == nullptr) {
+            ESP_LOGW(kTag, "rx alloc failed (len=%u) - closing session", (unsigned)frame.len);
+            return ESP_FAIL;
+        }
+        frame.payload = reinterpret_cast<std::uint8_t*>(payload.get());
         err = httpd_ws_recv_frame(req, &frame, frame.len);
         if (err != ESP_OK) return err;
     }
+    const std::span<const std::byte> body(payload.get(), frame.len);
     // Only data frames carry a TLV (control frames are httpd's — handle_ws_control_frames
     // is off); a stray TEXT/PONG is now drained and ignored.
     if (frame.type != HTTPD_WS_TYPE_BINARY && frame.type != HTTPD_WS_TYPE_CONTINUE) return ESP_OK;
@@ -336,23 +401,24 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     // Reassembly — asm_buf is httpd-task-only, so no lock. The SPA sends one whole TLV
     // per unfragmented BINARY frame (the fast path); a fragmented message chains here.
     if (frame.type == HTTPD_WS_TYPE_BINARY && frame.final && slot->asm_buf.empty()) {
-        deliver(peer, payload);  // unfragmented: deliver borrowed, no extra copy
+        deliver(peer, body);  // unfragmented: deliver borrowed, no extra copy
         return ESP_OK;
     }
     if (frame.type == HTTPD_WS_TYPE_CONTINUE && slot->asm_buf.empty())
         return ESP_OK;  // stray CONTINUE with no assembly open — drop
     if (frame.type == HTTPD_WS_TYPE_BINARY)
         slot->asm_buf.clear();  // a BINARY mid-assembly discards the stale partial
-    if (slot->asm_buf.size() + payload.size() > kMaxFrameBytes) {
+    if (slot->asm_buf.size() + body.size() > kMaxFrameBytes) {
         slot->asm_buf.clear();
-        slot->asm_buf.shrink_to_fit();
         return ESP_OK;  // reassembly would exceed the cap — drop the message
     }
-    slot->asm_buf.insert(slot->asm_buf.end(), payload.begin(), payload.end());
+    if (!slot->asm_buf.append(body)) {
+        ESP_LOGW(kTag, "reassembly alloc failed - message dropped");
+        return ESP_OK;  // nothrow growth failed: drop the message, keep the peer
+    }
     if (frame.final) {
-        deliver(peer, slot->asm_buf);
+        deliver(peer, slot->asm_buf.bytes());
         slot->asm_buf.clear();
-        slot->asm_buf.shrink_to_fit();
     }
     return ESP_OK;
 }
@@ -374,7 +440,6 @@ void httpd_ws_link_t::reclaim_slot(session_t* slot) {
         slot->fd = -1;
         slot->name.clear();
         slot->asm_buf.clear();
-        slot->asm_buf.shrink_to_fit();
         slot->tx_drops = 0;
     }
     // Departure seam (RFC-0009 §D extended to peer departure): a browser tab that
@@ -408,19 +473,43 @@ void httpd_ws_link_t::deliver(std::string_view peer, std::span<const std::byte> 
 // TX — every send is marshalled onto the httpd task (the async-send pattern).
 // ---------------------------------------------------------------------------
 
-void httpd_ws_link_t::queue_send(int fd, std::span<const std::byte> frame) {
+void httpd_ws_link_t::queue_send(int fd, std::span<const std::span<const std::byte>> iov) {
     if (handle_ == nullptr || fd < 0) return;
-    // Copy the payload: httpd_queue_work is asynchronous, so the caller's span is gone
-    // by the time the httpd task runs tx_work. Heap, never a fixed static buffer.
-    auto* const work = new (std::nothrow)
-        tx_work_t{handle_, fd, std::vector<std::byte>(frame.begin(), frame.end())};
+    // Gather-copy the payload ONCE: httpd_queue_work is asynchronous, so the caller's
+    // spans are gone by the time the httpd task runs tx_work. Heap, never a fixed
+    // static buffer — and nothrow END TO END: the previous std::vector copy inside
+    // the braced initializer allocated with the THROWING allocator, so the
+    // `new (std::nothrow)` guard only covered the work-item shell and a reply-sized
+    // copy hitting heap exhaustion aborted the node under -fno-exceptions. An
+    // allocation failure is now exactly the drop contract below: note_tx_result
+    // counts it and the streak closes the session.
+    std::size_t total = 0;
+    for (const auto& part : iov) total += part.size();
+    std::unique_ptr<std::byte[]> buf(new (std::nothrow) std::byte[total]);
+    tx_work_t* work = nullptr;
+    if (buf != nullptr) {
+        std::byte* p = buf.get();
+        for (const auto& part : iov) {
+            if (!part.empty()) std::memcpy(p, part.data(), part.size());
+            p += part.size();
+        }
+        // If the shell allocation fails the initializer never runs, so `buf` is not
+        // moved-from and frees itself on return — no leak either way.
+        work = new (std::nothrow) tx_work_t{handle_, fd, std::move(buf), total};
+    }
     bool queued = false;
     if (work != nullptr) {  // work == nullptr => OOM: drop this frame (backpressure)
         queued = httpd_queue_work(handle_, &httpd_ws_link_t::tx_work, work) == ESP_OK;
         if (!queued) delete work;  // could not enqueue — no leak
     }
     // Either drop kind is counted; kMaxConsecutiveTxDrops in a row closes the session.
-    note_tx_result(fd, queued, frame.size());
+    note_tx_result(fd, queued, total);
+}
+
+void httpd_ws_link_t::queue_send(int fd, std::span<const std::byte> frame) {
+    // One-span sugar over the gather form — the single copy/backpressure locus.
+    const std::span<const std::byte> one[] = {frame};
+    queue_send(fd, std::span<const std::span<const std::byte>>(one));
 }
 
 void httpd_ws_link_t::note_tx_result(int fd, bool queued, std::size_t bytes) {
@@ -462,8 +551,8 @@ void httpd_ws_link_t::tx_work(void* arg) {
         f.final = true;
         f.fragmented = false;
         f.type = HTTPD_WS_TYPE_BINARY;
-        f.payload = reinterpret_cast<std::uint8_t*>(work->payload.data());
-        f.len = work->payload.size();
+        f.payload = reinterpret_cast<std::uint8_t*>(work->payload.get());
+        f.len = work->len;
         const esp_err_t err = httpd_ws_send_frame_async(work->handle, work->fd, &f);
         if (err != ESP_OK) {
             // A failed send is broken-by-contract: the peer missed a frame it can never
@@ -474,7 +563,7 @@ void httpd_ws_link_t::tx_work(void* arg) {
             // reclaimed AND the departure notifier evicts the session's subscriber
             // edges; the client's onclose fires and it reconnects into clean state.
             ESP_LOGW(kTag, "ws send failed (%s) fd=%d len=%u - closing session",
-                     esp_err_to_name(err), work->fd, (unsigned)work->payload.size());
+                     esp_err_to_name(err), work->fd, (unsigned)work->len);
             if (httpd_sess_trigger_close(work->handle, work->fd) != ESP_OK)
                 ESP_LOGW(kTag, "trigger_close failed fd=%d", work->fd);
         }
@@ -483,8 +572,17 @@ void httpd_ws_link_t::tx_work(void* arg) {
 }
 
 void httpd_ws_link_t::send(std::span<const std::byte> frame) {
+    const std::span<const std::byte> one[] = {frame};
+    send(std::span<const std::span<const std::byte>>(one));
+}
+
+void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> iov) {
     // Broadcast: snapshot the open fds under the lock, then enqueue unlocked — the
-    // per-session drop accounting inside queue_send takes peers_m_ itself.
+    // per-session drop accounting inside queue_send takes peers_m_ itself. Overriding
+    // the iovec entry point means a rope reply is gathered ONCE per peer, straight
+    // into the queued work buffer — the base default's gather-into-a-temporary would
+    // double-buffer a large reply (flatten temp + tx copy live simultaneously), the
+    // heap spike behind the on-device OOM abort.
     std::vector<int> fds;
     {
         const std::lock_guard lock(peers_m_);
@@ -492,10 +590,17 @@ void httpd_ws_link_t::send(std::span<const std::byte> frame) {
         for (const auto& s : slots_)
             if (s->open) fds.push_back(s->fd);
     }
-    for (const int fd : fds) queue_send(fd, frame);
+    for (const int fd : fds) queue_send(fd, iov);
 }
 
 void httpd_ws_link_t::peer_endpoint_t::send(std::span<const std::byte> frame) {
+    const std::span<const std::byte> one[] = {frame};
+    send(std::span<const std::span<const std::byte>>(one));
+}
+
+void httpd_ws_link_t::peer_endpoint_t::send(std::span<const std::span<const std::byte>> iov) {
+    // The directed reply path (fwd_router hands the reply rope's iovec here): one
+    // nothrow gather into the tx work item, no intermediate flatten temporary.
     if (owner_ == nullptr || slot_ == nullptr) return;
     int fd = -1;
     {
@@ -503,7 +608,7 @@ void httpd_ws_link_t::peer_endpoint_t::send(std::span<const std::byte> frame) {
         if (!slot_->open) return;  // departed => no-op
         fd = slot_->fd;
     }
-    owner_->queue_send(fd, frame);
+    owner_->queue_send(fd, iov);
 }
 
 // ---------------------------------------------------------------------------
