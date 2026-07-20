@@ -12,6 +12,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`httpd_ws_link_t` heap exhaustion no longer aborts the node (OOM soft-fail).**
+  With `-fno-exceptions`, the throwing allocator turned heap exhaustion on the
+  in-call WS service path into `abort()` (decoded on-device: 3/3 browser-session
+  crashes on the httpd task while serving a ~12.7 KB composed-read reply). All
+  buffers on that path are now nothrow with graceful degradation: (1) TX — the
+  reply is gathered **once** from the caller's iovec into the queued work item
+  via `new (std::nothrow)` (the link and its `peer_endpoint_t` now override
+  `transport_t`'s iovec `send()`, eliminating the base default's throwing gather
+  temporary and the frame's double-buffering); a gather-OOM lands in the existing
+  `note_tx_result` drop/close ladder as a counted drop. (2) RX — the pass-2
+  payload buffer is nothrow (OOM closes that session), and fragment reassembly
+  moved to a nothrow exact-size regrow buffer (OOM drops the in-flight message,
+  keeps the peer). No wire-visible change: peers observe the pre-existing
+  drop/close backpressure behavior instead of a device reboot.
+
 - **`httpd_ws_link_t` no longer goes silently deaf on a failed WebSocket send.**
   Previously the TX work callback ignored the `httpd_ws_send_frame_async` result,
   so a send failure (e.g. a large fragmented frame timing out the socket's 5 s
