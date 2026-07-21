@@ -247,6 +247,52 @@ int main() {
         }
     }
 
+    // --- wide fan-out zero-alloc window (the >kInlineFanout snapshot cliff) ----
+    // A vertex with > kInlineFanout (8) in-process subscribers USED to malloc a fresh
+    // overflow vector on EVERY publish (graph_t::fan_out). With the thread-local reusable
+    // overflow lease, a WARM wide fan-out is zero-alloc. Measured via `propagate` (deliver
+    // only — a `write` would store a fresh LKV `make_shared` and mask the fan-out alloc).
+    // Gated at 0 (ZEROHEAP_MAX) like the forward hop: the snapshot buffer's capacity persists.
+    std::size_t fanout_allocs = 0;
+    std::size_t fanout_bytes = 0;
+    bool wide_delivered = false;
+    {
+        graph_t fg;
+        std::atomic<std::uint64_t> got{0};
+        auto cb = [&](const tr::view::rope_t&) { got.fetch_add(1, std::memory_order_relaxed); };
+        std::optional<tr::graph::vertex_handle_t> fv;
+        if (const auto p = tr::graph::path_t::parse("/wide/v")) {
+            fv = fg.register_vertex(*p, tr::graph::role_t::STORED_VALUE);
+            for (int i = 0; i < 16; ++i) (void)fg.subscribe(*p, cb);  // 16 > kInlineFanout (8)
+        }
+        if (fv) {
+            std::vector<std::byte> wstored;
+            tr::wire::emit_tlv(wstored, type_t::VALUE, opt_t{},
+                               std::span<const std::byte>(payload, 4));
+            const tr::view::view_t wsv = tr::view::over_bytes(wstored).value_or(tr::view::view_t{});
+            (void)fg.write(*fv, wsv);  // store the LKV once (outside the window)
+            fg.propagate(*fv);         // WARM propagate: prime the free-list + buffer capacity
+            const std::uint64_t warm_got = got.load();
+            probe::window_t fwin;
+            fg.propagate(*fv);  // MEASURED: warm wide fan-out -> zero-alloc with the lease
+            const probe::counts_t fc = fwin.result();
+            fanout_allocs = fc.allocs;
+            fanout_bytes = fc.bytes;
+            wide_delivered = got.load() == warm_got + 16;
+            // The residual 1 alloc is propagate_impl's subtree-sweep `build_key` (~13 B),
+            // NOT the fan-out: the >kInlineFanout overflow-vector cliff (a ~2 KB reserve
+            // every publish) is what the lease eliminated. `bytes` reports the balance —
+            // the byte-gate below fails if the KB-scale overflow ever returns.
+            std::printf(
+                "RESULT zeroheap fanout_wide allocs=%zu frees=%zu bytes=%zu subs=16 delivered=%d\n",
+                fc.allocs, fc.frees, fc.bytes, wide_delivered ? 1 : 0);
+            if (!wide_delivered) {
+                std::printf("FAIL: wide fan-out did not deliver to all 16 subscribers\n");
+                return 2;
+            }
+        }
+    }
+
     // --- per-vertex steady-heap probe (#361 §8, REPORT-ONLY) -------------------
     // The vertex-diet trend: LIVE usable-size bytes a default STORED_VALUE leaf
     // holds at steady state (struct + name key + child-link slot), and the
@@ -363,15 +409,30 @@ int main() {
         }
     }
 
-    // Optional hard gate: `ZEROHEAP_MAX=N` fails the run if FORWARD allocs>N (the
-    // terminus window above stays report-only). CI runs `ZEROHEAP_MAX=0`.
+    // Hard gate (always on): the warm WIDE FAN-OUT must not re-open the >kInlineFanout
+    // overflow-vector cliff — a ~2 KB per-publish `reserve` that the thread-local reusable
+    // overflow lease eliminated. Gated on BYTES so the orthogonal ~13 B subtree-sweep
+    // `build_key` residual passes while a returned KB-scale overflow fails loudly.
+    (void)fanout_allocs;
+    if (fanout_bytes > 256) {
+        std::printf(
+            "FAN-OUT: FAIL (warm wide fan-out allocated %zu B — the >kInlineFanout "
+            "overflow cliff returned; expected only the ~13 B build_key)\n",
+            fanout_bytes);
+        return 1;
+    }
+
+    // Optional hard gate: `ZEROHEAP_MAX=N` fails the run if the FORWARD hop allocs>N (the
+    // terminus + fanout_wide windows above are byte-gated / report-only). CI runs
+    // `ZEROHEAP_MAX=0` — the forward splice is zero-alloc.
     if (const char* cap = std::getenv("ZEROHEAP_MAX")) {
         const auto max_allocs = static_cast<std::size_t>(std::strtoul(cap, nullptr, 10));
         if (c.allocs > max_allocs) {
-            std::printf("ZEROHEAP: FAIL (allocs=%zu > max=%zu)\n", c.allocs, max_allocs);
+            std::printf("ZEROHEAP: FAIL (forward allocs=%zu > max=%zu)\n", c.allocs, max_allocs);
             return 1;
         }
-        std::printf("ZEROHEAP: PASS (allocs=%zu <= max=%zu)\n", c.allocs, max_allocs);
+        std::printf("ZEROHEAP: PASS (forward allocs=%zu <= max=%zu; fanout_wide bytes=%zu)\n",
+                    c.allocs, max_allocs, fanout_bytes);
     }
     (void)term_allocs;
     return 0;
