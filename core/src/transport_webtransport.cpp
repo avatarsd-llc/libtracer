@@ -511,6 +511,13 @@ webtransport_transport_t::webtransport_transport_t(const std::string& peer_host,
     i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
     i.backend = backend;
     if (max_frame != 0) i.max_frame = max_frame;
+    // Departure seam (RFC-0009 §D extended to peer departure): wire the base's
+    // connection-down / one-peer replacement harvest to this transport_t's flat
+    // link-down notifier. A WebTransport endpoint carries ONE session (one peer
+    // at a time), so a departure IS the whole link down (notify_down, like
+    // quic / ws-client; never notify_peer_down, the multi-peer bus facet's).
+    i.link_down_ctx = this;
+    i.link_down_fn = [](void* ctx) { static_cast<webtransport_transport_t*>(ctx)->notify_down(); };
     i.authority = peer_host + ":" + std::to_string(peer_port);
     i.path = path.empty() ? "/" : path;
 
@@ -588,6 +595,13 @@ webtransport_transport_t::webtransport_transport_t(std::uint16_t bind_port,
     i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
     i.backend = backend;
     if (max_frame != 0) i.max_frame = max_frame;
+    // Departure seam (RFC-0009 §D extended to peer departure): wire the base's
+    // connection-down / one-peer replacement harvest to this transport_t's flat
+    // link-down notifier. A WebTransport endpoint carries ONE session (one peer
+    // at a time), so a departure IS the whole link down (notify_down, like
+    // quic / ws-client; never notify_peer_down, the multi-peer bus facet's).
+    i.link_down_ctx = this;
+    i.link_down_fn = [](void* ctx) { static_cast<webtransport_transport_t*>(ctx)->notify_down(); };
 
     // Listener bring-up (base) — bad cert/key paths fail in there; the session
     // peer opens the frame stream.

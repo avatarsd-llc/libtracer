@@ -13,6 +13,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <concepts>
 #include <cstddef>
 #include <functional>
@@ -120,8 +121,14 @@ class bus_link_t {
      * @param ctx Caller-owned context; must outlive every possible notification.
      */
     void set_peer_down_notifier(peer_down_fn_t fn, void* ctx) noexcept {
-        peer_down_ctx_ = ctx;
-        peer_down_fn_ = fn;
+        // Publish ctx-before-fn with a release store on fn: a transport thread
+        // that observes a non-null fn (acquire, in notify_peer_down) is
+        // guaranteed to see the paired ctx. Atomic because an internal transport
+        // thread may fire the notifier concurrently with this wiring — a fast
+        // remote hangup can beat fwd_router_t::add_child's install (the callback
+        // thread is already live once the connection opens in the ctor).
+        peer_down_ctx_.store(ctx, std::memory_order_relaxed);
+        peer_down_fn_.store(fn, std::memory_order_release);
     }
 
     /**
@@ -193,7 +200,8 @@ class bus_link_t {
      * notifier re-enters the routing plane (router → graph), which takes graph locks.
      */
     void notify_peer_down(std::string_view peer) const {
-        if (peer_down_fn_ != nullptr) peer_down_fn_(peer_down_ctx_, peer);
+        const peer_down_fn_t fn = peer_down_fn_.load(std::memory_order_acquire);
+        if (fn != nullptr) fn(peer_down_ctx_.load(std::memory_order_relaxed), peer);
     }
 
     /** @brief The peer-named delivery-tier slot (the ONE tier-select mechanism);
@@ -201,8 +209,10 @@ class bus_link_t {
     receiver_slot_t<std::string_view> peer_rx_;
 
    private:
-    peer_down_fn_t peer_down_fn_ = nullptr; /**< @brief Installed peer-departure sink. */
-    void* peer_down_ctx_ = nullptr;         /**< @brief Its caller-owned context. */
+    /** @brief Installed peer-departure sink. Atomic: a transport thread may fire
+     *         it (notify_peer_down) while add_child is still installing it. */
+    std::atomic<peer_down_fn_t> peer_down_fn_{nullptr};
+    std::atomic<void*> peer_down_ctx_{nullptr}; /**< @brief Its caller-owned context. */
 };
 
 /**
@@ -333,15 +343,20 @@ class transport_t {
      * @param ctx Caller-owned context; must outlive every possible notification.
      */
     void set_down_notifier(down_fn_t fn, void* ctx) noexcept {
-        down_ctx_ = ctx;
-        down_fn_ = fn;
+        // Publish ctx-before-fn (release on fn); notify_down's acquire load pairs
+        // fn with its ctx. Atomic because a transport's callback thread — spawned
+        // in the ctor, so already live — can fire notify_down on a fast remote
+        // hangup before fwd_router_t::add_child finishes this install.
+        down_ctx_.store(ctx, std::memory_order_relaxed);
+        down_fn_.store(fn, std::memory_order_release);
     }
 
    protected:
     /** @brief Fire the link-down notifier (no-op when none installed) — see
      *         @ref set_down_notifier for the calling discipline. */
     void notify_down() const {
-        if (down_fn_ != nullptr) down_fn_(down_ctx_);
+        const down_fn_t fn = down_fn_.load(std::memory_order_acquire);
+        if (fn != nullptr) fn(down_ctx_.load(std::memory_order_relaxed));
     }
 
     /** @brief The delivery-tier slot (the ONE tier-select mechanism, ADR-0042 /
@@ -352,8 +367,10 @@ class transport_t {
     receiver_slot_t<> rx_;
 
    private:
-    down_fn_t down_fn_ = nullptr; /**< @brief Installed link-down sink. */
-    void* down_ctx_ = nullptr;    /**< @brief Its caller-owned context. */
+    /** @brief Installed link-down sink. Atomic: a transport's callback thread may
+     *         fire it (notify_down) while add_child is still installing it. */
+    std::atomic<down_fn_t> down_fn_{nullptr};
+    std::atomic<void*> down_ctx_{nullptr}; /**< @brief Its caller-owned context. */
 
    public:
     /**

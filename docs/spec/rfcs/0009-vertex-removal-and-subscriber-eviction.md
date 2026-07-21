@@ -456,6 +456,21 @@ and a write to a retired path is not an error the producer observes — §E.1). 
 is a real dangling-edge cost, called out honestly in §Discussion 2 rather than
 papered over.
 
+**D.5 — link teardown evicts a departed peer's edges (host-side, no wire bytes).**
+The same eviction §D settles is extended to **peer departure**: when a link's
+session dies (remote hangup, protocol `CLOSE`, or a device-initiated teardown), the
+router evicts every subscriber edge that named that link, exactly as an indexed
+clear would — a purely local host-side seam (`fwd_router_t::link_down`), **with no
+new TLV, verb, or delivery**. It is wired uniformly onto every connection-oriented
+transport: ws (server, peer-named and flat, and client) and tcp ([#453](https://github.com/avatarsd-llc/libtracer/issues/453)),
+the ESP-IDF adopted-mode WS link, and now the QUIC and WebTransport transports
+([#455](https://github.com/avatarsd-llc/libtracer/issues/455)) — firing on the
+msquic connection-shutdown callback or the one-peer replacement harvest, never on
+the endpoint's own teardown. Connectionless kinds (UDP) and announce-census buses
+(CAN) have no closure event and honestly never fire it. This keeps the wire
+byte-for-byte unchanged (Compatibility, above): the entire footprint is *when* a
+host drops edges it holds, never *what* is on the wire.
+
 ### E. Interactions
 
 **E.1 — write-creates revives a retired vertex, and this is deliberate.** RFC-0005

@@ -231,6 +231,33 @@ class msquic_endpoint_t {
     /** @} */
 
     /**
+     * @name Peer-departure eviction seam (RFC-0009 §D extended to peer
+     *       departure — #453 for ws/tcp, #455 for quic/webtransport). The
+     *       tcp_transport_t departure discipline, msquic-flavored: fire the
+     *       outer transport's link-down notifier when the ONE peer's connection
+     *       goes down (or is displaced by the one-peer replacement harvest), but
+     *       NEVER during our own teardown. Purely host-side — no wire bytes.
+     * @{
+     */
+    /** @brief The link-down notifier fn (a thunk to the outer
+     *         transport_t::notify_down), wired at construction. */
+    using link_down_fn_t = void (*)(void* ctx);
+    link_down_fn_t link_down_fn = nullptr; /**< @brief The outer notify_down thunk (null ⇒ never
+                                                       notifies). */
+    void* link_down_ctx = nullptr;         /**< @brief Its ctx — the outer transport. */
+    /** @brief Set true once @ref teardown begins, BEFORE any handle is closed:
+     *         the tcp_transport_t `stop_` guard. A connection-shutdown callback
+     *         that drains during our own teardown must not fire the notifier (it
+     *         would re-enter a routing plane being disposed). */
+    std::atomic<bool> stopping{false};
+    /** @brief Latched true at CONNECTED, consumed by the ONE departure fire: a
+     *         link that never came up flowed no frames (nothing to evict), and
+     *         the SHUTDOWN_COMPLETE trailing a hangup — or a replacement harvest
+     *         after the callback already fired — must not re-fire. */
+    std::atomic<bool> link_established{false};
+    /** @} */
+
+    /**
      * @name DIAL handshake rendezvous: the ctor blocks until CONNECTED or
      *       shutdown (derived transports may add further stages on the same
      *       mutex/cv — the webtransport session stage).
@@ -288,6 +315,27 @@ class msquic_endpoint_t {
             c = conn;
         }
         if (c != nullptr) api->ConnectionShutdown(c, QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, code);
+    }
+
+    /**
+     * @brief Fire the outer transport's link-down notifier for a DEPARTED peer
+     *        — once per established connection, and NEVER during our own
+     *        teardown.
+     *
+     * The tcp_transport_t departure discipline (transport_tcp.cpp's
+     * `if (!stop_.load()) notify_down()`), msquic-flavored: @ref stopping gates
+     * out our own teardown/destructor (firing there would re-enter a graph being
+     * disposed), and the @ref link_established latch fires exactly once —
+     * skipping a link that never came up, and the trailing SHUTDOWN_COMPLETE /
+     * one-peer replacement harvest after the first fire. Called from a
+     * connection (or listener) callback with no conn_m held: the notifier
+     * re-enters the routing plane, which takes graph locks (the transport.hpp
+     * set_down_notifier contract).
+     */
+    void fire_link_down() {
+        if (stopping.load(std::memory_order_relaxed)) return;  // our own teardown
+        if (!link_established.exchange(false, std::memory_order_relaxed)) return;  // once, if up
+        if (link_down_fn != nullptr) link_down_fn(link_down_ctx);
     }
 
     /**
@@ -503,6 +551,11 @@ class msquic_endpoint_t {
      */
     void teardown() noexcept {
         if (api == nullptr) return;  // MsQuicOpen2 failed — nothing to unwind
+        // Our own teardown: latch the departure guard BEFORE any Close, so a
+        // shutdown callback draining under the Closes below cannot fire the
+        // link-down notifier into a routing plane being disposed (the
+        // tcp_transport_t `stop_` guard — fire only on a REMOTE departure).
+        stopping.store(true, std::memory_order_relaxed);
         // 1. Stop accepting: ListenerClose blocks until listener callbacks
         //    drain, so no replacement peer can be installed after the harvest.
         if (listener != nullptr) api->ListenerClose(listener);
@@ -578,6 +631,8 @@ class msquic_endpoint_t {
         switch (ev->Type) {
             case QUIC_CONNECTION_EVENT_CONNECTED:
                 self->up.store(true, std::memory_order_relaxed);
+                self->link_established.store(true,
+                                             std::memory_order_relaxed);  // arm the fire latch
                 self->on_connected(conn_h);
                 self->signal_handshake(true);
                 return QUIC_STATUS_SUCCESS;
@@ -592,6 +647,11 @@ class msquic_endpoint_t {
                 self->up.store(false, std::memory_order_relaxed);
                 self->on_conn_down();
                 self->signal_handshake(false);
+                // Departure seam: the one peer's connection went down under us —
+                // evict its subscriber edges. Guarded so our own teardown (and a
+                // link that never came up) does not fire, deduped so the trailing
+                // SHUTDOWN_COMPLETE does not re-fire.
+                self->fire_link_down();
                 return QUIC_STATUS_SUCCESS;
             default:
                 return QUIC_STATUS_SUCCESS;
@@ -613,6 +673,12 @@ class msquic_endpoint_t {
         // the old handles' callbacks drain, so after this point nothing
         // touches the RX state — safe to reset for the new peer.
         if (!self->replace_peer()) return QUIC_STATUS_CONNECTION_REFUSED;
+        // A displaced peer that never got a connection-shutdown callback (its
+        // frame stream half-closed while the connection lingered) departs HERE —
+        // the replacement harvest is its last rites. Guarded + latched like the
+        // callback, so the common case (shutdown already fired) is a no-op and a
+        // first-ever connection (no prior peer) never fires.
+        self->fire_link_down();
         self->reset_rx();
 
         HQUIC c = ev->NEW_CONNECTION.Connection;
