@@ -10,6 +10,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` — Kconfig knob for the vertex
+  lock-stripe count.** libtracer's one process-global mutable buffer is the
+  vertex lock-stripe table (`core/include/libtracer/vertex.hpp`, #361 §2): it
+  costs N lazily-allocated FreeRTOS mutexes (~90 B of heap each) plus N
+  condition variables once a `graph_t` exists, independent of how many vertices
+  are registered. The core header already honored a
+  `-DLIBTRACER_VERTEX_LOCK_STRIPES` override; this exposes it through
+  menuconfig (default **16**, unchanged) and propagates it as a **PUBLIC**
+  compile definition so every translation unit that includes
+  `<libtracer/vertex.hpp>` agrees on the `inline constinit` table size (a
+  mismatch would be an ODR violation). A single-core chip node can drop it
+  (e.g. 4–8) to reclaim RAM; the lock-free LKV read/write hot path is
+  unaffected — only control-plane lock contention (ring trim, edge/ACL
+  mutation, `await` wake) rises. Doctrine-pure per RFC-0006 (bounds are
+  per-target config, never a synthetic magic number).
+
 ### Changed
 
 - **`httpd_ws_link_t` heap exhaustion no longer aborts the node (OOM soft-fail).**

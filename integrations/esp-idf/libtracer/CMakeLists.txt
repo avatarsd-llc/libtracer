@@ -145,6 +145,28 @@ idf_component_register(
 # C++ standard; pin it here so the component is correct regardless of project default.
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_23)
 
+# The sole process-global mutable buffer libtracer links is the vertex lock-stripe
+# table (core/include/libtracer/vertex.hpp, #361 §2). It is sized by
+# LIBTRACER_VERTEX_LOCK_STRIPES; expose that as the Kconfig knob
+# CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES (see Kconfig) so a chip node can shrink it
+# (fewer FreeRTOS mutexes/condvars) without patching the core header.
+#
+# PUBLIC, not PRIVATE: the table is an `inline constinit` object, so EVERY TU that
+# includes <libtracer/vertex.hpp> — the component's own sources AND every dependent
+# — must compile with the same value, or the differing std::array sizes are an ODR
+# violation. A PUBLIC definition propagates through `REQUIRES libtracer` to all
+# dependents.
+#
+# CONFIG_* is defined only in the SECOND (build) CMake pass, so guard the reference:
+# in the early requirement-expansion pass the symbol is unset and the header's own
+# `#ifndef LIBTRACER_VERTEX_LOCK_STRIPES` default (16) applies. The Kconfig default
+# (also 16) means the value passed matches the header at stock settings — no
+# footprint change unless a project lowers it in menuconfig.
+if(CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC
+        "LIBTRACER_VERTEX_LOCK_STRIPES=${CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES}")
+endif()
+
 # Ship the component archive as `libtracer.a`, not the double-prefixed
 # `liblibtracer.a` that ESP-IDF's `lib${COMPONENT_NAME}.a` convention produces for
 # a component literally named `libtracer`. This only renames the output file; the
