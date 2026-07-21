@@ -471,6 +471,35 @@ L2 frame parsing tolerates unaligned access (per [01-data-format.md](01-data-for
 
 ---
 
+## How the runtime consumes backends (the injection points)
+
+L0 backends are *supplied to* the runtime, never named by it — "which backend a given vertex uses" is the framework concern [§What L0 does NOT specify](#what-l0-does-not-specify) defers. This section describes how the reference L4 runtime (`tr::graph`) honors that deferral: it draws per-write memory from **two injected seams**, kept distinct because they allocate two different *kinds* of thing.
+
+1. **`std::pmr::memory_resource* mr_` — the wrapper-object seam** ([ADR-0039](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0039-pmr-memory-model-host-aligned-allocation.md), [ADR-0041](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0041-terminus-arena-decode-span-contract.md)). Allocates the small control *objects* a stored write needs — the `shared_ptr` control block and the `rope_t` that wraps the value's links. A bounded node installs a `std::pmr` pool / monotonic resource over a static arena; the default is the standard heap.
+
+2. **`tr::mem::mem_backend_t* value_backend_` — the value-bytes seam** ([ADR-0060](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0060-lkv-copy-store-injected-value-backend.md)). Allocates the durable byte `segment` that holds a vertex's **last-known-value (LKV)** when the write path must copy the value into memory it owns. This is a real L0 backend — a `mem_pool_static` on a bounded target, the default `mem_heap` otherwise — constructor-injected into `graph_t` and defaulted to `heap_backend()`, so behavior is byte-identical until a host supplies a pool.
+
+Two seams rather than one because a cache-managed byte buffer and a plain control object have different contracts: `owns_bytes`, the cache hooks, and ISR-safety belong to the byte buffer (an L0 `mem_backend_t`); object construction belongs to `std::pmr`. A host that wants **"one slab, whole stack"** points `value_backend_`, the wrapper `mr_`, and the transport-receive backend ([ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md)) all at the same underlying slab.
+
+### Why the value copy exists
+
+A stored write does not always own the bytes it is handed. The delivery seam ([ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md)) distinguishes two tiers:
+
+- **Owning delivery** — the transport hands the runtime a refcounted view over bytes it will keep alive (a reassembled frame, a pinned receive buffer). The LKV stores a **subview** of that frame: zero copy, just a refcount bump ([08-views-and-ownership.md](08-views-and-ownership.md) §rope semantics).
+- **Borrowed delivery** — the transport hands a *transient* span (e.g. the ESP-IDF `httpd_ws` receive buffer, freed the moment the receive callback returns). The bytes cannot be pinned, so the LKV must **copy** them into a segment it owns before the transient buffer disappears.
+
+That copy is the single `materialize()` flatten on the write path, and it draws its owned segment from `value_backend_`. On a node whose transport delivers borrowed — which includes the reference ESP-IDF firmware — *every stored write* mints one such segment, so routing it through a pool rather than the general heap is what makes the write path's value memory deterministic and fragmentation-free.
+
+### Backpressure, not fallback
+
+When `value_backend_` is exhausted — a pool with no free slot, or a value larger than the slot — `alloc` returns `nullptr` and the write **rejects with `STATUS=BACKPRESSURE`**; it does *not* silently fall back to the heap. A silent fallback would breach the bounded-memory guarantee the host bought by injecting a pool: exhaustion is an injected-resource signal, never a hidden allocation. The value-size distribution is the host's to compose (a uniform-telemetry pool, or a size-class / pool-plus-heap-fallback composite `mem_backend_t`), never runtime logic — this is the "no synthetic limits" line ([00-overview.md](00-overview.md)) applied to value memory.
+
+### Thread-safety of an injected value backend
+
+A value segment self-routes its own reclaim: when the last reference drops, the L1 owning handle calls `backend->destroy(seg)` **on whatever thread dropped it** — typically a reader or subscriber, concurrent with a writer allocating the next value. An injected `value_backend_` must therefore be thread-safe. The default `mem_heap` already is; a `mem_pool_static` is composed with the target's arch-appropriate synchronization — an interrupt-disable critical section on single-core MCUs, a spinlock on multi-core, never a heavyweight OS mutex whose round-trip would dominate the O(1) free-list op. Sharding the pool per lock-stripe does **not** remove the race (reclamation is cross-thread regardless of which stripe allocated the segment), so one thread-safe pool is the model.
+
+---
+
 ## Pressure and pool exhaustion
 
 When a backend's allocation fails (heap returns NULL, pool is full):
