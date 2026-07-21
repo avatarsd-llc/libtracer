@@ -64,6 +64,21 @@ crafting, no parse, no map lookup per call**. The string/`path_t` overloads are 
 conveniences.
 ```
 
+```{admonition} Injected memory — no allocator baked in
+:class: note
+`graph_t`'s constructor takes two optional memory seams, both defaulted to the standard
+heap (a host that passes nothing gets zero-churn, byte-identical behavior):
+
+- a `std::pmr::memory_resource*` for the per-write **control objects** — the LKV control
+  block and the `rope_t` wrapper (ADR-0039); and
+- a `mem::mem_backend_t* value_backend` for the durable **value bytes** the write path
+  copies into the LKV when a borrowed-delivery transport forces the copy (ADR-0060).
+
+A bounded target points both — and the transport-receive backend — at one static slab;
+pool exhaustion surfaces as `BACKPRESSURE`, never a silent heap fallback. See
+[reference/09](../reference/09-memory-substrate.md) §the injection points.
+```
+
 ```cpp
 // idiomatic: encode the path once (parse-once ctor), reuse the handle
 path_t p("/x:settings.reliability");                    // once — no *-deref (ADR-0054)
