@@ -14,6 +14,8 @@
  *
  *   - a write fans out a full-route `FWD{WRITE, dst=return_route, payload=VALUE}`
  *     to the remote subscriber, byte-exact, routed to the subscribe's `src`;
+ *   - that fan-out is ZERO-COPY: a multi-link rope's payload reaches `send(iov)` as spans that
+ *     point at the ORIGINAL segment memory, never a gathered copy (the latency-moat guard);
  *   - a transient-local (durability==1) producer LATCHES its current value to a
  *     fresh subscriber on subscribe (one immediate delivery), a volatile one does not;
  *   - a `delivery_compact` subscriber AUTO-promotes: the first delivery emits one
@@ -139,23 +141,55 @@ tr::view::view_t make_value(std::span<const std::byte> bytes) {
     return tr::view::view_t::over(std::move(seg));
 }
 
+/** @brief One captured egress span — its ORIGIN pointer + size (NOT a copy of the bytes). */
+struct span_rec_t {
+    const std::byte* data;
+    std::size_t size;
+};
+
 /**
  * @brief An in-memory transport that records every frame send()'s; the router installs its receiver
  *        into the base slot, which the test pokes to inject inbound frames.
  *
- * Mutex-guarded so the concurrent (TSan) sub-test can capture sends from the
- * writer thread safely.
+ * Overrides the scatter-gather `send(iov)` (NOT just the single-span form) so the router's iovec
+ * reaches us INTACT — the base `transport_t::send(iov)` default gathers-into-temp, which would hide
+ * the zero-copy egress property behind a flatten. Each send records both the reassembled bytes (for
+ * the byte-exact decode assertions) AND the per-span ORIGIN pointers (for the zero-copy address
+ * assertion): a delivered rope's payload spans must point at the ORIGINAL segment memory, never a
+ * gathered copy. Mutex-guarded so the concurrent (TSan) sub-test can capture sends from the writer
+ * thread safely.
  */
 class fake_link_t : public transport_t {
    public:
     void send(std::span<const std::byte> frame) override {
         const std::lock_guard lock(m_);
         sent_.emplace_back(frame.begin(), frame.end());
+        iovs_.push_back({span_rec_t{frame.data(), frame.size()}});
+    }
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        const std::lock_guard lock(m_);
+        std::vector<std::byte> flat;
+        std::vector<span_rec_t> rec;
+        rec.reserve(iov.size());
+        for (const auto& s : iov) {
+            rec.push_back(span_rec_t{s.data(), s.size()});
+            flat.insert(flat.end(), s.begin(), s.end());  // reassemble for the decode checks
+        }
+        sent_.push_back(std::move(flat));
+        iovs_.push_back(std::move(rec));
     }
     void inject(std::span<const std::byte> frame) { rx_.deliver_borrowed(frame); }
     std::vector<std::vector<std::byte>> drain() {
         const std::lock_guard lock(m_);
+        iovs_.clear();
         return std::exchange(sent_, {});
+    }
+    /** @brief The per-span ORIGIN records of every send since the last drain (parallel to drain()).
+     */
+    std::vector<std::vector<span_rec_t>> drain_iovs() {
+        const std::lock_guard lock(m_);
+        sent_.clear();
+        return std::exchange(iovs_, {});
     }
     std::size_t count() {
         const std::lock_guard lock(m_);
@@ -165,6 +199,7 @@ class fake_link_t : public transport_t {
    private:
     std::mutex m_;
     std::vector<std::vector<std::byte>> sent_;
+    std::vector<std::vector<span_rec_t>> iovs_;
 };
 
 // --- decode helpers ----------------------------------------------------------
@@ -275,6 +310,76 @@ void test_full_route_fanout_multilink() {
               "dst == the subscribe src (return route)");
         check(d && fwd_payload_u32(*d) == 0xFEEDFACE,
               "scatter-gathered payload reassembles to the intact VALUE");
+    }
+}
+
+/**
+ * @brief The default WRITE fan-out egress is ZERO-COPY: the transport receives the rope's own
+ *        segment memory as iovec spans, never a gathered copy (the latency-moat property).
+ *
+ * `test_full_route_fanout_multilink` proves the payload REASSEMBLES; this proves it is not COPIED
+ * on the way out. We record each segment's ORIGIN pointer before the rope is moved into the graph
+ * (store moves the refcounted links, it does not copy the bytes), then assert those very pointers
+ * reach `transport_t::send(iov)`. A regression that reintroduced a `materialize()`/gather on the
+ * egress path would hand the transport a fresh buffer — a different address — and fail here.
+ *
+ * This is the missing enforcement of an already-decided invariant: the net-plane's no-flatten
+ * egress (ADR-0055 "the router performs no decode and no flatten", ADR-0053 ⑤ scatter-gather
+ * fan-out, ADR-0038 buffer-lifetime). Those ADRs commit to it; nothing asserted it until now.
+ *
+ * Scope: the DEFAULT full-route WRITE delivery. COMPACT delivery flattens BY DESIGN (encode_compact
+ * needs a contiguous payload; single-link is a zero-copy adopt), and the CAN / QUIC transports copy
+ * once (CAN re-fragments to 8-byte frames; msquic requires send buffers to outlive the async call)
+ * — those are the known, intentional exceptions, not covered by this guard. Orthogonal to the LKV
+ * store's own copy leg for BORROWED/small ingress frames (ADR-0042/0060): this value is owning, so
+ * store moves it without a copy and any gather here would be the EGRESS path's own — which is the
+ * point.
+ */
+void test_full_route_fanout_zerocopy() {
+    std::printf("Full-route fan-out egress is ZERO-COPY (spans point at the original segments):\n");
+    graph_t graph;
+    fwd_router_t router(graph);
+    fake_link_t link;
+    router.add_child("client", link);
+
+    const auto p = path_t::parse("/sensor/temp");
+    auto v = graph.register_vertex(*p, role_t::STORED_VALUE);
+    link.inject(b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"client"}),
+                      b_field_subscribers_append(), b_subscriber(b_path({"client"}), false)));
+    link.drain();  // discard the subscribe REPLY (and its recorded iovs)
+
+    // A 3-link rope over ONE segment (zero-copy subviews). Record each link's ORIGIN pointer BEFORE
+    // the move: the stored+delivered rope shares this refcounted segment, so a zero-copy egress
+    // must hand these very pointers to the transport.
+    const std::vector<std::byte> vbytes = b_value_u32(0x0DDBA11Eu);
+    const tr::view::view_t whole = make_value(vbytes);
+    const std::size_t n = whole.length;
+    const std::size_t c1 = n / 3, c2 = 2 * n / 3;
+    const std::byte* a0 = whole.subview(0, c1).bytes().data();
+    const std::byte* a1 = whole.subview(c1, c2 - c1).bytes().data();
+    const std::byte* a2 = whole.subview(c2, n - c2).bytes().data();
+    tr::view::rope_t value;
+    value.append(whole.subview(0, c1));
+    value.append(whole.subview(c1, c2 - c1));
+    value.append(whole.subview(c2, n - c2));
+    check(value.link_count() == 3, "value is a genuine 3-link rope");
+
+    (void)graph.write(v, std::move(value));
+    const auto iovs = link.drain_iovs();
+    check(iovs.size() == 1, "one delivery iovec fanned out");
+    if (iovs.size() == 1) {
+        const auto& iov = iovs[0];
+        // A gather/flatten regression collapses the payload into one owned buffer; the zero-copy
+        // path rides the frame as head + route + src + one span PER rope link, so > 1 entry.
+        check(iov.size() > 1,
+              "delivery is scatter-gathered (multiple iovec entries, not one flat buffer)");
+        auto has_origin = [&](const std::byte* a) {
+            for (const auto& s : iov)
+                if (s.data == a) return true;
+            return false;
+        };
+        check(has_origin(a0) && has_origin(a1) && has_origin(a2),
+              "every payload span points at the ORIGINAL segment memory (no gather copy)");
     }
 }
 
@@ -389,6 +494,7 @@ void test_concurrent_writer_vs_clear() {
 int main() {
     test_full_route_fanout();
     test_full_route_fanout_multilink();
+    test_full_route_fanout_zerocopy();
     test_transient_local_latch();
     test_compact_auto_promote();
     test_concurrent_writer_vs_clear();
