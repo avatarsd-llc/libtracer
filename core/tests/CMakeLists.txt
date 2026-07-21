@@ -233,6 +233,13 @@ target_link_libraries(graph_value_backend_test PRIVATE libtracer)
 libtracer_test_warnings(graph_value_backend_test)
 add_test(NAME graph_value_backend COMMAND graph_value_backend_test)
 
+# ADR-0060 §2 thread-safe pool value_backend: concurrent alloc + cross-thread reclaim
+# (the tsan job in core-ci.yml builds this with -fsanitize=thread and runs it).
+add_executable(mem_sync_pool_test mem_sync_pool_test.cpp)
+target_link_libraries(mem_sync_pool_test PRIVATE libtracer)
+libtracer_test_warnings(mem_sync_pool_test)
+add_test(NAME mem_sync_pool COMMAND mem_sync_pool_test)
+
 add_executable(graph_test graph_test.cpp)
 target_link_libraries(graph_test PRIVATE libtracer)
 libtracer_test_warnings(graph_test)

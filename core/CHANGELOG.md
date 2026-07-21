@@ -12,6 +12,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`mem::sync_pool_t` — a thread-safe `pool_t` for the graph's `value_backend_` on a
+  multi-core host (ADR-0060 §2).** `value_backend_` must be thread-safe: a `segment`
+  self-routes its reclaim on whatever thread drops the last ref (a reader/subscriber),
+  concurrent with a writer's `alloc`, and `pool_t` is single-threaded-reclamation.
+  `sync_pool_t` guards the O(1) free-list with a spinlock — the multi-core-host variant
+  (`is_isr_safe == false`), avoiding the ~2 µs OS-mutex round-trip that would dominate
+  the ~120 ns op. It composes over `pool_t` and re-points each fresh segment to itself
+  with an `UNKNOWN` tag, so reclaim routes through the locked virtual `destroy` rather
+  than the devirtualized POOL fast path. The single-core interrupt-disable crit-section
+  and the many-core lock-free index+tag CAS variants are the recorded ADR-0060 §2
+  follow-ups. New bench series `syncpool-mt{1,2,4,8}` / `heap-mt*` track the contended
+  path; a `mem_sync_pool_test` proves it TSan-clean under contended + cross-thread reclaim.
+
 ## [0.5.0] — 2026-07-21
 
 ### Added

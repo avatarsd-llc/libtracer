@@ -15,6 +15,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <span>
 
@@ -90,6 +91,77 @@ class pool_t final : public mem_backend_t {
     std::size_t slot_count_ = 0;
     std::size_t free_count_ = 0;
     std::size_t free_head_ = kNil;  // index of first free slot (intrusive free list)
+};
+
+/**
+ * @brief A thread-safe `pool_t` for the graph's `value_backend_` on a MULTI-CORE host
+ *        (ADR-0060 §2), guarding the O(1) free-list with a spinlock.
+ *
+ * `value_backend_` MUST be thread-safe: a `segment` self-routes its reclaim on whatever
+ * thread drops the last ref — typically a *reader/subscriber* thread, concurrent with a
+ * writer's `alloc` (ADR-0060 §2). A single thread-safe pool (never per-stripe sharding,
+ * which removes no race and adds partition imbalance) is the answer. The sync mechanism
+ * is an ADR-0047 §2 module-set trait chosen by the target: this is the **spinlock**
+ * variant for the multi-core host (`is_isr_safe == false`) — negligible contention on an
+ * O(1) section, and it avoids the ~2 µs OS-mutex round-trip that would dominate the
+ * ~120 ns free-list op. The single-core interrupt-disable critical-section variant and the
+ * many-core lock-free index+tag CAS upgrade (the free list is already index-based) are the
+ * recorded ADR-0060 §2 follow-ups.
+ *
+ * Composition over `pool_t`: a freshly-`alloc`'d segment is re-pointed to `this` with a
+ * `UNKNOWN` tag, so `destroy_dispatch` routes reclaim through the virtual (locked)
+ * `destroy` here instead of the devirtualized POOL fast path (which would bypass the
+ * lock). `pool_t::destroy` recovers the slot from the segment's slab offset, so the
+ * re-point is invisible to the inner pool. The re-point touches only the just-allocated
+ * segment, which no other thread can observe until the caller publishes it.
+ */
+class sync_pool_t final : public mem_backend_t {
+   public:
+    /** @brief Carve @p slab into @p slot_payload-byte slots (see @ref pool_t), thread-safe. */
+    sync_pool_t(std::span<std::byte> slab, std::size_t slot_payload,
+                std::size_t align = alignof(std::max_align_t)) noexcept
+        : mem_backend_t("mem_sync_pool"), inner_(slab, slot_payload, align) {}
+
+    view::segment_t* alloc(std::size_t size, alloc_hint_t hint = alloc_hint_t::NONE) override {
+        lock();
+        view::segment_t* seg = inner_.alloc(size, hint);
+        if (seg != nullptr) {
+            seg->backend = this;               // reclaim routes back through this (locked)
+            seg->btag = backend_tag::UNKNOWN;  // -> destroy_dispatch virtual fallback
+        }
+        unlock();
+        return seg;
+    }
+    void destroy(view::segment_t* seg) noexcept override {
+        lock();
+        inner_.destroy(seg);
+        unlock();
+    }
+    [[nodiscard]] std::size_t alignment() const noexcept override { return inner_.alignment(); }
+    [[nodiscard]] std::size_t max_segment_size() const noexcept override {
+        return inner_.max_segment_size();
+    }
+    /** @brief UNKNOWN so `destroy_dispatch` takes the virtual (locked) `destroy`, not the
+     *         devirtualized POOL fast path that would bypass the spinlock. */
+    [[nodiscard]] backend_tag tag() const noexcept override { return backend_tag::UNKNOWN; }
+
+    // Module-set traits (ADR-0047 §2). Spinlock => NOT ISR-safe (the single-core
+    // crit-section variant is the ISR-safe one); plain-RAM slab => no cache ops.
+    static constexpr bool needs_cache_ops = false; /**< @brief Plain RAM slab. */
+    static constexpr bool is_isr_safe = false;     /**< @brief Spinlock (multi-core host). */
+    static constexpr bool owns_bytes = true;       /**< @brief Backend-managed, durably storable. */
+
+    /** @brief Total slots (delegated to the inner @ref pool_t). */
+    [[nodiscard]] std::size_t capacity() const noexcept { return inner_.capacity(); }
+
+   private:
+    pool_t inner_;
+    std::atomic_flag lk_{};
+    void lock() noexcept {
+        while (lk_.test_and_set(std::memory_order_acquire)) { /* spin: O(1) section */
+        }
+    }
+    void unlock() noexcept { lk_.clear(std::memory_order_release); }
 };
 
 }  // namespace tr::mem
