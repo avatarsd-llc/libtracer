@@ -1502,12 +1502,25 @@ class vertex_t {
     // The dispatch view of one slot; call with m_ held. Owning copies of the byte/string
     // fields (the slot may be cleared while dispatch runs outside the lock); the route
     // copy is a refcount clone (ADR-0041 §2 — keeps it alive across an unsubscribe).
+    //
+    // Single named return (NRVO), filled in place: this runs once per active edge on
+    // every fan-out (snapshot_edges), so it is a dispatch hot path. The earlier
+    // two-branch double-return brace-initialized the empty cold members and defeated
+    // NRVO, costing ~7 ns/edge — ~+7 µs/publish at fan-out 1024 (the #385
+    // subscriber-cold-split regression). The cold `remote` fields keep their
+    // default-member-init values (empty link/route/caller, non-compact) when local.
     [[nodiscard]] edge_view_t edge_view_of(const subscriber_t& s) const {
-        if (s.remote != nullptr)
-            return edge_view_t{s.callback,      s.callback_ctx,         s.target_key,
-                               s.remote->link,  s.remote->return_route, s.remote->delivery_compact,
-                               s.remote->caller};
-        return edge_view_t{s.callback, s.callback_ctx, s.target_key, {}, {}, false, {}};
+        edge_view_t e;
+        e.callback = s.callback;
+        e.callback_ctx = s.callback_ctx;
+        e.target_key = s.target_key;
+        if (s.remote != nullptr) {
+            e.link = s.remote->link;
+            e.return_route = s.remote->return_route;
+            e.delivery_compact = s.remote->delivery_compact;
+            e.caller = s.remote->caller;
+        }
+        return e;
     }
 
     /** @brief The slot index of the descriptor-table entry named @p name, or `-1` (no
