@@ -716,6 +716,54 @@ void run_lkv_store_gate() {
 
 }  // namespace
 
+/**
+ * @brief ADR-0060 §2: concurrent alloc+free through a shared backend at T threads.
+ *
+ * The thread-safe sync pool (spinlock) vs the thread-safe default heap — tracks whether
+ * the pool's O(1) locked free-list beats `malloc` under contention, and WHERE the single
+ * spinlock starts to bottleneck (the signal that motivates the lock-free index+tag CAS
+ * upgrade held in ADR-0060 §2). Aggregate ops/s across T threads + thread-0 latency.
+ */
+void run_syncpool_mt(std::size_t T, tr::mem::mem_backend_t& backend, const char* base) {
+    constexpr std::size_t S = 64;
+    constexpr std::size_t kOpsPerThread = 200000;
+    std::atomic<std::uint64_t> done{0};
+    Latency lat0;  // thread 0 only writes it; read after join (happens-before)
+    std::vector<std::thread> ts;
+    const auto t0 = now_ns();
+    for (std::size_t t = 0; t < T; ++t) {
+        ts.emplace_back([&, t] {
+            for (std::size_t i = 0; i < kOpsPerThread; ++i) {
+                const std::uint64_t a = (t == 0) ? now_ns() : 0;
+                tr::view::segment_t* raw = backend.alloc(S);
+                if (raw != nullptr) {
+                    const tr::view::segment_ptr_t p = tr::view::segment_ptr_t::adopt(raw);
+                }  // p drops -> destroy (locked for the pool) on this thread
+                if (t == 0) lat0.add(now_ns() - a);
+                done.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+    for (auto& th : ts) th.join();
+    const double secs = (now_ns() - t0) / 1e9;
+    const double ops = secs > 0 ? done.load() / secs : 0;
+    const std::string mode = base + std::to_string(T);
+    emit("libtracer", mode.c_str(), S, T, 1, ops, ops, ops * S / 1e6, lat0.summarize());
+}
+
+/** @brief The sync-pool vs heap MT contention sweep (charted to gh-pages, not gated). */
+void run_syncpool_gate() {
+    const std::size_t hw = std::max<std::size_t>(1, std::thread::hardware_concurrency());
+    // A slab comfortably larger than the max concurrent live set (each thread holds <=1).
+    std::vector<std::byte> slab(64 * (64 + sizeof(tr::view::segment_t) + 64));
+    for (std::size_t T : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+        if (T > hw) continue;
+        tr::mem::sync_pool_t pool(slab, 64);  // fresh free-list per T
+        run_syncpool_mt(T, pool, "syncpool-mt");
+        run_syncpool_mt(T, tr::mem::heap_backend(), "heap-mt");
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc > 1 && std::string_view(argv[1]) == "grid") {
         run_grid();
@@ -783,5 +831,10 @@ int main(int argc, char** argv) {
         run_inproc_pool(S, kRefFanout, kRefEndpoints, alloc_t::HEAP, false, "inproc-pool");
     for (std::size_t S : kSizes)
         run_inproc_pool(S, kRefFanout, kRefEndpoints, alloc_t::BORROW, false, "inproc-pool-borrow");
+    // ADR-0060 §2: thread-safe (spinlock) sync-pool vs the thread-safe heap under
+    // T-thread contention (syncpool-mtT / heap-mtT). Tracks where the single spinlock
+    // bottlenecks — the signal for the lock-free CAS upgrade. Appended LAST (never ahead
+    // of a gated row); tracked to gh-pages, not gated.
+    run_syncpool_gate();
     return 0;
 }
