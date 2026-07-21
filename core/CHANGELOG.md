@@ -195,6 +195,22 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **Departed QUIC / WebTransport peers now evict their subscriber edges (RFC-0009 §D.5,
+  closing the [#453](https://github.com/avatarsd-llc/libtracer/issues/453) eviction
+  gap — [#455](https://github.com/avatarsd-llc/libtracer/issues/455)).** The
+  connection-oriented ws/tcp/esp transports fire `transport_t::notify_down` on peer
+  departure, but the `quic` and `webtransport` modules never did — so a departed
+  QUIC/WebTransport peer's remote subscriber edges leaked (stayed ACTIVE in every write
+  fan-out). The shared `msquic_endpoint_t` base now fires the outer transport's link-down
+  notifier from the msquic connection-shutdown callback (and the one-peer replacement
+  harvest that displaces an old peer), guarded by a `stopping` latch so our OWN teardown
+  never fires it and deduped by a `link_established` latch so it fires at most once per
+  established connection (a link that never came up, and the trailing `SHUTDOWN_COMPLETE`,
+  do not fire). Both kinds are point-to-point (one peer at a time), so a departure is the
+  whole link down (`notify_down`, not the multi-peer bus facet's `notify_peer_down`).
+  No public-API change (the notifier seam is #453's) and no wire change; module-only —
+  exercised by the `quic` CI job (msquic).
+
 - **A read reply's link table is no longer heap-copied per reply (OOM-abort hardening,
   on-device crash)** — `assemble_result_rope` staged the stored payload rope's links
   through a fresh `std::vector<view_t>` before handing them to `assemble`, a per-reply

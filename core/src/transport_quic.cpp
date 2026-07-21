@@ -138,6 +138,13 @@ quic_transport_t::quic_transport_t(const std::string& peer_host, std::uint16_t p
     i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
     i.backend = backend;
     if (max_frame != 0) i.max_frame = max_frame;
+    // Departure seam (RFC-0009 §D extended to peer departure): wire the base's
+    // connection-down / one-peer replacement harvest to this transport_t's flat
+    // link-down notifier. quic is point-to-point — one peer at a time — so a
+    // departure IS the whole link down (notify_down, like tcp / ws-client; never
+    // notify_peer_down, which is the multi-peer bus facet's).
+    i.link_down_ctx = this;
+    i.link_down_fn = [](void* ctx) { static_cast<quic_transport_t*>(ctx)->notify_down(); };
 
     QUIC_SETTINGS settings{};
     settings.IdleTimeoutMs = 0;  // no idle teardown; link liveness is #66 lifecycle
@@ -174,6 +181,13 @@ quic_transport_t::quic_transport_t(std::uint16_t bind_port, const std::string& c
     i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
     i.backend = backend;
     if (max_frame != 0) i.max_frame = max_frame;
+    // Departure seam (RFC-0009 §D extended to peer departure): wire the base's
+    // connection-down / one-peer replacement harvest to this transport_t's flat
+    // link-down notifier. quic is point-to-point — one peer at a time — so a
+    // departure IS the whole link down (notify_down, like tcp / ws-client; never
+    // notify_peer_down, which is the multi-peer bus facet's).
+    i.link_down_ctx = this;
+    i.link_down_fn = [](void* ctx) { static_cast<quic_transport_t*>(ctx)->notify_down(); };
 
     QUIC_SETTINGS settings{};
     settings.IdleTimeoutMs = 0;  // no idle teardown; link liveness is #66 lifecycle

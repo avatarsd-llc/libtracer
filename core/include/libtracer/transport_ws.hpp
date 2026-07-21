@@ -110,7 +110,15 @@ class transport_ws_server : public transport_t, public bus_link_t, private strea
      *         peer (each browser tab gets its own return-route identity and the
      *         registry routes a `dst` segment to that one tab); without it, this
      *         link keeps point-to-point hop naming — inbound frames carry the
-     *         registered child NAME, and `send()` fans out to every open peer. */
+     *         registered child NAME, and `send()` fans out to every open peer.
+     * @note Departure eviction (RFC-0009 §D.5) follows the same split: peer-named
+     *       mode evicts just the departed peer's edges (`notify_peer_down(name)`),
+     *       while FLAT mode reports the whole link down (`notify_down()`) on ANY
+     *       single session's close — so one flat session leaving evicts EVERY
+     *       edge under the link name. That coarseness is unreachable under
+     *       `fwd_router` (which wires the peer-named facet whenever it fans a
+     *       link to many peers); it matters only to a manual wiring that fed a
+     *       flat server multiple concurrent peers. */
     [[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }
 
     /** @brief Visit the currently-OPEN (handshaken) peers' names, `<ip>:<port>`. */
