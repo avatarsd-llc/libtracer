@@ -76,3 +76,13 @@ body[data-theme="dark"] .ltz-compare, :root[data-theme="dark"] .ltz-compare {
 .ltz-compare table.ltz-raw tbody td.sys .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; vertical-align: middle; }
 .ltz-compare table.ltz-raw tbody tr.grp td { border-top: 2px solid var(--ltz-hair); }
 .ltz-compare .ltz-prov { font-family: var(--ltz-mono); font-size: 11.5px; color: var(--ltz-muted); margin: 14px 0 0; }
+
+/* Transport-coverage note: what we could NOT chart and why (render_compare._net_notes_html).
+ * Uses the warn tokens as an informational (not alarming) callout so absent transports are
+ * SURFACED, never mistaken for a measured tie. */
+.ltz-compare .ltz-netnotes { background: var(--ltz-warn-bg); border: 1px solid var(--ltz-warn-bd); border-radius: 9px; padding: 11px 15px; margin-top: 16px; }
+.ltz-compare .ltz-netnotes-h { display: block; font-family: var(--ltz-mono); font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--ltz-warn-ink); margin-bottom: 5px; }
+.ltz-compare .ltz-netnotes ul { margin: 0; padding-left: 18px; }
+.ltz-compare .ltz-netnotes li { font-size: 12.5px; color: var(--ltz-ink); line-height: 1.5; }
+.ltz-compare .ltz-netnotes li b { font-weight: 600; }
+.ltz-compare .ltz-netnotes li code { font-family: var(--ltz-mono); font-size: 11.5px; }
