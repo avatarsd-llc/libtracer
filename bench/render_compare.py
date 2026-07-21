@@ -171,22 +171,41 @@ def build(rows: list[dict]) -> dict:
                        "y": {"log": True, "fmt": "rate", "label": "effective values / second"},
                        "series": sc, "reading": reading(sc, f_rate)})
 
-    # Per-transport LATENCY (single value, paced) — the throughput chart above is the
-    # batched-composition story; a single-message net throughput would be the unbatched
-    # worst case for libtracer and is deliberately not charted.
-    net_specs = []
-    for proto in ("udp", "tcp", "ws"):
+    # Per-transport LATENCY (single value, paced) — the net-tp-compose chart above is the
+    # batched-composition throughput story; a single-message net throughput would be the
+    # unbatched worst case for libtracer and is deliberately not charted. We DO chart both
+    # p50 AND the p99 TAIL per transport: tail latency (determinism) is the RDMA-substrate
+    # story, so it earns its own axis rather than a footnote. Coverage we can't chart is
+    # SURFACED as a labeled note (net_notes), never silently dropped.
+    net_notes: list[str] = []
+    for proto in ("udp", "tcp", "ws", "quic"):
         mode = f"net-{proto}"
-        spec = {"mode": mode, "fixed": {"fan": 1, "ep": 1}, "axis": "size"}
-        sl = two(**{**spec, "col": "p50"})
-        if not (sl["libtracer"] and sl["zenoh"]):
-            continue  # only chart a transport when BOTH engines measured it — never one-sided
-        net_specs.append((proto, spec))
-        charts.append({"id": f"net-lat-{proto}", "title": f"{proto.upper()} — p50 latency vs payload",
-                       "cond": "one-way, same-clock · loopback kernel path · single value",
-                       "x": {"log": True, "fmt": "bytes", "label": "payload size"},
-                       "y": {"log": True, "fmt": "ns", "label": "p50 latency"},
-                       "series": sl, "reading": reading(sl, f_ns, label_x=f_bytes)})
+        fixed = {"fan": 1, "ep": 1}
+        p50 = two(mode, fixed, "size", "p50")
+        p99 = two(mode, fixed, "size", "p99")
+        have_lt, have_zn = bool(p50["libtracer"]), bool(p50["zenoh"])
+        if have_lt and have_zn:
+            charts.append({"id": f"net-lat-{proto}", "title": f"{proto.upper()} — p50 latency vs payload",
+                           "cond": "one-way, same-clock · loopback kernel path · single value",
+                           "x": {"log": True, "fmt": "bytes", "label": "payload size"},
+                           "y": {"log": True, "fmt": "ns", "label": "p50 latency"},
+                           "series": p50, "reading": reading(p50, f_ns, label_x=f_bytes)})
+            charts.append({"id": f"net-p99-{proto}", "title": f"{proto.upper()} — p99 tail latency vs payload",
+                           "cond": "one-way, same-clock · loopback · single value · TAIL (jitter / determinism)",
+                           "x": {"log": True, "fmt": "bytes", "label": "payload size"},
+                           "y": {"log": True, "fmt": "ns", "label": "p99 latency"},
+                           "series": p99, "reading": reading(p99, f_ns, label_x=f_bytes)})
+        elif have_lt or have_zn:
+            who = "libtracer" if have_lt else "Zenoh"
+            net_notes.append(f"<b>{proto.upper()}</b>: measured for {who} only — not charted "
+                             "(a comparison needs both engines on the same transport).")
+        elif proto == "ws":
+            net_notes.append("<b>WS</b>: not charted — libtracer's WebSocket transport shows large "
+                             "single-run p50 latency spikes (held until understood), and Zenoh has no "
+                             "WebSocket transport to compare against.")
+        elif proto == "quic":
+            net_notes.append("<b>QUIC</b>: not charted — needs the optional <code>LIBTRACER_WITH_QUIC</code> "
+                             "module (msquic + TLS), gated like the dedicated quic CI job.")
 
     # raw table — every plotted point, absolute
     table = []
@@ -207,7 +226,7 @@ def build(rows: list[dict]) -> dict:
                     "bandwidth": f_mb(p[3]) if bw_col else "—",
                     "p50": f_ns(p[2]),
                 })
-    return {"charts": charts, "table": table}
+    return {"charts": charts, "table": table, "net_notes": net_notes}
 
 
 BANNER = (
@@ -229,10 +248,21 @@ def _assets() -> tuple[str, str]:
     return (static / "ltz_compare.css").read_text(), (static / "ltz_compare.js").read_text()
 
 
+def _net_notes_html(net_notes: list[str]) -> str:
+    """A labeled 'transport coverage' note — what we could NOT chart and why. Surfaced
+    (not silently dropped) so the reader never mistakes an absent transport for a tie."""
+    if not net_notes:
+        return ""
+    items = "".join(f"<li>{n}</li>" for n in net_notes)
+    return (f'<div class="ltz-netnotes"><span class="ltz-netnotes-h">Transport coverage</span>'
+            f'<ul>{items}</ul></div>')
+
+
 def html_block(rows: list[dict], provenance: str) -> str:
     data = build(rows)
     payload = json.dumps(data, separators=(",", ":"))
     css, js = _assets()
+    net_notes_html = _net_notes_html(data.get("net_notes", []))
     return f"""\
 :::{{raw}} html
 <style>{css}</style>
@@ -244,6 +274,7 @@ def html_block(rows: list[dict], provenance: str) -> str:
     <span class="item"><span class="sw" style="background:var(--ltz-zn)"></span>Zenoh <span class="sub">— zenoh-c 1.9.0, peer mode (transient put)</span></span>
   </div>
   <div class="ltz-grid" id="ltz-charts"></div>
+  {net_notes_html}
   <div class="ltz-tablewrap"><table class="ltz-raw" id="ltz-raw"><thead><tr>
     <th>sweep</th><th>system</th><th>point</th><th>throughput</th><th>bandwidth</th><th>p50 latency</th>
   </tr></thead><tbody></tbody></table></div>

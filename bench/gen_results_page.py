@@ -212,12 +212,21 @@ with K *at flat latency*. Zenoh has no composite send; its throughput is the tra
 **timer-batched** put rate, independent of K — so it plots as a flat reference. (A single
 one-value-per-`send` rate would be the unbatched worst case for libtracer and is not the
 throughput path.) Network **latency** is the separate per-transport (**UDP** / **TCP**),
-single-value, two-process measurement — the same topology for both engines, so it is fair.
+single-value, two-process measurement — the same two-process topology (one socket, one
+paced value) for both engines, so it is fair. Each engine runs its own minimal transport
+path (libtracer's framed `transport_t` send/receive vs Zenoh's session `put`/subscriber),
+so this isolates **transport-substrate** latency, not a full graph write. Both **p50** and
+the **p99 tail** are charted per transport: for a latency-first, RDMA-style substrate the
+*tail* is the load-bearing number (jitter, not the median, is what a real-time consumer
+feels), so it earns its own axis. The tail is also where the transports separate — an
+unreliable datagram path can win the median yet spike at p99, which the p50 chart alone
+would hide.
 
-WebSocket and QUIC are not yet charted: libtracer's WebSocket transport shows large
-single-run latency spikes under this bench (order-of-magnitude p50 jitter) that would make
-a published latency chart misleading, and QUIC needs the `-DLIBTRACER_WITH_QUIC` module
-(msquic + TLS). Full harness in
+WebSocket and QUIC are not charted here, and that gap is stated in the **Transport
+coverage** note under the network charts rather than left silent: libtracer's WebSocket
+transport shows large single-run latency spikes under this bench (order-of-magnitude p50
+jitter) and Zenoh has no WebSocket transport to compare against, while QUIC needs the
+optional `-DLIBTRACER_WITH_QUIC` module (msquic + TLS). Full harness in
 [`bench/`](https://github.com/avatarsd-llc/libtracer/tree/main/bench).
 
 ### Why the throughput charts show different numbers
