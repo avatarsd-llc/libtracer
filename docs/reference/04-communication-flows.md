@@ -316,6 +316,8 @@ Heartbeat write granularity: the subscriber writes to its own `liveness.last_see
 
 A subscriber with `:liveness.heartbeat_hz = 0` opts out of liveness checking. Best-effort subscriptions with no liveness check are valid.
 
+**Link-level eviction (transport departure).** The heartbeat mechanism above is *per-subscriber application liveness*. A coarser, transport-level event is a whole **link** dropping — a TCP / WS peer disconnecting, a QUIC / WebTransport connection closing. Every subscriber edge that fanned out over that link is then dead at once, regardless of heartbeats. The runtime evicts them in one sweep — `evict_link_edges(link_name)` clears each edge bound to the departed link (under its vertex's stripe lock) and frees the slots for reuse — **without** retiring the target vertices themselves ([RFC-0009](../spec/rfcs/0009-vertex-removal-and-subscriber-eviction.md) §D; see [02-graph-model.md](02-graph-model.md) §Vertex lifecycle). This keeps a crashed or departed peer from pinning delivery slots until each per-subscriber heartbeat independently times out.
+
 ---
 
 ## Network partition and recovery
