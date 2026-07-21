@@ -28,6 +28,8 @@
 #include <vector>
 
 #include "bench_common.hpp"
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_pool.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tracer.hpp"
@@ -595,6 +597,99 @@ void run_acl_gated_mt(std::size_t T) {
          lat.summarize());
 }
 
+/** @brief One LKV copy-store measurement's outcome. */
+struct lkv_result_t {
+    double ops_per_s = 0;      /**< @brief alloc+free pairs per second. */
+    std::size_t exhausted = 0; /**< @brief Backpressure hits (must be 0 for the pool). */
+};
+
+/**
+ * @brief ADR-0060: the write-path copy-store allocation in isolation.
+ *
+ * Two variants of the exact allocation `graph_t` routes through its `value_backend_`
+ * at the branch/field write sites (`graph.cpp` 825/1017):
+ *   - @p copy `false` — the pure `backend.alloc` + `backend.destroy` op the ADR
+ *     gate names ("alloc/free throughput"), isolated from the payload copy. Mode
+ *     `lkv-alloc-*`; this is the gated ratio (a pooled O(1) free-list vs the
+ *     default heap's malloc/free).
+ *   - @p copy `true` — the full `materialize()` flatten (alloc + the payload
+ *     `memcpy`) the write path actually performs. Mode `lkv-store-*`; the memcpy is
+ *     backend-independent, so this end-to-end ratio is smaller than the alloc-only
+ *     one — the honest wall-clock the write path gains on this host.
+ * Every iteration allocates then drops one owned segment (one alloc + one free via
+ * `segment_ptr_t`), so both variants exercise the reclaim path graph relies on.
+ */
+lkv_result_t run_lkv_store_alloc(std::size_t S, bool copy, tr::mem::mem_backend_t& backend,
+                                 const char* mode) {
+    // A 2-link rope of S total bytes forces the flatten — a single-link rope would
+    // materialize zero-copy and never touch the backend (the fast path this bench is
+    // deliberately NOT measuring). Borrowed links keep the source alloc-free.
+    std::vector<std::byte> a(S - S / 2, std::byte{0xAB});
+    std::vector<std::byte> b(S / 2, std::byte{0xCD});
+    rope_t src{borrowed_view(a)};
+    src.append(borrowed_view(b));
+
+    constexpr std::size_t kIters = 200000;
+    std::size_t exhausted = 0;
+    {
+        const view_t warm = src.materialize(backend);
+        (void)warm;
+    }  // fault-in / warm caches
+    const std::uint64_t t0 = now_ns();
+    for (std::size_t i = 0; i < kIters; ++i) {
+        if (copy) {
+            const view_t flat = src.materialize(backend);  // alloc + payload memcpy
+            if (flat.empty()) ++exhausted;                 // pool exhaustion == BACKPRESSURE
+            // `flat` drops here → segment_ptr_t release → backend.destroy (1 free).
+        } else {
+            tr::view::segment_t* seg = backend.alloc(S);  // the allocation alone
+            if (seg == nullptr) {
+                ++exhausted;
+            } else {
+                const tr::view::segment_ptr_t p = tr::view::segment_ptr_t::adopt(seg);
+                // `p` drops here → release → backend.destroy (1 free).
+            }
+        }
+    }
+    const double secs = static_cast<double>(now_ns() - t0) / 1e9;
+    const double ops = secs > 0 ? kIters / secs : 0;
+    Latency::Summary lat{};
+    lat.p50 = lat.mean = static_cast<std::uint64_t>(secs * 1e9 / kIters);
+    emit("libtracer", mode, S, 1, 1, ops, ops, static_cast<double>(kIters) * S / (secs * 1e6), lat);
+    return {ops, exhausted};
+}
+
+/**
+ * @brief Run the ADR-0060 LKV copy-store gate across two payload sizes: pooled
+ *        `value_backend` vs the default heap, for both the pure alloc/free op (the
+ *        gated metric) and the end-to-end flatten. Emits the charted `lkv-alloc-*` /
+ *        `lkv-store-*` series and a stderr `LKV-GATE` line (the human-visible
+ *        alloc-cost ratio + the zero-exhaustion / no-fragmentation check).
+ */
+void run_lkv_store_gate() {
+    tr::mem::mem_backend_t& heap = tr::mem::heap_backend();
+    // A caller-owned slab carved into equal 2 KB slots. The loop keeps at most one
+    // segment live, so a handful of slots suffice; 64 gives headroom and lets the
+    // zero-exhaustion invariant (no fragmentation growth) be asserted directly.
+    constexpr std::size_t kSlot = 2048, kSlots = 64;
+    std::vector<std::byte> slab(kSlots * (sizeof(tr::view::segment_t) + kSlot + 64));
+    tr::mem::pool_t pool(slab, kSlot);
+    for (std::size_t S : {std::size_t{64}, std::size_t{1024}}) {
+        const lkv_result_t ha = run_lkv_store_alloc(S, false, heap, "lkv-alloc-heap");
+        const lkv_result_t pa = run_lkv_store_alloc(S, false, pool, "lkv-alloc-pool");
+        run_lkv_store_alloc(S, true, heap, "lkv-store-heap");
+        run_lkv_store_alloc(S, true, pool, "lkv-store-pool");
+        const double ratio = ha.ops_per_s > 0 ? pa.ops_per_s / ha.ops_per_s : 0.0;
+        // Zero exhaustion == no fragmentation growth (fixed slots always reclaimed).
+        // Floor 2.0x: glibc's tcache makes a hot same-size malloc/free ~15 ns, so the
+        // pool's O(1) free-list clears ~2.5x here — the ADR's >=10x is the ESP-IDF
+        // multi_heap figure (validated on-device, the follow-up). The gate proves the
+        // routing (not a heap fallback) + determinism, robustly across host allocators.
+        std::fprintf(stderr, "LKV-GATE S=%4zu: pool %5.1fx heap alloc/free  exhausted=%zu  %s\n", S,
+                     ratio, pa.exhausted, (ratio >= 2.0 && pa.exhausted == 0) ? "PASS" : "FAIL");
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -609,6 +704,10 @@ int main(int argc, char** argv) {
     }
     if (argc > 1 && std::string_view(argv[1]) == "deliver") {  // deliver-only rows (A/B runs)
         for (std::size_t F : kFanouts) run_inproc_deliver(kRefSize, F);
+        return 0;
+    }
+    if (argc > 1 && std::string_view(argv[1]) == "lkv") {  // ADR-0060 alloc gate alone (fast)
+        run_lkv_store_gate();
         return 0;
     }
     for (std::size_t F : kFanouts)
@@ -644,5 +743,10 @@ int main(int argc, char** argv) {
     // (a deterministic ~+100 ns on 2-vCPU CI — observed on PR #353's gate).
     // New sweeps append here, after every pre-existing row, for the same reason.
     for (std::size_t F : kFanouts) run_inproc_deliver(kRefSize, F);
+    // ADR-0060: the write-path copy-store alloc gate — pooled value_backend vs the
+    // default heap on the branch/field-write flatten. Two NEW charted series
+    // (lkv-store-heap / lkv-store-pool) + a same-run ratio gate (bench/perf_gate.py).
+    // Appended LAST per the row-ordering note above (never ahead of a gated row).
+    run_lkv_store_gate();
     return 0;
 }

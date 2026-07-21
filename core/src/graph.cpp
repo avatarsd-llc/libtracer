@@ -277,8 +277,9 @@ struct branch_node_t {
 
 }  // namespace
 
-graph_t::graph_t(std::pmr::memory_resource* mr)
+graph_t::graph_t(std::pmr::memory_resource* mr, mem::mem_backend_t* value_backend)
     : mr_(mr),
+      value_backend_(value_backend),
       root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, settings_t{},
                                        handlers_t{})) {
     // The one built-in creation-catalog type (#82, ADR-0017): `stored_value` makes a
@@ -822,7 +823,12 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
     // the sole link with zero copy; a multi-link POINT pays one flatten here (the
     // interim until the ④b rope-cursor decode). Every node span points into `head`,
     // so each landed slice is head.subview(...) — a refcount bump, never a byte copy.
-    const view_t head = value.materialize();
+    // The flatten draws from the ADR-0060 value_backend_ — the whole decomposition's
+    // durable bytes then live in one pooled segment. An exhausted pool yields an empty
+    // head (rope.cpp flatten's nullptr path); surface that as BACKPRESSURE (§3) rather
+    // than letting decode_into read it back as a malformed (TYPE_MISMATCH) value.
+    const view_t head = value.materialize(*value_backend_);
+    if (head.empty() && value.total_length() != 0) return std::unexpected(status_t::BACKPRESSURE);
     std::array<std::byte, 4096> stack;
     std::pmr::monotonic_buffer_resource mr(stack.data(), stack.size());
     const std::expected<wire::tlv_arena_t, wire::err_t> arena = wire::decode_into(head.bytes(), mr);
@@ -1013,8 +1019,13 @@ result_t<void> graph_t::write(vertex_handle_t vh, const field_path_t& field, rop
     vertex_t* v = vh.get();
     if (field.empty()) return write_impl(v, std::move(value), caller);
     // A field write targets a contiguous control TLV (settings / acl / subscribers);
-    // materialize it (single-link: zero copy) before the field surface parses it.
-    return field_write(v, field, value.materialize(), caller);
+    // materialize it (single-link: zero copy) before the field surface parses it. A
+    // multi-link value's flatten draws from the ADR-0060 value_backend_; an exhausted
+    // pool yields an empty head — surface the injected-resource BACKPRESSURE (§3)
+    // rather than letting field_write read it back as a malformed value.
+    const view_t head = value.materialize(*value_backend_);
+    if (head.empty() && value.total_length() != 0) return std::unexpected(status_t::BACKPRESSURE);
+    return field_write(v, field, head, caller);
 }
 
 result_t<rope_t> graph_t::await(vertex_handle_t vh, std::chrono::nanoseconds timeout,

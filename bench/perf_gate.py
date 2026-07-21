@@ -98,6 +98,44 @@ MEM_REGRESS = 1.02   # fail if live bytes/vertex > baseline * 1.02 ...
 MEM_TICK_B = 1       # ... AND grew by more than one byte (ignore a lone bucket flip)
 _MEM_RE = re.compile(r"^RESULT zeroheap (\w+) allocs=\d+ frees=\d+ bytes=(\d+)")
 
+# --- ADR-0060 LKV copy-store gate (same-run pool-vs-heap ratio, NOT vs-baseline) --
+# The pooled value_backend vs the default heap on the write-path alloc/free op. A
+# same-run ratio cancels absolute machine speed, so it needs no baseline: it proves
+# the pool routing is live (a heap fallback would collapse the ratio toward 1x) and
+# stays deterministically cheaper. The multiple is host-allocator-dependent (glibc's
+# tcache serves a hot same-size malloc/free in ~15 ns → ~2.5x here; ESP-IDF
+# multi_heap is hundreds of ns → the ADR's ≳10x, validated on-device), so the floor
+# is conservative. Skips cleanly when the rows are absent (an older bench binary),
+# keeping the gate backward-compatible with a main baseline that predates the rows.
+LKV_MIN_RATIO = 2.0
+
+
+def lkv_ratio_gate(bench: pathlib.Path) -> list[str]:
+    """Fail if the pooled alloc/free is not >= LKV_MIN_RATIO x the default heap. Runs
+    the bench's isolated `lkv` sweep (fast); best-of-3 max ops/s per size."""
+    best: dict[int, dict[str, float]] = {}
+    for _ in range(3):
+        out = subprocess.run([str(bench), "lkv"], capture_output=True, text=True,
+                             timeout=120).stdout
+        for line in out.splitlines():
+            f = line.split("\t")
+            if len(f) == 12 and f[0] == "RESULT" and f[2] in ("lkv-alloc-heap", "lkv-alloc-pool"):
+                s = best.setdefault(int(f[3]), {})
+                s[f[2]] = max(s.get(f[2], 0.0), float(f[6]))  # f[6] = deliveries/s (ops/s)
+    fails = []
+    for size, s in sorted(best.items()):
+        h, p = s.get("lkv-alloc-heap"), s.get("lkv-alloc-pool")
+        if not h or not p:
+            continue
+        ratio = p / h
+        print(f"  lkv-alloc S={size:<6} pool/heap alloc/free = {ratio:>4.1f}x"
+              + ("" if ratio >= LKV_MIN_RATIO else f"  << under {LKV_MIN_RATIO}x floor"))
+        if ratio < LKV_MIN_RATIO:
+            fails.append(f"lkv-alloc S={size} pool only {ratio:.1f}x heap alloc/free "
+                         f"(< {LKV_MIN_RATIO}x — the ADR-0060 value_backend routing may have "
+                         f"broken / fallen back to the heap)")
+    return fails
+
 
 def run_bench_once(bench: pathlib.Path) -> list[tuple]:
     if not bench.exists():
@@ -213,6 +251,7 @@ def main() -> int:
             if v["deliv_s"] < FLOOR_DELIV:
                 fails.append(f"{k} deliv {v['deliv_s']:,.0f} under floor {FLOOR_DELIV:,}")
         print(line)
+    fails += lkv_ratio_gate(bench)  # ADR-0060 same-run ratio (no baseline; skips if absent)
     if base is None or "--update-baseline" in args:
         BASELINE.write_text(json.dumps(cur, indent=2) + "\n")
         print(f"  ({'recorded' if base is None else 'updated'} baseline -> {BASELINE.name})")

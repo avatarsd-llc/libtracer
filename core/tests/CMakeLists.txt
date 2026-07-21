@@ -228,6 +228,11 @@ target_link_libraries(graph_pmr_test PRIVATE libtracer)
 libtracer_test_warnings(graph_pmr_test)
 add_test(NAME graph_pmr COMMAND graph_pmr_test)
 
+add_executable(graph_value_backend_test graph_value_backend_test.cpp)
+target_link_libraries(graph_value_backend_test PRIVATE libtracer)
+libtracer_test_warnings(graph_value_backend_test)
+add_test(NAME graph_value_backend COMMAND graph_value_backend_test)
+
 add_executable(graph_test graph_test.cpp)
 target_link_libraries(graph_test PRIVATE libtracer)
 libtracer_test_warnings(graph_test)
