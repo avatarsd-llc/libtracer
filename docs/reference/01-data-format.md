@@ -1,7 +1,7 @@
 # Reference 01 — Data Format
 
 > **Status**: normative, v1, 2026-05-03 (incorporated by [docs/spec/v1.md](../spec/v1.md) §3 per RFC-0001 §A.2). Byte-precise definition of every libtracer frame on the wire. A second-implementer SHOULD be able to write an interoperable parser/sender from this section alone.
-> **See also**: design rationale (CRC choice, atomic ordering, MCU stack safety) is in the ADRs ([../adr/](https://github.com/avatarsd-llc/libtracer/tree/main/docs/adr/)) and git history.
+> **See also**: design rationale (CRC choice, atomic ordering, MCU stack safety) is in the ADRs ([../adr/](https://github.com/avatarsd-llc/libtracer/tree/main/docs/adr/)) and git history. To inspect real libtracer frames on the wire, the [**Wireshark dissector**](https://github.com/avatarsd-llc/libtracer/tree/main/tools/wireshark) decodes this format live (a single-file Lua dissector, vector-tested against the conformance frames).
 
 ---
 
