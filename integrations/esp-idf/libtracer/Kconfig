@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+
+menu "libtracer"
+
+    config LIBTRACER_VERTEX_LOCK_STRIPES
+        int "Vertex lock-stripe count"
+        range 1 256
+        default 16
+        help
+            Number of process-wide mutex/condvar lock stripes shared by every
+            graph vertex (libtracer #361 section 2). This is the ONLY global
+            mutable buffer libtracer links into a node: N stripes cost N lazily
+            allocated FreeRTOS mutexes (~90 B of heap each) plus N condition
+            variables, paid once a graph_t exists — independent of how many
+            vertices you register.
+
+            The stripe a vertex rides is chosen by hashing its pinned address,
+            so lowering the count only raises CONTROL-PLANE lock contention
+            (ring trim, edge/ACL mutation, await wake); the lock-free LKV
+            read/write hot path is unaffected. On a single-core chip target a
+            small count (4-8) reclaims RAM at negligible contention cost; the
+            host/multi-core default stays 16.
+
+            The core header (<libtracer/vertex.hpp>) already honors a
+            -DLIBTRACER_VERTEX_LOCK_STRIPES override; this option is the ESP-IDF
+            front door for it. The component propagates the value as a PUBLIC
+            compile definition so every translation unit that includes
+            <libtracer/vertex.hpp> agrees: the stripe table is an
+            `inline constinit` object, and a size mismatch across TUs is an ODR
+            violation.
+
+endmenu
