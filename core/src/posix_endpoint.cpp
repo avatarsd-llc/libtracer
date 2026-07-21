@@ -8,8 +8,10 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <utility>
 
 namespace tr::net {
@@ -60,6 +62,32 @@ void stream_endpoint_t::write_all(int fd, std::span<const std::byte> bytes) {
         const ssize_t n = ::send(fd, bytes.data() + off, bytes.size() - off, MSG_NOSIGNAL);
         if (n <= 0) return;  // peer gone / error → drop the rest
         off += static_cast<std::size_t>(n);
+    }
+}
+
+void stream_endpoint_t::write_all_iov(int fd, ::iovec* vec, std::size_t count) {
+    if (fd < 0) return;
+    while (count > 0) {
+        msghdr msg{};
+        msg.msg_iov = vec;
+        msg.msg_iovlen = count;
+        const ssize_t n = ::sendmsg(fd, &msg, MSG_NOSIGNAL);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return;  // peer gone / error → drop the rest
+        }
+        std::size_t done = static_cast<std::size_t>(n);
+        // Advance past every fully-written entry, then trim the one the write
+        // stopped inside — the stream may stop at any byte boundary.
+        while (count > 0 && done >= vec->iov_len) {
+            done -= vec->iov_len;
+            ++vec;
+            --count;
+        }
+        if (count > 0 && done > 0) {
+            vec->iov_base = static_cast<std::byte*>(vec->iov_base) + done;
+            vec->iov_len -= done;
+        }
     }
 }
 

@@ -25,11 +25,6 @@ namespace tr::net {
 
 namespace {
 
-#ifndef MSG_NOSIGNAL
-/** @brief SIGPIPE would otherwise kill the process if the peer vanishes mid-write. */
-constexpr int MSG_NOSIGNAL = 0;
-#endif
-
 /** @brief The u32-LE length prefix (transport framing) — the framer's, shared verbatim. */
 constexpr std::size_t kPrefixBytes = length_prefix_framer::kPrefixBytes;
 
@@ -40,36 +35,6 @@ constexpr std::size_t kPrefixBytes = length_prefix_framer::kPrefixBytes;
 void set_nodelay(int fd) {
     const int one = 1;
     ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-}
-
-/**
- * @brief Write the gathered iovec entries completely, resuming partial writes (a stream write may
- *        stop anywhere).
- *
- * sendmsg for MSG_NOSIGNAL; `vec` is consumed (advanced).
- */
-void writev_all(int fd, ::iovec* vec, std::size_t count) {
-    if (fd < 0) return;
-    while (count > 0) {
-        msghdr msg{};
-        msg.msg_iov = vec;
-        msg.msg_iovlen = count;
-        const ssize_t n = ::sendmsg(fd, &msg, MSG_NOSIGNAL);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            return;  // peer gone / error → drop the rest
-        }
-        std::size_t done = static_cast<std::size_t>(n);
-        while (count > 0 && done >= vec->iov_len) {
-            done -= vec->iov_len;
-            ++vec;
-            --count;
-        }
-        if (count > 0 && done > 0) {
-            vec->iov_base = static_cast<std::byte*>(vec->iov_base) + done;
-            vec->iov_len -= done;
-        }
-    }
 }
 
 }  // namespace
@@ -151,8 +116,8 @@ void tcp_transport_t::send(std::span<const std::byte> frame) {
     // length-prefixed records on the stream; read the fd inside the lock to pair
     // with the teardown.
     const std::lock_guard lock(write_m_);
-    writev_all(conn_fd_.load(std::memory_order_relaxed), vec.data(),
-               frame.empty() ? 1 : vec.size());
+    write_all_iov(conn_fd_.load(std::memory_order_relaxed), vec.data(),
+                  frame.empty() ? 1 : vec.size());
 }
 
 void tcp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
@@ -181,7 +146,7 @@ void tcp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
         vec[n++] = ::iovec{const_cast<std::byte*>(s.data()), s.size()};
     }
     const std::lock_guard lock(write_m_);
-    writev_all(conn_fd_.load(std::memory_order_relaxed), vec, n);
+    write_all_iov(conn_fd_.load(std::memory_order_relaxed), vec, n);
 }
 
 bool tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len) {

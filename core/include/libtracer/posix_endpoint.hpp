@@ -21,6 +21,10 @@
 #include <span>
 #include <thread>
 
+/** @brief The POSIX scatter-gather descriptor (`<sys/uio.h>`), forward-declared
+ *         so this header need not pull the system socket headers in. */
+struct iovec;
+
 namespace tr::net {
 
 /**
@@ -181,6 +185,26 @@ class stream_endpoint_t : protected posix_endpoint_t {
      * @param bytes The bytes to write.
      */
     static void write_all(int fd, std::span<const std::byte> bytes);
+
+    /**
+     * @brief Write the gathered @p vec entries to @p fd completely as ONE record,
+     *        resuming partial writes — the zero-copy scatter-gather twin of
+     *        @ref write_all.
+     *
+     * `::sendmsg` (MSG_NOSIGNAL — a vanished peer must not SIGPIPE the process)
+     * emits every iovec in one syscall; a stream write may stop anywhere, so the
+     * loop advances past fully-written entries and trims a partially-written one
+     * and resends. @p vec is CONSUMED (its entries' `iov_base`/`iov_len` are
+     * advanced in place) — a caller that fans the same gather to several fds must
+     * pass a fresh copy per fd. Peer-gone / error drops the rest silently
+     * (link-down is #66 lifecycle). The caller holds @ref write_m_ per the
+     * write-serialization invariant.
+     *
+     * @param fd    The destination fd; a negative fd is a no-op.
+     * @param vec   The iovec array to gather (consumed in place).
+     * @param count The number of entries in @p vec.
+     */
+    static void write_all_iov(int fd, ::iovec* vec, std::size_t count);
 
     /**
      * @brief Write @p bytes to the live peer as one serialized record.
