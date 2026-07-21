@@ -710,14 +710,47 @@ void graph_t::fan_out(vertex_t* v, const rope_t& value) {
     // `value`; WHICH vertices propagate is the per-vertex delivery_mode decided by the
     // sweep (RFC-0008). Small fan-out (the common case) placement-constructs into a RAW
     // stack buffer — no per-publish heap allocation and no dead stack zeroing (an
-    // edge_view_t array default-construct cost ~18 ns/op of rep-stos zeroing here) —
-    // and large fan-out reserves the heap vector once.
+    // edge_view_t array default-construct cost ~18 ns/op of rep-stos zeroing here).
     edge_snapshot_t inline_buf;
+
+    // Wide fan-out (> kInlineFanout) used to malloc a fresh overflow vector EVERY publish
+    // — the wide-fan-out alloc cliff (jitter on the very path that is the fan-out moat).
+    // Reuse ONE persistent thread-local buffer instead, so a WARM wide publish is zero-alloc
+    // (its capacity survives across publishes). Gated on the lock-free own_subs() count so
+    // the small-fan-out hot path (incl. the fan-1-vs-Zenoh path) pays NO TLS cost.
+    // snapshot_edges re-checks the width under the lock, so a race on the count only costs a
+    // rare fallback alloc, never correctness. Re-entrancy: dispatch runs OUTSIDE the lock and
+    // a subscriber callback may re-publish (a nested wide fan_out) — the `busy` flag detects
+    // that and routes the nested call to a fresh local buffer below, so the outer's buffer is
+    // never aliased. The flag resets on scope exit (incl. an exception out of dispatch), so a
+    // throwing callback can't wedge the thread onto the slow path.
+    if (v->own_subs() > vertex_t::kInlineFanout) {
+        static thread_local std::vector<edge_view_t> tls_buf;
+        static thread_local bool tls_busy = false;
+        if (!tls_busy) {
+            tls_busy = true;
+            struct reset_t {
+                bool& b;
+                ~reset_t() noexcept { b = false; }
+            } reset{tls_busy};
+            tls_buf.clear();  // keeps capacity — the amortised-zero-alloc reuse
+            const std::size_t n = v->snapshot_edges(inline_buf, tls_buf);
+            if (tls_buf.empty())
+                for (std::size_t i = 0; i < n; ++i) dispatch_edge(inline_buf[i], value);
+            else
+                for (const edge_view_t& e : tls_buf) dispatch_edge(e, value);
+            return;
+        }
+        // Nested wide fan_out (rare): fall through to a fresh local buffer.
+    }
+
+    // Small fan-out (or a nested wide fan-out): fill the stack buffer; the empty local vector
+    // never allocates unless the overflow path above genuinely spilled.
     std::vector<edge_view_t> heap_buf;
     const std::size_t n = v->snapshot_edges(inline_buf, heap_buf);
     if (heap_buf.empty())
         for (std::size_t i = 0; i < n; ++i) dispatch_edge(inline_buf[i], value);
-    else
+    else  // count race (a subscriber was added between own_subs() and the lock): one alloc
         for (const edge_view_t& e : heap_buf) dispatch_edge(e, value);
 }
 
