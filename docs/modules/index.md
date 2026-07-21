@@ -18,7 +18,7 @@ flowchart TB
         GRAPH["graph — vertices, read/write/await"]
         DISP["dispatcher — fan-out + field-write"]
         FWD["fwd-router — FWD source-routing (RFC-0004)"]
-        TRANSPORT["transport — loopback · UDP · WS · CAN"]
+        TRANSPORT["transport — loopback · UDP · TCP · WS · CAN"]
     end
     subgraph L23["L2/L3 · wire codec"]
         FRAME["frame-codec — TLV decode/encode + CRC"]
@@ -53,7 +53,7 @@ Each module has its own page in the sidebar, grouped by layer:
 - **L1 views** — [views](views.md) (`view_t` / `rope_t` / the L1→L2 cast)
 - **L2/L3 wire codec** — [frame-codec](frame-codec.md) (TLV decode/encode + CRC)
 - **L4 graph** — [path](path.md) (addressing), [graph](graph.md) (vertices, read/write/await, dispatch)
-- **L4 transport** — [transport](transport.md) (loopback · UDP · WS · CAN)
+- **L4 transport** — [transport](transport.md) (loopback · UDP · TCP · WS · CAN; QUIC / WebTransport opt-in)
 
 For the cross-cutting view of how they compose, see the **[interface map](interface-map.md)**;
 for the exact bytes on the wire, the **[bit-level walkthrough](wire-format-bits.md)**.

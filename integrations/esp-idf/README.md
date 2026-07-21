@@ -88,6 +88,16 @@ The same CI step is a **footprint sentinel**: it gates the libtracer component's
 
 Steady-state heap is what you configure: the full_node example runs its RX segments and router tables out of a **24 KiB static slab** (12 KiB pool → 7 × 1536 B datagram slots + 12 KiB pmr arena); each live socket transport additionally owns one recv thread (stack below).
 
+## Configuration
+
+The component exposes libtracer's build-time knobs through **Kconfig** (`idf.py menuconfig` → *libtracer*, or set them in `sdkconfig` / `sdkconfig.defaults` like any IDF option):
+
+| Option | Type | Default | Effect |
+| ------ | ---- | ------- | ------ |
+| `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` | int (1–256) | 16 | Process-wide vertex lock-stripe count — the **only** global mutable buffer libtracer links into a node. N stripes cost N lazily-allocated FreeRTOS mutexes (~90 B heap each) + N condvars, paid once a `graph_t` exists (independent of how many vertices you register). A vertex's stripe is chosen by hashing its pinned address, so lowering N only raises **control-plane** lock contention (ring trim, edge/ACL mutation, `await` wake) — the lock-free LKV read/write hot path is unaffected. On a single-core target (esp32c3/c6) **4–8** reclaims RAM at negligible cost; the multi-core default stays 16. |
+
+The value propagates as a **PUBLIC** compile definition, so every translation unit that includes `<libtracer/vertex.hpp>` agrees — the stripe table is an `inline constinit` object and a mismatch across TUs would be an ODR violation. (The core header also honors a bare `-DLIBTRACER_VERTEX_LOCK_STRIPES` override; this Kconfig option is the ESP-IDF front door for it.)
+
 ## FreeRTOS / threading notes
 
 - **`std::thread` is pthread on FreeRTOS.** Every socket transport owns one recv thread; `transport_can`'s TWAI link owns one dispatch thread. Their stacks come from `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT` (the example sets **12 KiB**; the ESP-IDF default 3 KiB is NOT enough — the ws/tcp serve loops carry ~4 KiB chunk buffers + TLV decode frames). To differentiate per-thread, call `esp_pthread_set_cfg()` before constructing a transport (it applies to threads spawned after it). Priorities follow `CONFIG_PTHREAD_TASK_PRIO_DEFAULT` (5) — below Wi-Fi/lwIP tasks, which is the right default: recv loops are throughput, not latency-critical ISR work.
