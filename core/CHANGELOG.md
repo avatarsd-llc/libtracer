@@ -12,6 +12,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-07-21
+
 ### Added
 
 - **`graph_t` gains a second injected memory seam — the ADR-0060 write-path value
