@@ -21,12 +21,14 @@ on:
       - "integrations/esp-idf/**"
       - "core/src/**"
       - "core/include/**"
+      - "tools/check_esp_srcs.py"
       - ".github/workflows/esp-idf.yml"
   pull_request:
     paths:
       - "integrations/esp-idf/**"
       - "core/src/**"
       - "core/include/**"
+      - "tools/check_esp_srcs.py"
       - ".github/workflows/esp-idf.yml"
   workflow_dispatch:
 
@@ -45,7 +47,20 @@ env:
   LIBTRACER_SENTINEL_MODE: fail # thresholds are measured (see above); a breach is a real regression
 
 jobs:
+  # Fast fail-first guard: every core/src/*.cpp is either in the component's
+  # hand-maintained LIBTRACER_SRCS or explicitly opted out. Catches the "new core
+  # source forgotten in the ESP list" drift at lint time instead of as a much later
+  # full-node LINK error (the two lists legitimately differ — core assembles
+  # conditionally, the ESP list is a flat subset — so they can't share a fragment).
+  srcs-drift:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Guard ESP-IDF LIBTRACER_SRCS against core/src drift
+        run: python3 tools/check_esp_srcs.py
+
   build:
+    needs: srcs-drift
     runs-on: ubuntu-24.04
     # Pinned ESP-IDF v6.0 release (GCC 15 RISC-V toolchain — C++23: std::expected,
     # std::span; matches the origin firmware's IDF v6.0-dev toolchain). Bumped from v5.3/GCC13.
@@ -81,6 +96,7 @@ jobs:
   # target run below (full-node-host), and bus-/radio-level validation is the
   # on-silicon checklist on #183.
   full-node:
+    needs: srcs-drift
     runs-on: ubuntu-24.04
     container: espressif/idf:release-v6.0
     strategy:
