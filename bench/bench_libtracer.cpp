@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <memory_resource>
 #include <optional>
 #include <span>
 #include <string>
@@ -77,8 +78,12 @@ enum class alloc_t { HEAP, BORROW };
  */
 void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool by_path,
                 const char* mode, std::uint64_t budget = kDeliveryBudget,
-                std::uint64_t latbudget = kLatencyDeliveryBudget) {
-    graph_t g;
+                std::uint64_t latbudget = kLatencyDeliveryBudget,
+                std::pmr::memory_resource* mr = nullptr) {
+    // mr==nullptr keeps the default global-heap LKV (make_shared); an injected pool
+    // routes the per-write LKV allocate_shared through it (ADR-0060 mr_ seam) — the
+    // only difference between `inproc` and `inproc-pool` (graph.cpp store uses mr_).
+    graph_t g{mr ? mr : std::pmr::get_default_resource()};
     std::vector<vertex_handle_t> verts;
     std::vector<path_t> paths;
     verts.reserve(E);
@@ -120,6 +125,25 @@ void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool
         lat.add(now_ns() - a);
     }
     emit("libtracer", mode, S, F, E, pub_s, deliv_s, mb_s, lat.summarize());
+}
+
+/**
+ * @brief `inproc` write path through an INJECTED pool `mr_` (modes `inproc-pool` /
+ *        `inproc-pool-borrow`), vs the default global-heap `inproc` / `inproc-borrow`.
+ *
+ * The ONLY difference from `run_inproc` is the graph's LKV allocator: a
+ * `std::pmr::unsynchronized_pool_resource` (frees + reuses fixed-size blocks — a real
+ * deployment, not a monotonic best-case) instead of the process heap. This isolates
+ * the per-write persist `make_shared` the pool removes — the fan-1-vs-Zenoh gap is
+ * malloc-dominated (deliver-only already beats Zenoh; the ~180 ns delta is the LKV
+ * persist), and a pool is the ADR-0060 LATENCY/determinism lever (not a RAM play). The
+ * pool outlives the graph: `run_inproc` completes synchronously before `pool` destructs.
+ */
+void run_inproc_pool(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool by_path,
+                     const char* mode, std::uint64_t budget = kDeliveryBudget,
+                     std::uint64_t latbudget = kLatencyDeliveryBudget) {
+    std::pmr::unsynchronized_pool_resource pool;
+    run_inproc(S, F, E, alloc, by_path, mode, budget, latbudget, &pool);
 }
 
 /**
@@ -748,5 +772,16 @@ int main(int argc, char** argv) {
     // (lkv-store-heap / lkv-store-pool) + a same-run ratio gate (bench/perf_gate.py).
     // Appended LAST per the row-ordering note above (never ahead of a gated row).
     run_lkv_store_gate();
+    // ADR-0060 write-path latency: the full 1:1 write THROUGH an injected pool `mr_`
+    // (unsynchronized_pool_resource) vs the default global-heap `inproc` / `inproc-borrow`.
+    // Isolates the per-write persist `make_shared` the pool removes — the fan-1-vs-Zenoh
+    // gap is malloc-dominated (deliver-only already beats Zenoh; the ~180 ns delta is the
+    // LKV persist). Two NEW charted series to gh-pages (inproc-pool / inproc-pool-borrow),
+    // sweeping payload at fan=1 (where the per-publish alloc is un-amortised). Appended
+    // LAST per the row-ordering note above: never ahead of a gated row.
+    for (std::size_t S : kSizes)
+        run_inproc_pool(S, kRefFanout, kRefEndpoints, alloc_t::HEAP, false, "inproc-pool");
+    for (std::size_t S : kSizes)
+        run_inproc_pool(S, kRefFanout, kRefEndpoints, alloc_t::BORROW, false, "inproc-pool-borrow");
     return 0;
 }
