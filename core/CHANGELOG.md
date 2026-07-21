@@ -12,6 +12,26 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`graph_t` gains a second injected memory seam — the ADR-0060 write-path value
+  byte-buffer backend.** The constructor takes an optional
+  `mem::mem_backend_t* value_backend` (defaulted to `mem::heap_backend()`, so the
+  full signature is now `graph_t(std::pmr::memory_resource* mr =
+  get_default_resource(), mem::mem_backend_t* value_backend = &heap_backend())`).
+  The write-path copy-store — the single `materialize()` flatten of a branch or
+  field write (`graph.cpp` sites 825/1017), the last unpoolable allocation on the
+  write hot path — now draws its owned value `segment` from `value_backend` instead
+  of the default heap. A bounded host points it (and the ADR-0042 transport-receive
+  backend) at one `pool_t` slab for deterministic, fragmentation-free value memory;
+  passing nothing keeps the standard heap and behaviour is **byte-identical**. On
+  pool exhaustion / oversize the write rejects with `status_t::BACKPRESSURE` rather
+  than silently falling back to the heap (ADR-0060 §3). An injected `value_backend`
+  **must be thread-safe** — a value `segment` self-routes its reclaim on whatever
+  thread drops the last ref (§2); the default heap already is. New coverage:
+  `graph_value_backend_test` (routing / read-back / backpressure / default-idle) and
+  the `bench/` `lkv-alloc-*` / `lkv-store-*` series gated by `perf_gate.py`.
+
 ### Changed
 
 - **A plain `read` of a vertex with ≥ 1 registered child now serves the COMPOSED

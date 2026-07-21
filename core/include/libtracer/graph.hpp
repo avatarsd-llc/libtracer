@@ -29,6 +29,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/vertex.hpp"
@@ -132,13 +133,29 @@ class graph_t {
    public:
     /** @brief Construct an empty graph (registers the built-in `stored_value` child type). */
     /**
-     * @brief Construct a graph drawing its per-write allocations from @p mr —
-     *        the ADR-0039 §1 injection seam (#361 §5). A 16 KB node installs a
-     *        pool/monotonic resource over a static arena; a host passes nothing
-     *        and gets the standard heap (zero churn). The resource must outlive
-     *        the graph and every value handle obtained from it.
+     * @brief Construct a graph drawing its per-write control-block allocations from
+     *        @p mr (ADR-0039 §1, #361 §5) and its write-path value byte-buffers from
+     *        @p value_backend (ADR-0060).
+     *
+     * @p mr allocates the LKV control block + `rope_t` wrapper object; @p
+     * value_backend is the L0 byte-buffer seam the write-path copy-store draws its
+     * owned value @ref view::segment_t from — the single flatten of a branch or field
+     * write (`graph.cpp` sites 825, 1017). A bounded node points BOTH at one static
+     * slab ("one slab, whole stack"); a host passes nothing and gets the standard
+     * heap for each (zero churn, behaviour byte-identical).
+     *
+     * An injected @p value_backend MUST be thread-safe (ADR-0060 §2): a value @ref
+     * view::segment_t self-routes its reclaim on whatever thread drops the last ref —
+     * typically a reader/subscriber, concurrent with a writer's `alloc` — so
+     * sharding it per lock-stripe removes no race. The default `heap_backend()`
+     * already is thread-safe; a `pool_t` must be composed with the target's
+     * arch-selected synchronisation. On exhaustion `value_backend` returns `nullptr`
+     * (the BACKPRESSURE signal), and the write rejects rather than silently falling
+     * back to the heap (§3). @p mr and @p value_backend must both outlive the graph
+     * and every value handle obtained from it.
      */
-    explicit graph_t(std::pmr::memory_resource* mr = std::pmr::get_default_resource());
+    explicit graph_t(std::pmr::memory_resource* mr = std::pmr::get_default_resource(),
+                     mem::mem_backend_t* value_backend = &mem::heap_backend());
     graph_t(const graph_t&) = delete;
     graph_t& operator=(const graph_t&) = delete;
 
@@ -807,6 +824,15 @@ class graph_t {
      *         the LKV control block + rope of every `assign`. Host-owned; outlives the
      *         graph. Defaults to the standard heap. */
     std::pmr::memory_resource* mr_ = std::pmr::get_default_resource();
+    /** @brief The ADR-0060 injected byte-buffer seam the write-path copy-store draws
+     *         its owned value @ref view::segment_t from (the flatten of a branch/field
+     *         write, `graph.cpp` sites 825/1017). Host-owned; outlives the graph.
+     *         Defaults to the standard heap, so behaviour is byte-identical until a
+     *         host injects a pool. MUST be thread-safe when injected (§2): a segment's
+     *         reclaim self-routes on the last-ref thread, concurrent with a writer's
+     *         alloc. On exhaustion it returns `nullptr` — the write BACKPRESSUREs
+     *         (§3), never a silent heap fallback. */
+    mem::mem_backend_t* value_backend_ = &mem::heap_backend();
     std::unique_ptr<vertex_t> root_;
     // The device creation catalog (#82, ADR-0017): SPEC `type` -> factory. Populated at
     // setup (register_child_type), read-only once frames flow, so no lock (same contract
