@@ -331,6 +331,65 @@ void test_handshake_and_frames() {
 }
 
 /**
+ * @brief Zero-copy scatter-gather egress: server.send(iov) with the payload split into N spans
+ *        round-trips to a connected client identically to a flat server.send(span).
+ *
+ * The server→client path is UNMASKED (RFC 6455 §5.1), so the override rides the frame header ahead
+ * of the payload spans with no flatten copy. The client decodes an ordinary unmasked BINARY frame;
+ * the reassembled payload must be byte-identical whether the server gathered it from spans or wrote
+ * it flat. A 200-byte payload forces the 126 + u16-BE extended-length header, so the shared
+ * encode_frame_header helper is exercised on both paths.
+ */
+void test_scatter_gather_send() {
+    std::printf("transport_ws server — scatter-gather send(iov) zero-copy egress:\n");
+
+    tr::net::transport_ws_server server(0);
+    check(server.ok(), "listen socket bound");
+    const std::uint16_t port = server.local_port();
+
+    const int cfd = tcp_connect(port);
+    check(cfd >= 0 && raw_handshake(cfd), "raw client connected + 101 handshake");
+
+    // A payload deliberately > 125 bytes so the frame header takes the 126 + u16-BE
+    // extended-length form; split into four uneven spans — the "rope" a router gathers.
+    std::vector<std::byte> payload(200);
+    for (std::size_t i = 0; i < payload.size(); ++i)
+        payload[i] = static_cast<std::byte>((i * 7 + 1) & 0xFF);
+    const std::array<std::size_t, 4> cut{40, 55, 5, 100};  // sums to 200
+    std::vector<std::span<const std::byte>> spans;
+    std::size_t off = 0;
+    for (std::size_t c : cut) {
+        spans.emplace_back(payload.data() + off, c);
+        off += c;
+    }
+
+    // --- (a) scatter-gather send: the four spans emit as ONE server frame ---
+    server.send(std::span<const std::span<const std::byte>>(spans));
+    const auto sg_bytes = read_until(
+        cfd, [](const std::vector<std::byte>& b) { return ws::decode_frame(b).has_value(); }, 2s);
+    auto sg = ws::decode_frame(sg_bytes);
+    check(sg.has_value(), "client decoded the scatter-gather server frame");
+    if (sg) {
+        check(sg->first.op == ws::opcode_t::BINARY, "scatter-gather frame is BINARY");
+        check(sg->first.payload.size() == payload.size() &&
+                  std::memcmp(sg->first.payload.data(), payload.data(), payload.size()) == 0,
+              "scatter-gather payload == the gathered spans concatenated");
+    }
+
+    // --- (b) flat send of the SAME payload: byte-identical reassembly ---
+    server.send(std::span<const std::byte>(payload));
+    const auto flat_bytes = read_until(
+        cfd, [](const std::vector<std::byte>& b) { return ws::decode_frame(b).has_value(); }, 2s);
+    auto flat = ws::decode_frame(flat_bytes);
+    check(flat.has_value(), "client decoded the flat server frame");
+    if (sg && flat)
+        check(flat->first.payload == sg->first.payload,
+              "flat send and scatter-gather send reassemble to identical bytes");
+
+    ::close(cfd);
+}
+
+/**
  * @brief Two real transport_t endpoints over a live WS connection: a transport_ws_server and a
  *        transport_ws_client dialing into it.
  *
@@ -616,6 +675,7 @@ int main() {
     test_handshake_and_frames();
     test_fragmented_message_rope();
     test_fragmented_message_span();
+    test_scatter_gather_send();
     test_client_server_roundtrip();
     test_multi_peer_bus();
     test_max_peers_cap();

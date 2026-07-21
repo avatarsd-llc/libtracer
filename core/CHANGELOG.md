@@ -53,6 +53,27 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **Zero-copy scatter-gather WebSocket SERVER egress (`tr::net::transport_ws_server`).**
+  The WS server path now makes libtracer's "zero-copy everywhere" claim true on egress:
+  server→client frames are UNMASKED (RFC 6455 §5.1), so the frame header and the payload
+  spans go to the wire in one gathered `sendmsg` with no flatten and no re-copy. Previously
+  `send(iov)` fell back to the base `transport_t` default (flatten the rope into one buffer,
+  then `encode_frame` copied again to prepend the header = 2 allocs + 2 copies per send).
+  New public API:
+  - `transport_ws_server::send(std::span<const std::span<const std::byte>>)` — overrides
+    the base scatter-gather default; encodes the frame header once and fans
+    `[header, span0, span1, …]` to every open peer via one gathered write per peer (each
+    peer writes from a fresh copy of the iovec array, since the write consumes it).
+  - `transport_ws_server::peer_endpoint_t::send(std::span<const std::span<const std::byte>>)`
+    — the directed single-peer twin (one consumer, no per-peer copy).
+  - `tr::net::ws::encode_frame_header(std::array<std::byte, kMaxServerFrameHeader>&,
+    opcode_t, std::size_t, bool = true)` plus the `kMaxServerFrameHeader` (10) bound —
+    the extracted header-only length encoder now shared by `encode_frame` and the
+    scatter-gather egress (one length-encoding implementation). The MASKED client path
+    (`transport_ws_client`) is unchanged (it stays on the base flatten default — a client
+    XORs every payload byte, so its bytes cannot ride uncopied). The shared stream
+    scatter-gather writer moved to `stream_endpoint_t::write_all_iov` (tcp now uses it too).
+
 - **`rope_t` nothrow soft-fail growth API (`tr::view::rope_t`).** For assembling a
   scatter-gather reply on a constrained/fragmented heap without an `-fno-exceptions`
   `abort()`:

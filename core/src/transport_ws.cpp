@@ -9,16 +9,20 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/rope.hpp"
@@ -106,6 +110,46 @@ std::string header_value(std::string_view request, std::string_view name) {
     return {};
 }
 
+/** @brief Inline iovec capacity for a scatter-gather send before the heap fallback:
+ *         a FWD forward/reply gathers only a few spans, so the common broadcast
+ *         never allocates (mirrors transport_tcp's bound). */
+constexpr std::size_t kMaxServerIov = 16;
+
+/**
+ * @brief Build the scatter-gather iovec for one server→client frame: entry 0 is the
+ *        pre-encoded frame @p header (its first @p header_len bytes), the payload
+ *        @p iov spans follow (empty spans skipped).
+ *
+ * Server frames are UNMASKED (RFC 6455 §5.1), so the payload bytes ride straight to
+ * the wire with no copy. Uses the caller's @p inline_vec when the span count fits,
+ * else grows @p heap; both @p inline_vec / @p heap and @p header must outlive the
+ * write, since the returned iovec aliases them.
+ *
+ * @param header     The already-encoded frame header buffer (its bytes are aliased).
+ * @param header_len The number of valid header bytes in @p header.
+ * @param iov        The payload spans to gather after the header.
+ * @param inline_vec The caller's stack iovec array (the no-alloc fast path).
+ * @param heap       Grown only when the span count exceeds @p inline_vec.
+ * @return `{vec, count}` — the assembled iovec array and its entry count.
+ */
+std::pair<::iovec*, std::size_t> build_server_iov(
+    std::array<std::byte, ws::kMaxServerFrameHeader>& header, std::size_t header_len,
+    std::span<const std::span<const std::byte>> iov, std::span<::iovec> inline_vec,
+    std::vector<::iovec>& heap) {
+    ::iovec* vec = inline_vec.data();
+    if (iov.size() + 1 > inline_vec.size()) {
+        heap.resize(iov.size() + 1);
+        vec = heap.data();
+    }
+    vec[0] = ::iovec{header.data(), header_len};
+    std::size_t n = 1;
+    for (const std::span<const std::byte>& s : iov) {
+        if (s.empty()) continue;  // an empty span is a no-op gather entry
+        vec[n++] = ::iovec{const_cast<std::byte*>(s.data()), s.size()};
+    }
+    return {vec, n};
+}
+
 }  // namespace
 
 /**
@@ -179,12 +223,66 @@ void transport_ws_server::send(std::span<const std::byte> frame) {
     }
 }
 
+void transport_ws_server::send(std::span<const std::span<const std::byte>> iov) {
+    // Encode the ONE server frame header for the whole gathered payload, then fan
+    // [header, span0, span1, ...] to every open peer as a single gathered write —
+    // no flatten, no re-copy (server frames are UNMASKED, RFC 6455 §5.1). Lock
+    // order per the header contract: peers_m_ (slot list stable) → write_m_ (the
+    // stream write-serialization invariant, now covering every peer fd).
+    std::size_t total = 0;
+    for (const std::span<const std::byte>& s : iov) total += s.size();
+    std::array<std::byte, ws::kMaxServerFrameHeader> header{};
+    const std::size_t hlen = ws::encode_frame_header(header, ws::opcode_t::BINARY, total);
+
+    std::array<::iovec, kMaxServerIov + 1> inline_vec;
+    std::vector<::iovec> heap;
+    const auto [pristine, n] = build_server_iov(header, hlen, iov, inline_vec, heap);
+
+    const std::lock_guard plock(peers_m_);
+    const std::lock_guard wlock(write_m_);
+    // write_all_iov CONSUMES its iovec array (advances base/len on partial writes),
+    // so each peer must write from a fresh COPY of the pristine gather — otherwise
+    // peer 2+ would writev a consumed/zeroed array. peer_endpoint_t::send is
+    // single-fd and needs no such copy.
+    std::array<::iovec, kMaxServerIov + 1> scratch_inline;
+    std::vector<::iovec> scratch_heap;
+    ::iovec* scratch = scratch_inline.data();
+    if (n > scratch_inline.size()) {
+        scratch_heap.resize(n);
+        scratch = scratch_heap.data();
+    }
+    for (const std::unique_ptr<session_t>& s : slots_) {
+        if (!s->open.load(std::memory_order_relaxed)) continue;
+        std::copy_n(pristine, n, scratch);
+        write_all_iov(s->fd.load(std::memory_order_relaxed), scratch, n);
+    }
+}
+
 void transport_ws_server::peer_endpoint_t::send(std::span<const std::byte> frame) {
     if (owner_ == nullptr || slot_ == nullptr) return;
     const std::vector<std::byte> encoded = ws::encode_frame(ws::opcode_t::BINARY, frame);
     const std::lock_guard lock(owner_->write_m_);
     if (!slot_->open.load(std::memory_order_relaxed)) return;  // departed ⇒ no-op
     write_all(slot_->fd.load(std::memory_order_relaxed), encoded);
+}
+
+void transport_ws_server::peer_endpoint_t::send(std::span<const std::span<const std::byte>> iov) {
+    if (owner_ == nullptr || slot_ == nullptr) return;
+    // The single-fd twin of the broadcast override: one gathered [header, spans...]
+    // write, server frame UNMASKED (RFC 6455 §5.1), no flatten copy.
+    std::size_t total = 0;
+    for (const std::span<const std::byte>& s : iov) total += s.size();
+    std::array<std::byte, ws::kMaxServerFrameHeader> header{};
+    const std::size_t hlen = ws::encode_frame_header(header, ws::opcode_t::BINARY, total);
+
+    std::array<::iovec, kMaxServerIov + 1> inline_vec;
+    std::vector<::iovec> heap;
+    const auto [vec, n] = build_server_iov(header, hlen, iov, inline_vec, heap);
+
+    // Single consumer, so no pristine copy is needed (unlike the broadcast).
+    const std::lock_guard lock(owner_->write_m_);
+    if (!slot_->open.load(std::memory_order_relaxed)) return;  // departed ⇒ no-op
+    write_all_iov(slot_->fd.load(std::memory_order_relaxed), vec, n);
 }
 
 void transport_ws_server::enumerate_peers(const peer_visitor_t& visit) const {

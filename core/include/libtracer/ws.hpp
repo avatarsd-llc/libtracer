@@ -279,11 +279,61 @@ struct frame_t {
 }
 
 /**
+ * @brief The largest a server→client frame HEADER can be: 1 FIN/opcode byte +
+ *        1 length byte + 8 extended-length bytes (the 64-bit form).
+ *
+ * Server frames carry NO masking key (RFC 6455 §5.1), so 10 bytes bounds every
+ * header. A stack buffer of this size is the fixed prefix a scatter-gather
+ * egress rides ahead of the payload spans.
+ */
+inline constexpr std::size_t kMaxServerFrameHeader = 10;
+
+/**
+ * @brief Encode ONLY a server→client RFC 6455 frame header into @p out, UNMASKED.
+ *
+ * Writes byte0 = `(fin?0x80:0)|op`, then the payload length in the smallest legal
+ * encoding (7-bit, then the 126 + 2-byte u16-BE marker, then the 127 + 8-byte
+ * u64-BE marker); the MASK bit is always 0 (server frames MUST NOT be masked,
+ * RFC 6455 §5.1). This is the ONE length-encoding implementation —
+ * `encode_frame()` appends the payload after it, and the transport's zero-copy
+ * scatter-gather egress rides the payload spans behind it with no copy.
+ *
+ * @param out The header buffer to fill (`kMaxServerFrameHeader` bytes suffice).
+ * @param op  The frame opcode.
+ * @param len The payload length in bytes.
+ * @param fin The FIN bit (default true — a complete, unfragmented message;
+ *            pass false for a non-final fragment, RFC 6455 §5.4).
+ * @return The number of header bytes written into @p out (2, 4, or 10).
+ */
+[[nodiscard]] inline std::size_t encode_frame_header(
+    std::array<std::byte, kMaxServerFrameHeader>& out, opcode_t op, std::size_t len,
+    bool fin = true) {
+    out[0] = static_cast<std::byte>((fin ? 0x80u : 0x00u) | static_cast<std::uint8_t>(op));
+    if (len < 126) {
+        out[1] = static_cast<std::byte>(len);  // MASK=0
+        return 2;
+    }
+    if (len <= 0xFFFF) {
+        out[1] = static_cast<std::byte>(126);
+        out[2] = static_cast<std::byte>((len >> 8) & 0xFFu);
+        out[3] = static_cast<std::byte>(len & 0xFFu);
+        return 4;
+    }
+    out[1] = static_cast<std::byte>(127);
+    for (int i = 0; i < 8; ++i) {
+        out[2 + i] =
+            static_cast<std::byte>((static_cast<std::uint64_t>(len) >> ((7 - i) * 8)) & 0xFFu);
+    }
+    return 10;
+}
+
+/**
  * @brief Encode one server→client RFC 6455 frame: given opcode, UNMASKED.
  *
  * Server frames MUST NOT be masked (RFC 6455 §5.1), so the MASK bit is always
  * 0 and no masking key is emitted. The length uses the smallest legal encoding
- * (7-bit, then the 126 + 2-byte marker, then the 127 + 8-byte marker).
+ * (7-bit, then the 126 + 2-byte marker, then the 127 + 8-byte marker) — encoded
+ * by the shared `encode_frame_header()` helper, then the payload appended.
  *
  * @param op      The frame opcode.
  * @param payload The application payload to send.
@@ -294,24 +344,12 @@ struct frame_t {
 [[nodiscard]] inline std::vector<std::byte> encode_frame(opcode_t op,
                                                          std::span<const std::byte> payload,
                                                          bool fin = true) {
+    std::array<std::byte, kMaxServerFrameHeader> header{};
+    const std::size_t hlen = encode_frame_header(header, op, payload.size(), fin);
+
     std::vector<std::byte> out;
-    out.push_back(static_cast<std::byte>((fin ? 0x80u : 0x00u) | static_cast<std::uint8_t>(op)));
-
-    const std::size_t len = payload.size();
-    if (len < 126) {
-        out.push_back(static_cast<std::byte>(len));  // MASK=0
-    } else if (len <= 0xFFFF) {
-        out.push_back(static_cast<std::byte>(126));
-        out.push_back(static_cast<std::byte>((len >> 8) & 0xFFu));
-        out.push_back(static_cast<std::byte>(len & 0xFFu));
-    } else {
-        out.push_back(static_cast<std::byte>(127));
-        for (int i = 7; i >= 0; --i) {
-            out.push_back(
-                static_cast<std::byte>((static_cast<std::uint64_t>(len) >> (i * 8)) & 0xFFu));
-        }
-    }
-
+    out.reserve(hlen + payload.size());
+    out.insert(out.end(), header.begin(), header.begin() + static_cast<std::ptrdiff_t>(hlen));
     out.insert(out.end(), payload.begin(), payload.end());
     return out;
 }

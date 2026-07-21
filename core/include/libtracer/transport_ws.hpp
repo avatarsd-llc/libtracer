@@ -98,6 +98,21 @@ class transport_ws_server : public transport_t, public bus_link_t, private strea
      */
     void send(std::span<const std::byte> frame) override;
 
+    /**
+     * @brief Zero-copy scatter-gather broadcast: emit the gathered @p iov spans as
+     *        ONE server→client BINARY message to EVERY open peer, no flatten copy.
+     *
+     * Overrides the base flatten-then-encode default (transport.hpp): server frames
+     * are UNMASKED (RFC 6455 §5.1), so the frame header rides as the first iovec
+     * entry and the payload spans follow it straight to the wire via one gathered
+     * scatter-gather write per peer — no allocation, no copy. Each peer writes from
+     * a fresh copy of the iovec array (the write consumes it). No-op until a client
+     * is connected. Thread-safe (peers_m_ → write_m_, the header lock order).
+     *
+     * @param iov The spans to emit, in order, as a single frame.
+     */
+    void send(std::span<const std::span<const std::byte>> iov) override;
+
     /** @brief True — WS reassembles fragmented messages into ropes (ADR-0053 §5):
      *         each message crosses the seam as a `rope_t`, one owning link per WS
      *         fragment (a single link for an unfragmented message), chained by
@@ -167,6 +182,20 @@ class transport_ws_server : public transport_t, public bus_link_t, private strea
        public:
         /** @brief Send @p frame to this facade's peer only (no-op once departed). */
         void send(std::span<const std::byte> frame) override;
+
+        /**
+         * @brief Zero-copy scatter-gather directed send: emit the gathered @p iov
+         *        spans as ONE server BINARY message to this facade's peer only.
+         *
+         * The single-fd twin of the broadcast override: server frames are UNMASKED
+         * (RFC 6455 §5.1), so the frame header rides as the first iovec entry and
+         * the payload spans follow via one gathered scatter-gather write — no copy.
+         * Single consumer, so the iovec array needs no pristine copy. No-op once
+         * departed.
+         *
+         * @param iov The spans to emit, in order, as a single frame.
+         */
+        void send(std::span<const std::span<const std::byte>> iov) override;
 
        private:
         friend class transport_ws_server;
