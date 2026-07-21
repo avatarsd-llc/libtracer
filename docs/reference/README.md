@@ -1,7 +1,7 @@
 # Reference suite — reading guide
 
 > **Status**: draft suite. All sections written; promotion to "frozen" gated by the conformance milestone tracked in the issue tracker.
-> **Last revision**: 2026-05-03. Notable architectural commitments:
+> **Last revision**: actively maintained — sections revised through 2026-07 (see git history). Notable architectural commitments:
 >
 > 1. **Six-layer model**, numbered bottom-up: L0 memory substrate / L1 views and ownership / L2 frame envelope / L3 TLV semantics / L4 graph endpoint logic / L5 application semantics.
 > 2. **Everything is a module.** No "core vs module" split. Some modules are required for every conforming node (frame codec, dispatcher, refcount/view machinery, forwarder logic); the rest are opt-in (transports, discovery, security, executors, memory backends, view modules). The required set is identified in [10-module-catalog.md](10-module-catalog.md), not by architectural privilege.
