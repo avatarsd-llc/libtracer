@@ -8,12 +8,14 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
 #include <array>
 #include <cerrno>
+#include <cstring>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -36,6 +38,46 @@ void set_nodelay(int fd) {
     const int one = 1;
     ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 }
+
+/**
+ * @brief The gathered `[u32-LE prefix, spans...]` record EVERY stream sender
+ *        writes — built once, shared by the one-peer transport, the multi-peer
+ *        server's broadcast, and the directed peer facade (one copy of the
+ *        assembly in flash, not six).  The iovec count is small and bounded (a
+ *        FWD forward/reply is ≤ ~6 spans), so the common case uses the fixed
+ *        stack array; only an unusually large gather falls back to the heap
+ *        vector.  `ok` is false when the record exceeds @p cap — the peer
+ *        would reject it as malformed.  The prefix lives inside the struct, so
+ *        the assembled iovec stays valid for the struct's (local) lifetime.
+ */
+struct prefixed_iov_t {
+    static constexpr std::size_t kMaxInlineIov = 16;
+    std::array<std::byte, kPrefixBytes> prefix;
+    std::array<::iovec, kMaxInlineIov + 1> inline_vec;
+    std::vector<::iovec> heap_vec;
+    ::iovec* vec = nullptr;
+    std::size_t n = 0;
+    bool ok = false;
+
+    prefixed_iov_t(std::span<const std::span<const std::byte>> iov, std::size_t cap) {
+        std::size_t total = 0;
+        for (const std::span<const std::byte>& s : iov) total += s.size();
+        if (total > cap) return;
+        detail::store_le(prefix, static_cast<std::uint32_t>(total));
+        vec = inline_vec.data();
+        if (iov.size() + 1 > inline_vec.size()) {
+            heap_vec.resize(iov.size() + 1);
+            vec = heap_vec.data();
+        }
+        vec[0] = ::iovec{prefix.data(), prefix.size()};
+        n = 1;
+        for (const std::span<const std::byte>& s : iov) {
+            if (s.empty()) continue;  // writev rejects nothing, but skip no-op entries
+            vec[n++] = ::iovec{const_cast<std::byte*>(s.data()), s.size()};
+        }
+        ok = true;
+    }
+};
 
 }  // namespace
 
@@ -104,49 +146,22 @@ tcp_transport_t::~tcp_transport_t() {
 }
 
 void tcp_transport_t::send(std::span<const std::byte> frame) {
-    if (frame.size() > kMaxFrame) return;  // the peer would reject it as malformed
-    std::array<std::byte, kPrefixBytes> prefix;
-    detail::store_le(prefix, static_cast<std::uint32_t>(frame.size()));
-    std::array<::iovec, 2> vec{
-        ::iovec{prefix.data(), prefix.size()},
-        ::iovec{const_cast<std::byte*>(frame.data()), frame.size()},
-    };
+    // One span, same wire bytes (an empty frame is a prefix-only record either
+    // way) — the gathered path is the one implementation.
+    const std::span<const std::byte> one[1] = {frame};
+    send(std::span<const std::span<const std::byte>>(one));
+}
+
+void tcp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
+    // NOT const: write_all_iov consumes the iovec array in place.
+    prefixed_iov_t rec(iov, kMaxFrame);
+    if (!rec.ok) return;
     // Hold write_m_ across the whole write so (a) the recv thread cannot close and
     // reset conn_fd_ underneath us, and (b) two senders can never interleave their
     // length-prefixed records on the stream; read the fd inside the lock to pair
     // with the teardown.
     const std::lock_guard lock(write_m_);
-    write_all_iov(conn_fd_.load(std::memory_order_relaxed), vec.data(),
-                  frame.empty() ? 1 : vec.size());
-}
-
-void tcp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
-    std::size_t total = 0;
-    for (const auto& s : iov) total += s.size();
-    if (total > kMaxFrame) return;  // the peer would reject it as malformed
-
-    // The prefix rides as the FIRST iovec entry, the rope's spans follow — one
-    // gathered record, no flatten copy. The iovec count is small and bounded (a
-    // FWD forward/reply is ≤ ~6 spans), so the common case uses a fixed stack
-    // array; only an unusually large gather falls back to the heap vector.
-    std::array<std::byte, kPrefixBytes> prefix;
-    detail::store_le(prefix, static_cast<std::uint32_t>(total));
-    constexpr std::size_t kMaxInlineIov = 16;
-    std::array<::iovec, kMaxInlineIov + 1> inline_vec;
-    std::vector<::iovec> heap_vec;
-    ::iovec* vec = inline_vec.data();
-    if (iov.size() + 1 > inline_vec.size()) {
-        heap_vec.resize(iov.size() + 1);
-        vec = heap_vec.data();
-    }
-    vec[0] = ::iovec{prefix.data(), prefix.size()};
-    std::size_t n = 1;
-    for (const auto& s : iov) {
-        if (s.empty()) continue;  // writev rejects nothing, but skip no-op entries
-        vec[n++] = ::iovec{const_cast<std::byte*>(s.data()), s.size()};
-    }
-    const std::lock_guard lock(write_m_);
-    write_all_iov(conn_fd_.load(std::memory_order_relaxed), vec, n);
+    write_all_iov(conn_fd_.load(std::memory_order_relaxed), rec.vec, rec.n);
 }
 
 bool tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len) {
@@ -238,6 +253,272 @@ void tcp_transport_t::run_listen() {
             // never races a successor session on this single-peer link.
             if (!stop_.load(std::memory_order_relaxed)) notify_down();
         });
+}
+
+// ---------------------------------------------------------------------------
+// transport_tcp_server — the multi-peer listener (the transport_ws_server
+// slot/poll machinery over raw length-prefix stream framing).
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief One peer slot.  Slots are never destroyed while the server lives —
+ *        recycled in place on departure — so the peer_endpoint_t facade
+ *        `peer_link` hands out stays pointer-valid for the server's lifetime.
+ *        Threading: @ref fd / @ref open are atomics (senders read them under
+ *        `write_m_`); @ref name is guarded by `peers_m_`; the framer is
+ *        poll-thread-only.
+ */
+struct transport_tcp_server::session_t {
+    std::atomic<int> fd{-1};       /**< @brief The peer socket; -1 ⇒ free slot. */
+    std::atomic<bool> open{false}; /**< @brief True while the connection is live. */
+    std::string name;              /**< @brief The peer's name, `<ip>:<port>`. */
+    length_prefix_framer framer;   /**< @brief Per-stream u32-LE frame reassembly. */
+    peer_endpoint_t endpoint;      /**< @brief The directed facade `peer_link` returns. */
+};
+
+transport_tcp_server::transport_tcp_server(std::uint16_t bind_port, mem::mem_backend_t* backend,
+                                           std::size_t max_frame, std::size_t max_peers,
+                                           bool peer_named)
+    : backend_(backend), max_peers_(max_peers), peer_named_(peer_named) {
+    if (max_frame != 0) max_frame_ = max_frame;
+    listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd_ < 0) return;
+
+    const int one = 1;
+    ::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(INADDR_ANY);
+    local.sin_port = htons(bind_port);
+    // SOMAXCONN: the OS's own accept-queue bound — admission is per-connection
+    // in accept_peer (the max_peers deployment cap), never a synthetic backlog.
+    if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&local), sizeof(local)) < 0 ||
+        ::listen(listen_fd_, SOMAXCONN) < 0) {
+        ::close(listen_fd_);
+        listen_fd_ = -1;
+        return;
+    }
+    sockaddr_in bound{};
+    socklen_t blen = sizeof(bound);
+    if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound), &blen) == 0)
+        bound_port_ = ntohs(bound.sin_port);
+
+    start([this] { run(); });
+}
+
+transport_tcp_server::~transport_tcp_server() {
+    stop_and_join();  // FIRST: the run() thread touches the fds closed below
+    if (listen_fd_ >= 0) ::close(listen_fd_);
+    for (const std::unique_ptr<session_t>& s : slots_) {  // thread joined — nothing races
+        const int fd = s->fd.exchange(-1, std::memory_order_acq_rel);
+        if (fd >= 0) ::close(fd);
+    }
+}
+
+void transport_tcp_server::send(std::span<const std::byte> frame) {
+    const std::span<const std::byte> one[1] = {frame};
+    send(std::span<const std::span<const std::byte>>(one));
+}
+
+void transport_tcp_server::send(std::span<const std::span<const std::byte>> iov) {
+    // Build the record ONCE.  write_all_iov CONSUMES its iovec array (advances
+    // base/len on partial writes), so each peer writes from a fresh COPY of
+    // the pristine gather.  Lock order per the header contract:
+    // peers_m_ → write_m_.
+    const prefixed_iov_t rec(iov, tcp_transport_t::kMaxFrame);
+    if (!rec.ok) return;
+    const std::lock_guard plock(peers_m_);
+    const std::lock_guard wlock(write_m_);
+    std::array<::iovec, prefixed_iov_t::kMaxInlineIov + 1> scratch_inline;
+    std::vector<::iovec> scratch_heap;
+    ::iovec* scratch = scratch_inline.data();
+    if (rec.n > scratch_inline.size()) {
+        scratch_heap.resize(rec.n);
+        scratch = scratch_heap.data();
+    }
+    for (const std::unique_ptr<session_t>& s : slots_) {
+        if (!s->open.load(std::memory_order_relaxed)) continue;
+        std::copy_n(rec.vec, rec.n, scratch);
+        write_all_iov(s->fd.load(std::memory_order_relaxed), scratch, rec.n);
+    }
+}
+
+void transport_tcp_server::peer_endpoint_t::send(std::span<const std::byte> frame) {
+    const std::span<const std::byte> one[1] = {frame};
+    send(std::span<const std::span<const std::byte>>(one));
+}
+
+void transport_tcp_server::peer_endpoint_t::send(std::span<const std::span<const std::byte>> iov) {
+    if (owner_ == nullptr || slot_ == nullptr) return;
+    // Single consumer, so the record is written in place (no pristine copy —
+    // unlike the broadcast).  NOT const: write_all_iov consumes it.
+    prefixed_iov_t rec(iov, tcp_transport_t::kMaxFrame);
+    if (!rec.ok) return;
+    const std::lock_guard lock(owner_->write_m_);
+    if (!slot_->open.load(std::memory_order_relaxed)) return;  // departed ⇒ no-op
+    write_all_iov(slot_->fd.load(std::memory_order_relaxed), rec.vec, rec.n);
+}
+
+void transport_tcp_server::enumerate_peers(const peer_visitor_t& visit) const {
+    const std::lock_guard lock(peers_m_);
+    for (const std::unique_ptr<session_t>& s : slots_)
+        if (s->open.load(std::memory_order_relaxed) && !s->name.empty()) visit(s->name);
+}
+
+transport_t* transport_tcp_server::peer_link(std::string_view peer) {
+    const std::lock_guard lock(peers_m_);
+    for (const std::unique_ptr<session_t>& s : slots_)
+        if (s->open.load(std::memory_order_relaxed) && s->name == peer) return &s->endpoint;
+    return nullptr;
+}
+
+bool transport_tcp_server::close_peer(std::string_view peer) {
+    // Shutdown-only under the sender lock order (peers_m_ → write_m_); the
+    // poll thread's next pass observes the close and runs the IDENTICAL
+    // remote-FIN teardown — no duplicate logic, no off-thread framer touch.
+    const std::lock_guard plock(peers_m_);
+    for (const std::unique_ptr<session_t>& s : slots_) {
+        if (!s->open.load(std::memory_order_relaxed) || s->name != peer) continue;
+        const std::lock_guard wlock(write_m_);
+        const int fd = s->fd.load(std::memory_order_relaxed);
+        if (fd >= 0) ::shutdown(fd, SHUT_RDWR);
+        return true;
+    }
+    return false;
+}
+
+void transport_tcp_server::accept_peer() {
+    sockaddr_in remote{};
+    socklen_t rlen = sizeof(remote);
+    const int fd = ::accept(listen_fd_, reinterpret_cast<sockaddr*>(&remote), &rlen);
+    if (fd < 0) return;
+
+    session_t* slot = nullptr;
+    {
+        const std::lock_guard lock(peers_m_);
+        for (const std::unique_ptr<session_t>& s : slots_)
+            if (s->fd.load(std::memory_order_relaxed) < 0) {
+                slot = s.get();
+                break;
+            }
+        if (slot == nullptr) {
+            if (max_peers_ != 0 && slots_.size() >= max_peers_) {
+                ::close(fd);  // clean refusal at the deployment cap, not a hung SYN
+                return;
+            }
+            slots_.push_back(std::make_unique<session_t>());
+            slot = slots_.back().get();
+            slot->endpoint.owner_ = this;
+            slot->endpoint.slot_ = slot;
+        }
+        char ip[INET_ADDRSTRLEN] = {};
+        ::inet_ntop(AF_INET, &remote.sin_addr, ip, sizeof(ip));
+        slot->name = std::string(ip) + ':' + std::to_string(ntohs(remote.sin_port));
+    }
+    set_nodelay(fd);
+    slot->framer.reset();
+    // No handshake phase: the peer is open the moment it is accepted.  Publish
+    // the fd LAST — the slot is now live for senders and the poll pass.
+    slot->open.store(true, std::memory_order_relaxed);
+    slot->fd.store(fd, std::memory_order_release);
+}
+
+void transport_tcp_server::service_peer(session_t& s) {
+    const int fd = s.fd.load(std::memory_order_relaxed);
+    if (fd < 0) return;
+    std::array<std::byte, 4096> chunk;
+    const ssize_t n = ::recv(fd, chunk.data(), chunk.size(), 0);
+    if (n <= 0) {  // peer closed the TCP connection, or error
+        teardown_slot(s);
+        return;
+    }
+
+    // Feed the chunk through the slot's reassembler; each completed frame is
+    // delivered inline.  Tier select per frame (receiver_slot.hpp): the
+    // peer-named slot first (the ADR-0044 bus precedence — the router's
+    // wiring), flat transport_t slot as the point-to-point fallback.
+    const auto res = s.framer.feed(*backend_, max_frame_, chunk.data(), static_cast<std::size_t>(n),
+                                   [this, &s](view::segment_ptr_t seg, std::size_t len) {
+                                       view::view_t frame =
+                                           view::view_t::over(std::move(seg)).subview(0, len);
+                                       if (peer_rx_.has_any())
+                                           peer_rx_.deliver(s.name, std::move(frame));
+                                       else
+                                           rx_.deliver(std::move(frame));
+                                   });
+    if (res.dropped != 0) dropped_rx_.fetch_add(res.dropped, std::memory_order_relaxed);
+    if (res.malformed) {
+        // Malformed (corrupt/hostile) or undeliverable: a desynced stream
+        // cannot be re-framed — count it and tear this one peer down.
+        malformed_rx_.fetch_add(1, std::memory_order_relaxed);
+        teardown_slot(s);
+    }
+}
+
+void transport_tcp_server::teardown_slot(session_t& s) {
+    std::string departed;
+    {
+        // Stop peer_link/enumerate resolution FIRST, so no new sender targets
+        // the dying slot by name.  Keep the name: it identifies the departed
+        // session to the eviction seam below.
+        const std::lock_guard lock(peers_m_);
+        departed = std::move(s.name);
+        s.name.clear();
+    }
+    int fd;
+    bool was_open;
+    {
+        // The stream teardown-under-write-lock invariant, per slot: reset the
+        // fd and the open flag under write_m_ BEFORE ::close, so an in-flight
+        // send either finished against the still-open fd or observes the reset.
+        const std::lock_guard lock(write_m_);
+        was_open = s.open.load(std::memory_order_relaxed);
+        s.open.store(false, std::memory_order_relaxed);
+        fd = s.fd.exchange(-1, std::memory_order_acq_rel);
+    }
+    if (fd >= 0) ::close(fd);
+    s.framer.reset();
+    // Departure seam (RFC-0009 §D.5): fired LAST, with no transport lock held —
+    // the notifier re-enters the routing plane.  Peer-named mode reports the
+    // peer's own name; flat mode reports the whole link down.
+    if (was_open && !departed.empty()) {
+        if (peer_rx_.has_any())
+            notify_peer_down(departed);
+        else
+            notify_down();
+    }
+}
+
+void transport_tcp_server::run() {
+    // ONE poll pass multiplexes the listen socket and every live peer — no
+    // per-peer thread (the MCU-shaped choice, #362), bounded to 100 ms so the
+    // loop stays shutdown-responsive (the posix_endpoint_t idiom).
+    std::vector<pollfd> pfds;
+    std::vector<session_t*> pslots;
+    while (!stop_.load(std::memory_order_relaxed)) {
+        pfds.clear();
+        pslots.clear();
+        pfds.push_back(pollfd{listen_fd_, POLLIN, 0});
+        {
+            const std::lock_guard lock(peers_m_);
+            for (const std::unique_ptr<session_t>& s : slots_) {
+                const int fd = s->fd.load(std::memory_order_relaxed);
+                if (fd >= 0) {
+                    pfds.push_back(pollfd{fd, POLLIN, 0});
+                    pslots.push_back(s.get());
+                }
+            }
+        }
+        const int pr = ::poll(pfds.data(), static_cast<nfds_t>(pfds.size()), 100);
+        if (pr <= 0) continue;  // timeout or transient error → re-check stop_
+        if (stop_.load(std::memory_order_relaxed)) break;
+        // Peers first (their events are bound to this pass's fd list), then the
+        // accept (which may add a slot).
+        for (std::size_t i = 1; i < pfds.size(); ++i)
+            if ((pfds[i].revents & (POLLIN | POLLHUP | POLLERR)) != 0) service_peer(*pslots[i - 1]);
+        if ((pfds[0].revents & POLLIN) != 0) accept_peer();
+    }
 }
 
 }  // namespace tr::net
