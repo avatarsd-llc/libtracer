@@ -24,13 +24,16 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <future>
 #include <mutex>
+#include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -571,6 +574,173 @@ void test_config_constructed_tcp() {
     }
 }
 
+/** @brief The peer-named sink (the bus_link_t shape — the ws_transport_test twin). */
+struct peer_sink_t {
+    std::mutex m;
+    std::condition_variable cv;
+    std::vector<std::pair<std::string, std::vector<std::byte>>> frames;
+
+    /** @brief The peer-named receiver callable (bound by address). */
+    void operator()(std::string_view peer, std::span<const std::byte> f) {
+        {
+            const std::lock_guard lock(m);
+            frames.emplace_back(std::string(peer), std::vector<std::byte>(f.begin(), f.end()));
+        }
+        cv.notify_all();
+    }
+    /** @brief True once at least @p n frames arrived before @p timeout. */
+    bool wait_count(std::size_t n, std::chrono::milliseconds timeout) {
+        std::unique_lock lock(m);
+        return cv.wait_for(lock, timeout, [&] { return frames.size() >= n; });
+    }
+};
+
+/**
+ * @brief The multi-peer server: two concurrent dialers, peer-named inbound
+ *        delivery through the bus_link_t facet, broadcast send, a DIRECTED
+ *        peer_link send (span AND gathered iov) reaching exactly one peer, and
+ *        live peer enumeration tracking a departure — the transport_ws_server
+ *        #362 contract over raw length-prefix framing.
+ */
+void test_server_multi_peer_bus() {
+    std::printf("TCP transport — multi-peer server (bus facet):\n");
+
+    // Sinks BEFORE the transports (the file's destruction-order idiom).
+    peer_sink_t srv_sink;
+    sink_t at_a, at_b;
+    auto a_rx = [&](std::span<const std::byte> f) { at_a.push(f); };
+    auto b_rx = [&](std::span<const std::byte> f) { at_b.push(f); };
+
+    tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), 0, /*max_peers=*/0,
+                                         /*peer_named=*/true);
+    check(server.ok(), "listen socket bound");
+    const std::uint16_t port = server.local_port();
+    check(server.bus() != nullptr, "peer_named server exposes the bus_link_t facet (ADR-0044)");
+    server.bus()->set_peer_receiver(srv_sink);
+
+    tcp_transport_t a("127.0.0.1", port);
+    a.set_receiver(a_rx);
+    std::optional<tcp_transport_t> b;
+    b.emplace("127.0.0.1", port);
+    b->set_receiver(b_rx);
+    check(a.ok() && b->ok(), "TWO dialers connected concurrently (listen(fd,1) era over)");
+
+    // --- inbound: each dialer's frame arrives tagged with a DISTINCT peer name ---
+    const auto pa = test_frame(2, 0xA1);
+    const auto pb = test_frame(2, 0xB1);
+    a.send(pa);
+    b->send(pb);
+    check(srv_sink.wait_count(2, 2s), "server got both dialers' frames");
+    std::string name_a;
+    {
+        const std::lock_guard lock(srv_sink.m);
+        check(srv_sink.frames[0].first != srv_sink.frames[1].first,
+              "the two deliveries carry two distinct peer names");
+        for (const auto& [peer, bytes] : srv_sink.frames)
+            if (bytes == pa) name_a = peer;
+    }
+    check(!name_a.empty(), "dialer a's frame is identifiable by its peer tag");
+
+    // --- enumeration: both peers audible ---
+    std::size_t n_peers = 0;
+    server.bus()->enumerate_peers([&](std::string_view) { ++n_peers; });
+    check(n_peers == 2, "enumerate_peers lists both open peers");
+
+    // --- broadcast: the flat send() reaches every open peer ---
+    const auto bc = test_frame(3, 0xCC);
+    server.send(bc);
+    check(at_a.wait_for_count(1, 2s) && at_b.wait_for_count(1, 2s),
+          "flat server.send() broadcast to both dialers");
+
+    // --- directed: peer_link(name)->send() reaches exactly that peer ---
+    tr::net::transport_t* const link_a = server.bus()->peer_link(name_a);
+    check(link_a != nullptr, "peer_link resolves dialer a's name");
+    const auto da = test_frame(2, 0xDA);
+    if (link_a != nullptr) link_a->send(da);
+    check(at_a.wait_for_count(2, 2s), "directed send reached dialer a");
+    check(!at_b.wait_for_count(2, 300ms), "directed send did NOT reach dialer b");
+
+    // --- directed gathered: prefix + spans as ONE record, reassembled whole ---
+    const auto g1 = test_frame(3, 0x30);
+    const auto g2 = test_frame(4, 0x40);
+    const std::array<std::span<const std::byte>, 2> gathered{std::span(g1), std::span(g2)};
+    if (link_a != nullptr) link_a->send(gathered);
+    check(at_a.wait_for_count(3, 2s), "gathered directed send reached dialer a");
+    {
+        std::vector<std::byte> want(g1.begin(), g1.end());
+        want.insert(want.end(), g2.begin(), g2.end());
+        check(at_a.at(2) == want, "gathered spans arrived concatenated as one frame");
+    }
+
+    // --- departure: closing b frees its slot; enumeration tracks it ---
+    b.reset();
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    std::size_t live = 2;
+    while (std::chrono::steady_clock::now() < deadline) {
+        live = 0;
+        server.bus()->enumerate_peers([&](std::string_view) { ++live; });
+        if (live == 1) break;
+        std::this_thread::sleep_for(20ms);
+    }
+    check(live == 1, "departed peer left enumeration (slot recycled)");
+    check(server.bus()->peer_link(name_a) != nullptr, "surviving peer still resolves");
+}
+
+/**
+ * @brief The max_peers deployment cap (RFC-0006 injected bound) + the FLAT
+ *        (non-peer-named) surface: a peer beyond the cap is refused cleanly
+ *        (its connection closes — no handshake exists to fail), a departure
+ *        frees the slot, and flat-mode inbound reaches the plain transport_t
+ *        receiver untagged.
+ */
+void test_server_max_peers_cap() {
+    std::printf("TCP transport — server max_peers admission cap (flat mode):\n");
+
+    sink_t srv_rx_sink;
+    auto srv_rx = [&](std::span<const std::byte> f) { srv_rx_sink.push(f); };
+    tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), 0, /*max_peers=*/1);
+    check(server.ok(), "capped server bound");
+    check(server.bus() == nullptr, "flat server exposes no bus facet");
+    server.set_receiver(srv_rx);
+    const std::uint16_t port = server.local_port();
+
+    std::optional<tcp_transport_t> a;
+    a.emplace("127.0.0.1", port);
+    check(a->ok(), "first dialer admitted");
+
+    // TCP has no handshake: the refused dialer's connect() lands in the OS
+    // accept queue, then the server closes it at admission. Its recv loop sees
+    // the EOF and tears down — ok() flips false within a poll bound.
+    std::optional<tcp_transport_t> refused;
+    refused.emplace("127.0.0.1", port);
+    const auto rdead = std::chrono::steady_clock::now() + 2s;
+    while (refused->ok() && std::chrono::steady_clock::now() < rdead)
+        std::this_thread::sleep_for(20ms);
+    check(!refused->ok(), "second dialer refused cleanly at the cap (connection closed)");
+    refused.reset();
+
+    // Flat-mode inbound: the admitted dialer's frame reaches the plain receiver.
+    const auto f = test_frame(4, 0x77);
+    a->send(f);
+    check(srv_rx_sink.wait_for_count(1, 2s), "flat inbound reached the transport_t receiver");
+    check(srv_rx_sink.at(0) == f, "payload intact through the slot framer");
+
+    a.reset();  // departure frees the slot...
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    bool readmitted = false;
+    while (!readmitted && std::chrono::steady_clock::now() < deadline) {
+        tcp_transport_t c("127.0.0.1", port);
+        if (c.ok()) {
+            // Prove real admission (not just a queued connect): a frame flows.
+            const auto probe = test_frame(2, 0x55);
+            c.send(probe);
+            readmitted = srv_rx_sink.wait_for_count(2, 500ms);
+        }
+        if (!readmitted) std::this_thread::sleep_for(50ms);
+    }
+    check(readmitted, "...and the next dialer is admitted into the recycled slot");
+}
+
 }  // namespace
 
 int main() {
@@ -583,6 +753,8 @@ int main() {
     test_scatter_gather();
     test_two_nodes_over_tcp();
     test_config_constructed_tcp();
+    test_server_multi_peer_bus();
+    test_server_max_peers_cap();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

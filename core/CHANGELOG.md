@@ -14,6 +14,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`tr::net::transport_tcp_server` — the multi-peer raw-TCP listener (the board↔board
+  default).** The transport_ws_server slot/poll machinery (#362) over the shared u32-LE
+  length-prefix stream framing: ONE poll thread accepts and serves N concurrent peers
+  (slots recycled on departure; `max_peers` is the RFC-0006 injected admission cap), each
+  frame reassembled per-slot by a chunk-fed `length_prefix_framer` into one owning segment
+  from the injected `mem_backend_t` (ADR-0042). With `peer_named` the ADR-0044 `bus_link_t`
+  facet tags inbound frames per peer (`<ip>:<port>`), resolves directed per-peer links
+  (span and zero-copy gathered sends), and evicts a departed peer's edges
+  (`notify_peer_down`, RFC-0009 §D.5); FLAT mode keeps point-to-point semantics. The
+  built-in `kind=tcp` LISTEN factory now constructs this server (a single-client
+  deployment behaves exactly as the one-peer listener always did) and parses the two
+  ws-mirrored kind-private keys `peer_named` / `max_peers` (ADR-0043 §5). No HTTP
+  upgrade, no frame masking — leaner than WS packaging for device↔device links.
+  `tcp_transport_t`'s DIAL and one-peer LISTEN modes are unchanged.
+
 - **`graph_t::subscribe(...)` now returns a `subscription_t` handle, and `graph_t::unsubscribe(handle)`
   removes one in-process subscription.** The callback-form `subscribe` overloads return an opaque
   `subscription_t` (`{vertex, slot}`) instead of `void`; `unsubscribe` is the host-SDK-sugar
