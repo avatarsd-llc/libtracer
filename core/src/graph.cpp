@@ -1114,7 +1114,8 @@ void parse_subscriber_tlv(const tlv_t& sub, subscriber_t& s) {
 
 }  // namespace
 
-result_t<void> graph_t::admit_subscriber(vertex_t* v, subscriber_t s, std::string_view caller) {
+result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
+                                                   std::string_view caller) {
     // The single admission step (ADR-0049): every door lands here, so the SUBSCRIBE gate
     // and the transient-local durability latch apply UNIFORMLY — which invariants fire no
     // longer depends on which door an edge entered through.
@@ -1131,11 +1132,11 @@ result_t<void> graph_t::admit_subscriber(vertex_t* v, subscriber_t s, std::strin
     // target re-dispatch may re-enter the graph) through the SAME dispatch_edge legs a
     // write fans out with.
     edge_latch_t latch;
-    (void)v->add_edge(std::move(s), &latch);
+    const std::size_t slot = v->add_edge(std::move(s), &latch);
     note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
 
     if (latch.value) dispatch_edge(latch.edge, *latch.value);
-    return {};
+    return subscription_t{v, slot};
 }
 
 result_t<void> graph_t::subscribe(const path_t& src, const path_t& target) {
@@ -1161,7 +1162,7 @@ result_t<void> graph_t::subscribe(const path_t& src, const path_t& target) {
     return field_write(v, field, *value, {});
 }
 
-result_t<void> graph_t::subscribe(const path_t& src, subscriber_fn_t fn, void* ctx) {
+result_t<subscription_t> graph_t::subscribe(const path_t& src, subscriber_fn_t fn, void* ctx) {
     vertex_t* v = find_ptr(src.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
     // A callback cannot ride a TLV, so this sugar has no parse to share — it still
@@ -1171,6 +1172,18 @@ result_t<void> graph_t::subscribe(const path_t& src, subscriber_fn_t fn, void* c
     s.callback = fn;
     s.callback_ctx = ctx;
     return admit_subscriber(v, std::move(s), {});
+}
+
+result_t<void> graph_t::unsubscribe(const subscription_t& sub) {
+    if (sub.vertex == nullptr) return std::unexpected(status_t::NOT_FOUND);
+    // The in-process counterpart of the wire ":subscribers[N] clear" (field_write below):
+    // deactivate the slot, then unwind the RFC-0005 listener bookkeeping — the SAME order and
+    // the SAME helper the wire path uses, so both doors leave identical counters. clear_edge
+    // only flags the slot inactive (index-stable, add_edge reuses it); an in-flight delivery
+    // already snapshotted the edge (ADR-0041 §2) and completes untouched.
+    if (!sub.vertex->clear_edge(sub.slot)) return std::unexpected(status_t::NOT_FOUND);
+    note_subscriber_removed(sub.vertex);
+    return {};
 }
 
 void graph_t::set_app_fields(vertex_handle_t v, std::vector<app_field_t> table) {
@@ -1211,7 +1224,11 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view_t source_view, v
     r.link = std::move(link);
     const std::string gate_ctx = r.caller;  // survives the move above (the SUBSCRIBE gate
                                             // runs under the inbound link, #81/ADR-0026)
-    return admit_subscriber(v, std::move(s), gate_ctx);
+    // A wire subscribe carries no host handle back — discard the slot (unsubscribe is the
+    // wire :subscribers[N] clear, not this door's return).
+    if (const auto r2 = admit_subscriber(v, std::move(s), gate_ctx); !r2)
+        return std::unexpected(r2.error());
+    return {};
 }
 
 result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, const view_t& value,
@@ -1232,7 +1249,10 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
                                     // the empty (local) context needs no cold half
                 s.ensure_remote().caller.assign(caller);
             // The single admission step (ADR-0049): SUBSCRIBE gate → append → latch.
-            return admit_subscriber(v, std::move(s), caller);
+            // A field-write subscribe returns no host handle — discard the slot.
+            if (const auto r = admit_subscriber(v, std::move(s), caller); !r)
+                return std::unexpected(r.error());
+            return {};
         }
         if (step0.indexed) {  // clear a subscriber slot (unsubscribe) — a control write
             if (!acl_allows(v, caller, acl_right_t::WRITE))

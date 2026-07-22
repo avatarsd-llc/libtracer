@@ -14,6 +14,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`graph_t::subscribe(...)` now returns a `subscription_t` handle, and `graph_t::unsubscribe(handle)`
+  removes one in-process subscription.** The callback-form `subscribe` overloads return an opaque
+  `subscription_t` (`{vertex, slot}`) instead of `void`; `unsubscribe` is the host-SDK-sugar
+  counterpart of the wire `:subscribers[N]` clear (ADR-0049) — it deactivates the edge slot and
+  unwinds the RFC-0005 listener bookkeeping via the same `note_subscriber_removed` path the wire door
+  uses, so both leave identical counters. Only DEACTIVATES: an in-flight delivery already snapshotted
+  the edge (ADR-0041 §2) and completes, so the callback `ctx` must outlive it. Fills the "the substrate
+  has no local edge removal" gap (link-eviction was remote-only; retire is vertex-wide) that blocked
+  per-subscriber unbinding for host consumers. Source-compatible: existing callers use `(void)` or
+  `.has_value()`, both valid on the new return type.
+
 - **`mem::sync_pool_t` — a thread-safe `pool_t` for the graph's `value_backend_` on a
   multi-core host (ADR-0060 §2).** `value_backend_` must be thread-safe: a `segment`
   self-routes its reclaim on whatever thread drops the last ref (a reader/subscriber),

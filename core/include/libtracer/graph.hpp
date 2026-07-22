@@ -101,6 +101,22 @@ struct remote_delivery_t {
 };
 
 /**
+ * @brief An opaque handle to ONE in-process subscription — the token @ref graph_t::unsubscribe
+ *        removes it by (ADR-0049 host-SDK sugar for the wire `:subscribers[N]` clear).
+ *
+ * Returned by the callback-form @ref graph_t::subscribe overloads. The producer @ref vertex is
+ * pinned for the graph's lifetime (ADR-0057 — vertices are never freed), so the handle stays
+ * valid until it is unsubscribed; @ref slot is that edge's `:subscribers[]` index. Trivially
+ * copyable and pointer-sized-plus-index — pass it by value. Do NOT dereference @ref vertex; treat
+ * the whole struct as opaque. A default-constructed handle (`vertex == nullptr`) unsubscribes to a
+ * `NOT_FOUND` no-op.
+ */
+struct subscription_t {
+    vertex_t* vertex = nullptr; /**< @brief Opaque: the producer vertex the edge lives on. */
+    std::size_t slot = 0;       /**< @brief Opaque: the `:subscribers[]` slot index. */
+};
+
+/**
  * @brief An operation's subject token — opaque bytes matched against ACE subjects (ADR-0018).
  */
 using subject_token_t = std::vector<std::byte>;
@@ -448,21 +464,40 @@ class graph_t {
      * @param ctx Caller-owned context; must outlive every possible delivery (edges are
      *            never destroyed while the graph lives — an unsubscribe only deactivates
      *            the slot, but an in-flight delivery may still be running).
+     * @return A @ref subscription_t handle for @ref unsubscribe; error on an unknown @p src
+     *         or a denied SUBSCRIBE gate.
      */
-    [[nodiscard]] result_t<void> subscribe(const path_t& src, subscriber_fn_t fn, void* ctx);
+    [[nodiscard]] result_t<subscription_t> subscribe(const path_t& src, subscriber_fn_t fn,
+                                                     void* ctx);
 
     /**
      * @brief Subscribe @p src to a caller-owned callable (sugar over the `{fn, ctx}` form).
      *
      * Zero-erasure sugar mirroring `transport_t::set_receiver`: @p callback is bound by
      * address (lvalues only — a temporary would dangle) and MUST outlive every delivery.
+     * @return A @ref subscription_t handle for @ref unsubscribe (as the `{fn, ctx}` form).
      */
     template <typename F>
         requires std::invocable<F&, const view::rope_t&>
-    [[nodiscard]] result_t<void> subscribe(const path_t& src, F& callback) {
+    [[nodiscard]] result_t<subscription_t> subscribe(const path_t& src, F& callback) {
         return subscribe(
             src, [](void* c, const view::rope_t& v) { (*static_cast<F*>(c))(v); }, &callback);
     }
+
+    /**
+     * @brief Remove the in-process subscription @p sub returned by @ref subscribe.
+     *
+     * The host-SDK-sugar counterpart of the wire `:subscribers[N]` clear (ADR-0049): it
+     * deactivates the edge slot and unwinds the RFC-0005 listener bookkeeping (descendants'
+     * writes stop bubbling to @p sub.vertex), exactly as the wire path does. The slot shell
+     * stays (index-stable) and a later @ref subscribe reuses it. Idempotent-ish: a
+     * default-constructed or already-cleared handle returns `NOT_FOUND`. Only DEACTIVATES —
+     * an in-flight delivery already snapshotted the edge and completes (ADR-0041 §2), so the
+     * callback's `ctx` must outlive any delivery that may still be running.
+     * @note Applies to the callback-form subscriptions; a path→path (`subscribe(src, target)`)
+     *       edge is a wire `:subscribers[]` field-write, removed via that wire clear.
+     */
+    [[nodiscard]] result_t<void> unsubscribe(const subscription_t& sub);
 
     /**
      * @brief Install (or replace) @p v's field descriptor table — the OWNER declaring its
@@ -728,7 +763,7 @@ class graph_t {
     // the edge's kind) → RFC-0005 bookkeeping. Every door — the two subscribe() sugars,
     // the local `:subscribers[]` field-write, and the wire subscribe_wire — ends here,
     // so gate and latch semantics cannot diverge per entry point.
-    result_t<void> admit_subscriber(vertex_t* v, subscriber_t s, std::string_view caller);
+    result_t<subscription_t> admit_subscriber(vertex_t* v, subscriber_t s, std::string_view caller);
     // Field surface: ":settings.<f>", ":settings.app.<name…>" (RFC-0010),
     // ":subscribers[]" / "[N]", ":children[]".
     result_t<void> field_write(vertex_t* v, const field_path_t& field, const view_t& value,
