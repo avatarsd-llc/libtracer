@@ -53,6 +53,7 @@ using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::status_t;
+using tr::graph::subscription_t;
 using tr::graph::vertex_handle_t;
 using tr::net::bus_link_t;
 using tr::net::fwd_router_t;
@@ -476,9 +477,57 @@ void test_concurrent_evict_vs_writes() {
 }  // namespace
 
 /** @brief Entry: run every eviction sub-test; exit nonzero on any failure. */
+/**
+ * @brief The in-process unsubscribe handle (graph_t::subscribe → subscription_t → unsubscribe):
+ *        the edge goes silent AND the RFC-0005 bubbling counters unwind, and the freed slot reuses.
+ */
+void test_local_unsubscribe() {
+    std::printf("in-process unsubscribe by subscription_t handle:\n");
+    graph_t g;
+    vertex_handle_t a = g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
+    vertex_handle_t ab = g.register_vertex(path_t("/a/b"), role_t::STORED_VALUE);
+
+    std::size_t local = 0;
+    auto on_local = [&](const rope_t&) { ++local; };
+
+    const auto sub = g.subscribe(path_t("/a"), on_local);
+    check(sub.has_value(), "subscribe returns a subscription_t handle");
+
+    check(g.write(a, make_value({0x01})).has_value(), "write /a while subscribed");
+    check(local == 1, "the callback fires while subscribed");
+
+    // RFC-0005: a descendant write bubbles to /a's local edge while subscribed.
+    local = 0;
+    check(g.write(ab, make_value({0x02})).has_value(), "descendant write /a/b while subscribed");
+    check(local == 1, "a descendant write bubbles to the local subscriber");
+
+    // Unsubscribe by handle: the edge goes silent AND the bubbling counters unwind.
+    check(sub.has_value() && g.unsubscribe(*sub).has_value(), "unsubscribe by handle succeeds");
+    local = 0;
+    check(g.write(a, make_value({0x03})).has_value(), "write /a post-unsubscribe");
+    check(local == 0, "the callback does NOT fire after unsubscribe");
+    check(g.write(ab, make_value({0x04})).has_value(), "descendant write /a/b post-unsubscribe");
+    check(local == 0, "the descendant no longer bubbles (RFC-0005 counters unwound)");
+
+    // Defensive: a second unsubscribe and a default-constructed handle are NOT_FOUND no-ops.
+    check(sub.has_value() && !g.unsubscribe(*sub).has_value(),
+          "a second unsubscribe is NOT_FOUND (slot already inactive)");
+    check(!g.unsubscribe(subscription_t{}).has_value(), "a null handle unsubscribes to NOT_FOUND");
+
+    // §D.2 slot reuse: a fresh subscribe reuses the freed slot and delivers; the old stays silent.
+    std::size_t again = 0;
+    auto on_again = [&](const rope_t&) { ++again; };
+    const auto sub2 = g.subscribe(path_t("/a"), on_again);
+    check(sub2.has_value() && sub.has_value() && sub2->slot == sub->slot,
+          "re-subscribe reuses the freed slot (index stability §D.2)");
+    check(g.write(a, make_value({0x05})).has_value(), "write /a after re-subscribe");
+    check(again == 1 && local == 0, "the new subscriber delivers; the old one stays silent");
+}
+
 int main() {
     std::printf("== edge_eviction_test ==\n");
     test_evict_scoped_to_link();
+    test_local_unsubscribe();
     test_slot_reuse_and_index_stability();
     test_router_link_down();
     test_departure_notifier_seam();
