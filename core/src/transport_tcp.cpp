@@ -39,6 +39,46 @@ void set_nodelay(int fd) {
     ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 }
 
+/**
+ * @brief The gathered `[u32-LE prefix, spans...]` record EVERY stream sender
+ *        writes — built once, shared by the one-peer transport, the multi-peer
+ *        server's broadcast, and the directed peer facade (one copy of the
+ *        assembly in flash, not six).  The iovec count is small and bounded (a
+ *        FWD forward/reply is ≤ ~6 spans), so the common case uses the fixed
+ *        stack array; only an unusually large gather falls back to the heap
+ *        vector.  `ok` is false when the record exceeds @p cap — the peer
+ *        would reject it as malformed.  The prefix lives inside the struct, so
+ *        the assembled iovec stays valid for the struct's (local) lifetime.
+ */
+struct prefixed_iov_t {
+    static constexpr std::size_t kMaxInlineIov = 16;
+    std::array<std::byte, kPrefixBytes> prefix;
+    std::array<::iovec, kMaxInlineIov + 1> inline_vec;
+    std::vector<::iovec> heap_vec;
+    ::iovec* vec = nullptr;
+    std::size_t n = 0;
+    bool ok = false;
+
+    prefixed_iov_t(std::span<const std::span<const std::byte>> iov, std::size_t cap) {
+        std::size_t total = 0;
+        for (const std::span<const std::byte>& s : iov) total += s.size();
+        if (total > cap) return;
+        detail::store_le(prefix, static_cast<std::uint32_t>(total));
+        vec = inline_vec.data();
+        if (iov.size() + 1 > inline_vec.size()) {
+            heap_vec.resize(iov.size() + 1);
+            vec = heap_vec.data();
+        }
+        vec[0] = ::iovec{prefix.data(), prefix.size()};
+        n = 1;
+        for (const std::span<const std::byte>& s : iov) {
+            if (s.empty()) continue;  // writev rejects nothing, but skip no-op entries
+            vec[n++] = ::iovec{const_cast<std::byte*>(s.data()), s.size()};
+        }
+        ok = true;
+    }
+};
+
 }  // namespace
 
 tcp_transport_t::tcp_transport_t(const std::string& peer_host, std::uint16_t peer_port,
@@ -106,49 +146,22 @@ tcp_transport_t::~tcp_transport_t() {
 }
 
 void tcp_transport_t::send(std::span<const std::byte> frame) {
-    if (frame.size() > kMaxFrame) return;  // the peer would reject it as malformed
-    std::array<std::byte, kPrefixBytes> prefix;
-    detail::store_le(prefix, static_cast<std::uint32_t>(frame.size()));
-    std::array<::iovec, 2> vec{
-        ::iovec{prefix.data(), prefix.size()},
-        ::iovec{const_cast<std::byte*>(frame.data()), frame.size()},
-    };
+    // One span, same wire bytes (an empty frame is a prefix-only record either
+    // way) — the gathered path is the one implementation.
+    const std::span<const std::byte> one[1] = {frame};
+    send(std::span<const std::span<const std::byte>>(one));
+}
+
+void tcp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
+    // NOT const: write_all_iov consumes the iovec array in place.
+    prefixed_iov_t rec(iov, kMaxFrame);
+    if (!rec.ok) return;
     // Hold write_m_ across the whole write so (a) the recv thread cannot close and
     // reset conn_fd_ underneath us, and (b) two senders can never interleave their
     // length-prefixed records on the stream; read the fd inside the lock to pair
     // with the teardown.
     const std::lock_guard lock(write_m_);
-    write_all_iov(conn_fd_.load(std::memory_order_relaxed), vec.data(),
-                  frame.empty() ? 1 : vec.size());
-}
-
-void tcp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
-    std::size_t total = 0;
-    for (const auto& s : iov) total += s.size();
-    if (total > kMaxFrame) return;  // the peer would reject it as malformed
-
-    // The prefix rides as the FIRST iovec entry, the rope's spans follow — one
-    // gathered record, no flatten copy. The iovec count is small and bounded (a
-    // FWD forward/reply is ≤ ~6 spans), so the common case uses a fixed stack
-    // array; only an unusually large gather falls back to the heap vector.
-    std::array<std::byte, kPrefixBytes> prefix;
-    detail::store_le(prefix, static_cast<std::uint32_t>(total));
-    constexpr std::size_t kMaxInlineIov = 16;
-    std::array<::iovec, kMaxInlineIov + 1> inline_vec;
-    std::vector<::iovec> heap_vec;
-    ::iovec* vec = inline_vec.data();
-    if (iov.size() + 1 > inline_vec.size()) {
-        heap_vec.resize(iov.size() + 1);
-        vec = heap_vec.data();
-    }
-    vec[0] = ::iovec{prefix.data(), prefix.size()};
-    std::size_t n = 1;
-    for (const auto& s : iov) {
-        if (s.empty()) continue;  // writev rejects nothing, but skip no-op entries
-        vec[n++] = ::iovec{const_cast<std::byte*>(s.data()), s.size()};
-    }
-    const std::lock_guard lock(write_m_);
-    write_all_iov(conn_fd_.load(std::memory_order_relaxed), vec, n);
+    write_all_iov(conn_fd_.load(std::memory_order_relaxed), rec.vec, rec.n);
 }
 
 bool tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len) {
@@ -304,106 +317,47 @@ transport_tcp_server::~transport_tcp_server() {
 }
 
 void transport_tcp_server::send(std::span<const std::byte> frame) {
-    if (frame.size() > tcp_transport_t::kMaxFrame) return;  // the peer would reject it
-    // Encode the prefix ONCE, then one serialized gathered record per open
-    // peer.  Lock order per the header contract: peers_m_ → write_m_.
-    std::array<std::byte, kPrefixBytes> prefix;
-    detail::store_le(prefix, static_cast<std::uint32_t>(frame.size()));
-    const std::lock_guard plock(peers_m_);
-    const std::lock_guard wlock(write_m_);
-    for (const std::unique_ptr<session_t>& s : slots_) {
-        if (!s->open.load(std::memory_order_relaxed)) continue;
-        std::array<::iovec, 2> vec{
-            ::iovec{prefix.data(), prefix.size()},
-            ::iovec{const_cast<std::byte*>(frame.data()), frame.size()},
-        };
-        write_all_iov(s->fd.load(std::memory_order_relaxed), vec.data(),
-                      frame.empty() ? 1 : vec.size());
-    }
+    const std::span<const std::byte> one[1] = {frame};
+    send(std::span<const std::span<const std::byte>>(one));
 }
 
 void transport_tcp_server::send(std::span<const std::span<const std::byte>> iov) {
-    std::size_t total = 0;
-    for (const std::span<const std::byte>& s : iov) total += s.size();
-    if (total > tcp_transport_t::kMaxFrame) return;  // the peer would reject it
-
-    // The prefix rides as the FIRST iovec entry, the rope's spans follow — one
-    // gathered record per peer, no flatten copy.  write_all_iov CONSUMES its
-    // iovec array (advances base/len on partial writes), so each peer writes
-    // from a fresh COPY of the pristine gather.
-    std::array<std::byte, kPrefixBytes> prefix;
-    detail::store_le(prefix, static_cast<std::uint32_t>(total));
-    constexpr std::size_t kMaxInlineIov = 16;
-    std::array<::iovec, kMaxInlineIov + 1> pristine_inline;
-    std::vector<::iovec> pristine_heap;
-    ::iovec* pristine = pristine_inline.data();
-    if (iov.size() + 1 > pristine_inline.size()) {
-        pristine_heap.resize(iov.size() + 1);
-        pristine = pristine_heap.data();
-    }
-    pristine[0] = ::iovec{prefix.data(), prefix.size()};
-    std::size_t n = 1;
-    for (const std::span<const std::byte>& s : iov) {
-        if (s.empty()) continue;
-        pristine[n++] = ::iovec{const_cast<std::byte*>(s.data()), s.size()};
-    }
-
+    // Build the record ONCE.  write_all_iov CONSUMES its iovec array (advances
+    // base/len on partial writes), so each peer writes from a fresh COPY of
+    // the pristine gather.  Lock order per the header contract:
+    // peers_m_ → write_m_.
+    const prefixed_iov_t rec(iov, tcp_transport_t::kMaxFrame);
+    if (!rec.ok) return;
     const std::lock_guard plock(peers_m_);
     const std::lock_guard wlock(write_m_);
-    std::array<::iovec, kMaxInlineIov + 1> scratch_inline;
+    std::array<::iovec, prefixed_iov_t::kMaxInlineIov + 1> scratch_inline;
     std::vector<::iovec> scratch_heap;
     ::iovec* scratch = scratch_inline.data();
-    if (n > scratch_inline.size()) {
-        scratch_heap.resize(n);
+    if (rec.n > scratch_inline.size()) {
+        scratch_heap.resize(rec.n);
         scratch = scratch_heap.data();
     }
     for (const std::unique_ptr<session_t>& s : slots_) {
         if (!s->open.load(std::memory_order_relaxed)) continue;
-        std::copy_n(pristine, n, scratch);
-        write_all_iov(s->fd.load(std::memory_order_relaxed), scratch, n);
+        std::copy_n(rec.vec, rec.n, scratch);
+        write_all_iov(s->fd.load(std::memory_order_relaxed), scratch, rec.n);
     }
 }
 
 void transport_tcp_server::peer_endpoint_t::send(std::span<const std::byte> frame) {
-    if (owner_ == nullptr || slot_ == nullptr) return;
-    if (frame.size() > tcp_transport_t::kMaxFrame) return;
-    std::array<std::byte, kPrefixBytes> prefix;
-    detail::store_le(prefix, static_cast<std::uint32_t>(frame.size()));
-    std::array<::iovec, 2> vec{
-        ::iovec{prefix.data(), prefix.size()},
-        ::iovec{const_cast<std::byte*>(frame.data()), frame.size()},
-    };
-    const std::lock_guard lock(owner_->write_m_);
-    if (!slot_->open.load(std::memory_order_relaxed)) return;  // departed ⇒ no-op
-    write_all_iov(slot_->fd.load(std::memory_order_relaxed), vec.data(),
-                  frame.empty() ? 1 : vec.size());
+    const std::span<const std::byte> one[1] = {frame};
+    send(std::span<const std::span<const std::byte>>(one));
 }
 
 void transport_tcp_server::peer_endpoint_t::send(std::span<const std::span<const std::byte>> iov) {
     if (owner_ == nullptr || slot_ == nullptr) return;
-    std::size_t total = 0;
-    for (const std::span<const std::byte>& s : iov) total += s.size();
-    if (total > tcp_transport_t::kMaxFrame) return;
-    // Single consumer, so no pristine copy is needed (unlike the broadcast).
-    std::array<std::byte, kPrefixBytes> prefix;
-    detail::store_le(prefix, static_cast<std::uint32_t>(total));
-    constexpr std::size_t kMaxInlineIov = 16;
-    std::array<::iovec, kMaxInlineIov + 1> inline_vec;
-    std::vector<::iovec> heap_vec;
-    ::iovec* vec = inline_vec.data();
-    if (iov.size() + 1 > inline_vec.size()) {
-        heap_vec.resize(iov.size() + 1);
-        vec = heap_vec.data();
-    }
-    vec[0] = ::iovec{prefix.data(), prefix.size()};
-    std::size_t n = 1;
-    for (const std::span<const std::byte>& s : iov) {
-        if (s.empty()) continue;
-        vec[n++] = ::iovec{const_cast<std::byte*>(s.data()), s.size()};
-    }
+    // Single consumer, so the record is written in place (no pristine copy —
+    // unlike the broadcast).  NOT const: write_all_iov consumes it.
+    prefixed_iov_t rec(iov, tcp_transport_t::kMaxFrame);
+    if (!rec.ok) return;
     const std::lock_guard lock(owner_->write_m_);
     if (!slot_->open.load(std::memory_order_relaxed)) return;  // departed ⇒ no-op
-    write_all_iov(slot_->fd.load(std::memory_order_relaxed), vec, n);
+    write_all_iov(slot_->fd.load(std::memory_order_relaxed), rec.vec, rec.n);
 }
 
 void transport_tcp_server::enumerate_peers(const peer_visitor_t& visit) const {
