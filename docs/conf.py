@@ -71,6 +71,7 @@ include_patterns = [
     "index.md",
     "docs/getting-started.md",
     "docs/capability-matrix.md",
+    "docs/interoperability.md",
     "docs/methodology.md",
     "docs/performance.md",
     "docs/test-report.md",
