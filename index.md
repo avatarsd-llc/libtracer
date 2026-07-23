@@ -66,6 +66,15 @@ Which language core or platform port does what — native codecs, ports, binding
 and how far each is verified, in one honest capability matrix.
 :::
 
+:::{grid-item-card} Interoperate across vendors
+:link: docs/interoperability
+:link-type: doc
+
+Interop enforcement without a certification cartel: stay byte-agnostic, be nameable,
+be legible — and let a developer's agent build the integration from a node's own
+self-description.
+:::
+
 :::{grid-item-card} Implement the protocol
 :link: docs/spec/v1
 :link-type: doc
@@ -94,6 +103,7 @@ C++ modules <docs/modules/index>
 
 Reference (descriptive) <docs/reference/README>
 Capability matrix <docs/capability-matrix>
+Interoperability <docs/interoperability>
 ```
 
 ```{toctree}
