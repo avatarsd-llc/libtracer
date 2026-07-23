@@ -55,6 +55,34 @@ copy-elision idea and bigger than any single slice in the [program](00-bounded-r
 | 5 | Zero-copy TX (`NETCONN_NOCOPY` + hold refs to ACK) | rope+netconn+wlanif | removes 1 egress memcpy | marginal | **Defer** — hazardous (retx-lifetime = use-after-free; re-linearizes unless single-segment ≤MSS) |
 | 6 | Non-levers, ruled out | — | ~0 | — | WG bypass (already off-path); TX-by-ref (no PSRAM → hard floor); CAN rope-elision (an 8 B F64 value facade, never touches the rope). **Reclaim WG *flash* by gating `esp_wireguard` SRCS on `CONFIG_APP_WG_ENABLED`.** |
 
+## B0 vs v1.8.0 — the config diff (2026-07-23)
+
+Ran to answer whether B0 is a genuine *beat* of v1.8.0 or a wash. Compared `sdkconfig.defaults` (deliberate
+overrides) at tag `v1.8.0` against the current defaults, plus the resolved shipped `sdkconfig.prodnode`:
+
+| Knob | v1.8.0 intent | current intent | **shipped (resolved)** | idle-resident? |
+|---|---|---|---|---|
+| `ESP_WIFI_STATIC_RX_BUFFER_NUM` | 6 | 6 | 6 | **yes — equal** |
+| `ESP_WIFI_DYNAMIC_RX_BUFFER_NUM` | 6 | 6 | **8** | no (on-demand cap) |
+| `ESP_WIFI_DYNAMIC_TX_BUFFER_NUM` | 6 | 6 | **8** | no (on-demand cap) |
+| `ESP_WIFI_RX_BA_WIN` | IDF-default | IDF-default | **8** | no (BA reassembly) |
+| `LWIP_TCP_WND_DEFAULT` / `SND_BUF` | 5840 | 5840 | 5840 | per-conn (peer-scaled) |
+| `LWIP_MAX_SOCKETS` | 12 | 12 | 12 | ~equal |
+
+Three results:
+
+1. **v1.8.0's and the current `sdkconfig.defaults` are byte-identical for every buffer knob**, and the
+   idle-*resident* pools (`STATIC_RX`, `TCP_WND`, `MAX_SOCKETS`) are equal. → The ~25 KB idle marginal is
+   **genuinely libtracer, not a buffer-config difference** — the config angle independently reconfirms the
+   [RAM-audit thesis](00-bounded-reactor-node-profile.md).
+2. **B0 is a peak/ceiling lever, not an idle-vs-v1.8.0 lever.** The knobs it trims are *dynamic* (on-demand),
+   so B0 reclaims burst DRAM ceiling + largest-block-under-load + OOM-headroom — it does **not** move idle
+   heap vs v1.8.0. (An earlier draft over-claimed B0 as an idle beat; corrected.)
+3. **Config-hygiene drift:** the *shipped* image runs `DYNAMIC_RX/TX=8`, `RX_BA_WIN=8` — above the `=6` its
+   own `sdkconfig.defaults` intends (ESP-IDF defaults won over an already-generated full sdkconfig). **B0's
+   zero-risk first step is to reconcile the shipped config back to the intended 6/6** (reverting the drift
+   and restoring v1.8.0-parity on the caps at no throughput cost); trimming to 4/4 is the HIL-gated step.
+
 ## Verdict
 
 The "2–3× upstream copy" worry is **unfounded for this config**: lwIP adds zero copies (PBUF_REF), WireGuard

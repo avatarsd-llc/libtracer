@@ -236,31 +236,40 @@ then delete it, taking `io_dispatch` with it [**~6.7 KB**, the biggest chunk]. S
 
 ## 7. Expected outcome & honesty
 
-| Lever | Idle Δ | Fragmentation | Core? | Bucket |
+| Lever | Idle Δ | Fragmentation / peak | Core? | Bucket |
 |---|---:|---|---|---|
-| **B0 wifi+lwIP buffer right-size** | **−20…30 KB** | ++ | no (sdkconfig) | absolute (shared) |
+| **B0 wifi+lwIP buffer right-size** | **~0 (peak/ceiling: −20…30 KB)** | ++ | no (sdkconfig) | absolute (shared) |
 | S1 WS-for-btb | −12 KB (marginal → ~13 KB @ `can_en=1`) | + | no | marginal |
 | S2 reactor (dials → 0) | −N×~4–12 KB (**N=0 today**) | + | yes (gated) | marginal |
 | S3 bounded slab | small idle + | ++ | yes (gated) | marginal |
 | S4 bounded `/unit` | heap peak ↓ + **latency (HOL) fix** | + | strawberry (RFC) | — |
 | Retirement | ~−11.2–12.2 KB (**0 reclaimable now**) | — | no | delta (shared) |
 
-> **[errata + whole-chain]** **B0 is the largest single RAM lever in the whole investigation** and it is
-> **not a libtracer change** — it is composing the C6's over-provisioned wifi+lwIP pools for its
-> single-flow control-plane role (doc 4). S4's stack-floor entry was reassigned to S3d; S2's idle Δ is
-> **N=0** on the measured non-dialing leaf. Retirement is **0 B reclaimable today** (blocked behind
-> consumer migration) and lives in the *shared-with-v1.8.0* bucket — it improves the **delta** but is not a
-> cut to the +37/25 KB marginal. S1's −12 KB carries the LRU-eviction reliability tradeoff (recon §NG-4).
+> **[errata + whole-chain + config diff]** **B0 is the largest *peak/ceiling* RAM lever** (not an idle-heap
+> lever) and it is **not a libtracer change** — it composes the C6's over-provisioned wifi+lwIP pools for its
+> single-flow control-plane role (doc 4). **The v1.8.0 config diff (2026-07-23) settled B0's framing:** the
+> v1.8.0 and current `sdkconfig.defaults` are **byte-identical** for every buffer knob and the idle-resident
+> pools (`STATIC_RX=6`, `TCP_WND=5840`, `MAX_SOCKETS=12`) are **equal** — so the ~25 KB idle marginal is
+> **genuinely libtracer, not buffer config**, and B0 does **not** move idle heap vs v1.8.0. B0 trims *dynamic*
+> caps (`DYNAMIC_RX/TX`, `RX_BA_WIN`) that are **on-demand, not idle-resident** → it reclaims burst DRAM
+> ceiling + largest-block-under-load + OOM-headroom. **Config-hygiene finding:** the *shipped* image drifted
+> to `DYNAMIC_RX/TX=8`, `RX_BA_WIN=8` vs the `=6` its own defaults intend (IDF defaults won over a stale full
+> sdkconfig) — B0's **zero-risk first step is to reconcile the shipped config back to 6/6**, then HIL-trim to
+> 4/4. S4's stack-floor entry was reassigned to S3d; S2's idle Δ is **N=0** on the measured leaf. Retirement
+> is **0 B reclaimable today** (migration-blocked), *shared-with-v1.8.0* bucket — it improves the **delta**,
+> not the marginal. S1's −12 KB carries the LRU-eviction reliability tradeoff (recon §NG-4).
 
 **Honest ceiling — now with a number.** At the pinned **`can_en=1`** image the marginal is **~25 KB**; **S1**
-takes it to **~13 KB with zero dedicated libtracer transport threads**. The two *shared-baseline* levers then
-close the gap against v1.8.0: **retirement −~12 KB** (we shed legacy v1.8.0 keeps) and **B0 −20…30 KB** (we
-trim buffers v1.8.0 leaves at default — *pending the v1.8.0 config diff*). So **`can_en=1` + S1 + retirement
-≈ idle-heap parity with v1.8.0** *while adding the entire graph/transport stack*, and **B0 plausibly pushes
-below it** — the first credible path to actually "reclaim more RAM than v1.8.0." Caveats: B0 and retirement
-are HIL/throughput- and migration-gated respectively, and the copy chain itself is already near-optimal
-(doc 4: raw-TCP d2d = 2 fundamental copies, no systemic copy-elision win left). The program's non-scoreboard
-payoff remains **bounded, fragmentation-free memory** + a **single-core-optimal** node.
+takes it to **~13 KB with zero dedicated libtracer transport threads**. The idle-heap gap against v1.8.0 then
+closes on **one shared-baseline lever: retirement −~12 KB** — we shed legacy that v1.8.0 keeps, so *our*
+absolute idle heap drops below v1.8.0's while it stays put. **B0 does *not* help here** (idle buffers are
+equal to v1.8.0 — config diff confirmed); its win is peak/ceiling + fragmentation, not idle. So
+**`can_en=1` + S1 + retirement ≈ idle-heap parity-to-slightly-below v1.8.0** *while adding the entire
+graph/transport stack* — a credible path to "reclaim more RAM than v1.8.0," **contingent on the
+migration-gated retirement actually landing** (0 B until consumers move). B0 + S3 then deliver the
+**operational** win the program has always centred: **bounded, fragmentation-free memory** (fixing the
+84→44 KB largest-block collapse under load) on a **single-core-optimal** node. The copy chain itself is
+already near-optimal (doc 4) — no systemic copy-elision win remains.
 
 ## 8. Open questions (post-audit)
 Several earlier open questions are now **answered** by the companion docs:

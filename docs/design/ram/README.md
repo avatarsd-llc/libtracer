@@ -13,10 +13,12 @@ ESP32-C6 (strawberry-fw). Read in order; each stands alone but they cross-refere
 
 > **Verdict (2026-07-23):** the substantive thesis survives a 9-dimension re-audit intact (doc 3) — corrections
 > are documentation honesty + `can_en=1` pinned + couple S4 with S2, **not** design changes. The whole-chain
-> audit (doc 4) then found **the single biggest RAM lever: right-sizing the wifi+lwIP buffer budget (~20–30 KB,
-> sdkconfig, HIL-gated)** — *not a libtracer change*. Retirement (doc 0 §6) is a credible **~11–12 KB** but
-> **0 B reclaimable today** (blocked behind consumer migration). Two measurements gate any banked number: a
-> config-pinned HIL heap read and a deep-path **stress** stack census.
+> audit (doc 4) found the copy chain **already near-optimal** and the biggest RAM lever to be **B0: right-size
+> the wifi+lwIP buffer budget** — but the **v1.8.0 config diff** then showed B0 is a **peak/ceiling** win
+> (~20–30 KB burst DRAM + largest-block), **idle-neutral vs v1.8.0** (both ship identical `sdkconfig.defaults`).
+> So the idle-heap beat rests on **retirement** (credible **~11–12 KB**, but **0 B reclaimable today** — a
+> migration program): `can_en=1` + S1 + retirement ≈ **parity-to-slightly-below** v1.8.0 while adding the whole
+> stack. Two measurements gate any banked number: a config-pinned HIL heap read + a deep-path **stress** census.
 
 ## The headline findings (adversarially verified)
 
@@ -47,8 +49,10 @@ ESP32-C6 (strawberry-fw). Read in order; each stands alone but they cross-refere
 
 ## Ranked, do-this-order
 
-**Absolute-RAM first (biggest lever, no code):** `B0 wifi+lwIP buffer right-size (~20–30 KB, HIL-gated)`
-(doc 4). **Then the marginal/latency slices:** `O1 single-core crit-section pool` → `O2 WS owning delivery`
+**Peak/OOM-headroom first (biggest ceiling lever, no code):** `B0 wifi+lwIP buffer right-size` — step 0 is
+free (reconcile the shipped config back to its intended 6/6; the shipped image drifted to 8/8), then HIL-trim
+toward 4/4 (~20–30 KB burst ceiling; **idle-neutral vs v1.8.0** per the config diff) (doc 4). **Then the
+marginal/latency slices:** `O1 single-core crit-section pool` → `O2 WS owning delivery`
 → `O4 streaming/rope decode (−4 KB stack) + node-counting pre-pass (#477 → backpressure)` → `O3 pool the TX
 gather` → `O5/O6/O7 (lower ROI)` (doc 1 §5 / doc 2 §6). **Independently:** **S1 WS-for-btb** (delete the
 d2d listener thread, −12 KB; at `can_en=1` this zeroes dedicated libtracer transport threads) and
