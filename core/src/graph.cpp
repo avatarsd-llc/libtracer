@@ -691,6 +691,22 @@ bool graph_t::has_registered_child(vertex_t* v) const {
     return has;
 }
 
+namespace {
+/**
+ * @brief The NOTHROW delivery clone of a stored value (#477), ONE non-inline copy for
+ *        both writer-thread clone legs (target-edge dispatch, handler notify): a spilled
+ *        (> kInline links) rope's copy grows a heap chain that threw bad_alloc — an
+ *        abort() under `-fno-exceptions`. `try_reserve` is a no-op while the chain fits
+ *        inline (the hot case), and on OOM the caller drops that delivery leg.
+ * @retval false The chain could not be reserved — @p dst is empty, drop the leg.
+ */
+[[nodiscard]] bool try_clone_rope(rope_t& dst, const rope_t& src) noexcept {
+    if (!dst.try_reserve(src.link_count())) return false;
+    dst.concat(src);  // reserved (or inline) — the appends cannot reallocate
+    return true;
+}
+}  // namespace
+
 void graph_t::dispatch_edge_target(const edge_view_t& e, const rope_t& value) {
     vertex_t* target = find_ptr(e.target_key);
     if (target == nullptr) return;
@@ -705,14 +721,8 @@ void graph_t::dispatch_edge_target(const edge_view_t& e, const rope_t& value) {
     // the target's own logic (a controller re-emits on its execution; a handler re-emits
     // when it chooses), so a dispatch-level subscription cycle cannot form — no depth cap,
     // no dedup, no drain queue. An app wanting pure relay subscribes the consumer directly.
-    //
-    // The delivery clone of `value` is NOTHROW (#477): a spilled (> kInline links) rope's
-    // copy grows a heap chain that threw bad_alloc — an abort() under -fno-exceptions on
-    // the writer thread. try_reserve is a no-op while the chain fits inline (the hot
-    // case), and on OOM this one delivery leg drops.
-    rope_t clone;
-    if (!clone.try_reserve(value.link_count())) return;  // OOM: drop this delivery leg
-    clone.concat(value);  // reserved (or inline) — the appends cannot reallocate
+    rope_t clone;  // the NOTHROW delivery clone (#477) — on OOM this one leg drops
+    if (!try_clone_rope(clone, value)) return;
     (void)store_value(target, std::move(clone));
 }
 
@@ -859,12 +869,10 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
         // A handler stores no LKV (the user handler consumes the value), so the
         // delivery clone survives here — the cold path only. The hot roles below
         // deliver the exact published pointer store_value hands back instead. The
-        // clone is NOTHROW (#477): a spilled chain's copy would abort on OOM under
-        // -fno-exceptions; on failure the handler still runs (the write succeeds) and
-        // only the subscriber delivery drops.
+        // clone is NOTHROW (try_clone_rope, #477): on failure the handler still runs
+        // (the write succeeds) and only the subscriber delivery drops.
         rope_t notify;  // refcount clone — store_value consumes `value`
-        const bool can_notify = notify.try_reserve(value.link_count());
-        if (can_notify) notify.concat(value);
+        const bool can_notify = try_clone_rope(notify, value);
         const result_t<std::shared_ptr<const rope_t>> stored = store_value(v, std::move(value));
         if (!stored) return std::unexpected(stored.error());
         if (can_notify) deliver_vertex(v, notify);
