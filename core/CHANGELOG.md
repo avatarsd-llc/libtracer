@@ -12,6 +12,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-07-23
+
 ### Fixed
 
 - **A SUCCESS reply whose assembly OOMs now replies an addressed `BACKPRESSURE`, never a

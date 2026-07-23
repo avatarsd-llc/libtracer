@@ -1,6 +1,6 @@
 {
   "name": "@avatarsd-llc/libtracer-ws",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "WebSocket transport for libtracer (ADR-0029) — an RFC 6455 frame codec plus a TransportWs client that carries libtracer TLV frames over WebSocket, wire-compatible with the C++ tr::net::transport_ws. The core (@avatarsd-llc/libtracer) is a peerDependency. See docs/adr/0033-npm-subpackage-monorepo.md.",
   "author": "avatarsd LLC",
   "license": "Apache-2.0",
@@ -37,7 +37,7 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@avatarsd-llc/libtracer": ">=0.5.0 <0.6.0"
+    "@avatarsd-llc/libtracer": ">=0.6.0 <0.7.0"
   },
   "scripts": {
     "build": "tsc",

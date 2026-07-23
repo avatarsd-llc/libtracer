@@ -1,6 +1,6 @@
 {
   "name": "@avatarsd-llc/libtracer-webtransport",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "WebTransport transport for libtracer (ADR-0043 Phase B) — a browser WebTransport client that carries libtracer TLV frames over ONE bidirectional stream with 4-byte u32-LE length-prefix framing, wire-compatible with the C++ tr::net::webtransport_transport_t (the libtracer_quic module). The core (@avatarsd-llc/libtracer) is a peerDependency. See docs/adr/0033-npm-subpackage-monorepo.md.",
   "author": "avatarsd LLC",
   "license": "Apache-2.0",
@@ -37,7 +37,7 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@avatarsd-llc/libtracer": ">=0.5.0 <0.6.0"
+    "@avatarsd-llc/libtracer": ">=0.6.0 <0.7.0"
   },
   "scripts": {
     "build": "tsc",
