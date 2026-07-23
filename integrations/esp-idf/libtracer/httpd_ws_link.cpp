@@ -555,17 +555,20 @@ void httpd_ws_link_t::tx_work(void* arg) {
         f.len = work->len;
         const esp_err_t err = httpd_ws_send_frame_async(work->handle, work->fd, &f);
         if (err != ESP_OK) {
-            // A failed send is broken-by-contract: the peer missed a frame it can never
-            // learn about, so the stream is no longer trustworthy (seen on-device: a
-            // fragmented ~12.7 KB reply timing out the 5 s SO_SNDTIMEO and leaving the
-            // tab deaf on an open socket). Close the session — teardown flows through
-            // free_ctx (on_session_closed -> reclaim_slot), so the peer slot is
-            // reclaimed AND the departure notifier evicts the session's subscriber
-            // edges; the client's onclose fires and it reconnects into clean state.
-            ESP_LOGW(kTag, "ws send failed (%s) fd=%d len=%u - closing session",
+            // DROP the frame; do NOT close the session (#481). A single failed async
+            // send means the peer missed ONE frame it can retry — NOT that the socket
+            // is dead. The load-bearing case: a large reply (e.g. the composed-root
+            // snapshot, ~12.7 KB) whose one contiguous WS frame times out SO_SNDTIMEO on
+            // a fragmented heap while the SAME socket still delivers small frames fine.
+            // Closing here tore the whole session down and killed the peer's follow-on
+            // small requests ("transport closed") — the dead-web-ui churn. Dropping
+            // keeps the socket alive, so the peer's next (small) request succeeds and its
+            // own deadline/retry recovers the missed reply. A genuinely dead TCP is still
+            // reaped by lwIP -> free_ctx (slot reclaim + subscriber eviction), and a
+            // jammed WORK QUEUE still closes via note_tx_result's enqueue-drop streak;
+            // this path only stops a single oversized send from tearing a healthy socket.
+            ESP_LOGW(kTag, "ws send failed (%s) fd=%d len=%u - dropped, socket kept",
                      esp_err_to_name(err), work->fd, (unsigned)work->len);
-            if (httpd_sess_trigger_close(work->handle, work->fd) != ESP_OK)
-                ESP_LOGW(kTag, "trigger_close failed fd=%d", work->fd);
         }
     }
     delete work;
