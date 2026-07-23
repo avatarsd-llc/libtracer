@@ -160,6 +160,28 @@ which is the one kind of agreement that both holds up and stays free.
 
 ---
 
+## Worked guides
+
+The model above, made executable:
+
+- **[Building a custom interoperable device](interop/custom-device.md)** — a
+  generic vendor device end to end, plus the detailed matrix of what a custom
+  device *can*, *must*, and *must not* implement.
+- **[A production ESP32 node](interop/esp32-production-node.md)** — the hardened
+  embedded profile: memory slabs, transport composition, task-stack discipline,
+  backpressure behavior, and validation practice from a shipped ESP32-C6
+  deployment.
+
+```{toctree}
+:hidden:
+:maxdepth: 1
+
+Custom interoperable device <interop/custom-device>
+Production ESP32 node <interop/esp32-production-node>
+```
+
+---
+
 > **See also**: [reference/00-overview.md](reference/00-overview.md) (the six-layer
 > model and load-bearing claims), [RFC-0010](spec/rfcs/0010-owner-app-fields-and-schema.md)
 > (owner app fields and `:schema`), [reference 13](reference/13-network-formation.md)
