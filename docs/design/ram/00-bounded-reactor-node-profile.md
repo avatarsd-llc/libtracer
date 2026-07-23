@@ -12,8 +12,10 @@
 
 This document is the spine: it states the problem, the design center, the measured current state,
 and the committed multi-slice program to make a **unified transport→graph** node **RAM-lean on a
-single-core MCU without touching HPC latency**. The two companion docs go deep on the mechanisms it
-depends on (the lwIP I/O seam, and whether we need to flatten at all).
+single-core MCU without touching HPC latency**. Companion docs go deep on the mechanisms it depends on:
+[`10`](10-lwip-libtracer-seam.md) (the lwIP I/O seam), [`20`](20-zero-copy-and-flatten.md) (whether we
+need to flatten), [`30`](30-second-pass-reconciliation.md) (the adversarial re-audit + errata), and
+[`40`](40-buffer-chain-whole-analysis.md) (the whole wifi→graph buffer chain, home of the largest lever **B0**).
 
 ---
 
@@ -203,39 +205,62 @@ the reactor/CAN stack floor drop toward the shallow `STORED_VALUE` path.
 - **Governance:** RFC (the `/unit` wire/semantics contract changes). **Verify:** HIL stack high-water
   under a real multi-unit apply over CAN + WS.
 
-## 6. Retirement (parallel track, ~10 KB, delta-relevant)
-Independent of the above: retire the legacy `io_dispatch` task (4096 B) + `io_layer`/`event_bus`.
-v1.8.0 keeps these, so shedding them from the current image improves the *delta*.
-See [`project_legacy_retirement_plan`].
-> **[errata]** The forward ~10 KB is **two** 4096 B tasks — `io_dispatch` **and** `evt_bus`
-> (`event_bus.c:133`, created via `main.c:725`) — plus ~2 KB of io_layer/event_bus queues & subscriber
-> tables. `io_snapshot` is **already retired** (no component dir) → zero forward savings. This lever is
-> strawberry-side legacy that none of these `ram/` docs audit at file:line — do a dedicated source audit
-> before summing −10 KB into any parity claim (`io_layer` is a hard `REQUIRES` of `display_lvgl`, so
-> migrate consumers first). Recon doc §New-Gaps 10.
+## 6. Retirement (parallel track — **credible ~11.2–12.2 KB, but 0 B reclaimable *today***)
+Independent of the above: shed the legacy `io_layer` + `event_bus` from the current image. v1.8.0 keeps
+both, so removing them lowers *our* absolute idle heap while v1.8.0's stays put — a genuine
+**delta-vs-v1.8.0** lever (see §7 for how it closes the parity gap). A dedicated file:line source audit
+(2026-07-23, strawberry-fw) grounds it:
+
+- **The number is honest and slightly conservative:** **11,229 B strict** (8192 B two task stacks +
+  768 B queues + 2269 B `.bss` gen/free-id tables) → **~12,200 B resident** once FreeRTOS TCBs
+  (~720 B) + queue control blocks (~152 B) + mutex pools (~800 B) are counted. **~72 % of the win is two
+  4096 B dispatch task stacks.**
+- **`io_dispatch` ⊂ `io_layer`, `evt_bus` ⊂ `event_bus`** — the two tasks are the *components' own*
+  dispatch tasks, **not** separately retirable. `io_dispatch` dies when `io_layer_init()` stops being
+  called; do **not** sum it beside `io_layer` (that double-counts ~4.7 KB).
+- **0 B is reclaimable now — every byte is BLOCKED behind consumer migration** to the libtracer
+  `trc_subscribe`/graph seam. Only `wg_client` is migrated (PR #26). This is a **migration program**, not
+  a delete: ~14 `event_bus` pub/sub + ~15–20 `io_layer` producers/consumers must move first.
+- **Already banked (0 forward B), don't credit:** `io_snapshot` (retired, no source, PR #69), `proto`
+  (orphaned, no CMakeLists, unbuilt). **Keep, don't retire:** `io_outputs` (its 73 B `.bss` is the live
+  ADR-0088 D1 egress seam) — only cut its `io_layer` coupling onto `io_egress_graph`.
+- **`display_lvgl`'s hard `REQUIRES io_layer` blocks only the `.lvgl` image** (`CONFIG_APP_DISPLAY_LVGL`
+  unset in prodnode), **not the prodnode delta** — `zigbee_drv` likewise CONFIG-gated off.
+
+**Ordered sequence** (shallow→deep, so each delete unblocks the next): (1) `rm components/proto` [hygiene,
+0 B]; (2) `io_snapshot` — done; (3) cut `io_outputs`→`io_egress_graph` coupling [0 B, unblocks io_layer];
+(4) migrate `event_bus`'s 3 subscribers + invert ~11 publishers, then delete it [**~4.6 KB**, shallower →
+first]; (5) migrate `io_layer`'s ~15–20 consumers + give the graph bridges native `trc_subscribe` fan-out,
+then delete it, taking `io_dispatch` with it [**~6.7 KB**, the biggest chunk]. See
+[`project_legacy_retirement_plan`] + [`project_migration_progress`].
 
 ## 7. Expected outcome & honesty
 
-| Lever | Idle Δ | Fragmentation | Core? |
-|---|---:|---|---|
-| S1 WS-for-btb | −12 KB | + | no |
-| S2 reactor (dials → 0) | −N×~4–12 KB (**N=0 today**) | + | yes (gated) |
-| S3 bounded slab | small idle + | ++ | yes (gated) |
-| S4 bounded `/unit` | heap peak ↓ + **latency (HOL) fix** | + | strawberry (RFC) |
-| Retirement | ~−10 KB (two 4096 tasks) | — | no |
+| Lever | Idle Δ | Fragmentation | Core? | Bucket |
+|---|---:|---|---|---|
+| **B0 wifi+lwIP buffer right-size** | **−20…30 KB** | ++ | no (sdkconfig) | absolute (shared) |
+| S1 WS-for-btb | −12 KB (marginal → ~13 KB @ `can_en=1`) | + | no | marginal |
+| S2 reactor (dials → 0) | −N×~4–12 KB (**N=0 today**) | + | yes (gated) | marginal |
+| S3 bounded slab | small idle + | ++ | yes (gated) | marginal |
+| S4 bounded `/unit` | heap peak ↓ + **latency (HOL) fix** | + | strawberry (RFC) | — |
+| Retirement | ~−11.2–12.2 KB (**0 reclaimable now**) | — | no | delta (shared) |
 
-> **[errata]** S4's stack-floor entry was reassigned to S3d (streaming decode kills the 4096 arena);
-> S4's own contribution is the heap staged-list peak + the reactor head-of-line-latency fix. S2's idle Δ
-> is **N=0** on the measured non-dialing leaf (zero dial threads today) — its value there is latency /
-> threadless-mesh scaling, not idle-heap. The −12/−10/−N deltas target **disjoint** objects (no double-
-> count), but S1's −12 KB carries an S1 **reliability** tradeoff: folding d2d onto the shared 8-socket
-> httpd pool lets a browser hard-refresh LRU-evict a live mesh peer (recon doc §New-Gaps 4).
+> **[errata + whole-chain]** **B0 is the largest single RAM lever in the whole investigation** and it is
+> **not a libtracer change** — it is composing the C6's over-provisioned wifi+lwIP pools for its
+> single-flow control-plane role (doc 4). S4's stack-floor entry was reassigned to S3d; S2's idle Δ is
+> **N=0** on the measured non-dialing leaf. Retirement is **0 B reclaimable today** (blocked behind
+> consumer migration) and lives in the *shared-with-v1.8.0* bucket — it improves the **delta** but is not a
+> cut to the +37/25 KB marginal. S1's −12 KB carries the LRU-eviction reliability tradeoff (recon §NG-4).
 
-**Honest ceiling:** a strict *beat* of v1.8.0 on idle heap is not guaranteed — libtracer is *adding*
-functionality v1.8.0 lacks. But S1 + S2 + retirement plausibly reach **near/at parity**, and the
-program's larger payoff is **bounded, fragmentation-free memory** (the operational OOM-risk symptom)
-and a **single-core-optimal** node — which is the right target regardless of the parity scoreboard. The
-~20 KB of app-stack headroom the census shows is a separate, v1.8.0-neutral absolute win.
+**Honest ceiling — now with a number.** At the pinned **`can_en=1`** image the marginal is **~25 KB**; **S1**
+takes it to **~13 KB with zero dedicated libtracer transport threads**. The two *shared-baseline* levers then
+close the gap against v1.8.0: **retirement −~12 KB** (we shed legacy v1.8.0 keeps) and **B0 −20…30 KB** (we
+trim buffers v1.8.0 leaves at default — *pending the v1.8.0 config diff*). So **`can_en=1` + S1 + retirement
+≈ idle-heap parity with v1.8.0** *while adding the entire graph/transport stack*, and **B0 plausibly pushes
+below it** — the first credible path to actually "reclaim more RAM than v1.8.0." Caveats: B0 and retirement
+are HIL/throughput- and migration-gated respectively, and the copy chain itself is already near-optimal
+(doc 4: raw-TCP d2d = 2 fundamental copies, no systemic copy-elision win left). The program's non-scoreboard
+payoff remains **bounded, fragmentation-free memory** + a **single-core-optimal** node.
 
 ## 8. Open questions (post-audit)
 Several earlier open questions are now **answered** by the companion docs:
