@@ -134,13 +134,16 @@ Ordered by impact. ✎ = also fixed inline in doc 0; ▤ = corrected here only.
 
 Prioritized. The first two are blockers.
 
-1. **⛔ Composition contradiction — pin the shipped image.** The whole S-lever ROI table is calibrated on
-   the `can_en=0` bench image (both 12 KB threads). But graph-over-CAN (the maintainer's "every board does
-   the graph over CAN" constraint) **requires** the libtracer CAN attach, which *steps aside* when the
-   strawberry domain bus is enabled — **the two planes are mutually exclusive on one TWAI controller.** A
-   single unified image cannot run both. **Decide:** ship `can_en=0` (graph-over-CAN, ~37 KB, both threads)
-   **or** `can_en=1` (domain bus, ~25 KB, one thread), and re-calibrate every figure against that decision.
-   A reader optimizing against 37 KB may be optimizing an image that never ships.
+1. **✅ RESOLVED (2026-07-23) — `can_en=1`, graph-over-CAN always.** The ROI table was calibrated on the
+   `can_en=0` bench image (both 12 KB threads), but the two planes are **mutually exclusive on one TWAI
+   controller**: `make_can_link` steps aside when the domain bus is on (`can_link_esp.cpp:27-33`).
+   **Maintainer pinned `can_en=1`:** the libtracer CAN thread does not exist, the marginal re-anchors to
+   **~25 KB / one transport thread** (the TCP d2d listener), and **graph-over-CAN means the graph rides the
+   existing strawberry domain bus** — a **domain-bus → router seam** on the domain bus's own
+   (v1.8.0-shared) task, not a second TWAI link. *New design item (strawberry-side):* build that
+   domain-bus→router adapter. *Ledger consequence:* after **S1 (WS-for-btb)** deletes the lone d2d listener
+   thread, the production image has **zero dedicated libtracer transport threads** → marginal ≈ **13 KB**.
+   Every `can_en=0` figure in docs 0/10/20 is now the *bench* case; re-read against `can_en=1`.
 
 2. **⛔ The single most load-bearing measurement is unmade: a deep-path (stress) stack HWM census.** Every
    stack-sizing decision (Slice 4 floor-drop, the 46.5 KB / ~20 KB headroom) rests on an **idle** census,

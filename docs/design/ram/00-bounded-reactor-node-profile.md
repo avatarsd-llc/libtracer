@@ -24,11 +24,16 @@ costs **+37 KB idle heap over v1.8.0** on the Gorshok ESP32-C6 (measured: boot-f
 63 KB; v1.8.0 idle-free ~101 KB — reconcile the internal 37-vs-38 KB rounding, both HIL-only). The largest
 contiguous free block also collapses **84 KB → 44 KB** — a fragmentation symptom, not idle bytes.
 
-> **[errata] This figure is the `can_en=0` bench image (both 12 KB transport threads present).** On a
-> `can_en=1` production leaf the strawberry CAN domain bus owns the single TWAI controller, so
-> `make_can_link` steps aside (`can_link_esp.cpp:27-33`), the libtracer CAN thread vanishes, and the
-> marginal is **~25 KB, not 37**. Graph-over-CAN and the domain bus are **mutually exclusive on one TWAI
-> controller** — the shipped `can_en` must be pinned before banking any number (recon doc §New-Gaps 1).
+> **[errata + PINNED 2026-07-23] This figure was the `can_en=0` bench image (both 12 KB transport threads).
+> Maintainer decision: ship `can_en=1`, graph-over-CAN always.** At `can_en=1` the strawberry CAN domain
+> bus owns the single TWAI controller and `make_can_link` steps aside (`can_link_esp.cpp:27-33`), so the
+> libtracer CAN thread **does not exist** and the marginal re-anchors to **~25 KB, one transport thread**
+> (the TCP d2d listener). *Graph-over-CAN therefore means the graph rides the existing domain bus* — a
+> **domain-bus → router seam** on the domain bus's own (v1.8.0-shared) task, **not** a second libtracer
+> TWAI link — which is the leaner composition (one TWAI user, no new thread). Building that seam is a
+> strawberry-side design item. Consequence for the slice ledger: after **S1 (WS-for-btb)** deletes the
+> lone remaining d2d listener thread, the production image has **zero dedicated libtracer transport
+> threads** (CAN via the domain-bus seam, WS httpd-folded, d2d folded onto `/ws`) → marginal ≈ **13 KB**.
 
 An exhaustive source audit + a live `/system/tasks` census established that **this is not
 inefficiency** — libtracer is lean, and the RAM is the legitimate cost of standing up a whole
