@@ -1,6 +1,6 @@
 {
   "name": "libtracer",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Lightweight decentralized graph-based networking protocol — connect sensors, microcontrollers, gateways, and apps across vendors and transports.",
   "keywords": ["protocol", "iot", "sensor", "graph", "esp32", "stm32", "esphome", "tlv"],
   "repository": {

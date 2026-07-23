@@ -1,6 +1,6 @@
 [package]
 name = "libtracer"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 authors = ["avatarsd LLC"]
 description = "Rust binding for libtracer — a lightweight decentralized graph-based networking protocol."
