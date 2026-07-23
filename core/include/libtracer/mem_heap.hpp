@@ -13,6 +13,8 @@
 #include <new>
 #include <optional>
 #include <span>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -29,6 +31,28 @@
 namespace tr::detail {
 
 /**
+ * @brief Test-only OOM-injection seam over @ref probe_bytes: when set, a probe of @p bytes
+ *        that the hook rejects soft-fails as if the heap were exhausted.
+ *
+ * The nothrow soft-fail paths cannot be exercised by really exhausting the host heap, so
+ * this is their failure-injection tool — the global-heap twin of the failing `mem_backend_t`
+ * the `graph_value_backend_test` precedent injects (ADR-0060 §3). Production never sets it;
+ * the cost is one predictable null-check on the (cold) growth/probe paths.
+ */
+inline bool (*probe_fail_hook)(std::size_t bytes) noexcept = nullptr;
+
+/**
+ * @brief The @ref probe_fail_hook gate alone (no real probe): true when no hook is set or
+ *        the hook admits @p bytes.
+ *
+ * For soft-fail sites whose failure leg is not the probe itself (e.g. a host-profile
+ * `catch (bad_alloc)`) but that must still honor the test seam.
+ */
+[[nodiscard]] inline bool probe_hook_ok(std::size_t bytes) noexcept {
+    return probe_fail_hook == nullptr || probe_fail_hook(bytes);
+}
+
+/**
  * @brief Probe whether a @p bytes-sized heap allocation would succeed, nothrow — the ONE
  *        locus of the nothrow `operator new` probe.
  *
@@ -40,6 +64,7 @@ namespace tr::detail {
  * @retval false The allocation would fail (OOM) — nothing was allocated.
  */
 [[nodiscard]] inline bool probe_bytes(std::size_t bytes) noexcept {
+    if (!probe_hook_ok(bytes)) return false;  // test-only OOM injection
     void* p = ::operator new(bytes, std::nothrow);
     if (p == nullptr) return false;
     ::operator delete(p);
@@ -87,6 +112,35 @@ template <class T>
 [[nodiscard]] bool try_push_back(std::vector<T>& v, T&& x) noexcept {
     if (v.size() == v.capacity() && !try_reserve(v, grow_capacity(v.capacity()))) return false;
     v.push_back(std::move(x));  // guaranteed no reallocation now
+    return true;
+}
+
+/**
+ * @brief Nothrow byte-vector copy-assign: replace @p dst's contents with @p src WITHOUT
+ *        ever aborting — @ref try_reserve then an in-capacity `assign`.
+ *
+ * Non-template (the one element type the store/delivery path copies is `std::byte` —
+ * vertex keys, route records), per the footprint-sentinel discipline.
+ * @retval false The growth allocation failed — @p dst is unchanged.
+ */
+[[nodiscard]] inline bool try_assign(std::vector<std::byte>& dst,
+                                     std::span<const std::byte> src) noexcept {
+    if (!try_reserve(dst, src.size())) return false;
+    dst.assign(src.begin(), src.end());  // within capacity — no reallocation
+    return true;
+}
+
+/**
+ * @brief Nothrow string copy-assign: replace @p dst's contents with @p src WITHOUT ever
+ *        aborting.
+ *
+ * A fitting copy (SSO or existing capacity) assigns directly; a growing one probes the
+ * `size + 1` (NUL) buffer via @ref probe_bytes first and soft-fails instead of throwing.
+ * @retval false The growth allocation failed — @p dst is unchanged.
+ */
+[[nodiscard]] inline bool try_assign(std::string& dst, std::string_view src) noexcept {
+    if (src.size() > dst.capacity() && !probe_bytes(src.size() + 1)) return false;
+    dst.assign(src);  // fits capacity, or the just-freed probe block satisfies the grow
     return true;
 }
 

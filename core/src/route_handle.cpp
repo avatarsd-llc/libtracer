@@ -10,6 +10,7 @@
 #include <utility>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/tlv.hpp"
 #include "libtracer/tlv_emit.hpp"
 
@@ -190,6 +191,42 @@ std::vector<std::byte> encode_handle_nack(std::uint16_t label) {
     std::vector<std::byte> out;
     wire::emit_tlv(out, type_t::HANDLE_NACK, opt_t{.pl = true}, body);
     return out;
+}
+
+namespace {
+
+/**
+ * @brief The shared NOTHROW `<frame>{ VALUE label(u16), tail }` builder behind
+ *        @ref try_encode_advertise / @ref try_encode_compact (#477): reserve body and
+ *        frame exactly (≤ 6-byte headers, even LL-widened), then the emits below cannot
+ *        reallocate — so nothing here can throw. One non-template locus (the footprint-
+ *        sentinel discipline).
+ * @retval false A buffer could not be reserved — @p out is left empty.
+ */
+[[nodiscard]] bool try_encode_labeled(std::vector<std::byte>& out, type_t frame,
+                                      std::uint16_t label,
+                                      std::span<const std::byte> tail) noexcept {
+    out.clear();
+    constexpr std::size_t kLabelTlv = 6;  // 4-byte VALUE header + u16 label
+    std::vector<std::byte> body;
+    if (!detail::try_reserve(body, kLabelTlv + tail.size())) return false;
+    emit_label(body, label);
+    body.insert(body.end(), tail.begin(), tail.end());  // within capacity
+    if (!detail::try_reserve(out, 6 + body.size())) return false;
+    wire::emit_tlv(out, frame, opt_t{.pl = true}, body);  // within capacity
+    return true;
+}
+
+}  // namespace
+
+bool try_encode_advertise(std::vector<std::byte>& out, std::uint16_t label,
+                          std::span<const std::byte> route_path) noexcept {
+    return try_encode_labeled(out, type_t::ADVERTISE, label, route_path);
+}
+
+bool try_encode_compact(std::vector<std::byte>& out, std::uint16_t label,
+                        std::span<const std::byte> payload) noexcept {
+    return try_encode_labeled(out, type_t::COMPACT, label, payload);
 }
 
 }  // namespace tr::net

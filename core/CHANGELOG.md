@@ -12,7 +12,37 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The residual writer-thread store/delivery allocations are nothrow soft-fail (#477) —
+  drop or `BACKPRESSURE`, never `abort()`.** The 2026-07-22 storm HIL reproduced the
+  #453/#454 failure class on the ENGINE task: a throwing `operator new` reachable from the
+  local write path (`store_value` → fan-out → dispatch) aborts the node under the MCU
+  profile's `-fno-exceptions` on a heap-exhausted allocation. Per the d352998 discipline
+  (store legs report status, delivery legs drop): `vertex_t::store`'s LKV
+  control-block+rope allocation soft-fails (`store_value` maps it to
+  `status_t::BACKPRESSURE`; the handler-role null-`shared_ptr` "consumed" sentinel is
+  unaffected); a STREAM's ring append is shed on OOM (bounded-lossy history — the LKV
+  still publishes); `drain_unflushed` DEFERS its batch (cursor kept — redelivered next
+  sweep) instead of a throwing snapshot; the wide fan-out edge snapshot degrades to the
+  inline prefix and skips an uncloneable edge; a spilled (>2-link) value's target-edge /
+  handler-notify delivery clone drops that leg; the sweep-set legs
+  (`mark_pending`/`clear_pending`/`propagate` and the branch-write plan) render keys and
+  grow nothrow (branch-write OOM ⇒ `BACKPRESSURE`); and `fwd_router_t::deliver_remote`
+  drops a delivery whose iov table, flatten, or COMPACT/ADVERTISE frame cannot allocate.
+  Success paths are byte-identical.
+
 ### Added
+
+- **`tr::net::try_encode_advertise` / `try_encode_compact` — nothrow forms of the
+  route-handle frame encoders (#477).** Build the frame into a caller vector and return
+  `false` on OOM (the writer-thread delivery egress drops instead of aborting); the
+  throwing forms stay for setup-time callers. New `tr::detail` nothrow growth primitives
+  beside `try_reserve`/`try_push_back`: `try_assign(std::vector<std::byte>&, span)` and
+  `try_assign(std::string&, string_view)` (soft-fail copy-assign), plus the test-only
+  OOM-injection seam `tr::detail::probe_fail_hook` consulted by `probe_bytes` — the
+  global-heap twin of the failing-`mem_backend_t` injection `graph_value_backend_test`
+  uses; `graph_oom_softfail_test` exercises every converted class through it.
 
 - **`tr::net::transport_tcp_server` — the multi-peer raw-TCP listener (the board↔board
   default).** The transport_ws_server slot/poll machinery (#362) over the shared u32-LE

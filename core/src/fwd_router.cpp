@@ -537,14 +537,18 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
         // A COMPACT wraps a CONTIGUOUS payload (encode_compact), so a multi-link value pays
         // one flatten here — single-link, the common case, is a zero-copy adopt. The
         // scatter-gather win is the default full-route path below (the hot fan-out leg).
+        // Every per-delivery allocation on this writer-thread leg is NOTHROW (#477): a
+        // failed flatten or frame build DROPS the delivery (the subscriber misses one
+        // value under heap exhaustion — valid delivery behavior), never an abort. A
+        // dropped fresh ADVERTISE self-heals via the peer's HANDLE_NACK (§E.1).
         const view_t flat = value.materialize();
+        if (flat.empty() && value.total_length() != 0) return;  // flatten OOM — drop
         const auto [label, fresh] = handles_.ensure_egress(sub.link, route);
-        if (fresh) {
-            const std::vector<std::byte> adv = encode_advertise(label, route);
-            link->send(std::span<const std::byte>(adv));
-        }
-        const std::vector<std::byte> out = encode_compact(label, flat.bytes());
-        link->send(std::span<const std::byte>(out));
+        std::vector<std::byte> frame;
+        if (fresh && try_encode_advertise(frame, label, route))
+            link->send(std::span<const std::byte>(frame));
+        if (!try_encode_compact(frame, label, flat.bytes())) return;  // OOM — drop
+        link->send(std::span<const std::byte>(frame));
         return;
     }
     // Default: full-route `FWD{ op=WRITE, dst=<return route>, src=<empty PATH>,
@@ -569,8 +573,10 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
 
     // iov = head + route + empty_src + one span per value link (sized to the rope, no
     // synthetic cap — the same per-send iov vector the rope terminus reply builds).
+    // Nothrow-reserved (#477): an OOM drops this delivery instead of a bad_alloc
+    // abort() on the writer thread — the try_to_iovec discipline (d352998).
     std::vector<std::span<const std::byte>> iov;
-    iov.reserve(3 + value.link_count());
+    if (!tr::detail::try_reserve(iov, 3 + value.link_count())) return;  // OOM — drop
     iov.push_back(head.span());
     iov.push_back(route);
     iov.push_back(std::span<const std::byte>(empty_src));
