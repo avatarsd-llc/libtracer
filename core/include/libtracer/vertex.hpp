@@ -849,24 +849,35 @@ class vertex_t {
      * @return The published LKV pointer — exactly what a concurrent @ref read_stored
      *         observes — so the write path can deliver the stored value (RFC-0008 §D
      *         "deliver exactly what was stored") without recloning the rope.
+     * @retval nullptr The LKV control-block allocation failed (OOM): NOTHING was
+     *         published or appended (#477 nothrow soft-fail — the graph maps this to
+     *         `BACKPRESSURE`; the store verb never aborts the node).
      */
     std::shared_ptr<const rope_t> store(rope_t value, std::pmr::memory_resource* mr = nullptr) {
-        auto sp = mr == nullptr
-                      ? std::make_shared<const rope_t>(std::move(value))
-                      : std::allocate_shared<const rope_t>(
-                            std::pmr::polymorphic_allocator<rope_t>(mr), std::move(value));
-        lkv_.store(sp);  // lock-free publish of the new last-known-value
+        std::shared_ptr<const rope_t> sp = try_make_lkv(std::move(value), mr);
+        if (!sp) return nullptr;  // OOM: nothing published — the caller soft-fails (#477)
+        lkv_.store(sp);           // lock-free publish of the new last-known-value
         {
             vertex_stripe_t& st = vertex_stripe_of(this);  // one lookup per verb (#370)
             const std::lock_guard lock(st.m);
             vertex_ext_t* e = ext_.load(std::memory_order_acquire);
             if (role_ == role_t::STREAM && e != nullptr) {  // STREAM identity always has ext
-                if (!e->history)  // first append allocates the ring (#388 lazy deque)
-                    e->history = std::make_unique<std::deque<std::shared_ptr<const rope_t>>>();
-                e->history->push_back(sp);  // refcount bump — the caller keeps the returned sp
-                const std::size_t keep =
-                    e->settings.history_keep_last ? e->settings.history_keep_last : 1;
-                while (e->history->size() > keep) e->history->pop_front();
+                // The ring's deque legs (shell + map + one node per chunk) throw on OOM
+                // (#477). Probe one conservative per-append bound first (libstdc++'s
+                // 512 B chunk + map/shell slack — every -fno-exceptions MCU target;
+                // wider-chunk hosts keep real exceptions) and on failure SKIP the
+                // append: the ring is bounded-lossy by contract (drain: "entries
+                // trimmed before the drain are lost"), so a pressure-dropped history
+                // entry is valid behavior — the LKV above already published.
+                static constexpr std::size_t kRingAppendProbe = 1024;
+                if (tr::detail::probe_bytes(kRingAppendProbe)) {
+                    if (!e->history)  // first append allocates the ring (#388 lazy deque)
+                        e->history = std::make_unique<std::deque<std::shared_ptr<const rope_t>>>();
+                    e->history->push_back(sp);  // refcount bump — the caller keeps `sp`
+                    const std::size_t keep =
+                        e->settings.history_keep_last ? e->settings.history_keep_last : 1;
+                    while (e->history->size() > keep) e->history->pop_front();
+                }
             }
             ++write_seq_;
             // Waiterless publish skips the condvar entirely (#370): `waiters` only
@@ -936,8 +947,11 @@ class vertex_t {
      *
      * Snapshots under the lock into @p out (caller storage; overwritten); the caller
      * delivers OUTSIDE the lock. Entries trimmed out of the keep-last ring before this
-     * drain are lost (bounded history).
-     * @return The number of entries drained (0 ⇒ nothing appended since the last flush).
+     * drain are lost (bounded history). The snapshot growth is NOTHROW (#477): on OOM
+     * the drain returns 0 WITHOUT advancing the cursor, so the entries re-drain on the
+     * next covering flush — deferred, never lost, never an abort.
+     * @return The number of entries drained (0 ⇒ nothing appended since the last flush,
+     *         or the snapshot could not be allocated — retry on the next flush).
      */
     std::size_t drain_unflushed(std::vector<std::shared_ptr<const rope_t>>& out) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
@@ -946,11 +960,17 @@ class vertex_t {
         const std::uint64_t now = write_seq_;
         if (now == e->last_flushed_seq) return 0;
         const std::uint64_t n_new = now - e->last_flushed_seq;
-        e->last_flushed_seq = now;
-        if (!e->history) return 0;  // seq advanced but no ring — nothing to drain
+        if (!e->history) {  // seq advanced but no ring — nothing to drain
+            e->last_flushed_seq = now;
+            return 0;
+        }
         const auto take =
             static_cast<std::ptrdiff_t>(std::min<std::uint64_t>(n_new, e->history->size()));
-        out.assign(e->history->end() - take, e->history->end());
+        // Nothrow-reserve BEFORE the cursor advance: a failed snapshot leaves the ring
+        // marked un-flushed (deferred delivery), instead of a throwing assign (#477).
+        if (!tr::detail::try_reserve(out, static_cast<std::size_t>(take))) return 0;
+        e->last_flushed_seq = now;
+        out.assign(e->history->end() - take, e->history->end());  // within capacity
         return out.size();
     }
 
@@ -1059,6 +1079,14 @@ class vertex_t {
      * @p inline_buf — no heap allocation AND no dead stack zeroing per publish; a
      * larger subscriber list reserves @p overflow once and fills it instead (then
      * @p overflow is non-empty and holds ALL views).
+     *
+     * Every allocation here is NOTHROW (#477 — this runs on the writer thread's
+     * fan-out, where a bad_alloc is an abort() under `-fno-exceptions`): an
+     * unreservable @p overflow degrades the snapshot to the first `kInlineFanout`
+     * views in @p inline_buf (the rest of this delivery is dropped), and an edge
+     * whose owning copies cannot be cloned is skipped (that one delivery dropped).
+     * The small local fan-out (empty target/link/caller strings) stays allocation-
+     * free end to end, so the hot path cannot even reach a probe.
      * @param inline_buf The caller's raw stack buffer (cleared on entry).
      * @param overflow   The heap fallback for large fan-out (cleared on entry).
      * @return The number of views snapshotted (into whichever buffer was used).
@@ -1067,15 +1095,20 @@ class vertex_t {
         inline_buf.clear();
         overflow.clear();
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        const bool use_heap = subs_.size() > edge_snapshot_t::kCapacity;
-        if (use_heap) overflow.reserve(subs_.size());
+        const bool use_heap = subs_.size() > edge_snapshot_t::kCapacity &&
+                              tr::detail::try_reserve(overflow, subs_.size());
         std::size_t n = 0;
         for (const subscriber_t& s : subs_) {
             if (!s.active) continue;
+            // OOM fallback (reserve failed on a wide list): the inline prefix delivers,
+            // the remainder of this fan-out is dropped — never an abort.
+            if (!use_heap && n == edge_snapshot_t::kCapacity) break;
+            edge_view_t e;
+            if (!try_edge_view_of(s, e)) continue;  // OOM: drop this one edge's delivery
             if (use_heap)
-                overflow.push_back(edge_view_of(s));
+                overflow.push_back(std::move(e));  // reserved above — no reallocation
             else
-                inline_buf.push_back(edge_view_of(s));
+                inline_buf.push_back(std::move(e));
             ++n;
         }
         return n;
@@ -1499,6 +1532,40 @@ class vertex_t {
     }
 
    private:
+    /**
+     * @brief The @ref store LKV allocation (control block + rope), NOTHROW: `nullptr` on
+     *        OOM instead of the bad_alloc that abort()s under the MCU profile's
+     *        `-fno-exceptions` (#477, the engine-task storm crash class).
+     *
+     * Host profile (exceptions on): catch — zero cost on the hot success path, no probe
+     * race. MCU profile: the mem_heap.hpp probe-then-commit discipline; the probe covers
+     * the rope payload + a control-header bound and targets the global heap — exact for
+     * the default resource (every production graph today); an ADR-0039 injected @p mr
+     * keeps its own contract, the probe being a best-effort proxy for it.
+     */
+    [[nodiscard]] static std::shared_ptr<const rope_t> try_make_lkv(
+        rope_t&& value, std::pmr::memory_resource* mr) noexcept {
+        static constexpr std::size_t kCtrlSlack = 4 * sizeof(void*);  // ≥ both mainstream ABIs
+#if defined(__cpp_exceptions)
+        if (!tr::detail::probe_hook_ok(sizeof(rope_t) + kCtrlSlack)) return nullptr;  // test seam
+        try {
+            return mr == nullptr
+                       ? std::make_shared<const rope_t>(std::move(value))
+                       : std::allocate_shared<const rope_t>(
+                             std::pmr::polymorphic_allocator<rope_t>(mr), std::move(value));
+        } catch (...) {
+            // Only the allocation can throw here (the rope move is noexcept), so any
+            // exception — bad_alloc or an injected resource's own type — IS the OOM leg.
+            return nullptr;
+        }
+#else
+        if (!tr::detail::probe_bytes(sizeof(rope_t) + kCtrlSlack)) return nullptr;
+        return mr == nullptr ? std::make_shared<const rope_t>(std::move(value))
+                             : std::allocate_shared<const rope_t>(
+                                   std::pmr::polymorphic_allocator<rope_t>(mr), std::move(value));
+#endif
+    }
+
     // The dispatch view of one slot; call with m_ held. Owning copies of the byte/string
     // fields (the slot may be cleared while dispatch runs outside the lock); the route
     // copy is a refcount clone (ADR-0041 §2 — keeps it alive across an unsubscribe).
@@ -1521,6 +1588,32 @@ class vertex_t {
             e.caller = s.remote->caller;
         }
         return e;
+    }
+
+    /**
+     * @brief The NOTHROW twin of `edge_view_of` for the writer-thread fan-out snapshot
+     *        (#477): fill @p out with the slot's dispatch view, soft-failing instead of
+     *        throwing when an owning copy (target key / link / caller) cannot allocate.
+     *
+     * A local callback edge copies nothing that allocates (empty key, no cold half, the
+     * route is a refcount clone), so the hot small-fan-out path never reaches a probe.
+     * `edge_view_of` stays for the admission-time latch (control plane). Call with the
+     * stripe lock held.
+     * @retval false An owning copy failed (OOM) — drop this edge's delivery; @p out is
+     *         partially filled and must be discarded.
+     */
+    [[nodiscard]] bool try_edge_view_of(const subscriber_t& s, edge_view_t& out) const noexcept {
+        out.callback = s.callback;
+        out.callback_ctx = s.callback_ctx;
+        if (!tr::detail::try_assign(out.target_key, s.target_key)) return false;
+        if (s.remote != nullptr) {
+            if (!tr::detail::try_assign(out.link, s.remote->link) ||
+                !tr::detail::try_assign(out.caller, s.remote->caller))
+                return false;
+            out.return_route = s.remote->return_route;  // refcount clone — nothrow
+            out.delivery_compact = s.remote->delivery_compact;
+        }
+        return true;
     }
 
     /** @brief The slot index of the descriptor-table entry named @p name, or `-1` (no

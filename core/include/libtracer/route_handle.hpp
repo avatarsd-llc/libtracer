@@ -215,6 +215,29 @@ class route_handle_t {
                                                     std::span<const std::byte> payload);
 
 /**
+ * @brief NOTHROW `encode_advertise` — build the frame into @p out, soft-failing on OOM
+ *        instead of a bad_alloc `abort()` under `-fno-exceptions` (#477).
+ *
+ * For the writer-thread delivery path (a compact flow's first delivery re-advertises); the
+ * throwing form stays for setup-time callers. A dropped ADVERTISE self-heals: the peer's
+ * HANDLE_NACK on the unknown label prompts a re-advertise (RFC-0004 §E.1).
+ * @retval false The frame buffer could not be allocated — @p out is left empty.
+ */
+[[nodiscard]] bool try_encode_advertise(std::vector<std::byte>& out, std::uint16_t label,
+                                        std::span<const std::byte> route_path) noexcept;
+
+/**
+ * @brief NOTHROW `encode_compact` — build the frame into @p out, soft-failing on OOM
+ *        instead of a bad_alloc `abort()` under `-fno-exceptions` (#477).
+ *
+ * For the writer-thread per-delivery egress: on OOM the delivery drops (a subscriber
+ * missing one value under heap exhaustion is valid delivery behavior), never an abort.
+ * @retval false The frame buffer could not be allocated — @p out is left empty.
+ */
+[[nodiscard]] bool try_encode_compact(std::vector<std::byte>& out, std::uint16_t label,
+                                      std::span<const std::byte> payload) noexcept;
+
+/**
  * @brief Encode a HANDLE_NACK: `HANDLE_NACK{ VALUE label(u16) }` (stale-label signal).
  * @param label The unknown/stale label that prompted the NACK.
  * @return The framed HANDLE_NACK TLV bytes, sent back over the inbound link.

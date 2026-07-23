@@ -822,6 +822,12 @@ class graph_t {
     // immutable parent links, so no lock. Used only at sweep/observed-write/wiring
     // frequency (the RFC-0008 byte-keyed sweep sets, `create_child` key composition).
     [[nodiscard]] static std::vector<std::byte> build_key(const vertex_t* v);
+    // The NOTHROW twin of build_key for the writer-thread store/delivery legs (#477):
+    // renders into `out` via the mem_heap.hpp nothrow growth primitives; false on OOM
+    // (out is cleared), so a sweep-set mark/drain leg drops or defers instead of a
+    // bad_alloc abort() under the MCU profile's -fno-exceptions.
+    [[nodiscard]] static bool try_build_key(const vertex_t* v,
+                                            std::vector<std::byte>& out) noexcept;
     // Bump every strict descendant's listeners_above_ by `delta` (RFC-0005 bookkeeping) —
     // a child-link subtree walk (placeholders included, so a later fill inherits a
     // correct count). Call with map_mutex_ held (shared suffices; counters are atomics).

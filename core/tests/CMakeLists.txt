@@ -233,6 +233,13 @@ target_link_libraries(graph_value_backend_test PRIVATE libtracer)
 libtracer_test_warnings(graph_value_backend_test)
 add_test(NAME graph_value_backend COMMAND graph_value_backend_test)
 
+# #477 — the store/delivery path's nothrow soft-fail discipline: OOM injected through
+# tr::detail::probe_fail_hook (store => BACKPRESSURE, delivery => drop/defer, never abort).
+add_executable(graph_oom_softfail_test graph_oom_softfail_test.cpp)
+target_link_libraries(graph_oom_softfail_test PRIVATE libtracer)
+libtracer_test_warnings(graph_oom_softfail_test)
+add_test(NAME graph_oom_softfail COMMAND graph_oom_softfail_test)
+
 # ADR-0060 §2 thread-safe pool value_backend: concurrent alloc + cross-thread reclaim
 # (the tsan job in core-ci.yml builds this with -fsanitize=thread and runs it).
 add_executable(mem_sync_pool_test mem_sync_pool_test.cpp)

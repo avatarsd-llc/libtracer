@@ -205,14 +205,18 @@ struct branch_node_t {
 
     std::vector<open_t> stack;
     // Validate a POINT node's shape (structured, trailer-less, leading NAME) and
-    // open it with the sibling cursor past that NAME.
+    // open it with the sibling cursor past that NAME. The open-node stack grows
+    // NOTHROW (#477 — a branch write runs on the writer thread): OOM soft-fails the
+    // whole branch write as BACKPRESSURE (the store-leg status), never an abort.
     const auto open = [&a, &stack](std::uint32_t node, std::vector<std::byte> k) -> result_t<void> {
         if (!a[node].opt.pl || !trailer_less(a[node]))
             return std::unexpected(status_t::TYPE_MISMATCH);
         const std::uint32_t cn = wire::tlv_arena_t::first_child(node);
         if (cn >= a[node].end || a[cn].type != type_t::NAME)
             return std::unexpected(status_t::TYPE_MISMATCH);
-        stack.push_back(open_t{.node = node, .next = a.next_sibling(cn), .key = std::move(k)});
+        if (!detail::try_push_back(
+                stack, open_t{.node = node, .next = a.next_sibling(cn), .key = std::move(k)}))
+            return std::unexpected(status_t::BACKPRESSURE);
         return {};
     };
     if (const result_t<void> o = open(root, std::move(key)); !o) return std::unexpected(o.error());
@@ -228,7 +232,8 @@ struct branch_node_t {
             bn.store = std::move(top.store);
             bn.subtree_has_value = subtree_value;
             bn.key = std::move(top.key);
-            out.push_back(std::move(bn));
+            if (!detail::try_push_back(out, std::move(bn)))  // nothrow plan growth (#477)
+                return std::unexpected(status_t::BACKPRESSURE);
             stack.pop_back();
             if (stack.empty()) return subtree_value;
             stack.back().subtree_value = stack.back().subtree_value || subtree_value;
@@ -246,8 +251,14 @@ struct branch_node_t {
             const std::uint32_t cn = wire::tlv_arena_t::first_child(ci);
             if (cn >= c.end || a[cn].type != type_t::NAME)
                 return std::unexpected(status_t::TYPE_MISMATCH);
-            std::vector<std::byte> child_key = top.key;
-            wire::emit_name(child_key, a[cn].body);
+            // The child key = parent key + one NAME record, composed NOTHROW (#477):
+            // reserve the exact final size (≤ 6-byte header even if emit_tlv widens),
+            // then the copy + emit cannot reallocate.
+            std::vector<std::byte> child_key;
+            if (!detail::try_reserve(child_key, top.key.size() + 6 + a[cn].body.size()))
+                return std::unexpected(status_t::BACKPRESSURE);
+            child_key.assign(top.key.begin(), top.key.end());  // within capacity
+            wire::emit_name(child_key, a[cn].body);            // within capacity
             // `top` is invalidated by the push inside open().
             if (const result_t<void> o = open(ci, std::move(child_key)); !o)
                 return std::unexpected(o.error());
@@ -556,6 +567,26 @@ std::vector<std::byte> graph_t::build_key(const vertex_t* v) {
     return key;
 }
 
+bool graph_t::try_build_key(const vertex_t* v, std::vector<std::byte>& out) noexcept {
+    // The NOTHROW twin of build_key for the writer-thread store/delivery legs (#477):
+    // the single exact allocation is a throwing vector construction there — an abort()
+    // under -fno-exceptions on OOM — so those call sites render through this and drop
+    // (or defer) their leg on failure instead. Same two-pass fill, same immutability
+    // guarantees; read-plane callers keep build_key.
+    std::size_t total = 0;
+    for (const vertex_t* n = v; n->parent() != nullptr; n = n->parent()) total += n->name().size();
+    out.clear();
+    if (!detail::try_reserve(out, total)) return false;
+    out.resize(total);  // within capacity — no reallocation, cannot throw
+    std::size_t w = total;
+    for (const vertex_t* n = v; n->parent() != nullptr; n = n->parent()) {
+        const std::span<const std::byte> rec = n->name().bytes();
+        w -= rec.size();
+        std::copy(rec.begin(), rec.end(), out.begin() + static_cast<std::ptrdiff_t>(w));
+    }
+    return true;
+}
+
 std::optional<vertex_handle_t> graph_t::find(std::span<const std::byte> key) const {
     vertex_t* p = find_ptr(key);
     if (p == nullptr) return std::nullopt;
@@ -674,7 +705,15 @@ void graph_t::dispatch_edge_target(const edge_view_t& e, const rope_t& value) {
     // the target's own logic (a controller re-emits on its execution; a handler re-emits
     // when it chooses), so a dispatch-level subscription cycle cannot form — no depth cap,
     // no dedup, no drain queue. An app wanting pure relay subscribes the consumer directly.
-    (void)store_value(target, value);  // value cloned (const ref -> store_value's by-value)
+    //
+    // The delivery clone of `value` is NOTHROW (#477): a spilled (> kInline links) rope's
+    // copy grows a heap chain that threw bad_alloc — an abort() under -fno-exceptions on
+    // the writer thread. try_reserve is a no-op while the chain fits inline (the hot
+    // case), and on OOM this one delivery leg drops.
+    rope_t clone;
+    if (!clone.try_reserve(value.link_count())) return;  // OOM: drop this delivery leg
+    clone.concat(value);  // reserved (or inline) — the appends cannot reallocate
+    (void)store_value(target, std::move(clone));
 }
 
 void graph_t::dispatch_edge_remote(const edge_view_t& e, const rope_t& value) {
@@ -765,7 +804,14 @@ result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t
     }
     // The storage verb owns the invariant order: LKV publish (lock-free) BEFORE the
     // lock; ring append + keep-last trim + seq bump + await wake under it.
-    return v->store(std::move(value), mr_);
+    std::shared_ptr<const rope_t> sp = v->store(std::move(value), mr_);
+    // vertex_t::store soft-fails its LKV allocation nothrow (#477): null here (a
+    // non-handler role always publishes a pointer) is exactly OOM — report it as the
+    // injected-resource status (BACKPRESSURE, ADR-0060 §3), never abort. Distinct from
+    // the handler leg above, whose null shared_ptr is the "consumed, nothing stored"
+    // SUCCESS sentinel.
+    if (!sp) return std::unexpected(status_t::BACKPRESSURE);
+    return sp;
 }
 
 void graph_t::bubble_up(vertex_t* v, const rope_t& value) {
@@ -812,11 +858,16 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
     if (v->role() == role_t::HANDLER) {
         // A handler stores no LKV (the user handler consumes the value), so the
         // delivery clone survives here — the cold path only. The hot roles below
-        // deliver the exact published pointer store_value hands back instead.
-        const rope_t notify = value;  // refcount clone — store_value consumes `value`
+        // deliver the exact published pointer store_value hands back instead. The
+        // clone is NOTHROW (#477): a spilled chain's copy would abort on OOM under
+        // -fno-exceptions; on failure the handler still runs (the write succeeds) and
+        // only the subscriber delivery drops.
+        rope_t notify;  // refcount clone — store_value consumes `value`
+        const bool can_notify = notify.try_reserve(value.link_count());
+        if (can_notify) notify.concat(value);
         const result_t<std::shared_ptr<const rope_t>> stored = store_value(v, std::move(value));
         if (!stored) return std::unexpected(stored.error());
-        deliver_vertex(v, notify);
+        if (can_notify) deliver_vertex(v, notify);
         clear_pending(v);  // eager delivery flushes any pending mark a prior assign left
         return {};
     }
@@ -862,6 +913,11 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
     // than letting decode_into read it back as a malformed (TYPE_MISMATCH) value.
     const view_t head = value.materialize(*value_backend_);
     if (head.empty() && value.total_length() != 0) return std::unexpected(status_t::BACKPRESSURE);
+    // KNOWN #477 residual: a branch tree whose decode arena outgrows this slab draws
+    // from the monotonic's THROWING default upstream (a pmr resource cannot soft-fail).
+    // Typical branch writes stay slab-bound; converting the overflow leg needs a
+    // node-counting pre-pass (enumerated in the #477 sweep, deliberately not redesigned
+    // here).
     std::array<std::byte, 4096> stack;
     std::pmr::monotonic_buffer_resource mr(stack.data(), stack.size());
     const std::expected<wire::tlv_arena_t, wire::err_t> arena = wire::decode_into(head.bytes(), mr);
@@ -877,11 +933,15 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
         return std::unexpected(status_t::INVALID_PATH);
 
     // The written tree is rooted AT `v`: render its full key once (ADR-0057
-    // render-on-demand) — the node-key prefix of the whole decomposition plan.
-    const std::vector<std::byte> root_key = build_key(v);
+    // render-on-demand) — the node-key prefix of the whole decomposition plan. The key
+    // render and its parse copy are NOTHROW (#477): OOM soft-fails the branch write as
+    // BACKPRESSURE, the injected-resource status, never an abort on the writer thread.
+    std::vector<std::byte> root_key;
+    if (!try_build_key(v, root_key)) return std::unexpected(status_t::BACKPRESSURE);
+    std::vector<std::byte> parse_key;
+    if (!detail::try_assign(parse_key, root_key)) return std::unexpected(status_t::BACKPRESSURE);
     std::vector<branch_node_t> plan;  // post-order; plan.back() is the root
-    const result_t<bool> parsed =
-        parse_branch_node(a, 0, head, std::vector<std::byte>(root_key), plan);
+    const result_t<bool> parsed = parse_branch_node(a, 0, head, std::move(parse_key), plan);
     if (!parsed) return std::unexpected(parsed.error());
     if (!*parsed) return {};  // a value-free branch is a no-op write
 
@@ -894,7 +954,8 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
         const branch_node_t* node;
     };
     std::vector<site_t> sites;
-    sites.reserve(plan.size());
+    if (!detail::try_reserve(sites, plan.size()))  // nothrow (#477): OOM => BACKPRESSURE
+        return std::unexpected(status_t::BACKPRESSURE);
     for (const branch_node_t& node : plan) {
         if (node.store.empty()) continue;
         vertex_t* vx = nullptr;
@@ -979,21 +1040,34 @@ void graph_t::propagate_impl(vertex_t* v) {
     // and ITERATE the UNCONDITIONAL set over it. A subtree is a contiguous prefix range of
     // the key order (RFC-0008 §B). Snapshot the keys under sweep_mutex_, then deliver
     // outside it — delivery re-enters the graph (fan_out/re-dispatch), like fan_out itself.
-    const std::vector<std::byte> lo = build_key(v);
+    // Every allocation in the snapshot is NOTHROW (#477): an OOM key render skips the
+    // sweep, and an OOM mid-collection stops it BEFORE draining the affected mark — the
+    // undelivered entries stay in their sets, so the sweep defers instead of aborting.
+    std::vector<std::byte> lo;
+    if (!try_build_key(v, lo)) return;  // OOM: marks retained — the next sweep retries
     const auto in_subtree = [&lo](const std::vector<std::byte>& k) {
         return k.size() >= lo.size() && std::equal(lo.begin(), lo.end(), k.begin());
     };
     std::vector<std::vector<std::byte>> to_deliver;
+    // Nothrow copy of one sweep key into the delivery snapshot; false stops the sweep.
+    const auto collect = [&to_deliver](const std::vector<std::byte>& k) noexcept {
+        std::vector<std::byte> copy;
+        if (!detail::try_assign(copy, k)) return false;
+        return detail::try_push_back(to_deliver, std::move(copy));
+    };
     {
         const std::lock_guard lock(sweep_mutex_);
         for (auto it = pending_.lower_bound(lo); it != pending_.end() && in_subtree(*it);) {
-            if (it->size() != lo.size()) to_deliver.push_back(*it);  // strict descendant
+            // Collect BEFORE the drain: an OOM leaves this and later marks for the next
+            // covering sweep instead of silently losing them.
+            if (it->size() != lo.size() && !collect(*it)) break;  // strict descendant
             it = pending_.erase(it);  // drain (v itself, if present, was delivered above)
             pending_count_.fetch_sub(1, std::memory_order_relaxed);
         }
         for (auto it = unconditional_.lower_bound(lo);
              it != unconditional_.end() && in_subtree(*it); ++it) {
-            if (it->size() != lo.size()) to_deliver.push_back(*it);  // iterate, do not drain
+            // Iterate, do not drain; an OOM defers the rest to the next sweep.
+            if (it->size() != lo.size() && !collect(*it)) break;
         }
     }
     for (const std::vector<std::byte>& k : to_deliver) {
@@ -1008,8 +1082,15 @@ void graph_t::mark_pending(vertex_t* v) {
     // unobserved write off the shared lock, RFC-0005 listeners gate).
     if (v->delivery_mode() != delivery_mode_t::IF_NEWER) return;
     if (v->own_subs() == 0 && v->listeners_above() == 0) return;
-    std::vector<std::byte> key = build_key(v);  // outside the lock (a lock-free parent walk)
+    // The key render and the set-node insert both allocate on the writer thread —
+    // NOTHROW them (#477): on OOM the pending mark is dropped (that deferred delivery
+    // is shed, exactly like an eager delivery leg under the same pressure), never an
+    // abort. The node probe bounds both mainstream ABIs' RB-tree node + key header.
+    static constexpr std::size_t kSetNodeProbe = 8 * sizeof(void*) + sizeof(std::vector<std::byte>);
+    std::vector<std::byte> key;  // outside the lock (a lock-free parent walk)
+    if (!try_build_key(v, key)) return;
     const std::lock_guard lock(sweep_mutex_);
+    if (!detail::probe_bytes(kSetNodeProbe)) return;
     if (pending_.insert(std::move(key)).second)
         pending_count_.fetch_add(1, std::memory_order_relaxed);
 }
@@ -1021,7 +1102,11 @@ void graph_t::clear_pending(vertex_t* v) {
     // no key render, no sweep lock. Racing a concurrent mark_pending here leaves the mark
     // for the next covering sweep — an ordering the locked erase already permitted.
     if (pending_count_.load(std::memory_order_relaxed) == 0) return;
-    const std::vector<std::byte> key = build_key(v);  // outside the lock
+    // Nothrow key render (#477): on OOM keep the stale mark — at worst the next covering
+    // sweep re-delivers the current LKV once, an ordering the locked-erase race below
+    // already permitted. Never an abort on the writer thread.
+    std::vector<std::byte> key;  // outside the lock
+    if (!try_build_key(v, key)) return;
     const std::lock_guard lock(sweep_mutex_);
     if (pending_.erase(key) != 0) pending_count_.fetch_sub(1, std::memory_order_relaxed);
 }
