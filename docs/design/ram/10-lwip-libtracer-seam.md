@@ -2,6 +2,12 @@
 
 *A zero-copy audit of the ingress/egress boundary between the lwIP socket layer (and `esp_http_server`) and libtracer's rope tier, targeted at the single-core ESP32-C6 (strawberry-fw). Every claim is anchored `file:line` against `/home/sd/prj/20260503_libtracer`.*
 
+> **⚠ Second-pass errata (2026-07-23):** the re-audit corrected the ingress-copy anchoring below (this doc
+> conflates `flatten()` at `rope.cpp:12` with the ingress ownership copy — the real ingress copies are the
+> **recv** sites `transport_tcp.cpp:229` / `httpd_ws_link.cpp:332-338`, which C1/C4 anchor correctly;
+> `rope.cpp:12` is the **multi-link durable-store flatten**, C11). Full ledger:
+> [`30-second-pass-reconciliation.md`](30-second-pass-reconciliation.md) §Corrections 6.
+
 ## 0. Thesis
 
 libtracer's ingress doctrine is RDMA-shaped: **copy each byte once at the wire, then zero-copy forever.** A frame is received into a refcounted `segment_t`; every downstream view — routed suffix, child TLV, stored value, reply span — is a refcount-bumped subview (`rope.hpp` `subrope`), never a byte copy (`segment.hpp:124-127`, a relaxed increment). The question this audit answers is not "is the design zero-copy?" (it is, by construction) but **"where does the *implementation* still flatten, is each flatten fundamental or removable, and what does removing it actually save — stack, heap, fragmentation, or latency?"**

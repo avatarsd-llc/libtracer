@@ -8,6 +8,12 @@ single-core ESP32-C6 (strawberry-fw). Read in order; each stands alone but they 
 | 0 | [**Bounded-reactor node profile**](00-bounded-reactor-node-profile.md) | *The program.* Why the RAM goes where it does, the single-core rationale, the target architecture, and the four committed slices + retirement. |
 | 1 | [**The lwIP ↔ libtracer seam**](10-lwip-libtracer-seam.md) | *Is the seam optimized?* Full RX/TX path per transport, a 16-row copy inventory, the esp_http_server-vs-raw-lwIP threadless-vs-zero-copy tradeoff, and O1–O7 ranked optimizations. |
 | 2 | [**Zero-copy & the flatten question**](20-zero-copy-and-flatten.md) | *Do we really need to flatten?* All 12 flatten points enumerated, the 4096 on-stack arena dissected, the rope_cursor migration status, and a ranked removal plan. |
+| 3 | [**Second-pass reconciliation**](30-second-pass-reconciliation.md) | *Does it all hold up?* A 9-dimension adversarial re-audit against current source: what STANDS, 14 documentation/attribution corrections, and 13 new gaps (two blockers) to close before banking numbers. |
+
+> **Second-pass verdict (2026-07-23):** the substantive thesis survives intact — see doc 3. The corrections
+> are documentation honesty + attribution + one composition contradiction (pin `can_en`) + one sequencing
+> fix (couple S4 with S2), **not** design changes. Two measurements gate any banked number: a config-pinned
+> HIL heap read and a deep-path **stress** stack census.
 
 ## The headline findings (adversarially verified)
 

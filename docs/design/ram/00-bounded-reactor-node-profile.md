@@ -4,6 +4,11 @@
 > esp_http_server). **Author:** RAM-leanness grill, 2026-07-23. **Companion docs:**
 > [`10-lwip-libtracer-seam.md`](10-lwip-libtracer-seam.md) (the lwIP seam) and
 > [`20-zero-copy-and-flatten.md`](20-zero-copy-and-flatten.md) (the flatten question).
+>
+> **⚠ Second-pass errata (2026-07-23):** a 9-dimension adversarial re-audit corrected several figures and
+> causal attributions in this doc — full ledger in
+> [`30-second-pass-reconciliation.md`](30-second-pass-reconciliation.md). The thesis stands unchanged; the
+> load-bearing fixes are applied inline below and marked **[errata]**.
 
 This document is the spine: it states the problem, the design center, the measured current state,
 and the committed multi-slice program to make a **unified transport→graph** node **RAM-lean on a
@@ -16,17 +21,25 @@ depends on (the lwIP I/O seam, and whether we need to flatten at all).
 
 Running libtracer's graph/net plane alongside (and eventually replacing) strawberry-fw's legacy stack
 costs **+37 KB idle heap over v1.8.0** on the Gorshok ESP32-C6 (measured: boot-free 216 KB → idle-free
-63 KB; v1.8.0 idle-free ~101 KB). The largest contiguous free block also collapses **84 KB → 44 KB** — a
-fragmentation symptom, not idle bytes.
+63 KB; v1.8.0 idle-free ~101 KB — reconcile the internal 37-vs-38 KB rounding, both HIL-only). The largest
+contiguous free block also collapses **84 KB → 44 KB** — a fragmentation symptom, not idle bytes.
+
+> **[errata] This figure is the `can_en=0` bench image (both 12 KB transport threads present).** On a
+> `can_en=1` production leaf the strawberry CAN domain bus owns the single TWAI controller, so
+> `make_can_link` steps aside (`can_link_esp.cpp:27-33`), the libtracer CAN thread vanishes, and the
+> marginal is **~25 KB, not 37**. Graph-over-CAN and the domain bus are **mutually exclusive on one TWAI
+> controller** — the shipped `can_en` must be pinned before banking any number (recon doc §New-Gaps 1).
 
 An exhaustive source audit + a live `/system/tasks` census established that **this is not
 inefficiency** — libtracer is lean, and the RAM is the legitimate cost of standing up a whole
 comms stack v1.8.0 never had. There is **no dormant lever hiding a large idle-heap win.** The
-marginal decomposes (census-corrected) as:
+marginal decomposes (census-corrected) as follows. **[errata]** This is a *loose bottom-up estimate* that
+totals ~40–47 KB against the ~37 KB *measured* marginal (rows are approximate and partly **shared with
+v1.8.0**); read it as attribution, not a reconciled sum.
 
 | Consumer | ~KB | Nature |
 |---|---:|---|
-| 2× transport `std::thread` stacks (CAN twai + TCP d2d), each `pcfg.stack_size = 12288` | ~24 | correctness-sized for **inline** `/unit` batch-apply (8 KB measured-overflowed); ~22 KB idle-unused |
+| 2× transport `std::thread` stacks (CAN twai + TCP d2d), each `pcfg.stack_size = 12288` | ~24 | correctness-sized for **inline** `/unit` batch-apply (8 KB measured-overflowed); ~22 KB idle-unused. **[errata]** the CAN thread exists only at `can_en=0`; at `can_en=1` this row is ~12 KB |
 | graph durable values (LKV control blocks + segments + bytes, on the default heap) | ~7.5 | lean-by-design; drives fragmentation |
 | vertex tree + cold blocks (`vertex_t` ~72–88 B × ~50) | ~9 | already diet'd (#361/#380); insert-only |
 | node service backends (auth/net/sys/ota/ctrl_batch/catalog) | ~3.5 | required seams |
@@ -53,9 +66,13 @@ Three commitments constrain every choice below:
 3. **The single-core fact is the lever.** The ESP32-C6 is **single-core**. Thread-per-connection
    therefore buys it **zero parallelism** — every transport thread is pure RAM overhead with no
    throughput return. An async **reactor** (one poll loop for all sockets) is *strictly* leaner on a
-   single-core target **with no latency cost**, because nothing was parallelizing. This is the crux
+   single-core target **with no throughput cost**, because nothing was parallelizing. This is the crux
    that makes the whole program safe: the RAM-lean profile and the HPC-fast profile diverge exactly
-   along the core-count axis.
+   along the core-count axis. **[errata]** "No throughput cost" is exact; there is, however, a **bounded
+   tail-latency tradeoff under concurrency** — the reactor services each ready fd *run-to-completion*
+   (`transport_ws.cpp:527-528`), so a deep `/unit` apply head-of-line-blocks other ready sockets for its
+   duration, which preemptive thread-per-conn does not. Slice 4 (bounded `/unit`) is the fix and should be
+   sequenced *with* the reactor, not after it (recon doc §New-Gaps 3). Magnitude is HIL-only.
 
 **Definition — the bounded-reactor node profile:** on a single-core target, run **one poll reactor**
 for all sockets, back the graph value store and transport RX from **one bounded slab**, and keep the
@@ -65,7 +82,11 @@ opposite profile (thread-per-conn, heap, contiguous-flatten) and are untouched.
 ## 3. Current thread & memory census (ground truth, 10.5.60.177)
 
 From `bench/taskcensus.ts` (reads `/system/tasks`): 17 tasks, 66 KB total stack, **46.5 KB of
-provably-unused stack headroom** (min-ever-free − 512 B margin). The two libtracer threads:
+census-apparent stack headroom** (min-ever-free − 512 B margin). **[errata]** "census-apparent," not
+"provably-unused": a FreeRTOS HWM is cumulative-worst-*since-boot* and only trustworthy for deep paths that
+already fired — an unstressed board leaves MQTT-discovery/TLS/LVGL-redraw/httpd-large-request frames
+unfired, inflating the figure. **A deep-path stress census is the single most load-bearing unmade
+measurement; no stack shrink may be banked before it** (recon doc §New-Gaps 2). The two libtracer threads:
 
 ```
 main(=libtracer std::thread)  stack 12288  used <600 B   → CAN twai dispatch
@@ -141,6 +162,10 @@ here are *fragmentation* + *stack high-water*, not big idle-heap bytes.
   `segment_t`, adopt it, `deliver` **owning** (the TCP/UDP shape). Kills the per-frame
   `new(nothrow)` (httpd_ws_link.cpp:332) and the O(n²) `asm_buf` reassembly — the ~27 KB/session
   allocation/fragmentation class — and hands the rope tier an owned segment.
+  - **[errata]** `httpd_ws_recv_frame` demands **one contiguous buffer ≥ frame.len** (`httpd_ws.c:353-386`),
+    so rope-chaining into slot-segments is legal **only at the RFC-6455 fragment boundary**. A large
+    *unfragmented* frame (`kMaxFrameBytes=32768` peer-controlled vs 1472 B slots) forces a **big-slot class
+    or a heap fallback** — an added per-target policy decision. Killing `new`/`asm_buf` still stands.
 - **3c — pool the TX gather buffer.** The ESP WS TX gather-flatten (httpd_ws_link.cpp:488) is
   **fundamental within the threadless httpd seam** (async `httpd_queue_work` + contiguous send API) — do
   **not** chase removing it. Draw it from the slab to contain the OOM/fragmentation surface.
@@ -149,7 +174,7 @@ here are *fragmentation* + *stack high-water*, not big idle-heap bytes.
   not a payload copy**, and `rope_cursor` alone does **not** remove it (rope_cursor is a byte *source*;
   the arena is structure *storage*). Removing it needs a **streaming, walk-callback-driven decode**; the
   RAM **relocates stack→pool (net-neutral)** but drops **~4 KB stack high-water** off the deepest task —
-  and stack is the binding constraint here (the httpd task was bumped 4 KB→12 KB after a measured
+  and stack is the binding constraint here (the httpd task was bumped 4 KB→**8 KB** after a measured
   overflow). Pair it with a **node-counting pre-pass** to convert the #477 throwing-overflow `abort()`
   into a BACKPRESSURE soft-fail. Note: the `rope_cursor` migration is **mostly already shipped** (the FWD
   terminus migrated — `resolve_terminus_rope`); the header comment calling it an unfinished "⑤/⑥
@@ -164,23 +189,42 @@ transaction is on one stack) to **per-unit atomic + backpressure** (apply one un
 the sender, next unit). This bounds the deep transaction's depth and peak memory to *one unit*, letting
 the reactor/CAN stack floor drop toward the shallow `STORED_VALUE` path.
 - **Trade:** loses cross-unit atomicity (a batch can partially apply). Per-unit atomicity is retained.
+- **[errata]** Slice 4 does **not** lower the *stack floor* — the 12 KB is set by the 4096 decode arena
+  (graph.cpp:929) + per-unit projection depth (`web_server.c:114`, ADR-0075/0088), **not** batch atomicity
+  (apply loops unwind between units, so the floor doesn't scale with batch size). The **stack-floor win
+  belongs to Slice 3d** (streaming decode kills the arena); Slice 4 lowers the *heap* staged-list peak and
+  rollback scope, and — more importantly — is the **latency co-requisite of the reactor (S2)**: it chops
+  the run-to-completion quantum to one unit, fixing the §2 head-of-line tradeoff. Sequence S4 **with** S2.
 - **Governance:** RFC (the `/unit` wire/semantics contract changes). **Verify:** HIL stack high-water
   under a real multi-unit apply over CAN + WS.
 
 ## 6. Retirement (parallel track, ~10 KB, delta-relevant)
-Independent of the above: retire the legacy `io_dispatch` task (4096 B) + `io_layer`/`event_bus`/
-`io_snapshot`. v1.8.0 keeps these, so shedding them from the current image improves the *delta*.
+Independent of the above: retire the legacy `io_dispatch` task (4096 B) + `io_layer`/`event_bus`.
+v1.8.0 keeps these, so shedding them from the current image improves the *delta*.
 See [`project_legacy_retirement_plan`].
+> **[errata]** The forward ~10 KB is **two** 4096 B tasks — `io_dispatch` **and** `evt_bus`
+> (`event_bus.c:133`, created via `main.c:725`) — plus ~2 KB of io_layer/event_bus queues & subscriber
+> tables. `io_snapshot` is **already retired** (no component dir) → zero forward savings. This lever is
+> strawberry-side legacy that none of these `ram/` docs audit at file:line — do a dedicated source audit
+> before summing −10 KB into any parity claim (`io_layer` is a hard `REQUIRES` of `display_lvgl`, so
+> migrate consumers first). Recon doc §New-Gaps 10.
 
 ## 7. Expected outcome & honesty
 
 | Lever | Idle Δ | Fragmentation | Core? |
 |---|---:|---|---|
 | S1 WS-for-btb | −12 KB | + | no |
-| S2 reactor (dials → 0) | −N×~4–12 KB | + | yes (gated) |
+| S2 reactor (dials → 0) | −N×~4–12 KB (**N=0 today**) | + | yes (gated) |
 | S3 bounded slab | small idle + | ++ | yes (gated) |
-| S4 bounded `/unit` | stack floor ↓ | + | strawberry (RFC) |
-| Retirement | ~−10 KB | — | no |
+| S4 bounded `/unit` | heap peak ↓ + **latency (HOL) fix** | + | strawberry (RFC) |
+| Retirement | ~−10 KB (two 4096 tasks) | — | no |
+
+> **[errata]** S4's stack-floor entry was reassigned to S3d (streaming decode kills the 4096 arena);
+> S4's own contribution is the heap staged-list peak + the reactor head-of-line-latency fix. S2's idle Δ
+> is **N=0** on the measured non-dialing leaf (zero dial threads today) — its value there is latency /
+> threadless-mesh scaling, not idle-heap. The −12/−10/−N deltas target **disjoint** objects (no double-
+> count), but S1's −12 KB carries an S1 **reliability** tradeoff: folding d2d onto the shared 8-socket
+> httpd pool lets a browser hard-refresh LRU-evict a live mesh peer (recon doc §New-Gaps 4).
 
 **Honest ceiling:** a strict *beat* of v1.8.0 on idle heap is not guaranteed — libtracer is *adding*
 functionality v1.8.0 lacks. But S1 + S2 + retirement plausibly reach **near/at parity**, and the
@@ -204,5 +248,7 @@ Still open:
 - **Single-core pool internals:** interrupt-disable crit-section (docs' recommendation, ISR-safe) vs a
   lock-free MPSC free list — which fits {one reactor + one CAN thread + app writers} best?
 - **`/unit` atomicity RFC (Slice 4):** is cross-unit atomicity ever relied on by a client, or is per-unit
-  atomicity + backpressure a safe contract change? This also lets the **httpd task stack** (12 KB, sized
-  for the in-call batch-apply) drop — the batch-apply depth is what forces it there.
+  atomicity + backpressure a safe contract change? **[errata]** the strawberry httpd task is **8 KB**
+  (adopting `httpd_ws_link_t` ctor, `libtracer_node.cpp:383`; `TASK_STACK_HTTPD=8192`) — `kHttpdTaskStack
+  =12288` is dead code on-target (owning ctor only). The batch-apply depth (decode arena + projection) is
+  what forces it there, and Slice 3d (not S4) is what lowers it.
