@@ -14,6 +14,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **A SUCCESS reply whose assembly OOMs now replies an addressed `BACKPRESSURE`, never a
+  silent drop.** A composed-root READ (`read_subtree_folded`, RFC-0005 §C) serves a folded
+  hundreds-of-links snapshot; the fold itself is nothrow-guarded, but it can SUCCEED and
+  then the reply builder's own link-table reserve — a second large contiguous block, one
+  link larger — fail on a fragmented heap. `op_resolver_t::resolve`'s success sites
+  previously returned that empty rope, which `fwd_router_t`'s `link_count() == 0` guard
+  dropped with NO reply at all; a WebSocket client read the missing reply as a dead session
+  and churned teardown+redial (each redial re-primed the same failing snapshot, so the page
+  stayed wedged — and the churn fed the dead-peer accounting). The reply builder now (a)
+  returns an empty rope on a head-segment alloc failure instead of a headerless/malformed
+  frame, and (b) wraps every READ/WRITE/AWAIT/`:subscribers[]` success reply in
+  `or_backpressure`, turning an empty (OOM) reply into an addressed
+  `STATUS{ ERROR{ VALUE tr::flow::backpressure } }` the client falls back on over the same
+  link. The `BACKPRESSURE` reply's only allocation is a 14-byte head segment, so it succeeds
+  on exactly the heap that could not reserve the snapshot. Non-OOM replies are byte-identical.
+  `graph_oom_softfail_test` gains a composed-read case that fails without the wrap.
+
 - **The residual writer-thread store/delivery allocations are nothrow soft-fail (#477) —
   drop or `BACKPRESSURE`, never `abort()`.** The 2026-07-22 storm HIL reproduced the
   #453/#454 failure class on the ENGINE task: a throwing `operator new` reachable from the

@@ -423,21 +423,24 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
     rope_t rope;
     // Reserve the reply chain (head + one link per shared payload view) up front so the
     // appends below never spill through a throwing std::vector growth — an abort() under
-    // -fno-exceptions on a fragmented heap. On failure return an EMPTY rope: the caller's
-    // send site drops a link_count()==0 reply (never emits a malformed/garbage frame).
+    // -fno-exceptions on a fragmented heap. On failure return an EMPTY rope; resolve_node's
+    // or_backpressure wrapper turns an empty success reply into an addressed BACKPRESSURE
+    // error (the client falls back on the same link rather than presuming it dead).
     if (!rope.try_reserve(1 + shared.size())) return rope_t{};
     segment_ptr_t seg = view::heap_alloc(head_len);
-    if (seg) {
-        // A head-alloc failure degrades the reply (payload views only), never crashes.
-        emit_cursor_t out{seg->bytes.data()};
-        out.struct_header(type_t::FWD, ll, body_len);
-        out.u8_value(std::to_underlying(fwd_op_t::REPLY));
-        out.tlv_sliced(reply_dst_wire);
-        out.tlv_sliced(reply_src_wire);
-        out.u8_value(std::to_underlying(kind));
-        out.raw(inline_tail);
-        rope.append(view_t::over(std::move(seg)));
-    }
+    // A head-alloc failure invalidates the WHOLE reply: the shared payload views WITHOUT
+    // the FWD header are a headerless, unroutable frame that the send site's
+    // link_count() > 0 guard would wave through as garbage. Return an EMPTY rope instead
+    // (or_backpressure → addressed BACKPRESSURE), never a malformed frame.
+    if (!seg) return rope_t{};
+    emit_cursor_t out{seg->bytes.data()};
+    out.struct_header(type_t::FWD, ll, body_len);
+    out.u8_value(std::to_underlying(fwd_op_t::REPLY));
+    out.tlv_sliced(reply_dst_wire);
+    out.tlv_sliced(reply_src_wire);
+    out.u8_value(std::to_underlying(kind));
+    out.raw(inline_tail);
+    rope.append(view_t::over(std::move(seg)));
     for (const view_t& v : shared) rope.append(v);  // refcount clone — no byte copy
     return rope;
 }
@@ -485,6 +488,27 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
     // call, so borrowing its span is safe.
     return assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT, {}, payload.links(),
                     payload.total_length());
+}
+
+/**
+ * @brief Guard a built SUCCESS reply against a silent drop: an empty rope means the reply
+ *        assembly hit OOM (the link-table reserve or the head segment) — turn it into an
+ *        ADDRESSED kind=ERROR BACKPRESSURE reply instead of letting the send site drop a
+ *        `link_count() == 0` rope with no reply at all.
+ *
+ * The silent drop looked to a WS client like a dead session (no reply within its deadline)
+ * and drove a teardown+redial churn — each redial re-primes the same large composed-root
+ * snapshot and re-fails, so the page stays wedged. An addressed BACKPRESSURE lets the client
+ * fall back on the SAME link (RFC-0004 §D — a reply shape it already handles). The error tail
+ * is a 14-byte single-link frame whose only allocation is a tiny head segment (try_reserve(1)
+ * is the inline fast path), so it succeeds on exactly the fragmented heap that could not
+ * reserve the large snapshot's link table.
+ */
+[[nodiscard]] rope_t or_backpressure(rope_t reply, std::span<const std::byte> reply_dst_wire,
+                                     std::span<const std::byte> reply_src_wire) {
+    if (reply.link_count() == 0)
+        return assemble_error(reply_dst_wire, reply_src_wire, status_t::BACKPRESSURE);
+    return reply;
 }
 
 /**
@@ -578,14 +602,20 @@ template <class N>
                 const bool wll = sub_len > 0xFFFFu;
                 emit_cursor_t wout{wrapper.data()};
                 wout.struct_header(type_t::POINT, wll, sub_len);
-                return assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT,
-                                std::span<const std::byte>(wrapper.data(), wll ? 6u : 4u), *subs,
-                                sub_len);
+                return or_backpressure(
+                    assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT,
+                             std::span<const std::byte>(wrapper.data(), wll ? 6u : 4u), *subs,
+                             sub_len),
+                    reply_dst_wire, reply_src_wire);
             }
             result_t<rope_t> r =
                 has_field ? graph.read(v, field, inbound_link) : graph.read(v, inbound_link);
             if (!r) return assemble_error(reply_dst_wire, reply_src_wire, r.error());
-            return assemble_result_rope(reply_dst_wire, reply_src_wire, *r);
+            // The composed-root case: graph.read may SUCCEED (a folded ~hundreds-of-links
+            // snapshot) yet the reply's own link-table reserve fail on the fragmented heap.
+            // or_backpressure keeps that from becoming a silent drop (the dead-web-ui bug).
+            return or_backpressure(assemble_result_rope(reply_dst_wire, reply_src_wire, *r),
+                                   reply_dst_wire, reply_src_wire);
         }
         case fwd_op_t::WRITE: {
             if (!req.payload.has_value())
@@ -624,8 +654,9 @@ template <class N>
                 result_t<void> w =
                     graph.subscribe_wire(v, sub_value, return_route, std::string(inbound_link));
                 if (!w) return assemble_error(reply_dst_wire, reply_src_wire, w.error());
-                return assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT, {}, {},
-                                0);  // OK, empty payload
+                return or_backpressure(
+                    assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT, {}, {}, 0),
+                    reply_dst_wire, reply_src_wire);  // OK, empty payload
             }
 
             // The stored written value: ADR-0041 §2 one ownership copy, trailer-sliced by
@@ -641,8 +672,9 @@ template <class N>
             result_t<void> w =
                 graph.write(v, has_field ? field : field_path_t{}, value, inbound_link);
             if (!w) return assemble_error(reply_dst_wire, reply_src_wire, w.error());
-            return assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT, {}, {},
-                            0);  // OK, empty payload
+            return or_backpressure(
+                assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT, {}, {}, 0),
+                reply_dst_wire, reply_src_wire);  // OK, empty payload
         }
         case fwd_op_t::AWAIT: {
             const std::chrono::nanoseconds timeout =
@@ -652,7 +684,8 @@ template <class N>
             if (!r)
                 return assemble_error(reply_dst_wire, reply_src_wire,
                                       r.error());  // TIMEOUT => tr::flow::timeout
-            return assemble_result_rope(reply_dst_wire, reply_src_wire, *r);
+            return or_backpressure(assemble_result_rope(reply_dst_wire, reply_src_wire, *r),
+                                   reply_dst_wire, reply_src_wire);
         }
         case fwd_op_t::REPLY:
             break;  // unreachable — handled above
