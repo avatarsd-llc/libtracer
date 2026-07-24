@@ -15,9 +15,9 @@ Verified against `main` during the RFC's adversarial pass:
 
 | Area | Today | RFC-0014 needs |
 | --- | --- | --- |
-| Connection path | flat `/net/<name>` | nested `/net/<transport>/<name>` |
-| Creation surface | one global `client`/`listener` catalog, a `:children[]` target on `/net` (`graph.cpp:1521`); `quic` extends it via `register_transport_type` | a **per-transport `conn` endpoint vertex** owning its own catalog |
-| Catalog read | none; `:schema` is whole-vertex-only (`graph.cpp:1955`, `size()==1`) | `read /net/<transport>/conn:schema` returns the module's config catalog |
+| Connection path | flat `/net/<name>` | per-module `/net/<module>/<name>` (ADR-0061) |
+| Creation surface | one global `client`/`listener` catalog, a `:children[]` target on `/net` (`graph.cpp:1521`); `quic` extends it via `register_transport_type` | a **per-module `conn` endpoint vertex** owning its own catalog |
+| Catalog read | none; `:schema` is whole-vertex-only (`graph.cpp:1955`, `size()==1`) | `read /net/<module>/conn:schema` returns the module's config catalog |
 | Removal wire path | none (`retire()` has "no wire path") | `write NAME{name}` → `retire()` |
 | Gating | `CREATE` (0x08) enforced on `:children[]`/write-creates (`graph.cpp:1401`,`:475`,`:956`) | `SPEC`→`CREATE` (relocated to endpoint ACL); `NAME`→`WRITE` (0x02) |
 | Link state | manual binary `set_link_state(name,bool)` (`transport_vertex.hpp:227`) | 6-state liveness enum as the vertex value, propagating |
@@ -25,30 +25,33 @@ Verified against `main` during the RFC's adversarial pass:
 | conn settings | `addr/port/role/keepalive_ms/max_frame/kind` | `+ backoff, connect_timeout` |
 | Enumeration hide | none (a registered child always appears in `:children[]`) | a hide seam for `conn` |
 
-`retire()` (RFC-0009) is reused unchanged. The whole liveness engine, the per-transport endpoint,
-the per-transport catalog `:schema`, and the enumeration-hide seam are **greenfield**.
+`retire()` (RFC-0009) is reused unchanged. The whole liveness engine, the per-module endpoint,
+the per-module catalog `:schema`, and the enumeration-hide seam are **greenfield**.
 
-## Design spike 0 — reconcile per-transport nesting with flat FWD routing (BLOCKS everything)
+## Design spike 0 — RESOLVED → [ADR-0061](../adr/0061-per-transport-mount-routing-strip-k-l5-demux.md)
 
-Connections move from flat `/net/<name>` to nested `/net/<transport>/<name>`, but the FWD router
-resolves a `dst` by descending segments and matching against the **child-link registry**
-(`fwd_router.hpp`; `router_.add_child(name, link)` is keyed by bare name today; hardened by #373/#419).
-Resolve **before any code**:
+Spike 0 (reconcile the per-module `/net/<module>/<name>` nesting with the flat FWD child-link
+registry) is **resolved**; ADR-0061 (proposed) is the full mechanism and rationale. In brief:
 
-- **Recommended:** the connection **vertex** nests under `/net/<transport>/<name>`, while the
-  **router child** stays the flat bare `<name>` (the link object already knows its transport). The
-  FWD walk descends the structural `net`/`<transport>` segments and matches `<name>` against the flat
-  registry — the model CONTEXT.md §84 already describes ("the `/net/<name>` NAME is the router child a
-  `dst` routes through"), now one level deeper. **Cost:** connection names must be **globally unique
-  across transports** on a node (acceptable — a name is a logical handle, transport is discoverable
-  from its vertex path). No router-registry change.
-- **Alternative (rejected unless the spike finds a blocker):** transport-qualify the router key
-  (`<transport>/<name>`), changing the router's segment resolution. Bigger blast radius on the
-  hardened routing path.
+- **No RFC needed for the routing shape.** Routing-address `==` vertex-path is **already the normative
+  intent** — the `fwd-routed-multihop` conformance vector encodes the `/net`-mount form and `v1.md`
+  pins no MUST on the first-`dst`-segment shape — so aligning the flat bare-name impl is a **#419
+  conformance fix**. (Adversarially confirmed against the vectors + `v1.md`.)
+- **The mechanism stays entirely in L5.** The router peek recognizes the `/net/<module>` structural
+  prefix by offset (**strip-K**), `child_registry_t` is **kept and re-keyed per-module** (its
+  cross-bus peer fallback narrowed to a **per-endpoint `resolve_peer`**), and the L4 vertex stays
+  transport-blind — **no `graph.find` on the forward path**, hence no `map_mutex` regression. The
+  earlier "keep the router flat, nest only the vertex, global name uniqueness" recommendation is
+  **superseded**: names are per-module-scoped, and the bus-peer shape is read **structurally** from
+  the module (multi-peer module → a peer segment resolved in its own peer table; point-to-point →
+  none). The "make the graph the resolver / dissolve the registry" idea was **rejected** (inverts
+  L4↔L5 per ADR-0016; black-holes vertex-less bus peers).
 
-Deliverable: a short ADR or spike note confirming the recommended split routes correctly for
-single- and multi-hop `dst`, and that `read/await` of the connection **vertex** (`/net/<transport>/<name>`)
-still reaches the local vertex (not forwarded). Gate the rest of the plan on it.
+**Conditions ADR-0061 gates on before `accepted`** (folded into the slices below): a
+forward-demux-scan micro-bench (the harness has none today — S5-area), the
+`fwd-routed-multihop`/`fwd-src-accumulated` vector rewrites under #492 (S7), the registry teardown
+(#494, co-land with the remove-half), and the scoped `resolve_peer` + a multi-peer black-hole
+negative test (S2/S5).
 
 ## Slices (each an independent, CI-gated PR; order respects dependencies)
 
@@ -61,23 +64,23 @@ stream transitions. Add `backoff`/`connect_timeout` to `conn_settings_t`. *No en
 
 **S2 — The creator-endpoint vertex + `SPEC`/`NAME` dispatch (control plane).**
 Per design spike 0. Each transport module mounts a `conn` child on its transport vertex; move
-`register_child_type`/`register_transport_type` to populate the **per-transport** catalog rather than
+`register_child_type`/`register_transport_type` to populate the **per-module** catalog rather than
 the single global `:children[]`. Dispatch: `SPEC`⇒create (validate name non-empty/non-reserved +
-config vs catalog; `PATH_IN_USE` on existing; atomic create at `/net/<transport>/<name>`), `NAME`⇒remove
+config vs catalog; `PATH_IN_USE` on existing; atomic create at `/net/<module>/<name>`), `NAME`⇒remove
 (resolve; no-op on absent; reject reserved incl. `conn`; else `retire()`), any-other-payload⇒`type_mismatch`.
 Gate `SPEC` on `CREATE` (relocated to the endpoint's ACL), `NAME` on `WRITE`. Host-testable
 (create/remove/reserved/bad-payload/gating). **This is the ADR-0059 surface** and retires the
 `:children[]` creation spelling.
 
 **S3 — Catalog `:schema` + discovery.**
-Make `read /net/<transport>/conn:schema` return the module's config catalog — the endpoint vertex's
+Make `read /net/<module>/conn:schema` return the module's config catalog — the endpoint vertex's
 **own** schema (ADR-0059 §Decision 2: its structure *is* "what I accept"), which requires teaching the
 `:schema` read to serve a catalog for this vertex kind (today it emits settings + the RFC-0010
 app-field table). `/net:children[]` enumerates transports; absent endpoint → `PATH_NOT_FOUND` (falls
 out of path resolution). Host-testable.
 
 **S4 — Enumeration-hide seam.**
-Mark the `conn` endpoint hidden from `/net/<transport>:children[]` (which returns member connection
+Mark the `conn` endpoint hidden from `/net/<module>:children[]` (which returns member connection
 vertices). Cheapest path: reuse the ADR-0057 placeholder-exclusion already applied to unfilled
 intermediates, or add a per-vertex "hidden" bit. Host-testable (enumerate → members only, no `conn`).
 
@@ -100,7 +103,7 @@ failure), not a generic await-next-transition.
 
 **S7 — Migration + reference-doc sync + conformance vectors.**
 Retire the flat `:children[]` creation spelling. Update the reference docs that describe the old
-`/net/export` / `:children[]` model (05, 11, 13) to the per-transport `conn` model + the liveness
+`/net/export` / `:children[]` model (05, 11, 13) to the per-module `conn` model + the liveness
 enum. Land the conformance vectors named in the RFC (`create-via-SPEC`, `remove-via-NAME`,
 `remove-nonexistent-noop`, `remove-reserved-rejected`, `spec-name-in-use`, `bad-payload-type`,
 `catalog-read`, `absent-endpoint-PATH_NOT_FOUND`, `gate-CREATE`, `gate-WRITE`, the liveness transitions).
