@@ -75,6 +75,32 @@ inline constexpr slim_net_t slim_net{};
 enum class conn_role_t : std::uint8_t { DIAL = 0, LISTEN = 1 };
 
 /**
+ * @brief The connection vertex's link-liveness value (RFC-0014 §4).
+ *
+ * The 1-byte VALUE a connection vertex stores — `await`-able and subscribable, so a
+ * `subscribe /net/<module>/<name>` streams every transition (assign-then-deliver under
+ * RFC-0008 §D). Supersedes the binary up/down `set_link_state(name, bool)`. The six
+ * states are RFC-0014 §4's table, in table order; the byte encoding becomes normative
+ * on the S7 conformance-vector merge (the RFC defers it, so these values are the
+ * reference encoding until then). `DORMANT` keeps the old "down" `0x00` so a resting
+ * link stays the falsy default.
+ *
+ * DIAL links move through `DORMANT`/`DIALING`/`RECONNECTING`/`UP`; LISTEN links report
+ * listen-socket reachability as `LISTENING`/`BIND_FAILED` (never per-accepted-peer). The
+ * liveness *engine* that drives these automatically is RFC-0014 S5 — for now the value is
+ * set manually (config-constructed sockets report `UP`/`LISTENING` at creation; provided
+ * links report via @ref transport_vertex_t::set_link_state).
+ */
+enum class link_state_t : std::uint8_t {
+    DORMANT = 0,      /**< @brief DIAL: vertex exists; no socket (refcount 0). */
+    DIALING = 1,      /**< @brief DIAL: a connect attempt is in flight. */
+    RECONNECTING = 2, /**< @brief DIAL: retrying toward `UP` between backoff waits. */
+    UP = 3,           /**< @brief DIAL: socket connected, bidirectional. */
+    LISTENING = 4,    /**< @brief LISTEN: listen socket bound and accepting. */
+    BIND_FAILED = 5,  /**< @brief LISTEN: the listen socket could not bind. */
+};
+
+/**
  * @brief One connection's transport-private settings — NOT the graph's `settings_t`.
  *
  * `addr`/`port`/`role`/`keepalive_ms`/`kind` are a *device-private* `:settings` facet of
@@ -103,6 +129,13 @@ struct conn_settings_t {
                                                       never raises. */
     std::string kind;                     /**< @brief Transport-factory selector ("udp",
                                                       "ws", ...); empty = provide_link only. */
+    std::uint32_t backoff_ms = 0;         /**< @brief DIAL self-heal retry interval (RFC-0014 §4);
+                                                      consumed by the S5 liveness engine, 0 = the
+                                                      engine's default. Parsed but dormant until S5. */
+    std::uint32_t connect_timeout_ms = 0; /**< @brief DIAL connect-attempt deadline (RFC-0014 §4):
+                                                      how long one dial waits for `UP` before it
+                                                      counts as failed. 0 = the engine's default.
+                                                      Parsed but dormant until S5. */
 };
 
 /**
@@ -215,16 +248,19 @@ class transport_vertex_t {
     void provide_link(std::string name, transport_t& link);
 
     /**
-     * @brief Report a connection's link up/down — a write to the vertex value.
+     * @brief Report a connection's link-liveness state — a write to the vertex value.
      *
-     * Writing the 1-byte link state makes `await(/net/<name>)` fire (ADR-0021: `await`
-     * is the vertex's `poll`). Config-constructed transports are written up at creation;
-     * this remains the seam for later link events (and the only source for provided links).
-     * @param name The connection NAME.
-     * @param up   True = link up (`0x01`), false = down (`0x00`).
+     * Writing the 1-byte link_state_t makes `await(/net/<name>)` fire (ADR-0021:
+     * `await` is the vertex's `poll`) and delivers to every subscriber (RFC-0008 §D
+     * assign-then-deliver). Config-constructed transports are set `UP`/`LISTENING` at
+     * creation; this remains the seam for later link events (and the only source for
+     * provided links). Until the RFC-0014 S5 liveness engine lands, callers drive this
+     * manually — the engine will become the sole writer of the DIAL transitions.
+     * @param name  The connection NAME.
+     * @param state The link-liveness state to publish (see link_state_t).
      * @return NotFound if @p name names no created connection vertex.
      */
-    [[nodiscard]] graph::result_t<void> set_link_state(std::string_view name, bool up);
+    [[nodiscard]] graph::result_t<void> set_link_state(std::string_view name, link_state_t state);
 
     /** @brief The parsed transport-private settings of connection @p name (nullptr if none). */
     [[nodiscard]] const conn_settings_t* settings_of(std::string_view name) const;

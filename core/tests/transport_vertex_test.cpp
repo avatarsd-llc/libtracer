@@ -45,6 +45,7 @@ using tr::graph::role_t;
 using tr::graph::status_t;
 using tr::net::conn_role_t;
 using tr::net::fwd_router_t;
+using tr::net::link_state_t;
 using tr::net::transport_vertex_t;
 using tr::view::view_t;
 using tr::wire::opt_t;
@@ -70,7 +71,8 @@ view_t owned(std::span<const std::byte> bytes) {
  *       NAME "port" VALUE u16 [, NAME "kind" NAME <kind>][, NAME "addr" NAME <addr>] } }
  */
 view_t conn_spec(std::string_view type, std::string_view name, conn_role_t role, std::uint16_t port,
-                 std::string_view kind = {}, std::string_view addr = {}) {
+                 std::string_view kind = {}, std::string_view addr = {}, std::uint32_t backoff = 0,
+                 std::uint32_t connect_timeout = 0) {
     std::vector<std::byte> cfg;
     tr::wire::emit_name(cfg, "role");
     const std::byte r{static_cast<std::uint8_t>(role)};
@@ -87,6 +89,14 @@ view_t conn_spec(std::string_view type, std::string_view name, conn_role_t role,
         tr::wire::emit_name(cfg, "addr");
         tr::wire::emit_name(cfg, addr);
     }
+    const auto emit_u32 = [&cfg](std::string_view key, std::uint32_t val) {
+        tr::wire::emit_name(cfg, key);
+        std::vector<std::byte> vb(4);
+        tr::detail::store_le(vb, val, 4);
+        tr::wire::emit_tlv(cfg, type_t::VALUE, opt_t{}, vb);
+    };
+    if (backoff != 0) emit_u32("backoff", backoff);
+    if (connect_timeout != 0) emit_u32("connect_timeout", connect_timeout);
 
     std::vector<std::byte> body;
     tr::wire::emit_name(body, "type");
@@ -147,12 +157,79 @@ void test_await_link_state() {
         woke.set_value(r.has_value());
     });
     std::this_thread::sleep_for(20ms);  // let the waiter reach the wait
-    const auto ls = net.set_link_state("up", true);
-    check(ls.has_value(), "set_link_state(up=true) writes the vertex");
+    const auto ls = net.set_link_state("up", link_state_t::UP);
+    check(ls.has_value(), "set_link_state(UP) writes the vertex");
     check(fut.wait_for(2s) == std::future_status::ready && fut.get(),
           "the awaiter woke on the link-up write");
     waiter.join();
-    check(!net.set_link_state("nope", true).has_value(), "unknown connection => NotFound");
+    check(!net.set_link_state("nope", link_state_t::UP).has_value(),
+          "unknown connection => NotFound");
+    channel.shutdown();
+}
+
+/** @brief The 1-byte payload of a connection vertex's stored link-liveness VALUE TLV. */
+std::uint8_t read_link_state_byte(graph_t& g, std::string_view path) {
+    const auto h = g.find(path_t::parse(path)->key());
+    if (!h) return 0xFF;
+    const auto v = g.read(*h);
+    if (!v) return 0xFF;
+    const auto bytes = v->materialize().bytes();
+    // VALUE TLV of a 1-byte payload — the payload is the last byte.
+    return bytes.empty() ? 0xFF : static_cast<std::uint8_t>(bytes.back());
+}
+
+void test_liveness_enum_value() {
+    std::printf("Link-liveness value is the RFC-0014 6-state enum (S1):\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    tr::net::loopback_channel_t channel;
+    net.provide_link("l", channel.a());
+    (void)node.write(path_t("/net:children[]"), conn_spec("client", "l", conn_role_t::DIAL, 0));
+
+    // Each manual state publishes its own byte (table order 0..5), read back from the LKV.
+    (void)net.set_link_state("l", link_state_t::DORMANT);
+    check(read_link_state_byte(node, "/net/l") == 0, "DORMANT publishes 0x00 (the old 'down')");
+    (void)net.set_link_state("l", link_state_t::RECONNECTING);
+    check(read_link_state_byte(node, "/net/l") == 2, "RECONNECTING publishes 0x02");
+    (void)net.set_link_state("l", link_state_t::UP);
+    check(read_link_state_byte(node, "/net/l") == 3, "UP publishes 0x03");
+    channel.shutdown();
+}
+
+void test_constructed_link_reports_role_state() {
+    std::printf("A config-constructed socket self-reports UP (DIAL) / LISTENING (LISTEN):\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+
+    // A udp LISTENER binds at creation => it reports LISTENING (0x04), not UP.
+    const auto wl = node.write(path_t("/net:children[]"),
+                               conn_spec("listener", "srv", conn_role_t::LISTEN, 47131, "udp"));
+    check(wl.has_value(), "SPEC{listener, kind=udp} constructs the bound socket");
+    check(read_link_state_byte(node, "/net/srv") == 4,
+          "a constructed LISTEN reports LISTENING (0x04)");
+
+    // A udp CLIENT is UP the moment its socket is constructed (0x03).
+    const auto wc =
+        node.write(path_t("/net:children[]"),
+                   conn_spec("client", "cli", conn_role_t::DIAL, 47131, "udp", "127.0.0.1"));
+    check(wc.has_value(), "SPEC{client, kind=udp} constructs the socket");
+    check(read_link_state_byte(node, "/net/cli") == 3, "a constructed DIAL reports UP (0x03)");
+}
+
+void test_backoff_connect_timeout_parsed() {
+    std::printf("conn_settings_t parses backoff / connect_timeout (dormant until S5):\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    tr::net::loopback_channel_t channel;
+    net.provide_link("c", channel.a());
+    (void)node.write(path_t("/net:children[]"),
+                     conn_spec("client", "c", conn_role_t::DIAL, 0, {}, {}, 250, 3000));
+    const auto* s = net.settings_of("c");
+    check(s != nullptr && s->backoff_ms == 250 && s->connect_timeout_ms == 3000,
+          "backoff=250 / connect_timeout=3000 parsed into the transport-private settings");
     channel.shutdown();
 }
 
@@ -303,15 +380,16 @@ void test_config_constructed_udp() {
     check(s != nullptr && s->kind == "udp" && s->addr == "127.0.0.1" && s->port == 47120,
           "A: the parsed :settings carry kind/addr/port");
 
-    // Construction wrote the link state up — the /net/b vertex value is VALUE{0x01}.
+    // Construction reported the DIAL socket UP — the /net/b vertex value is VALUE{UP}
+    // (0x03, the RFC-0014 liveness enum; S1 replaced the binary 0x01 "up").
     const auto lv = node_a.read(path_t("/net/b"));
     bool up = false;
     if (lv) {
         const auto t = tr::wire::decode(lv->only());
         up = t.has_value() && t->type == type_t::VALUE && t->payload.size() == 1 &&
-             t->payload[0] == std::byte{0x01};
+             t->payload[0] == std::byte{static_cast<std::uint8_t>(link_state_t::UP)};
     }
-    check(up, "A: link state written up at creation (await-able bring-up)");
+    check(up, "A: link state written UP at creation (await-able bring-up)");
 
     // End-to-end: FWD{READ dst=/b/temp} from A crosses A's config-created socket to
     // B's terminus, and the REPLY source-routes back to A's reply sink — B's listener
@@ -597,6 +675,9 @@ void test_ws_peer_named_config() {
 int main() {
     test_create_connection_vertex();
     test_await_link_state();
+    test_liveness_enum_value();
+    test_constructed_link_reports_role_state();
+    test_backoff_connect_timeout_parsed();
     test_fwd_still_routes();
     test_local_path_untouched();
     test_config_constructed_udp();

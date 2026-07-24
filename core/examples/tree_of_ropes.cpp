@@ -205,7 +205,7 @@ void axis_transport_is_identity() {
 
     // Once the link reports, the value is a tiny link-state TLV — a SINGLE-link rope,
     // categorically not the sensor's two-link memory chain.
-    (void)net.set_link_state("link0", true);
+    (void)net.set_link_state("link0", tr::net::link_state_t::UP);
     const auto ls = g.read(*link_h);
     check(ls.has_value() && ls->link_count() == 1 && ls->total_length() <= 8,
           "link-state is a single-link rope of a few bytes — never a chained payload");
