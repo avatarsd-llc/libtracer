@@ -160,6 +160,52 @@ jobs:
           name: footprint-${{ matrix.target }}
           path: integrations/esp-idf/examples/full_node/footprint-${{ matrix.target }}.json
 
+  # Transport-trim gate (#393): prove the per-transport Kconfig knobs actually shed
+  # translation units and still link on-target. Builds full_node for esp32c6 with TCP +
+  # WS trimmed off (the self-proof only creates a `kind=udp` connection, so UDP + CAN
+  # stay on) — exercising the CMake-generated register_builtin_transports dispatcher
+  # (udp-only) and dropping transport_tcp / transport_ws / their factory glue /
+  # httpd_ws_link from libtracer.a. A clean build proves a role-composed node links with
+  # a partial transport set; the object-file assertions prove the trim REALLY happened
+  # (a broken gate would still build — just fatter — so build-success alone is not proof).
+  full-node-trimmed:
+    needs: srcs-drift
+    runs-on: ubuntu-24.04
+    container: espressif/idf:release-v6.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build full_node (TCP+WS trimmed; UDP+CAN on) for esp32c6
+        shell: bash
+        working-directory: integrations/esp-idf/examples/full_node
+        env:
+          SDKCONFIG_DEFAULTS: "sdkconfig.defaults;sdkconfig.ci_trim"
+        run: |
+          . "${IDF_PATH}/export.sh"
+          idf.py set-target esp32c6
+          idf.py build
+
+      - name: Assert the trimmed transport TUs were shed (and UDP kept)
+        shell: bash
+        working-directory: integrations/esp-idf/examples/full_node
+        run: |
+          fail=0
+          for dropped in transport_tcp transport_ws builtin_transport_tcp builtin_transport_ws; do
+            if find build -name "${dropped}.cpp.obj" | grep -q .; then
+              echo "ERROR: ${dropped}.cpp.obj was compiled — the transport trim did not shed it"
+              fail=1
+            fi
+          done
+          # Sanity: the transports we kept ON must still be present (guard against over-trim).
+          for kept in transport_udp builtin_transport_udp transport_can; do
+            if ! find build -name "${kept}.cpp.obj" | grep -q .; then
+              echo "ERROR: ${kept}.cpp.obj missing — over-trimmed a kept transport"
+              fail=1
+            fi
+          done
+          if [ "$fail" -ne 0 ]; then exit 1; fi
+          echo "OK: TCP + WS transport TUs shed; UDP + CAN retained in the trimmed archive"
+
   # Full-node HOST run (#183): the same full_node example on the ESP-IDF
   # `linux` target, executed — the device node and an in-process host peer talk
   # over REAL loopback datagrams (config-created udp connections via

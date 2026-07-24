@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# CI-only overlay for the #393 per-transport-trim gate. Drops the TCP + WS
+# transports (the full_node self-proof only ever creates a `kind=udp`
+# connection, so UDP + CAN stay on) to exercise:
+#   * the per-transport Kconfig gating (LIBTRACER_TRANSPORT_{TCP,WS}=n),
+#   * the CMake-generated register_builtin_transports dispatcher (udp-only), and
+#   * a clean on-target link with transport_tcp / transport_ws / their factory
+#     glue / httpd_ws_link shed from libtracer.a.
+# NOT a default overlay — only the `full-node-trimmed` CI job passes it via
+# SDKCONFIG_DEFAULTS. A stock build (sdkconfig.defaults alone) keeps all four
+# transports on and is byte-identical to before #393.
+CONFIG_LIBTRACER_TRANSPORT_TCP=n
+CONFIG_LIBTRACER_TRANSPORT_WS=n
