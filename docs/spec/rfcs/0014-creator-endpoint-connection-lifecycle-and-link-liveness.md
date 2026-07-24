@@ -27,9 +27,12 @@ underneath a connection vertex.
 Two independent lifecycles are specified:
 
 1. **The connection *vertex*** — an explicit, **named**, persistent identity. Created by a `SPEC`
-   write to a **per-transport** creator endpoint, removed by a `NAME` write to the same endpoint
-   (the two collapse onto one control, distinguished by payload type). The path carries the
-   **name**, never an address.
+   write to a **per-module** creator endpoint — one self-contained module per *(transport, role)*
+   (`ws-client`, `ws-server`, `tcp-client`, `tcp-server`, `can`, …) mounted flat under `/net` — and
+   removed by a `NAME` write to the same endpoint (the two collapse onto one control, distinguished
+   by payload type). The path carries the **name**, never an address; the **role is positional** (it
+   *is* the module), not a config field. The routing that makes `/net/<module>/<name>` addressable is
+   [ADR-0061](../../adr/0061-per-transport-mount-routing-strip-k-l5-demux.md).
 2. **The *link* it names** — the live socket underneath, managed automatically: **refcount-gated**
    (for a `DIAL` link the socket closes when no binding uses it — the vertex stays) and
    **self-healing** (it re-dials on demand or after loss). There is no lazy *vertex* creation; the
@@ -58,44 +61,49 @@ This unblocks the transport-link half of
   global `client`/`listener` catalog through `register_child_type` as a `:children[]` target on
   `/net` (`graph.cpp:1521`), and the `quic` module extends the *same* catalog via
   `register_transport_type` with a `kind` selector (open/closed). RFC-0014 keeps that module
-  ownership but **replaces the single-global-catalog mechanism** with a per-transport endpoint (§1);
-  the per-transport structure, the type-positional SPEC, and `conn:schema`-as-catalog are all **new
-  code**, not a preservation of the current seam.
+  ownership but **replaces the single-global-catalog mechanism** with a per-*(transport, role)*
+  module endpoint (§1); the per-module structure, the positional role, and `conn:schema`-as-catalog
+  are all **new code**, not a preservation of the current seam.
 
 ## Proposed change
 
 > **Implementation status.** Except where noted, this describes **new mechanism**. Today connections
-> register flat at `/net/<name>` (not `/net/<transport>/<name>`), the catalog is a single global
+> register flat at `/net/<name>` (not `/net/<module>/<name>`), the catalog is a single global
 > `:children[]` target, `:schema` is whole-vertex-only (`graph.cpp:1955`, `size()==1`), `set_link_state`
 > is a manual binary up/down bool, and no refcount / dormancy / self-heal exists. Per the clause-kind
 > rule (see Discussion) the byte-level clauses here are **proposed pending** code + conformance
 > vectors.
 
-### 1. A per-transport creator endpoint, designated by the transport module
+### 1. A per-module creator endpoint, designated by the transport module
 
-A creatable transport exposes a **creator-endpoint child vertex** on its transport vertex. By
-convention the child name is **`conn`**:
+A creatable *(transport, role)* pair is a **self-contained module** mounted flat under `/net` —
+`ws-client`, `ws-server`, `can`, … (a transport with a single shape, like `can`, is one module; a
+transport with both a dial and a listen shape, like `ws`, is two). Each module exposes a
+**creator-endpoint child vertex**; by convention the child name is **`conn`**:
 
 ```
-/net/<transport>/conn                                  ; the creator endpoint (a / vertex, not a : field)
-   write SPEC{ name, config }   → create /net/<transport>/<name>, atomically   (gated CREATE 0x08)
-   write NAME{ <name> }         → retire /net/<transport>/<name>                (gated WRITE  0x02)
-   read  :schema                → THE CATALOG: the transport's accepted config  (module-defined)
-/net:children[]                                        ; enumerate transport vertices (discovery, §6)
-/net/<transport>:children[]                            ; enumerate the member connection VERTICES
+/net/<module>/conn                                     ; the creator endpoint (a / vertex, not a : field)
+   write SPEC{ name, config }   → create /net/<module>/<name>, atomically       (gated CREATE 0x08)
+   write NAME{ <name> }         → retire /net/<module>/<name>                    (gated WRITE  0x02)
+   read  :schema                → THE CATALOG: the module's accepted config      (module-defined)
+/net:children[]                                        ; enumerate the modules (discovery, §6)
+/net/<module>:children[]                               ; enumerate the member connection VERTICES
+                                                       ; module ∈ { ws-client, ws-server, can, … }
 ```
 
-- **Per-transport, type positional.** The transport is fixed by the path (`/net/ws/…`,
-  `/net/can/…`), so `SPEC` carries `{ name, config }` with **no `type` field**, and each transport's
-  `:schema` is its own config catalog rather than a union. This refines ADR-0059's single global
-  `/net/export`.
+- **Per-module, role- and transport-positional.** Both the transport *and* the role are fixed by the
+  module in the path (`/net/ws-client/…`, `/net/ws-server/…`, `/net/can/…`), so `SPEC` carries
+  `{ name, config }` with **no `type` and no `role` field** — the module already says both — and each
+  module's `:schema` is its own config catalog (a client's dial-target vs. a server's bind-port are
+  *different* catalogs, which is the reason to split them). This refines ADR-0059's single global
+  `/net/export` and this RFC's own earlier per-*transport* spelling with a config `role`.
 - **The module designates the control.** The endpoint, its `:schema` catalog, and the `config`
   semantics are owned by the transport module (the `register_transport_type` seam), not a central
   switch — `transport_vertex.cpp` never learns a concrete transport (open/closed, ADR-0043). Adding a
-  transport module adds its creator endpoint and catalog; dropping one drops both. **This replaces
-  the current single-global catalog**, and requires per-transport-vertex `:schema`-as-catalog, which
+  module adds its creator endpoint and catalog; dropping one drops both. **This replaces
+  the current single-global catalog**, and requires per-module `:schema`-as-catalog, which
   `graph.cpp`'s whole-vertex-only `:schema` does not yet serve.
-- **It is a vertex, not a field.** `/net/<transport>/conn` is a distinct-identity `/` vertex written
+- **It is a vertex, not a field.** `/net/<module>/conn` is a distinct-identity `/` vertex written
   to, **not** a `:conn` control field — a creation *field* is exactly what ADR-0059 / ADR-0021 moved
   creation off of.
 
@@ -109,7 +117,7 @@ One control vertex serves both; the **TLV type of the written value** selects wh
   `ERROR{tr::schema::type_mismatch}`. `SPEC` naming a **name that already exists** (live or retired
   but re-registered) → `ERROR{tr::path::in_use}` — reconfiguration is via the connection's `:settings`,
   never re-SPEC. (A retrying orchestrator treats `PATH_IN_USE` as "already exists," so the reject is
-  idempotent-safe.) On success the child `/net/<transport>/<name>` exists **atomically** (one write
+  idempotent-safe.) On success the child `/net/<module>/<name>` exists **atomically** (one write
   yields a fully-configured connection vertex — the GPIO-atomicity ADR-0059 protects; no "live but
   misconfigured" window).
 - **`NAME` ⇒ remove.** The endpoint resolves the name; an **unresolvable** name (never created, or
@@ -121,7 +129,7 @@ One control vertex serves both; the **TLV type of the written value** selects wh
 - **Any other payload** (empty, or a TLV type that is neither `SPEC` nor `NAME`) →
   `ERROR{tr::schema::type_mismatch}`. The endpoint never falls through to an ordinary assign.
 - **`SPEC`/`NAME` are control only on the creator endpoint.** Written to any *other* vertex
-  (including a connection vertex `/net/<transport>/<name>`) they are ordinary value writes, not
+  (including a connection vertex `/net/<module>/<name>`) they are ordinary value writes, not
   control.
 
 The creator endpoint is **write-only and valueless**: the write is *executed*, not *assigned*, so it
@@ -132,31 +140,33 @@ ADR-0059 §Consequences pre-declared). Its only readable facet is `:schema` (the
 
 ### 3. The connection vertex (explicit identity) and the reserved name
 
-`/net/<transport>/<name>` is a first-class `/` vertex ([ADR-0027](../../adr/0027-transport-and-connections-are-vertices.md)):
+`/net/<module>/<name>` is a first-class `/` vertex ([ADR-0027](../../adr/0027-transport-and-connections-are-vertices.md)):
 
-- **Name, not address.** The path segment is a **logical name** chosen at creation; the address
-  (`addr`/`port`), `role` (`DIAL`/`LISTEN`), keepalive, reconnect `backoff`, and `connect_timeout`
-  live in `:settings` and are re-configurable. B's IP changing is a `:settings` edit; every route
-  under the connection is untouched.
+- **Name, not address; role is the module.** The path segment is a **logical name** chosen at
+  creation; the address (`addr`/`port`), keepalive, reconnect `backoff`, and `connect_timeout` live
+  in `:settings` and are re-configurable. The **`role` (`DIAL`/`LISTEN`) is *not* a `:settings`
+  field** — it is positional, fixed by which module the connection was created under (`ws-client` =
+  DIAL, `ws-server` = LISTEN, `can` = a multi-peer bus). B's IP changing is a `:settings` edit; every
+  route under the connection is untouched.
 - **Explicit lifecycle only.** Created solely by a `SPEC` write (or an owner-local registration),
   removed solely by a `NAME` write (or owner-local `retire`). Connection vertices are a stated
   **exception** to RFC-0005 §D write-creates and RFC-0009 §E.1 revive-by-data-write: a plain data
-  write to an absent or retired `/net/<transport>/<name>` does **not** create/revive it (a
+  write to an absent or retired `/net/<module>/<name>` does **not** create/revive it (a
   config-less connection would violate the SPEC-atomicity §2 protects). Re-creation is `SPEC`-only.
 - **Its value is the link-liveness state** (§4), readable, `await`-able, and **subscribable** — a
-  liveness transition assigns-and-propagates under RFC-0008 (so `subscribe /net/<transport>/<name>`
+  liveness transition assigns-and-propagates under RFC-0008 (so `subscribe /net/<module>/<name>`
   streams state changes without polling), distinguishing this propagating vertex from the write-only,
   non-propagating creator endpoint.
 
 **`conn` is a reserved, protocol-owned name** per transport:
 
 - **Create-side:** a connection may not be named `conn` — the endpoint vertex already occupies
-  `/net/<transport>/conn`, so a same-named `SPEC` fails `ERROR{tr::path::in_use}` at
+  `/net/<module>/conn`, so a same-named `SPEC` fails `ERROR{tr::path::in_use}` at
   `register_vertex_key`. (This is *not* the `#373` first-level-shadowing guard, which inspects only
   root-level `/name` children against the FWD child-link registry and never sees a `conn` nested
   under a transport.)
 - **Remove-side:** `NAME{conn}` is rejected (§2).
-- **Enumeration:** `conn` is **hidden** from `/net/<transport>:children[]` (which returns the member
+- **Enumeration:** `conn` is **hidden** from `/net/<module>:children[]` (which returns the member
   connection vertices). **No mechanism to hide a registered child from enumeration exists today** —
   this is a new seam the implementation must add (or the endpoint must be a placeholder-like node
   ADR-0057 already excludes).
@@ -169,7 +179,7 @@ link is a state machine.
 **Refcount governs `DIAL` links only.** A *binding* is anything that needs the peer reachable — a
 standing subscription or `await` routed through the link, plus a **transient** hold for the duration
 of a one-shot `read`/`write`/`FWD`. It is **per-hop and local**: a multi-hop route
-`/net/b/net/c/sensor` holds a ref on *this* node's link `b`; c's node independently refs its own link
+`/net/ws-client/b/net/ws-client/c/sensor` holds a ref on *this* node's link `b`; c's node independently refs its own link
 `c`. For a `DIAL` link the **steady-state target is: socket up while refcount > 0** (the transient
 states `dialing`/`healing` have refcount > 0 with the socket not yet or no longer up). A `LISTEN`
 link **ignores refcount** — its listen socket stays bound and accepting until the vertex is retired
@@ -177,7 +187,7 @@ link **ignores refcount** — its listen socket stays bound and accepting until 
 
 - **Any op auto-wakes a dormant `DIAL` link.** The op triggers a dial, waits for **one connect
   attempt** (bounded by `connect_timeout`), then serves or returns `link-down`. A `write` may
-  therefore stall on a dial; `await /net/<transport>/<name>` (which resolves specifically when
+  therefore stall on a dial; `await /net/<module>/<name>` (which resolves specifically when
   liveness reaches `up`, and returns `link-down` on terminal failure — not a generic
   await-next-transition) is the explicit "bring it up and wait" verb for callers that will not
   tolerate a data op blocking.
@@ -232,14 +242,16 @@ A peer can thus hold create-but-not-remove (`CREATE` without `WRITE` on the endp
 An orchestrator that manages a **remote** board — including one reachable only *through* a peer (the
 d2d premise: A bridges B) — must discover and drive the endpoint over the ordinary FWD route:
 
-- **Enumerate transports:** `read /net:children[]` returns the transport vertices.
-- **Creatability probe:** `read /net/<transport>/conn:schema` returns the config catalog; a
+- **Enumerate modules:** `read /net:children[]` returns the modules (`ws-client`, `ws-server`, `can`, …).
+- **Creatability probe:** `read /net/<module>/conn:schema` returns the config catalog; a
   `PATH_NOT_FOUND` reply means "no creator endpoint → not creatable" (the ENOTTY optionality pattern
   applied to a missing `/` vertex). This is the sanctioned way to learn a creator endpoint exists,
   since `conn` is hidden from enumeration.
 - **Reach through peers:** `conn:schema`, the connection-vertex liveness value, and `SPEC`/`NAME`
-  writes are addressable via ordinary multi-hop FWD — e.g. read `/net/<linkToB>/net/can/conn:schema`
-  to configure a CAN link *on B* from an orchestrator connected only to A. **Each hop gates
+  writes are addressable via ordinary multi-hop FWD — e.g. read
+  `/net/ws-client/<toB>/net/can/conn:schema` (route through A's `ws-client` link `<toB>`, then read
+  `/net/can/conn:schema` on B) to configure a CAN link *on B* from an orchestrator connected only to
+  A. **Each hop gates
   independently** (the intermediate link's ACL *and* the far endpoint's `CREATE`/`WRITE`).
 
 ## Scope boundary (what this RFC does NOT do)
@@ -308,7 +320,7 @@ fails-fast `link-down` and is reaped.
 
 - **Clause-kind rule.** Per ADR-0059 §Consequences, *declaring / forbidding / reserving* clauses may
   lead the code; *bytes / error identities / gate order* must be pinned by code **plus a conformance
-  vector** before they are normative. The leading clauses (a per-transport creator endpoint exists;
+  vector** before they are normative. The leading clauses (a per-module creator endpoint exists;
   creation is explicit and named; `conn` reserved and hidden; removal routes through `retire()`;
   refcount governs DIAL only; liveness target rule) stand on acceptance. The byte clauses (the
   `SPEC`/`NAME`/`config` layout, the `conn:schema` reply bytes, the liveness-enum encoding, the
@@ -325,7 +337,17 @@ fails-fast `link-down` and is reaped.
   **retries forever** while refcount > 0 — **no** give-up bound and **no** terminal state (a give-up
   count would be a synthetic limit); presentation thresholds are the consumer's. (iii) The
   remote-owned-subscription-origination surface named in §Scope boundary is a **separate follow-up**
-  (its own investigation / RFC), not part of RFC-0014 — RFC-0014 is the link plane only.
+  (its own investigation / RFC), not part of RFC-0014 — RFC-0014 is the link plane only. (iv) The
+  creator endpoint is a **per-*(transport, role)* flat module** (`/net/ws-client/…`,
+  `/net/ws-server/…`, `/net/can/…`), not a per-*transport* endpoint with a config `role`: a client and
+  a server take different config (dial-target vs. bind-port), so they are separate modules with
+  separate catalogs, and the **role is positional**, not a `:settings` field. Uniform
+  `net → module → name → [peer]` depth; a multi-peer module (`ws-server`, `can`) carries a **peer
+  segment** resolved in that module's own peer table, a point-to-point module (`ws-client`) does not
+  ([ADR-0061](../../adr/0061-per-transport-mount-routing-strip-k-l5-demux.md)). This refines the RFC's
+  own §1/§3; the exhaustive path/byte rewrite across §§2–6 and the conformance vectors lands **with
+  the code, under #492's draft-spec authority** (the clause-kind rule — leading clauses here, byte
+  clauses pending).
 - Drafted from a maintainer grill session (2026-07-24) with Claude Code, then revised against an
   adversarial verification pass (ADR/spec consistency, code-pinnability, internal coherence, consumer
   fit); the design decisions are the maintainer's. Accepted the same day (solo-maintained spec, window
