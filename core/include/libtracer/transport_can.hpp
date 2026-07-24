@@ -23,6 +23,8 @@
  */
 #pragma once
 
+#include <pthread.h>
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -144,8 +146,11 @@ class socketcan_link_t : public can_link_t {
     /**
      * @brief Open + bind a `CAN_RAW` socket on interface @p ifname.
      * @param ifname The CAN network interface name (e.g. `"vcan0"`).
+     * @param recv_stack Receive-thread stack size in bytes, 0 = platform default.
+     *        Non-zero right-sizes the dispatch thread on an MCU (applied via
+     *        `pthread_attr_setstacksize`; mirrors `net::posix_endpoint_t::start`).
      */
-    explicit socketcan_link_t(const std::string& ifname);
+    explicit socketcan_link_t(const std::string& ifname, std::size_t recv_stack = 0);
 
     /** @brief Stop the receive thread and close the socket. */
     ~socketcan_link_t() override;
@@ -163,14 +168,18 @@ class socketcan_link_t : public can_link_t {
     [[nodiscard]] bool ok() const noexcept { return fd_ >= 0; }
 
    private:
-    void run();  // receive thread
+    void run();                             // receive thread
+    static void* thread_entry(void* self);  // pthread trampoline → run()
 
     int fd_ = -1;
     rx_fn_t rx_;          // guarded by m_
     std::mutex m_;        // guards rx_
     std::mutex write_m_;  // serializes writes / fd teardown
     std::atomic<bool> stop_{false};
-    std::thread thread_;
+    // pthread (not std::thread): its ctor throws on failure → std::abort under
+    // -fno-exceptions; pthread_create returns an error code (see posix_endpoint).
+    pthread_t thread_{};    // valid only while started_
+    bool started_ = false;  // whether thread_ holds a joinable thread
 };
 
 /**

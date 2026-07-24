@@ -13,6 +13,7 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstring>
@@ -82,7 +83,8 @@ struct prefixed_iov_t {
 }  // namespace
 
 tcp_transport_t::tcp_transport_t(const std::string& peer_host, std::uint16_t peer_port,
-                                 mem::mem_backend_t* backend, std::size_t max_frame)
+                                 mem::mem_backend_t* backend, std::size_t max_frame,
+                                 std::size_t recv_stack)
     : backend_(backend) {
     if (max_frame != 0) max_frame_ = max_frame;
     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -101,17 +103,19 @@ tcp_transport_t::tcp_transport_t(const std::string& peer_host, std::uint16_t pee
     set_rcv_timeout(fd);
     set_nodelay(fd);
     conn_fd_.store(fd, std::memory_order_relaxed);
-    start([this, fd] {
-        serve(fd);
-        teardown_peer(fd);  // reset-under-write_m_ then close (stream_endpoint_t)
-        // Departure seam (RFC-0009 §D extended): the one connection died under us —
-        // not a local stop — so report the link down (no locks held here).
-        if (!stop_.load(std::memory_order_relaxed)) notify_down();
-    });
+    start(
+        [this, fd] {
+            serve(fd);
+            teardown_peer(fd);  // reset-under-write_m_ then close (stream_endpoint_t)
+            // Departure seam (RFC-0009 §D extended): the one connection died under us —
+            // not a local stop — so report the link down (no locks held here).
+            if (!stop_.load(std::memory_order_relaxed)) notify_down();
+        },
+        recv_stack);
 }
 
 tcp_transport_t::tcp_transport_t(std::uint16_t bind_port, mem::mem_backend_t* backend,
-                                 std::size_t max_frame)
+                                 std::size_t max_frame, std::size_t recv_stack)
     : listen_(true), backend_(backend) {
     if (max_frame != 0) max_frame_ = max_frame;
     listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -135,7 +139,7 @@ tcp_transport_t::tcp_transport_t(std::uint16_t bind_port, mem::mem_backend_t* ba
     if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound), &blen) == 0)
         bound_port_ = ntohs(bound.sin_port);
 
-    start([this] { run_listen(); });
+    start([this] { run_listen(); }, recv_stack);
 }
 
 tcp_transport_t::~tcp_transport_t() {
@@ -278,7 +282,7 @@ struct transport_tcp_server::session_t {
 
 transport_tcp_server::transport_tcp_server(std::uint16_t bind_port, mem::mem_backend_t* backend,
                                            std::size_t max_frame, std::size_t max_peers,
-                                           bool peer_named)
+                                           bool peer_named, std::size_t recv_stack)
     : backend_(backend), max_peers_(max_peers), peer_named_(peer_named) {
     if (max_frame != 0) max_frame_ = max_frame;
     listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -304,7 +308,7 @@ transport_tcp_server::transport_tcp_server(std::uint16_t bind_port, mem::mem_bac
     if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound), &blen) == 0)
         bound_port_ = ntohs(bound.sin_port);
 
-    start([this] { run(); });
+    start([this] { run(); }, recv_stack);
 }
 
 transport_tcp_server::~transport_tcp_server() {

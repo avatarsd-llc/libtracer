@@ -75,9 +75,13 @@ class transport_ws_server : public transport_t, public bus_link_t, private strea
      *                   server sets it so each tab gets its own return route;
      *                   a point-to-point link keeps the default (its registered
      *                   child NAME stays the hop name, as tcp/quic).
+     * @param recv_stack Poll-thread stack size in bytes, 0 = platform default
+     *                   (`posix_endpoint_t::start`). One thread multiplexes
+     *                   the listener and every peer, so this is the whole
+     *                   server's recv-stack knob.
      */
     explicit transport_ws_server(std::uint16_t bind_port, std::size_t max_peers = 0,
-                                 bool peer_named = false);
+                                 bool peer_named = false, std::size_t recv_stack = 0);
 
     /** @brief Stop the recv thread and close all sockets. */
     ~transport_ws_server() override;
@@ -250,8 +254,10 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
      *
      * @param host Dotted-quad IPv4 address of the peer (e.g. "127.0.0.1").
      * @param port TCP port of the peer (host byte order).
+     * @param recv_stack Recv-thread stack size in bytes, 0 = platform default
+     *             (`posix_endpoint_t::start`).
      */
-    transport_ws_client(const std::string& host, std::uint16_t port);
+    transport_ws_client(const std::string& host, std::uint16_t port, std::size_t recv_stack = 0);
 
     /** @brief Stop the recv thread and close the socket. */
     ~transport_ws_client() override;

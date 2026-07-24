@@ -173,7 +173,7 @@ struct transport_ws_server::session_t {
 };
 
 transport_ws_server::transport_ws_server(std::uint16_t bind_port, std::size_t max_peers,
-                                         bool peer_named)
+                                         bool peer_named, std::size_t recv_stack)
     : max_peers_(max_peers), peer_named_(peer_named) {
     listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd_ < 0) return;
@@ -198,7 +198,7 @@ transport_ws_server::transport_ws_server(std::uint16_t bind_port, std::size_t ma
     if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound), &blen) == 0)
         bound_port_ = ntohs(bound.sin_port);
 
-    start([this] { run(); });
+    start([this] { run(); }, recv_stack);
 }
 
 transport_ws_server::~transport_ws_server() {
@@ -534,7 +534,8 @@ void transport_ws_server::run() {
 // transport_ws_client — the dial-out half.
 // ---------------------------------------------------------------------------
 
-transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t port) {
+transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t port,
+                                         std::size_t recv_stack) {
     // Seed the per-frame masking-key stream with something that varies between
     // connections (steady_clock + this address). Not crypto-strong — RFC 6455
     // masking exists for proxy/cache safety, not to defend against a peer.
@@ -562,7 +563,7 @@ transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t 
 
     conn_fd_.store(fd, std::memory_order_relaxed);
     connected_ = true;
-    start([this, fd] { serve(fd); });
+    start([this, fd] { serve(fd); }, recv_stack);
 }
 
 transport_ws_client::~transport_ws_client() {

@@ -14,12 +14,13 @@
  */
 #pragma once
 
+#include <pthread.h>
+
 #include <atomic>
 #include <cstddef>
 #include <functional>
 #include <mutex>
 #include <span>
-#include <thread>
 
 /** @brief The POSIX scatter-gather descriptor (`<sys/uio.h>`), forward-declared
  *         so this header need not pull the system socket headers in. */
@@ -69,9 +70,23 @@ class posix_endpoint_t {
      * @ref stop_ (directly or via the bounded waits below) and return promptly
      * once it is set.
      *
-     * @param body The thread body (the transport's accept/recv loop).
+     * Spawns via `pthread_create` (not `std::thread`): the constructor of the
+     * latter THROWS on failure, which under `-fno-exceptions` (the MCU build)
+     * `std::abort`s — a thread-spawn OOM on a starved node would bring the whole
+     * process down instead of soft-failing. `pthread_create` returns an error
+     * code; a failed spawn leaves the endpoint simply not receiving (no abort).
+     *
+     * @param body       The thread body (the transport's accept/recv loop).
+     * @param stack_size Recv-thread stack size in bytes, or 0 for the platform
+     *        default (the ONLY value that preserves prior behavior). A non-zero
+     *        hint is applied via `pthread_attr_setstacksize`, honored by glibc
+     *        AND the ESP-IDF pthread layer (where it maps to the FreeRTOS task
+     *        stack) — the portable knob that lets an integrator right-size this
+     *        thread instead of inflating `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT`
+     *        for every pthread in the system. A hint below the platform floor is
+     *        ignored (the default stack is used) rather than failing the spawn.
      */
-    void start(std::function<void()> body);
+    void start(std::function<void()> body, std::size_t stack_size = 0);
 
     /**
      * @brief Request shutdown and join the receive thread (idempotent).
@@ -125,7 +140,19 @@ class posix_endpoint_t {
     std::atomic<bool> stop_{false};
 
    private:
-    std::thread thread_; /**< @brief The receive thread (joined by stop_and_join). */
+    /**
+     * @brief pthread entry trampoline — runs @ref body_ then returns.
+     *
+     * @param self The owning @ref posix_endpoint_t (the `pthread_create` arg).
+     * @return Always nullptr (the thread's exit value is unused).
+     */
+    static void* thread_entry(void* self);
+
+    std::function<void()> body_; /**< @brief The owned thread body @ref thread_entry runs. */
+    pthread_t thread_{};         /**< @brief The receive thread (joined by stop_and_join;
+                                            valid only while @ref started_). */
+    bool started_ = false;       /**< @brief Whether @ref thread_ holds a joinable thread
+                                            (a failed/never-attempted spawn stays false). */
 };
 
 /**

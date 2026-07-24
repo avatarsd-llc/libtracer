@@ -28,7 +28,8 @@ namespace {
 }  // namespace
 
 udp_transport_t::udp_transport_t(std::uint16_t bind_port, const std::string& peer_host,
-                                 std::uint16_t peer_port, mem::mem_backend_t* backend)
+                                 std::uint16_t peer_port, mem::mem_backend_t* backend,
+                                 std::size_t recv_stack)
     : backend_(backend) {
     std::uint32_t peer_ip = 0;
     in_addr addr{};
@@ -62,7 +63,7 @@ udp_transport_t::udp_transport_t(std::uint16_t bind_port, const std::string& pee
     // (the posix_endpoint_t SO_RCVTIMEO idiom).
     set_rcv_timeout(fd_);
 
-    start([this] { run(); });
+    start([this] { run(); }, recv_stack);
 }
 
 udp_transport_t::~udp_transport_t() {

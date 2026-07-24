@@ -26,11 +26,35 @@ constexpr int MSG_NOSIGNAL = 0;
 
 posix_endpoint_t::~posix_endpoint_t() { stop_and_join(); }
 
-void posix_endpoint_t::start(std::function<void()> body) { thread_ = std::thread(std::move(body)); }
+void* posix_endpoint_t::thread_entry(void* self) {
+    static_cast<posix_endpoint_t*>(self)->body_();
+    return nullptr;
+}
+
+void posix_endpoint_t::start(std::function<void()> body, std::size_t stack_size) {
+    body_ = std::move(body);
+
+    pthread_attr_t attr;
+    ::pthread_attr_init(&attr);
+    if (stack_size != 0) {
+        // A hint below the platform floor makes setstacksize return EINVAL and
+        // leaves the attr's default stacksize in place — we fall back to the
+        // default stack rather than fail the spawn.
+        (void)::pthread_attr_setstacksize(&attr, stack_size);
+    }
+
+    // Error-code return, not a throw: see start()'s header contract (a std::thread
+    // spawn failure would std::abort under -fno-exceptions).
+    started_ = (::pthread_create(&thread_, &attr, &posix_endpoint_t::thread_entry, this) == 0);
+    ::pthread_attr_destroy(&attr);
+}
 
 void posix_endpoint_t::stop_and_join() {
     stop_.store(true, std::memory_order_relaxed);
-    if (thread_.joinable()) thread_.join();
+    if (started_) {
+        ::pthread_join(thread_, nullptr);
+        started_ = false;
+    }
 }
 
 void posix_endpoint_t::set_rcv_timeout(int fd) {

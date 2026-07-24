@@ -19,7 +19,7 @@
 
 namespace tr::net {
 
-socketcan_link_t::socketcan_link_t(const std::string&) {}
+socketcan_link_t::socketcan_link_t(const std::string&, std::size_t) {}
 
 socketcan_link_t::~socketcan_link_t() = default;
 
