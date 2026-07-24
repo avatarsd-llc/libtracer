@@ -9,11 +9,11 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0014 |
 | **Title** | Creator endpoint: connection lifecycle and link liveness |
-| **Status** | draft |
+| **Status** | **accepted** (2026-07-24 — maintainer ruling; comment window waived on this solo-maintained spec, per the RFC-0009 precedent) |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-07-24 |
-| **Comment window closes** | 2026-08-07 (≥ 14 days after opening) |
-| **Tracking issue** | #TBD |
+| **Comment window closes** | waived |
+| **Tracking issue** | #492 (implementation); #491 (d2d-origination follow-up) |
 | **Target spec version** | v1 |
 
 ## Summary
@@ -108,7 +108,8 @@ One control vertex serves both; the **TLV type of the written value** selects wh
   `ERROR{tr::schema::not_found}` / `ERROR{tr::schema::type_mismatch}`; an empty or reserved name →
   `ERROR{tr::schema::type_mismatch}`. `SPEC` naming a **name that already exists** (live or retired
   but re-registered) → `ERROR{tr::path::in_use}` — reconfiguration is via the connection's `:settings`,
-  never re-SPEC. On success the child `/net/<transport>/<name>` exists **atomically** (one write
+  never re-SPEC. (A retrying orchestrator treats `PATH_IN_USE` as "already exists," so the reject is
+  idempotent-safe.) On success the child `/net/<transport>/<name>` exists **atomically** (one write
   yields a fully-configured connection vertex — the GPIO-atomicity ADR-0059 protects; no "live but
   misconfigured" window).
 - **`NAME` ⇒ remove.** The endpoint resolves the name; an **unresolvable** name (never created, or
@@ -188,9 +189,11 @@ link **ignores refcount** — its listen socket stays bound and accepting until 
 - **Ops on a down/`reconnecting` link fail fast** with `link-down` — never block forever on a dead
   peer.
 - **A permanently-unreachable `DIAL` peer with a standing binding retries indefinitely** while
-  refcount > 0 (the no-synthetic-limits consequence — no max-attempt constant). `backoff` and
-  `connect_timeout` are `:settings` config, never hardcoded (RFC-0006/0007 / ADR-0051). An optional
-  give-up bound (a `:settings` value plus a terminal state) is **deferred** (see Discussion).
+  refcount > 0 (the no-synthetic-limits consequence — no max-attempt constant, **no give-up bound,
+  and no terminal-failure state**: a declared link retries until it connects or is `NAME`-removed).
+  `backoff` and `connect_timeout` are `:settings` config, never hardcoded (RFC-0006/0007 / ADR-0051).
+  A consumer distinguishes "transiently retrying" from "unreachable" by applying its **own** display
+  threshold to the propagated `reconnecting` state — the wire stays honestly `reconnecting`.
 - **Liveness enum** (the vertex value; supersedes the binary `set_link_state`):
 
   | state | role | meaning |
@@ -316,11 +319,14 @@ fails-fast `link-down` and is reaped.
 - **Consistent with RFC-0009** — removal is the §A.1.1 device-mediated write, `WRITE`-gated per §A.2,
   reusing `retire()`; the write-creates exception for connection vertices (§3) explicitly narrows
   RFC-0009 §E.1 for the transport subtree.
-- **Open for the comment window:** (i) whether `SPEC` on an existing name should reject (this draft)
-  or act as an idempotent reconcile for a returning orchestrator; (ii) the optional give-up bound +
-  terminal liveness state; (iii) the remote-owned-subscription-origination surface named in §Scope
-  boundary — companion RFC vs. existing multi-hop `SUBSCRIBER` semantics.
+- **Rulings (maintainer, window waived).** (i) `SPEC` on an existing name **rejects** with
+  `PATH_IN_USE` (idempotent-safe for a retrying orchestrator); reconfiguration is `:settings`, and a
+  declarative reconciler diffs live-vs-desired and SPECs only absent names. (ii) A `DIAL` link
+  **retries forever** while refcount > 0 — **no** give-up bound and **no** terminal state (a give-up
+  count would be a synthetic limit); presentation thresholds are the consumer's. (iii) The
+  remote-owned-subscription-origination surface named in §Scope boundary is a **separate follow-up**
+  (its own investigation / RFC), not part of RFC-0014 — RFC-0014 is the link plane only.
 - Drafted from a maintainer grill session (2026-07-24) with Claude Code, then revised against an
   adversarial verification pass (ADR/spec consistency, code-pinnability, internal coherence, consumer
-  fit); the design decisions are the maintainer's.
-- Per [GOVERNANCE.md](../../../.github/GOVERNANCE.md), the tracking issue stays open ≥ 14 days.
+  fit); the design decisions are the maintainer's. Accepted the same day (solo-maintained spec, window
+  waived — the RFC-0009 precedent).
