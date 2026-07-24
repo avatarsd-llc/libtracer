@@ -66,12 +66,14 @@ void parse_config(const tlv_t* config, conn_settings_t& s) {
     if (const auto v = cfg.u8("role")) s.role = *v == 0 ? conn_role_t::DIAL : conn_role_t::LISTEN;
     if (const auto v = cfg.u32("keepalive")) s.keepalive_ms = *v;
     if (const auto v = cfg.u32("max_frame")) s.max_frame = *v;
+    if (const auto v = cfg.u32("backoff")) s.backoff_ms = *v;
+    if (const auto v = cfg.u32("connect_timeout")) s.connect_timeout_ms = *v;
 }
 
-/** @brief A 1-byte link-state VALUE TLV (0x00 down / 0x01 up) as an owned view. */
-[[nodiscard]] view_t link_state_value(bool up) {
+/** @brief A 1-byte link-liveness VALUE TLV (link_state_t) as an owned view. */
+[[nodiscard]] view_t link_state_value(link_state_t state) {
     std::vector<std::byte> out;
-    const std::byte b{static_cast<std::uint8_t>(up ? 1 : 0)};
+    const std::byte b{static_cast<std::uint8_t>(state)};
     wire::emit_tlv(out, type_t::VALUE, wire::opt_t{}, std::span<const std::byte>(&b, 1));
     return view::over_bytes(out).value_or(
         view_t{});  // empty view on alloc failure (caller-checked)
@@ -214,17 +216,22 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
     // NAME→link demux table (Brick 3a). The `/net/<name>` NAME is exactly the router
     // child name a `dst` routes through.
     router_.add_child(name, *link);
-    // A config-constructed socket is live once built: write its link state up so an
-    // awaiter on /net/<name> sees the bring-up. Provided links report via set_link_state.
-    if (constructed) (void)set_link_state(name, true);
+    // A config-constructed socket is live once built: publish its liveness so an awaiter
+    // on /net/<name> sees the bring-up. A DIAL socket is `UP`; a LISTEN socket that bound
+    // is `LISTENING` (a bind failure returns an error from the factory above, so a
+    // constructed LISTEN is always bound). Provided links report via set_link_state.
+    if (constructed)
+        (void)set_link_state(
+            name, role == conn_role_t::LISTEN ? link_state_t::LISTENING : link_state_t::UP);
     return v;
 }
 
-result_t<void> transport_vertex_t::set_link_state(std::string_view name, bool up) {
+result_t<void> transport_vertex_t::set_link_state(std::string_view name, link_state_t state) {
     const auto it = conns_.find(name);
     if (it == conns_.end()) return std::unexpected(status_t::NOT_FOUND);
-    // A write to the vertex value bumps write_seq_ + notifies — so await(/net/<name>) fires.
-    return graph_.write(it->second.vertex, link_state_value(up));
+    // A write to the vertex value bumps write_seq_ + delivers to subscribers (RFC-0008
+    // §D) — so await(/net/<name>) fires and a subscribe streams the transition.
+    return graph_.write(it->second.vertex, link_state_value(state));
 }
 
 const conn_settings_t* transport_vertex_t::settings_of(std::string_view name) const {

@@ -14,6 +14,26 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **Link-liveness enum — RFC-0014 S1 (`tr::net::link_state_t`, #492).** A connection
+  vertex's stored value is now the six-state liveness enum
+  (`DORMANT`/`DIALING`/`RECONNECTING`/`UP`/`LISTENING`/`BIND_FAILED`, RFC-0014 §4) rather
+  than a binary up/down byte. `conn_settings_t` gains `backoff_ms` and
+  `connect_timeout_ms` (config keys `backoff` / `connect_timeout`), parsed now but
+  consumed by the S5 liveness engine that lands later. The state remains manually driven
+  in S1: a config-constructed socket self-reports `UP` (DIAL) / `LISTENING` (LISTEN) at
+  creation; the engine becomes the sole writer of the DIAL transitions in S5. The 1-byte
+  wire encoding (table order, `DORMANT = 0x00` preserving the old "down") is the reference
+  encoding until the S7 conformance vectors make it normative (the RFC defers the byte
+  clauses to #492).
+
+### Changed
+
+- **BREAKING: `transport_vertex_t::set_link_state(std::string_view, bool)` →
+  `set_link_state(std::string_view, tr::net::link_state_t)` (#492).** The manual
+  link-state seam now takes the liveness enum instead of a bool. Migrate `set_link_state(n,
+  true)` → `set_link_state(n, tr::net::link_state_t::UP)` (or `LISTENING` for a listen
+  socket) and `set_link_state(n, false)` → `…::DORMANT`.
+
 - **Per-transport recv-thread stack sizing (#486).** Every socket transport constructor
   (`udp_transport_t`, `tcp_transport_t` dial+listen, `transport_tcp_server`,
   `transport_ws_server`, `transport_ws_client`) and `socketcan_link_t` gain a trailing
