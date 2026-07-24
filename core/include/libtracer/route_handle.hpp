@@ -28,6 +28,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <memory_resource>
 #include <mutex>
 #include <optional>
@@ -64,11 +65,14 @@ struct handle_binding_t {
  * monotonic label allocator — drawn from the injected memory resource and guarded
  * by the LINK'S OWN mutex, so label traffic on one connection never contends with
  * another. The only cross-link lock is a `shared_mutex` over the link registry,
- * taken exclusively only when a link's tables are first CREATED (never on clear —
- * which empties an existing entry under the per-link mutex, leaving the registry
- * insert-only so a handed-out table reference can never dangle). State exists only for flows
- * that opted into compaction, so @ref ingress_count on a node forwarding only
- * one-shot/cold traffic is zero.
+ * taken exclusively when a link's tables are first CREATED or when @ref clear_link
+ * removes them. Each link's tables are owned by a `shared_ptr`, so the accessors
+ * hand out a PINNING copy: `clear_link` can erase the registry entry while a
+ * concurrent writer still holds the tables — the node is destroyed only when the
+ * last outstanding reference drops (no dangling reference), and the registry is
+ * bounded to LIVE link names instead of growing one empty shell per departed name
+ * (#488). State exists only for flows that opted into compaction, so @ref
+ * ingress_count on a node forwarding only one-shot/cold traffic is zero.
  */
 class route_handle_t {
    public:
@@ -165,6 +169,16 @@ class route_handle_t {
     /** @brief Count of live egress (advertised) bindings. */
     [[nodiscard]] std::size_t egress_count() const;
 
+    /**
+     * @brief Count of live per-link table shells in the registry (diagnostic).
+     *
+     * One shell per link name that currently holds compaction state. @ref clear_link
+     * reclaims a departed link's shell, so a workload that churns through many distinct
+     * link names returns here to its steady-state live-name count rather than growing
+     * unboundedly (#488). Tests assert this reclamation.
+     */
+    [[nodiscard]] std::size_t link_count() const;
+
    private:
     // One connection's label state (ADR-0038 §3): flat pmr entry arrays (a link
     // carries FEW compact flows, so a linear label scan beats a node-based map —
@@ -186,14 +200,18 @@ class route_handle_t {
         std::uint16_t next_label = 1;  // 0 is reserved "none"
     };
 
+    // Each link's tables are heap-owned via a shared_ptr and the registry stores that
+    // pointer, so an accessor hands out a PINNING copy: a table stays alive for as long
+    // as any caller holds its shared_ptr, even after clear_link erases the registry entry
+    // (#488). std::map node stability is no longer relied on for reference validity.
     /** @brief The link's tables, created on first use (exclusive registry lock). */
-    [[nodiscard]] link_tables_t& tables(std::string_view link);
+    [[nodiscard]] std::shared_ptr<link_tables_t> tables(std::string_view link);
     /** @brief The link's tables if they exist (shared registry lock), else nullptr. */
-    [[nodiscard]] link_tables_t* find_tables(std::string_view link) const;
+    [[nodiscard]] std::shared_ptr<link_tables_t> find_tables(std::string_view link) const;
 
     std::pmr::memory_resource* mr_;
     mutable std::shared_mutex links_m_;  // registry only: create/clear, never per delivery
-    std::pmr::map<std::pmr::string, link_tables_t, std::less<>> links_;
+    std::pmr::map<std::pmr::string, std::shared_ptr<link_tables_t>, std::less<>> links_;
 };
 
 /**

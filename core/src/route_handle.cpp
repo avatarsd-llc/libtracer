@@ -19,40 +19,47 @@ namespace tr::net {
 using wire::opt_t;
 using wire::type_t;
 
-route_handle_t::link_tables_t& route_handle_t::tables(std::string_view link) {
+std::shared_ptr<route_handle_t::link_tables_t> route_handle_t::tables(std::string_view link) {
     {
         const std::shared_lock lock(links_m_);
         if (const auto it = links_.find(link); it != links_.end()) return it->second;
     }
     const std::unique_lock lock(links_m_);
-    // try_emplace: another thread may have created it between the two locks.
-    return links_.try_emplace(std::pmr::string(link, mr_), mr_).first->second;
+    // Re-check: another thread may have created it between the two locks.
+    if (const auto it = links_.find(link); it != links_.end()) return it->second;
+    // The tables node is INDEPENDENTLY owned (allocate_shared draws it from mr_), not
+    // stored inline in the map node: the returned shared_ptr copy pins it so clear_link
+    // can erase the registry entry while a concurrent writer still holds this table (#488).
+    auto sp = std::allocate_shared<link_tables_t>(
+        std::pmr::polymorphic_allocator<link_tables_t>(mr_), mr_);
+    links_.emplace(std::pmr::string(link, mr_), sp);
+    return sp;
 }
 
-route_handle_t::link_tables_t* route_handle_t::find_tables(std::string_view link) const {
+std::shared_ptr<route_handle_t::link_tables_t> route_handle_t::find_tables(
+    std::string_view link) const {
     const std::shared_lock lock(links_m_);
     const auto it = links_.find(link);
-    return it == links_.end() ? nullptr
-                              : const_cast<link_tables_t*>(&it->second);  // per-link mutex inside
+    return it == links_.end() ? nullptr : it->second;  // a pinning copy; per-link mutex inside
 }
 
 void route_handle_t::bind_ingress(std::string_view in_link, std::uint16_t label,
                                   handle_binding_t binding) {
-    link_tables_t& t = tables(in_link);
-    const std::lock_guard lock(t.m);
-    for (ingress_entry_t& e : t.ingress) {
+    const std::shared_ptr<link_tables_t> t = tables(in_link);
+    const std::lock_guard lock(t->m);
+    for (ingress_entry_t& e : t->ingress) {
         if (e.label == label) {
             e.binding = std::move(binding);
             return;
         }
     }
-    t.ingress.push_back(ingress_entry_t{.label = label, .binding = std::move(binding)});
+    t->ingress.push_back(ingress_entry_t{.label = label, .binding = std::move(binding)});
 }
 
 std::optional<handle_binding_t> route_handle_t::lookup_ingress(std::string_view in_link,
                                                                std::uint16_t label) const {
-    link_tables_t* const t = find_tables(in_link);
-    if (t == nullptr) return std::nullopt;
+    const std::shared_ptr<link_tables_t> t = find_tables(in_link);
+    if (!t) return std::nullopt;
     const std::lock_guard lock(t->m);
     for (const ingress_entry_t& e : t->ingress)
         if (e.label == label) return e.binding;
@@ -61,22 +68,22 @@ std::optional<handle_binding_t> route_handle_t::lookup_ingress(std::string_view 
 
 void route_handle_t::record_egress(std::string_view out_link, std::uint16_t label,
                                    std::vector<std::byte> route) {
-    link_tables_t& t = tables(out_link);
-    const std::lock_guard lock(t.m);
-    for (egress_entry_t& e : t.egress) {
+    const std::shared_ptr<link_tables_t> t = tables(out_link);
+    const std::lock_guard lock(t->m);
+    for (egress_entry_t& e : t->egress) {
         if (e.label == label) {
             e.route.assign(route.begin(), route.end());
             return;
         }
     }
-    t.egress.push_back(egress_entry_t{
+    t->egress.push_back(egress_entry_t{
         .label = label, .route = std::pmr::vector<std::byte>(route.begin(), route.end(), mr_)});
 }
 
 std::optional<std::vector<std::byte>> route_handle_t::egress_route(std::string_view out_link,
                                                                    std::uint16_t label) const {
-    link_tables_t* const t = find_tables(out_link);
-    if (t == nullptr) return std::nullopt;
+    const std::shared_ptr<link_tables_t> t = find_tables(out_link);
+    if (!t) return std::nullopt;
     const std::lock_guard lock(t->m);
     for (const egress_entry_t& e : t->egress)
         if (e.label == label) return std::vector<std::byte>(e.route.begin(), e.route.end());
@@ -85,55 +92,52 @@ std::optional<std::vector<std::byte>> route_handle_t::egress_route(std::string_v
 
 std::pair<std::uint16_t, bool> route_handle_t::ensure_egress(std::string_view out_link,
                                                              std::span<const std::byte> route) {
-    link_tables_t& t = tables(out_link);
-    const std::lock_guard lock(t.m);
+    const std::shared_ptr<link_tables_t> t = tables(out_link);
+    const std::lock_guard lock(t->m);
     // Reuse: the egress table doubles as the route -> label index (a link carries
     // few compact flows; a linear route compare beats a third keyed-by-bytes map).
-    for (const egress_entry_t& e : t.egress) {
+    for (const egress_entry_t& e : t->egress) {
         if (e.route.size() == route.size() &&
             std::equal(e.route.begin(), e.route.end(), route.begin()))
             return {e.label, false};  // already advertised on this link - reuse the label
     }
-    const std::uint16_t label = t.next_label++;
-    t.egress.push_back(egress_entry_t{
+    const std::uint16_t label = t->next_label++;
+    t->egress.push_back(egress_entry_t{
         .label = label, .route = std::pmr::vector<std::byte>(route.begin(), route.end(), mr_)});
     return {label, true};
 }
 
 std::uint16_t route_handle_t::alloc_label(std::string_view link) {
-    link_tables_t& t = tables(link);
-    const std::lock_guard lock(t.m);
-    return t.next_label++;
+    const std::shared_ptr<link_tables_t> t = tables(link);
+    const std::lock_guard lock(t->m);
+    return t->next_label++;
 }
 
 void route_handle_t::clear_link(std::string_view link) {
-    // Self-heal: forget the link's ingress/egress bindings and restart its label
-    // allocator, so a post-reconnect delivery re-advertises from a clean slate.
+    // Self-heal: forget the link's ingress/egress bindings and its label allocator so a
+    // post-reconnect delivery re-advertises from a clean slate.
     //
-    // The entry is EMPTIED in place, NOT erased. tables()/find_tables release
-    // links_m_ before the caller locks the per-link mutex, so a reference they
-    // handed out must stay valid while it is used; erasing the entry here (as an
-    // earlier version did) could destroy a link_tables_t a concurrent
-    // ensure_egress/bind_ingress was mid-write on — a use-after-free that orphaned
-    // the egress buffer (a leak). Keeping `links_` insert-only makes every such
-    // reference stable for this object's lifetime (std::map nodes never move), and
-    // the per-link mutex serializes this clear against those writers. A cleared
-    // link keeps only its small (empty) table shell, reused on the next advertise;
-    // the route bytes each egress entry owned are freed with the entries.
-    link_tables_t* const t = find_tables(link);
-    if (t == nullptr) return;
-    const std::lock_guard lock(t->m);
-    t->ingress.clear();
-    t->egress.clear();
-    t->next_label = 1;  // 0 is reserved "none" — restart, matching a fresh table
+    // The registry entry is ERASED, not emptied-in-place. The tables node is owned by a
+    // shared_ptr (#488): tables()/find_tables hand out a PINNING copy, so erasing the
+    // entry here cannot free a link_tables_t a concurrent ensure_egress/bind_ingress is
+    // mid-write on — the node is destroyed only when the last outstanding reference drops,
+    // and its route bytes are freed with it. A writer that raced the erase keeps writing to
+    // a now-detached table; those edits are correctly discarded, since the next tables()
+    // mints a fresh entry — exactly the clean slate the self-heal wants. Erasing bounds
+    // `links_` to LIVE link names instead of retaining an empty shell per departed name.
+    //
+    // We touch only the registry (map) structure under links_m_, never the link_tables_t
+    // object itself, so this never contends with a writer holding the per-link mutex.
+    const std::unique_lock lock(links_m_);
+    if (const auto it = links_.find(link); it != links_.end()) links_.erase(it);
 }
 
 std::size_t route_handle_t::ingress_count() const {
     const std::shared_lock lock(links_m_);
     std::size_t n = 0;
     for (const auto& [name, t] : links_) {
-        const std::lock_guard tl(const_cast<link_tables_t&>(t).m);
-        n += t.ingress.size();
+        const std::lock_guard tl(t->m);
+        n += t->ingress.size();
     }
     return n;
 }
@@ -142,10 +146,15 @@ std::size_t route_handle_t::egress_count() const {
     const std::shared_lock lock(links_m_);
     std::size_t n = 0;
     for (const auto& [name, t] : links_) {
-        const std::lock_guard tl(const_cast<link_tables_t&>(t).m);
-        n += t.egress.size();
+        const std::lock_guard tl(t->m);
+        n += t->egress.size();
     }
     return n;
+}
+
+std::size_t route_handle_t::link_count() const {
+    const std::shared_lock lock(links_m_);
+    return links_.size();
 }
 
 // --- transport-plane frame codec ---------------------------------------------

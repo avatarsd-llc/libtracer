@@ -11,15 +11,21 @@
  * reuse vs fresh, egress_route retention (NACK re-advertise), clear_link resets
  * one link only (allocator included), counts, and a whole-lifecycle run inside a
  * slab-backed monotonic resource with a null upstream (zero global heap for the
- * table state — the ADR-0039 host-owned-memory claim).
+ * table state — the ADR-0039 host-owned-memory claim). #488: clear_link reclaims
+ * the per-link shell (churn of N distinct names returns link_count() to steady
+ * state) while staying UAF-free under a concurrent writer x clear_link race (the
+ * shared_ptr pin — a TSan gate, run instrumented by the core-ci tsan job).
  */
 
 #include "libtracer/route_handle.hpp"
 
 #include <array>
+#include <atomic>
+#include <cstdint>
 #include <cstdio>
 #include <memory_resource>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -80,6 +86,73 @@ void exercise(route_handle_t& h) {
     check(h.ingress_count() == 0 && h.egress_count() == 3, "counts after clear");
 }
 
+/**
+ * @brief #488 — clear_link RECLAIMS a departed link's shell (was insert-only), and the
+ *        erase-while-referenced path is use-after-free-free (the shared_ptr pin).
+ *
+ * Runs on the default (freeing) resource so a reclaimed shell is truly returned. The
+ * concurrent section is a TSan gate: writers hammer a small shared name set while a
+ * clearer erases the same names; the pin must keep every handed-out table alive.
+ */
+void churn_and_race() {
+    std::printf(" #488 churn + erase-while-referenced:\n");
+    route_handle_t h;
+    check(h.link_count() == 0, "a fresh route_handle holds no link shells");
+
+    // Reclamation: N distinct link names each mint one shell; clearing each reclaims it,
+    // so link_count() returns to its steady state (it was insert-only before #488).
+    constexpr int kNames = 64;
+    for (int i = 0; i < kNames; ++i) {
+        char name[16];
+        std::snprintf(name, sizeof name, "peer%d", i);
+        (void)h.ensure_egress(name, route_bytes(static_cast<std::uint8_t>(i)));
+    }
+    check(h.link_count() == kNames, "each distinct link name creates exactly one shell");
+    for (int i = 0; i < kNames; ++i) {
+        char name[16];
+        std::snprintf(name, sizeof name, "peer%d", i);
+        h.clear_link(name);
+    }
+    check(h.link_count() == 0, "clear_link reclaims the shell — links_ back to steady state");
+
+    // Erase-while-referenced: writers churn ~2000 labels across 6 shared names while a
+    // clearer erases those same names. A handed-out shared_ptr must pin its table so an
+    // erase never frees a table mid-write (TSan/ASan would flag a UAF or race here).
+    constexpr int kThreads = 4;
+    constexpr int kIters = 1500;
+    std::atomic<bool> go{false};
+    auto writer = [&](int seed) {
+        while (!go.load(std::memory_order_acquire)) {
+        }
+        for (int i = 0; i < kIters; ++i) {
+            char name[8];
+            std::snprintf(name, sizeof name, "L%d", (seed + i) % 6);
+            (void)h.ensure_egress(name, route_bytes(static_cast<std::uint8_t>(i)));
+            h.bind_ingress(name, static_cast<std::uint16_t>((i & 0x7FFF) + 1),
+                           handle_binding_t{.terminus = true});
+            (void)h.lookup_ingress(name, static_cast<std::uint16_t>((i & 0x7FFF) + 1));
+        }
+    };
+    auto clearer = [&]() {
+        while (!go.load(std::memory_order_acquire)) {
+        }
+        for (int i = 0; i < kIters; ++i) {
+            char name[8];
+            std::snprintf(name, sizeof name, "L%d", i % 6);
+            h.clear_link(name);
+        }
+    };
+    std::vector<std::thread> ts;
+    ts.reserve(kThreads + 1);
+    for (int t = 0; t < kThreads; ++t) ts.emplace_back(writer, t);
+    ts.emplace_back(clearer);
+    go.store(true, std::memory_order_release);
+    for (auto& t : ts) t.join();
+    // No crash / no sanitizer report IS the assertion; the registry stays bounded to the
+    // live name set (<= 6), never the ~2000 distinct labels churned through it.
+    check(h.link_count() <= 6, "concurrent churn + clear keeps shells bounded to live names");
+}
+
 }  // namespace
 
 int main() {
@@ -100,6 +173,8 @@ int main() {
         route_handle_t h(&mr);
         exercise(h);
     }
+
+    churn_and_race();
 
     if (g_failures == 0) {
         std::printf("route_handle: ALL PASS\n");
