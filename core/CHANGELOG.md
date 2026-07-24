@@ -32,6 +32,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **FWD FIELD selector: a malformed `index_mode` byte now rejects with `INVALID_PATH` (#437).**
+  `selector_to_field` (`op_resolve_walk.hpp`) switched on the decoded `index_mode` (RFC-0004 §C:
+  `SCALAR`/`ELEMENT`/`WILDCARD`) with no `default` case, so a wire byte outside `{0,1,2}` fell
+  through and **silently dropped the decoded index** (the step resolved as a plain non-indexed
+  scalar) instead of erroring. It now returns `INVALID_PATH`, matching the sibling `kMaxFieldDepth`
+  guard and the wildcard-reject path. (Bracket handling in `path::has_reserved_char` — the other
+  half of #437 — is intentionally deferred, coupled to address-index parsing; left as-is.)
+
 - **`route_handle_t::clear_link` reclaims a departed link's table shell (#488).** The
   per-link compaction registry (`links_`) was insert-only: `clear_link` emptied a link's
   tables but retained the empty `link_tables_t` shell for the object's lifetime, so a

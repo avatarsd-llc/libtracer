@@ -291,6 +291,12 @@ template <class N>
                 step.indexed = has_index;
                 if (has_index) step.index = static_cast<std::uint16_t>(index);
                 break;
+            default:
+                // A wire index_mode byte outside {SCALAR,ELEMENT,WILDCARD} is malformed.
+                // Without this the switch would fall through and silently DROP the decoded
+                // index (step keeps its non-indexed defaults) — reject it, matching the
+                // kMaxFieldDepth guard below and the sibling INVALID_PATH sites (#437).
+                return std::unexpected(status_t::INVALID_PATH);
         }
         fp.steps.push_back(std::move(step));
         if (fp.steps.size() > kMaxFieldDepth) return std::unexpected(status_t::INVALID_PATH);
