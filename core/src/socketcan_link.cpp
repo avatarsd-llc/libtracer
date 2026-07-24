@@ -28,7 +28,12 @@
 
 namespace tr::net {
 
-socketcan_link_t::socketcan_link_t(const std::string& ifname) {
+void* socketcan_link_t::thread_entry(void* self) {
+    static_cast<socketcan_link_t*>(self)->run();
+    return nullptr;
+}
+
+socketcan_link_t::socketcan_link_t(const std::string& ifname, std::size_t recv_stack) {
     fd_ = ::socket(PF_CAN, SOCK_RAW, CAN_RAW);
     if (fd_ < 0) return;
 
@@ -57,12 +62,21 @@ socketcan_link_t::socketcan_link_t(const std::string& ifname) {
     timeval tv{.tv_sec = 0, .tv_usec = 100000};  // 100 ms
     ::setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    thread_ = std::thread([this] { run(); });
+    pthread_attr_t attr;
+    ::pthread_attr_init(&attr);
+    // A hint below the platform floor makes setstacksize return EINVAL and leaves
+    // the default stacksize in place — fall back rather than fail the spawn.
+    if (recv_stack != 0) (void)::pthread_attr_setstacksize(&attr, recv_stack);
+    started_ = (::pthread_create(&thread_, &attr, &socketcan_link_t::thread_entry, this) == 0);
+    ::pthread_attr_destroy(&attr);
 }
 
 socketcan_link_t::~socketcan_link_t() {
     stop_.store(true, std::memory_order_relaxed);
-    if (thread_.joinable()) thread_.join();
+    if (started_) {
+        ::pthread_join(thread_, nullptr);
+        started_ = false;
+    }
     // Reset the fd under the write lock before closing so an in-flight write_raw
     // never touches a closed/reused descriptor.
     int doomed;

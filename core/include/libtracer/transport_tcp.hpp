@@ -78,9 +78,13 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
      *                  frame is drained off the stream, dropped, and
      *                  dropped_rx() ticks; never an OOM. Must outlive the
      *                  transport.
+     * @param recv_stack Recv-thread stack size in bytes, 0 = platform default
+     *                  (`posix_endpoint_t::start`). Non-zero right-sizes this
+     *                  transport's recv thread on an MCU.
      */
     tcp_transport_t(const std::string& peer_host, std::uint16_t peer_port,
-                    mem::mem_backend_t* backend = &mem::heap_backend(), std::size_t max_frame = 0);
+                    mem::mem_backend_t* backend = &mem::heap_backend(), std::size_t max_frame = 0,
+                    std::size_t recv_stack = 0);
 
     /**
      * @brief LISTEN mode: bind+listen on @p bind_port, accept ONE inbound peer.
@@ -92,10 +96,12 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
      *
      * @param bind_port TCP port to listen on (host byte order; 0 → ephemeral).
      * @param backend   The RX memory seam — see the DIAL constructor.
+     * @param recv_stack Recv-thread stack size in bytes, 0 = platform default
+     *                  (`posix_endpoint_t::start`).
      */
     explicit tcp_transport_t(std::uint16_t bind_port,
                              mem::mem_backend_t* backend = &mem::heap_backend(),
-                             std::size_t max_frame = 0);
+                             std::size_t max_frame = 0, std::size_t recv_stack = 0);
 
     /** @brief Stop the receive thread and close all sockets. */
     ~tcp_transport_t() override;
@@ -211,11 +217,14 @@ class transport_tcp_server : public transport_t, public bus_link_t, private stre
      * @param peer_named Expose the @ref bus_link_t facet (see @ref bus) — the
      *                   board↔board wiring choice, same contract as
      *                   transport_ws_server's.
+     * @param recv_stack Poll-thread stack size in bytes, 0 = platform default
+     *                   (`posix_endpoint_t::start`). One thread serves every
+     *                   peer, so this is the whole server's recv-stack knob.
      */
     explicit transport_tcp_server(std::uint16_t bind_port,
                                   mem::mem_backend_t* backend = &mem::heap_backend(),
                                   std::size_t max_frame = 0, std::size_t max_peers = 0,
-                                  bool peer_named = false);
+                                  bool peer_named = false, std::size_t recv_stack = 0);
 
     /** @brief Stop the poll thread and close all sockets. */
     ~transport_tcp_server() override;

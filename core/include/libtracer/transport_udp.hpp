@@ -55,9 +55,13 @@ class udp_transport_t : public transport_t, private posix_endpoint_t {
      * datagram a node accepts (a pool over a static MCU slab works as-is; default is the
      * process heap, unbounded, keeping the full cap). Exhaustion is backpressure — the
      * datagram is dropped and @ref dropped_rx ticks, never an OOM. Must outlive the transport.
+     *
+     * @param recv_stack Recv-thread stack size in bytes, 0 = platform default
+     *        (`posix_endpoint_t::start`). Non-zero right-sizes this transport's
+     *        recv thread on an MCU instead of raising the global pthread default.
      */
     udp_transport_t(std::uint16_t bind_port, const std::string& peer_host, std::uint16_t peer_port,
-                    mem::mem_backend_t* backend = &mem::heap_backend());
+                    mem::mem_backend_t* backend = &mem::heap_backend(), std::size_t recv_stack = 0);
     ~udp_transport_t() override;
 
     udp_transport_t(const udp_transport_t&) = delete;

@@ -12,6 +12,29 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-transport recv-thread stack sizing (#486).** Every socket transport constructor
+  (`udp_transport_t`, `tcp_transport_t` dial+listen, `transport_tcp_server`,
+  `transport_ws_server`, `transport_ws_client`) and `socketcan_link_t` gain a trailing
+  `recv_stack` parameter, and `twai_link_config_t` gains a `stack_size` field — all
+  defaulting to `0` (the platform default, i.e. the prior behavior). A non-zero value
+  right-sizes that one thread's stack instead of forcing an integrator to inflate the
+  **global** `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT` (which pays for every pthread in the
+  system) to cover the stack-heaviest recv loop. Socket transports apply it via
+  `pthread_attr_setstacksize` (honored by glibc and the ESP-IDF pthread layer alike); the
+  ESP TWAI link applies it via `esp_pthread_set_cfg`. Size to the measured high-water mark.
+
+### Changed
+
+- **The shared recv-thread scaffold (`posix_endpoint_t::start`) and `socketcan_link_t` now
+  spawn via `pthread_create`, not `std::thread`.** `std::thread`'s constructor *throws* on a
+  spawn failure, which under the MCU profile's `-fno-exceptions` becomes `std::abort` — a
+  thread-spawn OOM on a starved node would bring the whole process down. `pthread_create`
+  returns an error code; a failed spawn now leaves the endpoint simply not receiving (a soft
+  fail in keeping with the 0.6.0 OOM→`BACKPRESSURE` hardening), never an abort. At the
+  default stack size the observable behavior is otherwise unchanged.
+
 ## [0.6.0] — 2026-07-23
 
 ### Fixed

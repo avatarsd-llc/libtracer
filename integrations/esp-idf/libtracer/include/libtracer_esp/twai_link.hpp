@@ -28,6 +28,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <thread>
@@ -55,6 +56,12 @@ struct twai_link_config_t {
                                             (the FULL policy's backpressure window); an
                                             expired wait is a COUNTED drop, @ref
                                             twai_link_t::tx_dropped. */
+    std::size_t stack_size = 0;        /**< @brief Dispatch-thread stack size in bytes, 0 =
+                                            the global pthread default. Non-zero right-sizes
+                                            this task via `esp_pthread_set_cfg` instead of
+                                            inflating `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT`
+                                            for every pthread — the RAM lever (libtracer #486).
+                                            Size to the measured high-water mark plus margin. */
 };
 
 /**

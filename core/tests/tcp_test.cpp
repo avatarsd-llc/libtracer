@@ -743,8 +743,33 @@ void test_server_max_peers_cap() {
 
 }  // namespace
 
+// Proves the recv_stack knob (libtracer #486): a transport constructed with an
+// explicit recv-thread stack size still spawns its recv thread and round-trips.
+// On an MCU this is the RAM lever (right-size the thread instead of raising the
+// global pthread default); here it confirms the value plumbs through start() to
+// pthread_attr_setstacksize and the recv thread runs correctly (under TSan+ASan).
+void test_recv_stack_sized() {
+    std::printf("TCP transport — explicit recv-thread stack size round-trips:\n");
+    // Sized down from the ~8 MiB host default, yet ample under the sanitizers for
+    // a one-frame round-trip; the point is that a non-default size is honored.
+    constexpr std::size_t kStack = 512 * 1024;
+    sink_t at_listener;
+    auto listener_rx = [&](std::span<const std::byte> f) { at_listener.push(f); };
+    tcp_transport_t listener(std::uint16_t{0}, &tr::mem::heap_backend(), 0, kStack);
+    check(listener.ok(), "listener bound with a sized recv stack");
+    tcp_transport_t dialer("127.0.0.1", listener.local_port(), &tr::mem::heap_backend(), 0, kStack);
+    check(dialer.ok(), "dialer connected with a sized recv stack");
+
+    listener.set_receiver(listener_rx);
+    const auto f1 = test_frame(7, 0x22);
+    dialer.send(f1);
+    check(at_listener.wait_for_count(1, 2000ms), "frame received over the sized-stack recv thread");
+    check(at_listener.count() == 1 && at_listener.at(0) == f1, "received bytes are identical");
+}
+
 int main() {
     test_raw_frame_duplex();
+    test_recv_stack_sized();
     test_partial_and_coalesced();
     test_oversize_prefix();
     test_settings_max_frame();
