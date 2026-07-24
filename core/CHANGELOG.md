@@ -26,6 +26,25 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   encoding until the S7 conformance vectors make it normative (the RFC defers the byte
   clauses to #492).
 
+- **`route_handle_t::link_count()` (#488).** A diagnostic accessor returning the number of
+  live per-link table shells in the compaction registry — the observable that `clear_link`
+  now returns to steady state (see Fixed).
+
+### Fixed
+
+- **`route_handle_t::clear_link` reclaims a departed link's table shell (#488).** The
+  per-link compaction registry (`links_`) was insert-only: `clear_link` emptied a link's
+  tables but retained the empty `link_tables_t` shell for the object's lifetime, so a
+  `delivery_compact` workload cycling through many distinct link names (e.g. a bus link that
+  names peers `<ip>:<port>` and never reuses a name) accumulated one shell per distinct name.
+  The registry now owns each link's tables through a `std::shared_ptr`, so the accessors hand
+  out a pinning copy and `clear_link` can *erase* the map entry — the node is destroyed only
+  once the last outstanding reference drops, preserving the reference-stability invariant that
+  made the map insert-only (no use-after-free of a table a concurrent `ensure_egress`/
+  `bind_ingress` is mid-write on) while bounding `links_` to live link names. The public label
+  API is behavior-unchanged; a churn-of-distinct-names case plus a concurrent
+  writer×`clear_link` case (TSan) were added.
+
 ### Changed
 
 - **BREAKING: `transport_vertex_t::set_link_state(std::string_view, bool)` →
