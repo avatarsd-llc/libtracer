@@ -647,7 +647,7 @@ Nested SETTINGS for module namespacing (instead of an unnamed structured wrapper
 
 ### Where it appears
 
-- `<vertex>:settings` for atomic multi-field reads/writes; a bare `:settings` read serves the full container — the protocol knobs plus the nested `app` record when a descriptor table is installed — and `:settings.app` serves the app record alone ([RFC-0010](../spec/rfcs/0010-owner-app-fields-and-schema.md) §A.4).
+- `<vertex>:settings` for atomic multi-field reads; a bare `:settings` read serves the full container — the protocol knobs plus the nested `app` record when a descriptor table is installed — and `:settings.app` serves the app record alone ([RFC-0010](../spec/rfcs/0010-owner-app-fields-and-schema.md) §A.4). Writes are **per-knob** (`:settings.<knob>`); there is no atomic multi-field settings *write* (a bare `:settings` write resolves no knob and returns `SCHEMA_NOT_FOUND`).
 - Inside SUBSCRIBER as the `qos_settings` sub-field for per-subscription overrides.
 - Inside the `:schema` POINT (§`0x07`): the synthesized protocol part, and one `SETTINGS` per declared app field inside the owner part.
 
