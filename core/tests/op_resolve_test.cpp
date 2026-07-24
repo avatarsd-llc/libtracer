@@ -630,6 +630,35 @@ void test_write_creates_remote() {
 
 }  // namespace
 
+void test_out_of_range_index_mode() {
+    std::printf(
+        "FIELD index_mode byte outside {0,1,2} -> INVALID_PATH (no silent index drop, #437):\n");
+    graph_t g;
+    op_resolver_t resolver(g);
+    const auto path = path_t::parse("/sensor/temp");
+    (void)g.register_vertex(*path, role_t::STORED_VALUE);
+
+    // A FIELD selector: NAME "app-x", VALUE index=5 (u32), VALUE index_mode=3 (u8). Mode 3 is
+    // outside {SCALAR=0, ELEMENT=1, WILDCARD=2}; before #437 the selector_to_field switch had no
+    // default, so it fell through and silently DROPPED the decoded index (resolving as a plain
+    // non-indexed scalar) rather than rejecting the malformed selector.
+    std::vector<std::byte> fbody;
+    for (const auto& part : {b_name("app-x"), b_value({5, 0, 0, 0}), b_value({3})})
+        fbody.insert(fbody.end(), part.begin(), part.end());
+    std::vector<std::byte> field;
+    tr::wire::emit_tlv(field, type_t::FIELD, opt_t{.pl = true}, fbody);
+
+    const auto fwd = b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), b_path({"reply-ep"}), field);
+    auto reply = resolve_bytes(resolver, fwd);
+    check(reply.has_value(), "malformed-mode resolve produced a reply (soft error, not a crash)");
+    const auto dr = decode_reply(*reply);
+    const tlv_t& r = dr.tlv;
+    check(value_u8(r.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR),
+          "index_mode=3 => kind=ERROR");
+    check(status_error_code(r.children[4]) == 0x0021 /*tr::path::invalid*/,
+          "ERROR payload == INVALID_PATH (0x0021) — the index is rejected, not dropped");
+}
+
 int main() {
     test_read_zero_copy();
     test_write();
@@ -640,6 +669,7 @@ int main() {
     test_store_ref_concurrent();
     test_non_canonical_dst();
     test_wildcard_and_not_local();
+    test_out_of_range_index_mode();
     test_write_creates_remote();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
