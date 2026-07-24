@@ -57,21 +57,62 @@ set(LIBTRACER_SRCS
     "${LIBTRACER_ROOT}/core/src/fwd_router.cpp"
     "${LIBTRACER_ROOT}/core/src/transport_vertex.cpp"
     "${LIBTRACER_ROOT}/core/src/loopback.cpp"
-    # built-in transport-factory registrations (udp/tcp/ws) transport_vertex_t wires up.
-    # The ESP-IDF component is always a FULL node, so it compiles all three glue TUs plus
-    # the hand-written full-node dispatcher src/builtin_transports.cpp (register_builtin_transports).
-    "${LIBTRACER_ROOT}/core/src/builtin_transport_udp.cpp"
-    "${LIBTRACER_ROOT}/core/src/builtin_transport_tcp.cpp"
-    "${LIBTRACER_ROOT}/core/src/builtin_transport_ws.cpp"
-    "${LIBTRACER_ROOT}/core/src/builtin_transports.cpp"
-    # socket transports — lwIP BSD sockets on chip targets, glibc on `linux`
-    "${LIBTRACER_ROOT}/core/src/posix_endpoint.cpp"
-    "${LIBTRACER_ROOT}/core/src/transport_udp.cpp"
-    "${LIBTRACER_ROOT}/core/src/transport_tcp.cpp"
-    "${LIBTRACER_ROOT}/core/src/transport_ws.cpp"
-    # CAN transport (framing/advertise/reassembly — portable, host-tested)
-    "${LIBTRACER_ROOT}/core/src/transport_can.cpp"
 )
+
+# --- Built-in transport modules (#393) — per-module gating, mirroring the core CMake
+# options LIBTRACER_TRANSPORT_{UDP,TCP,WS}. Each transport's glue factory + socket TU
+# compile ONLY when its Kconfig bool is on; all default y, so a stock node is
+# byte-identical to before. Turning one off sheds its TUs from libtracer.a and makes a
+# SPEC of that `kind` resolve to SCHEMA_NOT_FOUND — the RAM-audit "compose the C6 for
+# its role" lever, with NO in-source feature macros (selection is which TUs compile).
+#
+# NB the two-pass model: CONFIG_* is UNDEFINED in IDF's early requirement-expansion
+# pass, so these guards read as OFF there. That is harmless — SRCS are consumed only in
+# the second (build) pass, where sdkconfig (default y) is loaded. The transport
+# PRIV_REQUIRES below therefore stay UNCONDITIONAL, for the same reason a Kconfig-gated
+# REQUIRES never propagates (it evaluates false in the early pass).
+set(LIBTRACER_BUILTIN_TRANSPORT_CALLS "")
+if(CONFIG_LIBTRACER_TRANSPORT_UDP)
+    list(APPEND LIBTRACER_SRCS
+        "${LIBTRACER_ROOT}/core/src/builtin_transport_udp.cpp"
+        "${LIBTRACER_ROOT}/core/src/transport_udp.cpp")
+    string(APPEND LIBTRACER_BUILTIN_TRANSPORT_CALLS
+        "    register_udp_transport(vertex, rx_backend);\n")
+endif()
+if(CONFIG_LIBTRACER_TRANSPORT_TCP)
+    list(APPEND LIBTRACER_SRCS
+        "${LIBTRACER_ROOT}/core/src/builtin_transport_tcp.cpp"
+        "${LIBTRACER_ROOT}/core/src/transport_tcp.cpp")
+    string(APPEND LIBTRACER_BUILTIN_TRANSPORT_CALLS
+        "    register_tcp_transport(vertex, rx_backend);\n")
+endif()
+if(CONFIG_LIBTRACER_TRANSPORT_WS)
+    list(APPEND LIBTRACER_SRCS
+        "${LIBTRACER_ROOT}/core/src/builtin_transport_ws.cpp"
+        "${LIBTRACER_ROOT}/core/src/transport_ws.cpp")
+    string(APPEND LIBTRACER_BUILTIN_TRANSPORT_CALLS
+        "    register_ws_transport(vertex, rx_backend);\n")
+endif()
+
+# posix_endpoint_t — the recv-thread/endpoint scaffold shared by every socket transport.
+if(CONFIG_LIBTRACER_TRANSPORT_UDP OR CONFIG_LIBTRACER_TRANSPORT_TCP OR CONFIG_LIBTRACER_TRANSPORT_WS)
+    list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/posix_endpoint.cpp")
+endif()
+
+# register_builtin_transports dispatcher: the hand-written full-node form (udp+tcp+ws)
+# when all three are on — identical to a stock node — else a CMake-generated variant
+# from src/builtin_transports.cpp.in that calls ONLY the enabled register_*_transport, so
+# a dropped transport leaves neither a glue TU nor a dangling call (same mechanism as
+# core/CMakeLists.txt).
+if(CONFIG_LIBTRACER_TRANSPORT_UDP AND CONFIG_LIBTRACER_TRANSPORT_TCP AND CONFIG_LIBTRACER_TRANSPORT_WS)
+    list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/builtin_transports.cpp")
+else()
+    configure_file(
+        "${LIBTRACER_ROOT}/core/src/builtin_transports.cpp.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_transports.cpp"
+        @ONLY)
+    list(APPEND LIBTRACER_SRCS "${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_transports.cpp")
+endif()
 
 # lwip is a PRIVATE requirement of the socket transports' .cpp files only
 # (<sys/socket.h> etc. resolve into lwIP on chip targets); the public headers
@@ -80,43 +121,47 @@ set(LIBTRACER_SRCS
 set(LIBTRACER_PRIV_REQUIRES pthread)
 set(LIBTRACER_PRIV_INCLUDE_DIRS "")
 
-if(IDF_TARGET STREQUAL "linux")
-    # POSIX host: the real SocketCAN link (glibc ships <linux/can.h>).
-    list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/socketcan_link.cpp")
-else()
-    # Chip targets: SocketCAN stub + the TWAI-backed can_link_t, plus the
-    # esp_http_server-backed WS transport link (httpd_ws_link_t) — the embedded-native
-    # replacement for core's raw-socket transport_ws_server. Both are platform links,
-    # picked by which TU compiles (never an in-source #ifdef). transport_ws.cpp stays
-    # in LIBTRACER_SRCS above: it compiles but a node that binds this httpd link instead
-    # references it nowhere, so --gc-sections drops it from the image (the linux VB,
-    # which HAS no esp_http_server, keeps it).
-    list(APPEND LIBTRACER_SRCS
-        "${LIBTRACER_ROOT}/core/src/socketcan_link_stub.cpp"
-        "twai_link.cpp"
-    )
-    # httpd_ws_link.cpp is built on esp_http_server's native WebSocket API
-    # (httpd_ws_frame_t, HTTPD_WS_TYPE_*, httpd_uri_t::is_websocket, ...), which the
-    # component ships ONLY when CONFIG_HTTPD_WS_SUPPORT is enabled. Select the TU in
-    # CMake on that config (never an in-source #ifdef, per the platform-link rule
-    # above): a node that binds this link enables WS support; an example that does
-    # not use the WS link builds without it (transport_ws.cpp still --gc-sections out).
-    if(CONFIG_HTTPD_WS_SUPPORT)
+# CAN transport (#393-gated): portable framing/reassembly (transport_can.cpp) + its
+# can_link_t platform binding — the real SocketCAN link on the linux host (glibc ships
+# <linux/can.h>), a SocketCAN stub + the TWAI-backed can_link_t (twai_link.cpp) on chip
+# targets. Which link compiles is a TU choice, never an in-source #ifdef. Off => the
+# whole CAN plane (and the TWAI driver glue) is dropped from the archive.
+if(CONFIG_LIBTRACER_TRANSPORT_CAN)
+    list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/transport_can.cpp")
+    if(IDF_TARGET STREQUAL "linux")
+        list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/socketcan_link.cpp")
+    else()
+        list(APPEND LIBTRACER_SRCS
+            "${LIBTRACER_ROOT}/core/src/socketcan_link_stub.cpp"
+            "twai_link.cpp")
+    endif()
+endif()
+
+if(NOT IDF_TARGET STREQUAL "linux")
+    # Chip targets: the esp_http_server-backed WS transport link (httpd_ws_link_t) — the
+    # embedded-native replacement for core's raw-socket transport_ws_server, a platform
+    # link picked by which TU compiles (never an in-source #ifdef). transport_ws.cpp is in
+    # the WS block above: it compiles but a node that binds this httpd link instead
+    # references it nowhere, so --gc-sections drops it (the linux VB, which HAS no
+    # esp_http_server, keeps it). Gated on BOTH the WS module (#393) and
+    # CONFIG_HTTPD_WS_SUPPORT (the TU rides esp_http_server's native WS API, which the
+    # component ships only when that config is on).
+    if(CONFIG_LIBTRACER_TRANSPORT_WS AND CONFIG_HTTPD_WS_SUPPORT)
         list(APPEND LIBTRACER_SRCS "httpd_ws_link.cpp")
     endif()
-    # esp_driver_gpio: twai_link.cpp names its pins via <driver/gpio.h> types.
-    # esp_http_server: httpd_ws_link.cpp rides its native WS API. It MUST be an
-    # UNCONDITIONAL requirement — NOT gated on CONFIG_HTTPD_WS_SUPPORT like the TU
-    # above. IDF resolves component requirements in an early-expansion pass where
-    # CONFIG_* symbols are not yet defined, so a Kconfig-gated REQUIRES silently
-    # evaluates false there and never propagates the component's include dir; the
-    # TU (correctly gated on the same config in the second pass) then compiles
-    # WITHOUT <esp_http_server.h> and dies with "No such file" on any node that
-    # enables WS support (the origin firmware's prod build hit exactly this). The header
-    # is a base IDF component present on every chip target, so requiring it always is
-    # safe and free when the TU is absent — nothing references its symbols, so
-    # --gc-sections drops the link dep and libtracer.a is byte-identical (no footprint
-    # change to the WS-off examples the sentinel measures).
+    # esp_driver_gpio (twai_link.cpp names its pins via <driver/gpio.h>), esp_driver_twai
+    # (the TWAI peripheral) and esp_http_server (httpd_ws_link.cpp's native WS API) MUST be
+    # UNCONDITIONAL requirements — NOT gated on the transport bools or CONFIG_HTTPD_WS_SUPPORT.
+    # IDF resolves component requirements in an early-expansion pass where CONFIG_* symbols
+    # are not yet defined, so a Kconfig-gated REQUIRES silently evaluates false there and
+    # never propagates the component's include dir; the TU (correctly gated on the same
+    # config in the second pass) then compiles WITHOUT its header and dies with "No such
+    # file" on any node that enables it (the origin firmware's prod build hit exactly this).
+    # These headers are base IDF components present on every chip target, so requiring them
+    # always is safe and free when their TU is absent — nothing references the symbols, so
+    # --gc-sections drops the link dep and libtracer.a is byte-identical (no footprint change
+    # to a transport-trimmed build the sentinel measures). lwip stays unconditional for the
+    # same reason (the socket transports' <sys/socket.h> resolves into it).
     list(APPEND LIBTRACER_PRIV_REQUIRES lwip esp_driver_twai esp_driver_gpio esp_http_server)
     # compat/include: POSIX headers IDF's libc spells differently (<poll.h> ->
     # <sys/poll.h>) — private, so core sources stay pure POSIX and dependents

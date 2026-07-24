@@ -10,6 +10,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`CONFIG_LIBTRACER_TRANSPORT_{UDP,TCP,WS,CAN}` — per-transport Kconfig knobs (#393).**
+  The component now gates each built-in transport's translation units on its own
+  menuconfig bool, mirroring the core CMake options `LIBTRACER_TRANSPORT_{UDP,TCP,WS,CAN}`.
+  All four **default `y`**, so a stock node compiles the full transport set and
+  `libtracer.a` is byte-identical to before. Turning one **off** sheds that transport's
+  factory glue + socket TU(s) from the archive — e.g. UDP drops `builtin_transport_udp` +
+  `transport_udp`; WS additionally drops the chip-native `httpd_ws_link_t`; CAN drops
+  `transport_can` + the TWAI `twai_link_t` — and a `SPEC` of that trimmed `kind` then
+  resolves to `SCHEMA_NOT_FOUND` (the factory is simply absent). This is the RAM-audit
+  "compose the C6 for its role" lever (shed unused transports), with **no in-source
+  feature macros**: selection is which TUs the build compiles, and the
+  `register_builtin_transports` dispatcher is CMake-generated to call only the enabled
+  factories (the hand-written full-node form is used when udp+tcp+ws are all on, so a
+  stock build is unchanged). The transport `PRIV_REQUIRES` (`esp_driver_twai`,
+  `esp_driver_gpio`, `esp_http_server`, `lwip`) stay **unconditional** — a Kconfig-gated
+  REQUIRES never propagates in IDF's early requirement-expansion pass — and are free when
+  their TU is absent (`--gc-sections` drops the link dep).
+
 ## [0.6.0] — 2026-07-23
 
 ## [0.5.0] — 2026-07-21

@@ -3,6 +3,48 @@
 
 menu "libtracer"
 
+    # Per-transport module selection (#393) — mirrors the core CMake options
+    # LIBTRACER_TRANSPORT_{UDP,TCP,WS,CAN}. All default y, so a stock node compiles
+    # the full transport set (byte-identical to before this knob existed). Turn one
+    # OFF to shed that transport's translation units from libtracer.a for a node that
+    # never creates a connection of that kind — the RAM-audit "compose the C6 for its
+    # role" lever (shed unused transports), with NO in-source feature macros: which
+    # transport compiles is decided by which TUs the build selects. A SPEC of a
+    # trimmed `kind` then resolves to SCHEMA_NOT_FOUND (the factory is simply absent).
+
+    config LIBTRACER_TRANSPORT_UDP
+        bool "Build the UDP datagram transport"
+        default y
+        help
+            Compile the built-in `udp` transport (udp_transport_t + transport_udp.cpp
+            + its factory glue). ON by default. Turn OFF on a node that never creates
+            a `kind=udp` connection to drop those TUs from the archive.
+
+    config LIBTRACER_TRANSPORT_TCP
+        bool "Build the TCP stream transport"
+        default y
+        help
+            Compile the built-in `tcp` transport (tcp_transport_t / transport_tcp_server
+            + transport_tcp.cpp + its factory glue). ON by default. Turn OFF on a node
+            that never creates a `kind=tcp` connection.
+
+    config LIBTRACER_TRANSPORT_WS
+        bool "Build the WebSocket transport"
+        default y
+        help
+            Compile the built-in `ws` transport (transport_ws.cpp + its factory glue,
+            and the esp_http_server-backed httpd_ws_link_t on chip targets). ON by
+            default. Turn OFF on a node that neither serves nor dials a WebSocket link.
+
+    config LIBTRACER_TRANSPORT_CAN
+        bool "Build the CAN transport"
+        default y
+        help
+            Compile the CAN transport (transport_can.cpp portable framing/reassembly +
+            the TWAI-backed can_link_t on chip targets, SocketCAN on the linux host).
+            ON by default. Turn OFF on a node with no CAN bus — this also drops the
+            TWAI driver glue (twai_link.cpp).
+
     config LIBTRACER_VERTEX_LOCK_STRIPES
         int "Vertex lock-stripe count"
         range 1 256
