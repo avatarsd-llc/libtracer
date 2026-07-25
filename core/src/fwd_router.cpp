@@ -143,22 +143,6 @@ struct mount_hit_t {
         return mount_hit_t{c->link, {}, k, c->name};
     }
 
-    // BUS-PEER RETURN ROUTE (#513). A frame that arrived from a bus peer grows `src` with the
-    // bare peer segment — the child's mount is not in scope at the bus receiver (#510) — so a
-    // REPLY comes back leading with a name that matches no qualified child key. Before S2a
-    // this resolved through `by_name`'s cross-bus peer fallback; the scoped descent above
-    // dropped that, and the frame then fell through to the terminus arm and was ABSORBED at an
-    // intermediate node as though it had reached its originator.
-    //
-    // Consulting the fallback here restores the route. It is deliberately LAST, so a qualified
-    // mount always wins and the per-endpoint scoping ADR-0061 wanted still holds for every
-    // address that carries one; only a bare peer segment reaches this. It goes away once #510
-    // makes `src` accumulate the full `net/<module>/<name>/<peer>` mount, at which point the
-    // loop above resolves the reply directly.
-    if (n > 0 && !seg[0].empty()) {
-        if (transport_t* const peer = registry.by_name(seg[0]))
-            return mount_hit_t{peer, {}, 1, seg[0]};
-    }
     return {};
 }
 
@@ -199,25 +183,34 @@ void fwd_router_t::add_child(std::string name, transport_t& link) {
     if (bus_link_t* const bus = link.bus()) {
         // A reassembling bus that delivers ropes (ADR-0053 §5) hands its group up
         // as-is — zero-copy; a span-only bus keeps the borrowed peer-named path.
-        // A bus frame arrives tagged with the sending peer's name, so the ctx is
-        // just the router itself.
+        // A bus frame arrives tagged with the sending peer's name — but a PEER has no
+        // registry entry, so the peer name alone cannot say which mount it hangs under.
+        // The receiver therefore carries the same stable per-child ctx the point-to-point
+        // path uses, holding the child's QUALIFIED name (#510): a forward hop then grows
+        // `src` by the full `net/<module>/<name>/<peer>` path rather than a bare peer
+        // segment, which is what keeps two buses' same-named peers distinct on the way back.
         // Departure seam (RFC-0009 §D extended): a bus peer that hangs up carries its
-        // own name, so link_down needs no per-child state either.
+        // own name, and label state is keyed by that name, so link_down still takes the peer.
+        child_rx_ctx_t& bctx = child_rx_.emplace_back(this, std::move(name));
         bus->set_peer_down_notifier(
-            [](void* c, std::string_view peer) { static_cast<fwd_router_t*>(c)->link_down(peer); },
-            this);
+            [](void* c, std::string_view peer) {
+                static_cast<child_rx_ctx_t*>(c)->self->link_down(peer);
+            },
+            &bctx);
         if (bus->delivers_ropes()) {
             bus->set_peer_rope_receiver(
                 [](void* c, std::string_view peer, view::rope_t frame) {
-                    static_cast<fwd_router_t*>(c)->on_frame_rope(peer, std::move(frame));
+                    auto* const cc = static_cast<child_rx_ctx_t*>(c);
+                    cc->self->on_frame_rope_bus(cc->name, peer, std::move(frame));
                 },
-                this);
+                &bctx);
         } else {
             bus->set_peer_receiver(
                 [](void* c, std::string_view peer, std::span<const std::byte> frame) {
-                    static_cast<fwd_router_t*>(c)->on_frame(peer, frame);
+                    auto* const cc = static_cast<child_rx_ctx_t*>(c);
+                    cc->self->on_frame_bus(cc->name, peer, frame);
                 },
-                this);
+                &bctx);
         }
         return;
     }
@@ -320,7 +313,17 @@ void fwd_router_t::on_frame(std::string_view inbound_name, std::span<const std::
     on_frame_impl(inbound_name, frame, nullptr);
 }
 
+void fwd_router_t::on_frame_bus(std::string_view bus_child, std::string_view peer,
+                                std::span<const std::byte> frame) {
+    on_frame_impl(peer, frame, nullptr, bus_child);
+}
+
 void fwd_router_t::on_frame_rope(std::string_view inbound_name, view::rope_t frame) {
+    on_frame_rope_bus(std::string_view{}, inbound_name, std::move(frame));
+}
+
+void fwd_router_t::on_frame_rope_bus(std::string_view bus_child, std::string_view inbound_name,
+                                     view::rope_t frame) {
     // Single-link (every current producer): the link's bytes span feeds the SAME
     // routing as the borrowed path — the forward hop below never touches the
     // refcount (zero-heap, ADR-0038); only the terminus sees the owner, for the
@@ -328,7 +331,7 @@ void fwd_router_t::on_frame_rope(std::string_view inbound_name, view::rope_t fra
     if (frame.link_count() == 1) {
         const view_t& v = frame.links()[0];
         if (v.is_device()) return;  // CPU routing cannot read a DEVICE frame
-        on_frame_impl(inbound_name, v.bytes(), &v);
+        on_frame_impl(inbound_name, v.bytes(), &v, bus_child);
         return;
     }
     // Multi-link: route a FORWARD hop directly over the rope — NO flatten
@@ -352,7 +355,7 @@ void fwd_router_t::on_frame_rope(std::string_view inbound_name, view::rope_t fra
             seg_reader_t<wire::grammar::rope_cursor> rd{cur, {}, 0};
             const mount_hit_t hit = resolve_mount(registry_, cur, rd);
             if (hit.link != nullptr) {
-                route_fwd_forward(inbound_name, hit.strip_k, cur, *hit.link);
+                route_fwd_forward(inbound_name, bus_child, hit.strip_k, cur, *hit.link);
                 return;
             }
             // No child (or over-long segment) ⇒ this node is the terminus for the frame.
@@ -376,7 +379,7 @@ void fwd_router_t::on_frame_rope(std::string_view inbound_name, view::rope_t fra
 }
 
 void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const std::byte> frame,
-                                 const view_t* frame_view) {
+                                 const view_t* frame_view, std::string_view bus_child) {
     if (raw_cb_) raw_cb_(inbound_name, frame);
     if (frame.size() < 4) return;
 
@@ -396,7 +399,7 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
             seg_reader_t<wire::grammar::span_cursor> rd{cur, {}, 0};
             const mount_hit_t hit = resolve_mount(registry_, cur, rd);
             if (hit.link != nullptr) {
-                route_fwd_forward(inbound_name, hit.strip_k, cur, *hit.link);
+                route_fwd_forward(inbound_name, bus_child, hit.strip_k, cur, *hit.link);
                 return;
             }
             // The dst names no mount ⇒ this node is the terminus.
@@ -449,23 +452,34 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
 }
 
 template <class Cursor>
-void fwd_router_t::route_fwd_forward(std::string_view inbound_name, std::size_t strip_k,
-                                     const Cursor& cur_src, transport_t& child) {
+void fwd_router_t::route_fwd_forward(std::string_view inbound_name, std::string_view bus_child,
+                                     std::size_t strip_k, const Cursor& cur_src,
+                                     transport_t& child) {
     // All offsets, no decoded tree: the shrunk-dst / grown-src head rebuild lives in
     // fwd_frame_view.hpp (rebuild_fwd_forward — unit-tested directly); this hop only
     // resolves the child and scatter-gathers the result. Reads AND the egress go
     // through the grammar `Cursor` seam (ADR-0053 ④b): the same code serves a
     // contiguous `span_cursor` (each region is one sub-span) and a link-walking
     // `rope_cursor` (a region yields one sub-span per link it crosses).
-    // Prefer this child's PRE-ENCODED mount run (#508): the grown `src` prefix then costs a
-    // single iov entry and no per-segment encoding. A name with no registry entry — a bus
-    // PEER, whose name is not known until the frame arrives — falls back to encoding that one
-    // segment per frame, which is the only case that can't be precomputed.
-    const child_registry_t::child_t* const inbound = registry_.entry_by_name(inbound_name);
+    // Grow `src` by the inbound link's FULL mount path, so the reply resolves through the
+    // same strip-K descent a forward does (the ADR-0061 erratum). Two shapes:
+    //
+    //   - point-to-point — the child IS the inbound name, and its PRE-ENCODED mount run
+    //     (#508) makes the grown prefix one iov entry with no per-segment encoding;
+    //   - bus PEER — the child is `bus_child` (carried in from the per-child receiver ctx,
+    //     #510) and the peer segment, known only now that the frame has arrived, rides as
+    //     the one `extra_seg`. So `src` grows by `net/<module>/<name>/<peer>`.
+    //
+    // Before #510 a peer grew `src` by the BARE peer name: a return route that could not
+    // distinguish two buses' same-named peers — the reply-direction twin of exactly the
+    // collision per-module scoping exists to prevent.
+    const bool from_peer = !bus_child.empty();
+    const child_registry_t::child_t* const inbound =
+        registry_.entry_by_name(from_peer ? bus_child : inbound_name);
     const auto rebuilt =
         inbound != nullptr && !inbound->mount_tlv.empty()
             ? rebuild_fwd_forward(cur_src, std::span<const std::byte>(inbound->mount_tlv),
-                                  std::string_view{}, strip_k)
+                                  from_peer ? inbound_name : std::string_view{}, strip_k)
             : rebuild_fwd_forward(cur_src, std::span<const std::byte>{}, inbound_name, strip_k);
     if (!rebuilt) return;        // not a forwardable FWD ⇒ drop (callers pre-peeked)
     if (!rebuilt->ok()) return;  // malformed oversized op ⇒ drop, no overrun

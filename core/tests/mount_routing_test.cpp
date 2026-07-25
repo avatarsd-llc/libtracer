@@ -53,7 +53,9 @@ void check(bool ok, std::string_view what) {
 
 /** @brief A point-to-point transport that records nothing — an identity for the table. */
 struct p2p_link_t : tr::net::transport_t {
-    void send(std::span<const std::byte>) override {}
+    std::size_t received = 0; /**< @brief Frames this endpoint was handed. */
+    void send(std::span<const std::byte>) override { ++received; }
+    void send(std::span<const std::span<const std::byte>>) override { ++received; }
 };
 
 /** @brief A multi-peer transport whose peer table is a fixed name→endpoint list. */
@@ -69,6 +71,10 @@ struct bus_link_impl_t : tr::net::transport_t, tr::net::bus_link_t {
     }
     void enumerate_peers(const tr::net::bus_link_t::peer_visitor_t& visit) const override {
         for (const auto& [n, l] : peers) visit(n);
+    }
+    /** @brief Drive an inbound frame up the peer-named slot, as a real bus adapter does. */
+    void deliver(std::string_view peer, std::span<const std::byte> frame) {
+        peer_rx_.deliver_borrowed(peer, frame);
     }
 };
 
@@ -303,6 +309,112 @@ void test_advertise_descends_the_mount() {
     check(up.sent.empty(), "and no NACK travels back — the binding resolved");
 }
 
+/**
+ * @brief A frame from a bus PEER grows `src` by the FULL mount, not the bare peer (#510).
+ *
+ * The reply-direction twin of "two servers' same-named peers never collide". A peer has no
+ * registry entry, so before #510 the hop encoded the bare peer segment into `src` — and two
+ * buses carrying a peer with the same name produced IDENTICAL return routes. The forward
+ * direction was pinned; this is the direction that was not.
+ */
+void test_bus_peer_src_carries_the_mount() {
+    std::printf("bus-peer return route (#510)\n");
+    // Two buses, each with a peer called "n5". A frame from each must come back
+    // distinguishable.
+    const auto src_of = [](std::string_view module, std::string_view conn) {
+        bus_link_impl_t bus;
+        p2p_link_t n5;
+        bus.peers.emplace_back("n5", &n5);
+        recording_link_t out;
+
+        tr::graph::graph_t graph;
+        tr::net::fwd_router_t router{graph};
+        std::string child(module);
+        child += '/';
+        child += conn;
+        router.add_child(std::string("net/") + child, bus);
+        router.add_child("net/ws-client/out", out);
+
+        // The bus hands the frame up tagged with the sending peer's name; the router's
+        // per-child ctx is what supplies the mount. Driving it through set_peer_receiver
+        // (rather than calling on_frame directly) is the point — that wiring is the fix.
+        const std::vector<std::byte> frame =
+            make_fwd({"net", "ws-client", "out", "sensor"}, {"origin"});
+        bus.deliver("n5", frame);
+
+        std::vector<std::string> src;
+        if (out.sent.size() == 1) {
+            const auto paths = paths_of(out.sent[0]);
+            if (paths.size() == 2) src = paths[1];
+        }
+        return src;
+    };
+
+    const std::vector<std::string> a = src_of("can", "can0");
+    const std::vector<std::string> b = src_of("ws-server", "srv");
+    const std::vector<std::string> want_a = {"net", "can", "can0", "n5", "origin"};
+    check(a == want_a, "src grew by the full net/<module>/<name>/<peer> mount");
+    check(a != b, "two buses' same-named peers produce DIFFERENT return routes");
+}
+
+/**
+ * @brief The route a hop grows must be routable BACK — the round trip, end to end.
+ *
+ * #513 patched a symptom (a reply leading with a bare peer segment resolved nowhere, so it
+ * was absorbed at an intermediate node) with a `by_name` fallback, and shipped with no test.
+ * #510 removes the cause: `src` now carries the full mount, so the ordinary scoped descent
+ * resolves the reply and the fallback is dead code. This pins that directly — take the `src`
+ * a forward hop produced, send it back as `dst`, and require it to reach the peer — so the
+ * removal is covered by behaviour rather than by argument.
+ */
+void test_grown_src_round_trips() {
+    std::printf("grown src is routable back (#510 supersedes the #513 fallback)\n");
+    bus_link_impl_t bus;
+    p2p_link_t n5;
+    bus.peers.emplace_back("n5", &n5);
+    recording_link_t out;
+
+    tr::graph::graph_t graph;
+    tr::net::fwd_router_t router{graph};
+    router.add_child("net/can/can0", bus);
+    router.add_child("net/ws-client/out", out);
+
+    bus.deliver("n5", make_fwd({"net", "ws-client", "out", "sensor"}, {"origin"}));
+    check(out.sent.size() == 1, "the peer's frame forwarded");
+    if (out.sent.size() != 1) return;
+    const auto paths = paths_of(out.sent[0]);
+    if (paths.size() != 2) {
+        check(false, "the forwarded frame carries dst and src");
+        return;
+    }
+
+    // Feed that src back as a reply's dst. It must resolve to the peer — through the scoped
+    // descent alone, with no bare-name fallback in the registry's way.
+    std::vector<std::string_view> back(paths[1].begin(), paths[1].end());
+    const auto segs = std::span<const std::string_view>(back);
+    std::vector<std::byte> reply;
+    {
+        std::vector<std::byte> body;
+        const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::REPLY)};
+        tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
+        std::vector<std::byte> dst;
+        for (std::string_view s : segs) tr::wire::emit_name(dst, s);
+        tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, dst);
+        std::vector<std::byte> src;
+        tr::wire::emit_name(src, "net");
+        tr::wire::emit_name(src, "ws-client");
+        tr::wire::emit_name(src, "out");
+        tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, src);
+        const std::byte payload[1] = {std::byte{0x07}};
+        tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(payload, 1));
+        tr::wire::emit_tlv(reply, type_t::FWD, opt_t{.pl = true}, body);
+    }
+    const std::size_t before = n5.received;
+    router.on_frame("net/ws-client/out", reply);
+    check(n5.received == before + 1,
+          "the reply resolves through the scoped descent and reaches the peer endpoint");
+}
+
 /** @brief A route naming the mount EXACTLY still terminates here (ADR-0038 §3a). */
 void test_advertise_exact_mount_terminates() {
     std::printf("ADVERTISE naming the mount exactly\n");
@@ -330,6 +442,8 @@ int main() {
     test_strip_k_and_symmetric_src();
     test_short_dst_is_not_forwardable();
     test_advertise_descends_the_mount();
+    test_bus_peer_src_carries_the_mount();
+    test_grown_src_round_trips();
     test_advertise_exact_mount_terminates();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,

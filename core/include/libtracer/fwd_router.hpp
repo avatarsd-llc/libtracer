@@ -288,10 +288,29 @@ class fwd_router_t {
      * the migration ⑤/⑥ follow-on), pays the one flatten fallback.
      */
     void on_frame_rope(std::string_view inbound_name, view::rope_t frame);
+    /**
+     * @brief A frame from a bus PEER, carrying the owning child's mount alongside it (#510).
+     *
+     * A bus link tags each frame with the SENDING peer's name, and a peer has no registry
+     * entry of its own — so the receiver alone cannot say which mount the peer hangs under.
+     * These overloads carry the owning child's qualified name in from the per-child receiver
+     * ctx, which is what lets a forward hop grow `src` by the FULL
+     * `net/<module>/<name>/<peer>` path instead of the bare peer segment. Without it, two
+     * buses with same-named peers produce identical return routes.
+     *
+     * `inbound_name` stays the bare PEER for every other purpose (label tables, terminus
+     * replies, departure) — those key both sides consistently and the registry's peer
+     * fallback resolves them.
+     */
+    void on_frame_bus(std::string_view bus_child, std::string_view peer,
+                      std::span<const std::byte> frame);
+    /** @brief Rope twin of @ref on_frame_bus. */
+    void on_frame_rope_bus(std::string_view bus_child, std::string_view peer, view::rope_t frame);
     /** @brief The shared routing body: @p frame_view is the owning frame when the
-     *         link delivers ropes (nullptr on the borrowed-span path). */
+     *         link delivers ropes (nullptr on the borrowed-span path). @p bus_child is the
+     *         owning child's qualified name when the frame came from a bus peer, else empty. */
     void on_frame_impl(std::string_view inbound_name, std::span<const std::byte> frame,
-                       const view::view_t* frame_view);
+                       const view::view_t* frame_view, std::string_view bus_child = {});
     /**
      * @brief Terminus: arena-decode @p frame (ADR-0041) and resolve + reply.
      *
@@ -332,8 +351,8 @@ class fwd_router_t {
      * @param cur     The cursor positioned at the inbound FWD frame's first byte.
      */
     template <class Cursor>
-    void route_fwd_forward(std::string_view inbound_name, std::size_t strip_k, const Cursor& cur,
-                           transport_t& child);
+    void route_fwd_forward(std::string_view inbound_name, std::string_view bus_child,
+                           std::size_t strip_k, const Cursor& cur, transport_t& child);
     /**
      * @brief Dispatch a multi-link control frame (ADVERTISE / COMPACT / HANDLE_NACK)
      *        rope-native (ADR-0055 §2).
