@@ -164,12 +164,58 @@ void test_link_teardown_invalidates_cached_slot() {
           "nothing is sent through the departed link — the cached slot reads its tombstone");
 }
 
+/**
+ * @brief A COMPACT whose root CRC trailer says the payload is corrupt must be DROPPED.
+ *
+ * The regression guard for verify-before-apply (CONTEXT.md §Frame integrity, ADR-0041 §1) on
+ * the span control arm. That arm used to `wire::decode` the whole frame, which verifies every
+ * node's CRC as a side effect; it now reads by offset through `peek_control`, whose default is
+ * `crc_check_t::DEFER` because every forward-hop caller wants that. The control arm passes
+ * VERIFY explicitly — and nothing else in the suite would notice if that argument were dropped
+ * in a later refactor, because a well-formed frame routes identically either way.
+ *
+ * So this test corrupts a payload byte UNDER a valid CRC and requires the delivery not to
+ * land. Without the explicit VERIFY it is silently applied.
+ */
+void test_corrupt_crc_compact_is_dropped() {
+    std::printf("corrupt-CRC COMPACT is dropped (verify-before-apply)\n");
+    graph_t g;
+    (void)g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
+    fwd_router_t router{g};
+    rec_link_t up;
+    router.add_child("net/ws-client/up", up);
+    router.on_frame("net/ws-client/up", tr::net::encode_advertise(3, path_tlv({"sink"})));
+
+    // A good frame first — both to warm the binding and to prove the vehicle works.
+    router.on_frame("net/ws-client/up", tr::net::encode_compact(3, value_tlv(0x11)));
+    check(stored_byte(g, "/sink") == 0x11, "an intact COMPACT lands");
+
+    // Re-emit the same COMPACT carrying a whole-frame CRC-32C trailer.
+    const std::vector<std::byte> plain = tr::net::encode_compact(3, value_tlv(0x22));
+    tr::wire::tlv_t crc_tlv = *tr::wire::decode(plain);
+    crc_tlv.opt.cr = true;
+    const std::vector<std::byte> crc_frame = tr::wire::encode(crc_tlv);
+    check(crc_frame.size() == plain.size() + 4, "the CRC frame carries a 4-byte trailer");
+
+    // Intact-with-CRC must still deliver — otherwise the next assertion proves nothing.
+    router.on_frame("net/ws-client/up", crc_frame);
+    check(stored_byte(g, "/sink") == 0x22, "a CRC-carrying COMPACT still delivers when intact");
+
+    // Now corrupt a BODY byte under that trailer: the grammar stays valid, the CRC breaks.
+    std::vector<std::byte> corrupt = crc_frame;
+    corrupt[corrupt.size() - 5] ^= std::byte{0xFF};
+    router.on_frame("net/ws-client/up", corrupt);
+    check(stored_byte(g, "/sink") == 0x22,
+          "a corrupt-CRC COMPACT is DROPPED — the LKV still holds the last good value");
+}
+
 }  // namespace
 
 int main() {
     test_warm_terminus_delivers();
     test_retire_invalidates_cached_handle();
     test_link_teardown_invalidates_cached_slot();
+    test_corrupt_crc_compact_is_dropped();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");

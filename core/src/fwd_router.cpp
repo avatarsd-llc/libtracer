@@ -432,27 +432,45 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
         return;
     }
 
-    // Control frames (route-handle flow setup) keep the owning decode — a contiguous
-    // span decodes eagerly (byte-identical MCU terminus). Decompose the tree into the
-    // (label, child) the refactored sinks take, so the span and rope (on_control_rope)
-    // paths share one handler body (ADR-0055 §2).
-    const auto dec = wire::decode(frame);
-    if (!dec || !dec->opt.pl) return;  // drop malformed / non-structured
-    if (dec->children.empty() || dec->children[0].type != type_t::VALUE ||
-        dec->children[0].payload.size() < 2)
-        return;  // every control frame leads with a u16 label VALUE
-    const auto label = detail::load_le<std::uint16_t>(dec->children[0].payload);
-    switch (dec->type) {
-        case type_t::ADVERTISE:
-            if (dec->children.size() < 2) return;
-            on_advertise(inbound_name, label, dec->children[1]);
+    // Control frames are read BY OFFSET, exactly as `on_control_rope` already does — the
+    // span arm was the last reader in the ingress plane still building an owning `tlv_t`.
+    //
+    // That owning decode was justified by ADR-0041 §5 / ADR-0055 §3 as a flow-setup cost,
+    // "allowed to allocate per ADR-0039". ADR-0062 invalidated that premise: a warm COMPACT
+    // is now the steady-state per-sample data frame, not setup. It cost 3 allocations for
+    // the tree spine plus 5 more re-encoding a payload that is ALREADY contiguous in
+    // `frame` — together ~55-63% of a warm terminus frame.
+    //
+    // `crc_check_t::VERIFY` is passed explicitly and is load-bearing. `peek_control`
+    // defaults to DEFER for the forward-hop callers (byte-for-byte unchanged), but the
+    // owning `wire::decode` this replaces verified every node's CRC, so deferring here
+    // would silently start ACCEPTING a COMPACT whose root trailer says its payload is
+    // corrupt — verify-before-apply (CONTEXT.md §Frame integrity, ADR-0041 §1). The cost is
+    // zero allocations and, on our own traffic, zero cycles: `encode_compact` emits no CR
+    // bit. A peer may legally set one, which is exactly why the check must be explicit.
+    const wire::grammar::span_cursor ccur{frame};
+    const auto head = peek_control(ccur, wire::grammar::crc_check_t::VERIFY);
+    if (!head) return;  // malformed / not a control frame / CRC failure ⇒ drop
+    switch (head->type) {
+        case type_t::ADVERTISE: {
+            if (head->child1_off == 0) return;
+            // The route is the one child that genuinely needs a tree: on_advertise walks its
+            // NAME segments and re-encodes a stripped copy. Decode ONLY that sub-span, as
+            // the rope arm does — never the whole frame.
+            const auto route = wire::decode(frame.subspan(head->child1_off, head->child1_total));
+            if (!route) return;
+            on_advertise(inbound_name, head->label, *route);
             return;
+        }
         case type_t::COMPACT:
-            if (dec->children.size() < 2) return;
-            on_compact(inbound_name, label, wire::encode(dec->children[1]));
+            if (head->child1_off == 0) return;
+            // The payload TLV is already contiguous here — hand over the span. The old path
+            // decoded it into a tree and then `wire::encode`d it straight back.
+            on_compact(inbound_name, head->label,
+                       frame.subspan(head->child1_off, head->child1_total));
             return;
         case type_t::HANDLE_NACK:
-            on_nack(inbound_name, label);
+            on_nack(inbound_name, head->label);  // acts on the label alone — no child needed
             return;
         default:
             return;  // drop anything else

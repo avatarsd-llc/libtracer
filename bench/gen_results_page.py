@@ -194,12 +194,27 @@ invalidation, which is why this needed neither a second generation concept nor a
 sweep. (It also required slot addresses to be stable, which is what ADR-0063's chunked list
 provides; the container decision had to land first.)
 
-Measured on the warm path (`bench_compact_delivery`, versus the same bench built against the
-prior commit): terminus delivery **298 → 202 ns (−32%)** with allocations **13 → 9** and bytes
-**655 → 443**; the forwarding hop **202 → 180 ns**. The forwarding gain is the smaller one
-because the scan it removes was already cheap at that link count — that path is dominated by
-`encode_compact`'s fresh vector and the COMPACT frame's own owning decode, **neither of which
-is resolution**, and which are the next lever there.
+Two changes landed on this path, and the second was the larger. ADR-0062 removed the
+*resolution*; then the span control arm stopped building an owning `tlv_t` at all, reading
+`COMPACT` by offset through `peek_control` exactly as the rope arm already did. Measured on the
+warm path (`bench_compact_delivery`, host p50):
+
+| | before ADR-0062 | after ADR-0062 | after the offset read |
+| --- | ---: | ---: | ---: |
+| terminus delivery | 298 ns | 202 ns | **~110 ns** |
+| terminus allocations | 15 | 11 | **3** |
+| forwarding hop | 202 ns | 180 ns | **~90 ns** |
+| forwarding allocations | 18 | 17 | **9** |
+
+The owning decode cost three allocations for the tree spine plus five more re-encoding a payload
+that was **already contiguous in the frame** — together more than half a warm terminus frame. It
+had been justified as flow-setup cost (ADR-0041 §5), a classification ADR-0062 invalidated by
+making a warm `COMPACT` the steady-state per-sample data frame rather than setup.
+
+`crc_check_t::VERIFY` is passed explicitly on that path: the decode being replaced verified every
+node's CRC as a side effect, so reading by offset without asking for it would silently start
+accepting a frame whose own trailer says it is corrupt. That is pinned by a test which fails if
+the argument is dropped.
 
 The forward hop remains **zero-heap** regardless (`bench_forward_heap`, `allocs=0`, CI-gated)."""
 

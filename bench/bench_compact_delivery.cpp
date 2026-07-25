@@ -85,17 +85,44 @@ bool g_arm = false;
 
 }  // namespace
 
-void* operator new(std::size_t n) {
+// Every allocating form, not just the throwing one. libtracer's own heap backend allocates
+// through `::operator new(bytes, std::nothrow)` (mem_heap.hpp), so overriding only
+// `operator new(size)` made the payload-sized store copy INVISIBLE to this counter — the
+// published figures undercounted. bench_forward_heap has always overridden the full set;
+// this now matches it, so the two benches' allocation columns are comparable.
+namespace {
+void* counted(std::size_t n) {
     if (g_arm) {
         ++g_allocs;
         g_bytes += n;
     }
-    void* const p = std::malloc(n == 0 ? 1 : n);
+    return std::malloc(n == 0 ? 1 : n);
+}
+}  // namespace
+
+void* operator new(std::size_t n) {
+    void* const p = counted(n);
     if (p == nullptr) throw std::bad_alloc();
     return p;
 }
+void* operator new[](std::size_t n) {
+    void* const p = counted(n);
+    if (p == nullptr) throw std::bad_alloc();
+    return p;
+}
+void* operator new(std::size_t n, const std::nothrow_t&) noexcept { return counted(n); }
+void* operator new[](std::size_t n, const std::nothrow_t&) noexcept { return counted(n); }
+void* operator new(std::size_t n, std::align_val_t) { return operator new(n); }
+void* operator new(std::size_t n, std::align_val_t, const std::nothrow_t&) noexcept {
+    return counted(n);
+}
+void* operator new[](std::size_t n, std::align_val_t) { return operator new(n); }
 void operator delete(void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+void operator delete(void* p, std::align_val_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::align_val_t) noexcept { std::free(p); }
 
 namespace {
 
