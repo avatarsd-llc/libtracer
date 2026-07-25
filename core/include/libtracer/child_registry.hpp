@@ -127,8 +127,15 @@ class child_registry_t {
      * path stays allocation-free (`bench_forward_heap`'s `allocs=0` gate).
      */
     [[nodiscard]] const child_t* by_segments(std::span<const std::string_view> segs) const {
+        // The joined length is a property of `segs`, not of any child — so it is computed
+        // ONCE here rather than per candidate. It was inside `matches`, which meant every
+        // slot in the table re-ran a loop over the segments just to derive the number it
+        // would compare its own size against. Hoisting it leaves the per-slot work at a
+        // single integer compare for the (overwhelming) majority that cannot match.
+        std::size_t need = segs.empty() ? 0 : segs.size() - 1;
+        for (const std::string_view s : segs) need += s.size();
         for (const child_t& c : children_) {
-            if (c.link != nullptr && matches(c.name, segs)) return &c;
+            if (c.link != nullptr && c.name.size() == need && matches(c.name, segs)) return &c;
         }
         return nullptr;
     }
@@ -264,7 +271,13 @@ class child_registry_t {
         return out;
     }
 
-    /** @brief True iff @p key equals @p segs joined by `/`, compared without allocating. */
+    /**
+     * @brief True iff @p key equals @p segs joined by `/`, compared without allocating.
+     *
+     * Callers that scan a table pre-filter on the joined LENGTH (see @ref by_segments) —
+     * this still re-derives it, so the function is correct standalone, but on the scan path
+     * it only ever runs for a candidate whose size already matched.
+     */
     [[nodiscard]] static bool matches(const std::string& key,
                                       std::span<const std::string_view> segs) noexcept {
         std::size_t need = segs.empty() ? 0 : segs.size() - 1;
