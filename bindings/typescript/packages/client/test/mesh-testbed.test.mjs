@@ -18,13 +18,14 @@
  *      a ──dial──▶ hub ◀──dial── b                  (two peers on ONE peer_named listener)
  *
  * NAMING RULE: every node names every link after the node at the FAR end. That is what
- * makes replies retrace: each forwarder prepends its own name for the ARRIVAL link to
- * `src`, and the terminus answers over the arrival link (RFC-0004 §B).
+ * makes replies retrace: each forwarder prepends its own MOUNT PATH for the ARRIVAL link
+ * to `src`, and the terminus answers over the arrival link (RFC-0004 §B).
  *
- * ADDRESSING: a connection's routing key is its BARE name — `/b/c/node/name`, NOT
- * `/net/b/net/c/node/name` as reference/03 + /07 currently claim (see #419). These
- * assertions PIN the implementation; they are the repo's first two-forwarder coverage
- * (every existing FWD test has exactly one).
+ * ADDRESSING: a connection's routing key IS its vertex path — `/net/<module>/<name>`, so a
+ * two-hop route is `/net/ws-client/b/net/ws-client/c/node/name` (RFC-0014 §1, ADR-0061).
+ * This CLOSES #419: reference/03 + /07 were right about the shape and the old bare-name
+ * demux was the divergence. The `via()` helper below builds these routes. These assertions
+ * are the repo's first two-forwarder coverage (every existing FWD test has exactly one).
  *
  * GUARDED on LIBTRACER_MESH_CTRL / LIBTRACER_MESH_PEERS. Plain `npm test` without them
  * SKIPS gracefully; the `mesh-testbed` CI job brings the compose stack up and sets both.
@@ -148,6 +149,16 @@ function listingNames(tlv) {
   return names.sort();
 }
 
+/**
+ * @brief Expand link names into their MOUNT paths (RFC-0014 / ADR-0061).
+ *
+ * A connection lives at `/net/<module>/<name>` and its routing address IS that path, so a
+ * hop through link `b` is the three segments `net`, `ws-client`, `b`. Every link routed
+ * through in this testbed is a DIAL created with `kind: 'ws'`, hence the `ws-client`
+ * module; the inbound listeners each node binds are `ws-server`.
+ */
+const via = (...names) => names.flatMap((n) => ['net', 'ws-client', n]);
+
 /** @brief Read `/…/node/name` through `route` and return the terminus node's seeded name. */
 async function nameVia(client, route) {
   const tlv = await client.read([...route, 'node', 'name']);
@@ -179,11 +190,26 @@ test('mesh testbed: form a cyclic multi-node mesh in band, then route across it'
   t.diagnostic('mesh formed: ring a->b->c->a plus a,b->hub — every link an in-band SPEC');
 
   await t.test('each node reports the connections it was told to create', async () => {
-    // Ordinary vertex enumeration of /net (NOT peer enumeration).
-    assert.deepEqual(listingNames(await cli.a.readField(['net'], ':children[]')), ['b', 'c', 'ctrl', 'hub']);
-    assert.deepEqual(listingNames(await cli.b.readField(['net'], ':children[]')), ['a', 'c', 'ctrl', 'hub']);
-    assert.deepEqual(listingNames(await cli.c.readField(['net'], ':children[]')), ['a', 'b', 'ctrl']);
-    assert.deepEqual(listingNames(await cli.hub.readField(['net'], ':children[]')), ['ctrl', 'mesh']);
+    // Ordinary vertex enumeration (NOT peer enumeration). RFC-0014 §1: /net enumerates the
+    // MODULES, and each module enumerates its member connections — so a node's dials and its
+    // listeners now list separately, which is the whole point of per-module scoping.
+    assert.deepEqual(listingNames(await cli.a.readField(['net'], ':children[]')),
+                     ['ws-client', 'ws-server']);
+    assert.deepEqual(listingNames(await cli.a.readField(['net', 'ws-client'], ':children[]')),
+                     ['b', 'hub']);
+    assert.deepEqual(listingNames(await cli.a.readField(['net', 'ws-server'], ':children[]')),
+                     ['c', 'ctrl']);
+    assert.deepEqual(listingNames(await cli.b.readField(['net', 'ws-client'], ':children[]')),
+                     ['c', 'hub']);
+    assert.deepEqual(listingNames(await cli.b.readField(['net', 'ws-server'], ':children[]')),
+                     ['a', 'ctrl']);
+    assert.deepEqual(listingNames(await cli.c.readField(['net', 'ws-client'], ':children[]')), ['a']);
+    assert.deepEqual(listingNames(await cli.c.readField(['net', 'ws-server'], ':children[]')),
+                     ['b', 'ctrl']);
+    // The hub only ever listens, so it has no client module at all.
+    assert.deepEqual(listingNames(await cli.hub.readField(['net'], ':children[]')), ['ws-server']);
+    assert.deepEqual(listingNames(await cli.hub.readField(['net', 'ws-server'], ':children[]')),
+                     ['ctrl', 'mesh']);
   });
 
   await t.test('a local read resolves at the terminus (no hop)', async () => {
@@ -191,44 +217,48 @@ test('mesh testbed: form a cyclic multi-node mesh in band, then route across it'
     assert.equal(await nameVia(cli.c, []), 'c');
   });
 
-  await t.test('ONE hop: /b/node/name reaches b', async () => {
-    assert.equal(await nameVia(cli.a, ['b']), 'b');
+  await t.test('ONE hop: /net/ws-client/b/node/name reaches b', async () => {
+    assert.equal(await nameVia(cli.a, via('b')), 'b');
   });
 
   await t.test('TWO hops: /b/c/node/name reaches c through b', async () => {
     // The repo's first two-forwarder assertion. a strips "b" -> forwards to b; b strips
     // "c" -> forwards to c; c resolves /node/name locally and the REPLY retraces
     // c -> b -> a -> driver by the accumulated src.
-    assert.equal(await nameVia(cli.a, ['b', 'c']), 'c');
+    assert.equal(await nameVia(cli.a, via('b', 'c')), 'c');
   });
 
-  await t.test('the /net-prefixed address the docs promise does NOT resolve (#419)', async () => {
-    // reference/03:206 + /07:150 claim /net/b/net/c/... — it is stale. "net" misses the
-    // child-link registry, falls through to the local terminus, and graph.find gets the
-    // whole key. Pinned so the docs cannot quietly become true without this going red.
-    await assert.rejects(() => nameVia(cli.a, ['net', 'b', 'net', 'c']));
+  await t.test('#419 CLOSED: the /net-prefixed address is now the resolving one', async () => {
+    // This assertion is INVERTED by RFC-0014 S2a. It used to pin the divergence: the docs
+    // promised /net/b/net/c/... while the impl keyed the demux on a bare leaf NAME, so the
+    // prefixed form missed the registry and fell through to a local terminus. Routing-address
+    // now EQUALS vertex-path (ADR-0061), so the documented form is the real one...
+    assert.equal(await nameVia(cli.a, via('b', 'c')), 'c');
+    // ...and the old bare-name form no longer routes: "b" is not a first-level vertex, it is
+    // a leaf under /net/ws-client, so the dst falls through to this node's local terminus.
+    await assert.rejects(() => nameVia(cli.a, ['b', 'c']));
   });
 
   await t.test('CYCLE: an orbiting dst is not rejected — it terminates by dst exhaustion', async () => {
     // a -> b -> c -> a: a full orbit of the physical cycle, back to the origin node.
-    assert.equal(await nameVia(cli.a, ['b', 'c', 'a']), 'a');
+    assert.equal(await nameVia(cli.a, via('b', 'c', 'a')), 'a');
     // Two full orbits. There is NO visited-set and NO hop counter anywhere: loop-freedom
     // holds ONLY because dst is consumed monotonically, so a route is as long as it says
     // it is. The ERROR{tr::path::invalid} that reference/03:208 promises on a revisit does
     // not exist and cannot (the forwarder is stateless by design) — see #420.
-    assert.equal(await nameVia(cli.a, ['b', 'c', 'a', 'b', 'c', 'a']), 'a');
+    assert.equal(await nameVia(cli.a, via('b', 'c', 'a', 'b', 'c', 'a')), 'a');
     // The corollary that matters: a RECURSIVE WALK gets no protection from any of this.
     // Terminating one needs client-side identity-keyed dedup (#406 -> #409).
   });
 
   await t.test('a remote read through 2 hops returns the byte-exact seeded VALUE', async () => {
-    const tlv = await cli.a.read(['b', 'c', 'sensor', 'temp']);
+    const tlv = await cli.a.read([...via('b', 'c'), 'sensor', 'temp']);
     assert.deepEqual(new Uint8Array(tlv.payload), le32(SEEDED_TEMP));
   });
 
   await t.test('a remote WRITE through 2 hops lands, and reads back', async () => {
-    await cli.a.write(['b', 'c', 'sensor', 'temp'], encodeValue(le32(PUSHED_SAMPLE)));
-    const tlv = await cli.a.read(['b', 'c', 'sensor', 'temp']);
+    await cli.a.write([...via('b', 'c'), 'sensor', 'temp'], encodeValue(le32(PUSHED_SAMPLE)));
+    const tlv = await cli.a.read([...via('b', 'c'), 'sensor', 'temp']);
     assert.deepEqual(new Uint8Array(tlv.payload), le32(PUSHED_SAMPLE));
     // And the value really moved on the far node, not in a cache on the near one.
     const atC = await cli.c.read(['sensor', 'temp']);
@@ -240,7 +270,7 @@ test('mesh testbed: form a cyclic multi-node mesh in band, then route across it'
     let resolveFirst;
     const first = new Promise((r) => (resolveFirst = r));
     // ValueHandler is (payloadBytes, tlv) — the opaque VALUE payload comes first.
-    await cli.a.subscribe(['b', 'c', 'sensor', 'temp'], (value) => {
+    await cli.a.subscribe([...via('b', 'c'), 'sensor', 'temp'], (value) => {
       seen.push(new Uint8Array(value));
       resolveFirst();
     });
@@ -272,7 +302,7 @@ test('mesh testbed: form a cyclic multi-node mesh in band, then route across it'
   await t.test('ADR-0044 Brick C: the hub lists its live peers from real traffic', async () => {
     // /net/mesh is a peer_named ws listener CREATED IN BAND (its peer_named key is
     // ws-private config, parsed by the ws factory — ADR-0043 §5). Both a and b dialled it.
-    const listing = await cli.hub.readField(['net', 'mesh'], ':children[]');
+    const listing = await cli.hub.readField(['net', 'ws-server', 'mesh'], ':children[]');
     const peers = listingNames(listing);
     assert.equal(peers.length, 2, `the hub hears exactly its 2 dialers (got ${JSON.stringify(peers)})`);
     // Peer names are the far side's <ip>:<port>; the source port is ephemeral, so assert
@@ -281,8 +311,10 @@ test('mesh testbed: form a cyclic multi-node mesh in band, then route across it'
     const ips = peers.map((p) => p.slice(0, p.lastIndexOf(':'))).sort();
     assert.deepEqual(ips, [PEERS.a.host, PEERS.b.host].sort(), 'the peers are exactly a and b');
 
-    // NO vertex exists for a peer — the listing is synthesized on every read.
-    assert.deepEqual(listingNames(await cli.hub.readField(['net'], ':children[]')), ['ctrl', 'mesh']);
+    // NO vertex exists for a peer — the listing is synthesized on every read, so the module
+    // still holds exactly its two CONNECTIONS however many peers are audible.
+    assert.deepEqual(listingNames(await cli.hub.readField(['net', 'ws-server'], ':children[]')),
+                     ['ctrl', 'mesh']);
   });
 });
 

@@ -119,22 +119,23 @@ void test_create_connection_vertex() {
     transport_vertex_t net(node, router);
 
     tr::net::loopback_channel_t channel;
-    net.provide_link("up", channel.a());  // Stage-1 (A): supply the pre-built link
+    net.provide_link("ws-client", "up", channel.a());  // Stage-1 (A): supply the pre-built link
 
     const auto w =
         node.write(path_t("/net:children[]"), conn_spec("client", "up", conn_role_t::DIAL, 8080));
     check(w.has_value(), "SPEC{client, up} write creates the connection");
-    check(node.find(path_t::parse("/net/up")->key()).has_value(),
-          "the connection resolves as /net/up (a first-class / vertex)");
+    check(node.find(path_t::parse("/net/ws-client/up")->key()).has_value(),
+          "the connection resolves as /net/ws-client/up (a first-class / vertex)");
 
-    const auto* s = net.settings_of("up");
+    const auto* s = net.settings_of("net/ws-client/up");
     check(s != nullptr && s->role == conn_role_t::DIAL && s->port == 8080,
           "its transport-private :settings (role, port) parsed from the SPEC config");
 
     // Brick 3a: the NAME→link demux table has ONE owner — the router's child_registry_t.
     // The connection resolves there by the same NAME a `dst` routes through; the vertex
     // shell no longer duplicates the link.
-    check(router.registry().size() == 1 && router.registry().by_name("up") == &channel.a(),
+    check(router.registry().size() == 1 &&
+              router.registry().by_name("net/ws-client/up") == &channel.a(),
           "the connection is in the router's single child_registry_t (no duplicate table)");
     channel.shutdown();
 }
@@ -145,7 +146,7 @@ void test_await_link_state() {
     fwd_router_t router(node);
     transport_vertex_t net(node, router);
     tr::net::loopback_channel_t channel;
-    net.provide_link("up", channel.a());
+    net.provide_link("ws-client", "up", channel.a());
     (void)node.write(path_t("/net:children[]"),
                      conn_spec("listener", "up", conn_role_t::LISTEN, 0));
 
@@ -153,16 +154,16 @@ void test_await_link_state() {
     std::promise<bool> woke;
     auto fut = woke.get_future();
     std::thread waiter([&] {
-        const auto r = node.await(path_t("/net/up"), 2s);
+        const auto r = node.await(path_t("/net/ws-client/up"), 2s);
         woke.set_value(r.has_value());
     });
     std::this_thread::sleep_for(20ms);  // let the waiter reach the wait
-    const auto ls = net.set_link_state("up", link_state_t::UP);
+    const auto ls = net.set_link_state("net/ws-client/up", link_state_t::UP);
     check(ls.has_value(), "set_link_state(UP) writes the vertex");
     check(fut.wait_for(2s) == std::future_status::ready && fut.get(),
           "the awaiter woke on the link-up write");
     waiter.join();
-    check(!net.set_link_state("nope", link_state_t::UP).has_value(),
+    check(!net.set_link_state("net/ws-client/nope", link_state_t::UP).has_value(),
           "unknown connection => NotFound");
     channel.shutdown();
 }
@@ -184,16 +185,17 @@ void test_liveness_enum_value() {
     fwd_router_t router(node);
     transport_vertex_t net(node, router);
     tr::net::loopback_channel_t channel;
-    net.provide_link("l", channel.a());
+    net.provide_link("ws-client", "l", channel.a());
     (void)node.write(path_t("/net:children[]"), conn_spec("client", "l", conn_role_t::DIAL, 0));
 
     // Each manual state publishes its own byte (table order 0..5), read back from the LKV.
-    (void)net.set_link_state("l", link_state_t::DORMANT);
-    check(read_link_state_byte(node, "/net/l") == 0, "DORMANT publishes 0x00 (the old 'down')");
-    (void)net.set_link_state("l", link_state_t::RECONNECTING);
-    check(read_link_state_byte(node, "/net/l") == 2, "RECONNECTING publishes 0x02");
-    (void)net.set_link_state("l", link_state_t::UP);
-    check(read_link_state_byte(node, "/net/l") == 3, "UP publishes 0x03");
+    (void)net.set_link_state("net/ws-client/l", link_state_t::DORMANT);
+    check(read_link_state_byte(node, "/net/ws-client/l") == 0,
+          "DORMANT publishes 0x00 (the old 'down')");
+    (void)net.set_link_state("net/ws-client/l", link_state_t::RECONNECTING);
+    check(read_link_state_byte(node, "/net/ws-client/l") == 2, "RECONNECTING publishes 0x02");
+    (void)net.set_link_state("net/ws-client/l", link_state_t::UP);
+    check(read_link_state_byte(node, "/net/ws-client/l") == 3, "UP publishes 0x03");
     channel.shutdown();
 }
 
@@ -207,7 +209,7 @@ void test_constructed_link_reports_role_state() {
     const auto wl = node.write(path_t("/net:children[]"),
                                conn_spec("listener", "srv", conn_role_t::LISTEN, 47131, "udp"));
     check(wl.has_value(), "SPEC{listener, kind=udp} constructs the bound socket");
-    check(read_link_state_byte(node, "/net/srv") == 4,
+    check(read_link_state_byte(node, "/net/udp-server/srv") == 4,
           "a constructed LISTEN reports LISTENING (0x04)");
 
     // A udp CLIENT is UP the moment its socket is constructed (0x03).
@@ -215,7 +217,8 @@ void test_constructed_link_reports_role_state() {
         node.write(path_t("/net:children[]"),
                    conn_spec("client", "cli", conn_role_t::DIAL, 47131, "udp", "127.0.0.1"));
     check(wc.has_value(), "SPEC{client, kind=udp} constructs the socket");
-    check(read_link_state_byte(node, "/net/cli") == 3, "a constructed DIAL reports UP (0x03)");
+    check(read_link_state_byte(node, "/net/udp-client/cli") == 3,
+          "a constructed DIAL reports UP (0x03)");
 }
 
 void test_backoff_connect_timeout_parsed() {
@@ -224,10 +227,10 @@ void test_backoff_connect_timeout_parsed() {
     fwd_router_t router(node);
     transport_vertex_t net(node, router);
     tr::net::loopback_channel_t channel;
-    net.provide_link("c", channel.a());
+    net.provide_link("ws-client", "c", channel.a());
     (void)node.write(path_t("/net:children[]"),
                      conn_spec("client", "c", conn_role_t::DIAL, 0, {}, {}, 250, 3000));
-    const auto* s = net.settings_of("c");
+    const auto* s = net.settings_of("net/ws-client/c");
     check(s != nullptr && s->backoff_ms == 250 && s->connect_timeout_ms == 3000,
           "backoff=250 / connect_timeout=3000 parsed into the transport-private settings");
     channel.shutdown();
@@ -235,9 +238,9 @@ void test_backoff_connect_timeout_parsed() {
 
 void test_fwd_still_routes() {
     std::printf("Zero regression: a FWD still routes through the wired link:\n");
-    // Two nodes over the loopback. node A's /net/up connection wraps channel.a();
+    // Two nodes over the loopback. node A's /net/ws-client/up connection wraps channel.a();
     // node B's fwd_router owns channel.b() directly (the pre-Stage-1 wiring). A FWD
-    // written to node A's router routes out /net/up exactly as add_child wired it.
+    // written to node A's router routes out /net/ws-client/up exactly as add_child wired it.
     graph_t node_a;
     fwd_router_t router_a(node_a);
     transport_vertex_t net_a(node_a, router_a);
@@ -247,7 +250,7 @@ void test_fwd_still_routes() {
     (void)node_b.register_vertex(path_t("/temp"), role_t::STORED_VALUE);
 
     tr::net::loopback_channel_t channel;
-    net_a.provide_link("up", channel.a());
+    net_a.provide_link("ws-client", "up", channel.a());
     (void)node_a.write(path_t("/net:children[]"), conn_spec("client", "up", conn_role_t::DIAL, 0));
     router_b.add_child("down", channel.b());  // B's side: plain router child (unchanged path)
 
@@ -265,9 +268,11 @@ void test_fwd_still_routes() {
 
     // Build FWD{ op=WRITE, dst=/up/temp, src=/reply, VALUE } and hand it to A's router
     // as if it arrived locally (inbound_name "self" names no child => forward by dst).
-    std::vector<std::byte> dst;  // PATH{ NAME up, NAME temp }
+    std::vector<std::byte> dst;  // PATH{ NAME net, NAME ws-client, NAME up, NAME temp }
     {
         std::vector<std::byte> segs;
+        tr::wire::emit_name(segs, "net");
+        tr::wire::emit_name(segs, "ws-client");
         tr::wire::emit_name(segs, "up");
         tr::wire::emit_name(segs, "temp");
         tr::wire::emit_tlv(dst, type_t::PATH, opt_t{.pl = true}, segs);
@@ -288,9 +293,9 @@ void test_fwd_still_routes() {
     std::vector<std::byte> frame;
     tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
 
-    router_a.on_frame("self", frame);  // "self" names no child => forward by first dst seg "up"
+    router_a.on_frame("self", frame);  // "self" names no child => forward via the mount
     check(fut.wait_for(2s) == std::future_status::ready,
-          "the FWD forwarded out /net/up and arrived on B (byte path unchanged)");
+          "the FWD forwarded out /net/ws-client/up and arrived on B (byte path unchanged)");
     channel.shutdown();
 }
 
@@ -369,20 +374,21 @@ void test_config_constructed_udp() {
     const auto wb = node_b.write(path_t("/net:children[]"),
                                  conn_spec("listener", "a", conn_role_t::LISTEN, 47120, "udp"));
     check(wb.has_value(), "B: SPEC{listener, kind=udp, port} constructs the bound socket");
-    check(router_b.registry().by_name("a") != nullptr, "B: the socket is wired into the router");
+    check(router_b.registry().by_name("net/udp-server/a") != nullptr,
+          "B: the socket is wired into the router");
 
     // A: a udp CLIENT dialing B's port — also purely from config.
     const auto wa =
         node_a.write(path_t("/net:children[]"),
                      conn_spec("client", "b", conn_role_t::DIAL, 47120, "udp", "127.0.0.1"));
     check(wa.has_value(), "A: SPEC{client, kind=udp, addr, port} constructs the dialing socket");
-    const auto* s = net_a.settings_of("b");
+    const auto* s = net_a.settings_of("net/udp-client/b");
     check(s != nullptr && s->kind == "udp" && s->addr == "127.0.0.1" && s->port == 47120,
           "A: the parsed :settings carry kind/addr/port");
 
     // Construction reported the DIAL socket UP — the /net/b vertex value is VALUE{UP}
     // (0x03, the RFC-0014 liveness enum; S1 replaced the binary 0x01 "up").
-    const auto lv = node_a.read(path_t("/net/b"));
+    const auto lv = node_a.read(path_t("/net/udp-client/b"));
     bool up = false;
     if (lv) {
         const auto t = tr::wire::decode(lv->only());
@@ -394,7 +400,7 @@ void test_config_constructed_udp() {
     // End-to-end: FWD{READ dst=/b/temp} from A crosses A's config-created socket to
     // B's terminus, and the REPLY source-routes back to A's reply sink — B's listener
     // learned A's ephemeral source address from the request datagram.
-    router_a.on_frame("self", fwd_read({"b", "temp"}, {"reply-ep"}));
+    router_a.on_frame("self", fwd_read({"net", "udp-client", "b", "temp"}, {"reply-ep"}));
     const bool replied = fut.wait_for(3s) == std::future_status::ready;
     check(replied, "the READ reached B and the REPLY returned over the learned peer");
     if (replied) {
@@ -416,15 +422,15 @@ void test_provide_link_wins() {
     fwd_router_t router(node);
     transport_vertex_t net(node, router);
     tr::net::loopback_channel_t channel;
-    net.provide_link("up", channel.a());  // staged first — must win over kind=udp
+    net.provide_link("ws-client", "up", channel.a());  // staged first — must win over kind=udp
 
     const auto w =
         node.write(path_t("/net:children[]"),
                    conn_spec("client", "up", conn_role_t::DIAL, 47121, "udp", "127.0.0.1"));
     check(w.has_value(), "SPEC with kind=udp still creates the connection");
-    check(router.registry().by_name("up") == &channel.a(),
+    check(router.registry().by_name("net/ws-client/up") == &channel.a(),
           "the staged provide_link transport is the wired one (no socket constructed)");
-    const auto* s = net.settings_of("up");
+    const auto* s = net.settings_of("net/ws-client/up");
     check(s != nullptr && s->kind == "udp", "the config kind is still parsed into :settings");
     channel.shutdown();
 }
@@ -475,17 +481,17 @@ void test_link_of_accessor() {
                               conn_spec("listener", "srv", conn_role_t::LISTEN, 47131, "ws"));
     check(w.has_value(), "SPEC{listener, kind=ws} constructs the owned server");
 
-    tr::net::transport_t* const link = net.link_of("srv");
+    tr::net::transport_t* const link = net.link_of("net/ws-server/srv");
     check(link != nullptr, "link_of resolves the owned transport (previously unreachable)");
     auto* const srv = dynamic_cast<tr::net::transport_ws_server*>(link);
     check(srv != nullptr, "the owned transport is a transport_ws_server");
     if (srv != nullptr)
         check(srv->ok() && srv->local_port() != 0, "it is the live, bound owned socket");
-    check(net.link_of("absent") == nullptr, "link_of of an unknown NAME is nullptr");
+    check(net.link_of("net/ws-client/absent") == nullptr, "link_of of an unknown NAME is nullptr");
 }
 
 void test_link_name_collision_rejected() {
-    std::printf("Bug #373: a link name shadowing a first-level vertex is rejected:\n");
+    std::printf("Bug #373 is closed by ADDRESSING: a link may share a first-level name:\n");
     graph_t node;
     fwd_router_t router(node);
     transport_vertex_t net(node, router);
@@ -493,46 +499,52 @@ void test_link_name_collision_rejected() {
     (void)node.register_vertex(path_t("/system"), role_t::STORED_VALUE);
 
     tr::net::loopback_channel_t channel;
-    net.provide_link("system", channel.a());  // stage a link named exactly "system"
+    net.provide_link("ws-client", "system", channel.a());  // stage a link named exactly "system"
+    // #373 existed because a connection NAME was the FIRST dst segment, so a link sharing a
+    // name with a first-level vertex black-holed every /system/... read onto the transport.
+    // A connection is now addressed /net/<module>/<name> (RFC-0014, ADR-0061), so the two
+    // names live in different places and cannot collide — the guard is not just unnecessary,
+    // keeping it would wrongly reject a connection merely NAMED AFTER a local vertex.
     const auto w = node.write(path_t("/net:children[]"),
                               conn_spec("listener", "system", conn_role_t::LISTEN, 0));
-    check(!w.has_value() && w.error() == status_t::PATH_IN_USE,
-          "a link name colliding with a first-level vertex is rejected (PATH_IN_USE)");
-    check(!node.find(path_t::parse("/net/system")->key()).has_value(),
-          "no /net/system vertex was created");
-    check(router.registry().by_name("system") == nullptr,
-          "the colliding link was NOT wired into the router");
+    check(w.has_value(), "a link may now be named after a first-level vertex");
+    check(node.find(path_t::parse("/net/ws-client/system")->key()).has_value(),
+          "it mounts at /net/ws-client/system, nowhere near /system");
+    check(node.find(path_t::parse("/system")->key()).has_value(),
+          "the unrelated first-level /system vertex is untouched");
+    check(router.registry().by_name("net/ws-client/system") == &channel.a(),
+          "and it IS wired into the router under its mount path");
 
     // Control: a non-colliding name still works end-to-end.
-    net.provide_link("uplink", channel.a());
+    net.provide_link("ws-client", "uplink", channel.a());
     const auto w2 = node.write(path_t("/net:children[]"),
                                conn_spec("listener", "uplink", conn_role_t::LISTEN, 0));
     check(w2.has_value(), "a non-colliding link name still registers");
-    check(node.find(path_t::parse("/net/uplink")->key()).has_value() &&
-              router.registry().by_name("uplink") == &channel.a(),
+    check(node.find(path_t::parse("/net/ws-client/uplink")->key()).has_value() &&
+              router.registry().by_name("net/ws-client/uplink") == &channel.a(),
           "the non-colliding connection resolves and is wired into the router");
     channel.shutdown();
 }
 
 void test_link_name_collision_placeholder_parent() {
-    std::printf("Bug #373: a link name shadowing a PLACEHOLDER first-level parent is rejected:\n");
+    std::printf("Bug #373: a link name matching a PLACEHOLDER first-level parent is fine too:\n");
     graph_t node;
     fwd_router_t router(node);
     transport_vertex_t net(node, router);
-    // Only /system/mode is registered — /system stays a structural placeholder, but the
-    // router still shadows its first segment, so the collision must be caught here too.
+    // Only /system/mode is registered, so /system stays a structural placeholder. Under the
+    // old flat routing the router shadowed that first segment; under mount addressing there
+    // is nothing to shadow.
     (void)node.register_vertex(path_t("/system/mode"), role_t::STORED_VALUE);
     check(!node.find(path_t::parse("/system")->key()).has_value(),
           "/system is a placeholder (find sees no registered vertex there)");
 
     tr::net::loopback_channel_t channel;
-    net.provide_link("system", channel.a());
+    net.provide_link("ws-client", "system", channel.a());
     const auto w = node.write(path_t("/net:children[]"),
                               conn_spec("listener", "system", conn_role_t::LISTEN, 0));
-    check(!w.has_value() && w.error() == status_t::PATH_IN_USE,
-          "a link name shadowing a placeholder first-level parent is rejected (PATH_IN_USE)");
-    check(router.registry().by_name("system") == nullptr,
-          "the colliding link was NOT wired into the router");
+    check(w.has_value(), "a link name matching a placeholder first-level parent is accepted");
+    check(router.registry().by_name("net/ws-client/system") == &channel.a(),
+          "and it is wired under its mount path, leaving /system/mode reachable");
     channel.shutdown();
 }
 
@@ -628,7 +640,8 @@ void test_ws_peer_named_config() {
     const auto plain = node.write(path_t("/net:children[]"),
                                   conn_spec("listener", "plain", conn_role_t::LISTEN, 47140, "ws"));
     check(plain.has_value(), "SPEC{listener, kind=ws} with no peer_named constructs the server");
-    auto* const plain_srv = dynamic_cast<tr::net::transport_ws_server*>(net.link_of("plain"));
+    auto* const plain_srv =
+        dynamic_cast<tr::net::transport_ws_server*>(net.link_of("net/ws-server/plain"));
     check(plain_srv != nullptr && plain_srv->bus() == nullptr,
           "without the key the SPEC-created server has a NULL bus (no ADR-0044 facet)");
 
@@ -636,13 +649,13 @@ void test_ws_peer_named_config() {
     const auto w = node.write(path_t("/net:children[]"),
                               ws_listener_spec("hub", 47141, /*peer_named=*/true, /*max_peers=*/8));
     check(w.has_value(), "SPEC{listener, kind=ws, peer_named=1} constructs the owned server");
-    auto* const srv = dynamic_cast<tr::net::transport_ws_server*>(net.link_of("hub"));
+    auto* const srv = dynamic_cast<tr::net::transport_ws_server*>(net.link_of("net/ws-server/hub"));
     check(srv != nullptr && srv->ok(), "the owned transport is a live transport_ws_server");
     check(srv != nullptr && srv->bus() != nullptr,
           "the ws-private key exposed the bus_link_t facet on a CONFIG-constructed link");
 
     // A fresh listener is audible to nobody.
-    check(enumerate_peers(node, "/net/hub:children[]").empty(),
+    check(enumerate_peers(node, "/net/ws-server/hub:children[]").empty(),
           "/net/hub:children[] is empty before any peer dials in");
 
     // Two real ws clients dial the SPEC-created listener; each completes an RFC 6455
@@ -651,13 +664,13 @@ void test_ws_peer_named_config() {
     tr::net::transport_ws_client c2("127.0.0.1", 47141);
     check(c1.ok() && c2.ok(), "both ws clients handshook against the in-band-created listener");
 
-    const bool listed =
-        wait_until([&] { return enumerate_peers(node, "/net/hub:children[]").size() == 2; }, 2s);
+    const bool listed = wait_until(
+        [&] { return enumerate_peers(node, "/net/ws-server/hub:children[]").size() == 2; }, 2s);
     check(listed, "/net/hub:children[] synthesizes exactly the 2 live peers (ADR-0044 Brick C)");
 
     // The peer names are the far side's <ip>:<port> — the source port is ephemeral, so
     // assert the shape, never a literal.
-    const auto peers = enumerate_peers(node, "/net/hub:children[]");
+    const auto peers = enumerate_peers(node, "/net/ws-server/hub:children[]");
     const bool shaped = std::all_of(peers.begin(), peers.end(), [](const std::string& p) {
         return p.starts_with("127.0.0.1:") && p.size() > std::string_view("127.0.0.1:").size();
     });
@@ -666,8 +679,13 @@ void test_ws_peer_named_config() {
     // NO vertex is created for a peer — the listing is synthesized on every read, so the
     // /net subtree still holds exactly the two CONNECTIONS (ADR-0044: peers are never
     // registered; a peer name is not even a legal path segment).
-    check(enumerate_peers(node, "/net:children[]") == std::set<std::string>{"hub", "plain"},
-          "/net:children[] still lists only the two connections — no vertex per peer");
+    // RFC-0014 §1: /net enumerates MODULES; the connections themselves sit one level down
+    // under theirs. Either way no peer gains a vertex, which is what this asserts.
+    check(enumerate_peers(node, "/net:children[]") == std::set<std::string>{"ws-server"},
+          "/net:children[] lists the module");
+    check(
+        enumerate_peers(node, "/net/ws-server:children[]") == std::set<std::string>{"hub", "plain"},
+        "/net/ws-server:children[] lists only the two connections — no vertex per peer");
 }
 
 }  // namespace

@@ -666,7 +666,8 @@ void test_config_constructed_quic() {
         path_t("/net:children[]"),
         conn_spec("listener", "a", tr::net::conn_role_t::LISTEN, 47131, {}, g_cert, g_key));
     check(wb.has_value(), "B: SPEC{listener, kind=quic, port, cert, key} constructs the listener");
-    check(router_b.registry().by_name("a") != nullptr, "B: the socket is wired into the router");
+    check(router_b.registry().by_name("net/quic-server/a") != nullptr,
+          "B: the socket is wired into the router");
 
     // A missing cert/key on a quic LISTEN is a TYPE_MISMATCH (the kind requires them).
     const auto bad = node_b.write(path_t("/net:children[]"),
@@ -679,13 +680,13 @@ void test_config_constructed_quic() {
         node_a.write(path_t("/net:children[]"),
                      conn_spec("client", "b", tr::net::conn_role_t::DIAL, 47131, "127.0.0.1"));
     check(wa.has_value(), "A: SPEC{client, kind=quic, addr, port} constructs the dialing socket");
-    const auto* s = net_a.settings_of("b");
+    const auto* s = net_a.settings_of("net/quic-client/b");
     check(s != nullptr && s->kind == "quic" && s->addr == "127.0.0.1" && s->port == 47131,
           "A: the parsed :settings carry kind/addr/port");
 
     // End-to-end: FWD{READ dst=/b/temp} from A crosses A's config-created stream
     // to B's terminus, and the REPLY source-routes back over the same connection.
-    router_a.on_frame("self", fwd_read({"b", "temp"}, {"reply-ep"}));
+    router_a.on_frame("self", fwd_read({"net", "quic-client", "b", "temp"}, {"reply-ep"}));
     const bool replied = fut.wait_for(4s) == std::future_status::ready;
     check(replied, "the READ reached B and the REPLY returned over the accepted peer");
     if (replied) {

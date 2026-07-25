@@ -77,8 +77,16 @@ tr::view::view_t conn_spec(std::string_view type, std::string_view name) {
 }
 
 /** @brief Create connection @p name over the staged @p link via the `:children[]` SPEC. */
+/** @brief The module staged connections in this test mount under. */
+constexpr std::string_view kModule = "ws-client";
+
+/** @brief The full mount path a connection of @p name occupies (RFC-0014 / ADR-0061). */
+std::string mount_of(std::string_view name) {
+    return "net/" + std::string(kModule) + "/" + std::string(name);
+}
+
 bool create_conn(graph_t& g, transport_vertex_t& net, sink_link_t& link, std::string_view name) {
-    net.provide_link(std::string(name), link);
+    net.provide_link(std::string(kModule), std::string(name), link);
     const auto p = path_t::parse("/net:children[]");
     if (!p) return false;
     return g.write(*p, conn_spec("client", name)).has_value();
@@ -95,18 +103,19 @@ void test_removed_name_stops_resolving() {
     sink_link_t link;
 
     check(create_conn(g, net, link, "up"), "created /net/up over a staged link");
-    check(router.registry().by_name("up") == &link, "the NAME resolves to its link while live");
+    check(router.registry().by_name(mount_of("up")) == &link,
+          "the NAME resolves to its link while live");
     // A provided link is never auto-published (only a config-constructed socket self-reports),
     // so give the vertex a value to read back — that is what retirement must take away.
-    check(net.set_link_state("up", tr::net::link_state_t::UP).has_value(),
+    check(net.set_link_state(mount_of("up"), tr::net::link_state_t::UP).has_value(),
           "published its liveness");
-    check(g.read(*path_t::parse("/net/up")).has_value(), "/net/up reads while live");
+    check(g.read(*path_t::parse("/net/ws-client/up")).has_value(), "/net/up reads while live");
 
-    const auto rm = net.remove_connection("up");
+    const auto rm = net.remove_connection(mount_of("up"));
     check(rm.has_value(), "remove_connection succeeds");
-    check(router.registry().by_name("up") == nullptr,
+    check(router.registry().by_name(mount_of("up")) == nullptr,
           "the NAME resolves to NOTHING after removal (#494: no dangling transport_t*)");
-    const auto after = g.read(*path_t::parse("/net/up"));
+    const auto after = g.read(*path_t::parse("/net/ws-client/up"));
     check(!after && after.error() == status_t::NOT_FOUND, "/net/up is retired — reads not_found");
 }
 
@@ -158,12 +167,12 @@ void test_remove_unknown_and_idempotent() {
     transport_vertex_t net(g, router);
     sink_link_t link;
 
-    const auto miss = net.remove_connection("never-made");
+    const auto miss = net.remove_connection(mount_of("never-made"));
     check(!miss && miss.error() == status_t::NOT_FOUND, "an unknown NAME is a clean NotFound");
 
     check(create_conn(g, net, link, "up"), "created /net/up");
-    check(net.remove_connection("up").has_value(), "first removal succeeds");
-    const auto again = net.remove_connection("up");
+    check(net.remove_connection(mount_of("up")).has_value(), "first removal succeeds");
+    const auto again = net.remove_connection(mount_of("up"));
     check(!again && again.error() == status_t::NOT_FOUND,
           "a second removal is NotFound, not a crash");
 }
@@ -178,9 +187,10 @@ void test_name_is_reusable_after_removal() {
     sink_link_t second;
 
     check(create_conn(g, net, first, "up"), "created /net/up over link #1");
-    check(net.remove_connection("up").has_value(), "removed it");
+    check(net.remove_connection(mount_of("up")).has_value(), "removed it");
     check(create_conn(g, net, second, "up"), "created /net/up again over link #2");
-    check(router.registry().by_name("up") == &second, "the NAME now resolves to the NEW link");
+    check(router.registry().by_name(mount_of("up")) == &second,
+          "the NAME now resolves to the NEW link");
     check(router.registry().size() == 1, "and it reused the tombstoned slot");
 }
 

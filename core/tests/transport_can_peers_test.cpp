@@ -11,9 +11,9 @@
  *
  * Assertions:
  *   - P and Q announce at join (hello advertise); a read of the transit's
- *     /net/can0:children[] synthesizes exactly {n5, n7} — from live traffic, with
- *     NO vertex created for any peer (the transit graph holds only /net + /net/can0);
- *   - the same listing is reachable remotely: FWD{READ, dst=/net/can0, :children[]}
+ *     /net/can/can0:children[] synthesizes exactly {n5, n7} — from live traffic, with
+ *     NO vertex created for any peer (the transit graph holds only /net + /net/can/can0);
+ *   - the same listing is reachable remotely: FWD{READ, dst=/net/can/can0, :children[]}
  *     from the client returns the peer POINTs;
  *   - FWD{READ, dst=/n5/a/b} forwards through T DIRECTED to P (bystander Q, on the
  *     same broadcast bus, delivers nothing), resolves at P's terminus, and the
@@ -296,7 +296,7 @@ void test_enumeration_and_forwarding() {
 
     fake_can_bus_t bus;
 
-    // ----- transit node T (CAN node 1): graph + router + /net/can0. ----------
+    // ----- transit node T (CAN node 1): graph + router + /net/can/can0. ----------
     // Declaration = reverse teardown order (the RAII idiom of fwd_multihop_test):
     // the CAN transports are declared LAST so their receive threads stop first —
     // no frame can be forwarded into a half-destroyed loopback/mailbox.
@@ -317,9 +317,9 @@ void test_enumeration_and_forwarding() {
 
     tr::net::transport_can tcan_t(std::make_unique<fake_link_t>(bus),
                                   {0, 1, tr::view::can_frame_mode_t::CLASSIC, "transit"});
-    net_t.provide_link("can0", tcan_t);
+    net_t.provide_link("can", "can0", tcan_t);
     const auto made = graph_t_.write(path_t("/net:children[]"), conn_spec("client", "can0"));
-    check(made.has_value(), "the CAN connection vertex /net/can0 is SPEC-created");
+    check(made.has_value(), "the CAN connection vertex /net/can/can0 is SPEC-created");
 
     // ----- peer P (CAN node 5): terminus with /a/b holding a known VALUE. ----
     graph_t graph_p;
@@ -338,26 +338,30 @@ void test_enumeration_and_forwarding() {
                                   {0, 7, tr::view::can_frame_mode_t::CLASSIC, "boardC"});
     tcan_q.set_receiver(q_rx);
 
-    // ----- 1) local enumeration: /net/can0:children[] == {n5, n7}. ------------
+    // ----- 1) local enumeration: /net/can/can0:children[] == {n5, n7}. ------------
     const bool heard = wait_until(
         [&] {
-            return enumerate_local(graph_t_, "/net/can0:children[]") ==
+            return enumerate_local(graph_t_, "/net/can/can0:children[]") ==
                    std::set<std::string>{"n5", "n7"};
         },
         kBudget);
-    check(heard, "reading /net/can0:children[] synthesizes exactly {n5, n7} (join hellos)");
+    check(heard, "reading /net/can/can0:children[] synthesizes exactly {n5, n7} (join hellos)");
 
     // No vertex was created for any peer — the transit graph holds only what the
     // test created (ADR-0044 §1: peers never mutate any node's graph).
     check(!graph_t_.find(path_t::parse("/n5")->key()).has_value() &&
-              !graph_t_.find(path_t::parse("/net/can0/n5")->key()).has_value(),
+              !graph_t_.find(path_t::parse("/net/can/can0/n5")->key()).has_value(),
           "no vertex exists for peer n5 anywhere on the transit node");
-    check(enumerate_local(graph_t_, "/net:children[]") == std::set<std::string>{"can0"},
-          "/net:children[] (generic member read) still lists only the connection");
+    // RFC-0014 §1: /net enumerates the MODULES, and each module enumerates its member
+    // connections — so the connection now appears one level down, under its module.
+    check(enumerate_local(graph_t_, "/net:children[]") == std::set<std::string>{"can"},
+          "/net:children[] lists the module");
+    check(enumerate_local(graph_t_, "/net/can:children[]") == std::set<std::string>{"can0"},
+          "/net/can:children[] lists the member connection");
 
-    // ----- 2) remote enumeration: FWD{READ /net/can0 :children[]} from the client.
-    channel.b().send(
-        b_fwd(fwd_op_t::READ, b_path({"net", "can0"}), b_path({"reply-ep"}), b_field_children()));
+    // ----- 2) remote enumeration: FWD{READ /net/can/can0 :children[]} from the client.
+    channel.b().send(b_fwd(fwd_op_t::READ, b_path({"net", "can", "can0"}), b_path({"reply-ep"}),
+                           b_field_children()));
     const auto r_enum = inbox.wait(kBudget);
     check(r_enum.has_value(), "client received a REPLY for the remote :children[] READ");
     if (r_enum) {
@@ -370,7 +374,8 @@ void test_enumeration_and_forwarding() {
     }
 
     // ----- 3) FWD READ through: /n5/a/b resolves at P, reply routes back. -----
-    channel.b().send(b_fwd(fwd_op_t::READ, b_path({"n5", "a", "b"}), b_path({"reply-ep"})));
+    channel.b().send(b_fwd(fwd_op_t::READ, b_path({"net", "can", "can0", "n5", "a", "b"}),
+                           b_path({"reply-ep"})));
     const auto r_read = inbox.wait(kBudget);
     check(r_read.has_value(), "client received a REPLY for the forwarded READ via peer n5");
     if (r_read) {
@@ -397,7 +402,7 @@ void test_enumeration_and_forwarding() {
         std::vector<std::byte> body;
         const std::byte ob{static_cast<std::uint8_t>(fwd_op_t::WRITE)};
         tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&ob, 1));
-        const std::vector<std::byte> dst = b_path({"n5", "a", "b"});
+        const std::vector<std::byte> dst = b_path({"net", "can", "can0", "n5", "a", "b"});
         const std::vector<std::byte> src = b_path({"reply-ep"});
         const std::vector<std::byte> payload = b_value_u32(kWritten);
         body.insert(body.end(), dst.begin(), dst.end());

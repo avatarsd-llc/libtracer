@@ -332,7 +332,8 @@ class fwd_router_t {
      * @param cur     The cursor positioned at the inbound FWD frame's first byte.
      */
     template <class Cursor>
-    void route_fwd_forward(std::string_view inbound_name, const Cursor& cur, transport_t& child);
+    void route_fwd_forward(std::string_view inbound_name, std::size_t strip_k, const Cursor& cur,
+                           transport_t& child);
     /**
      * @brief Dispatch a multi-link control frame (ADVERTISE / COMPACT / HANDLE_NACK)
      *        rope-native (ADR-0055 §2).

@@ -475,7 +475,8 @@ void test_config_constructed_webtransport() {
         conn_spec("listener", "a", tr::net::conn_role_t::LISTEN, 47133, {}, g_cert, g_key));
     check(wb.has_value(),
           "B: SPEC{listener, kind=webtransport, port, cert, key} constructs the listener");
-    check(router_b.registry().by_name("a") != nullptr, "B: the endpoint is wired into the router");
+    check(router_b.registry().by_name("net/webtransport-server/a") != nullptr,
+          "B: the endpoint is wired into the router");
 
     // A missing cert/key on a webtransport LISTEN is a TYPE_MISMATCH.
     const auto bad = node_b.write(path_t("/net:children[]"),
@@ -489,7 +490,7 @@ void test_config_constructed_webtransport() {
                      conn_spec("client", "b", tr::net::conn_role_t::DIAL, 47133, "127.0.0.1"));
     check(wa.has_value(),
           "A: SPEC{client, kind=webtransport, addr, port} constructs the dialing endpoint");
-    const auto* s = net_a.settings_of("b");
+    const auto* s = net_a.settings_of("net/webtransport-client/b");
     check(s != nullptr && s->kind == "webtransport" && s->addr == "127.0.0.1" && s->port == 47133,
           "A: the parsed :settings carry kind/addr/port");
 }

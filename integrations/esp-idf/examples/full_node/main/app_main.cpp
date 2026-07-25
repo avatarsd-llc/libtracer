@@ -303,7 +303,7 @@ int run_host_probe(device_node_t& dev) {
         }
     });
 
-    // Dial the device: a config-created udp client connection at /net/dev.
+    // Dial the device: a config-created udp client connection at /net/udp-client/dev.
     const auto wa =
         graph.write(path_t("/net:children[]"),
                     conn_spec("client", "dev", conn_role_t::DIAL, kNodePort, "udp", "127.0.0.1"));
@@ -311,7 +311,7 @@ int run_host_probe(device_node_t& dev) {
 
     // 1) FWD{READ /dev/sensor/temp} — crosses the wire, resolves at the device
     //    terminus, and the REPLY source-routes back to our reply sink.
-    router.on_frame("self", b_fwd(tr::graph::fwd_op_t::READ, b_path({"dev", "sensor", "temp"}),
+    router.on_frame("self", b_fwd(tr::graph::fwd_op_t::READ, b_path({"net", "udp-client", "dev", "sensor", "temp"}),
                                   b_path({"probe"})));
     bool read_ok = false;
     for (int i = 0; i < 60 && !read_ok; ++i) {
@@ -328,7 +328,7 @@ int run_host_probe(device_node_t& dev) {
 
     // 2) Subscribe: a `:subscribers[]` append WRITE binds a REMOTE subscriber at
     //    the device; transient-local latches the current value immediately.
-    router.on_frame("self", b_fwd(tr::graph::fwd_op_t::WRITE, b_path({"dev", "sensor", "temp"}),
+    router.on_frame("self", b_fwd(tr::graph::fwd_op_t::WRITE, b_path({"net", "udp-client", "dev", "sensor", "temp"}),
                                   b_path({"probe"}), b_field_subscribers_append(),
                                   b_subscriber(b_path({"probe"}))));
 
@@ -377,7 +377,7 @@ extern "C" void app_main(void) {
         std::exit(1);
     }
     std::printf(
-        "device node up: /sensor/temp + udp listener /net/host (port %u), one-slab "
+        "device node up: /sensor/temp + udp listener /net/udp-server/host (port %u), one-slab "
         "recipe (pool %u slots x %u B + pmr arena)\n",
         static_cast<unsigned>(kNodePort), static_cast<unsigned>(dev.rx_pool.capacity()),
         static_cast<unsigned>(kRxSlotPayload));
