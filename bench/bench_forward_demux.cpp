@@ -192,6 +192,14 @@ std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* m
         }
     }
 
+    // The INBOUND child is registered LAST, on purpose. A forward hop performs TWO scans of
+    // the registry, not one: `by_segments` for the dst mount, and `entry_by_name` for the
+    // inbound child's precomputed `src` prefix. An earlier revision registered the inbound
+    // child FIRST, so its scan always hit at position 1 and was invisible -- the bench
+    // reported one scan's cost and called it the hop. Registering it last measures the worst
+    // case for that second scan, so the two are never conflated again.
+    router.add_child("net/ws-server/in", in_link);
+
     const std::byte payload[4] = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE},
                                   std::byte{0xEF}};
     const std::vector<std::byte> frame =
