@@ -328,7 +328,7 @@ class fwd_router_t {
     /** @brief Rope twin of `on_frame_bus`. */
     void on_frame_rope_bus(const child_rx_ctx_t& ctx, std::string_view peer, view::rope_t frame);
     /** @brief The shared rope routing body; @p inbound_ctx is the link's receiver ctx when the
-     *         frame arrived through one (nullptr on the public @ref on_frame_rope entry). */
+     *         frame arrived through one (nullptr on the public `on_frame_rope` entry). */
     void on_frame_rope_impl(std::string_view inbound_name, view::rope_t frame,
                             const child_rx_ctx_t* inbound_ctx, bool from_peer);
     /** @brief The shared routing body: @p frame_view is the owning frame when the
