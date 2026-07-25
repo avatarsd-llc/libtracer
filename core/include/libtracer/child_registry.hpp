@@ -17,6 +17,8 @@
  */
 #pragma once
 
+#include <atomic>
+#include <new>
 #include <span>
 #include <string>
 #include <string_view>
@@ -72,6 +74,18 @@ namespace tr::net {
  */
 class child_registry_t {
    public:
+    child_registry_t() = default;
+    child_registry_t(const child_registry_t&) = delete;
+    child_registry_t& operator=(const child_registry_t&) = delete;
+    /** @brief Frees the chunks. Nothing is reclaimed before this point, by design. */
+    ~child_registry_t() {
+        for (chunk_t* c = head_.load(std::memory_order_relaxed); c != nullptr;) {
+            chunk_t* const nxt = c->next.load(std::memory_order_relaxed);
+            delete c;
+            c = nxt;
+        }
+    }
+
     /**
      * @brief One registered child: its qualified mount name, its link, and its shape.
      *
@@ -81,9 +95,16 @@ class child_registry_t {
      * shape captured once at @ref add time, so the forward path never probes `bus()`.
      */
     struct child_t {
-        std::string name;        /**< @brief Qualified mount name, `"<module>/<name>"`. */
-        transport_t* link;       /**< @brief The link; nullptr marks a tombstone (#494). */
+        std::string name; /**< @brief Qualified mount name, `"<module>/<name>"`. */
+        /** @brief The link; nullptr marks a TOMBSTONE (#494). ATOMIC because teardown nulls
+         *         it in place while a lock-free forward read may be dereferencing the slot
+         *         (ADR-0063): the reader sees the old pointer or `nullptr`, never a tear. */
+        std::atomic<transport_t*> link{nullptr};
         bool multi_peer = false; /**< @brief Shape, captured once at @ref add time. */
+        /** @brief True while this slot still resolves — i.e. it is not a tombstone. */
+        [[nodiscard]] bool live() const noexcept {
+            return link.load(std::memory_order_acquire) != nullptr;
+        }
         /** @brief The mount path PRE-ENCODED as a run of NAME TLVs (#508), built once here so
          *         a forward hop emits the grown `src` prefix as ONE span with no per-segment
          *         work — and so no fixed buffer bounds how long a NAME may be. */
@@ -107,15 +128,27 @@ class child_registry_t {
     void add(std::string name, transport_t& link) {
         const bool multi_peer = link.bus() != nullptr;
         std::vector<std::byte> mount = encode_mount_name(name);
-        for (child_t& c : children_) {
+        child_t* hit = nullptr;
+        for_each([&](const child_t& c) {
             if (c.name == name) {
-                c.link = &link;
-                c.multi_peer = multi_peer;
-                c.mount_tlv = std::move(mount);
-                return;
+                hit = const_cast<child_t*>(&c);
+                return true;
             }
+            return false;
+        });
+        if (hit != nullptr) {
+            hit->multi_peer = multi_peer;
+            hit->mount_tlv = std::move(mount);
+            hit->link.store(&link, std::memory_order_release);
+            return;
         }
-        children_.push_back({std::move(name), &link, multi_peer, std::move(mount)});
+        child_t* const slot = append();
+        if (slot == nullptr) return;  // allocation failure — soft-fail, nothing registered
+        slot->name = std::move(name);
+        slot->multi_peer = multi_peer;
+        slot->mount_tlv = std::move(mount);
+        slot->link.store(&link, std::memory_order_release);
+        publish(slot);
     }
 
     /**
@@ -134,10 +167,15 @@ class child_registry_t {
         // single integer compare for the (overwhelming) majority that cannot match.
         std::size_t need = segs.empty() ? 0 : segs.size() - 1;
         for (const std::string_view s : segs) need += s.size();
-        for (const child_t& c : children_) {
-            if (c.link != nullptr && c.name.size() == need && matches(c.name, segs)) return &c;
-        }
-        return nullptr;
+        const child_t* hit = nullptr;
+        for_each([&](const child_t& c) {
+            if (c.live() && c.name.size() == need && matches(c.name, segs)) {
+                hit = &c;
+                return true;
+            }
+            return false;
+        });
+        return hit;
     }
 
     /**
@@ -150,8 +188,9 @@ class child_registry_t {
      * @return The directed per-peer endpoint, or nullptr if this child has no such peer.
      */
     [[nodiscard]] static transport_t* resolve_peer(const child_t& child, std::string_view peer) {
-        if (!child.multi_peer || child.link == nullptr) return nullptr;
-        bus_link_t* const bus = child.link->bus();
+        transport_t* const l = child.link.load(std::memory_order_acquire);
+        if (!child.multi_peer || l == nullptr) return nullptr;
+        bus_link_t* const bus = l->bus();
         return bus == nullptr ? nullptr : bus->peer_link(peer);
     }
 
@@ -165,12 +204,13 @@ class child_registry_t {
      */
     bool erase(std::string_view name) {
         bool erased = false;
-        for (child_t& c : children_) {
-            if (c.link != nullptr && c.name == name) {
-                c.link = nullptr;
+        for_each([&](const child_t& c) {
+            if (c.live() && c.name == name) {
+                const_cast<child_t&>(c).link.store(nullptr, std::memory_order_release);
                 erased = true;  // keep going: belt-and-braces against any shadow slot
             }
-        }
+            return false;
+        });
         return erased;
     }
 
@@ -186,10 +226,15 @@ class child_registry_t {
      */
     /** @brief The live child slot registered under exactly @p name (nullptr if none). */
     [[nodiscard]] const child_t* entry_by_name(std::string_view name) const {
-        for (const child_t& c : children_) {
-            if (c.link != nullptr && c.name == name) return &c;
-        }
-        return nullptr;
+        const child_t* hit = nullptr;
+        for_each([&](const child_t& c) {
+            if (c.live() && c.name == name) {
+                hit = &c;
+                return true;
+            }
+            return false;
+        });
+        return hit;
     }
 
     /**
@@ -202,16 +247,27 @@ class child_registry_t {
      * @ref resolve_peer for scoped peer resolution.
      */
     [[nodiscard]] transport_t* by_name(std::string_view name) const {
-        for (const child_t& c : children_) {
-            if (c.link != nullptr && c.name == name) return c.link;
-        }
-        for (const child_t& c : children_) {
-            if (c.link == nullptr) continue;  // tombstone (#494) — no link to ask
-            if (bus_link_t* const bus = c.link->bus()) {
-                if (transport_t* const peer = bus->peer_link(name)) return peer;
+        transport_t* hit = nullptr;
+        for_each([&](const child_t& c) {
+            if (c.live() && c.name == name) {
+                hit = c.link.load(std::memory_order_acquire);
+                return true;
             }
-        }
-        return nullptr;
+            return false;
+        });
+        if (hit != nullptr) return hit;
+        for_each([&](const child_t& c) {
+            transport_t* const l = c.link.load(std::memory_order_acquire);
+            if (l == nullptr) return false;  // tombstone (#494) — no link to ask
+            if (bus_link_t* const bus = l->bus()) {
+                if (transport_t* const peer = bus->peer_link(name)) {
+                    hit = peer;
+                    return true;
+                }
+            }
+            return false;
+        });
+        return hit;
     }
 
     /** @brief The link whose NAME equals the raw segment bytes @p seg (nullptr if none). */
@@ -231,14 +287,22 @@ class child_registry_t {
     }
 
     /** @brief Number of slots — live children PLUS tombstones (test introspection). */
-    [[nodiscard]] std::size_t size() const noexcept { return children_.size(); }
+    [[nodiscard]] std::size_t size() const noexcept {
+        std::size_t n = 0;
+        for_each([&](const child_t&) {
+            ++n;
+            return false;
+        });
+        return n;
+    }
 
     /** @brief Number of children that still resolve (test introspection). */
     [[nodiscard]] std::size_t live_size() const noexcept {
         std::size_t n = 0;
-        for (const child_t& c : children_) {
-            if (c.link != nullptr) ++n;
-        }
+        for_each([&](const child_t& c) {
+            if (c.live()) ++n;
+            return false;
+        });
         return n;
     }
 
@@ -292,13 +356,81 @@ class child_registry_t {
         return true;
     }
 
-    // Never erased or reordered, so a lock-free reader's iteration stays valid across a
-    // control-plane ERASE — that is what tombstoning buys, and no lock is taken on the hot
-    // path for it. It does NOT survive an APPEND: push_back reallocates and invalidates
-    // every slot reference (#521). Vector rather than a stable-address container is a
-    // deliberate hold, not an oversight — the container choice belongs with the S5
-    // mutation contract, where a reclamation scheme and the TSan gate land together.
-    std::vector<child_t> children_;
+    /**
+     * @brief An append-only chunked list — the ADR-0063 container (#521).
+     *
+     * The table is NEVER erased from or reordered (teardown tombstones in place), so the
+     * only mutations are APPEND and an in-place pointer null. That makes a chunked list the
+     * natural shape: a slot's address is stable for this object's lifetime, a reader walking
+     * it is unaffected by a concurrent append, and there is **no reclamation problem at all**
+     * because nothing is ever freed before teardown.
+     *
+     * It replaces a `std::vector`, whose `push_back` reallocated and invalidated every slot
+     * reference in the table — sound only while the registry was "immutable after setup", a
+     * premise RFC-0014 ended by making connection create/remove a runtime operation.
+     *
+     * `kChunk` is an **allocation granularity, not a bound**: the list grows without limit,
+     * so this introduces no synthetic cap (RFC-0006/0007, ADR-0051). Chunks are heap-allocated
+     * on demand, so a node with no connections carries one pointer and nothing else.
+     *
+     * Publication: a slot is fully constructed BEFORE `used` is bumped with release, and a
+     * reader acquires `used` before touching any slot — so a reader never observes a
+     * half-built entry. The same release/acquire pairing publishes each new chunk.
+     */
+    static constexpr std::size_t kChunk = 4;
+
+    struct chunk_t {
+        child_t slots[kChunk];
+        std::atomic<std::size_t> used{0};    /**< @brief Slots published in this chunk. */
+        std::atomic<chunk_t*> next{nullptr}; /**< @brief Next chunk, or null. */
+    };
+
+    /** @brief Walk every published slot in order; @p fn returning true stops the walk. */
+    template <class Fn>
+    void for_each(Fn&& fn) const {
+        for (chunk_t* c = head_.load(std::memory_order_acquire); c != nullptr;
+             c = c->next.load(std::memory_order_acquire)) {
+            const std::size_t n = c->used.load(std::memory_order_acquire);
+            for (std::size_t i = 0; i < n; ++i) {
+                if (fn(c->slots[i])) return;
+            }
+        }
+    }
+
+    /** @brief Append a slot and publish it. Control plane only — serialized by the caller. */
+    child_t* append() {
+        chunk_t* c = head_.load(std::memory_order_relaxed);
+        if (c == nullptr) {
+            c = new (std::nothrow) chunk_t();
+            if (c == nullptr) return nullptr;
+            head_.store(c, std::memory_order_release);
+        }
+        for (;;) {
+            const std::size_t n = c->used.load(std::memory_order_relaxed);
+            if (n < kChunk) return &c->slots[n];  // caller fills, then calls publish()
+            chunk_t* nxt = c->next.load(std::memory_order_relaxed);
+            if (nxt == nullptr) {
+                nxt = new (std::nothrow) chunk_t();
+                if (nxt == nullptr) return nullptr;
+                c->next.store(nxt, std::memory_order_release);
+            }
+            c = nxt;
+        }
+    }
+
+    /** @brief Make the slot `append` handed back visible to readers (release). */
+    void publish(const child_t* slot) {
+        for (chunk_t* c = head_.load(std::memory_order_relaxed); c != nullptr;
+             c = c->next.load(std::memory_order_relaxed)) {
+            const std::size_t n = c->used.load(std::memory_order_relaxed);
+            if (n < kChunk && slot == &c->slots[n]) {
+                c->used.store(n + 1, std::memory_order_release);
+                return;
+            }
+        }
+    }
+
+    std::atomic<chunk_t*> head_{nullptr};
 };
 
 }  // namespace tr::net
