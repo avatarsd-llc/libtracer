@@ -1049,7 +1049,20 @@ class vertex_t {
     bool clear_edge(std::size_t idx) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         if (idx >= subs_.size() || !subs_[idx].active) return false;
-        subs_[idx].active = false;
+        // RECLAIM in place, not merely deactivate. Flipping `active` alone left the slot's
+        // `target_key` buffer, its `source_view` segment pin and the whole cold `remote`
+        // half resident until an unrelated `add_edge` happened to land on this index — so an
+        // unsubscribed edge kept a frame segment alive indefinitely. This is the same
+        // move-an-inert-shell reclaim @ref evict_link_edges already performs under this very
+        // lock, and it is safe for the same reason: an @ref edge_view_t snapshot owns its
+        // copies and a refcount clone of the route (ADR-0041 §2), so releasing the pin here
+        // can never dangle a dispatch already in flight.
+        //
+        // The 80-byte slot SHELL stays — RFC-0009 §D.2 makes `:subscribers[]` indices
+        // stable, so the vector must not shrink; only the retained state is freed.
+        subscriber_t reclaimed;    // an inert shell: no view, no route, no cold half
+        reclaimed.active = false;  // the slot is free for add_edge reuse
+        subs_[idx] = std::move(reclaimed);
         return true;
     }
 

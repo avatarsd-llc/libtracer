@@ -1277,8 +1277,9 @@ result_t<void> graph_t::unsubscribe(const subscription_t& sub) {
     // The in-process counterpart of the wire ":subscribers[N] clear" (field_write below):
     // deactivate the slot, then unwind the RFC-0005 listener bookkeeping — the SAME order and
     // the SAME helper the wire path uses, so both doors leave identical counters. clear_edge
-    // only flags the slot inactive (index-stable, add_edge reuses it); an in-flight delivery
-    // already snapshotted the edge (ADR-0041 §2) and completes untouched.
+    // RECLAIMS the slot's retained state (target key, segment pin, cold remote half) and
+    // leaves an inert, index-stable shell that add_edge reuses; an in-flight delivery already
+    // snapshotted the edge (ADR-0041 §2) and completes untouched.
     if (!sub.vertex->clear_edge(sub.slot)) return std::unexpected(status_t::NOT_FOUND);
     note_subscriber_removed(sub.vertex);
     return {};
