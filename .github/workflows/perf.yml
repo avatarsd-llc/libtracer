@@ -90,7 +90,8 @@ jobs:
       - name: Build HEAD's benchmark (Release)
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build bench/build --target bench_libtracer bench_forward_heap -j
+          cmake --build bench/build --target bench_libtracer bench_forward_heap \
+            bench_forward_demux bench_compact_delivery -j
       # The zero-heap gate is deterministic (allocation counts, not time) — running it
       # per replica is a free consistency check; its transcript feeds the memory series.
       - name: Zero-heap forward gate (ADR-0038 §16KB-RAM)
@@ -141,6 +142,12 @@ jobs:
         run: |
           ./bench/build/bench_forward_demux >bench/bench_forward_demux_raw.txt || true
           ./bench/build/bench_compact_delivery >bench/bench_compact_delivery_raw.txt || true
+          # `|| true` keeps a crashing bench from costing this commit its whole history
+          # point — but it also silently swallowed a MISSING BINARY once, producing a green
+          # job that recorded nothing. Make an empty transcript visible in the log.
+          for f in bench/bench_forward_demux_raw.txt bench/bench_compact_delivery_raw.txt; do
+            [ -s "$f" ] || echo "::warning::$f is empty — its series will not be recorded"
+          done
       - name: Upload this replica's transcripts
         uses: actions/upload-artifact@v4
         with:
