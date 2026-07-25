@@ -52,15 +52,23 @@ namespace tr::net {
  * **Mutation model (#494).** The table was add-only, which left a retired link's
  * `name → transport_t*` resident and dangling. @ref erase closes that, and it does so by
  * **tombstoning in place** — the slot's `link` is nulled and its NAME kept — never by
- * erasing from `children_`. That is deliberate: shifting or reallocating the vector under
- * a concurrent lock-free reader is a hard use-after-free, whereas a tombstone leaves every
- * slot address stable and a racing reader sees either the old pointer or `nullptr`. A
+ * erasing from `children_`. That is deliberate: shifting the vector under a concurrent
+ * lock-free reader is a hard use-after-free, whereas a tombstone leaves the slot in place
+ * and a racing reader sees either the old pointer or `nullptr`. A
  * later @ref add of the SAME name reuses its tombstone, so create/remove churn on a stable
  * name set does not grow the table; a genuinely new name still appends, so the table's high
  * -water mark is the count of DISTINCT names ever registered. Compaction (and the full
  * mutation-vs-forward concurrency contract) lands with the RFC-0014 S5 liveness engine,
  * where the TSan gate and a safe reclamation scheme arrive together — see ADR-0061
  * (`docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md`).
+ *
+ * **What the tombstone does NOT buy (#521).** It makes a slot stable against ERASE only.
+ * `add` of a genuinely new name still `push_back`s, and that reallocates — invalidating
+ * every slot reference and iterator in the table. So slots are NOT address-stable for this
+ * object's lifetime, and a forward read racing a connection-create is unsound. That was
+ * harmless while the registry really was immutable after setup; RFC-0014 made connection
+ * create/remove a RUNTIME operation, so it is now a live hazard, tracked by #521 and
+ * closed by the S5 contract above. Do not build on slot addresses until it is.
  */
 class child_registry_t {
    public:
@@ -252,9 +260,12 @@ class child_registry_t {
         return true;
     }
 
-    // Slots are stable for this object's lifetime: only appended to, never erased or
-    // reordered, so a lock-free reader's iteration stays valid across a control-plane
-    // erase. No lock on the hot path.
+    // Never erased or reordered, so a lock-free reader's iteration stays valid across a
+    // control-plane ERASE — that is what tombstoning buys, and no lock is taken on the hot
+    // path for it. It does NOT survive an APPEND: push_back reallocates and invalidates
+    // every slot reference (#521). Vector rather than a stable-address container is a
+    // deliberate hold, not an oversight — the container choice belongs with the S5
+    // mutation contract, where a reclamation scheme and the TSan gate land together.
     std::vector<child_t> children_;
 };
 

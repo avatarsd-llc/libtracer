@@ -183,8 +183,11 @@ void fwd_router_t::add_child(std::string name, transport_t& link) {
     // already have a live recv thread, so `set_receiver` is the publish point — once the
     // callback is installed, on_frame can read the registry on that thread. Adding the
     // child first ensures the entry is visible before any inbound frame can resolve it
-    // (the set_receiver mutex provides the release/acquire fence). Registry is otherwise
-    // immutable after setup — no lock on the read hot path.
+    // (the set_receiver mutex provides the release/acquire fence). No lock is taken on the
+    // read hot path. NOTE: "the registry is immutable after setup" stopped being true when
+    // RFC-0014 made connection create/remove a RUNTIME operation — an add of a new name
+    // reallocates the table under a concurrent forward read (#521). Closed by the S5
+    // mutation contract, where the TSan gate and a reclamation scheme land together.
     registry_.add(name, link);
     // Capability-matched receiver (ADR-0042 §1 / ADR-0044): a BUS link delivers
     // frames tagged with the SENDING peer's name, which becomes the hop's inbound
