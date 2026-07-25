@@ -573,7 +573,7 @@ void test_two_nodes_over_quic() {
     std::vector<std::byte> payload;
     const std::array<std::byte, 2> pv{std::byte{0x2A}, std::byte{0x2B}};
     tr::wire::emit_tlv(payload, type_t::VALUE, opt_t{}, pv);
-    const auto frame = fwd_write({"net", "quic-client", "b", "sensor", "temp"}, payload);
+    const auto frame = fwd_write({"b", "sensor", "temp"}, payload);
     router_a.on_frame("client", frame);
 
     const bool arrived = fut.wait_for(4s) == std::future_status::ready;
@@ -666,7 +666,8 @@ void test_config_constructed_quic() {
         path_t("/net:children[]"),
         conn_spec("listener", "a", tr::net::conn_role_t::LISTEN, 47131, {}, g_cert, g_key));
     check(wb.has_value(), "B: SPEC{listener, kind=quic, port, cert, key} constructs the listener");
-    check(router_b.registry().by_name("net/quic-server/a") != nullptr, "B: the socket is wired into the router");
+    check(router_b.registry().by_name("net/quic-server/a") != nullptr,
+          "B: the socket is wired into the router");
 
     // A missing cert/key on a quic LISTEN is a TYPE_MISMATCH (the kind requires them).
     const auto bad = node_b.write(path_t("/net:children[]"),
