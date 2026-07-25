@@ -65,6 +65,14 @@ That option was unavailable when this erratum was written: slot addresses were n
 | bytes per frame | 655 | **443** |
 | warm forwarding hop (512 B) | 202 ns | 180 ns (−11%) |
 
+> **Correction (2026-07-26): the allocation columns above undercount.** `bench_compact_delivery`
+> overrode only the throwing `operator new(size)`, but libtracer's heap backend allocates through
+> `::operator new(bytes, std::nothrow)` (`mem_heap.hpp`), so the payload-sized store copy was
+> invisible to the counter. With the full set of overrides — matching `bench_forward_heap`, which
+> always had them — the same increment-2 build measures **11 allocations / 735 B** at payload 64,
+> not 9 / 443. The latency figures are unaffected (the counter is armed outside the timed window),
+> and the *direction* and *relative* saving hold; only the absolute allocation counts were wrong.
+
 The forwarding gain is small because the scan it removes was already cheap at that link count; that path is dominated by `encode_compact`'s fresh vector and the COMPACT frame's own owning decode — **neither of which is resolution**, and which are the next lever here.
 
 ## Consequences

@@ -75,10 +75,11 @@ struct fwd_hdr_t {
  * @retval std::nullopt @p pos is out of range or the grammar rejects the header.
  */
 template <class Cursor>
-[[nodiscard]] std::optional<fwd_hdr_t> read_fwd_header(const Cursor& cur, std::size_t pos) {
+[[nodiscard]] std::optional<fwd_hdr_t> read_fwd_header(
+    const Cursor& cur, std::size_t pos,
+    wire::grammar::crc_check_t crc = wire::grammar::crc_check_t::DEFER) {
     if (pos > cur.size()) return std::nullopt;
-    const auto h = wire::grammar::parse_header(cur.region(pos, cur.size() - pos),
-                                               wire::grammar::crc_check_t::DEFER);
+    const auto h = wire::grammar::parse_header(cur.region(pos, cur.size() - pos), crc);
     if (!h) return std::nullopt;
     return fwd_hdr_t{.type = h->type,
                      .opt = h->opt,
@@ -207,15 +208,23 @@ struct control_head_t {
  *         HANDLE_NACK leading with a ≥2-byte VALUE label.
  */
 template <class Cursor>
-[[nodiscard]] std::optional<control_head_t> peek_control(const Cursor& cur) {
-    const auto outer = read_fwd_header(cur, 0);
+[[nodiscard]] std::optional<control_head_t> peek_control(
+    const Cursor& cur, wire::grammar::crc_check_t crc = wire::grammar::crc_check_t::DEFER) {
+    const auto outer = read_fwd_header(cur, 0, crc);
     if (!outer || !outer->opt.pl) return std::nullopt;
     if (outer->type != wire::type_t::ADVERTISE && outer->type != wire::type_t::COMPACT &&
         outer->type != wire::type_t::HANDLE_NACK)
         return std::nullopt;
+    // Trailing bytes after the root are a malformed frame, not a prefix to ignore — the
+    // same rejection `grammar::walk` makes (grammar.hpp:334-335). Without it a peer could
+    // append arbitrary bytes past a well-formed root and have them silently accepted.
+    if (outer->total != cur.size()) return std::nullopt;
     const std::size_t body_end = outer->body_off + outer->body_len;
-    const auto label_h = read_fwd_header(cur, outer->body_off);
-    if (!label_h || label_h->type != wire::type_t::VALUE || label_h->body_len < 2)
+    const auto label_h = read_fwd_header(cur, outer->body_off, crc);
+    // The label must be an OPAQUE VALUE: a structured (pl=1) one would mean its body is a
+    // child run, not a u16, and reading two bytes out of it would be reading a header.
+    if (!label_h || label_h->type != wire::type_t::VALUE || label_h->opt.pl ||
+        label_h->body_len < 2)
         return std::nullopt;
     // The label VALUE is a 2-byte LE u16; stitch it a byte at a time so a value that
     // straddles a link boundary reads the same as a contiguous one.
@@ -225,9 +234,13 @@ template <class Cursor>
     control_head_t head{outer->type, label, 0, 0};
     const std::size_t c1 = outer->body_off + label_h->total;
     if (c1 < body_end) {
-        if (const auto c1_h = read_fwd_header(cur, c1)) {
-            head.child1_off = c1;
-            head.child1_total = c1_h->total;
+        if (const auto c1_h = read_fwd_header(cur, c1, crc)) {
+            // The child must FIT the parent body. Bounding only its start let a malformed
+            // child overrun into a root trailer, so its `total` could swallow CRC bytes.
+            if (c1 + c1_h->total <= body_end) {
+                head.child1_off = c1;
+                head.child1_total = c1_h->total;
+            }
         }
     }
     return head;

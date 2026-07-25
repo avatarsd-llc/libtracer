@@ -74,6 +74,15 @@ ADR-0052 escape hatch itself.
    path is unchanged — a contiguous frame still decodes eagerly, and those **span-tier
    flattens are legitimate and stay** (ADR-0053 ⑥).
 
+   > **Amendment (2026-07-26).** The span control arm is no longer unchanged: it now reads
+   > `COMPACT` / `HANDLE_NACK` by offset through `peek_control`, the same rule this ADR gave
+   > the rope arm, so the two are one reader instead of two. The premise that a span control
+   > frame may decode eagerly came from ADR-0041 §5's "flow-setup" classification, which
+   > [ADR-0062](0062-resolve-once-label-bindings-hold-resolutions-not-names.md) invalidated
+   > for `COMPACT` by making it the steady-state data frame (see the amendment on ADR-0041).
+   > The claim stands unchanged for **egress** flattens, which is what this ADR governs, and
+   > for `ADVERTISE`, which still decodes — but only its route sub-span.
+
 `tlv_t` is **not** touched — ADR-0052's cross-core parity and the ADR-0041 §2 span-arena
 contract are preserved. This is purely a question of *where* the optional materialize
 happens.
