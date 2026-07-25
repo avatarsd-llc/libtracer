@@ -51,6 +51,14 @@ add_executable(bench_forward_heap bench_forward_heap.cpp)
 target_link_libraries(bench_forward_heap PRIVATE libtracer)
 target_compile_options(bench_forward_heap PRIVATE -Wall -Wextra)
 
+# The forward-demux baseline (ADR-0061's one open acceptance condition): times ONE FWD
+# forward hop and separates the size-independent fixed cost (target first) from the
+# registry scan's marginal cost (target last), swept over links-per-node. Landed against
+# the flat by_name so it needs no strip-K code — it is the yardstick that PR must meet.
+add_executable(bench_forward_demux bench_forward_demux.cpp)
+target_link_libraries(bench_forward_demux PRIVATE libtracer)
+target_compile_options(bench_forward_demux PRIVATE -Wall -Wextra)
+
 # Many-core contention microbenchmarks (Wave 0e; the ADR-0032 measurement-first
 # answer to the 128-core scaling question). bench_fanout_clone_storm measures
 # segment-refcount cacheline contention under wide fan-out; bench_await_wakeup_storm
