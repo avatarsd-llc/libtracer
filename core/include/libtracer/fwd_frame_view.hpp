@@ -301,11 +301,26 @@ class stack_writer {
 /** @brief Capacity of the forward hop's first head: FWD hdr(≤6) + op TLV(small) + PATH hdr(≤6). */
 inline constexpr std::size_t kFwdHead1Cap = 64;
 /** @brief Capacity of the forward hop's second head: PATH hdr(≤6) + one NAME(≤4+segment). */
-// Sized for the grown src header PLUS a full mount path (ADR-0061): `net` / `<module>` /
-// `<name>` / `<peer>`, each a 4-byte NAME header plus its bytes. The pre-strip-K value (96)
-// budgeted for ONE segment; four user-chosen names need materially more, and an overflow
-// here is a silent drop of a legal frame, not a safe rejection.
-inline constexpr std::size_t kFwdHead2Cap = 256;
+// The grown src PATH header alone — 2 type/opt bytes plus a 2- or 4-byte length. This is a
+// STRUCTURAL bound (the widest TLV header the format has), not a budget: the prepended mount
+// NAMEs are emitted as bare 4-byte headers and their bytes are referenced from the caller's
+// storage by @ref fwd_rebuild_t::gather, never copied in here. An earlier revision copied them
+// into this buffer, which silently made the buffer size a cap on how long a connection NAME
+// could be — a synthetic limit on user-chosen data (forbidden by RFC-0006/0007 + ADR-0051), and
+// one whose breach was a dropped LEGAL frame rather than a clean rejection. A mount path is now
+// bounded only by the wire's own `u16` NAME length and by the outgoing frame fitting the link's
+// `max_frame`/MTU.
+inline constexpr std::size_t kFwdSrcHdrCap = 6;
+
+/**
+ * @brief Upper bound on the regions @ref fwd_rebuild_t::gather emits for a CONTIGUOUS source.
+ *
+ * Structural, derived from the layout rather than budgeted: the six fixed regions (head1,
+ * remaining dst, optional selector, src header, original src body, tail) plus one
+ * header-and-bytes PAIR per prepended mount segment. A rope source may split any region
+ * further and so gathers into a growable container instead.
+ */
+inline constexpr std::size_t kFwdMaxIov = 6 + 2 * kMountPeekMax;
 
 /**
  * @brief The rebuilt forward-hop frame: fresh stack heads + the untouched source
@@ -318,10 +333,16 @@ inline constexpr std::size_t kFwdHead2Cap = 256;
  * pre-extraction router.
  */
 struct fwd_rebuild_t {
-    stack_writer<kFwdHead1Cap> head1; /**< @brief FWD header + op (copied) + shrunk dst header. */
-    stack_writer<kFwdHead2Cap> head2; /**< @brief Grown src header + the prepended inbound NAME. */
-    std::size_t rem_dst_off = 0;      /**< @brief Remaining dst body after the stripped segment. */
-    std::size_t rem_dst_len = 0;      /**< @brief Length of the remaining dst body. */
+    stack_writer<kFwdHead1Cap> head1;  /**< @brief FWD header + op (copied) + shrunk dst header. */
+    stack_writer<kFwdSrcHdrCap> head2; /**< @brief The grown src PATH header (headers only). */
+    /** @brief Bare 4-byte NAME headers for the prepended mount segments, in order. */
+    std::array<std::array<std::byte, 4>, kMountPeekMax> mount_hdr;
+    /** @brief The mount segments themselves, REFERENCED not copied — they must outlive
+     *         @ref gather (the registry owns them for the duration of the hop). */
+    std::array<std::string_view, kMountPeekMax> mount;
+    std::size_t mount_n = 0;      /**< @brief How many mount segments are prepended to src. */
+    std::size_t rem_dst_off = 0;  /**< @brief Remaining dst body after the stripped segment. */
+    std::size_t rem_dst_len = 0;  /**< @brief Length of the remaining dst body. */
     std::size_t sel_pos = 0;      /**< @brief The optional FIELD selector TLV; 0 len ⇒ none. */
     std::size_t sel_total = 0;    /**< @brief Total bytes of the selector TLV. */
     std::size_t src_body_off = 0; /**< @brief The original src PATH body. */
@@ -351,6 +372,13 @@ struct fwd_rebuild_t {
         if (rem_dst_len > 0) cur.for_each_span(rem_dst_off, rem_dst_len, push);
         if (sel_total > 0) cur.for_each_span(sel_pos, sel_total, push);
         push(head2.span());
+        // The prepended mount run: each segment's header from our own storage, its bytes
+        // straight from the caller's string — no copy, so a long NAME costs nothing here.
+        for (std::size_t i = 0; i < mount_n; ++i) {
+            push(std::span<const std::byte>(mount_hdr[i]));
+            push(std::span<const std::byte>(reinterpret_cast<const std::byte*>(mount[i].data()),
+                                            mount[i].size()));
+        }
         if (src_body_len > 0) cur.for_each_span(src_body_off, src_body_len, push);
         if (tail_len > 0) cur.for_each_span(tail_off, tail_len, push);
     }
@@ -437,9 +465,17 @@ template <class Cursor>
     r.rem_dst_len = dst_end - strip_at;
 
     // The inbound mount path appended to src (grow) — empty for a REPLY (no accumulation).
+    // The only bounds here are the format's own: a mount is at most @ref kMountPeekMax
+    // segments (net / module / name / peer — RFC-0014's addressing arity, structural), and a
+    // NAME's length field is a `u16`. Beyond that a mount path is limited only by the frame
+    // fitting the link's `max_frame`/MTU — there is no buffer budget to exceed.
+    if (inbound_mount.size() > kMountPeekMax) return std::nullopt;
     std::size_t inbound_name_len = 0;
     if (!is_reply) {
-        for (const std::string_view seg : inbound_mount) inbound_name_len += 4u + seg.size();
+        for (const std::string_view seg : inbound_mount) {
+            if (seg.size() > 0xFFFFu) return std::nullopt;  // exceeds the NAME length field
+            inbound_name_len += 4u + seg.size();
+        }
     }
 
     const std::size_t new_dst_body = r.rem_dst_len;
@@ -459,7 +495,15 @@ template <class Cursor>
 
     r.head2.header(wire::type_t::PATH, new_src_body);
     if (!is_reply) {
-        for (const std::string_view seg : inbound_mount) r.head2.name(seg);
+        for (const std::string_view seg : inbound_mount) {
+            auto& h = r.mount_hdr[r.mount_n];
+            h[0] = static_cast<std::byte>(std::to_underlying(wire::type_t::NAME));
+            h[1] = std::byte{0};
+            h[2] = static_cast<std::byte>(seg.size() & 0xFF);
+            h[3] = static_cast<std::byte>((seg.size() >> 8) & 0xFF);
+            r.mount[r.mount_n] = seg;
+            ++r.mount_n;
+        }
     }
 
     return r;

@@ -336,10 +336,15 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name, const Cursor
     // `std::pmr::vector` over the injected @ref mr_ for the rope path (a link count is only
     // known at run time).
     if constexpr (std::is_same_v<Cursor, wire::grammar::span_cursor>) {
-        // Contiguous source: at most 6 regions, each a single sub-span — a stack array.
-        std::array<std::span<const std::byte>, 6> iov;
+        // Contiguous source: each region is a single sub-span — a stack array sized by
+        // kFwdMaxIov, which is derived from the layout (see its docs), not a chosen budget.
+        // The write is bounds-guarded regardless: this array was previously a bare 6 with an
+        // unchecked `iov[n++]`, so any growth in the region count was a silent overrun.
+        std::array<std::span<const std::byte>, kFwdMaxIov> iov;
         std::size_t n = 0;
-        rebuilt->gather(cur_src, [&](std::span<const std::byte> s) { iov[n++] = s; });
+        rebuilt->gather(cur_src, [&](std::span<const std::byte> s) {
+            if (n < iov.size()) iov[n++] = s;
+        });
         child.send(std::span<const std::span<const std::byte>>(iov.data(), n));
     } else {
         // Rope source: a region may cross several links — gather into a pmr vector drawn
