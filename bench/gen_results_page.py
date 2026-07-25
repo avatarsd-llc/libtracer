@@ -199,12 +199,15 @@ Two changes landed on this path, and the second was the larger. ADR-0062 removed
 `COMPACT` by offset through `peek_control` exactly as the rope arm already did. Measured on the
 warm path (`bench_compact_delivery`, host p50):
 
-| | before ADR-0062 | after ADR-0062 | after the offset read |
-| --- | ---: | ---: | ---: |
-| terminus delivery | 298 ns | 202 ns | **~110 ns** |
-| terminus allocations | 15 | 11 | **3** |
-| forwarding hop | 202 ns | 180 ns | **~90 ns** |
-| forwarding allocations | 18 | 17 | **9** |
+| | before ADR-0062 | after ADR-0062 | after the offset read | after exact-reserve egress |
+| --- | ---: | ---: | ---: | ---: |
+| terminus delivery | 298 ns | 202 ns | **~110 ns** | — |
+| terminus allocations | 15 | 11 | **3** | — |
+| forwarding hop | 202 ns | 180 ns | ~90 ns | **~70 ns** |
+| forwarding allocations | 18 | 17 | 9 | **4** |
+
+End to end that is **−63% on the terminus** and **−65% on the forwarding hop**, with per-frame
+allocations down 15 → 3 and 18 → 4.
 
 The owning decode cost three allocations for the tree spine plus five more re-encoding a payload
 that was **already contiguous in the frame** — together more than half a warm terminus frame. It
@@ -215,6 +218,13 @@ making a warm `COMPACT` the steady-state per-sample data frame rather than setup
 node's CRC as a side effect, so reading by offset without asking for it would silently start
 accepting a frame whose own trailer says it is corrupt. That is pinned by a test which fails if
 the argument is dropped.
+
+The last column swaps the forwarding leg's egress to the **nothrow exact-reserve** encoder, which
+also removes an abort path: the growth-doubling encoder grows `std::vector`s, and under
+`-fno-exceptions` an exhausted heap aborts rather than shedding the frame (#477). One caveat when
+reading its bytes column: the counter sums *requested* bytes, so an exact reservation totals
+higher than a doubling ladder at large payloads while peak footprint and fragmentation are
+strictly better — judge that change on allocation count and latency, not on bytes.
 
 The forward hop remains **zero-heap** regardless (`bench_forward_heap`, `allocs=0`, CI-gated)."""
 
