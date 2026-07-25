@@ -208,7 +208,9 @@ void test_strip_k_and_symmetric_src() {
         make_fwd({"net", "ws-client", "foo", "sensor", "temp"}, {"origin"});
     const tr::wire::grammar::span_cursor cur{std::span<const std::byte>(frame)};
     const std::string_view mount[3] = {"net", "ws-server", "up"};
-    const auto rb = tr::net::rebuild_fwd_forward(cur, std::span<const std::string_view>(mount), 3);
+    const auto enc = tr::net::encode_mount_tlv(std::span<const std::string_view>(mount));
+    check(enc.has_value(), "the mount prefix encodes");
+    const auto rb = tr::net::rebuild_fwd_forward(cur, std::span<const std::byte>(*enc), {}, 3);
     check(rb.has_value() && rb->ok(), "the hop rebuilds");
     if (!rb || !rb->ok()) return;
 
@@ -232,7 +234,8 @@ void test_short_dst_is_not_forwardable() {
     const std::vector<std::byte> frame = make_fwd({"net", "ws-client"}, {"origin"});
     const tr::wire::grammar::span_cursor cur{std::span<const std::byte>(frame)};
     const std::string_view mount[3] = {"net", "ws-server", "up"};
-    check(!tr::net::rebuild_fwd_forward(cur, std::span<const std::string_view>(mount), 3),
+    const auto enc = tr::net::encode_mount_tlv(std::span<const std::string_view>(mount));
+    check(!tr::net::rebuild_fwd_forward(cur, std::span<const std::byte>(*enc), {}, 3),
           "stripping more segments than dst holds is refused, not truncated");
 }
 

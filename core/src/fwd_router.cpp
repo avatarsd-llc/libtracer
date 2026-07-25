@@ -323,7 +323,16 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name, const Cursor
     // through the grammar `Cursor` seam (ADR-0053 ④b): the same code serves a
     // contiguous `span_cursor` (each region is one sub-span) and a link-walking
     // `rope_cursor` (a region yields one sub-span per link it crosses).
-    const auto rebuilt = rebuild_fwd_forward(cur_src, inbound_name);
+    // Prefer this child's PRE-ENCODED mount run (#508): the grown `src` prefix then costs a
+    // single iov entry and no per-segment encoding. A name with no registry entry — a bus
+    // PEER, whose name is not known until the frame arrives — falls back to encoding that one
+    // segment per frame, which is the only case that can't be precomputed.
+    const child_registry_t::child_t* const inbound = registry_.entry_by_name(inbound_name);
+    const auto rebuilt =
+        inbound != nullptr && !inbound->mount_tlv.empty()
+            ? rebuild_fwd_forward(cur_src, std::span<const std::byte>(inbound->mount_tlv),
+                                  std::string_view{}, 1)
+            : rebuild_fwd_forward(cur_src, inbound_name);
     if (!rebuilt) return;        // not a forwardable FWD ⇒ drop (callers pre-peeked)
     if (!rebuilt->ok()) return;  // malformed oversized op ⇒ drop, no overrun
 

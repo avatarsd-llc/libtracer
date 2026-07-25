@@ -20,9 +20,11 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/tlv.hpp"
 #include "libtracer/transport.hpp"
 
 namespace tr::net {
@@ -74,6 +76,10 @@ class child_registry_t {
         std::string name;        /**< @brief Qualified mount name, `"<module>/<name>"`. */
         transport_t* link;       /**< @brief The link; nullptr marks a tombstone (#494). */
         bool multi_peer = false; /**< @brief Shape, captured once at @ref add time. */
+        /** @brief The mount path PRE-ENCODED as a run of NAME TLVs (#508), built once here so
+         *         a forward hop emits the grown `src` prefix as ONE span with no per-segment
+         *         work — and so no fixed buffer bounds how long a NAME may be. */
+        std::vector<std::byte> mount_tlv;
     };
 
     /**
@@ -85,14 +91,16 @@ class child_registry_t {
      */
     void add(std::string name, transport_t& link) {
         const bool multi_peer = link.bus() != nullptr;
+        std::vector<std::byte> mount = encode_mount_name(name);
         for (child_t& c : children_) {
             if (c.link == nullptr && c.name == name) {
                 c.link = &link;
                 c.multi_peer = multi_peer;
+                c.mount_tlv = std::move(mount);
                 return;
             }
         }
-        children_.push_back({std::move(name), &link, multi_peer});
+        children_.push_back({std::move(name), &link, multi_peer, std::move(mount)});
     }
 
     /**
@@ -153,6 +161,23 @@ class child_registry_t {
      * routable next-hop segment with no registry mutation and no stored peer state
      * — the peer table lives inside the bus transport and expires with its traffic.
      */
+    /** @brief The live child slot registered under exactly @p name (nullptr if none). */
+    [[nodiscard]] const child_t* entry_by_name(std::string_view name) const {
+        for (const child_t& c : children_) {
+            if (c.link != nullptr && c.name == name) return &c;
+        }
+        return nullptr;
+    }
+
+    /**
+     * @brief The link addressed by @p name (nullptr if none), peer fallback included.
+     *
+     * The identity lookup used off the mount-descent path (reply/advertise plumbing, which
+     * addresses a link by its qualified name). Resolution order (ADR-0044): an exact child
+     * NAME wins; otherwise each registered BUS child is asked to resolve @p name as a
+     * currently-audible peer. Prefer @ref by_segments on the forward path, and
+     * @ref resolve_peer for scoped peer resolution.
+     */
     [[nodiscard]] transport_t* by_name(std::string_view name) const {
         for (const child_t& c : children_) {
             if (c.link != nullptr && c.name == name) return c.link;
@@ -184,6 +209,34 @@ class child_registry_t {
     }
 
    private:
+    /**
+     * @brief Encode qualified name @p name (`"a/b"`) as a run of NAME TLVs, one per segment.
+     *
+     * Canonical form (`opt = 0`, `u16` length) is chosen deliberately: this is EMITTING, so
+     * there is no encoding variance to be wrong about — unlike MATCHING an inbound path,
+     * where a peer may legally send `opt.LL=1` and byte comparison would break conformance
+     * (ADR-0062 §Considered options). A segment too long for the length field yields an empty
+     * run, and the hop falls back to encoding the name per-frame.
+     */
+    [[nodiscard]] static std::vector<std::byte> encode_mount_name(std::string_view name) {
+        std::vector<std::byte> out;
+        std::size_t at = 0;
+        while (at <= name.size()) {
+            const std::size_t slash = name.find('/', at);
+            const std::string_view seg = name.substr(
+                at, slash == std::string_view::npos ? std::string_view::npos : slash - at);
+            if (seg.size() > 0xFFFFu) return {};
+            out.push_back(static_cast<std::byte>(std::to_underlying(wire::type_t::NAME)));
+            out.push_back(std::byte{0});
+            out.push_back(static_cast<std::byte>(seg.size() & 0xFF));
+            out.push_back(static_cast<std::byte>((seg.size() >> 8) & 0xFF));
+            for (const char c : seg) out.push_back(static_cast<std::byte>(c));
+            if (slash == std::string_view::npos) break;
+            at = slash + 1;
+        }
+        return out;
+    }
+
     /** @brief True iff @p key equals @p segs joined by `/`, compared without allocating. */
     [[nodiscard]] static bool matches(const std::string& key,
                                       std::span<const std::string_view> segs) noexcept {
