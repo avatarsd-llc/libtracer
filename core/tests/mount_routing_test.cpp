@@ -15,6 +15,12 @@
  *   - `peek_fwd_dst_segs` + strip-K `rebuild_fwd_forward` — consuming K leading `dst`
  *     segments and growing `src` by the FULL mount path, which is what keeps a reply
  *     resolvable once names are per-module-scoped (the ADR-0061 erratum).
+ *
+ * It then covers the CONTROL plane over the same mounts (#516). The forward path and the
+ * route-handle ADVERTISE/COMPACT plane must descend by the same rule; they did not, and no
+ * test noticed, because every route-handle test wires FLAT single-segment children. So the
+ * last two cases build a real `fwd_router_t` whose children are RFC-0014 qualified mounts
+ * and drive an advertise+compact through it.
  */
 
 #include <array>
@@ -28,6 +34,7 @@
 #include <vector>
 
 #include "libtracer/fwd_frame_view.hpp"
+#include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 
@@ -239,6 +246,80 @@ void test_short_dst_is_not_forwardable() {
           "stripping more segments than dst holds is refused, not truncated");
 }
 
+// --- control plane over qualified mounts (#516) -------------------------------
+
+/** @brief A link that records every frame it is asked to send. */
+struct recording_link_t : tr::net::transport_t {
+    std::vector<std::vector<std::byte>> sent;
+    void send(std::span<const std::byte> f) override { sent.emplace_back(f.begin(), f.end()); }
+};
+
+/** @brief The route TLV carried by an ADVERTISE frame, as its NAME segments. */
+std::vector<std::string> advertised_route(std::span<const std::byte> frame) {
+    std::vector<std::string> segs;
+    const auto dec = tr::wire::decode(frame);
+    if (!dec || dec->children.size() < 2) return segs;
+    for (const auto& seg : dec->children[1].children) {
+        if (seg.type == type_t::NAME) segs.emplace_back(tr::detail::as_string_view(seg.payload));
+    }
+    return segs;
+}
+
+/**
+ * @brief An ADVERTISE addressed to a `/net/<module>/<name>` mount FORWARDS, stripping K.
+ *
+ * The #516 regression. `on_advertise` resolved a single BARE leading segment, so this route
+ * missed the registry entirely, fell through to the terminus arm, and bound the label to a
+ * LOCAL route at a node that was only supposed to relay — every subsequent COMPACT was then
+ * absorbed here instead of reaching the real target.
+ */
+void test_advertise_descends_the_mount() {
+    std::printf("ADVERTISE over a qualified mount (#516)\n");
+    tr::graph::graph_t graph;
+    tr::net::fwd_router_t router{graph};
+    recording_link_t up;
+    recording_link_t down;
+    router.add_child("net/ws-client/up", up);
+    router.add_child("net/ws-server/down", down);
+
+    std::vector<std::byte> route;
+    emit_path(route, {"net", "ws-server", "down", "sink"});
+    const std::vector<std::byte> adv = tr::net::encode_advertise(7, route);
+    router.on_frame("net/ws-client/up", adv);
+
+    check(down.sent.size() == 1, "the advertise is re-advertised downstream, not absorbed");
+    if (down.sent.size() != 1) return;
+    const std::vector<std::string> want = {"sink"};
+    check(advertised_route(down.sent[0]) == want,
+          "the egress route lost ALL 3 mount segments, not just the leading one");
+
+    // And the label now relays: a COMPACT on the bound label must leave on `down`, and
+    // must NOT be swallowed as a local delivery.
+    const std::byte payload[2] = {std::byte{0xAA}, std::byte{0xBB}};
+    std::vector<std::byte> value;
+    tr::wire::emit_tlv(value, type_t::VALUE, opt_t{}, std::span<const std::byte>(payload, 2));
+    router.on_frame("net/ws-client/up", tr::net::encode_compact(7, value));
+    check(down.sent.size() == 2, "a COMPACT on that label is forwarded downstream");
+    check(up.sent.empty(), "and no NACK travels back — the binding resolved");
+}
+
+/** @brief A route naming the mount EXACTLY still terminates here (ADR-0038 §3a). */
+void test_advertise_exact_mount_terminates() {
+    std::printf("ADVERTISE naming the mount exactly\n");
+    tr::graph::graph_t graph;
+    tr::net::fwd_router_t router{graph};
+    recording_link_t up;
+    recording_link_t down;
+    router.add_child("net/ws-client/up", up);
+    router.add_child("net/ws-server/down", down);
+
+    std::vector<std::byte> route;
+    emit_path(route, {"net", "ws-server", "down"});
+    router.on_frame("net/ws-client/up", tr::net::encode_advertise(9, route));
+    check(down.sent.empty(),
+          "the connection vertex itself is a local address — nothing is relayed onward");
+}
+
 }  // namespace
 
 int main() {
@@ -248,6 +329,8 @@ int main() {
     test_peek_segments();
     test_strip_k_and_symmetric_src();
     test_short_dst_is_not_forwardable();
+    test_advertise_descends_the_mount();
+    test_advertise_exact_mount_terminates();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
