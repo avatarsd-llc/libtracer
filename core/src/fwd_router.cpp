@@ -92,26 +92,33 @@ struct mount_hit_t {
     transport_t* link = nullptr; /**< @brief The egress link, or nullptr ⇒ this node terminates. */
     std::string_view peer;       /**< @brief The resolved bus PEER segment, if any. */
     std::size_t strip_k = 0;     /**< @brief Leading dst segments this hop consumes. */
+    /** @brief The link's REGISTRY identity — the qualified `"<module>/<name>"` of the matched
+     *         child, or the bare peer segment when the hop resolved a bus peer. This is what
+     *         `by_name` round-trips, so it is the key the label tables must store: the forward
+     *         path never needs it, the control plane (ADVERTISE/COMPACT swaps) always does. */
+    std::string_view link_name;
 };
 
 /**
- * @brief Resolve the leading `dst` segments against the registry (ADR-0061's strip-K descent).
+ * @brief Resolve leading path segments against the registry (ADR-0061's strip-K descent).
  *
  * Matches LONGEST-FIRST — the full `net/<module>/<name>` mount before any shorter key — so a
  * more specific mount always wins, and a node still carrying flat single-segment children
  * (the pre-RFC-0014 shape, and what the benches register) resolves through the same code.
  * When the matched child is multi-peer and another segment follows, that segment is resolved
  * in THAT endpoint's own peer table (never across buses) and the hop eats one more segment.
+ *
+ * Segment-based rather than cursor-based so the two planes share ONE descent: the forward
+ * path feeds it segments peeked out of the frame, and the control plane (@ref
+ * fwd_router_t::on_advertise) feeds it the NAME children of a decoded route. Those two used
+ * to resolve by different rules — the control plane still resolved a single BARE segment
+ * (#516) — which silently absorbed every advertise addressed to a `/net/<module>/<name>`
+ * mount at the first intermediate node.
  */
-template <class Cursor>
-[[nodiscard]] mount_hit_t resolve_mount(const child_registry_t& registry, const Cursor& cur,
-                                        seg_reader_t<Cursor>& rd) {
-    std::array<std::pair<std::size_t, std::size_t>, tr::net::kMountPeekMax> off{};
-    const std::size_t n = peek_fwd_dst_segs(cur, off);
+[[nodiscard]] mount_hit_t resolve_mount_segs(const child_registry_t& registry,
+                                             std::span<const std::string_view> seg) {
+    const std::size_t n = seg.size();
     if (n == 0) return {};
-    std::array<std::string_view, tr::net::kMountPeekMax> seg;
-    for (std::size_t i = 0; i < n; ++i) seg[i] = rd.read(off[i].first, off[i].second);
-
     const std::size_t widest = std::min<std::size_t>(n, tr::net::kMountPeekMax - 1);
     for (std::size_t k = widest; k >= 1; --k) {
         bool usable = true;
@@ -130,10 +137,10 @@ template <class Cursor>
         if (n == k) return {};
         if (c->multi_peer && !seg[k].empty()) {
             if (transport_t* const p = child_registry_t::resolve_peer(*c, seg[k])) {
-                return mount_hit_t{p, seg[k], k + 1};
+                return mount_hit_t{p, seg[k], k + 1, seg[k]};
             }
         }
-        return mount_hit_t{c->link, {}, k};
+        return mount_hit_t{c->link, {}, k, c->name};
     }
 
     // BUS-PEER RETURN ROUTE (#513). A frame that arrived from a bus peer grows `src` with the
@@ -149,9 +156,24 @@ template <class Cursor>
     // makes `src` accumulate the full `net/<module>/<name>/<peer>` mount, at which point the
     // loop above resolves the reply directly.
     if (n > 0 && !seg[0].empty()) {
-        if (transport_t* const peer = registry.by_name(seg[0])) return mount_hit_t{peer, {}, 1};
+        if (transport_t* const peer = registry.by_name(seg[0]))
+            return mount_hit_t{peer, {}, 1, seg[0]};
     }
     return {};
+}
+
+/**
+ * @brief The forward path's entry to @ref resolve_mount_segs — peeks `dst`, then descends.
+ */
+template <class Cursor>
+[[nodiscard]] mount_hit_t resolve_mount(const child_registry_t& registry, const Cursor& cur,
+                                        seg_reader_t<Cursor>& rd) {
+    std::array<std::pair<std::size_t, std::size_t>, tr::net::kMountPeekMax> off{};
+    const std::size_t n = peek_fwd_dst_segs(cur, off);
+    if (n == 0) return {};
+    std::array<std::string_view, tr::net::kMountPeekMax> seg;
+    for (std::size_t i = 0; i < n; ++i) seg[i] = rd.read(off[i].first, off[i].second);
+    return resolve_mount_segs(registry, std::span<const std::string_view>(seg.data(), n));
 }
 
 }  // namespace
@@ -570,19 +592,33 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
                                 const tlv_t& route) {
     if (route.type != type_t::PATH) return;
 
-    // Resolve the first route segment against this node's transport children — the
-    // SAME rule the FWD forward step uses, so the label tracks the delivery route.
-    transport_t* const down =
-        route.children.empty() ? nullptr : registry_.by_segment(route.children[0].payload);
+    // Resolve the leading route segments through the SAME strip-K mount descent the FWD
+    // forward step uses (resolve_mount_segs), so a label tracks exactly the route a FWD
+    // would take. It resolved a single BARE segment until #516, which meant every route
+    // addressed to an RFC-0014 `/net/<module>/<name>` mount missed, fell through to the
+    // terminus arm, and was ABSORBED at the first intermediate node — the compacted flow
+    // then delivered locally at a node that was only supposed to relay it.
+    std::array<std::string_view, tr::net::kMountPeekMax> seg;
+    std::size_t n = 0;
+    for (const tlv_t& child : route.children) {
+        // LEADING NAMEs only, and the collected count is exactly the erase count below —
+        // stopping at the first non-NAME keeps the segment indices positional, so `strip_k`
+        // never names a child that is not the segment it resolved.
+        if (n == seg.size() || child.type != type_t::NAME) break;
+        seg[n++] = detail::as_string_view(child.payload);
+    }
+    const mount_hit_t hit =
+        resolve_mount_segs(registry_, std::span<const std::string_view>(seg.data(), n));
 
-    if (down != nullptr) {
-        // Forwarding hop: strip the leading segment, allocate OUR own out-label,
-        // record the swap, retain the stripped egress route (for NACK re-advertise),
-        // and re-advertise downstream with the new label (MPLS-style swap).
-        const std::span<const std::byte> seg = route.children[0].payload;
-        const std::string down_name(detail::as_string_view(seg));
+    if (hit.link != nullptr) {
+        // Forwarding hop: strip the K segments this node consumed, allocate OUR own
+        // out-label, record the swap, retain the stripped egress route (for NACK
+        // re-advertise), and re-advertise downstream with the new label (MPLS-style swap).
+        const std::string down_name(hit.link_name);
         tlv_t stripped = route;
-        stripped.children.erase(stripped.children.begin());
+        stripped.children.erase(
+            stripped.children.begin(),
+            stripped.children.begin() + static_cast<std::ptrdiff_t>(hit.strip_k));
         const std::vector<std::byte> stripped_bytes = wire::encode(stripped);
 
         const std::uint16_t out_label = handles_.alloc_label(down_name);
@@ -593,7 +629,7 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
                                                .local_route = {}});
         handles_.record_egress(down_name, out_label, stripped_bytes);
         const std::vector<std::byte> adv2 = encode_advertise(out_label, stripped_bytes);
-        down->send(std::span<const std::byte>(adv2));
+        hit.link->send(std::span<const std::byte>(adv2));
         return;
     }
 
