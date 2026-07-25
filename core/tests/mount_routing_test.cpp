@@ -15,6 +15,12 @@
  *   - `peek_fwd_dst_segs` + strip-K `rebuild_fwd_forward` — consuming K leading `dst`
  *     segments and growing `src` by the FULL mount path, which is what keeps a reply
  *     resolvable once names are per-module-scoped (the ADR-0061 erratum).
+ *
+ * It then covers the CONTROL plane over the same mounts (#516). The forward path and the
+ * route-handle ADVERTISE/COMPACT plane must descend by the same rule; they did not, and no
+ * test noticed, because every route-handle test wires FLAT single-segment children. So the
+ * last two cases build a real `fwd_router_t` whose children are RFC-0014 qualified mounts
+ * and drive an advertise+compact through it.
  */
 
 #include <array>
@@ -28,6 +34,7 @@
 #include <vector>
 
 #include "libtracer/fwd_frame_view.hpp"
+#include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 
@@ -46,7 +53,9 @@ void check(bool ok, std::string_view what) {
 
 /** @brief A point-to-point transport that records nothing — an identity for the table. */
 struct p2p_link_t : tr::net::transport_t {
-    void send(std::span<const std::byte>) override {}
+    std::size_t received = 0; /**< @brief Frames this endpoint was handed. */
+    void send(std::span<const std::byte>) override { ++received; }
+    void send(std::span<const std::span<const std::byte>>) override { ++received; }
 };
 
 /** @brief A multi-peer transport whose peer table is a fixed name→endpoint list. */
@@ -62,6 +71,10 @@ struct bus_link_impl_t : tr::net::transport_t, tr::net::bus_link_t {
     }
     void enumerate_peers(const tr::net::bus_link_t::peer_visitor_t& visit) const override {
         for (const auto& [n, l] : peers) visit(n);
+    }
+    /** @brief Drive an inbound frame up the peer-named slot, as a real bus adapter does. */
+    void deliver(std::string_view peer, std::span<const std::byte> frame) {
+        peer_rx_.deliver_borrowed(peer, frame);
     }
 };
 
@@ -239,6 +252,186 @@ void test_short_dst_is_not_forwardable() {
           "stripping more segments than dst holds is refused, not truncated");
 }
 
+// --- control plane over qualified mounts (#516) -------------------------------
+
+/** @brief A link that records every frame it is asked to send. */
+struct recording_link_t : tr::net::transport_t {
+    std::vector<std::vector<std::byte>> sent;
+    void send(std::span<const std::byte> f) override { sent.emplace_back(f.begin(), f.end()); }
+};
+
+/** @brief The route TLV carried by an ADVERTISE frame, as its NAME segments. */
+std::vector<std::string> advertised_route(std::span<const std::byte> frame) {
+    std::vector<std::string> segs;
+    const auto dec = tr::wire::decode(frame);
+    if (!dec || dec->children.size() < 2) return segs;
+    for (const auto& seg : dec->children[1].children) {
+        if (seg.type == type_t::NAME) segs.emplace_back(tr::detail::as_string_view(seg.payload));
+    }
+    return segs;
+}
+
+/**
+ * @brief An ADVERTISE addressed to a `/net/<module>/<name>` mount FORWARDS, stripping K.
+ *
+ * The #516 regression. `on_advertise` resolved a single BARE leading segment, so this route
+ * missed the registry entirely, fell through to the terminus arm, and bound the label to a
+ * LOCAL route at a node that was only supposed to relay — every subsequent COMPACT was then
+ * absorbed here instead of reaching the real target.
+ */
+void test_advertise_descends_the_mount() {
+    std::printf("ADVERTISE over a qualified mount (#516)\n");
+    tr::graph::graph_t graph;
+    tr::net::fwd_router_t router{graph};
+    recording_link_t up;
+    recording_link_t down;
+    router.add_child("net/ws-client/up", up);
+    router.add_child("net/ws-server/down", down);
+
+    std::vector<std::byte> route;
+    emit_path(route, {"net", "ws-server", "down", "sink"});
+    const std::vector<std::byte> adv = tr::net::encode_advertise(7, route);
+    router.on_frame("net/ws-client/up", adv);
+
+    check(down.sent.size() == 1, "the advertise is re-advertised downstream, not absorbed");
+    if (down.sent.size() != 1) return;
+    const std::vector<std::string> want = {"sink"};
+    check(advertised_route(down.sent[0]) == want,
+          "the egress route lost ALL 3 mount segments, not just the leading one");
+
+    // And the label now relays: a COMPACT on the bound label must leave on `down`, and
+    // must NOT be swallowed as a local delivery.
+    const std::byte payload[2] = {std::byte{0xAA}, std::byte{0xBB}};
+    std::vector<std::byte> value;
+    tr::wire::emit_tlv(value, type_t::VALUE, opt_t{}, std::span<const std::byte>(payload, 2));
+    router.on_frame("net/ws-client/up", tr::net::encode_compact(7, value));
+    check(down.sent.size() == 2, "a COMPACT on that label is forwarded downstream");
+    check(up.sent.empty(), "and no NACK travels back — the binding resolved");
+}
+
+/**
+ * @brief A frame from a bus PEER grows `src` by the FULL mount, not the bare peer (#510).
+ *
+ * The reply-direction twin of "two servers' same-named peers never collide". A peer has no
+ * registry entry, so before #510 the hop encoded the bare peer segment into `src` — and two
+ * buses carrying a peer with the same name produced IDENTICAL return routes. The forward
+ * direction was pinned; this is the direction that was not.
+ */
+void test_bus_peer_src_carries_the_mount() {
+    std::printf("bus-peer return route (#510)\n");
+    // Two buses, each with a peer called "n5". A frame from each must come back
+    // distinguishable.
+    const auto src_of = [](std::string_view module, std::string_view conn) {
+        bus_link_impl_t bus;
+        p2p_link_t n5;
+        bus.peers.emplace_back("n5", &n5);
+        recording_link_t out;
+
+        tr::graph::graph_t graph;
+        tr::net::fwd_router_t router{graph};
+        std::string child(module);
+        child += '/';
+        child += conn;
+        router.add_child(std::string("net/") + child, bus);
+        router.add_child("net/ws-client/out", out);
+
+        // The bus hands the frame up tagged with the sending peer's name; the router's
+        // per-child ctx is what supplies the mount. Driving it through set_peer_receiver
+        // (rather than calling on_frame directly) is the point — that wiring is the fix.
+        const std::vector<std::byte> frame =
+            make_fwd({"net", "ws-client", "out", "sensor"}, {"origin"});
+        bus.deliver("n5", frame);
+
+        std::vector<std::string> src;
+        if (out.sent.size() == 1) {
+            const auto paths = paths_of(out.sent[0]);
+            if (paths.size() == 2) src = paths[1];
+        }
+        return src;
+    };
+
+    const std::vector<std::string> a = src_of("can", "can0");
+    const std::vector<std::string> b = src_of("ws-server", "srv");
+    const std::vector<std::string> want_a = {"net", "can", "can0", "n5", "origin"};
+    check(a == want_a, "src grew by the full net/<module>/<name>/<peer> mount");
+    check(a != b, "two buses' same-named peers produce DIFFERENT return routes");
+}
+
+/**
+ * @brief The route a hop grows must be routable BACK — the round trip, end to end.
+ *
+ * #513 patched a symptom (a reply leading with a bare peer segment resolved nowhere, so it
+ * was absorbed at an intermediate node) with a `by_name` fallback, and shipped with no test.
+ * #510 removes the cause: `src` now carries the full mount, so the ordinary scoped descent
+ * resolves the reply and the fallback is dead code. This pins that directly — take the `src`
+ * a forward hop produced, send it back as `dst`, and require it to reach the peer — so the
+ * removal is covered by behaviour rather than by argument.
+ */
+void test_grown_src_round_trips() {
+    std::printf("grown src is routable back (#510 supersedes the #513 fallback)\n");
+    bus_link_impl_t bus;
+    p2p_link_t n5;
+    bus.peers.emplace_back("n5", &n5);
+    recording_link_t out;
+
+    tr::graph::graph_t graph;
+    tr::net::fwd_router_t router{graph};
+    router.add_child("net/can/can0", bus);
+    router.add_child("net/ws-client/out", out);
+
+    bus.deliver("n5", make_fwd({"net", "ws-client", "out", "sensor"}, {"origin"}));
+    check(out.sent.size() == 1, "the peer's frame forwarded");
+    if (out.sent.size() != 1) return;
+    const auto paths = paths_of(out.sent[0]);
+    if (paths.size() != 2) {
+        check(false, "the forwarded frame carries dst and src");
+        return;
+    }
+
+    // Feed that src back as a reply's dst. It must resolve to the peer — through the scoped
+    // descent alone, with no bare-name fallback in the registry's way.
+    std::vector<std::string_view> back(paths[1].begin(), paths[1].end());
+    const auto segs = std::span<const std::string_view>(back);
+    std::vector<std::byte> reply;
+    {
+        std::vector<std::byte> body;
+        const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::REPLY)};
+        tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
+        std::vector<std::byte> dst;
+        for (std::string_view s : segs) tr::wire::emit_name(dst, s);
+        tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, dst);
+        std::vector<std::byte> src;
+        tr::wire::emit_name(src, "net");
+        tr::wire::emit_name(src, "ws-client");
+        tr::wire::emit_name(src, "out");
+        tr::wire::emit_tlv(body, type_t::PATH, opt_t{.pl = true}, src);
+        const std::byte payload[1] = {std::byte{0x07}};
+        tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(payload, 1));
+        tr::wire::emit_tlv(reply, type_t::FWD, opt_t{.pl = true}, body);
+    }
+    const std::size_t before = n5.received;
+    router.on_frame("net/ws-client/out", reply);
+    check(n5.received == before + 1,
+          "the reply resolves through the scoped descent and reaches the peer endpoint");
+}
+
+/** @brief A route naming the mount EXACTLY still terminates here (ADR-0038 §3a). */
+void test_advertise_exact_mount_terminates() {
+    std::printf("ADVERTISE naming the mount exactly\n");
+    tr::graph::graph_t graph;
+    tr::net::fwd_router_t router{graph};
+    recording_link_t up;
+    recording_link_t down;
+    router.add_child("net/ws-client/up", up);
+    router.add_child("net/ws-server/down", down);
+
+    std::vector<std::byte> route;
+    emit_path(route, {"net", "ws-server", "down"});
+    router.on_frame("net/ws-client/up", tr::net::encode_advertise(9, route));
+    check(down.sent.empty(),
+          "the connection vertex itself is a local address — nothing is relayed onward");
+}
+
 }  // namespace
 
 int main() {
@@ -248,6 +441,10 @@ int main() {
     test_peek_segments();
     test_strip_k_and_symmetric_src();
     test_short_dst_is_not_forwardable();
+    test_advertise_descends_the_mount();
+    test_bus_peer_src_carries_the_mount();
+    test_grown_src_round_trips();
+    test_advertise_exact_mount_terminates();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");

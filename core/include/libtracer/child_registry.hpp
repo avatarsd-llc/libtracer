@@ -17,6 +17,8 @@
  */
 #pragma once
 
+#include <atomic>
+#include <new>
 #include <span>
 #include <string>
 #include <string_view>
@@ -52,18 +54,38 @@ namespace tr::net {
  * **Mutation model (#494).** The table was add-only, which left a retired link's
  * `name → transport_t*` resident and dangling. @ref erase closes that, and it does so by
  * **tombstoning in place** — the slot's `link` is nulled and its NAME kept — never by
- * erasing from `children_`. That is deliberate: shifting or reallocating the vector under
- * a concurrent lock-free reader is a hard use-after-free, whereas a tombstone leaves every
- * slot address stable and a racing reader sees either the old pointer or `nullptr`. A
+ * erasing from `children_`. That is deliberate: shifting the vector under a concurrent
+ * lock-free reader is a hard use-after-free, whereas a tombstone leaves the slot in place
+ * and a racing reader sees either the old pointer or `nullptr`. A
  * later @ref add of the SAME name reuses its tombstone, so create/remove churn on a stable
  * name set does not grow the table; a genuinely new name still appends, so the table's high
  * -water mark is the count of DISTINCT names ever registered. Compaction (and the full
  * mutation-vs-forward concurrency contract) lands with the RFC-0014 S5 liveness engine,
  * where the TSan gate and a safe reclamation scheme arrive together — see ADR-0061
  * (`docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md`).
+ *
+ * **What the tombstone does NOT buy (#521).** It makes a slot stable against ERASE only.
+ * `add` of a genuinely new name still `push_back`s, and that reallocates — invalidating
+ * every slot reference and iterator in the table. So slots are NOT address-stable for this
+ * object's lifetime, and a forward read racing a connection-create is unsound. That was
+ * harmless while the registry really was immutable after setup; RFC-0014 made connection
+ * create/remove a RUNTIME operation, so it is now a live hazard, tracked by #521 and
+ * closed by the S5 contract above. Do not build on slot addresses until it is.
  */
 class child_registry_t {
    public:
+    child_registry_t() = default;
+    child_registry_t(const child_registry_t&) = delete;
+    child_registry_t& operator=(const child_registry_t&) = delete;
+    /** @brief Frees the chunks. Nothing is reclaimed before this point, by design. */
+    ~child_registry_t() {
+        for (chunk_t* c = head_.load(std::memory_order_relaxed); c != nullptr;) {
+            chunk_t* const nxt = c->next.load(std::memory_order_relaxed);
+            delete c;
+            c = nxt;
+        }
+    }
+
     /**
      * @brief One registered child: its qualified mount name, its link, and its shape.
      *
@@ -73,9 +95,16 @@ class child_registry_t {
      * shape captured once at @ref add time, so the forward path never probes `bus()`.
      */
     struct child_t {
-        std::string name;        /**< @brief Qualified mount name, `"<module>/<name>"`. */
-        transport_t* link;       /**< @brief The link; nullptr marks a tombstone (#494). */
+        std::string name; /**< @brief Qualified mount name, `"<module>/<name>"`. */
+        /** @brief The link; nullptr marks a TOMBSTONE (#494). ATOMIC because teardown nulls
+         *         it in place while a lock-free forward read may be dereferencing the slot
+         *         (ADR-0063): the reader sees the old pointer or `nullptr`, never a tear. */
+        std::atomic<transport_t*> link{nullptr};
         bool multi_peer = false; /**< @brief Shape, captured once at @ref add time. */
+        /** @brief True while this slot still resolves — i.e. it is not a tombstone. */
+        [[nodiscard]] bool live() const noexcept {
+            return link.load(std::memory_order_acquire) != nullptr;
+        }
         /** @brief The mount path PRE-ENCODED as a run of NAME TLVs (#508), built once here so
          *         a forward hop emits the grown `src` prefix as ONE span with no per-segment
          *         work — and so no fixed buffer bounds how long a NAME may be. */
@@ -85,22 +114,41 @@ class child_registry_t {
     /**
      * @brief Register the link addressed by qualified name @p name (`"<module>/<name>"`).
      *
-     * Reuses @p name's tombstone if it has one (the create → remove → re-create path),
-     * otherwise appends. Captures the link's SHAPE here, once, so the forward path never
-     * probes `bus()`. A control-plane call: not for the forward hot path.
+     * REBINDS @p name's existing slot when it has one — live or tombstoned — and only
+     * appends for a name the table has never held. Captures the link's SHAPE here, once, so
+     * the forward path never probes `bus()`. A control-plane call: not for the forward path.
+     *
+     * **A name has exactly one slot.** Re-adding a LIVE name used to append a second, and
+     * that shadow slot reopened precisely the dangling-`transport_t*` hole #494 closed:
+     * @ref erase nulled only the first match and returned `true`, so the caller destroyed
+     * its transport believing teardown had succeeded while @ref by_name kept resolving the
+     * freed link through the shadow. Rebinding makes the name→slot mapping one-to-one, which
+     * is what every other operation here already assumes.
      */
     void add(std::string name, transport_t& link) {
         const bool multi_peer = link.bus() != nullptr;
         std::vector<std::byte> mount = encode_mount_name(name);
-        for (child_t& c : children_) {
-            if (c.link == nullptr && c.name == name) {
-                c.link = &link;
-                c.multi_peer = multi_peer;
-                c.mount_tlv = std::move(mount);
-                return;
+        child_t* hit = nullptr;
+        for_each([&](const child_t& c) {
+            if (c.name == name) {
+                hit = const_cast<child_t*>(&c);
+                return true;
             }
+            return false;
+        });
+        if (hit != nullptr) {
+            hit->multi_peer = multi_peer;
+            hit->mount_tlv = std::move(mount);
+            hit->link.store(&link, std::memory_order_release);
+            return;
         }
-        children_.push_back({std::move(name), &link, multi_peer, std::move(mount)});
+        child_t* const slot = append();
+        if (slot == nullptr) return;  // allocation failure — soft-fail, nothing registered
+        slot->name = std::move(name);
+        slot->multi_peer = multi_peer;
+        slot->mount_tlv = std::move(mount);
+        slot->link.store(&link, std::memory_order_release);
+        publish(slot);
     }
 
     /**
@@ -112,10 +160,22 @@ class child_registry_t {
      * path stays allocation-free (`bench_forward_heap`'s `allocs=0` gate).
      */
     [[nodiscard]] const child_t* by_segments(std::span<const std::string_view> segs) const {
-        for (const child_t& c : children_) {
-            if (c.link != nullptr && matches(c.name, segs)) return &c;
-        }
-        return nullptr;
+        // The joined length is a property of `segs`, not of any child — so it is computed
+        // ONCE here rather than per candidate. It was inside `matches`, which meant every
+        // slot in the table re-ran a loop over the segments just to derive the number it
+        // would compare its own size against. Hoisting it leaves the per-slot work at a
+        // single integer compare for the (overwhelming) majority that cannot match.
+        std::size_t need = segs.empty() ? 0 : segs.size() - 1;
+        for (const std::string_view s : segs) need += s.size();
+        const child_t* hit = nullptr;
+        for_each([&](const child_t& c) {
+            if (c.live() && c.name.size() == need && matches(c.name, segs)) {
+                hit = &c;
+                return true;
+            }
+            return false;
+        });
+        return hit;
     }
 
     /**
@@ -128,8 +188,9 @@ class child_registry_t {
      * @return The directed per-peer endpoint, or nullptr if this child has no such peer.
      */
     [[nodiscard]] static transport_t* resolve_peer(const child_t& child, std::string_view peer) {
-        if (!child.multi_peer || child.link == nullptr) return nullptr;
-        bus_link_t* const bus = child.link->bus();
+        transport_t* const l = child.link.load(std::memory_order_acquire);
+        if (!child.multi_peer || l == nullptr) return nullptr;
+        bus_link_t* const bus = l->bus();
         return bus == nullptr ? nullptr : bus->peer_link(peer);
     }
 
@@ -142,13 +203,15 @@ class child_registry_t {
      * @return true if @p name named a live child, false if it named none.
      */
     bool erase(std::string_view name) {
-        for (child_t& c : children_) {
-            if (c.link != nullptr && c.name == name) {
-                c.link = nullptr;
-                return true;
+        bool erased = false;
+        for_each([&](const child_t& c) {
+            if (c.live() && c.name == name) {
+                const_cast<child_t&>(c).link.store(nullptr, std::memory_order_release);
+                erased = true;  // keep going: belt-and-braces against any shadow slot
             }
-        }
-        return false;
+            return false;
+        });
+        return erased;
     }
 
     /**
@@ -163,10 +226,15 @@ class child_registry_t {
      */
     /** @brief The live child slot registered under exactly @p name (nullptr if none). */
     [[nodiscard]] const child_t* entry_by_name(std::string_view name) const {
-        for (const child_t& c : children_) {
-            if (c.link != nullptr && c.name == name) return &c;
-        }
-        return nullptr;
+        const child_t* hit = nullptr;
+        for_each([&](const child_t& c) {
+            if (c.live() && c.name == name) {
+                hit = &c;
+                return true;
+            }
+            return false;
+        });
+        return hit;
     }
 
     /**
@@ -179,16 +247,27 @@ class child_registry_t {
      * @ref resolve_peer for scoped peer resolution.
      */
     [[nodiscard]] transport_t* by_name(std::string_view name) const {
-        for (const child_t& c : children_) {
-            if (c.link != nullptr && c.name == name) return c.link;
-        }
-        for (const child_t& c : children_) {
-            if (c.link == nullptr) continue;  // tombstone (#494) — no link to ask
-            if (bus_link_t* const bus = c.link->bus()) {
-                if (transport_t* const peer = bus->peer_link(name)) return peer;
+        transport_t* hit = nullptr;
+        for_each([&](const child_t& c) {
+            if (c.live() && c.name == name) {
+                hit = c.link.load(std::memory_order_acquire);
+                return true;
             }
-        }
-        return nullptr;
+            return false;
+        });
+        if (hit != nullptr) return hit;
+        for_each([&](const child_t& c) {
+            transport_t* const l = c.link.load(std::memory_order_acquire);
+            if (l == nullptr) return false;  // tombstone (#494) — no link to ask
+            if (bus_link_t* const bus = l->bus()) {
+                if (transport_t* const peer = bus->peer_link(name)) {
+                    hit = peer;
+                    return true;
+                }
+            }
+            return false;
+        });
+        return hit;
     }
 
     /** @brief The link whose NAME equals the raw segment bytes @p seg (nullptr if none). */
@@ -196,15 +275,34 @@ class child_registry_t {
         return by_name(detail::as_string_view(seg));
     }
 
+    /**
+     * @brief Qualified name @p name pre-encoded as a run of NAME TLVs — the mount run.
+     *
+     * The same bytes a slot's `mount_tlv` holds, exposed so a link's receiver ctx can carry
+     * its OWN copy and a forward hop need not scan the table to find them. It is a pure
+     * function of @p name, so the copy cannot drift from the slot's. A control-plane call.
+     */
+    [[nodiscard]] static std::vector<std::byte> mount_run_for(std::string_view name) {
+        return encode_mount_name(name);
+    }
+
     /** @brief Number of slots — live children PLUS tombstones (test introspection). */
-    [[nodiscard]] std::size_t size() const noexcept { return children_.size(); }
+    [[nodiscard]] std::size_t size() const noexcept {
+        std::size_t n = 0;
+        for_each([&](const child_t&) {
+            ++n;
+            return false;
+        });
+        return n;
+    }
 
     /** @brief Number of children that still resolve (test introspection). */
     [[nodiscard]] std::size_t live_size() const noexcept {
         std::size_t n = 0;
-        for (const child_t& c : children_) {
-            if (c.link != nullptr) ++n;
-        }
+        for_each([&](const child_t& c) {
+            if (c.live()) ++n;
+            return false;
+        });
         return n;
     }
 
@@ -237,7 +335,13 @@ class child_registry_t {
         return out;
     }
 
-    /** @brief True iff @p key equals @p segs joined by `/`, compared without allocating. */
+    /**
+     * @brief True iff @p key equals @p segs joined by `/`, compared without allocating.
+     *
+     * Callers that scan a table pre-filter on the joined LENGTH (see @ref by_segments) —
+     * this still re-derives it, so the function is correct standalone, but on the scan path
+     * it only ever runs for a candidate whose size already matched.
+     */
     [[nodiscard]] static bool matches(const std::string& key,
                                       std::span<const std::string_view> segs) noexcept {
         std::size_t need = segs.empty() ? 0 : segs.size() - 1;
@@ -252,10 +356,81 @@ class child_registry_t {
         return true;
     }
 
-    // Slots are stable for this object's lifetime: only appended to, never erased or
-    // reordered, so a lock-free reader's iteration stays valid across a control-plane
-    // erase. No lock on the hot path.
-    std::vector<child_t> children_;
+    /**
+     * @brief An append-only chunked list — the ADR-0063 container (#521).
+     *
+     * The table is NEVER erased from or reordered (teardown tombstones in place), so the
+     * only mutations are APPEND and an in-place pointer null. That makes a chunked list the
+     * natural shape: a slot's address is stable for this object's lifetime, a reader walking
+     * it is unaffected by a concurrent append, and there is **no reclamation problem at all**
+     * because nothing is ever freed before teardown.
+     *
+     * It replaces a `std::vector`, whose `push_back` reallocated and invalidated every slot
+     * reference in the table — sound only while the registry was "immutable after setup", a
+     * premise RFC-0014 ended by making connection create/remove a runtime operation.
+     *
+     * `kChunk` is an **allocation granularity, not a bound**: the list grows without limit,
+     * so this introduces no synthetic cap (RFC-0006/0007, ADR-0051). Chunks are heap-allocated
+     * on demand, so a node with no connections carries one pointer and nothing else.
+     *
+     * Publication: a slot is fully constructed BEFORE `used` is bumped with release, and a
+     * reader acquires `used` before touching any slot — so a reader never observes a
+     * half-built entry. The same release/acquire pairing publishes each new chunk.
+     */
+    static constexpr std::size_t kChunk = 4;
+
+    struct chunk_t {
+        child_t slots[kChunk];
+        std::atomic<std::size_t> used{0};    /**< @brief Slots published in this chunk. */
+        std::atomic<chunk_t*> next{nullptr}; /**< @brief Next chunk, or null. */
+    };
+
+    /** @brief Walk every published slot in order; @p fn returning true stops the walk. */
+    template <class Fn>
+    void for_each(Fn&& fn) const {
+        for (chunk_t* c = head_.load(std::memory_order_acquire); c != nullptr;
+             c = c->next.load(std::memory_order_acquire)) {
+            const std::size_t n = c->used.load(std::memory_order_acquire);
+            for (std::size_t i = 0; i < n; ++i) {
+                if (fn(c->slots[i])) return;
+            }
+        }
+    }
+
+    /** @brief Append a slot and publish it. Control plane only — serialized by the caller. */
+    child_t* append() {
+        chunk_t* c = head_.load(std::memory_order_relaxed);
+        if (c == nullptr) {
+            c = new (std::nothrow) chunk_t();
+            if (c == nullptr) return nullptr;
+            head_.store(c, std::memory_order_release);
+        }
+        for (;;) {
+            const std::size_t n = c->used.load(std::memory_order_relaxed);
+            if (n < kChunk) return &c->slots[n];  // caller fills, then calls publish()
+            chunk_t* nxt = c->next.load(std::memory_order_relaxed);
+            if (nxt == nullptr) {
+                nxt = new (std::nothrow) chunk_t();
+                if (nxt == nullptr) return nullptr;
+                c->next.store(nxt, std::memory_order_release);
+            }
+            c = nxt;
+        }
+    }
+
+    /** @brief Make the slot `append` handed back visible to readers (release). */
+    void publish(const child_t* slot) {
+        for (chunk_t* c = head_.load(std::memory_order_relaxed); c != nullptr;
+             c = c->next.load(std::memory_order_relaxed)) {
+            const std::size_t n = c->used.load(std::memory_order_relaxed);
+            if (n < kChunk && slot == &c->slots[n]) {
+                c->used.store(n + 1, std::memory_order_release);
+                return;
+            }
+        }
+    }
+
+    std::atomic<chunk_t*> head_{nullptr};
 };
 
 }  // namespace tr::net

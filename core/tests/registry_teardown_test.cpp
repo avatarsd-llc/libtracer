@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -194,6 +195,86 @@ void test_name_is_reusable_after_removal() {
     check(router.registry().size() == 1, "and it reused the tombstoned slot");
 }
 
+/**
+ * @brief Re-adding a LIVE name rebinds its slot — it never grows a second, shadow one.
+ *
+ * The regression. `add` only ever reused a TOMBSTONE, so re-registering a live name appended
+ * a duplicate. `erase` then nulled the first match and returned `true` — the caller destroys
+ * its transport on that `true` — while `by_name` went on resolving the freed link through the
+ * shadow slot. That is exactly the dangling-`transport_t*` hole #494 was written to close,
+ * reopened from a direction it did not consider.
+ */
+void test_duplicate_add_rebinds() {
+    std::printf("duplicate add rebinds rather than shadowing\n");
+    child_registry_t reg;
+    sink_link_t a;
+    sink_link_t b;
+    reg.add("net/ws-client/x", a);
+    reg.add("net/ws-client/x", a);
+    check(reg.size() == 1, "a repeated add does not grow the table");
+    check(reg.live_size() == 1, "and leaves exactly one live child");
+
+    check(reg.erase("net/ws-client/x"), "erase reports it removed a live child");
+    check(reg.by_name("net/ws-client/x") == nullptr,
+          "and NOTHING resolves afterwards — no shadow slot keeps the freed link reachable");
+
+    // Rebinding to a different link must take effect, not resolve the stale one.
+    reg.add("net/ws-client/x", a);
+    reg.add("net/ws-client/x", b);
+    check(reg.by_name("net/ws-client/x") == &b, "a re-add rebinds the name to the NEW link");
+    check(reg.live_size() == 1, "still one slot for the name");
+}
+
+/**
+ * @brief A slot's address survives every later append (ADR-0063 / #521).
+ *
+ * The property the chunked list exists for, and the one `std::vector` could not give:
+ * `push_back` reallocated and invalidated every slot reference in the table. That was sound
+ * only while the registry was "immutable after setup" — RFC-0014 ended that by making
+ * connection create/remove a RUNTIME operation, so a lock-free forward read can be walking
+ * the table while a CREATE appends on another thread.
+ *
+ * Pinned by ADDRESS rather than by value: a stale pointer into a reallocated vector usually
+ * still reads plausible bytes, so only identity catches the regression.
+ */
+void test_slot_addresses_are_stable() {
+    std::printf("slot addresses survive appends (#521)\n");
+    child_registry_t reg;
+    std::vector<std::unique_ptr<sink_link_t>> links;
+    std::vector<const child_registry_t::child_t*> slots;
+
+    // Span several chunks so the walk crosses chunk boundaries, not just one block.
+    constexpr std::size_t kN = 17;
+    for (std::size_t i = 0; i < kN; ++i) {
+        links.push_back(std::make_unique<sink_link_t>());
+        const std::string name = "net/ws-client/l" + std::to_string(i);
+        reg.add(name, *links.back());
+        slots.push_back(reg.entry_by_name(name));
+    }
+    check(slots.size() == kN && slots[0] != nullptr, "every child registered");
+
+    bool stable = true;
+    bool resolves = true;
+    for (std::size_t i = 0; i < kN; ++i) {
+        const std::string name = "net/ws-client/l" + std::to_string(i);
+        if (reg.entry_by_name(name) != slots[i]) stable = false;
+        if (slots[i]->link.load() != links[i].get()) resolves = false;
+    }
+    check(stable, "the address captured at add time is STILL the slot's address");
+    check(resolves, "and each slot still points at its own link");
+    check(reg.live_size() == kN, "all children live across the chunk boundaries");
+
+    // A tombstone must not disturb its neighbours' addresses either.
+    check(reg.erase("net/ws-client/l0"), "erase a child in the first chunk");
+    bool stable_after = true;
+    for (std::size_t i = 1; i < kN; ++i) {
+        if (reg.entry_by_name("net/ws-client/l" + std::to_string(i)) != slots[i])
+            stable_after = false;
+    }
+    check(stable_after, "a tombstone leaves every other slot address untouched");
+    check(slots[0]->link.load() == nullptr, "and the tombstoned slot reads null in place");
+}
+
 }  // namespace
 
 int main() {
@@ -203,6 +284,8 @@ int main() {
     test_remove_unknown_and_idempotent();
     test_name_is_reusable_after_removal();
 
+    test_duplicate_add_rebinds();
+    test_slot_addresses_are_stable();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

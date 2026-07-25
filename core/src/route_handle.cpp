@@ -66,6 +66,42 @@ std::optional<handle_binding_t> route_handle_t::lookup_ingress(std::string_view 
     return std::nullopt;
 }
 
+resolved_binding_t route_handle_t::resolved(std::string_view in_link, std::uint16_t label) const {
+    resolved_binding_t out;
+    const std::shared_ptr<link_tables_t> t = find_tables(in_link);
+    if (!t) return out;
+    const std::lock_guard lock(t->m);
+    for (const ingress_entry_t& e : t->ingress) {
+        if (e.label != label) continue;
+        out.found = true;
+        out.terminus = e.binding.terminus;
+        out.out_label = e.binding.out_label;
+        out.warm = e.binding.warm;
+        out.down_slot = e.binding.down_slot;
+        out.target = e.binding.target;
+        out.target_gen = e.binding.target_gen;
+        return out;  // ~24 trivially copyable bytes — no string, no vector, no allocation
+    }
+    return out;
+}
+
+void route_handle_t::cache_resolution(std::string_view in_link, std::uint16_t label,
+                                      const resolved_binding_t& r) {
+    const std::shared_ptr<link_tables_t> t = find_tables(in_link);
+    if (!t) return;
+    const std::lock_guard lock(t->m);
+    for (ingress_entry_t& e : t->ingress) {
+        if (e.label != label) continue;
+        e.binding.warm = true;
+        e.binding.down_slot = r.down_slot;
+        e.binding.target = r.target;
+        e.binding.target_gen = r.target_gen;
+        return;
+    }
+    // The binding went away between resolve and cache — nothing to record; the next frame
+    // simply resolves again. Never an error: this is best-effort memoization, not state.
+}
+
 void route_handle_t::record_egress(std::string_view out_link, std::uint16_t label,
                                    std::vector<std::byte> route) {
     const std::shared_ptr<link_tables_t> t = tables(out_link);

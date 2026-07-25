@@ -83,6 +83,30 @@ A grill framed this as "routing is path polymorphism; the runtime routing table 
   order as `clock_gettime`, and an early draft timing each hop individually reported the whole-table
   scan *beating* the first-hit lookup — the signature of a clock-dominated window.)
 
+  **ERRATUM (post-implementation).** Two of the numbers above, and one of the claims, did not
+  survive contact with the implementation. Recorded here rather than silently corrected, because the
+  acceptance decision rested on them:
+
+  - **The measurement under-reported by ~3×.** That revision registered the inbound child *first*,
+    so the second scan (`entry_by_name`, fetching the inbound child's `src` prefix) always hit at
+    position 1 and was invisible. With the inbound child registered last, a hop is **~107–115 ns
+    fixed** and `scan` reaches **~363 ns at N=64** — ~3.9 ns per link, not 1.0–1.4.
+  - **Strip-K's added cost was predicted at ~3 ns and is ~10× that.** The prediction counted
+    *segment compares*; the real work is parsing the extra TLV headers to find the segments at all.
+    The conclusion still holds — the constant term is flat across N and the addition is bounded —
+    but it held for the wrong reason, and the margin is much thinner than "3.4% of one hop".
+  - **Per-module scoping does NOT narrow the scan.** Axis 2 above calls the scan "the term strip-K
+    *narrows*". It does not. Scoping changed the registry *key*, not its *container*: it is still
+    one flat vector, walked identically. Building the implied module-bucketed index and measuring it
+    ([#515](https://github.com/avatarsd-llc/libtracer/issues/515)) moved N=64 from **363 ns to
+    390 ns** — no win. A node's links overwhelmingly sit in *one* module, so bucketing by module
+    relocates the scan rather than shortening it. **Do not re-attempt this.**
+
+  None of this reverses acceptance: this ADR's load-bearing justification is that two modules'
+  same-named connections must stay distinct, which is **correctness**, not lookup time. The
+  per-hop lever is [ADR-0062](0062-resolve-once-label-bindings-hold-resolutions-not-names.md) —
+  resolve once, then dereference — not a faster scan.
+
   **Merge gate on S2a** (not on acceptance): `allocs=0`
   still holds on the forward hop, and the scoped hop is ≤ the flat hop at equal total link count.
   Two existing signals bound the risk meanwhile: the `allocs=0` forward gate, and the intra-device

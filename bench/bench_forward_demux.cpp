@@ -129,6 +129,8 @@ template <typename Hop>
  */
 struct capture_transport_t : transport_t {
     std::size_t sends = 0;
+    /** @brief Push an inbound frame up this link's installed receiver, as a real one does. */
+    void deliver(std::span<const std::byte> f) { rx_.deliver_borrowed(f); }
     void send(std::span<const std::byte> f) override {
         ++sends;
         sink += f.size();
@@ -181,7 +183,6 @@ std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* m
     // Stable storage: add_child holds a reference for the transport's lifetime.
     std::vector<capture_transport_t> filler(links);
 
-    router.add_child("net/ws-server/in", in_link);
     std::size_t next_filler = 0;
     for (std::size_t i = 1; i <= links; ++i) {
         if (i == target_pos) {
@@ -192,13 +193,36 @@ std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* m
         }
     }
 
+    // The INBOUND child is registered LAST, and ONLY here. A forward hop performs TWO scans
+    // of the registry, not one: `by_segments` for the dst mount, and `entry_by_name` for the
+    // inbound child's precomputed `src` prefix. Registering it last measures the worst case
+    // for that second scan, so the two are never conflated.
+    //
+    // This used to `add_child` the inbound link a second time, at the TOP of the function as
+    // well. The intent -- "registered last" -- therefore never took effect: `entry_by_name`
+    // matched the first slot at position 1, and the second scan stayed exactly as invisible
+    // as the revision this comment was written to fix. Worse, the duplicate registration was
+    // itself a live registry bug (a shadow slot that survives `erase`), which is how it was
+    // finally caught. Keep this to ONE call.
+    router.add_child("net/ws-server/in", in_link);
+
     const std::byte payload[4] = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE},
                                   std::byte{0xEF}};
     const std::vector<std::byte> frame =
         make_fwd({"net", "ws-client", "out", "sensor", "temp"}, {"reply"},
                  std::span<const std::byte>(payload, 4));
 
-    const auto hop = [&] { router.on_frame("net/ws-server/in", frame); };
+    // Drive the hop through the INBOUND LINK's receiver, not `router.on_frame` directly.
+    // That is how a real transport delivers: `add_child` installs a receiver bound to a
+    // stable per-child ctx, and the hop reads its mount run off that ctx instead of scanning
+    // the registry for it. Calling `on_frame` by name takes the ctx-less entry — a path only
+    // tests and SDK hosts use — so the bench was timing a routing shape production never
+    // executes, and was blind to the ctx optimization entirely.
+    // Drive the hop through the INBOUND LINK's receiver, not `router.on_frame` directly —
+    // that is how a real transport delivers, and `add_child` wires a per-child receiver ctx
+    // for it. Calling `on_frame` by name takes a ctx-less entry only tests and SDK hosts use,
+    // so the bench was timing a routing shape production never executes.
+    const auto hop = [&] { in_link.deliver(frame); };
 
     // Calibration doubles as the warm-up: it primes lazy statics and caches, and its
     // own timings are discarded.

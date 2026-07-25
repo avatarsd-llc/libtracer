@@ -36,6 +36,7 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 OUT = REPO / "docs" / "performance.md"
 BENCH = REPO / "bench" / "build" / "bench_libtracer"
 BENCH_ZENOH = REPO / "bench" / "build" / "bench_zenoh"
+BENCH_DEMUX = REPO / "bench" / "build" / "bench_forward_demux"
 CODEC = REPO / "bench" / "build" / "bench_codec"
 VECTORS = REPO / "tests" / "conformance" / "vectors" / "v1"
 CXX = os.environ.get("LIBTRACER_CXX_HARNESS") or str(REPO / "build" / "tests" / "conformance_runner")
@@ -79,6 +80,118 @@ def perf_block() -> str:
             dv, p50, mean = seen[key]
             rows.append(f"| {label} | {p50} ns | {mean} ns | {dv/1e6:.1f} M/s |")
     return "\n".join(rows)
+
+
+def demux_block() -> str:
+    """@brief The forward-demux cost table, measured live by `bench_forward_demux`.
+
+    Two axes: `fixed` registers the target child FIRST (its lookup hits immediately, so the
+    row isolates the size-independent part of a hop) and `scan` registers it LAST (the lookup
+    walks the whole table, so the delta is the scan's marginal cost). Emitting both is what
+    keeps the size-independent and size-dependent terms separable — a sweep of one alone
+    reads as if the whole hop grew with N.
+    """
+    if not BENCH_DEMUX.exists():
+        return ("_(demux bench not built — `cmake --build bench/build --target "
+                "bench_forward_demux`)_")
+    fixed: dict[int, int] = {}
+    scan: dict[int, int] = {}
+    for ln in run([str(BENCH_DEMUX)]).splitlines():
+        f = ln.split("\t")
+        if len(f) != 12 or f[0] != "RESULT":
+            continue
+        target = {"fwd-demux-fixed": fixed, "fwd-demux-scan": scan}.get(f[2])
+        if target is not None:
+            target.setdefault(int(f[4]), int(f[9]))  # links -> p50 ns
+    common = sorted(set(fixed) & set(scan))
+    if not common:
+        return "_(demux bench produced no comparable rows)_"
+    rows = ["| links | `fixed` p50 (ns) | `scan` p50 (ns) | scan delta (ns) | ns per link |",
+            "| ---: | ---: | ---: | ---: | ---: |"]
+    for n in common:
+        delta = scan[n] - fixed[n]
+        rows.append(f"| {n} | {fixed[n]} | {scan[n]} | {delta} | {delta / n:.2f} |")
+    return "\n".join(rows)
+
+
+DEMUX_BLOCK = """\
+What one **FWD forward hop** costs in the router — before any payload is touched, measured
+by `bench/bench_forward_demux.cpp`.
+
+A hop performs **two** linear scans of the connection registry, and the bench is arranged so
+both are visible:
+
+- `by_segments` resolves the `dst` mount (`net/<module>/<name>`, ADR-0061);
+- `entry_by_name` fetches the **inbound** child's precomputed `src` prefix.
+
+`fixed` places the target child first, so its lookup hits immediately and the row isolates the
+size-independent part of a hop. `scan` places it last, so the lookup walks the whole table; the
+delta is the scan's marginal cost."""
+
+DEMUX_NOTES_BLOCK = """\
+### Two corrections this bench exists to prevent
+
+**Timing must be batch-amortized.** A hop costs the same order as `clock_gettime`, so timing
+each hop individually measures the clock. An early draft did exactly that and reported the
+whole-table scan *beating* the first-hit lookup — the signature of a clock-dominated window.
+The bench calibrates its batch size against the host's own clock and prints what it chose,
+rather than hardcoding a number tuned on one machine.
+
+**Both scans must be visible.** An earlier revision registered the inbound child *first*, so
+`entry_by_name` always hit at position 1 and was invisible: the bench reported one scan's cost
+and called it the hop. Registering it *last* was supposed to fix that — but the bench then
+registered the inbound link **twice**, once at each end, so the lookup matched the first slot
+at position 1 regardless and the fix never took effect. (That duplicate was also a real
+registry bug: a shadow slot that survived `erase`.) Both are gone; the numbers above are the
+first that actually include the second scan.
+
+**The timed path must be the production path.** The bench used to call `on_frame` by name — a
+ctx-less entry only tests and SDK hosts take. A real transport delivers through the receiver
+`add_child` installs, which is bound to a stable per-child ctx. The hop is now driven through
+the inbound link's receiver, so what is timed is what ships.
+
+The two scans are not interchangeable: `entry_by_name` compares whole strings (a length check
+rejects most candidates), while `by_segments` compares a qualified key piecewise — which is
+why the `dst` scan dominates, at roughly 7:1 measured.
+
+### What the shape means
+
+The size-independent term is flat across N, as the design predicted. The term that grows is
+the **scan**.
+
+**Per-module scoping does not narrow it.** ADR-0061 and an earlier revision of this page both
+claimed that keying the registry per module turns a whole-table walk into a walk of one
+module's members. That was an inference, and measurement refuted it: scoping changed the
+*key*, not the *container*. Building the implied module-bucketed index moved N=64 from 363 ns
+to 390 ns — no win. A node's links overwhelmingly sit in **one** module (a device has many
+`ws-server` peers, not many modules), so bucketing relocates the scan instead of shortening
+it. The per-module key earns its place by keeping two modules' same-named connections
+distinct — a **correctness** property. It buys no lookup time.
+
+**One of the two scans is gone.** A hop no longer looks the inbound child up at all: its mount
+run is carried on the link's own receiver ctx, created once in `add_child`. Measured against
+the corrected bench, that is **-36 ns at N=64 (-9%)**, and the saving grows linearly with the
+link count — 128 -> 117 at N=8, 258 -> 229 at N=32 — exactly the shape of deleting one of two
+linear scans. A copy on the ctx rather than a pointer into the registry slot is deliberate:
+slot addresses are not stable across a connection-create (#521), whereas the ctx deque never
+invalidates a reference.
+
+**Is the remaining scan a per-frame or a first-frame cost?** Today, **per-frame on every
+path**:
+
+| Path | Registry work per frame | Why |
+| --- | --- | --- |
+| Plain `FWD` write | mount descent + inbound `entry_by_name` | the frame carries the full path; nothing to cache against |
+| `COMPACT` on a bound label | `by_name(binding->down_link)` | compaction removed the *route* from the wire, but the binding stores the link's **name**, so each frame still scans to turn it back into a pointer |
+| Remote delivery to a subscriber | `by_name(sub.link)` | same shape — the subscriber record holds a name |
+
+So compaction (RFC-0004 §E.1) shrinks the *wire* and skips the multi-segment descent, but it
+does **not** yet make the scan a first-frame cost. Making it one is precisely what ADR-0062 is
+for — a binding holds the **resolved target**, not a name. Increment 1 (the
+retirement-generation stamp a cached resolution compares against) has landed; the caching
+itself has not. Until it does, read every row above as a per-frame cost.
+
+The forward hop remains **zero-heap** regardless (`bench_forward_heap`, `allocs=0`, CI-gated)."""
 
 
 def _parse_codec(out: str) -> list[tuple[int, float, int, int]]:
@@ -545,6 +658,14 @@ value), and an isometric **3D** surface — switchable per chart; hover for exac
 {history_tables_block(history)}
 
 {READING_BLOCK}
+
+## 2b · Forward-demux cost (routing, per hop)
+
+{DEMUX_BLOCK}
+
+{demux_block()}
+
+{DEMUX_NOTES_BLOCK}
 
 ## 3 · Memory footprint (allocations counted, not timed)
 

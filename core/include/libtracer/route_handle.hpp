@@ -39,13 +39,53 @@
 #include <utility>
 #include <vector>
 
+#include "libtracer/graph.hpp"
+
 namespace tr::net {
+
+/**
+ * @brief The RESOLVED form of a binding — everything a steady-state COMPACT frame needs.
+ *
+ * ADR-0062's point, made concrete: an established flow must not re-derive what it already
+ * knows. This is trivially copyable and allocation-free, so @ref route_handle_t::resolved
+ * can hand it out from under the link's mutex without the `std::string` + `std::vector`
+ * copy `lookup_ingress` pays on EVERY frame today — a cost that landed before anything even
+ * looked at whether a resolution was cached.
+ *
+ * The route bytes are deliberately absent. A warm binding never touches them: the terminus
+ * dereferences `target` and writes; the forwarding hop sends on `down`. They are
+ * needed only to RE-resolve, which is the cold path and keeps the owning accessor.
+ *
+ * Both cached forms are self-invalidating rather than notified — no callback fires from
+ * under a lock:
+ *   - `target` is paired with `target_gen`, compared against
+ *     `graph_t::retire_generation`; a retired-and-revived vertex bumps it (#511), so a
+ *     stale handle is detected on use (RFC-0009 §B.6 re-virginize).
+ *   - `down` is read from the registry SLOT, whose `link` teardown nulls in place
+ *     (ADR-0063 made slot addresses permanently stable) — so a departed link reads
+ *     `nullptr`: the same clean miss as an unresolved lookup. The tombstone IS the
+ *     invalidation.
+ */
+struct resolved_binding_t {
+    bool found = false;          /**< @brief false ⇒ no binding for this (link, label). */
+    bool terminus = false;       /**< @brief true ⇒ deliver locally; false ⇒ forward + swap. */
+    bool warm = false;           /**< @brief true ⇒ the resolution below is populated. */
+    std::uint16_t out_label = 0; /**< @brief Forward: label to stamp downstream. */
+    const void* down_slot = nullptr; /**< @brief Forward: cached registry slot. */
+    /** @brief Terminus: the cached vertex. `std::optional` rather than a defaulted handle —
+     *         ADR-0056 keeps `vertex_handle_t` opaque and ALWAYS valid, so "no resolution yet"
+     *         must be expressed outside the handle, not as an invalid one. */
+    std::optional<graph::vertex_handle_t> target;
+    std::uint32_t target_gen = 0; /**< @brief Terminus: generation `target` was resolved at. */
+};
 
 /**
  * @brief One learned per-link label binding — what an inbound label means here.
  *
- * Either a forwarding swap (rewrite to @ref out_label and re-emit over @ref
- * down_link) or a local terminus (resolve @ref local_route and apply the write).
+ * Either a forwarding swap (rewrite to `out_label` and re-emit over `down_link`) or a
+ * local terminus (resolve `local_route` and apply the write). The trailing fields memoize
+ * what that resolution produced (ADR-0062), so an established flow stops re-deriving it; the
+ * allocation-free view of them is @ref resolved_binding_t.
  */
 struct handle_binding_t {
     bool terminus = false;     /**< @brief true ⇒ deliver locally; false ⇒ forward + swap. */
@@ -53,6 +93,13 @@ struct handle_binding_t {
     std::uint16_t out_label{}; /**< @brief Forward: label to stamp on the downstream COMPACT. */
     std::vector<std::byte>
         local_route; /**< @brief Terminus: the local dst PATH TLV bytes to resolve + write. */
+    /** @brief ADR-0062: the resolution, filled on first use and re-filled when it goes stale.
+     *         `warm == false` means "never resolved"; the two cached forms carry their own
+     *         staleness signal (see @ref resolved_binding_t). */
+    bool warm = false;               /**< @brief true ⇒ the cached fields below are filled. */
+    const void* down_slot = nullptr; /**< @brief Forward: cached `child_registry_t::child_t*`. */
+    std::optional<graph::vertex_handle_t> target; /**< @brief Terminus: the cached vertex. */
+    std::uint32_t target_gen = 0; /**< @brief Terminus: generation `target` was resolved at. */
 };
 
 /**
@@ -105,6 +152,28 @@ class route_handle_t {
      */
     [[nodiscard]] std::optional<handle_binding_t> lookup_ingress(std::string_view in_link,
                                                                  std::uint16_t label) const;
+
+    /**
+     * @brief The steady-state lookup: the RESOLVED binding, by value, allocation-free.
+     *
+     * Prefer this on the COMPACT hot path. @ref lookup_ingress copies a `std::string` and a
+     * `std::vector` out of the table on every call — two allocations per frame, paid before
+     * anything checks whether the flow was already resolved. This copies ~24 trivially
+     * copyable bytes instead, and returns `found=false` for an unknown label so the caller
+     * still NACKs identically.
+     *
+     * A `warm=false` result means the caller must resolve and then call @ref cache_resolution.
+     */
+    [[nodiscard]] resolved_binding_t resolved(std::string_view in_link, std::uint16_t label) const;
+
+    /**
+     * @brief Record the resolution @p r against (@p in_link, @p label) so later frames skip it.
+     *
+     * Idempotent and best-effort: a binding that vanished between resolve and cache is simply
+     * not updated, and the next frame resolves again. Never invalidates a live delivery.
+     */
+    void cache_resolution(std::string_view in_link, std::uint16_t label,
+                          const resolved_binding_t& r);
 
     /**
      * @brief Remember the @p route advertised over @p out_link under @p label.

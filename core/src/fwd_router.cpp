@@ -92,26 +92,33 @@ struct mount_hit_t {
     transport_t* link = nullptr; /**< @brief The egress link, or nullptr ⇒ this node terminates. */
     std::string_view peer;       /**< @brief The resolved bus PEER segment, if any. */
     std::size_t strip_k = 0;     /**< @brief Leading dst segments this hop consumes. */
+    /** @brief The link's REGISTRY identity — the qualified `"<module>/<name>"` of the matched
+     *         child, or the bare peer segment when the hop resolved a bus peer. This is what
+     *         `by_name` round-trips, so it is the key the label tables must store: the forward
+     *         path never needs it, the control plane (ADVERTISE/COMPACT swaps) always does. */
+    std::string_view link_name;
 };
 
 /**
- * @brief Resolve the leading `dst` segments against the registry (ADR-0061's strip-K descent).
+ * @brief Resolve leading path segments against the registry (ADR-0061's strip-K descent).
  *
  * Matches LONGEST-FIRST — the full `net/<module>/<name>` mount before any shorter key — so a
  * more specific mount always wins, and a node still carrying flat single-segment children
  * (the pre-RFC-0014 shape, and what the benches register) resolves through the same code.
  * When the matched child is multi-peer and another segment follows, that segment is resolved
  * in THAT endpoint's own peer table (never across buses) and the hop eats one more segment.
+ *
+ * Segment-based rather than cursor-based so the two planes share ONE descent: the forward
+ * path feeds it segments peeked out of the frame, and the control plane (@ref
+ * fwd_router_t::on_advertise) feeds it the NAME children of a decoded route. Those two used
+ * to resolve by different rules — the control plane still resolved a single BARE segment
+ * (#516) — which silently absorbed every advertise addressed to a `/net/<module>/<name>`
+ * mount at the first intermediate node.
  */
-template <class Cursor>
-[[nodiscard]] mount_hit_t resolve_mount(const child_registry_t& registry, const Cursor& cur,
-                                        seg_reader_t<Cursor>& rd) {
-    std::array<std::pair<std::size_t, std::size_t>, tr::net::kMountPeekMax> off{};
-    const std::size_t n = peek_fwd_dst_segs(cur, off);
+[[nodiscard]] mount_hit_t resolve_mount_segs(const child_registry_t& registry,
+                                             std::span<const std::string_view> seg) {
+    const std::size_t n = seg.size();
     if (n == 0) return {};
-    std::array<std::string_view, tr::net::kMountPeekMax> seg;
-    for (std::size_t i = 0; i < n; ++i) seg[i] = rd.read(off[i].first, off[i].second);
-
     const std::size_t widest = std::min<std::size_t>(n, tr::net::kMountPeekMax - 1);
     for (std::size_t k = widest; k >= 1; --k) {
         bool usable = true;
@@ -130,12 +137,27 @@ template <class Cursor>
         if (n == k) return {};
         if (c->multi_peer && !seg[k].empty()) {
             if (transport_t* const p = child_registry_t::resolve_peer(*c, seg[k])) {
-                return mount_hit_t{p, seg[k], k + 1};
+                return mount_hit_t{p, seg[k], k + 1, seg[k]};
             }
         }
-        return mount_hit_t{c->link, {}, k};
+        return mount_hit_t{c->link.load(std::memory_order_acquire), {}, k, c->name};
     }
+
     return {};
+}
+
+/**
+ * @brief The forward path's entry to @ref resolve_mount_segs — peeks `dst`, then descends.
+ */
+template <class Cursor>
+[[nodiscard]] mount_hit_t resolve_mount(const child_registry_t& registry, const Cursor& cur,
+                                        seg_reader_t<Cursor>& rd) {
+    std::array<std::pair<std::size_t, std::size_t>, tr::net::kMountPeekMax> off{};
+    const std::size_t n = peek_fwd_dst_segs(cur, off);
+    if (n == 0) return {};
+    std::array<std::string_view, tr::net::kMountPeekMax> seg;
+    for (std::size_t i = 0; i < n; ++i) seg[i] = rd.read(off[i].first, off[i].second);
+    return resolve_mount_segs(registry, std::span<const std::string_view>(seg.data(), n));
 }
 
 }  // namespace
@@ -145,8 +167,11 @@ void fwd_router_t::add_child(std::string name, transport_t& link) {
     // already have a live recv thread, so `set_receiver` is the publish point — once the
     // callback is installed, on_frame can read the registry on that thread. Adding the
     // child first ensures the entry is visible before any inbound frame can resolve it
-    // (the set_receiver mutex provides the release/acquire fence). Registry is otherwise
-    // immutable after setup — no lock on the read hot path.
+    // (the set_receiver mutex provides the release/acquire fence). No lock is taken on the
+    // read hot path. NOTE: "the registry is immutable after setup" stopped being true when
+    // RFC-0014 made connection create/remove a RUNTIME operation — an add of a new name
+    // reallocates the table under a concurrent forward read (#521). Closed by the S5
+    // mutation contract, where the TSan gate and a reclamation scheme land together.
     registry_.add(name, link);
     // Capability-matched receiver (ADR-0042 §1 / ADR-0044): a BUS link delivers
     // frames tagged with the SENDING peer's name, which becomes the hop's inbound
@@ -158,31 +183,40 @@ void fwd_router_t::add_child(std::string name, transport_t& link) {
     if (bus_link_t* const bus = link.bus()) {
         // A reassembling bus that delivers ropes (ADR-0053 §5) hands its group up
         // as-is — zero-copy; a span-only bus keeps the borrowed peer-named path.
-        // A bus frame arrives tagged with the sending peer's name, so the ctx is
-        // just the router itself.
+        // A bus frame arrives tagged with the sending peer's name — but a PEER has no
+        // registry entry, so the peer name alone cannot say which mount it hangs under.
+        // The receiver therefore carries the same stable per-child ctx the point-to-point
+        // path uses, holding the child's QUALIFIED name (#510): a forward hop then grows
+        // `src` by the full `net/<module>/<name>/<peer>` path rather than a bare peer
+        // segment, which is what keeps two buses' same-named peers distinct on the way back.
         // Departure seam (RFC-0009 §D extended): a bus peer that hangs up carries its
-        // own name, so link_down needs no per-child state either.
+        // own name, and label state is keyed by that name, so link_down still takes the peer.
+        child_rx_ctx_t& bctx = child_rx_.emplace_back(this, name, registry_.mount_run_for(name));
         bus->set_peer_down_notifier(
-            [](void* c, std::string_view peer) { static_cast<fwd_router_t*>(c)->link_down(peer); },
-            this);
+            [](void* c, std::string_view peer) {
+                static_cast<child_rx_ctx_t*>(c)->self->link_down(peer);
+            },
+            &bctx);
         if (bus->delivers_ropes()) {
             bus->set_peer_rope_receiver(
                 [](void* c, std::string_view peer, view::rope_t frame) {
-                    static_cast<fwd_router_t*>(c)->on_frame_rope(peer, std::move(frame));
+                    auto* const cc = static_cast<child_rx_ctx_t*>(c);
+                    cc->self->on_frame_rope_bus(*cc, peer, std::move(frame));
                 },
-                this);
+                &bctx);
         } else {
             bus->set_peer_receiver(
                 [](void* c, std::string_view peer, std::span<const std::byte> frame) {
-                    static_cast<fwd_router_t*>(c)->on_frame(peer, frame);
+                    auto* const cc = static_cast<child_rx_ctx_t*>(c);
+                    cc->self->on_frame_bus(*cc, peer, frame);
                 },
-                this);
+                &bctx);
         }
         return;
     }
     // Point-to-point: the inbound NAME is fixed per child, carried by a stable
     // per-child ctx (child_rx_ holds the address for the transport's lifetime).
-    child_rx_ctx_t& ctx = child_rx_.emplace_back(this, std::move(name));
+    child_rx_ctx_t& ctx = child_rx_.emplace_back(this, name, registry_.mount_run_for(name));
     // Departure seam (RFC-0009 §D extended): the same stable ctx carries the child's
     // NAME to link_down when the transport reports its one connection dead.
     link.set_down_notifier(
@@ -195,14 +229,14 @@ void fwd_router_t::add_child(std::string name, transport_t& link) {
         link.set_rope_receiver(
             [](void* c, view::rope_t frame) {
                 auto* const cc = static_cast<child_rx_ctx_t*>(c);
-                cc->self->on_frame_rope(cc->name, std::move(frame));
+                cc->self->on_frame_rope_impl(cc->name, std::move(frame), cc, false);
             },
             &ctx);
     } else {
         link.set_receiver(
             [](void* c, std::span<const std::byte> frame) {
                 auto* const cc = static_cast<child_rx_ctx_t*>(c);
-                cc->self->on_frame(cc->name, frame);
+                cc->self->on_frame_impl(cc->name, frame, nullptr, cc, false);
             },
             &ctx);
     }
@@ -279,7 +313,22 @@ void fwd_router_t::on_frame(std::string_view inbound_name, std::span<const std::
     on_frame_impl(inbound_name, frame, nullptr);
 }
 
+void fwd_router_t::on_frame_bus(const child_rx_ctx_t& ctx, std::string_view peer,
+                                std::span<const std::byte> frame) {
+    on_frame_impl(peer, frame, nullptr, &ctx, true);
+}
+
 void fwd_router_t::on_frame_rope(std::string_view inbound_name, view::rope_t frame) {
+    on_frame_rope_impl(inbound_name, std::move(frame), nullptr, false);
+}
+
+void fwd_router_t::on_frame_rope_bus(const child_rx_ctx_t& ctx, std::string_view peer,
+                                     view::rope_t frame) {
+    on_frame_rope_impl(peer, std::move(frame), &ctx, true);
+}
+
+void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_t frame,
+                                      const child_rx_ctx_t* inbound_ctx, bool from_peer) {
     // Single-link (every current producer): the link's bytes span feeds the SAME
     // routing as the borrowed path — the forward hop below never touches the
     // refcount (zero-heap, ADR-0038); only the terminus sees the owner, for the
@@ -287,7 +336,7 @@ void fwd_router_t::on_frame_rope(std::string_view inbound_name, view::rope_t fra
     if (frame.link_count() == 1) {
         const view_t& v = frame.links()[0];
         if (v.is_device()) return;  // CPU routing cannot read a DEVICE frame
-        on_frame_impl(inbound_name, v.bytes(), &v);
+        on_frame_impl(inbound_name, v.bytes(), &v, inbound_ctx, from_peer);
         return;
     }
     // Multi-link: route a FORWARD hop directly over the rope — NO flatten
@@ -311,7 +360,8 @@ void fwd_router_t::on_frame_rope(std::string_view inbound_name, view::rope_t fra
             seg_reader_t<wire::grammar::rope_cursor> rd{cur, {}, 0};
             const mount_hit_t hit = resolve_mount(registry_, cur, rd);
             if (hit.link != nullptr) {
-                route_fwd_forward(inbound_name, hit.strip_k, cur, *hit.link);
+                route_fwd_forward(inbound_name, inbound_ctx, from_peer, hit.strip_k, cur,
+                                  *hit.link);
                 return;
             }
             // No child (or over-long segment) ⇒ this node is the terminus for the frame.
@@ -335,7 +385,8 @@ void fwd_router_t::on_frame_rope(std::string_view inbound_name, view::rope_t fra
 }
 
 void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const std::byte> frame,
-                                 const view_t* frame_view) {
+                                 const view_t* frame_view, const child_rx_ctx_t* inbound_ctx,
+                                 bool from_peer) {
     if (raw_cb_) raw_cb_(inbound_name, frame);
     if (frame.size() < 4) return;
 
@@ -355,7 +406,8 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
             seg_reader_t<wire::grammar::span_cursor> rd{cur, {}, 0};
             const mount_hit_t hit = resolve_mount(registry_, cur, rd);
             if (hit.link != nullptr) {
-                route_fwd_forward(inbound_name, hit.strip_k, cur, *hit.link);
+                route_fwd_forward(inbound_name, inbound_ctx, from_peer, hit.strip_k, cur,
+                                  *hit.link);
                 return;
             }
             // The dst names no mount ⇒ this node is the terminus.
@@ -408,21 +460,44 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
 }
 
 template <class Cursor>
-void fwd_router_t::route_fwd_forward(std::string_view inbound_name, std::size_t strip_k,
-                                     const Cursor& cur_src, transport_t& child) {
+void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
+                                     const child_rx_ctx_t* inbound_ctx, bool from_peer,
+                                     std::size_t strip_k, const Cursor& cur_src,
+                                     transport_t& child) {
     // All offsets, no decoded tree: the shrunk-dst / grown-src head rebuild lives in
     // fwd_frame_view.hpp (rebuild_fwd_forward — unit-tested directly); this hop only
     // resolves the child and scatter-gathers the result. Reads AND the egress go
     // through the grammar `Cursor` seam (ADR-0053 ④b): the same code serves a
     // contiguous `span_cursor` (each region is one sub-span) and a link-walking
     // `rope_cursor` (a region yields one sub-span per link it crosses).
-    // Prefer this child's PRE-ENCODED mount run (#508): the grown `src` prefix then costs a
-    // single iov entry and no per-segment encoding. A name with no registry entry — a bus
-    // PEER, whose name is not known until the frame arrives — falls back to encoding that one
-    // segment per frame, which is the only case that can't be precomputed.
-    const child_registry_t::child_t* const inbound = registry_.entry_by_name(inbound_name);
+    // Grow `src` by the inbound link's FULL mount path, so the reply resolves through the
+    // same strip-K descent a forward does (the ADR-0061 erratum). Two shapes:
+    //
+    //   - point-to-point — the child IS the inbound name, and its PRE-ENCODED mount run
+    //     (#508) makes the grown prefix one iov entry with no per-segment encoding;
+    //   - bus PEER — the child is `bus_child` (carried in from the per-child receiver ctx,
+    //     #510) and the peer segment, known only now that the frame has arrived, rides as
+    //     the one `extra_seg`. So `src` grows by `net/<module>/<name>/<peer>`.
+    //
+    // Before #510 a peer grew `src` by the BARE peer name: a return route that could not
+    // distinguish two buses' same-named peers — the reply-direction twin of exactly the
+    // collision per-module scoping exists to prevent.
+    // The mount run comes off the LINK's own receiver ctx — no registry lookup at all. That
+    // removes one of the two per-frame linear scans a hop used to pay (`entry_by_name`,
+    // fetching this same run out of the table); `docs/performance.md` §2b measures it. The
+    // ctx is created once per child in add_child and lives in a deque, so its address and
+    // its bytes are stable for the link's lifetime — unlike a registry SLOT pointer, which
+    // an append would invalidate (#521). A frame delivered through the public on_frame (no
+    // ctx: tests, SDK hosts, a link wired outside add_child) still resolves by name.
+    const std::span<const std::byte> mount =
+        inbound_ctx != nullptr ? std::span<const std::byte>(inbound_ctx->mount_tlv)
+                               : std::span<const std::byte>{};
+    const child_registry_t::child_t* const inbound =
+        inbound_ctx != nullptr ? nullptr : registry_.entry_by_name(inbound_name);
     const auto rebuilt =
-        inbound != nullptr && !inbound->mount_tlv.empty()
+        !mount.empty() ? rebuild_fwd_forward(cur_src, mount,
+                                             from_peer ? inbound_name : std::string_view{}, strip_k)
+        : inbound != nullptr && !inbound->mount_tlv.empty()
             ? rebuild_fwd_forward(cur_src, std::span<const std::byte>(inbound->mount_tlv),
                                   std::string_view{}, strip_k)
             : rebuild_fwd_forward(cur_src, std::span<const std::byte>{}, inbound_name, strip_k);
@@ -493,10 +568,15 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
     const auto view = wire::tlv_view_t::over(std::move(frame));
     if (!view) return;                        // malformed root ⇒ drop (as a decode error)
     if (!view->verify().has_value()) return;  // root CRC failure ⇒ drop
-    // The rope tier stores its one ownership copy (own_tlv) — the ADR-0042 §3
-    // referenced store needs a contiguous frame view, absent for a scatter-gather
-    // rope, so no frame_view is threaded. Reply routes back over the inbound link,
-    // its dst the request's accumulated src, exactly as the arena terminus.
+    // No frame_view is threaded, and the rope tier does not need one: unlike the arena's
+    // pin_wire — which requires a contiguous frame view and is gated on it —
+    // view_node::pin_wire IGNORES the argument and subropes the payload directly
+    // (`op_resolve_view.cpp:99-101`), so the ADR-0042 §3 referenced store works here with
+    // ZERO copy, retaining only the payload's links rather than the whole frame. (This
+    // comment previously read as though the pin were unavailable on the rope path; it is
+    // the reverse, and that misreading nearly justified deleting the tier.) Reply routes
+    // back over the inbound link, its dst the request's accumulated src, as at the arena
+    // terminus.
     auto reply = resolver_.resolve(*view, inbound_name, nullptr);
     if (!reply) return;                    // structurally non-request ⇒ drop
     if (reply->link_count() == 0) return;  // assemble OOM ⇒ empty rope ⇒ drop (no garbage frame)
@@ -554,38 +634,55 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
                                 const tlv_t& route) {
     if (route.type != type_t::PATH) return;
 
-    // Resolve the first route segment against this node's transport children — the
-    // SAME rule the FWD forward step uses, so the label tracks the delivery route.
-    transport_t* const down =
-        route.children.empty() ? nullptr : registry_.by_segment(route.children[0].payload);
+    // Resolve the leading route segments through the SAME strip-K mount descent the FWD
+    // forward step uses (resolve_mount_segs), so a label tracks exactly the route a FWD
+    // would take. It resolved a single BARE segment until #516, which meant every route
+    // addressed to an RFC-0014 `/net/<module>/<name>` mount missed, fell through to the
+    // terminus arm, and was ABSORBED at the first intermediate node — the compacted flow
+    // then delivered locally at a node that was only supposed to relay it.
+    std::array<std::string_view, tr::net::kMountPeekMax> seg;
+    std::size_t n = 0;
+    for (const tlv_t& child : route.children) {
+        // LEADING NAMEs only, and the collected count is exactly the erase count below —
+        // stopping at the first non-NAME keeps the segment indices positional, so `strip_k`
+        // never names a child that is not the segment it resolved.
+        if (n == seg.size() || child.type != type_t::NAME) break;
+        seg[n++] = detail::as_string_view(child.payload);
+    }
+    const mount_hit_t hit =
+        resolve_mount_segs(registry_, std::span<const std::string_view>(seg.data(), n));
 
-    if (down != nullptr) {
-        // Forwarding hop: strip the leading segment, allocate OUR own out-label,
-        // record the swap, retain the stripped egress route (for NACK re-advertise),
-        // and re-advertise downstream with the new label (MPLS-style swap).
-        const std::span<const std::byte> seg = route.children[0].payload;
-        const std::string down_name(detail::as_string_view(seg));
+    if (hit.link != nullptr) {
+        // Forwarding hop: strip the K segments this node consumed, allocate OUR own
+        // out-label, record the swap, retain the stripped egress route (for NACK
+        // re-advertise), and re-advertise downstream with the new label (MPLS-style swap).
+        const std::string down_name(hit.link_name);
         tlv_t stripped = route;
-        stripped.children.erase(stripped.children.begin());
+        stripped.children.erase(
+            stripped.children.begin(),
+            stripped.children.begin() + static_cast<std::ptrdiff_t>(hit.strip_k));
         const std::vector<std::byte> stripped_bytes = wire::encode(stripped);
 
         const std::uint16_t out_label = handles_.alloc_label(down_name);
-        handles_.bind_ingress(inbound_name, label,
-                              handle_binding_t{.terminus = false,
-                                               .down_link = down_name,
-                                               .out_label = out_label,
-                                               .local_route = {}});
+        // Built field-by-field rather than with a designated-initializer brace: the binding
+        // now carries ADR-0062's memoized resolution too, and an aggregate init that names
+        // only some members trips -Werror=missing-field-initializers on the ESP toolchain.
+        handle_binding_t fwd;
+        fwd.terminus = false;
+        fwd.down_link = down_name;
+        fwd.out_label = out_label;
+        handles_.bind_ingress(inbound_name, label, std::move(fwd));
         handles_.record_egress(down_name, out_label, stripped_bytes);
         const std::vector<std::byte> adv2 = encode_advertise(out_label, stripped_bytes);
-        down->send(std::span<const std::byte>(adv2));
+        hit.link->send(std::span<const std::byte>(adv2));
         return;
     }
 
     // Terminus: the route resolves locally here — bind the label to the local route.
-    handles_.bind_ingress(
-        inbound_name, label,
-        handle_binding_t{
-            .terminus = true, .down_link = {}, .out_label = 0, .local_route = wire::encode(route)});
+    handle_binding_t term;
+    term.terminus = true;
+    term.local_route = wire::encode(route);
+    handles_.bind_ingress(inbound_name, label, std::move(term));
 }
 
 void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label,
@@ -593,8 +690,12 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
     // `payload_bytes` is the already-contiguous wire encoding of the COMPACT payload TLV
     // (the span path re-encodes the decoded child; the rope path materializes only the
     // payload sub-rope — ADR-0055 §2). It is never re-decoded here — just stored/forwarded.
-    const std::optional<handle_binding_t> binding = handles_.lookup_ingress(inbound_name, label);
-    if (!binding) {
+    // ADR-0062: the STEADY-STATE lookup first — ~24 trivially copyable bytes, no allocation.
+    // `lookup_ingress` copies a std::string + a std::vector out of the table, and it did so on
+    // EVERY frame, before anything checked whether this flow was already resolved. The owning
+    // form is now taken only where the route bytes are genuinely needed: the cold re-resolve.
+    const resolved_binding_t rb = handles_.resolved(inbound_name, label);
+    if (!rb.found) {
         // Stale/unknown label: drop, observe, and NACK back to prompt a re-advertise
         // (self-heal). Never a crash — the route is simply re-learned (RFC-0004 §E.1).
         if (stale_cb_) stale_cb_(inbound_name, label);
@@ -605,18 +706,69 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
         return;
     }
 
-    if (binding->terminus) {
-        // Local delivery — expand the label to the bound route and apply the write
-        // (a delivery IS a write, RFC-0004 §D), then notify the delivery sink.
-        if (deliver_local(binding->local_route, payload_bytes) && delivery_cb_)
-            delivery_cb_(binding->local_route, payload_bytes);
+    if (rb.terminus) {
+        // WARM: dereference the cached vertex and write. No decode, no path walk, no
+        // graph_.find — the whole point of RFC-0004 §E.1's label, finally applied to the
+        // RESOLUTION and not merely to the wire. The generation guard is what makes the
+        // cached handle safe: retire() bumps it (#511), so a retired-and-revived vertex is
+        // detected here rather than silently written through (RFC-0009 §B.6 re-virginize).
+        if (rb.warm && rb.target && graph_.retire_generation(*rb.target) == rb.target_gen) {
+            const auto payload_view = view::over_bytes(payload_bytes);
+            if (!payload_view) return;  // alloc failure ⇒ drop (one audited locus)
+            view::rope_t value;
+            if (!value.try_reserve(1)) return;
+            value.append(*payload_view);
+            if (graph_.write(*rb.target, std::move(value)).has_value() && delivery_cb_) {
+                const std::optional<handle_binding_t> b =
+                    handles_.lookup_ingress(inbound_name, label);
+                if (b) delivery_cb_(b->local_route, payload_bytes);
+            }
+            return;
+        }
+        // COLD or STALE: take the owning form, resolve the route, then memoize it.
+        const std::optional<handle_binding_t> binding =
+            handles_.lookup_ingress(inbound_name, label);
+        if (!binding) return;
+        if (deliver_local(binding->local_route, payload_bytes)) {
+            if (const auto v = resolve_route_vertex(binding->local_route)) {
+                resolved_binding_t fill = rb;
+                fill.warm = true;
+                fill.target = *v;
+                fill.target_gen = graph_.retire_generation(*v);
+                handles_.cache_resolution(inbound_name, label, fill);
+            }
+            if (delivery_cb_) delivery_cb_(binding->local_route, payload_bytes);
+        }
         return;
     }
+
     // Forwarding hop: swap to our out-label and re-emit the COMPACT downstream — the
     // route still does NOT ride, only the (swapped) label.
-    if (transport_t* const down = registry_.by_name(binding->down_link)) {
-        const std::vector<std::byte> out = encode_compact(binding->out_label, payload_bytes);
-        down->send(std::span<const std::byte>(out));
+    //
+    // WARM: the cached registry SLOT is read directly. It is safe because teardown nulls the
+    // slot's `link` IN PLACE and ADR-0063 made slot addresses permanently stable — so a
+    // departed link reads nullptr, which is the same clean miss an unresolved lookup gives.
+    // The tombstone IS the invalidation; no generation and no teardown sweep are needed.
+    if (rb.warm && rb.down_slot != nullptr) {
+        const auto* const slot = static_cast<const child_registry_t::child_t*>(rb.down_slot);
+        if (transport_t* const down = slot->link.load(std::memory_order_acquire)) {
+            const std::vector<std::byte> out = encode_compact(rb.out_label, payload_bytes);
+            down->send(std::span<const std::byte>(out));
+            return;
+        }
+        // Tombstoned: fall through and re-resolve, so a re-created link re-warms.
+    }
+    const std::optional<handle_binding_t> binding = handles_.lookup_ingress(inbound_name, label);
+    if (!binding) return;
+    if (const child_registry_t::child_t* const slot = registry_.entry_by_name(binding->down_link)) {
+        if (transport_t* const down = slot->link.load(std::memory_order_acquire)) {
+            const std::vector<std::byte> out = encode_compact(binding->out_label, payload_bytes);
+            down->send(std::span<const std::byte>(out));
+            resolved_binding_t fill = rb;
+            fill.warm = true;
+            fill.down_slot = slot;
+            handles_.cache_resolution(inbound_name, label, fill);
+        }
     }
 }
 
@@ -631,12 +783,22 @@ void fwd_router_t::on_nack(std::string_view inbound_name, std::uint16_t label) {
     }
 }
 
+std::optional<graph::vertex_handle_t> fwd_router_t::resolve_route_vertex(
+    std::span<const std::byte> route_path) const {
+    // The SAME resolution deliver_local performs, factored out so the memoized handle can
+    // never diverge from the one the cold path would have used. Two rules would be two
+    // sources of truth for "which vertex does this label mean".
+    const auto route = wire::decode(route_path);
+    if (!route || route->type != type_t::PATH) return std::nullopt;
+    return graph_.find(wire::path_key(*route));
+}
+
 bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
                                  std::span<const std::byte> payload) {
-    const auto route = wire::decode(route_path);
-    if (!route || route->type != type_t::PATH) return false;
-    // The canonical PATH key (concatenated NAME encodings) — the graph vertex-map key.
-    const std::optional<graph::vertex_handle_t> v = graph_.find(wire::path_key(*route));
+    // Through the SAME helper the memoized handle is resolved by — so the cold path and the
+    // cached path cannot disagree about which vertex a label names. Two decode+find copies
+    // would be two sources of truth, which is the shape #516 turned out to be.
+    const std::optional<graph::vertex_handle_t> v = resolve_route_vertex(route_path);
     if (!v) return false;
     // `payload` is a wire-encoded TLV (never empty); `nullopt` is exactly an alloc
     // failure → drop the delivery (one audited alloc/copy/over locus).
