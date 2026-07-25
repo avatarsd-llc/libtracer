@@ -1,6 +1,6 @@
 # Per-module mount routing: routing-address `==` vertex-path, realized as a strip-K structural descent in the L5 demux over a per-module-scoped registry — refining ADR-0037/0038
 
-Status: proposed. **Refines [ADR-0037](0037-net-side-channels-dissolve-into-vertex-tree-compositor.md)** (dissolve the side-channel) and **[ADR-0038](0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md) §3b** (the `child_registry_t` brick) — it is their concrete strip-K + scoped-registry realization, not a supersession. **Upholds [ADR-0016](0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md)** (an L4 `vertex_t` carries no `transport_t*`; `graph.find` stays mount-unaware) and **ADR-0038 §3a** (the intra-device path pays nothing). The wire-visible byte change is governed by the already-accepted **[RFC-0014](../spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)** ([#492](https://github.com/avatarsd-llc/libtracer/issues/492)) — **no new RFC or amendment**. Grounded by a `/grill-with-docs` session, a deep-dive, and a three-lens spike whose load-bearing claims were adversarially verified against the code and the conformance vectors. **Conditions to clear before `accepted` are listed in Consequences** (bus-peer mechanism, bench, vector rewrite, teardown) — this is not yet a settled decision.
+Status: proposed. **Refines [ADR-0037](0037-net-side-channels-dissolve-into-vertex-tree-compositor.md)** (dissolve the side-channel) and **[ADR-0038](0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md) §3b** (the `child_registry_t` brick) — it is their concrete strip-K + scoped-registry realization, not a supersession. **Upholds [ADR-0016](0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md)** (an L4 `vertex_t` carries no `transport_t*`; `graph.find` stays mount-unaware) and **ADR-0038 §3a** (the intra-device path pays nothing). The wire-visible byte change is governed by the already-accepted **[RFC-0014](../spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)** ([#492](https://github.com/avatarsd-llc/libtracer/issues/492)) — **no new RFC or amendment**. Grounded by a `/grill-with-docs` session, a deep-dive, and a three-lens spike whose load-bearing claims were adversarially verified against the code and the conformance vectors. **One condition remains before `accepted`: the forward-hop baseline bench** (see Consequences). A maintainer grill on 2026-07-25 triaged the four original conditions — three were circular (they could only be cleared by implementation this ADR itself gates) and are demoted to implementation obligations; the mechanism is settled, its hot-path affordability is not.
 
 ## Context
 
@@ -43,12 +43,45 @@ A grill framed this as "routing is path polymorphism; the runtime routing table 
 
 ## Consequences
 
-**Conditions to clear before this moves from `proposed` to `accepted`:**
+**The one condition to clear before this moves from `proposed` to `accepted`:**
 
-- **DESIGNED (was the riskiest open item) — bus-peer resolution.** The grill resolved it structurally: because each module declares its **shape** (`ws-server`/`can` multi-peer vs. `ws-client` point-to-point), the demux reads the module segment and *structurally* knows whether a peer segment follows — no runtime `bus()` probe. A multi-peer module resolves `<peer>` in **its own** peer table (a **per-endpoint** `resolve_peer`, replacing today's global cross-bus `peer_link` scan), which also makes two servers' same-named peers distinct. The adversarial pass had refuted the naive "strip K+1 via the existing global `by_name`" because that scan is single-segment and bus-blind; the fix is the per-endpoint scoping — genuinely new code, not a re-key. **Remaining impl work (not a design unknown):** the scoped `resolve_peer` + a **multi-peer black-hole negative test** — `/net/ws-server/s/alice` reaches ws-`alice`, `/net/ws-server/s/zzz` → clean `PATH_NOT_FOUND`, and `/net/tcp-server/s`'s own `alice` is never reachable through the ws module.
-- **UNCONFIRMED — hot-path affordability, and the harness cannot yet measure it.** The per-hop fixed-depth structural walk + per-module-scoped linear scan over the immutable `children_` vector is bounded and zero-heap, but the net plane is latency-critical and [#386](https://github.com/avatarsd-llc/libtracer/issues/386) showed wide-fanout regression sensitivity. Today's benches do **not** cover this cost: `bench_forward_heap` measures per-hop *heap* (0 allocs — a self-policing CI gate the scan must preserve) and `bench_fanout_clone_storm` measures *refcount* contention — **neither times the forward-demux scan against registry size**. Closing this condition therefore requires a **new micro-bench that times one forward hop and sweeps it over links-per-transport** (flat-scan baseline vs. scoped-scan), landed with the strip-K PR. Two existing signals bound the risk meanwhile: the `allocs=0` forward gate (must hold), and the intra-device dispatch numbers (`inproc`/`inproc-borrow`/`inproc-path`) which per §3a must stay unchanged — a shift there means a local `dst` wrongly entered the forward path.
-- **Vector byte rewrite is RFC-0014-governed.** The wire-visible `dst` becomes `/net/<module>/<name>[/<peer>]/residual`; rewrite `fwd-routed-multihop` + `fwd-src-accumulated` under RFC-0014/[#492](https://github.com/avatarsd-llc/libtracer/issues/492)'s "proposed pending" clause-kind authority on the DRAFT spec — **not silently as a #419 tooling change** (`v1.md` §conformance: adding a vector is free, changing existing bytes is a spec change). **Keep the two gaps separate:** mount-vs-bare-name (pure impl + doc + vector conformance, no RFC) and one-level→two-level nesting depth (RFC-0014-governed).
-- **Teardown must co-land or be documented.** `retire()`/[#66](https://github.com/avatarsd-llc/libtracer/issues/66) currently cannot evict the registry entry or tear the socket — add a registry `erase` + wire `retire`/`link_down` → evict, or document the dangling-registry leak explicitly. RFC-0014's remove-half turns this latent leak live.
+- **UNCONFIRMED — hot-path affordability. A baseline bench answers it *without* strip-K code.** The
+  per-hop fixed-depth structural walk + per-module-scoped linear scan over the immutable `children_`
+  vector is bounded and zero-heap, but the net plane is latency-critical and
+  [#386](https://github.com/avatarsd-llc/libtracer/issues/386) showed wide-fanout regression
+  sensitivity. Today's benches do **not** cover this: `bench_forward_heap` measures per-hop *heap*
+  (0 allocs — a self-policing CI gate the scan must preserve) and `bench_fanout_clone_storm`
+  measures *refcount* contention — **neither times the forward-demux scan against registry size**.
+
+  The original phrasing ("a new micro-bench … landed with the strip-K PR") was **circular**: it
+  gated acceptance on code that acceptance gates. It is replaced by a **baseline-first bench**,
+  landed standalone against **today's flat `by_name`**, extending the existing `bench_forward_heap`
+  rig (which already stands up router + wired transport and feeds a frame straight into
+  `on_frame()` — it lacks only a timing window and a size sweep). It measures **two axes**, because
+  the two terms move in opposite directions:
+
+  1. **Fixed cost at N=1 link** — isolates the constant term. This is the *only* term strip-K
+     **adds**: the structural prefix walk (`segment[0]=="net"` literal, then a module match against
+     the link-time-closed module set), which is registry-size-independent.
+  2. **Scan share swept over N links per module** (1/2/4/8/16/32) — characterizes the term strip-K
+     **narrows**. Today's `by_name` (`child_registry.hpp:52-62`) is a linear scan over *all* links
+     plus a second pass asking *every* bus child to `peer_link`; per-module scoping and the
+     per-endpoint `resolve_peer` shrink both scan sets. A sweep alone would have measured only the
+     shrinking term and missed the growing one.
+
+  **Acceptance rule:** the ADR moves to `accepted` when the baseline shows the N=1 per-hop cost has
+  headroom for two additional segment compares. **Merge gate on S2a** (not on acceptance): `allocs=0`
+  still holds on the forward hop, and the scoped hop is ≤ the flat hop at equal total link count.
+  Two existing signals bound the risk meanwhile: the `allocs=0` forward gate, and the intra-device
+  dispatch numbers (`inproc`/`inproc-borrow`/`inproc-path`) which per §3a must stay unchanged — a
+  shift there means a local `dst` wrongly entered the forward path.
+
+**Demoted to implementation obligations** (each was unclearable as an acceptance gate, since only
+work this ADR blocks could clear it):
+
+- **DESIGNED — bus-peer resolution → S2a.** The grill resolved it structurally: because each module declares its **shape** (`ws-server`/`can` multi-peer vs. `ws-client` point-to-point), the demux reads the module segment and *structurally* knows whether a peer segment follows — no runtime `bus()` probe. A multi-peer module resolves `<peer>` in **its own** peer table (a **per-endpoint** `resolve_peer`, replacing today's global cross-bus `peer_link` scan), which also makes two servers' same-named peers distinct. The adversarial pass had refuted the naive "strip K+1 via the existing global `by_name`" because that scan is single-segment and bus-blind; the fix is the per-endpoint scoping — genuinely new code, not a re-key. **Remaining impl work (not a design unknown):** the scoped `resolve_peer` + a **multi-peer black-hole negative test** — `/net/ws-server/s/alice` reaches ws-`alice`, `/net/ws-server/s/zzz` → clean `PATH_NOT_FOUND`, and `/net/tcp-server/s`'s own `alice` is never reachable through the ws module.
+- **Vector byte rewrite is RFC-0014-governed → S7.** Strictly circular as a gate: S7 is four slices downstream of the S2 this ADR blocks. The wire-visible `dst` becomes `/net/<module>/<name>[/<peer>]/residual`; rewrite `fwd-routed-multihop` + `fwd-src-accumulated` under RFC-0014/[#492](https://github.com/avatarsd-llc/libtracer/issues/492)'s "proposed pending" clause-kind authority on the DRAFT spec — **not silently as a #419 tooling change** (`v1.md` §conformance: adding a vector is free, changing existing bytes is a spec change). **Keep the two gaps separate:** mount-vs-bare-name (pure impl + doc + vector conformance, no RFC) and one-level→two-level nesting depth (RFC-0014-governed).
+- **Teardown → [#494](https://github.com/avatarsd-llc/libtracer/issues/494), landing *first* and standalone.** `retire()`/[#66](https://github.com/avatarsd-llc/libtracer/issues/66) currently cannot evict the registry entry or tear the socket — add a registry `erase` + wire `retire`/`link_down` → evict. This is a real latent use-after-free **today**, independent of strip-K, so it is fixed against the flat registry on its own schedule rather than riding the re-key; it also keeps it out of S2a's ~250-450 LOC blast radius. RFC-0014's remove-half turns the latent leak live.
 
 **Standing consequences:**
 
