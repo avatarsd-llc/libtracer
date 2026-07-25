@@ -130,6 +130,17 @@ jobs:
             ./bench/build/bench_libtracer >bench/bench_libtracer_raw.txt
             : >bench/bench_libtracer_time.txt
           fi
+      # The NETWORK-plane series. These emit the same 12-column RESULT rows as
+      # bench_libtracer, so they feed the same history store with no emitter change — and
+      # without them the routing and delivery numbers are untracked, which is how a 63%
+      # win regresses unnoticed. Both self-calibrate and are budget-bounded; one second per
+      # point keeps this job's wall-clock roughly where it was.
+      - name: Run the network-plane benches (routing + steady-state delivery)
+        env:
+          LIBTRACER_BENCH_SECONDS: "1"
+        run: |
+          ./bench/build/bench_forward_demux >bench/bench_forward_demux_raw.txt || true
+          ./bench/build/bench_compact_delivery >bench/bench_compact_delivery_raw.txt || true
       - name: Upload this replica's transcripts
         uses: actions/upload-artifact@v4
         with:
@@ -138,6 +149,8 @@ jobs:
             bench/bench_libtracer_raw.txt
             bench/bench_libtracer_time.txt
             bench/bench_forward_heap_raw.txt
+            bench/bench_forward_demux_raw.txt
+            bench/bench_compact_delivery_raw.txt
           retention-days: 90
 
   # --- main push: persist the build-to-build history (best across runners) --------
@@ -169,7 +182,9 @@ jobs:
       - name: Emit best-across-runners history metrics (github-action-benchmark JSON)
         run: |
           args=""
-          for f in bench/raws/*/bench_libtracer_raw.txt; do
+          for f in bench/raws/*/bench_libtracer_raw.txt \
+                   bench/raws/*/bench_forward_demux_raw.txt \
+                   bench/raws/*/bench_compact_delivery_raw.txt; do
             [ -s "$f" ] && args="$args --raw $f"
           done
           if [ -z "$args" ]; then
