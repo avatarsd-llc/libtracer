@@ -17,7 +17,7 @@ So an established, hot flow — the case delivery compaction exists for — stil
 
 **A binding holds the resolved target.** `handle_binding_t` gains, alongside (not replacing) what it stores today:
 
-1. **Forwarding hop** — the resolved `transport_t*`, so a compact forward is a dereference instead of a registry scan. Safe only because [#494](https://github.com/avatarsd-llc/libtracer/issues/494) made teardown funnel through `fwd_router_t::remove_child` → `link_down` → `clear_link`, which already drops every label binding on the departing link. Without that funnel this would reintroduce, inside every binding, the exact dangling-`transport_t*` class #494 closed in the registry.
+1. **Forwarding hop** — the resolved `transport_t*`, so a compact forward is a dereference instead of a registry scan. **See the erratum below: the invalidation argument originally given here is WRONG, and this half is blocked until it is replaced.**
 
 2. **Terminus** — a **generation-stamped** `vertex_handle_t`: the pair `(handle, generation)`, delivered only when the vertex's current generation matches.
 
@@ -33,6 +33,22 @@ The generation stamp is load-bearing and is the non-obvious half of this decisio
 - **Cache the `transport_t*` only**, leaving the terminus re-resolving. **Rejected as the whole answer:** it sidesteps the generation question but forfeits the same-host dereference, which is the larger of the two wins (a full path walk, versus a short-string scan).
 - **Encode the registry key as raw TLV bytes and `memcmp`** — the originating idea. **Rejected on conformance:** a `NAME` may legally be emitted with `opt.LL=1`, and `opt` also carries `TS`/`CR`, so the same path has multiple valid encodings; receivers MUST accept every `LL`/`CW`/`TF` variant (CONTEXT §Capability negotiation). A raw-byte key silently fails to route a conforming peer. Caching the *resolution* rather than matching the *encoding* gets the same win without the conformance hazard.
 - **Do nothing** — the measured strip-K delta is ~3 ns on an ~82 ns hop. **Rejected:** this is not about strip-K's delta. It removes work from the steady state of every established flow, and it is what makes the ADR-0061 descent affordable *by construction* — a hot flow bypasses the demux walk entirely rather than paying a cheaper version of it.
+
+## Erratum (2026-07-25, found while implementing increment 2)
+
+The Decision above claimed the cached `transport_t*` is "safe only because #494 made teardown funnel through `remove_child` → `link_down` → `clear_link`, which already drops every label binding on the departing link." **That is wrong.**
+
+`route_handle_t::clear_link(L)` erases the tables *keyed by* link `L` — `L`'s own ingress and egress bindings. It does **not** touch a binding stored under a *different* link that merely *points at* `L`. And that is the normal shape of a forwarding binding: `bind_ingress(inbound_name, label, {down_link, out_label})` stores it under the **inbound** link while `down_link` names the **outbound** one.
+
+So when the downstream link departs, an upstream binding retains `down_link = "B"`. Today that is harmless: the next delivery calls `by_name("B")`, gets `nullptr` (since #494 tombstones the entry), and drops. **Caching the pointer would convert that clean miss into a use-after-free** — re-introducing, in a second place, precisely the dangling-`transport_t*` class #494 closed in the registry.
+
+The terminus half is unaffected: its generation stamp ([#511](https://github.com/avatarsd-llc/libtracer/pull/511)) is a different mechanism and does not rely on this claim.
+
+**Options for the forward half** (undecided — needs a ruling before implementation):
+
+- **Generation-stamp the link too**, mirroring the vertex stamp: a binding holds `(transport_t*, link_generation)` and re-checks. Symmetric with the terminus half and with `retire_gen_`, but adds a second generation concept.
+- **Sweep on teardown**: `remove_child` walks every link's bindings clearing any `down` matching the departing transport. Exact, and costs only the teardown path — but it is O(links × labels) there, and teardown already runs under the graph locks `link_down` takes.
+- **Cache the terminus only**, leaving the forward hop resolving by name. Forfeits the registry-scan win (~1.0–1.4 ns/link, and ~4.1 ns/link post-S2a) but keeps the larger terminus win, which is a full path walk.
 
 ## Consequences
 
