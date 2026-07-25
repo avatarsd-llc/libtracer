@@ -354,7 +354,11 @@ class fwd_router_t {
      * The owning rope-tier twin of `resolve_terminus` (ADR-0053 ④b / 3c-iii):
      * a request FWD reassembled as a scatter-gather rope (fragmented WS / CAN) is
      * adopted as a lazy @ref wire::tlv_view_t and resolved through the view-tier
-     * `op_resolver_t::resolve(tlv_view_t)` — the interim flatten this replaces is
+     * `op_resolver_t::resolve(tlv_view_t)`. Measured domain (ADR-0053 erratum): this tier
+     * earns its place on LARGE, LIGHTLY-FRAGMENTED frames — at 64 KB / 2 links it is ~12%
+     * ahead of flatten-then-arena, and behind it everywhere smaller. A single-link rope
+     * never reaches here (see the short-circuit below), which is deliberate and measured.
+     * The interim flatten this replaces is
      * deleted. The lazy view defers CRC, so integrity is verified here
      * (verify-all-then-apply, ADR-0053 §4) before the op mutates state, matching the
      * arena terminus's `decode_into(VERIFY)`. The ADR-0042 §3 referenced store needs

@@ -568,10 +568,15 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
     const auto view = wire::tlv_view_t::over(std::move(frame));
     if (!view) return;                        // malformed root ⇒ drop (as a decode error)
     if (!view->verify().has_value()) return;  // root CRC failure ⇒ drop
-    // The rope tier stores its one ownership copy (own_tlv) — the ADR-0042 §3
-    // referenced store needs a contiguous frame view, absent for a scatter-gather
-    // rope, so no frame_view is threaded. Reply routes back over the inbound link,
-    // its dst the request's accumulated src, exactly as the arena terminus.
+    // No frame_view is threaded, and the rope tier does not need one: unlike the arena's
+    // pin_wire — which requires a contiguous frame view and is gated on it —
+    // view_node::pin_wire IGNORES the argument and subropes the payload directly
+    // (`op_resolve_view.cpp:99-101`), so the ADR-0042 §3 referenced store works here with
+    // ZERO copy, retaining only the payload's links rather than the whole frame. (This
+    // comment previously read as though the pin were unavailable on the rope path; it is
+    // the reverse, and that misreading nearly justified deleting the tier.) Reply routes
+    // back over the inbound link, its dst the request's accumulated src, as at the arena
+    // terminus.
     auto reply = resolver_.resolve(*view, inbound_name, nullptr);
     if (!reply) return;                    // structurally non-request ⇒ drop
     if (reply->link_count() == 0) return;  // assemble OOM ⇒ empty rope ⇒ drop (no garbage frame)
