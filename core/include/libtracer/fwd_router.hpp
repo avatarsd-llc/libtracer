@@ -304,7 +304,7 @@ class fwd_router_t {
      */
     void on_frame_bus(std::string_view bus_child, std::string_view peer,
                       std::span<const std::byte> frame);
-    /** @brief Rope twin of @ref on_frame_bus. */
+    /** @brief Rope twin of `on_frame_bus`. */
     void on_frame_rope_bus(std::string_view bus_child, std::string_view peer, view::rope_t frame);
     /** @brief The shared routing body: @p frame_view is the owning frame when the
      *         link delivers ropes (nullptr on the borrowed-span path). @p bus_child is the
