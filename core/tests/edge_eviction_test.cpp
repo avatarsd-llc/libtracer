@@ -474,6 +474,50 @@ void test_concurrent_evict_vs_writes() {
     check(delivered.load() == 1, "exactly the surviving edge delivers after the storm");
 }
 
+/**
+ * @brief Clearing a wire edge RECLAIMS its retained state — it does not merely deactivate it.
+ *
+ * `clear_edge` used to flip `active` and nothing else, so a cleared edge kept its
+ * `target_key` buffer, its `source_view` **segment pin** and the whole cold `remote` half
+ * resident until an unrelated `add_edge` happened to reuse that index. On a node whose
+ * subscribers come and go, that is a frame segment held alive indefinitely by a dead edge.
+ *
+ * Observed through the segment's own refcount, because that is the thing that actually
+ * matters and a behavioural test cannot see it: a deactivated slot and a reclaimed slot route
+ * identically. It must be a WIRE edge — the in-process `subscribe(path, callback)` sugar
+ * retains no view, so the same assertion against it would pass no matter what `clear_edge`
+ * did, which is a test that cannot fail.
+ *
+ * The 80-byte slot SHELL must survive: RFC-0009 §D.2 makes `:subscribers[]` indices stable.
+ */
+void test_clear_edge_releases_the_slot_pin() {
+    std::printf("clear_edge reclaims retained slot state:\n");
+    graph_t g;
+    vertex_handle_t a = g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
+
+    // Build the SUBSCRIBER view over a segment this test also holds, so the slot's retained
+    // pin is visible here as an extra reference.
+    const std::vector<std::byte> sub_tlv = b_subscriber("cli:9");
+    tr::view::segment_ptr_t seg = tr::view::heap_alloc(sub_tlv.size());
+    std::memcpy(seg->bytes.data(), sub_tlv.data(), sub_tlv.size());
+    const auto refs = [&] { return seg->refcount.load_acquire(); };
+    const std::uint_least32_t held = refs();
+
+    check(g.subscribe_wire(a, view_t::over(tr::view::segment_ptr_t(seg)),
+                           make_value(b_path({"cli:9"})), "cli:9")
+              .has_value(),
+          "wire subscriber bound");
+    const std::uint_least32_t pinned = refs();
+    check(pinned > held, "the slot PINS the SUBSCRIBER segment while the edge is live");
+
+    // Clear it through the wire door (`:subscribers[0]` cleared), then require the pin gone.
+    const auto clear_fp = path_t::parse("/a:subscribers[0]");
+    check(clear_fp.has_value(), "the clear field-path parses");
+    check(g.write(a, clear_fp->field(), make_value({})).has_value(),
+          "clear the slot through the :subscribers[0] field-write door");
+    check(refs() == held, "clearing RELEASES the pin — the segment is no longer retained");
+}
+
 }  // namespace
 
 /** @brief Entry: run every eviction sub-test; exit nonzero on any failure. */
@@ -528,6 +572,7 @@ int main() {
     std::printf("== edge_eviction_test ==\n");
     test_evict_scoped_to_link();
     test_local_unsubscribe();
+    test_clear_edge_releases_the_slot_pin();
     test_slot_reuse_and_index_stability();
     test_router_link_down();
     test_departure_notifier_seam();
