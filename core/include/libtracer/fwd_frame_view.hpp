@@ -87,6 +87,46 @@ template <class Cursor>
                      .total = h->total};
 }
 
+/** @brief The most `dst` segments the mount descent ever inspects: net / module / name / peer. */
+inline constexpr std::size_t kMountPeekMax = 4;
+
+/**
+ * @brief The leading `dst` segments of a FWD, read by OFFSET with no allocation.
+ *
+ * The strip-K generalization of @ref peek_fwd_first_dst_seg (ADR-0061): a mount path is
+ * `/net/<module>/<name>[/<peer>]`, so the demux needs the first few segments rather than
+ * exactly one. Returns each segment's `[body_off, body_len)` in order, up to
+ * @ref kMountPeekMax; a shorter `dst` simply yields fewer. Offsets, not spans, so the
+ * result is source-agnostic — the caller re-slices from its own cursor (contiguous or
+ * rope). Empty iff the frame is not a structured FWD with an op VALUE and a non-empty dst.
+ *
+ * @tparam Cursor A grammar byte-source cursor (span or rope).
+ * @param  cur    The cursor positioned at the frame's first byte.
+ */
+template <class Cursor>
+[[nodiscard]] std::size_t peek_fwd_dst_segs(
+    const Cursor& cur, std::array<std::pair<std::size_t, std::size_t>, kMountPeekMax>& out) {
+    const auto fwd_h = read_fwd_header(cur, 0);
+    if (!fwd_h || fwd_h->type != wire::type_t::FWD || !fwd_h->opt.pl) return 0;
+    const std::size_t body_end = fwd_h->body_off + fwd_h->body_len;
+    const auto op_h = read_fwd_header(cur, fwd_h->body_off);
+    if (!op_h || op_h->type != wire::type_t::VALUE) return 0;
+    const std::size_t dst_pos = fwd_h->body_off + op_h->total;
+    if (dst_pos >= body_end) return 0;
+    const auto dst_h = read_fwd_header(cur, dst_pos);
+    if (!dst_h || dst_h->type != wire::type_t::PATH || dst_h->body_len == 0) return 0;
+    const std::size_t dst_end = dst_h->body_off + dst_h->body_len;
+    std::size_t pos = dst_h->body_off;
+    std::size_t n = 0;
+    while (n < kMountPeekMax && pos < dst_end) {
+        const auto seg_h = read_fwd_header(cur, pos);
+        if (!seg_h || seg_h->type != wire::type_t::NAME) break;
+        out[n++] = {seg_h->body_off, seg_h->body_len};
+        pos += seg_h->total;
+    }
+    return n;
+}
+
 /**
  * @brief The forward dispatch decision, read by OFFSET with no allocation
  *        (ADR-0038 inv. #1, ADR-0039).
@@ -261,7 +301,11 @@ class stack_writer {
 /** @brief Capacity of the forward hop's first head: FWD hdr(≤6) + op TLV(small) + PATH hdr(≤6). */
 inline constexpr std::size_t kFwdHead1Cap = 64;
 /** @brief Capacity of the forward hop's second head: PATH hdr(≤6) + one NAME(≤4+segment). */
-inline constexpr std::size_t kFwdHead2Cap = 96;
+// Sized for the grown src header PLUS a full mount path (ADR-0061): `net` / `<module>` /
+// `<name>` / `<peer>`, each a 4-byte NAME header plus its bytes. The pre-strip-K value (96)
+// budgeted for ONE segment; four user-chosen names need materially more, and an overflow
+// here is a silent drop of a legal frame, not a safe rejection.
+inline constexpr std::size_t kFwdHead2Cap = 256;
 
 /**
  * @brief The rebuilt forward-hop frame: fresh stack heads + the untouched source
@@ -316,23 +360,35 @@ struct fwd_rebuild_t {
  * @brief The forward hop's head rebuild, read entirely by OFFSET — no decoded
  *        tree (ADR-0038 inv. #1).
  *
- * Layout: `FWD{ op VALUE, dst PATH, FIELD? sel, src PATH, tail }` — strips dst's
- * leading segment (shrink), grows src by @p inbound_name (unless the op is
+ * Layout: `FWD{ op VALUE, dst PATH, FIELD? sel, src PATH, tail }` — strips @p strip_k
+ * leading dst segments (shrink), grows src by @p inbound_mount (unless the op is
  * REPLY: a reply accumulates no return route, RFC-0004 §B), and synthesizes the
  * two fresh stack heads. The caller scatter-gathers the result via
  * @ref fwd_rebuild_t::gather — no payload copy, zero heap.
  *
+ * **strip-K and the symmetric return route (ADR-0061 + its erratum).** A mount is
+ * addressed by its full path `/net/<module>/<name>[/<peer>]`, so a hop consumes K
+ * segments rather than one, and `src` grows by that SAME run — not by a single NAME.
+ * Growing by a bare name would make the return route ambiguous the moment connection
+ * names are per-module-scoped (`/net/ws-client/foo` vs `/net/tcp-client/foo`), because a
+ * reply's `dst` IS the accumulated `src`. Prepending the whole mount keeps
+ * routing-address `==` vertex-path in BOTH directions, so a reply resolves through the
+ * identical descent as a forward.
+ *
  * @tparam Cursor A grammar byte-source cursor (span or rope).
- * @param  cur          The cursor positioned at the inbound FWD frame's first byte.
- * @param  inbound_name This node's NAME for the link the frame arrived on.
+ * @param  cur           The cursor positioned at the inbound FWD frame's first byte.
+ * @param  inbound_mount This node's mount path for the link the frame arrived on, one
+ *                       string per segment (e.g. `{"net", "ws-client", "foo"}`).
+ * @param  strip_k       How many leading dst segments this hop consumes.
  * @retval std::nullopt The frame is not a well-formed forwardable FWD (wrong
- *         type/shape) — the caller falls to its terminus path.
+ *         type/shape, or fewer than @p strip_k dst segments) — the caller falls to its
+ *         terminus path.
  * @note   A returned rebuild may still have `!ok()` (an oversized op TLV
  *         overflowed a head) — the caller must check and drop, never overrun.
  */
 template <class Cursor>
-[[nodiscard]] std::optional<fwd_rebuild_t> rebuild_fwd_forward(const Cursor& cur,
-                                                               std::string_view inbound_name) {
+[[nodiscard]] std::optional<fwd_rebuild_t> rebuild_fwd_forward(
+    const Cursor& cur, std::span<const std::string_view> inbound_mount, std::size_t strip_k) {
     const auto fwd_h = read_fwd_header(cur, 0);
     if (!fwd_h || fwd_h->type != wire::type_t::FWD) return std::nullopt;
     const std::size_t body_end = fwd_h->body_off + fwd_h->body_len;
@@ -368,14 +424,23 @@ template <class Cursor>
     r.src_body_off = src_h->body_off;
     r.src_body_len = src_h->body_len;
 
-    // The leading dst segment (a NAME) to strip.
-    const auto seg_h = read_fwd_header(cur, dst_h->body_off);
-    if (!seg_h || seg_h->type != wire::type_t::NAME) return std::nullopt;
-    r.rem_dst_off = dst_h->body_off + seg_h->total;
-    r.rem_dst_len = dst_h->body_len - seg_h->total;
+    // The K leading dst segments (NAMEs) this hop consumes.
+    const std::size_t dst_end = dst_h->body_off + dst_h->body_len;
+    std::size_t strip_at = dst_h->body_off;
+    for (std::size_t i = 0; i < strip_k; ++i) {
+        if (strip_at >= dst_end) return std::nullopt;  // dst shorter than the mount
+        const auto seg_h = read_fwd_header(cur, strip_at);
+        if (!seg_h || seg_h->type != wire::type_t::NAME) return std::nullopt;
+        strip_at += seg_h->total;
+    }
+    r.rem_dst_off = strip_at;
+    r.rem_dst_len = dst_end - strip_at;
 
-    // The inbound NAME appended to src (grow) — empty for a REPLY (no accumulation).
-    const std::size_t inbound_name_len = is_reply ? 0u : (4u + inbound_name.size());
+    // The inbound mount path appended to src (grow) — empty for a REPLY (no accumulation).
+    std::size_t inbound_name_len = 0;
+    if (!is_reply) {
+        for (const std::string_view seg : inbound_mount) inbound_name_len += 4u + seg.size();
+    }
 
     const std::size_t new_dst_body = r.rem_dst_len;
     const std::size_t new_src_body = src_h->body_len + inbound_name_len;
@@ -393,9 +458,23 @@ template <class Cursor>
     r.head1.header(wire::type_t::PATH, new_dst_body);
 
     r.head2.header(wire::type_t::PATH, new_src_body);
-    if (!is_reply) r.head2.name(inbound_name);
+    if (!is_reply) {
+        for (const std::string_view seg : inbound_mount) r.head2.name(seg);
+    }
 
     return r;
+}
+
+/**
+ * @brief Single-NAME convenience overload — a flat, one-segment mount (strip-1).
+ *
+ * The pre-ADR-0061 shape, kept for callers whose link identity is a bare NAME.
+ */
+template <class Cursor>
+[[nodiscard]] std::optional<fwd_rebuild_t> rebuild_fwd_forward(const Cursor& cur,
+                                                               std::string_view inbound_name) {
+    const std::string_view one[1] = {inbound_name};
+    return rebuild_fwd_forward(cur, std::span<const std::string_view>(one), 1);
 }
 
 }  // namespace tr::net
