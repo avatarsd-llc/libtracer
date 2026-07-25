@@ -139,10 +139,20 @@ rather than hardcoding a number tuned on one machine.
 
 **Both scans must be visible.** An earlier revision registered the inbound child *first*, so
 `entry_by_name` always hit at position 1 and was invisible: the bench reported one scan's cost
-and called it the hop — understating it by roughly 3x. The inbound child is now registered
-**last**. The two scans are not interchangeable: `entry_by_name` compares whole strings (a
-length check rejects most candidates), while `by_segments` compares a qualified key piecewise,
-which is why the `dst` scan dominates.
+and called it the hop. Registering it *last* was supposed to fix that — but the bench then
+registered the inbound link **twice**, once at each end, so the lookup matched the first slot
+at position 1 regardless and the fix never took effect. (That duplicate was also a real
+registry bug: a shadow slot that survived `erase`.) Both are gone; the numbers above are the
+first that actually include the second scan.
+
+**The timed path must be the production path.** The bench used to call `on_frame` by name — a
+ctx-less entry only tests and SDK hosts take. A real transport delivers through the receiver
+`add_child` installs, which is bound to a stable per-child ctx. The hop is now driven through
+the inbound link's receiver, so what is timed is what ships.
+
+The two scans are not interchangeable: `entry_by_name` compares whole strings (a length check
+rejects most candidates), while `by_segments` compares a qualified key piecewise — which is
+why the `dst` scan dominates, at roughly 7:1 measured.
 
 ### What the shape means
 
@@ -158,7 +168,16 @@ to 390 ns — no win. A node's links overwhelmingly sit in **one** module (a dev
 it. The per-module key earns its place by keeping two modules' same-named connections
 distinct — a **correctness** property. It buys no lookup time.
 
-**Is this a per-frame or a first-frame cost?** Today, **per-frame on every path**:
+**One of the two scans is gone.** A hop no longer looks the inbound child up at all: its mount
+run is carried on the link's own receiver ctx, created once in `add_child`. Measured against
+the corrected bench, that is **-36 ns at N=64 (-9%)**, and the saving grows linearly with the
+link count — 128 -> 117 at N=8, 258 -> 229 at N=32 — exactly the shape of deleting one of two
+linear scans. A copy on the ctx rather than a pointer into the registry slot is deliberate:
+slot addresses are not stable across a connection-create (#521), whereas the ctx deque never
+invalidates a reference.
+
+**Is the remaining scan a per-frame or a first-frame cost?** Today, **per-frame on every
+path**:
 
 | Path | Registry work per frame | Why |
 | --- | --- | --- |

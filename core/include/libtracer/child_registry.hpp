@@ -212,6 +212,17 @@ class child_registry_t {
         return by_name(detail::as_string_view(seg));
     }
 
+    /**
+     * @brief Qualified name @p name pre-encoded as a run of NAME TLVs — the mount run.
+     *
+     * The same bytes a slot's `mount_tlv` holds, exposed so a link's receiver ctx can carry
+     * its OWN copy and a forward hop need not scan the table to find them. It is a pure
+     * function of @p name, so the copy cannot drift from the slot's. A control-plane call.
+     */
+    [[nodiscard]] static std::vector<std::byte> mount_run_for(std::string_view name) {
+        return encode_mount_name(name);
+    }
+
     /** @brief Number of slots — live children PLUS tombstones (test introspection). */
     [[nodiscard]] std::size_t size() const noexcept { return children_.size(); }
 

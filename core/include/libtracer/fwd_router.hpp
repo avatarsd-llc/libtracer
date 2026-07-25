@@ -272,6 +272,27 @@ class fwd_router_t {
 
    private:
     /**
+     * @brief A link's stable per-child receiver state — its identity AND its mount run.
+     *
+     * `mount_tlv` is the child's mount path pre-encoded as a run of NAME TLVs, the same
+     * bytes @ref child_registry_t::child_t holds. Carrying a COPY here is what keeps the
+     * forward path off the registry entirely: a hop grows `src` from `ctx->mount_tlv`
+     * instead of scanning the table for the inbound child, which removes one of the two
+     * per-frame linear scans (`docs/performance.md` §2b).
+     *
+     * A copy rather than a pointer into the registry slot is deliberate. Slot addresses are
+     * NOT stable across a connection-create — `children_` is a vector and `add` appends
+     * (#521) — so a cached slot pointer would be a use-after-free. This deque, by contrast,
+     * never invalidates a reference, and the run is a pure function of the child's name, so
+     * a copy cannot drift: re-adding a tombstoned name yields identical bytes.
+     */
+    struct child_rx_ctx_t {
+        fwd_router_t* self;
+        std::string name;
+        std::vector<std::byte> mount_tlv;
+    };
+
+    /**
      * @brief Route one OWNING inbound frame from a rope-delivering link
      *        (ADR-0042 §1, generalized per ADR-0053).
      *
@@ -302,15 +323,20 @@ class fwd_router_t {
      * replies, departure) — those key both sides consistently and the registry's peer
      * fallback resolves them.
      */
-    void on_frame_bus(std::string_view bus_child, std::string_view peer,
+    void on_frame_bus(const child_rx_ctx_t& ctx, std::string_view peer,
                       std::span<const std::byte> frame);
     /** @brief Rope twin of `on_frame_bus`. */
-    void on_frame_rope_bus(std::string_view bus_child, std::string_view peer, view::rope_t frame);
+    void on_frame_rope_bus(const child_rx_ctx_t& ctx, std::string_view peer, view::rope_t frame);
+    /** @brief The shared rope routing body; @p inbound_ctx is the link's receiver ctx when the
+     *         frame arrived through one (nullptr on the public `on_frame_rope` entry). */
+    void on_frame_rope_impl(std::string_view inbound_name, view::rope_t frame,
+                            const child_rx_ctx_t* inbound_ctx, bool from_peer);
     /** @brief The shared routing body: @p frame_view is the owning frame when the
      *         link delivers ropes (nullptr on the borrowed-span path). @p bus_child is the
      *         owning child's qualified name when the frame came from a bus peer, else empty. */
     void on_frame_impl(std::string_view inbound_name, std::span<const std::byte> frame,
-                       const view::view_t* frame_view, std::string_view bus_child = {});
+                       const view::view_t* frame_view, const child_rx_ctx_t* inbound_ctx = nullptr,
+                       bool from_peer = false);
     /**
      * @brief Terminus: arena-decode @p frame (ADR-0041) and resolve + reply.
      *
@@ -351,8 +377,9 @@ class fwd_router_t {
      * @param cur     The cursor positioned at the inbound FWD frame's first byte.
      */
     template <class Cursor>
-    void route_fwd_forward(std::string_view inbound_name, std::string_view bus_child,
-                           std::size_t strip_k, const Cursor& cur, transport_t& child);
+    void route_fwd_forward(std::string_view inbound_name, const child_rx_ctx_t* inbound_ctx,
+                           bool from_peer, std::size_t strip_k, const Cursor& cur,
+                           transport_t& child);
     /**
      * @brief Dispatch a multi-link control frame (ADVERTISE / COMPACT / HANDLE_NACK)
      *        rope-native (ADR-0055 §2).
@@ -391,10 +418,6 @@ class fwd_router_t {
     // router plus the child's inbound NAME (a bus link tags frames with the peer
     // name itself, so its ctx is just the router). Deque for pointer stability —
     // insert-only, like registry_ (the transport holds the address for its life).
-    struct child_rx_ctx_t {
-        fwd_router_t* self;
-        std::string name;
-    };
 
     graph::graph_t& graph_;
     graph::op_resolver_t resolver_;
