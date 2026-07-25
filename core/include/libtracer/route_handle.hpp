@@ -96,8 +96,8 @@ struct handle_binding_t {
     /** @brief ADR-0062: the resolution, filled on first use and re-filled when it goes stale.
      *         `warm == false` means "never resolved"; the two cached forms carry their own
      *         staleness signal (see @ref resolved_binding_t). */
-    bool warm = false;                /**< @brief true ⇒ the cached fields below are filled. */
-    const void* down_slot = nullptr;  /**< @brief Forward: cached `child_registry_t::child_t*`. */
+    bool warm = false;               /**< @brief true ⇒ the cached fields below are filled. */
+    const void* down_slot = nullptr; /**< @brief Forward: cached `child_registry_t::child_t*`. */
     std::optional<graph::vertex_handle_t> target; /**< @brief Terminus: the cached vertex. */
     std::uint32_t target_gen = 0; /**< @brief Terminus: generation `target` was resolved at. */
 };

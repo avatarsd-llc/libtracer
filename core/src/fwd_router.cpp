@@ -659,11 +659,14 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
         const std::vector<std::byte> stripped_bytes = wire::encode(stripped);
 
         const std::uint16_t out_label = handles_.alloc_label(down_name);
-        handles_.bind_ingress(inbound_name, label,
-                              handle_binding_t{.terminus = false,
-                                               .down_link = down_name,
-                                               .out_label = out_label,
-                                               .local_route = {}});
+        // Built field-by-field rather than with a designated-initializer brace: the binding
+        // now carries ADR-0062's memoized resolution too, and an aggregate init that names
+        // only some members trips -Werror=missing-field-initializers on the ESP toolchain.
+        handle_binding_t fwd;
+        fwd.terminus = false;
+        fwd.down_link = down_name;
+        fwd.out_label = out_label;
+        handles_.bind_ingress(inbound_name, label, std::move(fwd));
         handles_.record_egress(down_name, out_label, stripped_bytes);
         const std::vector<std::byte> adv2 = encode_advertise(out_label, stripped_bytes);
         hit.link->send(std::span<const std::byte>(adv2));
@@ -671,10 +674,10 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
     }
 
     // Terminus: the route resolves locally here — bind the label to the local route.
-    handles_.bind_ingress(
-        inbound_name, label,
-        handle_binding_t{
-            .terminus = true, .down_link = {}, .out_label = 0, .local_route = wire::encode(route)});
+    handle_binding_t term;
+    term.terminus = true;
+    term.local_route = wire::encode(route);
+    handles_.bind_ingress(inbound_name, label, std::move(term));
 }
 
 void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label,
