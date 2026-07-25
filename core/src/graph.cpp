@@ -380,6 +380,11 @@ void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& k
     v->for_each_child([this, &keys](vertex_t& c) { retire_subtree(&c, keys); });
 }
 
+std::uint32_t graph_t::retire_generation(vertex_handle_t vh) const noexcept {
+    const vertex_t* const v = vh.get();
+    return v == nullptr ? 0u : v->retire_gen();
+}
+
 result_t<void> graph_t::retire(vertex_handle_t vh) {
     vertex_t* root = vh.get();
     // The graph root has no parent and is not a retirable vertex.

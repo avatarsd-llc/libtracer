@@ -237,6 +237,22 @@ class graph_t {
     result_t<void> retire(vertex_handle_t vh);
 
     /**
+     * @brief @p vh's retirement generation — the stamp a cached resolution carries (ADR-0062).
+     *
+     * A `vertex_handle_t` never dangles (the vertex map is pinned and insert-only), but
+     * @ref retire re-virginizes the object in place. A holder that caches a resolved handle
+     * — a route-handle terminus binding, say — records this alongside it and re-reads it
+     * before use: a mismatch means the path was retired (and possibly re-created for a
+     * DIFFERENT owner) since the resolution, so the cached answer must be discarded rather
+     * than delivered into whatever now occupies that path.
+     *
+     * Lock-free; the counter is bumped under retirement's own ordering. Callers must NOT
+     * cache an authorization decision this way — a generation match says the vertex is the
+     * same one, never that the caller may still act on it (ACL stays per-operation).
+     */
+    [[nodiscard]] std::uint32_t retire_generation(vertex_handle_t vh) const noexcept;
+
+    /**
      * @brief Evict every subscriber edge a departed link left behind — the graph half
      *        of link-teardown eviction (RFC-0009 §D, extended to peer departure).
      *

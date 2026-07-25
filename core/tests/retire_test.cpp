@@ -337,6 +337,43 @@ void test_concurrent_read_vs_retire() {
     check(true, "read-vs-retire/revive churn completed without a crash / bad_function_call / UAF");
 }
 
+/**
+ * @brief The ADR-0062 stamp: retirement is OBSERVABLE to a holder of a cached resolution.
+ *
+ * A vertex_handle_t never dangles, so a cached handle stays *usable* across a retire —
+ * which is exactly the hazard: the revived path may belong to a DIFFERENT owner. The
+ * generation is what lets a holder tell "same vertex" from "same address, new occupant".
+ */
+void test_retire_generation() {
+    std::printf("ADR-0062: a retire is observable through the generation stamp\n");
+    graph_t g;
+    const vertex_handle_t vh =
+        g.register_vertex(*path_t::parse("/dev/sensor"), role_t::STORED_VALUE);
+
+    const std::uint32_t before = g.retire_generation(vh);
+    check(g.write(vh, make_value(as_bytes("v1"))).has_value(), "wrote a value");
+    check(g.retire_generation(vh) == before,
+          "an ordinary write does NOT move the generation — only retirement does");
+
+    check(g.retire(vh).has_value(), "retired it");
+    const std::uint32_t after = g.retire_generation(vh);
+    check(after != before, "retiring MOVED the generation — a cached resolution is now stale");
+
+    // Revive the same path: a fresh owner, the SAME vertex object, and a handle cached
+    // before the retire compares unequal — which is the confused deputy this prevents.
+    const vertex_handle_t revived =
+        g.register_vertex(*path_t::parse("/dev/sensor"), role_t::STORED_VALUE);
+    check(revived == vh, "revival reuses the SAME vertex object (the map is insert-only)");
+    check(g.retire_generation(revived) == after,
+          "reviving does not move it again — the stamp marks the retirement, not the refill");
+    check(g.retire_generation(revived) != before,
+          "so a resolution cached before the retire is detectably stale AFTER revival — "
+          "the case a bare cached handle would silently deliver into");
+
+    check(g.retire(revived).has_value(), "retire it again");
+    check(g.retire_generation(revived) != after, "each retirement moves it again");
+}
+
 }  // namespace
 
 int main() {
@@ -346,6 +383,7 @@ int main() {
     test_no_stale_handler();
     test_subtree();
     test_idempotent_and_silent();
+    test_retire_generation();
     test_concurrent_read_vs_retire();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
