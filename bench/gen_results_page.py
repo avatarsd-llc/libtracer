@@ -176,20 +176,30 @@ linear scans. A copy on the ctx rather than a pointer into the registry slot is 
 slot addresses are not stable across a connection-create (#521), whereas the ctx deque never
 invalidates a reference.
 
-**Is the remaining scan a per-frame or a first-frame cost?** Today, **per-frame on every
-path**:
+**Is the remaining scan a per-frame or a first-frame cost?** It depends on the path, and
+ADR-0062 changed the answer for one of them:
 
-| Path | Registry work per frame | Why |
+| Path | Registry work per frame | |
 | --- | --- | --- |
-| Plain `FWD` write | mount descent + inbound `entry_by_name` | the frame carries the full path; nothing to cache against |
-| `COMPACT` on a bound label | `by_name(binding->down_link)` | compaction removed the *route* from the wire, but the binding stores the link's **name**, so each frame still scans to turn it back into a pointer |
-| Remote delivery to a subscriber | `by_name(sub.link)` | same shape — the subscriber record holds a name |
+| Plain `FWD` write | mount descent + inbound `entry_by_name` | **per-frame** — the frame carries the full path, so there is nothing to cache against |
+| `COMPACT` on a bound label | one dereference of the cached registry slot | **first-frame** — resolved once, then memoized |
+| Remote delivery to a subscriber | `by_name(sub.link)` | **per-frame** — the subscriber record still holds a name |
 
-So compaction (RFC-0004 §E.1) shrinks the *wire* and skips the multi-segment descent, but it
-does **not** yet make the scan a first-frame cost. Making it one is precisely what ADR-0062 is
-for — a binding holds the **resolved target**, not a name. Increment 1 (the
-retirement-generation stamp a cached resolution compares against) has landed; the caching
-itself has not. Until it does, read every row above as a per-frame cost.
+Compaction (RFC-0004 §E.1) shrinks the *wire*; ADR-0062 shrinks the *resolution*. A binding
+now holds the resolved target rather than a name, and both cached forms self-invalidate
+without a callback: the terminus compares a **retirement generation**, and the forwarding hop
+reads the registry **slot**, whose `link` teardown nulls in place — so a departed link reads
+`nullptr`, the same clean miss an unresolved lookup gives. The tombstone *is* the
+invalidation, which is why this needed neither a second generation concept nor a teardown
+sweep. (It also required slot addresses to be stable, which is what ADR-0063's chunked list
+provides; the container decision had to land first.)
+
+Measured on the warm path (`bench_compact_delivery`, versus the same bench built against the
+prior commit): terminus delivery **298 → 202 ns (−32%)** with allocations **13 → 9** and bytes
+**655 → 443**; the forwarding hop **202 → 180 ns**. The forwarding gain is the smaller one
+because the scan it removes was already cheap at that link count — that path is dominated by
+`encode_compact`'s fresh vector and the COMPACT frame's own owning decode, **neither of which
+is resolution**, and which are the next lever there.
 
 The forward hop remains **zero-heap** regardless (`bench_forward_heap`, `allocs=0`, CI-gated)."""
 
