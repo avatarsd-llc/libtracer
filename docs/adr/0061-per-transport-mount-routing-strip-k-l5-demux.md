@@ -1,6 +1,6 @@
 # Per-module mount routing: routing-address `==` vertex-path, realized as a strip-K structural descent in the L5 demux over a per-module-scoped registry — refining ADR-0037/0038
 
-Status: proposed. **Refines [ADR-0037](0037-net-side-channels-dissolve-into-vertex-tree-compositor.md)** (dissolve the side-channel) and **[ADR-0038](0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md) §3b** (the `child_registry_t` brick) — it is their concrete strip-K + scoped-registry realization, not a supersession. **Upholds [ADR-0016](0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md)** (an L4 `vertex_t` carries no `transport_t*`; `graph.find` stays mount-unaware) and **ADR-0038 §3a** (the intra-device path pays nothing). The wire-visible byte change is governed by the already-accepted **[RFC-0014](../spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)** ([#492](https://github.com/avatarsd-llc/libtracer/issues/492)) — **no new RFC or amendment**. Grounded by a `/grill-with-docs` session, a deep-dive, and a three-lens spike whose load-bearing claims were adversarially verified against the code and the conformance vectors. **One condition remains before `accepted`: the forward-hop baseline bench** (see Consequences). A maintainer grill on 2026-07-25 triaged the four original conditions — three were circular (they could only be cleared by implementation this ADR itself gates) and are demoted to implementation obligations; the mechanism is settled, its hot-path affordability is not.
+Status: **accepted** (maintainer-ratified 2026-07-25, on the measured baseline below). **Refines [ADR-0037](0037-net-side-channels-dissolve-into-vertex-tree-compositor.md)** (dissolve the side-channel) and **[ADR-0038](0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md) §3b** (the `child_registry_t` brick) — it is their concrete strip-K + scoped-registry realization, not a supersession. **Upholds [ADR-0016](0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md)** (an L4 `vertex_t` carries no `transport_t*`; `graph.find` stays mount-unaware) and **ADR-0038 §3a** (the intra-device path pays nothing). The wire-visible byte change is governed by the already-accepted **[RFC-0014](../spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)** ([#492](https://github.com/avatarsd-llc/libtracer/issues/492)) — **no new RFC or amendment**. Grounded by a `/grill-with-docs` session, a deep-dive, and a three-lens spike whose load-bearing claims were adversarially verified against the code and the conformance vectors. **Every condition is cleared.** A maintainer grill on 2026-07-25 triaged the four original conditions: three were circular (clearable only by implementation this ADR itself gates) and were demoted to implementation obligations, leaving the forward-hop bench as the sole gate. That bench landed ([#503](https://github.com/avatarsd-llc/libtracer/pull/503), `bench/bench_forward_demux.cpp`) and **answered in the favorable direction — see Consequences for the numbers.**
 
 ## Context
 
@@ -24,7 +24,7 @@ A grill framed this as "routing is path polymorphism; the runtime routing table 
 
 2. **The mechanism stays in L5.** The FWD demux generalizes in three lockstep pieces:
    - **peek** — instead of peeking exactly the first `dst` segment (`fwd_frame_view.hpp:105-123`), recognize the **fixed structural prefix** by offset: `segment[0]==net` (literal), then `<module>` (one of the link-time-closed module set — `ws-client`, `ws-server`, `can`, …) are **descended but not forwarded**, then resolve the `<name>` segment against the **per-module-scoped** registry. Because the module declares its **shape**, the demux knows *structurally* whether a peer segment follows: a **multi-peer** module (`ws-server`, `can`) resolves the next segment as a peer in that module's own peer table (strip K+1); a **point-to-point** module (`ws-client`) forwards the residual directly (strip K). No runtime `bus()` probe — the module segment carries the shape.
-   - **strip-K** — `rebuild_fwd_forward` strips the K-segment local run at the mount hop (K = structural-depth-to-mount) rather than exactly one segment; `gather()` stays offset-only zero-copy and `src` still grows by **only** the single inbound-link `NAME` — the local mount prefix never rides the return route.
+   - **strip-K** — `rebuild_fwd_forward` strips the K-segment local run at the mount hop (K = structural-depth-to-mount) rather than exactly one segment; `gather()` stays offset-only zero-copy. **`src` grows by the full inbound mount path (`net` / `<module>` / `<name>`), not by a single `NAME`** — see the erratum below.
    - **scoped registry** — `child_registry_t` is **kept**, re-keyed from bare `<name>` to `<module>/<name>`, and its global cross-bus `peer_link` fallback narrows to a **per-endpoint** `resolve_peer` (scoped to the resolved multi-peer module — which is also what makes two servers' same-named peers distinct). `by_name`/`by_segment` mechanics are otherwise unchanged. All three demux sites move together: `on_frame_impl` (`fwd_router.cpp:249`), `on_frame_rope` (`:194`), `on_advertise` (`:440`).
 
    The L4 `vertex_t` stays **transport-blind** and `graph.find_ptr` stays **mount-unaware**; there is no is-mount marker and **no `graph.find` on the forward path** — hence no `map_mutex` per-hop regression. The mount binding is the opaque L5 registry link, never a raw pointer on a vertex.
@@ -43,9 +43,9 @@ A grill framed this as "routing is path polymorphism; the runtime routing table 
 
 ## Consequences
 
-**The one condition to clear before this moves from `proposed` to `accepted`:**
+**The condition that gated acceptance — now CLEARED:**
 
-- **UNCONFIRMED — hot-path affordability. A baseline bench answers it *without* strip-K code.** The
+- **CLEARED — hot-path affordability. The baseline bench answered it *without* strip-K code.** The
   per-hop fixed-depth structural walk + per-module-scoped linear scan over the immutable `children_`
   vector is bounded and zero-heap, but the net plane is latency-critical and
   [#386](https://github.com/avatarsd-llc/libtracer/issues/386) showed wide-fanout regression
@@ -70,7 +70,20 @@ A grill framed this as "routing is path polymorphism; the runtime routing table 
      shrinking term and missed the growing one.
 
   **Acceptance rule:** the ADR moves to `accepted` when the baseline shows the N=1 per-hop cost has
-  headroom for two additional segment compares. **Merge gate on S2a** (not on acceptance): `allocs=0`
+  headroom for two additional segment compares.
+
+  **MEASURED** ([#503](https://github.com/avatarsd-llc/libtracer/pull/503), dev box, gcc 14 Release):
+  `fixed` is **flat at ~82 ns/hop across N=1..64** — the constant term does not move with registry
+  size, as predicted. `scan` rises to ~169 ns at N=64, a marginal **~1.0–1.4 ns per link**, linear.
+  So strip-K's two extra segment compares cost **~3 ns, about 3.4% of one hop** — ample headroom, and
+  the term the scoping *narrows* is the one that actually grows with N. **Condition cleared; the ADR
+  is accepted.**
+
+  (The bench also had to calibrate its own batch size rather than hardcode one: a hop costs the same
+  order as `clock_gettime`, and an early draft timing each hop individually reported the whole-table
+  scan *beating* the first-hit lookup — the signature of a clock-dominated window.)
+
+  **Merge gate on S2a** (not on acceptance): `allocs=0`
   still holds on the forward hop, and the scoped hop is ≤ the flat hop at equal total link count.
   Two existing signals bound the risk meanwhile: the `allocs=0` forward gate, and the intra-device
   dispatch numbers (`inproc`/`inproc-borrow`/`inproc-path`) which per §3a must stay unchanged — a
@@ -83,7 +96,19 @@ work this ADR blocks could clear it):
 - **Vector byte rewrite is RFC-0014-governed → S7.** Strictly circular as a gate: S7 is four slices downstream of the S2 this ADR blocks. The wire-visible `dst` becomes `/net/<module>/<name>[/<peer>]/residual`; rewrite `fwd-routed-multihop` + `fwd-src-accumulated` under RFC-0014/[#492](https://github.com/avatarsd-llc/libtracer/issues/492)'s "proposed pending" clause-kind authority on the DRAFT spec — **not silently as a #419 tooling change** (`v1.md` §conformance: adding a vector is free, changing existing bytes is a spec change). **Keep the two gaps separate:** mount-vs-bare-name (pure impl + doc + vector conformance, no RFC) and one-level→two-level nesting depth (RFC-0014-governed).
 - **Teardown → [#494](https://github.com/avatarsd-llc/libtracer/issues/494), landing *first* and standalone.** `retire()`/[#66](https://github.com/avatarsd-llc/libtracer/issues/66) currently cannot evict the registry entry or tear the socket — add a registry `erase` + wire `retire`/`link_down` → evict. This is a real latent use-after-free **today**, independent of strip-K, so it is fixed against the flat registry on its own schedule rather than riding the re-key; it also keeps it out of S2a's ~250-450 LOC blast radius. RFC-0014's remove-half turns the latent leak live.
 
+**Erratum (2026-07-25, found while implementing S2a — corrects this ADR as accepted):**
+
+The strip-K bullet above originally read "`src` still grows by **only** the single inbound-link `NAME` — the local mount prefix never rides the return route." **That is wrong**, and it was carried over from the pre-per-module design rather than re-derived.
+
+A reply's `dst` **is** the accumulated `src`, and every hop resolves `dst[0]` against the registry (`fwd_router.cpp:151,163`). Once connection names are per-module-scoped, a bare `foo` in a return route cannot distinguish `/net/ws-client/foo` from `/net/tcp-client/foo` — the exact coexistence this ADR exists to enable. The forward direction was re-derived for per-module scoping; the reply direction was not, so "routing-address `==` vertex-path" held outbound and silently failed inbound.
+
+**Corrected:** `src` grows by the **full mount path** — `net` / `<module>` / `<name>`, the same K segments the forward hop stripped. Routing-address `==` vertex-path now holds in **both** directions, and a reply resolves through the *identical* strip-K descent as a forward: one mechanism, not two.
+
+The cost is a return route ~3× longer per hop. That is the cost [RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md) §E.1 route handles already exist to elide — a hop can bind `label ↔ return-route-so-far` and swap per hop in the reverse direction exactly as deliveries do forward, so the longer route is paid only on the cold exchange while established flows carry a `u16`. Reverse-direction binding raises the same "who originates the `ADVERTISE`" question as [#504](https://github.com/avatarsd-llc/libtracer/issues/504) and belongs to that design, not to a second mechanism.
+
 **Standing consequences:**
+
+- **Read alongside [ADR-0062](0062-resolve-once-label-bindings-hold-resolutions-not-names.md).** Once a label binding caches its resolved target, the strip-K descent is paid on a flow's **first** frame and established flows dereference past it entirely. The two must not be tuned independently: optimizing this descent further buys little once the steady state bypasses it, and the ~3 ns measured here is a cold-path cost, not a per-sample one.
 
 - Refines ADR-0038 §3b: keeps §3b.1's L5-registry layering realization; corrects only the **key** (bare `<name>` → `<module>/<name>`, plus per-endpoint peer scoping) and adds teardown. §3's "FWD demux lock-free" holds (still no `graph.find` on the forward path); invariants #1 (never full-decode), #2 (zero-heap forward), and §3a (intra-device pays nothing) stand. The registry now mutates at runtime (create/remove), so its "immutable after setup" premise erodes on the *write* side — the concurrency of runtime mutation vs. lock-free forward reads is TSan-gated (the plan's S5).
 - Closes #419 at the impl level (bare-name → mount form is the already-normative intent); the wire-visible closure lands with the #492 vector rewrite.
