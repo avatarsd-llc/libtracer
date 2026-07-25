@@ -165,7 +165,16 @@ test('topology: WITH identity the cycle closes, nodes collapse, and the walk sel
   // and the walk PROVED all three routes are one device. Pre-identity these were three
   // unrelated nodes (see the previous test).
   const a = g.nodes.find((n) => n.id === A);
-  assert.deepEqual(a.routes.map(routeKey).sort(), ['/', '/b/a', '/c/a']);
+  // Routes are MOUNT paths now (RFC-0014 §1 / ADR-0061): each hop is `net/<module>/<name>`,
+  // and the module says which END of the link this node holds — a's link to b is a's DIAL
+  // (ws-client) while b's link back to a is b's accepted LISTENER (ws-server). That
+  // asymmetry was invisible under bare-name routing and is exactly what per-module scoping
+  // makes addressable.
+  assert.deepEqual(a.routes.map(routeKey).sort(), [
+    '/',
+    '/net/ws-client/b/net/ws-server/a',
+    '/net/ws-server/c/net/ws-client/a',
+  ]);
 
   // Every link is seen from BOTH ends, because a link is bidirectional even though the
   // DIAL that created it was not: `a` dialing `b` creates link "b" at a AND link "a" at
@@ -196,7 +205,10 @@ test('topology: hub is reached by two independent routes and collapses to one no
 
   // a->hub directly, and a->b->hub. Two paths, one device: the dedup ADR-0044 says the
   // core will never do and the client must.
-  assert.deepEqual(routes, ['/b/hub', '/hub']);
+  assert.deepEqual(routes, [
+    '/net/ws-client/b/net/ws-client/hub',
+    '/net/ws-client/hub',
+  ]);
   assert.equal(g.edges.filter((e) => e.to === H).length, 2, 'two distinct edges reach the one hub');
 });
 

@@ -22,11 +22,14 @@
  *
  * ## Addressing (the part that surprises people)
  *
- * A connection's **routing key is its bare NAME**, not its `/net/<name>` vertex key.
- * `/net/b` is where you *read* the link's state; `b` is the first `dst` segment that
- * *routes through* it. So the walk composes routes as `[] → ['b'] → ['b','c']`, and
- * reads each node's connections at `[...route, 'net']:children[]`. (reference/03 and
- * /07 currently document a `/net/`-prefixed form that does not resolve — see #419.)
+ * A connection's **routing key IS its vertex path** — `/net/<module>/<name>` (RFC-0014 §1,
+ * ADR-0061). `/net/ws-client/b` is both where you *read* the link's state and the run of
+ * `dst` segments that *routes through* it. So the walk composes routes as
+ * `[] → ['net','ws-client','b'] → ['net','ws-client','b','net','ws-client','c']`, and
+ * discovers a node's links in TWO levels: `[...route,'net']:children[]` lists the modules,
+ * and `[...route,'net',<module>]:children[]` lists that module's connections. This CLOSES
+ * #419 — reference/03 and /07 documented the prefixed form all along, and the old
+ * bare-NAME demux was the divergence.
  *
  * ## Termination — read this before trusting a result
  *
@@ -231,9 +234,9 @@ export async function walkTopology(
    * facet and the generic member listing of a childless vertex is empty. Empty ⇒ safe
    * to route through by name; non-empty ⇒ a bus, and routing by name would broadcast.
    */
-  const peersOf = async (route: string[], name: string): Promise<string[]> => {
+  const peersOf = async (route: string[], module: string, name: string): Promise<string[]> => {
     try {
-      return listingNames(await client.readField([...route, netRoot, name], ':children[]'));
+      return listingNames(await client.readField([...route, netRoot, module, name], ':children[]'));
     } catch {
       return []; // unreadable ⇒ treat as point-to-point; the descend below will warn if it fails
     }
@@ -274,10 +277,12 @@ export async function walkTopology(
     const next: { route: string[]; id: string }[] = [];
 
     for (const { route, id } of frontier) {
-      let names: string[];
+      // RFC-0014 §1: `/net` enumerates the per-(transport, role) MODULES, and each module
+      // enumerates its member connections. So discovering a node's links is two levels, not
+      // one — and the same NAME may legitimately appear in two modules.
+      let modules: string[];
       try {
-        const listing = await client.readField([...route, netRoot], ':children[]');
-        names = listingNames(listing);
+        modules = listingNames(await client.readField([...route, netRoot], ':children[]'));
       } catch (err) {
         // A node with no /net has no connections — indistinguishable here from one that
         // refused the read. Either way it is a leaf, and either way the walk goes on.
@@ -285,13 +290,27 @@ export async function walkTopology(
         continue;
       }
 
-      for (const name of names) {
+      const links: { module: string; name: string }[] = [];
+      for (const module of modules) {
+        try {
+          const names = listingNames(
+            await client.readField([...route, netRoot, module], ':children[]'),
+          );
+          for (const name of names) links.push({ module, name });
+        } catch (err) {
+          warnings.push(
+            `could not read connections of module "${module}" at ${routeKey(route)}: ${String(err)}`,
+          );
+        }
+      }
+
+      for (const { module, name } of links) {
         if (opts.skipLink?.(name, route)) continue;
 
         // A bus link is a dead end: routing through its NAME broadcasts to every peer,
         // drawing N replies for one request. Record its peers and stop. (See
         // TopologyBusPeers for why the directed per-peer hop is not expressible either.)
-        const peers = await peersOf(route, name);
+        const peers = await peersOf(route, module, name);
         if (peers.length > 0) {
           const routable = peers.every((p) => !RESERVED_SEGMENT_CHARS.test(p));
           busLinks.push({ at: id, name, peers, routable });
@@ -302,7 +321,9 @@ export async function walkTopology(
           continue;
         }
 
-        const childRoute = [...route, name];
+        // The routing address IS the vertex path (ADR-0061), so a hop is the three
+        // segments `<netRoot>/<module>/<name>`, not the bare NAME.
+        const childRoute = [...route, netRoot, module, name];
         const child = await intern(childRoute);
         edges.push({ from: id, to: child.id, name });
         // Only descend into a node we have not already expanded — the dedup that makes
