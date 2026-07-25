@@ -402,6 +402,10 @@ class fwd_router_t {
     /** @brief Re-advertise an egress binding in response to a downstream HANDLE_NACK. */
     void on_nack(std::string_view inbound_name, std::uint16_t label);
     /** @brief Resolve a bound local route and apply the delivered write (delivery-is-a-write). */
+    /** @brief The vertex a bound route names, or nullopt — the memoizable half of
+     *         `deliver_local`, shared so a cached handle cannot diverge from it. */
+    [[nodiscard]] std::optional<graph::vertex_handle_t> resolve_route_vertex(
+        std::span<const std::byte> route_path) const;
     [[nodiscard]] bool deliver_local(std::span<const std::byte> route_path,
                                      std::span<const std::byte> payload);
     /**

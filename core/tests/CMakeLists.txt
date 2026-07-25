@@ -143,6 +143,11 @@ target_link_libraries(mount_routing_test PRIVATE libtracer)
 libtracer_test_warnings(mount_routing_test)
 add_test(NAME mount_routing COMMAND mount_routing_test)
 
+add_executable(compact_cache_test compact_cache_test.cpp)
+target_link_libraries(compact_cache_test PRIVATE libtracer)
+libtracer_test_warnings(compact_cache_test)
+add_test(NAME compact_cache COMMAND compact_cache_test)
+
 add_executable(registry_teardown_test registry_teardown_test.cpp)
 target_link_libraries(registry_teardown_test PRIVATE libtracer)
 libtracer_test_warnings(registry_teardown_test)
