@@ -1,0 +1,199 @@
+/**
+ * @file
+ * @brief Registry teardown — `child_registry_t::erase` / `remove_child` / `remove_connection`
+ * (#494).
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * `child_registry_t` used to be add-only, so a retired connection left its
+ * `name → transport_t*` entry resident and dangling — a use-after-free the moment
+ * RFC-0014's remove-half (#492 S2b) drives create/remove churn from the wire. These
+ * tests pin the teardown contract:
+ *   - a removed connection's NAME stops resolving (the #494 regression: a forward to it
+ *     must be a clean miss, not a route into freed memory);
+ *   - removal retires the identity vertex — `/net/<name>` reads not_found;
+ *   - the slot is TOMBSTONED, not erased: `size()` is stable while `live_size()` drops,
+ *     which is what keeps a concurrent lock-free reader's iteration valid;
+ *   - re-creating the same NAME REUSES its tombstone, so create/remove churn on a stable
+ *     name set does not grow the table (the aggressive-churn HIL case);
+ *   - removing an unknown NAME is a clean NotFound, and removal is idempotent.
+ */
+
+#include <cstddef>
+#include <cstdio>
+#include <cstring>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "libtracer/tlv_emit.hpp"
+#include "libtracer/tracer.hpp"
+
+namespace {
+
+using tr::graph::graph_t;
+using tr::graph::path_t;
+using tr::graph::status_t;
+using tr::net::child_registry_t;
+using tr::net::fwd_router_t;
+using tr::net::transport_vertex_t;
+
+int g_failures = 0;
+
+void check(bool ok, std::string_view what) {
+    std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
+    if (!ok) ++g_failures;
+}
+
+/** @brief A transport that only records what it was handed — no socket, no thread. */
+class sink_link_t : public tr::net::transport_t {
+   public:
+    void send(std::span<const std::byte> frame) override {
+        sent_.emplace_back(frame.begin(), frame.end());
+    }
+
+    /** @brief Number of frames this link was asked to carry. */
+    [[nodiscard]] std::size_t sends() const noexcept { return sent_.size(); }
+
+   private:
+    std::vector<std::vector<std::byte>> sent_;
+};
+
+/** @brief SPEC{ type, name } with no config — the provide_link-staged connection form. */
+tr::view::view_t conn_spec(std::string_view type, std::string_view name) {
+    std::vector<std::byte> body;
+    tr::wire::emit_name(body, "type");
+    tr::wire::emit_name(body, type);
+    tr::wire::emit_name(body, "name");
+    tr::wire::emit_name(body, name);
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, tr::wire::type_t::SPEC, tr::wire::opt_t{.pl = true},
+                       std::span<const std::byte>(body));
+    tr::view::segment_ptr_t seg = tr::view::heap_alloc(out.size());
+    if (!out.empty()) std::memcpy(seg->bytes.data(), out.data(), out.size());
+    return tr::view::view_t::over(std::move(seg));
+}
+
+/** @brief Create connection @p name over the staged @p link via the `:children[]` SPEC. */
+bool create_conn(graph_t& g, transport_vertex_t& net, sink_link_t& link, std::string_view name) {
+    net.provide_link(std::string(name), link);
+    const auto p = path_t::parse("/net:children[]");
+    if (!p) return false;
+    return g.write(*p, conn_spec("client", name)).has_value();
+}
+
+// --- the tests ---------------------------------------------------------------
+
+/** @brief The #494 regression: a removed NAME stops resolving; its vertex is retired. */
+void test_removed_name_stops_resolving() {
+    std::printf("removed NAME stops resolving\n");
+    graph_t g;
+    fwd_router_t router(g);
+    transport_vertex_t net(g, router);
+    sink_link_t link;
+
+    check(create_conn(g, net, link, "up"), "created /net/up over a staged link");
+    check(router.registry().by_name("up") == &link, "the NAME resolves to its link while live");
+    // A provided link is never auto-published (only a config-constructed socket self-reports),
+    // so give the vertex a value to read back — that is what retirement must take away.
+    check(net.set_link_state("up", tr::net::link_state_t::UP).has_value(),
+          "published its liveness");
+    check(g.read(*path_t::parse("/net/up")).has_value(), "/net/up reads while live");
+
+    const auto rm = net.remove_connection("up");
+    check(rm.has_value(), "remove_connection succeeds");
+    check(router.registry().by_name("up") == nullptr,
+          "the NAME resolves to NOTHING after removal (#494: no dangling transport_t*)");
+    const auto after = g.read(*path_t::parse("/net/up"));
+    check(!after && after.error() == status_t::NOT_FOUND, "/net/up is retired — reads not_found");
+}
+
+/** @brief The slot is tombstoned, not erased — stable addresses for lock-free readers. */
+void test_tombstone_not_erase() {
+    std::printf("erase tombstones rather than shrinking the table\n");
+    child_registry_t reg;
+    sink_link_t a;
+    sink_link_t b;
+    reg.add("a", a);
+    reg.add("b", b);
+    check(reg.size() == 2 && reg.live_size() == 2, "two live children");
+
+    check(reg.erase("a"), "erase reports it removed a live child");
+    check(reg.size() == 2, "the SLOT stays (no shift, no realloc — readers keep iterating)");
+    check(reg.live_size() == 1, "but only one child still resolves");
+    check(reg.by_name("a") == nullptr, "the tombstoned NAME misses");
+    check(reg.by_name("b") == &b, "its neighbour is untouched");
+    check(!reg.erase("a"), "erasing a tombstone reports nothing removed (idempotent)");
+    check(!reg.erase("nope"), "erasing an unknown NAME reports nothing removed");
+}
+
+/** @brief Churn on a stable name set reuses tombstones — the table does not grow. */
+void test_churn_reuses_tombstones() {
+    std::printf("create/remove churn reuses tombstones\n");
+    child_registry_t reg;
+    sink_link_t a;
+    sink_link_t b;
+    reg.add("conn", a);
+    for (int i = 0; i < 50; ++i) {
+        reg.erase("conn");
+        reg.add("conn", (i % 2 == 0) ? b : a);
+    }
+    reg.erase("conn");
+    reg.add("conn", b);
+    check(reg.size() == 1, "51 create/remove rounds on one NAME still occupy ONE slot");
+    check(reg.by_name("conn") == &b, "and the NAME resolves to the CURRENT link");
+
+    sink_link_t c;
+    reg.add("other", c);
+    check(reg.size() == 2, "a genuinely new NAME appends");
+}
+
+/** @brief Removal is idempotent at the vertex layer, and unknown names are NotFound. */
+void test_remove_unknown_and_idempotent() {
+    std::printf("removing an absent connection\n");
+    graph_t g;
+    fwd_router_t router(g);
+    transport_vertex_t net(g, router);
+    sink_link_t link;
+
+    const auto miss = net.remove_connection("never-made");
+    check(!miss && miss.error() == status_t::NOT_FOUND, "an unknown NAME is a clean NotFound");
+
+    check(create_conn(g, net, link, "up"), "created /net/up");
+    check(net.remove_connection("up").has_value(), "first removal succeeds");
+    const auto again = net.remove_connection("up");
+    check(!again && again.error() == status_t::NOT_FOUND,
+          "a second removal is NotFound, not a crash");
+}
+
+/** @brief A removed NAME is free for re-use — the vertex re-virginizes (RFC-0009 §B.6). */
+void test_name_is_reusable_after_removal() {
+    std::printf("a removed NAME can be created again\n");
+    graph_t g;
+    fwd_router_t router(g);
+    transport_vertex_t net(g, router);
+    sink_link_t first;
+    sink_link_t second;
+
+    check(create_conn(g, net, first, "up"), "created /net/up over link #1");
+    check(net.remove_connection("up").has_value(), "removed it");
+    check(create_conn(g, net, second, "up"), "created /net/up again over link #2");
+    check(router.registry().by_name("up") == &second, "the NAME now resolves to the NEW link");
+    check(router.registry().size() == 1, "and it reused the tombstoned slot");
+}
+
+}  // namespace
+
+int main() {
+    test_removed_name_stops_resolving();
+    test_tombstone_not_erase();
+    test_churn_reuses_tombstones();
+    test_remove_unknown_and_idempotent();
+    test_name_is_reusable_after_removal();
+
+    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
+                g_failures == 1 ? "" : "s");
+    return g_failures == 0 ? 0 : 1;
+}

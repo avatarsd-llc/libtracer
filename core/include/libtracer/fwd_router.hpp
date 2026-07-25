@@ -109,6 +109,24 @@ class fwd_router_t {
     void add_child(std::string name, transport_t& link);
 
     /**
+     * @brief Un-register child @p name — it stops resolving, and its routing state goes.
+     *
+     * The teardown counterpart of @ref add_child (#494). Tombstones the registry entry
+     * (@ref child_registry_t::erase) and then runs the full @ref link_down eviction, so
+     * the subscriber edges and route-handle labels bound to the name leave with it.
+     *
+     * **This is removal, not departure.** @ref link_down alone is the right hook for a
+     * link that merely dropped: under RFC-0014 a DIAL connection's *vertex* outlives its
+     * *socket* and self-heals, so evicting its registry entry on a down notification
+     * would permanently unroute a link that is only reconnecting. Call this one when the
+     * connection itself is gone — and call it BEFORE destroying the `transport_t`, so no
+     * forward can resolve a freed object.
+     * @param name The child's registered NAME.
+     * @return true if @p name named a live child, false if it named none.
+     */
+    bool remove_child(std::string_view name);
+
+    /**
      * @brief Set the sink for a REPLY that terminates at this node's reply endpoint.
      *
      * Invoked (with the `FWD{REPLY}` frame as a @ref view::rope_t) when a REPLY's first

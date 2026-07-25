@@ -112,6 +112,19 @@ void fwd_router_t::add_child(std::string name, transport_t& link) {
     }
 }
 
+bool fwd_router_t::remove_child(std::string_view name) {
+    // Stop resolving FIRST: once the entry is tombstoned no forward can reach the link,
+    // so the caller is free to destroy the transport as soon as this returns. Then the
+    // ordinary departure eviction reclaims the graph edges and label state — the same
+    // work link_down does, reused rather than duplicated.
+    if (!registry_.erase(name)) return false;
+    link_down(name);
+    // NOTE: the point-to-point receiver ctx in child_rx_ is intentionally left in place.
+    // The transport held its address, and the deque never invalidates, so the slot is
+    // inert once the link is gone; reclaiming it needs the S5 mutation contract.
+    return true;
+}
+
 void fwd_router_t::on_reply(std::function<void(const view::rope_t&)> cb) {
     reply_cb_ = std::move(cb);
 }

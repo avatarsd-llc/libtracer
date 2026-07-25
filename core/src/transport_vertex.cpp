@@ -226,6 +226,23 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
     return v;
 }
 
+result_t<void> transport_vertex_t::remove_connection(std::string_view name) {
+    const auto it = conns_.find(name);
+    if (it == conns_.end()) return std::unexpected(status_t::NOT_FOUND);
+    // Un-route BEFORE anything is destroyed: after this the NAME resolves to nothing,
+    // so the socket below can go without a forward ever reaching freed memory (#494).
+    (void)router_.remove_child(name);
+    // Retire the identity vertex (RFC-0009 §B.6): /net/<name> re-virginizes, so a later
+    // connection may take the same name — which is exactly the tombstone the registry
+    // reuses. Retiring an already-retired or unregistered vertex is a no-op, so a
+    // half-built connection tears down cleanly too.
+    const auto retired = graph_.retire(it->second.vertex);
+    // Erasing the entry destroys `owned` — the config-constructed socket — which joins
+    // its recv thread. A provided link is borrowed and is left untouched.
+    conns_.erase(it);
+    return retired;
+}
+
 result_t<void> transport_vertex_t::set_link_state(std::string_view name, link_state_t state) {
     const auto it = conns_.find(name);
     if (it == conns_.end()) return std::unexpected(status_t::NOT_FOUND);
