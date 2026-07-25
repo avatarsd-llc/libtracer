@@ -21,6 +21,7 @@
 #include <string_view>
 #include <vector>
 
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/receiver_slot.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/view.hpp"
@@ -251,10 +252,17 @@ class transport_t {
      * @param iov The spans to emit, in order, as a single frame.
      */
     virtual void send(std::span<const std::span<const std::byte>> iov) {
+        // NOTHROW soft-fail (#477): this used a throwing `reserve` + `insert`, which under
+        // `-fno-exceptions` ABORTS the node on an exhausted heap rather than shedding the
+        // frame. That is reachable on the FORWARD hot path today — `route_fwd_forward`
+        // scatter-gathers into `send(iov)`, and a transport that does not override this
+        // (`transport_can`, and any embedder's) lands here. An egress that cannot allocate
+        // must DROP, exactly as every other writer-side allocation on this plane does.
         std::size_t total = 0;
         for (const auto& s : iov) total += s.size();
         std::vector<std::byte> tmp;
-        tmp.reserve(total);
+        if (!detail::try_reserve(tmp, total)) return;  // heap exhausted ⇒ drop, never abort
+        // Reserved exactly, so the appends below cannot reallocate and cannot throw.
         for (const auto& s : iov) tmp.insert(tmp.end(), s.begin(), s.end());
         send(std::span<const std::byte>(tmp));
     }
