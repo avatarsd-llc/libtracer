@@ -108,6 +108,33 @@ The per-vertex figure is the one that matters for the constrained targets (the
 ESP32 profile lives inside a ~16 KB RAM budget), which is why it is tracked as its
 own series rather than folded into RSS.
 
+### 3b · Routing & delivery (the network plane, per frame)
+
+The in-process surfaces above measure the graph. Three benches measure the **network
+plane** — what a frame costs between arriving and being applied — because the two move
+independently and an improvement to one can hide a regression in the other.
+
+- **`bench_forward_demux`** — one FWD forward hop: resolving the `dst` mount against the
+  connection table and scatter-gathering the egress. Swept over registry size, on two axes
+  (`fixed` = target first, isolating the size-independent term; `scan` = target last,
+  exposing the marginal per-link cost). It never resolves a vertex, so it measures routing
+  alone.
+- **`bench_terminus_tier`** — the terminus *resolve*, driven through both reader tiers on
+  the **same frame**: the eager arena reader and the lazy rope reader, plus a
+  flatten-then-arena arm. This is the surface that settled the
+  [ADR-0053](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)
+  erratum — the eager arena wins 2.2–2.5× on latency *and* allocations for single-link
+  frames at every size, and the flatten crossover sits at roughly 16–64 KB.
+- **`bench_compact_delivery`** — the **steady state**: the Nth `COMPACT` frame on a warm
+  binding, which is the case delivery compaction exists for and the one the other two miss
+  (the demux bench never resolves; the terminus bench measures a *cold* resolve an
+  established flow pays once).
+
+All three report latency **and** exact allocation counts, and all three calibrate their own
+batch size against the host clock rather than hardcoding one — a routing operation costs the
+same order as `clock_gettime`, so per-op timing measures the clock. An early revision did
+exactly that and reported a whole-table scan *beating* a first-hit lookup.
+
 ### 4 · libtracer vs Zenoh (absolute, one pass, same runner)
 
 A side-by-side against [Eclipse Zenoh](https://zenoh.io) (zenoh-c, peer mode). Both
@@ -267,6 +294,12 @@ cmake --build bench/build -j
 # Pin to a core, take the best of several runs, compare only same-machine numbers.
 taskset -c 2 ./bench/build/bench_libtracer          # the sweep matrix
 taskset -c 2 ./bench/build/bench_forward_heap        # the allocation probes (zero-alloc gate)
+
+# The network plane (§3b). Each takes a per-point wall-clock budget via
+# LIBTRACER_BENCH_SECONDS; longer means tighter percentiles, never a different measurement.
+taskset -c 2 ./bench/build/bench_forward_demux       # forward hop vs registry size
+taskset -c 2 ./bench/build/bench_terminus_tier       # terminus: eager arena vs lazy rope reader
+taskset -c 2 ./bench/build/bench_compact_delivery    # steady-state warm compacted delivery
 
 # The comparison surface needs Zenoh vendored first:
 bench/fetch_zenoh.sh && cmake --build bench/build -j
