@@ -255,3 +255,38 @@ storage). Concretely:
   adopt-vector backend via an explicit [ADR-0047](0047-build-time-closed-module-sets-compile-time-seams.md)
   amendment. Until it lands, WS RX pays one extra copy per fragment — the one
   documented exception to the steady-state zero-copy requirement.
+
+## Erratum (2026-07-25): the lazy reader's ratified SCOPE is refuted by measurement
+
+The amendment above ratified the lazy reader as serving
+
+> the **whole owning tier, single-link ropes included**, so the lazy path is exercised by every TCP/QUIC/WS frame, not only the rare fragmented ones
+
+**That is not what shipped, and measurement says what shipped is right.**
+
+`fwd_router_t::on_frame_rope_impl` short-circuits a single-link rope onto the span path (`fwd_router.cpp:337`, commented "the pre-ADR-0053 view path, unchanged"), so the lazy reader serves **only** multi-link ropes — precisely the case the amendment said it must not be limited to. Nothing had measured which was correct: `bench_forward_demux` times the *forward* hop, which never resolves, and `bench_forward_heap` counts allocations without timing them.
+
+`bench/bench_terminus_tier.cpp` closes that gap — the same frame through both public `op_resolver_t::resolve` overloads (the pairing `op_resolve_view_test` already uses as a correctness oracle), plus a `flat+arena` arm. Host p50 ns, arena decoding into a monotonic pmr buffer as production does (`fwd_router.cpp:546`):
+
+| frame | arena L=1 | view L=1 | flat+arena L=8 | view L=8 |
+| ---: | ---: | ---: | ---: | ---: |
+| 53 B | **256** | 615 | 522 | 1286 |
+| 4 KB | **299** | 747 | 761 | 1322 |
+| 16 KB | **381** | 964 | 1244 | 1703 |
+| 64 KB | **886** | 1983 | 2870 | 2884 |
+
+Allocations: arena **2 / 80 B**, view **8 / 157 B**; at L=8, flat+arena **14 / 944 B** vs view **33 / 2525 B**.
+
+Three corrections follow:
+
+1. **The single-link short-circuit is a fast path, not a missed one.** The eager arena wins **2.2–2.5× on latency AND on RAM at every frame size**. The premise that laziness should win on large payloads does not hold, because the arena never copies the payload — it references it — so its cost is O(nodes), not O(bytes). The §7 claim that routing single-link ropes through the view reader keeps the lazy path "exercised by every frame" was a testing-coverage argument, and it was paid for in latency on the hottest path in the system.
+
+2. **Flatten is not the loser the ADR assumed.** `flat+arena` beats the rope walk at every size below the crossover, because flatten costs O(bytes) while the rope walk costs O(links). The crossover is **≈16–64 KB**; at 64 KB / 2 links the lazy view finally wins.
+
+3. **The lazy tier's real domain is narrow but real**: large, heavily fragmented frames. It is not dead code — `tlv_view_t` has production consumers in `op_resolve_view.cpp`, `op_resolve_walk.hpp` and `fwd_router.cpp` — it is simply scoped an order of magnitude tighter than ratified.
+
+**Decision recorded here:** the multi-link routing of ④b **stands**; the "single-link ropes included / every TCP/QUIC/WS frame" scope is **withdrawn**. `on_frame_rope_impl`'s short-circuit is the correct behaviour and must not be "fixed" to match the original wording.
+
+**Left open for the maintainer**: whether to keep the lazy tier scoped to its measured domain, or retire it and always flatten multi-link. Retiring would delete a reader, a resolver instantiation and their fuzz surface, at the cost of the ≥16 KB fragmented case — where the measured gap is small (2870 vs 2884 at 64 KB / 8 links) but favours the lazy path at low link counts. This erratum does not decide that; it records that the decision is now a measurement question, not an architectural one.
+
+ADR-0055 inherits this correction: its "flatten sweep" reasoning is unaffected for the **owning** path it governs, but its framing of span-tier flattens as a concession rather than a legitimate optimum should be read in light of the numbers above.
