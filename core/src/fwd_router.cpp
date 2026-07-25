@@ -140,7 +140,7 @@ struct mount_hit_t {
                 return mount_hit_t{p, seg[k], k + 1, seg[k]};
             }
         }
-        return mount_hit_t{c->link, {}, k, c->name};
+        return mount_hit_t{c->link.load(std::memory_order_acquire), {}, k, c->name};
     }
 
     return {};
