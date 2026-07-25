@@ -22,6 +22,7 @@
  *     `nullptr` after `remove_child`. The tombstone IS the invalidation.
  */
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -243,6 +244,49 @@ void test_encoders_agree_byte_for_byte() {
     check(mismatches == 0, "and its bytes are identical to the throwing encoder's");
 }
 
+/**
+ * @brief The default `send(iov)` gather DROPS on an exhausted heap — it must never abort.
+ *
+ * `transport_t::send(iov)`'s base implementation concatenates into a temporary before handing
+ * it to the span `send`. It used a throwing `reserve` + `insert`, so under `-fno-exceptions`
+ * (every ESP build) an exhausted heap ABORTED the node instead of shedding the frame — the
+ * exact crash class #477 closed everywhere else on the writer side.
+ *
+ * It is reachable on the FORWARD hot path: `route_fwd_forward` scatter-gathers into
+ * `send(iov)`, and a transport that does not override it — `transport_can`, and any
+ * embedder's — lands in the base gather.
+ *
+ * Exercised through the `probe_fail_hook` OOM-injection seam, since the host heap cannot be
+ * genuinely exhausted on demand.
+ */
+void test_iov_gather_drops_on_oom() {
+    std::printf("default send(iov) gather soft-fails (#477)\n");
+    struct counting_link_t : tr::net::transport_t {
+        // The base send(iov) is deliberately NOT overridden — it is the case under test — so
+        // it must be un-hidden by the span overload declared here.
+        using tr::net::transport_t::send;
+        std::size_t sends = 0;
+        void send(std::span<const std::byte>) override { ++sends; }
+    };
+    counting_link_t link;
+    const std::vector<std::byte> a(8, std::byte{0xA1});
+    const std::vector<std::byte> b(8, std::byte{0xB2});
+    const std::array<std::span<const std::byte>, 2> iov{std::span<const std::byte>(a),
+                                                        std::span<const std::byte>(b)};
+
+    link.send(std::span<const std::span<const std::byte>>(iov));
+    check(link.sends == 1, "with a healthy heap the gathered frame is sent");
+
+    // Now fail every probe: the gather must return without sending and without aborting.
+    tr::detail::probe_fail_hook = [](std::size_t) noexcept { return false; };
+    link.send(std::span<const std::span<const std::byte>>(iov));
+    tr::detail::probe_fail_hook = nullptr;
+    check(link.sends == 1, "an exhausted heap DROPS the frame — no send, and no abort");
+
+    link.send(std::span<const std::span<const std::byte>>(iov));
+    check(link.sends == 2, "and the link still works once the heap recovers");
+}
+
 }  // namespace
 
 int main() {
@@ -251,6 +295,7 @@ int main() {
     test_link_teardown_invalidates_cached_slot();
     test_corrupt_crc_compact_is_dropped();
     test_encoders_agree_byte_for_byte();
+    test_iov_gather_drops_on_oom();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
