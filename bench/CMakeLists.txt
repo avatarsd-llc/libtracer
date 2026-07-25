@@ -59,6 +59,13 @@ add_executable(bench_forward_demux bench_forward_demux.cpp)
 target_link_libraries(bench_forward_demux PRIVATE libtracer)
 target_compile_options(bench_forward_demux PRIVATE -Wall -Wextra)
 
+# Terminus tier comparison (ADR-0053): the eager arena reader vs the lazy view reader on
+# the SAME frame. Replaces argument with measurement on whether the single-link
+# short-circuit in on_frame_rope_impl is a fast path or a missed one.
+add_executable(bench_terminus_tier bench_terminus_tier.cpp)
+target_link_libraries(bench_terminus_tier PRIVATE libtracer)
+target_compile_options(bench_terminus_tier PRIVATE -Wall -Wextra)
+
 # Many-core contention microbenchmarks (Wave 0e; the ADR-0032 measurement-first
 # answer to the 128-core scaling question). bench_fanout_clone_storm measures
 # segment-refcount cacheline contention under wide fan-out; bench_await_wakeup_storm
