@@ -93,15 +93,22 @@ class child_registry_t {
     /**
      * @brief Register the link addressed by qualified name @p name (`"<module>/<name>"`).
      *
-     * Reuses @p name's tombstone if it has one (the create → remove → re-create path),
-     * otherwise appends. Captures the link's SHAPE here, once, so the forward path never
-     * probes `bus()`. A control-plane call: not for the forward hot path.
+     * REBINDS @p name's existing slot when it has one — live or tombstoned — and only
+     * appends for a name the table has never held. Captures the link's SHAPE here, once, so
+     * the forward path never probes `bus()`. A control-plane call: not for the forward path.
+     *
+     * **A name has exactly one slot.** Re-adding a LIVE name used to append a second, and
+     * that shadow slot reopened precisely the dangling-`transport_t*` hole #494 closed:
+     * @ref erase nulled only the first match and returned `true`, so the caller destroyed
+     * its transport believing teardown had succeeded while @ref by_name kept resolving the
+     * freed link through the shadow. Rebinding makes the name→slot mapping one-to-one, which
+     * is what every other operation here already assumes.
      */
     void add(std::string name, transport_t& link) {
         const bool multi_peer = link.bus() != nullptr;
         std::vector<std::byte> mount = encode_mount_name(name);
         for (child_t& c : children_) {
-            if (c.link == nullptr && c.name == name) {
+            if (c.name == name) {
                 c.link = &link;
                 c.multi_peer = multi_peer;
                 c.mount_tlv = std::move(mount);
@@ -150,13 +157,14 @@ class child_registry_t {
      * @return true if @p name named a live child, false if it named none.
      */
     bool erase(std::string_view name) {
+        bool erased = false;
         for (child_t& c : children_) {
             if (c.link != nullptr && c.name == name) {
                 c.link = nullptr;
-                return true;
+                erased = true;  // keep going: belt-and-braces against any shadow slot
             }
         }
-        return false;
+        return erased;
     }
 
     /**

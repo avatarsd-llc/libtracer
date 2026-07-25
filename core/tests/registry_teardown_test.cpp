@@ -194,6 +194,36 @@ void test_name_is_reusable_after_removal() {
     check(router.registry().size() == 1, "and it reused the tombstoned slot");
 }
 
+/**
+ * @brief Re-adding a LIVE name rebinds its slot — it never grows a second, shadow one.
+ *
+ * The regression. `add` only ever reused a TOMBSTONE, so re-registering a live name appended
+ * a duplicate. `erase` then nulled the first match and returned `true` — the caller destroys
+ * its transport on that `true` — while `by_name` went on resolving the freed link through the
+ * shadow slot. That is exactly the dangling-`transport_t*` hole #494 was written to close,
+ * reopened from a direction it did not consider.
+ */
+void test_duplicate_add_rebinds() {
+    std::printf("duplicate add rebinds rather than shadowing\n");
+    child_registry_t reg;
+    sink_link_t a;
+    sink_link_t b;
+    reg.add("net/ws-client/x", a);
+    reg.add("net/ws-client/x", a);
+    check(reg.size() == 1, "a repeated add does not grow the table");
+    check(reg.live_size() == 1, "and leaves exactly one live child");
+
+    check(reg.erase("net/ws-client/x"), "erase reports it removed a live child");
+    check(reg.by_name("net/ws-client/x") == nullptr,
+          "and NOTHING resolves afterwards — no shadow slot keeps the freed link reachable");
+
+    // Rebinding to a different link must take effect, not resolve the stale one.
+    reg.add("net/ws-client/x", a);
+    reg.add("net/ws-client/x", b);
+    check(reg.by_name("net/ws-client/x") == &b, "a re-add rebinds the name to the NEW link");
+    check(reg.live_size() == 1, "still one slot for the name");
+}
+
 }  // namespace
 
 int main() {
@@ -203,6 +233,7 @@ int main() {
     test_remove_unknown_and_idempotent();
     test_name_is_reusable_after_removal();
 
+    test_duplicate_add_rebinds();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;
