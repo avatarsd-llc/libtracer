@@ -26,6 +26,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -235,6 +236,28 @@ class transport_vertex_t {
     void register_transport_type(std::string kind, transport_factory_t factory);
 
     /**
+     * @brief Declare the MODULE that connections of @p kind and @p role mount under.
+     *
+     * A creatable *(transport, role)* pair is a self-contained module flat under `/net`
+     * (RFC-0014 §1), so a connection vertex lives at `/net/<module>/<name>` and its routing
+     * key is that same path (ADR-0061). Modules are **declared, not derived**, because the
+     * mapping is not uniform: a transport with both a dial and a listen shape is TWO modules
+     * (`ws-client`, `ws-server`), while a bus like `can` is ONE for both roles — "a bus has
+     * no dial/listen asymmetry" (`transport_can.hpp`).
+     *
+     * A `kind` with no declaration falls back to `"<kind>-client"` / `"<kind>-server"`, so an
+     * externally registered transport (quic) keeps working without changes; declare
+     * explicitly whenever that default is wrong.
+     * @param module The module segment (e.g. `"ws-client"`, `"can"`).
+     * @param kind   The config `kind` this module constructs (e.g. `"ws"`).
+     * @param role   The role this module fixes positionally.
+     */
+    void register_module(std::string module, std::string kind, conn_role_t role);
+
+    /** @brief The module a connection of @p kind and @p role mounts under (RFC-0014 §1). */
+    [[nodiscard]] std::string module_for(std::string_view kind, conn_role_t role) const;
+
+    /**
      * @brief Supply a pre-built transport a subsequent SPEC of connection @p name binds.
      *
      * The test/manual seam: the link is not constructed from the config — it is handed
@@ -242,10 +265,14 @@ class transport_vertex_t {
      * cover) and wired into the router when the matching `:children[]` SPEC is created.
      * Takes precedence over config construction (`kind` is ignored when a link is
      * staged). The caller keeps ownership. Call at setup, before the SPEC write.
-     * @param name The connection's NAME (the `/net/<name>` segment / the router child name).
+     * @param module The module the connection mounts under (`/net/<module>/<name>`). Required
+     *               because a staged link bypasses the transport factory, so there is no
+     *               `kind` to derive one from — the caller staging the link says where it
+     *               mounts (RFC-0014 §1).
+     * @param name The connection's NAME (the `/net/<module>/<name>` leaf segment).
      * @param link The transport carrying this connection's bytes.
      */
-    void provide_link(std::string name, transport_t& link);
+    void provide_link(std::string module, std::string name, transport_t& link);
 
     /**
      * @brief Report a connection's link-liveness state — a write to the vertex value.
@@ -321,6 +348,10 @@ class transport_vertex_t {
     std::map<std::string, transport_t*, std::less<>> pending_links_;
     std::map<std::string, conn_t, std::less<>> conns_;
     std::map<std::string, transport_factory_t, std::less<>> transport_types_;
+    // Declared modules, keyed by "<kind>\x00<role>" — see register_module / module_for.
+    std::map<std::string, std::string, std::less<>> modules_;
+    // Module vertices (`/net/<module>`) already registered, so they are created once.
+    std::set<std::string, std::less<>> module_vertices_;
 };
 
 }  // namespace tr::net

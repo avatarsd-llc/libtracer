@@ -44,6 +44,102 @@ constexpr std::uint8_t u8(std::byte b) noexcept { return std::to_integer<std::ui
 // fwd_frame_view.hpp (unit-tested directly, the length_prefix_framer precedent); this
 // TU delegates mechanically. Frames are byte-identical.
 
+namespace {
+
+/**
+ * @brief Reads `dst` segments as string_views, zero-copy when the region is contiguous.
+ *
+ * A span source yields each segment as one sub-span, so it is referenced in place; a rope
+ * source may straddle a link, so those segments are stitched into this reader's own scratch.
+ * The reader must outlive every view it hands out — callers keep it on the frame that also
+ * holds the rebuild, since a resolved PEER name is referenced right through `gather`.
+ */
+template <class Cursor>
+struct seg_reader_t {
+    const Cursor& cur;
+    std::array<std::byte, graph::kMaxSegmentBytes * tr::net::kMountPeekMax> scratch;
+    std::size_t used = 0;
+
+    /** @brief Segment `[off, len)` as a view, or empty when it is not routable. */
+    std::string_view read(std::size_t off, std::size_t len) {
+        if (len == 0 || len > graph::kMaxSegmentBytes) return {};
+        const std::byte* first = nullptr;
+        std::size_t first_len = 0;
+        bool straddles = false;
+        cur.for_each_span(off, len, [&](std::span<const std::byte> s) {
+            if (first == nullptr) {
+                first = s.data();
+                first_len = s.size();
+            } else {
+                straddles = true;
+            }
+        });
+        if (!straddles && first_len == len)
+            return std::string_view(reinterpret_cast<const char*>(first), len);
+        if (used + len > scratch.size()) return {};
+        std::size_t w = used;
+        cur.for_each_span(off, len, [&](std::span<const std::byte> s) {
+            for (const std::byte b : s) scratch[w++] = b;
+        });
+        std::string_view out(reinterpret_cast<const char*>(scratch.data() + used), len);
+        used += len;
+        return out;
+    }
+};
+
+/** @brief What the mount descent resolved: where to send, and how much of `dst` it ate. */
+struct mount_hit_t {
+    transport_t* link = nullptr; /**< @brief The egress link, or nullptr ⇒ this node terminates. */
+    std::string_view peer;       /**< @brief The resolved bus PEER segment, if any. */
+    std::size_t strip_k = 0;     /**< @brief Leading dst segments this hop consumes. */
+};
+
+/**
+ * @brief Resolve the leading `dst` segments against the registry (ADR-0061's strip-K descent).
+ *
+ * Matches LONGEST-FIRST — the full `net/<module>/<name>` mount before any shorter key — so a
+ * more specific mount always wins, and a node still carrying flat single-segment children
+ * (the pre-RFC-0014 shape, and what the benches register) resolves through the same code.
+ * When the matched child is multi-peer and another segment follows, that segment is resolved
+ * in THAT endpoint's own peer table (never across buses) and the hop eats one more segment.
+ */
+template <class Cursor>
+[[nodiscard]] mount_hit_t resolve_mount(const child_registry_t& registry, const Cursor& cur,
+                                        seg_reader_t<Cursor>& rd) {
+    std::array<std::pair<std::size_t, std::size_t>, tr::net::kMountPeekMax> off{};
+    const std::size_t n = peek_fwd_dst_segs(cur, off);
+    if (n == 0) return {};
+    std::array<std::string_view, tr::net::kMountPeekMax> seg;
+    for (std::size_t i = 0; i < n; ++i) seg[i] = rd.read(off[i].first, off[i].second);
+
+    const std::size_t widest = std::min<std::size_t>(n, tr::net::kMountPeekMax - 1);
+    for (std::size_t k = widest; k >= 1; --k) {
+        bool usable = true;
+        for (std::size_t i = 0; i < k; ++i) {
+            if (seg[i].empty()) usable = false;
+        }
+        if (!usable) continue;
+        const child_registry_t::child_t* const c =
+            registry.by_segments(std::span<const std::string_view>(seg.data(), k));
+        if (c == nullptr) continue;
+        // A dst that names the mount EXACTLY addresses the connection vertex itself — its
+        // own `:children[]`, `:settings`, liveness value — so it terminates HERE. Only a dst
+        // with something BELOW the mount is a forward (ADR-0038 §3a: a local dst descends to
+        // a local vertex and terminates). A bus PEER is the exception: it has no vertex, so
+        // naming a peer exactly still forwards, with an empty residual.
+        if (n == k) return {};
+        if (c->multi_peer && !seg[k].empty()) {
+            if (transport_t* const p = child_registry_t::resolve_peer(*c, seg[k])) {
+                return mount_hit_t{p, seg[k], k + 1};
+            }
+        }
+        return mount_hit_t{c->link, {}, k};
+    }
+    return {};
+}
+
+}  // namespace
+
 void fwd_router_t::add_child(std::string name, transport_t& link) {
     // Populate the registry BEFORE wiring the receiver: an async transport (UDP/ws) may
     // already have a live recv thread, so `set_receiver` is the publish point — once the
@@ -204,23 +300,19 @@ void fwd_router_t::on_frame_rope(std::string_view inbound_name, view::rope_t fra
     // fallback (flatten drops it, as before).
     if (frame.total_length() >= 4 && frame.all_host()) {
         const wire::grammar::rope_cursor cur{frame};
-        if (const auto seg = peek_fwd_first_dst_seg(cur)) {
-            // Resolve the first dst segment NAME. A routable segment is bounded
-            // (≤ kMaxSegmentBytes), so it is stitched into a small stack scratch —
-            // contiguous when it lies in one link, a byte-at-a-time copy across a link
-            // boundary; an over-long "segment" is not routable ⇒ fall to the terminus.
-            const auto [seg_off, seg_len] = *seg;
-            if (seg_len > 0 && seg_len <= graph::kMaxSegmentBytes) {
-                std::array<std::byte, graph::kMaxSegmentBytes> scratch;
-                std::size_t w = 0;
-                cur.for_each_span(seg_off, seg_len, [&](std::span<const std::byte> s) {
-                    for (std::byte b : s) scratch[w++] = b;
-                });
-                if (transport_t* const child =
-                        registry_.by_segment(std::span<const std::byte>(scratch.data(), seg_len))) {
-                    route_fwd_forward(inbound_name, cur, *child);
-                    return;
-                }
+        // Only a structured FWD enters the routing arm; ADVERTISE / COMPACT / HANDLE_NACK
+        // fall through to the control path below, exactly as they did when this was gated on
+        // peek_fwd_first_dst_seg.
+        std::array<std::pair<std::size_t, std::size_t>, tr::net::kMountPeekMax> probe{};
+        if (peek_fwd_dst_segs(cur, probe) > 0) {
+            // Resolve the mount prefix (ADR-0061 strip-K). Segments are read in place when
+            // the rope keeps them contiguous and stitched into the reader's scratch when they
+            // straddle a link; an over-long segment is not routable ⇒ fall to the terminus.
+            seg_reader_t<wire::grammar::rope_cursor> rd{cur, {}, 0};
+            const mount_hit_t hit = resolve_mount(registry_, cur, rd);
+            if (hit.link != nullptr) {
+                route_fwd_forward(inbound_name, hit.strip_k, cur, *hit.link);
+                return;
             }
             // No child (or over-long segment) ⇒ this node is the terminus for the frame.
             // A request FWD is resolved straight off the rope (ADR-0053 3c-iii — NO
@@ -259,13 +351,14 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
                 inbound_cb_(inbound_name, *dec);
         }
         const wire::grammar::span_cursor cur{frame};
-        if (const auto seg = peek_fwd_first_dst_seg(cur)) {
-            if (transport_t* const child =
-                    registry_.by_segment(frame.subspan(seg->first, seg->second))) {
-                route_fwd_forward(inbound_name, cur, *child);
+        {
+            seg_reader_t<wire::grammar::span_cursor> rd{cur, {}, 0};
+            const mount_hit_t hit = resolve_mount(registry_, cur, rd);
+            if (hit.link != nullptr) {
+                route_fwd_forward(inbound_name, hit.strip_k, cur, *hit.link);
                 return;
             }
-            // First dst segment names no child ⇒ this node is the terminus.
+            // The dst names no mount ⇒ this node is the terminus.
         }
         if (peek_fwd_op(cur) == fwd_op_t::REPLY) {
             // The accumulated return route is fully consumed — this node is the
@@ -315,8 +408,8 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
 }
 
 template <class Cursor>
-void fwd_router_t::route_fwd_forward(std::string_view inbound_name, const Cursor& cur_src,
-                                     transport_t& child) {
+void fwd_router_t::route_fwd_forward(std::string_view inbound_name, std::size_t strip_k,
+                                     const Cursor& cur_src, transport_t& child) {
     // All offsets, no decoded tree: the shrunk-dst / grown-src head rebuild lives in
     // fwd_frame_view.hpp (rebuild_fwd_forward — unit-tested directly); this hop only
     // resolves the child and scatter-gathers the result. Reads AND the egress go
@@ -331,8 +424,8 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name, const Cursor
     const auto rebuilt =
         inbound != nullptr && !inbound->mount_tlv.empty()
             ? rebuild_fwd_forward(cur_src, std::span<const std::byte>(inbound->mount_tlv),
-                                  std::string_view{}, 1)
-            : rebuild_fwd_forward(cur_src, inbound_name);
+                                  std::string_view{}, strip_k)
+            : rebuild_fwd_forward(cur_src, std::span<const std::byte>{}, inbound_name, strip_k);
     if (!rebuilt) return;        // not a forwardable FWD ⇒ drop (callers pre-peeked)
     if (!rebuilt->ok()) return;  // malformed oversized op ⇒ drop, no overrun
 

@@ -32,6 +32,9 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     //    facet — each inbound peer gets its own return-route identity (board↔board).
     //  - `max_peers` (VALUE u32; default 0 = unbounded, host-bounded per RFC-0006) is
     //    the concurrent-peer admission cap.
+    // tcp has both a dial and a listen shape, so it is TWO modules (RFC-0014 §1).
+    vertex.register_module("tcp-client", "tcp", conn_role_t::DIAL);
+    vertex.register_module("tcp-server", "tcp", conn_role_t::LISTEN);
     vertex.register_transport_type("tcp", [rx_backend](const conn_settings_t& s,
                                                        const wire::tlv_t* raw_config) {
         const config_reader_t cfg(raw_config);

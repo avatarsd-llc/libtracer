@@ -181,13 +181,13 @@ std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* m
     // Stable storage: add_child holds a reference for the transport's lifetime.
     std::vector<capture_transport_t> filler(links);
 
-    router.add_child("in", in_link);
+    router.add_child("net/ws-server/in", in_link);
     std::size_t next_filler = 0;
     for (std::size_t i = 1; i <= links; ++i) {
         if (i == target_pos) {
-            router.add_child("out", out_link);
+            router.add_child("net/ws-client/out", out_link);
         } else {
-            router.add_child("l" + std::to_string(next_filler), filler[next_filler]);
+            router.add_child("net/ws-client/l" + std::to_string(next_filler), filler[next_filler]);
             ++next_filler;
         }
     }
@@ -195,9 +195,10 @@ std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* m
     const std::byte payload[4] = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE},
                                   std::byte{0xEF}};
     const std::vector<std::byte> frame =
-        make_fwd({"out", "sensor", "temp"}, {"reply"}, std::span<const std::byte>(payload, 4));
+        make_fwd({"net", "ws-client", "out", "sensor", "temp"}, {"reply"},
+                 std::span<const std::byte>(payload, 4));
 
-    const auto hop = [&] { router.on_frame("in", frame); };
+    const auto hop = [&] { router.on_frame("net/ws-server/in", frame); };
 
     // Calibration doubles as the warm-up: it primes lazy statics and caches, and its
     // own timings are discarded.

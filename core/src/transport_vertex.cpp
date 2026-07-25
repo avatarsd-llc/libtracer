@@ -129,8 +129,29 @@ void transport_vertex_t::register_transport_type(std::string kind, transport_fac
     transport_types_.insert_or_assign(std::move(kind), std::move(factory));
 }
 
-void transport_vertex_t::provide_link(std::string name, transport_t& link) {
-    pending_links_.insert_or_assign(std::move(name), &link);
+void transport_vertex_t::register_module(std::string module, std::string kind, conn_role_t role) {
+    std::string key(kind);
+    key.push_back('\0');
+    key.push_back(static_cast<char>(role));
+    modules_.insert_or_assign(std::move(key), std::move(module));
+}
+
+std::string transport_vertex_t::module_for(std::string_view kind, conn_role_t role) const {
+    std::string key(kind);
+    key.push_back('\0');
+    key.push_back(static_cast<char>(role));
+    const auto it = modules_.find(key);
+    if (it != modules_.end()) return it->second;
+    // Undeclared: the role-split default, so an externally registered transport works
+    // unchanged. A transport whose shape this gets wrong declares itself explicitly.
+    return std::string(kind) + (role == conn_role_t::DIAL ? "-client" : "-server");
+}
+
+void transport_vertex_t::provide_link(std::string module, std::string name, transport_t& link) {
+    std::string key = std::move(module);
+    key.push_back('/');
+    key += name;
+    pending_links_.insert_or_assign(std::move(key), &link);
 }
 
 result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::byte> child_key,
@@ -138,26 +159,70 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
                                                               conn_role_t role) {
     const std::string name = last_segment(child_key);
     if (name.empty()) return std::unexpected(status_t::INVALID_PATH);
-    if (conns_.contains(name)) return std::unexpected(status_t::PATH_IN_USE);
-    // Bug #373: the router resolves a FWD's first dst segment against the child-link
-    // registry BEFORE the local graph (fwd_router_t::on_frame_impl / on_frame_rope), so a
-    // link named the same as a first-level vertex silently black-holes every /name/... read
-    // onto the transport (no wire error; the local subtree is never reached, reads time out).
-    // Reject the collision at registration, before any side effect leaves the wiring half-set.
-    std::vector<std::byte> seg_key;
-    wire::emit_name(seg_key, name);
-    if (graph_.has_first_level_child(seg_key)) return std::unexpected(status_t::PATH_IN_USE);
 
     conn_settings_t settings;
     settings.role = role;  // the type default; config may override
     parse_config(config, settings);
+
+    // Which MODULE does this connection mount under (RFC-0014 §1, ADR-0061)? A staged link
+    // carries no `kind`, so the module is the one it was staged under; otherwise it follows
+    // from (kind, role). The connection then lives at `/net/<module>/<name>` and routes by
+    // that same path.
+    std::string module;
+    std::string staged_key;
+    for (const auto& [key, l] : pending_links_) {
+        const std::size_t slash = key.rfind('/');
+        if (slash != std::string::npos && key.compare(slash + 1, std::string::npos, name) == 0) {
+            module = key.substr(0, slash);
+            staged_key = key;
+            break;
+        }
+    }
+    if (module.empty()) module = module_for(settings.kind, settings.role);
+
+    // The routing key IS the mount path (ADR-0061): `net/<module>/<name>`. Keeping the root
+    // segment in the key means the registry's precomputed run is exactly the prefix a hop
+    // prepends to `src`, so the forward path needs no per-hop assembly.
+    std::string qualified(std::string_view(net_root_).substr(1));
+    qualified.push_back('/');
+    qualified += module;
+    qualified.push_back('/');
+    qualified += name;
+    if (conns_.contains(qualified)) return std::unexpected(status_t::PATH_IN_USE);
+
+    // The #373 first-level shadow guard is GONE, and can be: it existed because a connection
+    // NAME was the first `dst` segment, so a link sharing a name with a first-level vertex
+    // black-holed every `/name/...` read onto the transport. A routable connection is now
+    // addressed `/net/<module>/<name>`, so a first-level vertex cannot shadow one — and
+    // keeping the guard would instead wrongly reject a connection merely named after an
+    // unrelated local vertex.
+
+    // Compose the mount key: `<net_root>/<module>/<name>`, replacing the flat key the
+    // graph's `:children[]` machinery handed us.
+    std::vector<std::byte> mount_key;
+    for (std::string_view seg : {std::string_view(net_root_).substr(1), std::string_view(module),
+                                 std::string_view(name)}) {
+        wire::emit_name(mount_key, seg);
+    }
+    child_key = std::move(mount_key);
+
+    // The `/net/<module>` grouping vertex exists once, created lazily on first use.
+    if (!module_vertices_.contains(module)) {
+        std::vector<std::byte> mod_key;
+        wire::emit_name(mod_key, std::string_view(net_root_).substr(1));
+        wire::emit_name(mod_key, module);
+        if (!graph_.find(mod_key)) {
+            (void)graph_.register_vertex_key(mod_key, graph::role_t::STORED_VALUE, {});
+        }
+        module_vertices_.insert(module);
+    }
 
     // Resolve the connection's link. Precedence: a provide_link-staged transport wins
     // (the test/manual seam); otherwise the config `kind` selects a factory and the
     // real socket is CONSTRUCTED here and owned by the connection.
     transport_t* link = nullptr;
     std::unique_ptr<transport_t> owned;
-    const auto pl = pending_links_.find(name);
+    const auto pl = staged_key.empty() ? pending_links_.end() : pending_links_.find(staged_key);
     if (pl != pending_links_.end()) {
         link = pl->second;
     } else if (!settings.kind.empty()) {
@@ -209,20 +274,21 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
 
     const bool constructed = owned != nullptr;
     conns_.insert_or_assign(
-        name, conn_t{.vertex = *v, .settings = std::move(settings), .owned = std::move(owned)});
+        qualified,
+        conn_t{.vertex = *v, .settings = std::move(settings), .owned = std::move(owned)});
     if (pl != pending_links_.end()) pending_links_.erase(pl);
 
     // Wire the link into the router's child_registry_t — the single owner of the
     // NAME→link demux table (Brick 3a). The `/net/<name>` NAME is exactly the router
     // child name a `dst` routes through.
-    router_.add_child(name, *link);
+    router_.add_child(qualified, *link);
     // A config-constructed socket is live once built: publish its liveness so an awaiter
     // on /net/<name> sees the bring-up. A DIAL socket is `UP`; a LISTEN socket that bound
     // is `LISTENING` (a bind failure returns an error from the factory above, so a
     // constructed LISTEN is always bound). Provided links report via set_link_state.
     if (constructed)
         (void)set_link_state(
-            name, role == conn_role_t::LISTEN ? link_state_t::LISTENING : link_state_t::UP);
+            qualified, role == conn_role_t::LISTEN ? link_state_t::LISTENING : link_state_t::UP);
     return v;
 }
 

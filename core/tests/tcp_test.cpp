@@ -545,20 +545,21 @@ void test_config_constructed_tcp() {
     const auto wb = node_b.write(path_t("/net:children[]"),
                                  conn_spec("listener", "a", tr::net::conn_role_t::LISTEN, port));
     check(wb.has_value(), "B: SPEC{listener, kind=tcp, port} constructs the bound socket");
-    check(router_b.registry().by_name("a") != nullptr, "B: the socket is wired into the router");
+    check(router_b.registry().by_name("net/tcp-server/a") != nullptr,
+          "B: the socket is wired into the router");
 
     // A: a tcp CLIENT dialing B's port — a SYNCHRONOUS connect from config.
     const auto wa =
         node_a.write(path_t("/net:children[]"),
                      conn_spec("client", "b", tr::net::conn_role_t::DIAL, port, "127.0.0.1"));
     check(wa.has_value(), "A: SPEC{client, kind=tcp, addr, port} constructs the dialing socket");
-    const auto* s = net_a.settings_of("b");
+    const auto* s = net_a.settings_of("net/tcp-client/b");
     check(s != nullptr && s->kind == "tcp" && s->addr == "127.0.0.1" && s->port == port,
           "A: the parsed :settings carry kind/addr/port");
 
     // End-to-end: FWD{READ dst=/b/temp} from A crosses A's config-created stream to
     // B's terminus, and the REPLY source-routes back over the same connection.
-    router_a.on_frame("self", fwd_read({"b", "temp"}, {"reply-ep"}));
+    router_a.on_frame("self", fwd_read({"net", "tcp-client", "b", "temp"}, {"reply-ep"}));
     const bool replied = fut.wait_for(3s) == std::future_status::ready;
     check(replied, "the READ reached B and the REPLY returned over the accepted peer");
     if (replied) {
