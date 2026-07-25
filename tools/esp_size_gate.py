@@ -129,7 +129,12 @@ def main() -> int:
     ap.add_argument("--summary-json", required=True, help="esp-idf-size summary JSON")
     ap.add_argument("--component-pattern", default=r"libtracer", help="archive-name regex")
     ap.add_argument("--target", default="unknown", help="chip target label (esp32c6, ...)")
-    ap.add_argument("--max-flash-bytes", type=int, required=True)
+    # Flash is TRACKED, not gated (maintainer ruling 2026-07-25). A flash ceiling on
+    # libtracer polices the wrong thing: what has to fit is the PRODUCT image on its own
+    # target, and every raise here was a feature landing, not a regression. Lower flash is an
+    # improvement to report alongside latency and throughput — not a merge gate. Pass the flag
+    # to re-arm a ceiling for a target that genuinely has one.
+    ap.add_argument("--max-flash-bytes", type=int, default=None)
     ap.add_argument("--max-static-ram-bytes", type=int, required=True)
     ap.add_argument("--mode", choices=("warn", "fail"), default="warn")
     ap.add_argument("--out-json", default=None, help="write the numbers as a JSON artifact")
@@ -149,7 +154,7 @@ def main() -> int:
         print(f"::warning::{msg} (warn mode: not failing the job)")
         return 0
 
-    flash_ok = flash <= args.max_flash_bytes
+    flash_ok = args.max_flash_bytes is None or flash <= args.max_flash_bytes
     ram_ok = ram <= args.max_static_ram_bytes
     verdict = "PASS" if (flash_ok and ram_ok) else ("WARN" if args.mode == "warn" else "FAIL")
 
@@ -161,7 +166,8 @@ def main() -> int:
         "| Scope | Flash (text+rodata) | Static RAM (data+bss+iram) |",
         "| --- | --- | --- |",
         f"| **libtracer component** | {_fmt(flash)} | {_fmt(ram)} |",
-        f"| threshold (sentinel, mode={args.mode}) | {_fmt(args.max_flash_bytes)} "
+        f"| threshold (sentinel, mode={args.mode}) | "
+        f"{'tracked, no ceiling' if args.max_flash_bytes is None else _fmt(args.max_flash_bytes)} "
         f"| {_fmt(args.max_static_ram_bytes)} |",
         f"| whole app image (app + IDF) | {_fmt(total)} (total image) | "
         f"{_fmt(sum(v for k, v in used.items() if 'flash' not in k.lower()))} |",
@@ -196,7 +202,7 @@ def main() -> int:
             "app_total_image_bytes": total,
             "app_used_by_memory_type": used,
             "thresholds": {
-                "max_flash_bytes": args.max_flash_bytes,
+                "max_flash_bytes": args.max_flash_bytes,  # null ⇒ tracked, not gated
                 "max_static_ram_bytes": args.max_static_ram_bytes,
                 "mode": args.mode,
             },
@@ -208,7 +214,8 @@ def main() -> int:
         return 0
     over = (
         f"libtracer footprint over threshold on {args.target}: "
-        f"flash {_fmt(flash)} (max {_fmt(args.max_flash_bytes)}), "
+        f"flash {_fmt(flash)} "
+        f"({'tracked' if args.max_flash_bytes is None else 'max ' + _fmt(args.max_flash_bytes)}), "
         f"static RAM {_fmt(ram)} (max {_fmt(args.max_static_ram_bytes)})"
     )
     if args.mode == "fail":
