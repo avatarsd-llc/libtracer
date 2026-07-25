@@ -47,11 +47,24 @@ registry) is **resolved**; ADR-0061 (proposed) is the full mechanism and rationa
   none). The "make the graph the resolver / dissolve the registry" idea was **rejected** (inverts
   L4↔L5 per ADR-0016; black-holes vertex-less bus peers).
 
-**Conditions ADR-0061 gates on before `accepted`** (folded into the slices below): a
-forward-demux-scan micro-bench (the harness has none today — S5-area), the
-`fwd-routed-multihop`/`fwd-src-accumulated` vector rewrites under #492 (S7), the registry teardown
-(#494, co-land with the remove-half), and the scoped `resolve_peer` + a multi-peer black-hole
-negative test (S2/S5).
+**ADR-0061 acceptance (maintainer grill, 2026-07-25).** S2 **stays blocked on ADR-0061 reaching
+`accepted`**: a `conn` endpoint that cannot express `/net/ws-client/foo` alongside
+`/net/tcp-client/foo` is a half-surface, so per-module scoping is intrinsic to the creator endpoint,
+not a follow-on. Of the ADR's four original conditions, **three were circular** — they could only be
+cleared by work the ADR itself gates — and are demoted to implementation obligations (bus-peer
+`resolve_peer` + black-hole negative test → S2a; vector rewrites → S7; registry teardown → #494).
+
+**The one live gate is a baseline-first forward-hop bench**, landed standalone against *today's*
+flat `by_name`, requiring no strip-K code. It extends the `bench_forward_heap` rig (already a full
+router + wired transport + `on_frame()` feed; it lacks only timing and a size sweep) and measures
+two axes: the **fixed per-hop cost at N=1** — the only term strip-K adds (the registry-size-
+independent structural prefix walk) — and the **scan share swept over N links per module**, the term
+strip-K *narrows* (per-module scoping shrinks both of `by_name`'s passes). ADR-0061 accepts once the
+N=1 cost shows headroom for two extra segment compares; `allocs=0` + scoped-≤-flat become merge
+gates on S2a.
+
+**Immediately actionable, in parallel, today:** the #494 `erase` PR and the baseline bench PR.
+Neither depends on the other or on acceptance.
 
 ## Slices (each an independent, CI-gated PR; order respects dependencies)
 
@@ -62,15 +75,33 @@ Widen the connection vertex's value from the binary up/down to the 6-member enum
 (callers still drive it), and make it **propagate** (assign+propagate under RFC-0008) so subscribers
 stream transitions. Add `backoff`/`connect_timeout` to `conn_settings_t`. *No engine yet.* Host-testable.
 
-**S2 — The creator-endpoint vertex + `SPEC`/`NAME` dispatch (control plane).**
-Per design spike 0. Each transport module mounts a `conn` child on its transport vertex; move
+**S2 — The creator endpoint (control plane), decomposed S2a → S2b → S2c.**
+Blocked on ADR-0061 `accepted`. The split is placement+routing / dispatch / gating.
+
+**S2a — Per-module placement + the ADR-0061 routing impl (one atomic edit).**
+Move the connection vertex to `/net/<module>/<name>` **and** re-key the router in the same PR: today
+`make_connection` registers `router_.add_child(name, *link)` on the *bare leaf*
+(`core/src/transport_vertex.cpp:218`) while composing the vertex key separately, so placement and
+routing are the same change to `child_registry_t` and the three `fwd_router` demux sites
+(`on_frame_impl`, `on_frame_rope`, `on_advertise`) — splitting them would open a window where the
+vertex path and the routing key disagree, the very divergence (#419) this closes. Carries: strip-K
+peek in `fwd_frame_view.hpp`, the per-module re-key, the **per-endpoint `resolve_peer`**, the
+**multi-peer black-hole negative test** (`/net/ws-server/s/alice` reaches ws-`alice`;
+`/net/ws-server/s/zzz` → clean `PATH_NOT_FOUND`; `/net/tcp-server/s`'s own `alice` unreachable
+through the ws module), the #373 `has_first_level_child` guard's fate, and the scoped-vs-flat bench
+delta. **Merge gates:** `allocs=0` on the forward hop; scoped hop ≤ flat hop at equal total links.
+
+**S2b — The `conn` endpoint vertex + `SPEC`/`NAME` dispatch.**
+Each transport module mounts a `conn` child on its transport vertex; move
 `register_child_type`/`register_transport_type` to populate the **per-module** catalog rather than
 the single global `:children[]`. Dispatch: `SPEC`⇒create (validate name non-empty/non-reserved +
 config vs catalog; `PATH_IN_USE` on existing; atomic create at `/net/<module>/<name>`), `NAME`⇒remove
 (resolve; no-op on absent; reject reserved incl. `conn`; else `retire()`), any-other-payload⇒`type_mismatch`.
-Gate `SPEC` on `CREATE` (relocated to the endpoint's ACL), `NAME` on `WRITE`. Host-testable
-(create/remove/reserved/bad-payload/gating). **This is the ADR-0059 surface** and retires the
-`:children[]` creation spelling.
+**This is the ADR-0059 surface** and retires the `:children[]` creation spelling.
+
+**S2c — Gating + the negative-test matrix.**
+Gate `SPEC` on `CREATE` (relocated to the endpoint's ACL), `NAME` on `WRITE` (per RFC-0009 §A.2 —
+`WRITE`, not `DELETE`). Land the create/remove/reserved-name/bad-payload/gating host tests.
 
 **S3 — Catalog `:schema` + discovery.**
 Make `read /net/<module>/conn:schema` return the module's config catalog — the endpoint vertex's
@@ -125,6 +156,9 @@ UI work must know the wire half is not yet available.
 
 ## Suggested sequencing
 
-Spike 0 → S1 (parallel with the spike) → S2 → S3 → S4 → S5 → S6 → S7 → S8. S5 is the critical-path
-risk (greenfield concurrency); everything downstream of the control plane (S2) can proceed once the
-spike unblocks the path shape.
+**(#494 `erase` ∥ baseline forward-hop bench ∥ S1)** → ADR-0061 `accepted` → S2a → S2b → S2c → S3 →
+S4 → S5 → S6 → S7 → S8.
+
+The three leading items are independent of each other and of acceptance, so they start now; only the
+bench feeds the acceptance decision. S2a is the ADR-0061 impl and the routing key it settles is what
+S2b/S2c build on. S5 remains the critical-path risk (greenfield concurrency).
