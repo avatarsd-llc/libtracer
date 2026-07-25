@@ -323,7 +323,16 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name, const Cursor
     // through the grammar `Cursor` seam (ADR-0053 ④b): the same code serves a
     // contiguous `span_cursor` (each region is one sub-span) and a link-walking
     // `rope_cursor` (a region yields one sub-span per link it crosses).
-    const auto rebuilt = rebuild_fwd_forward(cur_src, inbound_name);
+    // Prefer this child's PRE-ENCODED mount run (#508): the grown `src` prefix then costs a
+    // single iov entry and no per-segment encoding. A name with no registry entry — a bus
+    // PEER, whose name is not known until the frame arrives — falls back to encoding that one
+    // segment per frame, which is the only case that can't be precomputed.
+    const child_registry_t::child_t* const inbound = registry_.entry_by_name(inbound_name);
+    const auto rebuilt =
+        inbound != nullptr && !inbound->mount_tlv.empty()
+            ? rebuild_fwd_forward(cur_src, std::span<const std::byte>(inbound->mount_tlv),
+                                  std::string_view{}, 1)
+            : rebuild_fwd_forward(cur_src, inbound_name);
     if (!rebuilt) return;        // not a forwardable FWD ⇒ drop (callers pre-peeked)
     if (!rebuilt->ok()) return;  // malformed oversized op ⇒ drop, no overrun
 
@@ -336,10 +345,15 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name, const Cursor
     // `std::pmr::vector` over the injected @ref mr_ for the rope path (a link count is only
     // known at run time).
     if constexpr (std::is_same_v<Cursor, wire::grammar::span_cursor>) {
-        // Contiguous source: at most 6 regions, each a single sub-span — a stack array.
-        std::array<std::span<const std::byte>, 6> iov;
+        // Contiguous source: each region is a single sub-span — a stack array sized by
+        // kFwdMaxIov, which is derived from the layout (see its docs), not a chosen budget.
+        // The write is bounds-guarded regardless: this array was previously a bare 6 with an
+        // unchecked `iov[n++]`, so any growth in the region count was a silent overrun.
+        std::array<std::span<const std::byte>, kFwdMaxIov> iov;
         std::size_t n = 0;
-        rebuilt->gather(cur_src, [&](std::span<const std::byte> s) { iov[n++] = s; });
+        rebuilt->gather(cur_src, [&](std::span<const std::byte> s) {
+            if (n < iov.size()) iov[n++] = s;
+        });
         child.send(std::span<const std::span<const std::byte>>(iov.data(), n));
     } else {
         // Rope source: a region may cross several links — gather into a pmr vector drawn

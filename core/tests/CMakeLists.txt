@@ -138,6 +138,11 @@ libtracer_test_warnings(acl_test)
 add_test(NAME acl COMMAND acl_test)
 
 # #407 — graph_t::retire() vertex retirement (RFC-0009 §B/§C/§E.6).
+add_executable(mount_routing_test mount_routing_test.cpp)
+target_link_libraries(mount_routing_test PRIVATE libtracer)
+libtracer_test_warnings(mount_routing_test)
+add_test(NAME mount_routing COMMAND mount_routing_test)
+
 add_executable(registry_teardown_test registry_teardown_test.cpp)
 target_link_libraries(registry_teardown_test PRIVATE libtracer)
 libtracer_test_warnings(registry_teardown_test)
