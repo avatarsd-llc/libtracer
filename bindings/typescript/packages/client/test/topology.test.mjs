@@ -8,7 +8,7 @@
  * The mesh testbed is the right proving ground precisely because it contains a
  * deliberate physical cycle (a→b→c→a). That cycle is what separates the two modes:
  *
- *   - **pre-identity** — there is no way to know `/b` and `/b/c/a/b` are one device, so
+ *   - **pre-identity** — there is no way to know a node and its own orbit are one device, so
  *     the walk cannot terminate on its own and `maxDepth` is the only bound. This test
  *     asserts that degradation EXACTLY, rather than hiding it: the walk is bounded,
  *     `truncated` is true, `authoritative` is false, and node count grows with depth.
@@ -133,12 +133,15 @@ test('topology: WITHOUT identity the cyclic mesh cannot terminate — maxDepth i
     `node count must grow with depth while devices repeat (3 hops: ${shallow.nodes.length}, 6 hops: ${deep.nodes.length})`,
   );
 
-  // And concretely: node `a` — the vantage — is reached again as /b/a and is NOT
+  // And concretely: node `a` — the vantage — is reached again one orbit later and is NOT
   // recognized as itself. ADR-0044 pt 2, made visible.
   const ids = deep.nodes.map((n) => n.id);
   assert.ok(ids.includes('/'), 'the vantage is the root node');
-  assert.ok(ids.includes('/b/a'), 'the vantage is ALSO reached as /b/a — as a separate node');
-  assert.ok(ids.includes('/b/a/b/a'), 'and again as /b/a/b/a — the same device, four nodes deep');
+  // Mount paths (ADR-0061): out through a's DIAL to b (ws-client), back through b's
+  // accepted LISTENER for a (ws-server) — the same orbit, spelled by vertex path.
+  const orbit = '/net/ws-client/b/net/ws-server/a';
+  assert.ok(ids.includes(orbit), `the vantage is ALSO reached as ${orbit} — as a separate node`);
+  assert.ok(ids.includes(orbit + orbit), `and again as ${orbit + orbit} — the same device, four nodes deep`);
   t.diagnostic(`pre-identity: ${deep.nodes.length} nodes for 4 real devices — the cycle is unrolled, not closed`);
 });
 
