@@ -755,6 +755,18 @@ class vertex_t {
     [[nodiscard]] bool registered() const noexcept { return registered_; }
 
     /**
+     * @brief This vertex's retirement generation (ADR-0062).
+     *
+     * Bumped every time retirement re-virginizes this object, so a holder of a CACHED
+     * resolution can tell "the same vertex" from "the same address, a new occupant". A
+     * handle alone cannot: the vertex map is pinned and insert-only, so a stale handle stays
+     * usable and would silently address the revived path's new owner.
+     */
+    [[nodiscard]] std::uint32_t retire_gen() const noexcept {
+        return retire_gen_.load(std::memory_order_acquire);
+    }
+
+    /**
      * @brief Fill this node with a registration's identity: set the role, QoS settings, and
      *        handlers, and mark it @ref registered.
      *
@@ -1167,6 +1179,10 @@ class vertex_t {
         // fail-closed: the graph's bearing-ancestor walk (has_own_aces_) skips this vertex
         // immediately, so a concurrent gated op on a descendant stops seeing the retired
         // owner's policy at once (it climbs to the live ancestor instead).
+        // Bump BEFORE anything else is torn down (ADR-0062): a holder comparing generations
+        // must see the invalidation no later than it could observe the reverted state, so a
+        // cached resolution can never be used against a vertex already mid-revert.
+        retire_gen_.fetch_add(1, std::memory_order_release);
         has_own_aces_.store(false, std::memory_order_release);
         lkv_.store({}, std::memory_order_release);  // atomic<shared_ptr>: a mid-read reader
                                                     // holds its own refcount — safe.
@@ -1777,6 +1793,23 @@ class vertex_t {
     // read lock-free by the graph's bearing-ancestor walk on every gated op.
     std::atomic<bool> has_own_aces_{false};
     bool registered_ = false;  // false => placeholder intermediate (invisible to find)
+    /**
+     * @brief Bumped every time this vertex is re-virginized by retirement (ADR-0062).
+     *
+     * A `vertex_handle_t` never dangles — the vertex map is pinned and insert-only — but
+     * `retire()` RE-VIRGINIZES the object in place, so a handle cached across a retire+revive
+     * would address the path's NEW occupant while believing it holds the old one. That is a
+     * confused deputy across an ownership boundary, not a stale read. A holder that caches a
+     * resolution stamps this counter alongside it and compares before use; a mismatch is
+     * handled exactly as a stale route-handle label (drop, observe, NACK, re-advertise), so
+     * no second invalidation mechanism exists.
+     *
+     * Read lock-free off the delivery path while `revert_to_placeholder` writes it, hence
+     * atomic. Placed here rather than in @ref vertex_ext_t deliberately: the ext block is
+     * LAZILY allocated, so a generation living there would be absent for exactly the plain
+     * leaves that retire most often. 32-bit wrap needs 2^32 retirements of one vertex.
+     */
+    std::atomic<std::uint32_t> retire_gen_{0};
 
     // Composite tree links (ADR-0057) at the cold tail. parent_ is immutable once the
     // node is linked (lock-free parent walks); children/registered_ are guarded by
