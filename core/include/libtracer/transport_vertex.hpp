@@ -349,9 +349,16 @@ class transport_vertex_t {
     std::map<std::string, conn_t, std::less<>> conns_;
     std::map<std::string, transport_factory_t, std::less<>> transport_types_;
     // Declared modules, keyed by "<kind>\x00<role>" — see register_module / module_for.
-    std::map<std::string, std::string, std::less<>> modules_;
-    // Module vertices (`/net/<module>`) already registered, so they are created once.
-    std::set<std::string, std::less<>> module_vertices_;
+    // Declared modules. A flat vector, not a map: this is written at setup and read once per
+    // connection creation, so an rbtree buys nothing a linear scan over a handful of entries
+    // does not — and it costs a whole extra container instantiation in flash. Nothing here is
+    // on the forward path.
+    struct module_decl_t {
+        std::string module;
+        std::string kind;
+        conn_role_t role;
+    };
+    std::vector<module_decl_t> modules_;
 };
 
 }  // namespace tr::net

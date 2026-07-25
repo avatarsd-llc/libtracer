@@ -130,18 +130,19 @@ void transport_vertex_t::register_transport_type(std::string kind, transport_fac
 }
 
 void transport_vertex_t::register_module(std::string module, std::string kind, conn_role_t role) {
-    std::string key(kind);
-    key.push_back('\0');
-    key.push_back(static_cast<char>(role));
-    modules_.insert_or_assign(std::move(key), std::move(module));
+    for (module_decl_t& d : modules_) {
+        if (d.kind == kind && d.role == role) {
+            d.module = std::move(module);
+            return;
+        }
+    }
+    modules_.push_back({std::move(module), std::move(kind), role});
 }
 
 std::string transport_vertex_t::module_for(std::string_view kind, conn_role_t role) const {
-    std::string key(kind);
-    key.push_back('\0');
-    key.push_back(static_cast<char>(role));
-    const auto it = modules_.find(key);
-    if (it != modules_.end()) return it->second;
+    for (const module_decl_t& d : modules_) {
+        if (d.kind == kind && d.role == role) return d.module;
+    }
     // Undeclared: the role-split default, so an externally registered transport works
     // unchanged. A transport whose shape this gets wrong declares itself explicitly.
     return std::string(kind) + (role == conn_role_t::DIAL ? "-client" : "-server");
@@ -206,15 +207,16 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
     }
     child_key = std::move(mount_key);
 
-    // The `/net/<module>` grouping vertex exists once, created lazily on first use.
-    if (!module_vertices_.contains(module)) {
+    // The `/net/<module>` grouping vertex, created lazily on first use. graph_.find IS the
+    // dedupe — a separate seen-set would be a second source of truth (and another container
+    // instantiation) for something the graph already knows.
+    {
         std::vector<std::byte> mod_key;
         wire::emit_name(mod_key, std::string_view(net_root_).substr(1));
         wire::emit_name(mod_key, module);
         if (!graph_.find(mod_key)) {
             (void)graph_.register_vertex_key(mod_key, graph::role_t::STORED_VALUE, {});
         }
-        module_vertices_.insert(module);
     }
 
     // Resolve the connection's link. Precedence: a provide_link-staged transport wins
