@@ -30,7 +30,7 @@
  *
  *   3. **A transport is an identity, not memory** — mounting a transport
  *      (ADR-0027) via an in-band `/net:children[]` write adds exactly one
- *      addressable `/net/link0` vertex whose value is a tiny link-state rope
+ *      addressable `/net/can/link0` vertex whose value is a tiny link-state rope
  *      (one VALUE TLV), and only once the link reports — a fresh mount holds no
  *      value at all. The transport's real bytes live *outside* the graph, in the
  *      FWD router's
@@ -186,15 +186,15 @@ void axis_transport_is_identity() {
     transport_vertex_t net(g, router);
 
     tr::net::loopback_channel_t channel;  // in-process, deterministic, no hardware
-    net.provide_link("link0", channel.a());
+    net.provide_link("can", "link0", channel.a());
 
     const auto cw =
         g.write(P("/net:children[]"), conn_spec("client", "link0", conn_role_t::DIAL, 8080));
     check(cw.has_value(),
           "mounting a transport is an in-band :children[] write (no new primitive)");
 
-    const auto link_h = g.find(P("/net/link0").key());
-    check(link_h.has_value(), "the mount added exactly ONE addressable vertex: /net/link0");
+    const auto link_h = g.find(P("/net/can/link0").key());
+    check(link_h.has_value(), "the mount added exactly ONE addressable vertex: /net/can/link0");
 
     // A fresh mount is pure identity: an address with NO stored value until the link
     // reports state (a provided link reports via set_link_state; a dialled socket
@@ -205,11 +205,11 @@ void axis_transport_is_identity() {
 
     // Once the link reports, the value is a tiny link-state TLV — a SINGLE-link rope,
     // categorically not the sensor's two-link memory chain.
-    (void)net.set_link_state("link0", tr::net::link_state_t::UP);
+    (void)net.set_link_state("net/can/link0", tr::net::link_state_t::UP);
     const auto ls = g.read(*link_h);
     check(ls.has_value() && ls->link_count() == 1 && ls->total_length() <= 8,
           "link-state is a single-link rope of a few bytes — never a chained payload");
-    check(router.registry().by_name("link0") == &channel.a(),
+    check(router.registry().by_name("net/can/link0") == &channel.a(),
           "the transport's real bytes live OUTSIDE the graph, in the router's demux");
 
     channel.shutdown();  // join recv threads before the router/graph go away
