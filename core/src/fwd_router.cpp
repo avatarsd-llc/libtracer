@@ -790,10 +790,10 @@ std::optional<graph::vertex_handle_t> fwd_router_t::resolve_route_vertex(
 
 bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
                                  std::span<const std::byte> payload) {
-    const auto route = wire::decode(route_path);
-    if (!route || route->type != type_t::PATH) return false;
-    // The canonical PATH key (concatenated NAME encodings) — the graph vertex-map key.
-    const std::optional<graph::vertex_handle_t> v = graph_.find(wire::path_key(*route));
+    // Through the SAME helper the memoized handle is resolved by — so the cold path and the
+    // cached path cannot disagree about which vertex a label names. Two decode+find copies
+    // would be two sources of truth, which is the shape #516 turned out to be.
+    const std::optional<graph::vertex_handle_t> v = resolve_route_vertex(route_path);
     if (!v) return false;
     // `payload` is a wire-encoded TLV (never empty); `nullopt` is exactly an alloc
     // failure → drop the delivery (one audited alloc/copy/over locus).
