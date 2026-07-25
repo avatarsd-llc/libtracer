@@ -209,6 +209,40 @@ void test_corrupt_crc_compact_is_dropped() {
           "a corrupt-CRC COMPACT is DROPPED — the LKV still holds the last good value");
 }
 
+/**
+ * @brief `try_encode_compact` emits BYTE-IDENTICAL frames to `encode_compact`.
+ *
+ * The forwarding leg swapped to the nothrow exact-reserve encoder to drop four
+ * growth-doubling allocations per steady-state frame. That is only a safe swap if the two
+ * encoders agree on the wire, so this pins it across payload sizes (including empty and
+ * >64 KB, where the length field widens) and across label values (including 0 and 0xFFFF).
+ *
+ * Byte equality is the assertion that matters here, not the allocation count: an encoder that
+ * merely produced a *parseable* frame would pass a routing test while breaking a peer.
+ */
+void test_encoders_agree_byte_for_byte() {
+    std::printf("try_encode_compact matches encode_compact byte-for-byte\n");
+    int mismatches = 0;
+    int failures = 0;
+    for (const std::size_t n :
+         {std::size_t{0}, std::size_t{1}, std::size_t{2}, std::size_t{63}, std::size_t{64},
+          std::size_t{512}, std::size_t{4096}, std::size_t{65000}}) {
+        const std::vector<std::byte> payload(n, std::byte{0x5A});
+        for (const std::uint16_t label :
+             {std::uint16_t{0}, std::uint16_t{1}, std::uint16_t{0x1234}, std::uint16_t{0xFFFF}}) {
+            const std::vector<std::byte> a = tr::net::encode_compact(label, payload);
+            std::vector<std::byte> b;
+            if (!tr::net::try_encode_compact(b, label, payload)) {
+                ++failures;
+                continue;
+            }
+            if (a != b) ++mismatches;
+        }
+    }
+    check(failures == 0, "the nothrow encoder succeeds for every size and label");
+    check(mismatches == 0, "and its bytes are identical to the throwing encoder's");
+}
+
 }  // namespace
 
 int main() {
@@ -216,6 +250,7 @@ int main() {
     test_retire_invalidates_cached_handle();
     test_link_teardown_invalidates_cached_slot();
     test_corrupt_crc_compact_is_dropped();
+    test_encoders_agree_byte_for_byte();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");

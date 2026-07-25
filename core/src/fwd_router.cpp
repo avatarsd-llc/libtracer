@@ -770,7 +770,13 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
     if (rb.warm && rb.down_slot != nullptr) {
         const auto* const slot = static_cast<const child_registry_t::child_t*>(rb.down_slot);
         if (transport_t* const down = slot->link.load(std::memory_order_acquire)) {
-            const std::vector<std::byte> out = encode_compact(rb.out_label, payload_bytes);
+            // The NOTHROW exact-reserve encoder, not `encode_compact`: this is a steady-state
+            // data frame, so its two growth-doubling vectors were four avoidable allocations
+            // per frame. On reserve failure it DROPS — the audited soft-fail locus, matching
+            // `deliver_remote` and the #477 never-abort discipline (`encode_compact` grows
+            // `std::vector`s, which abort under -fno-exceptions).
+            std::vector<std::byte> out;
+            if (!try_encode_compact(out, rb.out_label, payload_bytes)) return;
             down->send(std::span<const std::byte>(out));
             return;
         }
@@ -780,7 +786,8 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
     if (!binding) return;
     if (const child_registry_t::child_t* const slot = registry_.entry_by_name(binding->down_link)) {
         if (transport_t* const down = slot->link.load(std::memory_order_acquire)) {
-            const std::vector<std::byte> out = encode_compact(binding->out_label, payload_bytes);
+            std::vector<std::byte> out;
+            if (!try_encode_compact(out, binding->out_label, payload_bytes)) return;
             down->send(std::span<const std::byte>(out));
             resolved_binding_t fill = rb;
             fill.warm = true;
