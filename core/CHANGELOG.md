@@ -14,6 +14,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **Connection teardown — `child_registry_t::erase`, `fwd_router_t::remove_child`,
+  `transport_vertex_t::remove_connection` (#494).** The FWD child registry was add-only, so a
+  retired connection left a dangling `name → transport_t*` — latent while removal had no wire
+  path, a use-after-free once RFC-0014's remove-half drives create/remove churn. `erase`
+  **tombstones in place** (nulls the slot's link, keeps its NAME) rather than erasing from the
+  vector, so a concurrent lock-free reader's iteration stays valid; a later `add` of the same
+  NAME reuses the tombstone, so churn on a stable name set does not grow the table.
+  `remove_connection` sequences un-route → `retire()` the vertex → destroy the owned socket. The
+  eviction hook is **removal, not departure**: `link_down` alone remains correct for a link that
+  merely dropped, since a DIAL connection's vertex outlives its socket and self-heals.
+  `remove_connection` is owner-internal — the RFC-0014 `NAME`-write dispatch (S2b) is what will
+  expose it to the wire. `child_registry_t::size()` now counts slots including tombstones;
+  `live_size()` counts those that still resolve.
+
 - **Link-liveness enum — RFC-0014 S1 (`tr::net::link_state_t`, #492).** A connection
   vertex's stored value is now the six-state liveness enum
   (`DORMANT`/`DIALING`/`RECONNECTING`/`UP`/`LISTENING`/`BIND_FAILED`, RFC-0014 §4) rather

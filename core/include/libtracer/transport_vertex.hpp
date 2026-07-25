@@ -262,6 +262,23 @@ class transport_vertex_t {
      */
     [[nodiscard]] graph::result_t<void> set_link_state(std::string_view name, link_state_t state);
 
+    /**
+     * @brief Remove connection @p name — un-route it, retire its vertex, close its socket.
+     *
+     * The teardown counterpart of creation (#494), in the order the invariants require:
+     * `fwd_router_t::remove_child` first (the name stops resolving, so no forward can
+     * reach the link), then `graph.retire()` on the identity vertex (RFC-0009 §B.6 —
+     * the path re-virginizes), then the owned transport is destroyed (joining its recv
+     * thread). A connection whose link was staged via @ref provide_link leaves that
+     * borrowed link alone; only the routing entry and the vertex go.
+     *
+     * This is the owner-internal operation the RFC-0014 `NAME`-write removal dispatch
+     * (S2b) will call; it is not itself reachable from the wire.
+     * @param name The connection's NAME (the `/net/<name>` segment).
+     * @return NotFound if @p name names no created connection.
+     */
+    [[nodiscard]] graph::result_t<void> remove_connection(std::string_view name);
+
     /** @brief The parsed transport-private settings of connection @p name (nullptr if none). */
     [[nodiscard]] const conn_settings_t* settings_of(std::string_view name) const;
 
