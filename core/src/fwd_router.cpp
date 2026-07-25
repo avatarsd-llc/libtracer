@@ -659,11 +659,14 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
         const std::vector<std::byte> stripped_bytes = wire::encode(stripped);
 
         const std::uint16_t out_label = handles_.alloc_label(down_name);
-        handles_.bind_ingress(inbound_name, label,
-                              handle_binding_t{.terminus = false,
-                                               .down_link = down_name,
-                                               .out_label = out_label,
-                                               .local_route = {}});
+        // Built field-by-field rather than with a designated-initializer brace: the binding
+        // now carries ADR-0062's memoized resolution too, and an aggregate init that names
+        // only some members trips -Werror=missing-field-initializers on the ESP toolchain.
+        handle_binding_t fwd;
+        fwd.terminus = false;
+        fwd.down_link = down_name;
+        fwd.out_label = out_label;
+        handles_.bind_ingress(inbound_name, label, std::move(fwd));
         handles_.record_egress(down_name, out_label, stripped_bytes);
         const std::vector<std::byte> adv2 = encode_advertise(out_label, stripped_bytes);
         hit.link->send(std::span<const std::byte>(adv2));
@@ -671,10 +674,10 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
     }
 
     // Terminus: the route resolves locally here — bind the label to the local route.
-    handles_.bind_ingress(
-        inbound_name, label,
-        handle_binding_t{
-            .terminus = true, .down_link = {}, .out_label = 0, .local_route = wire::encode(route)});
+    handle_binding_t term;
+    term.terminus = true;
+    term.local_route = wire::encode(route);
+    handles_.bind_ingress(inbound_name, label, std::move(term));
 }
 
 void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label,
@@ -682,8 +685,12 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
     // `payload_bytes` is the already-contiguous wire encoding of the COMPACT payload TLV
     // (the span path re-encodes the decoded child; the rope path materializes only the
     // payload sub-rope — ADR-0055 §2). It is never re-decoded here — just stored/forwarded.
-    const std::optional<handle_binding_t> binding = handles_.lookup_ingress(inbound_name, label);
-    if (!binding) {
+    // ADR-0062: the STEADY-STATE lookup first — ~24 trivially copyable bytes, no allocation.
+    // `lookup_ingress` copies a std::string + a std::vector out of the table, and it did so on
+    // EVERY frame, before anything checked whether this flow was already resolved. The owning
+    // form is now taken only where the route bytes are genuinely needed: the cold re-resolve.
+    const resolved_binding_t rb = handles_.resolved(inbound_name, label);
+    if (!rb.found) {
         // Stale/unknown label: drop, observe, and NACK back to prompt a re-advertise
         // (self-heal). Never a crash — the route is simply re-learned (RFC-0004 §E.1).
         if (stale_cb_) stale_cb_(inbound_name, label);
@@ -694,18 +701,69 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
         return;
     }
 
-    if (binding->terminus) {
-        // Local delivery — expand the label to the bound route and apply the write
-        // (a delivery IS a write, RFC-0004 §D), then notify the delivery sink.
-        if (deliver_local(binding->local_route, payload_bytes) && delivery_cb_)
-            delivery_cb_(binding->local_route, payload_bytes);
+    if (rb.terminus) {
+        // WARM: dereference the cached vertex and write. No decode, no path walk, no
+        // graph_.find — the whole point of RFC-0004 §E.1's label, finally applied to the
+        // RESOLUTION and not merely to the wire. The generation guard is what makes the
+        // cached handle safe: retire() bumps it (#511), so a retired-and-revived vertex is
+        // detected here rather than silently written through (RFC-0009 §B.6 re-virginize).
+        if (rb.warm && rb.target && graph_.retire_generation(*rb.target) == rb.target_gen) {
+            const auto payload_view = view::over_bytes(payload_bytes);
+            if (!payload_view) return;  // alloc failure ⇒ drop (one audited locus)
+            view::rope_t value;
+            if (!value.try_reserve(1)) return;
+            value.append(*payload_view);
+            if (graph_.write(*rb.target, std::move(value)).has_value() && delivery_cb_) {
+                const std::optional<handle_binding_t> b =
+                    handles_.lookup_ingress(inbound_name, label);
+                if (b) delivery_cb_(b->local_route, payload_bytes);
+            }
+            return;
+        }
+        // COLD or STALE: take the owning form, resolve the route, then memoize it.
+        const std::optional<handle_binding_t> binding =
+            handles_.lookup_ingress(inbound_name, label);
+        if (!binding) return;
+        if (deliver_local(binding->local_route, payload_bytes)) {
+            if (const auto v = resolve_route_vertex(binding->local_route)) {
+                resolved_binding_t fill = rb;
+                fill.warm = true;
+                fill.target = *v;
+                fill.target_gen = graph_.retire_generation(*v);
+                handles_.cache_resolution(inbound_name, label, fill);
+            }
+            if (delivery_cb_) delivery_cb_(binding->local_route, payload_bytes);
+        }
         return;
     }
+
     // Forwarding hop: swap to our out-label and re-emit the COMPACT downstream — the
     // route still does NOT ride, only the (swapped) label.
-    if (transport_t* const down = registry_.by_name(binding->down_link)) {
-        const std::vector<std::byte> out = encode_compact(binding->out_label, payload_bytes);
-        down->send(std::span<const std::byte>(out));
+    //
+    // WARM: the cached registry SLOT is read directly. It is safe because teardown nulls the
+    // slot's `link` IN PLACE and ADR-0063 made slot addresses permanently stable — so a
+    // departed link reads nullptr, which is the same clean miss an unresolved lookup gives.
+    // The tombstone IS the invalidation; no generation and no teardown sweep are needed.
+    if (rb.warm && rb.down_slot != nullptr) {
+        const auto* const slot = static_cast<const child_registry_t::child_t*>(rb.down_slot);
+        if (transport_t* const down = slot->link.load(std::memory_order_acquire)) {
+            const std::vector<std::byte> out = encode_compact(rb.out_label, payload_bytes);
+            down->send(std::span<const std::byte>(out));
+            return;
+        }
+        // Tombstoned: fall through and re-resolve, so a re-created link re-warms.
+    }
+    const std::optional<handle_binding_t> binding = handles_.lookup_ingress(inbound_name, label);
+    if (!binding) return;
+    if (const child_registry_t::child_t* const slot = registry_.entry_by_name(binding->down_link)) {
+        if (transport_t* const down = slot->link.load(std::memory_order_acquire)) {
+            const std::vector<std::byte> out = encode_compact(binding->out_label, payload_bytes);
+            down->send(std::span<const std::byte>(out));
+            resolved_binding_t fill = rb;
+            fill.warm = true;
+            fill.down_slot = slot;
+            handles_.cache_resolution(inbound_name, label, fill);
+        }
     }
 }
 
@@ -720,12 +778,22 @@ void fwd_router_t::on_nack(std::string_view inbound_name, std::uint16_t label) {
     }
 }
 
+std::optional<graph::vertex_handle_t> fwd_router_t::resolve_route_vertex(
+    std::span<const std::byte> route_path) const {
+    // The SAME resolution deliver_local performs, factored out so the memoized handle can
+    // never diverge from the one the cold path would have used. Two rules would be two
+    // sources of truth for "which vertex does this label mean".
+    const auto route = wire::decode(route_path);
+    if (!route || route->type != type_t::PATH) return std::nullopt;
+    return graph_.find(wire::path_key(*route));
+}
+
 bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
                                  std::span<const std::byte> payload) {
-    const auto route = wire::decode(route_path);
-    if (!route || route->type != type_t::PATH) return false;
-    // The canonical PATH key (concatenated NAME encodings) — the graph vertex-map key.
-    const std::optional<graph::vertex_handle_t> v = graph_.find(wire::path_key(*route));
+    // Through the SAME helper the memoized handle is resolved by — so the cold path and the
+    // cached path cannot disagree about which vertex a label names. Two decode+find copies
+    // would be two sources of truth, which is the shape #516 turned out to be.
+    const std::optional<graph::vertex_handle_t> v = resolve_route_vertex(route_path);
     if (!v) return false;
     // `payload` is a wire-encoded TLV (never empty); `nullopt` is exactly an alloc
     // failure → drop the delivery (one audited alloc/copy/over locus).
