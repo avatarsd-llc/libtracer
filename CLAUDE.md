@@ -20,18 +20,6 @@ libtracer is a spec-first protocol project. See [GOVERNANCE.md](.github/GOVERNAN
 - **Glossary (canonical domain vocabulary):** [CONTEXT.md](CONTEXT.md) — the root context glossary; read this before naming any domain concept (vertex, edge, path, view, segment, TLV, bridge, address-shift slicing, etc.).
 - **Decisions & RFCs:** [docs/adr/](docs/adr/) records architecture decisions; [docs/spec/rfcs/](docs/spec/rfcs/) holds spec-change proposals. (The earlier `docs/analisys/` reviews were consolidated into these and removed.)
 
-## Repo layout
-
-| Path                     | Purpose                                                   |
-| ------------------------ | --------------------------------------------------------- |
-| [core/](core/)           | C++ reference implementation (CMake)                      |
-| [bindings/](bindings/)   | Language bindings — currently `rust/`, `typescript/`      |
-| [integrations/](integrations/) | Platform integrations — `arduino/`, `esphome/`, `platformio/` |
-| [docs/implementations.md](docs/implementations.md) | Registry of independent third-party implementations |
-| [examples/](examples/)   | Per-platform usage examples                               |
-| [tests/](tests/)         | Conformance test vectors                                  |
-| [docs/](docs/)           | Spec, reference, ADRs, RFCs (see above)              |
-
 ## Agent skills
 
 This repo is set up for use with Matt Pocock's engineering skills (`triage`, `to-issues`, `to-prd`, `improve-codebase-architecture`, `diagnose`, `tdd`, `grill-with-docs`, etc.).
