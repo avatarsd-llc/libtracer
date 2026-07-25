@@ -135,6 +135,22 @@ template <class Cursor>
         }
         return mount_hit_t{c->link, {}, k};
     }
+
+    // BUS-PEER RETURN ROUTE (#513). A frame that arrived from a bus peer grows `src` with the
+    // bare peer segment — the child's mount is not in scope at the bus receiver (#510) — so a
+    // REPLY comes back leading with a name that matches no qualified child key. Before S2a
+    // this resolved through `by_name`'s cross-bus peer fallback; the scoped descent above
+    // dropped that, and the frame then fell through to the terminus arm and was ABSORBED at an
+    // intermediate node as though it had reached its originator.
+    //
+    // Consulting the fallback here restores the route. It is deliberately LAST, so a qualified
+    // mount always wins and the per-endpoint scoping ADR-0061 wanted still holds for every
+    // address that carries one; only a bare peer segment reaches this. It goes away once #510
+    // makes `src` accumulate the full `net/<module>/<name>/<peer>` mount, at which point the
+    // loop above resolves the reply directly.
+    if (n > 0 && !seg[0].empty()) {
+        if (transport_t* const peer = registry.by_name(seg[0])) return mount_hit_t{peer, {}, 1};
+    }
     return {};
 }
 
