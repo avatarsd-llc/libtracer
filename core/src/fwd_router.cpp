@@ -6,6 +6,7 @@
 #include "libtracer/fwd_router.hpp"
 
 #include <array>
+#include <cassert>
 #include <cstring>
 #include <memory_resource>
 #include <optional>
@@ -147,6 +148,22 @@ struct mount_hit_t {
 }
 
 /**
+ * @brief Segments in a qualified mount name — `"a/b"` is 2, `""` is 0 (#523).
+ *
+ * Counts separators rather than splitting: this runs once per `add_child`, and allocating a
+ * vector of pieces to learn a count would be the wrong shape even on a control-plane path.
+ */
+// `maybe_unused`: its only caller is an `assert`, which vanishes under NDEBUG.
+[[nodiscard, maybe_unused]] std::size_t mount_segment_count(std::string_view name) noexcept {
+    if (name.empty()) return 0;
+    std::size_t n = 1;
+    for (const char c : name) {
+        if (c == '/') ++n;
+    }
+    return n;
+}
+
+/**
  * @brief The forward path's entry to @ref resolve_mount_segs — peeks `dst`, then descends.
  */
 template <class Cursor>
@@ -203,15 +220,29 @@ void fwd_router_t::add_child(std::string name, transport_t& link) {
     // child_rx_ deque's emplace_back are both non-atomic, and two creates arriving on two
     // different transports' receive threads are genuinely concurrent. Readers take nothing.
     const std::lock_guard ctl(ctl_m_);
+    // A name the mount descent can never match is a silent misroute (#523): the slot is
+    // appended, `size()`/`live_size()` report it as healthy, and every forward to it misses
+    // and falls through to the terminus with no error anywhere. That is the same failure
+    // shape as #516, one layer up, and #516 took a while to find precisely because a silent
+    // miss looks identical to a correct terminus decision.
+    //
+    // The bound is DERIVED, not chosen: `resolve_mount_segs` tries key widths from
+    // `kMountPeekMax - 1` down to 1, and `kMountPeekMax` is the full RFC-0014 mount grammar
+    // `net / <module> / <name> / <peer>`. So this is not a synthetic limit on user data
+    // (RFC-0006/0007, ADR-0051) — it is the addressing model's own shape, and widening it
+    // would be an addressing change belonging in an RFC, not a quiet edit here.
+    //
+    // Debug-only, so release behaviour is byte-identical: promoting this to a rejection
+    // means changing a public `void` signature, which is the maintainer's call.
+    assert(mount_segment_count(name) >= 1 && mount_segment_count(name) <= kMountPeekMax - 1 &&
+           "add_child: name must have 1..3 segments or the mount descent can never resolve it");
+
     // Populate the registry BEFORE wiring the receiver: an async transport (UDP/ws) may
     // already have a live recv thread, so `set_receiver` is the publish point — once the
     // callback is installed, on_frame can read the registry on that thread. Adding the
     // child first ensures the entry is visible before any inbound frame can resolve it
     // (the set_receiver mutex provides the release/acquire fence). No lock is taken on the
-    // read hot path. NOTE: "the registry is immutable after setup" stopped being true when
-    // RFC-0014 made connection create/remove a RUNTIME operation — an add of a new name
-    // reallocates the table under a concurrent forward read (#521). Closed by the S5
-    // mutation contract, where the TSan gate and a reclamation scheme land together.
+    // read hot path.
     registry_.add(name, link);
     // Capability-matched receiver (ADR-0042 §1 / ADR-0044): a BUS link delivers
     // frames tagged with the SENDING peer's name, which becomes the hop's inbound

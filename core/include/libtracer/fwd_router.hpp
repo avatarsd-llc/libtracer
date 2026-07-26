@@ -104,7 +104,19 @@ class fwd_router_t {
      * stays span-based zero-heap; the refcounts ride only to the terminus);
      * every other link keeps the borrowed-span receiver unchanged.
      *
-     * @param name This node's local NAME for the link (e.g. "up", "cli").
+     * **@p name must have 1 to 3 segments** (#523) — `"up"`, `"ws-server/up"`, or the RFC-0014
+     * mount `"net/<module>/<name>"`. The mount descent matches key widths from
+     * `kMountPeekMax - 1` down to 1, so a 4-segment name registers a slot that resolves for
+     * *nothing*: every forward to it misses and falls through to the terminus, while `size()`
+     * and `live_size()` report it as a healthy child. That silent misroute is the same shape
+     * as #516. The bound is DERIVED from the mount grammar `net / <module> / <name> / <peer>`,
+     * not chosen, so it is not a synthetic limit (RFC-0006/0007, ADR-0051) — widening it is an
+     * addressing-model change and belongs in an RFC.
+     *
+     * Debug builds `assert` this; release behaviour is unchanged, since rejecting at the door
+     * means changing this `void` signature.
+     *
+     * @param name This node's local NAME for the link (e.g. "up", "cli"), 1..3 segments.
      * @param link The transport carrying the next/previous hop.
      */
     void add_child(std::string name, transport_t& link);
