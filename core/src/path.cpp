@@ -77,6 +77,28 @@ result_t<path_t> path_t::parse(std::string_view text) {
     path_t p;
     // Root "/" is zero segments (the graph root); otherwise split on '/'.
     if (addr != "/") {
+        // Pre-size the payload EXACTLY, before a single byte is appended. `emit_name` grows
+        // `payload_` by geometric doubling, so a two-segment path used to walk a 1→2→4→8→16
+        // realloc chain — four throwaway blocks and four frees to build fifteen bytes. That
+        // is not a registration cost: EVERY path-keyed read, write and subscribe parses a
+        // path first, so the whole codebase paid it per operation, and on an MCU allocator a
+        // malloc/free round-trip is hundreds of nanoseconds rather than the tens glibc's
+        // tcache serves it in.
+        //
+        // The size is exact, not an estimate. `addr` is rooted and has no trailing or
+        // doubled slashes by this point, so each segment is preceded by exactly one '/':
+        // the separator count IS the segment count, the segment bytes total
+        // `addr.size() - nsegs`, and each segment adds a 4-byte NAME header — giving
+        // `4*nsegs + (addr.size() - nsegs)`.
+        std::size_t nsegs = 0;
+        for (const char c : addr) {
+            if (c == '/') ++nsegs;
+        }
+        // Reserve only within the bound the loop below enforces anyway, so a garbage address
+        // cannot make this allocate more than a well-formed one of the same length would.
+        if (const std::size_t want = 3 * nsegs + addr.size(); want <= kMaxPathBytes)
+            p.payload_.reserve(want);
+
         std::size_t pos = 1;  // skip the leading '/'
         for (;;) {
             const std::size_t slash = addr.find('/', pos);

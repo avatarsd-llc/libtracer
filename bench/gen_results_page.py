@@ -236,6 +236,38 @@ allocates once. That is still strictly better than the two allocations and two c
 replaces, so no transport regresses — but the honest claim is "zero in the router", not "zero on
 the wire".
 
+### The parse nobody was measuring
+
+`path_t::parse` turns an address into the canonical PATH-TLV payload, and **every** path-keyed
+read, write and subscribe calls it. Nothing in this suite measured it: `inproc-path` parses its
+addresses once into a vector and reuses the `path_t`s, so it times the registry lookup on an
+already-parsed key.
+
+That mattered, because the parse built its payload by geometric doubling — a two-segment address
+walked a 1→2→4→8→16 realloc chain, four throwaway blocks and four frees to produce fifteen bytes.
+Pre-sizing it exactly (the separator count *is* the segment count, so the total is
+`4*segments + address bytes` with no estimate) removes them:
+
+| segments | before | after |
+| ---: | ---: | ---: |
+| 1 | 34 ns | **12 ns** |
+| 2 | 49 ns | **20 ns** |
+| 4 | 75 ns | **29 ns** |
+| 8 | 80 ns | **38 ns** |
+
+Per-vertex registration drops from **7 allocations to 3**, and a by-path write's window from 6 to
+2 — visible in the `heap allocs per … (probe)` series above. Resident bytes are unchanged, because
+this was transient churn, not residency.
+
+Worth stating plainly: these are **host** figures, where glibc's tcache serves a hot same-size
+malloc/free in tens of nanoseconds. On an MCU allocator a round-trip is hundreds, so the same four
+saved round-trips are worth proportionally more on the target than this table shows.
+
+This lever was found by *refuting* the framing of the issue that asked for a vertex arena. That
+issue assumed a registration made 5-7 resident sub-allocations dominated by allocator headers; a
+bare leaf actually leaves **one** resident block, and the ESP-IDF header is 4 bytes. The real cost
+was never in the vertex at all — it was in the parse every caller runs first.
+
 The owning decode cost three allocations for the tree spine plus five more re-encoding a payload
 that was **already contiguous in the frame** — together more than half a warm terminus frame. It
 had been justified as flow-setup cost (ADR-0041 §5), a classification ADR-0062 invalidated by
