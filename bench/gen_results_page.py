@@ -390,6 +390,69 @@ all **same-runner relative** comparisons, where machine speed cancels:
 """
 
 
+RELEASE_COMPARE_BLOCK = """\
+## 3b · What changed since v0.6.0
+
+`v0.6.0` (2026-07-23) to `main` is 118 commits. The figures below are a same-machine A/B with
+**today's bench sources built against both cores**, so the measuring instrument is identical and
+only the library differs — three of these benches did not exist at v0.6.0, and running each
+release's own bench would have compared two different rulers.
+
+### Latency (host p50)
+
+| | v0.6.0 | main | |
+| --- | ---: | ---: | ---: |
+| `COMPACT` terminus, 4 / 64 / 512 B | 280 / 284 / 285 ns | **105 / 107 / 109 ns** | −62% |
+| `COMPACT` forward hop, 4 / 64 / 512 B | 261 / 258 / 260 ns | **44 / 44 / 44 ns** | **−83%** |
+| FWD demux, 1 link | 415 ns | **118 ns** | −72% |
+| FWD demux, 64 links | 483 ns | **122 ns** | −75% |
+| `path_t::parse`, 1 / 2 / 4 / 8 segments | 33 / 46 / 71 / 74 ns | **12 / 20 / 31 / 40 ns** | −46…−64% |
+| in-process write / borrowed / by-path | 100 / 90 / 120 ns | 100 / 90 / 120 ns | unchanged |
+
+The forward hop also became **flat with payload** — 260 ns at 512 B against 261 ns at 4 B before,
+44 ns at both now — because it no longer copies the payload on its way out.
+
+### Throughput
+
+| | v0.6.0 | main | |
+| --- | ---: | ---: | ---: |
+| `COMPACT` terminus, 4 / 64 / 512 B | 3.31 / 3.37 / 3.26 M/s | **8.61 / 6.71 / 8.80 M/s** | ~2.0–2.7x |
+| `COMPACT` forward, 4 / 64 / 512 B | 3.62 / 3.60 / 3.43 M/s | **12.76 / 20.78 / 19.02 M/s** | **3.5–5.8x** |
+| in-process, 64 B | ~11.7 M/s | ~11.6 M/s | flat |
+
+### Memory
+
+| | v0.6.0 | main |
+| --- | ---: | ---: |
+| forward hop | 0 allocs / 0 B | 0 / 0 (the hard gate) |
+| terminus resolve | 9 allocs / 937 B | 9 / 937 B — unchanged |
+| wide fan-out publish | 2 / 26 B | 2 / 26 B |
+| bare leaf vertex | 7 allocs / 136 B | **3** / 136 B |
+| + one LKV write | 6 / 104 B | **2** / 104 B |
+| + owning 5-field app table | 17 / 695 B | **13** / 695 B |
+| + borrowed 5-field app table | 11 / 592 B | **5 / 392 B** |
+| per frame, `COMPACT` terminus | 15 allocs | **3** |
+| per frame, `COMPACT` forward | 14 allocs | **0** |
+
+**Read that last table carefully: resident bytes barely moved.** The only genuine footprint
+reduction is the borrowed app-field table (592 to 392 B). Everything else in that column is
+allocation *churn* — 7 to 3 per registration, 14 to 0 per forwarded frame — which buys latency and
+fights fragmentation, but is not steady-state RAM. This release cycle bought latency and
+throughput; it did not shrink the idle heap, and it was never going to. That lever is retiring
+legacy mechanisms, not tuning the core.
+
+Churn also matters more on the target than these host numbers suggest: glibc's tcache serves a hot
+same-size malloc/free in tens of nanoseconds, where an MCU allocator takes hundreds.
+
+### What this exposed
+
+At v0.6.0 the demux `fixed` and `scan` arms were indistinguishable (415 vs 422 ns at one link,
+483 vs 473 at sixty-four) because a fixed ~415 ns overhead swamped them both. That overhead is now
+gone, and the consequence is that the **linear per-link registry scan has become visible**: 122 ns
+fixed against 398 ns scanning 64 links, or roughly **4.3 ns per registered link**. Removing a
+dominant constant does not make a system fast; it makes the next term legible."""
+
+
 COMPARE_INTRO = """\
 ## 4 · libtracer vs Zenoh — measured, absolute
 
@@ -785,6 +848,8 @@ allocation counts and bytes, not statistics. Five probes feed the history store 
 
 Their series live in the smaller-is-better history suite (§2) under
 `heap bytes per … (probe)` and `max RSS`.
+
+{RELEASE_COMPARE_BLOCK}
 
 {COMPARE_INTRO}
 
