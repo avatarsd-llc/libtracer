@@ -532,7 +532,7 @@ class edge_snapshot_t {
  * Why: the blocking primitives were the single largest per-vertex RAM cost on
  * the MCU target — ESP-IDF pthreads lazily allocate a FreeRTOS mutex (~90 B)
  * plus condvar state PER VERTEX on first touch, and the host paid 88 B of
- * struct. The LKV read/write hot path is lock-free (the atomic shared_ptr
+ * struct. The LKV read/write hot path takes no VERTEX lock (the atomic shared_ptr
  * swap), so a stripe serializes only control-plane verbs (ring trim, edge
  * mutation, ACL state, seq/notify) — cross-vertex contention is
  * wiring-frequency, not per-publish. `await` waits on the stripe's condvar
@@ -542,10 +542,12 @@ class edge_snapshot_t {
 struct alignas(64) vertex_stripe_t {  // one cache line per stripe: adjacent stripes must
                                       // never false-share under multi-threaded publish
     std::mutex m;                     /**< @brief Serializes the stripe's vertices' verbs. */
-    /** @brief Live `await` waiters on this stripe — mutated ONLY under @ref m, so the
-     *         notify side (also under @ref m) reads it race-free and can skip the
-     *         condvar call entirely on the waiterless hot path (issue #370). */
-    int waiters = 0;
+    /** @brief Live `await` waiters on this stripe. Mutated only under @ref m, but READ
+     *         without it by a publish that never takes the lock at all (#555), so it is
+     *         atomic: the waiterless publish skips the mutex, not just the condvar call
+     *         that #370 skipped. See @ref vertex_t::store for the ordering argument that
+     *         makes the lock-free read safe against a lost wakeup. */
+    std::atomic<int> waiters{0};
 };
 
 /**
@@ -685,7 +687,7 @@ struct vertex_ext_t {
  *
  * Pinned in place (the atomic last-known-value slot + mutex + condvar are non-movable) and
  * always handled via a `vertex_handle_t` returned by `graph_t::register_vertex` (ADR-0056). The
- * read/write hot path is lock-free (an atomic shared_ptr swap); the mutex guards only the
+ * read/write hot path takes no vertex lock (an atomic shared_ptr swap); the mutex guards only the
  * history ring, the subscriber list, and the await waiter accounting. Non-copyable.
  *
  * The public surface is a VERB interface — storage (@ref store / @ref read_stored),
@@ -886,12 +888,43 @@ class vertex_t {
     std::shared_ptr<const rope_t> store(rope_t value, std::pmr::memory_resource* mr = nullptr) {
         std::shared_ptr<const rope_t> sp = try_make_lkv(std::move(value), mr);
         if (!sp) return nullptr;  // OOM: nothing published — the caller soft-fails (#477)
-        lkv_.store(sp);           // lock-free publish of the new last-known-value
+        lkv_.store(sp);  // publish the new last-known-value (lock-free by CONTRACT; see lkv_)
+
+        // WAITERLESS PUBLISH: no ring to append and nobody in `await` ⇒ take no lock at all
+        // (#555). #370 already skipped the condvar CALL on this path; the mutex itself was
+        // what remained, and it was not free: measured, it sits immediately downstream of the
+        // `lkv_` atomic publish, so the two serializing regions land back-to-back on the
+        // critical dependency chain and cost ~38 cycles of the write's ~335. (The stripe lock
+        // in `snapshot_edges` overlaps the tail and measures zero — this one does not.)
+        //
+        // Why this cannot lose a wakeup. Both sides are seq_cst, so they share one total
+        // order. WRITER: bump `write_seq_`, THEN read `waiters`. WAITER: publish `++waiters`,
+        // THEN read `write_seq_` to evaluate its predicate. If the writer reads `waiters == 0`
+        // it is ordered before the waiter's store, hence before the waiter's read of the
+        // sequence — so the waiter observes the bump and `wait_for` returns on its FIRST
+        // predicate evaluation, without ever blocking. If instead the waiter got there first,
+        // the writer reads a non-zero count and takes the slow path below, which acquires the
+        // stripe mutex the waiter must hold to block. Neither interleaving leaves a sleeper.
+        //
+        // A spurious slow path is harmless: `waiters` is per STRIPE, so an unrelated vertex's
+        // awaiter makes this publish take the lock and notify needlessly. That is the same
+        // collision `vertex_stripe_t` already documents (a spurious wake plus a re-check,
+        // never a correctness change).
+        vertex_stripe_t& st = vertex_stripe_of(this);  // one lookup per verb (#370)
+        if (role_ != role_t::STREAM) {
+            write_seq_.fetch_add(1, std::memory_order_seq_cst);
+            if (st.waiters.load(std::memory_order_seq_cst) == 0) return sp;
+            const std::lock_guard lock(st.m);
+            vertex_stripe_cv(vertex_stripe_index(this)).notify_all();
+            return sp;
+        }
+
+        // STREAM keeps the original shape verbatim: the ring append is real state mutation
+        // and must stay under the stripe mutex.
         {
-            vertex_stripe_t& st = vertex_stripe_of(this);  // one lookup per verb (#370)
             const std::lock_guard lock(st.m);
             vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-            if (role_ == role_t::STREAM && e != nullptr) {  // STREAM identity always has ext
+            if (e != nullptr) {  // STREAM identity always has ext
                 // The ring's deque legs (shell + map + one node per chunk) throw on OOM
                 // (#477). Probe one conservative per-append bound first (libstdc++'s
                 // 512 B chunk + map/shell slack — every -fno-exceptions MCU target;
@@ -909,10 +942,11 @@ class vertex_t {
                     while (e->history->size() > keep) e->history->pop_front();
                 }
             }
-            ++write_seq_;
-            // Waiterless publish skips the condvar entirely (#370): `waiters` only
-            // changes under st.m, which we hold — no lost-wakeup window exists.
-            if (st.waiters != 0) vertex_stripe_cv(vertex_stripe_index(this)).notify_all();
+            write_seq_.fetch_add(1, std::memory_order_seq_cst);
+            // Waiterless publish skips the condvar entirely (#370): we hold st.m, so a
+            // zero count here cannot race a registration.
+            if (st.waiters.load(std::memory_order_relaxed) != 0)
+                vertex_stripe_cv(vertex_stripe_index(this)).notify_all();
         }
         return sp;
     }
@@ -923,10 +957,10 @@ class vertex_t {
      */
     void note_write() {
         vertex_stripe_t& st = vertex_stripe_of(this);  // one lookup per verb (#370)
+        write_seq_.fetch_add(1, std::memory_order_seq_cst);
+        if (st.waiters.load(std::memory_order_seq_cst) == 0) return;  // waiterless (#555)
         const std::lock_guard lock(st.m);
-        ++write_seq_;
-        if (st.waiters != 0)  // waiterless skip, as @ref store
-            vertex_stripe_cv(vertex_stripe_index(this)).notify_all();
+        vertex_stripe_cv(vertex_stripe_index(this)).notify_all();
     }
 
     /** @brief The stored last-known-value (lock-free; null ⇒ never assigned / Handler role). */
@@ -942,22 +976,29 @@ class vertex_t {
         const std::size_t idx = vertex_stripe_index(this);
         vertex_stripe_t& st = vertex_stripe_at(idx);
         std::unique_lock lock(st.m);
-        // Register on the stripe's waiter count (under st.m — the notify side reads it
-        // under the same mutex, so a publish either sees us and notifies, or happened
-        // before we locked and the predicate below observes its seq bump). RAII so a
-        // throwing wait can never leak a phantom waiter.
+        // Register on the stripe's waiter count. Still mutated under st.m, but the count is
+        // now also read by a publish that takes NO lock (#555), so the store must be seq_cst
+        // and must land BEFORE this thread reads `write_seq_` in the predicate below. That
+        // ordering is the waiter's half of the Dekker pair documented on @ref store: a
+        // publisher that saw zero here is ordered before this store, therefore before the
+        // predicate's read, so the predicate observes its bump and `wait_for` returns without
+        // blocking. RAII so a throwing wait can never leak a phantom waiter.
         struct waiter_scope_t {
-            int& n;
-            explicit waiter_scope_t(int& c) : n(c) { ++n; }
-            ~waiter_scope_t() { --n; }
+            std::atomic<int>& n;
+            explicit waiter_scope_t(std::atomic<int>& c) : n(c) {
+                n.fetch_add(1, std::memory_order_seq_cst);
+            }
+            ~waiter_scope_t() { n.fetch_sub(1, std::memory_order_seq_cst); }
         } scope(st.waiters);
-        return vertex_stripe_cv(idx).wait_for(lock, timeout, [&] { return write_seq_ != seq0; });
+        return vertex_stripe_cv(idx).wait_for(
+            lock, timeout, [&] { return write_seq_.load(std::memory_order_seq_cst) != seq0; });
     }
 
     /** @brief The current write sequence (bumped per assign — the await predicate base). */
-    [[nodiscard]] std::uint64_t current_seq() {
-        const std::lock_guard lock(vertex_stripe_of(this).m);
-        return write_seq_;
+    [[nodiscard]] std::uint64_t current_seq() const {
+        // Lock-free (#555): the sequence is atomic, and a publish no longer holds the stripe
+        // mutex while bumping it — so taking the lock here would synchronize against nothing.
+        return write_seq_.load(std::memory_order_seq_cst);
     }
 
     /**
@@ -968,7 +1009,7 @@ class vertex_t {
     void mark_flushed() {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         if (vertex_ext_t* e = ext_.load(std::memory_order_acquire))
-            e->last_flushed_seq = write_seq_;
+            e->last_flushed_seq = write_seq_.load(std::memory_order_relaxed);
     }
 
     /**
@@ -987,7 +1028,7 @@ class vertex_t {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         if (e == nullptr) return 0;  // no ring — nothing was ever appended
-        const std::uint64_t now = write_seq_;
+        const std::uint64_t now = write_seq_.load(std::memory_order_relaxed);
         if (now == e->last_flushed_seq) return 0;
         const std::uint64_t n_new = now - e->last_flushed_seq;
         if (!e->history) {  // seq advanced but no ring — nothing to drain
@@ -1790,16 +1831,25 @@ class vertex_t {
 
     // The stored value is a rope (ADR-0053 §6): a contiguous scalar is a single-link
     // rope (small-buffer inline, no extra alloc), a chunked stream keeps its links.
-    std::atomic<std::shared_ptr<const rope_t>> lkv_{};  // lock-free read/write hot path
-    std::vector<subscriber_t> subs_;                    // fan-out edges; guarded by m_
+    /** @brief The last-known value. Lock-free BY CONTRACT, and spin-locked in practice:
+     *         `std::atomic<std::shared_ptr<T>>::is_lock_free()` returns 0 on libstdc++, so both
+     *         load and store take its internal pointer-lock bit (`lock cmpxchg` to acquire, an
+     *         `xchg` to release). Measured, that is ~77 of the ~316 cycles of an in-process
+     *         write and the largest single term left on the path — 88% of `store`'s samples
+     *         land on those three instructions. Making it genuinely lock-free needs a
+     *         reclamation scheme for the displaced value; ADR-0064 §2 records the options and
+     *         why none was chosen yet. Until then, do not read "lock-free" here as "no
+     *         serializing operation". */
+    std::atomic<std::shared_ptr<const rope_t>> lkv_{};
+    std::vector<subscriber_t> subs_;  // fan-out edges; guarded by m_
     // The lazily-allocated cold half (#361 §1): handlers, STREAM ring, the ACL state +
     // ADR-0050 effective-merge cache, non-default settings, and the stream drain cursor.
     // Null for the common default leaf. Published once by ensure_ext (CAS), never
     // cleared; freed by the destructor.
     std::atomic<vertex_ext_t*> ext_{nullptr};
-    std::uint64_t write_seq_ = 0;  // bumped per assign; await waits for an increment, and it is
-                                   // the value-agnostic "newer" signal a sweep reads (RFC-0008 §B).
-                                   // Guarded by m_.
+    std::atomic<std::uint64_t> write_seq_{0};  // bumped per assign; await waits for an increment,
+                                               // and it is the value-agnostic "newer" signal a
+                                               // sweep reads (RFC-0008 §B). Guarded by m_.
 
     // Subtree-subscription bookkeeping (RFC-0005): every subscription observes its
     // vertex AND all descendants, so a write must fan out to ancestor subscribers

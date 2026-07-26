@@ -14,6 +14,27 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **The LKV publish takes no lock when nobody is awaiting (ADR-0064 §1, #555).** A non-`STREAM`
+  write now bumps `write_seq_` with one `fetch_add(seq_cst)`, reads the stripe's `waiters`
+  count, and returns **without acquiring the stripe mutex** when it is zero. `#370` already
+  skipped the condvar *call* on this path; the mutex itself was what remained, and measured it
+  is not free — it sits immediately downstream of the `lkv_` atomic publish, so the two
+  serializing regions land back-to-back on the critical dependency chain (~38 of the write's
+  ~335 cycles). `inproc` measures **89.2 → 82.6 ns/op**, faster in 5 of 5 pinned interleaved
+  rounds. `current_seq()` becomes lock-free as a consequence. `STREAM` roles are unchanged —
+  their ring append is real state mutation and keeps the lock.
+
+  **`write_seq_` and `vertex_stripe_t::waiters` are now atomic and part of a documented
+  ordering contract**: the writer bumps the sequence *before* reading `waiters`, the waiter
+  publishes `++waiters` *before* reading the sequence, both `seq_cst`. Reversing either order,
+  or relaxing either access, silently reintroduces a lost-wakeup window. The argument is in
+  ADR-0064 §1 and beside the code.
+
+  Also corrects the "lock-free" language on `lkv_`: `std::atomic<std::shared_ptr<T>>` is
+  lock-free *by contract* and **spin-locked in libstdc++** (`is_lock_free()` returns 0), which
+  is ~77 of the remaining ~316 cycles and now the largest single term on the write path.
+  ADR-0064 §2 records what a genuinely lock-free slot would take and why none was chosen yet.
+
 - **Borrowed app-field installs now really cost zero declaration RAM (ADR-0058 erratum 1).**
   `set_app_fields_static` promised the slots would view caller flash, but the runtime still
   copied the caller's array into an owned `std::vector` — and `app_field_static_t` /
