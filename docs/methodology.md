@@ -252,20 +252,32 @@ of work per operation*.
 - **ACL is disabled in the comparison rows.** No subject resolver is installed, so
   the access gate is a single null check. The *cost of enforcement* is measured
   separately (the `acl-inherit` rows), never hidden inside the comparison.
-- **Network throughput is charted against composition size K, not a single-message
-  rate.** Throughput here comes from *batching*, and the two engines batch
-  differently: libtracer batches by **composition** — a composite endpoint's value is
-  a K-link rope already in memory, shipped as **one datagram** (one `sendmsg` for K
-  values), so effective values/s scales with K at flat latency; Zenoh has no
-  composite send, so its throughput is the transport's timer-batched put rate,
-  independent of K, and plots as a flat reference. Charting a single value-per-send
-  rate would be libtracer's unbatched worst case and is deliberately not the
-  throughput path. Network **latency** is the separate single-value, two-process,
-  same-clock measurement — identical topology for both engines, so it is fair.
+- **There is no network throughput comparison, and the one that existed was
+  withdrawn rather than restyled.** It charted effective values/s against composition
+  size K, on the argument that libtracer ships a K-link rope as one datagram while
+  Zenoh's timer-batched put rate is K-independent and plots as a flat reference. The
+  argument was fine; the measurement was not. Its Zenoh side declared a publisher with
+  **no subscriber and no peer**, so `put()` never reached the wire — measured under
+  `strace`, **5 `sendto` calls for 520 000 puts**, and all five were multicast scouting
+  beacons. The libtracer side measured a real `sendmsg` rate but published `rate × K`,
+  egress-only, with no receiver counting deliveries. Both K-curves were therefore
+  arithmetic rather than measured, only one engine performed any I/O, and the page
+  described the scenario as "loopback UDP · two processes" when it was a single
+  process. A valid version needs a real subscriber in a second process on **both**
+  sides with delivery counted at the receiver — that is a new benchmark, not a fix, and
+  it is tracked separately rather than left on the page as a placeholder.
+- **Network latency is the surviving network comparison**, and it is fair: a
+  single-value, two-process, same-clock measurement over the real loopback kernel path,
+  identical topology for both engines. Both **p50** and the **p99 tail** are charted per
+  transport — for a latency-first substrate the tail is the load-bearing number, and it
+  is where transports separate, since an unreliable datagram path can win the median and
+  still spike at p99.
 
-WebSocket and QUIC latencies are intentionally not charted yet: the WebSocket
-transport shows order-of-magnitude single-run p50 jitter under this bench that would
-make a published latency chart misleading, and QUIC needs the optional TLS module.
+A transport that is **not** charted always says so in the transport-coverage note under
+the charts, including when neither engine produced rows for it. WebSocket and QUIC are
+the standing cases: the WebSocket transport shows order-of-magnitude single-run p50
+jitter under this bench that would make a published chart misleading, and QUIC needs the
+optional TLS module. An absent transport must never be readable as a tie.
 
 ---
 
@@ -286,6 +298,21 @@ make a published latency chart misleading, and QUIC needs the optional TLS modul
   same smaller-is-better suite. The throughput suite is bigger-is-better natural
   `deliveries/s`. The same measurement can therefore appear twice, in two units — by
   design, so each suite reads monotonically.
+- **A discontinuity in the instrument is annotated; a discontinuity in the code is
+  not.** When a commit changes a *bench source* — `bench_libtracer.cpp`,
+  `bench_forward_demux.cpp`, the shared harness, the emitter — every series that bench
+  feeds is marked at that commit, because points either side of it were taken with
+  different rulers and are not comparable. Changes under `core/**` are deliberately
+  **never** marked: a core change moving the line is the signal the series exists to
+  show, and marking both would reduce the annotation to "something happened," which is
+  worth nothing. Comment- and whitespace-only bench edits are filtered out for the same
+  reason — an alert that fires on nothing trains readers to ignore it.
+- **Renaming beats reinterpreting.** If a fix changes *what a row measures*, the mode
+  string changes too: the old series ends visibly and a new one starts at one point.
+  What is never done is keeping the name while changing the meaning, which produces a
+  continuous-looking line that silently stops being about the same thing. If a fix only
+  makes the *same* quantity more accurately measured, the name is kept and the
+  instrument marker carries the discontinuity.
 
 ---
 
