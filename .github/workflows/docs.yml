@@ -36,10 +36,24 @@ permissions:
   id-token: write
   pull-requests: write # post the libtracer-vs-Zenoh absolute comparison as a PR comment
 
-# Allow one concurrent deployment; don't cancel an in-progress publish.
+# Deploys serialize on one group; PR builds do NOT belong in it.
+#
+# This used to be a bare `group: pages` for every trigger, which quietly broke PR
+# checks: GitHub keeps at most ONE pending run per concurrency group, so whenever a
+# second PR's docs build was queued behind the first, it was CANCELLED rather than
+# queued. A cancelled check is not a red check — it reports no conclusion at all, so
+# the PR simply appears to have no docs result, and any merge gate counting completed
+# checks sees nothing to wait for. That is not hypothetical; it let a PR merge on an
+# incomplete matrix.
+#
+# A pull_request run never reaches the deploy job (`if: github.ref == 'refs/heads/main'`
+# on both the artifact upload and the deploy job), so it has no claim on the deployment
+# lock. PR builds therefore get their own per-PR group, where cancel-in-progress is not
+# only safe but wanted: a force-push supersedes its own earlier build. Pushes to main
+# keep the shared `pages` group and still never cancel an in-flight publish.
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.event.pull_request.number) || 'pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
