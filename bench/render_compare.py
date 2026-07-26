@@ -11,9 +11,11 @@ and topic count — with libtracer and Zenoh as two series on shared axes. No sp
 ratios and no prose claim that isn't a measured point: every "reading" under a chart
 is computed from the data's own endpoints at render time.
 
-The chart markup is a self-contained MyST ``:::{raw} html`` block that references the
-committed ``docs/_static/ltz_compare.{css,js}`` assets and carries the measured data
-as embedded JSON; ltz_compare.js draws the SVGs in the reader's browser (theme-aware).
+The charts are emitted in the SAME payload shape as bench/render_history.py and drawn
+by the SAME renderer (``docs/_static/perf_history.js``) — one chart idiom for the whole
+Performance page. The only difference is the x-axis: a history chart's x is a recorded
+commit, a comparison chart's x is the swept parameter, which the payload declares as
+``xkind: "param"``. There is deliberately no second chart engine.
 
   cat results.tsv | python3 bench/render_compare.py --html      # the docs block
   cat results.tsv | python3 bench/render_compare.py --md        # a markdown table (PR comment)
@@ -30,7 +32,7 @@ import sys
 REF_SIZE = 64  # the fixed payload for the fan-out / topic sweeps (must be a kGridSizes point)
 
 
-# ---- formatters (mirror ltz_compare.js so the table and axes read identically) ----
+# ---- formatters (mirror perf_history.js so the PR table and the axes read identically) ----
 def f_rate(v: float) -> str:
     if v >= 1e6:
         return f"{v/1e6:.1f} M" if v < 1e7 else f"{v/1e6:.0f} M"
@@ -93,6 +95,28 @@ def build(rows: list[dict]) -> dict:
         return {sys: [[p[0], p[1]] for p in _series(rows, sys, mode, fixed, axis, [col])]
                 for sys in ("libtracer", "zenoh")}
 
+    # The engine is the LINE dimension here, exactly as fan-out or payload is the line
+    # dimension on a history chart. Labels are spelled out rather than keyed by system id
+    # so the legend reads as prose and so the write-vs-deliver distinction — the one that
+    # decides whether the Zenoh row is a fair counterpart — is visible on the chart itself
+    # instead of only in the prose above it.
+    LINES = [("libtracer", "libtracer — write (store+notify+deliver)", 0),
+             ("libtracer-deliver", "libtracer — deliver-only (propagate)", 1),
+             ("zenoh", "Zenoh — zenoh-c 1.9.0, peer mode (put)", 2)]
+
+    def chart(cid, title, cond, series, x, fmt, ylabel, log, read):
+        """One chart in the render_history payload shape (see perf_history.js)."""
+        out = []
+        for key, label, ci in LINES:
+            pts = series.get(key) or []
+            if pts:
+                out.append({"label": label, "ci": ci, "pts": pts})
+        if not out:
+            return None
+        return {"id": cid, "section": "zenoh", "suite": "compare", "xkind": "param",
+                "title": title, "cond": cond, "fmt": fmt, "ylabel": ylabel, "log": log,
+                "px": x, "series": out, "reading": read}
+
     fan = {"mode": "inproc", "fixed": {"size": REF_SIZE, "ep": 1}, "axis": "fan"}
     pay = {"mode": "inproc", "fixed": {"fan": 1, "ep": 1}, "axis": "size"}
     top = {"mode": "inproc-path", "fixed": {"size": REF_SIZE, "fan": 1}, "axis": "ep"}
@@ -117,46 +141,40 @@ def build(rows: list[dict]) -> dict:
         return series
 
     charts = []
+
+    def add(*a, **kw):
+        c = chart(*a, **kw)
+        if c:
+            charts.append(c)
+
+    X_FAN = {"log": True, "fmt": "count", "label": "subscribers per topic (fan-out)"}
+    X_SIZE = {"log": True, "fmt": "bytes", "label": "payload size"}
+    X_EP = {"log": True, "fmt": "count", "label": "number of topics"}
+    REF = f_bytes(REF_SIZE)
+
     s = add_deliver(two(**{**fan, "col": "deliv"}), "deliv")
-    charts.append({"id": "tp-fan", "title": "Throughput vs fan-out",
-                   "cond": f"{f_bytes(REF_SIZE)} payload · 1 topic · in-process",
-                   "x": {"log": True, "fmt": "count", "label": "subscribers per topic (fan-out)"},
-                   "y": {"log": True, "fmt": "rate", "label": "deliveries / second"},
-                   "series": s, "reading": reading(s, f_rate)})
+    add("ltz-tp-fan", "Throughput vs fan-out", f"{REF} payload · 1 topic · in-process",
+        s, X_FAN, "rate", "deliveries / second", True, reading(s, f_rate))
     s = add_deliver(two(**{**fan, "col": "p50"}), "p50")
-    charts.append({"id": "lat-fan", "title": "p50 latency vs fan-out",
-                   "cond": f"{f_bytes(REF_SIZE)} payload · 1 topic · in-process",
-                   "x": {"log": True, "fmt": "count", "label": "subscribers per topic (fan-out)"},
-                   "y": {"log": True, "fmt": "ns", "label": "p50 latency"},
-                   "series": s, "reading": reading(s, f_ns)})
+    add("ltz-lat-fan", "p50 latency vs fan-out", f"{REF} payload · 1 topic · in-process",
+        s, X_FAN, "ns", "p50 latency", True, reading(s, f_ns))
     s = two(**{**pay, "col": "deliv"})
-    charts.append({"id": "tp-size", "title": "Throughput vs payload",
-                   "cond": "1 subscriber · 1 topic · in-process",
-                   "x": {"log": True, "fmt": "bytes", "label": "payload size"},
-                   "y": {"log": True, "fmt": "rate", "label": "deliveries / second"},
-                   "series": s, "reading": reading(s, f_rate, label_x=f_bytes)})
+    add("ltz-tp-size", "Throughput vs payload", "1 subscriber · 1 topic · in-process",
+        s, X_SIZE, "rate", "deliveries / second", True, reading(s, f_rate, label_x=f_bytes))
     s = two(**{**pay, "col": "mbps"})
-    charts.append({"id": "mb-size", "title": "Bandwidth vs payload",
-                   "cond": "1 subscriber · 1 topic · in-process",
-                   "x": {"log": True, "fmt": "bytes", "label": "payload size"},
-                   "y": {"log": True, "fmt": "mb", "label": "application bandwidth"},
-                   "series": s, "reading": reading(s, f_mb, label_x=f_bytes)})
+    add("ltz-mb-size", "Bandwidth vs payload", "1 subscriber · 1 topic · in-process",
+        s, X_SIZE, "mb", "application bandwidth", True, reading(s, f_mb, label_x=f_bytes))
     s = two(**{**top, "col": "pub"})
-    charts.append({"id": "tp-ep", "title": "Throughput vs topic count",
-                   "cond": f"{f_bytes(REF_SIZE)} · 1 subscriber · write-by-path",
-                   "x": {"log": True, "fmt": "count", "label": "number of topics"},
-                   "y": {"log": False, "fmt": "rate", "label": "publishes / second"},
-                   "series": s, "reading": reading(s, f_rate)})
+    add("ltz-tp-ep", "Throughput vs topic count", f"{REF} · 1 subscriber · write-by-path",
+        s, X_EP, "rate", "publishes / second", False, reading(s, f_rate))
     s = two(**{**top, "col": "p50"})
-    charts.append({"id": "lat-ep", "title": "p50 latency vs topic count",
-                   "cond": f"{f_bytes(REF_SIZE)} · 1 subscriber · write-by-path",
-                   "x": {"log": True, "fmt": "count", "label": "number of topics"},
-                   "y": {"log": False, "fmt": "ns", "label": "p50 latency"},
-                   "series": s, "reading": reading(s, f_ns)})
+    add("ltz-lat-ep", "p50 latency vs topic count", f"{REF} · 1 subscriber · write-by-path",
+        s, X_EP, "ns", "p50 latency", False, reading(s, f_ns))
 
     # --- network transports: per-transport libtracer-vs-Zenoh over the real kernel path ---
     # Present only if the transport benches ran (mode `net-<proto>`); each transport gets a
-    # throughput and a latency chart vs payload, both engines on shared axes.
+    # p50 and a p99 chart vs payload, both engines on shared axes.
+    #
     # The composition-throughput chart was REMOVED, not restyled. Its Zenoh side declared a
     # publisher with no subscriber and no peer, so `put()` never reached the wire — measured,
     # 5 `sendto` calls for 520 000 puts, and those five were multicast scouting beacons. It
@@ -166,14 +184,16 @@ def build(rows: list[dict]) -> dict:
     # the scenario "loopback UDP · two processes" when it was one process. A valid version
     # needs a real subscriber in a second process on both sides and delivery counted at the
     # receiver — that is a new benchmark, not a restyle. Tracked separately.
-
-    # Per-transport LATENCY (single value, paced). With the composition-throughput chart
-    # gone there is no network THROUGHPUT comparison on this page at all, which is the
-    # honest state: a single-message rate would be the unbatched worst case for libtracer,
-    # and the batched story has no valid measurement behind it yet. We DO chart both
-    # p50 AND the p99 TAIL per transport: tail latency (determinism) is the RDMA-substrate
-    # story, so it earns its own axis rather than a footnote. Coverage we can't chart is
-    # SURFACED as a labeled note (net_notes), never silently dropped.
+    #
+    # With it gone there is no network THROUGHPUT comparison at all, which is the honest
+    # state. We DO chart both p50 AND the p99 TAIL per transport: for a latency-first
+    # substrate the tail (jitter, determinism) is the load-bearing number, so it earns its
+    # own axis rather than a footnote.
+    #
+    # EVERY transport gets a note when it is not charted — including the case where NEITHER
+    # engine produced rows. That case used to emit nothing at all, so a transport the prose
+    # promised simply vanished while the WS and QUIC notes stayed visible, implying the
+    # missing one HAD been charted and tied.
     net_notes: list[str] = []
     for proto in ("udp", "tcp", "ws", "quic"):
         mode = f"net-{proto}"
@@ -182,16 +202,12 @@ def build(rows: list[dict]) -> dict:
         p99 = two(mode, fixed, "size", "p99")
         have_lt, have_zn = bool(p50["libtracer"]), bool(p50["zenoh"])
         if have_lt and have_zn:
-            charts.append({"id": f"net-lat-{proto}", "title": f"{proto.upper()} — p50 latency vs payload",
-                           "cond": "one-way, same-clock · loopback kernel path · single value",
-                           "x": {"log": True, "fmt": "bytes", "label": "payload size"},
-                           "y": {"log": True, "fmt": "ns", "label": "p50 latency"},
-                           "series": p50, "reading": reading(p50, f_ns, label_x=f_bytes)})
-            charts.append({"id": f"net-p99-{proto}", "title": f"{proto.upper()} — p99 tail latency vs payload",
-                           "cond": "one-way, same-clock · loopback · single value · TAIL (jitter / determinism)",
-                           "x": {"log": True, "fmt": "bytes", "label": "payload size"},
-                           "y": {"log": True, "fmt": "ns", "label": "p99 latency"},
-                           "series": p99, "reading": reading(p99, f_ns, label_x=f_bytes)})
+            add(f"ltz-net-lat-{proto}", f"{proto.upper()} — p50 latency vs payload",
+                "one-way, same-clock · loopback kernel path · single value",
+                p50, X_SIZE, "ns", "p50 latency", True, reading(p50, f_ns, label_x=f_bytes))
+            add(f"ltz-net-p99-{proto}", f"{proto.upper()} — p99 tail latency vs payload",
+                "one-way, same-clock · loopback · single value · TAIL (jitter / determinism)",
+                p99, X_SIZE, "ns", "p99 latency", True, reading(p99, f_ns, label_x=f_bytes))
         elif have_lt or have_zn:
             who = "libtracer" if have_lt else "Zenoh"
             net_notes.append(f"<b>{proto.upper()}</b>: measured for {who} only — not charted "
@@ -203,13 +219,29 @@ def build(rows: list[dict]) -> dict:
         elif proto == "quic":
             net_notes.append("<b>QUIC</b>: not charted — needs the optional <code>LIBTRACER_WITH_QUIC</code> "
                              "module (msquic + TLS), gated like the dedicated quic CI job.")
+        else:
+            net_notes.append(f"<b>{proto.upper()}</b>: not measured in this run — neither engine "
+                             "produced rows, so there is nothing to compare (the transport bench "
+                             "did not come up).")
 
-    # raw table — every plotted point, absolute
+    return {"charts": charts, "net_notes": net_notes}
+
+
+def raw_table(rows: list[dict]) -> list[dict]:
+    """@brief Every plotted point as absolute numbers, for the PR-comment table.
+
+    This lives outside `build` because only `markdown_table` consumes it: the docs page
+    charts hover for exact values, so an in-page duplicate of the same numbers was pure
+    weight. `docs.yml` shells out to `--md` for the sticky PR comment, which has no
+    JavaScript and therefore does still need it.
+    """
+    fan = {"mode": "inproc", "fixed": {"size": REF_SIZE, "ep": 1}, "axis": "fan"}
+    pay = {"mode": "inproc", "fixed": {"fan": 1, "ep": 1}, "axis": "size"}
+    top = {"mode": "inproc-path", "fixed": {"size": REF_SIZE, "fan": 1}, "axis": "ep"}
     table = []
     sweeps = [("fan-out", fan, f_count, "deliv", None),
               ("payload", pay, f_bytes, "deliv", "mbps"),
               ("topics", top, f_count, "pub", None)]
-    # (network compose-throughput and per-transport latency are shown in the charts above.)
     for si, (label, spec, xf, rate_col, bw_col) in enumerate(sweeps):
         for sys in ("libtracer", "zenoh"):
             cols = [rate_col, "p50"] + ([bw_col] if bw_col else [])
@@ -223,82 +255,73 @@ def build(rows: list[dict]) -> dict:
                     "bandwidth": f_mb(p[3]) if bw_col else "—",
                     "p50": f_ns(p[2]),
                 })
-    return {"charts": charts, "table": table, "net_notes": net_notes}
+    return table
 
-
-BANNER = (
-    "Both engines are built <code>-O3</code> and measured in the same pass on the same "
-    "runner, so this is like-for-like on identical hardware. Values are absolute and "
-    "representative of the CI runner — read trends and orders of magnitude, not the "
-    "third digit (shared-runner variance is real). No ratios: every point is a measured "
-    "number on an absolute axis."
-)
-
-
-def _assets() -> tuple[str, str]:
-    """The committed chart CSS + JS (docs/_static/ltz_compare.{css,js}), read at generate
-    time so they can be INLINED into the page. They must be inlined rather than linked:
-    performance.md renders one directory deep (docs/performance.html), and a relative
-    `_static/...` href resolves to docs/_static/... — a 404, since Sphinx copies _static to
-    the SITE ROOT. Inlining is path-independent and self-contained."""
-    static = pathlib.Path(__file__).resolve().parent.parent / "docs" / "_static"
-    return (static / "ltz_compare.css").read_text(), (static / "ltz_compare.js").read_text()
 
 
 def _net_notes_html(net_notes: list[str]) -> str:
-    """A labeled 'transport coverage' note — what we could NOT chart and why. Surfaced
-    (not silently dropped) so the reader never mistakes an absent transport for a tie."""
+    """A labeled 'transport coverage' note — what could NOT be charted, and why. Surfaced
+    rather than silently dropped, so an absent transport is never read as a tie."""
     if not net_notes:
         return ""
     items = "".join(f"<li>{n}</li>" for n in net_notes)
-    return (f'<div class="ltz-netnotes"><span class="ltz-netnotes-h">Transport coverage</span>'
-            f'<ul>{items}</ul></div>')
+    return ('<div class="ph-note ph-coverage"><b>Transport coverage</b>'
+            f"<ul>{items}</ul></div>")
 
 
 def html_block(rows: list[dict], provenance: str) -> str:
+    """@brief The comparison charts, in the page's ONE chart idiom.
+
+    Emits a `.ph-hist` root exactly like a history section, so `perf_history.js` picks it
+    up with no special case and the charts look and behave identically to every other
+    chart on the page — same axes, same legend, same colors, same formatters.
+
+    The CSS and JS are NOT inlined here: the history sections above this one already
+    inlined both, and `perf_history.js` defers its bootstrap to `DOMContentLoaded`, so a
+    root emitted after the script tag is still drawn. That is the whole benefit of there
+    being one engine — this block is data, not machinery.
+    """
     data = build(rows)
     payload = json.dumps(data, separators=(",", ":"))
-    css, js = _assets()
-    net_notes_html = _net_notes_html(data.get("net_notes", []))
-    return f"""\
-:::{{raw}} html
-<style>{css}</style>
-<div class="ltz-compare">
-  <div class="ltz-banner"><span class="ic">i</span><span>{BANNER}</span></div>
-  <div class="ltz-legend">
-    <span class="item"><span class="sw" style="background:var(--ltz-lt)"></span>libtracer <span class="sub">— write (store+notify+deliver)</span></span>
-    <span class="item"><span class="sw" style="background:var(--ltz-ltd)"></span>libtracer <span class="sub">— deliver-only (propagate)</span></span>
-    <span class="item"><span class="sw" style="background:var(--ltz-zn)"></span>Zenoh <span class="sub">— zenoh-c 1.9.0, peer mode (transient put)</span></span>
-  </div>
-  <div class="ltz-grid" id="ltz-charts"></div>
-  {net_notes_html}
-  <div class="ltz-tablewrap"><table class="ltz-raw" id="ltz-raw"><thead><tr>
-    <th>sweep</th><th>system</th><th>point</th><th>throughput</th><th>bandwidth</th><th>p50 latency</th>
-  </tr></thead><tbody></tbody></table></div>
-  <p class="ltz-prov">{provenance}</p>
-  <script type="application/json" id="ltz-data">{payload}</script>
+    return f""":::{{raw}} html
+<div class="ph-hist">
+  <p class="ph-note">Both engines built <code>-O3</code> and measured in the SAME pass on the
+  same runner, so this is like-for-like on identical hardware. Absolute values on absolute
+  axes — no ratios, and every "reading" under a chart is computed from that chart's own
+  endpoints at render time. Read trends and orders of magnitude, not the third digit;
+  shared-runner variance is real. x-axis = the swept parameter (these are the only charts on
+  the page whose x-axis is not a commit).</p>
+  <div class="ph-grid ph-charts"></div>
+  {_net_notes_html(data.get("net_notes", []))}
+  <p class="ph-prov">{provenance}</p>
+  <script type="application/json" class="ph-data">{payload}</script>
 </div>
-<script>{js}</script>
 :::"""
 
 
 def standalone_html(rows: list[dict], provenance: str) -> str:
     """A self-contained HTML page for offline local preview — the same charts the docs
-    render (assets already inlined by html_block), viewable without a Sphinx build.
+    render, viewable without a Sphinx build. Unlike the docs block this one MUST carry
+    the assets, since there is no history section above it to have inlined them.
     See bench/grid.sh."""
+    static = pathlib.Path(__file__).resolve().parent.parent / "docs" / "_static"
+    css = (static / "perf_history.css").read_text()
+    js = (static / "perf_history.js").read_text()
     inner = html_block(rows, provenance).split("\n", 1)[1].rsplit(":::", 1)[0]
     return (f"<!doctype html><html><head><meta charset='utf-8'>"
-            f"<title>libtracer vs Zenoh</title>"
-            f"<style>body{{margin:2rem;max-width:1100px;font-family:system-ui,sans-serif}}</style>"
-            f"</head><body><h1>libtracer vs Zenoh — absolute</h1>{inner}</body></html>")
+            f"<title>libtracer vs Zenoh</title><style>{css}</style>"
+            f"<style>:root{{color-scheme:light dark}}"
+            f"body{{margin:2rem;max-width:1100px;font-family:system-ui,sans-serif}}</style>"
+            f"</head><body><h1>libtracer vs Zenoh — absolute</h1>{inner}"
+            f"<script>{js}</script></body></html>")
 
 
 def markdown_table(rows: list[dict]) -> str:
     """Absolute-number table for a PR comment (no ratios)."""
-    data = build(rows)
+    table = raw_table(rows)
     out = ["| sweep | system | point | throughput | bandwidth | p50 latency |",
            "| --- | --- | --- | ---: | ---: | ---: |"]
-    for r in data["table"]:
+    for r in table:
         out.append(f"| {r['sweep']} | {r['system']} | {r['x']} | {r['throughput']} | "
                    f"{r['bandwidth']} | {r['p50']} |")
     return "\n".join(out)

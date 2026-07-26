@@ -29,7 +29,9 @@
   function fmtNum(v) { return v >= 1e6 ? (v / 1e6).toFixed(1) + " M" : v >= 1e3 ? (v / 1e3).toFixed(1) + " k" : (v === Math.round(v) ? "" + v : +v.toFixed(1)); }
   function fmtBytes(v) { return v >= 1024 ? (v / 1024) + " KB" : v + " B"; }
   function fmtCount(v) { return v >= 1000 ? (v / 1000) + "k" : "" + v; }
-  var FMT = { ns: fmtNs, rate: fmtRate, num: fmtNum, bytes: fmtBytes, count: fmtCount };
+  // fmtMB is the one formatter the deleted ltz_compare.js had and this one did not.
+  function fmtMB(v) { return v >= 1000 ? (v / 1000).toFixed(1) + " GB/s" : Math.round(v) + " MB/s"; }
+  var FMT = { ns: fmtNs, rate: fmtRate, num: fmtNum, bytes: fmtBytes, count: fmtCount, mb: fmtMB };
 
   function logTicks(min, max) {
     var lo = Math.floor(Math.log10(min)), hi = Math.ceil(Math.log10(max)), t = [];
@@ -319,6 +321,74 @@
     return { svg: s, hover: null };
   }
 
+
+  // ------------------------------------------------------------ param x-axis --
+  // A chart whose x-axis is a measured PARAMETER rather than a commit index:
+  // one line per series (engine, mode), x = the swept value. Structurally the
+  // same object as a trend chart — same axes code, same formatters, same colors,
+  // same legend — which is the whole reason the comparison charts stopped having
+  // their own renderer. `pts` are [x, value] instead of [commit_idx, value].
+  function renderParam(c) {
+    var W = 560, H = 330, m = { l: 66, r: 18, t: 26, b: 48 };
+    var pw = W - m.l - m.r, ph = H - m.t - m.b;
+    var xs = [], all = [];
+    c.series.forEach(function (s) {
+      s.pts.forEach(function (p) { if (xs.indexOf(p[0]) < 0) xs.push(p[0]); all.push(p[1]); });
+    });
+    xs.sort(function (a, b) { return a - b; });
+    if (!xs.length || !all.length) return { svg: "", hover: null };
+    var xmin = xs[0], xmax = xs[xs.length - 1];
+    var xlog = !!(c.px && c.px.log) && xmin > 0 && xmax > xmin;
+    function X(v) {
+      if (xmax <= xmin) return m.l + pw / 2;
+      return xlog
+        ? m.l + (Math.log10(v) - Math.log10(xmin)) / (Math.log10(xmax) - Math.log10(xmin)) * pw
+        : m.l + (v - xmin) / (xmax - xmin) * pw;
+    }
+    var ymin = Math.min.apply(null, all), ymax = Math.max.apply(null, all), yt;
+    if (c.log && ymin > 0) { yt = logTicks(ymin, ymax); } else { yt = linTicks(ymin, ymax); }
+    ymin = yt[0]; ymax = yt[yt.length - 1];
+    var ylog = !!c.log && ymin > 0;
+    function Y(v) {
+      if (ylog) return m.t + (1 - (Math.log10(Math.max(v, ymin)) - Math.log10(ymin)) / (Math.log10(ymax) - Math.log10(ymin))) * ph;
+      return m.t + (1 - (v - ymin) / (ymax - ymin)) * ph;
+    }
+    var yf = FMT[c.fmt] || fmtNum, xf = (c.px && FMT[c.px.fmt]) || fmtNum;
+    var s = '<svg viewBox="0 0 ' + W + " " + H + '" role="img" aria-label="' + c.title + '">';
+    if (ylog) {
+      var e0 = Math.round(Math.log10(ymin)), e1 = Math.round(Math.log10(ymax));
+      for (var e = e0; e < e1; e++) for (var k = 2; k <= 9; k++) {
+        var v = k * Math.pow(10, e); if (v <= ymin || v >= ymax) continue;
+        s += '<line class="ph-glm" x1="' + m.l + '" y1="' + Y(v).toFixed(1) + '" x2="' + (W - m.r) + '" y2="' + Y(v).toFixed(1) + '"/>';
+      }
+    }
+    yt.forEach(function (v) {
+      var y = Y(v);
+      s += '<line class="ph-gl" x1="' + m.l + '" y1="' + y.toFixed(1) + '" x2="' + (W - m.r) + '" y2="' + y.toFixed(1) + '"/>';
+      s += '<text class="ph-tick" x="' + (m.l - 8) + '" y="' + (y + 3).toFixed(1) + '" text-anchor="end">' + yf(v) + "</text>";
+    });
+    xs.forEach(function (v) {
+      var x = X(v);
+      s += '<line class="ph-gl" x1="' + x.toFixed(1) + '" y1="' + m.t + '" x2="' + x.toFixed(1) + '" y2="' + (m.t + ph) + '"/>';
+      s += '<text class="ph-tick" x="' + x.toFixed(1) + '" y="' + (m.t + ph + 16) + '" text-anchor="middle">' + xf(v) + "</text>";
+    });
+    s += '<rect class="ph-frame" x="' + m.l + '" y="' + m.t + '" width="' + pw + '" height="' + ph + '"/>';
+    s += '<text class="ph-axtitle" x="' + (m.l + pw / 2) + '" y="' + (H - 6) + '" text-anchor="middle">' + ((c.px && c.px.label) || "") + "</text>";
+    s += '<text class="ph-axtitle" transform="translate(15 ' + (m.t + ph / 2) + ') rotate(-90)" text-anchor="middle">' + c.ylabel + "</text>";
+    c.series.forEach(function (se) {
+      if (!se.pts.length) return;
+      var line = se.pts.map(function (p) { return X(p[0]).toFixed(1) + "," + Y(p[1]).toFixed(1); }).join(" ");
+      s += '<polyline fill="none" stroke="' + col(se.ci) + '" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" points="' + line + '"/>';
+      se.pts.forEach(function (p, i) {
+        s += '<circle cx="' + X(p[0]).toFixed(1) + '" cy="' + Y(p[1]).toFixed(1) + '" r="' + (i === se.pts.length - 1 ? 4 : 2.6) + '" fill="' + col(se.ci) + '"/>';
+      });
+      var lp = se.pts[se.pts.length - 1];
+      s += '<text x="' + (X(lp[0]) - 6).toFixed(1) + '" y="' + (Y(lp[1]) - 8).toFixed(1) + '" text-anchor="end" class="ph-tick" style="fill:' + col(se.ci) + ';font-weight:700">' + yf(lp[1]) + "</text>";
+    });
+    s += "</svg>";
+    return { svg: s, hover: null };
+  }
+
   // -------------------------------------------------------------- assembly --
   // The page emits one .ph-hist block per chapter, each carrying its own chart
   // payload and its own host div, so a chart sits beside the prose that explains
@@ -326,11 +396,14 @@
   // the charts LAND, never how they are rendered.
   function draw(D, host) {
     D.charts.forEach(function (c) {
-    var suite = D.suites[c.suite];
-    if (!suite || !c.series.length) return;
-    var N = suite.shas.length;
-    var idxs = denseIdxs(c, N);
-    var multi = !!c.px && idxs.length >= 2 && c.series.length >= 2;
+    // A param-x chart carries its own axis in its points and has no commit
+    // dimension, so it needs neither a suite nor the multi-view tabs.
+    var param = c.xkind === "param";
+    var suite = param ? null : D.suites[c.suite];
+    if ((!suite && !param) || !c.series.length) return;
+    var N = suite ? suite.shas.length : 0;
+    var idxs = suite ? denseIdxs(c, N) : [];
+    var multi = !param && !!c.px && idxs.length >= 2 && c.series.length >= 2;
     var card = document.createElement("div");
     card.className = "ph-card";
     var legend = c.series.map(function (se) {
@@ -342,13 +415,15 @@
     }).join("") + "</div>" : "";
     card.innerHTML = "<h4>" + c.title + "</h4>" + tabs + '<p class="cond">' + c.cond + "</p>"
       + '<div class="ph-legend">' + legend + "</div>"
-      + '<div class="ph-plot"></div><div class="ph-tip" style="display:none"></div>';
+      + '<div class="ph-plot"></div><div class="ph-tip" style="display:none"></div>'
+      + (c.reading ? '<p class="ph-reading">' + c.reading + "</p>" : "");
     host.appendChild(card);
     var plot = card.querySelector(".ph-plot"), tip = card.querySelector(".ph-tip");
     var byIdx = c.series.map(lookup);
 
     function show(view) {
-      var r = view === "sweep" ? renderSweep(c, suite, idxs)
+      var r = param ? renderParam(c)
+        : view === "sweep" ? renderSweep(c, suite, idxs)
         : view === "heatmap" ? renderHeat(c, suite, idxs)
           : view === "3D" ? render3D(c, suite, idxs)
             : renderTrend(c, suite);
