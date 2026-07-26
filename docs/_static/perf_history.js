@@ -29,7 +29,9 @@
   function fmtNum(v) { return v >= 1e6 ? (v / 1e6).toFixed(1) + " M" : v >= 1e3 ? (v / 1e3).toFixed(1) + " k" : (v === Math.round(v) ? "" + v : +v.toFixed(1)); }
   function fmtBytes(v) { return v >= 1024 ? (v / 1024) + " KB" : v + " B"; }
   function fmtCount(v) { return v >= 1000 ? (v / 1000) + "k" : "" + v; }
-  var FMT = { ns: fmtNs, rate: fmtRate, num: fmtNum, bytes: fmtBytes, count: fmtCount };
+  // fmtMB is the one formatter the deleted ltz_compare.js had and this one did not.
+  function fmtMB(v) { return v >= 1000 ? (v / 1000).toFixed(1) + " GB/s" : Math.round(v) + " MB/s"; }
+  var FMT = { ns: fmtNs, rate: fmtRate, num: fmtNum, bytes: fmtBytes, count: fmtCount, mb: fmtMB };
 
   function logTicks(min, max) {
     var lo = Math.floor(Math.log10(min)), hi = Math.ceil(Math.log10(max)), t = [];
@@ -319,6 +321,81 @@
     return { svg: s, hover: null };
   }
 
+
+  // ------------------------------------------------------------ param x-axis --
+  // A chart whose x-axis is a measured PARAMETER rather than a commit index:
+  // one line per series (engine, mode), x = the swept value. Structurally the
+  // same object as a trend chart — same axes code, same formatters, same colors,
+  // same legend — which is the whole reason the comparison charts stopped having
+  // their own renderer. `pts` are [x, value] instead of [commit_idx, value].
+  function renderParam(c) {
+    var W = 560, H = 330, m = { l: 66, r: 18, t: 26, b: 48 };
+    var pw = W - m.l - m.r, ph = H - m.t - m.b;
+    var xs = [], all = [];
+    c.series.forEach(function (s) {
+      s.pts.forEach(function (p) { if (xs.indexOf(p[0]) < 0) xs.push(p[0]); all.push(p[1]); });
+    });
+    xs.sort(function (a, b) { return a - b; });
+    if (!xs.length || !all.length) return { svg: "", hover: null };
+    var xmin = xs[0], xmax = xs[xs.length - 1];
+    var xlog = !!(c.px && c.px.log) && xmin > 0 && xmax > xmin;
+    function X(v) {
+      if (xmax <= xmin) return m.l + pw / 2;
+      return xlog
+        ? m.l + (Math.log10(v) - Math.log10(xmin)) / (Math.log10(xmax) - Math.log10(xmin)) * pw
+        : m.l + (v - xmin) / (xmax - xmin) * pw;
+    }
+    var ymin = Math.min.apply(null, all), ymax = Math.max.apply(null, all), yt;
+    if (c.log && ymin > 0) { yt = logTicks(ymin, ymax); } else { yt = linTicks(ymin, ymax); }
+    ymin = yt[0]; ymax = yt[yt.length - 1];
+    var ylog = !!c.log && ymin > 0;
+    function Y(v) {
+      if (ylog) return m.t + (1 - (Math.log10(Math.max(v, ymin)) - Math.log10(ymin)) / (Math.log10(ymax) - Math.log10(ymin))) * ph;
+      return m.t + (1 - (v - ymin) / (ymax - ymin)) * ph;
+    }
+    var yf = FMT[c.fmt] || fmtNum, xf = (c.px && FMT[c.px.fmt]) || fmtNum;
+    var s = '<svg viewBox="0 0 ' + W + " " + H + '" role="img" aria-label="' + c.title + '">';
+    s += '<line class="ph-cross" x1="0" y1="' + m.t + '" x2="0" y2="' + (m.t + ph) + '" style="display:none"/>';
+    if (ylog) {
+      var e0 = Math.round(Math.log10(ymin)), e1 = Math.round(Math.log10(ymax));
+      for (var e = e0; e < e1; e++) for (var k = 2; k <= 9; k++) {
+        var v = k * Math.pow(10, e); if (v <= ymin || v >= ymax) continue;
+        s += '<line class="ph-glm" x1="' + m.l + '" y1="' + Y(v).toFixed(1) + '" x2="' + (W - m.r) + '" y2="' + Y(v).toFixed(1) + '"/>';
+      }
+    }
+    yt.forEach(function (v) {
+      var y = Y(v);
+      s += '<line class="ph-gl" x1="' + m.l + '" y1="' + y.toFixed(1) + '" x2="' + (W - m.r) + '" y2="' + y.toFixed(1) + '"/>';
+      s += '<text class="ph-tick" x="' + (m.l - 8) + '" y="' + (y + 3).toFixed(1) + '" text-anchor="end">' + yf(v) + "</text>";
+    });
+    xs.forEach(function (v) {
+      var x = X(v);
+      s += '<line class="ph-gl" x1="' + x.toFixed(1) + '" y1="' + m.t + '" x2="' + x.toFixed(1) + '" y2="' + (m.t + ph) + '"/>';
+      s += '<text class="ph-tick" x="' + x.toFixed(1) + '" y="' + (m.t + ph + 16) + '" text-anchor="middle">' + xf(v) + "</text>";
+    });
+    s += '<rect class="ph-frame" x="' + m.l + '" y="' + m.t + '" width="' + pw + '" height="' + ph + '"/>';
+    s += '<text class="ph-axtitle" x="' + (m.l + pw / 2) + '" y="' + (H - 6) + '" text-anchor="middle">' + ((c.px && c.px.label) || "") + "</text>";
+    s += '<text class="ph-axtitle" transform="translate(15 ' + (m.t + ph / 2) + ') rotate(-90)" text-anchor="middle">' + c.ylabel + "</text>";
+    c.series.forEach(function (se) {
+      if (!se.pts.length) return;
+      var line = se.pts.map(function (p) { return X(p[0]).toFixed(1) + "," + Y(p[1]).toFixed(1); }).join(" ");
+      s += '<polyline fill="none" stroke="' + col(se.ci) + '" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" points="' + line + '"/>';
+      se.pts.forEach(function (p, i) {
+        s += '<circle cx="' + X(p[0]).toFixed(1) + '" cy="' + Y(p[1]).toFixed(1) + '" r="' + (i === se.pts.length - 1 ? 4 : 2.6) + '" fill="' + col(se.ci) + '"/>';
+      });
+      var lp = se.pts[se.pts.length - 1];
+      s += '<text x="' + (X(lp[0]) - 6).toFixed(1) + '" y="' + (Y(lp[1]) - 8).toFixed(1) + '" text-anchor="end" class="ph-tick" style="fill:' + col(se.ci) + ';font-weight:700">' + yf(lp[1]) + "</text>";
+    });
+    s += "</svg>";
+    // Hover is not decoration here: it is the ONLY place the interior points of a
+    // comparison sweep can be read. Only the last point of each series carries a
+    // printed label, and the generated one-line reading under the chart gives the
+    // sweep's endpoints — so without this, a five-point series published three
+    // numbers and hid two. The in-page absolute-number table used to cover that
+    // gap; hover is what earns the right to have removed it.
+    return { svg: s, hover: { kind: "param", W: W, m: m, pw: pw, xs: xs, X: X, xf: xf, yf: yf } };
+  }
+
   // -------------------------------------------------------------- assembly --
   // The page emits one .ph-hist block per chapter, each carrying its own chart
   // payload and its own host div, so a chart sits beside the prose that explains
@@ -326,11 +403,14 @@
   // the charts LAND, never how they are rendered.
   function draw(D, host) {
     D.charts.forEach(function (c) {
-    var suite = D.suites[c.suite];
-    if (!suite || !c.series.length) return;
-    var N = suite.shas.length;
-    var idxs = denseIdxs(c, N);
-    var multi = !!c.px && idxs.length >= 2 && c.series.length >= 2;
+    // A param-x chart carries its own axis in its points and has no commit
+    // dimension, so it needs neither a suite nor the multi-view tabs.
+    var param = c.xkind === "param";
+    var suite = param ? null : D.suites[c.suite];
+    if ((!suite && !param) || !c.series.length) return;
+    var N = suite ? suite.shas.length : 0;
+    var idxs = suite ? denseIdxs(c, N) : [];
+    var multi = !param && !!c.px && idxs.length >= 2 && c.series.length >= 2;
     var card = document.createElement("div");
     card.className = "ph-card";
     var legend = c.series.map(function (se) {
@@ -342,36 +422,66 @@
     }).join("") + "</div>" : "";
     card.innerHTML = "<h4>" + c.title + "</h4>" + tabs + '<p class="cond">' + c.cond + "</p>"
       + '<div class="ph-legend">' + legend + "</div>"
-      + '<div class="ph-plot"></div><div class="ph-tip" style="display:none"></div>';
+      + '<div class="ph-plot"></div><div class="ph-tip" style="display:none"></div>'
+      + (c.reading ? '<p class="ph-reading">' + c.reading + "</p>" : "");
     host.appendChild(card);
     var plot = card.querySelector(".ph-plot"), tip = card.querySelector(".ph-tip");
     var byIdx = c.series.map(lookup);
 
     function show(view) {
-      var r = view === "sweep" ? renderSweep(c, suite, idxs)
+      var r = param ? renderParam(c)
+        : view === "sweep" ? renderSweep(c, suite, idxs)
         : view === "heatmap" ? renderHeat(c, suite, idxs)
           : view === "3D" ? render3D(c, suite, idxs)
             : renderTrend(c, suite);
       plot.innerHTML = r.svg;
       tip.style.display = "none";
-      if (!r.hover || r.hover.kind !== "trend") return;
+      if (!r.hover) return;
       var g = r.hover, svg = plot.querySelector("svg"), cross = plot.querySelector(".ph-cross");
-      svg.addEventListener("mousemove", function (ev) {
+      if (!cross) return;
+      // Both chart kinds hover the same way — snap to the nearest x, draw the
+      // crosshair, list every series' value there. They differ only in what an x
+      // IS: a recorded commit, or a swept parameter value.
+      function nearest(ev) {
         var rc = svg.getBoundingClientRect();
         var fx = (ev.clientX - rc.left) / rc.width * g.W;
+        if (g.kind === "param") {
+          var best = 0, bd = Infinity;
+          for (var k = 0; k < g.xs.length; k++) {
+            var d = Math.abs(g.X(g.xs[k]) - fx);
+            if (d < bd) { bd = d; best = k; }
+          }
+          return { i: best, x: g.X(g.xs[best]) };
+        }
         var i = Math.round((fx - g.m.l) / g.pw * (g.N - 1));
         if (i < 0) i = 0; if (i > g.N - 1) i = g.N - 1;
-        var x = g.m.l + (g.N <= 1 ? g.pw / 2 : (i / (g.N - 1)) * g.pw);
-        cross.setAttribute("x1", x); cross.setAttribute("x2", x); cross.style.display = "";
-        var rel = (suite.releases || []).filter(function (rr) { return rr.i === i; })
-          .map(function (rr) { return ' <span class="rel">🏷 ' + (rr.approx ? "≈ " : "") + rr.label + "</span>"; }).join("");
-        var rows = c.series.map(function (se, si) {
-          var v = byIdx[si][i];
-          return v === undefined ? "" : '<div><span class="dot" style="background:' + col(se.ci) + '"></span>'
-            + se.label + " <b>" + g.yf(v) + "</b></div>";
-        }).join("");
-        tip.innerHTML = "<div class='sha'><code>" + suite.shas[i] + "</code>" + rel + "</div>"
-          + (suite.msgs && suite.msgs[i] ? "<div class='msg'>" + suite.msgs[i] + "</div>" : "") + rows;
+        return { i: i, x: g.m.l + (g.N <= 1 ? g.pw / 2 : (i / (g.N - 1)) * g.pw) };
+      }
+      svg.addEventListener("mousemove", function (ev) {
+        var hit = nearest(ev), i = hit.i;
+        cross.setAttribute("x1", hit.x); cross.setAttribute("x2", hit.x); cross.style.display = "";
+        var head, rows;
+        if (g.kind === "param") {
+          var xv = g.xs[i];
+          head = "<div class='sha'><code>" + ((c.px && c.px.label) || "x") + " " + g.xf(xv) + "</code></div>";
+          rows = c.series.map(function (se) {
+            var hitpt = null;
+            se.pts.forEach(function (pt) { if (pt[0] === xv) hitpt = pt; });
+            return hitpt === null ? "" : '<div><span class="dot" style="background:' + col(se.ci) + '"></span>'
+              + se.label + " <b>" + g.yf(hitpt[1]) + "</b></div>";
+          }).join("");
+        } else {
+          var rel = (suite.releases || []).filter(function (rr) { return rr.i === i; })
+            .map(function (rr) { return ' <span class="rel">🏷 ' + (rr.approx ? "≈ " : "") + rr.label + "</span>"; }).join("");
+          head = "<div class='sha'><code>" + suite.shas[i] + "</code>" + rel + "</div>"
+            + (suite.msgs && suite.msgs[i] ? "<div class='msg'>" + suite.msgs[i] + "</div>" : "");
+          rows = c.series.map(function (se, si) {
+            var v = byIdx[si][i];
+            return v === undefined ? "" : '<div><span class="dot" style="background:' + col(se.ci) + '"></span>'
+              + se.label + " <b>" + g.yf(v) + "</b></div>";
+          }).join("");
+        }
+        tip.innerHTML = head + rows;
         tip.style.display = "";
       });
       svg.addEventListener("mouseleave", function () { cross.style.display = "none"; tip.style.display = "none"; });

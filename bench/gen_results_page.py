@@ -353,18 +353,28 @@ def codec_block() -> str:
 HOW_TO_READ = """\
 ## How to read this page
 
-Every number below belongs to exactly ONE of these measurement approaches. They use
-different harnesses, different processes, and different units — **a value is only
-comparable to values from the same surface**, never across surfaces.
+Every number below belongs to exactly ONE measurement surface. Surfaces use different
+harnesses, processes and units — **a value is only comparable to values from the same
+surface**, never across surfaces.
 
-| § | surface | what it measures | harness | discipline |
+**A surface is a property of a series, not of a chapter.** The chapters below group by
+*subject* — everything about allocation in one place, everything about routing in
+another — because that is how a reader arrives with a question. A subject can be
+answered by more than one instrument, so §3 and §4 each carry two, and the column
+saying which is the one that matters when comparing two numbers.
+
+| surface | what it measures | harness | where it appears | discipline |
 | --- | --- | --- | --- | --- |
-| 1 | Cross-core conformance | byte-exactness across cores (not speed) | `run-all.py` | any DISAGREE fails CI |
-| 2 | Dispatch | single-process write/deliver cost (the µs thesis) | `bench_libtracer` | gated per PR **and** per `main` push, same-runner |
-| 3 | Wire & routing | what a framed hop costs before any payload is touched | `bench_forward_demux` + `bench_compact_delivery` | same harness, batch-amortized |
-| 4 | Memory & allocation | heap allocations counted, not timed | `bench_forward_heap` probes + max RSS | forward hop hard-gated at ZERO allocs |
-| 5 | libtracer vs Zenoh | absolute side-by-side, both engines same pass | `bench_libtracer` + `bench_zenoh` (+ loopback net) | same runner, same pass — no ratios |
-| 6 | Cross-core codec | decode→encode roundtrip per implementation | cpp / ts / rust codec benches | same v1 vectors for all cores |
+| Cross-core conformance | byte-exactness across cores (not speed) | `run-all.py` | §1 | any DISAGREE fails CI |
+| In-process timing | per-op latency and throughput in one process | `bench_libtracer` | §2, and the timed charts in §3 (fold, `path_t::parse`) and §4 (LKV, allocator-under-contention) | gated per PR **and** per `main` push, same-runner |
+| Framed-hop timing | what one wire frame costs before any payload is touched | `bench_forward_demux` + `bench_compact_delivery` | §3 | batch-amortized, self-calibrating |
+| Allocation counting | exact allocs and bytes around ONE operation — counted, never timed | `bench_forward_heap` probes + max RSS | §4 | forward hop hard-gated at ZERO allocs |
+| Engine comparison | absolute side-by-side, both engines in one pass | `bench_libtracer` + `bench_zenoh` (+ loopback net) | §5 | same runner, same pass — no ratios |
+| Cross-core codec | decode→encode roundtrip per implementation | cpp / ts / rust codec benches | §6 | same v1 vectors for all cores |
+
+The two that share a chapter are the pair most easily confused: **§4's counted bytes and
+its timed nanoseconds answer different questions** — how much an object holds, versus
+what it costs to get and give back. Neither number bounds the other.
 
 **Enforcement (what actually stops a pullback).** Absolute nanoseconds vary ~2× with
 the CI runner drawn, so raw chart height is a *trend* signal, not a gate. The gates are
@@ -384,9 +394,13 @@ all **same-runner relative** comparisons, where machine speed cancels:
 ### Every chart on this page is the same chart
 
 There is one chart type here and no second one. Each is a **family** — a set of series
-that differ in exactly one variable (fan-out, payload size, thread count, fold width,
-registry size, engine) — drawn as lines on shared axes, x-axis = recorded `main` commits,
-oldest to newest. Learn to read one and you have read all of them.
+answering one question, drawn as lines on shared axes. Most vary a single parameter
+(fan-out, payload size, thread count, fold width, registry size, engine) and those get
+the extra views described below; a few are deliberate matrices, such as the LKV chart
+(operation × backend × payload) and the allocator-under-contention chart (allocator ×
+thread count), where the comparison IS the cross-product. The x-axis is recorded `main`
+commits, oldest to newest, except in §5 where it is the swept parameter. Learn to read
+one and you have read all of them.
 
 - **Two kinds of vertical marker, and they mean different things.** 🏷 *dashed* = a release
   tag (**≈** when the tag's own commit is not a recorded point, so the marker sits at the
@@ -394,15 +408,22 @@ oldest to newest. Learn to read one and you have read all of them.
   A release marker says the code moved; an instrument marker says the ruler moved, so
   points on either side of one are **not comparable**. Core changes are deliberately not
   marked — a core change moving the line is the signal the chart exists to show.
-- **Colors are global.** A label is one color across every chart on the page, so "fan 8"
-  in the latency chapter and "fan 8" in the throughput chapter are visibly the same thing.
+- **Colors are global within the history charts.** A series label is assigned one color
+  once, so "fan 8" is the same color on the latency chart and on the throughput chart
+  beside it, in any chapter. The §5 comparison charts are the exception and use a fixed
+  three-color engine palette instead: their line dimension is which engine, not which
+  parameter, so borrowing a parameter's color would suggest a relationship that is not
+  there.
 - **Families with a numeric parameter carry four views.** *trend* (value vs commit, one
   line per parameter), *sweep* (value vs parameter, one line per commit, recency-faded),
   *heatmap* (commit × parameter, color = value) and an isometric *3D* surface — the same
   three-axis data, switchable per chart. The sweep and heatmap views are drawn only over
   the commit sub-grid where **every** series of the family has a value, so a series that
   started late cannot fake a trend.
-- **Hover for exact values**, the commit sha and its subject line.
+- **Hover any chart for exact values.** On a history chart the tooltip also names the
+  commit and its subject line; on a §5 comparison chart it names the swept parameter
+  value. Every point is readable this way, including the interior ones that carry no
+  printed label.
 
 ### Reading the numbers
 
@@ -565,7 +586,7 @@ def _load_history() -> dict | None:
         return None
 
 
-def history_sections(data: dict | None) -> dict[str, str]:
+def history_sections(data: dict | None) -> tuple[dict[str, str], str]:
     """@brief The family trend charts, split into the page's chapters.
 
     Every chart on this page is the same kind of object: one series-family, all
@@ -573,23 +594,29 @@ def history_sections(data: dict | None) -> dict[str, str]:
     numeric-parameter families — the sweep / heatmap / 3D views. There is
     deliberately no second chart style anywhere; a reader learns the idiom once.
 
-    Returns a section-name -> raw-html-block map (see render_history.html_blocks).
-    Missing keys are normal: a section whose families found no series in the store
-    simply has no chart block, and `charts_for` degrades it to a note.
+    Returns (section -> raw-html block, reason-this-is-empty). The reason matters:
+    three different things produce no blocks and they are NOT interchangeable —
+    the store was unreachable, the store was reachable but unparseable, or the
+    store was read fine and simply carries no family with two or more series yet.
+    Reporting all three as "unreachable" publishes a false cause, and does it on
+    a page that may be showing live charts from that same store two chapters up.
     """
     if not data:
-        return {}
+        return {}, ("the per-commit history store was not reachable in this build")
     try:
-        return render_history.html_blocks(data)
-    except Exception:  # a malformed store must never break the docs build
-        return {}
+        blocks = render_history.html_blocks(data)
+    except Exception as e:  # a malformed store must never break the docs build
+        return {}, f"the history store could not be rendered in this build — {e}"
+    return blocks, "the history store carries no chartable family for this chapter yet"
 
 
-def charts_for(sections: dict[str, str], name: str) -> str:
-    """@brief One chapter's chart block, or the note explaining its absence."""
-    return sections.get(name) or (
-        "_(per-commit history store unreachable in this build — the interactive charts"
-        " linked under Raw data still serve it once published)_")
+def charts_for(sections: tuple[dict[str, str], str], name: str) -> str:
+    """@brief One chapter's chart block, or a note naming why it is absent."""
+    blocks, reason = sections
+    if name in blocks:
+        return blocks[name]
+    return (f"_({reason} — the [raw per-series browser](#8-raw-data-provenance)"
+            " serves the full store once published)_")
 
 
 def tests_block() -> str:
@@ -619,18 +646,31 @@ def tests_block() -> str:
 
 
 def zenoh_compare_block() -> str:
-    """Run both grids and render the absolute-value comparison charts. Degrades to a
-    note (never a crash) if the bench isn't built or Zenoh isn't vendored."""
+    """Run both grids and render the absolute-value comparison charts.
+
+    Two absences are treated differently on purpose:
+
+    - **Zenoh missing** is soft. `docs.yml` builds `bench_zenoh` best-effort and says so
+      in its own comment: a failed vendor must never break a deploy. The chapter degrades
+      to a note and libtracer's own numbers stand.
+    - **libtracer's own rows missing** is hard under `LIBTRACER_DOCS_STRICT`. That means
+      the sweep did not run at all, and the surrounding prose describes charts that are
+      not there. CI always creates the TSV file (`|| true` in the workflow), so an EMPTY
+      file is the shape this failure actually takes — checking that the path exists is
+      not enough to catch it, which is why the check is on the parsed rows.
+    """
     tsv = os.environ.get("LIBTRACER_COMPARE_TSV")
+    combined = ""
     if tsv and pathlib.Path(tsv).exists():
         combined = pathlib.Path(tsv).read_text()  # CI runs the sweep once, shared with the PR comment
-    elif BENCH.exists():
+    if not combined.strip() and BENCH.exists():
         combined = run([str(BENCH), "grid"])
         if BENCH_ZENOH.exists():
             combined += "\n" + run([str(BENCH_ZENOH), "grid"])
-    else:
-        return _missing("bench_codec", "cmake --build bench/build --target bench_codec")
     rows = render_compare.parse(combined)
+    if not any(r["sys"] == "libtracer" for r in rows):
+        return _missing("bench_libtracer (comparison sweep produced no rows)",
+                        "cmake --build bench/build --target bench_libtracer")
     if not render_compare.has_zenoh(rows):
         return ("_(Zenoh not vendored in this build, so the comparison charts are omitted."
                 " Run [`bench/fetch_zenoh.sh`](https://github.com/avatarsd-llc/libtracer/tree/main/bench)"
@@ -702,6 +742,7 @@ def main() -> int:
     summary, passed = cross_core_block()
     history = _load_history()
     charts = history_sections(history)
+    assets = render_history.assets_block()
     page = f"""\
 # Performance & Conformance
 
@@ -778,12 +819,14 @@ The timed rows in this chapter are a separate question from the probes: what the
 {charts_for(charts, "memory")}
 
 ```{{note}}
-**Allocation churn is not resident footprint, and this page charts both.** The probe
-series are bytes a live object holds; the timed series are the cost of getting and
-returning them. A release cycle can cut per-frame allocations from 14 to 0 — as this one
-did — and move resident bytes almost not at all, because churn buys latency and fights
-fragmentation rather than shrinking the idle heap. Shrinking that is a different lever:
-retiring mechanisms, not tuning the core.
+**Allocation churn is not resident footprint, and this page charts both — separately.**
+"Resident bytes per vertex" is what a live object *holds*; "Heap & memory footprint" is
+the transient churn of one forward or terminus operation; the timed charts are what it
+costs to get a block and give it back. A release cycle can cut per-frame allocations from
+14 to 0 — as this one did — and move resident bytes almost not at all, because churn buys
+latency and fights fragmentation rather than shrinking the idle heap. Shrinking that is a
+different lever: retiring mechanisms, not tuning the core. Read the resident chart before
+concluding a release shrank anything.
 
 Churn also matters more on the target than these host numbers suggest. glibc\'s tcache
 serves a hot same-size malloc/free in tens of nanoseconds; an MCU allocator takes
@@ -810,6 +853,8 @@ roundtrip); a core whose toolchain is absent in this build degrades to a note.
 {tests_block()}
 
 {RAW_DATA_BLOCK}
+
+{assets}
 """
     check_heading_depth(page)
     OUT.write_text(page)
