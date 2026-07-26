@@ -57,6 +57,48 @@ inline constexpr std::uint64_t kLatencyDeliveryBudget = 200'000;
     return static_cast<std::size_t>(std::clamp<std::uint64_t>(n, 2000, 200000));
 }
 
+/**
+ * @brief Growth factor at which the batch is deemed large enough (5%).
+ *
+ * Doubling the batch stops lowering the per-op figure once the clock's own cost is
+ * amortized away; the first batch whose per-op cost is not at least this much better
+ * than the previous one is that plateau.
+ */
+inline constexpr double kBatchPlateau = 0.05;
+
+/** @brief Hard ceiling on the calibrated batch — a guard against a pathological plateau. */
+inline constexpr std::size_t kMaxBatch = 1U << 20;
+
+/**
+ * @brief Smallest batch size at which per-op timing stops measuring the clock.
+ *
+ * An operation costing the same order as `clock_gettime` cannot be timed one at a time:
+ * the two clock reads and the clock's own granularity dominate the window, and the
+ * reported percentiles snap to coarse steps. Timing a BATCH of @p op and dividing
+ * amortizes both away. The right batch size is host-dependent (a fast TSC needs a
+ * smaller batch than a syscall-backed clock), so it is calibrated against the host's own
+ * clock rather than hardcoded: double the batch until the per-op figure stops improving.
+ *
+ * Hoisted here from bench_compact_delivery.cpp (#553) so the in-process bench can use
+ * the same calibrator the net-plane benches already do, and so there is ONE definition of
+ * "large enough" across the harness.
+ *
+ * @param op The operation to time; called (many) times, so it must be repeatable.
+ * @return The calibrated batch size, clamped to @ref kMaxBatch.
+ */
+template <typename Op>
+[[nodiscard]] std::size_t calibrate_batch(Op&& op) {
+    double prev = 0.0;
+    for (std::size_t batch = 1; batch <= kMaxBatch; batch *= 2) {
+        const std::uint64_t a = now_ns();
+        for (std::size_t i = 0; i < batch; ++i) op();
+        const double per_op = static_cast<double>(now_ns() - a) / static_cast<double>(batch);
+        if (prev > 0.0 && per_op > prev * (1.0 - kBatchPlateau)) return batch;
+        prev = per_op;
+    }
+    return kMaxBatch;
+}
+
 class Latency {
    public:
     void add(std::uint64_t ns) { samples_.push_back(ns); }
