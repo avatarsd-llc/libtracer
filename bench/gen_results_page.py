@@ -644,7 +644,7 @@ READING_BLOCK = """\
   shared CI runners still vary ~2× in absolute speed — which is why each point is
   recorded as the best across three runner draws — and sub-µs points sit on a
   ~10 ns timer grain. The tell: **a move that hits every series at once —
-  including unrelated ones like the pure-codec `fold-n*` rows — is the runner; a
+  including unrelated ones like the pure-codec `fold-b*` rows — is the runner; a
   move confined to one family is the code.** Read trends across several commits,
   not the third digit of one point. Reproducing locally: build Release
   (`-O3`), pin the bench to a core (`taskset -c N`), take the best of several runs,

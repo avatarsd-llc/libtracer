@@ -273,7 +273,7 @@ make a published latency chart misleading, and QUIC needs the optional TLS modul
 
 - **Runner lottery.** Shared CI runners vary ~2× in absolute speed. **The tell:** a
   move that hits *every* series at once — including unrelated ones like the pure-codec
-  `fold-n*` rows — is the runner; a move confined to one family is the code. Read
+  `fold-b*` rows — is the runner; a move confined to one family is the code. Read
   trends across several commits, not the third digit of one point.
 - **Per-point noise floor.** Each recorded point is the **median of the repeated
   RESULT rows** one run emits, so per-iteration jitter does not move a series. Points
