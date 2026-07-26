@@ -14,6 +14,24 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **Borrowed app-field installs now really cost zero declaration RAM (ADR-0058 erratum 1).**
+  `set_app_fields_static` promised the slots would view caller flash, but the runtime still
+  copied the caller's array into an owned `std::vector` — and `app_field_static_t` /
+  `app_field_slot_t` were field-for-field identical, so the copy converted between a type and
+  itself. Measured host-side, that vector was the **largest single resident block** on the
+  borrowed path: 200 B of the 456 B a 5-field table added. **`app_field_static_t` is now an
+  alias of `app_field_slot_t`**, and `app_field_table_t::slots` is a `std::span` the borrowed
+  install points straight at the caller's array. Per-vertex live bytes for a 5-field borrowed
+  table drop **592 → 392 B (11 → 10 allocations)**; the owning install is unchanged, and the
+  struct does not grow (the owning copy moves to `unique_ptr<slot[]>`, which with the span is
+  the size the vector was on host and rv32 alike). Gated by the `vertex_app5_static` row.
+
+  **⚠ Stronger caller contract.** The runtime now views the **array**, not merely the
+  `name`/`descriptor` bytes it points at — so a `set_app_fields_static` caller must keep the
+  array itself alive for the vertex's lifetime. Pass a `static`/`constexpr` array; a stack
+  array that previously worked by accident will now dangle. Wire-invariant (`:schema` serves
+  identical bytes), so no RFC.
+
 - **Control-plane serialization — `fwd_router_t` and `transport_vertex_t` each gain an internal
   mutex (ADR-0063 §3).** `transport_vertex_t` had **no synchronization at all**, yet the graph
   invokes its connection factory *outside* `map_mutex_`, on whichever transport's receive thread
