@@ -404,8 +404,8 @@ release's own bench would have compared two different rulers.
 | --- | ---: | ---: | ---: |
 | `COMPACT` terminus, 4 / 64 / 512 B | 280 / 284 / 285 ns | **105 / 107 / 109 ns** | −62% |
 | `COMPACT` forward hop, 4 / 64 / 512 B | 261 / 258 / 260 ns | **44 / 44 / 44 ns** | **−83%** |
-| FWD demux, 1 link | 415 ns | **118 ns** | −72% |
-| FWD demux, 64 links | 483 ns | **122 ns** | −75% |
+| FWD demux, 1 link | 415 ns | **86 ns** | −79% |
+| FWD demux, 64 links | 464 ns | **87 ns** | −81% |
 | `path_t::parse`, 1 / 2 / 4 / 8 segments | 33 / 46 / 71 / 74 ns | **12 / 20 / 31 / 40 ns** | −46…−64% |
 | in-process write / borrowed / by-path | 100 / 90 / 120 ns | 100 / 90 / 120 ns | unchanged |
 
@@ -446,11 +446,34 @@ same-size malloc/free in tens of nanoseconds, where an MCU allocator takes hundr
 
 ### What this exposed
 
-At v0.6.0 the demux `fixed` and `scan` arms were indistinguishable (415 vs 422 ns at one link,
-483 vs 473 at sixty-four) because a fixed ~415 ns overhead swamped them both. That overhead is now
-gone, and the consequence is that the **linear per-link registry scan has become visible**: 122 ns
-fixed against 398 ns scanning 64 links, or roughly **4.3 ns per registered link**. Removing a
-dominant constant does not make a system fast; it makes the next term legible."""
+At v0.6.0 the demux `fixed` and `scan` arms were **indistinguishable** — 415 vs 419 ns at one
+link, 464 vs 468 at sixty-four. Not because the scan was cheap, but because the hop then performed
+a *second*, unconditional full-table scan: `entry_by_name`, to find the inbound link's own mount
+prefix. The bench registers the inbound link last, so **both** arms walked the whole table for it
+and the target-first / target-last distinction they exist to isolate was masked entirely. #525
+moved that prefix onto the link's receiver context, which is what made the remaining scan
+measurable at all.
+
+So the surviving `by_segments` scan now shows up cleanly: **86 ns fixed against ~400 ns scanning
+64 links, or roughly 5 ns per registered link**, flat from 4 links upward.
+
+That number is deliberately not being optimised, and the reason is worth recording. A bus
+transport registers **one** child regardless of peer count — a WebSocket server with four hundred
+peers occupies a single registry slot, because a peer has no registry entry at all. The production
+ESP32-C6 carries one or two links; the densest topology in this repository is four. At that
+envelope the scan costs 0–14 ns, at or below this bench's own run-to-run noise, and it only begins
+to pay above roughly thirty connections. Trading the registry's address-stability contract
+(ADR-0063, which ADR-0062's forward cache depends on) for a workload that does not exist would be
+a bad bargain.
+
+**A caution about this row's history.** Until recently the bench's filler links were named
+`l0 … l62`, which are 16 bytes qualified for the first ten and 17 thereafter — and the lookup
+rejects a candidate on length before comparing any segment. So a varying fraction of the table was
+skipped for free, and the per-link column reported that ratio rather than the scan. Worse, none of
+the fillers matched the *target's* width either, so every one was rejected on length alone and
+never reached the segment compare: the column was timing the list walk. An earlier revision of this
+page cited 4.3 ns per link from that broken instrument. The names are now padded to the target's
+width, which is what makes this the honest worst case the row claims to report."""
 
 
 COMPARE_INTRO = """\
