@@ -108,28 +108,19 @@ void run_grid(Session& session) {
             run(session, S, 1, E, "inproc-path", kGridBudget, kGridLatBudget);
 }
 
-/**
- * @brief Egress-throughput reference for the composition (K) axis.
+/*
+ * `run_scatter` was DELETED, not fixed. It declared a publisher with no subscriber and no
+ * peer, so `put()` never reached the wire — measured with strace, 5 `sendto` for 520 000
+ * puts, and those five were multicast scouting beacons. It then emitted ONE K-independent
+ * put rate for every K in {1,8,64,256}, so its "curve" was arithmetic. Charted against a
+ * libtracer side that published `sendmsg_rate * K` (egress-only, no receiver), it produced
+ * a published multi-x win on a page that described the scenario as "loopback UDP, two
+ * processes" — one process, and no network on the Zenoh side at all.
  *
- * Zenoh has no composite send:
- * its throughput comes from the transport's put-batching timer, which is independent of
- * any application grouping — so its effective values/s is essentially FLAT across K. We
- * measure the raw put egress rate once and report it at every K, as the flat reference the
- * libtracer scatter curve (one sendmsg for K values) is plotted against (bench_scatter).
+ * A valid composition comparison needs a real subscriber in a SECOND PROCESS on both sides
+ * with deliveries counted at the receiver. That is a new benchmark; it is tracked as an
+ * issue rather than left here as something to "fix".
  */
-void run_scatter(Session& session) {
-    auto pub = session.declare_publisher(KeyExpr("bench/scatter"));
-    const std::vector<std::uint8_t> payload(kRefSize, 0xAB);
-    for (std::size_t i = 0; i < 20000; ++i) pub.put(Bytes(payload));  // warmup
-    const std::size_t N = 500000;
-    const auto t0 = now_ns();
-    for (std::size_t i = 0; i < N; ++i) pub.put(Bytes(payload));
-    const double secs = (now_ns() - t0) / 1e9;
-    const double put_rate = secs > 0 ? N / secs : 0;  // values/s (K-independent)
-    for (std::size_t K : {std::size_t{1}, std::size_t{8}, std::size_t{64}, std::size_t{256}})
-        emit("zenoh", "scatter", kRefSize, K, 1, put_rate / static_cast<double>(K), put_rate,
-             put_rate * static_cast<double>(kRefSize) / 1e6, Latency::Summary{});
-}
 
 }  // namespace
 
@@ -141,7 +132,9 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (argc > 1 && std::string_view(argv[1]) == "scatter") {
-        run_scatter(session);
+        std::fprintf(stderr,
+                     "bench_zenoh: the `scatter` mode was removed — it measured no network "
+                     "I/O (see the note above run_grid). Emitting nothing is deliberate.\n");
         return 0;
     }
     for (std::size_t F : kFanouts) run(session, kRefSize, F, kRefEndpoints, "inproc");

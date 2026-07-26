@@ -81,7 +81,7 @@ jobs:
           cmake --build core/build -j          # all test targets, for the live test report
           bash bench/fetch_zenoh.sh || echo "zenoh fetch failed — comparison will be omitted"
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build bench/build --target bench_libtracer bench_codec bench_forward_heap bench_transports bench_scatter -j
+          cmake --build bench/build --target bench_libtracer bench_codec bench_forward_heap bench_transports bench_forward_demux bench_compact_delivery -j
           # zenoh is optional: build it separately so a missing/failed vendor never breaks
           # the docs deploy (the comparison degrades to a note; libtracer numbers stand).
           cmake --build bench/build --target bench_zenoh bench_zenoh_net -j || echo "bench_zenoh unavailable — comparison omitted"
@@ -91,9 +91,11 @@ jobs:
         run: |
           out="${RUNNER_TEMP}/compare.tsv"
           { ./bench/build/bench_libtracer grid; ./bench/build/bench_zenoh grid; } >"$out" 2>/dev/null || true
-          # Network throughput vs composition size K: libtracer composite send (one datagram
-          # for K values) vs Zenoh's flat timer-batched put rate.
-          { ./bench/build/bench_scatter; ./bench/build/bench_zenoh scatter; } >>"$out" 2>/dev/null || true
+          # The composition-throughput rows are NOT collected. Their Zenoh side declared a
+          # publisher with no subscriber and no peer, so `put()` never reached the wire
+          # (5 sendto for 520 000 puts, all scouting beacons) and it reported one
+          # K-independent rate for every K; the libtracer side published sendmsg_rate x K,
+          # egress-only. Both curves were arithmetic and only one engine did any I/O.
           # Network transports (UDP/TCP) — two-process pub/sub over real loopback sockets,
           # the SAME topology for both engines. Best-effort; never fails the build (a chart
           # is simply omitted if a transport doesn't come up).
@@ -102,6 +104,10 @@ jobs:
         env:
           LIBTRACER_CXX_HARNESS: ${{ github.workspace }}/core/build/tests/conformance_runner
           LIBTRACER_COMPARE_TSV: ${{ runner.temp }}/compare.tsv
+          # A missing bench binary must FAIL the published build, not degrade into a
+          # placeholder sitting under prose that asserts measured figures (that is exactly
+          # what happened to the forward-demux section). Local previews still degrade.
+          LIBTRACER_DOCS_STRICT: "1"
         run: python3 bench/gen_results_page.py
       # Absolute-number comparison table, upserted as a single sticky PR comment (option
       # "publish result to pr"). Absolute values only — the full interactive charts land
