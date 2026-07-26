@@ -154,6 +154,37 @@ The two scans are not interchangeable: `entry_by_name` compares whole strings (a
 rejects most candidates), while `by_segments` compares a qualified key piecewise — which is
 why the `dst` scan dominates, at roughly 7:1 measured.
 
+### Where the hop stops, and why
+
+After the duplicate header parse was removed the hop sits at ~86 ns, and **~85% of that is still
+TLV header parsing** — but it is now nine *distinct* header reads, none of them a duplicate: the
+FWD header, the op VALUE, the dst PATH and four `dst` segments in the peek, plus the selector peek
+and the src PATH in the rebuild. Each header is read exactly once.
+
+Two source-level levers were implemented and measured, and **both regress**, so neither was taken:
+
+| variant | p50 |
+| --- | ---: |
+| as shipped | **86–87 ns** |
+| `read_fwd_header` forced `always_inline` | 95–96 ns (+10%) |
+| narrowed header struct (48 → 40 bytes) | 95–96 ns (+10%) |
+
+The reasoning that motivated them was sound and the measurement still refuted it. `read_fwd_header`
+parses into a seven-field grammar struct through a `std::expected`, then repacks into a six-field
+one through a `std::optional`, for a path that reads four fields — which looks like obvious waste.
+Disassembly says otherwise: at `-O3` the parse is fully inlined with values flowing in registers
+straight into the narrow struct's stores. There is no intermediate object and no copy, so the
+repack costs **zero instructions** and removing it at source level can only make things worse.
+Forcing the inline is worse still — nine copies of a ~450-byte parser cost more in instruction
+cache than the single well-predicted out-of-line call it replaces.
+
+The gather is not a lever either: it measures ~1.6 ns, not the ~11 ns an earlier profile
+attributed to it. It fills a stack `std::array` of spans and allocates nothing, which the
+`allocs=0` gate pins.
+
+So the forward hop is at a local optimum for its current structure. Recording that here is
+deliberate — "the compiler already did it" is not visible from the source, and the two obvious
+edits both look like clear wins right up until they are measured.
 ### What the shape means
 
 The size-independent term is flat across N, as the design predicted. The term that grows is
