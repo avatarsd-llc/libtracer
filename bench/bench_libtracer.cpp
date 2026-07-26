@@ -118,6 +118,25 @@ void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool
     const double deliv_s = pub_s * static_cast<double>(F);
     const double mb_s = deliv_s * static_cast<double>(S) / 1e6;
 
+    // ⚠ THE p50/p99 COLUMNS ARE CLOCK-QUANTIZED — read the throughput column for small deltas.
+    //
+    // This times ONE operation between two `steady_clock` reads. An in-process write costs
+    // ~70-85 ns and the clock's own granularity plus the two reads is a large fraction of
+    // that, so the reported percentiles snap to coarse steps: run the binary and the p50s for
+    // these rows cluster on 30 / 70 / 80 / 90 / 100 / 120 rather than spreading. Anything
+    // under roughly 10 ns is INVISIBLE here — a real 6% improvement to the write path measured
+    // 100 ns before and 100 ns after, while the throughput column moved 87 -> 80 ns/op.
+    //
+    // The net-plane benches (bench_compact_delivery, bench_forward_demux) do not have this
+    // problem: they batch-amortize and self-calibrate the batch size, precisely because "one
+    // delivery is close enough to clock_gettime that per-op timing measures the clock". This
+    // loop predates that lesson. Converting it is NOT a drop-in change — these rows feed
+    // long-running gh-pages series, and switching what they measure would break continuity
+    // with every historical point — so it is tracked separately rather than done here.
+    //
+    // Until then: `deliv/s` (derived from a bulk-timed run, not per-op reads) is the column to
+    // compare when the difference is small. The percentiles remain useful for order-of-
+    // magnitude and for tail shape, not for resolving a few nanoseconds.
     Latency lat;
     for (std::size_t i = 0; i < LATN; ++i) {
         const auto a = now_ns();
@@ -133,11 +152,24 @@ void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool
  *
  * The ONLY difference from `run_inproc` is the graph's LKV allocator: a
  * `std::pmr::unsynchronized_pool_resource` (frees + reuses fixed-size blocks — a real
- * deployment, not a monotonic best-case) instead of the process heap. This isolates
- * the per-write persist `make_shared` the pool removes — the fan-1-vs-Zenoh gap is
- * malloc-dominated (deliver-only already beats Zenoh; the ~180 ns delta is the LKV
- * persist), and a pool is the ADR-0060 LATENCY/determinism lever (not a RAM play). The
- * pool outlives the graph: `run_inproc` completes synchronously before `pool` destructs.
+ * deployment, not a monotonic best-case) instead of the process heap. The pool outlives the
+ * graph: `run_inproc` completes synchronously before `pool` destructs.
+ *
+ * **The pool is a DETERMINISM lever, not a latency one — and on a host it is SLOWER.**
+ * Measured here: ~104 ns/op pooled against ~85 ns/op on the default heap. glibc's tcache
+ * serves a hot same-size malloc/free in tens of nanoseconds and a general-purpose pool cannot
+ * beat that; the same inversion measures on the terminus path (295 ns heap vs 309 ns pooled).
+ * The reason to inject one is a bounded, deterministic ceiling — which is what the 16KB target
+ * needs — and on an MCU allocator, where a round-trip costs hundreds of nanoseconds, the
+ * comparison flips. That is a property of the HOST allocator, not of the seam.
+ *
+ * This comment used to claim the opposite: that the fan-1-vs-Zenoh gap is "malloc-dominated"
+ * and that "the ~180 ns delta is the LKV persist". Both are refuted by measurement. A leaf
+ * write makes exactly ONE allocation (the 104-byte `allocate_shared` of the LKV rope), and
+ * removing it outright by injecting the pool buys under a nanosecond — the write path is not
+ * allocation-bound at all. It is bound by a short chain of serializing atomics: removing ~164
+ * instructions per op from it changed the cycle count by zero, because the out-of-order machine
+ * was already hiding that work at IPC ~5.
  */
 void run_inproc_pool(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool by_path,
                      const char* mode, std::uint64_t budget = kDeliveryBudget,
@@ -871,11 +903,13 @@ int main(int argc, char** argv) {
     // (lkv-store-heap / lkv-store-pool) + a same-run ratio gate (bench/perf_gate.py).
     // Appended LAST per the row-ordering note above (never ahead of a gated row).
     run_lkv_store_gate();
-    // ADR-0060 write-path latency: the full 1:1 write THROUGH an injected pool `mr_`
-    // (unsynchronized_pool_resource) vs the default global-heap `inproc` / `inproc-borrow`.
-    // Isolates the per-write persist `make_shared` the pool removes — the fan-1-vs-Zenoh
-    // gap is malloc-dominated (deliver-only already beats Zenoh; the ~180 ns delta is the
-    // LKV persist). Two NEW charted series to gh-pages (inproc-pool / inproc-pool-borrow),
+    // The full 1:1 write THROUGH an injected pool `mr_` (unsynchronized_pool_resource) vs the
+    // default global-heap `inproc` / `inproc-borrow`. Isolates what the pool actually does to
+    // the per-write persist — which, measured, is make it ~19 ns SLOWER on this host (~104 vs
+    // ~85 ns/op): the pool is a determinism/bounded-ceiling lever, not a latency one. See the
+    // note on `run_inproc_pool` for the full reading and for the two claims this comment used
+    // to make that measurement refuted. Two charted series to gh-pages (inproc-pool /
+    // inproc-pool-borrow),
     // sweeping payload at fan=1 (where the per-publish alloc is un-amortised). Appended
     // LAST per the row-ordering note above: never ahead of a gated row.
     for (std::size_t S : kSizes)
