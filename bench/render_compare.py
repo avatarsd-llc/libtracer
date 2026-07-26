@@ -157,23 +157,20 @@ def build(rows: list[dict]) -> dict:
     # --- network transports: per-transport libtracer-vs-Zenoh over the real kernel path ---
     # Present only if the transport benches ran (mode `net-<proto>`); each transport gets a
     # throughput and a latency chart vs payload, both engines on shared axes.
-    # Throughput comes from BATCHING, so we chart it against composition size K, not a
-    # single-message rate: libtracer ships K values as one composite datagram (one
-    # sendmsg for the K-link rope), so effective values/s scales with K at flat latency;
-    # Zenoh has no composite send — its throughput is the transport's timer-batched put
-    # rate, independent of K, so it plots as a flat reference. (mode `scatter`.)
-    sc = {sys: [[p[0], p[1]] for p in _series(rows, sys, "scatter", {"size": REF_SIZE, "ep": 1}, "fan", ["deliv"])]
-          for sys in ("libtracer", "zenoh")}
-    if sc["libtracer"] and sc["zenoh"]:
-        charts.append({"id": "net-tp-compose", "title": "Network throughput vs composition size",
-                       "cond": f"{f_bytes(REF_SIZE)} values · one datagram per composite · effective values delivered",
-                       "x": {"log": True, "fmt": "count", "label": "values per composite (K)"},
-                       "y": {"log": True, "fmt": "rate", "label": "effective values / second"},
-                       "series": sc, "reading": reading(sc, f_rate)})
+    # The composition-throughput chart was REMOVED, not restyled. Its Zenoh side declared a
+    # publisher with no subscriber and no peer, so `put()` never reached the wire — measured,
+    # 5 `sendto` calls for 520 000 puts, and those five were multicast scouting beacons. It
+    # then emitted ONE K-independent put rate for every K. The libtracer side measured a real
+    # `sendmsg` rate but reported `rate * K`, egress-only with no receiver. So BOTH K-curves
+    # were arithmetic rather than measured, only one engine did any I/O, and the page called
+    # the scenario "loopback UDP · two processes" when it was one process. A valid version
+    # needs a real subscriber in a second process on both sides and delivery counted at the
+    # receiver — that is a new benchmark, not a restyle. Tracked separately.
 
-    # Per-transport LATENCY (single value, paced) — the net-tp-compose chart above is the
-    # batched-composition throughput story; a single-message net throughput would be the
-    # unbatched worst case for libtracer and is deliberately not charted. We DO chart both
+    # Per-transport LATENCY (single value, paced). With the composition-throughput chart
+    # gone there is no network THROUGHPUT comparison on this page at all, which is the
+    # honest state: a single-message rate would be the unbatched worst case for libtracer,
+    # and the batched story has no valid measurement behind it yet. We DO chart both
     # p50 AND the p99 TAIL per transport: tail latency (determinism) is the RDMA-substrate
     # story, so it earns its own axis rather than a footnote. Coverage we can't chart is
     # SURFACED as a labeled note (net_notes), never silently dropped.

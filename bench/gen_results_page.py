@@ -42,6 +42,24 @@ VECTORS = REPO / "tests" / "conformance" / "vectors" / "v1"
 CXX = os.environ.get("LIBTRACER_CXX_HARNESS") or str(REPO / "build" / "tests" / "conformance_runner")
 
 
+
+def _missing(binary: str, hint: str) -> str:
+    """A bench binary is absent: degrade locally, FAIL the published build.
+
+    A placeholder is fine in a local preview. On the live site it is not: the prose around
+    these blocks asserts measured figures ("87 ns", "-36%"), so a reader meets an assertion
+    with a "not built" note where its evidence should be and reasonably reads the assertion
+    as measured. That is exactly what §2b did — `bench_forward_demux` was never in the docs
+    workflow's build target list, so the published page carried a placeholder under live
+    numbers. `LIBTRACER_DOCS_STRICT=1` (set only in docs.yml) turns that into a build
+    failure, so the page can never again publish prose whose evidence is missing.
+    """
+    if os.environ.get("LIBTRACER_DOCS_STRICT") == "1":
+        sys.exit(f"gen_results_page: {binary} not built, and LIBTRACER_DOCS_STRICT=1. "
+                 f"Build it ({hint}) or drop the section that cites it.")
+    return f"_({binary} not built — `{hint}`)_"
+
+
 def run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, cwd=REPO, **kw).stdout
 
@@ -59,7 +77,7 @@ def cross_core_block() -> str:
 
 def perf_block() -> str:
     if not BENCH.exists():
-        return "_(bench not built — `cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release && cmake --build bench/build --target bench_libtracer`)_"
+        return _missing("bench_libtracer", "cmake --build bench/build --target bench_libtracer")
     out = run([str(BENCH)])
     rows = []
     want = {("inproc", 64, 1, 1): "in-process write (store+notify+deliver)",
@@ -92,8 +110,7 @@ def demux_block() -> str:
     reads as if the whole hop grew with N.
     """
     if not BENCH_DEMUX.exists():
-        return ("_(demux bench not built — `cmake --build bench/build --target "
-                "bench_forward_demux`)_")
+        return _missing("bench_forward_demux", "cmake --build bench/build --target bench_forward_demux")
     fixed: dict[int, int] = {}
     scan: dict[int, int] = {}
     for ln in run([str(BENCH_DEMUX)]).splitlines():
@@ -528,14 +545,17 @@ stored once and each op only delivers, matching Zenoh's put semantics. Note also
 so the gate is a single null check); the gated cost is measured separately by the
 `acl-inherit-d4` rows on this page.
 
-Network **throughput** is charted against **composition size K**, because throughput here
-comes from *batching*, and the two engines batch differently. libtracer batches by
-**composition**: a composite endpoint's value is a K-link rope already in memory, shipped
-as **one datagram** (`send(iov)` — one syscall for K values), so effective values/s scale
-with K *at flat latency*. Zenoh has no composite send; its throughput is the transport's
-**timer-batched** put rate, independent of K — so it plots as a flat reference. (A single
-one-value-per-`send` rate would be the unbatched worst case for libtracer and is not the
-throughput path.) Network **latency** is the separate per-transport (**UDP** / **TCP**),
+There is **no network throughput comparison on this page**, and that is deliberate. One
+existed and was removed rather than restyled: its Zenoh side declared a publisher with no
+subscriber and no peer, so `put()` never reached the wire — measured, **5 `sendto` calls for
+520 000 puts**, and those five were multicast scouting beacons. It then reported one
+K-independent put rate for every K. The libtracer side measured a real `sendmsg` rate but
+published `rate × K`, egress-only with no receiver counting deliveries. Both K-curves were
+arithmetic rather than measured, only one engine performed any I/O, and this page described
+the scenario as "loopback UDP · two processes" when it was a single process. A valid version
+needs a real subscriber in a second process on both sides with delivery counted at the
+receiver — a new benchmark, not a fix, and it is tracked separately rather than left as a
+placeholder. Network **latency** is the separate per-transport (**UDP** / **TCP**),
 single-value, two-process measurement — the same two-process topology (one socket, one
 paced value) for both engines, so it is fair. Each engine runs its own minimal transport
 path (libtracer's framed `transport_t` send/receive vs Zenoh's session `put`/subscriber),
@@ -566,7 +586,6 @@ chart (same scenario, both engines); never compare heights *across* charts.
 | Throughput vs payload | payload size | fan-out 1 · 1 topic · in-process | deliveries/s | falls as payload grows (copy-bound) |
 | Bandwidth vs payload | payload size | **same run** as "vs payload" | MB/s | same data re-expressed in bytes — rises with payload |
 | Throughput vs topic count | number of vertices | 64 B · fan-out 1 · in-process | deliveries/s | ~flat; probes registry pressure |
-| Network throughput vs composition size | composite size K | 64 B values · loopback UDP · two processes | effective values/s | rises with K for libtracer (one datagram per composite); flat for Zenoh (timer batching) |
 
 The per-commit history store adds one more deliberate duplication: throughput is
 recorded **twice** — natural `deliveries/s` in the bigger-is-better suite *and* inverted
@@ -784,7 +803,7 @@ def zenoh_compare_block() -> str:
         if BENCH_ZENOH.exists():
             combined += "\n" + run([str(BENCH_ZENOH), "grid"])
     else:
-        return "_(bench not built — `cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release && cmake --build bench/build`)_"
+        return _missing("bench_codec", "cmake --build bench/build --target bench_codec")
     rows = render_compare.parse(combined)
     if not render_compare.has_zenoh(rows):
         return ("_(Zenoh not vendored in this build, so the comparison charts are omitted."
