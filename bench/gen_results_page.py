@@ -822,7 +822,7 @@ not a hot pattern.
 
 A different instrument entirely: `bench_forward_heap` replaces the global allocator
 with a counting wrapper and arms it around exactly one operation — so its probes are
-exact allocation counts and bytes, not statistics. Six probes feed the store:
+exact allocation counts and bytes, not statistics. Seven probes feed the store:
 
 - **forward hop** — hard-gated at **zero** allocations every CI run (ADR-0038 §16KB-RAM);
 - **terminus resolve** — report-only; a terminus may allocate (ADR-0039), the probe
@@ -839,6 +839,17 @@ exact allocation counts and bytes, not statistics. Six probes feed the store:
   the caller\'s array into a vector, the largest single block on that path — which is now
   fixed (592 → 392 B per vertex, ADR-0058 erratum 1);
 - **wide fan-out publish** — the per-write cost at large subscriber counts;
+- **registration escapes** — how much of a **runtime** vertex registration bypasses the
+  graph's own injected `memory_resource`. ADR-0039 carves init/setup allocations out of
+  the seam, and under that carve-out registering a vertex was fine: it happened once, at
+  startup. RFC-0014 ended that — a connection CREATE arriving on the wire now registers a
+  vertex on whichever transport thread received the frame, so a *peer* drives the
+  allocation. This probe registers a connection-shaped path (a long, peer-chosen name that
+  overflows the inline name buffer, plus a handler) on a graph with a resource injected,
+  and reports what the resource never saw. Its target is **zero**; today it is not zero
+  (#551). It is charted separately from the per-vertex rows above rather than beside them,
+  because it measures a different fixture — reading its block count against a bare leaf's
+  would compare two different objects;
 - **whole-run max RSS** — the coarse process-level footprint.
 
 Each probe reports two independent quantities, and **both now ratchet**: `bytes=`, the

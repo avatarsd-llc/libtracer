@@ -179,6 +179,18 @@ FAMILIES: list[dict] = [
                 ("heap allocs per vertex_app5_static (probe)", "+ borrowed 5-field table"),
                 ("heap allocs per fanout_wide (probe)", "wide fan-out publish")],
          log=False, fmt="num", ylabel="allocations"),
+    # Kept OUT of the two per-vertex families above on purpose. Those measure a leaf on a
+    # DEFAULT graph; this measures a connection-shaped vertex (long peer-chosen name, one
+    # handler) on an INJECTED one. Drawing them on shared axes would invite reading "4 vs
+    # 3 blocks" as a regression when it is two different fixtures. Both series here head
+    # for ZERO — that is the whole point of the chart (#551).
+    dict(id="lat-seam-escape", section="memory", suite="latency",
+         title="ADR-0039 seam escapes — what a runtime registration allocates OUTSIDE the resource",
+         cond="allocator probe · a wire-driven `/net/<module>/<name>` registration on a graph with "
+              "an injected memory_resource — blocks and live bytes that bypass it. Target: zero",
+         names=[("heap allocs per reg_escape (probe)", "blocks escaping the seam"),
+                ("heap bytes per reg_escape (probe)", "live bytes escaping the seam")],
+         log=True, fmt="num", ylabel="value (per-series units)"),
     dict(id="lat-heap", section="memory", suite="latency", title="Heap & memory footprint",
          cond="allocator probe (allocs / bytes per hop) + whole-run max RSS — mixed units, log axis",
          names=[("heap allocs per forward (probe)", "allocs/forward"),
