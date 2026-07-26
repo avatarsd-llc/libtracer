@@ -163,7 +163,11 @@ struct app_field_slot_t {
  *        (class ②) split from the per-vertex mutable values (class ③).
  *
  * Both install overloads converge here. `set_app_fields_static` leaves `backing` empty and
- * points the slots at caller flash (zero declaration RAM). The owning `set_app_fields`
+ * points the slots at caller flash — zero declaration BYTES, though the @ref slots vector
+ * itself is still allocated and copied from the caller's array, so a borrowed install is
+ * cheaper than an owning one rather than free (measured host-side: 592 B / 11 allocs per
+ * leaf versus 695 B / 17 for the owning install, against a 136 B bare leaf — the
+ * `vertex_app5_static` and `vertex_app5` gate rows). The owning `set_app_fields`
  * packs the runtime table's name+descriptor bytes into `backing` — ONE allocation for the
  * whole table — and points the slots into it. `backing` is never mutated or reallocated
  * while `slots` reference it (a re-install replaces the whole table under the vertex mutex).

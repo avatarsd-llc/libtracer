@@ -23,6 +23,7 @@
  * capturing the bytes the wired transport is handed — no threads, no sockets, no lwIP.
  */
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -405,6 +406,64 @@ int main() {
             app_ok ? 1 : 0);
         if (!app_ok) {
             std::printf("FAIL: app-field fixture did not register — not a heap result\n");
+            return 2;
+        }
+    }
+
+    // --- the BORROWED install of the same table (ADR-0058, REPORT-ONLY) --------
+    // The row above measures `set_app_fields`, which COPIES the declaration into the
+    // table's `backing`. ADR-0058 also gives owners `set_app_fields_static`, whose slots
+    // VIEW caller storage — built precisely for the MCU case #388 argues from, where the
+    // descriptor tables are compile-time constants in flash. That path decides whether
+    // per-endpoint schemas beat the `/meta` workaround on the target, and until now
+    // nothing measured it: the economics were claimed, never gated. This row is the
+    // borrowed twin of `vertex_app5`, same five fields and same descriptor width, so the
+    // pair reads as the copy-vs-view delta rather than two unrelated numbers.
+    {
+        graph_t app_graph;
+        static constexpr std::array<std::byte, 16> kDescriptor{};
+        static constexpr std::string_view kNames[5] = {"kp", "ki", "kd", "mode", "label"};
+        // Static storage, as the borrowed contract requires: these must outlive every
+        // vertex that views them, which is what makes the declaration cost zero RAM.
+        static std::array<tr::graph::app_field_static_t, 5> kTable = [] {
+            std::array<tr::graph::app_field_static_t, 5> t{};
+            for (std::size_t i = 0; i < 5; ++i) {
+                t[i].name = kNames[i];
+                t[i].access = tr::graph::app_access_t::RW;
+                t[i].descriptor = std::span<const std::byte>(kDescriptor);
+            }
+            return t;
+        }();
+        if (const auto warm = tr::graph::path_t::parse("/sapp/warm")) {
+            const auto h = app_graph.register_vertex(*warm, tr::graph::role_t::STORED_VALUE);
+            app_graph.set_app_fields_static(h, kTable);
+        }
+        constexpr std::size_t kAppN = 256;
+        bool sapp_ok = true;
+        probe::reset();
+        probe::arm();
+        for (std::size_t i = 0; i < kAppN; ++i) {
+            char pb[24];
+            std::snprintf(pb, sizeof pb, "/sapp/v%04zu", i);
+            const auto p = tr::graph::path_t::parse(pb);
+            sapp_ok = sapp_ok && p.has_value();
+            if (p) {
+                const auto h = app_graph.register_vertex(*p, tr::graph::role_t::STORED_VALUE);
+                app_graph.set_app_fields_static(h, kTable);
+            }
+        }
+        const probe::counts_t sapp = probe::snapshot();
+        probe::disarm();
+        const std::size_t leaf_and_view =
+            sapp.live_bytes > 0 ? static_cast<std::size_t>(sapp.live_bytes) / kAppN : 0;
+        std::printf(
+            "RESULT zeroheap vertex_app5_static allocs=%zu frees=%zu bytes=%zu n=%zu "
+            "gross_bytes=%zu ok=%d (report-only — live bytes per leaf with a BORROWED "
+            "5-field app table, ADR-0058 / #388)\n",
+            sapp.allocs / kAppN, sapp.frees / kAppN, leaf_and_view, kAppN, sapp.bytes / kAppN,
+            sapp_ok ? 1 : 0);
+        if (!sapp_ok) {
+            std::printf("FAIL: borrowed app-field fixture did not register — not a heap result\n");
             return 2;
         }
     }
