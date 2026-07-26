@@ -135,6 +135,14 @@ batch size against the host clock rather than hardcoding one — a routing opera
 same order as `clock_gettime`, so per-op timing measures the clock. An early revision did
 exactly that and reported a whole-table scan *beating* a first-hit lookup.
 
+`bench_forward_demux` and `bench_compact_delivery` are recorded into the build-to-build
+history alongside the in-process series, so a routing or delivery regression shows up as a
+trend rather than being noticed later. They emit the same `RESULT` rows as `bench_libtracer`,
+so they need no separate aggregation. Their transcripts are tolerated-empty — a bench that
+fails to run must not cost a commit its whole history point — but an empty one now emits a
+build warning naming the file, because a silently-empty transcript once produced a green job
+that recorded nothing at all.
+
 ### 4 · libtracer vs Zenoh (absolute, one pass, same runner)
 
 A side-by-side against [Eclipse Zenoh](https://zenoh.io) (zenoh-c, peer mode). Both
