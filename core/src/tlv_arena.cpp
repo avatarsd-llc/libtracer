@@ -91,6 +91,14 @@ std::expected<tlv_arena_t, err_t> decode_into(std::span<const std::byte> input,
     // slab-bound terminus decode stays heap-free (ADR-0041 terminus-arena span
     // contract) and the caller's arena is the nesting-depth bound (RFC-0006).
     tlv_arena_t arena(mr);
+    // Pre-size the node vector, as the sink already does for its open-node stack just below.
+    // Without this a 7-node FWD request walked 1->2->4->8, i.e. THREE realloc-and-copy passes
+    // to reach a capacity it could have started at — 720 of the terminus decode's 784 bytes
+    // were that growth curve rather than the nodes themselves. A capacity hint, not a bound:
+    // a deeper frame still grows, bounded only by `mr` (RFC-0006/0007, ADR-0051). The 8 is the
+    // same typical-FWD-nesting figure already used twice in this function, so it introduces no
+    // new number to keep in sync.
+    arena.nodes_.reserve(8);
     arena_sink sink(arena.nodes_, mr);
     std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;
     grammar::walk_stack_t<grammar::span_cursor> stack(slots, &mr);

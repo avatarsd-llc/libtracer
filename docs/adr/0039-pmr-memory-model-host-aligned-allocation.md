@@ -51,5 +51,39 @@ The steady-state forward hop takes **neither** seam: no `tlv_t` (offset-dispatch
 - **`bench_forward_heap`'s "0" is now precise**: zero allocations from the global heap *or* the node's `memory_resource` on the steady-state forward hop. Init/setup/terminus/host allocations are explicitly out of scope, measured by the armed window.
 - **Stage-2 signatures gain a defaulted `std::pmr::memory_resource*`** on `graph_t`/`fwd_router_t`/the connection-vertex/the terminus arena — additive, defaulted to `get_default_resource()`, so no existing caller changes. Public API note in `core/CHANGELOG.md` when it lands.
 - **New surface**: `wire::decode_into(span, memory_resource&)` (arena decode). The container seam itself needs **no new `tr::mem` class** — a standard `std::pmr::monotonic_buffer_resource` over a caller slab is the resource (see §2; the earlier "`pool_t`-backed adapter" is dropped — `pool_t`'s fixed-`segment_t`-slot shape does not fit `do_allocate`). `wire::decode(span)`, `mem_backend_t`, and `pool_t` are unchanged.
-- **One slab, whole stack**: a 16KB node constructs one static arena → feeds the segment pool and a `monotonic_buffer_resource` → every libtracer allocation (segments, terminus trees, label tables) comes from it. Host-aligned by construction, boundable, no global heap dependency.
+- **One slab, whole stack**: a 16KB node constructs one static arena → feeds the segment pool and a container `memory_resource` → every libtracer allocation (segments, terminus trees, label tables) comes from it. Host-aligned by construction, boundable, no global heap dependency.
+
+## Errata — three things measured on the terminus path
+
+Recorded after instrumenting a real terminus resolve (every `operator new` form, symbolized per
+allocation). The seam works as designed; three statements around it invite the wrong reading.
+
+**1. `monotonic_buffer_resource` is the wrong injection, despite being named above.** The terminus
+arena is destroyed each frame, but a monotonic resource never reclaims — a measured run exhausted a
+1 MB slab after ~200k frames. The realistic injection for a steady-state node is
+`std::pmr::unsynchronized_pool_resource` (or a host resource that genuinely recycles). The original
+wording named the monotonic form because the ADR was reasoning about a *bounded* node's setup, not a
+node running for days; both are now referred to as "a container `memory_resource`" above.
+
+**2. The injected pool buys bounded RAM, not speed — and on a host it is SLOWER.** Measured on the
+terminus path: 295 ns on the default heap versus 309 ns with a pool resource injected. glibc's
+tcache serves a hot same-size malloc/free in tens of nanoseconds, which a general-purpose pool
+cannot beat. The reason to inject is determinism and a bounded ceiling, which is what a 16KB target
+needs; reading this ADR as a latency optimisation gets it backwards. (On an MCU allocator, where a
+round-trip costs hundreds of nanoseconds rather than tens, the comparison inverts — but that is a
+property of the *host* allocator, not of the seam.)
+
+**3. The same `memory_resource` feeds per-frame and long-lived state, so it MUST NOT be reset per
+frame.** `fwd_router_t` hands its `mr_` both to the per-frame terminus arena and to the long-lived
+`route_handle_t` label tables. A host that "resets the arena between frames" — the natural reading
+of a per-frame arena — would free live label state. Nothing in-tree does this and no defect is
+being claimed here; the point is that the safety of a per-frame reset is not a property a host can
+assume from this ADR's framing, and today it does not hold. Separating the two resources would make
+per-frame reset safe, and is a live option rather than a decision recorded here.
+
+**What the seam does deliver, measured.** Injecting a resource moves the terminus decode off the
+global heap exactly as designed — 9 allocations / 937 bytes becomes 4 / 153, i.e. 84% of the bytes
+redirected, with no decode leg bypassing the seam. The residual legs are on *other* deliberate
+seams (the reply head draws from the ADR-0042/0060 `value_backend_` mem-backend, and the egress
+span table uses the plain allocator), so a fully bounded node injects both knobs, not one.
 - **The Stage-2 bricks are unchanged in order; this fixes their memory contract**: Brick 1 (kill the forward-path full-decode) and Brick 2 (pooled header rebuild) drive the bench to 0 *from any resource*; Brick 3 (the structural split + label tables) draws its per-connection state from the node's `memory_resource`.
