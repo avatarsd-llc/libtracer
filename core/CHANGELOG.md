@@ -14,6 +14,28 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **Control-plane serialization — `fwd_router_t` and `transport_vertex_t` each gain an internal
+  mutex (ADR-0063 §3).** `transport_vertex_t` had **no synchronization at all**, yet the graph
+  invokes its connection factory *outside* `map_mutex_`, on whichever transport's receive thread
+  delivered the CREATE. With two transports that is two threads, so concurrent `make_connection`
+  calls raced `conns_` / `pending_links_` (and the unlocked `settings_of` / `link_of` readers
+  raced the insert's rebalance), while `fwd_router_t::add_child` raced on the registry's
+  scan-then-append — two writers could be handed the **same empty slot**, silently losing a
+  child — and on the `child_rx_` deque spine. Now serialized. **The forward and delivery paths
+  take no lock and are unchanged** (ADR-0038 §3). Lock order, where more than one is held:
+  `transport_vertex_t` → `fwd_router_t` → `graph_t::map_mutex_` → the vertex stripe. Cost is
+  ~4 B static per lock plus a FreeRTOS mutex allocated on first lock — one-time, not per
+  connection. ADR-0063 originally specified an arch-selected sync *trait* for this; its
+  Erratum 1 records why that was withdrawn (it was never built, it cannot wrap a section that
+  blocks on sockets and `map_mutex_`, and a spinlock there risks unbounded priority inversion
+  on single-core FreeRTOS).
+
+- **`child_registry_t::child_t::multi_peer` is now `std::atomic<bool>`.** `add` **rebinds** an
+  existing slot on the tombstone-reuse path that create/remove churn takes constantly, and that
+  rebind wrote this field while the lock-free mount descent read it — a genuine reader-vs-writer
+  data race that the atomic `link` did not cover. Confirmed under TSan, independently of the
+  locks above: with the locks in place and this field left plain, the race still reports.
+
 - **Connection teardown — `child_registry_t::erase`, `fwd_router_t::remove_child`,
   `transport_vertex_t::remove_connection` (#494).** The FWD child registry was add-only, so a
   retired connection left a dangling `name → transport_t*` — latent while removal had no wire

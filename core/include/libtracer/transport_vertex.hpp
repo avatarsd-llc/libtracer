@@ -26,6 +26,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
@@ -338,6 +339,25 @@ class transport_vertex_t {
     graph::result_t<graph::vertex_handle_t> make_connection(std::vector<std::byte> child_key,
                                                             const wire::tlv_t* config,
                                                             conn_role_t role);
+
+    /**
+     * @brief Serializes every CONTROL-PLANE mutation here (ADR-0063 §3).
+     *
+     * This class had no synchronization at all, yet `make_connection` writes `conns_` and
+     * `pending_links_` while `settings_of` / `link_of` / `remove_connection` traverse `conns_`
+     * — and the graph invokes the connection factory OUTSIDE `map_mutex_`, on whichever
+     * transport's receive thread delivered the CREATE. Two transports means two such threads,
+     * so concurrent `std::map` inserts (and the readers racing their rebalance) were reachable
+     * on any ordinary multi-transport node.
+     *
+     * A plain mutex is deliberate. The guarded section constructs sockets and can block for
+     * milliseconds, which rules out an interrupt-disable critical section outright and makes a
+     * spinlock a priority-inversion hazard on single-core FreeRTOS (ADR-0063 erratum 1).
+     *
+     * Lock order: this → `fwd_router_t::ctl_m_` → `graph_t::map_mutex_` → the vertex stripe.
+     * Nothing on the forward or delivery path takes any of them.
+     */
+    mutable std::mutex ctl_m_;
 
     graph::graph_t& graph_;
     fwd_router_t& router_;
