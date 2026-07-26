@@ -280,10 +280,13 @@ int main() {
             fanout_allocs = fc.allocs;
             fanout_bytes = fc.bytes;
             wide_delivered = got.load() == warm_got + 16;
-            // The residual 1 alloc is propagate_impl's subtree-sweep `build_key` (~13 B),
+            // The residual 2 allocs / ~26 B are propagate_impl's subtree-sweep `build_key`,
             // NOT the fan-out: the >kInlineFanout overflow-vector cliff (a ~2 KB reserve
             // every publish) is what the lease eliminated. `bytes` reports the balance —
-            // the byte-gate below fails if the KB-scale overflow ever returns.
+            // the byte-gate below fails if the KB-scale overflow ever returns. (This said
+            // "1 alloc" for a while after the count moved to 2; the GATE is on bytes, so the
+            // drift was invisible — worth stating, since a stale figure in a comment beside a
+            // live number is how someone concludes the gate caught something it did not.)
             std::printf(
                 "RESULT zeroheap fanout_wide allocs=%zu frees=%zu bytes=%zu subs=16 delivered=%d\n",
                 fc.allocs, fc.frees, fc.bytes, wide_delivered ? 1 : 0);
