@@ -764,6 +764,56 @@ void run_syncpool_gate() {
     }
 }
 
+/**
+ * @brief What `path_t::parse` itself costs — the tax EVERY path-keyed operation pays.
+ *
+ * Nothing measured this. `inproc-path` parses its addresses once into a vector and reuses the
+ * `path_t`s, so it times the registry lookup on an already-parsed key; the parse was invisible
+ * to the whole suite. That mattered, because `parse` built its canonical PATH-TLV payload by
+ * geometric doubling — a two-segment address walked a 1→2→4→8→16 realloc chain, four throwaway
+ * blocks per call — and the natural API use (`g.write(*path_t::parse("/a/b"), v)`) pays it per
+ * operation.
+ *
+ * Swept over segment COUNT rather than payload size, because the realloc chain grew with the
+ * number of `emit_name` appends, not with the bytes. Reported under `size_bytes` = address
+ * length so the row keeps the standard 12-field shape and flows into the history store.
+ */
+void run_path_parse() {
+    static constexpr const char* kAddrs[] = {
+        "/a",
+        "/bench/v0001",
+        "/net/ws-server/up/peer0",
+        "/a/b/c/d/e/f/g/h",
+    };
+    for (const char* addr : kAddrs) {
+        const std::string_view a{addr};
+        std::size_t segs = 0;
+        for (const char c : a) {
+            if (c == '/') ++segs;
+        }
+        // Batch-amortized for the same reason the net-plane benches are: one parse is close
+        // enough to `clock_gettime` that per-op timing would measure the clock.
+        constexpr std::size_t kBatch = 256;
+        Latency lat;
+        std::size_t sink = 0;
+        const std::uint64_t t0 = now_ns();
+        std::size_t iters = 0;
+        while (now_ns() - t0 < 300000000ULL) {
+            const std::uint64_t s0 = now_ns();
+            for (std::size_t i = 0; i < kBatch; ++i) {
+                const auto p = tr::graph::path_t::parse(a);
+                sink += p.has_value() ? p->segment_count() : 0;
+            }
+            lat.add((now_ns() - s0) / kBatch);
+            ++iters;
+        }
+        if (sink == 0) std::printf("WARN path-parse produced nothing\n");
+        const double total_s = static_cast<double>(now_ns() - t0) / 1e9;
+        const double per_s = static_cast<double>(iters * kBatch) / total_s;
+        emit("libtracer", "path-parse", a.size(), segs, 1, per_s, per_s, 0.0, lat.summarize());
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc > 1 && std::string_view(argv[1]) == "grid") {
         run_grid();
@@ -791,6 +841,7 @@ int main(int argc, char** argv) {
     for (std::size_t E : kEndpoints)
         run_inproc(kRefSize, kRefFanout, E, alloc_t::HEAP, true, "inproc-path");
     run_mixed();
+    run_path_parse();
     // n-cores (parallel-dispatch) axis: thread counts clamped to the host CPU.
     const std::size_t hw = std::max<std::size_t>(1, std::thread::hardware_concurrency());
     for (std::size_t T : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}})
