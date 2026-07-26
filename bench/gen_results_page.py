@@ -848,6 +848,21 @@ Canonical points from `bench_libtracer` (the µs-latency / zero-copy thesis, ADR
 
 {perf_block()}
 
+```{{note}}
+**The p50 and mean columns here are clock-quantized; use throughput for small differences.**
+These rows time one operation between two `steady_clock` reads, and an in-process write costs
+~70–85 ns — the clock's granularity plus the two reads is a large fraction of that, so the
+percentiles snap to coarse steps (run the binary and they cluster on 30 / 70 / 80 / 90 / 100 /
+120 rather than spreading). **Differences under roughly 10 ns are invisible in this column.**
+
+That is not hypothetical: a change measured at 6% on this path showed 100 ns before and 100 ns
+after here, while the throughput column moved 87 → 80 ns/op. The net-plane benches in §3 do not
+share the problem — they batch-amortize and self-calibrate, exactly because one delivery is close
+enough to `clock_gettime` that per-op timing measures the clock. These rows predate that lesson,
+and converting them would break continuity with every historical point in the series above, so it
+is tracked as its own change rather than done quietly.
+```
+
 {HISTORY_BLOCK}
 
 #### Unified family trends (all related series on one axes; releases marked)
