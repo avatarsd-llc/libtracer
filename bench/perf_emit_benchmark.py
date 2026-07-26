@@ -148,7 +148,13 @@ def main() -> int:
              "deliv_s": max(m["deliv_s"] for m in cands)}
         tag = f"{mode} {size}B/fan{fan}/{ep}ep"
         smaller.append({"name": f"{tag} p50 latency", "unit": "ns", "value": v["p50_ns"]})
-        smaller.append({"name": f"{tag} p99 latency", "unit": "ns", "value": v["p99_ns"]})
+        # A zero p99 means the row is batch-amortized and has no distribution to take a
+        # percentile of, not that its tail latency is zero nanoseconds. Recording it
+        # anyway gave the `lkv-*` rows eight constant-zero series, one point per commit,
+        # that looked like measurements and were not. Same shape as the throughput guard
+        # below: a metric a row does not produce is not a series.
+        if v["p99_ns"] > 0:
+            smaller.append({"name": f"{tag} p99 latency", "unit": "ns", "value": v["p99_ns"]})
         if v["deliv_s"] > 0:
             # Throughput twice, deliberately: natural deliveries/s in the bigger-is-
             # better suite, and the legacy ns/delivery inversion (1e9 / deliv_s) so the

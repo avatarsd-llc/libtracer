@@ -729,8 +729,18 @@ lkv_result_t run_lkv_store_alloc(std::size_t S, bool copy, tr::mem::mem_backend_
     const double secs = static_cast<double>(now_ns() - t0) / 1e9;
     const double ops = secs > 0 ? kIters / secs : 0;
     Latency::Summary lat{};
+    // Batch-amortized: the whole loop is timed as one block, so p50 == mean == the
+    // per-op average and there IS no distribution to take a percentile of. p99 stays
+    // 0, which the emitter reads as "not measured" and declines to record — it used
+    // to publish a constant-zero p99 series per commit, which was not a measurement
+    // of anything. Measuring one iteration between two clock reads is not the fix
+    // either: an alloc+free costs the same order as `clock_gettime`.
     lat.p50 = lat.mean = static_cast<std::uint64_t>(secs * 1e9 / kIters);
-    emit("libtracer", mode, S, 1, 1, ops, ops, static_cast<double>(kIters) * S / (secs * 1e6), lat);
+    // Bandwidth only means something for the copy arm. The alloc-only arm moves NO
+    // payload — it takes a block and gives it back — so reporting kIters*S/secs there
+    // published a fabricated figure (a "151 GB/s" zero-copy allocation).
+    const double mb_per_s = copy ? static_cast<double>(kIters) * S / (secs * 1e6) : 0.0;
+    emit("libtracer", mode, S, 1, 1, ops, ops, mb_per_s, lat);
     return {ops, exhausted};
 }
 
