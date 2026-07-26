@@ -24,6 +24,49 @@ Four sub-decisions, each with its rejected alternative:
 
 4. **Eliminating the copy is a separate, later optimization.** The copy is cheap (a small `memcpy`); the *allocation* is the cost, and pooling it is this ADR's whole win. Making a borrowed-delivery transport (e.g. `httpd_ws_link`) deliver **owning** so the store subviews instead of copies (ADR-0042 §1/§3, `set_view_receiver`) is per-transport surgery that pins frame-sized buffers — it gets its own decision, layered on top of this one.
 
+
+## Erratum 1 — "negligible contention" is refuted, and the proposed CAS upgrade would not fix it
+
+§2 says a spinlock is fine on multi-core because there is "negligible contention for an O(1)
+section", and holds a **lock-free index+tag CAS** as the measured upgrade for a many-core host.
+Measured on a 12-core host with the (now honestly named) `poolalloc-mt*` / `heapalloc-mt*` rows —
+every thread instrumented, so latency and throughput describe the same workload:
+
+| threads | pool ops/s | pool p50 | heap ops/s | heap p50 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 8.3 M | 60 ns | 15.8 M | 30 ns |
+| 4 | 3.6 M | 802 ns | 25.5 M | 70 ns |
+| 8 | **1.36 M** | **3587 ns** | 31.0 M | 70 ns |
+
+Two things follow, and the second is the important one.
+
+**Contention is not negligible — it is catastrophic.** The pool does not merely serialize; it drops
+to roughly a *fifteenth of its own single-thread rate*. Pure serialization would hold flat at the
+T=1 figure. Collapsing far below it is the signature of a cacheline storm: `sync_pool_t` takes one
+global `atomic_flag` twice per operation (once in `alloc`, once in `destroy`) and `lock()` is a bare
+`test_and_set` spin with no test-load and no pause, so every waiter's RMW steals the line. The heap,
+by contrast, *scales* — glibc's per-thread tcache has no shared line to contend. Independently
+reproduced on the 4-core CI runner.
+
+**The proposed fix would not have worked.** A lock-free `[index | ABA-tag]` CAS on `free_head_`
+replaces one contended word with… the same one contended word. It removes the spin but keeps every
+thread hammering a single cacheline, which is what actually costs the 15×. The shape that fixes this
+is per-thread free-lists or magazines — i.e. what the heap already does. Recording that here matters
+because §2 presents the CAS as the known answer, and someone would have built it and measured no
+improvement.
+
+**What is NOT retracted.** The single-threaded case is unaffected (the pool's O(1) op is genuinely
+cheap), and the MCU rationale stands: on a single-core target with an interrupt-disable critical
+section there is no concurrent RMW to storm, and a deterministic bounded ceiling is the point rather
+than throughput. This erratum is about the *multi-core* branch of §2's spectrum only.
+
+Related: the same "the pool is a latency lever" reading is refuted single-threaded in
+[ADR-0039](0039-pmr-memory-model-host-aligned-allocation.md)'s errata (295 vs 309 ns on the terminus,
+~85 vs ~104 ns on the in-process write). This is the third independent measurement.
+
+No redesign is proposed here. The finding is recorded; the fix is an ADR-0060 decision with its own
+gate.
+
 ## Consequences
 
 - New surface: one defaulted `mem_backend_t*` constructor parameter on `graph_t`. Additive; no existing caller changes; behavior byte-identical until a host injects a pool.

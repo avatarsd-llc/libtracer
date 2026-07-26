@@ -21,6 +21,7 @@
 #include <cstring>
 #include <memory>
 #include <memory_resource>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -762,25 +763,47 @@ void run_syncpool_mt(std::size_t T, tr::mem::mem_backend_t& backend, const char*
     std::atomic<std::uint64_t> done{0};
     Latency lat0;  // thread 0 only writes it; read after join (happens-before)
     std::vector<std::thread> ts;
+    // EVERY thread is instrumented, not just thread 0. Instrumenting one thread meant the
+    // published throughput came from a cheaper loop (T-1 threads skipping two clock reads
+    // per op) than the one whose latency was published — two different workloads in one
+    // row, with the throughput inflated ~1.4-1.7x relative to the latency's conditions.
+    std::mutex lat_m;
     const auto t0 = now_ns();
     for (std::size_t t = 0; t < T; ++t) {
-        ts.emplace_back([&, t] {
+        ts.emplace_back([&] {
+            Latency mine;
             for (std::size_t i = 0; i < kOpsPerThread; ++i) {
-                const std::uint64_t a = (t == 0) ? now_ns() : 0;
+                const std::uint64_t a = now_ns();
                 tr::view::segment_t* raw = backend.alloc(S);
                 if (raw != nullptr) {
                     const tr::view::segment_ptr_t p = tr::view::segment_ptr_t::adopt(raw);
                 }  // p drops -> destroy (locked for the pool) on this thread
-                if (t == 0) lat0.add(now_ns() - a);
+                mine.add(now_ns() - a);
                 done.fetch_add(1, std::memory_order_relaxed);
             }
+            const std::lock_guard g(lat_m);
+            lat0.merge(mine);
         });
     }
     for (auto& th : ts) th.join();
     const double secs = (now_ns() - t0) / 1e9;
     const double ops = secs > 0 ? done.load() / secs : 0;
     const std::string mode = base + std::to_string(T);
-    emit("libtracer", mode.c_str(), S, T, 1, ops, ops, ops * S / 1e6, lat0.summarize());
+    // fan=1, ep=1, and bandwidth=0 — all three deliberately.
+    //
+    // This runner allocates a segment and drops it. It delivers NOTHING and copies NO bytes,
+    // so the row must not claim otherwise. It previously emitted the thread count in the
+    // FAN-OUT column (a series literally named `.../fan4/1ep` for 4 threads and zero
+    // subscribers) and `ops * S` as bandwidth for a loop that moves zero bytes. The thread
+    // count now lives only in the mode name, where it is not mistakable for a topology.
+    //
+    // The rate still lands in the pub/deliv columns because `emit`'s 12-field shape is fixed
+    // and shared with every other bench; what changed is the MODE NAME — `poolalloc-` /
+    // `heapalloc-` rather than `syncpool-` / `heap-`, so the charted series reads as an
+    // allocator rate instead of a delivery rate. That renames the series, which ends the old
+    // ones and starts new ones: the correct, VISIBLE outcome when a row's meaning was wrong,
+    // as opposed to silently re-valuing a name readers already trust.
+    emit("libtracer", mode.c_str(), S, 1, 1, ops, ops, 0.0, lat0.summarize());
 }
 
 /** @brief The sync-pool vs heap MT contention sweep (charted to gh-pages, not gated). */
@@ -791,8 +814,8 @@ void run_syncpool_gate() {
     for (std::size_t T : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
         if (T > hw) continue;
         tr::mem::sync_pool_t pool(slab, 64);  // fresh free-list per T
-        run_syncpool_mt(T, pool, "syncpool-mt");
-        run_syncpool_mt(T, tr::mem::heap_backend(), "heap-mt");
+        run_syncpool_mt(T, pool, "poolalloc-mt");
+        run_syncpool_mt(T, tr::mem::heap_backend(), "heapalloc-mt");
     }
 }
 

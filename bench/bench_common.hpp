@@ -61,6 +61,16 @@ class Latency {
    public:
     void add(std::uint64_t ns) { samples_.push_back(ns); }
 
+    /** @brief Absorb another collector's samples — for pooling per-thread collectors.
+     *
+     * A multi-threaded runner must not have one thread do the timing on everyone's behalf:
+     * the instrumented thread runs a different (slower) loop than the rest, so its latency
+     * and the run's throughput then describe two different workloads. Each thread keeps its
+     * own collector and merges here, which keeps the timed loop identical on every thread. */
+    void merge(const Latency& other) {
+        samples_.insert(samples_.end(), other.samples_.begin(), other.samples_.end());
+    }
+
     struct Summary {
         std::uint64_t p50 = 0, p99 = 0, mean = 0;
     };
