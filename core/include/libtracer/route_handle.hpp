@@ -25,6 +25,7 @@
  */
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -300,6 +301,19 @@ class route_handle_t {
  */
 [[nodiscard]] std::vector<std::byte> encode_compact(std::uint16_t label,
                                                     std::span<const std::byte> payload);
+
+/**
+ * @brief The 6-byte `VALUE label(u16)` TLV that opens every route-handle frame.
+ *
+ * The label child is a fixed-shape run — opaque (`opt.PL=0`), 2-byte length — so it needs no
+ * header emitter and no growable buffer. Returning it lets a SCATTER-GATHER egress build a
+ * frame head entirely on the stack (`tr::net::stack_writer`) while keeping the byte layout
+ * at ONE locus: `encode_compact` and friends emit it through here too, so a gathered frame
+ * and a built one cannot drift apart.
+ * @param label The per-link label naming the established route.
+ * @return `{VALUE, opt=0, len=2 (u16 LE), label (u16 LE)}`.
+ */
+[[nodiscard]] std::array<std::byte, 6> label_tlv(std::uint16_t label) noexcept;
 
 /**
  * @brief NOTHROW `encode_advertise` — build the frame into @p out, soft-failing on OOM

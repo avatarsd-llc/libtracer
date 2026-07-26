@@ -160,6 +160,42 @@ template <class Cursor>
     return resolve_mount_segs(registry, std::span<const std::string_view>(seg.data(), n));
 }
 
+/**
+ * @brief Emit `COMPACT{ VALUE label(u16), payload }` over @p down by SCATTER-GATHER — the
+ *        steady-state egress, allocating NOTHING in the router.
+ *
+ * A COMPACT is a 6-byte frame header, a 6-byte label child, and a payload that is ALREADY
+ * contiguous in the caller's storage. `try_encode_compact` nonetheless built the whole frame
+ * into two `std::vector`s, copying the payload twice to produce bytes the transport was about
+ * to gather anyway. Here the 12-byte head is written on the stack and the payload is REFERENCED,
+ * so the router's per-frame allocation count on this leg is zero.
+ *
+ * The bytes are unchanged: `stack_writer::header` and `wire::emit_header` share the `> 0xFFFF`
+ * LL-widening rule and the same little-endian order, and the label child comes from
+ * @ref tr::net::label_tlv, the same locus the built encoders use. Frames carry no trailer here
+ * (`encode_compact` emits no CR bit), so nothing is left uncomputed.
+ *
+ * What this does NOT promise is zero allocations in the TRANSPORT. A link that overrides the
+ * gather form (tcp, udp, ws-server) writes these spans straight to the socket; one that does
+ * not (can, loopback, ws-client) falls into `transport_t::send(iov)`'s default concatenation,
+ * which allocates once. That is still strictly better than the two allocations and two payload
+ * copies it replaces, so no transport regresses.
+ *
+ * @param down    The downstream link to emit over.
+ * @param label   The out-label for that link.
+ * @param payload A complete payload TLV's bytes; must outlive the call (every in-tree
+ *                transport either writes synchronously or gather-copies before returning).
+ */
+void emit_compact(transport_t& down, std::uint16_t label, std::span<const std::byte> payload) {
+    const std::array<std::byte, 6> lbl = tr::net::label_tlv(label);
+    stack_writer<12> head;  // COMPACT header (<=6) + the 6-byte label child
+    head.header(type_t::COMPACT, lbl.size() + payload.size());
+    head.raw(lbl);
+    if (!head.ok()) return;  // cannot happen at N=12; drop rather than emit a truncated frame
+    const std::array<std::span<const std::byte>, 2> iov{head.span(), payload};
+    down.send(std::span<const std::span<const std::byte>>(iov));
+}
+
 }  // namespace
 
 void fwd_router_t::add_child(std::string name, transport_t& link) {
@@ -303,10 +339,9 @@ std::uint16_t fwd_router_t::advertise(std::string_view link_name,
 
 void fwd_router_t::send_compact(std::string_view link_name, std::uint16_t label,
                                 std::span<const std::byte> payload) {
-    if (transport_t* const link = registry_.by_name(link_name)) {
-        const std::vector<std::byte> out = encode_compact(label, payload);
-        link->send(std::span<const std::byte>(out));
-    }
+    // The producer-side door shares the router's gather locus, so the public API and the
+    // forwarding hop emit the same bytes by construction and neither allocates here.
+    if (transport_t* const link = registry_.by_name(link_name)) emit_compact(*link, label, payload);
 }
 
 void fwd_router_t::on_frame(std::string_view inbound_name, std::span<const std::byte> frame) {
@@ -770,14 +805,7 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
     if (rb.warm && rb.down_slot != nullptr) {
         const auto* const slot = static_cast<const child_registry_t::child_t*>(rb.down_slot);
         if (transport_t* const down = slot->link.load(std::memory_order_acquire)) {
-            // The NOTHROW exact-reserve encoder, not `encode_compact`: this is a steady-state
-            // data frame, so its two growth-doubling vectors were four avoidable allocations
-            // per frame. On reserve failure it DROPS — the audited soft-fail locus, matching
-            // `deliver_remote` and the #477 never-abort discipline (`encode_compact` grows
-            // `std::vector`s, which abort under -fno-exceptions).
-            std::vector<std::byte> out;
-            if (!try_encode_compact(out, rb.out_label, payload_bytes)) return;
-            down->send(std::span<const std::byte>(out));
+            emit_compact(*down, rb.out_label, payload_bytes);
             return;
         }
         // Tombstoned: fall through and re-resolve, so a re-created link re-warms.
@@ -786,9 +814,7 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
     if (!binding) return;
     if (const child_registry_t::child_t* const slot = registry_.entry_by_name(binding->down_link)) {
         if (transport_t* const down = slot->link.load(std::memory_order_acquire)) {
-            std::vector<std::byte> out;
-            if (!try_encode_compact(out, binding->out_label, payload_bytes)) return;
-            down->send(std::span<const std::byte>(out));
+            emit_compact(*down, binding->out_label, payload_bytes);
             resolved_binding_t fill = rb;
             fill.warm = true;
             fill.down_slot = slot;

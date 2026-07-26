@@ -204,12 +204,26 @@ namespace {
  * Opaque (opt.PL=0), 2-byte length: 6 bytes on the wire.
  */
 void emit_label(std::vector<std::byte>& out, std::uint16_t label) {
-    std::array<std::byte, 2> p{};
-    detail::store_le<std::uint16_t>(p, label);
-    wire::emit_tlv(out, type_t::VALUE, opt_t{}, p);
+    const std::array<std::byte, 6> tlv = label_tlv(label);
+    out.insert(out.end(), tlv.begin(), tlv.end());
 }
 
 }  // namespace
+
+std::array<std::byte, 6> label_tlv(std::uint16_t label) noexcept {
+    // The one spelling of the label child's bytes: a 2-byte opaque VALUE. Written field by
+    // field rather than as a literal so the length and the payload keep the wire's
+    // little-endian order by construction. `emit_label` (and therefore every throwing and
+    // nothrow encoder) goes through here, so a gathered frame head and a built frame cannot
+    // disagree; `compact_cache_test` pins these bytes against `wire::emit_tlv` independently,
+    // since a shared locus alone would let a wrong layout pass a self-comparison.
+    std::array<std::byte, 6> out{};
+    out[0] = static_cast<std::byte>(std::to_underlying(type_t::VALUE));
+    out[1] = static_cast<std::byte>(opt_t{}.encode());
+    detail::store_le<std::uint16_t>(std::span<std::byte>(out).subspan(2, 2), 2);
+    detail::store_le<std::uint16_t>(std::span<std::byte>(out).subspan(4, 2), label);
+    return out;
+}
 
 std::vector<std::byte> encode_advertise(std::uint16_t label,
                                         std::span<const std::byte> route_path) {

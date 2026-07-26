@@ -199,15 +199,42 @@ Two changes landed on this path, and the second was the larger. ADR-0062 removed
 `COMPACT` by offset through `peek_control` exactly as the rope arm already did. Measured on the
 warm path (`bench_compact_delivery`, host p50):
 
-| | before ADR-0062 | after ADR-0062 | after the offset read | after exact-reserve egress |
-| --- | ---: | ---: | ---: | ---: |
-| terminus delivery | 298 ns | 202 ns | **~110 ns** | — |
-| terminus allocations | 15 | 11 | **3** | — |
-| forwarding hop | 202 ns | 180 ns | ~90 ns | **~70 ns** |
-| forwarding allocations | 18 | 17 | 9 | **4** |
+| | before ADR-0062 | after ADR-0062 | after the offset read | after exact-reserve egress | after gathered egress |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| terminus delivery | 298 ns | 202 ns | **~110 ns** | — | — |
+| terminus allocations | 15 | 11 | **3** | — | — |
+| forwarding hop | 202 ns | 180 ns | ~90 ns | ~70 ns | **~45 ns** |
+| forwarding allocations | 18 | 17 | 9 | 4 | **0** |
 
-End to end that is **−63% on the terminus** and **−65% on the forwarding hop**, with per-frame
-allocations down 15 → 3 and 18 → 4.
+End to end that is **−63% on the terminus** and **−78% on the forwarding hop**, with per-frame
+allocations down 15 → 3 and 18 → **0**.
+
+The last column is the one that ends the sequence: the forwarding hop no longer *builds* a frame
+at all. A `COMPACT` is a 6-byte frame header, a 6-byte label child, and a payload that is already
+contiguous in the inbound frame — so the head is written to a 12-byte stack buffer and the payload
+is handed to the transport **by reference**, as a two-element scatter-gather list. The two
+allocations and two payload copies that produced bytes the transport was about to gather anyway
+are simply gone.
+
+That shows up as more than the average suggests, because the cost it removes **scaled with the
+payload** while the rest of the hop did not. Same-machine A/B against `main`, three runs each:
+
+| payload | before | after |
+| ---: | ---: | ---: |
+| 4 B | 70–75 ns | 44–47 ns |
+| 64 B | 70–74 ns | 43–47 ns |
+| 512 B | 76–77 ns | 43–47 ns |
+
+The *flatness* is the result worth reading: the old hop grew with payload size because it copied
+the payload twice, and the gathered hop does not grow at all. The terminus leg is untouched by
+this change (~106–110 ns before and after) — it writes into the graph rather than re-emitting.
+
+Zero allocations *in the router* is not zero in the transport. A link that overrides the gather
+form (tcp, udp, ws-server) writes these spans straight to the socket; one that does not (can,
+loopback, ws-client) falls into the default concatenation in `transport_t::send(iov)`, which
+allocates once. That is still strictly better than the two allocations and two copies it
+replaces, so no transport regresses — but the honest claim is "zero in the router", not "zero on
+the wire".
 
 The owning decode cost three allocations for the tree spine plus five more re-encoding a payload
 that was **already contiguous in the frame** — together more than half a warm terminus frame. It

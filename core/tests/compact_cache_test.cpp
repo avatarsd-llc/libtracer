@@ -22,6 +22,7 @@
  *     `nullptr` after `remove_child`. The tombstone IS the invalidation.
  */
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -33,6 +34,7 @@
 #include <string_view>
 #include <vector>
 
+#include "libtracer/byteorder.hpp"
 #include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -225,9 +227,15 @@ void test_encoders_agree_byte_for_byte() {
     std::printf("try_encode_compact matches encode_compact byte-for-byte\n");
     int mismatches = 0;
     int failures = 0;
+    // 65530 and 70000 are the point of this list: the label child is 6 bytes, so the frame
+    // body crosses 0xFFFF (and the length field widens to 4 bytes) at a payload of 65530 —
+    // NOT at 65536. Every earlier revision stopped at 65000, a body of 65006, so the
+    // "including >64 KB, where the length field widens" claim above was untrue and the
+    // widening path was never executed by any test.
     for (const std::size_t n :
          {std::size_t{0}, std::size_t{1}, std::size_t{2}, std::size_t{63}, std::size_t{64},
-          std::size_t{512}, std::size_t{4096}, std::size_t{65000}}) {
+          std::size_t{512}, std::size_t{4096}, std::size_t{65000}, std::size_t{65529},
+          std::size_t{65530}, std::size_t{70000}}) {
         const std::vector<std::byte> payload(n, std::byte{0x5A});
         for (const std::uint16_t label :
              {std::uint16_t{0}, std::uint16_t{1}, std::uint16_t{0x1234}, std::uint16_t{0xFFFF}}) {
@@ -242,6 +250,92 @@ void test_encoders_agree_byte_for_byte() {
     }
     check(failures == 0, "the nothrow encoder succeeds for every size and label");
     check(mismatches == 0, "and its bytes are identical to the throwing encoder's");
+}
+
+/**
+ * @brief `label_tlv` agrees with the generic emitter — pinned INDEPENDENTLY.
+ *
+ * Every encoder now routes the label child through `label_tlv`, which is what keeps a
+ * scatter-gathered frame head and a built frame from drifting. But a single locus makes the
+ * encoders agree with each OTHER even if that locus has the layout wrong — a self-comparison
+ * that cannot fail. So this pins its six bytes against `wire::emit_tlv`, which reaches the
+ * same shape by a different route, and against the literal wire spelling.
+ */
+void test_label_tlv_matches_the_generic_emitter() {
+    std::printf("label_tlv matches wire::emit_tlv byte-for-byte\n");
+    int mismatches = 0;
+    for (const std::uint16_t label : {std::uint16_t{0}, std::uint16_t{1}, std::uint16_t{0x00FF},
+                                      std::uint16_t{0x1234}, std::uint16_t{0xFFFF}}) {
+        std::array<std::byte, 2> raw{};
+        tr::detail::store_le<std::uint16_t>(raw, label);
+        std::vector<std::byte> want;
+        tr::wire::emit_tlv(want, tr::wire::type_t::VALUE, tr::wire::opt_t{}, raw);
+        const std::array<std::byte, 6> got = tr::net::label_tlv(label);
+        if (want.size() != got.size() || !std::equal(want.begin(), want.end(), got.begin()))
+            ++mismatches;
+    }
+    check(mismatches == 0, "label_tlv equals the generic VALUE emitter for every label");
+
+    // And the literal wire spelling, so a change to BOTH emitters still trips something:
+    // {VALUE, opt=0, len=2 (u16 LE), label (u16 LE)}.
+    const std::array<std::byte, 6> got = tr::net::label_tlv(0xBEEF);
+    check(got[0] == static_cast<std::byte>(0x01) && got[1] == std::byte{0} &&
+              got[2] == std::byte{2} && got[3] == std::byte{0} &&
+              got[4] == static_cast<std::byte>(0xEF) && got[5] == static_cast<std::byte>(0xBE),
+          "and its bytes are the literal opaque 2-byte VALUE the wire specifies");
+}
+
+/**
+ * @brief The SCATTER-GATHERED egress emits exactly what the built encoder would have.
+ *
+ * The forwarding hop and the producer-side `send_compact` no longer build a frame: they write
+ * a 12-byte head on the stack and hand the transport `{head, payload}`, referencing the
+ * payload instead of copying it twice. That is only a safe swap if the concatenation of the
+ * gathered spans is byte-identical to `encode_compact`, so this drives the REAL router door
+ * and reassembles what the link was handed.
+ *
+ * Sizes span the LL-widening boundary for the same reason as the encoder test above: the
+ * gathered head computes its own length field, so a widening disagreement would show up here
+ * and nowhere else.
+ */
+void test_gathered_egress_matches_the_built_frame() {
+    std::printf("scatter-gathered COMPACT egress matches encode_compact byte-for-byte\n");
+    // A link that RECORDS the gathered spans instead of writing them, so the test can compare
+    // the concatenation. It must also prove the gather form was the one taken.
+    struct recording_link_t : tr::net::transport_t {
+        std::vector<std::byte> last;
+        std::size_t gathers = 0;
+        std::size_t contiguous = 0;
+        void send(std::span<const std::byte> b) override {
+            ++contiguous;
+            last.assign(b.begin(), b.end());
+        }
+        void send(std::span<const std::span<const std::byte>> iov) override {
+            ++gathers;
+            last.clear();
+            for (const std::span<const std::byte> s : iov)
+                last.insert(last.end(), s.begin(), s.end());
+        }
+    };
+
+    graph_t g;
+    tr::net::fwd_router_t router(g);
+    recording_link_t link;
+    router.add_child("net/ws-server/down", link);
+
+    int mismatches = 0;
+    for (const std::size_t n : {std::size_t{0}, std::size_t{1}, std::size_t{64}, std::size_t{4096},
+                                std::size_t{65529}, std::size_t{65530}, std::size_t{70000}}) {
+        const std::vector<std::byte> payload(n, std::byte{0x5A});
+        for (const std::uint16_t label :
+             {std::uint16_t{0}, std::uint16_t{0x1234}, std::uint16_t{0xFFFF}}) {
+            router.send_compact("net/ws-server/down", label, payload);
+            if (link.last != tr::net::encode_compact(label, payload)) ++mismatches;
+        }
+    }
+    check(mismatches == 0, "every gathered frame equals the built one, across the LL boundary");
+    check(link.contiguous == 0 && link.gathers > 0,
+          "and the egress took the GATHER form — a contiguous send would mean it still built");
 }
 
 /**
@@ -295,6 +389,8 @@ int main() {
     test_link_teardown_invalidates_cached_slot();
     test_corrupt_crc_compact_is_dropped();
     test_encoders_agree_byte_for_byte();
+    test_label_tlv_matches_the_generic_emitter();
+    test_gathered_egress_matches_the_built_frame();
     test_iov_gather_drops_on_oom();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
