@@ -484,9 +484,12 @@ COMPARE_INTRO = """\
 
 A side-by-side comparison against [Eclipse Zenoh](https://zenoh.io) (zenoh-c 1.9.0, peer
 mode). Two surfaces: three **in-process** axes — subscriber **fan-out**, **payload** size,
-and **topic count** — and a **network** comparison over the real loopback kernel path. Both engines are built
-`-O3` and measured in the **same pass on the same runner**, so the numbers are directly
-comparable on identical hardware. The charts plot **absolute** throughput / latency /
+and **topic count** — and a **network** comparison over the real loopback kernel path. Both are measured in the
+**same pass on the same runner**, so the numbers are directly comparable on identical
+hardware. libtracer is compiled from source at `-O3`; Zenoh is the upstream prebuilt
+`zenoh-c 1.9.0` release binary, which `bench/fetch_zenoh.sh` downloads — we do not build it,
+so its optimization profile is upstream's Rust release build rather than a flag this repo
+sets. Both are optimized builds; neither is a debug build. The charts plot **absolute** throughput / latency /
 bandwidth — libtracer and Zenoh as series on shared axes — so you read the real
 numbers off the graph; there are no speed-up ratios.
 

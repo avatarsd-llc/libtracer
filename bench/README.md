@@ -212,7 +212,9 @@ different now.
 
 - **Throughput** — back-to-back publishes; `deliveries / elapsed`.
 - **Latency** — one publish at a time (publish, wait for receipt, repeat); p50/p99/mean.
-- Both sides build at **`-O3`** (Release) for parity; the app payload size (not the
+- libtracer builds at **`-O3`** (Release); Zenoh is the upstream **prebuilt** zenoh-c
+  release binary, so "both at `-O3`" was never quite true — both are optimized builds
+  measured in one pass, which is what parity actually rests on. The app payload size (not the
   on-wire envelope) is used for MB/s.
 
 ## Results

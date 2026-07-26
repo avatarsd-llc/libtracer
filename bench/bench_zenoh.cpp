@@ -126,7 +126,15 @@ void run_grid(Session& session) {
 
 int main(int argc, char** argv) {
     init_log_from_env_or("error");
-    auto session = Session::open(Config::create_default());
+    // Multicast scouting OFF, as `bench_zenoh_net` already does. This is an
+    // IN-PROCESS comparison: libtracer runs no discovery subsystem at all, so
+    // leaving Zenoh's on puts a background thread and real multicast traffic
+    // inside the timed window on one side only. Measured on the default config:
+    // 23 sendto + 35 receives across one `grid` run. Small, but it is a
+    // fairness asymmetry in a chart whose whole premise is like-for-like.
+    Config cfg = Config::create_default();
+    cfg.insert_json5("scouting/multicast/enabled", "false");
+    auto session = Session::open(std::move(cfg));
     if (argc > 1 && std::string_view(argv[1]) == "grid") {
         run_grid(session);
         return 0;

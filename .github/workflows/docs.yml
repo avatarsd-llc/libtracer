@@ -140,7 +140,7 @@ jobs:
             } catch (e) { core.warning('comparison sweep produced no data; skipping PR comment'); return; }
             const marker = '<!-- ltz-compare -->';
             const body = `${marker}\n### 📊 libtracer vs Zenoh — absolute (this run)\n\n`
-              + `Measured on this CI runner, both engines \`-O3\` in the same pass. Absolute values, no ratios — `
+              + `Measured on this CI runner in the same pass. libtracer built from source at \`-O3\`; Zenoh is the upstream zenoh-c 1.9.0 prebuilt release. Absolute values, no ratios — `
               + `shared-runner variance is real, read trends not the third digit. Interactive charts land on the `
               + `[Performance page](https://avatarsd-llc.github.io/libtracer/docs/performance.html) after merge.\n\n`
               + table;
