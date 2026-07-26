@@ -93,7 +93,7 @@ DEFAULT_RUNS = 3
 # Same-runner correctness comes from --bench-fwd (record the baseline binary's bytes),
 # mirroring --bench for the latency binary; keys are `mem:`-namespaced so they never
 # collide with the latency points.
-MEM_POINTS = ["vertex", "vertex_value", "vertex_app5"]
+MEM_POINTS = ["vertex", "vertex_value", "vertex_app5", "vertex_app5_static"]
 MEM_REGRESS = 1.02   # fail if live bytes/vertex > baseline * 1.02 ...
 MEM_TICK_B = 1       # ... AND grew by more than one byte (ignore a lone bucket flip)
 _MEM_RE = re.compile(r"^RESULT zeroheap (\w+) allocs=\d+ frees=\d+ bytes=(\d+)")

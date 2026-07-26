@@ -706,13 +706,19 @@ value), and an isometric **3D** surface — switchable per chart; hover for exac
 
 A different instrument entirely: `bench_forward_heap` replaces the global allocator
 with a counting wrapper and arms it around exactly one operation — so these are exact
-allocation counts and bytes, not statistics. Four probes feed the history store above:
+allocation counts and bytes, not statistics. Five probes feed the history store above:
 
 - **forward hop** — hard-gated at **zero** allocations every CI run (ADR-0038 §16KB-RAM);
 - **terminus resolve** — report-only; a terminus may allocate (ADR-0039), the probe
   keeps the cost visible;
 - **per-vertex steady heap** — LIVE usable-size bytes a default leaf holds, and the
   increment one small LKV write adds (the vertex-diet trend, #361);
+- **per-vertex app-field table** — what an RFC-0010 five-field descriptor table adds
+  on top of that leaf, measured for BOTH installs (ADR-0058): the owning
+  `set_app_fields`, which copies the declaration into the table's backing, and the
+  borrowed `set_app_fields_static`, whose slots view caller flash. The pair is what
+  decides whether per-endpoint schemas beat the `/meta` child-vertex workaround on an
+  MCU (#388), so both are gated rather than argued;
 - **whole-run max RSS** — the coarse process-level footprint.
 
 Their series live in the smaller-is-better history suite (§2) under
