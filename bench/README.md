@@ -18,7 +18,6 @@ for a local `preview.html` of the same charts.
 | `run.sh` | **in-process** sweep: dispatch + (optionally) serialization cost, on one process. |
 | `run_net.sh` | **network**: two processes over real localhost **UDP** (the kernel path). |
 | `grid.sh` | **response-surface grid** for both engines → a self-contained `preview.html` of the absolute-value comparison charts (the same ones CI publishes, via `render_compare.py`). |
-| `bench_scatter` | **scatter-gather egress**: one `sendmsg(iovec)` ships a K-value composite rope. |
 | `bench_forward_heap` | **16KB-RAM zero-heap gate**: a global `operator new` counter measures how many heap allocations one FWD *forward hop* costs (ADR-0038). |
 | `bench_fanout_clone_storm` | **many-core refcount contention**: T threads clone+release one shared segment — the per-subscriber fan-out primitive under wide fan-out (ADR-0032 128-core row). |
 | `bench_await_wakeup_storm` | **many-core await fan-in**: one writer storms writes while W threads `await` one vertex — condvar/notify_all + vertex-lock scaling (ADR-0032 128-core row). |
@@ -120,12 +119,11 @@ craft libtracer":
 | `loopback` | the M4 bridge: encode + ROUTER-wrap + cross-thread queue + decode. |
 | `mixed` | 128 topics, varied fan-out + payloads. |
 | `net` | two processes over real UDP (`run_net.sh`). |
-| `scatter` | composite rope shipped in one `sendmsg(iovec)` (`bench_scatter`). |
 | `eptype-lean` | ep-type axis: minimal sink (see below). |
 | `eptype-lean-cached` | ep-type axis: loaned / `out_cache` read (see below). |
 | `eptype-stream` | ep-type axis: `STREAM`-role vertex (see below). |
 | `routers-h{1,2,4,8}` | n-routers axis: end-to-end delivery across `H` bridge/ROUTER hops (see below). |
-| `fold-n1` … `fold-n8` | n-layer-folded axis: same total bytes folded across N segments (see below). |
+| `fold-b1` … `fold-b8` | n-layer-folded axis: same total bytes folded across N segments (see below). |
 
 ### ep-type (endpoint-dispatch-class) axis (#96 / ADR-0032)
 
@@ -192,18 +190,25 @@ the **view-chain walk / scatter-gather** cost.
 
 | mode | fold depth | what it exercises |
 | --- | --- | --- |
-| `fold-n1` | 1 (flat) | a single contiguous segment — one link to walk. |
-| `fold-n2` | 2 | a 2-link rope of the same total bytes. |
-| `fold-n4` | 4 | a 4-link rope of the same total bytes. |
-| `fold-n8` | 8 | an 8-link rope of the same total bytes — most scatter-gather work. |
+| `fold-b1` | 1 (flat) | a single contiguous segment — one link to walk. |
+| `fold-b2` | 2 | a 2-link rope of the same total bytes. |
+| `fold-b4` | 4 | a 4-link rope of the same total bytes. |
+| `fold-b8` | 8 | an 8-link rope of the same total bytes — most scatter-gather work. |
 
 Expected trend: cost **rises** with fold depth — more folds ⇒ more links to gather/walk
 ⇒ higher per-op time and lower throughput, even though the byte count is fixed. (This is
 the cost the rope *trades for* zero-copy composition; the win is that those bytes are
-never copied — see `scatter` for the egress payoff.) **The naming "n-layer-folded" /
+never copied.) **The naming "n-layer-folded" /
 "fold depth" is provisional** (the depth sweep is what matters); each line keeps the
 12-field shape so `collate.py` / `perf_gate.py` still parse. `size` carries the constant
 total bytes (512); `fan` and `ep` are 1.
+
+The `b` in `fold-b*` is **batch-amortized**, and the rename was not cosmetic. The rows
+were `fold-n*` and timed ONE ~11 ns operation between two `steady_clock` reads, so all
+four widths published `p50=30` — the chart was four identical flat lines and the fold
+cost it exists to show was invisible. The batch form resolves them (~1 / 2 / 4 / 6 ns).
+The old series were ended rather than continued, because the number means something
+different now.
 
 - **Throughput** — back-to-back publishes; `deliveries / elapsed`.
 - **Latency** — one publish at a time (publish, wait for receipt, repeat); p50/p99/mean.
