@@ -64,13 +64,19 @@ namespace tr::net {
  * where the TSan gate and a safe reclamation scheme arrive together — see ADR-0061
  * (`docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md`).
  *
- * **What the tombstone does NOT buy (#521).** It makes a slot stable against ERASE only.
- * `add` of a genuinely new name still `push_back`s, and that reallocates — invalidating
- * every slot reference and iterator in the table. So slots are NOT address-stable for this
- * object's lifetime, and a forward read racing a connection-create is unsound. That was
- * harmless while the registry really was immutable after setup; RFC-0014 made connection
- * create/remove a RUNTIME operation, so it is now a live hazard, tracked by #521 and
- * closed by the S5 contract above. Do not build on slot addresses until it is.
+ * **Slots ARE address-stable (#521, ADR-0063).** The tombstone alone bought stability against
+ * ERASE only: `children_` was a `std::vector`, so appending a genuinely new name reallocated
+ * and invalidated every slot reference and iterator in the table — which RFC-0014 turned from
+ * a dormant caveat into a live hazard by making connection create/remove a RUNTIME operation.
+ * The storage is now an append-only CHUNKED LIST: a chunk is never moved, resized, or freed
+ * before this object dies, so a slot's address is fixed from the moment it is published.
+ * ADR-0062's forward cache builds on exactly that — it holds a `const child_t*` and reads the
+ * tombstone as its invalidation.
+ *
+ * **Writers are serialized by the caller; readers are not (ADR-0063).** @ref add and @ref erase
+ * are control-plane calls and must not run concurrently with each other — `add`'s scan-then-
+ * append is not atomic, so two racing writers can be handed the SAME empty slot. `fwd_router_t`
+ * holds the lock that prevents this. Readers need no lock and take none.
  */
 class child_registry_t {
    public:
@@ -100,7 +106,15 @@ class child_registry_t {
          *         it in place while a lock-free forward read may be dereferencing the slot
          *         (ADR-0063): the reader sees the old pointer or `nullptr`, never a tear. */
         std::atomic<transport_t*> link{nullptr};
-        bool multi_peer = false; /**< @brief Shape, captured once at @ref add time. */
+        /** @brief Shape, captured at @ref add time. ATOMIC for the same reason `link` is, and
+         *         it was missed the first time: @ref add REBINDS an existing slot on the
+         *         tombstone-reuse path that RFC-0014 create/remove churn takes constantly, and
+         *         that rebind writes this field while a lock-free forward read is testing it
+         *         (`fwd_router.cpp`'s mount descent). A plain write against a plain read is a
+         *         data race however benign the codegen looks on a given target (ADR-0063
+         *         erratum 3). Relaxed suffices: the value is an independent bool, published
+         *         BEFORE the `link` release-store that makes the slot resolvable at all. */
+        std::atomic<bool> multi_peer{false};
         /** @brief True while this slot still resolves — i.e. it is not a tombstone. */
         [[nodiscard]] bool live() const noexcept {
             return link.load(std::memory_order_acquire) != nullptr;
@@ -137,7 +151,7 @@ class child_registry_t {
             return false;
         });
         if (hit != nullptr) {
-            hit->multi_peer = multi_peer;
+            hit->multi_peer.store(multi_peer, std::memory_order_relaxed);
             hit->mount_tlv = std::move(mount);
             hit->link.store(&link, std::memory_order_release);
             return;
@@ -145,7 +159,7 @@ class child_registry_t {
         child_t* const slot = append();
         if (slot == nullptr) return;  // allocation failure — soft-fail, nothing registered
         slot->name = std::move(name);
-        slot->multi_peer = multi_peer;
+        slot->multi_peer.store(multi_peer, std::memory_order_relaxed);
         slot->mount_tlv = std::move(mount);
         slot->link.store(&link, std::memory_order_release);
         publish(slot);
@@ -189,7 +203,7 @@ class child_registry_t {
      */
     [[nodiscard]] static transport_t* resolve_peer(const child_t& child, std::string_view peer) {
         transport_t* const l = child.link.load(std::memory_order_acquire);
-        if (!child.multi_peer || l == nullptr) return nullptr;
+        if (!child.multi_peer.load(std::memory_order_relaxed) || l == nullptr) return nullptr;
         bus_link_t* const bus = l->bus();
         return bus == nullptr ? nullptr : bus->peer_link(peer);
     }

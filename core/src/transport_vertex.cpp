@@ -126,10 +126,12 @@ transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& rout
 }
 
 void transport_vertex_t::register_transport_type(std::string kind, transport_factory_t factory) {
+    const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
     transport_types_.insert_or_assign(std::move(kind), std::move(factory));
 }
 
 void transport_vertex_t::register_module(std::string module, std::string kind, conn_role_t role) {
+    const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
     for (module_decl_t& d : modules_) {
         if (d.kind == kind && d.role == role) {
             d.module = std::move(module);
@@ -149,6 +151,7 @@ std::string transport_vertex_t::module_for(std::string_view kind, conn_role_t ro
 }
 
 void transport_vertex_t::provide_link(std::string module, std::string name, transport_t& link) {
+    const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
     std::string key = std::move(module);
     key.push_back('/');
     key += name;
@@ -158,6 +161,7 @@ void transport_vertex_t::provide_link(std::string module, std::string name, tran
 result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::byte> child_key,
                                                               const tlv_t* config,
                                                               conn_role_t role) {
+    const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
     const std::string name = last_segment(child_key);
     if (name.empty()) return std::unexpected(status_t::INVALID_PATH);
 
@@ -295,6 +299,7 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
 }
 
 result_t<void> transport_vertex_t::remove_connection(std::string_view name) {
+    const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
     const auto it = conns_.find(name);
     if (it == conns_.end()) return std::unexpected(status_t::NOT_FOUND);
     // Un-route BEFORE anything is destroyed: after this the NAME resolves to nothing,
@@ -320,11 +325,15 @@ result_t<void> transport_vertex_t::set_link_state(std::string_view name, link_st
 }
 
 const conn_settings_t* transport_vertex_t::settings_of(std::string_view name) const {
+    const std::lock_guard ctl(
+        ctl_m_);  // ADR-0063 §3 — readers of conns_ race the insert's rebalance
     const auto it = conns_.find(name);
     return it == conns_.end() ? nullptr : &it->second.settings;
 }
 
 transport_t* transport_vertex_t::link_of(std::string_view name) const {
+    const std::lock_guard ctl(
+        ctl_m_);  // ADR-0063 §3 — readers of conns_ race the insert's rebalance
     const auto it = conns_.find(name);
     return it == conns_.end() ? nullptr : it->second.owned.get();
 }

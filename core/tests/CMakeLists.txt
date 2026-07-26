@@ -148,6 +148,16 @@ target_link_libraries(compact_cache_test PRIVATE libtracer)
 libtracer_test_warnings(compact_cache_test)
 add_test(NAME compact_cache COMMAND compact_cache_test)
 
+# ADR-0063 §3: control-plane create/remove churn against a live forward reader. Its value is
+# under `-fsanitize=thread` (the tsan CI lane runs the whole suite), where it reports the
+# writer-vs-writer and rebind-vs-reader races; without TSan it still catches a lost or
+# duplicated child. RUN_SERIAL so a loaded CI machine does not starve its four threads.
+add_executable(net_control_plane_race_test net_control_plane_race_test.cpp)
+target_link_libraries(net_control_plane_race_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(net_control_plane_race_test)
+add_test(NAME net_control_plane_race COMMAND net_control_plane_race_test)
+set_tests_properties(net_control_plane_race PROPERTIES RUN_SERIAL TRUE TIMEOUT 300)
+
 add_executable(registry_teardown_test registry_teardown_test.cpp)
 target_link_libraries(registry_teardown_test PRIVATE libtracer)
 libtracer_test_warnings(registry_teardown_test)

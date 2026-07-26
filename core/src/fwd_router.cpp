@@ -135,7 +135,7 @@ struct mount_hit_t {
         // a local vertex and terminates). A bus PEER is the exception: it has no vertex, so
         // naming a peer exactly still forwards, with an empty residual.
         if (n == k) return {};
-        if (c->multi_peer && !seg[k].empty()) {
+        if (c->multi_peer.load(std::memory_order_relaxed) && !seg[k].empty()) {
             if (transport_t* const p = child_registry_t::resolve_peer(*c, seg[k])) {
                 return mount_hit_t{p, seg[k], k + 1, seg[k]};
             }
@@ -199,6 +199,10 @@ void emit_compact(transport_t& down, std::uint16_t label, std::span<const std::b
 }  // namespace
 
 void fwd_router_t::add_child(std::string name, transport_t& link) {
+    // ADR-0063 §3: serialize control-plane writers. The registry's scan-then-append and the
+    // child_rx_ deque's emplace_back are both non-atomic, and two creates arriving on two
+    // different transports' receive threads are genuinely concurrent. Readers take nothing.
+    const std::lock_guard ctl(ctl_m_);
     // Populate the registry BEFORE wiring the receiver: an async transport (UDP/ws) may
     // already have a live recv thread, so `set_receiver` is the publish point — once the
     // callback is installed, on_frame can read the registry on that thread. Adding the
@@ -279,6 +283,7 @@ void fwd_router_t::add_child(std::string name, transport_t& link) {
 }
 
 bool fwd_router_t::remove_child(std::string_view name) {
+    const std::lock_guard ctl(ctl_m_);  // pairs with add_child (ADR-0063 §3)
     // Stop resolving FIRST: once the entry is tombstoned no forward can reach the link,
     // so the caller is free to destroy the transport as soon as this returns. Then the
     // ordinary departure eviction reclaims the graph edges and label state — the same

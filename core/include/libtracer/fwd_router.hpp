@@ -34,6 +34,7 @@
 #include <deque>
 #include <functional>
 #include <memory_resource>
+#include <mutex>
 #include <span>
 #include <string>
 #include <string_view>
@@ -433,6 +434,24 @@ class fwd_router_t {
     child_registry_t registry_;            // the one NAME→link demux table (Brick 3a, ADR-0037)
     route_handle_t handles_;               // per-link label tables (compact flows only)
     std::deque<child_rx_ctx_t> child_rx_;  // stable receiver contexts, one per child
+    /**
+     * @brief Serializes CONTROL-PLANE mutation of the registry and `child_rx_` (ADR-0063 §3).
+     *
+     * `add_child` performs a scan-then-append on the registry and an `emplace_back` on the
+     * receiver deque; neither is atomic, so two concurrent creates could be handed the same
+     * empty slot (losing a child) or corrupt the deque spine. Those creates are genuinely
+     * concurrent on an ordinary multi-transport node: `make_connection` runs on whichever
+     * transport's RECEIVE thread delivered the CREATE, and each transport has its own.
+     *
+     * A plain mutex, not a spinlock or an interrupt-disable section: this holds across socket
+     * construction and can block for milliseconds, where a spinlock on a single-core FreeRTOS
+     * target invites unbounded priority inversion (ADR-0063 erratum 1).
+     *
+     * **The forward path never takes this** — that lock-freedom is ADR-0038 §3, and the whole
+     * point of the chunked list is that readers need no lock. Lock order, where more than one
+     * is held: `transport_vertex_t::ctl_m_` → this → `graph_t::map_mutex_` → the vertex stripe.
+     */
+    mutable std::mutex ctl_m_;
     std::function<void(const view::rope_t&)> reply_cb_;
     std::function<void(std::string_view, const wire::tlv_t&)> inbound_cb_;
     std::function<void(std::string_view, std::span<const std::byte>)> raw_cb_;

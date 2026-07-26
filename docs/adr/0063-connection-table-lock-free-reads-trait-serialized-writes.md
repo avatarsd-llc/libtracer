@@ -1,6 +1,6 @@
-# The connection table is lock-free to read and trait-serialized to write: an append-only chunked list, plus an arch-selected control-plane sync trait
+# The connection table is lock-free to read and mutex-serialized to write: an append-only chunked list, plus one control-plane lock
 
-Status: proposed. **Corrects the load-bearing premise of [ADR-0061](0061-per-transport-mount-routing-strip-k-l5-demux.md)** — that the connection table is "immutable after setup" — which [RFC-0014](../spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) invalidated by making connection create/remove a *runtime* operation. Reuses [ADR-0060](0060-lkv-copy-store-injected-value-backend.md) §2's arch-selected sync trait rather than introducing a second mechanism. Upholds [ADR-0038](0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md) §3 (the FWD demux is lock-free) and its invariant #2 (zero-heap forward). Resolves [#521](https://github.com/avatarsd-llc/libtracer/issues/521) and unblocks [#512](https://github.com/avatarsd-llc/libtracer/issues/512). Grounded by a `/grill-with-docs` session against the code and fresh measurement.
+Status: proposed. **Corrects the load-bearing premise of [ADR-0061](0061-per-transport-mount-routing-strip-k-l5-demux.md)** — that the connection table is "immutable after setup" — which [RFC-0014](../spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) invalidated by making connection create/remove a *runtime* operation. Originally reused [ADR-0060](0060-lkv-copy-store-injected-value-backend.md) §2's arch-selected sync trait; **Erratum 1 retires that** in favour of a plain `std::mutex`, which is the primitive the rest of the codebase already serializes with. Upholds [ADR-0038](0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md) §3 (the FWD demux is lock-free) and its invariant #2 (zero-heap forward). Resolves [#521](https://github.com/avatarsd-llc/libtracer/issues/521) and unblocks [#512](https://github.com/avatarsd-llc/libtracer/issues/512). Grounded by a `/grill-with-docs` session against the code and fresh measurement.
 
 ## Context
 
@@ -24,13 +24,74 @@ Exploring the write side found the problem is wider than the registry. `transpor
 
 2. **Slot addresses become permanently stable**, which is a deliberate second effect, not a side effect — see Consequences.
 
-3. **The control plane serializes writers with the ADR-0060 §2 sync trait**, not an OS mutex: an interrupt-disable critical section on single-core targets (ESP32-C6, Cortex-M), a spinlock on multi-core (ESP32-S3, host). It covers `make_connection` / `remove_connection` in full — the three `transport_vertex_t` containers *and* the registry's scan-then-append — and is **never taken by the forward path**.
+3. **The control plane serializes writers with a plain `std::mutex`** — one on `transport_vertex_t`, one on `fwd_router_t` — covering `make_connection` / `remove_connection` / `provide_link` and `add_child` / `remove_child` in full, and **never taken by the forward path**. *(Revised — see Erratum 1. This decision originally specified the ADR-0060 §2 arch-selected sync trait; that was wrong, and the reasons are recorded below rather than quietly dropped.)*
 
-4. **`graph_t`'s vertex map stays as it is**, under `map_mutex_`. Making it lock-free is explicitly out of scope; see Considered Options.
+4. **`child_t::multi_peer` becomes atomic.** Increment 1 made the *append* publish safely, but `add()` also **rebinds** an existing slot (the tombstone-reuse path that RFC-0014 create/remove churn takes constantly), and that rebind plainly writes `multi_peer` while the forward path plainly reads it (`fwd_router.cpp:138`). Only `link` was atomic, so this was a genuine reader-vs-writer data race that increment 1 did not close — see Erratum 3.
+
+5. **`graph_t`'s vertex map stays as it is**, under `map_mutex_`. Making it lock-free is explicitly out of scope; see Considered Options.
+
+## Errata
+
+Recorded after an adversarial re-judgement of this ADR against the code. The central claim — that
+control-plane writers are unsynchronized and that this is reachable — **held**. Three of its
+supporting specifics did not, and the mechanism it prescribed was unimplementable at the call site
+it named.
+
+**Erratum 1 — the arch-selected sync trait was the wrong mechanism, and could not have been built.**
+Decision 3 originally specified ADR-0060 §2's trait (interrupt-disable on single-core, spinlock on
+multi-core). Three grounds retire that:
+
+- *The trait does not exist to be reused.* ADR-0060 §2's "arch-selected sync" is prose; its only
+  realization, `sync_pool_t` (`mem_pool.hpp:158`), hardcodes a `std::atomic_flag` spinlock and its
+  own comment defers the interrupt-disable variant as a follow-up. Adopting it here meant *building*
+  the abstraction, not reusing one — so the "second mechanism would be incoherent" argument in
+  Considered Options was comparing against something not yet there.
+- *Interrupt-disable cannot wrap this section.* `make_connection` calls the transport factory —
+  `socket()`, `bind()`, `connect()`, a WebSocket handshake, `pthread_create` — and then
+  `graph_.register_vertex_key`, which blocks on `map_mutex_`. Blocking inside an interrupt-disabled
+  critical section aborts. The ADR's own Consequences ("must not re-enter the graph's mutation APIs
+  or block") states a constraint this call site already violates and cannot be made to satisfy.
+- *A spinlock is actively worse here.* The section is milliseconds long (a DIAL can wait
+  `connect_timeout_ms`). On single-core FreeRTOS a high-priority task spinning on a lock held by a
+  lower-priority one is unbounded priority inversion with no way out; a mutex has priority
+  inheritance. The ~2 µs semaphore round-trip that motivated the trait is a **data-path** figure
+  imported into a **control-plane** decision this ADR itself labels non-hot — ~0.1% of a multi-
+  millisecond socket setup.
+
+The cost is ~4 B static per lock plus ~90 B of FreeRTOS mutex allocated on first lock (the figure
+already recorded at `vertex.hpp:511`), i.e. ~188 B one-time for both locks — not per connection.
+Against the priority order this also *converges* on the primitive `route_handle_t` and the vertex
+stripes already use, rather than adding a second.
+
+**Erratum 2 — `make_connection` mutates two containers, not three.** It writes `conns_`
+(`transport_vertex.cpp:278`) and `pending_links_` (`:281`); it only *reads* `modules_` and
+`transport_types_`, both written at setup. The Context paragraph's "three containers
+(`pending_links_`, `conns_`, `modules_`)" is wrong about `modules_`. The exposure is nonetheless
+*wider* than stated: `settings_of` / `link_of` / `remove_connection` all traverse `conns_` unlocked,
+so readers race the insert's rebalance too, and `fwd_router_t::child_rx_` (a `std::deque`
+`emplace_back`'d in `add_child`) and `child_registry_t::append` itself are both unsynchronized
+writer-vs-writer. `append` is the sharpest: two writers read the same `used`, receive **the same
+slot pointer**, both fill it and both publish — one child silently lost.
+
+**Erratum 3 — the reachability example was wrong; the race is real by another route.** "Two peers
+each creating a connection" does **not** race: `transport_ws_server` and `transport_tcp_server`
+multiplex every peer on ONE poll thread (`transport_ws.hpp:210`, `transport_tcp.hpp:338`) — no
+per-peer thread, because FreeRTOS stacks are the scarce resource. Two peers of one server are
+serialized by construction. The race needs **two distinct links in distinct modules** (a CREATE over
+`ws-server` while another arrives over `udp`, `tcp-server`, or `can`), or any application thread
+calling `provide_link` / `graph.write` at runtime. That is the ordinary multi-transport node shape,
+so the conclusion stands — but the mechanism is per-transport receive threads, not per-peer ones.
+
+**Erratum 4 — increment 1's ordering is correct, and a naive TSan test will not fail.** Every memory
+order on the append path checks out: the slot is filled before `link.store(release)` and before
+`used.store(release)`, and `for_each` acquire-loads `head_`, `next`, and `used` before touching a
+slot. So a test that hammers *new* names against a forward reader will pass and give false
+assurance. The test that actually fails must churn **create → remove → create of the same name**, to
+drive the rebind path of Erratum 3 and the writer-vs-writer paths above.
 
 ## Considered options
 
-- **A `std::mutex` control-plane lock.** Rejected on the embedded cost. Measured on host, an uncontended `std::mutex` lock/unlock is **3 ns** — identical to an atomic RMW, so on host the choice is a wash. But ADR-0060 §2 measures a **FreeRTOS semaphore round-trip at ~2 µs**, and having already established a trait for exactly this reason, introducing a second, heavier mechanism next to it would be incoherent.
+- **A `std::mutex` control-plane lock.** Originally rejected on embedded cost — an uncontended host lock/unlock is **3 ns**, but ADR-0060 §2 measures a **FreeRTOS semaphore round-trip at ~2 µs**, and a second mechanism beside an established trait looked incoherent. **This rejection is withdrawn (Erratum 1):** the trait was never built, cannot wrap a section that blocks on sockets and `map_mutex_`, and a spinlock there risks unbounded priority inversion. The 2 µs figure is also a data-path number applied to a control plane this ADR calls non-hot — ~0.1% of a multi-millisecond connection setup. **This is now the decision.**
 
 - **`std::deque` instead of a chunked list.** Rejected as a half-measure: it stabilizes element *references* across `push_back`, but a reader iterating still walks the deque's spine, whose map an append can reallocate. It fixes the pointer hazard and leaves the iteration hazard.
 
