@@ -90,9 +90,15 @@ FAMILIES: list[dict] = [
          pat=r"^eptype-([\w-]+) 64B/fan1/1ep p50 latency$",
          label=lambda m: f"eptype-{m.group(1)}", key=lambda m: m.group(1), log=False,
          fmt="ns", ylabel="p50 latency"),
+    # Re-pointed from `fold-n*` to `fold-b*`: the old rows timed ONE ~11 ns op between two
+    # clock reads, so every width published p50=30 and this chart was four identical flat
+    # lines. The batch-amortized `fold-b*` rows resolve the widths (~1/2/3/6 ns), so the
+    # chart shows the fold-width story it was drawn for. A re-pointed family charts a NEW
+    # series set with no history — the old `fold-n*` series stop here rather than being
+    # silently continued under a name whose meaning changed.
     dict(id="lat-fold", suite="latency", title="Fold family — per-delivery cost by width",
-         cond="fold-n* · 512 B · fan-out 1 — ns/delivery per fold width",
-         pat=r"^fold-n(\d+) 512B/fan1/1ep ns/delivery$",
+         cond="fold-b* · 512 B · fan-out 1 — batch-amortized ns/delivery per fold width",
+         pat=r"^fold-b(\d+) 512B/fan1/1ep ns/delivery$",
          label=lambda m: f"fold n{m.group(1)}", key=_num, log=False,
          fmt="ns", ylabel="ns per delivery",
          px=dict(label="fold width n", log=True, fmt="count")),
@@ -139,8 +145,8 @@ FAMILIES: list[dict] = [
          label=lambda m: f"eptype-{m.group(1)}", key=lambda m: m.group(1), log=False,
          fmt="rate", ylabel="deliveries / second"),
     dict(id="tp-fold", suite="throughput", title="Fold family — throughput by width",
-         cond="fold-n* · 512 B · fan-out 1 — one line per fold width",
-         pat=r"^fold-n(\d+) 512B/fan1/1ep throughput$",
+         cond="fold-b* · 512 B · fan-out 1 — one line per fold width",
+         pat=r"^fold-b(\d+) 512B/fan1/1ep throughput$",
          label=lambda m: f"fold n{m.group(1)}", key=_num, log=False,
          fmt="rate", ylabel="deliveries / second",
          px=dict(label="fold width n", log=True, fmt="count")),

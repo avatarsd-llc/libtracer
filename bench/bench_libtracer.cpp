@@ -474,19 +474,26 @@ void run_fold(std::size_t N) {
     tr::view::rope_t rope;
     for (auto& b : bufs) rope.append(borrowed_view(b));
 
-    // One egress-serialize op: gather the rope into a scatter-gather iovec, then walk
-    // the links (the view-chain walk a transport / codec performs to ship the rope).
+    // One egress-serialize op: gather the rope into a scatter-gather iovec, then walk the
+    // links (the view-chain walk a transport / codec performs to ship the rope).
+    //
+    // The span table is REUSED, via the nothrow `try_to_iovec`, exactly as the real terminus
+    // egress does. The old loop called `to_iovec()`, which does `reserve(link_count())` and
+    // therefore one malloc PER OP — measured at 1.00 allocations/op, 47-70% of the timed
+    // work. That contradicted this function's own docstring ("the timed loop allocates
+    // nothing ... purely the fold-depth walk/gather") and meant the fold-width axis was
+    // mostly charting a constant malloc.
+    std::vector<std::span<const std::byte>> iov;
     const auto serialize = [&]() -> std::size_t {
-        const auto iov = rope.to_iovec();
+        if (!rope.try_to_iovec(iov)) return 0;
         std::size_t acc = 0;
-        for (const auto& s : iov)
-            acc += s.size() + (s.empty() ? 0u : std::to_integer<std::size_t>(s[0]));
+        for (const auto& sp : iov)
+            acc += sp.size() + (sp.empty() ? 0u : std::to_integer<std::size_t>(sp[0]));
         return acc;
     };
 
     volatile std::size_t sink = 0;
     constexpr std::size_t MSGS = 2'000'000;                      // throughput phase
-    constexpr std::size_t LATN = 200'000;                        // latency phase
     for (std::size_t i = 0; i < 1000; ++i) sink += serialize();  // warmup
 
     const auto t0 = now_ns();
@@ -494,17 +501,28 @@ void run_fold(std::size_t N) {
     const double secs = (now_ns() - t0) / 1e9;
     const double pub_s = MSGS / secs;
     const double deliv_s = pub_s;  // fan=1 => one egress per publish
-    const double mb_s = deliv_s * static_cast<double>(kFoldTotal) / 1e6;
 
+    // BATCH-AMORTIZED latency, like `run_path_parse` below and the net-plane benches. A fold
+    // op costs ~8-15 ns; timing one between two `steady_clock` reads measured the CLOCK, and
+    // published p50=30 / p99=31 for EVERY width. The `lat-fold` chart was consequently four
+    // identical flat lines, and the perf gate's `fold-n4` leg was dead: p50=30 with
+    // LAT_REGRESS=1.15 needs 34.5, i.e. one 10 ns tick, so a real ~11 ns op had to more than
+    // DOUBLE before the gate could fire. See #553 for the same defect in the other rows.
+    constexpr std::size_t kBatch = 256;
     Latency lat;
-    for (std::size_t i = 0; i < LATN; ++i) {
+    for (std::size_t r = 0; r < 800; ++r) {
         const auto a = now_ns();
-        sink += serialize();
-        lat.add(now_ns() - a);
+        for (std::size_t i = 0; i < kBatch; ++i) sink += serialize();
+        lat.add((now_ns() - a) / kBatch);
     }
     (void)sink;
-    const std::string mode = "fold-n" + std::to_string(N);
-    emit("libtracer", mode.c_str(), kFoldTotal, 1, 1, pub_s, deliv_s, mb_s, lat.summarize());
+    // Mode renamed `fold-n*` -> `fold-b*` because the number now means something different
+    // (a batch-amortized per-op cost, not a clock-quantized single-shot). Renaming ends the
+    // old series and starts a new one, which is the visible outcome a changed meaning should
+    // have. Bandwidth is 0: the op reads at most 8 payload bytes per link, so the old
+    // `deliv_s * 512` was ~74 GB/s of bytes never touched.
+    const std::string mode = "fold-b" + std::to_string(N);
+    emit("libtracer", mode.c_str(), kFoldTotal, 1, 1, pub_s, deliv_s, 0.0, lat.summarize());
 }
 
 /**

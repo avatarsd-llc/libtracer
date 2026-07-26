@@ -58,14 +58,14 @@ BASELINE = HERE / "perf_baseline.json"
 #   fan-out 1024            — the subscriber fan-out loop
 #   inproc-path @ 8192 ep   — the resolver canary (registry lookup per write)
 #   mixed                   — the composed realistic topology
-#   fold-n4                 — the L0 inline-fold codec tier
+#   fold-b4                 — the L0 inline-fold codec tier (batch-amortized)
 POINTS = [
     ("inproc", 64, 1, 1),
     ("inproc-borrow", 64, 1, 1),
     ("inproc", 64, 1024, 1),
     ("inproc-path", 64, 1, 8192),
     ("mixed", 0, 6, 128),
-    ("fold-n4", 512, 1, 1),
+    ("fold-b4", 512, 1, 1),
 ]
 # No-baseline absolute-floor backstop, per point: a fan-1024 write's p50 is the
 # WHOLE 1024-subscriber fan-out (~13 µs), so the 1 µs 1:1 floor cannot apply.
@@ -80,7 +80,19 @@ MEAN_REGRESS = 1.12  # fail if mean > baseline * 1.12 — the mean is NOT tick-
 TPUT_REGRESS = 0.88  # fail if deliv_s < baseline * 0.88 (throughput pullback)
 LAT_TICK_NS = 25     # sub-100ns baselines: one ~10ns clock tick already exceeds 15%,
                      # so grain alone could fail the gate — such points must ALSO
-                     # regress by ~2 ticks in absolute ns before they count
+                     # regress by ~2 ticks in absolute ns before they count.
+                     #
+                     # NOTE, so nobody over-reads this gate: the guard exists for
+                     # CLOCK-QUANTIZED points and it silences the latency legs of any
+                     # point measured in single-digit ns, batch-amortized or not.
+                     # `fold-b4` sits at ~3 ns, so its p50 and mean legs cannot fire
+                     # below ~28 ns and are effectively inert; what actually gates that
+                     # point is THROUGHPUT (`TPUT_REGRESS`), which is bulk-timed and has
+                     # no tick guard, so it resolves a 12% drop at any magnitude. Its
+                     # predecessor `fold-n4` was no better — it published a quantized
+                     # p50 of 30 for a real ~11 ns op, so its latency legs needed a
+                     # >100% regression to fire. Making the tick guard per-point is the
+                     # real fix and is not attempted here.
 FLOOR_P50_NS = 1000  # absolute backstop if no baseline (canonical is ~100 ns)
 FLOOR_DELIV = 1_000_000
 DEFAULT_RUNS = 3
