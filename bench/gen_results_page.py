@@ -368,7 +368,7 @@ saying which is the one that matters when comparing two numbers.
 | Cross-core conformance | byte-exactness across cores (not speed) | `run-all.py` | §1 | any DISAGREE fails CI |
 | In-process timing | per-op latency and throughput in one process | `bench_libtracer` | §2, and the timed charts in §3 (fold, `path_t::parse`) and §4 (LKV, allocator-under-contention) | gated per PR **and** per `main` push, same-runner |
 | Framed-hop timing | what one wire frame costs before any payload is touched | `bench_forward_demux` + `bench_compact_delivery` | §3 | batch-amortized, self-calibrating |
-| Allocation counting | exact allocs and bytes around ONE operation — counted, never timed | `bench_forward_heap` probes + max RSS | §4 | forward hop hard-gated at ZERO allocs |
+| Allocation counting | exact allocs and bytes around ONE operation — counted, never timed | `bench_forward_heap` probes + max RSS | §4 | forward hop hard-gated at ZERO allocs; per-vertex block count ratcheted exactly |
 | Engine comparison | absolute side-by-side, both engines in one pass | `bench_libtracer` + `bench_zenoh` (+ loopback net) | §5 | same runner, same pass — no ratios |
 | Cross-core codec | decode→encode roundtrip per implementation | cpp / ts / rust codec benches | §6 | same v1 vectors for all cores |
 
@@ -382,7 +382,12 @@ all **same-runner relative** comparisons, where machine speed cancels:
 
 - **per PR** — `bench/perf_gate.py` builds `main`'s bench *and* the PR's bench on one
   runner and fails the PR if any of six canonical points regresses (p50 **+15 %** /
-  deliveries/s **−12 %**, best-of-3 runs);
+  deliveries/s **−12 %**, best-of-3 runs), **or** if a vertex grows: resident bytes
+  **+2 %** and **any** increase in heap-block count. The two memory quantities ratchet
+  differently on purpose — bytes are host-allocator-dependent (glibc rounds to 16 with an
+  8 B header where ESP-IDF TLSF rounds to 4 with 4) and so carry a tolerance, while a
+  block *count* is a count of `operator new` calls, identical on every host and exactly
+  reproducible, so it gets none: one extra block per vertex fails;
 - **per `main` push** — the same gate re-runs HEAD against its **parent commit** on
   **three independently-drawn runners** (the redundant no-pullback ratchet; each
   replica is a complete same-runner experiment): a regression that lands anyway
@@ -815,6 +820,13 @@ exact allocation counts and bytes, not statistics. Six probes feed the store:
   fixed (592 → 392 B per vertex, ADR-0058 erratum 1);
 - **wide fan-out publish** — the per-write cost at large subscriber counts;
 - **whole-run max RSS** — the coarse process-level footprint.
+
+Each probe reports two independent quantities, and **both now ratchet**: `bytes=`, the
+live usable-size balance, and `allocs=`, the number of heap blocks. Until #571 only bytes
+were gated — block counts were pushed to the store and charted but nothing stopped them
+climbing, which is why the 7 → 3 reduction was visible in the chart yet unprotected. They
+are gated on different terms because they are different kinds of number: bytes carry a
+2 % tolerance since a size-class flip is not a regression, block counts carry none.
 
 The timed rows in this chapter are a separate question from the probes: what the
 *allocator* costs, pooled against the default heap, on one thread and under contention.

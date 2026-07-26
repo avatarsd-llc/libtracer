@@ -105,10 +105,22 @@ DEFAULT_RUNS = 3
 # Same-runner correctness comes from --bench-fwd (record the baseline binary's bytes),
 # mirroring --bench for the latency binary; keys are `mem:`-namespaced so they never
 # collide with the latency points.
+#
+# Two independent quantities ride on the same probe rows and BOTH ratchet (#571):
+#
+#   bytes=  — live usable-size bytes per vertex. Host-allocator-dependent (glibc rounds
+#             to 16 with an 8 B header where ESP-IDF TLSF rounds to 4 with 4), so it is
+#             comparable only against a baseline measured on the SAME runner, and it
+#             carries a tolerance because a lone size-class flip is not a regression.
+#   allocs= — the NUMBER of heap blocks a vertex costs. Host-INdependent (it counts
+#             operator-new calls, not sizes) and exactly reproducible, so it needs no
+#             tolerance at all: one extra block per vertex is a regression, full stop.
+#             This is the quantity #546's 7→3 win moved and that nothing was protecting
+#             — it was pushed to the history store and charted, but never gated.
 MEM_POINTS = ["vertex", "vertex_value", "vertex_app5", "vertex_app5_static"]
 MEM_REGRESS = 1.02   # fail if live bytes/vertex > baseline * 1.02 ...
 MEM_TICK_B = 1       # ... AND grew by more than one byte (ignore a lone bucket flip)
-_MEM_RE = re.compile(r"^RESULT zeroheap (\w+) allocs=\d+ frees=\d+ bytes=(\d+)")
+_MEM_RE = re.compile(r"^RESULT zeroheap (\w+) allocs=(\d+) frees=\d+ bytes=(\d+)")
 
 # --- ADR-0060 LKV copy-store gate (same-run pool-vs-heap ratio, NOT vs-baseline) --
 # The pooled value_backend vs the default heap on the write-path alloc/free op. A
@@ -195,9 +207,10 @@ def best_of(bench: pathlib.Path, runs: int) -> dict[str, dict]:
 
 
 def mem_probe(bench_fwd: pathlib.Path) -> dict[str, dict]:
-    """Live usable-size bytes per vertex from the counting-allocator probes — one run
-    (deterministic). Returns {"mem:<what>": {"bytes": N}}; empty when the binary is
-    absent or emits no probe rows, so memory gating degrades to a note, never a crash."""
+    """Live usable-size bytes AND heap-block count per vertex from the counting-allocator
+    probes — one run (deterministic). Returns {"mem:<what>": {"bytes": N, "allocs": M}};
+    empty when the binary is absent or emits no probe rows, so memory gating degrades to
+    a note, never a crash."""
     if not bench_fwd.exists():
         return {}
     out = subprocess.run([str(bench_fwd)], capture_output=True, text=True, timeout=180).stdout
@@ -205,7 +218,7 @@ def mem_probe(bench_fwd: pathlib.Path) -> dict[str, dict]:
     for line in out.splitlines():
         m = _MEM_RE.match(line)
         if m and m.group(1) in MEM_POINTS:
-            got[f"mem:{m.group(1)}"] = {"bytes": int(m.group(2))}
+            got[f"mem:{m.group(1)}"] = {"bytes": int(m.group(3)), "allocs": int(m.group(2))}
     return got
 
 
@@ -222,19 +235,34 @@ def main() -> int:
     cur.update(mem_probe(bench_fwd))  # fold the mem:* points into the same baseline dict
     base = json.loads(BASELINE.read_text()) if BASELINE.exists() else None
     fails = []
-    mem_hdr = f" / mem +{(MEM_REGRESS - 1) * 100:.0f}%" if any(k.startswith("mem:") for k in cur) else ""
+    mem_hdr = (f" / mem +{(MEM_REGRESS - 1) * 100:.0f}% / blocks +0"
+               if any(k.startswith("mem:") for k in cur) else "")
     print(f"Per-loop perf gate (libtracer in-process, best of {runs} run(s), "
           f"fail: p50 +{(LAT_REGRESS - 1) * 100:.0f}% / mean +{(MEAN_REGRESS - 1) * 100:.0f}% / "
           f"deliv -{(1 - TPUT_REGRESS) * 100:.0f}%{mem_hdr}):")
     for k, v in cur.items():
         if "bytes" in v:  # memory footprint point (mem:*) — exact, deterministic
-            line = f"  {k:<22} live={v['bytes']:>6} B/vertex"
+            line = f"  {k:<22} live={v['bytes']:>6} B/vertex  blocks={v['allocs']:>2}"
             b = base.get(k) if base else None
             if b and "bytes" in b:
                 if v["bytes"] > b["bytes"] * MEM_REGRESS and v["bytes"] - b["bytes"] > MEM_TICK_B:
                     fails.append(f"{k} memory pullback: {v['bytes']}B vs base {b['bytes']}B "
                                  f"(+{(v['bytes'] / b['bytes'] - 1) * 100:.1f}%)")
-                line += f"   (base {b['bytes']}B)"
+                line += f"   (base {b['bytes']}B"
+                # Block COUNT ratchets exactly — no tolerance, no tick guard. It is a
+                # count of operator-new calls, identical on every host, so any increase
+                # is the code allocating more per vertex. Guarded on presence so a
+                # baseline recorded before this key existed degrades to bytes-only
+                # gating rather than crashing (the checked-in perf_baseline.json
+                # fallback deliberately carries no `allocs`: it was captured on a
+                # different toolchain, and an exact ratchet is only honest against a
+                # same-runner baseline binary, which is what CI's --bench-fwd supplies).
+                if "allocs" in b:
+                    if v["allocs"] > b["allocs"]:
+                        fails.append(f"{k} allocation pullback: {v['allocs']} heap blocks per "
+                                     f"vertex vs base {b['allocs']} (+{v['allocs'] - b['allocs']})")
+                    line += f", {b['allocs']} blocks"
+                line += ")"
             print(line)
             continue
         line = (f"  {k:<22} p50={v['p50_ns']:>7}ns mean={v['mean_ns']:>7}ns "
