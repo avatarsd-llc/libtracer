@@ -14,10 +14,13 @@ The egress-batching gap below has been **resolved differently and better** than 
 Nagle-style timer that costs latency), libtracer batches **structurally**: a
 composite endpoint's value is a rope already batched in memory, shipped in **one
 `sendmsg(iovec)`** via `transport_t::send(iov)` (the scatter-gather seam, shipped in
-the perf work — see [Performance](../performance.md) and `bench/bench_scatter`). One
-syscall carries K values, so throughput scales with composition size *at flat
-latency* (the measured, absolute libtracer-vs-Zenoh comparison is on the
-[Performance page](../performance.md), generated in CI). The
+the perf work — see [Performance](../performance.md)). One syscall carries K
+values, so throughput **should** scale with composition size *at flat latency*.
+Stated as a claim rather than a result on purpose: the benchmark that used to
+back it was withdrawn as invalid (its Zenoh side never reached the wire and its
+libtracer side published `rate x K` by arithmetic, egress-only), so this is a
+design property that has not yet been measured end to end. A valid two-process,
+delivery-counted version is tracked in issue #568. The
 `BatchingTransport` timer-decorator is therefore **superseded** (kept below only as
 the considered-and-rejected alternative). The remaining M6 work is purely the
 **reliable byte-stream transport** (TCP/QUIC + `FrameReassembler`) for ROS

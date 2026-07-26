@@ -32,9 +32,6 @@ target_compile_definitions(bench_codec PRIVATE
 # over a real transport is covered by core/tests/udp_test.
 
 # Scatter-gather egress demo: one sendmsg(iovec) ships a K-value composite rope.
-add_executable(bench_scatter bench_scatter.cpp)
-target_link_libraries(bench_scatter PRIVATE libtracer)
-target_compile_options(bench_scatter PRIVATE -Wall -Wextra)
 
 # NETWORK transport comparison (UDP/TCP/WS over the loopback kernel path) — the
 # libtracer side of the transport matrix vs Zenoh (bench_zenoh_net). Two PROCESSES
