@@ -98,27 +98,6 @@ jobs:
         run: |
           set -o pipefail
           ZEROHEAP_MAX=0 ./bench/build/bench_forward_heap | tee bench/bench_forward_heap_raw.txt
-      - name: Build the parent commit's benchmark on this runner (ratchet baseline)
-        run: |
-          if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
-            git worktree add --detach ../parent-baseline HEAD^
-            cmake -S ../parent-baseline/bench -B ../parent-baseline/bench/build -DCMAKE_BUILD_TYPE=Release
-            cmake --build ../parent-baseline/bench/build --target bench_libtracer bench_forward_heap -j
-          else
-            echo "root commit — no parent to ratchet against"
-          fi
-      - name: No-pullback ratchet (HEAD vs parent, this runner)
-        run: |
-          if [ -x ../parent-baseline/bench/build/bench_libtracer ]; then
-            echo "== record the parent (ratchet baseline) on this runner =="
-            python3 bench/perf_gate.py --bench ../parent-baseline/bench/build/bench_libtracer \
-              --bench-fwd ../parent-baseline/bench/build/bench_forward_heap --update-baseline
-            echo "== gate HEAD against its parent on the same runner (latency + per-vertex memory) =="
-            python3 bench/perf_gate.py
-          else
-            echo "== no parent build — absolute floors only =="
-            python3 bench/perf_gate.py --update-baseline
-          fi
       # One full-bench transcript per replica; the history job aggregates all three.
       # GNU time -v: whole-run max RSS feeds the memory-footprint series. Degrades
       # to an empty transcript (metric omitted) if GNU time is absent on the runner.
@@ -148,7 +127,36 @@ jobs:
           for f in bench/bench_forward_demux_raw.txt bench/bench_compact_delivery_raw.txt; do
             [ -s "$f" ] || echo "::warning::$f is empty — its series will not be recorded"
           done
+      - name: Build the parent commit's benchmark on this runner (ratchet baseline)
+        run: |
+          if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            git worktree add --detach ../parent-baseline HEAD^
+            cmake -S ../parent-baseline/bench -B ../parent-baseline/bench/build -DCMAKE_BUILD_TYPE=Release
+            cmake --build ../parent-baseline/bench/build --target bench_libtracer bench_forward_heap -j
+          else
+            echo "root commit — no parent to ratchet against"
+          fi
+      - name: No-pullback ratchet (HEAD vs parent, this runner)
+        run: |
+          if [ -x ../parent-baseline/bench/build/bench_libtracer ]; then
+            echo "== record the parent (ratchet baseline) on this runner =="
+            python3 bench/perf_gate.py --bench ../parent-baseline/bench/build/bench_libtracer \
+              --bench-fwd ../parent-baseline/bench/build/bench_forward_heap --update-baseline
+            echo "== gate HEAD against its parent on the same runner (latency + per-vertex memory) =="
+            python3 bench/perf_gate.py
+          else
+            echo "== no parent build — absolute floors only =="
+            python3 bench/perf_gate.py --update-baseline
+          fi
+      # if: always() is load-bearing, not defensive. The ratchet gate above EXITS
+      # NON-ZERO on a regression, which aborts the job — so without this the one
+      # commit guaranteed to have no artifact is the one that regressed, and the
+      # `history` job's own `always()` (which exists for exactly this case) has
+      # nothing to download. That is how #385's merge produced a chart that jumps
+      # straight from its parent to the next commit, and why the regression was
+      # misattributed to a later PR.
       - name: Upload this replica's transcripts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: bench-raw-r${{ matrix.replica }}
