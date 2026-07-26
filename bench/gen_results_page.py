@@ -747,7 +747,7 @@ def history_tables_block(data: dict | None) -> str:
             for b in e.get("benches", []):
                 series.setdefault(b["name"], []).append(float(b["value"]))
         unit = entries[-1]["benches"][0].get("unit", "") if entries[-1].get("benches") else ""
-        out.append(f"### {suite}")
+        out.append(f"#### {suite}")
         out.append("")
         out.append(f"{len(entries)} tracked commit(s), `{first_c}` → `{last_c}`; unit: {unit}.")
         rel = render_history.release_note(entries)
@@ -833,6 +833,45 @@ def provenance() -> str:
     return f"**🤖 CI-generated** on {date} · commit {commit} · {run}{runner_note}."
 
 
+def check_heading_depth(page: str) -> None:
+    """@brief Fail the build on a heading hierarchy that skips a level.
+
+    This is what shipped to the live page: a `##` section whose subsections
+    were emitted at `####`, so the reader saw chapters belonging to nothing.
+    It went unnoticed because each block owns its own heading level and no
+    single file sees the assembled sequence — which is exactly why the
+    assembled page is where the rule is enforced.
+
+    Descending back up a level is legal and not flagged; only a downward jump
+    of more than one is structurally wrong.
+
+    Depth also has a hard ceiling here: `docs/conf.py` sets
+    `myst_heading_anchors = 3`, so an `h4` gets **no anchor** and cannot be
+    deep-linked. Nothing that a reader is meant to link to may sit below `###`;
+    the tables under "Full history" are the only permitted `h4`, being an
+    index rather than a destination.
+
+    Fenced code blocks are skipped so a `#` comment inside one is never read as
+    a heading.
+    """
+    depths: list[tuple[int, str]] = []
+    fenced = False
+    for line in page.splitlines():
+        if line.startswith("```") or line.startswith(":::"):
+            fenced = not fenced
+            continue
+        if fenced or not line.startswith("#"):
+            continue
+        level = len(line) - len(line.lstrip("#"))
+        if level and line[level:level + 1] == " ":
+            depths.append((level, line.strip()))
+    prev = 0
+    for level, text in depths:
+        if prev and level > prev + 1:
+            raise SystemExit(f"heading depth skips a level ({prev} -> {level}): {text}")
+        prev = level
+
+
 def main() -> int:
     summary, passed = cross_core_block()
     history = _load_history()
@@ -884,7 +923,7 @@ is tracked as its own change rather than done quietly.
 
 {HISTORY_BLOCK}
 
-#### Unified family trends (all related series on one axes; releases marked)
+### Unified family trends (all related series on one axes; releases marked)
 
 Instead of one tiny chart per series, related series are grouped into **families** —
 fan-out sweep, payload sweep, MT scaling, dispatch modes, endpoint types, fold widths,
@@ -898,7 +937,7 @@ value), and an isometric **3D** surface — switchable per chart; hover for exac
 
 {unified_history_block(history)}
 
-#### Full history, in-page (every tracked series, all recorded `main` commits)
+### Full history, in-page (every tracked series, all recorded `main` commits)
 
 {history_tables_block(history)}
 
@@ -957,6 +996,7 @@ roundtrip); a core whose toolchain is absent in this build degrades to a note.
 
 {codec_block()}
 """
+    check_heading_depth(page)
     OUT.write_text(page)
     print(f"wrote {OUT.relative_to(REPO)} ({'conformance PASS' if passed else 'conformance check ran'})")
     return 0
