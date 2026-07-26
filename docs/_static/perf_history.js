@@ -93,6 +93,17 @@
       '<text class="ph-rellab" x="' + (x + 4).toFixed(1) + '" y="' + (y0 + 11) + '">' + (r.approx ? "≈ " : "") + r.label + "</text>";
   }
 
+  // An INSTRUMENT marker, visually distinct from a release. A release says the code
+  // changed; this says the thing doing the MEASURING changed, so points on either side are
+  // not comparable. The release line is already dashed, so this is DOTTED and a different
+  // hue, and labelled at the foot of the plot rather than the head — a chart carrying both
+  // must not read as one kind of event.
+  function instrMark(x, y0, y1, r) {
+    return '<line class="ph-instr" x1="' + x.toFixed(1) + '" y1="' + y0 + '" x2="' + x.toFixed(1) + '" y2="' + y1 + '"/>' +
+      '<text class="ph-instrlab" x="' + (x + 4).toFixed(1) + '" y="' + (y1 - 4) + '">⚙</text>' +
+      '<title>' + r.label + ' — the benchmark itself changed here; points either side are not directly comparable</title>';
+  }
+
   // ---------------------------------------------------------------- trend --
   function renderTrend(c, suite) {
     var N = suite.shas.length;
@@ -138,6 +149,7 @@
     s += '<rect class="ph-frame" x="' + m.l + '" y="' + m.t + '" width="' + pw + '" height="' + ph + '"/>';
     s += '<text class="ph-axtitle" transform="translate(13 ' + (m.t + ph / 2) + ') rotate(-90)" text-anchor="middle">' + c.ylabel + "</text>";
     (suite.releases || []).forEach(function (r) { if (r.i < N) s += relMark(X(r.i), m.t, m.t + ph, r); });
+    (suite.instruments || []).forEach(function (r) { if (r.i < N) s += instrMark(X(r.i), m.t, m.t + ph, r); });
     c.series.forEach(function (se) {
       var cc = col(se.ci);
       var pts = se.pts.map(function (p) { return X(p[0]).toFixed(1) + "," + Y(p[1]).toFixed(1); }).join(" ");

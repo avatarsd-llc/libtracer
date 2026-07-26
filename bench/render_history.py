@@ -187,6 +187,118 @@ def _is_ancestor(a: str, b: str) -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# instrument-change markers (directive: "create markers if test has been changed")
+# ---------------------------------------------------------------------------
+# A release marker says "the CODE changed here". These say "the INSTRUMENT changed here",
+# which is a different and more urgent statement: points either side of one are not
+# comparable, because the thing doing the measuring is not the same thing.
+#
+# This is not hypothetical. Within one week this repo found a bench whose filler link names
+# were rejected on length before ever reaching the comparison it claimed to time; a history
+# emitter that silently recorded nothing; a latency column quantized so coarsely that a 6%
+# improvement read as zero; and fold rows that published one constant for four different
+# widths. Every one of those changed a published number without changing the code under
+# test, and nothing on the chart said so.
+#
+# `core/**` is deliberately NOT a source here. A core change moving the line is the SIGNAL
+# the chart exists to show. Mixing the two would make the marker mean "something happened",
+# which is worth nothing. Presentation-only files (gen_results_page.py, render_*.py, docs/**)
+# are excluded for the same reason inverted: they cannot move a number.
+INSTRUMENT_SOURCES: list[tuple[str, list[str]]] = [
+    (r"^(inproc|inproc-borrow|inproc-path|inproc-deliver|inproc-pool|inproc-pool-borrow"
+     r"|inproc-mt\d+|eptype-[\w-]+|fold-b\d+|acl-\S+|mixed|path-parse|lkv-\S+"
+     r"|poolalloc-mt\d+|heapalloc-mt\d+)\b", ["bench/bench_libtracer.cpp"]),
+    (r"^fwd-demux-", ["bench/bench_forward_demux.cpp"]),
+    (r"^compact-", ["bench/bench_compact_delivery.cpp"]),
+    (r"^heap (allocs|bytes) per ", ["bench/bench_forward_heap.cpp"]),
+    (r"max RSS$", ["bench/bench_libtracer.cpp"]),
+]
+# Shared harness: a change here can move EVERY series, so it marks all of them.
+HARNESS_SOURCES = ["bench/bench_common.hpp", "bench/CMakeLists.txt",
+                   "bench/perf_emit_benchmark.py", ".github/workflows/perf.yml"]
+
+
+def _touching_commits(path: str, first: str, last: str) -> list[str]:
+    """@brief Commits in (first, last] that touched @p path, newest first.
+
+    `--first-parent` is MANDATORY, not an optimization. gh-pages records the merge commits
+    on main, so a plain `git log` returns the topic-branch commits that are not recorded
+    points and the markers would land nowhere. Measured on this repo for
+    bench_libtracer.cpp: plain log = 1 of 20 are merges; --first-parent = 17 of 20.
+    """
+    try:
+        p = subprocess.run(["git", "log", "--first-parent", "--format=%H",
+                            f"{first}..{last}", "--", path],
+                           capture_output=True, text=True, cwd=REPO, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return [ln.strip() for ln in p.stdout.splitlines() if ln.strip()]
+
+
+def _substantive(sha: str, path: str) -> bool:
+    """@brief True if @p sha changed @p path's CODE, not just comments/whitespace.
+
+    A comment-only edit cannot move a number, and marking it would train readers to ignore
+    the markers — which is the failure mode that makes an alerting mechanism worthless. On
+    any error we return True: over-marking is a visible annotation, under-marking is a
+    silent discontinuity, and the whole point is to stop those.
+    """
+    try:
+        par = subprocess.run(["git", "rev-parse", f"{sha}^1"], capture_output=True,
+                             text=True, cwd=REPO, timeout=30).stdout.strip()
+        if not par:
+            return True
+        before = subprocess.run(["git", "show", f"{par}:{path}"], capture_output=True,
+                                text=True, cwd=REPO, timeout=30).stdout
+        after = subprocess.run(["git", "show", f"{sha}:{path}"], capture_output=True,
+                               text=True, cwd=REPO, timeout=30).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    return _strip_noise(before, path) != _strip_noise(after, path)
+
+
+def _strip_noise(text: str, path: str) -> str:
+    """@brief Drop comments and collapse whitespace, so formatting is not a 'change'."""
+    if path.endswith((".cpp", ".hpp")):
+        text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+        text = re.sub(r"//[^\n]*", "", text)
+    else:
+        text = re.sub(r"(?m)^\s*#[^\n]*", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def instrument_annotations(series_names: list[str], entries: list[dict]) -> list[dict]:
+    """@brief Commits where the INSTRUMENT behind @p series_names changed.
+
+    Returned in the same shape as @ref release_annotations so the renderer draws both from
+    one code path: ``{"i": <index>, "label": str, "approx": bool}``. A marked commit that is
+    not itself a recorded point resolves to the nearest FOLLOWING one, exactly as a release
+    tag does — the discontinuity is real either way and the reader needs to see it somewhere.
+    """
+    shas = [e.get("commit", {}).get("id", "") for e in entries]
+    if len(shas) < 2:
+        return []
+    paths: set[str] = set(HARNESS_SOURCES)
+    for pat, srcs in INSTRUMENT_SOURCES:
+        if any(re.match(pat, n) for n in series_names):
+            paths.update(srcs)
+    hits: dict[int, set[str]] = {}
+    for path in sorted(paths):
+        for sha in _touching_commits(path, shas[0], shas[-1]):
+            if not _substantive(sha, path):
+                continue
+            idx = next((i for i, s in enumerate(shas) if s == sha), None)
+            approx = False
+            if idx is None:
+                idx = next((i for i, s in enumerate(shas) if s and _is_ancestor(sha, s)), None)
+                approx = True
+            if idx is not None:
+                hits.setdefault(idx, set()).add((pathlib.Path(path).name, approx)[0])
+    return [{"i": i, "label": "instrument: " + ", ".join(sorted(names)), "approx": False}
+            for i, names in sorted(hits.items())]
+
+
 def release_annotations(entries: list[dict]) -> list[dict]:
     """@brief Map each ``v*`` tag onto this suite's recorded-commit axis.
 
@@ -261,6 +373,12 @@ def build(data: dict) -> dict:
             "shas": [e.get("commit", {}).get("id", "")[:7] for e in entries],
             "msgs": [_first_line(e.get("commit", {}).get("message", "")) for e in entries],
             "releases": release_annotations(entries),
+            # Markers for commits where the INSTRUMENT changed. Computed per suite over
+            # the series that suite actually carries, so a bench_forward_demux edit does
+            # not annotate the in-process charts. See instrument_annotations.
+            "instruments": instrument_annotations(
+                sorted({b.get("name", "") for e in entries for b in e.get("benches", [])}),
+                entries),
         }
         suite_series[k] = _series_by_name(entries)
 
