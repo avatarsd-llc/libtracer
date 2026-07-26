@@ -355,6 +355,7 @@
     }
     var yf = FMT[c.fmt] || fmtNum, xf = (c.px && FMT[c.px.fmt]) || fmtNum;
     var s = '<svg viewBox="0 0 ' + W + " " + H + '" role="img" aria-label="' + c.title + '">';
+    s += '<line class="ph-cross" x1="0" y1="' + m.t + '" x2="0" y2="' + (m.t + ph) + '" style="display:none"/>';
     if (ylog) {
       var e0 = Math.round(Math.log10(ymin)), e1 = Math.round(Math.log10(ymax));
       for (var e = e0; e < e1; e++) for (var k = 2; k <= 9; k++) {
@@ -386,7 +387,13 @@
       s += '<text x="' + (X(lp[0]) - 6).toFixed(1) + '" y="' + (Y(lp[1]) - 8).toFixed(1) + '" text-anchor="end" class="ph-tick" style="fill:' + col(se.ci) + ';font-weight:700">' + yf(lp[1]) + "</text>";
     });
     s += "</svg>";
-    return { svg: s, hover: null };
+    // Hover is not decoration here: it is the ONLY place the interior points of a
+    // comparison sweep can be read. Only the last point of each series carries a
+    // printed label, and the generated one-line reading under the chart gives the
+    // sweep's endpoints — so without this, a five-point series published three
+    // numbers and hid two. The in-page absolute-number table used to cover that
+    // gap; hover is what earns the right to have removed it.
+    return { svg: s, hover: { kind: "param", W: W, m: m, pw: pw, xs: xs, X: X, xf: xf, yf: yf } };
   }
 
   // -------------------------------------------------------------- assembly --
@@ -429,24 +436,52 @@
             : renderTrend(c, suite);
       plot.innerHTML = r.svg;
       tip.style.display = "none";
-      if (!r.hover || r.hover.kind !== "trend") return;
+      if (!r.hover) return;
       var g = r.hover, svg = plot.querySelector("svg"), cross = plot.querySelector(".ph-cross");
-      svg.addEventListener("mousemove", function (ev) {
+      if (!cross) return;
+      // Both chart kinds hover the same way — snap to the nearest x, draw the
+      // crosshair, list every series' value there. They differ only in what an x
+      // IS: a recorded commit, or a swept parameter value.
+      function nearest(ev) {
         var rc = svg.getBoundingClientRect();
         var fx = (ev.clientX - rc.left) / rc.width * g.W;
+        if (g.kind === "param") {
+          var best = 0, bd = Infinity;
+          for (var k = 0; k < g.xs.length; k++) {
+            var d = Math.abs(g.X(g.xs[k]) - fx);
+            if (d < bd) { bd = d; best = k; }
+          }
+          return { i: best, x: g.X(g.xs[best]) };
+        }
         var i = Math.round((fx - g.m.l) / g.pw * (g.N - 1));
         if (i < 0) i = 0; if (i > g.N - 1) i = g.N - 1;
-        var x = g.m.l + (g.N <= 1 ? g.pw / 2 : (i / (g.N - 1)) * g.pw);
-        cross.setAttribute("x1", x); cross.setAttribute("x2", x); cross.style.display = "";
-        var rel = (suite.releases || []).filter(function (rr) { return rr.i === i; })
-          .map(function (rr) { return ' <span class="rel">🏷 ' + (rr.approx ? "≈ " : "") + rr.label + "</span>"; }).join("");
-        var rows = c.series.map(function (se, si) {
-          var v = byIdx[si][i];
-          return v === undefined ? "" : '<div><span class="dot" style="background:' + col(se.ci) + '"></span>'
-            + se.label + " <b>" + g.yf(v) + "</b></div>";
-        }).join("");
-        tip.innerHTML = "<div class='sha'><code>" + suite.shas[i] + "</code>" + rel + "</div>"
-          + (suite.msgs && suite.msgs[i] ? "<div class='msg'>" + suite.msgs[i] + "</div>" : "") + rows;
+        return { i: i, x: g.m.l + (g.N <= 1 ? g.pw / 2 : (i / (g.N - 1)) * g.pw) };
+      }
+      svg.addEventListener("mousemove", function (ev) {
+        var hit = nearest(ev), i = hit.i;
+        cross.setAttribute("x1", hit.x); cross.setAttribute("x2", hit.x); cross.style.display = "";
+        var head, rows;
+        if (g.kind === "param") {
+          var xv = g.xs[i];
+          head = "<div class='sha'><code>" + ((c.px && c.px.label) || "x") + " " + g.xf(xv) + "</code></div>";
+          rows = c.series.map(function (se) {
+            var hitpt = null;
+            se.pts.forEach(function (pt) { if (pt[0] === xv) hitpt = pt; });
+            return hitpt === null ? "" : '<div><span class="dot" style="background:' + col(se.ci) + '"></span>'
+              + se.label + " <b>" + g.yf(hitpt[1]) + "</b></div>";
+          }).join("");
+        } else {
+          var rel = (suite.releases || []).filter(function (rr) { return rr.i === i; })
+            .map(function (rr) { return ' <span class="rel">🏷 ' + (rr.approx ? "≈ " : "") + rr.label + "</span>"; }).join("");
+          head = "<div class='sha'><code>" + suite.shas[i] + "</code>" + rel + "</div>"
+            + (suite.msgs && suite.msgs[i] ? "<div class='msg'>" + suite.msgs[i] + "</div>" : "");
+          rows = c.series.map(function (se, si) {
+            var v = byIdx[si][i];
+            return v === undefined ? "" : '<div><span class="dot" style="background:' + col(se.ci) + '"></span>'
+              + se.label + " <b>" + g.yf(v) + "</b></div>";
+          }).join("");
+        }
+        tip.innerHTML = head + rows;
         tip.style.display = "";
       });
       svg.addEventListener("mouseleave", function () { cross.style.display = "none"; tip.style.display = "none"; });

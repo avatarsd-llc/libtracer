@@ -230,10 +230,13 @@ def build(rows: list[dict]) -> dict:
 def raw_table(rows: list[dict]) -> list[dict]:
     """@brief Every plotted point as absolute numbers, for the PR-comment table.
 
-    This lives outside `build` because only `markdown_table` consumes it: the docs page
-    charts hover for exact values, so an in-page duplicate of the same numbers was pure
-    weight. `docs.yml` shells out to `--md` for the sticky PR comment, which has no
-    JavaScript and therefore does still need it.
+    This lives outside `build` because only `markdown_table` consumes it. The docs page
+    charts hover every point — including the interior ones, which carry no printed label
+    and which the generated one-line reading (endpoints only) does not name — so an
+    in-page duplicate of the same numbers is weight. That hover is a precondition for
+    dropping the table, not a happy accident: without it a five-point sweep would publish
+    three numbers and hide two. `docs.yml` shells out to `--md` for the sticky PR comment,
+    which has no JavaScript and therefore does still need the table.
     """
     fan = {"mode": "inproc", "fixed": {"size": REF_SIZE, "ep": 1}, "axis": "fan"}
     pay = {"mode": "inproc", "fixed": {"fan": 1, "ep": 1}, "axis": "size"}

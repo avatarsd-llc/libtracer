@@ -107,6 +107,31 @@ FAMILIES: list[dict] = [
          pat=r"^(acl-inherit-d4(?:-mt4)?) 64B/fan\d+/\d+ep p50 latency$",
          label=lambda m: m.group(1), key=lambda m: m.group(1), log=False,
          fmt="ns", ylabel="p50 latency"),
+    # The per-vertex probes: LIVE usable-size bytes a resident object holds, as opposed
+    # to the transient per-op churn in `lat-heap`. These are the series the memory
+    # chapter's prose argues from (the vertex diet, #361, and the ADR-0058 borrowed
+    # app-field erratum that took a leaf from 592 to 392 B) — they were recorded for
+    # months and charted nowhere, so the argument had no picture under it.
+    dict(id="lat-vertex-bytes", section="memory", suite="latency",
+         title="Resident bytes per vertex — what a live object holds",
+         cond="allocator probe · LIVE usable-size bytes, not per-op churn — a bare leaf, "
+              "the increment one small LKV write adds, and both app-field installs (ADR-0058)",
+         names=[("heap bytes per vertex (probe)", "bare leaf"),
+                ("heap bytes per vertex_value (probe)", "+ one LKV write"),
+                ("heap bytes per vertex_app5 (probe)", "+ owning 5-field table"),
+                ("heap bytes per vertex_app5_static (probe)", "+ borrowed 5-field table"),
+                ("heap bytes per fanout_wide (probe)", "wide fan-out publish")],
+         log=True, fmt="bytes", ylabel="live bytes"),
+    dict(id="lat-vertex-allocs", section="memory", suite="latency",
+         title="Allocations per vertex — how many blocks that footprint costs",
+         cond="allocator probe · block COUNT for the same five probes — fragmentation "
+              "pressure on an MCU allocator, which the byte total alone does not show",
+         names=[("heap allocs per vertex (probe)", "bare leaf"),
+                ("heap allocs per vertex_value (probe)", "+ one LKV write"),
+                ("heap allocs per vertex_app5 (probe)", "+ owning 5-field table"),
+                ("heap allocs per vertex_app5_static (probe)", "+ borrowed 5-field table"),
+                ("heap allocs per fanout_wide (probe)", "wide fan-out publish")],
+         log=False, fmt="num", ylabel="allocations"),
     dict(id="lat-heap", section="memory", suite="latency", title="Heap & memory footprint",
          cond="allocator probe (allocs / bytes per hop) + whole-run max RSS — mixed units, log axis",
          names=[("heap allocs per forward (probe)", "allocs/forward"),
@@ -595,15 +620,17 @@ def html_blocks(data: dict) -> dict[str, str]:
       renderable — a section whose axis data was emitted elsewhere would draw
       no axes at all.
 
-    The CSS is inlined into the first block and the JS into the LAST, so the
-    bootstrap runs after every host div exists. The script also defers to
-    `DOMContentLoaded` while the document is still parsing, which is belt and
-    braces for the same hazard.
+    These blocks carry NO assets. The renderer is emitted once by
+    `assets_block()`, which the page emits unconditionally — because these blocks
+    are conditional (no store, malformed store, no chartable family all yield
+    `{}`) and the comparison block is not, so hanging the only copy of the engine
+    off one of them left the comparison charts undrawn whenever the store was
+    unreachable. An offline build, a fork PR with no `gh-pages`, and a malformed
+    store are all documented-normal conditions, so that is not a corner.
     """
     payload = build(data)
     if not payload["charts"]:
         return {}
-    css, js = _assets()
     sections = list(dict.fromkeys(c["section"] for c in payload["charts"]))
     out: dict[str, str] = {}
     for n, sec in enumerate(sections):
@@ -611,10 +638,8 @@ def html_blocks(data: dict) -> dict[str, str]:
         blob = json.dumps({"suites": payload["suites"], "charts": charts},
                           separators=(",", ":"))
         nser = sum(len(c["series"]) for c in charts)
-        head = f"<style>{css}</style>\n" if n == 0 else ""
-        tail = f"\n<script>{js}</script>" if n == len(sections) - 1 else ""
         out[sec] = f""":::{{raw}} html
-{head}<div class="ph-hist">
+<div class="ph-hist">
   <p class="ph-note">{len(charts)} family charts \u00b7 {nser} series \u00b7 x-axis = recorded
   <code>main</code> commits (oldest \u2192 newest) \u00b7 \U0001f3f7 dashed verticals mark release
   tags (<b>\u2248</b> = tag commit itself is not a recorded point; marker sits at the nearest
@@ -624,6 +649,28 @@ def html_blocks(data: dict) -> dict[str, str]:
   three axes (commit \u00d7 parameter \u00d7 value). Hover any chart for exact per-commit values.</p>
   <div class="ph-grid ph-charts"></div>
   <script type="application/json" class="ph-data">{blob}</script>
-</div>{tail}
+</div>
 :::"""
     return out
+
+
+def assets_block() -> str:
+    """@brief The chart CSS + JS, inlined once for the whole page.
+
+    Emit this UNCONDITIONALLY and exactly once. It is separate from the chart
+    blocks because those are conditional and the comparison block is not: when
+    the history store is unreachable there are no history blocks, and if the
+    engine rode along with one of them the comparison charts would silently
+    render as an empty grid.
+
+    Inlined rather than linked because `docs/conf.py` registers neither file in
+    `html_css_files` / `html_js_files`, and `performance.md` renders one
+    directory deep, so a relative `_static/` href would 404. Placement in the
+    document does not matter: `perf_history.js` defers its bootstrap to
+    `DOMContentLoaded` when the document is still parsing.
+    """
+    css, js = _assets()
+    return f""":::{{raw}} html
+<style>{css}</style>
+<script>{js}</script>
+:::"""
