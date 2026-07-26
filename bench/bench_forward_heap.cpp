@@ -5,14 +5,19 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Three armed windows: (1) one FWD *forward hop* — offset-dispatch + stack heads +
+ * Four armed windows: (1) one FWD *forward hop* — offset-dispatch + stack heads +
  * stack iov (ADR-0038 invariants #1/#2), hard-gated at ZERO allocations by CI
  * (`ZEROHEAP_MAX=0`); (2) one *terminus* resolve (ADR-0041) — REPORT-ONLY, since a
  * terminus may allocate (ADR-0039): the arena draws from the router's injected
  * memory_resource (the default heap here, so every draw is counted and visible);
  * (3) the *per-vertex steady-heap* probe (#361 §8) — REPORT-ONLY, LIVE usable-size
  * bytes a default STORED_VALUE leaf holds at steady state, and the increment one
- * small LKV write adds — the diet trend the gh-pages history tracks.
+ * small LKV write adds — the diet trend the gh-pages history tracks; (4) the
+ * *registration escape* probe (#551) — REPORT-ONLY, how much of a RUNTIME vertex
+ * registration bypasses the graph's own injected memory_resource. Window (4) is the
+ * only one that counts what did NOT happen through a seam rather than what an
+ * operation cost, so it reads both counters at once: global blocks that escaped, and
+ * blocks the resource served.
  *
  * This TU owns the global operator-new/delete override (probe/heap_probe.hpp): all
  * allocation variants — plain, sized, aligned (what `heap_alloc`'s `operator new(size,
@@ -28,6 +33,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <memory_resource>
 #include <new>
 #include <optional>
 #include <span>
@@ -139,6 +145,40 @@ struct capture_transport_t : transport_t {
         for (const auto& s : iov) total += s.size();
         ++sends;
         last_len = total;
+    }
+};
+
+/**
+ * @brief A pass-through `std::pmr::memory_resource` that counts what it is asked to serve.
+ *
+ * The escape probe needs BOTH sides of the ADR-0039 seam in one window: the global
+ * operator-new counter says how many blocks bypassed the resource, and this says how many
+ * the resource actually served. Reporting only the first would leave "0 escapes" and "the
+ * graph allocated nothing at all" indistinguishable.
+ *
+ * Serves from the default resource rather than a slab, deliberately: a slab would also
+ * change WHERE the bytes come from, and this probe is measuring routing, not locality.
+ */
+class counting_resource_t final : public std::pmr::memory_resource {
+   public:
+    std::size_t allocs = 0; /**< @brief Total allocations served. */
+    std::size_t live = 0;   /**< @brief Allocations not yet released. */
+
+   private:
+    /** @brief Serve from the default resource, counting. */
+    void* do_allocate(std::size_t n, std::size_t align) override {
+        ++allocs;
+        ++live;
+        return std::pmr::get_default_resource()->allocate(n, align);
+    }
+    /** @brief Release to the default resource, counting. */
+    void do_deallocate(void* p, std::size_t n, std::size_t align) override {
+        --live;
+        std::pmr::get_default_resource()->deallocate(p, n, align);
+    }
+    /** @brief Identity equality — a stateful counter is only equal to itself. */
+    [[nodiscard]] bool do_is_equal(const std::pmr::memory_resource& o) const noexcept override {
+        return this == &o;
     }
 };
 
@@ -467,6 +507,87 @@ int main() {
             sapp_ok ? 1 : 0);
         if (!sapp_ok) {
             std::printf("FAIL: borrowed app-field fixture did not register — not a heap result\n");
+            return 2;
+        }
+    }
+
+    // --- ADR-0039 injection-seam escape probe (#551, REPORT-ONLY) --------------
+    // How many heap blocks a RUNTIME vertex registration takes that the graph's own
+    // injected `std::pmr::memory_resource` never sees.
+    //
+    // Registration used to be a setup-time operation, which ADR-0039 explicitly carves
+    // out of the seam. RFC-0014 ended that: `transport_vertex_t::make_connection` calls
+    // `register_vertex_key` when a CREATE op resolves, on whichever transport thread
+    // received the frame — so a peer now drives vertex allocation. The carve-out no
+    // longer covers it, and nothing measured whether the seam was honored.
+    //
+    // The fixture is the shape RFC-0014 actually produces, not a bare leaf: a
+    // `/net/<module>/<name>` path whose NAME record EXCEEDS `path_key_t::kInlineBytes`
+    // (a connection name is peer-chosen, and `conn-192-168-1-50-47301` is 23 characters
+    // against a 12-character inline budget), registered with a handler so the extension
+    // block and the value seam are both installed. Every one of the six allocation sites
+    // fires.
+    //
+    // `allocs=` is the number that matters and it is exact, host-independent and
+    // ratcheted (perf_gate.py): today it counts the blocks that ESCAPE to the global
+    // heap. Each #551 slice drives it down; the ratchet is what stops it climbing back.
+    //
+    // It reads FOUR, while #551's ledger names SIX allocation SITES, and both are right.
+    // A site is not a per-vertex cost: `children_t` is allocated once for a parent's
+    // FIRST child, and the child vector's growth is geometric, so across kRegN siblings
+    // the two together contribute well under one block per vertex and the per-vertex
+    // integer division drops them. What remains, once per registration, is the
+    // `path_key_t` spill, the `vertex_t` block, the extension block and the value seam.
+    // Do not read a drop from 4 to 2 as "two sites fixed" — read the sites off the ledger
+    // and this row off the tree shape it was measured on.
+    {
+        counting_resource_t reg_mr;
+        graph_t reg_graph{&reg_mr};
+        constexpr std::size_t kRegN = 256;
+        bool reg_ok = true;
+
+        // The parent chain is built OUTSIDE the armed window: what is measured is the
+        // marginal cost of ONE fresh connection vertex, not the spine it hangs from.
+        if (const auto mount = tr::graph::path_t::parse("/net/tcp"))
+            (void)reg_graph.register_vertex(*mount, tr::graph::role_t::STORED_VALUE);
+
+        std::vector<std::vector<std::byte>> reg_keys;
+        reg_keys.reserve(kRegN);
+        for (std::size_t i = 0; i < kRegN; ++i) {
+            char pb[64];
+            std::snprintf(pb, sizeof pb, "/net/tcp/conn-192-168-1-50-%05zu", i);
+            const auto p = tr::graph::path_t::parse(pb);
+            reg_ok = reg_ok && p.has_value();
+            if (p) reg_keys.emplace_back(p->key().begin(), p->key().end());
+        }
+
+        const std::size_t mr_before = reg_mr.allocs;
+        probe::reset();
+        probe::arm();
+        for (std::vector<std::byte>& key : reg_keys) {
+            tr::graph::handlers_t h;
+            h.on_write = [](const tr::view::rope_t&) -> tr::graph::result_t<void> { return {}; };
+            reg_ok =
+                reg_ok && reg_graph
+                              .register_vertex_key(std::move(key), tr::graph::role_t::STORED_VALUE,
+                                                   std::move(h))
+                              .has_value();
+        }
+        const probe::counts_t reg = probe::snapshot();
+        probe::disarm();
+        const std::size_t mr_served = reg_mr.allocs - mr_before;
+
+        const auto per_reg = [](long long total) {
+            return total > 0 ? static_cast<std::size_t>(total) / kRegN : std::size_t{0};
+        };
+        std::printf(
+            "RESULT zeroheap reg_escape allocs=%zu frees=%zu bytes=%zu n=%zu mr_served=%zu "
+            "ok=%d (report-only — GLOBAL-heap blocks per RUNTIME registration that bypass "
+            "the injected memory_resource; ADR-0039 / RFC-0014, #551)\n",
+            reg.allocs / kRegN, reg.frees / kRegN, per_reg(reg.live_bytes), kRegN,
+            mr_served / kRegN, reg_ok ? 1 : 0);
+        if (!reg_ok) {
+            std::printf("FAIL: registration-escape fixture did not register — not a heap result\n");
             return 2;
         }
     }

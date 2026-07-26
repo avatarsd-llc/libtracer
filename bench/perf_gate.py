@@ -117,7 +117,13 @@ DEFAULT_RUNS = 3
 #             tolerance at all: one extra block per vertex is a regression, full stop.
 #             This is the quantity #546's 7→3 win moved and that nothing was protecting
 #             — it was pushed to the history store and charted, but never gated.
-MEM_POINTS = ["vertex", "vertex_value", "vertex_app5", "vertex_app5_static"]
+#
+# `reg_escape` is the odd one out and the reason the alloc ratchet earns its keep: it
+# counts the blocks a RUNTIME vertex registration takes that the graph's injected
+# memory_resource never sees (ADR-0039's seam, which RFC-0014 turned into a wire-driven
+# path — #551). Its target is ZERO, every slice of that work lowers it, and the exact
+# ratchet is what stops it drifting back up between slices.
+MEM_POINTS = ["vertex", "vertex_value", "vertex_app5", "vertex_app5_static", "reg_escape"]
 MEM_REGRESS = 1.02   # fail if live bytes/vertex > baseline * 1.02 ...
 MEM_TICK_B = 1       # ... AND grew by more than one byte (ignore a lone bucket flip)
 _MEM_RE = re.compile(r"^RESULT zeroheap (\w+) allocs=(\d+) frees=\d+ bytes=(\d+)")
