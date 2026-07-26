@@ -20,10 +20,6 @@
 // "fan 8" is the same color on the latency and the throughput chart.
 // Vanilla JS + inline SVG only — self-contained, no CDN, theme-aware via CSS vars.
 (function () {
-  var el = document.getElementById("ph-data");
-  if (!el) return;
-  var D;
-  try { D = JSON.parse(el.textContent); } catch (e) { return; }
 
   var NPAL = 12;
   function col(ci) { return "var(--ph-c" + (ci % NPAL) + ")"; }
@@ -324,9 +320,12 @@
   }
 
   // -------------------------------------------------------------- assembly --
-  var host = document.getElementById("ph-charts");
-  if (!host) return;
-  D.charts.forEach(function (c) {
+  // The page emits one .ph-hist block per chapter, each carrying its own chart
+  // payload and its own host div, so a chart sits beside the prose that explains
+  // it. Every block is drawn by this same code path — the sectioning is where
+  // the charts LAND, never how they are rendered.
+  function draw(D, host) {
+    D.charts.forEach(function (c) {
     var suite = D.suites[c.suite];
     if (!suite || !c.series.length) return;
     var N = suite.shas.length;
@@ -384,6 +383,22 @@
         show(b.dataset.v);
       });
     });
-    show("trend");
-  });
+      show("trend");
+    });
+  }
+
+  function boot() {
+    document.querySelectorAll(".ph-hist").forEach(function (root) {
+      var el = root.querySelector("script.ph-data"), host = root.querySelector(".ph-charts");
+      if (!el || !host) return;
+      var D;
+      try { D = JSON.parse(el.textContent); } catch (e) { return; }
+      draw(D, host);
+    });
+  }
+  // This script is inlined into the LAST chapter block, so every host div is
+  // already parsed by the time it runs; the readyState guard covers the case
+  // where a future change moves it earlier.
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
+  else boot();
 })();

@@ -7,9 +7,9 @@ auto-generated test+perf results, not a hand-maintained snapshot (ADR-0032 §aut
 Runs the cross-core conformance driver (run-all.py), the in-process perf bench
 (bench_libtracer), the cross-core codec benches (cpp-core bench_codec + ts-core
 perf.mjs + rust-core `cargo run --example perf`), and the coverage audit, and
-renders a MyST page: the cross-match matrix, the canonical latency/throughput
-table, the cross-core codec comparison, and type×opt coverage — followed by the
-zenoh methodology/figures narrative. CI regenerates this in-place before
+renders a MyST page: the cross-match matrix, the per-family trend charts (one chart
+idiom throughout, distributed into the chapter each family belongs to), the
+cross-core codec comparison, and the zenoh comparison. CI regenerates this in-place before
 sphinx-build (docs.yml); the committed copy is the last snapshot. Each codec
 runner degrades gracefully if its toolchain is missing (a note, not a crash).
 
@@ -36,7 +36,6 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 OUT = REPO / "docs" / "performance.md"
 BENCH = REPO / "bench" / "build" / "bench_libtracer"
 BENCH_ZENOH = REPO / "bench" / "build" / "bench_zenoh"
-BENCH_DEMUX = REPO / "bench" / "build" / "bench_forward_demux"
 CODEC = REPO / "bench" / "build" / "bench_codec"
 VECTORS = REPO / "tests" / "conformance" / "vectors" / "v1"
 CXX = os.environ.get("LIBTRACER_CXX_HARNESS") or str(REPO / "build" / "tests" / "conformance_runner")
@@ -75,62 +74,6 @@ def cross_core_block() -> str:
     return body, ("CONFORMANCE: PASS" in out)
 
 
-def perf_block() -> str:
-    if not BENCH.exists():
-        return _missing("bench_libtracer", "cmake --build bench/build --target bench_libtracer")
-    out = run([str(BENCH)])
-    rows = []
-    want = {("inproc", 64, 1, 1): "in-process write (store+notify+deliver)",
-            ("inproc-deliver", 64, 1, 1): "in-process deliver-only (`propagate`)",
-            ("inproc-borrow", 64, 1, 1): "in-process, zero-alloc loaned path (borrowed view)",
-            ("inproc-path", 64, 1, 1): "write-by-path (registry lookup)"}
-    seen = {}
-    for ln in out.splitlines():
-        f = ln.split("\t")
-        if len(f) == 12 and f[0] == "RESULT":
-            key = (f[2], int(f[3]), int(f[4]), int(f[5]))
-            if key in want and key not in seen:
-                seen[key] = (float(f[7]), int(f[9]), int(f[11]))  # deliv_s, p50ns, meanns
-    rows.append("| path | p50 latency | mean | throughput |")
-    rows.append("| --- | --- | --- | --- |")
-    for key, label in want.items():
-        if key in seen:
-            dv, p50, mean = seen[key]
-            rows.append(f"| {label} | {p50} ns | {mean} ns | {dv/1e6:.1f} M/s |")
-    return "\n".join(rows)
-
-
-def demux_block() -> str:
-    """@brief The forward-demux cost table, measured live by `bench_forward_demux`.
-
-    Two axes: `fixed` registers the target child FIRST (its lookup hits immediately, so the
-    row isolates the size-independent part of a hop) and `scan` registers it LAST (the lookup
-    walks the whole table, so the delta is the scan's marginal cost). Emitting both is what
-    keeps the size-independent and size-dependent terms separable — a sweep of one alone
-    reads as if the whole hop grew with N.
-    """
-    if not BENCH_DEMUX.exists():
-        return _missing("bench_forward_demux", "cmake --build bench/build --target bench_forward_demux")
-    fixed: dict[int, int] = {}
-    scan: dict[int, int] = {}
-    for ln in run([str(BENCH_DEMUX)]).splitlines():
-        f = ln.split("\t")
-        if len(f) != 12 or f[0] != "RESULT":
-            continue
-        target = {"fwd-demux-fixed": fixed, "fwd-demux-scan": scan}.get(f[2])
-        if target is not None:
-            target.setdefault(int(f[4]), int(f[9]))  # links -> p50 ns
-    common = sorted(set(fixed) & set(scan))
-    if not common:
-        return "_(demux bench produced no comparable rows)_"
-    rows = ["| links | `fixed` p50 (ns) | `scan` p50 (ns) | scan delta (ns) | ns per link |",
-            "| ---: | ---: | ---: | ---: | ---: |"]
-    for n in common:
-        delta = scan[n] - fixed[n]
-        rows.append(f"| {n} | {fixed[n]} | {scan[n]} | {delta} | {delta / n:.2f} |")
-    return "\n".join(rows)
-
-
 DEMUX_BLOCK = """\
 What one **FWD forward hop** costs in the router — before any payload is touched, measured
 by `bench/bench_forward_demux.cpp`.
@@ -141,9 +84,10 @@ both are visible:
 - `by_segments` resolves the `dst` mount (`net/<module>/<name>`, ADR-0061);
 - `entry_by_name` fetches the **inbound** child's precomputed `src` prefix.
 
-`fixed` places the target child first, so its lookup hits immediately and the row isolates the
-size-independent part of a hop. `scan` places it last, so the lookup walks the whole table; the
-delta is the scan's marginal cost."""
+`fixed` places the target child first, so its lookup hits immediately and that chart isolates the
+size-independent part of a hop. `scan` places it last, so the lookup walks the whole table — the
+rise of the `scan` chart over the `fixed` one, at the same registry size, is the scan's marginal
+cost. Read them as a pair; neither is meaningful alone."""
 
 DEMUX_NOTES_BLOCK = """\
 ### Two corrections this bench exists to prevent
@@ -406,8 +350,8 @@ def codec_block() -> str:
     return body
 
 
-SURFACES_BLOCK = """\
-## The measurement surfaces (how this page is organized)
+HOW_TO_READ = """\
+## How to read this page
 
 Every number below belongs to exactly ONE of these measurement approaches. They use
 different harnesses, different processes, and different units — **a value is only
@@ -416,10 +360,11 @@ comparable to values from the same surface**, never across surfaces.
 | § | surface | what it measures | harness | discipline |
 | --- | --- | --- | --- | --- |
 | 1 | Cross-core conformance | byte-exactness across cores (not speed) | `run-all.py` | any DISAGREE fails CI |
-| 2 | In-process latency & throughput | single-process dispatch cost (the µs thesis) | `bench_libtracer` | gated per PR **and** per `main` push, same-runner |
-| 3 | Memory footprint | heap allocations counted, not timed | `bench_forward_heap` probes + max RSS | forward hop hard-gated at ZERO allocs |
-| 4 | libtracer vs Zenoh | absolute side-by-side, both engines same pass | `bench_libtracer` + `bench_zenoh` (+ loopback net) | same runner, same pass — no ratios |
-| 5 | Cross-core codec | decode→encode roundtrip per implementation | cpp / ts / rust codec benches | same v1 vectors for all cores |
+| 2 | Dispatch | single-process write/deliver cost (the µs thesis) | `bench_libtracer` | gated per PR **and** per `main` push, same-runner |
+| 3 | Wire & routing | what a framed hop costs before any payload is touched | `bench_forward_demux` + `bench_compact_delivery` | same harness, batch-amortized |
+| 4 | Memory & allocation | heap allocations counted, not timed | `bench_forward_heap` probes + max RSS | forward hop hard-gated at ZERO allocs |
+| 5 | libtracer vs Zenoh | absolute side-by-side, both engines same pass | `bench_libtracer` + `bench_zenoh` (+ loopback net) | same runner, same pass — no ratios |
+| 6 | Cross-core codec | decode→encode roundtrip per implementation | cpp / ts / rust codec benches | same v1 vectors for all cores |
 
 **Enforcement (what actually stops a pullback).** Absolute nanoseconds vary ~2× with
 the CI runner drawn, so raw chart height is a *trend* signal, not a gate. The gates are
@@ -435,97 +380,86 @@ all **same-runner relative** comparisons, where machine speed cancels:
 - **trend soft-alert** — the history tracker comments on a commit whose series drifts
   past 125 % of the previous point (cross-runner, so an alert is a prompt to look,
   not a verdict).
+
+### Every chart on this page is the same chart
+
+There is one chart type here and no second one. Each is a **family** — a set of series
+that differ in exactly one variable (fan-out, payload size, thread count, fold width,
+registry size, engine) — drawn as lines on shared axes, x-axis = recorded `main` commits,
+oldest to newest. Learn to read one and you have read all of them.
+
+- **Two kinds of vertical marker, and they mean different things.** 🏷 *dashed* = a release
+  tag (**≈** when the tag's own commit is not a recorded point, so the marker sits at the
+  nearest following one). 🔧 *dotted* = the **benchmark itself** changed at that commit.
+  A release marker says the code moved; an instrument marker says the ruler moved, so
+  points on either side of one are **not comparable**. Core changes are deliberately not
+  marked — a core change moving the line is the signal the chart exists to show.
+- **Colors are global.** A label is one color across every chart on the page, so "fan 8"
+  in the latency chapter and "fan 8" in the throughput chapter are visibly the same thing.
+- **Families with a numeric parameter carry four views.** *trend* (value vs commit, one
+  line per parameter), *sweep* (value vs parameter, one line per commit, recency-faded),
+  *heatmap* (commit × parameter, color = value) and an isometric *3D* surface — the same
+  three-axis data, switchable per chart. The sweep and heatmap views are drawn only over
+  the commit sub-grid where **every** series of the family has a value, so a series that
+  started late cannot fake a trend.
+- **Hover for exact values**, the commit sha and its subject line.
+
+### Reading the numbers
+
+
+- **Sign conventions.** The history store charts one direction per suite: the
+  *latency* suite is smaller-is-better nanoseconds — throughput also appears there
+  inverted as `ns/delivery` (`1e9 / deliveries-per-second`) so a slowdown always
+  charts as a rise — and memory-footprint metrics (bytes, KB) live in the same
+  smaller-is-better suite. The *throughput* suite is bigger-is-better, natural
+  `deliveries/s`. On this page, throughput is shown in natural units.
+- **Three thresholds, three jobs.** The **hard PR gate** (`bench/perf_gate.py`)
+  fails a PR whose p50 exceeds **115 %** of its own same-runner `main` baseline or
+  whose throughput drops below **88 %**, over six canonical points, best-of-3 runs.
+  The **push ratchet** re-runs the same gate on every `main` push — HEAD against its
+  parent commit on one runner — so a pullback that lands anyway turns `main` red.
+  The **soft alert** (trend tracker, per `main` commit, cross-runner) comments at
+  **125 %** commit-to-commit; because it compares across runners it is a prompt to
+  look at the trend, not a verdict.
+- **Noise floor.** Each recorded point is the **median of the repeated RESULT
+  rows** one run emits, so single-iteration jitter does not move the series — but
+  shared CI runners still vary ~2× in absolute speed — which is why each point is
+  recorded as the best across three runner draws — and sub-µs points sit on a
+  ~10 ns timer grain. The tell: **a move that hits every series at once —
+  including unrelated ones like the pure-codec `fold-b*` rows — is the runner; a
+  move confined to one family is the code.** Read trends across several commits,
+  not the third digit of one point. Reproducing locally: build Release
+  (`-O3`), pin the bench to a core (`taskset -c N`), take the best of several runs,
+  and compare only numbers measured on the same machine in the same session.
+- **`inproc-path` is a resolver canary, not a hot pattern.** The write-by-path
+  rows exercise the registry lookup on every write *on purpose*, so a resolver-cost
+  regression is visible as its own series. Hot paths resolve the path once and
+  write through the held vertex handle (the `inproc` / `inproc-borrow` rows) —
+  compare against those, not `inproc-path`, when judging dispatch cost.
+
+### Why "throughput" means different numbers in different chapters
+
+Several charts below are titled "throughput" and their absolute values differ by orders
+of magnitude. That is expected: **each chart sweeps a different variable while pinning a
+different scenario**, so each has a different denominator. Compare series *within* one
+chart (same scenario, both engines); never compare heights *across* charts.
+
+| chart | swept variable | pinned scenario | unit | expected shape |
+| --- | --- | --- | --- | --- |
+| Throughput vs fan-out | subscribers per write | 64 B payload · 1 topic · in-process | deliveries/s | rises with fan-out (per-write dispatch amortizes) |
+| Throughput vs payload | payload size | fan-out 1 · 1 topic · in-process | deliveries/s | falls as payload grows (copy-bound) |
+| Bandwidth vs payload | payload size | **same run** as "vs payload" | MB/s | same data re-expressed in bytes — rises with payload |
+| Throughput vs topic count | number of vertices | 64 B · fan-out 1 · in-process | deliveries/s | ~flat; probes registry pressure |
+
+The per-commit history store adds one more deliberate duplication: throughput is
+recorded **twice** — natural `deliveries/s` in the bigger-is-better suite *and* inverted
+`ns/delivery` in the smaller-is-better latency suite (so a slowdown always charts as a
+rise there). Same measurement, two units.
 """
 
 
-RELEASE_COMPARE_BLOCK = """\
-## 3b · What changed since v0.6.0
-
-`v0.6.0` (2026-07-23) to `main` is 118 commits. The figures below are a same-machine A/B with
-**today's bench sources built against both cores**, so the measuring instrument is identical and
-only the library differs — three of these benches did not exist at v0.6.0, and running each
-release's own bench would have compared two different rulers.
-
-### Latency (host p50)
-
-| | v0.6.0 | main | |
-| --- | ---: | ---: | ---: |
-| `COMPACT` terminus, 4 / 64 / 512 B | 280 / 284 / 285 ns | **105 / 107 / 109 ns** | −62% |
-| `COMPACT` forward hop, 4 / 64 / 512 B | 261 / 258 / 260 ns | **44 / 44 / 44 ns** | **−83%** |
-| FWD demux, 1 link | 415 ns | **86 ns** | −79% |
-| FWD demux, 64 links | 464 ns | **87 ns** | −81% |
-| `path_t::parse`, 1 / 2 / 4 / 8 segments | 33 / 46 / 71 / 74 ns | **12 / 20 / 31 / 40 ns** | −46…−64% |
-| in-process write / borrowed / by-path | 100 / 90 / 120 ns | 100 / 90 / 120 ns | unchanged |
-
-The forward hop also became **flat with payload** — 260 ns at 512 B against 261 ns at 4 B before,
-44 ns at both now — because it no longer copies the payload on its way out.
-
-### Throughput
-
-| | v0.6.0 | main | |
-| --- | ---: | ---: | ---: |
-| `COMPACT` terminus, 4 / 64 / 512 B | 3.31 / 3.37 / 3.26 M/s | **8.61 / 6.71 / 8.80 M/s** | ~2.0–2.7x |
-| `COMPACT` forward, 4 / 64 / 512 B | 3.62 / 3.60 / 3.43 M/s | **12.76 / 20.78 / 19.02 M/s** | **3.5–5.8x** |
-| in-process, 64 B | ~11.7 M/s | ~11.6 M/s | flat |
-
-### Memory
-
-| | v0.6.0 | main |
-| --- | ---: | ---: |
-| forward hop | 0 allocs / 0 B | 0 / 0 (the hard gate) |
-| terminus resolve | 9 allocs / 937 B | 9 / 937 B — unchanged |
-| wide fan-out publish | 2 / 26 B | 2 / 26 B |
-| bare leaf vertex | 7 allocs / 136 B | **3** / 136 B |
-| + one LKV write | 6 / 104 B | **2** / 104 B |
-| + owning 5-field app table | 17 / 695 B | **13** / 695 B |
-| + borrowed 5-field app table | 11 / 592 B | **5 / 392 B** |
-| per frame, `COMPACT` terminus | 15 allocs | **3** |
-| per frame, `COMPACT` forward | 14 allocs | **0** |
-
-**Read that last table carefully: resident bytes barely moved.** The only genuine footprint
-reduction is the borrowed app-field table (592 to 392 B). Everything else in that column is
-allocation *churn* — 7 to 3 per registration, 14 to 0 per forwarded frame — which buys latency and
-fights fragmentation, but is not steady-state RAM. This release cycle bought latency and
-throughput; it did not shrink the idle heap, and it was never going to. That lever is retiring
-legacy mechanisms, not tuning the core.
-
-Churn also matters more on the target than these host numbers suggest: glibc's tcache serves a hot
-same-size malloc/free in tens of nanoseconds, where an MCU allocator takes hundreds.
-
-### What this exposed
-
-At v0.6.0 the demux `fixed` and `scan` arms were **indistinguishable** — 415 vs 419 ns at one
-link, 464 vs 468 at sixty-four. Not because the scan was cheap, but because the hop then performed
-a *second*, unconditional full-table scan: `entry_by_name`, to find the inbound link's own mount
-prefix. The bench registers the inbound link last, so **both** arms walked the whole table for it
-and the target-first / target-last distinction they exist to isolate was masked entirely. #525
-moved that prefix onto the link's receiver context, which is what made the remaining scan
-measurable at all.
-
-So the surviving `by_segments` scan now shows up cleanly: **86 ns fixed against ~400 ns scanning
-64 links, or roughly 5 ns per registered link**, flat from 4 links upward.
-
-That number is deliberately not being optimised, and the reason is worth recording. A bus
-transport registers **one** child regardless of peer count — a WebSocket server with four hundred
-peers occupies a single registry slot, because a peer has no registry entry at all. The production
-ESP32-C6 carries one or two links; the densest topology in this repository is four. At that
-envelope the scan costs 0–14 ns, at or below this bench's own run-to-run noise, and it only begins
-to pay above roughly thirty connections. Trading the registry's address-stability contract
-(ADR-0063, which ADR-0062's forward cache depends on) for a workload that does not exist would be
-a bad bargain.
-
-**A caution about this row's history.** Until recently the bench's filler links were named
-`l0 … l62`, which are 16 bytes qualified for the first ten and 17 thereafter — and the lookup
-rejects a candidate on length before comparing any segment. So a varying fraction of the table was
-skipped for free, and the per-link column reported that ratio rather than the scan. Worse, none of
-the fillers matched the *target's* width either, so every one was rejected on length alone and
-never reached the segment compare: the column was timing the list walk. An earlier revision of this
-page cited 4.3 ns per link from that broken instrument. The names are now padded to the target's
-width, which is what makes this the honest worst case the row claims to report."""
-
-
 COMPARE_INTRO = """\
-## 4 · libtracer vs Zenoh — measured, absolute
+## 5 · libtracer vs Zenoh — measured, absolute
 
 A side-by-side comparison against [Eclipse Zenoh](https://zenoh.io) (zenoh-c 1.9.0, peer
 mode). Two surfaces: three **in-process** axes — subscriber **fan-out**, **payload** size,
@@ -571,89 +505,32 @@ coverage** note under the network charts rather than left silent: libtracer's We
 transport shows large single-run latency spikes under this bench (order-of-magnitude p50
 jitter) and Zenoh has no WebSocket transport to compare against, while QUIC needs the
 optional `-DLIBTRACER_WITH_QUIC` module (msquic + TLS). Full harness in
-[`bench/`](https://github.com/avatarsd-llc/libtracer/tree/main/bench).
-
-### Why the throughput charts show different numbers
-
-Several charts below are titled "throughput" and their absolute values differ by orders
-of magnitude. That is expected: **each chart sweeps a different variable while pinning a
-different scenario**, so each has a different denominator. Compare series *within* one
-chart (same scenario, both engines); never compare heights *across* charts.
-
-| chart | swept variable | pinned scenario | unit | expected shape |
-| --- | --- | --- | --- | --- |
-| Throughput vs fan-out | subscribers per write | 64 B payload · 1 topic · in-process | deliveries/s | rises with fan-out (per-write dispatch amortizes) |
-| Throughput vs payload | payload size | fan-out 1 · 1 topic · in-process | deliveries/s | falls as payload grows (copy-bound) |
-| Bandwidth vs payload | payload size | **same run** as "vs payload" | MB/s | same data re-expressed in bytes — rises with payload |
-| Throughput vs topic count | number of vertices | 64 B · fan-out 1 · in-process | deliveries/s | ~flat; probes registry pressure |
-
-The per-commit history store adds one more deliberate duplication: throughput is
-recorded **twice** — natural `deliveries/s` in the bigger-is-better suite *and* inverted
-`ns/delivery` in the smaller-is-better latency suite (so a slowdown always charts as a
-rise there). Same measurement, two units."""
+[`bench/`](https://github.com/avatarsd-llc/libtracer/tree/main/bench)."""
 
 
-HISTORY_BLOCK = """\
-### History & trends (per-commit, `main`)
+RAW_DATA_BLOCK = """\
+## 8 · Raw data & provenance
 
-The table above is one run; the trend is the durable signal. Every push to `main`
-runs the full bench on **three independently-drawn runners**, archives all raw
-transcripts as a per-commit CI artifact (`bench-results-<sha>`, on the `perf`
-workflow run), and records **every** `(mode, size, fanout, endpoints)` point —
-latency (p50/p99 ns), throughput (deliveries/s), and memory footprint (heap-probe
-bytes per hop, whole-run max RSS) as **separate series** — to a persisted
-build-to-build history. Per metric the recorded value is the **best across the
-three runners** (min latency / max throughput): machine speed varies ~2× between
-runner draws, so best-of-3 approximates the code's capability rather than the
-machine lottery
-([benchmark-action/github-action-benchmark](https://github.com/benchmark-action/github-action-benchmark),
-stored on the machine-maintained `gh-pages` branch). A commit that drifts a series
-past **125 %** of the previous point gets an automatic soft-alert comment; the hard
-per-PR gate stays in `bench/perf_gate.py`.
+The charts above are one view of a persisted store; this is where the store comes from
+and how to get at it directly.
 
-**[Open the interactive trend charts ↗](https://libtracer.avatarsd.com/dev/bench/)**
-— every series across all `main` commits, zoomable, with per-point commit links.
+Every push to `main` runs the full bench on **three independently-drawn runners**, archives
+all raw transcripts as a per-commit CI artifact (`bench-results-<sha>`, on the `perf`
+workflow run), and records **every** `(mode, size, fanout, endpoints)` point — latency
+(p50/p99 ns), throughput (deliveries/s), and memory footprint (heap-probe bytes per hop,
+whole-run max RSS) as **separate series** — to a build-to-build history on the
+machine-maintained `gh-pages` branch
+([benchmark-action/github-action-benchmark](https://github.com/benchmark-action/github-action-benchmark)).
+Per metric the recorded value is the **best across the three runners** (min latency / max
+throughput): machine speed varies ~2× between runner draws, so best-of-3 approximates the
+code\'s capability rather than the machine lottery. A commit that drifts a series past
+**125 %** of the previous point gets an automatic soft-alert comment; the hard per-PR gate
+stays in `bench/perf_gate.py`.
 
-:::{raw} html
-<iframe src="/dev/bench/index.html" title="libtracer benchmark history (per-commit trends)"
-        loading="lazy"
-        style="width:100%;height:70vh;border:1px solid var(--color-background-border,#d0d0d0);border-radius:6px;background:#fff">
-</iframe>
-:::"""
-
-
-READING_BLOCK = """\
-### Reading these numbers
-
-- **Sign conventions.** The history store charts one direction per suite: the
-  *latency* suite is smaller-is-better nanoseconds — throughput also appears there
-  inverted as `ns/delivery` (`1e9 / deliveries-per-second`) so a slowdown always
-  charts as a rise — and memory-footprint metrics (bytes, KB) live in the same
-  smaller-is-better suite. The *throughput* suite is bigger-is-better, natural
-  `deliveries/s`. On this page, throughput is shown in natural units.
-- **Three thresholds, three jobs.** The **hard PR gate** (`bench/perf_gate.py`)
-  fails a PR whose p50 exceeds **115 %** of its own same-runner `main` baseline or
-  whose throughput drops below **88 %**, over six canonical points, best-of-3 runs.
-  The **push ratchet** re-runs the same gate on every `main` push — HEAD against its
-  parent commit on one runner — so a pullback that lands anyway turns `main` red.
-  The **soft alert** (trend tracker, per `main` commit, cross-runner) comments at
-  **125 %** commit-to-commit; because it compares across runners it is a prompt to
-  look at the trend, not a verdict.
-- **Noise floor.** Each recorded point is the **median of the repeated RESULT
-  rows** one run emits, so single-iteration jitter does not move the series — but
-  shared CI runners still vary ~2× in absolute speed — which is why each point is
-  recorded as the best across three runner draws — and sub-µs points sit on a
-  ~10 ns timer grain. The tell: **a move that hits every series at once —
-  including unrelated ones like the pure-codec `fold-b*` rows — is the runner; a
-  move confined to one family is the code.** Read trends across several commits,
-  not the third digit of one point. Reproducing locally: build Release
-  (`-O3`), pin the bench to a core (`taskset -c N`), take the best of several runs,
-  and compare only numbers measured on the same machine in the same session.
-- **`inproc-path` is a resolver canary, not a hot pattern.** The write-by-path
-  rows exercise the registry lookup on every write *on purpose*, so a resolver-cost
-  regression is visible as its own series. Hot paths resolve the path once and
-  write through the held vertex handle (the `inproc` / `inproc-borrow` rows) —
-  compare against those, not `inproc-path`, when judging dispatch cost."""
+The store carries roughly three times as many series as this page charts — every recorded
+point, including the ones no family groups. **[Open the raw per-series trend
+browser ↗](https://libtracer.avatarsd.com/dev/bench/)** — one chart per series, zoomable,
+with per-point commit links. It is the archive; the families above are the reading."""
 
 
 def _load_history() -> dict | None:
@@ -688,82 +565,31 @@ def _load_history() -> dict | None:
         return None
 
 
-def _spark(vals: list[float]) -> str:
-    """@brief Render a min-max-normalized unicode sparkline for a value series."""
-    bars = "▁▂▃▄▅▆▇█"
-    lo, hi = min(vals), max(vals)
-    if hi <= lo:
-        return bars[0] * len(vals)
-    return "".join(bars[min(7, int((v - lo) / (hi - lo) * 7.999))] for v in vals)
+def history_sections(data: dict | None) -> dict[str, str]:
+    """@brief The family trend charts, split into the page's chapters.
 
+    Every chart on this page is the same kind of object: one series-family, all
+    its series as lines on shared axes, release + instrument markers, and — for
+    numeric-parameter families — the sweep / heatmap / 3D views. There is
+    deliberately no second chart style anywhere; a reader learns the idiom once.
 
-def _fmt_val(v: float) -> str:
-    """@brief Human-compact number: 12.3M / 4.5k / 929 / 23.8."""
-    a = abs(v)
-    if a >= 1e6:
-        return f"{v / 1e6:.3g}M"
-    if a >= 1e4:
-        return f"{v / 1e3:.3g}k"
-    return f"{v:.4g}"
-
-
-def unified_history_block(data: dict | None) -> str:
-    """@brief The UNIFIED family trend charts: one chart per series-family with
-    every series of the family as a line on shared axes (render_history.py),
-    release tags as labeled vertical markers, and — for numeric-parameter
-    families — the sweep / heatmap / 3D three-axis views. Self-contained inline
-    SVG+JS, no CDN; degrades to a note when the store is unreachable."""
-    if not data:
-        return ("_(per-commit history store unreachable in this build — the interactive"
-                " chart link above still serves it once published)_")
-    try:
-        block = render_history.html_block(data)
-    except Exception as e:  # a malformed store must never break the docs build
-        return f"_(unified history charts unavailable in this build — {e})_"
-    return block or "_(no chartable series family in the history store yet)_"
-
-
-def history_tables_block(data: dict | None) -> str:
-    """@brief The IN-PAGE per-commit history: every tracked series across every
-    `main` commit in the store, as compact tables (first→last, extremes, sparkline).
-
-    This is the same data the interactive chart plots, embedded as text so the
-    history survives wherever the iframe cannot (PDF export, RSS scrapers, a
-    momentarily unpublished `/dev/bench/`), and so one page carries current
-    numbers, their full history, and the Zenoh comparison side by side. Release
-    tags are noted per suite (render_history resolves them via git).
+    Returns a section-name -> raw-html-block map (see render_history.html_blocks).
+    Missing keys are normal: a section whose families found no series in the store
+    simply has no chart block, and `charts_for` degrades it to a note.
     """
     if not data:
-        return ("_(per-commit history store unreachable in this build — the interactive"
-                " chart link above still serves it once published)_")
-    out: list[str] = []
-    for suite, entries in data.get("entries", {}).items():
-        if not entries:
-            continue
-        first_c = entries[0]["commit"]["id"][:7]
-        last_c = entries[-1]["commit"]["id"][:7]
-        series: dict[str, list[float]] = {}
-        for e in entries:
-            for b in e.get("benches", []):
-                series.setdefault(b["name"], []).append(float(b["value"]))
-        unit = entries[-1]["benches"][0].get("unit", "") if entries[-1].get("benches") else ""
-        out.append(f"#### {suite}")
-        out.append("")
-        out.append(f"{len(entries)} tracked commit(s), `{first_c}` → `{last_c}`; unit: {unit}.")
-        rel = render_history.release_note(entries)
-        if rel:
-            out.append("")
-            out.append(rel)
-        out.append("")
-        out.append("| series | pts | first → last | Δ | min … max | trend |")
-        out.append("| --- | --- | --- | --- | --- | --- |")
-        for name in sorted(series):
-            v = series[name]
-            delta = f"{(v[-1] - v[0]) / v[0] * 100:+.1f}%" if len(v) > 1 and v[0] else "—"
-            out.append(f"| {name} | {len(v)} | {_fmt_val(v[0])} → {_fmt_val(v[-1])} | {delta} "
-                       f"| {_fmt_val(min(v))} … {_fmt_val(max(v))} | `{_spark(v)}` |")
-        out.append("")
-    return "\n".join(out).rstrip()
+        return {}
+    try:
+        return render_history.html_blocks(data)
+    except Exception:  # a malformed store must never break the docs build
+        return {}
+
+
+def charts_for(sections: dict[str, str], name: str) -> str:
+    """@brief One chapter's chart block, or the note explaining its absence."""
+    return sections.get(name) or (
+        "_(per-commit history store unreachable in this build — the interactive charts"
+        " linked under Raw data still serve it once published)_")
 
 
 def tests_block() -> str:
@@ -875,6 +701,7 @@ def check_heading_depth(page: str) -> None:
 def main() -> int:
     summary, passed = cross_core_block()
     history = _load_history()
+    charts = history_sections(history)
     page = f"""\
 # Performance & Conformance
 
@@ -883,15 +710,14 @@ This page is **auto-generated** from the live test + benchmark harnesses on each
 build (`bench/gen_results_page.py`, ADR-0032). It is the published response surface,
 not a hand-edited snapshot. All rates and latencies are **absolute measured values**,
 representative of the CI runner (shared-runner variance is real — read trends, not the
-third digit); the libtracer-vs-Zenoh charts below plot both engines on the same axes.
-How these numbers are produced — the measurement surfaces, the metrics, and the
-gating discipline — is documented on the [Test & benchmark methodology](methodology.md)
-page.
+third digit); the libtracer-vs-Zenoh charts plot both engines on the same axes. How
+these numbers are produced — the measurement surfaces, the metrics, and the gating
+discipline — is documented on the [Test & benchmark methodology](methodology.md) page.
 
 {provenance()}
 ```
 
-{SURFACES_BLOCK}
+{HOW_TO_READ}
 
 ## 1 · Cross-core conformance (every native core must agree byte-for-byte)
 
@@ -900,62 +726,34 @@ fails CI (ADR-0028). Live driver summary:
 
 {summary}
 
-## 2 · In-process latency & throughput
+## 2 · Dispatch — in-process latency & throughput
 
-Canonical points from `bench_libtracer` (the µs-latency / zero-copy thesis, ADR-0031):
+The µs-latency / zero-copy thesis (ADR-0031), measured by `bench_libtracer`: what one
+write costs when publisher and subscriber are in the same process, swept over fan-out,
+payload size, topic count, thread count, endpoint type and dispatch path.
 
-{perf_block()}
+Four dispatch paths recur across these charts. **`inproc`** is a full write — store the
+value, bump the readiness sequence, deliver. **`inproc-deliver`** stores once and then
+only delivers, which is the apples-to-apples counterpart to a Zenoh `put` (§5).
+**`inproc-borrow`** is the loaned path: the subscriber sees a borrowed view and nothing
+is copied. **`inproc-path`** resolves the address on every write — a resolver canary,
+not a hot pattern.
 
-```{{note}}
-**The p50 and mean columns here are clock-quantized; use throughput for small differences.**
-These rows time one operation between two `steady_clock` reads, and an in-process write costs
-~70–85 ns — the clock's granularity plus the two reads is a large fraction of that, so the
-percentiles snap to coarse steps (run the binary and they cluster on 30 / 70 / 80 / 90 / 100 /
-120 rather than spreading). **Differences under roughly 10 ns are invisible in this column.**
+{charts_for(charts, "dispatch")}
 
-That is not hypothetical: a change measured at 6% on this path showed 100 ns before and 100 ns
-after here, while the throughput column moved 87 → 80 ns/op. The net-plane benches in §3 do not
-share the problem — they batch-amortize and self-calibrate, exactly because one delivery is close
-enough to `clock_gettime` that per-op timing measures the clock. These rows predate that lesson,
-and converting them would break continuity with every historical point in the series above, so it
-is tracked as its own change rather than done quietly.
-```
-
-{HISTORY_BLOCK}
-
-### Unified family trends (all related series on one axes; releases marked)
-
-Instead of one tiny chart per series, related series are grouped into **families** —
-fan-out sweep, payload sweep, MT scaling, dispatch modes, endpoint types, fold widths,
-ACL, heap/memory — and each family is ONE chart with its series as lines on shared axes
-(log axes where a family spans decades). Release tags are drawn as labeled vertical
-markers on every chart (**≈** = the tag's commit is not itself a recorded point; the
-marker sits at the nearest following recorded commit). Families swept over a numeric
-parameter carry the full three-axis view set — **trend** (value vs commit), **sweep**
-(value vs parameter, one line per commit), **heatmap** (commit × parameter, color =
-value), and an isometric **3D** surface — switchable per chart; hover for exact values.
-
-{unified_history_block(history)}
-
-### Full history, in-page (every tracked series, all recorded `main` commits)
-
-{history_tables_block(history)}
-
-{READING_BLOCK}
-
-## 2b · Forward-demux cost (routing, per hop)
+## 3 · Wire & routing — what a framed hop costs
 
 {DEMUX_BLOCK}
 
-{demux_block()}
+{charts_for(charts, "routing")}
 
 {DEMUX_NOTES_BLOCK}
 
-## 3 · Memory footprint (allocations counted, not timed)
+## 4 · Memory & allocation
 
 A different instrument entirely: `bench_forward_heap` replaces the global allocator
-with a counting wrapper and arms it around exactly one operation — so these are exact
-allocation counts and bytes, not statistics. Five probes feed the history store above:
+with a counting wrapper and arms it around exactly one operation — so its probes are
+exact allocation counts and bytes, not statistics. Six probes feed the store:
 
 - **forward hop** — hard-gated at **zero** allocations every CI run (ADR-0038 §16KB-RAM);
 - **terminus resolve** — report-only; a terminus may allocate (ADR-0039), the probe
@@ -964,29 +762,40 @@ allocation counts and bytes, not statistics. Five probes feed the history store 
   increment one small LKV write adds (the vertex-diet trend, #361);
 - **per-vertex app-field table** — what an RFC-0010 five-field descriptor table adds
   on top of that leaf, measured for BOTH installs (ADR-0058): the owning
-  `set_app_fields`, which copies the declaration into the table's backing, and the
+  `set_app_fields`, which copies the declaration into the table\'s backing, and the
   borrowed `set_app_fields_static`, whose slots view caller flash. The pair is what
   decides whether per-endpoint schemas beat the `/meta` child-vertex workaround on an
   MCU (#388), so both are gated rather than argued. Gating them is what showed the
   borrowed path was **not** the promised zero-declaration-RAM install — it still copied
-  the caller's array into a vector, the largest single block on that path — which is now
+  the caller\'s array into a vector, the largest single block on that path — which is now
   fixed (592 → 392 B per vertex, ADR-0058 erratum 1);
+- **wide fan-out publish** — the per-write cost at large subscriber counts;
 - **whole-run max RSS** — the coarse process-level footprint.
 
-Their series live in the smaller-is-better history suite (§2) under
-`heap bytes per … (probe)` and `max RSS`.
+The timed rows in this chapter are a separate question from the probes: what the
+*allocator* costs, pooled against the default heap, on one thread and under contention.
 
-{RELEASE_COMPARE_BLOCK}
+{charts_for(charts, "memory")}
+
+```{{note}}
+**Allocation churn is not resident footprint, and this page charts both.** The probe
+series are bytes a live object holds; the timed series are the cost of getting and
+returning them. A release cycle can cut per-frame allocations from 14 to 0 — as this one
+did — and move resident bytes almost not at all, because churn buys latency and fights
+fragmentation rather than shrinking the idle heap. Shrinking that is a different lever:
+retiring mechanisms, not tuning the core.
+
+Churn also matters more on the target than these host numbers suggest. glibc\'s tcache
+serves a hot same-size malloc/free in tens of nanoseconds; an MCU allocator takes
+hundreds. A host measurement of churn is therefore a *lower* bound on what it costs
+where libtracer actually ships.
+```
 
 {COMPARE_INTRO}
 
 {zenoh_compare_block()}
 
-## Test rollup (live ctest, unified with the perf surface)
-
-{tests_block()}
-
-## 5 · Cross-core codec performance (decode→encode roundtrip, same v1 vectors)
+## 6 · Cross-core codec performance (decode→encode roundtrip, same v1 vectors)
 
 Every native core (cpp-core / ts-core / rust-core) runs the SAME per-vector
 decode→encode roundtrip over the shared v1 conformance vectors (ADR-0032 `lang`
@@ -995,6 +804,12 @@ Figures are the **median across all v1 vectors** (one decode + one encode == one
 roundtrip); a core whose toolchain is absent in this build degrades to a note.
 
 {codec_block()}
+
+## 7 · Test rollup (live ctest, unified with the perf surface)
+
+{tests_block()}
+
+{RAW_DATA_BLOCK}
 """
     check_heading_depth(page)
     OUT.write_text(page)

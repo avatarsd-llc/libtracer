@@ -49,43 +49,43 @@ def _num(m: re.Match) -> float:
 
 FAMILIES: list[dict] = [
     # -- latency suite ------------------------------------------------------
-    dict(id="lat-fan", suite="latency", title="In-process p50 latency by fan-out",
+    dict(id="lat-fan", section="dispatch", suite="latency", title="In-process p50 latency by fan-out",
          cond="inproc · 64 B payload · 1 topic — one line per fan-out",
          pat=r"^inproc 64B/fan(\d+)/1ep p50 latency$",
          label=lambda m: f"fan {m.group(1)}", key=_num, log=True,
          fmt="ns", ylabel="p50 latency",
          px=dict(label="fan-out (subscribers)", log=True, fmt="count")),
-    dict(id="lat-payload", suite="latency", title="In-process p50 latency by payload size",
+    dict(id="lat-payload", section="dispatch", suite="latency", title="In-process p50 latency by payload size",
          cond="inproc · fan-out 1 · 1 topic — one line per payload",
          pat=r"^inproc (\d+)B/fan1/1ep p50 latency$",
          label=lambda m: f"{m.group(1)} B", key=_num, log=False,
          fmt="ns", ylabel="p50 latency",
          px=dict(label="payload size", log=True, fmt="bytes")),
-    dict(id="lat-borrow-payload", suite="latency",
+    dict(id="lat-borrow-payload", section="dispatch", suite="latency",
          title="Loaned-path (borrow) p50 latency by payload size",
          cond="inproc-borrow · fan-out 1 · 1 topic — one line per payload",
          pat=r"^inproc-borrow (\d+)B/fan1/1ep p50 latency$",
          label=lambda m: f"borrow {m.group(1)} B", key=_num, log=False,
          fmt="ns", ylabel="p50 latency",
          px=dict(label="payload size", log=True, fmt="bytes")),
-    dict(id="lat-topics", suite="latency", title="Write-by-path p50 latency by topic count",
+    dict(id="lat-topics", section="dispatch", suite="latency", title="Write-by-path p50 latency by topic count",
          cond="inproc-path · 64 B · fan-out 1 — one line per registry size (resolver canary)",
          pat=r"^inproc-path 64B/fan1/(\d+)ep p50 latency$",
          label=lambda m: f"{m.group(1)} topics", key=_num, log=False,
          fmt="ns", ylabel="p50 latency",
          px=dict(label="topic count", log=True, fmt="count")),
-    dict(id="lat-dispatch", suite="latency", title="Dispatch modes — p50 latency",
+    dict(id="lat-dispatch", section="dispatch", suite="latency", title="Dispatch modes — p50 latency",
          cond="64 B · fan-out 1 · 1 topic — the four dispatch paths on one axes",
          pat=r"^(inproc|inproc-borrow|inproc-path|inproc-mt1) 64B/fan1/1ep p50 latency$",
          label=lambda m: m.group(1), key=lambda m: m.group(1), log=False,
          fmt="ns", ylabel="p50 latency"),
-    dict(id="lat-mt", suite="latency", title="MT scaling — per-delivery cost",
+    dict(id="lat-mt", section="dispatch", suite="latency", title="MT scaling — per-delivery cost",
          cond="64 B · fan-out 1 — ns/delivery per worker count (lower = better scaling)",
          pat=r"^inproc-mt(\d+) 64B/fan1/\d+ep ns/delivery$",
          label=lambda m: f"mt{m.group(1)}", key=_num, log=False,
          fmt="ns", ylabel="ns per delivery",
          px=dict(label="worker threads", log=True, fmt="count")),
-    dict(id="lat-eptype", suite="latency", title="Endpoint-type family — p50 latency",
+    dict(id="lat-eptype", section="dispatch", suite="latency", title="Endpoint-type family — p50 latency",
          cond="eptype-* · 64 B · fan-out 1 · 1 topic",
          pat=r"^eptype-([\w-]+) 64B/fan1/1ep p50 latency$",
          label=lambda m: f"eptype-{m.group(1)}", key=lambda m: m.group(1), log=False,
@@ -96,18 +96,18 @@ FAMILIES: list[dict] = [
     # chart shows the fold-width story it was drawn for. A re-pointed family charts a NEW
     # series set with no history — the old `fold-n*` series stop here rather than being
     # silently continued under a name whose meaning changed.
-    dict(id="lat-fold", suite="latency", title="Fold family — per-delivery cost by width",
+    dict(id="lat-fold", section="routing", suite="latency", title="Fold family — per-delivery cost by width",
          cond="fold-b* · 512 B · fan-out 1 — batch-amortized ns/delivery per fold width",
          pat=r"^fold-b(\d+) 512B/fan1/1ep ns/delivery$",
          label=lambda m: f"fold n{m.group(1)}", key=_num, log=False,
          fmt="ns", ylabel="ns per delivery",
          px=dict(label="fold width n", log=True, fmt="count")),
-    dict(id="lat-acl", suite="latency", title="ACL-inherit family — p50 latency",
+    dict(id="lat-acl", section="dispatch", suite="latency", title="ACL-inherit family — p50 latency",
          cond="acl-inherit depth 4 · 64 B — single-thread vs mt4",
          pat=r"^(acl-inherit-d4(?:-mt4)?) 64B/fan\d+/\d+ep p50 latency$",
          label=lambda m: m.group(1), key=lambda m: m.group(1), log=False,
          fmt="ns", ylabel="p50 latency"),
-    dict(id="lat-heap", suite="latency", title="Heap & memory footprint",
+    dict(id="lat-heap", section="memory", suite="latency", title="Heap & memory footprint",
          cond="allocator probe (allocs / bytes per hop) + whole-run max RSS — mixed units, log axis",
          names=[("heap allocs per forward (probe)", "allocs/forward"),
                 ("heap allocs per terminus (probe)", "allocs/terminus"),
@@ -116,46 +116,190 @@ FAMILIES: list[dict] = [
                 ("bench_libtracer max RSS", "max RSS (KB)")],
          log=True, fmt="num", ylabel="value (per-series units)"),
     # -- throughput suite ---------------------------------------------------
-    dict(id="tp-fan", suite="throughput", title="Throughput by fan-out",
+    dict(id="tp-fan", section="dispatch", suite="throughput", title="Throughput by fan-out",
          cond="inproc · 64 B · 1 topic — one line per fan-out",
          pat=r"^inproc 64B/fan(\d+)/1ep throughput$",
          label=lambda m: f"fan {m.group(1)}", key=_num, log=True,
          fmt="rate", ylabel="deliveries / second",
          px=dict(label="fan-out (subscribers)", log=True, fmt="count")),
-    dict(id="tp-payload", suite="throughput", title="Throughput by payload size",
+    dict(id="tp-payload", section="dispatch", suite="throughput", title="Throughput by payload size",
          cond="inproc · fan-out 1 · 1 topic — one line per payload",
          pat=r"^inproc (\d+)B/fan1/1ep throughput$",
          label=lambda m: f"{m.group(1)} B", key=_num, log=False,
          fmt="rate", ylabel="deliveries / second",
          px=dict(label="payload size", log=True, fmt="bytes")),
-    dict(id="tp-dispatch", suite="throughput", title="Dispatch modes — throughput",
+    dict(id="tp-dispatch", section="dispatch", suite="throughput", title="Dispatch modes — throughput",
          cond="64 B · fan-out 1 · 1 topic — the four dispatch paths on one axes",
          pat=r"^(inproc|inproc-borrow|inproc-path|inproc-mt1) 64B/fan1/1ep throughput$",
          label=lambda m: m.group(1), key=lambda m: m.group(1), log=False,
          fmt="rate", ylabel="deliveries / second"),
-    dict(id="tp-mt", suite="throughput", title="MT scaling — aggregate throughput",
+    dict(id="tp-mt", section="dispatch", suite="throughput", title="MT scaling — aggregate throughput",
          cond="64 B · fan-out 1 — one line per worker count",
          pat=r"^inproc-mt(\d+) 64B/fan1/\d+ep throughput$",
          label=lambda m: f"mt{m.group(1)}", key=_num, log=False,
          fmt="rate", ylabel="deliveries / second",
          px=dict(label="worker threads", log=True, fmt="count")),
-    dict(id="tp-eptype", suite="throughput", title="Endpoint-type family — throughput",
+    dict(id="tp-eptype", section="dispatch", suite="throughput", title="Endpoint-type family — throughput",
          cond="eptype-* · 64 B · fan-out 1 · 1 topic",
          pat=r"^eptype-([\w-]+) 64B/fan1/1ep throughput$",
          label=lambda m: f"eptype-{m.group(1)}", key=lambda m: m.group(1), log=False,
          fmt="rate", ylabel="deliveries / second"),
-    dict(id="tp-fold", suite="throughput", title="Fold family — throughput by width",
+    dict(id="tp-fold", section="routing", suite="throughput", title="Fold family — throughput by width",
          cond="fold-b* · 512 B · fan-out 1 — one line per fold width",
          pat=r"^fold-b(\d+) 512B/fan1/1ep throughput$",
          label=lambda m: f"fold n{m.group(1)}", key=_num, log=False,
          fmt="rate", ylabel="deliveries / second",
          px=dict(label="fold width n", log=True, fmt="count")),
-    dict(id="tp-topics", suite="throughput", title="Write-by-path throughput by topic count",
+    dict(id="tp-topics", section="dispatch", suite="throughput", title="Write-by-path throughput by topic count",
          cond="inproc-path · 64 B · fan-out 1 — one line per registry size",
          pat=r"^inproc-path 64B/fan1/(\d+)ep throughput$",
          label=lambda m: f"{m.group(1)} topics", key=_num, log=False,
          fmt="rate", ylabel="publishes / second",
          px=dict(label="topic count", log=True, fmt="count")),
+    dict(id="lat-deliver-fan", section="dispatch", suite="latency",
+         title="Deliver-only p50 latency by fan-out",
+         cond="inproc-deliver · 64 B · 1 topic — the value is stored once and each op only "
+              "delivers (Zenoh `put` semantics)",
+         pat=r"^inproc-deliver 64B/fan(\d+)/1ep p50 latency$",
+         label=lambda m: f"fan {m.group(1)}", key=_num, log=True,
+         fmt="ns", ylabel="p50 latency",
+         px=dict(label="fan-out (subscribers)", log=True, fmt="count")),
+    dict(id="tp-deliver-fan", section="dispatch", suite="throughput",
+         title="Deliver-only throughput by fan-out",
+         cond="inproc-deliver · 64 B · 1 topic — the apples-to-apples counterpart to the "
+              "Zenoh comparison rows",
+         pat=r"^inproc-deliver 64B/fan(\d+)/1ep throughput$",
+         label=lambda m: f"fan {m.group(1)}", key=_num, log=True,
+         fmt="rate", ylabel="deliveries / second",
+         px=dict(label="fan-out (subscribers)", log=True, fmt="count")),
+    dict(id="lat-pool-payload", section="dispatch", suite="latency",
+         title="Pooled-backend p50 latency by payload size",
+         cond="inproc-pool · fan-out 1 · 1 topic — the value backend is a `sync_pool_t` "
+              "(ADR-0060) instead of the default heap",
+         pat=r"^inproc-pool (\d+)B/fan1/1ep p50 latency$",
+         label=lambda m: f"pool {m.group(1)} B", key=_num, log=False,
+         fmt="ns", ylabel="p50 latency",
+         px=dict(label="payload size", log=True, fmt="bytes")),
+    dict(id="tp-pool-payload", section="dispatch", suite="throughput",
+         title="Pooled-backend throughput by payload size",
+         cond="inproc-pool · fan-out 1 · 1 topic — compare against the default-heap "
+              "\"Throughput by payload size\" chart above",
+         pat=r"^inproc-pool (\d+)B/fan1/1ep throughput$",
+         label=lambda m: f"pool {m.group(1)} B", key=_num, log=False,
+         fmt="rate", ylabel="deliveries / second",
+         px=dict(label="payload size", log=True, fmt="bytes")),
+    dict(id="lat-pool-borrow-payload", section="dispatch", suite="latency",
+         title="Pooled loaned-path p50 latency by payload size",
+         cond="inproc-pool-borrow · fan-out 1 · 1 topic — pooled backend on the borrowed view",
+         pat=r"^inproc-pool-borrow (\d+)B/fan1/1ep p50 latency$",
+         label=lambda m: f"pool-borrow {m.group(1)} B", key=_num, log=False,
+         fmt="ns", ylabel="p50 latency",
+         px=dict(label="payload size", log=True, fmt="bytes")),
+    # -- routing / wire (latency suite) -------------------------------------
+    # The two demux arms are separate families rather than one chart: `fixed` sweeps
+    # fan(N)/1ep and `scan` sweeps fan(N)/Nep, so a single family would need two
+    # different patterns, and each arm's parameter sweep is what carries the story
+    # (flat for `fixed`, rising for `scan`).
+    dict(id="lat-demux-fixed", section="routing", suite="latency",
+         title="Forward-demux p50 latency — target registered FIRST",
+         cond="fwd-demux-fixed · one line per registry size — the size-independent part of a hop",
+         pat=r"^fwd-demux-fixed 79B/fan(\d+)/1ep p50 latency$",
+         label=lambda m: f"{m.group(1)} links", key=_num, log=False,
+         fmt="ns", ylabel="p50 latency",
+         px=dict(label="registered links", log=True, fmt="count")),
+    dict(id="lat-demux-scan", section="routing", suite="latency",
+         title="Forward-demux p50 latency — target registered LAST",
+         cond="fwd-demux-scan · one line per registry size — the lookup walks the whole table, "
+              "so the rise over the chart above is the scan's marginal cost",
+         pat=r"^fwd-demux-scan 79B/fan(\d+)/\d+ep p50 latency$",
+         label=lambda m: f"{m.group(1)} links", key=_num, log=False,
+         fmt="ns", ylabel="p50 latency",
+         px=dict(label="registered links", log=True, fmt="count")),
+    dict(id="tp-demux-scan", section="routing", suite="throughput",
+         title="Forward-demux throughput — target registered LAST",
+         cond="fwd-demux-scan · one line per registry size",
+         pat=r"^fwd-demux-scan 79B/fan(\d+)/\d+ep throughput$",
+         label=lambda m: f"{m.group(1)} links", key=_num, log=False,
+         fmt="rate", ylabel="hops / second",
+         px=dict(label="registered links", log=True, fmt="count")),
+    dict(id="lat-compact-terminus", section="routing", suite="latency",
+         title="COMPACT terminus p50 latency by payload size",
+         cond="compact-terminus · a framed COMPACT delivery resolved at its terminus",
+         pat=r"^compact-terminus (\d+)B/fan1/1ep p50 latency$",
+         label=lambda m: f"terminus {m.group(1)} B", key=_num, log=False,
+         fmt="ns", ylabel="p50 latency",
+         px=dict(label="payload size", log=True, fmt="bytes")),
+    dict(id="lat-compact-forward", section="routing", suite="latency",
+         title="COMPACT forward hop p50 latency by payload size",
+         cond="compact-forward · the zero-allocation forward path (ADR-0038 §3) — flat with "
+              "payload is the property this chart exists to show",
+         pat=r"^compact-forward (\d+)B/fan1/1ep p50 latency$",
+         label=lambda m: f"forward {m.group(1)} B", key=_num, log=False,
+         fmt="ns", ylabel="p50 latency",
+         px=dict(label="payload size", log=True, fmt="bytes")),
+    dict(id="tp-compact-forward", section="routing", suite="throughput",
+         title="COMPACT forward hop throughput by payload size",
+         cond="compact-forward · fan-out 1 · 1 topic",
+         pat=r"^compact-forward (\d+)B/fan1/1ep throughput$",
+         label=lambda m: f"forward {m.group(1)} B", key=_num, log=False,
+         fmt="rate", ylabel="hops / second",
+         px=dict(label="payload size", log=True, fmt="bytes")),
+    dict(id="tp-compact-terminus", section="routing", suite="throughput",
+         title="COMPACT terminus throughput by payload size",
+         cond="compact-terminus · fan-out 1 · 1 topic",
+         pat=r"^compact-terminus (\d+)B/fan1/1ep throughput$",
+         label=lambda m: f"terminus {m.group(1)} B", key=_num, log=False,
+         fmt="rate", ylabel="deliveries / second",
+         px=dict(label="payload size", log=True, fmt="bytes")),
+    # `path-parse` encodes the segment count in the fanout column and the address
+    # length in the size column, so the parameter axis is the fanout capture.
+    dict(id="lat-path-parse", section="routing", suite="latency",
+         title="`path_t::parse` p50 latency by segment count",
+         cond="path-parse · one line per segment count — the address parse every by-path "
+              "write pays before it reaches the registry",
+         pat=r"^path-parse \d+B/fan(\d+)/1ep p50 latency$",
+         label=lambda m: f"{m.group(1)} segments", key=_num, log=False,
+         fmt="ns", ylabel="p50 latency",
+         px=dict(label="segments", log=True, fmt="count")),
+    dict(id="tp-path-parse", section="routing", suite="throughput",
+         title="`path_t::parse` throughput by segment count",
+         cond="path-parse · one line per segment count",
+         pat=r"^path-parse \d+B/fan(\d+)/1ep throughput$",
+         label=lambda m: f"{m.group(1)} segments", key=_num, log=False,
+         fmt="rate", ylabel="parses / second",
+         px=dict(label="segments", log=True, fmt="count")),
+    # -- memory & allocation ------------------------------------------------
+    dict(id="lat-lkv", section="memory", suite="latency",
+         title="LKV publish cost — pooled vs heap value backend",
+         cond="lkv-{alloc,store}-{heap,pool} · fan-out 1 · 1 topic — `alloc` isolates the "
+              "value allocation, `store` the full publish",
+         pat=r"^lkv-(alloc|store)-(heap|pool) (\d+)B/fan1/1ep p50 latency$",
+         label=lambda m: f"{m.group(1)} {m.group(2)} {m.group(3)} B",
+         key=lambda m: f"{m.group(1)} {m.group(2)} {int(m.group(3)):06d}", log=False,
+         fmt="ns", ylabel="p50 latency"),
+    dict(id="tp-lkv", section="memory", suite="throughput",
+         title="LKV publish throughput — pooled vs heap value backend",
+         cond="lkv-{alloc,store}-{heap,pool} · fan-out 1 · 1 topic",
+         pat=r"^lkv-(alloc|store)-(heap|pool) (\d+)B/fan1/1ep throughput$",
+         label=lambda m: f"{m.group(1)} {m.group(2)} {m.group(3)} B",
+         key=lambda m: f"{m.group(1)} {m.group(2)} {int(m.group(3)):06d}", log=False,
+         fmt="rate", ylabel="publishes / second"),
+    dict(id="lat-alloc-mt", section="memory", suite="latency",
+         title="Allocator under contention — pooled vs heap, by thread count",
+         cond="{pool,heap}alloc-mt* · 64 B — alloc+free of one value block per op, every "
+              "thread instrumented. This is the chart behind the ADR-0060 erratum: the pool "
+              "does not stay ahead of the heap as threads are added.",
+         pat=r"^(pool|heap)alloc-mt(\d+) 64B/fan1/1ep ns/delivery$",
+         label=lambda m: f"{m.group(1)} mt{m.group(2)}",
+         key=lambda m: f"{m.group(1)} {int(m.group(2)):03d}", log=False,
+         fmt="ns", ylabel="ns per alloc+free"),
+    dict(id="tp-alloc-mt", section="memory", suite="throughput",
+         title="Allocator under contention — aggregate rate by thread count",
+         cond="{pool,heap}alloc-mt* · 64 B — aggregate alloc+free operations per second",
+         pat=r"^(pool|heap)alloc-mt(\d+) 64B/fan1/1ep throughput$",
+         label=lambda m: f"{m.group(1)} mt{m.group(2)}",
+         key=lambda m: f"{m.group(1)} {int(m.group(2)):03d}", log=False,
+         fmt="rate", ylabel="operations / second"),
 ]
 
 
@@ -411,7 +555,8 @@ def build(data: dict) -> dict:
             if pv is not None:
                 s["pv"] = pv
             series.append(s)
-        chart = {"id": fam["id"], "suite": fam["suite"], "title": fam["title"],
+        chart = {"id": fam["id"], "section": fam.get("section", "other"),
+                 "suite": fam["suite"], "title": fam["title"],
                  "cond": fam["cond"], "fmt": fam["fmt"], "ylabel": fam["ylabel"],
                  "log": fam["log"], "series": series}
         if "px" in fam and all("pv" in s for s in series):
@@ -432,40 +577,53 @@ def _assets() -> tuple[str, str]:
     return (static / "perf_history.css").read_text(), (static / "perf_history.js").read_text()
 
 
-def html_block(data: dict) -> str:
-    """@brief The MyST raw-html block embedding the family charts (or '' if the
-    store yields no chartable family)."""
+def html_blocks(data: dict) -> dict[str, str]:
+    """@brief One MyST raw-html chart block per SECTION, keyed by section name.
+
+    The page places each block under the chapter it belongs to, so a chart sits
+    next to the prose that explains it instead of all thirty-odd landing in one
+    undifferentiated grid. Every block is the SAME renderer with the SAME payload
+    schema — that uniformity is the point: a reader who learns to read one chart
+    can read all of them.
+
+    Two things must stay whole across the split:
+
+    - the **color index** is global (assigned in `build`), so "fan 8" is one
+      color on every chart in every section;
+    - the **suite metadata** (commit shas, release markers, instrument markers)
+      is repeated into each block, because a block must be independently
+      renderable — a section whose axis data was emitted elsewhere would draw
+      no axes at all.
+
+    The CSS is inlined into the first block and the JS into the LAST, so the
+    bootstrap runs after every host div exists. The script also defers to
+    `DOMContentLoaded` while the document is still parsing, which is belt and
+    braces for the same hazard.
+    """
     payload = build(data)
     if not payload["charts"]:
-        return ""
+        return {}
     css, js = _assets()
-    nser = sum(len(c["series"]) for c in payload["charts"])
-    blob = json.dumps(payload, separators=(",", ":"))
-    return f"""\
-:::{{raw}} html
-<style>{css}</style>
-<div class="ph-hist">
-  <p class="ph-note">{len(payload["charts"])} family charts · {nser} series · x-axis = recorded
-  <code>main</code> commits (oldest → newest) · 🏷 dashed verticals mark release tags
-  (<b>≈</b> = tag commit itself is not a recorded point; marker sits at the nearest following
-  recorded commit). Families with a numeric parameter axis offer <b>trend</b> /
-  <b>sweep</b> / <b>heatmap</b> / <b>3D</b> views — same data, three axes
-  (commit × parameter × value). Hover any chart for exact per-commit values.</p>
-  <div class="ph-grid" id="ph-charts"></div>
-  <script type="application/json" id="ph-data">{blob}</script>
-</div>
-<script>{js}</script>
+    sections = list(dict.fromkeys(c["section"] for c in payload["charts"]))
+    out: dict[str, str] = {}
+    for n, sec in enumerate(sections):
+        charts = [c for c in payload["charts"] if c["section"] == sec]
+        blob = json.dumps({"suites": payload["suites"], "charts": charts},
+                          separators=(",", ":"))
+        nser = sum(len(c["series"]) for c in charts)
+        head = f"<style>{css}</style>\n" if n == 0 else ""
+        tail = f"\n<script>{js}</script>" if n == len(sections) - 1 else ""
+        out[sec] = f""":::{{raw}} html
+{head}<div class="ph-hist">
+  <p class="ph-note">{len(charts)} family charts \u00b7 {nser} series \u00b7 x-axis = recorded
+  <code>main</code> commits (oldest \u2192 newest) \u00b7 \U0001f3f7 dashed verticals mark release
+  tags (<b>\u2248</b> = tag commit itself is not a recorded point; marker sits at the nearest
+  following recorded commit) \u00b7 \U0001f527 dotted verticals mark commits where the BENCH
+  changed \u2014 points either side of one are not comparable. Families with a numeric parameter
+  axis offer <b>trend</b> / <b>sweep</b> / <b>heatmap</b> / <b>3D</b> views \u2014 same data,
+  three axes (commit \u00d7 parameter \u00d7 value). Hover any chart for exact per-commit values.</p>
+  <div class="ph-grid ph-charts"></div>
+  <script type="application/json" class="ph-data">{blob}</script>
+</div>{tail}
 :::"""
-
-
-def release_note(entries: list[dict]) -> str:
-    """@brief One-line release annotation for the table views ('' if none)."""
-    ann = release_annotations(entries)
-    if not ann:
-        return ""
-    shas = [e.get("commit", {}).get("id", "")[:7] for e in entries]
-    parts = []
-    for a in ann:
-        where = f"`{shas[a['i']]}`" + (" (≈ nearest following recorded commit)" if a["approx"] else "")
-        parts.append(f"🏷 **{a['label']}** at {where}, point {a['i'] + 1}/{len(entries)}")
-    return "Releases: " + " · ".join(parts) + "."
+    return out
