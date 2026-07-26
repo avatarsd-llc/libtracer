@@ -79,6 +79,50 @@ FAMILIES: list[dict] = [
          pat=r"^(inproc|inproc-borrow|inproc-path|inproc-mt1) 64B/fan1/1ep p50 latency$",
          label=lambda m: m.group(1), key=lambda m: m.group(1), log=False,
          fmt="ns", ylabel="p50 latency"),
+    # The #553 pair. Each `-batch` series measures the SAME operation as the series
+    # beside it, timed over a calibrated batch instead of one at a time — so the gap
+    # between a mode and its `-batch` twin IS the clock's contribution, read directly off
+    # the chart. Both are kept because they answer different questions: the quantized
+    # series is the unbroken long-run history and the only one with a real p99, the batch
+    # series is the one that can resolve a few nanoseconds.
+    dict(id="lat-quantization", section="dispatch", suite="latency",
+         title="Clock quantization — per-op timing vs batch-amortized",
+         cond="64 B · fan-out 1 · 1 topic — each mode against its own batch-amortized twin; "
+              "the gap is what the clock costs, not what the code costs",
+         pat=r"^(inproc|inproc-borrow|inproc-path)(-batch)? 64B/fan1/1ep p50 latency$",
+         label=lambda m: m.group(1) + (" (batch)" if m.group(2) else " (per-op)"),
+         key=lambda m: m.group(1) + (m.group(2) or ""), log=False,
+         fmt="ns", ylabel="p50 latency"),
+    dict(id="lat-batch-payload", section="dispatch", suite="latency",
+         title="Batch-amortized p50 latency by payload size",
+         cond="inproc-batch · fan-out 1 · 1 topic — the clock-free twin of the payload sweep",
+         pat=r"^inproc-batch (\d+)B/fan1/1ep p50 latency$",
+         label=lambda m: f"{m.group(1)} B", key=_num, log=False,
+         fmt="ns", ylabel="p50 latency",
+         px=dict(label="payload size", log=True, fmt="bytes")),
+    dict(id="lat-batch-fan", section="dispatch", suite="latency",
+         title="Batch-amortized p50 latency by fan-out",
+         cond="inproc-batch · 64 B payload · 1 topic — the clock-free twin of the fan-out sweep; "
+              "converges on its per-op twin as the operation outgrows the clock",
+         pat=r"^inproc-batch 64B/fan(\d+)/1ep p50 latency$",
+         label=lambda m: f"fan {m.group(1)}", key=_num, log=True,
+         fmt="ns", ylabel="p50 latency",
+         px=dict(label="fan-out (subscribers)", log=True, fmt="count")),
+    dict(id="lat-batch-borrow-payload", section="dispatch", suite="latency",
+         title="Batch-amortized loaned-path p50 latency by payload size",
+         cond="inproc-borrow-batch · fan-out 1 · 1 topic — the clock-free twin of the loaned "
+              "payload sweep, where the per-op reading is flat at the clock's own floor",
+         pat=r"^inproc-borrow-batch (\d+)B/fan1/1ep p50 latency$",
+         label=lambda m: f"borrow {m.group(1)} B", key=_num, log=False,
+         fmt="ns", ylabel="p50 latency",
+         px=dict(label="payload size", log=True, fmt="bytes")),
+    dict(id="lat-batch-topics", section="dispatch", suite="latency",
+         title="Batch-amortized write-by-path p50 latency by topic count",
+         cond="inproc-path-batch · 64 B · fan-out 1 — the clock-free twin of the resolver canary",
+         pat=r"^inproc-path-batch 64B/fan1/(\d+)ep p50 latency$",
+         label=lambda m: f"{m.group(1)} topics", key=_num, log=False,
+         fmt="ns", ylabel="p50 latency",
+         px=dict(label="topic count", log=True, fmt="count")),
     dict(id="lat-mt", section="dispatch", suite="latency", title="MT scaling — per-delivery cost",
          cond="64 B · fan-out 1 — ns/delivery per worker count (lower = better scaling)",
          pat=r"^inproc-mt(\d+) 64B/fan1/\d+ep ns/delivery$",
@@ -87,7 +131,10 @@ FAMILIES: list[dict] = [
          px=dict(label="worker threads", log=True, fmt="count")),
     dict(id="lat-eptype", section="dispatch", suite="latency", title="Endpoint-type family — p50 latency",
          cond="eptype-* · 64 B · fan-out 1 · 1 topic",
-         pat=r"^eptype-([\w-]+) 64B/fan1/1ep p50 latency$",
+         # The `(?<!-batch)` is load-bearing, not defensive clutter: without it a future
+         # `eptype-lean-batch` row would land here labelled as a THIRD endpoint type
+         # rather than as the same type measured with a different instrument (#553).
+         pat=r"^eptype-([\w-]+)(?<!-batch) 64B/fan1/1ep p50 latency$",
          label=lambda m: f"eptype-{m.group(1)}", key=lambda m: m.group(1), log=False,
          fmt="ns", ylabel="p50 latency"),
     # Re-pointed from `fold-n*` to `fold-b*`: the old rows timed ONE ~11 ns op between two

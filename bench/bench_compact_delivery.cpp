@@ -57,7 +57,6 @@ using tr::wire::type_t;
 constexpr std::size_t kPayloadSizes[] = {4, 64, 512};
 
 constexpr double kDefaultBudgetSeconds = 1.0;
-constexpr double kPlateau = 0.05;
 
 [[nodiscard]] double budget_seconds() {
     const char* const env = std::getenv("LIBTRACER_BENCH_SECONDS");
@@ -66,18 +65,7 @@ constexpr double kPlateau = 0.05;
     return v > 0.0 ? v : kDefaultBudgetSeconds;
 }
 
-template <typename Op>
-[[nodiscard]] std::size_t calibrate_batch(Op&& op) {
-    double prev = 0.0;
-    for (std::size_t batch = 1; batch <= (1U << 20); batch *= 2) {
-        const std::uint64_t a = bench::now_ns();
-        for (std::size_t i = 0; i < batch; ++i) op();
-        const double per_op = static_cast<double>(bench::now_ns() - a) / static_cast<double>(batch);
-        if (prev > 0.0 && per_op > prev * (1.0 - kPlateau)) return batch;
-        prev = per_op;
-    }
-    return 1U << 20;
-}
+using bench::calibrate_batch;  // hoisted to bench_common.hpp (#553) — one definition
 
 std::size_t g_allocs = 0;
 std::size_t g_bytes = 0;

@@ -367,6 +367,7 @@ saying which is the one that matters when comparing two numbers.
 | --- | --- | --- | --- | --- |
 | Cross-core conformance | byte-exactness across cores (not speed) | `run-all.py` | §1 | any DISAGREE fails CI |
 | In-process timing | per-op latency and throughput in one process | `bench_libtracer` | §2, and the timed charts in §3 (fold, `path_t::parse`) and §4 (LKV, allocator-under-contention) | gated per PR **and** per `main` push, same-runner |
+| In-process timing, batch-amortized | the same operations, timed over a calibrated batch so the clock is not what is measured | `bench_libtracer` `-batch` rows | §2 | latency only — no p99 (averaging has no tail), no throughput (the bulk phase measures it better) |
 | Framed-hop timing | what one wire frame costs before any payload is touched | `bench_forward_demux` + `bench_compact_delivery` | §3 | batch-amortized, self-calibrating |
 | Allocation counting | exact allocs and bytes around ONE operation — counted, never timed | `bench_forward_heap` probes + max RSS | §4 | forward hop hard-gated at ZERO allocs; per-vertex block count ratcheted exactly |
 | Engine comparison | absolute side-by-side, both engines in one pass | `bench_libtracer` + `bench_zenoh` (+ loopback net) | §5 | same runner, same pass — no ratios |
@@ -455,8 +456,27 @@ one and you have read all of them.
   including unrelated ones like the pure-codec `fold-b*` rows — is the runner; a
   move confined to one family is the code.** Read trends across several commits,
   not the third digit of one point. Reproducing locally: build Release
-  (`-O3`), pin the bench to a core (`taskset -c N`), take the best of several runs,
-  and compare only numbers measured on the same machine in the same session.
+  (`-O3`), take the best of several runs, and compare only numbers measured on the same
+  machine in the same session. If you pin with `taskset`, **check what you pinned to** —
+  on a hybrid CPU the core numbering mixes performance and efficiency clusters, and
+  pinning to the wrong one silently rescales every figure by the clock ratio while
+  cycles-per-operation stay identical. Pinning is not required; comparing same-machine,
+  same-session numbers is.
+- **Two latency series per in-process mode, and they are not redundant.** Every
+  `<mode>` row is timed one operation at a time; every `<mode>-batch` row times a
+  calibrated batch of the same operation and divides. An in-process write costs ~70–85 ns
+  and the clock's granularity plus its two reads is a large fraction of that, so the
+  per-op percentiles **snap to coarse steps** — 90 / 110 / 120 / 150 / 180 — and anything
+  under roughly 10 ns is invisible in them. Measured side by side, the per-op column runs
+  **19–26 % high at fan-out 1** (`inproc-borrow` 90 → 73 ns, `inproc` 110 → 81 ns) and
+  **converges to within 1 %** by fan-out 1024, where one operation is ~11 µs and the clock
+  is noise. Use `-batch` when resolving a small delta; use the per-op row for **tail
+  shape**, because it is the one with a real p99 — a percentile of batch means measures
+  interference between batches, not the tail of an operation, so the `-batch` rows
+  publish no p99 at all rather than a fabricated one. The per-op series are also the
+  unbroken long-run history: they were deliberately **not** converted, because renaming
+  what a series measures would make every point before the change incomparable to every
+  point after it.
 - **`inproc-path` is a resolver canary, not a hot pattern.** The write-by-path
   rows exercise the registry lookup on every write *on purpose*, so a resolver-cost
   regression is visible as its own series. Hot paths resolve the path once and

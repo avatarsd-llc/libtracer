@@ -280,7 +280,11 @@ def main() -> int:
             if "mean_ns" in b and lat_fails(v["mean_ns"], b["mean_ns"], MEAN_REGRESS):
                 fails.append(f"{k} mean-latency pullback: {v['mean_ns']}ns vs base "
                              f"{b['mean_ns']}ns (+{(v['mean_ns'] / b['mean_ns'] - 1) * 100:.0f}%)")
-            if v["deliv_s"] < b["deliv_s"] * TPUT_REGRESS:
+            # A latency-only row (the `-batch` arms, #553) publishes deliv_s = 0 meaning
+            # "this row does not measure throughput" — its bulk-timed twin does. Gating a
+            # zero against a zero is vacuous; gating a zero against a real baseline would
+            # fail every run for a metric the row never claimed to produce.
+            if b["deliv_s"] > 0 and v["deliv_s"] > 0 and v["deliv_s"] < b["deliv_s"] * TPUT_REGRESS:
                 fails.append(f"{k} throughput pullback: {v['deliv_s']:,.0f} vs base "
                              f"{b['deliv_s']:,.0f} ({(v['deliv_s'] / b['deliv_s'] - 1) * 100:.0f}%)")
             line += f"   (base p50={b['p50_ns']}ns deliv/s={b['deliv_s']:,.0f})"
@@ -288,7 +292,7 @@ def main() -> int:
             floor = FLOOR_P50_OVERRIDE.get(k, FLOOR_P50_NS)
             if v["p50_ns"] > floor:
                 fails.append(f"{k} p50 {v['p50_ns']}ns over floor {floor}ns")
-            if v["deliv_s"] < FLOOR_DELIV:
+            if v["deliv_s"] > 0 and v["deliv_s"] < FLOOR_DELIV:
                 fails.append(f"{k} deliv {v['deliv_s']:,.0f} under floor {FLOOR_DELIV:,}")
         print(line)
     fails += lkv_ratio_gate(bench)  # ADR-0060 same-run ratio (no baseline; skips if absent)

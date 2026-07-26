@@ -71,6 +71,63 @@ view_t borrowed_view(std::span<const std::byte> bytes) {
 enum class alloc_t { HEAP, BORROW };
 
 /**
+ * @brief Publish the batch-amortized twin of a quantized latency row (#553).
+ *
+ * Times a CALIBRATED BATCH of @p op and divides, so the two `clock_gettime` reads and the
+ * clock's granularity are amortized across the batch instead of dominating one operation.
+ * Emitted as a SEPARATE row under `<mode>-batch` rather than replacing the quantized one:
+ * the quantized series are the primary key of long-running `gh-pages` history, and giving
+ * an existing name a new meaning would silently make every point before the change
+ * incomparable to every point after it.
+ *
+ * **This row is a LATENCY instrument only.** Every other column is left at 0, which the
+ * history emitter reads as "this row does not produce that metric" and skips rather than
+ * charting — the same convention the `lkv-*` constant-zero p99 fix established. Each is
+ * zero for its own reason:
+ *
+ * - **p99** — each sample here is a MEAN over `batch` operations, so its 99th percentile
+ *   is the tail of the batch means: it measures scheduling interference BETWEEN batches,
+ *   not the tail of one operation. Averaging destroys exactly the quantity a p99 is read
+ *   for, so publishing one under that name would be a fabricated tail. Read the quantized
+ *   twin's p99 for tail shape and this row's p50/mean for magnitude.
+ * - **throughput** — this arm could report its own, and it would be a real measurement,
+ *   but it would be a WORSE one: the bulk phase above times an order of magnitude more
+ *   work over a longer window and is already the authoritative figure for this exact
+ *   point. Publishing a second, weaker estimate of one quantity is how a reader ends up
+ *   with two numbers for one thing and no rule for which to trust.
+ * - **`mb_s`** — bandwidth belongs to that same bulk phase, for the same reason.
+ *
+ * @param mode    The quantized row's mode; this row publishes as `<mode>-batch`.
+ * @param op      The operation to time, indexed like the quantized loop's.
+ * @param lat_n   Operation budget, matched to the quantized arm so both cost the same work.
+ */
+template <typename Op>
+void emit_batch_row(const char* mode, std::size_t S, std::size_t F, std::size_t E, Op&& op,
+                    std::size_t lat_n) {
+    std::size_t i = 0;
+    const std::size_t batch = calibrate_batch([&] { op(i++); });
+    const std::size_t rounds = std::max<std::size_t>(1, lat_n / batch);
+
+    Latency lat;
+    for (std::size_t r = 0; r < rounds; ++r) {
+        const auto a = now_ns();
+        for (std::size_t b = 0; b < batch; ++b) op(i++);
+        lat.add((now_ns() - a) / batch);
+    }
+
+    Latency::Summary sum = lat.summarize();
+    sum.p99 = 0;  // a percentile of batch means is not an operation's tail — see above
+
+    const std::string batch_mode = std::string(mode) + "-batch";
+    emit("libtracer", batch_mode.c_str(), S, F, E, 0.0, 0.0, 0.0, sum);
+    std::printf(
+        "NOTE mode=%s batch=%zu rounds=%zu (latency-only row: throughput and "
+        "bandwidth belong to the bulk phase of `%s`)\n",
+        batch_mode.c_str(), batch, rounds, mode);
+    std::fflush(stdout);
+}
+
+/**
  * @brief One inproc run: E endpoints, F subscribers each, S-byte payload.
  *
  * `by_path`
@@ -80,7 +137,7 @@ enum class alloc_t { HEAP, BORROW };
 void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool by_path,
                 const char* mode, std::uint64_t budget = kDeliveryBudget,
                 std::uint64_t latbudget = kLatencyDeliveryBudget,
-                std::pmr::memory_resource* mr = nullptr) {
+                std::pmr::memory_resource* mr = nullptr, bool batch_row = true) {
     // mr==nullptr keeps the default global-heap LKV (make_shared); an injected pool
     // routes the per-write LKV allocate_shared through it (ADR-0060 mr_ seam) — the
     // only difference between `inproc` and `inproc-pool` (graph.cpp store uses mr_).
@@ -119,7 +176,7 @@ void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool
     const double deliv_s = pub_s * static_cast<double>(F);
     const double mb_s = deliv_s * static_cast<double>(S) / 1e6;
 
-    // ⚠ THE p50/p99 COLUMNS ARE CLOCK-QUANTIZED — read the throughput column for small deltas.
+    // THE p50/p99 COLUMNS OF THIS ROW ARE CLOCK-QUANTIZED. Read `<mode>-batch` for small deltas.
     //
     // This times ONE operation between two `steady_clock` reads. An in-process write costs
     // ~70-85 ns and the clock's own granularity plus the two reads is a large fraction of
@@ -128,16 +185,10 @@ void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool
     // under roughly 10 ns is INVISIBLE here — a real 6% improvement to the write path measured
     // 100 ns before and 100 ns after, while the throughput column moved 87 -> 80 ns/op.
     //
-    // The net-plane benches (bench_compact_delivery, bench_forward_demux) do not have this
-    // problem: they batch-amortize and self-calibrate the batch size, precisely because "one
-    // delivery is close enough to clock_gettime that per-op timing measures the clock". This
-    // loop predates that lesson. Converting it is NOT a drop-in change — these rows feed
-    // long-running gh-pages series, and switching what they measure would break continuity
-    // with every historical point — so it is tracked separately rather than done here.
-    //
-    // Until then: `deliv/s` (derived from a bulk-timed run, not per-op reads) is the column to
-    // compare when the difference is small. The percentiles remain useful for order-of-
-    // magnitude and for tail shape, not for resolving a few nanoseconds.
+    // The row is KEPT AS IS ON PURPOSE (#553). These rows feed long-running gh-pages series
+    // keyed by their name, and changing what one measures while keeping its name would make
+    // every historical point incomparable to every later one. So the quantized series
+    // continues unbroken and the honest measurement is published ALONGSIDE it, below.
     Latency lat;
     for (std::size_t i = 0; i < LATN; ++i) {
         const auto a = now_ns();
@@ -145,6 +196,7 @@ void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool
         lat.add(now_ns() - a);
     }
     emit("libtracer", mode, S, F, E, pub_s, deliv_s, mb_s, lat.summarize());
+    if (batch_row) emit_batch_row(mode, S, F, E, put, LATN);
 }
 
 /**
@@ -176,7 +228,11 @@ void run_inproc_pool(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc,
                      const char* mode, std::uint64_t budget = kDeliveryBudget,
                      std::uint64_t latbudget = kLatencyDeliveryBudget) {
     std::pmr::unsynchronized_pool_resource pool;
-    run_inproc(S, F, E, alloc, by_path, mode, budget, latbudget, &pool);
+    // No `-batch` twin (#553): what these rows are FOR is the pooled-vs-heap LKV
+    // comparison, and that is gated by the `lkv` same-run throughput ratio
+    // (perf_gate.py lkv_ratio_gate), not by a latency percentile. A batch twin here
+    // would be ten more series with no chart reading them.
+    run_inproc(S, F, E, alloc, by_path, mode, budget, latbudget, &pool, false);
 }
 
 /**
@@ -231,15 +287,21 @@ void run_inproc_deliver(std::size_t S, std::size_t F, std::uint64_t budget = kDe
  * run) so one parser feeds both the terminal table and the docs comparison charts.
  */
 void run_grid() {
+    // No `-batch` twins here (#553). The grid is the ENGINE-COMPARISON surface: every row
+    // is drawn against a Zenoh row measured the same way, and there is no batch-amortized
+    // Zenoh arm to compare one against. A batch twin would also double a 7x7 grid on both
+    // sweeps — 98 extra rows whose only reader would be a chart with nothing beside it.
     for (std::size_t S : kGridSizes)
         for (std::size_t F : kGridFanouts)
-            run_inproc(S, F, 1, alloc_t::HEAP, false, "inproc", kGridBudget, kGridLatBudget);
+            run_inproc(S, F, 1, alloc_t::HEAP, false, "inproc", kGridBudget, kGridLatBudget,
+                       nullptr, false);
     // Deliver-only fan sweep at the reference payload (the comparison charts' fixed
     // size): propagate touches no payload bytes, so a full size sweep would be flat.
     for (std::size_t F : kGridFanouts) run_inproc_deliver(kRefSize, F, kGridBudget, kGridLatBudget);
     for (std::size_t S : kGridSizes)
         for (std::size_t E : kGridEndpoints)
-            run_inproc(S, 1, E, alloc_t::HEAP, true, "inproc-path", kGridBudget, kGridLatBudget);
+            run_inproc(S, 1, E, alloc_t::HEAP, true, "inproc-path", kGridBudget, kGridLatBudget,
+                       nullptr, false);
 }
 
 /** @brief Mixed workload: 128 topics with varied fan-out (1..16) and payloads (1..8192). */
@@ -445,8 +507,13 @@ void run_eptype_stream() {
 
 /** @brief The full ep-type sweep: lean, lean-cached, stream — all at size=64 fan=1 ep=1. */
 void run_eptype() {
-    run_inproc(kRefSize, 1, 1, alloc_t::HEAP, false, "eptype-lean");
-    run_inproc(kRefSize, 1, 1, alloc_t::BORROW, false, "eptype-lean-cached");
+    // No `-batch` twins (#553): these two re-emit `inproc` / `inproc-borrow` at the
+    // reference point under an endpoint-type name, so their batch twins would be a
+    // duplicate measurement of `inproc-batch 64B/fan1/1ep` and its borrow counterpart.
+    run_inproc(kRefSize, 1, 1, alloc_t::HEAP, false, "eptype-lean", kDeliveryBudget,
+               kLatencyDeliveryBudget, nullptr, false);
+    run_inproc(kRefSize, 1, 1, alloc_t::BORROW, false, "eptype-lean-cached", kDeliveryBudget,
+               kLatencyDeliveryBudget, nullptr, false);
     run_eptype_stream();
 }
 
