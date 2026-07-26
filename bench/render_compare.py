@@ -288,8 +288,11 @@ def html_block(rows: list[dict], provenance: str) -> str:
     payload = json.dumps(data, separators=(",", ":"))
     return f""":::{{raw}} html
 <div class="ph-hist">
-  <p class="ph-note">Both engines built <code>-O3</code> and measured in the SAME pass on the
-  same runner, so this is like-for-like on identical hardware. Absolute values on absolute
+  <p class="ph-note">Measured in the SAME pass on the same runner, so this is like-for-like on
+  identical hardware. libtracer is compiled from source at <code>-O3</code> here; Zenoh is the
+  upstream <b>zenoh-c 1.9.0 prebuilt release</b> binary (<code>bench/fetch_zenoh.sh</code>
+  downloads it — we do not build it, so its optimization profile is upstream's, not a flag we
+  set). Both are optimized builds. Absolute values on absolute
   axes — no ratios, and every "reading" under a chart is computed from that chart's own
   endpoints at render time. Read trends and orders of magnitude, not the third digit;
   shared-runner variance is real. x-axis = the swept parameter (these are the only charts on

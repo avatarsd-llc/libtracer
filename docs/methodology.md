@@ -145,8 +145,10 @@ that recorded nothing at all.
 
 ### 4 · libtracer vs Zenoh (absolute, one pass, same runner)
 
-A side-by-side against [Eclipse Zenoh](https://zenoh.io) (zenoh-c, peer mode). Both
-engines are built `-O3` and measured **in the same pass on the same runner**, and
+A side-by-side against [Eclipse Zenoh](https://zenoh.io) (zenoh-c, peer mode). Both are
+measured **in the same pass on the same runner** — libtracer compiled from source at `-O3`,
+Zenoh as the upstream prebuilt `zenoh-c 1.9.0` release binary that `bench/fetch_zenoh.sh`
+downloads (we do not build it, so its optimization profile is upstream's, not ours). And
 the charts plot **absolute** throughput / latency / bandwidth — both engines as
 series on shared axes. There are **no speed-up ratios**: every point is a measured
 number you can read off directly. Fairness is discussed in its own section below,
