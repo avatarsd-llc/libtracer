@@ -745,7 +745,10 @@ allocation counts and bytes, not statistics. Five probes feed the history store 
   `set_app_fields`, which copies the declaration into the table's backing, and the
   borrowed `set_app_fields_static`, whose slots view caller flash. The pair is what
   decides whether per-endpoint schemas beat the `/meta` child-vertex workaround on an
-  MCU (#388), so both are gated rather than argued;
+  MCU (#388), so both are gated rather than argued. Gating them is what showed the
+  borrowed path was **not** the promised zero-declaration-RAM install — it still copied
+  the caller's array into a vector, the largest single block on that path — which is now
+  fixed (592 → 392 B per vertex, ADR-0058 erratum 1);
 - **whole-run max RSS** — the coarse process-level footprint.
 
 Their series live in the smaller-is-better history suite (§2) under

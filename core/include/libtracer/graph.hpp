@@ -574,9 +574,13 @@ class graph_t {
      *        but the `name`/`descriptor` bytes are VIEWED, never copied.
      *
      * For an MCU owner whose field table is `constexpr` in flash, this costs **zero
-     * declaration RAM**: the runtime stores views into @p table's `name`/`descriptor`
-     * storage, so the caller MUST keep that storage alive for the vertex's lifetime (pass
-     * pointers into flash / `.rodata`, never into stack or a soon-freed heap). Declaration
+     * declaration RAM**: the runtime views @p table itself, so the caller MUST keep
+     * **@p table and the bytes it points at** alive for the vertex's lifetime (pass a
+     * `static`/`constexpr` array in flash / `.rodata`, never a stack array or a soon-freed
+     * heap block). Note this is the ARRAY as well as its bytes — an earlier revision copied
+     * @p table's entries into an owned vector, so only the bytes had to outlive the vertex,
+     * and the "zero declaration RAM" above was untrue by ~200 B per vertex on host
+     * (ADR-0058 erratum 1; measured by the `vertex_app5_static` gate row). Declaration
      * only — no initial value; write values later through the field-write surface. Empty
      * @p table uninstalls, exactly as @ref set_app_fields. Wire-invariant: `:schema` serves
      * the same verbatim bytes as the owning overload.

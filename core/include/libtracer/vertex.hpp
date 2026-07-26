@@ -131,32 +131,33 @@ struct app_field_t {
 };
 
 /**
- * @brief A borrowed (static-storage) declaration of one app field (ADR-0058) — the
- *        install-time shape for a `constexpr`/flash-resident field table on an MCU.
+ * @brief One app-field DECLARATION (ADR-0058, class ②): view-shaped, owning nothing.
  *
- * Unlike @ref app_field_t this owns NOTHING: `name` and `descriptor` are VIEWS the
- * runtime stores as-is (@ref graph_t::set_app_fields_static). The caller therefore
- * guarantees the pointed-to bytes **outlive the vertex** — pass pointers into static
- * storage (flash / `.rodata`), never into stack or a soon-freed heap. Declaration only:
- * no initial value (write the value after install via the field-write surface).
+ * Unlike @ref app_field_t this owns NOTHING: `name` and `descriptor` are VIEWS. For an
+ * OWNING install they point into @ref app_field_table_t::backing; for a BORROWED install
+ * (@ref graph_t::set_app_fields_static) they point at the caller's own storage, and the
+ * caller guarantees the pointed-to bytes — **and the array holding these entries** —
+ * outlive the vertex. Pass static storage (flash / `.rodata`), never a stack array or a
+ * soon-freed heap block. Either way the storage is immutable for the table's lifetime, so
+ * the views stay valid. Declaration only: no initial value (write values after install via
+ * the field-write surface).
+ *
+ * This is ONE type serving both roles. It used to be two — `app_field_static_t` for the
+ * install-time shape and `app_field_slot_t` for the runtime's copy of it — which were
+ * field-for-field identical, so a borrowed install spent an allocation and a copy
+ * converting between them. Unifying them lets a borrowed table be viewed in place
+ * (ADR-0058 erratum 1).
  */
-struct app_field_static_t {
+struct app_field_slot_t {
     std::string_view name;                   /**< @brief Field key below `settings.app.` (§A.1). */
     app_access_t access = app_access_t::RO;  /**< @brief Owner-declared remote writability. */
     std::span<const std::byte> descriptor{}; /**< @brief §B.1 descriptor bytes, served verbatim. */
 };
 
-/**
- * @brief The runtime's per-field DECLARATION storage (ADR-0058, class ②): view-shaped,
- *        owning nothing itself. The views point into @ref app_field_table_t::backing (an
- *        owning install) or into caller flash (a borrowed install) — both immutable for
- *        the table's lifetime, so the views stay valid.
- */
-struct app_field_slot_t {
-    std::string_view name;                   /**< @brief Field key (into backing / flash). */
-    app_access_t access = app_access_t::RO;  /**< @brief Owner-declared remote writability. */
-    std::span<const std::byte> descriptor{}; /**< @brief Descriptor bytes (into backing / flash). */
-};
+/** @brief The install-time spelling of @ref app_field_slot_t — the same type. Kept as a name
+ *         because it reads better at an owner's `set_app_fields_static` call site, and because
+ *         it is the spelling already in the wild (docs, integrations, firmware tables). */
+using app_field_static_t = app_field_slot_t;
 
 /**
  * @brief A vertex's RFC-0010 field descriptor table (ADR-0058): the immutable declaration
@@ -174,8 +175,21 @@ struct app_field_slot_t {
  */
 struct app_field_table_t {
     /** @brief Per-field declaration views, in owner install order. Empty ⇒ no table
-     *         installed (the closed `ENOTTY` default). Guarded by the vertex mutex. */
-    std::vector<app_field_slot_t> slots{};
+     *         installed (the closed `ENOTTY` default). Guarded by the vertex mutex.
+     *
+     *         A SPAN, not a container: a borrowed install points it straight at the caller's
+     *         array and allocates nothing for the declaration, which is what ADR-0058 §Step 1.2
+     *         promised and did not deliver (it copied into a `std::vector` — see erratum 1). An
+     *         owning install points it at @ref owned_slots. Stable across the table's moves for
+     *         the same reason `backing` is: a moved `unique_ptr` keeps its heap address, and a
+     *         borrowed span points outside the table entirely. */
+    std::span<const app_field_slot_t> slots{};
+    /** @brief The owning install's slot array; null for a borrowed install. A
+     *         `unique_ptr<T[]>` rather than a `vector` so the table stays the same size as
+     *         when `slots` was the vector (pointer + span == vector on both host and rv32)
+     *         and drops the vector's capacity word. Never resized: a re-install builds a
+     *         whole new table and move-assigns it under the stripe lock. */
+    std::unique_ptr<app_field_slot_t[]> owned_slots{};
     /** @brief Owned copy of the declaration bytes for the owning install (name then
      *         descriptor, concatenated per field); empty for a borrowed install whose
      *         slots view caller storage. */
@@ -1415,9 +1429,7 @@ class vertex_t {
     void set_app_fields_static(std::span<const app_field_static_t> table) {
         if (table.empty() && ext_.load(std::memory_order_acquire) == nullptr) return;
         app_field_table_t built;
-        built.slots.reserve(table.size());
-        for (const app_field_static_t& f : table)
-            built.slots.push_back(app_field_slot_t{f.name, f.access, f.descriptor});
+        built.slots = table;  // viewed in place — the borrowed install allocates NOTHING here
         vertex_ext_t& e = ensure_ext();
         const std::lock_guard lock(vertex_stripe_of(this).m);
         install_app_table(e, std::move(built));
@@ -1655,7 +1667,7 @@ class vertex_t {
      *         control-plane. */
     [[nodiscard]] static std::ptrdiff_t find_app_slot(vertex_ext_t* e, std::string_view name) {
         if (e == nullptr || e->app == nullptr) return -1;
-        const std::vector<app_field_slot_t>& slots = e->app->table.slots;
+        const std::span<const app_field_slot_t> slots = e->app->table.slots;
         for (std::size_t i = 0; i < slots.size(); ++i)
             if (slots[i].name == name) return static_cast<std::ptrdiff_t>(i);
         return -1;
@@ -1687,7 +1699,8 @@ class vertex_t {
             any_value = any_value || !f.value.empty();
         }
         t.backing.resize(total);
-        t.slots.reserve(table.size());
+        t.owned_slots = std::make_unique<app_field_slot_t[]>(table.size());
+        std::size_t si = 0;
         std::size_t off = 0;
         for (const app_field_t& f : table) {
             const std::size_t noff = off;
@@ -1697,12 +1710,12 @@ class vertex_t {
             const std::size_t doff = off;
             std::copy(f.descriptor.begin(), f.descriptor.end(), t.backing.data() + doff);
             off += f.descriptor.size();
-            t.slots.push_back(app_field_slot_t{
+            t.owned_slots[si++] = app_field_slot_t{
                 std::string_view(reinterpret_cast<const char*>(t.backing.data()) + noff,
                                  f.name.size()),
-                f.access,
-                std::span<const std::byte>(t.backing.data() + doff, f.descriptor.size())});
+                f.access, std::span<const std::byte>(t.backing.data() + doff, f.descriptor.size())};
         }
+        t.slots = std::span<const app_field_slot_t>(t.owned_slots.get(), table.size());
         if (any_value) {
             t.values = std::make_unique<std::vector<std::vector<std::byte>>>(table.size());
             for (std::size_t i = 0; i < table.size(); ++i)

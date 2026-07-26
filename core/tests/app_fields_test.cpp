@@ -493,24 +493,28 @@ void test_table_replace() {
 // owning one (identical :schema and value bytes) while storing views, not copies.
 void test_borrowed_static_install() {
     std::printf("borrowed static install, wire-invariant (ADR-0058):\n");
+
+    // Declaration storage DECLARED FIRST so it outlives `g` — which is what the borrowed
+    // contract requires and what this block used to get wrong: both were declared after the
+    // graph, so they were destroyed BEFORE it while the comment asserted the opposite. Benign
+    // then (nothing reads slots during ~graph_t) but never compliant, and now load-bearing:
+    // the runtime views the ARRAY itself, not just the bytes it points at.
+    const std::vector<std::byte> kp_desc = dtype_desc("f32");
+    const std::array<tr::graph::app_field_static_t, 2> borrowed{{
+        tr::graph::app_field_static_t{
+            .name = "kp", .access = app_access_t::RW, .descriptor = kp_desc},
+        tr::graph::app_field_static_t{.name = "secret", .access = app_access_t::WO},
+    }};
+
     graph_t g;
     const vertex_handle_t owning = g.register_vertex(path_t("/x/pid"), role_t::STORED_VALUE);
     const vertex_handle_t borrow = g.register_vertex(path_t("/y/pid"), role_t::STORED_VALUE);
-
-    // Declaration storage the caller guarantees outlives the vertices (outlives g here) —
-    // the borrowed overload stores VIEWS into exactly these bytes, never a copy.
-    const std::vector<std::byte> kp_desc = dtype_desc("f32");
 
     std::vector<app_field_t> owned;
     owned.push_back(app_field_t{.name = "kp", .access = app_access_t::RW, .descriptor = kp_desc});
     owned.push_back(app_field_t{.name = "secret", .access = app_access_t::WO});
     g.set_app_fields(owning, std::move(owned));
 
-    const std::array<tr::graph::app_field_static_t, 2> borrowed{{
-        tr::graph::app_field_static_t{
-            .name = "kp", .access = app_access_t::RW, .descriptor = kp_desc},
-        tr::graph::app_field_static_t{.name = "secret", .access = app_access_t::WO},
-    }};
     g.set_app_fields_static(borrow, borrowed);
 
     // :schema is byte-identical across the two install paths (the ADR's wire-invariance).

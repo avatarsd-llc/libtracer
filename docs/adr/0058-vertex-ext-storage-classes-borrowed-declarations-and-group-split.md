@@ -68,6 +68,47 @@ So Step 2 as shipped is the two *unconditionally-dead-for-a-leaf* groups (value 
 - **Cost.** The group-split adds a second pointer hop (hot core → slim ext → group) on *cold control-plane* paths only; the LKV read/write hot path never touches the ext. The owning read snapshot pays a cold transient copy.
 - **fn-ptr handlers stay deferred** (ADR-0047 §3, #215): `std::function` is heap-free for libtracer's `[this]`-shaped captures (measured), so converting saves no allocation; the only win is struct size (32 B → 16 B/slot), which the group-split already neutralises for the app-field case by removing handlers from that vertex's cost entirely.
 
+
+## Erratum 1 — "zero declaration RAM" was not true as implemented
+
+Step 1.2 promised that a borrowed install's "slots point straight at the caller's flash — zero
+declaration RAM". The bytes were indeed never copied, but the runtime still **copied the caller's
+`app_field_static_t` array into an owned `std::vector<app_field_slot_t>`** — and those two types
+were field-for-field identical (`std::string_view name; app_access_t access;
+std::span<const std::byte> descriptor;`), so the copy converted between a type and itself.
+
+Measured on host with the `vertex_app5` / `vertex_app5_static` gate rows, live usable-size bytes
+per vertex for a 5-field table:
+
+| | bytes | allocs |
+| --- | ---: | ---: |
+| bare leaf | 136 | 7 |
+| + owning install | 695 | 17 |
+| + borrowed install, as promised | 592 | 11 |
+| + borrowed install, after this fix | **392** | **10** |
+
+The slots vector was **the largest single resident block** on the borrowed path (200 B of the
+456 B the table added), ahead of `vertex_ext_t` (168 B) and `app_field_group_t` (88 B). The
+remaining two are irreducible: the ext block is needed by any gated vertex, and the group *is*
+the table plus its apply seam.
+
+**The fix:** the two types are unified (`app_field_static_t` is now an alias of
+`app_field_slot_t`), and `app_field_table_t::slots` becomes a `std::span` that a borrowed install
+points at the caller's array directly. The owning install keeps its copy in a
+`std::unique_ptr<app_field_slot_t[]>`, which — with the span — is the same size the vector was on
+both host and rv32, so the struct does not grow and the win is not partly given back.
+
+**The contract is correspondingly stronger, and this is a real API change:** the caller must now
+keep the **array** alive for the vertex's lifetime, not merely the `name`/`descriptor` bytes it
+points at. Wire-invariant (`:schema` serves the same verbatim bytes), so no RFC — but noted in
+`core/CHANGELOG.md`. On rv32 (`sizeof(app_field_slot_t) == 20`, measured with
+`riscv32-esp-elf-g++`) the saving is ~100-112 B per vertex including multi_heap block overhead;
+the 392/592 figures are host and do not transfer.
+
+Nothing ever mutated a slot after install — every write to `.slots` is in the two build paths —
+so viewing immutable caller storage is safe by construction, and `slots` is now
+`span<const app_field_slot_t>` so that is compiler-enforced rather than doc-enforced.
+
 ## Alternatives rejected
 
 - **Replace the owning overload with the borrowed one** (all callers pass views) — rejected: runtime-formed tables (host, dynamic config) have no static storage to point at; forcing them to fabricate it is the footgun the two-overload split exists to avoid.
