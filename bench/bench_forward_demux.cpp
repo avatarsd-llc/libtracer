@@ -188,7 +188,18 @@ std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* m
         if (i == target_pos) {
             router.add_child("net/ws-client/out", out_link);
         } else {
-            router.add_child("net/ws-client/l" + std::to_string(next_filler), filler[next_filler]);
+            // Zero-padded so every filler is the SAME LENGTH AS THE TARGET ("out", giving a
+            // 17-byte qualified name). Two separate things were wrong before. Unpadded,
+            // "l0".."l9" were 16 bytes and "l10"+ were 17, so `by_segments`'s length
+            // pre-filter rejected a varying fraction of the table before any string compare
+            // and the reported "ns per link" measured that ratio rather than the scan. And a
+            // filler that differs in length from the target is rejected on the length check
+            // alone, so it never reaches the segment compare at all — which measures the
+            // list WALK, not the scan. Matching the target's width is what makes this the
+            // honest worst case the row claims to report.
+            char fname[32];
+            std::snprintf(fname, sizeof fname, "net/ws-client/l%02zu", next_filler);
+            router.add_child(fname, filler[next_filler]);
             ++next_filler;
         }
     }

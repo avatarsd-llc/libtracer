@@ -49,6 +49,11 @@
 
 namespace tr::net {
 
+/** @brief Offsets a `dst` peek recorded for the head rebuild (defined in fwd_frame_view.hpp).
+ *         Forward-declared: the router only passes it through by pointer, so this header does
+ *         not pull in the forward-plane cluster. */
+struct fwd_pre_t;
+
 /**
  * @brief A stateless hop-by-hop FWD forwarder (RFC-0004 §A/§B, ADR-0035 slice 3).
  *
@@ -396,7 +401,7 @@ class fwd_router_t {
     template <class Cursor>
     void route_fwd_forward(std::string_view inbound_name, const child_rx_ctx_t* inbound_ctx,
                            bool from_peer, std::size_t strip_k, const Cursor& cur,
-                           transport_t& child);
+                           transport_t& child, const fwd_pre_t* pre = nullptr);
     /**
      * @brief Dispatch a multi-link control frame (ADVERTISE / COMPACT / HANDLE_NACK)
      *        rope-native (ADR-0055 §2).
