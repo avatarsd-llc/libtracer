@@ -168,13 +168,25 @@ struct mount_hit_t {
  */
 template <class Cursor>
 [[nodiscard]] mount_hit_t resolve_mount(const child_registry_t& registry, const Cursor& cur,
-                                        seg_reader_t<Cursor>& rd) {
+                                        seg_reader_t<Cursor>& rd, fwd_pre_t& pre) {
     std::array<std::pair<std::size_t, std::size_t>, tr::net::kMountPeekMax> off{};
-    const std::size_t n = peek_fwd_dst_segs(cur, off);
+    const std::size_t n = peek_fwd_dst_segs(cur, off, pre);
     if (n == 0) return {};
     std::array<std::string_view, tr::net::kMountPeekMax> seg;
     for (std::size_t i = 0; i < n; ++i) seg[i] = rd.read(off[i].first, off[i].second);
-    return resolve_mount_segs(registry, std::span<const std::string_view>(seg.data(), n));
+    mount_hit_t hit =
+        resolve_mount_segs(registry, std::span<const std::string_view>(seg.data(), n));
+    // The peek just walked these segments; record where the consumed run ENDS so the rebuild
+    // does not walk them again. A NAME body is the TLV's tail, so segment i ends at
+    // `off[i].first + off[i].second`. Only meaningful once the descent has chosen `strip_k`,
+    // which is why it is filled here rather than in the peek.
+    if (hit.link != nullptr && hit.strip_k > 0 && hit.strip_k <= n) {
+        const auto& last = off[hit.strip_k - 1];
+        pre.strip_at = last.first + last.second;
+    } else {
+        pre.valid = false;  // nothing to hand over — the rebuild parses for itself
+    }
+    return hit;
 }
 
 /**
@@ -429,10 +441,11 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
             // the rope keeps them contiguous and stitched into the reader's scratch when they
             // straddle a link; an over-long segment is not routable ⇒ fall to the terminus.
             seg_reader_t<wire::grammar::rope_cursor> rd{cur, {}, 0};
-            const mount_hit_t hit = resolve_mount(registry_, cur, rd);
+            fwd_pre_t pre;
+            const mount_hit_t hit = resolve_mount(registry_, cur, rd, pre);
             if (hit.link != nullptr) {
-                route_fwd_forward(inbound_name, inbound_ctx, from_peer, hit.strip_k, cur,
-                                  *hit.link);
+                route_fwd_forward(inbound_name, inbound_ctx, from_peer, hit.strip_k, cur, *hit.link,
+                                  &pre);
                 return;
             }
             // No child (or over-long segment) ⇒ this node is the terminus for the frame.
@@ -475,10 +488,11 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
         const wire::grammar::span_cursor cur{frame};
         {
             seg_reader_t<wire::grammar::span_cursor> rd{cur, {}, 0};
-            const mount_hit_t hit = resolve_mount(registry_, cur, rd);
+            fwd_pre_t pre;
+            const mount_hit_t hit = resolve_mount(registry_, cur, rd, pre);
             if (hit.link != nullptr) {
-                route_fwd_forward(inbound_name, inbound_ctx, from_peer, hit.strip_k, cur,
-                                  *hit.link);
+                route_fwd_forward(inbound_name, inbound_ctx, from_peer, hit.strip_k, cur, *hit.link,
+                                  &pre);
                 return;
             }
             // The dst names no mount ⇒ this node is the terminus.
@@ -551,8 +565,8 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
 template <class Cursor>
 void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
                                      const child_rx_ctx_t* inbound_ctx, bool from_peer,
-                                     std::size_t strip_k, const Cursor& cur_src,
-                                     transport_t& child) {
+                                     std::size_t strip_k, const Cursor& cur_src, transport_t& child,
+                                     const fwd_pre_t* pre) {
     // All offsets, no decoded tree: the shrunk-dst / grown-src head rebuild lives in
     // fwd_frame_view.hpp (rebuild_fwd_forward — unit-tested directly); this hop only
     // resolves the child and scatter-gathers the result. Reads AND the egress go
@@ -584,12 +598,14 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     const child_registry_t::child_t* const inbound =
         inbound_ctx != nullptr ? nullptr : registry_.entry_by_name(inbound_name);
     const auto rebuilt =
-        !mount.empty() ? rebuild_fwd_forward(cur_src, mount,
-                                             from_peer ? inbound_name : std::string_view{}, strip_k)
+        !mount.empty()
+            ? rebuild_fwd_forward(cur_src, mount, from_peer ? inbound_name : std::string_view{},
+                                  strip_k, pre)
         : inbound != nullptr && !inbound->mount_tlv.empty()
             ? rebuild_fwd_forward(cur_src, std::span<const std::byte>(inbound->mount_tlv),
-                                  std::string_view{}, strip_k)
-            : rebuild_fwd_forward(cur_src, std::span<const std::byte>{}, inbound_name, strip_k);
+                                  std::string_view{}, strip_k, pre)
+            : rebuild_fwd_forward(cur_src, std::span<const std::byte>{}, inbound_name, strip_k,
+                                  pre);
     if (!rebuilt) return;        // not a forwardable FWD ⇒ drop (callers pre-peeked)
     if (!rebuilt->ok()) return;  // malformed oversized op ⇒ drop, no overrun
 

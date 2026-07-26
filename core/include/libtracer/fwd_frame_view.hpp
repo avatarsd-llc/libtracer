@@ -93,6 +93,43 @@ template <class Cursor>
 inline constexpr std::size_t kMountPeekMax = 4;
 
 /**
+ * @brief What a `dst` peek already learned about a FWD frame, so the head rebuild need not
+ *        re-derive it (ADR-0038 inv. #1 — the forward hop parses each header ONCE).
+ *
+ * A forward hop used to walk the same TLV headers twice: `peek_fwd_dst_segs` read the FWD
+ * header, the op VALUE, the dst PATH and every leading dst segment to decide where the frame
+ * goes — then @ref rebuild_fwd_forward threw all of it away and re-read the identical bytes to
+ * build the outgoing heads. Profiling a 1-link hop put ~88% of it in header parsing, most of it
+ * that duplicate. Carrying the offsets forward is what removes it.
+ *
+ * Offsets, not spans, for the same reason the peeks are: the source may be a rope, so a caller
+ * re-slices from its own cursor. Filled by the `peek_fwd_dst_segs` overload that takes one;
+ * @ref strip_at is filled by the CALLER once the mount descent has decided how many segments
+ * this hop consumes, since the peek runs before that is known.
+ */
+struct fwd_pre_t {
+    bool valid = false;       /**< @brief False ⇒ nothing was learned; rebuild parses itself. */
+    std::size_t body_end = 0; /**< @brief End of the FWD body. */
+    std::size_t op_pos = 0;   /**< @brief Offset of the op VALUE TLV. */
+    std::size_t op_total = 0; /**< @brief Its total size. */
+    std::size_t op_body_off = 0; /**< @brief Its body — read to test for REPLY. */
+    /** @brief Its body length. Carried rather than re-checked so the rebuild keeps its own
+     *         `body_len == 0` rejection: the peek does NOT reject an empty op (such a frame
+     *         falls through to the terminus decode today), and making the peek stricter would
+     *         silently turn a dropped frame into a terminus one. */
+    std::size_t op_body_len = 0;
+    std::size_t dst_body_off = 0; /**< @brief First byte of the dst PATH body. */
+    std::size_t dst_end = 0;      /**< @brief End of the dst PATH body. */
+    std::size_t after_dst = 0;    /**< @brief First byte after the dst PATH TLV. */
+    /** @brief Where the surviving `dst` starts after this hop consumes its leading segments —
+     *         i.e. the end of segment `strip_k - 1`, or @ref dst_body_off when nothing is
+     *         stripped. Filled by the caller after the mount descent; leaving it 0 with
+     *         `valid` set would silently forward an unshrunk dst, so the rebuild treats a
+     *         `strip_at` below @ref dst_body_off as "not supplied" and walks the segments. */
+    std::size_t strip_at = 0;
+};
+
+/**
  * @brief The leading `dst` segments of a FWD, read by OFFSET with no allocation.
  *
  * The strip-K generalization of @ref peek_fwd_first_dst_seg (ADR-0061): a mount path is
@@ -105,6 +142,7 @@ inline constexpr std::size_t kMountPeekMax = 4;
  * @tparam Cursor A grammar byte-source cursor (span or rope).
  * @param  cur    The cursor positioned at the frame's first byte.
  */
+
 template <class Cursor>
 [[nodiscard]] std::size_t peek_fwd_dst_segs(
     const Cursor& cur, std::array<std::pair<std::size_t, std::size_t>, kMountPeekMax>& out) {
@@ -126,6 +164,49 @@ template <class Cursor>
         out[n++] = {seg_h->body_off, seg_h->body_len};
         pos += seg_h->total;
     }
+    return n;
+}
+
+/**
+ * @brief `peek_fwd_dst_segs`, additionally recording what it parsed into @p pre.
+ *
+ * Identical result and identical rejections — it only stops throwing the offsets away, so the
+ * head rebuild can skip re-reading the same four headers. @p pre is left `valid = false` on
+ * every path that returns 0, so a caller cannot pass stale offsets to the rebuild.
+ */
+template <class Cursor>
+[[nodiscard]] std::size_t peek_fwd_dst_segs(
+    const Cursor& cur, std::array<std::pair<std::size_t, std::size_t>, kMountPeekMax>& out,
+    fwd_pre_t& pre) {
+    pre = fwd_pre_t{};
+    const auto fwd_h = read_fwd_header(cur, 0);
+    if (!fwd_h || fwd_h->type != wire::type_t::FWD || !fwd_h->opt.pl) return 0;
+    const std::size_t body_end = fwd_h->body_off + fwd_h->body_len;
+    const auto op_h = read_fwd_header(cur, fwd_h->body_off);
+    if (!op_h || op_h->type != wire::type_t::VALUE) return 0;
+    const std::size_t dst_pos = fwd_h->body_off + op_h->total;
+    if (dst_pos >= body_end) return 0;
+    const auto dst_h = read_fwd_header(cur, dst_pos);
+    if (!dst_h || dst_h->type != wire::type_t::PATH || dst_h->body_len == 0) return 0;
+    const std::size_t dst_end = dst_h->body_off + dst_h->body_len;
+    std::size_t pos = dst_h->body_off;
+    std::size_t n = 0;
+    while (n < kMountPeekMax && pos < dst_end) {
+        const auto seg_h = read_fwd_header(cur, pos);
+        if (!seg_h || seg_h->type != wire::type_t::NAME) break;
+        out[n++] = {seg_h->body_off, seg_h->body_len};
+        pos += seg_h->total;
+    }
+    pre.valid = true;
+    pre.body_end = body_end;
+    pre.op_pos = fwd_h->body_off;
+    pre.op_total = op_h->total;
+    pre.op_body_off = op_h->body_off;
+    pre.op_body_len = op_h->body_len;
+    pre.dst_body_off = dst_h->body_off;
+    pre.dst_end = dst_end;
+    pre.after_dst = dst_pos + dst_h->total;
+    pre.strip_at = dst_h->body_off;  // caller overwrites once strip_k is known
     return n;
 }
 
@@ -438,22 +519,53 @@ template <class Cursor>
 [[nodiscard]] std::optional<fwd_rebuild_t> rebuild_fwd_forward(const Cursor& cur,
                                                                std::span<const std::byte> mount_tlv,
                                                                std::string_view extra_seg,
-                                                               std::size_t strip_k) {
-    const auto fwd_h = read_fwd_header(cur, 0);
-    if (!fwd_h || fwd_h->type != wire::type_t::FWD) return std::nullopt;
-    const std::size_t body_end = fwd_h->body_off + fwd_h->body_len;
+                                                               std::size_t strip_k,
+                                                               const fwd_pre_t* pre = nullptr) {
+    // The frame's leading headers were already parsed by the `dst` peek that routed this hop.
+    // When the caller hands them over, re-reading them is pure duplicated work — profiling put
+    // ~88% of a 1-link forward hop in header parsing, most of it exactly this. There is still
+    // ONE rebuild: the branch below only chooses where the four offsets come from, and every
+    // rejection the self-parsing path applies is applied to the carried values too (see the
+    // `op_body_len` note on fwd_pre_t — the peek deliberately does not reject an empty op, so
+    // that check has to live here or a malformed frame would change fate).
+    std::size_t body_end = 0;
+    std::size_t op_pos = 0;
+    std::size_t op_total = 0;
+    std::size_t op_body_off = 0;
+    std::size_t dst_body_off = 0;
+    std::size_t dst_end = 0;
+    std::size_t pos = 0;
 
-    std::size_t pos = fwd_h->body_off;
-    const auto op_h = read_fwd_header(cur, pos);
-    if (!op_h || op_h->type != wire::type_t::VALUE || op_h->body_len == 0) return std::nullopt;
-    const std::size_t op_pos = pos;
+    if (pre != nullptr && pre->valid) {
+        if (pre->op_body_len == 0) return std::nullopt;
+        body_end = pre->body_end;
+        op_pos = pre->op_pos;
+        op_total = pre->op_total;
+        op_body_off = pre->op_body_off;
+        dst_body_off = pre->dst_body_off;
+        dst_end = pre->dst_end;
+        pos = pre->after_dst;
+    } else {
+        const auto fwd_h = read_fwd_header(cur, 0);
+        if (!fwd_h || fwd_h->type != wire::type_t::FWD) return std::nullopt;
+        body_end = fwd_h->body_off + fwd_h->body_len;
+
+        pos = fwd_h->body_off;
+        const auto op_h = read_fwd_header(cur, pos);
+        if (!op_h || op_h->type != wire::type_t::VALUE || op_h->body_len == 0) return std::nullopt;
+        op_pos = pos;
+        op_total = op_h->total;
+        op_body_off = op_h->body_off;
+        pos += op_h->total;
+
+        const auto dst_h = read_fwd_header(cur, pos);
+        if (!dst_h || dst_h->type != wire::type_t::PATH) return std::nullopt;
+        dst_body_off = dst_h->body_off;
+        dst_end = dst_h->body_off + dst_h->body_len;
+        pos += dst_h->total;
+    }
     const bool is_reply =
-        static_cast<graph::fwd_op_t>(cur.byte_at(op_h->body_off)) == graph::fwd_op_t::REPLY;
-    pos += op_h->total;
-
-    const auto dst_h = read_fwd_header(cur, pos);
-    if (!dst_h || dst_h->type != wire::type_t::PATH) return std::nullopt;
-    pos += dst_h->total;
+        static_cast<graph::fwd_op_t>(cur.byte_at(op_body_off)) == graph::fwd_op_t::REPLY;
 
     fwd_rebuild_t r;
     if (pos < body_end) {
@@ -474,14 +586,20 @@ template <class Cursor>
     r.src_body_off = src_h->body_off;
     r.src_body_len = src_h->body_len;
 
-    // The K leading dst segments (NAMEs) this hop consumes.
-    const std::size_t dst_end = dst_h->body_off + dst_h->body_len;
-    std::size_t strip_at = dst_h->body_off;
-    for (std::size_t i = 0; i < strip_k; ++i) {
-        if (strip_at >= dst_end) return std::nullopt;  // dst shorter than the mount
-        const auto seg_h = read_fwd_header(cur, strip_at);
-        if (!seg_h || seg_h->type != wire::type_t::NAME) return std::nullopt;
-        strip_at += seg_h->total;
+    // The K leading dst segments (NAMEs) this hop consumes. The peek already walked exactly
+    // these, so a caller that recorded where they end hands the answer over; `strip_at` below
+    // `dst_body_off` means it did not, and the walk runs as before.
+    std::size_t strip_at = dst_body_off;
+    if (pre != nullptr && pre->valid && pre->strip_at >= dst_body_off) {
+        strip_at = pre->strip_at;
+        if (strip_at > dst_end) return std::nullopt;  // dst shorter than the mount
+    } else {
+        for (std::size_t i = 0; i < strip_k; ++i) {
+            if (strip_at >= dst_end) return std::nullopt;  // dst shorter than the mount
+            const auto seg_h = read_fwd_header(cur, strip_at);
+            if (!seg_h || seg_h->type != wire::type_t::NAME) return std::nullopt;
+            strip_at += seg_h->total;
+        }
     }
     r.rem_dst_off = strip_at;
     r.rem_dst_len = dst_end - strip_at;
@@ -500,14 +618,14 @@ template <class Cursor>
     const std::size_t new_dst_total = (new_dst_body > 0xFFFFu ? 6u : 4u) + new_dst_body;
     const std::size_t new_src_total = (new_src_body > 0xFFFFu ? 6u : 4u) + new_src_body;
     const std::size_t new_fwd_body =
-        op_h->total + new_dst_total + r.sel_total + new_src_total + r.tail_len;
+        op_total + new_dst_total + r.sel_total + new_src_total + r.tail_len;
 
     // head1: FWD header + op (copied) + new (shrunk) dst header. head2: new (grown)
     // src header + the prepended inbound NAME. Both fixed stack buffers — ZERO heap
     // on the forward hop (ADR-0038 inv. #2). An overflow (a malformed op TLV larger
     // than the buffer) yields an empty span ⇒ the caller drops, never a buffer overrun.
     r.head1.header(wire::type_t::FWD, new_fwd_body);
-    cur.for_each_span(op_pos, op_h->total, [&](std::span<const std::byte> s) { r.head1.raw(s); });
+    cur.for_each_span(op_pos, op_total, [&](std::span<const std::byte> s) { r.head1.raw(s); });
     r.head1.header(wire::type_t::PATH, new_dst_body);
 
     r.head2.header(wire::type_t::PATH, new_src_body);
