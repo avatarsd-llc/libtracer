@@ -252,7 +252,7 @@ A generic list would have no semantic meaning of its own — an un-named default
 
 ## `0x06` — PATH
 
-A hierarchical address. Structured TLV (`opt.PL=1`) whose children are NAME TLVs, one per segment. Distinct from a generic structured TLV in that the parser validates path-segment constraints up-front.
+A hierarchical address. Structured TLV (`opt.PL=1`) whose children are NAME TLVs, one per segment. Distinct from a generic structured TLV in that the constraints below are *enforced*, not merely conventional — see [where](#where-the-path-constraints-are-enforced).
 
 ### Payload layout
 
@@ -275,6 +275,33 @@ PATH (PL=1) {
 - Total path length (sum of NAME bytes + segment separators) ≤ 1024 bytes.
 - Segment count ≤ 32.
 
+### Where the PATH constraints are enforced
+
+An earlier revision of this section said *"the parser validates path-segment constraints
+up-front"*. That was a **description of behaviour that did not happen**, and it papered
+over a real defect for as long as it stood (#436): nothing checked the child type at any
+layer, and a resolver silently re-materialized a `PATH{VALUE "sensor"}` into the lookup key
+of the legal `PATH{NAME "sensor"}`, so two byte-different PATHs addressed one vertex.
+
+The corrected statement, which describes what implementations actually do:
+
+- **The codec does not enforce these constraints, and is not expected to.** A PATH's
+  children are decoded as a generic child sequence; the bytes above are well-formed TLV and
+  round-trip byte-identically. That is deliberate — the constraint is about what an address
+  *means*, not about what the octets *are*, and it keeps codec-only cores (TypeScript,
+  Rust) free of resolver semantics.
+- **The resolver enforces the child-type rule**, when it turns a PATH into a vertex lookup
+  key. A non-NAME child makes the address unspellable, so the op answers
+  `ERROR{tr::path::invalid}` (`0x0021`) — *not* `tr::path::not_found`, which would wrongly
+  suggest the address was well-formed but absent. Enforcement precedes any write-create:
+  a `WRITE` to an illegally-spelled path creates nothing.
+- **The length and segment-count limits** are bounded where the address is constructed or
+  admitted, not at decode.
+
+Conformance vector: `path/path-value-children-illegal` carries the illegal spelling next to
+`path/path-sensor-temp`'s legal one — the same 22 bytes, differing only in each child's
+type byte.
+
 ### Where it appears
 
 - Inside SUBSCRIBER as `target_path`.
@@ -286,7 +313,7 @@ PATH (PL=1) {
 A path may be expressed two ways:
 
 - **String form**: `"/sensor/temp"` — a UTF-8 byte string with `/` separators. Used at the API surface for ergonomics. Stored as a single VALUE TLV when transported as data.
-- **PATH-TLV form**: a PATH TLV (structured, NAME children). Used inside structured TLVs (SUBSCRIBER, FWD) where the parser needs to validate segments individually.
+- **PATH-TLV form**: a PATH TLV (structured, NAME children). Used inside structured TLVs (SUBSCRIBER, FWD) where segments must be addressable individually rather than re-split from a byte string.
 
 Both forms canonicalize to the same internal representation. Implementations MUST accept either form where a path is expected.
 

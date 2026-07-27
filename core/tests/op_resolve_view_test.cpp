@@ -22,6 +22,7 @@
  * verify-at-access divergence (ADR-0053 §4) that 3c-iii wires in.
  */
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -66,6 +67,24 @@ std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     for (std::string_view s : segs) {
         const std::vector<std::byte> n = b_name(s);
         body.insert(body.end(), n.begin(), n.end());
+    }
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    return out;
+}
+/**
+ * @brief An ILLEGAL PATH whose children are VALUE TLVs carrying the segment text (#436).
+ *
+ * `reference/05` §PATH: "Each child MUST be a NAME TLV; other types are invalid in PATH
+ * context". Before the fix, the resolver's non-canonical fallback re-emitted every child
+ * body through `emit_name` regardless of type, so this spelling produced the SAME lookup
+ * key as `b_path` and served the same vertex.
+ */
+std::vector<std::byte> b_path_value_children(std::initializer_list<std::string_view> segs) {
+    std::vector<std::byte> body;
+    for (std::string_view s : segs) {
+        const auto* p = reinterpret_cast<const std::byte*>(s.data());
+        tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(p, s.size()));
     }
     std::vector<std::byte> out;
     tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
@@ -337,6 +356,70 @@ int main() {
                  b_fwd(fwd_op_t::WRITE, b_path({"fresh", "leaf"}), b_path({"reply-ep"}), {},
                        b_value({0x5A})),
                  "cli");
+
+    // #436 — a PATH whose children are VALUE TLVs is ILLEGAL (reference/05 §PATH: "Each
+    // child MUST be a NAME TLV"). Both tiers must reject it identically...
+    differential(
+        "READ PATH{VALUE} illegal child (ERROR INVALID_PATH)", seed_temp_value,
+        b_fwd(fwd_op_t::READ, b_path_value_children({"sensor", "temp"}), b_path({"reply-ep"})));
+
+    // ...and — the part that actually matters — it must NOT resolve to the vertex the
+    // legal spelling names. Before the fix these two replies were the same length and both
+    // carried the stored value, because the fallback rewrote VALUE children into NAMEs:
+    // two byte-different PATHs addressed one vertex, breaking reference/02's injectivity.
+    {
+        std::printf("#436 injectivity — PATH{VALUE} must not alias PATH{NAME}:\n");
+        const auto legal = b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), b_path({"reply-ep"}));
+        const auto illegal =
+            b_fwd(fwd_op_t::READ, b_path_value_children({"sensor", "temp"}), b_path({"reply-ep"}));
+        const auto legal_reply = resolve_arena_flat(seed_temp_value, legal, {});
+        const auto illegal_reply = resolve_arena_flat(seed_temp_value, illegal, {});
+        check(!legal_reply.empty() && !illegal_reply.empty(), "both spellings produced a reply");
+
+        // NOTE: `legal_reply != illegal_reply` is NOT a useful assertion here and is
+        // deliberately absent. It held before the fix too — the reply echoes the request's
+        // dst as its own src, and the two dst spellings differ in bytes, so the replies
+        // differed while both still served the value. Payload identity is what detects the
+        // aliasing; reply inequality only detects that the routes were spelled differently.
+
+        // The stored value is VALUE u32=1234 (seed_temp_value). The legal read returns it;
+        // the illegal one must not, whatever else its error reply contains.
+        const std::vector<std::byte> stored = b_value({0xD2, 0x04, 0x00, 0x00});
+        const auto contains = [](const std::vector<std::byte>& hay,
+                                 const std::vector<std::byte>& needle) {
+            return std::search(hay.begin(), hay.end(), needle.begin(), needle.end()) != hay.end();
+        };
+        check(contains(legal_reply, stored), "the LEGAL spelling still serves the stored value");
+        check(!contains(illegal_reply, stored),
+              "the ILLEGAL spelling does not serve the stored value");
+
+        // And it fails as a malformed ADDRESS (INVALID_PATH), not as an unknown one
+        // (NOT_FOUND) — the distinction a peer needs to tell "you spelled it wrong" from
+        // "it is not here".
+        const auto notfound = resolve_arena_flat(
+            seed_temp_empty,
+            b_fwd(fwd_op_t::READ, b_path({"nope", "missing"}), b_path({"reply-ep"})), {});
+        check(!notfound.empty() && illegal_reply != notfound,
+              "INVALID_PATH is distinguishable from the NOT_FOUND reply");
+    }
+
+    // A WRITE must not mkdir-p an illegally-spelled path either: the write-creates branch
+    // (RFC-0005) sits AFTER the key build, so the rejection has to come first.
+    differential("WRITE PATH{VALUE} illegal child (ERROR, no write-create)", seed_temp_empty,
+                 b_fwd(fwd_op_t::WRITE, b_path_value_children({"fresh", "leaf"}),
+                       b_path({"reply-ep"}), {}, b_value({0x5A})),
+                 "cli");
+    {
+        graph_t g;
+        seed_temp_empty(g);
+        op_resolver_t r(g);
+        const auto wframe = b_fwd(fwd_op_t::WRITE, b_path_value_children({"fresh", "leaf"}),
+                                  b_path({"reply-ep"}), {}, b_value({0x5A}));
+        const auto arena = tr::wire::decode_into(wframe, *std::pmr::get_default_resource());
+        (void)r.resolve(*arena, "cli");
+        check(!g.find(path_t::parse("/fresh/leaf")->key()).has_value(),
+              "the rejected WRITE created no vertex (rejection precedes write-create)");
+    }
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");

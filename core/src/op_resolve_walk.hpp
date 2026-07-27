@@ -523,15 +523,37 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
  *        foreign encoder's LL-widened / trailer-carrying NAMEs).
  *
  * Our own encoders always produce the canonical form.
+ *
+ * @par Why the fallback checks the child's TYPE (#436)
+ * "Non-canonical" is two different things wearing one flag. `is_canonical_name`
+ * (`tlv_arena.cpp:20`) demands `type == NAME && opt == {}`, so a PATH is non-canonical
+ * either because a child is a legal NAME carrying options — an LL-widened length or a
+ * trailer, which is exactly what this fallback exists to normalize — or because a child is
+ * **not a NAME at all**, which `reference/05` §PATH forbids: *"Each child MUST be a NAME
+ * TLV; other types are invalid in PATH context"* (normative by incorporation, ADR-0007).
+ *
+ * Re-emitting blindly conflated the two. `wire::emit_name` was called on every child body
+ * regardless of type, so an illegal `PATH{VALUE "sensor"}` was silently REWRITTEN into the
+ * legal `PATH{NAME "sensor"}`'s key and resolved `/sensor` — measured, before this fix, as
+ * a `RESULT` carrying the stored value rather than an error. That breaks the injectivity
+ * `reference/02` depends on: two byte-different PATHs addressed one vertex, so any peer,
+ * cache or router keyed on PATH bytes had two spellings for one address.
+ *
+ * The fallback is still needed for the first case, so the fix is not to delete it — it is
+ * to reject a non-NAME child before re-emitting it.
+ *
+ * @retval INVALID_PATH A child is not a NAME TLV.
  */
 template <class N>
-[[nodiscard]] std::span<const std::byte> path_lookup_key(const N& path,
-                                                         std::vector<std::byte>& fallback) {
+[[nodiscard]] result_t<std::span<const std::byte>> path_lookup_key(
+    const N& path, std::vector<std::byte>& fallback) {
     if (path.canonical_path()) return path.body();
     auto ch = path.children();
-    for (std::optional<N> seg = ch.next(); seg; seg = ch.next())
+    for (std::optional<N> seg = ch.next(); seg; seg = ch.next()) {
+        if (seg->type() != type_t::NAME) return std::unexpected(status_t::INVALID_PATH);
         wire::emit_name(fallback, seg->body());
-    return fallback;
+    }
+    return std::span<const std::byte>(fallback);
 }
 
 /**
@@ -577,7 +599,13 @@ template <class N>
     // canonical PATH (ADR-0041 §3: the frame IS the key). Local-only: a dst
     // naming a transport child / unknown path is not local => ERROR(NOT_FOUND).
     std::vector<std::byte> key_fallback;
-    const std::span<const std::byte> dst_key = path_lookup_key(req.dst, key_fallback);
+    // An illegal non-NAME child makes the dst unaddressable, not merely unknown: it is a
+    // malformed address, so it answers INVALID_PATH rather than NOT_FOUND, and it answers
+    // BEFORE the write-creates branch below — a WRITE must not mkdir-p a path the spec
+    // says cannot be spelled that way (#436).
+    const result_t<std::span<const std::byte>> dst_key_r = path_lookup_key(req.dst, key_fallback);
+    if (!dst_key_r) return assemble_error(reply_dst_wire, reply_src_wire, dst_key_r.error());
+    const std::span<const std::byte> dst_key = *dst_key_r;
     std::optional<vertex_handle_t> found = graph.find(dst_key);
     if (!found) {
         // Write-creates (RFC-0005): a remote DATA write (no :field selector) to a
