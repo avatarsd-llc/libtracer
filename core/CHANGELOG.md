@@ -14,6 +14,24 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **A nothrow control-plane block seam: `tr::mem::block_source_t` (#551, slice 1).** New header
+  `libtracer/mem_source.hpp` with `block_source_t` (`try_alloc` / `release`, both `noexcept`,
+  `nullptr` on exhaustion), the default `heap_source_t`, and `tr::mem::heap_source()`.
+  `graph_t` gained a THIRD, **appended** constructor parameter
+  (`mem::block_source_t* ctl = &mem::heap_source()`) and a `control_source()` accessor.
+  Appended, so every existing `graph_t{...}` call site — including the shipping
+  `graph_t graph{&mr};` — compiles unchanged.
+
+  Why a new type rather than reusing `std::pmr::memory_resource` with a documented
+  may-return-null contract: `memory_resource::allocate` is annotated `returns_nonnull`, so
+  the caller's null check is undefined behaviour and **is deleted at `-Os`/`-Oz`** —
+  measured on `riscv32-esp-elf-g++ 15.2.0`, where the soft-fail branch survives at
+  `-O0`/`-O1`/`-O2`/`-O3` and vanishes at the two size-optimized levels. `-Os` is what an
+  ESP-IDF node ships and the one level no test executes at.
+
+  **No call site draws from the seam yet** — this slice wires it only. The registration
+  allocations that motivated #551 migrate next.
+
 - **The LKV publish takes no lock when nobody is awaiting (ADR-0064 §1, #555).** A non-`STREAM`
   write now bumps `write_seq_` with one `fetch_add(seq_cst)`, reads the stripe's `waiters`
   count, and returns **without acquiring the stripe mutex** when it is zero. `#370` already

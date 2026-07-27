@@ -76,6 +76,7 @@ add_library(libtracer STATIC
     src/tlv_arena.cpp
     src/backend_set.cpp
     src/mem_heap.cpp
+    src/mem_source.cpp
     src/mem_pool.cpp
     src/rope.cpp
     src/rope_decode.cpp

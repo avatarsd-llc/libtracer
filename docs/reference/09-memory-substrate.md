@@ -224,6 +224,47 @@ When a segment's refcount drops to zero (L1 machinery, [08-views-and-ownership.m
 
 L0 is ignorant of L1 view semantics; L1 is ignorant of how L0 honors `destroy`. The protocol's zero-copy story is the contract that they cooperate via this seam.
 
+### The second L0 seam: `block_source_t` (control-plane blocks)
+
+`mem_backend_t` vends **refcounted `segment_t`s** — the right shape for payload bytes that many views share. The control plane is the other shape: the objects a node builds when it *registers* something (a vertex, a route label, a reassembly entry) have exactly **one owner** and no header, so a refcount on them is pure overhead. They are served by a second, deliberately smaller seam:
+
+```cpp
+namespace tr::mem {
+
+// The nothrow control-plane block seam. Raw bytes, single owner, no refcount.
+class block_source_t {
+   public:
+    explicit constexpr block_source_t(const char* name) noexcept;
+    virtual ~block_source_t() = default;
+
+    // Storage for `bytes`, aligned to at least `align` — NOTHROW.
+    // nullptr means exhaustion: the caller answers BACKPRESSURE. It never
+    // falls back to the global heap and never aborts.
+    [[nodiscard]] virtual void* try_alloc(std::size_t bytes, std::size_t align) noexcept = 0;
+
+    // Sized reclaim: `bytes`/`align` MUST match the try_alloc that served the
+    // block, so a bump or pool source needs no per-block header.
+    virtual void release(void* p, std::size_t bytes, std::size_t align) noexcept = 0;
+
+    [[nodiscard]] const char* name() const noexcept;
+};
+
+// The process-wide default: the platform heap, nothrow.
+[[nodiscard]] block_source_t& heap_source() noexcept;
+
+}  // namespace tr::mem
+```
+
+Why it is a distinct type rather than a `std::pmr::memory_resource` with a documented "may return null" contract — the question is not stylistic, and the answer is measurable. `memory_resource::allocate` is annotated `__attribute__((__returns_nonnull__))` in libstdc++, so a caller's `if (p == nullptr)` is undefined behaviour and the optimizer may delete it. On `riscv32-esp-elf-g++ 15.2.0` with the deployment flags it does exactly that, and **only at the size-optimized levels**:
+
+| `-O0` | `-O1` | `-O2` | `-O3` | `-Os` | `-Oz` |
+| --- | --- | --- | --- | --- | --- |
+| check kept | kept | kept | kept | **deleted** | **deleted** |
+
+`-Os` is what an ESP-IDF node ships (`CONFIG_COMPILER_OPTIMIZATION_SIZE`). A seam whose failure signal disappears at exactly the optimization level the target uses is not a seam, so the control plane gets its own type, whose `try_alloc` carries no such annotation and whose name cannot be confused with `allocate` at a call site.
+
+The two seams are injected independently and a node may point both at the same underlying store ("one slab, whole stack") or split them.
+
 ---
 
 ## Backend catalog

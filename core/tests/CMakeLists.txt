@@ -17,6 +17,14 @@ target_link_libraries(byteorder_test PRIVATE libtracer)
 libtracer_test_warnings(byteorder_test)
 add_test(NAME byteorder COMMAND byteorder_test)
 
+# The nothrow control-plane block seam (mem_source.hpp, #551) — its contract, the
+# structural "not a memory_resource" assertions the ruling rests on, and the
+# appended graph_t parameter's zero-diff promise.
+add_executable(mem_source_test mem_source_test.cpp)
+target_link_libraries(mem_source_test PRIVATE libtracer)
+libtracer_test_warnings(mem_source_test)
+add_test(NAME mem_source COMMAND mem_source_test)
+
 # u32-length-prefix stream reassembler (length_prefix_framer.hpp) — the extracted
 # transport_quic/webtransport RX state machine, tested without a live connection.
 add_executable(length_prefix_framer_test length_prefix_framer_test.cpp)

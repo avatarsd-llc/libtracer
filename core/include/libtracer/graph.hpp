@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/vertex.hpp"
@@ -169,11 +170,33 @@ class graph_t {
      * (the BACKPRESSURE signal), and the write rejects rather than silently falling
      * back to the heap (§3). @p mr and @p value_backend must both outlive the graph
      * and every value handle obtained from it.
+     *
+     * @param ctl The #551 nothrow control-plane seam every FAILABLE control-plane
+     *        allocation draws from: vertex registration first, then the
+     *        `route_handle` label tables, `tlv_arena` nodes, `fwd_router` iov and
+     *        `can_reassembly` maps as each migrates. On exhaustion it returns
+     *        `nullptr` and the operation answers BACKPRESSURE, so a peer's CREATE
+     *        frame can no longer reboot a `-fno-exceptions` node. Deliberately a
+     *        DIFFERENT C++ type from @p mr so the two contracts (must-not-be-null
+     *        vs may-be-null) cannot be transposed by a one-token edit, and so
+     *        retiring @p mr later is a compile error rather than a silent rebind.
+     *        Appended, not prepended, so every existing `graph_t{&mr}` call site
+     *        compiles unchanged. Must outlive the graph, like the other two.
      */
     explicit graph_t(std::pmr::memory_resource* mr = std::pmr::get_default_resource(),
-                     mem::mem_backend_t* value_backend = &mem::heap_backend());
+                     mem::mem_backend_t* value_backend = &mem::heap_backend(),
+                     mem::block_source_t* ctl = &mem::heap_source());
     graph_t(const graph_t&) = delete;
     graph_t& operator=(const graph_t&) = delete;
+
+    /**
+     * @brief The injected #551 nothrow control-plane seam (@ref tr::mem::block_source_t).
+     *
+     * Exposed so a host can name it in a memory census and so the wiring is
+     * observable without reaching into the graph's state. Callers inside the
+     * library draw from `ctl_` directly.
+     */
+    [[nodiscard]] mem::block_source_t& control_source() const noexcept { return *ctl_; }
 
     /**
      * @brief Register a vertex at a known-good @p path LITERAL, parsing nothing further (any
@@ -933,6 +956,21 @@ class graph_t {
     // assign has marked anything — losing a race with a concurrent mark_pending leaves the
     // mark for the next sweep, an ordering the locked erase already permitted (ADR-0057).
     std::atomic<std::size_t> pending_count_{0};
+    /** @brief The #551 nothrow control-plane block seam. Host-owned; outlives the
+     *         graph. Defaults to the platform heap, so behaviour is byte-identical
+     *         until a host injects a bounded source — except that exhaustion is a
+     *         `nullptr` return rather than the `-fno-exceptions` abort stub.
+     *         No call site draws from it yet; the migration order is in the ctor
+     *         docs. Kept a DIFFERENT type from `mr_` on purpose (see
+     *         @ref tr::mem::block_source_t).
+     *
+     *         LAST on purpose: no hot path reads it, so declaring it here keeps
+     *         every other member at the byte offset it had before this seam
+     *         existed. A cold pointer inserted mid-object would shift `root_` and
+     *         everything after it, which is a layout change the forward-hop bench
+     *         can see and nothing gains from.
+     */
+    mem::block_source_t* ctl_ = &mem::heap_source();
 };
 
 }  // namespace tr::graph
