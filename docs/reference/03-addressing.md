@@ -114,7 +114,7 @@ If stage 1 fails: `ERROR{tr::path::not_found}`. If stage 2 fails: `ERROR{tr::sch
 
 - `read("/x:subscribers[0]")` returns the SUBSCRIBER TLV at slot 0, or `STATUS=ERROR(NOT_FOUND)` if empty.
 - `read("/x:subscribers[]")` returns a `PL=1` reply whose children are all populated SUBSCRIBER slots, in slot-order.
-- `write("/x:subscribers[3]", tlv)` places the TLV at slot 3, replacing any existing entry.
+- `write("/x:subscribers[3]", …)` **CLEARS** slot 3 — it is the unsubscribe, and the payload is not inspected. There is no set-a-slot surface; see [02 §writing `:subscribers[N]`](02-graph-model.md#writing-subscribers-n-unsubscribes-it-does-not-register).
 - `write("/x:subscribers[]", tlv)` allocates the next free slot and places the TLV there. The caller can recover the chosen index by reading `:subscribers[]` and looking for their TLV (typically by including a unique subscriber-id NAME in the SUBSCRIBER record).
 
 ### Atomicity of multi-field writes

@@ -42,3 +42,9 @@ All header emission converges on `opt_t` + one cursor-capable emit primitive (`k
 - CAN delivers its reassembled group and WS its assembled frame as ropes that decode **without flattening** — the precondition for [ADR-0047](0047-build-time-closed-module-sets-compile-time-seams.md) §3's rope tier doing anything useful end-to-end.
 - `reference/08` §cast and the frame/arena module docs are updated in the same change; the glossary needs no edit (it already promised this decode).
 - Conformance vectors are unaffected (no wire change); the differential fuzzers gain a rope-source mode (same bytes split at adversarial link boundaries MUST decode identically to the contiguous case — including mid-header splits).
+
+## Erratum — "zero-heap under a stack `monotonic_buffer_resource`" names a shape that was removed
+
+*(2026-07-27, [#588](https://github.com/avatarsd-llc/libtracer/issues/588).)*
+
+§2's characterisation of the terminus arena sink is right about the property and stale about the mechanism. A `monotonic_buffer_resource` over a stack buffer is zero-heap **until the buffer runs out**, at which point it draws from a throwing upstream — on a `-fno-exceptions` target, an `abort()` a peer can provoke by choosing the frame's depth. The walk stack, the sink's open-node stack and the arena's node array now all draw from a `tr::mem::block_source_t`, and the zero-heap composition is a `bump_source_t` over the same stack buffer with `null_source()` upstream. The grammar and the descent are unchanged; only where the stack's spill comes from moved. See [ADR-0065](0065-failable-allocation-gets-its-own-seam-block-source.md) and [ADR-0041](0041-terminus-arena-decode-span-contract.md)'s erratum.

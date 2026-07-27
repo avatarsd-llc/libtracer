@@ -454,7 +454,12 @@ A retired path may be **revived** by a later write-creates. The revived vertex i
 
 ### Module-namespaced extension fields
 
-A transport module like `transport_tcp` MAY add per-subscriber settings such as `:subscribers[N].settings.transport_tcp.send_buf_kb`. Rules:
+A transport module MAY add module-namespaced settings, e.g. `:settings.transport_tcp.send_buf_kb`. Rules:
+
+```{note}
+This section previously used `:subscribers[N].settings.transport_tcp.send_buf_kb` as its example. That selector is **not addressable**: `:subscribers` is addressed whole (§above), so a multi-step selector answers `ERROR{tr::schema::not_found}` — and before that bound it silently cleared the slot instead. Per-subscriber module settings have no wire surface today; the vertex-level `:settings.<module>.<field>` form below is the one that resolves.
+```
+
 
 - Module fields MUST live under their own module name (here, `transport_tcp`).
 - The name `app` inside vertex `SETTINGS` is **reserved for the application** ([RFC-0010](../spec/rfcs/0010-owner-app-fields-and-schema.md) §A.1): no module or future protocol knob may claim it. The application is one more namespace owner under the same nesting shape; `app` is its name.

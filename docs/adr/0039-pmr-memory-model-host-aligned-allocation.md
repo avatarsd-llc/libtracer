@@ -120,6 +120,7 @@ gap for injected resources. Closing it for the rest of the stack requires either
 `mr_` contract to nullptr-on-exhaustion (making an injected resource formally non-conforming, which
 any resource usable on this profile already is) or routing failable control-plane allocations
 through a nothrow seam instead. That choice is open, not recorded here.
+**Erratum 6 below closes it** — the second option was taken.
 
 **What the seam does deliver, measured.** Injecting a resource moves the terminus decode off the
 global heap exactly as designed — 9 allocations / 937 bytes becomes 4 / 153, i.e. 84% of the bytes
@@ -127,3 +128,17 @@ redirected, with no decode leg bypassing the seam. The residual legs are on *oth
 seams (the reply head draws from the ADR-0042/0060 `value_backend_` mem-backend, and the egress
 span table uses the plain allocator), so a fully bounded node injects both knobs, not one.
 - **The Stage-2 bricks are unchanged in order; this fixes their memory contract**: Brick 1 (kill the forward-path full-decode) and Brick 2 (pooled header rebuild) drive the bench to 0 *from any resource*; Brick 3 (the structural split + label tables) draws its per-connection state from the node's `memory_resource`.
+
+## Erratum 6 — the choice erratum 5 left open was made: a separate nothrow seam, not a tightened `mr_`
+
+*(2026-07-27, ratified with [#551](https://github.com/avatarsd-llc/libtracer/issues/551) Q1–Q3; shipped in the same range.)*
+
+Erratum 5 named two ways to close the gap and recorded neither. The second was taken, and the first turns out **not to be implementable on the profile that ships**: `std::pmr::memory_resource::allocate` is annotated `__attribute__((__returns_nonnull__))` in libstdc++, so a caller's `if (p == nullptr)` is undefined behaviour — and measured on `riscv32-esp-elf-g++ 15.2.0` it is **deleted at `-Os`/`-Oz`** while surviving at `-O0`/`-O1`/`-O2`/`-O3`. `-Os` is what an ESP-IDF node ships and the one level no test executes at, so tightening `mr_`'s contract would have replaced a diagnosed reboot with an undiagnosed null-deref and a false SUCCESS on the wire.
+
+The seam, its rejected alternatives (including a variant *deriving* from `memory_resource`, refuted on a different probe) and the measurements are in **[ADR-0065](0065-failable-allocation-gets-its-own-seam-block-source.md)**.
+
+Two consequences for the text above:
+
+- **§3's `decode_into(std::span, std::pmr::memory_resource&)` signature is superseded.** It now takes `tr::mem::block_source_t&` ([#588](https://github.com/avatarsd-llc/libtracer/issues/588)), because the terminus arena is built from a peer's frame behind no ACL and could abort on exhaustion.
+- **The Consequences' "no new `tr::mem` class is needed" no longer holds.** `block_source_t`, `heap_source_t`, `null_source_t`, `bump_source_t` and `block_array_t<T>` are exactly that class of addition. The reasoning it rested on — that object construction is `std::pmr`'s job — survives for allocations that **cannot fail at runtime**; it does not survive for the ones a peer provokes.
+- **Erratum 1's premise moved.** Its advice (inject an `unsynchronized_pool_resource`, not a `monotonic_buffer_resource`, because the terminus arena is the per-frame consumer that never frees) now targets a consumer that has **left `mr_`**. `mr_`'s remaining per-frame consumer is the LKV control block; the arena draws from the block seam, and a bounded node bounds it with a `bump_source_t` over its slab.

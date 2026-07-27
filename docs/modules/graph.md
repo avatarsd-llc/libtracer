@@ -66,13 +66,19 @@ conveniences.
 
 ```{admonition} Injected memory — no allocator baked in
 :class: note
-`graph_t`'s constructor takes two optional memory seams, both defaulted to the standard
+`graph_t`'s constructor takes three optional memory seams, all defaulted to the standard
 heap (a host that passes nothing gets zero-churn, byte-identical behavior):
 
 - a `std::pmr::memory_resource*` for the per-write **control objects** — the LKV control
-  block and the `rope_t` wrapper (ADR-0039); and
+  block and the `rope_t` wrapper (ADR-0039);
 - a `mem::mem_backend_t* value_backend` for the durable **value bytes** the write path
-  copies into the LKV when a borrowed-delivery transport forces the copy (ADR-0060).
+  copies into the LKV when a borrowed-delivery transport forces the copy (ADR-0060); and
+- a `mem::block_source_t* ctl` — the **nothrow** source for allocations a peer can
+  provoke, which report exhaustion by value instead of throwing (ADR-0065). Read it back
+  with `control_source()`.
+
+The parameters are **appended** in that order, so an existing `graph_t{&mr}` keeps
+compiling and picks up the defaults.
 
 A bounded target points both — and the transport-receive backend — at one static slab;
 pool exhaustion surfaces as `BACKPRESSURE`, never a silent heap fallback. See

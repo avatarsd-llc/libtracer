@@ -30,37 +30,28 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
   **Also closes the `#477` residual** at the branch-write decode (`graph.cpp`), which used a
   `monotonic_buffer_resource` whose overflow leg drew from the *throwing* default upstream.
-  A `bump_source_t` over the same stack buffer falls back to the nothrow heap source
-  instead, so capability is unchanged and exhaustion is a value. The node-counting pre-pass
+  A `bump_source_t` over the same stack buffer falls back to the graph's injected
+  `ctl` block source instead (which defaults to the nothrow heap source), so capability
+  is unchanged, exhaustion is a value, and a bounded node's seam covers that leg too. The node-counting pre-pass
   that residual called for turned out to be unnecessary.
 
   Signature change: `decode_into(input, std::pmr::memory_resource&)` →
   `decode_into(input, tr::mem::block_source_t&)`; `tlv_arena_t`'s constructor likewise.
   `fwd_router_t` gained a third **appended** parameter (`rx`, defaulted) for the arena
-  source, so existing call sites are unchanged.
+  source, so existing call sites are unchanged. `grammar::walk_stack_t`'s constructor
+  also changed its spill parameter from `std::pmr::memory_resource*` to
+  `mem::block_source_t*` — source-breaking for anyone driving the grammar walk directly.
 
   **Faster, not slower**: the terminus decode measures **236 ns vs 241–251 ns** on `main`
   (interleaved, best of 3), and **97 ns vs 114 ns** on an isolated decode loop. Getting
   there required `push_slot()` — see below.
 
-### Added
-
-- **`tr::mem::bump_source_t`, `null_source()`, and `block_array_t<T>`** — the companions the
-  migrated call sites need. `bump_source_t` is the nothrow twin of
-  `std::pmr::monotonic_buffer_resource` over a caller buffer, with an upstream so it stays
-  capability-preserving; `null_source()` is the upstream that makes the buffer a hard bound.
-  `block_array_t<T>` is a nothrow growable array of trivially-copyable `T` whose growth
-  returns `false`.
-
-  `block_array_t::push_slot()` claims one uninitialized slot to fill **in place**. That is
-  load-bearing, not sugar: `push_back(T{...})` on a 48-byte element materializes the
-  aggregate on the stack field-by-field and reads it back as wide loads, and the
-  store-forwarding stall cost **~45 % of a terminus decode while executing FEWER
-  instructions** (IPC 5.0 → 2.6). It was the entire regression this change first showed, and
-  five other hypotheses — modulo vs mask alignment, growth inlining, index vs pointer
-  cursor, the sink's latch stores, `is_canonical_name` inlining — were each measured and
-  refuted before the profile pointed here.
-
+- **A PATH whose child is not a NAME answers `INVALID_PATH` instead of being silently
+  rewritten (#436).** `op_resolve`'s lookup-key builder accepted any child TLV and emitted
+  it as if it were a NAME, so a malformed address resolved to *some* vertex rather than
+  being rejected — and a WRITE could `mkdir -p` a path the spec does not permit. The
+  rejection now happens before the RFC-0005 write-creates branch. Conformance vector
+  `path/path-value-children-illegal` pins it.
 
 - **`:subscribers` and `:children` are addressed WHOLE — a trailing step no longer acts
   (#580, #581).** `field_write` gated both branches on the FIRST step alone, so every
@@ -82,7 +73,24 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
-- **A nothrow control-plane block seam: `tr::mem::block_source_t` (#551, slice 1).** New header
+- **`tr::mem::bump_source_t`, `null_source()`, and `block_array_t<T>`** — the companions the
+  migrated call sites need. `bump_source_t` is the nothrow twin of
+  `std::pmr::monotonic_buffer_resource` over a caller buffer, with an upstream so it stays
+  capability-preserving; `null_source()` is the upstream that makes the buffer a hard bound.
+  `block_array_t<T>` is a nothrow growable array of trivially-copyable `T` whose growth
+  returns `false`.
+
+  `block_array_t::push_slot()` claims one uninitialized slot to fill **in place**. That is
+  load-bearing, not sugar: `push_back(T{...})` on a 48-byte element materializes the
+  aggregate on the stack field-by-field and reads it back as wide loads, and the
+  store-forwarding stall cost **~45 % of a terminus decode while executing FEWER
+  instructions** (IPC 5.0 → 2.6). It was the entire regression this change first showed, and
+  five other hypotheses — modulo vs mask alignment, growth inlining, index vs pointer
+  cursor, the sink's latch stores, `is_canonical_name` inlining — were each measured and
+  refuted before the profile pointed here.
+
+
+- **A nothrow failable-block seam: `tr::mem::block_source_t` (#551, slice 1).** New header
   `libtracer/mem_source.hpp` with `block_source_t` (`try_alloc` / `release`, both `noexcept`,
   `nullptr` on exhaustion), the default `heap_source_t`, and `tr::mem::heap_source()`.
   `graph_t` gained a THIRD, **appended** constructor parameter
@@ -97,7 +105,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `-O0`/`-O1`/`-O2`/`-O3` and vanishes at the two size-optimized levels. `-Os` is what an
   ESP-IDF node ships and the one level no test executes at.
 
-  **No call site draws from the seam yet** — this slice wires it only. The registration
+  **As of slice 1 no call site drew from the seam**; the #588 entry above then made the
+  branch-write decode its first consumer. The registration
   allocations that motivated #551 migrate next.
 
 - **The LKV publish takes no lock when nobody is awaiting (ADR-0064 §1, #555).** A non-`STREAM`

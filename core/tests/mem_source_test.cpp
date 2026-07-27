@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief Unit tests for the nothrow control-plane block seam (mem_source.hpp, #551).
+ * @brief Unit tests for the nothrow failable-block seam (mem_source.hpp, #551).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -96,7 +96,7 @@ constinit tr::mem::heap_source_t g_constinit_probe{};
 }  // namespace
 
 int main() {
-    std::printf("mem_source — the nothrow control-plane block seam (#551):\n");
+    std::printf("mem_source — the nothrow failable-block seam (#551):\n");
 
     tr::mem::block_source_t& heap = tr::mem::heap_source();
     check(std::strcmp(heap.name(), "heap") == 0, "the default source names itself \"heap\"");

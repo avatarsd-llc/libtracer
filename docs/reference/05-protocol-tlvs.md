@@ -811,11 +811,11 @@ sequenceDiagram
     Note over C,N: WRITE/AWAIT/subscribe ride the same shape<br/>an error returns kind=ERROR + STATUS{ERROR}
 ```
 
-At the terminus — the one place a node reads the whole FWD tree — the frame is decoded into a flat **arena** rather than an owning tree ([ADR-0041](../adr/0041-terminus-arena-decode-span-contract.md)): `wire::decode_into(frame, mr)` parses it into a `tlv_arena_t` of pre-order span-nodes (`{type, opt, wire — trailer-excluded, body, end, canonical_path}`), every span pointing into the inbound frame; `op_resolver_t::resolve` runs over that arena. The nodes are drawn from an injected `std::pmr::memory_resource` — a host that supplies a pool resource over its own slab gets a terminus that allocates nothing from the global heap.
+At the terminus — the one place a node reads the whole FWD tree — the frame is decoded into a flat **arena** rather than an owning tree ([ADR-0041](../adr/0041-terminus-arena-decode-span-contract.md)): `wire::decode_into(frame, src)` parses it into a `tlv_arena_t` of pre-order span-nodes (`{type, opt, wire — trailer-excluded, body, end, canonical_path}`), every span pointing into the inbound frame; `op_resolver_t::resolve` runs over that arena. The nodes are drawn from an injected **nothrow** `tr::mem::block_source_t` — a host that supplies a bounded source over its own slab gets a terminus that allocates nothing from the global heap, and one whose exhaustion is a `tr::tlv::nesting_too_deep` reject rather than an allocation failure ([ADR-0065](../adr/0065-failable-allocation-gets-its-own-seam-block-source.md)).
 
 ```{mermaid}
 flowchart LR
-    F["inbound FWD frame<br/>(bytes)"] --> D["wire::decode_into(frame, mr)"]
+    F["inbound FWD frame<br/>(bytes)"] --> D["wire::decode_into(frame, src)"]
     D --> A["tlv_arena_t<br/>flat pre-order span-nodes"]
     A --> R["op_resolver_t::resolve"]
     R --> K["vertex lookup:<br/>span-aliased path key<br/>(canonical PATH body IS the map key)"]

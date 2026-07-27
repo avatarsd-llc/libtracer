@@ -61,3 +61,22 @@ Roping small route bytes as borrowed views into the reply (a `view::borrow` cost
 - New surface: `wire::decode_into`, `tlv_arena_t`/`arena_tlv_t` (`tlv_arena.hpp`); `fwd_router_t(graph, memory_resource*)`. Removed: `op_resolver_t::resolve(const tlv_t&, …)` overloads. `wire::decode`/`encode`/`tlv_t`/conformance vectors: byte-for-byte untouched.
 - Equivalence is testable: for every conformance vector, `decode` and `decode_into` must agree node-for-node (type/opt/payload bytes/trailer handling) — the arena is gated by the same vectors as the tree decoder.
 - The heap bench gains a terminus mode (armed window around one `resolve`) reporting the alloc count — decode+dispatch at 0, reply construction O(1), the ownership copies visible and bounded.
+
+## Erratum — the arena no longer draws from a `std::pmr::memory_resource`
+
+*(2026-07-27, [#588](https://github.com/avatarsd-llc/libtracer/issues/588).)*
+
+Everywhere this ADR names the decoder's memory seam — §1's signature, §5's "draws directly from `fwd_router_t`'s `std::pmr::memory_resource*`", and the Consequences' `fwd_router_t(graph, memory_resource*)` — read `tr::mem::block_source_t` instead:
+
+```cpp
+wire::decode_into(std::span<const std::byte>, tr::mem::block_source_t&)
+tlv_arena_t::tlv_arena_t(tr::mem::block_source_t&)
+fwd_router_t(graph_t&, std::pmr::memory_resource* = default,
+             mem::block_source_t* rx = &mem::heap_source())
+```
+
+The `memory_resource` parameter stays on `fwd_router_t` — it still serves the `route_handle` label tables — but the **arena** draws from the appended `rx`. A bounded host must now inject **both**; injecting only the resource leaves the arena on the global heap.
+
+**Why**, and this is the part that matters for the span contract: all three of the decoder's allocations (the node array, the sink's open-node stack, the walk stack's spill) are sized by the peer's frame, on a path behind no ACL. Through `std::pmr` their failure mode is `std::bad_alloc`, which on a `-fno-exceptions` target is the link-wrapped `abort()` stub — measured: exit 134 before, `TLV_NESTING_TOO_DEEP` after. The status is not new; [RFC-0006](../spec/rfcs/0006-resource-bounded-nesting-depth.md) already defines it as "exceeds this receiver's decode resources". See [ADR-0065](0065-failable-allocation-gets-its-own-seam-block-source.md).
+
+A bounded terminus is now composed as a `bump_source_t` over the slab with `null_source()` upstream, which is the honest form of what a `monotonic_buffer_resource` with a `null_memory_resource` upstream was reaching for: same bump, same slab, but the refusal is a return value rather than a throw.

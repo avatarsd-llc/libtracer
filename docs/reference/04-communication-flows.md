@@ -137,7 +137,11 @@ Effects after the subscribe write returns:
 
 - A SUBSCRIBER TLV exists at `/sensor/temp:subscribers[N]`.
 - All future writes to `/sensor/temp` produce a write to `/local/handler` with the publisher's payload.
-- The subscriber's `liveness` state begins; if `:liveness.heartbeat_hz > 0`, the subscriber MUST start writing heartbeats to `/sensor/temp:subscribers[N].liveness.last_seen_ns` periodically.
+- The subscriber's `liveness` state begins; if `:liveness.heartbeat_hz > 0`, the subscriber is expected to refresh its liveness periodically.
+
+  :::{warning}
+  The spelling this flow used to give — `write /sensor/temp:subscribers[N].liveness.last_seen_ns` — is **not a valid selector**. `:subscribers` is addressed whole ([02 §writing `:subscribers[N]`](02-graph-model.md#writing-subscribers-n-unsubscribes-it-does-not-register)): a multi-step selector answers `ERROR{tr::schema::not_found}`, and before that bound landed the same write **cleared the slot** and answered success. No replacement heartbeat spelling is ratified yet — the `:liveness.*` surface is under review — so treat the liveness loop below as descriptive of intent, not as a wire recipe.
+  :::
 
 The SUBSCRIBER TLV layout is defined in [05-protocol-tlvs.md](05-protocol-tlvs.md) §`SUBSCRIBER`.
 
@@ -214,7 +218,7 @@ write("/sensor/temp:settings",
 A remote operation rides an **`FWD`** frame that carries its own route ([RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md) / [ADR-0035](../adr/0035-implementing-rfc-0004-remote-operation-addressing.md)): `dst` holds the remaining hops and shrinks by one NAME per hop; `src` accumulates the way back. A remote endpoint is addressed by path-suffix through a transport-vertex ([ADR-0027](../adr/0027-transport-and-connections-are-vertices.md)) — see [reference/13](13-network-formation.md) and [CONTEXT.md §Path-as-route](../../CONTEXT.md). Each node plays one of two roles per frame, decided by the first `dst` segment:
 
 - **Forward hop** — the first `dst` segment names a transport-child vertex. The hop reads roughly three TLV headers **by offset** (no decoded tree — **zero heap allocations**, CI-gated), strips that leading `dst` NAME, prepends the inbound-link NAME to `src`, and scatter-gather-sends the result: stack-built replacement heads plus untouched views over the original frame bytes.
-- **Terminus** — the first `dst` segment names a local, non-transport vertex. The frame is arena-decoded (`wire::decode_into` → `tlv_arena_t`, a flat pre-order array of span nodes over the frame bytes, drawn from an injected `std::pmr::memory_resource`), `op_resolver_t::resolve` applies the operation to the local graph, and the `FWD{REPLY}` head is direct-emitted into one exactly-sized segment.
+- **Terminus** — the first `dst` segment names a local, non-transport vertex. The frame is arena-decoded (`wire::decode_into` → `tlv_arena_t`, a flat pre-order array of span nodes over the frame bytes, drawn from an injected **nothrow** `tr::mem::block_source_t` — see [09 §where the wire decode draws from](09-memory-substrate.md), and note that exhaustion there is a `tr::tlv::nesting_too_deep` reject, never an allocation failure ([ADR-0065](../adr/0065-failable-allocation-gets-its-own-seam-block-source.md))), `op_resolver_t::resolve` applies the operation to the local graph, and the `FWD{REPLY}` head is direct-emitted into one exactly-sized segment.
 
 ```{mermaid}
 sequenceDiagram
@@ -227,7 +231,7 @@ sequenceDiagram
     H->>H: first dst segment → transport child<br/>(child-registry demux)
     H->>T: strip leading dst NAME · prepend inbound-link NAME to src<br/>scatter-gather send: stack heads + untouched frame views
     Note over T: first dst segment names a local vertex → terminus
-    T->>T: wire::decode_into(frame, mr) → tlv_arena_t<br/>(flat pre-order span nodes)
+    T->>T: wire::decode_into(frame, src) → tlv_arena_t<br/>(flat pre-order span nodes)
     T->>T: op_resolver_t::resolve — read/write/await<br/>the local vertex
     T->>H: FWD{REPLY, dst = accumulated src}<br/>direct-emitted into one exactly-sized segment
     Note over H: a REPLY routes by the same per-hop step<br/>but does not accumulate src
