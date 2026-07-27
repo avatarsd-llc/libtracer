@@ -170,6 +170,15 @@ class null_source_t final : public block_source_t {
  *       THROWING default resource, which on `-fno-exceptions` is the `abort()` this whole
  *       seam exists to remove. Pass a bounded source (or a null-serving one) to make the
  *       buffer the hard limit instead.
+ *
+ * @warning SCOPE-LIFETIME USE ONLY. A bump block is never reclaimed, so a source that
+ *          outlives one burst of work monotonically fills and then refuses everything.
+ *          Construct it per operation (as the branch-write decode does), or @ref reset it
+ *          between operations. It is NOT a long-lived seam: an 8 KiB bump source wired as
+ *          a router's `rx` decoded 6 frames and rejected the next 194 — measured. A
+ *          long-lived bounded seam needs a RECYCLING source, which this library does not
+ *          ship yet; until it does, a bounded node either writes one or leaves that seam
+ *          on @ref heap_source.
  * @note Single-threaded by contract — a bump cursor is not synchronized. Its intended use
  *       is a function-scoped buffer on the calling thread's stack.
  */

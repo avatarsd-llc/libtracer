@@ -212,8 +212,15 @@ std::uint32_t reply_value_u32(const tr::wire::tlv_t& f) {
  *
  * The front region becomes the RX segment pool (pool_t — fixed slots,
  * exhaustion = backpressure, ADR-0042); the back region backs the container
- * memory_resource the router draws its terminus arena and label tables from.
- * Steady state allocates from THIS slab, not the global heap.
+ * memory_resource the router draws its LABEL TABLES from.
+ *
+ * NOT slab-bound (#588): the terminus decode ARENA moved off the pmr resource onto
+ * the router's `rx` block source, and this example does not inject one — so the
+ * arena, and the graph's own three seams (this example default-constructs the
+ * graph), still come from the global heap. Bounding them needs a RECYCLING
+ * block_source_t, which the library does not ship yet: `bump_source_t` is bounded
+ * but never reclaims, so wiring one here would decode a handful of frames and then
+ * refuse every frame after. See docs/reference/09 §the second L0 seam.
  */
 constexpr std::size_t kSlabBytes = 24 * 1024;
 constexpr std::size_t kRxRegion = 12 * 1024; /**< @brief pool_t: RX datagram segments. */
@@ -232,8 +239,10 @@ struct device_node_t {
     /**
      * @brief Container seam: a monotonic arena over the slab's back region.
      *
-     * The synchronized pool on top recycles freed blocks (label tables,
-     * terminus arena spill) and makes the resource safe for the recv threads.
+     * The synchronized pool on top recycles freed blocks (label tables, LKV
+     * control blocks) and makes the resource safe for the recv threads. Since
+     * #588 the terminus arena is NOT among them — it draws from the router's
+     * `rx` block source, left at the default heap here (see the slab comment).
      */
     std::pmr::monotonic_buffer_resource arena{g_slab + kRxRegion, kSlabBytes - kRxRegion};
     std::pmr::synchronized_pool_resource mr{&arena};
@@ -311,8 +320,9 @@ int run_host_probe(device_node_t& dev) {
 
     // 1) FWD{READ /dev/sensor/temp} — crosses the wire, resolves at the device
     //    terminus, and the REPLY source-routes back to our reply sink.
-    router.on_frame("self", b_fwd(tr::graph::fwd_op_t::READ, b_path({"net", "udp-client", "dev", "sensor", "temp"}),
-                                  b_path({"probe"})));
+    router.on_frame(
+        "self", b_fwd(tr::graph::fwd_op_t::READ,
+                      b_path({"net", "udp-client", "dev", "sensor", "temp"}), b_path({"probe"})));
     bool read_ok = false;
     for (int i = 0; i < 60 && !read_ok; ++i) {
         read_ok = reply_ready.load(std::memory_order_acquire);
@@ -328,9 +338,10 @@ int run_host_probe(device_node_t& dev) {
 
     // 2) Subscribe: a `:subscribers[]` append WRITE binds a REMOTE subscriber at
     //    the device; transient-local latches the current value immediately.
-    router.on_frame("self", b_fwd(tr::graph::fwd_op_t::WRITE, b_path({"net", "udp-client", "dev", "sensor", "temp"}),
-                                  b_path({"probe"}), b_field_subscribers_append(),
-                                  b_subscriber(b_path({"probe"}))));
+    router.on_frame(
+        "self",
+        b_fwd(tr::graph::fwd_op_t::WRITE, b_path({"net", "udp-client", "dev", "sensor", "temp"}),
+              b_path({"probe"}), b_field_subscribers_append(), b_subscriber(b_path({"probe"}))));
 
     // The latch delivery races our next call, so poll-read until it lands.
     bool latched = false;
