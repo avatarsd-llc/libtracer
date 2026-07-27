@@ -337,6 +337,58 @@ void test_subscribe_via_field_write_and_unsubscribe() {
     check(*sink_seen == 0x10, "no further delivery after unsubscribe");
 }
 
+/**
+ * @brief `:subscribers` is addressed WHOLE — a trailing step names nothing and MUST NOT
+ *        reach the slot clear (#580).
+ *
+ * The `[N]` arm is an unconditional `clear_edge`, so before the bound a caller aiming at a
+ * member — `:subscribers[0].liveness.last_seen_ns`, or any typo'd tail — unbound a live
+ * subscriber and got `kind=RESULT`, byte-identical to a legitimate `[0]` clear. The
+ * decisive assertion here is therefore not the status code but the DELIVERY: the edge must
+ * still route after the rejected write.
+ */
+void test_subscribers_addressed_whole() {
+    std::printf(":subscribers is addressed whole — a trailing step must not clear the slot:\n");
+    for (const char* p : {"/sensor/temp:subscribers[0].liveness.last_seen_ns",
+                          "/sensor/temp:subscribers[0].totally.made.up",
+                          "/sensor/temp:subscribers[].tail", "/sensor/temp:subscribers.bogus"}) {
+        graph_t g;
+        auto sink_seen = std::make_shared<int>(0);
+        tr::graph::handlers_t h;
+        h.on_write = [sink_seen](const tr::view::rope_t& in) -> tr::graph::result_t<void> {
+            *sink_seen += std::to_integer<int>(in.only().bytes()[0]);
+            return {};
+        };
+        (void)g.register_vertex(path_t("/sink"), role_t::HANDLER, std::move(h));
+        tr::graph::vertex_handle_t src =
+            g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+        check(g.write(path_t("/sensor/temp:subscribers[]"), subscriber_tlv("sink")).has_value(),
+              "seed: one live subscriber edge");
+
+        const auto fp = path_t::parse(p);
+        check(fp.has_value(), "the multi-step :subscribers path parses (the branch is reachable)");
+        if (!fp) continue;
+        const auto w = g.write(src, fp->field(), make_value({0x01}));
+        check(!w.has_value() && w.error() == tr::graph::status_t::SCHEMA_NOT_FOUND,
+              "a non-whole :subscribers write names nothing: SCHEMA_NOT_FOUND");
+
+        // The assertion that actually catches the defect: the edge still delivers.
+        (void)g.write(src, make_value({0x20}));
+        check(*sink_seen == 0x20, "... and the subscriber edge SURVIVED (it still routes)");
+    }
+
+    // The two legal shapes are untouched — this gate must not use `plain_step`.
+    graph_t g;
+    tr::graph::vertex_handle_t src =
+        g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/sink"), role_t::STORED_VALUE);
+    check(g.write(path_t("/sensor/temp:subscribers[]"), subscriber_tlv("sink")).has_value(),
+          ":subscribers[] (append) still subscribes");
+    check(g.write(src, path_t::parse("/sensor/temp:subscribers[0]")->field(), make_value({}))
+              .has_value(),
+          ":subscribers[0] (clear) still unsubscribes");
+}
+
 void test_schema_read() {
     std::printf(":schema read (POINT descriptor):\n");
     graph_t g;
@@ -543,6 +595,7 @@ int main() {
     test_field_write_settings();
     test_field_write_handle();
     test_subscribe_via_field_write_and_unsubscribe();
+    test_subscribers_addressed_whole();
     test_admission_door_uniformity();
     test_schema_read();
     test_delivery_terminates_at_target();

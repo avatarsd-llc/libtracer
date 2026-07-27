@@ -99,6 +99,41 @@ void test_unknown_type() {
     check(!g.find(path_t::parse("/dev/x")->key()).has_value(), "no child was created");
 }
 
+/**
+ * @brief `:children` is addressed WHOLE — `[]` and nothing else creates (#581).
+ *
+ * `append` was the sole predicate, so `:children[].bogus` (any tail, any depth) created the
+ * child exactly as the sanctioned `:children[]` does and answered RESULT, with the tail
+ * provably inert — two different tails produced identical replies and identical graph
+ * state, and nothing was ever created AT the tail. The READ of the byte-identical selector
+ * already answered SCHEMA_NOT_FOUND, so the halves disagreed. On `/net` this spelling built
+ * a live connection vertex and wired it into the router.
+ */
+void test_children_addressed_whole() {
+    std::printf(":children is addressed whole — a trailing step creates nothing:\n");
+    for (const char* p : {"/dev:children[].bogus", "/dev:children[].a.b.c",
+                          "/dev:children[3].bogus", "/dev:children.bogus"}) {
+        graph_t g;
+        (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
+        const auto fp = path_t::parse(p);
+        check(fp.has_value(), "the multi-step :children path parses (the branch is reachable)");
+        if (!fp) continue;
+        const auto w = g.write(*fp, spec("stored_value", "x"));
+        check(!w.has_value() && w.error() == status_t::SCHEMA_NOT_FOUND,
+              "a non-whole :children write names nothing: SCHEMA_NOT_FOUND");
+        check(!g.find(path_t::parse("/dev/x")->key()).has_value(),
+              "... and NO child was created (the tail must not be discarded)");
+    }
+
+    // The one legal shape is untouched — this gate must not use `plain_step`, since a
+    // sanctioned create is exactly `append == true`.
+    graph_t g;
+    (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
+    check(g.write(path_t("/dev:children[]"), spec("stored_value", "x")).has_value(),
+          ":children[] (append) still creates");
+    check(g.find(path_t::parse("/dev/x")->key()).has_value(), "... and the child exists");
+}
+
 void test_duplicate_name() {
     std::printf("Duplicate child name => PATH_IN_USE:\n");
     graph_t g;
@@ -145,6 +180,7 @@ void test_custom_factory() {
 int main() {
     test_create_and_resolve();
     test_unknown_type();
+    test_children_addressed_whole();
     test_duplicate_name();
     test_non_spec_value();
     test_custom_factory();

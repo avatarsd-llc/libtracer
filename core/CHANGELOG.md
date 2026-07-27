@@ -12,6 +12,26 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`:subscribers` and `:children` are addressed WHOLE — a trailing step no longer acts
+  (#580, #581).** `field_write` gated both branches on the FIRST step alone, so every
+  deeper selector fell through to the branch's action and answered `RESULT`:
+  - `:subscribers[0].liveness.last_seen_ns` (or any tail, any depth) reached the
+    unconditional `clear_edge` and **destroyed the slot** — a caller aiming at a member
+    unbound a live subscriber and was told it succeeded, with a reply byte-identical to a
+    legitimate `[0]` clear.
+  - `:children[].bogus` created the child exactly as the sanctioned `:children[]` does,
+    silently discarding the tail. On `/net` that spelling built a live connection vertex
+    and wired it into the router.
+
+  Both now answer `SCHEMA_NOT_FOUND`, resolved before the ACL gate exactly as `:acl`
+  already was. This makes WRITE agree with READ, which already required
+  `steps.size() == 1` on both surfaces — no new rule is invented. The legal shapes are
+  untouched: `:subscribers[]`, `:subscribers[N]` and `:children[]` behave exactly as
+  before (the guard deliberately does NOT use `plain_step`, since an append is
+  `append == true` and a clear is `indexed == true`).
+
 ### Added
 
 - **A nothrow control-plane block seam: `tr::mem::block_source_t` (#551, slice 1).** New header
