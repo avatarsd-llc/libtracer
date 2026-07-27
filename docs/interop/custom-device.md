@@ -71,6 +71,15 @@ legibility layer can live in `.rodata` and cost zero heap. A reader (human or
 agent) that reads `:schema` now knows the type, range, direction and purpose
 without any out-of-band contract.
 
+The `static` above is load-bearing: the runtime views **the array as well as the
+bytes it points at**, so both must outlive the vertex. The parameter type
+(`tr::graph::borrowed_fields_t`) accepts the array spellings a `constexpr` table
+takes and rejects a `std::vector`, so the usual way to get this wrong is a compile
+error rather than a use-after-free. A table whose size is only known at run time
+needs storage you keep alive yourself, installed via
+`tr::graph::borrowed_fields_t::unchecked(...)`; if you would rather the runtime own
+a copy, use the owning `set_app_fields` instead.
+
 ---
 
 ## What a custom device CAN implement (all optional, all conforming)

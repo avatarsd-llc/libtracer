@@ -160,15 +160,89 @@ struct app_field_slot_t {
 using app_field_static_t = app_field_slot_t;
 
 /**
+ * @brief The argument type of a BORROWED app-field install — a table the caller promises
+ *        outlives the vertex, constrained at compile time to storage shaped like it does
+ *        (ADR-0058 erratum 2).
+ *
+ * Erratum 1 tightened the borrowed install's contract from "the `name`/`descriptor` bytes
+ * must outlive the vertex" to "**the array too**". Because the parameter was a
+ * `std::span`, which binds implicitly to any contiguous range, that tightening reached
+ * callers as a SILENT change: the same call kept compiling and started dangling. This type
+ * closes the common case of that trap. It converts implicitly from a `T[N]` or a
+ * `std::array` — the two spellings a `constexpr`/`static` table takes — and NOT from a
+ * `std::vector`, so the natural way to build a table dynamically (fill a vector, install
+ * it, return) is now a compile error at the call site rather than a use-after-free found
+ * later by a downstream test suite. Default-constructed (`{}`) is the empty table, which
+ * uninstalls.
+ *
+ * **What it does NOT prove:** that the storage is `static`. A block-scope `T[N]` binds
+ * exactly like a namespace-scope one — C++ cannot express "static storage duration" as a
+ * constraint on a parameter. It rejects the container/temporary class of mistake, not
+ * every lifetime mistake. A caller whose table really is runtime-sized (a binding mapping
+ * a foreign POD array into slots, e.g.) opts out through @ref unchecked, whose name is the
+ * point: the lifetime promise moves to the caller, in writing, at the call site.
+ */
+class borrowed_fields_t {
+   public:
+    /** @brief The empty table — installs nothing, uninstalls an existing one. */
+    constexpr borrowed_fields_t() noexcept = default;
+
+    /**
+     * @brief Borrow a C array of declarations — the `static constexpr kFields[]` spelling.
+     * @param table The caller's array; it and the bytes it points at MUST outlive the vertex.
+     */
+    template <std::size_t N>
+    constexpr borrowed_fields_t(const app_field_static_t (&table)[N]) noexcept  // NOLINT
+        : slots_(table, N) {}
+
+    /**
+     * @brief Borrow a `std::array` of declarations — same contract as the C-array form.
+     * @param table The caller's array; it and the bytes it points at MUST outlive the vertex.
+     */
+    template <std::size_t N>
+    constexpr borrowed_fields_t(const std::array<app_field_static_t, N>& table) noexcept  // NOLINT
+        : slots_(table.data(), N) {}
+
+    /**
+     * @brief Borrow an arbitrary span, asserting the lifetime by hand — the escape hatch for
+     *        a table whose extent is only known at run time.
+     *
+     * Use when the storage is genuinely long-lived but not array-shaped at the call site: a
+     * language binding filling a `.bss` slot array from a foreign POD table, say. The
+     * spelling is deliberately unpleasant — it is the caller taking the promise the implicit
+     * constructors would otherwise have checked the shape of.
+     *
+     * @param table Slots that MUST outlive the vertex, along with the bytes they point at.
+     */
+    [[nodiscard]] static constexpr borrowed_fields_t unchecked(
+        std::span<const app_field_static_t> table) noexcept {
+        borrowed_fields_t b;
+        b.slots_ = table;
+        return b;
+    }
+
+    /** @brief The borrowed slots, in owner install order. */
+    [[nodiscard]] constexpr std::span<const app_field_static_t> slots() const noexcept {
+        return slots_;
+    }
+
+    /** @brief True when the table declares no fields — the uninstall case. */
+    [[nodiscard]] constexpr bool empty() const noexcept { return slots_.empty(); }
+
+   private:
+    std::span<const app_field_static_t> slots_{};
+};
+
+/**
  * @brief A vertex's RFC-0010 field descriptor table (ADR-0058): the immutable declaration
  *        (class ②) split from the per-vertex mutable values (class ③).
  *
  * Both install overloads converge here. `set_app_fields_static` leaves `backing` empty and
- * points the slots at caller flash — zero declaration BYTES, though the @ref slots vector
- * itself is still allocated and copied from the caller's array, so a borrowed install is
- * cheaper than an owning one rather than free (measured host-side: 592 B / 11 allocs per
- * leaf versus 695 B / 17 for the owning install, against a 136 B bare leaf — the
- * `vertex_app5_static` and `vertex_app5` gate rows). The owning `set_app_fields`
+ * points @ref slots straight at the caller's array — the declaration costs zero RAM, neither
+ * bytes nor slots (measured host-side: 392 B / 10 allocs per leaf versus 695 B / 17 for the
+ * owning install, against a 136 B bare leaf — the `vertex_app5_static` and `vertex_app5` gate
+ * rows). Erratum 1 is what removed the slot copy; an earlier revision of this comment still
+ * described it (592 B / 11) after the code had stopped doing it. The owning `set_app_fields`
  * packs the runtime table's name+descriptor bytes into `backing` — ONE allocation for the
  * whole table — and points the slots into it. `backing` is never mutated or reallocated
  * while `slots` reference it (a re-install replaces the whole table under the vertex mutex).
@@ -1462,15 +1536,17 @@ class vertex_t {
 
     /**
      * @brief Install a BORROWED descriptor table (ADR-0058): the slots view the caller's
-     *        @p table storage directly — zero declaration RAM. The `name` and `descriptor`
-     *        bytes MUST outlive the vertex (static/flash storage). Declaration only; values
-     *        are written later via the field-write surface. Same uninstall-on-empty and
-     *        allocate-nothing-on-empty-leaf semantics as @ref set_app_fields.
+     *        @p table storage directly — zero declaration RAM. The array AND the `name` /
+     *        `descriptor` bytes it points at MUST outlive the vertex (static/flash storage);
+     *        @ref borrowed_fields_t is what constrains the argument's shape to match.
+     *        Declaration only; values are written later via the field-write surface. Same
+     *        uninstall-on-empty and allocate-nothing-on-empty-leaf semantics as
+     *        @ref set_app_fields.
      */
-    void set_app_fields_static(std::span<const app_field_static_t> table) {
+    void set_app_fields_static(borrowed_fields_t table) {
         if (table.empty() && ext_.load(std::memory_order_acquire) == nullptr) return;
         app_field_table_t built;
-        built.slots = table;  // viewed in place — the borrowed install allocates NOTHING here
+        built.slots = table.slots();  // viewed in place — this install allocates NOTHING here
         vertex_ext_t& e = ensure_ext();
         const std::lock_guard lock(vertex_stripe_of(this).m);
         install_app_table(e, std::move(built));

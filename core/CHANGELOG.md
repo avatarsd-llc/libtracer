@@ -12,6 +12,28 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **`graph_t::set_app_fields_static` / `vertex_t::set_app_fields_static` take a
+  `tr::graph::borrowed_fields_t`** instead of a `std::span<const app_field_static_t>`
+  (ADR-0058 erratum 2). **Source-compatible with every array-shaped caller**: the new type
+  converts implicitly from `const app_field_static_t (&)[N]` and from `std::array`, which is
+  what a `static`/`constexpr` table already is. It deliberately does **not** convert from a
+  `std::vector` or a bare `std::span`.
+
+  This closes a silent break. The previous release tightened this install's lifetime contract
+  to cover the ARRAY, not just the bytes it points at — but a `std::span` binds implicitly to a
+  `std::vector`, so a caller that built its table into a function-local vector kept compiling
+  and began viewing freed memory. That reached the reference firmware
+  ([strawberry-fw #80](https://github.com/avatarsd-llc/strawberry-fw/issues/80)) and cost a
+  188-commit bisect to find, because there was no compiler diagnostic anywhere.
+
+  **If this stops compiling for you, you had the bug.** Give the table storage that outlives the
+  vertex. A genuinely runtime-sized table — a language binding mapping a foreign POD array into
+  slots, typically — opts out explicitly with `borrowed_fields_t::unchecked(span)`, which asserts
+  the lifetime by hand. Note the guard rejects the container/temporary mistake, not every one: a
+  block-scope array still binds, since static storage duration is not expressible as a constraint.
+
 ### Added
 
 - **`tr::mem::block_array_t<T>::data()`** (both const and non-const), returning the contiguous

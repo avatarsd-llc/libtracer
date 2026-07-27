@@ -608,8 +608,13 @@ class graph_t {
      * only — no initial value; write values later through the field-write surface. Empty
      * @p table uninstalls, exactly as @ref set_app_fields. Wire-invariant: `:schema` serves
      * the same verbatim bytes as the owning overload.
+     *
+     * @p table is a @ref borrowed_fields_t, which converts implicitly from the array
+     * spellings a static table takes and NOT from a `std::vector` — so the erratum-1
+     * lifetime tightening lands on a stale caller as a compile error rather than silently
+     * (ADR-0058 erratum 2). A runtime-sized table opts out via `borrowed_fields_t::unchecked`.
      */
-    void set_app_fields_static(vertex_handle_t v, std::span<const app_field_static_t> table);
+    void set_app_fields_static(vertex_handle_t v, borrowed_fields_t table);
 
     /**
      * @brief Install the sink the producer fan-out hands each REMOTE subscriber's delivery

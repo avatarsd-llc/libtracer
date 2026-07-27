@@ -109,9 +109,49 @@ Nothing ever mutated a slot after install — every write to `.slots` is in the 
 so viewing immutable caller storage is safe by construction, and `slots` is now
 `span<const app_field_slot_t>` so that is compiler-enforced rather than doc-enforced.
 
+## Erratum 2 — the erratum-1 tightening reached callers silently
+
+Erratum 1 strengthened the borrowed install's contract: the caller must now keep the **array**
+alive, not merely the bytes it points at. That was documented, put in `core/CHANGELOG.md`, and
+audited against every in-tree caller. It still broke a downstream one, because the parameter was
+a `std::span<const app_field_static_t>` and **a `std::span` binds implicitly to a
+`std::vector`** — so a caller that built its table into a function-local vector kept compiling,
+unchanged, under a contract it no longer satisfied.
+
+That is what happened to the reference firmware's C shim
+([strawberry-fw #80](https://github.com/avatarsd-llc/strawberry-fw/issues/80)):
+`trc_app_fields_set_static` converted a C POD array into a local
+`std::vector<app_field_static_t>`, installed it, and returned. Every `:settings.app.*` write on
+that node then read freed heap; it surfaced as `PERMISSION_DENIED` — garbage access bits, not an
+ACL decision — across seven host suites, and was found by bisecting 188 commits rather than by a
+compiler diagnostic. The in-tree audit could not have caught it: the offending caller was in
+another repository.
+
+**The fix:** `set_app_fields_static` takes a `borrowed_fields_t` instead of a span. It converts
+implicitly from `const app_field_static_t (&)[N]` and from `std::array` — the spellings a
+`static`/`constexpr` table takes, and the shape of every existing caller, so the change is source
+compatible — and from nothing else. `borrowed_fields_t::unchecked(span)` is the explicit opt-out
+for a table whose extent is only known at run time, which is what a language binding mapping a
+foreign POD array needs. The lifetime promise still rests on the caller; what changed is that
+making it is now deliberate rather than implicit.
+
+**What this does and does not buy.** It rejects the container-and-temporary class of mistake,
+which is the one that actually occurred and the one a dynamic table naturally falls into. It does
+**not** prove static storage duration: a block-scope `app_field_static_t[N]` binds exactly like a
+namespace-scope one, and C++ cannot express that constraint on a parameter. A caller determined to
+dangle can still dangle — via a local array, or via `unchecked`. The guard is a diagnostic for the
+common error, not a proof of the contract.
+
+The generalisable lesson, and the reason this is recorded rather than just fixed: **a lifetime
+contract tightened underneath an unchanged signature is invisible to every caller that is not
+recompiled against a changed type.** Documentation, a CHANGELOG entry, and an in-tree caller audit
+were all present here and all insufficient. When a borrow contract changes, change the type.
+
 ## Alternatives rejected
 
 - **Replace the owning overload with the borrowed one** (all callers pass views) — rejected: runtime-formed tables (host, dynamic config) have no static storage to point at; forcing them to fabricate it is the footgun the two-overload split exists to avoid.
+- **Revert erratum 1 — have the borrowed install copy the caller's array into `owned_slots`** (erratum 2's alternative) — rejected: it hands back the 200 B/leaf erratum 1 measured, and pays `n * sizeof(app_field_slot_t)` **per vertex** for an array that is byte-identical across every vertex sharing a table. The reference firmware installs two shared tables across 77 endpoints, where per-vertex copies cost ~3.5 KB against a measured 4.3 KB heap floor. The caller-side answer — compile the table once into static storage, install the same slots everywhere — costs ~120 B for the same node, so the borrow contract is worth keeping and worth guarding.
+- **Rename the span-taking form** so `set_app_fields_static` could become array-reference-only — rejected: same protection as `borrowed_fields_t` with no new type, but it churns a spelling that is already in the ADR, the interop guide, the CHANGELOG and three in-tree callers, for a name the header itself notes is "already in the wild".
 - **Discriminated per-table owning-vs-borrowed storage** (a flag, two representations) — rejected: branches every read site and keeps N per-field allocations on the owning path. The single view-slot representation with an optional backing buffer subsumes both.
 - **Value inline in the slot** — rejected: re-fuses classes ② and ③, re-bloats the slot array, and makes every RO/never-written field carry an empty-vector header.
 - **Maximal per-member ext-split** — rejected: pointer-chase and allocation count grow past the measured need. The four co-occurrence groups are driven by the #388 problem, not speculative.
