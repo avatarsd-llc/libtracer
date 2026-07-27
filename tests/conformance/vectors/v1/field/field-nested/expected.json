@@ -6,6 +6,7 @@
   "decoded": {
     "type": "0x10 FIELD",
     "structured": true,
+    "field": ":settings.deadline_ns",
     "meaning": "FIELD{ NAME \"settings\", NAME \"deadline_ns\" } \u2014 :settings.deadline_ns (two scalar levels)",
     "note": "RFC-0004 \u00a7B/\u00a7C canonical bytes; structured TLV, opt.PL=1, no trailers (at-rest form)"
   }

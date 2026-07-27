@@ -6,6 +6,7 @@
   "decoded": {
     "type": "0x0F FWD",
     "structured": true,
+    "field": ":data[*]",
     "meaning": "FWD{ op=READ, dst=/sensor/temp, FIELD :data[*] (index_mode=WILDCARD), src=/reply-ep } \u2014 a [*] wildcard on a non-subscriber-path data target",
     "note": "RFC-0004 \u00a7C: a valid, round-trip-safe FWD/FIELD frame at the CODEC layer (the 3-core conformance machine stays green). At the slice-2 RESOLUTION layer it MUST be rejected with a kind=ERROR reply STATUS=ERROR(INVALID_PATH=0x03): [*] is legal only on a subscriber-path. See ADR-0035 slice 2 validation."
   }

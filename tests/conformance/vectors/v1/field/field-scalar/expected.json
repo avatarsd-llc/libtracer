@@ -1,0 +1,13 @@
+{
+  "name": "field-scalar",
+  "category": "field",
+  "hex": "10400F0002000B007375627363726962657273",
+  "total_bytes": 19,
+  "decoded": {
+    "type": "0x10 FIELD",
+    "structured": true,
+    "field": ":subscribers",
+    "meaning": "FIELD{ NAME \"subscribers\" } — :subscribers (index_mode absent ⇒ SCALAR, the whole-array read)",
+    "note": "RFC-0004 §B/§C canonical bytes; structured TLV, opt.PL=1, no trailers (at-rest form). The index_mode VALUE is OPTIONAL and its absence is SCALAR by default, so this is `field-append` minus its 5-byte trailing VALUE. Completes the index_mode triple with field-append (ELEMENT) and field-wildcard (WILDCARD)."
+  }
+}

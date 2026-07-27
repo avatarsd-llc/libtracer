@@ -29,6 +29,14 @@ FRAMES = [
     "fwd/fwd-write-value",
     "fwd/fwd-reply-result",
     "errors/error-registered-code",
+    # The three FIELD index forms, adjacent on purpose: field-append and
+    # field-wildcard differ by ONE byte (index_mode 0x01 vs 0x02) and mean
+    # append-a-subscriber vs address-them-all. Seeing ":subscribers",
+    # ":subscribers[]" and ":subscribers[*]" as three distinct Info lines is
+    # the check that the dissector is reading index_mode at all (#587).
+    "field/field-scalar",
+    "field/field-append",
+    "field/field-wildcard",
 ]
 
 
