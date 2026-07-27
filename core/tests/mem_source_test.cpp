@@ -163,10 +163,10 @@ int main() {
               "an injected source is the one the graph holds");
         check(std::strcmp(g_ctl.control_source().name(), "budget") == 0,
               "the injected source reports its own name");
-        // No call site draws from the seam yet (slice 1 wires it only), so a graph
-        // that merely exists must not have consumed the injected budget. When the
-        // first allocation migrates, THIS assertion is the one that changes.
-        check(injected.served_ == 0, "slice 1: constructing a graph draws no control blocks yet");
+        // Constructing a graph draws nothing from the seam — the first consumer is the
+        // branch-write decode (graph.cpp), which only reaches the seam past its 4 KiB
+        // stack buffer. Registration is still to migrate.
+        check(injected.served_ == 0, "constructing a graph draws no control blocks");
     }
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,

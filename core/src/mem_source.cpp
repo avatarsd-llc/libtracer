@@ -23,8 +23,13 @@ namespace {
  */
 constinit heap_source_t g_heap_source{};
 
+/** @brief The process-wide null source (same constant-init discipline). */
+constinit null_source_t g_null_source{};
+
 }  // namespace
 
 block_source_t& heap_source() noexcept { return g_heap_source; }
+
+block_source_t& null_source() noexcept { return g_null_source; }
 
 }  // namespace tr::mem

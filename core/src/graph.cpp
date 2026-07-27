@@ -928,14 +928,21 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
     // than letting decode_into read it back as a malformed (TYPE_MISMATCH) value.
     const view_t head = value.materialize(*value_backend_);
     if (head.empty() && value.total_length() != 0) return std::unexpected(status_t::BACKPRESSURE);
-    // KNOWN #477 residual: a branch tree whose decode arena outgrows this slab draws
-    // from the monotonic's THROWING default upstream (a pmr resource cannot soft-fail).
-    // Typical branch writes stay slab-bound; converting the overflow leg needs a
-    // node-counting pre-pass (enumerated in the #477 sweep, deliberately not redesigned
-    // here).
+    // The #477 residual is CLOSED (#588). This used to be a
+    // `std::pmr::monotonic_buffer_resource` over the same stack buffer, whose overflow
+    // leg drew from the THROWING default upstream — so a branch tree bigger than the
+    // slab reached `__cxa_throw`'s abort() stub on a -fno-exceptions node. A
+    // `bump_source_t` carves from the same buffer and, past it, falls back to the
+    // NOTHROW heap source: capability is unchanged (a big tree still decodes), but
+    // exhaustion is now a value. No node-counting pre-pass was needed after all — the
+    // seam alone was the missing piece.
+    // The overflow leg draws from the graph's injected control seam, not the global heap:
+    // a bounded node that injected `ctl` gets its own store here too, and the default
+    // (heap_source) reproduces today's behaviour exactly.
     std::array<std::byte, 4096> stack;
-    std::pmr::monotonic_buffer_resource mr(stack.data(), stack.size());
-    const std::expected<wire::tlv_arena_t, wire::err_t> arena = wire::decode_into(head.bytes(), mr);
+    mem::bump_source_t src(stack, *ctl_);
+    const std::expected<wire::tlv_arena_t, wire::err_t> arena =
+        wire::decode_into(head.bytes(), src);
     if (!arena) return std::unexpected(status_t::TYPE_MISMATCH);
     const wire::tlv_arena_t& a = *arena;
 

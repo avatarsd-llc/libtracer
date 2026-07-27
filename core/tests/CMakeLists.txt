@@ -445,6 +445,8 @@ add_executable(substrate_test_no_atomic
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/backend_set.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/mem_heap.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/mem_pool.cpp
+    # frame.cpp's decode spills its walk stack to mem::heap_source() (#588).
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/mem_source.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/rope.cpp
 )
 target_include_directories(substrate_test_no_atomic PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)

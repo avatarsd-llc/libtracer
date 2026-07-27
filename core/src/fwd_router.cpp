@@ -648,7 +648,7 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
     // src). The inbound link makes a `:subscribers[]` WRITE bind a REMOTE
     // subscriber whose deliveries route back over it (#136); the latch
     // (transient-local) fires inside resolve.
-    const auto arena = wire::decode_into(frame, *mr_);
+    const auto arena = wire::decode_into(frame, *rx_);
     if (!arena) return;  // malformed frame ⇒ drop
     auto reply = resolver_.resolve(*arena, inbound_name, frame_view);
     if (!reply) return;                    // structurally non-request ⇒ drop

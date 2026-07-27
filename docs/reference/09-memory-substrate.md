@@ -265,6 +265,17 @@ Why it is a distinct type rather than a `std::pmr::memory_resource` with a docum
 
 The two seams are injected independently and a node may point both at the same underlying store ("one slab, whole stack") or split them.
 
+Two companions ship with it, because the migrated call sites all need the same pair:
+
+- **`bump_source_t`** — a caller-owned buffer handed out by bump, falling back to an upstream source once full. The nothrow twin of `std::pmr::monotonic_buffer_resource`. The upstream is what makes it a *capability-preserving* substitution: a monotonic resource also spills past its buffer, but it spills to a **throwing** resource, which on `-fno-exceptions` is the `abort()` this seam exists to remove. Pass `null_source()` as the upstream to make the buffer a hard bound instead.
+- **`block_array_t<T>`** — a nothrow growable array of trivially-copyable `T`. Growth returns `false` instead of throwing, and relocation is a `memcpy`. Same four-word footprint as `std::pmr::vector`, one virtual call per growth instead of the allocator's two.
+
+`block_array_t` exposes `push_slot()` — claim one uninitialized slot and fill it **in place** — alongside `push_back`. That is not a convenience: building a 48-byte element as a temporary and copying it in writes the aggregate field-by-field to the stack and reads it back as wide loads, and the resulting store-forwarding stall measured **~45 %** of a terminus decode, with *fewer* instructions executed. Hot paths use `push_slot`.
+
+### Where the wire decode draws from
+
+`wire::decode_into` — the terminus arena decoder — is on the **RX path, behind no ACL**, and a peer chooses both the nesting depth and the node count of the frame it sends. All three of its draws (the node array, the walk's open-node stack, and the walk stack's spill past its inline slots) come from a `block_source_t`, so exhaustion is `TLV_NESTING_TOO_DEEP` — the status RFC-0006 already defines for "exceeds this receiver's decode resources" — and never an allocation failure. A bounded node composes this as a `bump_source_t` over its slab with `null_source()` upstream.
+
 ---
 
 ## Backend catalog

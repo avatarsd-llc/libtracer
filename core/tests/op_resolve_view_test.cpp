@@ -165,7 +165,7 @@ std::vector<std::byte> resolve_arena_flat(const seed_fn& seed, std::span<const s
     graph_t g;
     seed(g);
     op_resolver_t r(g);
-    const auto arena = tr::wire::decode_into(frame, *std::pmr::get_default_resource());
+    const auto arena = tr::wire::decode_into(frame, tr::mem::heap_source());
     if (!arena) return {};
     auto reply = r.resolve(*arena, inbound_link);
     if (!reply) return {};
@@ -255,7 +255,7 @@ void seed_temp_with_remote_subs(graph_t& g) {
         std::initializer_list<std::string_view> t{tgt};
         const auto wfwd = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"reply-ep"}),
                                 field, b_subscriber(t));
-        const auto arena = tr::wire::decode_into(wfwd, *std::pmr::get_default_resource());
+        const auto arena = tr::wire::decode_into(wfwd, tr::mem::heap_source());
         (void)r.resolve(*arena, "cli");  // inbound_link set => REMOTE subscriber binding
     }
 }
@@ -279,7 +279,7 @@ int main() {
         graph_t ga;
         seed_temp_empty(ga);
         op_resolver_t ra(ga);
-        const auto arena = tr::wire::decode_into(wframe, *std::pmr::get_default_resource());
+        const auto arena = tr::wire::decode_into(wframe, tr::mem::heap_source());
         (void)ra.resolve(*arena);
         graph_t gv;
         seed_temp_empty(gv);
@@ -415,7 +415,7 @@ int main() {
         op_resolver_t r(g);
         const auto wframe = b_fwd(fwd_op_t::WRITE, b_path_value_children({"fresh", "leaf"}),
                                   b_path({"reply-ep"}), {}, b_value({0x5A}));
-        const auto arena = tr::wire::decode_into(wframe, *std::pmr::get_default_resource());
+        const auto arena = tr::wire::decode_into(wframe, tr::mem::heap_source());
         (void)r.resolve(*arena, "cli");
         check(!g.find(path_t::parse("/fresh/leaf")->key()).has_value(),
               "the rejected WRITE created no vertex (rejection precedes write-create)");

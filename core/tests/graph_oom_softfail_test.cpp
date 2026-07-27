@@ -308,7 +308,7 @@ void test_composed_read_reply_backpressure() {
 
     // Baseline (no injection): the composed reply builds — head + every folded snapshot link.
     {
-        const auto arena = tr::wire::decode_into(fwd, *std::pmr::get_default_resource());
+        const auto arena = tr::wire::decode_into(fwd, tr::mem::heap_source());
         auto reply = resolver.resolve(*arena, "ws0");
         check(reply.has_value() && reply->link_count() == reply_links,
               "baseline composed reply = FWD head + folded snapshot links");
@@ -316,7 +316,7 @@ void test_composed_read_reply_backpressure() {
 
     // Fragmented heap: fail EXACTLY the reply's link-table reserve.
     {
-        const auto arena = tr::wire::decode_into(fwd, *std::pmr::get_default_resource());
+        const auto arena = tr::wire::decode_into(fwd, tr::mem::heap_source());
         g_reject_size = reply_links * sizeof(view_t);
         auto reply = [&] {
             const hook_guard_t frag(fail_exact);

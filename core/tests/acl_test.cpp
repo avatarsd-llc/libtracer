@@ -165,7 +165,7 @@ std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
 tr::graph::result_t<tr::view::rope_t> resolve_bytes(op_resolver_t& resolver,
                                                     std::span<const std::byte> fwd,
                                                     std::string_view inbound_link = {}) {
-    const auto arena = tr::wire::decode_into(fwd, *std::pmr::get_default_resource());
+    const auto arena = tr::wire::decode_into(fwd, tr::mem::heap_source());
     if (!arena) return std::unexpected(status_t::INVALID_PATH);
     return resolver.resolve(*arena, inbound_link);
 }

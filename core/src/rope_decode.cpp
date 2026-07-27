@@ -48,11 +48,11 @@ std::expected<void, err_t> validate_rope(const view::rope_t& r) {
     // to verify each CRC.
     if (!r.all_host()) return std::unexpected(err_t::FRAME_INVALID);
     // The walk stack starts inline and spills to the heap: this strict validator
-    // is a host-side opt-in, so its RFC-0006 depth bound is the default resource
+    // is a host-side opt-in, so its RFC-0006 depth bound is the heap source
     // — matching decode(flatten(r)), whose verdict it must reproduce exactly.
     null_sink_t sink;
     std::array<grammar::walk_frame_t<grammar::rope_cursor>, 8> slots;
-    grammar::walk_stack_t<grammar::rope_cursor> stack(slots, std::pmr::get_default_resource());
+    grammar::walk_stack_t<grammar::rope_cursor> stack(slots, &mem::heap_source());
     return grammar::walk(grammar::rope_cursor{r}, sink, stack);
 }
 
