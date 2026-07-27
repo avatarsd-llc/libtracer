@@ -14,6 +14,27 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **BREAKING (routing addresses): a bus PEER is addressed `<mount>/<peer>/<residual>`, not
+  `<peer>/<residual>` — RFC-0014 S2a (`9d038b9`).** Per-module mount routing made
+  routing-address equal vertex-path, and a multi-peer child now resolves the next segment in
+  **its own** peer table, eating one more segment. A dst that used to reach a CAN peer as
+  `n21/a/b` must now say `can0/n21/a/b` (or the full `net/can/can0/n21/a/b` for a connection
+  created through `/net`). Nothing rejects the old form — it simply stops resolving, so a peer
+  goes quietly unreachable and a READ times out rather than erroring.
+
+  This slice landed without a CHANGELOG entry, which is how it reached a downstream firmware as
+  a mystery timeout (`"READ over vcan never resolved"`) and cost a 188-commit bisect to
+  attribute. The commit message documented it thoroughly; the file an integrator actually reads
+  did not.
+
+- **BREAKING: `transport_vertex_t::provide_link` gains a leading `module` argument** — RFC-0014
+  S2a. A staged link bypasses the connection factory, so there is no `kind` to derive the mount
+  from and it must be named: `provide_link("can", "can0", tcan)`. Modules are **declared**, not
+  derived (`register_module(module, kind, role)`) — a transport with both a dial and a listen
+  shape is two modules (`ws-client` / `ws-server`), while a bus like CAN is one for both roles;
+  an undeclared kind falls back to `<kind>-client` / `<kind>-server`, so an externally
+  registered transport keeps working.
+
 - **`graph_t::set_app_fields_static` / `vertex_t::set_app_fields_static` take a
   `tr::graph::borrowed_fields_t`** instead of a `std::span<const app_field_static_t>`
   (ADR-0058 erratum 2). **Source-compatible with every array-shaped caller**: the new type
