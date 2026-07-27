@@ -12,8 +12,34 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`tr::mem::block_array_t<T>::data()`** (both const and non-const), returning the contiguous
+  block or `nullptr` when empty. For handing the array to a pointer/length API — the egress
+  `iov` table below is the first caller. Invalidated by any growth, like every other
+  contiguous container.
+
 ### Fixed
 
+- **The rope FORWARD hop can no longer abort (#596).** `fwd_router_t::route_fwd_forward`'s
+  multi-link instantiation gathered its scatter-gather entries into a
+  `std::pmr::vector<std::span<const std::byte>>` drawn from the injected `mr_`. The entry
+  count is `~6 + link_count` — **chosen by the sending peer**, on the **forward** path, which
+  sits behind no ACL and is not even the terminus. Growth went through `std::pmr`, so a
+  fragmented heap threw `std::bad_alloc`, which on `-fno-exceptions` ESP-IDF is the
+  link-wrapped `abort()` stub: the same peer-reachable reboot #588 removed from the decode
+  path, still live on egress. The reply path immediately below it had already been guarded
+  (`rope_t::try_to_iovec`), so this was an asymmetry, not an oversight of the whole file.
+  The table is now a `mem::block_array_t` over the router's injected `rx_`
+  ([ADR-0065](../docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md)) and
+  exhaustion **drops the hop**. Dropping rather than sending the entries that fit is the
+  point: a partial iov is a *truncated FWD on the wire*, and FWD is not delivery-guaranteed,
+  so the sender retries. No API change for callers that do not inject a source — `rx_`
+  already defaulted to `mem::heap_source()`.
+  Pinned by `core/tests/fwd_rope_forward_test.cpp`: one maximally fragmented rope through
+  three seams — `null_source()` emits **nothing** (asserted as nothing, not as something
+  short), a bounded `bump_source_t` and the default heap source both emit bytes identical to
+  the contiguous oracle. Reverting the fix fails the first two.
 - **The wire RX decode path can no longer abort (#588).** `wire::decode_into` — the terminus
   arena decoder, reached from a peer's frame **behind no ACL** — made three unguarded
   `std::pmr` allocations: the node array's `reserve`/growth, the sink's open-node stack, and

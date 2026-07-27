@@ -18,6 +18,7 @@
 #include "libtracer/fwd_frame_view.hpp"
 #include "libtracer/grammar.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/rope_decode.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -629,10 +630,23 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
         });
         child.send(std::span<const std::span<const std::byte>>(iov.data(), n));
     } else {
-        // Rope source: a region may cross several links — gather into a pmr vector drawn
-        // from the terminus arena's resource (the forward hop still copies no payload).
-        std::pmr::vector<std::span<const std::byte>> iov{mr_};
-        rebuilt->gather(cur_src, [&](std::span<const std::byte> s) { iov.push_back(s); });
+        // Rope source: a region may cross several links, so the sub-span count is only known
+        // at run time — gather into a NOTHROW block array drawn from the failable seam (#596).
+        // A `std::pmr::vector` here was a peer-reachable abort(): the element count is chosen
+        // by the sender (link count x region count), the growth is `operator new`, and on
+        // -fno-exceptions the throw is a reboot. This is the FORWARD path — it sits behind no
+        // ACL, exactly like the RX decode (#588). The reply path immediately below already
+        // refused by value via `try_to_iovec`; this closes the asymmetry.
+        //
+        // Exhaustion drops the frame. That is the correct answer for a forward hop: FWD is
+        // not delivery-guaranteed, the sender retries, and emitting a partial iov would put a
+        // TRUNCATED frame on the wire — worse than none.
+        mem::block_array_t<std::span<const std::byte>> iov{*rx_};
+        bool ok = true;
+        rebuilt->gather(cur_src, [&](std::span<const std::byte> s) {
+            if (ok && !iov.push_back(s)) ok = false;
+        });
+        if (!ok) return;
         child.send(std::span<const std::span<const std::byte>>(iov.data(), iov.size()));
     }
 }

@@ -332,6 +332,15 @@ class block_array_t {
     }
     /** @brief True when no elements are held. */
     [[nodiscard]] bool empty() const noexcept { return end_ == data_; }
+    /**
+     * @brief First element, or `nullptr` when empty — the contiguous block.
+     *
+     * For handing the array to an API that takes a pointer/length pair, e.g. building a
+     * `std::span` over an egress iov table. The pointer is invalidated by any growth.
+     */
+    [[nodiscard]] T* data() noexcept { return data_; }
+    /** @brief First element (const), or `nullptr` when empty. */
+    [[nodiscard]] const T* data() const noexcept { return data_; }
 
    private:
     void give_back() noexcept {
