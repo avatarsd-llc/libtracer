@@ -48,7 +48,12 @@ CORES = [
         "Typed TLVs":      ("✅", "", [f"{TSPKG}/client/test/vectors.test.mjs"]),
         "FWD / FIELD":     ("✅", "", [f"{TSPKG}/client/test/roundtrip.test.mjs"]),
         "Client / node":   ("🟡", "experimental", [f"{TSPKG}/client/test/session.test.mjs", f"{TSPKG}/client/test/interop.test.mjs"]),
-        "Transports":      ("🟡", "ws + webtransport", [f"{TSPKG}/transport-ws/test/ws-codec.test.mjs", f"{TSPKG}/transport-webtransport/test/framing.test.mjs"]),
+        # webtransport now also cites the LIVE browser<->C++ interop that
+        # wt-interop.yml runs (#321) — a real HTTP/3 session exchanging real bytes,
+        # which is what closed the last cell backed by frame shape alone. The
+        # framing vectors stay cited: ts.yml still runs them, and they pin the wire
+        # shape the live test only exercises for one payload.
+        "Transports":      ("🟡", "ws + webtransport", [f"{TSPKG}/transport-ws/test/ws-codec.test.mjs", f"{TSPKG}/transport-webtransport/test/framing.test.mjs", f"{TSPKG}/transport-webtransport/test/interop-browser.test.mjs"]),
         "Graph runtime":   ("❌", "by design", []),
         "Cross-validated": ("✅", "+ live interop", [f"{TSPKG}/transport-ws/test/interop.test.mjs", f"{TSPKG}/client/test/interop.test.mjs"]),
         "Published":       ("npm", "core + client + ws", [f"{TSPKG}/core/package.json"]),
