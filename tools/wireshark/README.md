@@ -66,7 +66,27 @@ libtracer.path contains "temp"  frames addressing a path with "temp"
 libtracer.opt.cr == 1           frames carrying a CRC
 libtracer.crc.bad               frames whose trailer CRC failed to verify
 libtracer.error                 ERROR frames (shows tr::concept::name)
+libtracer.field.selector        the FIELD selector in source spelling
 ```
+
+### Telling the four FIELD forms apart
+
+`libtracer.field.selector` renders a FIELD selector the way you would write it,
+including the 1-byte `index_mode` (RFC-0004 §C) that decides what the frame
+actually does:
+
+| Selector | `index_mode` | Meaning |
+| --- | --- | --- |
+| `:subscribers` | absent ⇒ `SCALAR` | the whole array |
+| `:subscribers[3]` | `ELEMENT` + index | one slot |
+| `:subscribers[]` | `ELEMENT`, no index | append (subscribe) |
+| `:subscribers[*]` | `WILDCARD` | every slot |
+
+`[]` and `[*]` differ **by one byte on the wire** and by a great deal in effect,
+so filter on the selector, not `libtracer.field.name` (which is still the plain
+first-level name). Nested selectors join with `.` — `:settings.app.kp`. An
+`index_mode` byte outside `{0,1,2}` renders as `[mode?N]` and raises the
+malformed expert info; the reference resolver rejects it with `INVALID_PATH`.
 
 ## Tests
 

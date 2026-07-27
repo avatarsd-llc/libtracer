@@ -84,6 +84,22 @@ def type_code_from_expected(s: str) -> int:
     return int(s.split()[0], 16)
 
 
+def first_field_str(node: dict) -> str | None:
+    """The rendered selector of the first FIELD in the decoded tree, or None.
+
+    FIELD appears both as a whole vector (the `field/` category) and nested
+    inside FWD, so the search is depth-first over the decoded children.
+    """
+    fld = node.get("field")
+    if isinstance(fld, dict) and fld.get("str"):
+        return fld["str"]
+    for child in node.get("children") or []:
+        got = first_field_str(child)
+        if got is not None:
+            return got
+    return None
+
+
 def frame_bytes(case: Path, exp: dict) -> str:
     """Hex of the frame under test: input.bin | reject.bin | the expected `hex`."""
     for fn in ("input.bin", "reject.bin"):
@@ -149,6 +165,14 @@ def check_vector(case: Path, backend: LuaBackend, verbose: bool) -> list[str]:
                 fails.append(f"crc value {got_crc['stored']} != {exp_crc['value']}")
     if got_crc and not got_crc["ok"]:
         fails.append(f"CRC verification FAILED (stored {got_crc['stored']} computed {got_crc['computed']})")
+
+    # FIELD selector: the full source spelling, so `:x`, `:x[]`, `:x[N]` and
+    # `:x[*]` cannot silently collapse onto one another (#587). Only asserted
+    # for vectors that declare it, so unrelated vectors need no edit.
+    if isinstance(dec.get("field"), str):
+        got_field = first_field_str(frame)
+        if got_field != dec["field"]:
+            fails.append(f"field {got_field!r} != {dec['field']!r}")
 
     # Children (PATH NAME segments etc.).
     if isinstance(dec.get("children"), list):

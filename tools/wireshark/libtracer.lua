@@ -158,7 +158,11 @@ M.STRUCTURED = {
 
 M.FWD_OP = { [0] = "READ", [1] = "WRITE", [2] = "AWAIT", [3] = "REPLY" }
 M.FWD_KIND = { [0] = "RESULT", [1] = "ERROR" }
-M.INDEX_MODE = { [0] = "ELEMENT", [1] = "WILDCARD" }
+-- FIELD index_mode, the optional trailing u8 VALUE of a selector level
+-- (RFC-0004 §C; core/src/op_resolve_walk.hpp:237 `index_mode_t`). Any other
+-- byte is malformed and is rejected with INVALID_PATH by the reference
+-- resolver (op_resolve_walk.hpp:294-299), so the dissector flags it too.
+M.INDEX_MODE = { [0] = "SCALAR", [1] = "ELEMENT", [2] = "WILDCARD" }
 
 -- tr::<concept>::<error> registry, keyed by the u16 registered code.
 M.ERROR_CODES = {
@@ -192,6 +196,18 @@ end
 local function u32le(b, off)
   local b0, b1, b2, b3 = string.byte(b, off + 1, off + 4)
   return b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+end
+-- Tolerant little-endian load of `min(len, width)` bytes: the Lua twin of
+-- tr::detail::load_le (core/include/libtracer/byteorder.hpp:27), where a VALUE
+-- narrower than the target integer zero-extends instead of being rejected.
+-- Missing bytes (truncated capture) also read as zero.
+local function uxle(b, off, len, width)
+  local n = (len < width) and len or width
+  local value = 0
+  for i = 0, n - 1 do
+    value = value + (string.byte(b, off + 1 + i) or 0) * (256 ^ i)
+  end
+  return math.floor(value)
 end
 -- u64 ns timestamps exceed 2^53, so keep exact hex and a best-effort decimal.
 local function u64le_hex(b, off)
@@ -370,14 +386,52 @@ function M._semantics(b, node)
     end
     node.fwd = fwd
 
-  elseif t == 0x10 then -- FIELD: NAME field_name (+ optional index / index_mode)
-    local fld = {}
-    for _, c in ipairs(node.children) do
-      if c.type == 0x02 and not fld.name then
-        fld.name = string.sub(b, c.payload_off + 1, c.payload_off + c.length)
-      elseif c.type == 0x01 and c.length == 4 and not fld.index then
-        fld.index = u32le(b, c.payload_off)
+  elseif t == 0x10 then -- FIELD: one or more levels, each NAME + 0/1/2 VALUE
+    -- Mirrors the reference resolver's `selector_to_field`
+    -- (core/src/op_resolve_walk.hpp:247-306) level for level: a NAME, then
+    -- 0 VALUEs => SCALAR, 1 VALUE => index_mode only ("[]" / "[*]"),
+    -- 2 VALUEs => [index u32, index_mode u8] ("[N]"). Reading only the u32
+    -- (as this branch once did) makes ":subscribers", ":subscribers[]" and
+    -- ":subscribers[*]" render identically — three operations with wholly
+    -- different effects on the target vertex.
+    local fld = { steps = {} }
+    local kids = node.children
+    local i = 1
+    while i <= #kids do
+      local c = kids[i]
+      if c.type ~= 0x02 then -- every level MUST open with a NAME
+        fld.malformed = "FIELD level does not start with NAME"
+        break
       end
+      local step = { name = string.sub(b, c.payload_off + 1, c.payload_off + c.length) }
+      i = i + 1
+      local v0, v1
+      if kids[i] and kids[i].type == 0x01 then v0 = kids[i]; i = i + 1 end
+      if v0 and kids[i] and kids[i].type == 0x01 then v1 = kids[i]; i = i + 1 end
+      local mode_val
+      if v0 and v1 then
+        -- Tolerant width, matching tr::detail::load_le (byteorder.hpp:27): a
+        -- VALUE narrower than 4 bytes zero-extends rather than being ignored.
+        step.index = uxle(b, v0.payload_off, v0.length, 4)
+        mode_val = v1
+      elseif v0 then
+        mode_val = v0
+      end
+      step.mode = mode_val and uxle(b, mode_val.payload_off, mode_val.length, 1) or 0
+      step.mode_name = M.INDEX_MODE[step.mode]
+      if not step.mode_name then
+        step.mode_name = "mode?" .. step.mode
+        fld.malformed = "FIELD index_mode " .. step.mode .. " outside {0,1,2}"
+      end
+      fld.steps[#fld.steps + 1] = step
+      -- `i` already points at the next level's NAME: the NAME and its 0/1/2
+      -- VALUEs were each consumed above.
+    end
+    fld.str = M.field_str(fld)
+    -- Back-compat: the first level's plain name/index, as this branch used to expose.
+    if fld.steps[1] then
+      fld.name = fld.steps[1].name
+      fld.index = fld.steps[1].index
     end
     node.field = fld
 
@@ -395,6 +449,34 @@ function M._semantics(b, node)
   end
 end
 
+--[[ @brief Render a decoded FIELD selector in its source spelling.
+
+  The four forms an analyst must be able to tell apart at a glance, because
+  they are four different operations on the target vertex (RFC-0004 §C):
+  `:name` (scalar), `:name[N]` (one slot), `:name[]` (append), `:name[*]`
+  (wildcard — subscriber-path targets only, INVALID_PATH anywhere else).
+  Levels join with `.`, matching the `:settings.app.kp` spelling.
+]]--
+function M.field_str(fld)
+  local out = {}
+  for _, s in ipairs(fld.steps or {}) do
+    local part = s.name or "?"
+    if s.mode_name == "WILDCARD" then
+      part = part .. "[*]"
+    elseif s.mode_name == "ELEMENT" then
+      part = part .. (s.index and ("[" .. s.index .. "]") or "[]")
+    elseif s.mode_name == "SCALAR" then
+      -- A bare index with mode=SCALAR still selects one slot (the resolver's
+      -- `step.indexed = has_index` leg); only an index-less SCALAR is plain.
+      if s.index then part = part .. "[" .. s.index .. "]" end
+    else
+      part = part .. "[" .. s.mode_name .. "]"
+    end
+    out[#out + 1] = part
+  end
+  return ":" .. table.concat(out, ".")
+end
+
 --[[ @brief One-line human summary of a top-level frame (Info column). ]]--
 function M.summary(node)
   if not node.type then return "malformed" end
@@ -407,9 +489,7 @@ function M.summary(node)
   elseif node.type == 0x06 and node.path_str then
     return "PATH " .. node.path_str
   elseif node.type == 0x10 and node.field then
-    local s = "FIELD :" .. (node.field.name or "?")
-    if node.field.index then s = s .. "[" .. node.field.index .. "]" end
-    return s
+    return "FIELD " .. (node.field.str or ":?")
   elseif node.type == 0x08 and node.error_id then
     return "ERROR " .. (node.error_id.name or "?")
   elseif node.type == 0x09 and node.length == 0 then
@@ -469,8 +549,18 @@ local function node_to_json(n)
       jstr(n.fwd.src or ""), tostring(n.fwd.kind or "null"), jstr(n.fwd.kind_name or ""))
   end
   if n.field then
-    parts[#parts + 1] = string.format('"field":{"name":%s,"index":%s}',
-      jstr(n.field.name or ""), tostring(n.field.index or "null"))
+    local sp = {}
+    for _, s in ipairs(n.field.steps or {}) do
+      sp[#sp + 1] = string.format('{"name":%s,"index":%s,"mode":%s,"mode_name":%s}',
+        jstr(s.name or ""), tostring(s.index or "null"),
+        tostring(s.mode or "null"), jstr(s.mode_name or ""))
+    end
+    parts[#parts + 1] = string.format(
+      '"field":{"name":%s,"index":%s,"str":%s,"malformed":%s,"steps":[%s]}',
+      jstr(n.field.name or ""), tostring(n.field.index or "null"),
+      jstr(n.field.str or ""),
+      n.field.malformed and jstr(n.field.malformed) or "false",
+      table.concat(sp, ","))
   end
   if n.error_id then
     parts[#parts + 1] = string.format('"error_id":{"form":%s,"name":%s,"code":%s}',
@@ -539,6 +629,7 @@ if rawget(_G, "Proto") then
     fwd_dst  = ProtoField.string("libtracer.fwd.dst", "FWD dst"),
     fwd_src  = ProtoField.string("libtracer.fwd.src", "FWD src"),
     field_nm = ProtoField.string("libtracer.field.name", "Field"),
+    field_sel = ProtoField.string("libtracer.field.selector", "Field selector"),
     err_name = ProtoField.string("libtracer.error", "Error"),
     ts_abs   = ProtoField.uint64("libtracer.trailer.ts_abs", "Wire-time (abs ns)", base.DEC),
     ts_rel   = ProtoField.int32("libtracer.trailer.ts_rel", "Wire-time (rel ns)", base.DEC),
@@ -599,7 +690,13 @@ if rawget(_G, "Proto") then
       if node.fwd.dst then gen(f.fwd_dst, node.fwd.dst) end
       if node.fwd.src then gen(f.fwd_src, node.fwd.src) end
     end
-    if node.field and node.field.name then gen(f.field_nm, node.field.name) end
+    if node.field then
+      if node.field.name then gen(f.field_nm, node.field.name) end
+      -- The full selector, so `[*]` vs `[]` vs `[N]` is filterable and not
+      -- merely visible in the summary line.
+      if node.field.str then gen(f.field_sel, node.field.str) end
+      if node.field.malformed then sub:add_proto_expert_info(ef.invalid, node.field.malformed) end
+    end
     if node.error_id then gen(f.err_name, node.error_id.name) end
 
     if node.opt.PL == 1 then

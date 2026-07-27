@@ -54,7 +54,36 @@ A path that violates any limit MUST be rejected with `ERROR{tr::path::invalid}`.
 - `[N]` (decimal integer 0..65535): a specific slot.
 - `[]` (empty index): the array as a whole. A read returns a `PL=1` reply whose children are the element TLVs; a write appends to the next free slot.
 
-Indexing is resolved at **L4 from the field schema**, not from a wire marker: a **fixed-stride** array (uniform element size) resolves `[N]` by direct offset (O(1)) on contiguous backing; otherwise the children are walked (ADR-0008).
+Indexing is resolved at **L4 from the field schema**, not from the storage layout: a **fixed-stride** array (uniform element size) resolves `[N]` by direct offset (O(1)) on contiguous backing; otherwise the children are walked (ADR-0008).
+
+### How the index form travels on the wire
+
+The text spelling above is the human form. A remote operation carries the field
+chain as a `0x10` **FIELD** TLV, one *level* per `.`-separated step, and each
+level spells its index form with an optional trailing 1-byte `index_mode` VALUE
+([RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md) §C):
+
+| Text | FIELD level | `index_mode` |
+| --- | --- | --- |
+| `:name` | `NAME` | absent ⇒ `SCALAR` (0) |
+| `:name[N]` | `NAME`, `VALUE` u32 = N, `VALUE` u8 | `ELEMENT` (1) |
+| `:name[]` | `NAME`, `VALUE` u8 | `ELEMENT` (1), no index |
+| `:name[*]` | `NAME`, `VALUE` u8 | `WILDCARD` (2) |
+
+`index_mode` is **optional and defaults to `SCALAR`**, so `:name` and `:name[N]`
+each have one canonical spelling while the mode byte is what separates `[]` from
+`[*]`. A mode byte outside `{0, 1, 2}` is malformed and MUST be rejected with
+`ERROR{tr::path::invalid}`.
+
+Two consequences worth stating, because both have caught tooling out:
+
+- `:name[]` and `:name[*]` differ **by exactly one byte**, and a decoder that
+  reads only the u32 index renders `:name`, `:name[]` and `:name[*]`
+  identically. The conformance corpus pins all three
+  (`field/field-scalar`, `field/field-append`, `field/field-wildcard`).
+- `[*]` is a **wire marker, not a path character**. The reserved-character rule
+  below still forbids `*` inside a NAME, and there is still no textual wildcard
+  grammar.
 
 ### Reserved characters
 
@@ -118,7 +147,15 @@ A subtree subscriber receives TLVs produced at many concrete paths and may need 
 
 ### Future direction: per-segment wildcards (non-normative)
 
-A per-segment wildcard grammar — `*` matching one segment (`/sensor/*/temp` for *horizontal* matching across siblings), `[*]` matching any index — is an **unratified idea**, not part of v1: no implementation exists, and adopting it would require its own RFC. The characters `*` and `?` are reserved so such a grammar could be added without breaking existing names. Subtree subscription deliberately removes the need for the `**`-style *vertical* wildcard.
+A per-**segment** wildcard grammar — `*` matching one segment (`/sensor/*/temp` for *horizontal* matching across siblings) — is an **unratified idea**, not part of v1: no implementation exists, and adopting it would require its own RFC. The characters `*` and `?` are reserved so such a grammar could be added without breaking existing names. Subtree subscription deliberately removes the need for the `**`-style *vertical* wildcard.
+
+The **field-index** `[*]` is a different thing and is *not* future work: it exists
+in v1 as FIELD `index_mode = WILDCARD` ([§How the index form travels on the
+wire](#how-the-index-form-travels-on-the-wire)). It is confined to
+subscriber-path targets — a `[*]` level on any other field answers
+`ERROR{tr::path::invalid}`, which the `fwd/fwd-wildcard-reject` conformance
+vector pins. Earlier revisions of this page listed `[*]` alongside the segment
+wildcard as unimplemented; that was wrong, and this note is the correction.
 
 ---
 

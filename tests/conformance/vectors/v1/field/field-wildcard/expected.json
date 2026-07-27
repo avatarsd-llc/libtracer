@@ -1,0 +1,13 @@
+{
+  "name": "field-wildcard",
+  "category": "field",
+  "hex": "1040140002000B0073756273637269626572730100010002",
+  "total_bytes": 24,
+  "decoded": {
+    "type": "0x10 FIELD",
+    "structured": true,
+    "field": ":subscribers[*]",
+    "meaning": "FIELD{ NAME \"subscribers\", index_mode=WILDCARD } — :subscribers[*] (every subscriber slot)",
+    "note": "RFC-0004 §B/§C canonical bytes; structured TLV, opt.PL=1, no trailers (at-rest form). Byte-for-byte `field-append` with the index_mode VALUE flipped 0x01→0x02 — the ONE-BYTE difference between appending a subscriber and addressing them all. Codec-valid here; `[*]` is legal only on a subscriber-path target at the resolution layer (see fwd/fwd-wildcard-reject)."
+  }
+}

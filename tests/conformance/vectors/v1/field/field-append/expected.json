@@ -6,6 +6,7 @@
   "decoded": {
     "type": "0x10 FIELD",
     "structured": true,
+    "field": ":subscribers[]",
     "meaning": "FIELD{ NAME \"subscribers\", index_mode=ELEMENT (no index) } \u2014 :subscribers[] (append)",
     "note": "RFC-0004 \u00a7B/\u00a7C canonical bytes; structured TLV, opt.PL=1, no trailers (at-rest form)"
   }

@@ -6,6 +6,7 @@
   "decoded": {
     "type": "0x10 FIELD",
     "structured": true,
+    "field": ":settings.app.kp",
     "meaning": "FIELD{ NAME \"settings\", NAME \"app\", NAME \"kp\" } — :settings.app.kp (an RFC-0010 owner app field: the reserved `app` subkey inside the settings container, then the owner-declared name)",
     "note": "RFC-0004 §B/§C canonical bytes; structured TLV, opt.PL=1, no trailers (at-rest form). RFC-0010 §A.1: `app` is a reserved NAME inside vertex SETTINGS — the path grammar is unchanged, one more scalar level."
   }
