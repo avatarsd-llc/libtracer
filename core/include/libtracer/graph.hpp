@@ -171,8 +171,9 @@ class graph_t {
      * back to the heap (§3). @p mr and @p value_backend must both outlive the graph
      * and every value handle obtained from it.
      *
-     * @param ctl The #551 nothrow control-plane seam every FAILABLE control-plane
-     *        allocation draws from: vertex registration first, then the
+     * @param ctl The #551 nothrow seam every FAILABLE allocation draws from — the ones a
+     *        PEER can provoke ("failable", not "control-plane": CONTEXT.md binds that
+     *        phrase to the `:` field-write plane): vertex registration first, then the
      *        `route_handle` label tables, `tlv_arena` nodes, `fwd_router` iov and
      *        `can_reassembly` maps as each migrates. On exhaustion it returns
      *        `nullptr` and the operation answers BACKPRESSURE, so a peer's CREATE
@@ -190,7 +191,7 @@ class graph_t {
     graph_t& operator=(const graph_t&) = delete;
 
     /**
-     * @brief The injected #551 nothrow control-plane seam (@ref tr::mem::block_source_t).
+     * @brief The injected #551 nothrow failable-block seam (@ref tr::mem::block_source_t).
      *
      * Exposed so a host can name it in a memory census and so the wiring is
      * observable without reaching into the graph's state. Callers inside the
@@ -956,12 +957,13 @@ class graph_t {
     // assign has marked anything — losing a race with a concurrent mark_pending leaves the
     // mark for the next sweep, an ordering the locked erase already permitted (ADR-0057).
     std::atomic<std::size_t> pending_count_{0};
-    /** @brief The #551 nothrow control-plane block seam. Host-owned; outlives the
+    /** @brief The #551 nothrow failable-block seam. Host-owned; outlives the
      *         graph. Defaults to the platform heap, so behaviour is byte-identical
      *         until a host injects a bounded source — except that exhaustion is a
      *         `nullptr` return rather than the `-fno-exceptions` abort stub.
-     *         No call site draws from it yet; the migration order is in the ctor
-     *         docs. Kept a DIFFERENT type from `mr_` on purpose (see
+     *         Its first consumer is the branch-write decode's bump upstream
+     *         (`graph.cpp`); registration and the remaining containers are still
+     *         to migrate. Kept a DIFFERENT type from `mr_` on purpose (see
      *         @ref tr::mem::block_source_t).
      *
      *         LAST on purpose: no hot path reads it, so declaring it here keeps

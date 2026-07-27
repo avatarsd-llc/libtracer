@@ -271,10 +271,16 @@ The contract:
   firmware (an ESP32-C6 smart-agriculture node), is likewise a host
   detail, not a libtracer limit — libtracer handles are pointers.)
 - **Memory policy is the host's.** The reference forwarder (`fwd_router_t`) takes
-  a defaulted `std::pmr::memory_resource*`: the terminus arena draws from it
-  directly, and the library holds no internal buffer. A host that wants a
-  zero-global-heap terminus injects a pool resource over its own slab; the
-  default is the standard heap (a terminus may allocate).
+  **two** defaulted memory parameters, and a bounded host must inject BOTH: a
+  `std::pmr::memory_resource*` for the route-handle label tables, and a
+  `tr::mem::block_source_t*` (`rx`) the **terminus arena** draws from. They are
+  separate types because only the second one is on a peer-driven path and
+  therefore has to report exhaustion by value rather than by throwing
+  ([ADR-0065](../adr/0065-failable-allocation-gets-its-own-seam-block-source.md)).
+  The library holds no internal buffer. A host that wants a zero-global-heap
+  terminus injects a bounded source over its own slab — injecting only the
+  `memory_resource` leaves the arena on the global heap. Both default to the
+  standard heap (a terminus may allocate).
 
 ### Failure surfaces locally
 

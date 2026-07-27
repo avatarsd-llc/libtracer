@@ -32,10 +32,19 @@ static std::byte g_slab[24 * 1024];
 // Every inbound datagram lands in a pool slot; exhaustion = backpressure.
 tr::mem::pool_t rx_pool{front_region(g_slab), /*slot=*/1536};
 
-// Back region: monotonic + synchronized arena — router terminus & label tables.
+// Back region: monotonic + synchronized arena — the pmr seam (label tables,
+// LKV control blocks).
 std::pmr::monotonic_buffer_resource arena{back_region(g_slab).data(),
                                           back_region(g_slab).size()};
 std::pmr::synchronized_pool_resource shared{&arena};
+
+// The FAILABLE seam is separate and must be injected too: everything a PEER can
+// provoke (the terminus decode arena today) draws from it, and it reports
+// exhaustion by value instead of throwing (ADR-0065). Injecting only `shared`
+// above leaves those allocations on the global heap.
+tr::mem::bump_source_t blocks{back_region(g_slab), tr::mem::null_source()};
+// ... graph_t graph{&shared, &rx_pool_backend, &blocks};
+// ... fwd_router_t router{graph, &shared, &blocks};
 ```
 
 Rules that follow from it:

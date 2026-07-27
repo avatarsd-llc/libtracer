@@ -401,7 +401,7 @@ class fwd_router_t {
      * ④b): a @ref wire::grammar::span_cursor reads a contiguous frame (byte-identical to the
      * pre-rope path, zero heap — a stack `iov` array), a @ref wire::grammar::rope_cursor reads
      * a scatter-gather frame (the egress gathers each region's per-link sub-spans into a
-     * `std::pmr::vector` drawn from the injected `mr_` — still no payload copy).
+     * nothrow-reserved `std::vector` via `rope_t::try_to_iovec` — still no payload copy).
      *
      * @tparam Cursor A grammar byte-source cursor (span or rope).
      * @param cur     The cursor positioned at the inbound FWD frame's first byte.

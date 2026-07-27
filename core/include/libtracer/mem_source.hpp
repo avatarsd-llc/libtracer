@@ -2,8 +2,8 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * mem_source — the L0 nothrow block seam every FAILABLE control-plane
- * allocation draws from (#551). Raw bytes, failure by value, no refcount.
+ * mem_source — the L0 nothrow block seam every FAILABLE allocation draws from
+ * (#551). Raw bytes, failure by value, no refcount.
  */
 #pragma once
 
@@ -16,7 +16,7 @@
 
 /**
  * @file
- * @brief The nothrow control-plane block seam (`tr::mem::block_source_t`), the
+ * @brief The nothrow failable-block seam (`tr::mem::block_source_t`), the
  *        process-wide platform-heap source that backs it by default, and the two
  *        companions the migrated call sites need: a bump source over a caller
  *        buffer and a nothrow growable array.
@@ -25,8 +25,12 @@
 namespace tr::mem {
 
 /**
- * @brief The nothrow block seam every FAILABLE control-plane allocation draws from
- *        (#551, ADR-0039 erratum 5).
+ * @brief The nothrow block seam every FAILABLE allocation draws from — the ones a
+ *        PEER can provoke (#551, ADR-0065; ADR-0039 erratum 5/6).
+ *
+ * @note "Failable", not "control-plane": CONTEXT.md already binds *control plane* to the
+ *       `:` field-write addressing plane, and this seam is orthogonal to that axis — a
+ *       DATA-plane branch write is one of its first consumers.
  *
  * RFC-0014 made vertex registration a **runtime, wire-driven** operation: a peer's
  * CREATE frame reaches `register_vertex_key`. Every allocation on that path is an
@@ -223,7 +227,7 @@ class bump_source_t final : public block_source_t {
 /**
  * @brief A nothrow growable array of trivially-copyable @p T drawn from a @ref block_source_t.
  *
- * The container the control plane uses where a `std::pmr::vector` would otherwise sit
+ * The container a failable path uses where a `std::pmr::vector` would otherwise sit
  * (#551 Q2, #588). Two differences carry the whole point:
  *
  * 1. **Growth returns `false` instead of throwing.** `std::pmr::vector::push_back` on an

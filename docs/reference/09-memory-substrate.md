@@ -224,22 +224,23 @@ When a segment's refcount drops to zero (L1 machinery, [08-views-and-ownership.m
 
 L0 is ignorant of L1 view semantics; L1 is ignorant of how L0 honors `destroy`. The protocol's zero-copy story is the contract that they cooperate via this seam.
 
-### The second L0 seam: `block_source_t` (control-plane blocks)
+### The second L0 seam: `block_source_t` (failable blocks)
 
 `mem_backend_t` vends **refcounted `segment_t`s** — the right shape for payload bytes that many views share. The control plane is the other shape: the objects a node builds when it *registers* something (a vertex, a route label, a reassembly entry) have exactly **one owner** and no header, so a refcount on them is pure overhead. They are served by a second, deliberately smaller seam:
 
 ```cpp
 namespace tr::mem {
 
-// The nothrow control-plane block seam. Raw bytes, single owner, no refcount.
+// The nothrow failable-block seam. Raw bytes, single owner, no refcount.
 class block_source_t {
    public:
     explicit constexpr block_source_t(const char* name) noexcept;
     virtual ~block_source_t() = default;
 
     // Storage for `bytes`, aligned to at least `align` — NOTHROW.
-    // nullptr means exhaustion: the caller answers BACKPRESSURE. It never
-    // falls back to the global heap and never aborts.
+    // nullptr means exhaustion. It never falls back to the global heap and
+    // never aborts; WHICH reject the caller answers is the caller's, and
+    // follows the operation (see the two consumers below).
     [[nodiscard]] virtual void* try_alloc(std::size_t bytes, std::size_t align) noexcept = 0;
 
     // Sized reclaim: `bytes`/`align` MUST match the try_alloc that served the
@@ -275,6 +276,8 @@ Two companions ship with it, because the migrated call sites all need the same p
 ### Where the wire decode draws from
 
 `wire::decode_into` — the terminus arena decoder — is on the **RX path, behind no ACL**, and a peer chooses both the nesting depth and the node count of the frame it sends. All three of its draws (the node array, the walk's open-node stack, and the walk stack's spill past its inline slots) come from a `block_source_t`, so exhaustion is `TLV_NESTING_TOO_DEEP` — the status RFC-0006 already defines for "exceeds this receiver's decode resources" — and never an allocation failure. A bounded node composes this as a `bump_source_t` over its slab with `null_source()` upstream.
+
+The reject is the operation's, not the seam's. Both consumers that draw from it today answer `tr::tlv::nesting_too_deep` — the decode failed, and RFC-0006 already names that status "exceeds this receiver's decode resources". `BACKPRESSURE` is what a *store* answers when its value backend is exhausted ([§Backpressure, not fallback](#backpressure-not-fallback)); it is not a property of the block seam.
 
 ---
 
@@ -531,7 +534,9 @@ L0 backends are *supplied to* the runtime, never named by it — "which backend 
 
 2. **`tr::mem::mem_backend_t* value_backend_` — the value-bytes seam** ([ADR-0060](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0060-lkv-copy-store-injected-value-backend.md)). Allocates the durable byte `segment` that holds a vertex's **last-known-value (LKV)** when the write path must copy the value into memory it owns. This is a real L0 backend — a `mem_pool_static` on a bounded target, the default `mem_heap` otherwise — constructor-injected into `graph_t` and defaulted to `heap_backend()`, so behavior is byte-identical until a host supplies a pool.
 
-Two seams rather than one because a cache-managed byte buffer and a plain control object have different contracts: `owns_bytes`, the cache hooks, and ISR-safety belong to the byte buffer (an L0 `mem_backend_t`); object construction belongs to `std::pmr`. A host that wants **"one slab, whole stack"** points `value_backend_`, the wrapper `mr_`, and the transport-receive backend ([ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md)) all at the same underlying slab.
+3. **`tr::mem::block_source_t* ctl_` — the failable-block seam** ([ADR-0065](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md)). The nothrow source every allocation that a **peer** can provoke draws from. `fwd_router_t` carries the same seam separately as its `rx` parameter, which the terminus arena draws from. A bounded node MUST inject this one too: injecting only the other two leaves every peer-driven allocation on the global heap, and on a `-fno-exceptions` target its failure mode is `abort()`.
+
+Three seams rather than one because a cache-managed byte buffer, a plain control object and a failable peer-driven block have different contracts: `owns_bytes`, the cache hooks, and ISR-safety belong to the byte buffer (an L0 `mem_backend_t`); object construction belongs to `std::pmr`; and reporting exhaustion **by value** belongs to `block_source_t`, because `std::pmr` structurally cannot do it on a `-fno-exceptions` target ([ADR-0065](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md)). A host that wants **"one slab, whole stack"** points `value_backend_`, the wrapper `mr_`, the block source `ctl_` (and `fwd_router_t`'s `rx`), and the transport-receive backend ([ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md)) all at the same underlying slab.
 
 ### Why the value copy exists
 

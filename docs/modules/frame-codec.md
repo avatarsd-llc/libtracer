@@ -75,7 +75,7 @@ namespace crc { std::uint32_t crc32c(...); std::uint16_t crc16_ccitt(...); }   /
 ## The terminus arena sibling
 
 Alongside the owning `tlv_t` model, the codec ships a second decoder for the FWD
-terminus: **`wire::decode_into(span, std::pmr::memory_resource&) → tlv_arena_t`**
+terminus: **`wire::decode_into(span, tr::mem::block_source_t&) → tlv_arena_t`**
 (public header `tlv_arena.hpp`). It parses the same frames with the same
 validation (bounds, reserved bits, depth cap, trailer CRC), but the result is a
 **flat, pre-order array of `arena_tlv_t` span-nodes** — `{type, opt, wire

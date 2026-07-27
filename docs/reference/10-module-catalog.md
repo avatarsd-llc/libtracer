@@ -23,6 +23,7 @@ This catalog is the source of truth for **what gets built and how it composes**.
 | `security` | Wraps a transport with confidentiality / integrity / auth. |
 | `executor` | Hosts vertex-side compute (C callbacks, scripting, WASM). |
 | `mem-backend` | L0 memory substrate — owns real bytes, exposes them as `tr::view::segment_t`. |
+| `block-source` | L0 failable-block seam — raw single-owner blocks, exhaustion reported by value (`tr::mem::block_source_t`). |
 | `view-module` | L1 view + rope + cast layer — owns no bytes, owns the ownership semantics. |
 | `tool` | Out-of-process utility (CLI introspection, GUI, recorder). |
 | `future` | Named, not built for v1. Listed so the design space is explicit. |
@@ -35,11 +36,12 @@ This catalog is the source of truth for **what gets built and how it composes**.
 
 ### L0 — Memory substrate ([09-memory-substrate.md](09-memory-substrate.md))
 
-Backends that own real bytes. Each implements the `tr::mem::mem_backend_t` interface.
+L0 has **two** seams. Most modules here are *backends* that own real bytes and implement `tr::mem::mem_backend_t`, vending refcounted `segment`s for payload. One is a *block source* (`tr::mem::block_source_t`): raw single-owner blocks with failure reported by value, for allocations a peer can provoke ([09 §the second L0 seam](09-memory-substrate.md), [ADR-0065](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md)).
 
 | Module | Tag | What it wraps | Status |
 | ---- | ---- | ---- | ---- |
 | `mem_heap` | mem-backend | malloc/free, jemalloc, mimalloc — any general-purpose heap | v1 |
+| `mem_source` | block-source | The nothrow failable-block seam (`block_source_t`) plus `heap_source()`, `null_source()`, a `bump_source_t` over a caller buffer, and `block_array_t<T>` | v1 |
 | `mem_borrowed` | mem-backend | Caller-owned bytes wrapped as a non-owning segment (borrowed lifetime; the transparent byte-routing vehicle of [ADR-0012](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0012-modular-memory-binding-transparent-router.md)) | v1 |
 | `mem_pool_static` | mem-backend | A statically-allocated fixed-size slot pool | v1 |
 | `mem_pool_class` | mem-backend | A small set of fixed-size slot pools partitioned by size class | v1 |

@@ -298,3 +298,13 @@ Three corrections follow:
 What would reopen it: evidence that the 64 KB / L=2 advantage does not survive on the target (these are host numbers), or a decision that ≥64 KB frames are out of scope. The ruling's other findings are folded in above (corrections 2 and 4). Retiring would delete a reader, a resolver instantiation and their fuzz surface, at the cost of the ≥16 KB fragmented case — where the measured gap is small (2870 vs 2884 at 64 KB / 8 links) but favours the lazy path at low link counts. This erratum does not decide that; it records that the decision is now a measurement question, not an architectural one.
 
 ADR-0055 inherits this correction: its "flatten sweep" reasoning is unaffected for the **owning** path it governs, but its framing of span-tier flattens as a concession rather than a legitimate optimum should be read in light of the numbers above.
+
+## Erratum — the multi-link egress iov is a nothrow `std::vector`, not a `pmr::vector` over `mr_`
+
+*(2026-07-27, noted while auditing [#588](https://github.com/avatarsd-llc/libtracer/issues/588).)*
+
+§7 sanctions building the scatter-gather entry table as a `std::pmr::vector` drawn from the router's injected resource. That is not what shipped, and the difference matters for the same reason #588 did: the table is sized by `link_count()` on a path a peer drives, so through `std::pmr` its growth failure is `std::bad_alloc` — an `abort()` on `-fno-exceptions`.
+
+What the code does instead is `rope_t::try_to_iovec` (`rope.hpp`), which nothrow-reserves a plain `std::vector` to `link_count()` and returns `false` on failure; `fwd_router_t`'s reply egress drops the reply on `false`. The throwing `rope_t::to_iovec()` remains as a host convenience and is documented as throwing — **it has no caller inside the library**, which is the property to preserve.
+
+So the reasoning of §7 stands (no stack cap, no synthetic limit — the bound is a real resource) and only the mechanism is superseded. `fwd_router.hpp`'s surrounding comment still describes the `pmr::vector` form and is stale in the same way.

@@ -49,7 +49,7 @@ not a copy.
 
 Each module has its own page in the sidebar, grouped by layer:
 
-- **L0 substrate** — [segment](segment.md) (refcounted bytes), [backends](backends.md) (allocators)
+- **L0 substrate** — [segment](segment.md) (refcounted bytes), [backends](backends.md) (the `mem_backend_t` byte-buffer seam **and** the `block_source_t` failable-block seam)
 - **L1 views** — [views](views.md) (`view_t` / `rope_t` / the L1→L2 cast)
 - **L2/L3 wire codec** — [frame-codec](frame-codec.md) (TLV decode/encode + CRC)
 - **L4 graph** — [path](path.md) (addressing), [graph](graph.md) (vertices, read/write/await, dispatch)
