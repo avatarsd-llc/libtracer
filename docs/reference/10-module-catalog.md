@@ -286,7 +286,7 @@ When a TLV arrives at the dispatcher, the registry tells the graph runtime what 
 
 - `VALUE` at a vertex path → store, then fan out to subscribers.
 - `PATH` → resolve and read.
-- `SUBSCRIBER` written to `:subscribers[N]` → register a fan-out target.
+- `SUBSCRIBER` appended to `:subscribers[]` → register a fan-out target. (An **indexed** write, `:subscribers[N]`, is the *unsubscribe* — it clears slot N regardless of payload. See [02 §writing `:subscribers[N]`](02-graph-model.md#writing-subscribers-n-unsubscribes-it-does-not-register).)
 - `FWD` arriving via a transport → the forwarder's responsibility (forward onward, or terminus-resolve when the leading `dst` segment is local). `0x0D ROUTER` is a reserved code — it decodes generically; no mechanism consumes it.
 - Unknown user-range types with `PL=1` → store as opaque structured data; subscribers see what they handle.
 

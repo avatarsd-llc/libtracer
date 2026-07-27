@@ -374,7 +374,7 @@ A vertex exposes a **schema** describing every writable field. The schema lives 
 
 | Field path | Type | Writable | Meaning |
 | ---- | ---- | ---- | ---- |
-| `:subscribers[N]` | SUBSCRIBER | yes | Subscription record N |
+| `:subscribers[N]` | SUBSCRIBER | read; write **clears** | Subscription record N. A write UNSUBSCRIBES slot N — see the note below |
 | `:subscribers[]` | sequence of SUBSCRIBER | read-only; write to `[]` appends | Full list (read) or new slot (write) |
 | `:settings.reliability` | u8 enum | yes | `0=best-effort, 1=reliable` |
 | `:settings.durability` | u8 enum | yes | `0=volatile, 1=transient-local` |
@@ -389,6 +389,27 @@ A vertex exposes a **schema** describing every writable field. The schema lives 
 | `:schema` | structured TLV | read-only | Self-describing schema of fields and types |
 | `:description` | UTF-8 | yes (with permission) | Human-readable description |
 | `:acl` | ACL | yes (with permission) | Access control list |
+
+### Writing `:subscribers[N]` unsubscribes; it does not register
+
+There is **no set-a-slot surface**. Subscription records are written only by appending to
+`:subscribers[]`; an indexed write is the **unsubscribe** operation, and it clears slot `N`
+whatever the payload is — the runtime never inspects the value on that path
+([05 §`0x09`](05-protocol-tlvs.md) documents the empty-`STATUS` sentinel spelling, but a
+`SUBSCRIBER`, a junk `VALUE`, and the sentinel all produce the identical clear and the
+identical `RESULT` reply). A client that writes a `SUBSCRIBER` to `:subscribers[3]` expecting
+to install or retarget record 3 **silently unsubscribes** whoever was in slot 3, and is told
+it succeeded.
+
+`:subscribers` is also addressed **whole**: `:subscribers[N].<anything>` names nothing and
+answers `SCHEMA_NOT_FOUND`, matching the read half.
+
+| Intent | Spelling |
+| --- | --- |
+| subscribe | `write :subscribers[]` with a `SUBSCRIBER` |
+| unsubscribe slot N | `write :subscribers[N]` (any payload) |
+| retarget | unsubscribe, then subscribe — the new record may land in a **different** slot |
+| list | `read :subscribers[]` |
 
 ### Owner-declared application fields (`settings.app`) — RFC-0010
 

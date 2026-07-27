@@ -1337,6 +1337,23 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
     const field_step_t& step0 = field.steps[0];
 
     if (step0.name == "subscribers") {
+        // `:subscribers` is addressed WHOLE — `[]` appends an edge, `[N]` clears one, and
+        // there is nothing INSIDE a slot to address: a SUBSCRIBER record is stored and
+        // served as one TLV, never member-wise. So any further step names nothing.
+        //
+        // This gate is not cosmetic (#580). The `[N]` arm below is an unconditional
+        // `clear_edge`, so before it, `:subscribers[0].liveness.last_seen_ns` — or any
+        // typo'd tail at all — DESTROYED the slot and answered `kind=RESULT`, byte-identical
+        // to a legitimate `[0]` clear. A caller aiming at a member wrote nothing, unbound a
+        // live subscriber, and was told it succeeded. The read half already required
+        // `steps.size() == 1` (see read_field's `:subscribers[N]` arm), so this makes the
+        // two halves agree rather than inventing a rule.
+        //
+        // Resolved BEFORE the ACL gate, exactly as `:acl` below: a shape that names nothing
+        // is not an access question. Note that leaves the `[]` / `[N]` shapes untouched, so
+        // `plain_step` — the `:acl` guard's second half — must NOT be used here: an append
+        // is `append == true` and a clear is `indexed == true`, and both are legal.
+        if (field.steps.size() != 1) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         if (step0.append) {
             const auto sub = wire::decode(value);
             if (!sub || sub->type != type_t::SUBSCRIBER)
@@ -1405,6 +1422,16 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
         // instantiates a child of a device-catalog type, gated by the parent's CREATE
         // right (#81, ADR-0020). A `[N]` clear (child removal) is deferred (#66).
         // Read-back (members, not SPECs) is the field-read surface.
+        //
+        // `:children` is addressed WHOLE, like `:subscribers` above (#581). `append` was
+        // the sole predicate here, so `:children[].bogus` — or `[].a.b.c` — created the
+        // child exactly as the sanctioned `:children[]` does and answered `kind=RESULT`,
+        // byte-identical, with the tail provably inert (two different tails produced the
+        // same reply and the same graph). On `/net` that spelling built a LIVE connection
+        // vertex and wired it into the router. The READ of the byte-identical selector
+        // already answered SCHEMA_NOT_FOUND, so the two halves disagreed; this makes them
+        // agree. Before the CREATE gate, like `:acl`.
+        if (field.steps.size() != 1) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         if (step0.append) {
             if (!acl_allows(v, caller, acl_right_t::CREATE))
                 return std::unexpected(status_t::PERMISSION_DENIED);
