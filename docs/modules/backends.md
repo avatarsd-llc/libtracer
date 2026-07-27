@@ -55,8 +55,6 @@ The DMA/allocation enums the seam uses:
 :project: libtracer
 ```
 
-The bounded reference backend:
-
 ### The failable-block seam — `block_source_t`
 
 The second L0 seam ([ADR-0065](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md), [reference/09](../reference/09-memory-substrate.md)). `mem_backend_t` above vends refcounted `segment`s for payload bytes; this one vends **raw single-owner blocks** and reports exhaustion **by value**, because `std::pmr::memory_resource` structurally cannot — and on a `-fno-exceptions` target its only failure mode is `abort()`, which a peer can provoke.
@@ -81,6 +79,8 @@ The second L0 seam ([ADR-0065](https://github.com/avatarsd-llc/libtracer/blob/ma
 ```{doxygenclass} tr::mem::block_array_t
 :members:
 ```
+
+The bounded reference backend:
 
 ```{doxygenclass} tr::mem::pool_t
 :project: libtracer

@@ -226,7 +226,7 @@ L0 is ignorant of L1 view semantics; L1 is ignorant of how L0 honors `destroy`. 
 
 ### The second L0 seam: `block_source_t` (failable blocks)
 
-`mem_backend_t` vends **refcounted `segment_t`s** — the right shape for payload bytes that many views share. The control plane is the other shape: the objects a node builds when it *registers* something (a vertex, a route label, a reassembly entry) have exactly **one owner** and no header, so a refcount on them is pure overhead. They are served by a second, deliberately smaller seam:
+`mem_backend_t` vends **refcounted `segment_t`s** — the right shape for payload bytes that many views share. The other shape is the **failable** one: the objects a node builds when it *registers* something (a vertex, a route label, a reassembly entry) have exactly **one owner** and no header, so a refcount on them is pure overhead. They are served by a second, deliberately smaller seam:
 
 ```cpp
 namespace tr::mem {
@@ -262,7 +262,7 @@ Why it is a distinct type rather than a `std::pmr::memory_resource` with a docum
 | --- | --- | --- | --- | --- | --- |
 | check kept | kept | kept | kept | **deleted** | **deleted** |
 
-`-Os` is what an ESP-IDF node ships (`CONFIG_COMPILER_OPTIMIZATION_SIZE`). A seam whose failure signal disappears at exactly the optimization level the target uses is not a seam, so the control plane gets its own type, whose `try_alloc` carries no such annotation and whose name cannot be confused with `allocate` at a call site.
+`-Os` is what an ESP-IDF node ships (`CONFIG_COMPILER_OPTIMIZATION_SIZE`). A seam whose failure signal disappears at exactly the optimization level the target uses is not a seam, so failable allocation gets its own type, whose `try_alloc` carries no such annotation and whose name cannot be confused with `allocate` at a call site.
 
 The two seams are injected independently and a node may point both at the same underlying store ("one slab, whole stack") or split them.
 

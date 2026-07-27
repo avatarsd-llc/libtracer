@@ -50,7 +50,10 @@ import tempfile
 # rope), the L2/L3 wire codec (frame + terminus arena decode), and L4 addressing
 # (path). No graph runtime, no transports, no threads — the surface v1.md §3.1
 # guarantees an MCU can carry. Keep in sync with sentinel_node.cpp's includes.
-REQUIRED_MODULES = ("frame", "tlv_arena", "backend_set", "mem_pool", "rope", "path")
+# mem_source is required since #588: frame.cpp's decode and the fixture both call
+# tr::mem::heap_source(). Without it the link fails with an undefined reference, and
+# because this gate runs in `warn` mode that failure is SILENT — it measured nothing.
+REQUIRED_MODULES = ("frame", "tlv_arena", "backend_set", "mem_pool", "mem_source", "rope", "path")
 FIXTURE = "core/tests/footprint/sentinel_node.cpp"
 DEFAULT_BUDGET = 16 * 1024  # 16 KiB — the ADR-0016 §3 / ADR-0047 §5 Cortex-M0 bound.
 

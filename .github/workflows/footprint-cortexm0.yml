@@ -10,9 +10,14 @@
 # gate stays green (it catches vtable/erasure bloat AND template-instantiation
 # bloat). Complements the ESP-IDF whole-image sentinel in esp-idf.yml.
 #
-# Mode is `warn` today: the measured node is ~0.9 KiB over 16 KiB (std::pmr
-# soft-float via the arena decoder + CRC tables). Flip `--mode fail` once the
-# Wave 2 arena/codec rework brings the required modules under the ceiling.
+# Mode is `warn` today: the measured node is ~4.5 KiB over 16 KiB (20,937 B,
+# re-measured 2026-07-27). The old note blamed std::pmr soft-float reaching the
+# image via the arena decoder's `memory_resource&` seam; #588 removed that seam,
+# so that attribution no longer holds and the remaining overage has not been
+# re-attributed. NOTE the gate had silently stopped LINKING between #593 and this
+# commit — REQUIRED_MODULES omitted `mem_source`, and warn mode swallowed the
+# undefined reference, so it measured nothing. Flip `--mode fail` only after the
+# overage is understood.
 name: footprint-cortexm0
 
 on:

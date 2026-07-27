@@ -44,8 +44,9 @@ namespace tr::mem {
  *       (libstdc++ `bits/memory_resource.h`), so a caller's `if (p == nullptr)` is
  *       undefined-behaviour-deletable. Measured on riscv32-esp-elf-g++ 15.2.0 with
  *       the deployment flags: the soft-fail branch survives at `-O0`/`-O1`/`-O2`/`-O3`
- *       and is GONE at `-Os`/`-Oz` — the level the node ships at
- *       (`CONFIG_COMPILER_OPTIMIZATION_SIZE`) and the one level no test executes at.
+ *       and is GONE at `-Os`/`-Oz` — the level the reference node ships at
+ *       (`CONFIG_COMPILER_OPTIMIZATION_SIZE`), and the level at which no job exercises an
+ *       allocation-failure path (see ADR-0065 §1).
  *       Inheriting would keep that `allocate()` publicly callable on this object,
  *       one token away from every correct `try_alloc` call site, with no diagnostic
  *       at any warning level. A separate type makes the slip a compile error.

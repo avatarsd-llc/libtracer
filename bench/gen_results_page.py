@@ -846,8 +846,13 @@ exact allocation counts and bytes, not statistics. Seven probes feed the store:
   vertex on whichever transport thread received the frame, so a *peer* drives the
   allocation. This probe registers a connection-shaped path (a long, peer-chosen name that
   overflows the inline name buffer, plus a handler) on a graph with a resource injected,
-  and reports what the resource never saw. Its target is **zero**; today it is not zero
-  (#551). It is charted separately from the per-vertex rows above rather than beside them,
+  and reports what the resource never saw. #551 has since been RULED (ADR-0065): the
+  target is not "route it through that `memory_resource`" — `std::pmr` cannot report
+  exhaustion by value, and on the shipping `-Os` profile a caller's null check is deleted
+  outright. Registration will instead draw from the nothrow `tr::mem::block_source_t`
+  seam, so the number to drive to **zero** is what escapes *both* injected seams. Today
+  it is not zero: registration has not migrated yet, and this probe still measures the
+  pmr escape. It is charted separately from the per-vertex rows above rather than beside them,
   because it measures a different fixture — reading its block count against a bare leaf's
   would compare two different objects;
 - **whole-run max RSS** — the coarse process-level footprint.
