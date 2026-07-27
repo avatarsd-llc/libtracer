@@ -197,7 +197,7 @@ def render():
     L.append("  `cargo test`, an `npm test`, a live-interop job, or an ESP build — and")
     L.append("  `tools/gen_capability_matrix.py --check` (CI) fails if any citation is missing")
     L.append("  or if this page is stale. The tests' pass/fail is proven by the existing CI")
-    L.append("  jobs (`conformance`, `core-ci`, `ts`, `ws-interop`, `esp-idf`).")
+    L.append("  jobs (`conformance`, `core-ci`, `ts`, `ws-interop`, `wt-interop`, `esp-idf`).")
     L.append("- The **module** table is auto-derived by scanning the tree, so it cannot")
     L.append("  overclaim: `transport_i2c`/`spi`/`unix` show as *planned* until their TU lands.")
     L.append("- Full module catalog: [reference/10-module-catalog.md](reference/10-module-catalog.md).")
