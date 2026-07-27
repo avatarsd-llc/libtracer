@@ -38,14 +38,24 @@ std::pmr::monotonic_buffer_resource arena{back_region(g_slab).data(),
                                           back_region(g_slab).size()};
 std::pmr::synchronized_pool_resource shared{&arena};
 
-// The FAILABLE seam is separate and must be injected too: everything a PEER can
-// provoke (the terminus decode arena today) draws from it, and it reports
-// exhaustion by value instead of throwing (ADR-0065). Injecting only `shared`
-// above leaves those allocations on the global heap.
-tr::mem::bump_source_t blocks{back_region(g_slab), tr::mem::null_source()};
-// ... graph_t graph{&shared, &rx_pool_backend, &blocks};
-// ... fwd_router_t router{graph, &shared, &blocks};
+// The FAILABLE seam is separate: everything a PEER can provoke (the terminus
+// decode arena today) draws from it, and it reports exhaustion by value instead
+// of throwing (ADR-0065). Injecting only `shared` above leaves those allocations
+// on the global heap — where they at least RECYCLE, which matters below.
+//
+// ... graph_t graph{&shared, &rx_pool_backend, /*ctl=*/&blocks};
+// ... fwd_router_t router{graph, &shared, /*rx=*/&blocks};
 ```
+
+:::{warning}
+Do **not** reach for `tr::mem::bump_source_t` as `blocks` here. It is scope-lifetime
+only: a bump block is never reclaimed, so a long-lived bump seam fills monotonically and
+then refuses every frame — measured, an 8 KiB one decoded 6 frames and rejected the next
+194. A long-lived bounded seam needs a **recycling** block source, and libtracer does not
+ship one yet. Until it does, this node's honest options are to supply its own free-list
+`block_source_t` over the slab, or to leave `ctl`/`rx` on `heap_source()` (recycling, but
+unbounded) and accept that those allocations are not slab-bound.
+:::
 
 Rules that follow from it:
 

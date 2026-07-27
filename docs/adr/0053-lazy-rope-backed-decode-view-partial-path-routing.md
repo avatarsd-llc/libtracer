@@ -299,12 +299,21 @@ What would reopen it: evidence that the 64 KB / L=2 advantage does not survive o
 
 ADR-0055 inherits this correction: its "flatten sweep" reasoning is unaffected for the **owning** path it governs, but its framing of span-tier flattens as a concession rather than a legitimate optimum should be read in light of the numbers above.
 
-## Erratum — the multi-link egress iov is a nothrow `std::vector`, not a `pmr::vector` over `mr_`
+## Erratum — §7's `pmr::vector` egress iov is still there, and it is a live instance of the #588 abort class
 
-*(2026-07-27, noted while auditing [#588](https://github.com/avatarsd-llc/libtracer/issues/588).)*
+*(2026-07-27. **This erratum replaces an earlier one that got this backwards** and claimed the mechanism had been superseded. It had not; the check behind that claim looked for callers of `rope_t::to_iovec()` and found none, which is true and beside the point — the vector is built inline, not through that method.)*
 
-§7 sanctions building the scatter-gather entry table as a `std::pmr::vector` drawn from the router's injected resource. That is not what shipped, and the difference matters for the same reason #588 did: the table is sized by `link_count()` on a path a peer drives, so through `std::pmr` its growth failure is `std::bad_alloc` — an `abort()` on `-fno-exceptions`.
+§7 sanctions building the scatter-gather entry table as a `std::pmr::vector` drawn from the router's injected resource, and that is exactly what `fwd_router.cpp`'s rope forward path does:
 
-What the code does instead is `rope_t::try_to_iovec` (`rope.hpp`), which nothrow-reserves a plain `std::vector` to `link_count()` and returns `false` on failure; `fwd_router_t`'s reply egress drops the reply on `false`. The throwing `rope_t::to_iovec()` remains as a host convenience and is documented as throwing — **it has no caller inside the library**, which is the property to preserve.
+```cpp
+// Rope source: a region may cross several links — gather into a pmr vector drawn
+// from the terminus arena's resource (the forward hop still copies no payload).
+std::pmr::vector<std::span<const std::byte>> iov{mr_};
+rebuilt->gather(cur_src, [&](std::span<const std::byte> s) { iov.push_back(s); });
+```
 
-So the reasoning of §7 stands (no stack cap, no synthetic limit — the bound is a real resource) and only the mechanism is superseded. `fwd_router.hpp`'s surrounding comment still describes the `pmr::vector` form and is stale in the same way.
+The entry count is `~6 + link_count()`, chosen by the **peer's** frame, on the **forward** path — which is behind no ACL and is not even the terminus. `push_back`'s growth goes through `std::pmr`, so on a fragmented heap it throws, and on `-fno-exceptions` that is the link-wrapped `abort()` stub. This is the same class [#588](https://github.com/avatarsd-llc/libtracer/issues/588) removed from the decode path, still present on the egress path.
+
+The **reply** egress is a different, already-fixed story: it uses `rope_t::try_to_iovec`, which nothrow-reserves a plain `std::vector` and drops the reply on failure. That asymmetry — reply guarded, forward not — is the finding.
+
+§7's *reasoning* stands (no stack cap, no synthetic limit — the bound is a real resource). What needs to change is the mechanism, to a `block_source_t`-backed table, tracked separately.

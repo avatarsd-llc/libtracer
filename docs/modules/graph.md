@@ -80,7 +80,7 @@ heap (a host that passes nothing gets zero-churn, byte-identical behavior):
 The parameters are **appended** in that order, so an existing `graph_t{&mr}` keeps
 compiling and picks up the defaults.
 
-A bounded target points both — and the transport-receive backend — at one static slab;
+A bounded target points all three — and the transport-receive backend — at one static slab;
 pool exhaustion surfaces as `BACKPRESSURE`, never a silent heap fallback. See
 [reference/09](../reference/09-memory-substrate.md) §the injection points.
 ```

@@ -226,7 +226,7 @@ L0 is ignorant of L1 view semantics; L1 is ignorant of how L0 honors `destroy`. 
 
 ### The second L0 seam: `block_source_t` (failable blocks)
 
-`mem_backend_t` vends **refcounted `segment_t`s** — the right shape for payload bytes that many views share. The control plane is the other shape: the objects a node builds when it *registers* something (a vertex, a route label, a reassembly entry) have exactly **one owner** and no header, so a refcount on them is pure overhead. They are served by a second, deliberately smaller seam:
+`mem_backend_t` vends **refcounted `segment_t`s** — the right shape for payload bytes that many views share. The other shape is the **failable** one: the objects a node builds when it *registers* something (a vertex, a route label, a reassembly entry) have exactly **one owner** and no header, so a refcount on them is pure overhead. They are served by a second, deliberately smaller seam:
 
 ```cpp
 namespace tr::mem {
@@ -262,7 +262,7 @@ Why it is a distinct type rather than a `std::pmr::memory_resource` with a docum
 | --- | --- | --- | --- | --- | --- |
 | check kept | kept | kept | kept | **deleted** | **deleted** |
 
-`-Os` is what an ESP-IDF node ships (`CONFIG_COMPILER_OPTIMIZATION_SIZE`). A seam whose failure signal disappears at exactly the optimization level the target uses is not a seam, so the control plane gets its own type, whose `try_alloc` carries no such annotation and whose name cannot be confused with `allocate` at a call site.
+`-Os` is what an ESP-IDF node ships (`CONFIG_COMPILER_OPTIMIZATION_SIZE`). A seam whose failure signal disappears at exactly the optimization level the target uses is not a seam, so failable allocation gets its own type, whose `try_alloc` carries no such annotation and whose name cannot be confused with `allocate` at a call site.
 
 The two seams are injected independently and a node may point both at the same underlying store ("one slab, whole stack") or split them.
 
@@ -275,9 +275,11 @@ Two companions ship with it, because the migrated call sites all need the same p
 
 ### Where the wire decode draws from
 
-`wire::decode_into` — the terminus arena decoder — is on the **RX path, behind no ACL**, and a peer chooses both the nesting depth and the node count of the frame it sends. All three of its draws (the node array, the walk's open-node stack, and the walk stack's spill past its inline slots) come from a `block_source_t`, so exhaustion is `TLV_NESTING_TOO_DEEP` — the status RFC-0006 already defines for "exceeds this receiver's decode resources" — and never an allocation failure. A bounded node composes this as a `bump_source_t` over its slab with `null_source()` upstream.
+`wire::decode_into` — the terminus arena decoder — is on the **RX path, behind no ACL**, and a peer chooses both the nesting depth and the node count of the frame it sends. All three of its draws (the node array, the walk's open-node stack, and the walk stack's spill past its inline slots) come from a `block_source_t`, so exhaustion is `TLV_NESTING_TOO_DEEP` — the status RFC-0006 already defines for "exceeds this receiver's decode resources" — and never an allocation failure. A **scope-lifetime** consumer composes this as a `bump_source_t` over a stack buffer with `null_source()` upstream — construct it, decode, drop it. That is what the branch-write decode does.
 
-The reject is the operation's, not the seam's. Both consumers that draw from it today answer `tr::tlv::nesting_too_deep` — the decode failed, and RFC-0006 already names that status "exceeds this receiver's decode resources". `BACKPRESSURE` is what a *store* answers when its value backend is exhausted ([§Backpressure, not fallback](#backpressure-not-fallback)); it is not a property of the block seam.
+A **long-lived** seam (a router's `rx`, a graph's `ctl`) must not be a bump source: bump blocks are never reclaimed, so it fills monotonically and then refuses everything. Measured: an 8 KiB bump source wired as a router's `rx` decoded 6 frames and rejected the next 194. A long-lived bounded seam needs a **recycling** source, and libtracer does not ship one yet — `heap_source()` recycles but is unbounded, `bump_source_t` is bounded but does not recycle. Until that gap is closed, a bounded node either supplies its own recycling `block_source_t` (a free-list over its slab) or leaves the long-lived seams on the heap and accepts it.
+
+The reject is the operation's, not the seam's, and the two consumers that draw from it today answer **differently**: the terminus decode answers `tr::tlv::nesting_too_deep` (RFC-0006's "exceeds this receiver's decode resources"), while the branch-write decode answers `tr::schema::type_mismatch` — it cannot distinguish "the value did not parse" from "the arena ran out", and does not try. `BACKPRESSURE` is what a *store* answers when its value backend is exhausted ([§Backpressure, not fallback](#backpressure-not-fallback)); it is not a property of the block seam.
 
 ---
 

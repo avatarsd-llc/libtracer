@@ -78,7 +78,8 @@ int main() {
     acc = fold(acc, wire::path_key(root));
 
     // Wire: owning decode (the vector tree) and the terminus arena decode (a flat
-    // pre-order array over borrowed spans, drawn from a fixed monotonic buffer —
+    // pre-order array over borrowed spans, drawn from a fixed bump_source_t over a
+    // stack buffer (#588 — nothrow, so exhaustion rejects instead of throwing) —
     // no per-node heap; ADR-0041 / ADR-0039 §3).
     if (const auto dec = wire::decode(bytes); dec) {
         acc += static_cast<std::uint32_t>(dec->children.size());

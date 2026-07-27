@@ -9,12 +9,13 @@
  * stack iov (ADR-0038 invariants #1/#2), hard-gated at ZERO allocations by CI
  * (`ZEROHEAP_MAX=0`); (2) one *terminus* resolve (ADR-0041) — REPORT-ONLY, since a
  * terminus may allocate (ADR-0039): the arena draws from the router's injected
- * memory_resource (the default heap here, so every draw is counted and visible);
+ * memory seams (the default heap here, so every draw is counted and visible; since #588
+ * the terminus ARENA draws from the router's nothrow `rx` block source, not from `mr_`);
  * (3) the *per-vertex steady-heap* probe (#361 §8) — REPORT-ONLY, LIVE usable-size
  * bytes a default STORED_VALUE leaf holds at steady state, and the increment one
  * small LKV write adds — the diet trend the gh-pages history tracks; (4) the
  * *registration escape* probe (#551) — REPORT-ONLY, how much of a RUNTIME vertex
- * registration bypasses the graph's own injected memory_resource. Window (4) is the
+ * registration bypasses the graph's own injected seams. Window (4) is the
  * only one that counts what did NOT happen through a seam rather than what an
  * operation cost, so it reads both counters at once: global blocks that escaped, and
  * blocks the resource served.

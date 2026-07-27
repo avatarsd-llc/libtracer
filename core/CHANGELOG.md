@@ -102,8 +102,9 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   may-return-null contract: `memory_resource::allocate` is annotated `returns_nonnull`, so
   the caller's null check is undefined behaviour and **is deleted at `-Os`/`-Oz`** —
   measured on `riscv32-esp-elf-g++ 15.2.0`, where the soft-fail branch survives at
-  `-O0`/`-O1`/`-O2`/`-O3` and vanishes at the two size-optimized levels. `-Os` is what an
-  ESP-IDF node ships and the one level no test executes at.
+  `-O0`/`-O1`/`-O2`/`-O3` and vanishes at the two size-optimized levels. `-Os` is what the
+  reference ESP-IDF node ships, and no job executes an allocation-failure path at it (the
+  one `-Os` binary CI runs, `full-node-host`, drives only the happy path).
 
   **As of slice 1 no call site drew from the seam**; the #588 entry above then made the
   branch-write decode its first consumer. The registration

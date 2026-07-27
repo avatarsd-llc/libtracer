@@ -156,13 +156,13 @@ void seed(graph_t& g) {
  * @param tier "arena" (eager, span tier) or "view" (lazy, owning tier).
  */
 void run_point(std::span<const std::byte> frame, std::size_t links, const char* tier) {
-    // Production's terminus arena decodes into the router's INJECTED pmr resource
-    // (`fwd_router.cpp`, `decode_into(frame, *rx_)` — ADR-0039 §1 / #588), not into the
-    // default resource. An earlier revision of this bench passed `get_default_resource()`,
-    // which is plain `new`: that measured an arena tier no deployment runs, and understated
-    // it. A bump source over a stack slab is the shape the terminus actually has (it was a
-    // `monotonic_buffer_resource` until the seam went nothrow — same bump, same slab, one
-    // fewer virtual per allocation).
+    // Production's terminus arena decodes into the router's INJECTED block source
+    // (`fwd_router.cpp`, `decode_into(frame, *rx_)` — ADR-0039 §1 / #588; `rx_` is a
+    // `tr::mem::block_source_t`, NOT the pmr resource), not into the default source. An earlier
+    // revision of this bench passed `get_default_resource()`, which is plain `new`: that measured
+    // an arena tier no deployment runs, and understated it. A bump source over a stack slab is the
+    // shape the terminus actually has (it was a `monotonic_buffer_resource` until the seam went
+    // nothrow — same bump, same slab, one fewer virtual per allocation).
     std::array<std::byte, 1 << 16> slab;
     tr::mem::bump_source_t arena_mr(slab, tr::mem::null_source());
     graph_t g;
