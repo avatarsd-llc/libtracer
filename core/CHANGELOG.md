@@ -14,6 +14,54 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **The wire RX decode path can no longer abort (#588).** `wire::decode_into` — the terminus
+  arena decoder, reached from a peer's frame **behind no ACL** — made three unguarded
+  `std::pmr` allocations: the node array's `reserve`/growth, the sink's open-node stack, and
+  `walk_stack_t::grow`'s spill past its 8 inline slots (the only direct `->allocate(` in
+  `core/`). A peer picks the nesting depth and the node count, so on a fragmented heap any
+  of the three threw `std::bad_alloc`, which on `-fno-exceptions` ESP-IDF is the
+  link-wrapped `__cxa_throw` → `abort()` stub. Measured on the host, same 24-deep frame and
+  a 64 B budget: **exit 134 (SIGABRT) before, `TLV_NESTING_TOO_DEEP` after.**
+
+  All three now draw from a `tr::mem::block_source_t`. No new status was invented —
+  `TLV_NESTING_TOO_DEEP` is what RFC-0006 already specifies for "exceeds this receiver's
+  decode resources", and `walk_stack_t::push` already returned `false` for the no-spill
+  case; only the allocation was dishonest.
+
+  **Also closes the `#477` residual** at the branch-write decode (`graph.cpp`), which used a
+  `monotonic_buffer_resource` whose overflow leg drew from the *throwing* default upstream.
+  A `bump_source_t` over the same stack buffer falls back to the nothrow heap source
+  instead, so capability is unchanged and exhaustion is a value. The node-counting pre-pass
+  that residual called for turned out to be unnecessary.
+
+  Signature change: `decode_into(input, std::pmr::memory_resource&)` →
+  `decode_into(input, tr::mem::block_source_t&)`; `tlv_arena_t`'s constructor likewise.
+  `fwd_router_t` gained a third **appended** parameter (`rx`, defaulted) for the arena
+  source, so existing call sites are unchanged.
+
+  **Faster, not slower**: the terminus decode measures **236 ns vs 241–251 ns** on `main`
+  (interleaved, best of 3), and **97 ns vs 114 ns** on an isolated decode loop. Getting
+  there required `push_slot()` — see below.
+
+### Added
+
+- **`tr::mem::bump_source_t`, `null_source()`, and `block_array_t<T>`** — the companions the
+  migrated call sites need. `bump_source_t` is the nothrow twin of
+  `std::pmr::monotonic_buffer_resource` over a caller buffer, with an upstream so it stays
+  capability-preserving; `null_source()` is the upstream that makes the buffer a hard bound.
+  `block_array_t<T>` is a nothrow growable array of trivially-copyable `T` whose growth
+  returns `false`.
+
+  `block_array_t::push_slot()` claims one uninitialized slot to fill **in place**. That is
+  load-bearing, not sugar: `push_back(T{...})` on a 48-byte element materializes the
+  aggregate on the stack field-by-field and reads it back as wide loads, and the
+  store-forwarding stall cost **~45 % of a terminus decode while executing FEWER
+  instructions** (IPC 5.0 → 2.6). It was the entire regression this change first showed, and
+  five other hypotheses — modulo vs mask alignment, growth inlining, index vs pointer
+  cursor, the sink's latch stores, `is_canonical_name` inlining — were each measured and
+  refuted before the profile pointed here.
+
+
 - **`:subscribers` and `:children` are addressed WHOLE — a trailing step no longer acts
   (#580, #581).** `field_write` gated both branches on the FIRST step alone, so every
   deeper selector fell through to the branch's action and answered `RESULT`:

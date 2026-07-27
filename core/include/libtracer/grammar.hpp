@@ -22,13 +22,13 @@
 #include <cstdint>
 #include <cstring>
 #include <expected>
-#include <memory_resource>
 #include <span>
 #include <type_traits>
 
 #include "libtracer/byteorder.hpp"
 #include "libtracer/crc.hpp"
 #include "libtracer/error.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/tlv.hpp"
 
 /**
@@ -218,24 +218,28 @@ struct walk_frame_t {
  * A null @p spill makes the inline span the receiver's whole decode budget:
  * exhaustion makes @ref push return false, which `walk` maps to
  * `TLV_NESTING_TOO_DEEP` ("exceeds this receiver's decode resources") — a clean
- * reject, no throw, safe under `-fno-exceptions`. A non-null @p spill allocates
- * with the resource's own exhaustion behavior: hosts pass
- * `std::pmr::get_default_resource()` (effectively unbounded); the terminus
- * arena passes ITS resource so the caller's arena is the real bound. An MCU
- * profile whose arena has a null upstream should pass a null spill instead,
- * keeping the reject non-throwing.
+ * reject, no throw, safe under `-fno-exceptions`. A non-null @p spill is drawn
+ * from NOTHROW (#588): exhaustion there returns `nullptr` and takes the SAME
+ * reject path, so the depth bound is honest whether or not a spill exists.
+ *
+ * @note @p spill is a @ref tr::mem::block_source_t and deliberately not a
+ *       `std::pmr::memory_resource`. It used to be the latter, and `grow` used
+ *       its throwing `allocate` unguarded — so a peer sending a frame nested
+ *       past the inline slots could reach `__cxa_throw`'s `abort()` stub on a
+ *       `-fno-exceptions` node, from the RX decode path, behind no ACL (#588).
+ *       The reject this replaces it with was already specified; only the
+ *       allocation was dishonest.
  */
 template <class Cursor>
 class walk_stack_t {
    public:
     /** @brief A stack over @p inline_slots, spilling to @p spill when they run out. */
-    walk_stack_t(std::span<walk_frame_t<Cursor>> inline_slots,
-                 std::pmr::memory_resource* spill) noexcept
+    walk_stack_t(std::span<walk_frame_t<Cursor>> inline_slots, mem::block_source_t* spill) noexcept
         : data_(inline_slots.data()), cap_(inline_slots.size()), spill_(spill) {}
 
     /** @brief Releases the spill block, if any (the inline slots are the caller's). */
     ~walk_stack_t() {
-        if (spilled_) spill_->deallocate(data_, cap_ * sizeof(walk_frame_t<Cursor>), kAlign);
+        if (spilled_) spill_->release(data_, cap_ * sizeof(walk_frame_t<Cursor>), kAlign);
     }
 
     /** @brief Non-copyable (one walk, one stack — the spill block has one owner). */
@@ -244,8 +248,9 @@ class walk_stack_t {
     walk_stack_t& operator=(const walk_stack_t&) = delete;
 
     /**
-     * @brief Open one node. False ⇔ the receiver's decode resources are exhausted
-     *        (inline slots full and no spill) — never throws in that case.
+     * @brief Open one node. False ⇔ the receiver's decode resources are exhausted —
+     *        the inline slots are full and the spill is absent OR itself exhausted.
+     *        Never throws (#588).
      */
     [[nodiscard]] bool push(const walk_frame_t<Cursor>& f) {
         if (size_ == cap_ && !grow()) return false;
@@ -270,9 +275,10 @@ class walk_stack_t {
         if (spill_ == nullptr) return false;
         const std::size_t new_cap = cap_ < 4 ? 8 : cap_ * 2;
         auto* fresh = static_cast<walk_frame_t<Cursor>*>(
-            spill_->allocate(new_cap * sizeof(walk_frame_t<Cursor>), kAlign));
+            spill_->try_alloc(new_cap * sizeof(walk_frame_t<Cursor>), kAlign));
+        if (fresh == nullptr) return false;  // exhausted ⇒ the same clean reject as no spill
         if (size_ > 0) std::memcpy(fresh, data_, size_ * sizeof(walk_frame_t<Cursor>));
-        if (spilled_) spill_->deallocate(data_, cap_ * sizeof(walk_frame_t<Cursor>), kAlign);
+        if (spilled_) spill_->release(data_, cap_ * sizeof(walk_frame_t<Cursor>), kAlign);
         data_ = fresh;
         cap_ = new_cap;
         spilled_ = true;
@@ -282,7 +288,7 @@ class walk_stack_t {
     walk_frame_t<Cursor>* data_;
     std::size_t cap_;
     std::size_t size_ = 0;
-    std::pmr::memory_resource* spill_;
+    mem::block_source_t* spill_;
     bool spilled_ = false;
 };
 

@@ -111,11 +111,12 @@ std::expected<tlv_t, err_t> decode(std::span<const std::byte> input) {
     // The one structural descent lives in grammar::walk (ADR-0048 §1); this sink
     // only builds the owning tree. The walk stack starts in these inline slots
     // (a tuning knob sized for the typical FWD nesting, ~3-4 levels) and spills
-    // to the default (heap) resource for deeper frames — an owning-tree decode
+    // to the nothrow heap source for deeper frames — an owning-tree decode
     // already allocates on the heap, so its RFC-0006 depth bound is the heap.
+    // (#588: the spill used to be a throwing pmr allocate.)
     owning_sink sink;
     std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;
-    grammar::walk_stack_t<grammar::span_cursor> stack(slots, std::pmr::get_default_resource());
+    grammar::walk_stack_t<grammar::span_cursor> stack(slots, &mem::heap_source());
     const auto r = grammar::walk(grammar::span_cursor{input}, sink, stack);
     if (!r) return std::unexpected(r.error());
     return std::move(sink.result_);

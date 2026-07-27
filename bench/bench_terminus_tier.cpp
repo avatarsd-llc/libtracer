@@ -157,13 +157,14 @@ void seed(graph_t& g) {
  */
 void run_point(std::span<const std::byte> frame, std::size_t links, const char* tier) {
     // Production's terminus arena decodes into the router's INJECTED pmr resource
-    // (`fwd_router.cpp:546`, `decode_into(frame, *mr_)` — ADR-0039 §1), not into the default
-    // resource. An earlier revision of this bench passed `get_default_resource()`, which is
-    // plain `new`: that measured an arena tier no deployment runs, and understated it.
-    // A monotonic buffer over a stack slab is the shape the terminus actually has.
+    // (`fwd_router.cpp`, `decode_into(frame, *rx_)` — ADR-0039 §1 / #588), not into the
+    // default resource. An earlier revision of this bench passed `get_default_resource()`,
+    // which is plain `new`: that measured an arena tier no deployment runs, and understated
+    // it. A bump source over a stack slab is the shape the terminus actually has (it was a
+    // `monotonic_buffer_resource` until the seam went nothrow — same bump, same slab, one
+    // fewer virtual per allocation).
     std::array<std::byte, 1 << 16> slab;
-    std::pmr::monotonic_buffer_resource arena_mr(slab.data(), slab.size(),
-                                                 std::pmr::null_memory_resource());
+    tr::mem::bump_source_t arena_mr(slab, tr::mem::null_source());
     graph_t g;
     seed(g);
     tr::graph::op_resolver_t r(g);
@@ -181,11 +182,11 @@ void run_point(std::span<const std::byte> frame, std::size_t links, const char* 
         if (v) (void)r.resolve(*v, "cli");
     } else if (flat) {
         const tr::view::view_t f = rope_of(frame, links).materialize();
-        arena_mr.release();
+        arena_mr.reset();
         const auto a = tr::wire::decode_into(f.bytes(), arena_mr);
         if (a) (void)r.resolve(*a, "cli");
     } else {
-        arena_mr.release();
+        arena_mr.reset();
         const auto a = tr::wire::decode_into(frame, arena_mr);
         if (a) (void)r.resolve(*a, "cli");
     }
@@ -205,11 +206,11 @@ void run_point(std::span<const std::byte> frame, std::size_t links, const char* 
             // contiguously. Measured rather than assumed — if it wins, the lazy tier has
             // no remaining case at all.
             const tr::view::view_t f = rope_of(frame, links).materialize();
-            arena_mr.release();
+            arena_mr.reset();
             const auto a = tr::wire::decode_into(f.bytes(), arena_mr);
             if (a) (void)r.resolve(*a, "cli");
         } else {
-            arena_mr.release();
+            arena_mr.reset();
             const auto a = tr::wire::decode_into(frame, arena_mr);
             if (a) (void)r.resolve(*a, "cli");
         }

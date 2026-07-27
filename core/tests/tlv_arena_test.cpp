@@ -86,9 +86,8 @@ std::uint32_t match_subtree(const tlv_t& t, const tlv_arena_t& a, std::uint32_t 
     return child == n.end ? n.end : 0;  // extra arena children ⇒ mismatch
 }
 
-std::pmr::monotonic_buffer_resource fresh_heap_resource() {
-    return std::pmr::monotonic_buffer_resource(std::pmr::get_default_resource());
-}
+/** @brief A fresh nothrow source per decode — the heap, so nothing is ever refused. */
+tr::mem::block_source_t& fresh_heap_resource() { return tr::mem::heap_source(); }
 
 /**
  * @brief Run both decoders over `bytes`; check same accept/reject, same error, and — on accept —
@@ -96,7 +95,7 @@ std::pmr::monotonic_buffer_resource fresh_heap_resource() {
  */
 bool equivalent(std::span<const std::byte> bytes, std::string_view label) {
     const auto tree = decode(bytes);
-    auto mr = fresh_heap_resource();
+    auto& mr = fresh_heap_resource();
     const auto arena = decode_into(bytes, mr);
     if (tree.has_value() != arena.has_value()) {
         std::printf("    [%.*s] accept/reject disagree\n", static_cast<int>(label.size()),
@@ -184,7 +183,7 @@ int main() {
                     v.opt.ts = ts;
                     v.opt.tf = tf;
                     const std::vector<std::byte> bytes = encode(v);
-                    auto mr = fresh_heap_resource();
+                    auto& mr = fresh_heap_resource();
                     const auto arena = decode_into(bytes, mr);
                     if (!arena) {
                         all = false;
@@ -214,7 +213,7 @@ int main() {
         fwd.children.push_back(make_value(pl));
 
         const std::vector<std::byte> bytes = encode(fwd);
-        auto mr = fresh_heap_resource();
+        auto& mr = fresh_heap_resource();
         const auto arena = decode_into(bytes, mr);
         check(arena.has_value(), "FWD-like tree decodes");
         if (arena) {
@@ -235,7 +234,7 @@ int main() {
     {
         const tlv_t path = make_path({make_name("net"), make_name("ws"), make_name("peer1")});
         const std::vector<std::byte> bytes = encode(path);
-        auto mr = fresh_heap_resource();
+        auto& mr = fresh_heap_resource();
         const auto arena = decode_into(bytes, mr);
         const auto tree = decode(bytes);
         check(arena && arena->root().canonical_path, "canonical PATH flagged");
@@ -267,7 +266,7 @@ int main() {
 
         bool all = true;
         for (const auto* b : {&b1, &b2, &b3, &b4}) {
-            auto mr = fresh_heap_resource();
+            auto& mr = fresh_heap_resource();
             const auto arena = decode_into(*b, mr);
             all = all && arena && !arena->root().canonical_path && equivalent(*b, "non-canonical");
         }
@@ -279,7 +278,7 @@ int main() {
         fwd.opt.pl = true;
         fwd.children.push_back(make_path({make_name("a")}));
         const std::vector<std::byte> b5 = encode(fwd);
-        auto mr = fresh_heap_resource();
+        auto& mr = fresh_heap_resource();
         const auto arena = decode_into(b5, mr);
         check(arena && !arena->root().canonical_path && (*arena)[1].canonical_path,
               "nested PATH inside FWD flagged on the PATH node only");
@@ -290,7 +289,7 @@ int main() {
     // still agrees with decode() node-for-node.
     {
         const std::vector<std::byte> deep_bytes = encode(nested(100));
-        auto mr = fresh_heap_resource();
+        auto& mr = fresh_heap_resource();
         check(decode_into(deep_bytes, mr).has_value() && equivalent(deep_bytes, "depth 100"),
               "deep nesting (100 levels) decodes, arena == tree");
     }
@@ -353,7 +352,7 @@ int main() {
         bool all = true;
         std::size_t i = 0;
         for (const auto& c : cases) {
-            auto mr = fresh_heap_resource();
+            auto& mr = fresh_heap_resource();
             const auto arena = decode_into(c, mr);
             if (arena.has_value() || !equivalent(c, "rejection " + std::to_string(i))) all = false;
             ++i;
@@ -362,7 +361,8 @@ int main() {
     }
 
     // (3b) A typical terminus frame decodes with ZERO allocation outside a
-    // 4 KiB stack buffer — null upstream would throw on any spill.
+    // 4 KiB stack buffer — a null upstream refuses any spill, so a decode that
+    // needed one would come back TLV_NESTING_TOO_DEEP rather than reach the heap.
     {
         tlv_t fwd;
         fwd.type = type_t::FWD;
@@ -376,11 +376,69 @@ int main() {
         const std::vector<std::byte> bytes = encode(fwd);
 
         alignas(std::max_align_t) std::array<std::byte, 4096> buf;
-        std::pmr::monotonic_buffer_resource mr(buf.data(), buf.size(),
-                                               std::pmr::null_memory_resource());
+        tr::mem::bump_source_t mr(buf, tr::mem::null_source());
         const auto arena = decode_into(bytes, mr);
         check(arena.has_value() && arena->size() == 9,
               "typical FWD decodes inside a 4KiB stack buffer (null upstream)");
+    }
+
+    // (3c) THE #588 CASE: an exhausted source REJECTS, it does not abort.
+    //
+    // `decode_into` runs on the wire RX path behind no ACL, and a peer picks both the
+    // nesting depth and the node count. Before the block seam, all three draws here — the
+    // node array, the sink's open-node stack, and the walk stack's spill past its 8 inline
+    // slots — went through a throwing `std::pmr` allocate, which on a -fno-exceptions node
+    // is the link-wrapped `abort()` stub. Each of the three is probed separately, because a
+    // fix that guards only one leaves the others reachable.
+    //
+    // Every case here TERMINATES the process if the guard is missing, so the assertion
+    // being reached at all is half the result.
+    {
+        // A source that serves exactly `budget` blocks, then refuses forever — the
+        // "exhausted at the Nth allocation" injection #588 asked for.
+        struct budget_source_t final : tr::mem::block_source_t {
+            explicit budget_source_t(int budget) noexcept
+                : tr::mem::block_source_t("budget"), left_(budget) {}
+            [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+                if (left_-- <= 0) return nullptr;
+                return ::operator new(bytes, std::align_val_t{align}, std::nothrow);
+            }
+            void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+                ::operator delete(p, bytes, std::align_val_t{align});
+            }
+            int left_;
+        };
+
+        // Deeper than the 8 inline walk-stack slots, so the spill is genuinely entered.
+        const std::vector<std::byte> deep = encode(nested(24));
+        check(decode_into(deep, tr::mem::heap_source()).has_value(),
+              "the 24-deep frame decodes fine on an unbounded source (the probe is valid)");
+
+        // Zero blocks: the very first draw (the node array's reserve) is refused.
+        budget_source_t none(0);
+        const auto r0 = decode_into(deep, none);
+        check(!r0.has_value() && r0.error() == err_t::TLV_NESTING_TOO_DEEP,
+              "0-block source => TLV_NESTING_TOO_DEEP (node array refused, no abort)");
+
+        // One block: the node array gets its reserve, the sink's open-node stack is refused.
+        budget_source_t one(1);
+        const auto r1 = decode_into(deep, one);
+        check(!r1.has_value() && r1.error() == err_t::TLV_NESTING_TOO_DEEP,
+              "1-block source => TLV_NESTING_TOO_DEEP (sink stack refused, no abort)");
+
+        // Enough for both containers' first blocks but not for the walk stack's spill.
+        budget_source_t two(2);
+        const auto r2 = decode_into(deep, two);
+        check(!r2.has_value() && r2.error() == err_t::TLV_NESTING_TOO_DEEP,
+              "2-block source => TLV_NESTING_TOO_DEEP (walk spill refused, no abort)");
+
+        // The same shape through the composition a bounded node actually uses: a small
+        // stack buffer whose upstream serves nothing.
+        alignas(std::max_align_t) std::array<std::byte, 64> tiny;
+        tr::mem::bump_source_t bounded(tiny, tr::mem::null_source());
+        const auto rb = decode_into(deep, bounded);
+        check(!rb.has_value() && rb.error() == err_t::TLV_NESTING_TOO_DEEP,
+              "a 64 B bump over a null upstream => TLV_NESTING_TOO_DEEP, never an abort");
     }
 
     if (g_failures == 0) {

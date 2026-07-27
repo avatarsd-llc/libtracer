@@ -74,17 +74,25 @@ class fwd_router_t {
      * use — the same lifetime the held `graph_` reference already requires.
      *
      * @param graph The node's local graph.
-     * @param mr    The node's container memory resource (ADR-0039 §1) — the terminus
-     *              arena draws from it directly; the library holds no buffer of its
-     *              own. A bounded node injects a pool resource over its static slab
-     *              (one slab, whole stack — ADR-0039 §2) and the terminus then
-     *              allocates nothing from the global heap; the default is the
-     *              standard heap (a terminus may allocate, ADR-0039). Must outlive
+     * @param mr    The node's container memory resource (ADR-0039 §1) — the
+     *              `route_handle` label tables draw from it; the library holds no
+     *              buffer of its own. A bounded node injects a pool resource over
+     *              its static slab (one slab, whole stack — ADR-0039 §2); the
+     *              default is the standard heap. Must outlive the router.
+     * @param rx    The nothrow source the TERMINUS ARENA draws from (#588). Split from
+     *              @p mr because the arena is built from a peer's frame, on the RX
+     *              path, behind no ACL: a `std::pmr::memory_resource` cannot report
+     *              exhaustion by value, so on `-fno-exceptions` its only failure mode
+     *              is `abort()`. Drawing the arena from a @ref mem::block_source_t
+     *              instead makes an over-large frame a `TLV_NESTING_TOO_DEEP` reject.
+     *              Appended with a default, so every existing call site is unchanged;
+     *              a bounded node points this at the same slab as @p mr. Must outlive
      *              the router.
      */
     explicit fwd_router_t(graph::graph_t& graph,
-                          std::pmr::memory_resource* mr = std::pmr::get_default_resource())
-        : graph_(graph), resolver_(graph), mr_(mr), handles_(mr) {
+                          std::pmr::memory_resource* mr = std::pmr::get_default_resource(),
+                          mem::block_source_t* rx = &mem::heap_source())
+        : graph_(graph), resolver_(graph), mr_(mr), rx_(rx), handles_(mr) {
         graph_.set_remote_delivery_sink(
             [this](const graph::remote_delivery_t& sub, const view::rope_t& value) {
                 deliver_remote(sub, value);
@@ -447,7 +455,8 @@ class fwd_router_t {
 
     graph::graph_t& graph_;
     graph::op_resolver_t resolver_;
-    std::pmr::memory_resource* mr_;        // terminus-arena spill resource (ADR-0039 §1)
+    std::pmr::memory_resource* mr_;        // route_handle label-table resource (ADR-0039 §1)
+    mem::block_source_t* rx_;              // terminus-arena source, NOTHROW (#588)
     child_registry_t registry_;            // the one NAME→link demux table (Brick 3a, ADR-0037)
     route_handle_t handles_;               // per-link label tables (compact flows only)
     std::deque<child_rx_ctx_t> child_rx_;  // stable receiver contexts, one per child

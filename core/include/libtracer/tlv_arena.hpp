@@ -4,7 +4,7 @@
  *
  * The terminus arena decoder (ADR-0041, implementing ADR-0038 inv. #5 /
  * ADR-0039 §3): decode_into parses a frame into a flat, pre-order array of
- * arena nodes drawn from an injected std::pmr::memory_resource. Every byte
+ * arena nodes drawn from an injected nothrow tr::mem::block_source_t. Every byte
  * span points into the caller's input buffer — the arena holds structure
  * only, never bytes. It is the resolve-scoped view the FWD terminus reads;
  * the owning tlv_t model (frame.hpp decode/encode) is unchanged alongside.
@@ -18,10 +18,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
-#include <memory_resource>
 #include <span>
 
 #include "libtracer/frame.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/tlv.hpp"
 
 namespace tr::wire {
@@ -73,8 +73,8 @@ struct arena_tlv_t {
  */
 class tlv_arena_t {
    public:
-    /** @brief An empty arena drawing its nodes from @p mr. */
-    explicit tlv_arena_t(std::pmr::memory_resource& mr) : nodes_(&mr) {}
+    /** @brief An empty arena drawing its nodes from @p src. */
+    explicit tlv_arena_t(mem::block_source_t& src) : nodes_(src) {}
 
     /** @brief The root node (index 0). Precondition: a successful decode (never empty). */
     [[nodiscard]] const arena_tlv_t& root() const noexcept { return nodes_.front(); }
@@ -96,23 +96,29 @@ class tlv_arena_t {
 
    private:
     friend std::expected<tlv_arena_t, err_t> decode_into(std::span<const std::byte>,
-                                                         std::pmr::memory_resource&);
-    std::pmr::vector<arena_tlv_t> nodes_;
+                                                         mem::block_source_t&);
+    mem::block_array_t<arena_tlv_t> nodes_;
 };
 
 /**
- * @brief Decode exactly one TLV filling @p input into a flat arena drawn from @p mr.
+ * @brief Decode exactly one TLV filling @p input into a flat arena drawn from @p src.
  *
  * The terminus-side counterpart of `decode` (ADR-0041 §1): identical
  * validation (bounds, reserved bits, type 0x00, trailer CRC, trailing bytes ⇒
- * FRAME_INVALID), iterative (no recursion) with the walk stack drawn from
- * @p mr — so the caller's arena IS the nesting-depth bound (RFC-0006; no
- * depth constant exists) — but the result is
- * a pre-order @ref arena_tlv_t array of spans into @p input instead of an
- * owning `tlv_t` tree — zero heap when @p mr is a stack-buffer
- * `monotonic_buffer_resource`. @p input and @p mr must outlive the arena.
+ * FRAME_INVALID), iterative (no recursion) with the node array, the sink's
+ * open-node stack and the walk stack all drawn from @p src — so the caller's
+ * source IS the nesting-depth bound (RFC-0006; no depth constant exists) — but
+ * the result is a pre-order @ref arena_tlv_t array of spans into @p input
+ * instead of an owning `tlv_t` tree — zero heap when @p src is a stack-buffer
+ * @ref mem::bump_source_t. @p input and @p src must outlive the arena.
+ *
+ * NOTHROW end to end (#588). This function is on the wire RX path and reachable
+ * behind no ACL — a peer picks the frame's nesting depth and node count. Every
+ * draw from @p src is guarded: exhaustion answers `TLV_NESTING_TOO_DEEP`
+ * ("exceeds this receiver's decode resources"), never `std::bad_alloc`, which on
+ * a `-fno-exceptions` node is the link-wrapped `abort()` stub.
  */
 [[nodiscard]] std::expected<tlv_arena_t, err_t> decode_into(std::span<const std::byte> input,
-                                                            std::pmr::memory_resource& mr);
+                                                            mem::block_source_t& src);
 
 }  // namespace tr::wire

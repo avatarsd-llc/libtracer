@@ -119,7 +119,7 @@ std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
 tr::graph::result_t<tr::view::rope_t> resolve_bytes(op_resolver_t& resolver,
                                                     std::span<const std::byte> fwd,
                                                     std::string_view inbound_link = {}) {
-    const auto arena = tr::wire::decode_into(fwd, *std::pmr::get_default_resource());
+    const auto arena = tr::wire::decode_into(fwd, tr::mem::heap_source());
     if (!arena) return std::unexpected(tr::graph::status_t::INVALID_PATH);
     return resolver.resolve(*arena, inbound_link);
 }
@@ -420,7 +420,7 @@ void test_store_ref_threshold() {
 
     // Default threshold 0 => referencing DISABLED: stored segment differs (copied).
     {
-        const auto arena = tr::wire::decode_into(frame.bytes(), *std::pmr::get_default_resource());
+        const auto arena = tr::wire::decode_into(frame.bytes(), tr::mem::heap_source());
         auto reply = resolver.resolve(*arena, {}, &frame);
         check(reply.has_value(), "WRITE with default threshold produced a reply");
         const auto rd = g.read(v);
@@ -439,7 +439,7 @@ void test_store_ref_threshold() {
 
     // Big trailer-less payload >= threshold => the stored view IS the frame segment.
     {
-        const auto arena = tr::wire::decode_into(frame.bytes(), *std::pmr::get_default_resource());
+        const auto arena = tr::wire::decode_into(frame.bytes(), tr::mem::heap_source());
         auto reply = resolver.resolve(*arena, {}, &frame);
         check(reply.has_value(), "WRITE over threshold produced a reply");
         const auto rd = g.read(v);
@@ -470,8 +470,7 @@ void test_store_ref_threshold() {
         const auto fwd_crc =
             b_fwd(fwd_op_t::WRITE, b_path({"sensor", "blob"}), b_path({"reply-ep"}), {}, val_bytes);
         tr::view::view_t crc_frame = make_value(fwd_crc);
-        const auto arena =
-            tr::wire::decode_into(crc_frame.bytes(), *std::pmr::get_default_resource());
+        const auto arena = tr::wire::decode_into(crc_frame.bytes(), tr::mem::heap_source());
         auto reply = resolver.resolve(*arena, {}, &crc_frame);
         check(reply.has_value(), "trailered WRITE over threshold produced a reply");
         const auto rd = g.read(v);
@@ -487,8 +486,7 @@ void test_store_ref_threshold() {
         const auto fwd_small = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "blob"}),
                                      b_path({"reply-ep"}), {}, b_value({0x2A}));
         tr::view::view_t small_frame = make_value(fwd_small);
-        const auto arena =
-            tr::wire::decode_into(small_frame.bytes(), *std::pmr::get_default_resource());
+        const auto arena = tr::wire::decode_into(small_frame.bytes(), tr::mem::heap_source());
         auto reply = resolver.resolve(*arena, {}, &small_frame);
         check(reply.has_value(), "small WRITE produced a reply");
         const auto rd = g.read(v);
@@ -517,7 +515,7 @@ void test_store_ref_concurrent() {
     const auto fwd =
         b_fwd(fwd_op_t::WRITE, b_path({"sensor", "blob"}), b_path({"reply-ep"}), {}, big_tlv);
     tr::view::view_t frame = make_value(fwd);
-    const auto arena = tr::wire::decode_into(frame.bytes(), *std::pmr::get_default_resource());
+    const auto arena = tr::wire::decode_into(frame.bytes(), tr::mem::heap_source());
     auto reply = resolver.resolve(*arena, {}, &frame);
     check(reply.has_value(), "referenced WRITE produced a reply");
 

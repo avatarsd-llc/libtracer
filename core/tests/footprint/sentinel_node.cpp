@@ -84,7 +84,7 @@ int main() {
         acc += static_cast<std::uint32_t>(dec->children.size());
     }
     alignas(std::max_align_t) std::array<std::byte, 512> arena_buf{};
-    std::pmr::monotonic_buffer_resource mr(arena_buf.data(), arena_buf.size());
+    mem::bump_source_t mr(arena_buf);
     if (const auto arena = wire::decode_into(bytes, mr); arena) {
         acc += static_cast<std::uint32_t>(arena->size());
     }
