@@ -506,9 +506,29 @@ void test_borrowed_static_install() {
         tr::graph::app_field_static_t{.name = "secret", .access = app_access_t::WO},
     }};
 
+    // ADR-0058 erratum 2 — the argument type is the whole guard, so assert what binds to it.
+    // Erratum 1 tightened this install's lifetime contract while the parameter was a
+    // std::span, so every stale caller kept compiling and started dangling (strawberry-fw
+    // #80: a function-local vector, found only by a downstream runtime suite). The container
+    // rows below are the ones that must NOT bind; without them the guard could rot silently
+    // back into a span and nothing here would notice.
+    using guard_t = tr::graph::borrowed_fields_t;
+    using decl_t = tr::graph::app_field_static_t;
+    static_assert(std::is_constructible_v<guard_t, decl_t(&)[2]>,
+                  "a C array of declarations must install implicitly");
+    static_assert(std::is_constructible_v<guard_t, const std::array<decl_t, 2>&>,
+                  "a std::array of declarations must install implicitly");
+    static_assert(std::is_default_constructible_v<guard_t>,
+                  "`{}` must remain the uninstall spelling");
+    static_assert(!std::is_constructible_v<guard_t, std::vector<decl_t>&>,
+                  "a vector must NOT install implicitly — that is strawberry-fw #80");
+    static_assert(!std::is_constructible_v<guard_t, std::span<const decl_t>>,
+                  "a bare span must NOT install implicitly — use borrowed_fields_t::unchecked");
+
     graph_t g;
     const vertex_handle_t owning = g.register_vertex(path_t("/x/pid"), role_t::STORED_VALUE);
     const vertex_handle_t borrow = g.register_vertex(path_t("/y/pid"), role_t::STORED_VALUE);
+    const vertex_handle_t escape = g.register_vertex(path_t("/z/pid"), role_t::STORED_VALUE);
 
     std::vector<app_field_t> owned;
     owned.push_back(app_field_t{.name = "kp", .access = app_access_t::RW, .descriptor = kp_desc});
@@ -517,12 +537,19 @@ void test_borrowed_static_install() {
 
     g.set_app_fields_static(borrow, borrowed);
 
+    // The escape hatch a runtime-sized binding uses (the C shim's .bss slot array): same
+    // install, lifetime asserted by the caller instead of checked by the argument's shape.
+    g.set_app_fields_static(escape, guard_t::unchecked(borrowed));
+
     // :schema is byte-identical across the two install paths (the ADR's wire-invariance).
     const std::optional<decoded_t> da = decode_read(g.read(path_t("/x/pid:schema")));
     const std::optional<decoded_t> db = decode_read(g.read(path_t("/y/pid:schema")));
+    const std::optional<decoded_t> dc = decode_read(g.read(path_t("/z/pid:schema")));
     check(da.has_value() && db.has_value(), "borrowed: both :schema reads decode");
     check(da && db && da->bytes == db->bytes,
           "borrowed vs owning :schema bytes are identical (wire-invariant)");
+    check(dc && db && dc->bytes == db->bytes,
+          "borrowed via unchecked() is byte-identical to the checked spelling");
 
     // Declared-but-unset reads NOT_FOUND; a write lands in the lazily-allocated value store
     // and reads back verbatim; the undeclared sibling stays SCHEMA_NOT_FOUND.
