@@ -44,6 +44,7 @@ set(LIBTRACER_SRCS
     "${LIBTRACER_ROOT}/core/src/tlv_arena.cpp"
     "${LIBTRACER_ROOT}/core/src/backend_set.cpp"
     "${LIBTRACER_ROOT}/core/src/mem_heap.cpp"
+    "${LIBTRACER_ROOT}/core/src/mem_source.cpp"
     "${LIBTRACER_ROOT}/core/src/mem_pool.cpp"
     "${LIBTRACER_ROOT}/core/src/rope.cpp"
     "${LIBTRACER_ROOT}/core/src/rope_decode.cpp"
