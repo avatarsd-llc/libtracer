@@ -917,14 +917,6 @@ class graph_t {
      *         alloc. On exhaustion it returns `nullptr` — the write BACKPRESSUREs
      *         (§3), never a silent heap fallback. */
     mem::mem_backend_t* value_backend_ = &mem::heap_backend();
-    /** @brief The #551 nothrow control-plane block seam. Host-owned; outlives the
-     *         graph. Defaults to the platform heap, so behaviour is byte-identical
-     *         until a host injects a bounded source — except that exhaustion is a
-     *         `nullptr` return rather than the `-fno-exceptions` abort stub.
-     *         No call site draws from it yet; the migration order is in the ctor
-     *         docs. Kept a DIFFERENT type from `mr_` on purpose (see
-     *         @ref tr::mem::block_source_t). */
-    mem::block_source_t* ctl_ = &mem::heap_source();
     std::unique_ptr<vertex_t> root_;
     // The device creation catalog (#82, ADR-0017): SPEC `type` -> factory. Populated at
     // setup (register_child_type), read-only once frames flow, so no lock (same contract
@@ -964,6 +956,21 @@ class graph_t {
     // assign has marked anything — losing a race with a concurrent mark_pending leaves the
     // mark for the next sweep, an ordering the locked erase already permitted (ADR-0057).
     std::atomic<std::size_t> pending_count_{0};
+    /** @brief The #551 nothrow control-plane block seam. Host-owned; outlives the
+     *         graph. Defaults to the platform heap, so behaviour is byte-identical
+     *         until a host injects a bounded source — except that exhaustion is a
+     *         `nullptr` return rather than the `-fno-exceptions` abort stub.
+     *         No call site draws from it yet; the migration order is in the ctor
+     *         docs. Kept a DIFFERENT type from `mr_` on purpose (see
+     *         @ref tr::mem::block_source_t).
+     *
+     *         LAST on purpose: no hot path reads it, so declaring it here keeps
+     *         every other member at the byte offset it had before this seam
+     *         existed. A cold pointer inserted mid-object would shift `root_` and
+     *         everything after it, which is a layout change the forward-hop bench
+     *         can see and nothing gains from.
+     */
+    mem::block_source_t* ctl_ = &mem::heap_source();
 };
 
 }  // namespace tr::graph

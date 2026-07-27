@@ -26,6 +26,20 @@
 
 #include "libtracer/graph.hpp"
 
+// ASan/TSan intercept `operator new` and treat a request past their allocator cap
+// as a fatal error rather than returning null, so the one probe that asks for an
+// unservable block has to sit out those builds (see its call site).
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define LIBTRACER_TEST_UNDER_SANITIZER 1
+#endif
+#endif
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#ifndef LIBTRACER_TEST_UNDER_SANITIZER
+#define LIBTRACER_TEST_UNDER_SANITIZER 1
+#endif
+#endif
+
 namespace {
 
 int g_failures = 0;
@@ -100,10 +114,19 @@ int main() {
     // THE contract: exhaustion is a value, not a throw and not an abort. An
     // allocation this size cannot be served, and `::operator new(nothrow)` must
     // answer nullptr rather than reaching __cxa_throw.
-    void* huge = heap.try_alloc(static_cast<std::size_t>(-1) / 2, alignof(std::max_align_t));
-    check(huge == nullptr, "an unservable request returns nullptr (never throws)");
     static_assert(noexcept(heap.try_alloc(1, 1)), "try_alloc is noexcept");
     static_assert(noexcept(heap.release(nullptr, 1, 1)), "release is noexcept");
+#if defined(LIBTRACER_TEST_UNDER_SANITIZER)
+    // Skipped, not weakened: a sanitizer's allocator treats an over-cap request as
+    // a hard error and exits before `operator new` can answer, so the probe would
+    // fail the RUN rather than the assertion. The property still has coverage —
+    // every non-sanitizer job runs the line below, and `budget_source_t` exercises
+    // the same nullptr-is-BACKPRESSURE path unconditionally just underneath.
+    std::printf("  [SKIP] unservable-request probe (sanitizer allocator aborts first)\n");
+#else
+    void* huge = heap.try_alloc(static_cast<std::size_t>(-1) / 2, alignof(std::max_align_t));
+    check(huge == nullptr, "an unservable request returns nullptr (never throws)");
+#endif
 
     // A bounded source: served until the budget runs out, then a clean refusal.
     budget_source_t budget(2);

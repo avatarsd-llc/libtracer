@@ -292,9 +292,9 @@ graph_t::graph_t(std::pmr::memory_resource* mr, mem::mem_backend_t* value_backen
                  mem::block_source_t* ctl)
     : mr_(mr),
       value_backend_(value_backend),
-      ctl_(ctl),
       root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, settings_t{},
-                                       handlers_t{})) {
+                                       handlers_t{})),
+      ctl_(ctl) {
     // The one built-in creation-catalog type (#82, ADR-0017): `stored_value` makes a
     // plain last-writer-wins vertex at the composed child key. Its optional SPEC
     // `config` SETTINGS is ignored for now (a stored-value has no instantiation params
