@@ -91,7 +91,7 @@ from-scratch native reimplementations kept in lock-step by the same vectors
   `cargo test`, an `npm test`, a live-interop job, or an ESP build — and
   `tools/gen_capability_matrix.py --check` (CI) fails if any citation is missing
   or if this page is stale. The tests' pass/fail is proven by the existing CI
-  jobs (`conformance`, `core-ci`, `ts`, `ws-interop`, `esp-idf`).
+  jobs (`conformance`, `core-ci`, `ts`, `ws-interop`, `wt-interop`, `esp-idf`).
 - The **module** table is auto-derived by scanning the tree, so it cannot
   overclaim: `transport_i2c`/`spi`/`unix` show as *planned* until their TU lands.
 - Full module catalog: [reference/10-module-catalog.md](reference/10-module-catalog.md).

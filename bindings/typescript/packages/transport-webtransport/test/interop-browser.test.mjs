@@ -22,6 +22,12 @@
  * The dev certificate is generated here: `serverCertificateHashes` is only
  * honored by browsers for an ECDSA certificate valid <= 14 days (a browser
  * rule) — tools/gen-dev-cert.sh's RSA/365d pair would be rejected.
+ *
+ * The page is served from a throwaway loopback origin rather than evaluated on
+ * the default blank tab, because `WebTransport` is gated on a SECURE CONTEXT and
+ * a fresh tab has an opaque origin — there the constructor is simply not defined.
+ * `http://127.0.0.1:<port>` is "potentially trustworthy" by spec, so plain HTTP
+ * on loopback is enough and no second certificate is involved.
  */
 
 import { test } from 'node:test';
@@ -29,6 +35,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -73,6 +80,22 @@ function certSha256(certPem) {
     .replace(/-----END CERTIFICATE-----/, '')
     .replace(/\s+/g, '');
   return createHash('sha256').update(Buffer.from(b64, 'base64')).digest();
+}
+
+/**
+ * @brief Serve one empty page on an ephemeral loopback port, so the browser has a
+ *        secure-context origin to run the WebTransport client from.
+ */
+function startPageOrigin() {
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end('<!doctype html><meta charset="utf-8"><title>libtracer wt interop</title>');
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () =>
+      resolve({ server, url: `http://127.0.0.1:${server.address().port}/` }),
+    );
+  });
 }
 
 /** @brief Spawn wt_interop_server; resolve `{ child, port }` on its PORT= line. */
@@ -123,6 +146,7 @@ test(
     const { cert, key } = genBrowserDevCert(dir);
     const hash = certSha256(cert);
     const { child, port } = await startServer(cert, key);
+    const { server: origin, url: originUrl } = await startPageOrigin();
 
     const browser = await puppeteer.launch({
       headless: 'new',
@@ -130,6 +154,15 @@ test(
     });
     try {
       const page = await browser.newPage();
+      await page.goto(originUrl);
+      // Guard the precondition explicitly: without a secure context the
+      // constructor is undefined, and the failure would otherwise surface as a
+      // bare ReferenceError from inside page.evaluate.
+      assert.equal(
+        await page.evaluate(() => window.isSecureContext && typeof WebTransport),
+        'function',
+        'the page origin is a secure context exposing WebTransport',
+      );
       // Inside the browser: the raw WebTransport + the SAME 4-byte u32-LE
       // length-prefix framing TransportWebTransport speaks (inlined — the page
       // context cannot import the package; the unit tests pin the TS class to
@@ -169,6 +202,7 @@ test(
       assert.deepEqual(echoed, [0x03, 0x01, 0x64, 0x2a], 'echo is byte-identical');
     } finally {
       await browser.close();
+      origin.close();
       child.kill('SIGTERM');
     }
   },

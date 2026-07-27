@@ -1,0 +1,133 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# C++ <-> BROWSER WebTransport INTEROP end-to-end job (#321) — the one capability
+# matrix cell that was verified by framing shape + codec agreement rather than by
+# a live byte exchange. Builds the C++ `wt_interop_server` echo harness (a real
+# `tr::net::webtransport_transport_t`, LIBTRACER_WITH_QUIC=ON) and drives a real
+# chrome-headless against it: a genuine HTTP/3 extended-CONNECT session with
+# `serverCertificateHashes` dev trust, one browser `createBidirectionalStream()`,
+# a length-prefixed record out, the echoed record back.
+#
+# Unlike ws-interop this needs a BROWSER: TS WebTransport is the browser
+# `WebTransport` API over HTTP/3, so there is no in-process Node client to drive.
+# That is why the harness carries a puppeteer dependency this job installs, and
+# why it lives in its own workflow rather than joining ws-interop.yml — that file
+# is path-filtered on all of `core/**`, and an msquic build has no business
+# running on every core change.
+#
+# The msquic cache key is deliberately IDENTICAL to quic.yml's, so whichever
+# workflow runs first populates the prefix and the other hits it.
+name: wt-interop
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "core/src/transport_webtransport.cpp"
+      - "core/include/libtracer/transport_webtransport.hpp"
+      - "core/src/wt_h3.hpp"
+      - "core/src/msquic_endpoint.hpp"
+      - "core/include/libtracer/length_prefix_framer.hpp"
+      - "core/tests/wt_interop_server.cpp"
+      - "core/CMakeLists.txt"
+      - "core/tests/CMakeLists.txt"
+      - "bindings/typescript/packages/transport-webtransport/**"
+      - ".github/workflows/wt-interop.yml"
+  pull_request:
+    paths:
+      - "core/src/transport_webtransport.cpp"
+      - "core/include/libtracer/transport_webtransport.hpp"
+      - "core/src/wt_h3.hpp"
+      - "core/src/msquic_endpoint.hpp"
+      - "core/include/libtracer/length_prefix_framer.hpp"
+      - "core/tests/wt_interop_server.cpp"
+      - "core/CMakeLists.txt"
+      - "core/tests/CMakeLists.txt"
+      - "bindings/typescript/packages/transport-webtransport/**"
+      - ".github/workflows/wt-interop.yml"
+  workflow_dispatch:
+
+env:
+  MSQUIC_TAG: v2.4.18
+
+jobs:
+  wt-interop:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache the msquic install prefix
+        id: msquic-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/msquic-install
+          key: msquic-${{ env.MSQUIC_TAG }}-${{ runner.os }}-ubuntu24
+
+      - name: Build msquic from source (cache miss only)
+        if: steps.msquic-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$MSQUIC_TAG" --recurse-submodules --shallow-submodules \
+            https://github.com/microsoft/msquic.git ~/msquic-src
+          cmake -S ~/msquic-src -B ~/msquic-src/build -DCMAKE_BUILD_TYPE=Release \
+            -DQUIC_BUILD_TOOLS=OFF -DQUIC_BUILD_TEST=OFF -DQUIC_BUILD_PERF=OFF \
+            -DQUIC_ENABLE_LOGGING=OFF -DCMAKE_INSTALL_PREFIX="$HOME/msquic-install"
+          cmake --build ~/msquic-src/build -j
+          cmake --install ~/msquic-src/build
+
+      - name: Build the C++ wt_interop_server helper binary
+        run: |
+          cmake -S core -B core/build-wt -DBUILD_TESTING=ON \
+            -DLIBTRACER_WITH_QUIC=ON -DCMAKE_PREFIX_PATH="$HOME/msquic-install" \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build core/build-wt --target wt_interop_server -j
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: bindings/typescript/package-lock.json
+
+      - name: Install + build the TypeScript workspace
+        working-directory: bindings/typescript
+        run: |
+          npm ci
+          npm run build
+
+      # puppeteer is deliberately NOT a devDependency of the package (the mocked
+      # unit tests cover the transport logic without a browser download), so the
+      # browser harness installs it here — ~200 MB of browser, pulled only in the
+      # one job that drives a browser. --no-save so the install cannot rewrite the
+      # checked-in package.json or lockfile underneath a later step; the workspace
+      # was already resolved by `npm ci` above, and publish-npm.yml ships from the
+      # same committed lockfile.
+      - name: Install puppeteer for the browser harness
+        working-directory: bindings/typescript
+        run: npm i --no-save puppeteer
+
+      # Only the interop case — the package's mocked unit tests are ts.yml's job,
+      # and running them here would make a browser failure and a codec failure
+      # share one red badge.
+      #
+      # The harness SKIPS rather than fails when the server binary or puppeteer
+      # is missing. That is deliberate and right: `npm test` must stay green for a
+      # contributor with no QUIC build. In CI the same property is a hazard —
+      # a skipped run exits 0, so the job would report success having exchanged no
+      # bytes, which is the exact gap this workflow exists to close. Trusting the
+      # exit status is therefore not enough; TAP is parsed and the case is
+      # asserted to have genuinely PASSED.
+      - name: Run the browser <-> C++ WebTransport interop test
+        working-directory: bindings/typescript/packages/transport-webtransport
+        env:
+          LIBTRACER_WT_INTEROP_SERVER: ${{ github.workspace }}/core/build-wt/tests/wt_interop_server
+        run: |
+          set -o pipefail
+          # msquic ships as a shared lib; the spawned server needs it on the path.
+          export LD_LIBRARY_PATH="$HOME/msquic-install/lib:${LD_LIBRARY_PATH:-}"
+          node --test --test-reporter=tap test/interop-browser.test.mjs 2>&1 | tee wt-interop.tap
+          if ! grep -qx '# pass 1' wt-interop.tap || ! grep -qx '# skipped 0' wt-interop.tap; then
+            echo "::error::the WebTransport interop case did not execute (it skipped)."
+            echo "A skipped browser harness exits 0 while exchanging no bytes — see the TAP above"
+            echo "for which precondition was missing (server binary, or puppeteer)."
+            exit 1
+          fi
