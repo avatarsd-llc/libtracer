@@ -279,7 +279,17 @@ Two companions ship with it, because the migrated call sites all need the same p
 
 A **long-lived** seam (a router's `rx`, a graph's `ctl`) must not be a bump source: bump blocks are never reclaimed, so it fills monotonically and then refuses everything. Measured: an 8 KiB bump source wired as a router's `rx` decoded 6 frames and rejected the next 194. A long-lived bounded seam needs a **recycling** source, and libtracer does not ship one yet — `heap_source()` recycles but is unbounded, `bump_source_t` is bounded but does not recycle. Until that gap is closed, a bounded node either supplies its own recycling `block_source_t` (a free-list over its slab) or leaves the long-lived seams on the heap and accepts it.
 
-The reject is the operation's, not the seam's, and the two consumers that draw from it today answer **differently**: the terminus decode answers `tr::tlv::nesting_too_deep` (RFC-0006's "exceeds this receiver's decode resources"), while the branch-write decode answers `tr::schema::type_mismatch` — it cannot distinguish "the value did not parse" from "the arena ran out", and does not try. `BACKPRESSURE` is what a *store* answers when its value backend is exhausted ([§Backpressure, not fallback](#backpressure-not-fallback)); it is not a property of the block seam.
+### Where the forward hop draws from
+
+The decode arena is not the only thing a peer sizes. A FWD hop reading a **multi-link rope** must build a scatter-gather entry table whose length is `~6 + link_count` — again the sender's choice, again on a path behind no ACL, and this one is not even the terminus. `fwd_router_t` gathers it into a `block_array_t` over the same injected `rx`, so exhaustion **drops the hop**.
+
+Dropping is the whole answer, not half of one: emitting the entries that did fit would put a **truncated FWD on the wire**, which is strictly worse than silence, and FWD is not delivery-guaranteed — the sender retries. Note the shape difference from the decode: the decode has a *status* to return, so it answers by value; a forward hop has no reply channel, so its only honest answer is to stay quiet.
+
+The **single-link** (contiguous) hop is unchanged and allocates nothing: its entry count is bounded by the frame layout, so it uses a stack array.
+
+### How the consumers answer
+
+The reject is the operation's, not the seam's, and the three consumers that draw from it today answer **differently**: the terminus decode answers `tr::tlv::nesting_too_deep` (RFC-0006's "exceeds this receiver's decode resources"); the branch-write decode answers `tr::schema::type_mismatch` — it cannot distinguish "the value did not parse" from "the arena ran out", and does not try; the rope forward hop answers with **nothing at all**, per above. `BACKPRESSURE` is what a *store* answers when its value backend is exhausted ([§Backpressure, not fallback](#backpressure-not-fallback)); it is not a property of the block seam.
 
 ---
 

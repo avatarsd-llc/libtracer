@@ -26,12 +26,14 @@
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
+#include <memory_resource>
 #include <span>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -163,6 +165,25 @@ std::vector<std::vector<std::byte>> forward_as_rope(std::span<const std::byte> f
     fake_link_t up;
     router.add_child("cli", cli);  // inbound (rope) link
     router.add_child("up", up);    // the dst-resolved forward child
+    cli.inject(rope_split(frame, cuts));
+    return std::move(up.sent());
+}
+
+/**
+ * @brief Same as @ref forward_as_rope, but with an explicit FAILABLE seam for the egress iov.
+ *
+ * The rope forward path is the only one whose iov length is chosen by the SENDER (link count x
+ * region count), so it is the only one that can be starved from the wire (#596).
+ */
+std::vector<std::vector<std::byte>> forward_as_rope_with(std::span<const std::byte> frame,
+                                                         std::span<const std::size_t> cuts,
+                                                         tr::mem::block_source_t& rx) {
+    graph_t g;
+    fwd_router_t router(g, std::pmr::get_default_resource(), &rx);
+    fake_rope_link_t cli;
+    fake_link_t up;
+    router.add_child("cli", cli);
+    router.add_child("up", up);
     cli.inject(rope_split(frame, cuts));
     return std::move(up.sent());
 }
@@ -363,6 +384,39 @@ int main() {
                       tr::detail::load_le<std::uint32_t>(inner->payload) == kVal,
                   "LKV updated to the label-compacted value (payload sub-rope decoded)");
         }
+    }
+
+    // #596: the rope forward hop's egress iov is the one allocation on this path whose
+    // ELEMENT COUNT a peer chooses — one sub-span per link crossed, per region. It used to
+    // be a `std::pmr::vector`, so exhaustion threw, and on -fno-exceptions that is abort():
+    // a peer-reachable reboot behind no ACL. It now draws from the failable seam and refuses
+    // by value. These cases run the SAME maximally fragmented rope through three seams.
+    {
+        std::printf("Rope forward-hop egress iov is failable, not throwing (#596):\n");
+        // One link per byte — the largest sub-span count this frame can produce.
+        std::vector<std::size_t> every_byte;
+        for (std::size_t i = 1; i < frame.size(); ++i) every_byte.push_back(i);
+
+        // A seam that serves nothing: the very first growth is refused.
+        const auto starved = forward_as_rope_with(frame, every_byte, tr::mem::null_source());
+        check(starved.empty(), "a starved iov seam DROPS the forward frame (no abort, no send)");
+
+        // Not a partial send: a truncated FWD on the wire would be worse than none, so the
+        // check above is specifically that NOTHING was emitted, not that something short was.
+        check(starved.size() == 0, "and emits no truncated frame either");
+
+        // A bounded seam with room forwards byte-identically to the contiguous oracle. Sized
+        // generously on purpose: `block_array_t` grows 8 -> 16 -> 32 -> ..., and a bump source
+        // never reclaims the block it just outgrew, so the peak draw is the SUM of the
+        // capacities, not the last one (see mem_source.hpp's scope-lifetime warning).
+        std::array<std::byte, 8192> slab{};
+        tr::mem::bump_source_t bounded{slab, tr::mem::null_source()};
+        check(forward_as_rope_with(frame, every_byte, bounded) == oracle,
+              "a bounded-but-sufficient iov seam forwards byte-identically to the oracle");
+
+        // And the default seam is unchanged — this is the path every existing check above ran.
+        check(forward_as_rope_with(frame, every_byte, tr::mem::heap_source()) == oracle,
+              "the default heap seam is byte-identical (no behaviour change when it fits)");
     }
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,

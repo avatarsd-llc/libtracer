@@ -221,7 +221,10 @@ storage). Concretely:
   unbounded at compile time; a stack cap would be a synthetic limit
   ([ADR-0051](0051-delivery-terminates-at-target-no-dispatch-limits.md)). The
   multi-link instantiation builds its iov in a `std::pmr::vector` over the router's
-  injected resource. This is a **scoped reading of ADR-0038 inv. #2**, not a revision:
+  injected resource. *(Superseded by the erratum below: the container is now a
+  `mem::block_array_t` over the router's `rx_`, so exhaustion drops the hop instead of
+  throwing. The rest of this bullet is unchanged.)* This is a **scoped reading of
+  ADR-0038 inv. #2**, not a revision:
   the "stack `std::array`, never a `std::vector`" invariant stays literally true on the
   span-tier hop where it was stated; the multi-link hop is owning-tier traffic that
   postdates it, bounded by the injected resource per the RFC-0006 doctrine.
@@ -299,11 +302,11 @@ What would reopen it: evidence that the 64 KB / L=2 advantage does not survive o
 
 ADR-0055 inherits this correction: its "flatten sweep" reasoning is unaffected for the **owning** path it governs, but its framing of span-tier flattens as a concession rather than a legitimate optimum should be read in light of the numbers above.
 
-## Erratum — §7's `pmr::vector` egress iov is still there, and it is a live instance of the #588 abort class
+## Erratum — §7's `pmr::vector` egress iov was a live instance of the #588 abort class. FIXED.
 
-*(2026-07-27. **This erratum replaces an earlier one that got this backwards** and claimed the mechanism had been superseded. It had not; the check behind that claim looked for callers of `rope_t::to_iovec()` and found none, which is true and beside the point — the vector is built inline, not through that method.)*
+*(2026-07-27. **This erratum replaces an earlier one that got this backwards** and claimed the mechanism had been superseded. It had not; the check behind that claim looked for callers of `rope_t::to_iovec()` and found none, which is true and beside the point — the vector was built inline, not through that method. Resolved the same day by [#596](https://github.com/avatarsd-llc/libtracer/issues/596).)*
 
-§7 sanctions building the scatter-gather entry table as a `std::pmr::vector` drawn from the router's injected resource, and that is exactly what `fwd_router.cpp`'s rope forward path does:
+§7 sanctioned building the scatter-gather entry table as a `std::pmr::vector` drawn from the router's injected resource, and that is what `fwd_router.cpp`'s rope forward path did:
 
 ```cpp
 // Rope source: a region may cross several links — gather into a pmr vector drawn
@@ -312,8 +315,12 @@ std::pmr::vector<std::span<const std::byte>> iov{mr_};
 rebuilt->gather(cur_src, [&](std::span<const std::byte> s) { iov.push_back(s); });
 ```
 
-The entry count is `~6 + link_count()`, chosen by the **peer's** frame, on the **forward** path — which is behind no ACL and is not even the terminus. `push_back`'s growth goes through `std::pmr`, so on a fragmented heap it throws, and on `-fno-exceptions` that is the link-wrapped `abort()` stub. This is the same class [#588](https://github.com/avatarsd-llc/libtracer/issues/588) removed from the decode path, still present on the egress path.
+The entry count is `~6 + link_count()`, chosen by the **peer's** frame, on the **forward** path — which is behind no ACL and is not even the terminus. `push_back`'s growth went through `std::pmr`, so on a fragmented heap it threw, and on `-fno-exceptions` that is the link-wrapped `abort()` stub. Same class as [#588](https://github.com/avatarsd-llc/libtracer/issues/588), on the egress path instead of the decode path.
 
-The **reply** egress is a different, already-fixed story: it uses `rope_t::try_to_iovec`, which nothrow-reserves a plain `std::vector` and drops the reply on failure. That asymmetry — reply guarded, forward not — is the finding.
+The **reply** egress was already a different story: it uses `rope_t::try_to_iovec`, which nothrow-reserves a plain `std::vector` and drops the reply on failure. That asymmetry — reply guarded, forward not — was the finding.
 
-§7's *reasoning* stands (no stack cap, no synthetic limit — the bound is a real resource). What needs to change is the mechanism, to a `block_source_t`-backed table, tracked separately.
+**The mechanism is now a `mem::block_array_t` over the router's injected `rx_`** ([ADR-0065](0065-failable-allocation-gets-its-own-seam-block-source.md)); exhaustion returns `false` and the hop **drops the frame**. Dropping — rather than emitting the entries that did fit — is the only correct answer: a partial iov is a *truncated FWD on the wire*, which is worse than silence, and FWD is not delivery-guaranteed, so the sender retries.
+
+§7's *reasoning* stands unchanged (no stack cap, no synthetic limit — the bound is a real injected resource per [RFC-0006](../spec/rfcs/0006-resource-bounded-nesting-depth.md)). Only the container changed, and with it the failure mode: from `abort()` to backpressure.
+
+`core/tests/fwd_rope_forward_test.cpp` pins it — the same maximally fragmented rope is forwarded through three seams: a `null_source()` (emits **nothing**, and the test asserts *nothing*, not *something short*), a bounded `bump_source_t` with room, and the default heap source; the latter two are byte-identical to the contiguous oracle. Reverting the fix fails the first two checks.
