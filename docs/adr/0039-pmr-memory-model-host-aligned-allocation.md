@@ -53,10 +53,11 @@ The steady-state forward hop takes **neither** seam: no `tlv_t` (offset-dispatch
 - **New surface**: `wire::decode_into(span, memory_resource&)` (arena decode). The container seam itself needs **no new `tr::mem` class** — a standard `std::pmr::monotonic_buffer_resource` over a caller slab is the resource (see §2; the earlier "`pool_t`-backed adapter" is dropped — `pool_t`'s fixed-`segment_t`-slot shape does not fit `do_allocate`). `wire::decode(span)`, `mem_backend_t`, and `pool_t` are unchanged.
 - **One slab, whole stack**: a 16KB node constructs one static arena → feeds the segment pool and a container `memory_resource` → every libtracer allocation (segments, terminus trees, label tables) comes from it. Host-aligned by construction, boundable, no global heap dependency.
 
-## Errata — three things measured on the terminus path
+## Errata — five corrections, all measured
 
 Recorded after instrumenting a real terminus resolve (every `operator new` form, symbolized per
-allocation). The seam works as designed; three statements around it invite the wrong reading.
+allocation), then extended (errata 4-5) while scoping #551. The seam works as designed; five
+statements around it invite the wrong reading.
 
 **1. `monotonic_buffer_resource` is the wrong injection, despite being named above.** The terminus
 arena is destroyed each frame, but a monotonic resource never reclaims — a measured run exhausted a
@@ -80,6 +81,45 @@ of a per-frame arena — would free live label state. Nothing in-tree does this 
 being claimed here; the point is that the safety of a per-frame reset is not a property a host can
 assume from this ADR's framing, and today it does not hold. Separating the two resources would make
 per-frame reset safe, and is a live option rather than a decision recorded here.
+
+**4. The "init/setup is out of scope" carve-out no longer covers vertex registration, and the
+registration path never drew from `mr_` in the first place.** §Context 1 lists "the graph vertex
+map" among the init-time allocations this ADR deliberately exempts, and under that reading
+registering a vertex was fine: it happened once, at startup, before the counter was armed.
+[RFC-0014](../spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) ended that.
+`transport_vertex_t::make_connection` calls `graph_t::register_vertex_key` when a CREATE op
+resolves, on whichever transport thread received the frame — so vertex allocation is now a
+**runtime, wire-driven** operation a *peer* drives. This is the same premise-invalidation
+[ADR-0063](0063-connection-table-lock-free-reads-trait-serialized-writes.md) recorded for the
+connection registry ("immutable after setup" stopped being true when RFC-0014 made create/remove a
+runtime operation); the registry got a mechanism, the allocation path did not.
+
+Measured on that path (`bench_forward_heap`'s `reg_escape` probe, a `/net/<module>/<name>`
+registration with a peer-length name and one handler): **four global-heap blocks per registration,
+and the injected resource serves zero of them.** The probe is ratcheted, so the number cannot drift
+once it moves. Tracked as [#551](https://github.com/avatarsd-llc/libtracer/issues/551).
+
+**5. `std::pmr::memory_resource` cannot report allocation failure by value, which makes this seam
+unusable for a failable operation on the `-fno-exceptions` profile.** `allocate` is specified to
+return storage or throw; there is no null return. ESP-IDF builds with exceptions off (the IDF
+default, and a commitment in `integrations/esp-idf/README.md`) and link-wraps `__cxa_throw` /
+`__cxa_allocate_exception` to `abort()` stubs. So on the deployment profile, an injected resource
+that runs out has exactly one way to say so: reboot the node.
+
+This is not hypothetical. The shipping integration's resource ends its failure path with an
+`abort()` and a log line, and its comment states the reason outright: *"pmr cannot report failure
+by value and the target builds with `-fno-exceptions`: fail loudly WITH the numbers instead of the
+bare bad_alloc-abort this replaces."*
+
+The consequence for anyone reading this ADR as a bounding mechanism: **`mr_` bounds memory, it does
+not make exhaustion survivable.** The seam that does is the sibling one this ADR §2 bridges to —
+`mem_backend_t::create()` is nothrow and returns `nullptr` (see
+[ADR-0060](0060-lkv-copy-store-injected-value-backend.md)), and `vertex_t::try_make_lkv` is that
+discipline applied to `mr_` on the one path that already needed it, with a docstring conceding the
+gap for injected resources. Closing it for the rest of the stack requires either tightening the
+`mr_` contract to nullptr-on-exhaustion (making an injected resource formally non-conforming, which
+any resource usable on this profile already is) or routing failable control-plane allocations
+through a nothrow seam instead. That choice is open, not recorded here.
 
 **What the seam does deliver, measured.** Injecting a resource moves the terminus decode off the
 global heap exactly as designed — 9 allocations / 937 bytes becomes 4 / 153, i.e. 84% of the bytes
