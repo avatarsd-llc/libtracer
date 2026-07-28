@@ -14,6 +14,33 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **BREAKING (wire behaviour): an indexed `:subscribers[N]` write is now payload-discriminating,
+  per RFC-0009 §D.1 — and `:subscribers[*]` on a write is rejected (#598, #579).** The
+  implementation cleared slot `N` payload-blind, so a `SUBSCRIBER`, a junk `VALUE` and the
+  empty-`STATUS` sentinel all produced the identical clear and the identical `RESULT`. Now:
+  an empty `STATUS` (`09 00 00 00`) clears; a `SUBSCRIBER` **replaces** slot `N`'s edge; anything
+  else is `TYPE_MISMATCH`; an index no slot answers to is `INVALID_PATH`.
+
+  Three consequences an integrator must read:
+
+  1. **A replace passes the `SUBSCRIBE` gate, not merely `WRITE`.** It enters the same admission
+     door as an append (ADR-0049), so a caller holding `WRITE` but not `SUBSCRIBE` can still
+     clear a slot but can no longer install one.
+  2. **Writes that used to succeed now fail.** A client clearing a slot with an arbitrary payload
+     was already non-conforming (§D.1 calls this a conformance *repair*), but it was succeeding;
+     it now gets `TYPE_MISMATCH`. Clear with the sentinel.
+  3. **`:subscribers[*]` was silent data loss.** The wildcard sets `indexed` and leaves `index`
+     at 0, so a wildcard write cleared **slot 0** and answered `RESULT`. It is now
+     `INVALID_PATH`; the `WRITE` grammar has no wildcard axis.
+
+### Added
+
+- **`vertex_t::replace_edge(idx, subscriber_t, edge_latch_t*)` and `vertex_t::edge_replace_t`** —
+  the §D.1 replace primitive. Takes the durability latch under the same single lock hold as
+  `add_edge`, so a concurrent `clear_edge` cannot slip between the write and the snapshot, and
+  reclaims the displaced edge's segment pin in place. It never grows `subs_`: an out-of-range
+  index is refused rather than back-filled, because the index arrives off the wire.
+
 - **BREAKING (routing addresses): a bus PEER is addressed `<mount>/<peer>/<residual>`, not
   `<peer>/<residual>` — RFC-0014 S2a (`9d038b9`).** Per-module mount routing made
   routing-address equal vertex-path, and a multi-peer child now resolves the next segment in

@@ -390,16 +390,28 @@ A vertex exposes a **schema** describing every writable field. The schema lives 
 | `:description` | UTF-8 | yes (with permission) | Human-readable description |
 | `:acl` | ACL | yes (with permission) | Access control list |
 
-### Writing `:subscribers[N]` unsubscribes; it does not register
+### Writing `:subscribers[N]` is payload-discriminating
 
-There is **no set-a-slot surface**. Subscription records are written only by appending to
-`:subscribers[]`; an indexed write is the **unsubscribe** operation, and it clears slot `N`
-whatever the payload is — the runtime never inspects the value on that path
-([05 §`0x09`](05-protocol-tlvs.md) documents the empty-`STATUS` sentinel spelling, but a
-`SUBSCRIBER`, a junk `VALUE`, and the sentinel all produce the identical clear and the
-identical `RESULT` reply). A client that writes a `SUBSCRIBER` to `:subscribers[3]` expecting
-to install or retarget record 3 **silently unsubscribes** whoever was in slot 3, and is told
-it succeeded.
+An indexed write is resolved by **what it carries** ([RFC-0009 §D.1](../spec/rfcs/0009-vertex-removal-and-subscriber-eviction.md)):
+
+| Payload written to `:subscribers[N]` | Effect |
+| --- | --- |
+| empty `STATUS` (`09 00 00 00`) — the sentinel ([05 §`0x09`](05-protocol-tlvs.md)) | **clears** slot `N` (unsubscribe) |
+| a `SUBSCRIBER` | **replaces** slot `N`'s edge, admitted through the same door as an append — so it passes the `SUBSCRIBE` gate, not merely `WRITE` |
+| anything else | `TYPE_MISMATCH`; the slot is untouched |
+| an `N` no slot answers to | `INVALID_PATH` — the slot vector is never grown to reach a wire-supplied index |
+
+A `[*]` selector is **not a write selector**: `:subscribers[*]` on a write answers
+`INVALID_PATH`, because the `WRITE` grammar has no wildcard axis.
+
+> **Erratum (2026-07-28).** Until [#598](https://github.com/avatarsd-llc/libtracer/issues/598)
+> this page described the indexed write as clearing slot `N` *whatever the payload is*, and
+> said there was "no set-a-slot surface". That documented the implementation, which diverged
+> from the accepted RFC: a client writing a `SUBSCRIBER` to `:subscribers[3]` to retarget
+> record 3 silently unsubscribed whoever held slot 3 and was told it succeeded. And
+> `:subscribers[*]` cleared **slot 0** and answered `RESULT`
+> ([#579](https://github.com/avatarsd-llc/libtracer/issues/579)). Both are fixed; the table
+> above is the behaviour.
 
 `:subscribers` is also addressed **whole**: `:subscribers[N].<anything>` names nothing and
 answers `SCHEMA_NOT_FOUND`, matching the read half.

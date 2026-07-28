@@ -812,7 +812,8 @@ class graph_t {
     // the edge's kind) → RFC-0005 bookkeeping. Every door — the two subscribe() sugars,
     // the local `:subscribers[]` field-write, and the wire subscribe_wire — ends here,
     // so gate and latch semantics cannot diverge per entry point.
-    result_t<subscription_t> admit_subscriber(vertex_t* v, subscriber_t s, std::string_view caller);
+    result_t<subscription_t> admit_subscriber(vertex_t* v, subscriber_t s, std::string_view caller,
+                                              std::optional<std::size_t> slot = std::nullopt);
     // Field surface: ":settings.<f>", ":settings.app.<name…>" (RFC-0010),
     // ":subscribers[]" / "[N]", ":children[]".
     result_t<void> field_write(vertex_t* v, const field_path_t& field, const view_t& value,

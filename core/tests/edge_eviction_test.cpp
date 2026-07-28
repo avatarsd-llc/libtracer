@@ -513,7 +513,7 @@ void test_clear_edge_releases_the_slot_pin() {
     // Clear it through the wire door (`:subscribers[0]` cleared), then require the pin gone.
     const auto clear_fp = path_t::parse("/a:subscribers[0]");
     check(clear_fp.has_value(), "the clear field-path parses");
-    check(g.write(a, clear_fp->field(), make_value({})).has_value(),
+    check(g.write(a, clear_fp->field(), make_value({0x09, 0x00, 0x00, 0x00})).has_value(),
           "clear the slot through the :subscribers[0] field-write door");
     check(refs() == held, "clearing RELEASES the pin — the segment is no longer retained");
 }
