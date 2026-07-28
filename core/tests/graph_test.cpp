@@ -331,10 +331,90 @@ void test_subscribe_via_field_write_and_unsubscribe() {
     (void)g.write(src, make_value({0x10}));
     check(*sink_seen == 0x10, "fan-out reaches the SUBSCRIBER's target path");
 
-    auto unsub = g.write(path_t("/sensor/temp:subscribers[0]"), make_value({}));  // clear slot 0
+    auto unsub = g.write(path_t("/sensor/temp:subscribers[0]"),
+                         make_value({0x09, 0x00, 0x00, 0x00}));  // empty STATUS = the §D.1 sentinel
     check(unsub.has_value(), "unsubscribe clears the slot");
     (void)g.write(src, make_value({0x20}));
     check(*sink_seen == 0x10, "no further delivery after unsubscribe");
+}
+
+/**
+ * @brief RFC-0009 §D.1: an indexed `:subscribers[N]` write is payload-DISCRIMINATING
+ *        (#598), and `[*]` is not a write selector at all (#579).
+ *
+ * Before this, the `[N]` arm cleared the slot payload-blind: a `SUBSCRIBER`, a junk `VALUE`
+ * and the empty-`STATUS` sentinel all produced the identical clear and the identical
+ * `RESULT`. A peer writing a SUBSCRIBER to slot N — plainly meaning to REPLACE that edge —
+ * silently destroyed it and was told it succeeded. `[*]` was worse: it sets
+ * `indexed=true, wildcard=true` and never assigns `index`, so it landed on slot 0.
+ */
+void test_subscribers_indexed_write_discriminates() {
+    std::printf(":subscribers[N] discriminates on payload; [*] is not a write selector:\n");
+    graph_t g;
+    auto seen_a = std::make_shared<int>(0);
+    auto seen_b = std::make_shared<int>(0);
+    auto sink = [](std::shared_ptr<int> tally) {
+        tr::graph::handlers_t h;
+        h.on_write = [tally](const tr::view::rope_t& in) -> tr::graph::result_t<void> {
+            *tally += std::to_integer<int>(in.only().bytes()[0]);
+            return {};
+        };
+        return h;
+    };
+    (void)g.register_vertex(path_t("/sink_a"), role_t::HANDLER, sink(seen_a));
+    (void)g.register_vertex(path_t("/sink_b"), role_t::HANDLER, sink(seen_b));
+    tr::graph::vertex_handle_t src =
+        g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+
+    check(g.write(path_t("/sensor/temp:subscribers[]"), subscriber_tlv("sink_a")).has_value(),
+          "seed: slot 0 routes to sink_a");
+    (void)g.write(src, make_value({0x10}));
+    check(*seen_a == 0x10 && *seen_b == 0, "seed delivers to sink_a only");
+
+    // (1) A SUBSCRIBER to [0] REPLACES the edge — it does not destroy it.
+    check(g.write(path_t("/sensor/temp:subscribers[0]"), subscriber_tlv("sink_b")).has_value(),
+          "a SUBSCRIBER write to [0] is accepted");
+    (void)g.write(src, make_value({0x20}));
+    check(*seen_b == 0x20, "slot 0 now routes to sink_b — REPLACED, per §D.1");
+    check(*seen_a == 0x10, "... and no longer to sink_a");
+
+    // (2) Anything that is neither the sentinel nor a SUBSCRIBER is a TYPE_MISMATCH,
+    //     where it used to be an accepted, silent destruction.
+    const auto junk = g.write(path_t("/sensor/temp:subscribers[0]"), make_value({0x01, 0x02}));
+    check(!junk && junk.error() == status_t::TYPE_MISMATCH, "a junk payload is TYPE_MISMATCH");
+    (void)g.write(src, make_value({0x30}));
+    check(*seen_b == 0x50, "... and the edge SURVIVED the rejected write");
+
+    // (3) `[*]` is INVALID_PATH — and, decisively, slot 0 is untouched.
+    //
+    // The wildcard is NOT text-path syntax: RFC-0004 §C defines it as a FIELD TLV with
+    // index_mode=WILDCARD, so `path_t::parse("…[*]")` rejects it and only a decoded wire
+    // FIELD produces this shape. Build it the way the decoder does — `indexed` set,
+    // `wildcard` set, `index` left at 0 — which is exactly #579's defect.
+    auto star_fp = path_t::parse("/sensor/temp:subscribers[0]")->field();
+    star_fp.steps[0].wildcard = true;
+    const auto star = g.write(src, star_fp, subscriber_tlv("sink_a"));
+    check(!star && star.error() == status_t::INVALID_PATH, "[*] on a WRITE is INVALID_PATH");
+    (void)g.write(src, make_value({0x02}));
+    check(*seen_b == 0x52, "... and slot 0 SURVIVED the wildcard write (#579's data loss)");
+
+    // (4) An index no slot answers to is refused, not back-filled — a wire-supplied index
+    //     must not be able to grow the slot vector.
+    const auto oor_fp = path_t::parse("/sensor/temp:subscribers[900]");
+    check(oor_fp.has_value(), "the out-of-range field-path parses");
+    const auto oor = g.write(src, oor_fp->field(), subscriber_tlv("sink_a"));
+    check(!oor && oor.error() == status_t::INVALID_PATH, "out-of-range [N] is INVALID_PATH");
+
+    // (5) The sentinel still clears, and a cleared slot can be refilled by index.
+    check(g.write(path_t("/sensor/temp:subscribers[0]"), make_value({0x09, 0x00, 0x00, 0x00}))
+              .has_value(),
+          "the empty-STATUS sentinel still clears");
+    (void)g.write(src, make_value({0x04}));
+    check(*seen_b == 0x52, "... and delivery stops");
+    check(g.write(path_t("/sensor/temp:subscribers[0]"), subscriber_tlv("sink_a")).has_value(),
+          "a cleared slot accepts a SUBSCRIBER by index");
+    (void)g.write(src, make_value({0x05}));
+    check(*seen_a == 0x15, "... and routes again");
 }
 
 /**
@@ -384,7 +464,8 @@ void test_subscribers_addressed_whole() {
     (void)g.register_vertex(path_t("/sink"), role_t::STORED_VALUE);
     check(g.write(path_t("/sensor/temp:subscribers[]"), subscriber_tlv("sink")).has_value(),
           ":subscribers[] (append) still subscribes");
-    check(g.write(src, path_t::parse("/sensor/temp:subscribers[0]")->field(), make_value({}))
+    check(g.write(src, path_t::parse("/sensor/temp:subscribers[0]")->field(),
+                  make_value({0x09, 0x00, 0x00, 0x00}))
               .has_value(),
           ":subscribers[0] (clear) still unsubscribes");
 }
@@ -595,6 +676,7 @@ int main() {
     test_field_write_settings();
     test_field_write_handle();
     test_subscribe_via_field_write_and_unsubscribe();
+    test_subscribers_indexed_write_discriminates();
     test_subscribers_addressed_whole();
     test_admission_door_uniformity();
     test_schema_read();

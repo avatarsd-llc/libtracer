@@ -1199,6 +1199,55 @@ class vertex_t {
         return true;
     }
 
+    /** @brief Outcome of @ref replace_edge — tells the caller which bookkeeping it owes. */
+    enum class edge_replace_t {
+        OUT_OF_RANGE,    /**< @brief No slot @p idx exists; nothing was written. */
+        FILLED_EMPTY,    /**< @brief The slot existed but was cleared — this is an ADD. */
+        REPLACED_ACTIVE, /**< @brief A live edge was swapped out; the listener count is unchanged.
+                          */
+    };
+
+    /**
+     * @brief Replace the edge occupying slot @p idx (RFC-0009 §D.1), snapshotting the
+     *        transient-local durability latch under the SAME single lock hold as
+     *        @ref add_edge.
+     *
+     * §D.1 makes an indexed `:subscribers[N]` write of a `SUBSCRIBER` *replace* that
+     * slot rather than destroy it. The latch is taken here, not by the caller, for the
+     * reason @ref add_edge gives: a concurrent @ref clear_edge must not be able to slip
+     * between the write and the snapshot. The caller dispatches OUTSIDE the lock.
+     *
+     * Move-assigning the slot reclaims the displaced edge's `source_view` segment pin and
+     * cold `remote` half in place, exactly as @ref clear_edge does — a replace must not
+     * leak the frame segment the old edge pinned.
+     *
+     * **This never grows `subs_`.** An out-of-range @p idx is refused rather than
+     * back-filled with inactive shells: the index arrives off the wire, so growing on
+     * demand would let a peer allocate an arbitrary number of slots with a single
+     * `:subscribers[65535]` write. Slot indices are stable per §D.2, so a slot that does
+     * not exist yet is not addressable.
+     *
+     * @param idx   The `:subscribers[N]` slot number.
+     * @param s     The replacing edge.
+     * @param latch Optional durability latch; snapshotted iff the vertex is
+     *              transient-local (`settings.durability == 1`) and holds an LKV.
+     * @return Which case applied — see @ref edge_replace_t.
+     */
+    edge_replace_t replace_edge(std::size_t idx, subscriber_t s, edge_latch_t* latch = nullptr) {
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        if (idx >= subs_.size()) return edge_replace_t::OUT_OF_RANGE;
+        const bool was_active = subs_[idx].active;
+        subs_[idx] = std::move(s);  // reclaims the displaced edge's pins in place
+        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        if (latch != nullptr && e != nullptr && e->settings.durability == 1) {
+            if (std::shared_ptr<const rope_t> lkv = lkv_.load()) {
+                latch->value = std::move(lkv);
+                latch->edge = edge_view_of(subs_[idx]);
+            }
+        }
+        return was_active ? edge_replace_t::REPLACED_ACTIVE : edge_replace_t::FILLED_EMPTY;
+    }
+
     /**
      * @brief Deactivate AND reclaim every active subscriber edge stored against the
      *        link @p link — the per-vertex half of peer-departure eviction (RFC-0009

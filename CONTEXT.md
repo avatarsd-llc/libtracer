@@ -239,7 +239,7 @@ A `:`-field that is addressed **as one unit**: `:acl`, `:subscribers` and `:chil
 _Avoid_: "an unknown trailing step is ignored" / "extra selector steps are harmless"; treating `:subscribers[]` (append) or `:subscribers[N]` (the **unsubscribe** — see below) as counter-examples: those are the field's *own* forms, one step deep, not member addressing.
 
 **`:subscribers[N]` is the UNSUBSCRIBE**:
-Writing to an indexed subscriber slot **clears** it; the payload is never inspected, so a `SUBSCRIBER`, a junk `VALUE` and the empty-`STATUS` sentinel all produce the identical clear and the identical success reply. There is **no set-a-slot surface**: subscribing is an append to `:subscribers[]`, and a "retarget" is unsubscribe-then-subscribe, which may land in a **different** slot.
+Writing to an indexed subscriber slot is **payload-discriminating** (RFC-0009 §D.1): an empty `STATUS` (`09 00 00 00`) **clears** the slot, a `SUBSCRIBER` **replaces** its edge through the same admission door as an append (so it passes the `SUBSCRIBE` gate), and anything else is `TYPE_MISMATCH` with the slot untouched. An index no slot answers to is `INVALID_PATH` — a wire-supplied index never grows the slot vector. `[*]` is a read/deferral selector only: on a write it is `INVALID_PATH`.
 _Avoid_: "write a SUBSCRIBER to `:subscribers[N]` to register/install/retarget record N" (it unsubscribes whoever is there and reports success); "the slot index is stable across a retarget".
 
 **Index mode (`SCALAR` / `ELEMENT` / `WILDCARD`)**:

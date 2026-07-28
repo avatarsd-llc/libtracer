@@ -1222,7 +1222,8 @@ void parse_subscriber_tlv(const tlv_t& sub, subscriber_t& s) {
 }  // namespace
 
 result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
-                                                   std::string_view caller) {
+                                                   std::string_view caller,
+                                                   std::optional<std::size_t> slot) {
     // The single admission step (ADR-0049): every door lands here, so the SUBSCRIBE gate
     // and the transient-local durability latch apply UNIFORMLY — which invariants fire no
     // longer depends on which door an edge entered through.
@@ -1239,11 +1240,25 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     // target re-dispatch may re-enter the graph) through the SAME dispatch_edge legs a
     // write fans out with.
     edge_latch_t latch;
-    const std::size_t slot = v->add_edge(std::move(s), &latch);
-    note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
+    std::size_t idx = 0;
+    if (slot) {
+        // RFC-0009 §D.1 replace: the SAME door, so the SUBSCRIBE gate above and the latch
+        // below apply identically to a replace and to an append (ADR-0049). An index no
+        // slot answers to is a malformed address, not a silent no-op — and refusing it is
+        // what stops a wire-supplied `:subscribers[65535]` from growing the slot vector.
+        const vertex_t::edge_replace_t r = v->replace_edge(*slot, std::move(s), &latch);
+        if (r == vertex_t::edge_replace_t::OUT_OF_RANGE)
+            return std::unexpected(status_t::INVALID_PATH);
+        // Filling a CLEARED slot adds a listener; swapping a live one leaves the count be.
+        if (r == vertex_t::edge_replace_t::FILLED_EMPTY) note_subscriber_added(v);
+        idx = *slot;
+    } else {
+        idx = v->add_edge(std::move(s), &latch);
+        note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
+    }
 
     if (latch.value) dispatch_edge(latch.edge, *latch.value);
-    return subscription_t{v, slot};
+    return subscription_t{v, idx};
 }
 
 result_t<void> graph_t::subscribe(const path_t& src, const path_t& target) {
@@ -1379,11 +1394,37 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
                 return std::unexpected(r.error());
             return {};
         }
-        if (step0.indexed) {  // clear a subscriber slot (unsubscribe) — a control write
+        // `[*]` sets indexed=true AND wildcard=true and never assigns `index` — so it
+        // arrives here with `index == 0`, OUTSIDE the validity window path.hpp declares
+        // ("valid when indexed && !append && !wildcard"). Testing `indexed` alone therefore
+        // clears SLOT 0 and answers RESULT: silent data loss reported as success (#579).
+        // The WRITE grammar has no wildcard axis, so a write bearing one is a malformed
+        // address, not a missing schema entry — `:subscribers` plainly exists.
+        if (step0.wildcard) return std::unexpected(status_t::INVALID_PATH);
+        if (step0.indexed) {  // `[N]` — clear or replace, per RFC-0009 §D.1
             if (!acl_allows(v, caller, acl_right_t::WRITE))
                 return std::unexpected(status_t::PERMISSION_DENIED);
-            if (v->clear_edge(step0.index))
-                note_subscriber_removed(v);  // RFC-0005 counter bookkeeping
+            // §D.1 is payload-DISCRIMINATING. Before this, every indexed write cleared the
+            // slot payload-blind, so a peer writing a SUBSCRIBER to slot N — plainly meaning
+            // to replace that edge — silently destroyed it and was told RESULT.
+            const auto tlv = wire::decode(value);
+            if (!tlv) return std::unexpected(status_t::TYPE_MISMATCH);
+            // The eviction sentinel: an empty STATUS (`09 00 00 00`, the smallest valid TLV).
+            if (tlv->type == type_t::STATUS && tlv->payload.empty() && tlv->children.empty()) {
+                if (v->clear_edge(step0.index))
+                    note_subscriber_removed(v);  // RFC-0005 counter bookkeeping
+                return {};
+            }
+            if (tlv->type != type_t::SUBSCRIBER) return std::unexpected(status_t::TYPE_MISMATCH);
+            subscriber_t s;
+            parse_subscriber_tlv(*tlv, s);  // the shared door parse (ADR-0049)
+            if (s.target_key.empty()) return std::unexpected(status_t::TYPE_MISMATCH);
+            s.source_view = value;  // retain the SUBSCRIBER TLV zero-copy, as the append arm does
+            if (!caller.empty()) s.ensure_remote().caller.assign(caller);
+            // Through the SAME admission door as an append, so a replace passes the
+            // SUBSCRIBE gate — §D.1's "admitted through the same admission door".
+            if (const auto r = admit_subscriber(v, std::move(s), caller, step0.index); !r)
+                return std::unexpected(r.error());
             return {};
         }
         return std::unexpected(status_t::SCHEMA_NOT_FOUND);
