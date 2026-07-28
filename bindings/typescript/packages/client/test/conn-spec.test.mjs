@@ -37,7 +37,7 @@ const CPP_DIAL_SPEC =
  *        ws-private `peer_named=1` / `max_peers=8` keys — 134 bytes.
  */
 const CPP_LISTEN_SPEC =
-  '0e4082000200040074797065020008006c697374656e6572020004006e616d650200030068756202000600636f6e6669' +
+  '0e4082000200040074797065020008006c697374656e6572020004006e616d650200030062757302000600636f6e6669' +
   '670b40510002000400726f6c65010001000102000400706f727401000200d8b8020004006b696e6402000200777302' +
   '000a00706565725f6e616d65640100010001020009006d61785f70656572730100040008000000';
 
@@ -57,7 +57,7 @@ test('encodeConnSpec matches the C++ emitter byte-for-byte: a ws DIAL client', (
 test('encodeConnSpec matches the C++ emitter byte-for-byte: a peer_named ws LISTENER', () => {
   const spec = encodeConnSpec({
     type: 'listener',
-    name: 'hub',
+    name: 'bus',
     role: 'listen',
     port: 47320,
     kind: 'ws',

@@ -12,10 +12,10 @@
  * end to end — no `provide_link`, no config file, no test seam: every link is a real ws
  * socket the built-in `ws` factory constructs from a SPEC's config.
  *
- * TOPOLOGY — a 3-node ring (the deliberate physical CYCLE) plus a peer-enumeration hub:
+ * TOPOLOGY — a 3-node ring (the deliberate physical CYCLE) plus a peer-enumeration bus:
  *
  *      a ──dial──▶ b ──dial──▶ c ──dial──▶ a        (the ring closes: a physical cycle)
- *      a ──dial──▶ hub ◀──dial── b                  (two peers on ONE peer_named listener)
+ *      a ──dial──▶ bus ◀──dial── b                  (two peers on ONE peer_named listener)
  *
  * NAMING RULE: every node names every link after the node at the FAR end. That is what
  * makes replies retrace: each forwarder prepends its own MOUNT PATH for the ARRIVAL link
@@ -55,7 +55,7 @@ const CTRL = parseEndpoints(process.env.LIBTRACER_MESH_CTRL);
 /** @brief Each node's LINK-listener endpoint, reachable from INSIDE the mesh (static IPs). */
 const PEERS = parseEndpoints(process.env.LIBTRACER_MESH_PEERS);
 
-const NODES = ['a', 'b', 'c', 'hub'];
+const NODES = ['a', 'b', 'c', 'bus'];
 const skip = !NODES.every((n) => CTRL[n] && PEERS[n]);
 
 /** @brief The `/sensor/temp` value every node seeds — pinned in `core/tests/mesh_node.cpp`. */
@@ -184,10 +184,10 @@ test('mesh testbed: form a cyclic multi-node mesh in band, then route across it'
   await dial(cli.a, 'a', 'b', 'b');
   await dial(cli.b, 'b', 'c', 'c');
   await dial(cli.c, 'c', 'a', 'a'); // closes the CYCLE: a -> b -> c -> a
-  // The hub: two peers on ONE peer_named listener (ADR-0044 Brick C).
-  await dial(cli.a, 'a', 'hub', 'hub');
-  await dial(cli.b, 'b', 'hub', 'hub');
-  t.diagnostic('mesh formed: ring a->b->c->a plus a,b->hub — every link an in-band SPEC');
+  // The bus: two peers on ONE peer_named listener (ADR-0044 Brick C).
+  await dial(cli.a, 'a', 'bus', 'bus');
+  await dial(cli.b, 'b', 'bus', 'bus');
+  t.diagnostic('mesh formed: ring a->b->c->a plus a,b->bus — every link an in-band SPEC');
 
   await t.test('each node reports the connections it was told to create', async () => {
     // Ordinary vertex enumeration (NOT peer enumeration). RFC-0014 §1: /net enumerates the
@@ -196,19 +196,21 @@ test('mesh testbed: form a cyclic multi-node mesh in band, then route across it'
     assert.deepEqual(listingNames(await cli.a.readField(['net'], ':children[]')),
                      ['ws-client', 'ws-server']);
     assert.deepEqual(listingNames(await cli.a.readField(['net', 'ws-client'], ':children[]')),
-                     ['b', 'hub']);
+                     ['b', 'bus']);
     assert.deepEqual(listingNames(await cli.a.readField(['net', 'ws-server'], ':children[]')),
                      ['c', 'ctrl']);
+    // The module lists its children in NAME order, not dial order: b dials c first, yet
+    // `bus` is listed first. (`hub` sorted after `c`, which is why this line moved.)
     assert.deepEqual(listingNames(await cli.b.readField(['net', 'ws-client'], ':children[]')),
-                     ['c', 'hub']);
+                     ['bus', 'c']);
     assert.deepEqual(listingNames(await cli.b.readField(['net', 'ws-server'], ':children[]')),
                      ['a', 'ctrl']);
     assert.deepEqual(listingNames(await cli.c.readField(['net', 'ws-client'], ':children[]')), ['a']);
     assert.deepEqual(listingNames(await cli.c.readField(['net', 'ws-server'], ':children[]')),
                      ['b', 'ctrl']);
-    // The hub only ever listens, so it has no client module at all.
-    assert.deepEqual(listingNames(await cli.hub.readField(['net'], ':children[]')), ['ws-server']);
-    assert.deepEqual(listingNames(await cli.hub.readField(['net', 'ws-server'], ':children[]')),
+    // The bus only ever listens, so it has no client module at all.
+    assert.deepEqual(listingNames(await cli.bus.readField(['net'], ':children[]')), ['ws-server']);
+    assert.deepEqual(listingNames(await cli.bus.readField(['net', 'ws-server'], ':children[]')),
                      ['ctrl', 'mesh']);
   });
 
@@ -299,12 +301,12 @@ test('mesh testbed: form a cyclic multi-node mesh in band, then route across it'
     assert.deepEqual(seen[1], le32(SEEDED_TEMP));
   });
 
-  await t.test('ADR-0044 Brick C: the hub lists its live peers from real traffic', async () => {
+  await t.test('ADR-0044 Brick C: the bus lists its live peers from real traffic', async () => {
     // /net/mesh is a peer_named ws listener CREATED IN BAND (its peer_named key is
     // ws-private config, parsed by the ws factory — ADR-0043 §5). Both a and b dialled it.
-    const listing = await cli.hub.readField(['net', 'ws-server', 'mesh'], ':children[]');
+    const listing = await cli.bus.readField(['net', 'ws-server', 'mesh'], ':children[]');
     const peers = listingNames(listing);
-    assert.equal(peers.length, 2, `the hub hears exactly its 2 dialers (got ${JSON.stringify(peers)})`);
+    assert.equal(peers.length, 2, `the bus hears exactly its 2 dialers (got ${JSON.stringify(peers)})`);
     // Peer names are the far side's <ip>:<port>; the source port is ephemeral, so assert
     // the shape and the source addresses, never a literal.
     for (const p of peers) assert.match(p, /^\d+\.\d+\.\d+\.\d+:\d+$/);
@@ -313,7 +315,7 @@ test('mesh testbed: form a cyclic multi-node mesh in band, then route across it'
 
     // NO vertex exists for a peer — the listing is synthesized on every read, so the module
     // still holds exactly its two CONNECTIONS however many peers are audible.
-    assert.deepEqual(listingNames(await cli.hub.readField(['net', 'ws-server'], ':children[]')),
+    assert.deepEqual(listingNames(await cli.bus.readField(['net', 'ws-server'], ':children[]')),
                      ['ctrl', 'mesh']);
   });
 });
@@ -350,7 +352,7 @@ test('xfail: killing a node does not drive its peers\' link state down (#407, #6
 test('xfail: close_peer cannot evict a peer from a SPEC-created listener (#407)', { todo: true }, () => {
   // The documented eviction path is link_of(name)->bus()->close_peer(peer). Before #418 it
   // was dead for every builtin: link_of() resolves only config-constructed links, and a
-  // config-constructed ws was never peer_named, so bus() was null. #418 makes the hub's
+  // config-constructed ws was never peer_named, so bus() was null. #418 makes the bus's
   // listener both config-constructed AND peer_named, so the path is now REACHABLE — but
   // there is still no in-band surface to invoke it: eviction needs the removal model #407
   // owns. Promote this to a real assertion when #407 lands.

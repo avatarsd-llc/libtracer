@@ -15,17 +15,23 @@ production firmware (an ESP32-C6 smart-agriculture node) wires device-to-device.
                                            (published as 47301..47304)
 
     a ──dial──▶ b ──dial──▶ c ──dial──▶ a          the ring closes: a physical CYCLE
-    a ──dial──▶ hub ◀──dial── b                    two peers on ONE peer_named listener
+    a ──dial──▶ bus ◀──dial── b                    two peers on ONE peer_named listener
 
-    172.28.0.11 a    172.28.0.12 b    172.28.0.13 c    172.28.0.14 hub
+    172.28.0.11 a    172.28.0.12 b    172.28.0.13 c    172.28.0.14 bus
 ```
 
 | Node | Link listener | Dials (created remotely by the driver) |
 | --- | --- | --- |
-| `a` | `c` on :47311 | `b` → b:47311, `hub` → hub:47320 |
-| `b` | `a` on :47311 | `c` → c:47311, `hub` → hub:47320 |
+| `a` | `c` on :47311 | `b` → b:47311, `bus` → bus:47320 |
+| `b` | `a` on :47311 | `c` → c:47311, `bus` → bus:47320 |
 | `c` | `b` on :47311 | `a` → a:47311 |
-| `hub` | `mesh` on :47320 (**peer_named**) | — |
+| `bus` | `mesh` on :47320 (**peer_named**) | — |
+
+The fourth node is called **`bus`** after the only thing that distinguishes it: it is the
+one node whose listener is `peer_named`, so both dialers land on a single connection it
+serves as a bus. It is emphatically *not* a hub, master or coordinator — every node here
+is an equal peer, and `bus` carries no more traffic and no more authority than `a`, `b` or
+`c`. See **Peer / peer symmetry** in [CONTEXT.md](../../CONTEXT.md).
 
 **Naming rule: every node names every link after the node at the FAR end.** That is not
 cosmetic — it is what makes replies work. Each forwarder prepends *its own* name for the
@@ -51,8 +57,8 @@ every link is a real ws socket the built-in `ws` factory constructs from a SPEC'
 docker compose -f tests/testbed/compose.yml up -d --build --wait
 
 cd bindings/typescript && npm ci && npm run build && cd packages/client
-export LIBTRACER_MESH_CTRL="a=127.0.0.1:47301,b=127.0.0.1:47302,c=127.0.0.1:47303,hub=127.0.0.1:47304"
-export LIBTRACER_MESH_PEERS="a=172.28.0.11:47311,b=172.28.0.12:47311,c=172.28.0.13:47311,hub=172.28.0.14:47320"
+export LIBTRACER_MESH_CTRL="a=127.0.0.1:47301,b=127.0.0.1:47302,c=127.0.0.1:47303,bus=127.0.0.1:47304"
+export LIBTRACER_MESH_PEERS="a=172.28.0.11:47311,b=172.28.0.12:47311,c=172.28.0.13:47311,bus=172.28.0.14:47320"
 node --test test/mesh-testbed.test.mjs
 
 docker compose -f tests/testbed/compose.yml down -v
@@ -66,7 +72,7 @@ cmake --build core/build --target mesh_node -j
 core/build/tests/mesh_node --name a   --ctrl-port 47401 --listen c:47411 --timeout-ms 300000 &
 core/build/tests/mesh_node --name b   --ctrl-port 47402 --listen a:47412 --timeout-ms 300000 &
 core/build/tests/mesh_node --name c   --ctrl-port 47403 --listen b:47413 --timeout-ms 300000 &
-core/build/tests/mesh_node --name hub --ctrl-port 47404 --peer-named-listen mesh:47420 --timeout-ms 300000 &
+core/build/tests/mesh_node --name bus --ctrl-port 47404 --peer-named-listen mesh:47420 --timeout-ms 300000 &
 # then point LIBTRACER_MESH_CTRL / _PEERS at 127.0.0.1 with those ports.
 ```
 
@@ -133,7 +139,7 @@ keystone that makes that key trustworthy rather than a guess.
   failure (`PATH_IN_USE`). Recovery needs a **new name** — a hard blocker for
   stable-identity reconnection, and the sharpest argument for #407.
 - **`close_peer` has no in-band surface.** #418 made the documented
-  `link_of(name)->bus()->close_peer(peer)` path *reachable* (the hub's listener is now both
+  `link_of(name)->bus()->close_peer(peer)` path *reachable* (the bus's listener is now both
   config-constructed and `peer_named`), but invoking it needs the removal model #407 owns.
 
 ### 3. The revisit error is fiction — #420
