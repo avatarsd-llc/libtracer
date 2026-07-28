@@ -99,6 +99,46 @@ registration with a peer-length name and one handler): **four global-heap blocks
 and the injected resource serves zero of them.** The probe is ratcheted, so the number cannot drift
 once it moves. Tracked as [#551](https://github.com/avatarsd-llc/libtracer/issues/551).
 
+**Ruling (2026-07-28, maintainer): vertex allocation is deliberately OUTSIDE this seam.** The
+carve-out stands — but it no longer rests on "init/setup", which is the wording RFC-0014 falsified.
+It rests on a measurement.
+
+Routing the registration through `ctl_` requires the allocation's owner to know which resource
+freed it, i.e. a source-carrying deleter on `std::unique_ptr<vertex_t>` (`graph.hpp:926`). Sizes
+read out of the compiler on the deployment target (`riscv32-esp-elf-g++ 15.2.0`,
+`-march=rv32imac_zicsr_zifencei -mabi=ilp32 -Os -fno-exceptions -fno-rtti -std=c++23`):
+
+| ownership | rv32 | x86-64 |
+| --- | --- | --- |
+| `std::unique_ptr<vertex_t>` today | **4 B** | 8 B |
+| with a stateful, source-carrying deleter | **8 B** | 16 B |
+| with a stateless deleter (empty-base optimised) | **4 B** | 8 B |
+
+Every vertex but the root sits in exactly one parent's `children_->sorted`, so the stateful form
+costs **+4 B per vertex** — against a benefit measured at *~4 B of allocator header per vertex*. It
+pays exactly what it saves, and it additionally changes the ownership type of both `vertex_t` and
+`vertex_ext_t` at ~7 sites (a public API break) while a release deleter has no owner to run it,
+because no `~graph_t` exists in `core/` ([#576](https://github.com/avatarsd-llc/libtracer/issues/576)).
+The stateless form is free in bytes only by resolving a **process-wide** source, which contradicts
+the per-graph injection this seam exists for.
+
+So the honest statement is not "registration is setup" — it is *"per-vertex bytes are the scarcer
+resource than seam purity, and the seam buys nothing here."* A host that needs every vertex byte
+drawn from its own resource is asking for a different ownership model, not a different call site.
+
+**Consequence to carry, so this is not re-derived from the stale wording:** the registration path
+*is* wire-driven and peer-reachable (`transport_vertex.cpp:274` reaches it from a CREATE), so the
+bound on how many vertices a peer can cause to be allocated is **not** supplied by this seam
+(`transport_vertex.cpp:277` reaches `register_vertex_key` from a resolved CREATE). That bound
+belongs to the connection/creation admission surface RFC-0014 defines, and is where it must be
+enforced.
+
+**Trap for any future attempt.** Do not "just route the root allocation first": `graph.hpp:926`
+declares `root_`, `graph.hpp:980` declares `ctl_`, and C++ initialises members in **declaration**
+order regardless of the constructor's init-list — so routing `graph.cpp:295` reads `ctl_` before it
+is constructed. Silent UB that a debug build hides, in a codebase already bitten by "`-Os` deletes a
+null check no test covers".
+
 **5. `std::pmr::memory_resource` cannot report allocation failure by value, which makes this seam
 unusable for a failable operation on the `-fno-exceptions` profile.** `allocate` is specified to
 return storage or throw; there is no null return. ESP-IDF builds with exceptions off (the IDF
