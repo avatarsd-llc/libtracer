@@ -479,6 +479,47 @@ struct subscriber_remote_t {
 };
 
 /**
+ * @brief A subscription edge's canonical PATH key — **immutable and refcount-shared**.
+ *
+ * Shared rather than owned because the dispatch snapshot must outlive a concurrent
+ * unsubscribe: @ref vertex_t::snapshot_edges copies each active slot out under the vertex
+ * lock so the graph can dispatch OUTSIDE it, and the slot may be cleared in between. A
+ * deep copy satisfied that and cost a **malloc + free per edge per delivery** — a
+ * `std::vector` has no small-buffer optimisation, so every non-null key allocated, which is
+ * the ordinary local-binding case (`/sensor/temp:subscribers[] -> /dev/ctrl0/in/temp`).
+ * Refcounting satisfies it for an atomic increment instead, exactly as
+ * @ref edge_view_t::return_route already does one field over for the same hazard.
+ *
+ * Null ⇒ no local re-dispatch target (the callback-only or remote-only edge). The key is
+ * built once at admission and never mutated, so sharing it needs no synchronization beyond
+ * the control block's own refcount.
+ */
+using target_key_t = std::shared_ptr<const std::vector<std::byte>>;
+
+/**
+ * @brief Wrap @p key as a shared @ref target_key_t, NOTHROW — null on OOM or empty input.
+ *
+ * Mirrors `vertex_t::try_make_lkv`'s probe-then-commit discipline (#477): under the MCU
+ * profile a `bad_alloc` is an `abort()`, and admission is reachable from a peer's bytes
+ * (RFC-0014 made registration wire-driven), so this soft-fails by value instead.
+ * @param key The canonical PATH key bytes; an empty span yields null (no target).
+ */
+[[nodiscard]] inline target_key_t try_make_target_key(std::vector<std::byte>&& key) noexcept {
+    if (key.empty()) return nullptr;
+    static constexpr std::size_t kCtrlSlack = 4 * sizeof(void*);  // >= both mainstream ABIs
+#if defined(__cpp_exceptions)
+    try {
+        return std::make_shared<const std::vector<std::byte>>(std::move(key));
+    } catch (...) {
+        return nullptr;  // only the control-block allocation can throw (the move is noexcept)
+    }
+#else
+    if (!tr::detail::probe_bytes(sizeof(std::vector<std::byte>) + kCtrlSlack)) return nullptr;
+    return std::make_shared<const std::vector<std::byte>>(std::move(key));
+#endif
+}
+
+/**
  * @brief One subscription edge (M3b).
  *
  * A write to the owning vertex fans out to a target vertex (@ref target_key —
@@ -488,7 +529,7 @@ struct subscriber_remote_t {
  * @ref remote half (#380 §3), so the plain in-process edge costs 80 B, not 160.
  */
 struct subscriber_t {
-    std::vector<std::byte> target_key;  /**< @brief Canonical PATH key (empty ⇒ callback-only). */
+    target_key_t target_key;            /**< @brief Canonical PATH key (null ⇒ callback-only). */
     subscriber_fn_t callback = nullptr; /**< @brief In-process sink fn; null ⇒ target-only
                                              (ADR-0053 §6 rope value). */
     void* callback_ctx = nullptr;       /**< @brief Caller-owned context passed back to
@@ -526,15 +567,21 @@ struct subscriber_t {
  *
  * What @ref vertex_t::snapshot_edges copies out under the vertex lock so the graph can
  * dispatch OUTSIDE it (callbacks / re-dispatch re-enter the graph): the `{fn, ctx}`
- * callback pair, owning copies of the target key / link / caller (the slot may be
- * cleared concurrently once dispatch runs outside the lock), and a refcount CLONE of
- * the stored return route (ADR-0041 §2 — a bump, not a byte copy; the clone keeps the
- * route alive across a concurrent unsubscribe).
+ * callback pair, owning copies of the link / caller strings (the slot may be cleared
+ * concurrently once dispatch runs outside the lock), and refcount CLONES of the target
+ * key and the stored return route (ADR-0041 §2 — a bump, not a byte copy; the clone keeps
+ * each alive across a concurrent unsubscribe).
+ *
+ * The target key is shared rather than copied because the copy was a **malloc + free per
+ * edge per delivery**: `std::vector` has no small-buffer optimisation, and this snapshot is
+ * a fresh stack object per publish, so every local binding allocated on the fan-out path.
+ * `link` and `caller` stay owning copies — they are `std::string`, so the short names that
+ * dominate ride the SSO buffer and never reach the allocator.
  */
 struct edge_view_t {
     subscriber_fn_t callback = nullptr; /**< @brief The in-process sink fn (null ⇒ none). */
     void* callback_ctx = nullptr;       /**< @brief The sink's caller-owned context. */
-    std::vector<std::byte> target_key;  /**< @brief Local re-dispatch target (owning copy). */
+    target_key_t target_key; /**< @brief Local re-dispatch target (refcount share, not a copy). */
     std::string link;      /**< @brief Remote-delivery link NAME (owning copy; empty ⇒ local). */
     view_t return_route{}; /**< @brief Consumer return route (refcount clone). */
     bool delivery_compact = false; /**< @brief RFC-0004 §E.1 label-compaction opt-in. */
@@ -1832,7 +1879,7 @@ class vertex_t {
     [[nodiscard]] bool try_edge_view_of(const subscriber_t& s, edge_view_t& out) const noexcept {
         out.callback = s.callback;
         out.callback_ctx = s.callback_ctx;
-        if (!tr::detail::try_assign(out.target_key, s.target_key)) return false;
+        out.target_key = s.target_key;  // refcount clone — nothrow, and no longer a malloc
         if (s.remote != nullptr) {
             if (!tr::detail::try_assign(out.link, s.remote->link) ||
                 !tr::detail::try_assign(out.caller, s.remote->caller))

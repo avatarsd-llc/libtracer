@@ -715,7 +715,7 @@ namespace {
 }  // namespace
 
 void graph_t::dispatch_edge_target(const edge_view_t& e, const rope_t& value) {
-    vertex_t* target = find_ptr(e.target_key);
+    vertex_t* target = find_ptr(*e.target_key);
     if (target == nullptr) return;
     // Fan-in gate (#81, ADR-0026): the delivery is an ordinary write to the target,
     // gated by the TARGET's :acl WRITE right under the edge's stored caller context.
@@ -755,7 +755,7 @@ inline void graph_t::dispatch_edge(const edge_view_t& e, const rope_t& value) {
     // Always called OUTSIDE the vertex lock (each leg may re-enter the graph or do I/O).
     if (e.callback != nullptr)
         e.callback(e.callback_ctx, value);  // the rope by const ref (sink may clone links)
-    if (!e.target_key.empty()) dispatch_edge_target(e, value);
+    if (e.target_key) dispatch_edge_target(e, value);
     if (!e.link.empty() && remote_sink_) dispatch_edge_remote(e, value);
 }
 
@@ -1205,8 +1205,8 @@ namespace {
  */
 void parse_subscriber_tlv(const tlv_t& sub, subscriber_t& s) {
     for (const tlv_t& child : sub.children) {
-        if (child.type == type_t::PATH && s.target_key.empty()) {
-            s.target_key = wire::path_key(child);
+        if (child.type == type_t::PATH && !s.target_key) {
+            s.target_key = try_make_target_key(wire::path_key(child));
         } else if (child.type == type_t::SETTINGS) {
             const std::vector<tlv_t>& q = child.children;
             for (std::size_t i = 0; i + 1 < q.size(); ++i) {
@@ -1339,7 +1339,7 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view_t source_view, v
     parse_subscriber_tlv(*sub, s);
     // A PATH child names the consumer at ITS origin — never a local re-dispatch target;
     // remote delivery rides the return route over the link (RFC-0004 §D).
-    s.target_key.clear();
+    s.target_key.reset();
     subscriber_remote_t& r = s.ensure_remote();  // a wire subscriber always carries the cold half
     r.caller = link;  // the fan-in gate context this edge's deliveries run under (#81)
     r.return_route = std::move(return_route);
@@ -1382,7 +1382,7 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
                 return std::unexpected(status_t::TYPE_MISMATCH);
             subscriber_t s;
             parse_subscriber_tlv(*sub, s);  // the shared door parse (ADR-0049)
-            if (s.target_key.empty()) return std::unexpected(status_t::TYPE_MISMATCH);
+            if (!s.target_key) return std::unexpected(status_t::TYPE_MISMATCH);
             s.source_view = value;  // retain the SUBSCRIBER TLV zero-copy (refcount clone) so a
                                     // later :subscribers[] read ropes it into the REPLY (ADR-0035).
             if (!caller.empty())    // the fan-in gate context for this edge's deliveries (#81);
@@ -1418,7 +1418,7 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
             if (tlv->type != type_t::SUBSCRIBER) return std::unexpected(status_t::TYPE_MISMATCH);
             subscriber_t s;
             parse_subscriber_tlv(*tlv, s);  // the shared door parse (ADR-0049)
-            if (s.target_key.empty()) return std::unexpected(status_t::TYPE_MISMATCH);
+            if (!s.target_key) return std::unexpected(status_t::TYPE_MISMATCH);
             s.source_view = value;  // retain the SUBSCRIBER TLV zero-copy, as the append arm does
             if (!caller.empty()) s.ensure_remote().caller.assign(caller);
             // Through the SAME admission door as an append, so a replace passes the
