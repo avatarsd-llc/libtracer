@@ -497,7 +497,7 @@ struct subscriber_remote_t {
 using target_key_t = std::shared_ptr<const std::vector<std::byte>>;
 
 /**
- * @brief Wrap @p key as a shared @ref target_key_t, NOTHROW — null on OOM or empty input.
+ * @brief Wrap @p key as a shared `target_key_t`, NOTHROW — null on OOM or empty input.
  *
  * Mirrors `vertex_t::try_make_lkv`'s probe-then-commit discipline (#477): under the MCU
  * profile a `bad_alloc` is an `abort()`, and admission is reachable from a peer's bytes
