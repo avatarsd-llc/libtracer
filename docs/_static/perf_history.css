@@ -72,6 +72,17 @@ body[data-theme="dark"] .ph-hist, :root[data-theme="dark"] .ph-hist {
 .ph-hist .ph-tab { font-family: var(--ph-mono); font-size: 10.5px; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--ph-line); background: transparent; color: var(--ph-muted); cursor: pointer; }
 .ph-hist .ph-tab.on { background: var(--ph-sweep); border-color: var(--ph-sweep); color: #fff; }
 
+/* Metric selector: which NUMBER is on the y-axis (p50 / p99 / ns-per-delivery /
+   throughput). Distinct from .ph-tabs, which chooses the VIEW (trend / sweep /
+   heatmap / 3D) of whatever metric is active — two different questions, so two
+   different controls rather than one row of eight buttons. */
+.ph-hist .ph-mets { display: flex; gap: 4px; flex-wrap: wrap; margin: 0 0 6px; }
+.ph-hist .ph-met { font-family: var(--ph-mono); font-size: 10.5px; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--ph-line); background: transparent; color: var(--ph-muted); cursor: pointer; }
+.ph-hist .ph-met.on { background: var(--ph-ink); border-color: var(--ph-ink); color: var(--ph-panel); }
+.ph-hist .ph-met:hover { color: var(--ph-ink); }
+.ph-hist .ph-metblurb { font-size: 11.5px; color: var(--ph-muted); line-height: 1.5; margin: 0 0 8px; }
+.ph-hist .ph-metblurb:empty { display: none; }
+
 .ph-hist .ph-legend { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 0 0 8px; }
 .ph-hist .ph-legend .item { display: flex; gap: 6px; align-items: center; font-size: 12px; font-weight: 600; color: var(--ph-ink); }
 .ph-hist .ph-legend .sw { width: 18px; height: 3px; border-radius: 2px; }
