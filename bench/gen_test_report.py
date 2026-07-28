@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -29,8 +30,11 @@ OUT = REPO / "docs" / "test-report.md"
 BUILD = pathlib.Path(os.environ.get("LIBTRACER_CORE_BUILD") or (REPO / "core" / "build"))
 VECTORS = REPO / "tests" / "conformance" / "vectors" / "v1"
 
-# Suite name -> (category, one-line what-it-covers). Names match core/tests/CMakeLists
-# add_test(NAME ...). A suite not listed here still shows under "other".
+# Suite name -> (category, legacy one-liner). The description half is now DEAD for any
+# suite whose source resolves: `_brief()` reads the test file's own @brief instead, so
+# these strings survive only as the fallback for an unresolvable suite. The category
+# half is a deliberate OVERRIDE of CATEGORY_RULES below, for the handful whose name
+# does not imply their layer.
 SUITES = {
     "byteorder":            ("Codec (L2/L3)", "little-endian load/store + string-view helpers"),
     "frame":                ("Codec (L2/L3)", "TLV encode/decode, CRC, trailer round-trip"),
@@ -82,8 +86,109 @@ def run_ctest_junit(build: pathlib.Path) -> list[tuple[str, str, float]]:
     return out
 
 
+# --- source resolution ------------------------------------------------------
+# ctest name -> the .cpp that defines it, and that file's own @brief.
+#
+# Both are DERIVED, never listed. A hand-maintained table of descriptions had
+# already drifted: it named 25 suites while ctest ran 64, so 43 suites reached the
+# published report with no description at all and four entries described tests that
+# no longer existed. A table that must be updated by hand to stay true will not stay
+# true; the build files and the test headers cannot go stale, because they are what
+# actually runs.
+CMAKELISTS = [REPO / "core" / "tests" / "CMakeLists.txt",
+              REPO / "core" / "examples" / "CMakeLists.txt"]
+
+
+def _test_sources() -> dict[str, pathlib.Path]:
+    """@brief ctest suite name -> its defining source file, read off the build graph.
+
+    Resolves `add_test(NAME x COMMAND tgt)` through `add_executable(tgt src...)`, so
+    the four naming exceptions need no special case: the conformance runner, the
+    NO_ATOMIC rebuild of an existing source, a suite whose target is spelled
+    differently from its test name, and every `core/examples/` binary all fall out of
+    the same two rules.
+    """
+    exe: dict[str, str] = {}
+    tests: dict[str, str] = {}
+    for cm in CMAKELISTS:
+        if not cm.exists():
+            continue
+        text = " ".join(cm.read_text().split())  # flatten: these calls wrap lines
+        for m in re.finditer(r"add_executable\(\s*(\S+)\s+([^)]*)\)", text):
+            src = next((w for w in m.group(2).split() if w.endswith(".cpp")), None)
+            if src:
+                exe[m.group(1)] = src
+        for m in re.finditer(r"add_test\(\s*NAME\s+([\w.-]+)\s+COMMAND\s+([\w.-]+)", text):
+            tests[m.group(1)] = m.group(2)
+    out: dict[str, pathlib.Path] = {}
+    for name, tgt in tests.items():
+        src = exe.get(tgt)
+        if not src:
+            continue
+        for base in (REPO / "core" / "tests", REPO / "core" / "examples"):
+            cand = (base / src).resolve()
+            if cand.exists():
+                out[name] = cand
+                break
+    return out
+
+
+def _brief(path: pathlib.Path) -> str:
+    """@brief The file header's `@brief`, flattened to one line.
+
+    This is the test's description on the published page. Taking it from the source
+    means the report says what the test says about itself — a description cannot
+    drift from the test it describes, because there is only one copy.
+    """
+    try:
+        head = path.read_text(errors="ignore")[:4000]
+    except OSError:
+        return ""
+    m = re.search(r"@brief\s+(.+?)(?:\n\s*\*\s*\n|\*/)", head, re.S)
+    if not m:
+        return ""
+    return re.sub(r"\s+", " ", re.sub(r"\n\s*\*\s?", " ", m.group(1))).strip()
+
+
+def _src_link(path: pathlib.Path | None) -> str:
+    """@brief A permalink to the file on the default branch, or an em dash."""
+    if path is None:
+        return "—"
+    rel = path.relative_to(REPO).as_posix()
+    return f"[`{rel.split('/')[-1]}`](https://github.com/avatarsd-llc/libtracer/blob/main/{rel})"
+
+
+# Ordered name rules -> category. FIRST match wins, so the specific rules come before
+# the general ones (`ws_transport` is a Transport suite; bare `ws` is the frame codec).
+#
+# Derived rather than listed for the same reason the descriptions are: the hand table
+# had grown to cover 21 of 64 suites, so 43 landed in "other" and the "By subsystem"
+# rollup — the one number a reader skims — was 67 % noise. A rule that mis-files a new
+# suite is visible and fixable here; a table that silently omits it is not.
+CATEGORY_RULES: list[tuple[tuple[str, ...], str]] = [
+    (("example_",), "Examples"),
+    (("transport_can", "transport_conformance", "can_tx_pool", "udp", "tcp",
+      "ws_transport"), "Transport"),
+    (("fwd_", "op_resolve", "mount_routing", "route_handle", "compact_cache",
+      "net_control_plane_race", "transport_vertex", "bridge"), "Net (FWD plane)"),
+    (("graph", "acl", "effective_acl", "security_acl", "app_fields", "identity",
+      "retire", "edge_eviction", "registry_teardown", "delivery_drops", "vertex",
+      "children", "folded_children", "subtree"), "Graph (L4)"),
+    (("byteorder", "frame", "ws", "can_frames", "key_view", "length_prefix_framer",
+      "tlv_", "rope_decode"), "Codec (L2/L3)"),
+    (("path", "substrate", "rope", "mem_"), "Substrate (L0/L1)"),
+]
+
+
 def category_of(name: str) -> str:
-    return SUITES.get(name, ("other", ""))[0]
+    """@brief The suite's subsystem: an explicit SUITES entry, else the first rule that
+    matches its name, else "other"."""
+    if name in SUITES:
+        return SUITES[name][0]
+    for prefixes, cat in CATEGORY_RULES:
+        if any(name == p or name.startswith(p) for p in prefixes):
+            return cat
+    return "other"
 
 
 def main() -> int:
@@ -138,8 +243,15 @@ def main() -> int:
         lines.append(f"| {cat} | {len(rows)} | {mark} {p}/{len(rows)} |")
     lines.append("")
 
-    # Per-suite detail, grouped by category.
+    # Per-suite detail, grouped by category. "covers" is the SOURCE FILE's own
+    # @brief and "source" links to it, so the report cannot describe a test as
+    # something other than what the test says it is.
+    sources = _test_sources()
     lines.append("## Suites")
+    lines.append("")
+    lines.append("Each row's description is the test file's own `@brief`, read from the source "
+                 "at generation time, and `source` links to that file. Neither is transcribed "
+                 "into this generator, so neither can drift from the test.")
     lines.append("")
     for cat in CATEGORY_ORDER:
         rows = by_cat.get(cat)
@@ -147,12 +259,23 @@ def main() -> int:
             continue
         lines.append(f"### {cat}")
         lines.append("")
-        lines.append("| suite | result | time | covers |")
-        lines.append("| --- | --- | --- | --- |")
+        lines.append("| suite | result | time | covers | source |")
+        lines.append("| --- | --- | --- | --- | --- |")
         for name, status, t in sorted(rows):
             mark = "✅ pass" if status == "pass" else "❌ **FAIL**"
-            covers = SUITES.get(name, ("", "—"))[1]
-            lines.append(f"| `{name}` | {mark} | {t:.2f}s | {covers} |")
+            src = sources.get(name)
+            covers = (_brief(src) if src else "") or SUITES.get(name, ("", "—"))[1]
+            covers = covers.replace("|", "\\|")
+            lines.append(f"| `{name}` | {mark} | {t:.2f}s | {covers} | {_src_link(src)} |")
+        lines.append("")
+    missing = sorted(n for n, _, _ in results if n not in sources)
+    if missing:
+        lines.append("```{warning}")
+        lines.append("No source could be resolved from the CMake build graph for: "
+                     + ", ".join(f"`{m}`" for m in missing)
+                     + ". Those rows fall back to a hand-written description, which is exactly "
+                       "the drift this resolution exists to remove.")
+        lines.append("```")
         lines.append("")
 
     # How it's verified — the config matrix (sanitizers are separate CI jobs; this

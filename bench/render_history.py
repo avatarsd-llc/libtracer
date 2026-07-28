@@ -506,6 +506,28 @@ def _first_line(msg: str, limit: int = 72) -> str:
     return ln[: limit - 1] + "…" if len(ln) > limit else ln
 
 
+def _family_source(sample: str | None) -> str | None:
+    """@brief The bench source a family's series come from, as a repo-relative path.
+
+    Resolved through INSTRUMENT_SOURCES rather than a second per-family field. That
+    table already maps series-name patterns to the files that produce them — it is what
+    puts the "instrument changed" markers on these charts — so a separate `src=` per
+    family would be a duplicate free to disagree with it. One list, two uses.
+
+    Takes a REAL matched series name, never the family's own pattern: two families begin
+    with a regex construct rather than a literal (`^(pool|heap)alloc-mt`, and an
+    `eptype-` pattern carrying a negative lookbehind), so pattern-probing silently
+    resolved 20 of 22 and would have quietly dropped the link on exactly the two
+    families whose names are hardest to guess from the chart.
+    """
+    if not sample:
+        return None
+    for pat, srcs in INSTRUMENT_SOURCES:
+        if re.match(pat, sample):
+            return srcs[0]
+    return None
+
+
 def build(data: dict) -> dict:
     """@brief Assemble the chart payload perf_history.js draws.
 
@@ -536,6 +558,7 @@ def build(data: dict) -> dict:
 
     colors: dict[str, int] = {}
     charts: list[dict] = []
+    seen: list[str] = []  # one real series name per family, for source resolution
 
     def collect(fam: dict, names: dict, pat: str | None) -> list[dict]:
         """@brief The family's series within one metric's suite, or [] if it has none there.
@@ -548,12 +571,14 @@ def build(data: dict) -> dict:
         if "names" in fam:  # explicit fixed list (heap/memory probes, not point-swept)
             for i, (name, label) in enumerate(fam["names"]):
                 if name in names:
+                    seen.append(name)
                     picked.append((i, label, None, names[name]))
         else:
             for name in names:
                 m = re.match(pat, name)
                 if not m:
                     continue
+                seen.append(name)
                 key = fam["key"](m)
                 pv = key if isinstance(key, float) else None
                 picked.append((key, fam["label"](m), pv, names[name]))
@@ -573,6 +598,7 @@ def build(data: dict) -> dict:
 
     for fam in FAMILIES:
         variants: list[dict] = []
+        del seen[:]
         if "names" in fam:
             # A fixed-name probe family names whole series itself, so there is no metric
             # suffix to vary — it carries exactly the one it declares.
@@ -591,8 +617,10 @@ def build(data: dict) -> dict:
         if not variants:
             continue
         first = variants[0]
+        src = _family_source(seen[0] if seen else None)
         chart = {"id": fam["id"], "section": fam.get("section", "other"),
                  "title": fam["title"], "cond": fam["cond"], "log": fam["log"],
+                 "src": src,
                  "metrics": variants,
                  # The active-metric fields are mirrored at the top level so a renderer
                  # that never switches metric reads exactly what it read before.

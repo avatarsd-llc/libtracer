@@ -76,6 +76,9 @@ body[data-theme="dark"] .ph-hist, :root[data-theme="dark"] .ph-hist {
    throughput). Distinct from .ph-tabs, which chooses the VIEW (trend / sweep /
    heatmap / 3D) of whatever metric is active — two different questions, so two
    different controls rather than one row of eight buttons. */
+.ph-hist .ph-card .cond .ph-src { color: var(--ph-sweep); text-decoration: none; border-bottom: 1px dotted currentColor; }
+.ph-hist .ph-card .cond .ph-src:hover { border-bottom-style: solid; }
+
 .ph-hist .ph-mets { display: flex; gap: 4px; flex-wrap: wrap; margin: 0 0 6px; }
 .ph-hist .ph-met { font-family: var(--ph-mono); font-size: 10.5px; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--ph-line); background: transparent; color: var(--ph-muted); cursor: pointer; }
 .ph-hist .ph-met.on { background: var(--ph-ink); border-color: var(--ph-ink); color: var(--ph-panel); }

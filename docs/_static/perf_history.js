@@ -436,8 +436,12 @@
     var mrow = '<div class="ph-mets">' + mets.map(function (m, i) {
       return '<button class="ph-met' + (i === 0 ? " on" : "") + '" data-m="' + i + '">' + m.name + "</button>";
     }).join("") + "</div>";
+    // Every card names the code that produced it. A chart whose harness you cannot
+    // find is a number you cannot check.
+    var src = c.src ? '<a class="ph-src" href="https://github.com/avatarsd-llc/libtracer/blob/main/'
+      + c.src + '">' + c.src.replace(/^bench\//, "") + "</a>" : "";
     card.innerHTML = "<h4>" + c.title + "</h4>" + '<div class="ph-tabs"></div>'
-      + '<p class="cond">' + c.cond + "</p>" + mrow
+      + '<p class="cond">' + c.cond + (src ? ' \u00b7 measured by ' + src : "") + "</p>" + mrow
       + '<p class="ph-metblurb"></p>'
       + '<div class="ph-legend">' + legend + "</div>"
       + '<div class="ph-plot"></div><div class="ph-tip" style="display:none"></div>'
