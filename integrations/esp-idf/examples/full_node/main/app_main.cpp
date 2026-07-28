@@ -218,9 +218,12 @@ std::uint32_t reply_value_u32(const tr::wire::tlv_t& f) {
  * the router's `rx` block source, and this example does not inject one — so the
  * arena, and the graph's own three seams (this example default-constructs the
  * graph), still come from the global heap. Bounding them needs a RECYCLING
- * block_source_t, which the library does not ship yet: `bump_source_t` is bounded
- * but never reclaims, so wiring one here would decode a handful of frames and then
- * refuse every frame after. See docs/reference/09 §the second L0 seam.
+ * block_source_t, which `tr::mem::pool_source_t` now is (#597 / ADR-0067) —
+ * `bump_source_t` is bounded but never reclaims, so wiring one here would decode a
+ * handful of frames and then refuse every frame after. Wiring the pool in is a
+ * deliberate follow-on rather than an oversight: it wants a per-child source on the
+ * router (ADR-0067 §3) and a class span sized from what this node actually draws.
+ * See docs/reference/09 §the second L0 seam and docs/interop/esp32-production-node.md.
  */
 constexpr std::size_t kSlabBytes = 24 * 1024;
 constexpr std::size_t kRxRegion = 12 * 1024; /**< @brief pool_t: RX datagram segments. */

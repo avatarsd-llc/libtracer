@@ -51,11 +51,36 @@ std::pmr::synchronized_pool_resource shared{&arena};
 Do **not** reach for `tr::mem::bump_source_t` as `blocks` here. It is scope-lifetime
 only: a bump block is never reclaimed, so a long-lived bump seam fills monotonically and
 then refuses every frame — measured, an 8 KiB one decoded 6 frames and rejected the next
-194. A long-lived bounded seam needs a **recycling** block source, and libtracer does not
-ship one yet. Until it does, this node's honest options are to supply its own free-list
-`block_source_t` over the slab, or to leave `ctl`/`rx` on `heap_source()` (recycling, but
-unbounded) and accept that those allocations are not slab-bound.
+194. Use `tr::mem::pool_source_t`, which recycles.
 :::
+
+`pool_source_t` takes the slab **and** a caller-owned span of `size_class_t` slots, so both
+bounds are yours rather than the library's:
+
+```cpp
+// One region of the slab, plus a class table sized from what this node actually draws.
+static tr::mem::size_class_t ctl_classes[8];
+static tr::mem::pool_source_t<> blocks{ctl_region, ctl_classes};
+```
+
+:::{warning}
+**Give each transport child its own source; do not share one across receive threads.** A
+shared free-list pool was measured at roughly a fifteenth of its single-thread rate on a
+12-core host while the platform heap scaled, and a lock-free CAS does not fix it
+(ADR-0060 erratum 1, ADR-0067 §3). Pass it per child instead — the bound then also becomes
+per-peer, so one noisy link cannot starve another's decode:
+
+```cpp
+router.add_child("up", up_link, /*rx=*/&up_blocks);
+```
+
+A source shared at **wiring** frequency — a graph's `ctl` — is fine with a locking `Sync`
+policy (`tr::mem::sync_mutex_t`, or a target's own interrupt-disable section).
+:::
+
+After it has run, `classes_used()` says how many slots the node really needed and
+`overflowed()` must read zero — a non-zero count means the class span is too small and
+blocks are being lost to the slab.
 
 Rules that follow from it:
 

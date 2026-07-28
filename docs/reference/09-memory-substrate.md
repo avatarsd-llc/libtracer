@@ -277,7 +277,20 @@ Two companions ship with it, because the migrated call sites all need the same p
 
 `wire::decode_into` — the terminus arena decoder — is on the **RX path, behind no ACL**, and a peer chooses both the nesting depth and the node count of the frame it sends. All three of its draws (the node array, the walk's open-node stack, and the walk stack's spill past its inline slots) come from a `block_source_t`, so exhaustion is `TLV_NESTING_TOO_DEEP` — the status RFC-0006 already defines for "exceeds this receiver's decode resources" — and never an allocation failure. A **scope-lifetime** consumer composes this as a `bump_source_t` over a stack buffer with `null_source()` upstream — construct it, decode, drop it. That is what the branch-write decode does.
 
-A **long-lived** seam (a router's `rx`, a graph's `ctl`) must not be a bump source: bump blocks are never reclaimed, so it fills monotonically and then refuses everything. Measured: an 8 KiB bump source wired as a router's `rx` decoded 6 frames and rejected the next 194. A long-lived bounded seam needs a **recycling** source, and libtracer does not ship one yet — `heap_source()` recycles but is unbounded, `bump_source_t` is bounded but does not recycle. Until that gap is closed, a bounded node either supplies its own recycling `block_source_t` (a free-list over its slab) or leaves the long-lived seams on the heap and accepts it.
+A **long-lived** seam (a router's `rx`, a graph's `ctl`) must not be a bump source: bump blocks are never reclaimed, so it fills monotonically and then refuses everything. Measured: an 8 KiB bump source wired as a router's `rx` decoded 6 frames and rejected the next 194. A long-lived bounded seam needs a **recycling** source, which is `pool_source_t` — segregated exact-size free lists over a caller slab, with **no per-block header** (the seam's sized `release` makes one unnecessary). Both bounds are injected: the caller supplies the slab *and* the span of `size_class_t` slots, so neither the byte ceiling nor the class count is a constant in the library.
+
+Its one limitation is worth knowing before you size a slab: **classes do not share.** A freed 64 B block cannot serve a 128 B request. On the measured demand that costs about 11 % over the theoretical peak-live floor — cheaper than a coalescing allocator, which pays more in fragmentation under this workload's geometric growth than it recovers by merging. `classes_used()` and `overflowed()` report what to size the class span against.
+
+:::{warning}
+**Own one per receiver; do not share one across receive threads.** A shared free-list pool
+was measured collapsing to roughly a fifteenth of its own single-thread rate on a 12-core
+host while the platform heap *scaled* — a cacheline storm, and a lock-free CAS on the list
+head does not fix it (see ADR-0060 erratum 1 and ADR-0067 §3). `fwd_router_t::add_child`
+therefore takes an optional per-child source; each transport has its own receive thread, so
+a source parked on the child is touched by exactly one. That also makes the bound per-peer:
+one noisy link cannot starve another's decode. A source shared at **wiring** frequency (a
+graph's `ctl`) is fine with a locking `Sync` policy.
+:::
 
 ### Where the forward hop draws from
 
