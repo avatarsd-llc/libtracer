@@ -7,6 +7,25 @@
   [docs/reference/02-graph-model.md](../reference/02-graph-model.md),
   [docs/reference/08-views-and-ownership.md](../reference/08-views-and-ownership.md)
 
+## Erratum (2026-07-28) — "satellite" is not libtracer vocabulary
+
+The Context section below calls the origin firmware's STM32 an "STM32 satellite". That word is
+retained here as the historical text of an accepted ADR, but it is **wrong for this project** and
+must not be copied forward.
+
+libtracer's model is **peer symmetry**: every device that speaks the wire format is a peer, and
+there is no main node, hub, master, or satellite. A peer may be an MCU, a host process, or a
+container, and the transport it peers over (CAN, WebSocket, TCP, UDP) does not change its
+standing. Nothing in the spec or the reference implementation distinguishes a "central" peer from
+an "outlying" one — see [CONTEXT.md](../../CONTEXT.md) for the canonical vocabulary.
+
+What the original sentence was reaching for is a **co-processor** relationship, which is a
+property of that *product's* board layout, not of the protocol: the STM32 is a real-time I/O
+front-end for an ESP32 on the same physical unit. Even there the two are libtracer peers on the
+CAN domain bus — the asymmetry is in what each one is wired to, never in the protocol.
+
+This erratum changes no normative surface; it corrects vocabulary only.
+
 ## Context
 
 libtracer today is **specification-rich and implementation-poor**. The six-layer model
