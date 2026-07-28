@@ -188,6 +188,45 @@ std::vector<std::vector<std::byte>> forward_as_rope_with(std::span<const std::by
     return std::move(up.sent());
 }
 
+/**
+ * @brief A source that forwards to the heap and counts what it served.
+ *
+ * Attribution, not budgeting: the point of the per-child topology (ADR-0067 §3) is WHICH
+ * source a frame draws from, so the test needs to tell two live sources apart.
+ */
+class counting_source_t final : public tr::mem::block_source_t {
+   public:
+    explicit counting_source_t(const char* n) noexcept : tr::mem::block_source_t(n) {}
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        ++served;
+        return ::operator new(bytes, std::align_val_t{align}, std::nothrow);
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        ::operator delete(p, bytes, std::align_val_t{align});
+    }
+    int served = 0; /**< @brief Allocations served since construction. */
+};
+
+/**
+ * @brief Route a rope in over a child that carries its OWN failable source (ADR-0067 §3).
+ *
+ * The router keeps a different source as its default, so the two counters answer the only
+ * question that matters: did the inbound child's frame draw from the child's slab, or from
+ * the shared one the ADR forbids on this path?
+ */
+std::vector<std::vector<std::byte>> forward_as_rope_per_child(
+    std::span<const std::byte> frame, std::span<const std::size_t> cuts,
+    tr::mem::block_source_t& child_rx, tr::mem::block_source_t& router_default) {
+    graph_t g;
+    fwd_router_t router(g, std::pmr::get_default_resource(), &router_default);
+    fake_rope_link_t cli;
+    fake_link_t up;
+    router.add_child("cli", cli, &child_rx);  // inbound link brings its own slab
+    router.add_child("up", up);               // forward child falls back to the default
+    cli.inject(rope_split(frame, cuts));
+    return std::move(up.sent());
+}
+
 /** @brief The oracle: route the identical `frame` contiguously (the span-cursor path). */
 std::vector<std::vector<std::byte>> forward_contiguous(std::span<const std::byte> frame) {
     graph_t g;
@@ -417,6 +456,40 @@ int main() {
         // And the default seam is unchanged — this is the path every existing check above ran.
         check(forward_as_rope_with(frame, every_byte, tr::mem::heap_source()) == oracle,
               "the default heap seam is byte-identical (no behaviour change when it fits)");
+    }
+
+    // ── ADR-0067 §3: the inbound child's OWN source is the one that serves ──────────────
+    //
+    // Not a micro-optimization: a pool_source_t shared across receive threads was measured
+    // at ~1/15 of its single-thread rate on 12 cores (ADR-0060 erratum 1), so "which source"
+    // is a correctness-of-topology question. Without a test, a refactor that reverts to the
+    // router's shared `rx_` would keep every other assertion in this file green.
+    {
+        std::printf("\nper-child failable source (ADR-0067 3):\n");
+        std::vector<std::size_t> every_byte;
+        for (std::size_t i = 1; i < frame.size(); ++i) every_byte.push_back(i);
+
+        counting_source_t child{"child"};
+        counting_source_t shared{"router-default"};
+        const auto out = forward_as_rope_per_child(frame, every_byte, child, shared);
+
+        check(out == oracle, "a per-child source forwards byte-identically to the oracle");
+        check(child.served > 0, "the inbound child's OWN source served the rope iov");
+        check(shared.served == 0,
+              "and the router's shared default was never touched on that frame");
+
+        // The fallback still works, so this is additive: a child given no source of its own
+        // draws from the router's, which is what every existing call site relies on.
+        counting_source_t only_default{"router-default"};
+        graph_t g2;
+        fwd_router_t r2(g2, std::pmr::get_default_resource(), &only_default);
+        fake_rope_link_t cli2;
+        fake_link_t up2;
+        r2.add_child("cli", cli2);
+        r2.add_child("up", up2);
+        cli2.inject(rope_split(frame, every_byte));
+        check(std::move(up2.sent()) == oracle, "a child with no source of its own still routes");
+        check(only_default.served > 0, "drawing from the router's default, as before");
     }
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,

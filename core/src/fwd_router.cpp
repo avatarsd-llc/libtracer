@@ -228,7 +228,7 @@ void emit_compact(transport_t& down, std::uint16_t label, std::span<const std::b
 
 }  // namespace
 
-void fwd_router_t::add_child(std::string name, transport_t& link) {
+void fwd_router_t::add_child(std::string name, transport_t& link, mem::block_source_t* rx) {
     // ADR-0063 §3: serialize control-plane writers. The registry's scan-then-append and the
     // child_rx_ deque's emplace_back are both non-atomic, and two creates arriving on two
     // different transports' receive threads are genuinely concurrent. Readers take nothing.
@@ -275,7 +275,8 @@ void fwd_router_t::add_child(std::string name, transport_t& link) {
         // segment, which is what keeps two buses' same-named peers distinct on the way back.
         // Departure seam (RFC-0009 §D extended): a bus peer that hangs up carries its
         // own name, and label state is keyed by that name, so link_down still takes the peer.
-        child_rx_ctx_t& bctx = child_rx_.emplace_back(this, name, registry_.mount_run_for(name));
+        child_rx_ctx_t& bctx =
+            child_rx_.emplace_back(this, name, registry_.mount_run_for(name), rx);
         bus->set_peer_down_notifier(
             [](void* c, std::string_view peer) {
                 static_cast<child_rx_ctx_t*>(c)->self->link_down(peer);
@@ -300,7 +301,7 @@ void fwd_router_t::add_child(std::string name, transport_t& link) {
     }
     // Point-to-point: the inbound NAME is fixed per child, carried by a stable
     // per-child ctx (child_rx_ holds the address for the transport's lifetime).
-    child_rx_ctx_t& ctx = child_rx_.emplace_back(this, name, registry_.mount_run_for(name));
+    child_rx_ctx_t& ctx = child_rx_.emplace_back(this, name, registry_.mount_run_for(name), rx);
     // Departure seam (RFC-0009 §D extended): the same stable ctx carries the child's
     // NAME to link_down when the transport reports its one connection dead.
     link.set_down_notifier(
@@ -514,7 +515,7 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
             }
             return;
         }
-        resolve_terminus(inbound_name, frame, frame_view);
+        resolve_terminus(inbound_name, frame, frame_view, inbound_ctx);
         return;
     }
 
@@ -641,7 +642,7 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
         // Exhaustion drops the frame. That is the correct answer for a forward hop: FWD is
         // not delivery-guaranteed, the sender retries, and emitting a partial iov would put a
         // TRUNCATED frame on the wire — worse than none.
-        mem::block_array_t<std::span<const std::byte>> iov{*rx_};
+        mem::block_array_t<std::span<const std::byte>> iov{rx_for(inbound_ctx)};
         bool ok = true;
         rebuilt->gather(cur_src, [&](std::span<const std::byte> s) {
             if (ok && !iov.push_back(s)) ok = false;
@@ -652,7 +653,7 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
 }
 
 void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<const std::byte> frame,
-                                    const view_t* frame_view) {
+                                    const view_t* frame_view, const child_rx_ctx_t* inbound_ctx) {
     // Local request terminus (ADR-0041 §5): arena-decode straight from the
     // node's injected resource (ADR-0039 §1) — the library keeps no buffer of
     // its own; a bounded host injects a pool resource over its slab and the
@@ -662,7 +663,7 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
     // src). The inbound link makes a `:subscribers[]` WRITE bind a REMOTE
     // subscriber whose deliveries route back over it (#136); the latch
     // (transient-local) fires inside resolve.
-    const auto arena = wire::decode_into(frame, *rx_);
+    const auto arena = wire::decode_into(frame, rx_for(inbound_ctx));
     if (!arena) return;  // malformed frame ⇒ drop
     auto reply = resolver_.resolve(*arena, inbound_name, frame_view);
     if (!reply) return;                    // structurally non-request ⇒ drop

@@ -177,9 +177,7 @@ class null_source_t final : public block_source_t {
  *          Construct it per operation (as the branch-write decode does), or @ref reset it
  *          between operations. It is NOT a long-lived seam: an 8 KiB bump source wired as
  *          a router's `rx` decoded 6 frames and rejected the next 194 — measured. A
- *          long-lived bounded seam needs a RECYCLING source, which this library does not
- *          ship yet; until it does, a bounded node either writes one or leaves that seam
- *          on @ref heap_source.
+ *          long-lived bounded seam wants @ref pool_source_t, which recycles.
  * @note Single-threaded by contract — a bump cursor is not synchronized. Its intended use
  *       is a function-scoped buffer on the calling thread's stack.
  */
@@ -232,6 +230,199 @@ class bump_source_t final : public block_source_t {
     std::span<std::byte> buf_;
     block_source_t* upstream_;
     std::size_t used_ = 0;
+};
+
+/**
+ * @brief The no-op synchronization policy — the default, and the one the hot seam wants.
+ *
+ * A @ref pool_source_t owned by exactly one thread needs no synchronization at all, and
+ * that is the intended shape for a per-receiver source: ownership removes the race
+ * instead of guarding it. See @ref pool_source_t's threading note for why this matters
+ * more than the choice of free-list algorithm.
+ *
+ * A policy is anything with `lock()`/`unlock()`; a target supplies its own where it needs
+ * one (an interrupt-disable critical section on single-core FreeRTOS,
+ * `tr::mem::sync_mutex_t` from `mem_source_sync.hpp` on a host). This header stays
+ * freestanding-clean, so it pulls in no threading facility of its own.
+ */
+struct sync_none_t {
+    /** @brief No-op — this policy exists to compile to nothing. */
+    static void lock() noexcept {}
+    /** @brief No-op. */
+    static void unlock() noexcept {}
+};
+
+/**
+ * @brief One recycling free-list, keyed by the exact `(bytes, align)` pair it serves.
+ *
+ * Caller-supplied storage: a @ref pool_source_t is handed a span of these, so the number
+ * of classes is a deployment property rather than a constant in this header (ADR-0065's
+ * injected-bounds rule). Sizing it is measurable — see @ref pool_source_t::classes_used.
+ */
+struct size_class_t {
+    std::size_t bytes = 0; /**< @brief Normalized payload size; 0 marks an unused slot. */
+    std::size_t align = 0; /**< @brief Normalized alignment this class's blocks satisfy. */
+    void* head = nullptr;  /**< @brief Intrusive free-list head; the link lives in the block. */
+};
+
+/**
+ * @brief A BOUNDED, RECYCLING source: segregated exact-size free lists over a caller slab.
+ *
+ * The long-lived counterpart to @ref bump_source_t, and the source a node with a RAM
+ * ceiling injects. Exhaustion is `nullptr` — never the platform heap, never an abort.
+ *
+ * ### Why exact-size classes, measured
+ *
+ * The demand at this seam is nearly degenerate. Recording every `try_alloc`/`release`
+ * across the host suite (70,937 events) found **12 distinct sizes, three of which cover
+ * 99.8 % of all allocations** — they are the arena's geometrically growing arrays. So
+ * exact classes cost **zero internal fragmentation**, and a first-fit-with-coalescing
+ * allocator's header buys nothing back. Replaying that trace against both policies:
+ *
+ * | policy | slab to serve the trace | vs peak-live floor |
+ * | --- | ---: | ---: |
+ * | this one | 26,176 B | +11.1 % |
+ * | first-fit + coalescing | 27,448 B | +16.5 % |
+ *
+ * The gap is **1,088 B of external fragmentation and only 184 B of header** — splitting a
+ * remainder under geometric growth rarely produces the size of the next request. Note what
+ * that says about the usual argument for a header-free pool: here it is worth 0.7 % of the
+ * difference, so it is not the reason to choose this shape.
+ *
+ * Code size of what actually ships, `riscv32-esp-elf-g++ -Os -fno-exceptions -fno-rtti`:
+ * **322 B** of text (`try_alloc` 120, `release` 142, `find` 46, teardown 14) plus a 24 B
+ * vtable. The two 256 B / 380 B figures quoted while choosing between the policies were
+ * feature-matched *prototypes* — neither carried the alignment key, the overflow counter
+ * or the foreign-pointer check this one does — so they compare the shapes to each other
+ * and are not the shipped cost of either.
+ *
+ * ### Threading — read this before sharing one
+ *
+ * @warning A shared pool is the WRONG shape for a hot multi-core path, and this is
+ *          measured, not feared. ADR-0060 erratum 1 recorded a shared free-list pool
+ *          collapsing to roughly **a fifteenth of its own single-thread rate** on a
+ *          12-core host (8.3 M → 1.36 M ops/s; p50 60 ns → 3587 ns) while the platform
+ *          heap *scaled* — a cacheline storm, not serialization. A lock-free CAS on the
+ *          list head does not fix it: it replaces one contended word with the same word.
+ *          The shape that works is per-thread free lists, and the cheapest way to get
+ *          them is to give each receiver its **own** source rather than to guard a shared
+ *          one. Reach for a locking @p Sync only where the seam is wiring-frequency (a
+ *          graph's control source), never per-frame.
+ *
+ * @tparam Sync Synchronization policy (`lock()`/`unlock()`); @ref sync_none_t by default,
+ *              which compiles to nothing.
+ */
+template <class Sync = sync_none_t>
+class pool_source_t final : public block_source_t {
+   public:
+    /**
+     * @brief Serve allocations from @p slab, recycling through @p classes.
+     *
+     * @param slab    Caller-owned storage; must outlive every block carved from it.
+     * @param classes Caller-owned free-list slots. Running out is safe but lossy — see
+     *                @ref overflowed.
+     */
+    pool_source_t(std::span<std::byte> slab, std::span<size_class_t> classes) noexcept
+        : block_source_t("pool"), buf_(slab), cls_(classes) {}
+
+    /** @brief Pop a recycled block of this exact shape, else carve a fresh one; `nullptr` when
+     * full. */
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        normalize(bytes, align);
+        const guard_t g{sync_};
+        if (size_class_t* c = find(bytes, align); c != nullptr && c->head != nullptr) {
+            void* const p = c->head;
+            std::memcpy(&c->head, p, sizeof(void*));  // pop the intrusive link
+            return p;
+        }
+        // Padding to the next `align` boundary. Mask, not modulo: `align` is a power of two
+        // by contract, and the division showed up as ~20 % of a terminus decode.
+        const std::uintptr_t cur = reinterpret_cast<std::uintptr_t>(buf_.data()) + used_;
+        const auto pad = static_cast<std::size_t>((~cur + 1U) & (align - 1U));
+        if (pad > buf_.size() - used_ || bytes > buf_.size() - used_ - pad) return nullptr;
+        used_ += pad + bytes;
+        return buf_.data() + (used_ - bytes);
+    }
+
+    /**
+     * @brief Return a block to its class's free list.
+     *
+     * @p bytes and @p align MUST match the originating @ref try_alloc, per the seam's sized
+     * contract — that is what lets a block carry no header. A pointer from outside the slab
+     * is ignored rather than trusted, mirroring `bump_source_t` — two compares are cheaper
+     * than the corruption a foreign pointer would cause.
+     */
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        auto* const b = static_cast<std::byte*>(p);
+        if (b < buf_.data() || b >= buf_.data() + buf_.size()) return;
+        normalize(bytes, align);
+        const guard_t g{sync_};
+        size_class_t* c = find(bytes, align);
+        if (c == nullptr) c = claim(bytes, align);
+        if (c == nullptr) {
+            // The class table is full. The block stays carved — bounded and safe, never
+            // corrupt — and the loss is counted so a deployment can size the span.
+            ++overflow_;
+            return;
+        }
+        std::memcpy(p, &c->head, sizeof(void*));  // push the intrusive link
+        c->head = p;
+    }
+
+    /** @brief Bytes carved from the slab so far, recycled blocks included (diagnostics). */
+    [[nodiscard]] std::size_t used() const noexcept { return used_; }
+
+    /** @brief Class slots in use — the number to size the injected span against. */
+    [[nodiscard]] std::size_t classes_used() const noexcept { return n_; }
+
+    /** @brief Blocks lost because the class table was full; non-zero means the span is too small.
+     */
+    [[nodiscard]] std::size_t overflowed() const noexcept { return overflow_; }
+
+   private:
+    /** @brief RAII lock over the policy; empty and free when @p Sync is @ref sync_none_t. */
+    struct guard_t {
+        explicit guard_t(Sync& s) noexcept : s_(s) { s_.lock(); }
+        ~guard_t() { s_.unlock(); }
+        guard_t(const guard_t&) = delete;
+        guard_t& operator=(const guard_t&) = delete;
+        Sync& s_;
+    };
+
+    /**
+     * @brief Widen a request so a freed block can host the intrusive link.
+     *
+     * Applied identically on both sides, so the `(bytes, align)` a `release` computes is
+     * the one its `try_alloc` computed — the whole header-free scheme rests on that.
+     * Alignment is part of the key rather than folded away: a block carved for `align=4`
+     * cannot be handed back out for an `align=8` request.
+     */
+    static void normalize(std::size_t& bytes, std::size_t& align) noexcept {
+        if (bytes < sizeof(void*)) bytes = sizeof(void*);
+        if (align < alignof(void*)) align = alignof(void*);
+    }
+
+    /** @brief The slot serving this exact shape, or `nullptr`. */
+    [[nodiscard]] size_class_t* find(std::size_t bytes, std::size_t align) noexcept {
+        for (std::size_t i = 0; i < n_; ++i) {
+            if (cls_[i].bytes == bytes && cls_[i].align == align) return &cls_[i];
+        }
+        return nullptr;
+    }
+
+    /** @brief Take the next free slot for this shape, or `nullptr` when the span is full. */
+    [[nodiscard]] size_class_t* claim(std::size_t bytes, std::size_t align) noexcept {
+        if (n_ == cls_.size()) return nullptr;
+        cls_[n_] = size_class_t{bytes, align, nullptr};
+        return &cls_[n_++];
+    }
+
+    std::span<std::byte> buf_;
+    std::span<size_class_t> cls_;
+    std::size_t used_ = 0;
+    std::size_t n_ = 0;
+    std::size_t overflow_ = 0;
+    [[no_unique_address]] Sync sync_{};
 };
 
 /**
