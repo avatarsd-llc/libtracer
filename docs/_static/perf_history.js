@@ -105,7 +105,7 @@
   // ---------------------------------------------------------------- trend --
   function renderTrend(c, suite) {
     var N = suite.shas.length;
-    var W = 560, H = 330, m = { l: 64, r: 14, t: 26, b: 46 };
+    var W = 900, H = 330, m = { l: 64, r: 14, t: 26, b: 46 };
     var pw = W - m.l - m.r, ph = H - m.t - m.b;
     function X(i) { return m.l + (N <= 1 ? pw / 2 : (i / (N - 1)) * pw); }
     var all = [];
@@ -165,7 +165,7 @@
   // value vs parameter, one polyline per recorded commit: older commits fade,
   // the newest is bold, release-tagged commits are highlighted + labeled.
   function renderSweep(c, suite, idxs) {
-    var W = 560, H = 330, m = { l: 64, r: 14, t: 26, b: 44 };
+    var W = 900, H = 330, m = { l: 64, r: 14, t: 26, b: 44 };
     var pw = W - m.l - m.r, ph = H - m.t - m.b;
     var pvs = c.series.map(function (s) { return s.pv; });
     var pmin = Math.min.apply(null, pvs), pmax = Math.max.apply(null, pvs);
@@ -220,7 +220,7 @@
   // -------------------------------------------------------------- heatmap --
   function renderHeat(c, suite, idxs) {
     var P = c.series.length, N = idxs.length;
-    var W = 560, H = 90 + P * 26 + 60, m = { l: 96, r: 60, t: 26, b: 54 };
+    var W = 900, H = 90 + P * 26 + 60, m = { l: 96, r: 60, t: 26, b: 54 };
     var pw = W - m.l - m.r, ph = P * 26;
     var cw = pw / N;
     var nm = normalizer(c);
@@ -263,7 +263,7 @@
   // isometric surface: u = commit (right/down), w = parameter (right/up),
   // height = normalized value. Quads painted back-to-front, wireframe on top.
   function render3D(c, suite, idxs) {
-    var W = 560, H = 380;
+    var W = 900, H = 380;
     var N = idxs.length, P = c.series.length;
     var ax = 300, ay = 96, bx = 150, by = -104, zh = 150;
     var ox = 56, oy = H - 88;
@@ -329,7 +329,7 @@
   // same legend — which is the whole reason the comparison charts stopped having
   // their own renderer. `pts` are [x, value] instead of [commit_idx, value].
   function renderParam(c) {
-    var W = 560, H = 330, m = { l: 66, r: 18, t: 26, b: 48 };
+    var W = 900, H = 330, m = { l: 66, r: 18, t: 26, b: 48 };
     var pw = W - m.l - m.r, ph = H - m.t - m.b;
     var xs = [], all = [];
     c.series.forEach(function (s) {
