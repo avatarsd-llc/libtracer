@@ -657,8 +657,12 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
             }
             return std::move(eff).release();
         },
-        [&](const std::vector<ace_t>& merged, const std::vector<ace_t>& inherited) {
-            return effective_acl_t::allows(self ? merged : inherited, *subject, bit, now);
+        [&](const std::vector<ace_t>& merged) {
+            // A bare descendant evaluates the INHERITABLE SUBSEQUENCE of the bearer's merge.
+            // Filtered in place (order-identical) rather than against a second, projected
+            // vector — see effective_acl_t::allows.
+            return effective_acl_t::allows(merged, *subject, bit, now,
+                                           self ? std::uint8_t{0} : kAceInherit);
         });
 }
 

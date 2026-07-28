@@ -199,16 +199,31 @@ class effective_acl_t {
      * @param subject The resolved subject token bytes (ADR-0018).
      * @param bit     The requested right (one `acl_right_t` bit).
      * @param now     Check-time wall clock, ns since the UNIX epoch.
+     * @param required_flags ACEs lacking these bits are skipped, exactly as
+     *                `Policy::allows` skips them: `0` evaluates the whole list (the
+     *                bearer's own check), `kAceInherit` evaluates the inheritable
+     *                **subsequence** — what a BARE descendant sees. Filtering in place
+     *                rather than against a pre-projected copy is what lets the merge be
+     *                stored once; it is order-identical by construction, since skipping
+     *                elements cannot reorder the ones that remain, which matters because
+     *                the full policy is first-match-per-bit in stored order.
      * @return true iff @p subject may exercise @p bit.
      */
     template <class Policy = acl_policy_t>
     [[nodiscard]] static bool allows(std::span<const ace_t> merged,
                                      std::span<const std::byte> subject, std::uint32_t bit,
-                                     std::uint64_t now) noexcept {
-        const acl_verdict_t verdict = Policy::allows(subject, bit, merged, now);
+                                     std::uint64_t now, std::uint8_t required_flags = 0) noexcept {
+        const acl_verdict_t verdict = Policy::allows(subject, bit, merged, now, required_flags);
         if (verdict == acl_verdict_t::ALLOW) return true;
         if (verdict == acl_verdict_t::DENY) return false;
-        return merged.empty();  // open by default; any present ACE closes
+        // Open by default; any ACE that PASSES the flag filter closes. The filter must
+        // apply here too: a bearer holding only NON-inheritable ACEs presents an empty
+        // inheritable subsequence, so a bare descendant stays open — which is exactly what
+        // testing a pre-projected (and therefore empty) list used to yield.
+        if (required_flags == 0) return merged.empty();
+        return std::none_of(merged.begin(), merged.end(), [required_flags](const ace_t& a) {
+            return (a.flags & required_flags) == required_flags;
+        });
     }
 
     /** @brief The final ACL verdict over THIS instance's merged list (the static
