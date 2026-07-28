@@ -506,7 +506,6 @@ using target_key_t = std::shared_ptr<const std::vector<std::byte>>;
  */
 [[nodiscard]] inline target_key_t try_make_target_key(std::vector<std::byte>&& key) noexcept {
     if (key.empty()) return nullptr;
-    static constexpr std::size_t kCtrlSlack = 4 * sizeof(void*);  // >= both mainstream ABIs
 #if defined(__cpp_exceptions)
     try {
         return std::make_shared<const std::vector<std::byte>>(std::move(key));
@@ -514,6 +513,9 @@ using target_key_t = std::shared_ptr<const std::vector<std::byte>>;
         return nullptr;  // only the control-block allocation can throw (the move is noexcept)
     }
 #else
+    // Declared inside the branch that uses it: at -Wextra an unconditional definition is an
+    // unused variable on every exception-enabled build, which is most of CI.
+    static constexpr std::size_t kCtrlSlack = 4 * sizeof(void*);  // >= both mainstream ABIs
     if (!tr::detail::probe_bytes(sizeof(std::vector<std::byte>) + kCtrlSlack)) return nullptr;
     return std::make_shared<const std::vector<std::byte>>(std::move(key));
 #endif
