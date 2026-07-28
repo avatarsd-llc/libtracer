@@ -25,6 +25,13 @@ target_link_libraries(mem_source_test PRIVATE libtracer)
 libtracer_test_warnings(mem_source_test)
 add_test(NAME mem_source COMMAND mem_source_test)
 
+# The bounded RECYCLING source (pool_source_t, #597) — the long-lived-seam gap that
+# heap_source (unbounded) and bump_source (never recycles) between them left open.
+add_executable(mem_pool_source_test mem_pool_source_test.cpp)
+target_link_libraries(mem_pool_source_test PRIVATE libtracer)
+libtracer_test_warnings(mem_pool_source_test)
+add_test(NAME mem_pool_source COMMAND mem_pool_source_test)
+
 # u32-length-prefix stream reassembler (length_prefix_framer.hpp) — the extracted
 # transport_quic/webtransport RX state machine, tested without a live connection.
 add_executable(length_prefix_framer_test length_prefix_framer_test.cpp)

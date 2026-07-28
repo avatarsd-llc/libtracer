@@ -12,6 +12,36 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`tr::mem::pool_source_t<Sync>` — a bounded, RECYCLING `block_source_t`** (#597,
+  [ADR-0067](../docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md)). Closes the
+  gap between `heap_source_t` (recycles, unbounded) and `bump_source_t` (bounded, never
+  recycles): a **long-lived** seam could not be bounded at all, so an 8 KiB bump source wired
+  as a router's `rx` decoded six frames and rejected the next 194. Segregated free lists keyed
+  on the exact `(bytes, align)` pair, with **no per-block header** — the seam's sized `release`
+  makes one unnecessary. Both bounds are injected per RFC-0006: the caller supplies the slab and
+  the `size_class_t` span, so neither the byte ceiling nor the class count is a constant in this
+  library. `classes_used()` / `overflowed()` report what to size the span against.
+
+  Shape chosen on a recorded trace of the seam (70,937 events): **12 distinct sizes, three
+  covering 99.8 %**, so exact classes cost zero internal fragmentation and need 26,176 B where
+  first-fit-with-coalescing needs 27,448 B and TLSF 28,440 B. Costs **322 B** of text on
+  `riscv32-esp-elf-g++ -Os -fno-exceptions -fno-rtti`, plus a 24 B vtable.
+
+  **Read ADR-0067 §3 before sharing one.** A `pool_source_t` is structurally the object
+  ADR-0060 erratum 1 measured collapsing to ~1/15 of its single-thread rate on a 12-core host
+  while the platform heap scaled. It is owned by one thread wherever it sits on a per-frame
+  path; sharing behind a lock is admissible only at wiring frequency. **In particular, do not
+  yet inject one as a `fwd_router_t`'s `rx`** — that seam is still a single shared pointer on a
+  documented lock-free path, and its per-child fix is a separate slice.
+
+- **`tr::mem::sync_none_t`** (in `mem_source.hpp`) and **`tr::mem::sync_mutex_t`** (in the new
+  `mem_source_sync.hpp`) — the synchronization policies for the above. The default is empty and
+  compiles to nothing under `[[no_unique_address]]`; the hosted one is in its own header so
+  `mem_source.hpp` stays freestanding-clean for the footprint sentinel. A policy is anything
+  with `lock()`/`unlock()`, so a single-core target supplies its own interrupt-disable section.
+
 ### Changed
 
 - **`vertex_ext_t` no longer caches a second, projected ACE list.** `eff_aces_inherit` — a
