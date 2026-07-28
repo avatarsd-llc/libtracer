@@ -58,6 +58,21 @@ It collapses to roughly **a fifteenth of its own single-thread rate** — a cach
 
 > **A `pool_source_t` is owned by one thread wherever it sits on a per-frame path. Sharing one behind a lock is admissible only at wiring frequency.**
 
+**Confirmed at this seam (2026-07-28, [#625](https://github.com/avatarsd-llc/libtracer/issues/625)).** The paragraphs above argue from ADR-0060's measurement, taken at a different seam; `bench_rx_source_topology` now measures the router's own RX draw. T receive threads each drive a multi-link rope through their own inbound child to their own egress sink, so the source is the only object two threads share. Median of three 300 ms runs, 12-core / 24-thread host, aggregate forwards/s:
+
+| T | shared `heap_source()` | one shared `pool_source_t` | per-child `pool_source_t` |
+| ---: | ---: | ---: | ---: |
+| 1 | 4.10 M | 4.09 M | 4.32 M |
+| 4 | 10.99 M | 2.78 M | 10.80 M |
+| 8 | 15.30 M | 1.90 M | 16.00 M |
+| 24 | 21.77 M | **1.46 M** | 21.81 M |
+
+The shared pool falls to **a sixty-seventh** of its own single-thread rate (per-thread 244 ns → 16,428 ns), a deeper collapse than the erratum's fifteenth, while the per-child pool tracks the scaling heap across the whole sweep. The one point where the medians diverge — T=16, heap 22.6 M vs per-child 19.0 M — is inside the per-child run-to-run range and is not a finding.
+
+The bench also refutes something this ADR might have been tempted to claim: at T=1 the pool is **not** faster than the heap here either (231 vs 244 ns, ranges overlapping). A single run suggested a 27 % pool win; three runs deleted it. §2's "latency is not a discriminator" holds at the live seam, not only in the offline replay.
+
+Sizing, for a deployment bounding this seam: a 4-link rope's forward hop settles at **128 B** of slab per child in **one** size class, independent of T.
+
 The synchronization policy is a template parameter, defaulting to the empty `sync_none_t`, which compiles to nothing under `[[no_unique_address]]`. This passes ADR-0047 §1 on both limbs: the identity is per-target build configuration, and the mechanism's *existence* costs code size on MCU profiles. A target instantiates only what it injects. `sync_mutex_t` lives in a separate `mem_source_sync.hpp` so `mem_source.hpp` stays freestanding-clean for the footprint sentinel; a single-core FreeRTOS target supplies an interrupt-disable policy of its own, and the seam asks only for `lock()`/`unlock()`.
 
 ### 4. `heap_source()` remains the default, and that is the honest answer for a host
