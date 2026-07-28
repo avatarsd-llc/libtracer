@@ -52,15 +52,27 @@ enum class role_t : std::uint8_t {
     HANDLER,      /**< @brief Roles 3-7: user `on_read` / `on_write` supplies the behavior. */
 };
 
-/** @brief The mandatory core QoS fields of a vertex (docs/reference/02 §core writable fields). */
+/**
+ * @brief The mandatory core QoS fields of a vertex (docs/reference/02 §core writable fields).
+ *
+ * **Members are ordered widest-first, and that ordering is load-bearing.** Every field is a
+ * fixed-width scalar, so this struct is the same size on a 32-bit MCU as on a 64-bit host —
+ * it never shrinks with the pointer, which makes it the largest non-ACL member of
+ * @ref vertex_ext_t on device (32 of 112 B on rv32 before this ordering). Declaration order
+ * `u64, u32 x3, u8 x3` packs the 23 bytes of members into **24**; interleaving the `u8`s
+ * between the wider fields costs 8 bytes of pure padding on every ext-bearing vertex, on
+ * every target.
+ *
+ * Reordering is safe here and must stay safe: the wire form emits **named** children
+ * (`SETTINGS{ NAME "reliability", VALUE u8 }` — reference/05), so it is independent of
+ * declaration order, and every construction site value-initializes (`settings_t{}`). Do not
+ * introduce positional aggregate initialization — it would silently bind values to the wrong
+ * fields the next time this order changes.
+ */
 struct settings_t {
-    std::uint8_t reliability = 0;        /**< @brief 0=best-effort, 1=reliable. */
-    std::uint8_t durability = 0;         /**< @brief 0=volatile, 1=transient-local. */
-    std::uint32_t history_keep_last = 1; /**< @brief Stream ring depth (>=1). */
     std::uint64_t deadline_ns = 0;       /**< @brief 0=off; max ns between writes before a
                                               liveness fault. */
-    std::uint8_t priority = 0;           /**< @brief 0=low .. 255=critical (transport hint, not a
-                                              wire bit). */
+    std::uint32_t history_keep_last = 1; /**< @brief Stream ring depth (>=1). */
     std::uint32_t queue_max_bytes = 0; /**< @brief 0=unbounded; per-subscriber back-pressure cap. */
     /**
      * @brief Store-by-reference threshold (ADR-0042 §3): a view-delivered WRITE whose
@@ -70,6 +82,10 @@ struct settings_t {
      *        amplification is a per-vertex deployment call.
      */
     std::uint32_t store_ref_min_bytes = 0;
+    std::uint8_t reliability = 0; /**< @brief 0=best-effort, 1=reliable. */
+    std::uint8_t durability = 0;  /**< @brief 0=volatile, 1=transient-local. */
+    std::uint8_t priority = 0;    /**< @brief 0=low .. 255=critical (transport hint, not a
+                                       wire bit). */
 
     /** @brief Memberwise equality — lets registration detect all-defaults settings (which
      *         need no @ref vertex_ext_t allocation, ADR-0021 pay-for-what-you-use). */
