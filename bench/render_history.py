@@ -105,6 +105,19 @@ FAMILIES: list[dict] = [
     # being one of perf_gate.py's canonical gated points. A gated number with no visible
     # history is the exact blind spot these charts exist to remove, so it opts in to a
     # single-line trend.
+    # libtracer AND Zenoh on one axes, over commits. Zenoh's version is PINNED, so its
+    # line is expected to be flat and is read as a CONTROL: libtracer moving while Zenoh
+    # holds still is the code; both moving together is the runner, which on shared CI
+    # varies about 2x. Until the emitter was keyed by system these two could not coexist
+    # as series at all — a `zenoh` row and a libtracer row with the same mode were
+    # medianed into one number.
+    dict(id="vs-zenoh-fan", section="dispatch",
+         title="libtracer vs Zenoh — by fan-out, over commits",
+         cond="inproc · 64 B · 1 topic · same runner, same pass — Zenoh (zenoh-c 1.9.0) is "
+              "version-pinned, so its line is the runner's own drift",
+         pat=r"^(zenoh )?inproc 64B/fan(\d+)/1ep",
+         label=lambda m: ("zenoh" if m.group(1) else "libtracer") + " fan " + m.group(2),
+         key=lambda m: ("z" if m.group(1) else "l") + f"-{int(m.group(2)):05d}", log=True,),
     dict(id="mixed", section="dispatch", title="Mixed workload — the composed topology",
          cond="mixed · 128 topics · varied fan-out and payloads — one gated point, tracked "
               "over time rather than compared against a sibling",
@@ -361,6 +374,7 @@ INSTRUMENT_SOURCES: list[tuple[str, list[str]]] = [
      r"|inproc-target-\w+"
      r"|inproc-mt\d+|eptype-[\w-]+|fold-b\d+|acl-\S+|mixed|path-parse|lkv-\S+"
      r"|poolalloc-mt\d+|heapalloc-mt\d+)\b", ["bench/bench_libtracer.cpp"]),
+    (r"^zenoh ", ["bench/bench_zenoh.cpp"]),
     (r"^fwd-demux-", ["bench/bench_forward_demux.cpp"]),
     (r"^compact-", ["bench/bench_compact_delivery.cpp"]),
     (r"^heap (allocs|bytes) per ", ["bench/bench_forward_heap.cpp"]),
@@ -506,7 +520,7 @@ def _first_line(msg: str, limit: int = 72) -> str:
     return ln[: limit - 1] + "…" if len(ln) > limit else ln
 
 
-def _family_source(sample: str | None) -> str | None:
+def _family_sources(samples: list[str]) -> list[str]:
     """@brief The bench source a family's series come from, as a repo-relative path.
 
     Resolved through INSTRUMENT_SOURCES rather than a second per-family field. That
@@ -514,18 +528,23 @@ def _family_source(sample: str | None) -> str | None:
     puts the "instrument changed" markers on these charts — so a separate `src=` per
     family would be a duplicate free to disagree with it. One list, two uses.
 
-    Takes a REAL matched series name, never the family's own pattern: two families begin
+    Takes REAL matched series names, never the family's own pattern: two families begin
     with a regex construct rather than a literal (`^(pool|heap)alloc-mt`, and an
     `eptype-` pattern carrying a negative lookbehind), so pattern-probing silently
     resolved 20 of 22 and would have quietly dropped the link on exactly the two
     families whose names are hardest to guess from the chart.
+
+    Returns EVERY distinct source, not the first: the libtracer-vs-Zenoh family draws two
+    engines from two different harnesses, and naming only one would credit a chart to code
+    that produced half of it.
     """
-    if not sample:
-        return None
-    for pat, srcs in INSTRUMENT_SOURCES:
-        if re.match(pat, sample):
-            return srcs[0]
-    return None
+    out: list[str] = []
+    for sample in samples:
+        for pat, srcs in INSTRUMENT_SOURCES:
+            if re.match(pat, sample) and srcs[0] not in out:
+                out.append(srcs[0])
+                break
+    return out
 
 
 def build(data: dict) -> dict:
@@ -617,10 +636,10 @@ def build(data: dict) -> dict:
         if not variants:
             continue
         first = variants[0]
-        src = _family_source(seen[0] if seen else None)
+        src = _family_sources(seen)
         chart = {"id": fam["id"], "section": fam.get("section", "other"),
                  "title": fam["title"], "cond": fam["cond"], "log": fam["log"],
-                 "src": src,
+                 "src": src or None,
                  "metrics": variants,
                  # The active-metric fields are mirrored at the top level so a renderer
                  # that never switches metric reads exactly what it read before.
