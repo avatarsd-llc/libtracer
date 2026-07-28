@@ -32,15 +32,29 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   **Read ADR-0067 §3 before sharing one.** A `pool_source_t` is structurally the object
   ADR-0060 erratum 1 measured collapsing to ~1/15 of its single-thread rate on a 12-core host
   while the platform heap scaled. It is owned by one thread wherever it sits on a per-frame
-  path; sharing behind a lock is admissible only at wiring frequency. **In particular, do not
-  yet inject one as a `fwd_router_t`'s `rx`** — that seam is still a single shared pointer on a
-  documented lock-free path, and its per-child fix is a separate slice.
+  path; sharing behind a lock is admissible only at wiring frequency.
 
 - **`tr::mem::sync_none_t`** (in `mem_source.hpp`) and **`tr::mem::sync_mutex_t`** (in the new
   `mem_source_sync.hpp`) — the synchronization policies for the above. The default is empty and
   compiles to nothing under `[[no_unique_address]]`; the hosted one is in its own header so
   `mem_source.hpp` stays freestanding-clean for the footprint sentinel. A policy is anything
   with `lock()`/`unlock()`, so a single-core target supplies its own interrupt-disable section.
+
+- **`fwd_router_t::add_child` takes an optional per-child failable source**:
+  `add_child(std::string name, transport_t& link, mem::block_source_t* rx = nullptr)`, stored on
+  the child's `child_rx_ctx_t`. **Source-compatible** — the parameter is appended with a default,
+  and a child that supplies none draws from the router's as before.
+
+  This is what makes a bounded source *usable* on the RX path at all. The router previously held
+  one `rx_` while its own class comment documented `on_frame` as firing on several transports'
+  receive threads concurrently with no per-request locking — so a shared pool there would have
+  put a contended lock on a deliberately lock-free path, at the 15x cost ADR-0060 erratum 1
+  measured. Each transport has its own receive thread, so a source parked on the child is
+  touched by exactly one. It also makes the bound **per-peer**: one noisy link can no longer
+  starve another link's decode.
+
+  Resolution is `rx_for(ctx)` — a branch on a pointer already in a register, with no lookup by
+  name on the frame path.
 
 ### Changed
 

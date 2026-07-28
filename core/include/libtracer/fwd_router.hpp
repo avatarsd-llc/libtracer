@@ -131,8 +131,11 @@ class fwd_router_t {
      *
      * @param name This node's local NAME for the link (e.g. "up", "cli"), 1..3 segments.
      * @param link The transport carrying the next/previous hop.
+     * @param rx   Optional per-child failable-block source; null uses the router's. Give
+     *             each child its OWN when injecting a bounded one — see ADR-0067 3
+     *             for why sharing one across receive threads is the wrong shape.
      */
-    void add_child(std::string name, transport_t& link);
+    void add_child(std::string name, transport_t& link, mem::block_source_t* rx = nullptr);
 
     /**
      * @brief Un-register child @p name — it stops resolving, and its routing state goes.
@@ -316,6 +319,17 @@ class fwd_router_t {
         fwd_router_t* self;
         std::string name;
         std::vector<std::byte> mount_tlv;
+        /**
+         * @brief This child's OWN failable-block source; null falls back to the router's.
+         *
+         * ADR-0067 §3: a `pool_source_t` shared across receive threads is measured-worse
+         * than the heap it replaces (ADR-0060 erratum 1 — ~1/15 of its single-thread rate
+         * on 12 cores). Each transport has its own receive thread, so a source parked here
+         * is touched by exactly one — the per-thread shape, obtained by ownership rather
+         * than by a lock. A bounded node gives each child its own slab, which also makes
+         * the bound per-peer: one noisy link cannot starve another's decode.
+         */
+        mem::block_source_t* rx = nullptr;
     };
 
     /**
@@ -366,14 +380,16 @@ class fwd_router_t {
     /**
      * @brief Terminus: arena-decode @p frame (ADR-0041) and resolve + reply.
      *
-     * The arena draws directly from the injected `mr_` (ADR-0039 §1) and is
+     * The arena draws from the inbound child's failable source, or the router's when
+     * the child has none (#588 moved this off `mr_`; the doc lagged), and is
      * released before returning — the memory policy is entirely the host's. The
      * FWD{REPLY} is sent back over the link the request arrived on. @p frame_view
      * (non-null on the owning-delivery path) is threaded into the resolver for
      * the ADR-0042 §3 referenced WRITE store.
      */
     void resolve_terminus(std::string_view inbound_name, std::span<const std::byte> frame,
-                          const view::view_t* frame_view);
+                          const view::view_t* frame_view,
+                          const child_rx_ctx_t* inbound_ctx = nullptr);
     /**
      * @brief Terminus over a MULTI-LINK rope: resolve straight off the rope, NO flatten.
      *
@@ -455,10 +471,23 @@ class fwd_router_t {
     // name itself, so its ctx is just the router). Deque for pointer stability —
     // insert-only, like registry_ (the transport holds the address for its life).
 
+    /**
+     * @brief The failable source a frame from @p ctx decodes through.
+     *
+     * A branch on a pointer already in a register, on the per-frame path — the whole cost
+     * of ADR-0067 §3's per-owner topology. There is deliberately no lookup by name here:
+     * resolving the child per frame would put a string scan on the hot path to save a
+     * pointer, which is the wrong trade under latency-first.
+     */
+    [[nodiscard]] mem::block_source_t& rx_for(const child_rx_ctx_t* ctx) const noexcept {
+        return ctx != nullptr && ctx->rx != nullptr ? *ctx->rx : *rx_;
+    }
+
     graph::graph_t& graph_;
     graph::op_resolver_t resolver_;
     std::pmr::memory_resource* mr_;        // route_handle label-table resource (ADR-0039 §1)
-    mem::block_source_t* rx_;              // terminus-arena source, NOTHROW (#588)
+    mem::block_source_t* rx_;              // DEFAULT terminus-arena source, NOTHROW (#588);
+                                           // a child may carry its own (ADR-0067 §3)
     child_registry_t registry_;            // the one NAME→link demux table (Brick 3a, ADR-0037)
     route_handle_t handles_;               // per-link label tables (compact flows only)
     std::deque<child_rx_ctx_t> child_rx_;  // stable receiver contexts, one per child
