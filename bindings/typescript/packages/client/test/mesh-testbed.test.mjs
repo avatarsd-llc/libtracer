@@ -199,8 +199,10 @@ test('mesh testbed: form a cyclic multi-node mesh in band, then route across it'
                      ['b', 'bus']);
     assert.deepEqual(listingNames(await cli.a.readField(['net', 'ws-server'], ':children[]')),
                      ['c', 'ctrl']);
+    // The module lists its children in NAME order, not dial order: b dials c first, yet
+    // `bus` is listed first. (`hub` sorted after `c`, which is why this line moved.)
     assert.deepEqual(listingNames(await cli.b.readField(['net', 'ws-client'], ':children[]')),
-                     ['c', 'bus']);
+                     ['bus', 'c']);
     assert.deepEqual(listingNames(await cli.b.readField(['net', 'ws-server'], ':children[]')),
                      ['a', 'ctrl']);
     assert.deepEqual(listingNames(await cli.c.readField(['net', 'ws-client'], ':children[]')), ['a']);
