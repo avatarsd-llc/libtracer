@@ -141,6 +141,7 @@ craft libtracer":
 | `inproc-deliver` | **deliver-only (`propagate`)**: the value is stored once, then each op is `graph_t::propagate(v)` — deliver the current LKV to the subscribers, no per-op store/alloc/copy. The semantic analogue of Zenoh's transient put (RFC-0008 edge transition). |
 | `inproc-borrow` | the **zero-copy loaned path** — a borrowed view, *zero alloc, zero copy* (a refcount handoff). libtracer-only semantics: Zenoh's matched rows use its copying put. |
 | `inproc-path` | write **by path** (registry hash + lookup per publish) — the "many topics" cost. |
+| `inproc-target-stored` / `inproc-target-handler` | the **path-target dispatch leg** — edges carrying a `target_key` (what a wire `SUBSCRIBER` produces) instead of a callback. Each delivery resolves the target in the registry, passes the fan-in ACL gate, clones the rope nothrow, then applies the target's own write effects: **~10x a callback edge** at fan-out. `stored` lands in a `STORED_VALUE`'s LKV, `handler` in a `HANDLER`'s `on_write`; the gap between them is the target's store. Every row above subscribes by callback, so read these against `inproc` at the same fan-out. `bench_libtracer target` runs the pair alone. |
 | `loopback` | the M4 bridge: encode + ROUTER-wrap + cross-thread queue + decode. |
 | `mixed` | 128 topics, varied fan-out + payloads. |
 | `net` | two processes over real UDP (`run_net.sh`). |

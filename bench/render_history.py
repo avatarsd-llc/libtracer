@@ -256,6 +256,25 @@ FAMILIES: list[dict] = [
          label=lambda m: f"fan {m.group(1)}", key=_num, log=True,
          fmt="rate", ylabel="deliveries / second",
          px=dict(label="fan-out (subscribers)", log=True, fmt="count")),
+    dict(id="lat-target-fan", section="dispatch", suite="latency",
+         title="Path-target dispatch p50 latency by fan-out",
+         cond="inproc-target-* · 64 B · 1 topic — edges carrying a `target_key` (the wire "
+              "SUBSCRIBER form) rather than a callback; `stored` lands in the target's LKV, "
+              "`handler` in its on_write. Read against the `inproc` fan-out chart, which is "
+              "the callback leg.",
+         pat=r"^inproc-target-(\w+) 64B/fan(\d+)/1ep p50 latency$",
+         label=lambda m: f"{m.group(1)} fan {m.group(2)}",
+         key=lambda m: f"{m.group(1)}-{int(m.group(2)):05d}", log=True,
+         fmt="ns", ylabel="p50 latency"),
+    dict(id="tp-target-fan", section="dispatch", suite="throughput",
+         title="Path-target dispatch throughput by fan-out",
+         cond="inproc-target-* · 64 B · 1 topic — the spec-faithful dispatch leg "
+              "(`dispatch_edge_target`: registry resolve, fan-in ACL gate, nothrow rope clone, "
+              "then the target's own write effects).",
+         pat=r"^inproc-target-(\w+) 64B/fan(\d+)/1ep throughput$",
+         label=lambda m: f"{m.group(1)} fan {m.group(2)}",
+         key=lambda m: f"{m.group(1)}-{int(m.group(2)):05d}", log=True,
+         fmt="rate", ylabel="deliveries / second"),
     dict(id="lat-pool-payload", section="dispatch", suite="latency",
          title="Pooled-backend p50 latency by payload size",
          cond="inproc-pool · fan-out 1 · 1 topic — the value backend is a `sync_pool_t` "
@@ -435,6 +454,7 @@ def _is_ancestor(a: str, b: str) -> bool:
 # are excluded for the same reason inverted: they cannot move a number.
 INSTRUMENT_SOURCES: list[tuple[str, list[str]]] = [
     (r"^(inproc|inproc-borrow|inproc-path|inproc-deliver|inproc-pool|inproc-pool-borrow"
+     r"|inproc-target-\w+"
      r"|inproc-mt\d+|eptype-[\w-]+|fold-b\d+|acl-\S+|mixed|path-parse|lkv-\S+"
      r"|poolalloc-mt\d+|heapalloc-mt\d+)\b", ["bench/bench_libtracer.cpp"]),
     (r"^fwd-demux-", ["bench/bench_forward_demux.cpp"]),

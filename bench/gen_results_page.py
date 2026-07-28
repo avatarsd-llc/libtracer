@@ -808,6 +808,16 @@ only delivers, which is the apples-to-apples counterpart to a Zenoh `put` (§5).
 is copied. **`inproc-path`** resolves the address on every write — a resolver canary,
 not a hot pattern.
 
+All four subscribe with an **in-process callback**, which is one of the three legs a
+subscription edge can take. The **`inproc-target-*`** charts measure a different one:
+edges that carry a target **path** — the form a remote `SUBSCRIBER` actually takes on the
+wire, where the callback form is host-SDK sugar (ADR-0049). That leg resolves the target
+through the registry, passes the fan-in ACL gate, clones the rope nothrow, and then applies
+the target's own write effects, so it costs **roughly ten times a callback edge** at
+fan-out. `inproc-target-stored` lands in a `STORED_VALUE` target's LKV;
+`inproc-target-handler` lands in a `HANDLER`'s `on_write`, and the gap between the two is
+what the target's own store costs. Read either against `inproc` at the same fan-out.
+
 {charts_for(charts, "dispatch")}
 
 ## 3 · Wire & routing — what a framed hop costs

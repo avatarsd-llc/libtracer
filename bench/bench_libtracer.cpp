@@ -235,6 +235,131 @@ void run_inproc_pool(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc,
     run_inproc(S, F, E, alloc, by_path, mode, budget, latbudget, &pool, false);
 }
 
+/** @brief Which local vertex kind a path-target edge re-dispatches INTO. */
+enum class target_kind_t { STORED, HANDLER };
+
+/**
+ * @brief A SUBSCRIBER TLV naming a single-segment target path (the wire subscribe form).
+ *
+ * The graph-test idiom: a `SUBSCRIBER` whose `PATH` child is the target key. This is what
+ * gives the edge a non-null `target_key` — the thing `g.subscribe(path, callback)` cannot
+ * produce, and therefore the thing the rest of this file never measures.
+ */
+view_t subscriber_tlv(std::string_view target_segment) {
+    std::vector<std::byte> name_bytes;
+    for (char c : target_segment)
+        name_bytes.push_back(static_cast<std::byte>(static_cast<unsigned char>(c)));
+    tr::wire::tlv_t name{.type = tr::wire::type_t::NAME, .payload = name_bytes};
+    tr::wire::tlv_t path{.type = tr::wire::type_t::PATH};
+    path.opt.pl = true;
+    path.children.push_back(name);
+    tr::wire::tlv_t sub{.type = tr::wire::type_t::SUBSCRIBER};
+    sub.opt.pl = true;
+    sub.children.push_back(path);
+    return owned_view(tr::wire::encode(sub));
+}
+
+/**
+ * @brief The PATH-TARGET fan-out sweep (#619) — modes `inproc-target-stored` /
+ *        `inproc-target-handler`.
+ *
+ * Every other fan-out row in this file subscribes with `g.subscribe(path, callback)`, whose
+ * edges carry a NULL `target_key`. Those exercise exactly one of `dispatch_edge`'s three
+ * legs: `e.callback(...)`. The leg that carries the WIRE semantics — a remote `SUBSCRIBER`
+ * written into `:subscribers[]` names a target PATH, not a callback — is
+ * `dispatch_edge_target`: a registry `find_ptr(target_key)`, the fan-in ACL gate, a nothrow
+ * rope clone, and the target's own `store_value`. Until this row, no bench in the suite
+ * touched it at any width, so the published fan-out curves described the convenience API
+ * (ADR-0049's own word for it: sugar) and not the specified one.
+ *
+ * That blind spot had already cost something concrete: #618 deleted TWO heap allocations
+ * per delivery from this leg, and the suite could not see the change, because its edges
+ * never had a target key to copy.
+ *
+ * F edges each go to their OWN target vertex, mirroring the callback rows' F independent
+ * consumers — F edges into ONE target would measure a different topology (and a single hot
+ * LKV). @p kind picks what the delivery lands in, because the two costs are different and
+ * neither is "the" answer: `STORED` measures dispatch + the target's store (LKV publish,
+ * history, await wake), `HANDLER` measures dispatch + a user handler that does nothing.
+ * Read against the `inproc` row at the same fan-out for the callback leg's cost.
+ */
+void run_inproc_target(std::size_t S, std::size_t F, target_kind_t kind, const char* mode,
+                       std::uint64_t budget = kDeliveryBudget,
+                       std::uint64_t latbudget = kLatencyDeliveryBudget) {
+    graph_t g;
+    std::atomic<std::uint64_t> recv{0};
+    for (std::size_t f = 0; f < F; ++f) {
+        const std::string seg = "t" + std::to_string(f);
+        if (kind == target_kind_t::HANDLER) {
+            tr::graph::handlers_t h;
+            h.on_write = [&recv](const rope_t&) -> tr::graph::result_t<void> {
+                recv.fetch_add(1, std::memory_order_relaxed);
+                return {};
+            };
+            (void)g.register_vertex(*path_t::parse("/" + seg), role_t::HANDLER, std::move(h));
+        } else {
+            (void)g.register_vertex(*path_t::parse("/" + seg), role_t::STORED_VALUE);
+        }
+    }
+    const path_t src_path = *path_t::parse("/bench/target-src");
+    vertex_handle_t src = g.register_vertex(src_path, role_t::STORED_VALUE);
+
+    // Subscribe the wire way, once per target. If any edge fails to admit, every number
+    // below would describe a smaller fan-out than its own label claims, so refuse to emit.
+    const path_t sub_path = *path_t::parse("/bench/target-src:subscribers[]");
+    std::size_t admitted = 0;
+    for (std::size_t f = 0; f < F; ++f)
+        if (g.write(sub_path, subscriber_tlv("t" + std::to_string(f))).has_value()) ++admitted;
+    if (admitted != F) {
+        std::fprintf(stderr, "SKIP mode=%s fanout=%zu: admitted %zu of %zu path-target edges\n",
+                     mode, F, admitted, F);
+        return;
+    }
+
+    const std::vector<std::byte> tlv = value_tlv(S);
+    const auto put = [&](std::size_t) { (void)g.write(src, owned_view(tlv)); };
+
+    // Prove the leg under test is actually taken before timing it. A path-target edge that
+    // resolved to nothing — a mis-built key, a fan-in ACL denial — drops its delivery
+    // SILENTLY (`dispatch_edge_target` returns on a null `find_ptr` and on a denied gate),
+    // so the loop below would happily report the cost of not delivering. The handler rows
+    // check their counter after the bulk phase; a STORED target has no counter, so read one
+    // back instead.
+    put(0);
+    if (kind == target_kind_t::STORED && !g.read(path_t("/t0")).has_value()) {
+        std::fprintf(stderr, "SKIP mode=%s fanout=%zu: target /t0 holds no value after a write\n",
+                     mode, F);
+        return;
+    }
+
+    const std::size_t MSGS = publishes_for(F, budget);
+    const std::size_t LATN = publishes_for(F, latbudget);
+    for (std::size_t i = 0; i < 1000; ++i) put(i);  // warmup
+
+    // The delivery counter only moves for HANDLER targets (a STORED target's delivery
+    // terminates in its LKV), so this is a wiring check for the handler row alone.
+    recv.store(0);
+    const auto t0 = now_ns();
+    for (std::size_t i = 0; i < MSGS; ++i) put(i);
+    const double secs = (now_ns() - t0) / 1e9;
+    const double pub_s = MSGS / secs;
+    const double deliv_s = pub_s * static_cast<double>(F);
+    const double mb_s = deliv_s * static_cast<double>(S) / 1e6;
+    if (kind == target_kind_t::HANDLER && recv.load() == 0) {
+        std::fprintf(stderr, "SKIP mode=%s fanout=%zu: no delivery reached a handler target\n",
+                     mode, F);
+        return;
+    }
+
+    Latency lat;
+    for (std::size_t i = 0; i < LATN; ++i) {
+        const auto a = now_ns();
+        put(i);
+        lat.add(now_ns() - a);
+    }
+    emit("libtracer", mode, S, F, 1, pub_s, deliv_s, mb_s, lat.summarize());
+}
+
 /**
  * @brief Deliver-only row (mode `inproc-deliver`): RFC-0008's edge-transition
  *        primitive, timed alone.
@@ -978,6 +1103,13 @@ int main(int argc, char** argv) {
         for (std::size_t F : kFanouts) run_inproc_deliver(kRefSize, F);
         return 0;
     }
+    if (argc > 1 && std::string_view(argv[1]) == "target") {  // path-target rows alone (A/B runs)
+        for (std::size_t F : kFanouts)
+            run_inproc_target(kRefSize, F, target_kind_t::STORED, "inproc-target-stored");
+        for (std::size_t F : kFanouts)
+            run_inproc_target(kRefSize, F, target_kind_t::HANDLER, "inproc-target-handler");
+        return 0;
+    }
     if (argc > 1 && std::string_view(argv[1]) == "lkv") {  // ADR-0060 alloc gate alone (fast)
         run_lkv_store_gate();
         return 0;
@@ -1039,5 +1171,14 @@ int main(int argc, char** argv) {
     // bottlenecks — the signal for the lock-free CAS upgrade. Appended LAST (never ahead
     // of a gated row); tracked to gh-pages, not gated.
     run_syncpool_gate();
+    // PATH-TARGET fan-out (#619): the same 1/8/128/1024/8192 fan sweep the `inproc` rows
+    // run, but with edges that carry a `target_key` instead of a callback — the leg a wire
+    // `SUBSCRIBER` actually takes. Two charted series (inproc-target-stored /
+    // inproc-target-handler) so the two dispatch legs are separable in the results.
+    // Appended LAST per the row-ordering note above: never ahead of a gated row.
+    for (std::size_t F : kFanouts)
+        run_inproc_target(kRefSize, F, target_kind_t::STORED, "inproc-target-stored");
+    for (std::size_t F : kFanouts)
+        run_inproc_target(kRefSize, F, target_kind_t::HANDLER, "inproc-target-handler");
     return 0;
 }

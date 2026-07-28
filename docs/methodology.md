@@ -73,6 +73,16 @@ Several named *modes* isolate distinct costs on the same axes:
   is a deliberate **resolver canary**, not a hot pattern: real code resolves a path
   once and writes through the held handle. Judge dispatch cost against `inproc` /
   `inproc-borrow`, never against `inproc-path`.
+- `inproc-target-stored` / `inproc-target-handler` — the **path-target** dispatch leg:
+  edges carrying a target key instead of a callback, which is what a wire `SUBSCRIBER`
+  produces (the callback form is host-SDK sugar). Each delivery resolves the target in
+  the registry, passes the fan-in ACL gate, clones the rope nothrow, and applies the
+  target's write effects — measured at roughly **10× a callback edge** at fan-out. The
+  `stored` / `handler` pair separates the target's own store from the dispatch itself.
+
+Every mode above except the `inproc-target-*` pair subscribes with an in-process
+callback. Fan-out curves published before those rows existed describe the callback leg
+only; they are not wrong, but they are not the whole dispatch surface.
 
 This is the surface that carries the microsecond thesis — the zero-copy substrate
 ([ADR-0016](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md))
