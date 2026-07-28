@@ -14,6 +14,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`settings_t`'s member order changed (widest-first), shrinking it 32 → 24 B.** Layout only —
+  no field was added, removed, renamed or retyped, and the wire form is unaffected (it emits
+  **named** children, so it never depended on declaration order). `vertex_ext_t` drops
+  112 → 104 B on rv32 and 168 → 160 B on x86-64, so every ext-bearing vertex (ACL, handlers,
+  app fields, STREAM ring, or non-default QoS) gets 8 bytes back on every target.
+
+  `settings_t` is all fixed-width scalars, so it is the one runtime type that does **not** shrink
+  with the pointer — it was 32 B on a 32-bit MCU exactly as on a 64-bit host, making it the
+  largest non-ACL member of `vertex_ext_t` on device.
+
+  **Only affects you if you positionally aggregate-initialize it** (`settings_t{1, 0, 8, …}`),
+  which would now bind values to different fields. Use designated initializers
+  (`settings_t{.deadline_ns = …}`) or assign members; every construction site in this tree
+  value-initializes with `settings_t{}` and needed no change.
+
 - **BREAKING (wire behaviour): an indexed `:subscribers[N]` write is now payload-discriminating,
   per RFC-0009 §D.1 — and `:subscribers[*]` on a write is rejected (#598, #579).** The
   implementation cleared slot `N` payload-blind, so a `SUBSCRIBER`, a junk `VALUE` and the
