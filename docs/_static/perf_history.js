@@ -403,32 +403,77 @@
   // the charts LAND, never how they are rendered.
   function draw(D, host) {
     D.charts.forEach(function (c) {
+    // A card carries every METRIC the family actually recorded (p50 / p99 /
+    // ns-per-delivery / throughput) and switches between them in place. Before this,
+    // each family hardcoded a single metric and 160 of 323 recorded series were drawn
+    // on no chart at all. Metrics live in one card rather than four because a
+    // full-width single-column page cannot absorb 4x the cards.
+    //
+    // Switching metric can change the SUITE (throughput lives in the bigger-is-better
+    // store), and a suite carries its own commit axis — so `suite`, `fmt`, `ylabel`
+    // and `series` are all re-read per metric rather than fixed per card.
+    var mets = (c.metrics && c.metrics.length) ? c.metrics
+      : [{ name: c.ylabel, suite: c.suite, fmt: c.fmt, ylabel: c.ylabel, series: c.series }];
+    var mi = 0;
+    function useMetric(i) {
+      mi = i;
+      c.series = mets[i].series; c.suite = mets[i].suite;
+      c.fmt = mets[i].fmt; c.ylabel = mets[i].ylabel;
+    }
+    useMetric(0);
     // A param-x chart carries its own axis in its points and has no commit
     // dimension, so it needs neither a suite nor the multi-view tabs.
     var param = c.xkind === "param";
-    var suite = param ? null : D.suites[c.suite];
-    if ((!suite && !param) || !c.series.length) return;
-    var N = suite ? suite.shas.length : 0;
-    var idxs = suite ? denseIdxs(c, N) : [];
-    var multi = !param && !!c.px && idxs.length >= 2 && c.series.length >= 2;
+    if (!param && !D.suites[c.suite]) return;
+    if (!c.series.length) return;
     var card = document.createElement("div");
     card.className = "ph-card";
     var legend = c.series.map(function (se) {
       return '<span class="item"><span class="sw" style="background:' + col(se.ci) + '"></span>' + se.label + "</span>";
     }).join("");
-    var views = multi ? ["trend", "sweep", "heatmap", "3D"] : ["trend"];
-    var tabs = views.length > 1 ? '<div class="ph-tabs">' + views.map(function (v, i) {
-      return '<button class="ph-tab' + (i === 0 ? " on" : "") + '" data-v="' + v + '">' + v + "</button>";
-    }).join("") + "</div>" : "";
-    card.innerHTML = "<h4>" + c.title + "</h4>" + tabs + '<p class="cond">' + c.cond + "</p>"
+    // The metric row is emitted even for a single metric, so every card states in
+    // words which number is on the y-axis instead of leaving it to the axis label.
+    var mrow = '<div class="ph-mets">' + mets.map(function (m, i) {
+      return '<button class="ph-met' + (i === 0 ? " on" : "") + '" data-m="' + i + '">' + m.name + "</button>";
+    }).join("") + "</div>";
+    card.innerHTML = "<h4>" + c.title + "</h4>" + '<div class="ph-tabs"></div>'
+      + '<p class="cond">' + c.cond + "</p>" + mrow
+      + '<p class="ph-metblurb"></p>'
       + '<div class="ph-legend">' + legend + "</div>"
       + '<div class="ph-plot"></div><div class="ph-tip" style="display:none"></div>'
       + (c.reading ? '<p class="ph-reading">' + c.reading + "</p>" : "");
     host.appendChild(card);
     var plot = card.querySelector(".ph-plot"), tip = card.querySelector(".ph-tip");
+    var tabhost = card.querySelector(".ph-tabs"), blurb = card.querySelector(".ph-metblurb");
     var byIdx = c.series.map(lookup);
+    var suite, idxs, multi, view = "trend";
+
+    // Re-derive everything the active metric decides: its suite's commit axis, whether
+    // there are enough dense points for the sweep/heatmap/3D views, and the view tabs.
+    // A metric with sparser history can lose those views, so the tab row is rebuilt
+    // rather than fixed at card creation.
+    function rebind() {
+      suite = param ? null : D.suites[c.suite];
+      var N = suite ? suite.shas.length : 0;
+      idxs = suite ? denseIdxs(c, N) : [];
+      multi = !param && !!c.px && idxs.length >= 2 && c.series.length >= 2;
+      var views = multi ? ["trend", "sweep", "heatmap", "3D"] : ["trend"];
+      if (views.indexOf(view) < 0) view = "trend";
+      tabhost.innerHTML = views.length > 1 ? views.map(function (v) {
+        return '<button class="ph-tab' + (v === view ? " on" : "") + '" data-v="' + v + '">' + v + "</button>";
+      }).join("") : "";
+      tabhost.querySelectorAll(".ph-tab").forEach(function (b) {
+        b.addEventListener("click", function () {
+          tabhost.querySelectorAll(".ph-tab").forEach(function (x) { x.classList.remove("on"); });
+          b.classList.add("on"); view = b.dataset.v; show(view);
+        });
+      });
+      byIdx = c.series.map(lookup);
+      blurb.textContent = mets[mi].blurb || "";
+    }
 
     function show(view) {
+      if (!suite && !param) { plot.innerHTML = ""; return; }
       var r = param ? renderParam(c)
         : view === "sweep" ? renderSweep(c, suite, idxs)
         : view === "heatmap" ? renderHeat(c, suite, idxs)
@@ -486,14 +531,19 @@
       });
       svg.addEventListener("mouseleave", function () { cross.style.display = "none"; tip.style.display = "none"; });
     }
-    card.querySelectorAll(".ph-tab").forEach(function (b) {
+    // View tabs are wired inside rebind() (they are rebuilt per metric). Metric
+    // buttons are wired once — the row itself never changes.
+    card.querySelectorAll(".ph-met").forEach(function (b) {
       b.addEventListener("click", function () {
-        card.querySelectorAll(".ph-tab").forEach(function (x) { x.classList.remove("on"); });
+        card.querySelectorAll(".ph-met").forEach(function (x) { x.classList.remove("on"); });
         b.classList.add("on");
-        show(b.dataset.v);
+        useMetric(+b.dataset.m);
+        rebind();
+        show(view);
       });
     });
-      show("trend");
+    rebind();
+    show(view);
     });
   }
 
