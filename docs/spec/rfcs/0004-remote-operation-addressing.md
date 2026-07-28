@@ -16,6 +16,14 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Tracking issue** | [#125](https://github.com/avatarsd-llc/libtracer/issues/125) |
 | **Target spec version** | v1 (draft refinement — no released v1 yet, so no v2 needed) |
 
+> **Amended by [RFC-0017](0017-element-addressing-value-plane-index.md) (2026-07-28):** §C's `FIELD`
+> grammar admits **K = 0** — a selector carrying only `index` / `index_mode` and no leading `NAME`
+> addresses the **vertex's own value**, so `[n]` reaches the value plane and not only a `:field`.
+> Levels are `NAME`-delimited, so a `FIELD` whose first child is not a `NAME` is unambiguously a
+> value-plane selector. §D gains the element operations and the rule that a **delivery mirrors the
+> shape of the write** that caused it. `PATH` is untouched — the "children MUST be `NAME`"
+> invariant restated in §C still stands, and an element index never appears in `dst` or `src`.
+
 > **Partially superseded by [RFC-0008](0008-vertex-operations-assign-propagate.md) (2026-07-06, amended 2026-07-06b):** the value-based `delivery_mode` QoS hint (`EVERY`/`THROTTLED`/`ON_CHANGE`) and the `min_interval_ns` throttle referenced in §E are removed from `SUBSCRIBER.qos_settings` — the runtime no longer filters delivery by comparing values. `delivery_mode` survives redefined as a value-agnostic **per-vertex** policy (`UNCONDITIONAL`/`IF_NEWER`/`EXPLICIT`), not a per-subscriber value filter. `delivery_compact` (label compaction) is orthogonal and unaffected.
 
 ## Summary
