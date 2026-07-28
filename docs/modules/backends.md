@@ -76,6 +76,18 @@ The second L0 seam ([ADR-0065](https://github.com/avatarsd-llc/libtracer/blob/ma
 :members:
 ```
 
+```{doxygenclass} tr::mem::pool_source_t
+:members:
+```
+
+```{doxygenstruct} tr::mem::size_class_t
+:members:
+```
+
+```{doxygenstruct} tr::mem::sync_none_t
+:members:
+```
+
 ```{doxygenclass} tr::mem::block_array_t
 :members:
 ```

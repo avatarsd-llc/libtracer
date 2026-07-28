@@ -41,7 +41,7 @@ L0 has **two** seams. Most modules here are *backends* that own real bytes and i
 | Module | Tag | What it wraps | Status |
 | ---- | ---- | ---- | ---- |
 | `mem_heap` | mem-backend | malloc/free, jemalloc, mimalloc — any general-purpose heap | v1 |
-| `mem_source` | block-source | The nothrow failable-block seam (`block_source_t`) plus `heap_source()`, `null_source()`, a `bump_source_t` over a caller buffer, and `block_array_t<T>` | v1 |
+| `mem_source` | block-source | The nothrow failable-block seam (`block_source_t`) plus `heap_source()`, `null_source()`, a `bump_source_t` over a caller buffer, the bounded recycling `pool_source_t<Sync>`, and `block_array_t<T>` | v1 |
 | `mem_borrowed` | mem-backend | Caller-owned bytes wrapped as a non-owning segment (borrowed lifetime; the transparent byte-routing vehicle of [ADR-0012](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0012-modular-memory-binding-transparent-router.md)) | v1 |
 | `mem_pool_static` | mem-backend | A statically-allocated fixed-size slot pool | v1 |
 | `mem_pool_class` | mem-backend | A small set of fixed-size slot pools partitioned by size class | v1 |
