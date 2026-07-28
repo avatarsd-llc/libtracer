@@ -14,6 +14,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`vertex_ext_t` no longer caches a second, projected ACE list.** `eff_aces_inherit` — a
+  materialized copy of `eff_aces`'s `kAceInherit`-flagged elements — is removed;
+  `effective_acl_t::allows` gained a `required_flags` parameter and filters the single cached
+  merge in place. `vertex_ext_t` drops **104 → 96 B on rv32**, and each ACL-bearing vertex loses a
+  heap block plus N x 32 B of `ace_t` copies rebuilt on every merge invalidation.
+
+  The evaluator could already do this: both ACL policies' `allows` take `required_flags` ("ACEs
+  lacking these flag bits are skipped"), so the projection duplicated a filter that existed.
+  Filtering in place is **order-identical** to projecting — skipping elements cannot reorder the
+  ones that remain — which matters because the full policy is first-match-per-bit in stored
+  order. (Partitioning the vector by the flag, considered first, is **not** sound: it would move
+  an own INHERIT-flagged ACE past ancestor ones.)
+
+  **Only affects you if you call `vertex_t::with_effective_aces` directly**: the `eval` callable
+  now takes one list, not `(merged, inherited)`. Select the inheritable subsequence by passing
+  `kAceInherit` as `effective_acl_t::allows`'s `required_flags`.
+
 - **`subscriber_t::target_key` and `edge_view_t::target_key` are now
   `std::shared_ptr<const std::vector<std::byte>>`, not `std::vector<std::byte>`** — the key is
   immutable and refcount-shared instead of deep-copied per delivery. A null pointer means "no
