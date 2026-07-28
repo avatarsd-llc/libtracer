@@ -14,6 +14,27 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`subscriber_t::target_key` and `edge_view_t::target_key` are now
+  `std::shared_ptr<const std::vector<std::byte>>`, not `std::vector<std::byte>`** — the key is
+  immutable and refcount-shared instead of deep-copied per delivery. A null pointer means "no
+  local re-dispatch target", replacing the old `.empty()` test.
+
+  **Why:** `snapshot_edges` copied the key into every `edge_view_t` so dispatch could run outside
+  the vertex lock, and that snapshot is a fresh stack object per publish — so every edge with a
+  local target allocated on the fan-out path. It cost **two** allocations, not one, because
+  `try_reserve` is probe-then-commit (probe allocates and frees, then the real reserve allocates).
+  Measured with a global operator-new counter: a delivery to a local target went from **2.00
+  allocations to 0.00**, with the store's own LKV allocation unchanged at 1.00 on both sides as a
+  control.
+
+  Sizes on rv32 (`riscv32-esp-elf -Os`): `subscriber_t` 40 → 36 B, `edge_view_t` 84 → 80 B — so
+  the 8-deep inline dispatch snapshot drops from 672 to 640 B of stack per publish.
+
+  **Only affects you if you construct `subscriber_t` directly** (the in-process
+  `graph_t::subscribe` sugar and every wire path are unchanged). Build the key with
+  `tr::graph::try_make_target_key(std::move(bytes))`, which soft-fails to null on OOM rather than
+  aborting under `-fno-exceptions`.
+
 - **`settings_t`'s member order changed (widest-first), shrinking it 32 → 24 B.** Layout only —
   no field was added, removed, renamed or retyped, and the wire form is unaffected (it emits
   **named** children, so it never depended on declaration order). `vertex_ext_t` drops
