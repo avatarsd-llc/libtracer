@@ -21,6 +21,8 @@ for a local `preview.html` of the same charts.
 | `bench_forward_heap` | **16KB-RAM zero-heap gate**: a global `operator new` counter measures how many heap allocations one FWD *forward hop* costs (ADR-0038). |
 | `bench_fanout_clone_storm` | **many-core refcount contention**: T threads clone+release one shared segment — the per-subscriber fan-out primitive under wide fan-out (ADR-0032 128-core row). |
 | `bench_await_wakeup_storm` | **many-core await fan-in**: one writer storms writes while W threads `await` one vertex — condvar/notify_all + vertex-lock scaling (ADR-0032 128-core row). |
+| `bench_route_handle_contention` | **per-link-lock contention**: T producers doing steady-state `ensure_egress` reuse-reads on one hot link (its header carries the finding that `shared_mutex` does not help). |
+| `bench_rx_source_topology` | **RX failable-source topology**: T receive threads forwarding rope frames through a shared heap, one shared pool, or one pool per child — the measurement behind [ADR-0067](../docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md) §3. |
 
 ### `bench_forward_heap` — the 16KB-RAM zero-heap forward gate (ADR-0038)
 
@@ -99,6 +101,29 @@ cmake --build bench/build --target bench_fanout_clone_storm bench_await_wakeup_s
   ~39 k at W=128, i.e. 0.47 µs → ~26 µs per write); `deliv_per_s` is aggregate wakeups/s.
   Steady-state throughput is used over single-shot latency so no fragile "all W parked"
   barrier is needed — the bench is not flaky.
+
+### `bench_rx_source_topology` — where a bounded RX source may sit (ADR-0067 §3)
+
+```sh
+cmake --build bench/build --target bench_rx_source_topology -j
+./bench/build/bench_rx_source_topology   # RESULT mode=rx_source_<topology>, fanout=T threads
+```
+
+ADR-0067 §3 rules that a `pool_source_t` on a per-frame path is owned by **one** thread.
+This bench is the evidence for that rule at the seam it governs: T receive threads each
+drive a multi-link rope through their own inbound child to their own egress sink — so the
+source is the only object two threads can contend on — under three wirings. The two pool
+configurations are given **equal total slab**, so what is compared is topology, not budget.
+
+The signature to look for is the shared pool's per-thread rate collapsing while the heap
+and the per-child pool both scale. On a 12-core / 24-thread host the shared pool falls to
+**~1/67** of its own single-thread rate by T=24 (244 ns → 16.4 µs per forward) while
+per-child tracks the heap within run-to-run spread. Peak slab is reported on stderr:
+**128 B per child, one size class**, independent of T.
+
+Diagnostic, **not** a `perf.yml` gate, for the same reason as the two storms above. Run it
+at least three times before drawing a conclusion — a single run of this workload showed a
+27 % single-thread pool win that three runs deleted.
 
 ## What is measured
 

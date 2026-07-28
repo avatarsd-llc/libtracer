@@ -89,6 +89,13 @@ add_executable(bench_route_handle_contention bench_route_handle_contention.cpp)
 target_link_libraries(bench_route_handle_contention PRIVATE libtracer)
 target_compile_options(bench_route_handle_contention PRIVATE -Wall -Wextra)
 
+# The FWD router's RX failable-source topology (ADR-0067 3, #625): shared heap vs one
+# shared pool vs one pool per child, swept over T receive threads. Diagnostic, not a perf
+# gate — thread-contention numbers are runner-dependent.
+add_executable(bench_rx_source_topology bench_rx_source_topology.cpp)
+target_link_libraries(bench_rx_source_topology PRIVATE libtracer)
+target_compile_options(bench_rx_source_topology PRIVATE -Wall -Wextra)
+
 # Zenoh side — built only when the prebuilt is vendored (run bench/fetch_zenoh.sh).
 set(ZC ${CMAKE_CURRENT_SOURCE_DIR}/vendor/zenoh-c)
 set(ZCPP ${CMAKE_CURRENT_SOURCE_DIR}/vendor/zenoh-cpp-1.9.0)
