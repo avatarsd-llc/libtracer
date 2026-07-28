@@ -355,6 +355,13 @@ add_test(NAME fwd_fanout COMMAND fwd_fanout_test)
 # evict_link_edges scoping + RFC-0005 counter unwind, §D.2 slot reuse/index stability,
 # fwd_router link_down (evict + clear_link), the add_child departure-notifier seam
 # (p2p down / bus peer-down), and a concurrent writer x evict race (the TSan gate).
+# Per-cause delivery-drop counters: a path-target edge whose delivery cannot happen drops
+# it (specified) and now says so (graph_t::delivery_drops).
+add_executable(delivery_drops_test delivery_drops_test.cpp)
+target_link_libraries(delivery_drops_test PRIVATE libtracer)
+libtracer_test_warnings(delivery_drops_test)
+add_test(NAME delivery_drops COMMAND delivery_drops_test)
+
 add_executable(edge_eviction_test edge_eviction_test.cpp)
 target_link_libraries(edge_eviction_test PRIVATE libtracer)
 libtracer_test_warnings(edge_eviction_test)

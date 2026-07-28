@@ -512,6 +512,12 @@ std::uint64_t graph_t::ancestor_walks() const noexcept {
     return ancestor_walks_.load(std::memory_order_relaxed);
 }
 
+graph_t::delivery_drops_t graph_t::delivery_drops() const noexcept {
+    return {.no_target = drops_no_target_.load(std::memory_order_relaxed),
+            .denied = drops_denied_.load(std::memory_order_relaxed),
+            .out_of_memory = drops_oom_.load(std::memory_order_relaxed)};
+}
+
 void graph_t::bump_subtree_listeners(vertex_t* v, std::int32_t delta) {
     v->for_each_child([delta](vertex_t& c) {
         c.bump_listeners_above(delta);
@@ -720,11 +726,21 @@ namespace {
 
 void graph_t::dispatch_edge_target(const edge_view_t& e, const rope_t& value) {
     vertex_t* target = find_ptr(*e.target_key);
-    if (target == nullptr) return;
+    // Each of the three drops below is counted before returning (delivery_drops()). The
+    // drop itself is specified — this leg fails alone and the write still succeeded — but
+    // an UNCOUNTED drop is indistinguishable from a delivery that never had to happen, for
+    // an operator and for a benchmark alike.
+    if (target == nullptr) {
+        drops_no_target_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     // Fan-in gate (#81, ADR-0026): the delivery is an ordinary write to the target,
     // gated by the TARGET's :acl WRITE right under the edge's stored caller context.
     // Denial drops this delivery.
-    if (!acl_allows(target, e.caller, acl_right_t::WRITE)) return;
+    if (!acl_allows(target, e.caller, acl_right_t::WRITE)) {
+        drops_denied_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     // Delivery TERMINATES at the target (ADR-0051 / RFC-0007): apply exactly the
     // target-local effects of a write — store (LKV/history per role), await wake, and the
     // target's own handler reaction (all inside store_value) — and NEVER re-dispatch to the
@@ -733,7 +749,10 @@ void graph_t::dispatch_edge_target(const edge_view_t& e, const rope_t& value) {
     // when it chooses), so a dispatch-level subscription cycle cannot form — no depth cap,
     // no dedup, no drain queue. An app wanting pure relay subscribes the consumer directly.
     rope_t clone;  // the NOTHROW delivery clone (#477) — on OOM this one leg drops
-    if (!try_clone_rope(clone, value)) return;
+    if (!try_clone_rope(clone, value)) {
+        drops_oom_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     (void)store_value(target, std::move(clone));
 }
 
