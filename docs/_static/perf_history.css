@@ -53,8 +53,16 @@ body[data-theme="dark"] .ph-hist, :root[data-theme="dark"] .ph-hist {
 .ph-hist .ph-note { font-size: 13px; color: var(--ph-muted); line-height: 1.55; margin: 4px 0 14px; }
 .ph-hist .ph-note b { color: var(--ph-ink); }
 
-.ph-hist .ph-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
-@media (max-width: 860px) { .ph-hist .ph-grid { grid-template-columns: 1fr; } }
+/* One chart per row, each spanning the full width. A history chart's x-axis is one
+   tick per recorded commit, so it is the axis that runs out of room first: at half
+   width the commit labels thin out and adjacent points merge. The SVG viewBox is
+   widened to match (perf_history.js) so a full-width card stays a WIDE chart rather
+   than a scaled-up half-width one. */
+.ph-hist .ph-grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
+/* No bleed rule here on purpose: custom.css widens the ARTICLE itself to the
+   viewport, so a chart is already full width. A negative margin on top of that
+   would push the cards past the content padding and make the page scroll
+   sideways — two mechanisms fighting over the same width. */
 .ph-hist .ph-card { position: relative; background: var(--ph-panel); border: 1px solid var(--ph-line); border-radius: 10px; padding: 15px 15px 12px; }
 .ph-hist .ph-card h4 { margin: 0 0 2px; font-size: 14.5px; font-weight: 650; color: var(--ph-ink); }
 .ph-hist .ph-card .cond { font-family: var(--ph-mono); font-size: 11px; color: var(--ph-muted); margin: 0 0 6px; }

@@ -43,3 +43,50 @@ dl.cpp > dt {
   margin: 1.4rem 0;
   text-align: center;
 }
+
+/*
+ * Full-viewport content width.
+ *
+ * Furo caps the article at `--content-width` (46rem by default), which suits
+ * running prose but starves the two things this documentation set leans on
+ * hardest: the performance charts, whose x-axis is one tick per recorded commit,
+ * and the wide reference tables. Both were being squeezed into a column narrower
+ * than the data.
+ *
+ * `--content-padding` is kept (and raised a little on large screens) so text
+ * never runs edge-to-edge against the viewport, and the sidebars keep their own
+ * widths — this widens the ARTICLE, it does not remove the navigation.
+ *
+ * Tradeoff, stated rather than hidden: at very wide viewports a paragraph line
+ * gets long enough to hurt scanning. Prose blocks below therefore keep a
+ * readable measure while tables, code, and figures take the full width.
+ */
+:root {
+  --content-width: 100%;
+  --content-padding: 2rem;
+}
+@media (min-width: 1600px) {
+  :root { --content-padding: 3rem; }
+}
+.content { max-width: 100%; }
+
+/* Keep running prose at a readable measure while anything data-bearing spans the
+   full width. Without this, full-viewport body text is a regression in
+   readability, not an improvement. */
+article > p,
+article > ul,
+article > ol,
+article > blockquote {
+  max-width: 62rem;
+}
+article > table,
+article > figure,
+article > .highlight,
+article > .ph-hist,
+article > div[class*="admonition"],
+article > section > table,
+article > section > figure,
+article > section > .highlight,
+article > section > .ph-hist {
+  max-width: 100%;
+}
