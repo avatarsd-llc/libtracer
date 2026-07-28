@@ -1,11 +1,19 @@
 # Test & benchmark methodology
 
-> How libtracer's numbers are produced — the measurement surfaces, the metrics,
-> and the discipline that turns a benchmark into a *gate*. This page is the
-> durable companion to the auto-generated
-> [Performance & conformance](performance.md) page: that page carries the live
-> measured values; this one explains what they mean and how to read them.
-> Nothing here describes a chart — it describes the experiment behind the chart.
+> **This file is not a published page.** Its sections are spliced into the
+> generated [Performance & conformance](performance.md) page by
+> `bench/gen_results_page.py`, each next to the results it explains — the method
+> for a surface belongs beside that surface's numbers, not one click away. It
+> lives here as ordinary Markdown so it stays editable and reviewable as a diff
+> rather than as a string inside a generator.
+>
+> Two consequences for editing it. **Section headings are the splice keys**: the
+> generator looks them up by name and *fails the docs build* if one goes missing,
+> so rename a heading only together with `bench/gen_results_page.py`. And the
+> `##`/`###` levels here land unchanged under the generated page's chapters, so
+> they must stay as they are.
+>
+> It describes the experiment behind each chart, never the chart.
 
 libtracer's central claim is a **sub-microsecond, zero-copy dispatch substrate**
 that stays byte-exact across three independent native cores. A claim like that is

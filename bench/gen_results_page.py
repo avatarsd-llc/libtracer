@@ -505,7 +505,7 @@ rise there). Same measurement, two units.
 
 
 COMPARE_INTRO = """\
-## 5 · libtracer vs Zenoh — measured, absolute
+## 9 · libtracer vs Zenoh — measured, absolute
 
 A side-by-side comparison against [Eclipse Zenoh](https://zenoh.io) (zenoh-c 1.9.0, peer
 mode). Two surfaces: three **in-process** axes — subscriber **fan-out**, **payload** size,
@@ -558,7 +558,7 @@ optional `-DLIBTRACER_WITH_QUIC` module (msquic + TLS). Full harness in
 
 
 RAW_DATA_BLOCK = """\
-## 8 · Raw data & provenance
+## 13 · Raw data & provenance
 
 The charts above are one view of a persisted store; this is where the store comes from
 and how to get at it directly.
@@ -727,6 +727,88 @@ def provenance() -> str:
     return f"**🤖 CI-generated** on {date} · commit {commit} · {run}{runner_note}."
 
 
+# ---------------------------------------------------------------------------
+# methodology prose (docs/methodology.md, spliced in — not a page of its own)
+# ---------------------------------------------------------------------------
+METHODOLOGY = REPO / "docs" / "methodology.md"
+
+
+def _methodology() -> dict[str, str]:
+    """@brief Parse `docs/methodology.md` into {heading text: body}, both `##` and `###`.
+
+    The methodology used to be a SEPARATE page, and the split had a cost the two
+    pages could not see: they described the same six measurement surfaces in the
+    same order, one saying what a surface measures and the other showing what it
+    measured, so a reader had to hold two tabs open to read one number. Worse, the
+    duplication drifted — a caveat updated on one page stayed stale on the other.
+
+    Merging them by CONCATENATION would have kept that structure and just removed a
+    click. Instead each surface's methodology is spliced next to its own results
+    below, which is the same principle the chart sectioning already follows: the
+    explanation sits with the thing it explains.
+
+    The prose stays in its own Markdown file rather than moving into this
+    generator's f-string, so it is still editable by anyone who can write Markdown
+    and still reviewable as a diff. `docs/conf.py` drops it from `include_patterns`
+    so it renders once, here, instead of twice.
+
+    Heading levels are spliced UNCHANGED: the file's `###` subsections land under
+    this page's `##` chapters, which is exactly one level down and satisfies
+    `check_heading_depth`.
+    """
+    out: dict[str, str] = {}
+    if not METHODOLOGY.exists():
+        return out
+    lines = METHODOLOGY.read_text().splitlines()
+    cur: str | None = None
+    lvl = 0
+    buf: list[str] = []
+    fenced = False
+    for ln in lines:
+        if ln.startswith("```"):
+            fenced = not fenced
+        if not fenced and ln.startswith("#"):
+            n = len(ln) - len(ln.lstrip("#"))
+            if n in (2, 3) and ln[n:n + 1] == " ":
+                if cur is not None:
+                    out[cur] = "\n".join(buf).strip()
+                cur, lvl, buf = ln[n:].strip(), n, []
+                continue
+            if n == 1:  # the file's own title; the merged page supplies its own
+                if cur is not None:
+                    out[cur] = "\n".join(buf).strip()
+                cur, buf = None, []
+                continue
+        if cur is not None:
+            buf.append(ln)
+    if cur is not None:
+        out[cur] = "\n".join(buf).strip()
+    return out
+
+
+def mprose(sections: dict[str, str], heading: str, *, keep_heading: bool = False) -> str:
+    """@brief One methodology section by heading, or a hard failure.
+
+    Missing is an ERROR, never an empty string. A renamed heading would otherwise
+    delete a paragraph from the published page silently, which is the same failure
+    mode as a chart family that matches nothing — the page still builds and simply
+    says less than it did. Fail the docs build instead.
+    """
+    if not sections:
+        return ""  # file absent entirely (partial checkout) — degrade, do not crash
+    if heading not in sections:
+        raise SystemExit(
+            f"gen_results_page: docs/methodology.md has no section {heading!r}.\n"
+            f"  available: {sorted(sections)}\n"
+            "  (renaming a methodology heading must be mirrored here — the splice is by name)")
+    body = sections[heading]
+    # `keep_heading` emits a CONSTANT subheading, never the source heading: the source
+    # headings carry methodology's own chapter numbers ("2 · In-process latency"), which
+    # collide with this page's numbering the moment they are spliced under it, and they
+    # restate the chapter title they now sit beneath. One consistent line instead.
+    return f"### How this surface is measured\n\n{body}" if keep_heading else body
+
+
 def check_heading_depth(page: str) -> None:
     """@brief Fail the build on a heading hierarchy that skips a level.
 
@@ -768,6 +850,7 @@ def check_heading_depth(page: str) -> None:
 
 def main() -> int:
     summary, passed = cross_core_block()
+    M = _methodology()
     history = _load_history()
     charts = history_sections(history)
     assets = render_history.assets_block()
@@ -779,23 +862,44 @@ This page is **auto-generated** from the live test + benchmark harnesses on each
 build (`bench/gen_results_page.py`, ADR-0032). It is the published response surface,
 not a hand-edited snapshot. All rates and latencies are **absolute measured values**,
 representative of the CI runner (shared-runner variance is real — read trends, not the
-third digit); the libtracer-vs-Zenoh charts plot both engines on the same axes. How
-these numbers are produced — the measurement surfaces, the metrics, and the gating
-discipline — is documented on the [Test & benchmark methodology](methodology.md) page.
+third digit); the libtracer-vs-Zenoh charts plot both engines on the same axes. How each
+number is produced is documented **beside the number itself** — every chapter opens with
+the method for its own surface, and the cross-cutting rules (what the metrics mean, what
+actually stops a regression, how to read the noise) are chapters 1-3.
 
 {provenance()}
 ```
 
 {HOW_TO_READ}
 
-## 1 · Cross-core conformance (every native core must agree byte-for-byte)
+## 1 · What the metrics mean
+
+{mprose(M, "The metric taxonomy")}
+
+## 2 · What actually stops a regression
+
+{mprose(M, "What actually stops a regression")}
+
+## 3 · Noise, variance, and what one number is worth
+
+{mprose(M, "Reading the numbers (noise & variance)")}
+
+## 4 · The measurement surfaces
+
+{mprose(M, "The measurement surfaces")}
+
+## 5 · Cross-core conformance (every native core must agree byte-for-byte)
+
+{mprose(M, "1 · Cross-core conformance (correctness, not speed)", keep_heading=True)}
 
 The shared conformance vectors are decoded+re-encoded by every enabled core; a DISAGREE
 fails CI (ADR-0028). Live driver summary:
 
 {summary}
 
-## 2 · Dispatch — in-process latency & throughput
+## 6 · Dispatch — in-process latency & throughput
+
+{mprose(M, "2 · In-process latency & throughput (the dispatch thesis)", keep_heading=True)}
 
 The µs-latency / zero-copy thesis (ADR-0031), measured by `bench_libtracer`: what one
 write costs when publisher and subscriber are in the same process, swept over fan-out,
@@ -820,7 +924,9 @@ what the target's own store costs. Read either against `inproc` at the same fan-
 
 {charts_for(charts, "dispatch")}
 
-## 3 · Wire & routing — what a framed hop costs
+## 7 · Wire & routing — what a framed hop costs
+
+{mprose(M, "3b · Routing & delivery (the network plane, per frame)", keep_heading=True)}
 
 {DEMUX_BLOCK}
 
@@ -828,7 +934,9 @@ what the target's own store costs. Read either against `inproc` at the same fan-
 
 {DEMUX_NOTES_BLOCK}
 
-## 4 · Memory & allocation
+## 8 · Memory & allocation
+
+{mprose(M, "3 · Memory footprint (allocations counted, not sampled)", keep_heading=True)}
 
 A different instrument entirely: `bench_forward_heap` replaces the global allocator
 with a counting wrapper and arms it around exactly one operation — so its probes are
@@ -897,9 +1005,15 @@ where libtracer actually ships.
 
 {COMPARE_INTRO}
 
+{mprose(M, "4 · libtracer vs Zenoh (absolute, one pass, same runner)")}
+
+### Fairness in the comparison
+
+{mprose(M, "Fairness in the Zenoh comparison")}
+
 {zenoh_compare_block()}
 
-## 6 · Cross-core codec performance (decode→encode roundtrip, same v1 vectors)
+## 10 · Cross-core codec performance (decode→encode roundtrip, same v1 vectors)
 
 Every native core (cpp-core / ts-core / rust-core) runs the SAME per-vector
 decode→encode roundtrip over the shared v1 conformance vectors (ADR-0032 `lang`
@@ -907,13 +1021,23 @@ axis, #96), so this is a like-for-like codec surface across implementations.
 Figures are the **median across all v1 vectors** (one decode + one encode == one
 roundtrip); a core whose toolchain is absent in this build degrades to a note.
 
+{mprose(M, "5 · Cross-core codec (like-for-like across implementations)", keep_heading=True)}
+
 {codec_block()}
 
-## 7 · Test rollup (live ctest, unified with the perf surface)
+## 11 · Test rollup (live ctest, unified with the perf surface)
 
 {tests_block()}
 
+## 12 · Reproducing this page locally
+
+{mprose(M, "Reproducing locally")}
+
 {RAW_DATA_BLOCK}
+
+### Provenance & auditability
+
+{mprose(M, "Provenance & auditability")}
 
 {assets}
 """

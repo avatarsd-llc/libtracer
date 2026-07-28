@@ -73,7 +73,9 @@ include_patterns = [
     "docs/capability-matrix.md",
     "docs/interoperability.md",
     "docs/interop/**",
-    "docs/methodology.md",
+    # docs/methodology.md is NOT listed: bench/gen_results_page.py splices its
+    # prose into docs/performance.md, so listing it here would publish every
+    # paragraph twice under two different URLs.
     "docs/performance.md",
     "docs/test-report.md",
     "docs/reference/**",
