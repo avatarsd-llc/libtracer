@@ -120,7 +120,6 @@ About the specification <docs/spec/README>
 :hidden:
 :maxdepth: 1
 
-Test & benchmark methodology <docs/methodology>
 Performance & conformance <docs/performance>
 Test report <docs/test-report>
 ```
