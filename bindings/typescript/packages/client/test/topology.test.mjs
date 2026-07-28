@@ -105,7 +105,7 @@ const skipCtrl = (name) => name === 'ctrl';
 const A = 'k1:' + 'a1'.repeat(32);
 const B = 'k1:' + 'b2'.repeat(32);
 const C = 'k1:' + 'c3'.repeat(32);
-const H = 'k1:' + '40'.repeat(32);
+const BUS = 'k1:' + '40'.repeat(32);
 
 test('topology: WITHOUT identity the cyclic mesh cannot terminate — maxDepth is the only bound', { skip }, async (t) => {
   const { client, transport } = await connect('a');
@@ -161,7 +161,7 @@ test('topology: WITH identity the cycle closes, nodes collapse, and the walk sel
 
   // Exactly the four devices the compose stack runs — no matter how many routes reach them.
   const ids = g.nodes.map((n) => n.id).sort();
-  assert.deepEqual(ids, [A, B, C, H].sort());
+  assert.deepEqual(ids, [A, B, C, BUS].sort());
   assert.equal(g.root, A, 'the vantage is node a — identified by its KEY, not a name');
 
   // The collapse itself: the vantage is reached again from BOTH its ring neighbours,
@@ -182,37 +182,37 @@ test('topology: WITH identity the cycle closes, nodes collapse, and the walk sel
   // Every link is seen from BOTH ends, because a link is bidirectional even though the
   // DIAL that created it was not: `a` dialing `b` creates link "b" at a AND link "a" at
   // b, and either end routes through its own name. So the 5 dials surface as 8 walkable
-  // edges — the hub's two inbound links are the exception: they land on its single
+  // edges — the bus's two inbound links are the exception: they land on its single
   // peer_named `mesh` bus, which is not descendable (next test).
   const wire = g.edges.map((e) => `${e.from} -${e.name}-> ${e.to}`).sort();
   assert.deepEqual(wire, [
     `${A} -b-> ${B}`,
     `${A} -c-> ${C}`,
-    `${A} -hub-> ${H}`,
+    `${A} -bus-> ${BUS}`,
     `${B} -a-> ${A}`,
     `${B} -c-> ${C}`,
-    `${B} -hub-> ${H}`,
+    `${B} -bus-> ${BUS}`,
     `${C} -a-> ${A}`,
     `${C} -b-> ${B}`,
   ].sort());
   t.diagnostic('with identity: 4 nodes, 8 edges, ring closed, walk self-terminated — the ADR-0044 pt-3 projection');
 });
 
-test('topology: hub is reached by two independent routes and collapses to one node', { skip }, async (t) => {
+test('topology: bus is reached by two independent routes and collapses to one node', { skip }, async (t) => {
   const { client, transport } = await connect('a');
   t.after(() => transport.close().catch(() => {}));
 
   const g = await walkTopology(client, { maxDepth: 12, identify: identifyByFacet, skipLink: skipCtrl });
-  const hub = g.nodes.find((n) => n.id === H);
-  const routes = hub.routes.map(routeKey).sort();
+  const busNode = g.nodes.find((n) => n.id === BUS);
+  const routes = busNode.routes.map(routeKey).sort();
 
-  // a->hub directly, and a->b->hub. Two paths, one device: the dedup ADR-0044 says the
+  // a->bus directly, and a->b->bus. Two paths, one device: the dedup ADR-0044 says the
   // core will never do and the client must.
   assert.deepEqual(routes, [
-    '/net/ws-client/b/net/ws-client/hub',
-    '/net/ws-client/hub',
+    '/net/ws-client/b/net/ws-client/bus',
+    '/net/ws-client/bus',
   ]);
-  assert.equal(g.edges.filter((e) => e.to === H).length, 2, 'two distinct edges reach the one hub');
+  assert.equal(g.edges.filter((e) => e.to === BUS).length, 2, 'two distinct edges reach the one bus');
 });
 
 test('topology: a BUS link is reported with its peers, never descended', { skip }, async (t) => {
@@ -221,10 +221,10 @@ test('topology: a BUS link is reported with its peers, never descended', { skip 
 
   const g = await walkTopology(client, { maxDepth: 12, identify: identifyByFacet, skipLink: skipCtrl });
 
-  // The hub's `mesh` listener is peer_named: ONE connection serving both a and b.
+  // The bus's `mesh` listener is peer_named: ONE connection serving both a and b.
   const bus = g.busLinks.find((b) => b.name === 'mesh');
   assert.ok(bus, 'the peer_named listener is reported as a bus link');
-  assert.equal(bus.at, H);
+  assert.equal(bus.at, BUS);
   assert.equal(bus.peers.length, 2, 'it hears exactly its two dialers');
   for (const p of bus.peers) assert.match(p, /^\d+\.\d+\.\d+\.\d+:\d+$/);
 
@@ -241,5 +241,5 @@ test('topology: a BUS link is reported with its peers, never descended', { skip 
   // And it must not have been walked as a node — routing through a bus link's NAME
   // broadcasts to every peer, drawing N replies for one request.
   assert.equal(g.edges.some((e) => e.name === 'mesh'), false, 'no edge descends the bus link');
-  t.diagnostic(`bus link hub/mesh: peers=${JSON.stringify(bus.peers)} routable=${bus.routable}`);
+  t.diagnostic(`bus link bus/mesh: peers=${JSON.stringify(bus.peers)} routable=${bus.routable}`);
 });

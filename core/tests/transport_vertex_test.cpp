@@ -647,16 +647,16 @@ void test_ws_peer_named_config() {
 
     // ----- the SUBJECT: peer_named=1 => the bus facet, hence the synthesized listing. -----
     const auto w = node.write(path_t("/net:children[]"),
-                              ws_listener_spec("hub", 47141, /*peer_named=*/true, /*max_peers=*/8));
+                              ws_listener_spec("bus", 47141, /*peer_named=*/true, /*max_peers=*/8));
     check(w.has_value(), "SPEC{listener, kind=ws, peer_named=1} constructs the owned server");
-    auto* const srv = dynamic_cast<tr::net::transport_ws_server*>(net.link_of("net/ws-server/hub"));
+    auto* const srv = dynamic_cast<tr::net::transport_ws_server*>(net.link_of("net/ws-server/bus"));
     check(srv != nullptr && srv->ok(), "the owned transport is a live transport_ws_server");
     check(srv != nullptr && srv->bus() != nullptr,
           "the ws-private key exposed the bus_link_t facet on a CONFIG-constructed link");
 
     // A fresh listener is audible to nobody.
-    check(enumerate_peers(node, "/net/ws-server/hub:children[]").empty(),
-          "/net/hub:children[] is empty before any peer dials in");
+    check(enumerate_peers(node, "/net/ws-server/bus:children[]").empty(),
+          "/net/bus:children[] is empty before any peer dials in");
 
     // Two real ws clients dial the SPEC-created listener; each completes an RFC 6455
     // handshake, so each becomes an audible peer of the bus.
@@ -665,12 +665,12 @@ void test_ws_peer_named_config() {
     check(c1.ok() && c2.ok(), "both ws clients handshook against the in-band-created listener");
 
     const bool listed = wait_until(
-        [&] { return enumerate_peers(node, "/net/ws-server/hub:children[]").size() == 2; }, 2s);
-    check(listed, "/net/hub:children[] synthesizes exactly the 2 live peers (ADR-0044 Brick C)");
+        [&] { return enumerate_peers(node, "/net/ws-server/bus:children[]").size() == 2; }, 2s);
+    check(listed, "/net/bus:children[] synthesizes exactly the 2 live peers (ADR-0044 Brick C)");
 
     // The peer names are the far side's <ip>:<port> — the source port is ephemeral, so
     // assert the shape, never a literal.
-    const auto peers = enumerate_peers(node, "/net/ws-server/hub:children[]");
+    const auto peers = enumerate_peers(node, "/net/ws-server/bus:children[]");
     const bool shaped = std::all_of(peers.begin(), peers.end(), [](const std::string& p) {
         return p.starts_with("127.0.0.1:") && p.size() > std::string_view("127.0.0.1:").size();
     });
@@ -684,7 +684,7 @@ void test_ws_peer_named_config() {
     check(enumerate_peers(node, "/net:children[]") == std::set<std::string>{"ws-server"},
           "/net:children[] lists the module");
     check(
-        enumerate_peers(node, "/net/ws-server:children[]") == std::set<std::string>{"hub", "plain"},
+        enumerate_peers(node, "/net/ws-server:children[]") == std::set<std::string>{"bus", "plain"},
         "/net/ws-server:children[] lists only the two connections — no vertex per peer");
 }
 

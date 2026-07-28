@@ -5,7 +5,7 @@
 # container with its own network namespace and IP.
 #
 #      a ──dial──▶ b ──dial──▶ c ──dial──▶ a       (the ring closes: a physical CYCLE)
-#      a ──dial──▶ hub ◀──dial── b                 (two peers on ONE peer_named listener)
+#      a ──dial──▶ bus ◀──dial── b                 (two peers on ONE peer_named listener)
 #
 # NOTHING HERE FORMS THE MESH. Each service creates only its own listeners; every
 # inter-node link is DIALLED by a SPEC the TypeScript driver writes into that node's
@@ -82,12 +82,12 @@ services:
   # max_peers keys are ws-private config the ws factory parses (ADR-0043 §5), so this
   # listener is created in band like every other — no direct construction, no
   # provide_link.
-  hub:
+  bus:
     <<: *node
     networks:
       mesh:
         ipv4_address: 172.28.0.14
     ports: ["47304:47300"]
     command:
-      ["--name", "hub", "--ctrl-port", "47300", "--peer-named-listen", "mesh:47320",
+      ["--name", "bus", "--ctrl-port", "47300", "--peer-named-listen", "mesh:47320",
        "--identity", "4040404040404040404040404040404040404040404040404040404040404040", "--timeout-ms", "300000"]
