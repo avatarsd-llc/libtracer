@@ -14,6 +14,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`graph_t::delivery_drops()` — a dropped delivery is now countable** (#629). A path-target
+  subscription edge (the form a wire `SUBSCRIBER` produces) delivers by re-dispatching into its
+  target, and three conditions make that impossible: the target PATH resolves to no live vertex,
+  the target's `:acl` denies the edge's stored caller (the #81 fan-in gate), or the nothrow
+  delivery clone cannot be allocated (#477). All three are specified to drop that ONE leg while
+  the write itself succeeds — correct, and previously **invisible**: a node whose target had been
+  retired dropped every delivery for the rest of its life with nothing anywhere to say so. Note
+  that an edge may name a target that does not exist and still be admitted, so this is reachable
+  without anything being retired.
+
+  Returns `delivery_drops_t{no_target, denied, out_of_memory}` — per cause, because "something
+  dropped" is not actionable. Counted, never enforced: nothing in the library reads them, so a
+  deployment decides whether to alarm. Relaxed monotonic and incremented only ON a drop, so the
+  delivering path is unchanged while nothing drops — the same near-free-when-idle shape as
+  `ancestor_walks()`. The three loads are not one coherent snapshot, deliberately: a lock on the
+  drop path to serve a diagnostic would cost more than it tells.
+
 - **`tr::mem::pool_source_t<Sync>` — a bounded, RECYCLING `block_source_t`** (#597,
   [ADR-0067](../docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md)). Closes the
   gap between `heap_source_t` (recycles, unbounded) and `bump_source_t` (bounded, never

@@ -733,6 +733,40 @@ class graph_t {
      */
     [[nodiscard]] std::uint64_t ancestor_walks() const noexcept;
 
+    /**
+     * @brief Why a subscription edge's delivery was dropped, counted per cause.
+     *
+     * A path-target edge — the form a wire `SUBSCRIBER` produces, naming a target PATH —
+     * delivers by re-dispatching into that target. Three conditions make that impossible,
+     * and all three are specified to DROP the one delivery rather than fail the write: the
+     * write itself succeeded and the other legs still ran. Dropping is correct. Dropping
+     * *invisibly* is what these counters fix — a node whose target was retired, or whose
+     * fan-in gate denies the edge's stored caller, otherwise drops every delivery for the
+     * rest of its life with nothing anywhere to say so.
+     *
+     * Counted, never enforced: nothing in the library reads them, so a deployment chooses
+     * whether to alarm. Relaxed monotonic, incremented only ON a drop — the delivering path
+     * pays nothing when nothing is dropped, exactly like @ref ancestor_walks.
+     */
+    struct delivery_drops_t {
+        /** @brief The target PATH resolved to no live vertex (retired, or never created). */
+        std::uint64_t no_target = 0;
+        /** @brief The target's `:acl` denied WRITE to the edge's stored caller (#81). */
+        std::uint64_t denied = 0;
+        /** @brief The nothrow delivery clone could not be allocated (#477). */
+        std::uint64_t out_of_memory = 0;
+    };
+
+    /**
+     * @brief Snapshot the per-cause delivery-drop counters (@ref delivery_drops_t).
+     *
+     * The three loads are individually relaxed and not one atomic snapshot, so a reader
+     * racing a delivering thread may see a torn total. That is deliberate: making it
+     * coherent would put a lock on the drop path to serve a diagnostic, and these are
+     * monotonic counters whose useful reading is "is this growing", not an instant.
+     */
+    [[nodiscard]] delivery_drops_t delivery_drops() const noexcept;
+
    private:
     // Internal (raw `vertex_t*`) forms of the public handle-returning resolvers: the graph's
     // own machinery threads raw pointers (ADR-0056 — internal methods keep `vertex_t*`), and
@@ -945,6 +979,11 @@ class graph_t {
     std::vector<std::byte> identity_record_;
     // Bubbling-walk instrumentation (RFC-0005) — see ancestor_walks().
     mutable std::atomic<std::uint64_t> ancestor_walks_{0};
+    // Per-cause delivery-drop instrumentation — see delivery_drops(). Touched only on the
+    // drop path, so the delivering path is byte-identical while nothing drops.
+    mutable std::atomic<std::uint64_t> drops_no_target_{0};
+    mutable std::atomic<std::uint64_t> drops_denied_{0};
+    mutable std::atomic<std::uint64_t> drops_oom_{0};
 
     // The propagate-sweep selection sets (RFC-0008 §B), keyed on canonical PATH-payload
     // bytes and ORDERED so a subtree is a contiguous prefix range (a parent's key is a
