@@ -127,6 +127,25 @@ jobs:
           for f in bench/bench_forward_demux_raw.txt bench/bench_compact_delivery_raw.txt; do
             [ -s "$f" ] || echo "::warning::$f is empty — its series will not be recorded"
           done
+      # Zenoh, on the SAME runner and in the same pass. Its version is pinned, so its line
+      # is expected to be FLAT — which is the point: it is a control. A libtracer series
+      # that moves while Zenoh's stays put is the code changing; both moving together is
+      # the runner, and shared runners vary ~2x. Until now Zenoh was measured only for the
+      # per-build comparison charts, so libtracer-vs-Zenoh could not be read over time at
+      # all. Entirely optional — a failed vendor download must never cost this commit its
+      # history point.
+      - name: Run the Zenoh comparison bench (control series, optional)
+        run: |
+          if bash bench/fetch_zenoh.sh; then
+            cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
+            if cmake --build bench/build --target bench_zenoh -j; then
+              ./bench/build/bench_zenoh >bench/bench_zenoh_raw.txt || true
+            fi
+          fi
+          # Same visibility rule as the network-plane benches above: an empty transcript is
+          # a silent non-recording, so say so rather than letting the job go green quietly.
+          [ -s bench/bench_zenoh_raw.txt ] || \
+            echo "::warning::no Zenoh transcript — its control series will not be recorded this commit"
       - name: Build the parent commit's benchmark on this runner (ratchet baseline)
         run: |
           if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
@@ -166,6 +185,7 @@ jobs:
             bench/bench_forward_heap_raw.txt
             bench/bench_forward_demux_raw.txt
             bench/bench_compact_delivery_raw.txt
+            bench/bench_zenoh_raw.txt
           retention-days: 90
 
   # --- main push: persist the build-to-build history (best across runners) --------
@@ -199,7 +219,8 @@ jobs:
           args=""
           for f in bench/raws/*/bench_libtracer_raw.txt \
                    bench/raws/*/bench_forward_demux_raw.txt \
-                   bench/raws/*/bench_compact_delivery_raw.txt; do
+                   bench/raws/*/bench_compact_delivery_raw.txt \
+                   bench/raws/*/bench_zenoh_raw.txt; do
             [ -s "$f" ] && args="$args --raw $f"
           done
           if [ -z "$args" ]; then

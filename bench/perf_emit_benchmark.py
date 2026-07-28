@@ -58,33 +58,53 @@ def run_bench(bench: pathlib.Path) -> str:
 
 
 def parse_rows(out: str) -> list[tuple]:
-    """RESULT lines -> (mode, size, fan, ep, deliv_s, p50ns, p99ns) tuples."""
+    """RESULT lines -> (system, mode, size, fan, ep, deliv_s, p50ns, p99ns) tuples.
+
+    `system` (RESULT column 1) is part of the key, and that is not cosmetic. It used to
+    be DROPPED, so a point was identified by mode alone — fine while only libtracer
+    transcripts were ever fed in, and silently destructive the moment one was not:
+    Zenoh's `inproc` rows and libtracer's `inproc` rows would have been medianed
+    together into a single series blending two engines, under a name that claims to be
+    one of them. Keying by system is what makes recording Zenoh history possible at all.
+    """
     rows = []
     for line in out.splitlines():
         f = line.split("\t")
         if len(f) == 12 and f[0] == "RESULT":
-            rows.append((f[2], int(f[3]), int(f[4]), int(f[5]),
+            rows.append((f[1], f[2], int(f[3]), int(f[4]), int(f[5]),
                          float(f[7]), int(f[9]), int(f[10])))
     return rows
 
 
 def points(rows: list[tuple]) -> list[tuple]:
-    """Every distinct (mode, size, fan, ep) the run produced, in first-seen order —
-    ALL bench rows feed the tracker, not a hand-picked subset."""
+    """Every distinct (system, mode, size, fan, ep) the run produced, in first-seen
+    order — ALL bench rows feed the tracker, not a hand-picked subset."""
     seen: dict[tuple, None] = {}
     for r in rows:
-        seen.setdefault((r[0], r[1], r[2], r[3]))
+        seen.setdefault(r[:5])
     return list(seen)
 
 
+def series_tag(system: str, mode: str, size: int, fan: int, ep: int) -> str:
+    """@brief The recorded series name for one point.
+
+    libtracer keeps its historical bare-`mode` naming, byte-identical, because these
+    names key a persisted gh-pages store: renaming them would orphan every point
+    recorded so far and restart the history at zero. Any OTHER system is prefixed, so
+    its series can never collide with libtracer's.
+    """
+    head = f"{mode}" if system == "libtracer" else f"{system} {mode}"
+    return f"{head} {size}B/fan{fan}/{ep}ep"
+
+
 def median_point(rows: list[tuple], key: tuple):
-    sel = [r for r in rows if (r[0], r[1], r[2], r[3]) == key]
+    sel = [r for r in rows if r[:5] == key]
     if not sel:
         return None
     return {
-        "p50_ns": int(statistics.median(r[5] for r in sel)),
-        "p99_ns": int(statistics.median(r[6] for r in sel)),
-        "deliv_s": statistics.median(r[4] for r in sel),
+        "p50_ns": int(statistics.median(r[6] for r in sel)),
+        "p99_ns": int(statistics.median(r[7] for r in sel)),
+        "deliv_s": statistics.median(r[5] for r in sel),
     }
 
 
@@ -139,14 +159,14 @@ def main() -> int:
     smaller: list[dict] = []
     bigger: list[dict] = []
     for key in points(all_rows):
-        mode, size, fan, ep = key
+        system, mode, size, fan, ep = key
         # Best across runners: each runner contributes its own median for the
         # point; min latency / max throughput wins (machine speed cancels).
         cands = [m for m in (median_point(rows, key) for rows in per_runner) if m]
         v = {"p50_ns": min(m["p50_ns"] for m in cands),
              "p99_ns": min(m["p99_ns"] for m in cands),
              "deliv_s": max(m["deliv_s"] for m in cands)}
-        tag = f"{mode} {size}B/fan{fan}/{ep}ep"
+        tag = series_tag(system, mode, size, fan, ep)
         smaller.append({"name": f"{tag} p50 latency", "unit": "ns", "value": v["p50_ns"]})
         # A zero p99 means the row is batch-amortized and has no distribution to take a
         # percentile of, not that its tail latency is zero nanoseconds. Recording it

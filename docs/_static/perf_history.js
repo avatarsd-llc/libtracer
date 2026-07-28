@@ -438,8 +438,13 @@
     }).join("") + "</div>";
     // Every card names the code that produced it. A chart whose harness you cannot
     // find is a number you cannot check.
-    var src = c.src ? '<a class="ph-src" href="https://github.com/avatarsd-llc/libtracer/blob/main/'
-      + c.src + '">' + c.src.replace(/^bench\//, "") + "</a>" : "";
+    // c.src is a LIST: a chart may draw series from more than one harness (the
+    // libtracer-vs-Zenoh card does), and naming one would credit it with the other's work.
+    var srcs = c.src ? (Array.isArray(c.src) ? c.src : [c.src]) : [];
+    var src = srcs.map(function (f) {
+      return '<a class="ph-src" href="https://github.com/avatarsd-llc/libtracer/blob/main/'
+        + f + '">' + f.replace(/^bench\//, "") + "</a>";
+    }).join(" + ");
     card.innerHTML = "<h4>" + c.title + "</h4>" + '<div class="ph-tabs"></div>'
       + '<p class="cond">' + c.cond + (src ? ' \u00b7 measured by ' + src : "") + "</p>" + mrow
       + '<p class="ph-metblurb"></p>'
