@@ -779,11 +779,6 @@ struct vertex_ext_t {
      *         when @ref acl_cache_dirty is raised. Only the MERGE is cached, never a
      *         verdict — expiry evaluates at check time against the caller's now. */
     std::vector<ace_t> eff_aces;
-    /** @brief The `kAceInherit`-flagged projection of @ref eff_aces (#361 §3): what a
-     *         BARE descendant (no own ACEs) evaluates against — the filter of a bearing
-     *         vertex's merge IS the descendant's effective list (idempotent, ordered).
-     *         Rebuilt together with @ref eff_aces. */
-    std::vector<ace_t> eff_aces_inherit;
     /** @brief Raised ⇒ @ref eff_aces is stale (rebuild lazily; ADR-0050 cache protocol). */
     std::atomic<bool> acl_cache_dirty{true};
     /** @brief Monotonic `:acl`-mutation counter — bumped (ahead of @ref acl_cache_dirty) by
@@ -1458,7 +1453,6 @@ class vertex_t {
             e->acl.clear();
             e->aces.clear();
             e->eff_aces.clear();
-            e->eff_aces_inherit.clear();
             e->acl_gen.fetch_add(1, std::memory_order_release);
             e->acl_cache_dirty.store(true, std::memory_order_release);
             e->settings = kDefaultSettings;
@@ -1572,16 +1566,17 @@ class vertex_t {
      * @param rebuild `std::vector<ace_t>(const std::vector<ace_t>& own)` — the
      *                fresh merge over a snapshot of this vertex's own ACEs; runs
      *                UNLOCKED (it may take other vertices' stripes freely).
-     * @param eval    Pure evaluation over `(merged, inherited)` — the cached merge
-     *                and its `kAceInherit` projection (#361 §3: a bare descendant
-     *                evaluates the latter). ADR-0050 policy contract: no
-     *                locks/clock/graph inside.
+     * @param eval    Pure evaluation over the cached merge. A BARE descendant evaluates
+     *                the merge's `kAceInherit` **subsequence**, which `eval` selects with
+     *                `effective_acl_t::allows`'s `required_flags` rather than receiving a
+     *                second, pre-projected list — filtering in place is order-identical
+     *                and costs no storage. ADR-0050 policy contract: no locks/clock/graph
+     *                inside.
      * @return Whatever @p eval returns.
      */
     template <typename Rebuild, typename Eval>
     auto with_effective_aces(Rebuild&& rebuild, Eval&& eval)
-        -> decltype(eval(std::declval<const std::vector<ace_t>&>(),
-                         std::declval<const std::vector<ace_t>&>())) {
+        -> decltype(eval(std::declval<const std::vector<ace_t>&>())) {
         vertex_ext_t& e = ensure_ext();  // gated eval caches its merge here (fresh ⇒ dirty)
         std::unique_lock lock(vertex_stripe_of(this).m);
         // Generation-gated rebuild (#425). `acl_gen` is bumped — ahead of the dirty flag,
@@ -1610,19 +1605,14 @@ class vertex_t {
             const std::vector<ace_t> own = e.aces;  // snapshot; rebuild runs unlocked
             lock.unlock();
             std::vector<ace_t> merged = rebuild(static_cast<const std::vector<ace_t>&>(own));
-            std::vector<ace_t> inherit;
-            for (const ace_t& a : merged)
-                if ((a.flags & kAceInherit) != 0) inherit.push_back(a);
             lock.lock();
             if (e.acl_gen.load(std::memory_order_acquire) != gen)
                 continue;  // an :acl write raced the walk — drop the stale merge, rebuild
             e.eff_aces = std::move(merged);
-            e.eff_aces_inherit = std::move(inherit);
             e.acl_cache_dirty.store(false, std::memory_order_release);
             break;
         }
-        return eval(static_cast<const std::vector<ace_t>&>(e.eff_aces),
-                    static_cast<const std::vector<ace_t>&>(e.eff_aces_inherit));
+        return eval(static_cast<const std::vector<ace_t>&>(e.eff_aces));
     }
 
     // -- application property fields (RFC-0010) ------------------------------------------
