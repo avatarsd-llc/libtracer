@@ -18,9 +18,9 @@
  * benefit is argued, not shown. A bench that does would also make §2's case measurable,
  * and is the natural prerequisite to attempting it."* Everything below is that bench.
  *
- * ## Part A — the slot in isolation, four arms
+ * ## Part A — the slot in isolation, five arms
  *
- * The same workload against four implementations of "one pointer to an immutable value,
+ * The same workload against five implementations of "one pointer to an immutable value,
  * published by writers and read by readers":
  *
  *   sp-atomic   `std::atomic<std::shared_ptr<const T>>` — what libtracer ships today.
@@ -41,7 +41,16 @@
  *   hazard      Hazard pointers. The reader publishes the pointer it is about to use
  *               (`seq_cst` store) and re-validates the slot; the writer scans every hazard
  *               slot before freeing. Bounded memory, but the read side pays exactly the kind
- *               of serializing store §2 is trying to delete.
+ *               of serializing store §2 is trying to delete. **Its reader does not keep the
+ *               object** — it extracts one word inside the pinned window and unpins before
+ *               returning, which is a cheaper contract than the real slot has.
+ *   hazard-ref  The same scheme under the contract `vertex_t::read_stored()` actually has:
+ *               the read returns an **owning** reference, so the pin must be promoted to a
+ *               counted one before it is dropped. That promotion is a contended RMW on the
+ *               shared payload — the same class of operation that makes `sp-atomic`'s read
+ *               collapse. This arm exists because ADR-0069 §1 quoted `hazard`'s number as
+ *               the host read cost, and `hazard`'s number was bought with a contract the
+ *               library cannot honour (see @ref hazard_ref_slot_t).
  *
  * Three shapes, because the arms do not rank the same way in all of them:
  *
@@ -53,13 +62,18 @@
  *               scaling loss here is **false** contention, e.g. two unrelated vertices
  *               hashing to the same entry of libstdc++'s lock-bit table.
  *
- * ## Part B — the same question on the real write path
+ * ## Part B — the same question on the real path
  *
- * `run_graph` drives `graph_t::write` from T threads, in three topologies, so Part A's
- * finding lands on production code rather than a model of it:
+ * `run_graph` drives `graph_t::write` — and, since #604's read arm, `graph_t::read` — from T
+ * threads, in three topologies, so Part A's finding lands on production code rather than a
+ * model of it. The `-read` rows are the ones a slot change is gated on: Part A's cheap arms
+ * measure a read that keeps nothing, while `graph_t::read` copies the rope out (cloning every
+ * link's `segment_ptr_t`), so a shared LKV's refcount traffic is part of the real cost and no
+ * model arm can be substituted for it. Topologies:
  *
- *   hot1        T threads writing ONE vertex — one lock bit, one `write_seq_`.
- *   stripe1     T threads writing T DISTINCT vertices deliberately chosen to collide on a
+ *   hot1        T threads driving ONE vertex — one lock bit, one `write_seq_`. For the read
+ *               arm this is the shape that matters: T readers on ONE shared LKV.
+ *   stripe1     T threads driving T DISTINCT vertices deliberately chosen to collide on a
  *               single `vertex_stripe_t`. After #555 a waiterless non-STREAM publish takes
  *               no stripe lock at all, so the expectation was that this arm now matches
  *               `spread`. **It does not** — `fan_out` reaches `snapshot_edges`, which takes
@@ -77,7 +91,7 @@
  * bench_rx_source_topology, bench_route_handle_contention and bench_fanout_clone_storm make.
  *
  * Output: the shared bench RESULT contract (bench_common.hpp) —
- *   mode=lkv_<shape>_<arm> / lkvgraph_<topology>-fan<N>, fanout=T,
+ *   mode=lkv_<shape>_<arm> / lkvgraph_<topology>-fan<N>[-read], fanout=T,
  *   pub_per_s=per-thread ops/s, deliv_per_s=aggregate ops/s, latency fields = ns/op.
  */
 #include <algorithm>
@@ -389,6 +403,145 @@ class hazard_slot_t {
     std::array<retire_list_t, kMaxThreads> retired_{};
 };
 
+// --- arm 5: hazard pointers under the OWNING read contract --------------------------------
+
+/**
+ * @brief The published value with the intrusive refcount an owning read needs.
+ *
+ * Deliberately the same 104 bytes as @ref payload_t, so `hazard` and `hazard-ref` are read on
+ * one axis and the delta is the contract, not the allocation size.
+ */
+struct rc_payload_t {
+    std::atomic<std::uint32_t> rc{1}; /**< @brief Live references, the publisher's included. */
+    std::atomic<bool> parked{false};  /**< @brief Already on a retire list; blocks a re-park. */
+    std::uint64_t tag = 0;            /**< @brief The value a reader extracts. */
+    std::byte fill[88]{};             /**< @brief Pad to the LKV rope size ADR-0064 measured. */
+};
+static_assert(sizeof(rc_payload_t) == 104, "keep both hazard arms on one payload size");
+
+/** @brief Cache-line-isolated hazard slot over @ref rc_payload_t (see @ref slot_ptr_t). */
+struct alignas(64) rc_slot_ptr_t {
+    std::atomic<rc_payload_t*> v{nullptr};
+};
+
+/** @brief Per-thread retire list for @ref hazard_ref_slot_t, cache-line isolated. */
+struct alignas(64) rc_retire_list_t {
+    std::vector<rc_payload_t*> items;
+    std::size_t peak = 0;
+};
+
+/**
+ * @brief Hazard pointers whose read returns an **owning** reference — the contract
+ *        `vertex_t::read_stored()` actually has.
+ *
+ * The `hazard` arm pins, extracts one word, and unpins before returning: its reader never
+ * keeps the object, so it never pays for ownership. The real slot cannot use that contract.
+ * `graph_t::read_subtree_folded` stashes one LKV per node into a `std::vector<snap_node_t>`
+ * that outlives the map lock and spans three passes (`core/src/graph.cpp`), so **N ropes are
+ * held simultaneously** — a single per-thread hazard slot cannot express N pins, and the
+ * handle must outlive the pinned window regardless.
+ *
+ * An owning read therefore has to promote: pin, `fetch_add` the payload's refcount, unpin,
+ * hand back the counted reference. The promotion is a read-modify-write on a cache line
+ * every reader shares, which is the same term that makes `sp-atomic`'s read collapse under
+ * T readers. So the honest question is not "hazard vs epoch" but "how much of `sp-atomic`'s
+ * read cost is the libstdc++ lock bit (which hazard deletes) and how much is the refcount
+ * RMW (which it does not)" — and only this arm answers it.
+ */
+class hazard_ref_slot_t {
+   public:
+    void publish(std::size_t tid, std::uint64_t tag) {
+        auto* p = new rc_payload_t;
+        p->tag = tag;
+        rc_payload_t* old = slot_.exchange(p, std::memory_order_acq_rel);
+        if (old != nullptr) release(tid, old);  // drop the publisher's reference
+    }
+
+    [[nodiscard]] std::uint64_t read(std::size_t tid) {
+        rc_payload_t* p = nullptr;
+        for (;;) {
+            p = slot_.load(std::memory_order_acquire);
+            haz_[tid].v.store(p, std::memory_order_seq_cst);
+            if (slot_.load(std::memory_order_acquire) == p) break;  // still published: pinned
+        }
+        if (p == nullptr) {
+            haz_[tid].v.store(nullptr, std::memory_order_release);
+            return 0;
+        }
+        // Promote the pin to a counted reference, THEN unpin — this is what makes the handle
+        // outlive the pinned window, and it is the cost the `hazard` arm never pays.
+        p->rc.fetch_add(1, std::memory_order_acq_rel);
+        haz_[tid].v.store(nullptr, std::memory_order_release);
+        const std::uint64_t t = p->tag;  // dereferenced off the owned reference, not the pin
+        release(tid, p);                 // the caller dropping its handle
+        return t;
+    }
+
+    void seed() { publish(0, 1); }
+
+    void drain() {
+        rc_payload_t* p = slot_.exchange(nullptr, std::memory_order_acq_rel);
+        delete p;  // single-threaded at drain: the publisher's reference is the only one left
+        for (auto& rl : retired_) {
+            for (auto* q : rl.items) delete q;
+            rl.items.clear();
+        }
+    }
+
+    [[nodiscard]] std::size_t peak_parked() const {
+        std::size_t m = 0;
+        for (const auto& rl : retired_) m = std::max(m, rl.peak);
+        return m;
+    }
+
+    [[nodiscard]] std::size_t registry_bytes(std::size_t threads) const {
+        return threads * sizeof(rc_slot_ptr_t);
+    }
+
+   private:
+    /**
+     * @brief Drop one reference; the last one parks the object for the hazard scan.
+     *
+     * Parking is latched, not repeated: a reader can pin a pointer, see it retired, and then
+     * promote it back to `rc == 1`. `parked` makes that resurrection re-use the existing
+     * list entry instead of adding a second one, which is what would double-free it.
+     */
+    void release(std::size_t tid, rc_payload_t* p) {
+        if (p->rc.fetch_sub(1, std::memory_order_acq_rel) != 1) return;
+        if (p->parked.exchange(true, std::memory_order_acq_rel)) return;  // already listed
+        rc_retire_list_t& rl = retired_[tid];
+        rl.items.push_back(p);
+        rl.peak = std::max(rl.peak, rl.items.size());
+        if (rl.items.size() >= kReclaimBatch) reclaim(rl);
+    }
+
+    void reclaim(rc_retire_list_t& rl) {
+        std::array<rc_payload_t*, kMaxThreads> pinned{};
+        std::size_t n = 0;
+        for (const auto& h : haz_) {
+            rc_payload_t* p = h.v.load(std::memory_order_seq_cst);
+            if (p != nullptr) pinned[n++] = p;
+        }
+        std::size_t keep = 0;
+        for (std::size_t i = 0; i < rl.items.size(); ++i) {
+            rc_payload_t* q = rl.items[i];
+            const bool held =
+                std::find(pinned.begin(), pinned.begin() + n, q) != pinned.begin() + n;
+            // Announced, or resurrected by a promotion since it was parked: stays parked.
+            if (held || q->rc.load(std::memory_order_acquire) != 0) {
+                rl.items[keep++] = q;
+            } else {
+                delete q;
+            }
+        }
+        rl.items.resize(keep);
+    }
+
+    std::atomic<rc_payload_t*> slot_{nullptr};
+    std::array<rc_slot_ptr_t, kMaxThreads> haz_{};
+    std::array<rc_retire_list_t, kMaxThreads> retired_{};
+};
+
 // --- the runner ---------------------------------------------------------------------------
 
 /** @brief Which workload shape a point runs. */
@@ -523,18 +676,40 @@ void run_slot(const char* arm, shape_t shape, std::size_t T) {
          /*mb_per_s=*/0.0, pooled.summarize());
 }
 
-/** @brief Every arm at one (shape, T), so the four are always read as a set. */
+/** @brief Every arm at one (shape, T), so the five are always read as a set. */
 void run_all_arms(shape_t shape, std::size_t T) {
     run_slot<sp_atomic_slot_t>("sp-atomic", shape, T);
     run_slot<raw_lag_slot_t>("raw-lag", shape, T);
     run_slot<epoch_slot_t2>("epoch", shape, T);
     run_slot<hazard_slot_t>("hazard", shape, T);
+    run_slot<hazard_ref_slot_t>("hazard-ref", shape, T);
 }
 
 // --- Part B: the real write path ----------------------------------------------------------
 
-/** @brief Which vertex topology the T writer threads drive. */
+/** @brief Which vertex topology the T threads drive. */
 enum class topo_t { HOT1, STRIPE1, SPREAD };
+
+/**
+ * @brief Which graph verb the timed window drives.
+ *
+ * Part A ranks model slots; only this dimension puts the ranking on the real member. `READ`
+ * exists because ADR-0069 quoted Part A's `hazard` read as the host read cost, and Part A's
+ * read contract is not the one `graph_t::read` has — it copies the rope out (cloning each
+ * link's `segment_ptr_t`) before returning, so the shared refcount traffic Part A's cheap arm
+ * never pays is unavoidable here. This arm is the baseline any slot change must beat.
+ */
+enum class op_t { WRITE, READ };
+
+[[nodiscard]] const char* op_name(op_t o) {
+    switch (o) {
+        case op_t::WRITE:
+            return "";  // the pre-existing rows keep their exact names
+        case op_t::READ:
+            return "-read";
+    }
+    return "?";
+}
 
 [[nodiscard]] const char* topo_name(topo_t t) {
     switch (t) {
@@ -607,7 +782,7 @@ enum class topo_t { HOT1, STRIPE1, SPREAD };
  * measuring only the empty case would leave the finding open to "that is just the idle
  * path".
  */
-void run_graph(topo_t topo, std::size_t T, std::size_t subs) {
+void run_graph(topo_t topo, std::size_t T, std::size_t subs, op_t op) {
     if (topo == topo_t::SPREAD && T > tr::graph::kVertexLockStripes) return;  // pigeonhole
 
     graph_t g;
@@ -671,17 +846,36 @@ void run_graph(topo_t topo, std::size_t T, std::size_t subs) {
         return;
     }
 
+    // A READ arm must find a landed LKV on EVERY vertex it reads, not just verts[0]: an
+    // unseeded vertex answers NOT_FOUND, which measures the miss path instead of the slot.
+    if (op == op_t::READ)
+        for (std::size_t t = 0; t < T; ++t) (void)g.write(verts[t], views[t]);
+
+    // The timed operation. The READ result is folded into a thread-local accumulator and
+    // published to the sink ONCE after the loop — an atomic per op would swamp the very
+    // contention the arm exists to measure.
+    const auto drive = [&](std::size_t t) -> std::size_t {
+        if (op == op_t::WRITE) {
+            (void)g.write(verts[t], views[t]);
+            return 0;
+        }
+        const auto r = g.read(verts[t]);
+        return r ? r->total_length() : 0;
+    };
+
     std::atomic<std::size_t> ready{0};
     std::atomic<bool> go{false};
     std::vector<std::thread> ts;
     ts.reserve(T);
     for (std::size_t t = 0; t < T; ++t) {
         ts.emplace_back([&, t]() {
-            for (std::size_t i = 0; i < 2000; ++i) (void)g.write(verts[t], views[t]);  // warmup
+            std::size_t acc = 0;
+            for (std::size_t i = 0; i < 2000; ++i) acc += drive(t);  // warmup
             ready.fetch_add(1, std::memory_order_acq_rel);
             while (!go.load(std::memory_order_acquire)) { /* spin until released */
             }
-            for (std::size_t i = 0; i < kOps; ++i) (void)g.write(verts[t], views[t]);
+            for (std::size_t i = 0; i < kOps; ++i) acc += drive(t);
+            g_sink.fetch_add(acc, std::memory_order_relaxed);
         });
     }
     while (ready.load(std::memory_order_acquire) < T) { /* wait for all warmed up */
@@ -700,14 +894,16 @@ void run_graph(topo_t topo, std::size_t T, std::size_t subs) {
     for (std::size_t t = 0; t < T; ++t) {
         ls.emplace_back([&, t]() {
             Latency mine;
+            std::size_t acc = 0;
             ready2.fetch_add(1, std::memory_order_acq_rel);
             while (!go2.load(std::memory_order_acquire)) { /* spin */
             }
             for (std::size_t i = 0; i < kLatOps; ++i) {
                 const std::uint64_t a = now_ns();
-                (void)g.write(verts[t], views[t]);
+                acc += drive(t);
                 mine.add(now_ns() - a);
             }
+            g_sink.fetch_add(acc, std::memory_order_relaxed);
             lats[t] = std::move(mine);
         });
     }
@@ -720,7 +916,7 @@ void run_graph(topo_t topo, std::size_t T, std::size_t subs) {
     for (auto& l : lats) pooled.merge(l);
 
     const std::string mode =
-        std::string("lkvgraph_") + topo_name(topo) + (subs > 0 ? "-fan1" : "-fan0");
+        std::string("lkvgraph_") + topo_name(topo) + (subs > 0 ? "-fan1" : "-fan0") + op_name(op);
     emit("libtracer", mode.c_str(), S, T, /*endpoints=*/1, agg / static_cast<double>(T), agg,
          agg * static_cast<double>(S) / 1e6, pooled.summarize());
 }
@@ -744,8 +940,16 @@ int main(int argc, char** argv) {
             for (topo_t topo : {topo_t::HOT1, topo_t::STRIPE1, topo_t::SPREAD}) {
                 for (std::size_t T : kThreads) {
                     if (T > hw) continue;
-                    run_graph(topo, T, subs);
+                    run_graph(topo, T, subs, op_t::WRITE);
                 }
+            }
+        }
+        // The read arm takes no `subs` sweep: a read delivers to nobody, so fan-out is not a
+        // dimension of it. HOT1 is the shape that matters — T readers on ONE shared LKV.
+        for (topo_t topo : {topo_t::HOT1, topo_t::STRIPE1, topo_t::SPREAD}) {
+            for (std::size_t T : kThreads) {
+                if (T > hw) continue;
+                run_graph(topo, T, /*subs=*/0, op_t::READ);
             }
         }
     }
