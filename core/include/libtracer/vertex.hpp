@@ -2008,13 +2008,13 @@ class vertex_t {
 
     // The stored value is a rope (ADR-0053 §6): a contiguous scalar is a single-link
     // rope (small-buffer inline, no extra alloc), a chunked stream keeps its links.
-    /** @brief The last-known value, held through the build's slot policy (ADR-0069 §1).
-     *         `sp_atomic_slot_t` is today's `std::atomic<std::shared_ptr<const rope_t>>` and
-     *         the checked-in default — it is lock-free by CONTRACT and spin-locked in
-     *         practice, which `lkv_slot.hpp` documents along with the contract any
-     *         replacement must satisfy. Do not read "lock-free" here as "no serializing
-     *         operation". */
-    sp_atomic_slot_t lkv_{};
+    /** @brief The last-known value, held through the slot policy this target bound
+     *         (`tr::graph::lkv_slot_t` in `config.hpp`; ADR-0069 §1). The default binding is
+     *         `sp_atomic_slot_t` — today's `std::atomic<std::shared_ptr<const rope_t>>`,
+     *         which is lock-free by CONTRACT and spin-locked in practice. `lkv_slot.hpp`
+     *         documents that caveat and the contract any replacement must satisfy. Do not
+     *         read "lock-free" here as "no serializing operation". */
+    lkv_slot_t lkv_{};
     std::vector<subscriber_t> subs_;  // fan-out edges; guarded by m_
     // The lazily-allocated cold half (#361 §1): handlers, STREAM ring, the ACL state +
     // ADR-0050 effective-merge cache, non-default settings, and the stream drain cursor.

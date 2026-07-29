@@ -38,6 +38,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`tr::graph::lkv_slot_t` — the LKV slot is now a per-target binding** (#604,
+  [ADR-0069](../docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md) §1). The
+  slot type `vertex_t` holds is selected in `config.hpp` through the same forward-declare-plus-alias
+  mechanism `acl_policy_t` already uses, set by the CMake cache variable `LIBTRACER_LKV_SLOT`
+  (default `sp_atomic_slot_t`, so a stock build and the ESP-IDF component are unchanged). No
+  templating is involved: `vertex_t` names the alias, and binding a different slot is a
+  target-configuration change rather than an edit to any header. Verified that the generated
+  header substitutes the requested type, that the configure-time drift gate is **not** fooled by a
+  non-default cache value, and that `graph.cpp.o` is byte-for-byte the size it was before the
+  alias was introduced — the indirection costs nothing.
+
 - **`libtracer/lkv_slot.hpp` — the LKV slot is a named policy** (#604,
   [ADR-0069](../docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md) §1). The
   new public header defines `tr::graph::sp_atomic_slot_t`, which is exactly the
