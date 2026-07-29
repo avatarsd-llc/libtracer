@@ -59,6 +59,33 @@ A hazard scheme needs a fixed set of reader slots. Per [RFC-0006](../spec/rfcs/0
 
 This ADR deliberately does not touch [#635](https://github.com/avatarsd-llc/libtracer/issues/635) (the `snapshot_edges` stripe lock, ×16.6 at T=24 on the distinct-vertex shape). One of #635's candidates — a published immutable edge array — faces the *same* displaced-object problem this ADR solves; the hazard machinery landed here is expected to be reusable there, and that is a reason to land this first, not a license to widen this change.
 
+### §5 — The hazard slot keeps `std::shared_ptr` by pinning an indirection node
+
+Added 2026-07-30, after slices 1–2 (#644, #645) and before the hazard slice, because it removes the largest unknown in what remains. §1 describes `hazard_slot_t` as "a plain `std::atomic<const rope_t*>`", which raises a question that ADR-0064 and this ADR both left open: `read_stored()` returns `std::shared_ptr<const rope_t>`, so how does a slot holding a bare pointer produce one?
+
+Measured, not reasoned (a five-line program, this libstdc++):
+
+| candidate | `is_lock_free()` | verdict |
+| --- | ---: | --- |
+| `std::atomic<std::shared_ptr<const rope_t>>` | 0 | today's slot — the lock bit ADR-0064 measured |
+| `std::atomic<std::weak_ptr<const rope_t>>` | **0** | the obvious alternative buys **nothing**: same `_Sp_locker` |
+| `std::atomic<T*>` | 1 | the only lock-free option |
+
+And from a bare `const rope_t*` there is no standard route back to its control block — the rope does not inherit `enable_shared_from_this`, and adding that would put a control-block pointer in every rope.
+
+So the slot does not store a pointer to the *rope*. It stores a pointer to a small **indirection node** that owns the rope's `shared_ptr`:
+
+- **publish** — allocate a node holding the new `shared_ptr` (16 bytes, verified), `exchange` it in, retire the displaced node.
+- **read** — pin the node, **copy its `shared_ptr` out** (one control-block increment), unpin, return the copy.
+- **reclaim** — the hazard scan frees *nodes*; the rope's own lifetime remains the refcount's business, exactly as today.
+
+Two consequences worth stating because they change the size of the remaining work:
+
+- **No public API change.** `read_stored()` keeps its signature, so the four call sites in `graph.cpp`, `snap_node_t::lkv`, and the N-simultaneous-handles property of `read_subtree_folded` all stand untouched. The hazard slice does not have to modify `graph.cpp` at all.
+- **The cost is already measured.** The read is precisely the promotion `hazard-ref` modelled — pin, one RMW on a line every reader shares, unpin — so the 20.8× at T=24 in the Context above is the number to expect, not an optimistic stand-in. The write additionally pays one 16-byte allocation per publish, on top of the rope's own. That lands squarely on the MCU's dominant operation, which is a third independent reason §1 keeps `sp_atomic_slot_t` as the default rather than a first.
+
+**Open question for the maintainer, deliberately not resolved here.** Slices 1–2 delivered per-target slot selection with **zero templates** — `config.hpp` forward-declares the policy and aliases it, `vertex_t` names the alias, and `graph.cpp.o` came out byte-for-byte unchanged. That means ADR-0068 §2's `basic_graph_t<slot_t>` is now needed for exactly one thing: getting two policies instantiated in a single binary for CI coverage. A second host build already achieves that, and `substrate_test_no_atomic` is the standing precedent for doing it that way. Whether to spend the template (and the ~3 s/build second instantiation ADR-0068 measured) on that convenience is a call for whoever owns ADR-0068 §2; this ADR notes only that the mechanism it depends on turned out not to require it.
+
 ## Considered options
 
 - **One slot for both targets (hazard everywhere).** Rejected: at T=1 the hazard slot's write is ~34% slower than today's (43 vs 32 ns) and its registry is pure overhead on a target whose workload is write-dominated fan-out. The MCU would pay real latency and RAM for read-side scaling it cannot exhibit.
