@@ -391,14 +391,17 @@ void test_fwd_read_round_trip() {
 
     std::promise<std::vector<std::byte>> got;
     auto fut = got.get_future();
-    router_a.on_reply([&got](const tr::view::rope_t& reply) {
-        try {
-            const tr::view::view_t mat = reply.materialize();
-            const auto b = mat.bytes();
-            got.set_value(std::vector<std::byte>(b.begin(), b.end()));
-        } catch (...) {
-        }
-    });
+    router_a.on_reply(
+        [](void* ctx, const tr::view::rope_t& reply) {
+            try {
+                const tr::view::view_t mat = reply.materialize();
+                const auto b = mat.bytes();
+                static_cast<std::promise<std::vector<std::byte>>*>(ctx)->set_value(
+                    std::vector<std::byte>(b.begin(), b.end()));
+            } catch (...) {
+            }
+        },
+        &got);
 
     router_a.on_frame("self", fwd_read({"b", "sensor", "temp"}, {"reply-ep"}));
     const bool replied = fut.wait_for(4s) == std::future_status::ready;

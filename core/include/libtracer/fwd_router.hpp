@@ -32,7 +32,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
-#include <functional>
 #include <memory_resource>
 #include <mutex>
 #include <span>
@@ -155,6 +154,26 @@ class fwd_router_t {
      */
     bool remove_child(std::string_view name);
 
+    // -- observability / terminus sinks (fn-ptr + context, ADR-0047/ADR-0068 §3) -------
+    // Not std::function: these fire on the per-frame RX path, where the erasure
+    // machinery (code size, heap capability, exception paths) is the largest avoidable
+    // embedded liability — the same call graph_t::subscriber_fn_t already makes at L4.
+    // Configure before frames flow; passing nullptr clears a sink.
+
+    /** @brief Reply-terminus sink (@ref on_reply): @p ctx, then the FWD{REPLY} frame. */
+    using reply_fn_t = void (*)(void* ctx, const view::rope_t& reply);
+    /** @brief Inbound-FWD observer (@ref on_inbound): @p ctx, inbound child, decoded FWD. */
+    using inbound_fn_t = void (*)(void* ctx, std::string_view inbound, const wire::tlv_t& fwd);
+    /** @brief Raw-frame observer (@ref on_raw): @p ctx, inbound child, the whole frame. */
+    using raw_fn_t = void (*)(void* ctx, std::string_view inbound,
+                              std::span<const std::byte> frame);
+    /** @brief Local COMPACT delivery sink (@ref on_compact_delivery): @p ctx, the bound
+     *         local route PATH bytes, the delivered payload TLV bytes. */
+    using compact_delivery_fn_t = void (*)(void* ctx, std::span<const std::byte> route,
+                                           std::span<const std::byte> payload);
+    /** @brief Stale-label observer (@ref on_stale_label): @p ctx, inbound child, label. */
+    using stale_label_fn_t = void (*)(void* ctx, std::string_view inbound, std::uint16_t label);
+
     /**
      * @brief Set the sink for a REPLY that terminates at this node's reply endpoint.
      *
@@ -172,9 +191,10 @@ class fwd_router_t {
      * (ADR-0052) now lives at the consumer, not the router; keep `m` alive while reading
      * its span.
      *
-     * @param cb Callback invoked on a transport receive thread; keep it cheap.
+     * @param fn  Callback invoked on a transport receive thread; keep it cheap.
+     * @param ctx Opaque pointer handed back as @p fn's first argument.
      */
-    void on_reply(std::function<void(const view::rope_t&)> cb);
+    void on_reply(reply_fn_t fn, void* ctx = nullptr) noexcept;
 
     /**
      * @brief Set a read-only observer of every inbound FWD (observability/tests).
@@ -184,9 +204,10 @@ class fwd_router_t {
      * / `src`-grow invariant and as the seam where a per-hop `:acl` forward-right
      * check (RFC-0004 §F) will later hang.
      *
-     * @param cb Callback invoked on a transport receive thread.
+     * @param fn  Callback invoked on a transport receive thread.
+     * @param ctx Opaque pointer handed back as @p fn's first argument.
      */
-    void on_inbound(std::function<void(std::string_view, const wire::tlv_t&)> cb);
+    void on_inbound(inbound_fn_t fn, void* ctx = nullptr) noexcept;
 
     /**
      * @brief Set a read-only observer of every inbound frame's RAW bytes (any type).
@@ -194,9 +215,10 @@ class fwd_router_t {
      * Fires before dispatch with the inbound link name and the complete frame span —
      * used by tests to measure the on-wire byte-delta between a lean COMPACT delivery
      * and the equivalent full-route FWD{WRITE} (the point of the route-handle).
-     * @param cb Callback invoked on a transport receive thread.
+     * @param fn  Callback invoked on a transport receive thread.
+     * @param ctx Opaque pointer handed back as @p fn's first argument.
      */
-    void on_raw(std::function<void(std::string_view, std::span<const std::byte>)> cb);
+    void on_raw(raw_fn_t fn, void* ctx = nullptr) noexcept;
 
     /**
      * @brief Set the sink for a label-compacted delivery that terminates at this node.
@@ -205,10 +227,10 @@ class fwd_router_t {
      * established route names a vertex here): the payload has already been written to
      * that vertex (delivery-is-a-write, RFC-0004 §D). Carries the bound local route
      * PATH bytes and the delivered payload TLV bytes (both borrowed for the call).
-     * @param cb Callback invoked on a transport receive thread; keep it cheap.
+     * @param fn  Callback invoked on a transport receive thread; keep it cheap.
+     * @param ctx Opaque pointer handed back as @p fn's first argument.
      */
-    void on_compact_delivery(
-        std::function<void(std::span<const std::byte>, std::span<const std::byte>)> cb);
+    void on_compact_delivery(compact_delivery_fn_t fn, void* ctx = nullptr) noexcept;
 
     /**
      * @brief Set the observer for a dropped stale/unknown-label COMPACT (RFC-0004 §E.1).
@@ -216,9 +238,10 @@ class fwd_router_t {
      * Invoked when a COMPACT bears a label with no ingress binding on its link — the
      * frame is dropped and a HANDLE_NACK is sent back to prompt a re-advertise (never
      * a crash). Carries the inbound link name and the stale label.
-     * @param cb Callback invoked on a transport receive thread.
+     * @param fn  Callback invoked on a transport receive thread.
+     * @param ctx Opaque pointer handed back as @p fn's first argument.
      */
-    void on_stale_label(std::function<void(std::string_view, std::uint16_t)> cb);
+    void on_stale_label(stale_label_fn_t fn, void* ctx = nullptr) noexcept;
 
     /**
      * @brief Advertise a `label ↔ route` binding over link @p link_name (producer side).
@@ -509,11 +532,16 @@ class fwd_router_t {
      * is held: `transport_vertex_t::ctl_m_` → this → `graph_t::map_mutex_` → the vertex stripe.
      */
     mutable std::mutex ctl_m_;
-    std::function<void(const view::rope_t&)> reply_cb_;
-    std::function<void(std::string_view, const wire::tlv_t&)> inbound_cb_;
-    std::function<void(std::string_view, std::span<const std::byte>)> raw_cb_;
-    std::function<void(std::span<const std::byte>, std::span<const std::byte>)> delivery_cb_;
-    std::function<void(std::string_view, std::uint16_t)> stale_cb_;
+    reply_fn_t reply_cb_ = nullptr;               /**< @brief Reply-terminus sink. */
+    void* reply_ctx_ = nullptr;                   /**< @brief Its opaque context. */
+    inbound_fn_t inbound_cb_ = nullptr;           /**< @brief Inbound-FWD observer. */
+    void* inbound_ctx_ = nullptr;                 /**< @brief Its opaque context. */
+    raw_fn_t raw_cb_ = nullptr;                   /**< @brief Raw-frame observer. */
+    void* raw_ctx_ = nullptr;                     /**< @brief Its opaque context. */
+    compact_delivery_fn_t delivery_cb_ = nullptr; /**< @brief Local COMPACT delivery sink. */
+    void* delivery_ctx_ = nullptr;                /**< @brief Its opaque context. */
+    stale_label_fn_t stale_cb_ = nullptr;         /**< @brief Stale-label observer. */
+    void* stale_ctx_ = nullptr;                   /**< @brief Its opaque context. */
 };
 
 }  // namespace tr::net

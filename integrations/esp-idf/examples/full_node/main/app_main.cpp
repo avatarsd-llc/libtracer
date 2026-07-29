@@ -302,18 +302,23 @@ int run_host_probe(device_node_t& dev) {
     // The reply sink is installed BEFORE the socket exists (frames may flow the
     // moment the SPEC write returns). No <future>: the example runs under the
     // ESP-IDF default -fno-exceptions, so the capture is a mutex + flag.
-    std::mutex reply_m;
-    std::vector<std::byte> reply_bytes;
-    std::atomic<bool> reply_ready{false};
-    router.on_reply([&](const tr::view::rope_t& r) {
-        const std::lock_guard lock(reply_m);
-        if (!reply_ready.load(std::memory_order_relaxed)) {
-            const tr::view::view_t mat = r.materialize();
-            const auto b = mat.bytes();
-            reply_bytes.assign(b.begin(), b.end());
-            reply_ready.store(true, std::memory_order_release);
-        }
-    });
+    struct reply_box_t {
+        std::mutex m;
+        std::vector<std::byte> bytes;
+        std::atomic<bool> ready{false};
+    } reply_box;
+    router.on_reply(
+        [](void* ctx, const tr::view::rope_t& r) {
+            auto* box = static_cast<reply_box_t*>(ctx);
+            const std::lock_guard lock(box->m);
+            if (!box->ready.load(std::memory_order_relaxed)) {
+                const tr::view::view_t mat = r.materialize();
+                const auto b = mat.bytes();
+                box->bytes.assign(b.begin(), b.end());
+                box->ready.store(true, std::memory_order_release);
+            }
+        },
+        &reply_box);
 
     // Dial the device: a config-created udp client connection at /net/udp-client/dev.
     const auto wa =
@@ -328,13 +333,13 @@ int run_host_probe(device_node_t& dev) {
                       b_path({"net", "udp-client", "dev", "sensor", "temp"}), b_path({"probe"})));
     bool read_ok = false;
     for (int i = 0; i < 60 && !read_ok; ++i) {
-        read_ok = reply_ready.load(std::memory_order_acquire);
+        read_ok = reply_box.ready.load(std::memory_order_acquire);
         if (!read_ok) std::this_thread::sleep_for(50ms);
     }
     std::uint32_t got = 0;
     if (read_ok) {
-        const std::lock_guard lock(reply_m);
-        const auto dec = tr::wire::decode(reply_bytes);
+        const std::lock_guard lock(reply_box.m);
+        const auto dec = tr::wire::decode(reply_box.bytes);
         got = dec ? reply_value_u32(*dec) : 0;
     }
     check(read_ok && got == 21, "FWD{READ} round-trip: /dev/sensor/temp == 21");
