@@ -38,6 +38,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`libtracer/lkv_slot.hpp` — the LKV slot is a named policy** (#604,
+  [ADR-0069](../docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md) §1). The
+  new public header defines `tr::graph::sp_atomic_slot_t`, which is exactly the
+  `std::atomic<std::shared_ptr<const rope_t>>` `vertex_t` has always held, behind the three
+  operations the vertex actually performs. **No behaviour change and no new configuration**: this
+  slice only names the seam so a later one can bind a different reclamation strategy per target.
+  The header also states the contract a replacement must satisfy — chiefly that `load()` returns
+  an *owning* handle, because the composed branch read holds one per node across three passes.
+  Verified neutral: `graph.cpp.o`'s symbol table is unchanged (423 symbols, none added or
+  removed, so the policy inlines away), the `sizeof(vertex_t)` gate is unmoved, and
+  `bench_compact_delivery`'s forward and terminus hops sit within ±1.1% p50 over eight
+  alternating runs per side with no consistent sign.
+
 - **`graph_t::delivery_drops()` — a dropped delivery is now countable** (#629). A path-target
   subscription edge (the form a wire `SUBSCRIBER` produces) delivers by re-dispatching into its
   target, and three conditions make that impossible: the target PATH resolves to no live vertex,

@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "libtracer/config.hpp"
+#include "libtracer/lkv_slot.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/status.hpp"
@@ -2007,16 +2008,13 @@ class vertex_t {
 
     // The stored value is a rope (ADR-0053 §6): a contiguous scalar is a single-link
     // rope (small-buffer inline, no extra alloc), a chunked stream keeps its links.
-    /** @brief The last-known value. Lock-free BY CONTRACT, and spin-locked in practice:
-     *         `std::atomic<std::shared_ptr<T>>::is_lock_free()` returns 0 on libstdc++, so both
-     *         load and store take its internal pointer-lock bit (`lock cmpxchg` to acquire, an
-     *         `xchg` to release). Measured, that is ~77 of the ~316 cycles of an in-process
-     *         write and the largest single term left on the path — 88% of `store`'s samples
-     *         land on those three instructions. Making it genuinely lock-free needs a
-     *         reclamation scheme for the displaced value; ADR-0064 §2 records the options and
-     *         why none was chosen yet. Until then, do not read "lock-free" here as "no
-     *         serializing operation". */
-    std::atomic<std::shared_ptr<const rope_t>> lkv_{};
+    /** @brief The last-known value, held through the build's slot policy (ADR-0069 §1).
+     *         `sp_atomic_slot_t` is today's `std::atomic<std::shared_ptr<const rope_t>>` and
+     *         the checked-in default — it is lock-free by CONTRACT and spin-locked in
+     *         practice, which `lkv_slot.hpp` documents along with the contract any
+     *         replacement must satisfy. Do not read "lock-free" here as "no serializing
+     *         operation". */
+    sp_atomic_slot_t lkv_{};
     std::vector<subscriber_t> subs_;  // fan-out edges; guarded by m_
     // The lazily-allocated cold half (#361 §1): handlers, STREAM ring, the ACL state +
     // ADR-0050 effective-merge cache, non-default settings, and the stream drain cursor.
