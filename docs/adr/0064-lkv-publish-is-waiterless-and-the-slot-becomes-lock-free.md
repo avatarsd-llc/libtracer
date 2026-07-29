@@ -41,6 +41,8 @@ A write took the stripe mutex twice. Sizing them by deletion:
 
 They cost radically different amounts despite removing the same ~160 instructions each. `store()`'s sits immediately downstream of the atomic publish, so the two serializing regions land back-to-back on the critical dependency chain. `snapshot_edges()`' overlaps the tail and is **free as it stands** — a fact worth pinning, so nobody spends effort removing it.
 
+> **This table is single-threaded, and the last sentence does not survive a second thread** (2026-07-29, [#635](https://github.com/avatarsd-llc/libtracer/issues/635)). The `snapshot_edges()` row reproduces at T=1 and inverts from T=2: at 24 concurrent writers to *distinct* vertices sharing one stripe, removing that lock is **×16.6**. Read the whole table as "at one thread". The corrected entry is under [Considered options](#considered-options); the measurements are in the multi-writer consequence below.
+
 ## Decision
 
 ### §1 — A publish with no awaiter takes no lock (implemented)
@@ -63,6 +65,8 @@ A spurious slow path is harmless and already contemplated by the stripe design: 
 **Measured:** `inproc` **89.2 → 82.6 ns/op** (min of 5 pinned interleaved rounds, faster in 5/5), ~−20 cycles/op. 61/61 tests pass, 61/61 under TSan, the `allocs=0` forward gate is byte-identical, and `bench_await_wakeup_storm` delivers wakeups at every waiter count from 1 to 128.
 
 The single-threaded gain is ~7%. **The real prize is multi-writer contention**, which no bench in this repo currently measures — a stripe is shared by 16 vertices by default, so today every publish on any of them serialises against every other.
+
+> **Measured (2026-07-29, [#635](https://github.com/avatarsd-llc/libtracer/issues/635)); `bench/bench_lkv_slot.cpp` is now that bench.** The closing sentence was right about the mechanism and wrong about which lock: §1 took the mutex off `store()`, but `fan_out` still reaches it through `snapshot_edges` on **every** write, so vertices sharing a stripe do still serialise against each other. §1's waiterless publish did not finish the job it is described here as starting.
 
 ### §2 — The LKV slot itself becomes lock-free (proposed, not implemented)
 
