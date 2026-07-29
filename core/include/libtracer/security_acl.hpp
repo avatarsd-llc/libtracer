@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/config.hpp"
 #include "libtracer/frame.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -127,18 +128,9 @@ struct full_acl_policy_t {
     }
 };
 
-/**
- * @brief The target's selected ACL policy (ADR-0047 §1 build-time module set).
- *
- * Default: the ALLOW-only MCU profile. Defining `LIBTRACER_ACL_FULL` (the CMake
- * option of the same name) swaps in the full `security_acl` host policy — a
- * target-configuration change, never an edit to `graph.cpp`.
- */
-#if defined(LIBTRACER_ACL_FULL)
-using acl_policy_t = full_acl_policy_t;
-#else
-using acl_policy_t = allow_only_policy_t;
-#endif
+// The `acl_policy_t` binding lives in libtracer/config.hpp (ADR-0068): the CMake option
+// LIBTRACER_ACL_FULL rebinds the alias there as plain C++ — no `#if` in this header. Both
+// policy structs above are always compiled and unit-tested regardless of the binding.
 
 /**
  * @brief One vertex's EFFECTIVE ACL (ADR-0020/0050): its own ACEs plus the

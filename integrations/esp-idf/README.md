@@ -96,7 +96,7 @@ The component exposes libtracer's build-time knobs through **Kconfig** (`idf.py 
 | ------ | ---- | ------- | ------ |
 | `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` | int (1–256) | 16 | Process-wide vertex lock-stripe count — the **only** global mutable buffer libtracer links into a node. N stripes cost N lazily-allocated FreeRTOS mutexes (~90 B heap each) + N condvars, paid once a `graph_t` exists (independent of how many vertices you register). A vertex's stripe is chosen by hashing its pinned address, so lowering N only raises **control-plane** lock contention (ring trim, edge/ACL mutation, `await` wake) — the lock-free LKV read/write hot path is unaffected. On a single-core target (esp32c3/c6) **4–8** reclaims RAM at negligible cost; the multi-core default stays 16. |
 
-The value propagates as a **PUBLIC** compile definition, so every translation unit that includes `<libtracer/vertex.hpp>` agrees — the stripe table is an `inline constinit` object and a mismatch across TUs would be an ODR violation. (The core header also honors a bare `-DLIBTRACER_VERTEX_LOCK_STRIPES` override; this Kconfig option is the ESP-IDF front door for it.)
+The value is delivered as the ordinary constexpr `tr::graph::kVertexLockStripes` in a generated `<libtracer/config.hpp>` (ADR-0068) listed before `core/include` in the component's public include dirs — one shared header per build, so the `inline constinit` stripe table's size can never diverge across TUs. (A bare `-D` no longer does anything; the Kconfig option is the knob.)
 
 ## FreeRTOS / threading notes
 

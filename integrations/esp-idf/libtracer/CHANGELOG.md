@@ -10,6 +10,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` now rides the generated `libtracer/config.hpp`**
+  ([ADR-0068](../../../docs/adr/0068-build-configuration-is-plain-cpp-config-header.md))
+  instead of a PUBLIC compile definition: the component `configure_file`s the header from the
+  Kconfig value and lists it before `core/include`, so every dependent TU reads the same
+  constexpr `tr::graph::kVertexLockStripes` — the ODR hazard the PUBLIC `-D` existed to manage
+  is gone by construction. menuconfig behavior is unchanged.
+
 ### Added
 
 - **`CONFIG_LIBTRACER_TRANSPORT_{UDP,TCP,WS,CAN}` — per-transport Kconfig knobs (#393).**

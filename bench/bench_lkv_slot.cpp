@@ -66,7 +66,7 @@
  *               the stripe mutex unconditionally, and that lock costs ×16.6 at T=24. See
  *               ADR-0064's corrected "Considered options" entry.
  *   spread      T threads writing T distinct vertices on T distinct stripes. Capped at
- *               LIBTRACER_VERTEX_LOCK_STRIPES threads, since beyond that a collision is
+ *               tr::graph::kVertexLockStripes threads, since beyond that a collision is
  *               forced by the pigeonhole.
  *
  * Each topology runs at fan-0 (the store leg alone) and fan-1 (`inproc`, the reference point
@@ -577,7 +577,7 @@ enum class topo_t { HOT1, STRIPE1, SPREAD };
         pick.assign(T, 0);  // every thread drives the SAME vertex
         return pick;
     }
-    std::vector<std::vector<std::size_t>> by_stripe(LIBTRACER_VERTEX_LOCK_STRIPES);
+    std::vector<std::vector<std::size_t>> by_stripe(tr::graph::kVertexLockStripes);
     for (std::size_t i = 0; i < pool.size(); ++i)
         by_stripe[tr::graph::vertex_stripe_index(std::bit_cast<vertex_t*>(pool[i]))].push_back(i);
     if (topo == topo_t::STRIPE1) {
@@ -608,7 +608,7 @@ enum class topo_t { HOT1, STRIPE1, SPREAD };
  * path".
  */
 void run_graph(topo_t topo, std::size_t T, std::size_t subs) {
-    if (topo == topo_t::SPREAD && T > LIBTRACER_VERTEX_LOCK_STRIPES) return;  // pigeonhole
+    if (topo == topo_t::SPREAD && T > tr::graph::kVertexLockStripes) return;  // pigeonhole
 
     graph_t g;
     std::vector<vertex_handle_t> pool;

@@ -12,6 +12,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: build configuration is plain C++ — the config macros are gone**
+  ([ADR-0068](../docs/adr/0068-build-configuration-is-plain-cpp-config-header.md)). The new
+  public header `libtracer/config.hpp` carries every per-target compile-time knob as ordinary
+  C++; a CMake build generates it from `config.hpp.in` (shadowing the checked-in default, with
+  a configure-time drift gate keeping the two identical). Consequences:
+  `LIBTRACER_VERTEX_LOCK_STRIPES` is now the constexpr `tr::graph::kVertexLockStripes`, set
+  via the CMake cache variable (or ESP-IDF menuconfig) — a bare `-D` compile definition **no
+  longer does anything**; `LIBTRACER_ACL_FULL` remains the CMake option name but no longer
+  exists as a preprocessor symbol (it rebinds the `acl_policy_t` alias in the generated
+  header). Pre-production, so no deprecation shims.
+
 ### Added
 
 - **`graph_t::delivery_drops()` — a dropped delivery is now countable** (#629). A path-target
