@@ -47,28 +47,36 @@ dl.cpp > dt {
 /*
  * Full-viewport content width.
  *
- * Furo caps the article at `--content-width` (46rem by default), which suits
- * running prose but starves the two things this documentation set leans on
- * hardest: the performance charts, whose x-axis is one tick per recorded commit,
- * and the wide reference tables. Both were being squeezed into a column narrower
- * than the data.
+ * Furo caps the article at a FIXED 46em, which suits running prose but starves
+ * the two things this documentation set leans on hardest: the performance
+ * charts, whose x-axis is one tick per recorded commit, and the wide reference
+ * tables. Both were being squeezed into a column narrower than the data, and
+ * because the cap is absolute rather than proportional, a wider display made it
+ * worse rather than better — the column stayed 736px and the margins grew.
  *
- * `--content-padding` is kept (and raised a little on large screens) so text
- * never runs edge-to-edge against the viewport, and the sidebars keep their own
- * widths — this widens the ARTICLE, it does not remove the navigation.
+ * This must override `width`, not `max-width`. The shipped rule is
+ * `.content { ... width: 46em }` with the number written literally — Furo
+ * declares no `--content-width` custom property in this build, so setting one
+ * changes nothing (verified against the deployed `_static/styles/furo.css`,
+ * which contains no `--content-width` declaration at all). A `max-width: 100%`
+ * alone is likewise inert against an explicit narrower `width`. Same specificity
+ * as Furo's own selector, and custom.css loads after it, so load order wins.
+ *
+ * Padding is deliberately left to Furo: its own narrow-viewport media query
+ * drops the 3em gutter to 1em, and overriding the property here would flatten
+ * that responsive behaviour on phones.
+ *
+ * The sidebars keep their widths — this widens the ARTICLE, it does not remove
+ * the navigation, so "full width" means the full width left over beside the nav.
  *
  * Tradeoff, stated rather than hidden: at very wide viewports a paragraph line
  * gets long enough to hurt scanning. Prose blocks below therefore keep a
  * readable measure while tables, code, and figures take the full width.
  */
-:root {
-  --content-width: 100%;
-  --content-padding: 2rem;
+.content {
+  max-width: none;
+  width: 100%;
 }
-@media (min-width: 1600px) {
-  :root { --content-padding: 3rem; }
-}
-.content { max-width: 100%; }
 
 /* Keep running prose at a readable measure while anything data-bearing spans the
    full width. Without this, full-viewport body text is a regression in
