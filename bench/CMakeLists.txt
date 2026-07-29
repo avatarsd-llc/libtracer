@@ -96,6 +96,14 @@ add_executable(bench_rx_source_topology bench_rx_source_topology.cpp)
 target_link_libraries(bench_rx_source_topology PRIVATE libtracer)
 target_compile_options(bench_rx_source_topology PRIVATE -Wall -Wextra)
 
+# The LKV slot under concurrency (ADR-0064 2, #604): today's atomic<shared_ptr> against a
+# no-reclamation ceiling, epoch-based reclamation and hazard pointers, in three shapes, plus
+# the same question on the real graph_t::write path. The ADR's own closing consequence names
+# this bench as the prerequisite to attempting 2. Diagnostic, not a perf gate.
+add_executable(bench_lkv_slot bench_lkv_slot.cpp)
+target_link_libraries(bench_lkv_slot PRIVATE libtracer)
+target_compile_options(bench_lkv_slot PRIVATE -Wall -Wextra)
+
 # Zenoh side — built only when the prebuilt is vendored (run bench/fetch_zenoh.sh).
 set(ZC ${CMAKE_CURRENT_SOURCE_DIR}/vendor/zenoh-c)
 set(ZCPP ${CMAKE_CURRENT_SOURCE_DIR}/vendor/zenoh-cpp-1.9.0)

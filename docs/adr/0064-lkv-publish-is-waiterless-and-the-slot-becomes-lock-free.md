@@ -41,6 +41,8 @@ A write took the stripe mutex twice. Sizing them by deletion:
 
 They cost radically different amounts despite removing the same ~160 instructions each. `store()`'s sits immediately downstream of the atomic publish, so the two serializing regions land back-to-back on the critical dependency chain. `snapshot_edges()`' overlaps the tail and is **free as it stands** — a fact worth pinning, so nobody spends effort removing it.
 
+> **This table is single-threaded, and the last sentence does not survive a second thread** (2026-07-29, [#635](https://github.com/avatarsd-llc/libtracer/issues/635)). The `snapshot_edges()` row reproduces at T=1 and inverts from T=2: at 24 concurrent writers to *distinct* vertices sharing one stripe, removing that lock is **×16.6**. Read the whole table as "at one thread". The corrected entry is under [Considered options](#considered-options); the measurements are in the multi-writer consequence below.
+
 ## Decision
 
 ### §1 — A publish with no awaiter takes no lock (implemented)
@@ -63,6 +65,8 @@ A spurious slow path is harmless and already contemplated by the stripe design: 
 **Measured:** `inproc` **89.2 → 82.6 ns/op** (min of 5 pinned interleaved rounds, faster in 5/5), ~−20 cycles/op. 61/61 tests pass, 61/61 under TSan, the `allocs=0` forward gate is byte-identical, and `bench_await_wakeup_storm` delivers wakeups at every waiter count from 1 to 128.
 
 The single-threaded gain is ~7%. **The real prize is multi-writer contention**, which no bench in this repo currently measures — a stripe is shared by 16 vertices by default, so today every publish on any of them serialises against every other.
+
+> **Measured (2026-07-29, [#635](https://github.com/avatarsd-llc/libtracer/issues/635)); `bench/bench_lkv_slot.cpp` is now that bench.** The closing sentence was right about the mechanism and wrong about which lock: §1 took the mutex off `store()`, but `fan_out` still reaches it through `snapshot_edges` on **every** write, so vertices sharing a stripe do still serialise against each other. §1's waiterless publish did not finish the job it is described here as starting.
 
 ### §2 — The LKV slot itself becomes lock-free (proposed, not implemented)
 
@@ -88,6 +92,20 @@ None of these is obviously right, and the honest expected win is **~15 ns on a ~
 
 - **Remove the `snapshot_edges` lock too.** Rejected — measured at **0 cycles**. It is free where it sits, and removing a lock for no gain spends correctness budget on nothing.
 
+  > **Correction (2026-07-29, [#635](https://github.com/avatarsd-llc/libtracer/issues/635)).** That measurement was taken with **one** thread, and this rejection generalized it to all of them. It does not hold. `bench_lkv_slot graph` drives `graph_t::write` from T threads against T **distinct** vertices that share nothing but a stripe, and sizes the lock by deleting it (same semantics-breaking method as the rest of this ADR):
+  >
+  > | T | fan-1 writes/s, lock in place | lock removed | |
+  > | ---: | ---: | ---: | ---: |
+  > | 1 | 11.25 M | 11.21 M | ×1.00 |
+  > | 4 | 7.56 M | 22.58 M | ×2.99 |
+  > | 8 | 4.58 M | 34.26 M | ×7.47 |
+  > | 16 | 4.61 M | 57.97 M | ×12.56 |
+  > | 24 | 4.75 M | 78.73 M | **×16.59** |
+  >
+  > Median of 3 runs, 24-core host. The **×1.00 at T=1 is the original finding, reproduced** — the lock genuinely is free where it sits, for one thread. From T=2 it is the dominant term on the write path, and with it removed the same-stripe arm matches the distinct-stripe arm (78.7 M vs 78.7 M at T=24), so the stripe accounts for the *entire* difference between them.
+  >
+  > This does not make "delete the lock" the fix — `snapshot_edges` copies `subs_`, and a concurrent `add_edge`/`clear_edge` would race. It makes the lock a **larger multi-writer term than §2**, which is what this ADR was written to identify. Note also that `fan_out` reaches `snapshot_edges` unconditionally, so a **zero-subscriber** write pays it too.
+
 - **Take the fast path for `STREAM` roles as well.** Rejected: the ring append is genuine state mutation. `STREAM` keeps the original code verbatim so the change cannot regress a role it was not measured on.
 
 - **A lock-free slot now, in the same change (§2).** Rejected on scope. It needs a reclamation scheme, it touches every reader, and folding it into a change whose correctness argument is a two-line Dekker pair would make both unreviewable.
@@ -100,7 +118,29 @@ None of these is obviously right, and the honest expected win is **~15 ns on a ~
 
 - **`current_seq()` is lock-free**, so callers no longer serialise on the stripe to read a sequence.
 
-- **The multi-writer win is unmeasured.** No bench in this repo exercises concurrent publishers on one stripe, so the contention benefit is argued, not shown. A bench that does would also make §2's case measurable, and is the natural prerequisite to attempting it.
+- ~~**The multi-writer win is unmeasured.** No bench in this repo exercises concurrent publishers on one stripe, so the contention benefit is argued, not shown. A bench that does would also make §2's case measurable, and is the natural prerequisite to attempting it.~~
+
+  **Measured 2026-07-29 ([#635](https://github.com/avatarsd-llc/libtracer/issues/635)); `bench/bench_lkv_slot.cpp` is that bench.** It answers the question in three parts, and the parts do not agree with each other — which is the useful result.
+
+  **1. Concurrent writers to ONE vertex — §2's case, confirmed.** `graph_t::write` from T threads at a single vertex, fan-1: **11.79 M/s at T=1 → 2.58 M/s at T=24**, i.e. adding 23 cores makes the system 4.6× *slower* in aggregate. Deleting the `snapshot_edges` lock does **not** recover it (×0.98), so what remains is the slot itself: the `atomic<shared_ptr>` lock bit plus `write_seq_` on one cacheline. This is the term §2 proposes to remove.
+
+  **2. Concurrent writers to DIFFERENT vertices — not §2's case.** See the correction under "Considered options": the stripe lock, not the slot, is what costs there (×16.59 at T=24). §2 would buy approximately nothing on that shape.
+
+  **3. The read side is where §2 is worth the most, by an order of magnitude.** ADR-0064 §2 estimated the win as *"~15 ns on a ~67 ns path"* — a **single-threaded** figure, and the read side does not behave that way. `bench_lkv_slot slot` runs T readers against one shared slot in four implementations of the same contract:
+
+  | T readers | `atomic<shared_ptr>` (today) | epoch-based | hazard pointers | no reclamation (ceiling) |
+  | ---: | ---: | ---: | ---: | ---: |
+  | 1 | 29.3 M/s | 116 M/s | 117 M/s | 2,226 M/s |
+  | 8 | 2.7 M/s | 890 M/s | 803 M/s | 10,621 M/s |
+  | 24 | **1.3 M/s** | 2,730 M/s | 2,205 M/s | 16,965 M/s |
+
+  Median of 3 runs; run-to-run spread is 1.0–1.8× at the small-T points, which the 23× effect clears comfortably. Today's slot does not merely fail to scale — it **inverts**: 24 concurrent readers are collectively **22× slower** than one. Both real reclamation schemes scale near-linearly and land within run-to-run noise of each other (epoch is 24% ahead at T=24 against a 1.2–1.3× spread), at ~1/6 of the ceiling.
+
+  The ceiling arm is not a candidate — it frees on a fixed publish lag and a stalled reader can still be holding a freed pointer. It is there to bound the question: with reclamation free, the read reduces to one acquire load, so everything above 0.45 ns/op is what a scheme charges for safety.
+
+  **Scope, stated because it bounds the claim.** This read cost is paid by `read_stored()` callers — `graph_t::read`, `await`'s return, the late-join replay, and `read_subtree_folded`, which takes **one per node**, so a branch read of an N-node subtree takes N of them. It is **not** paid by push-subscriber delivery, which receives the rope by const reference from the writer and never touches the slot.
+
+  **The control that rules out the obvious alternative explanation.** A third shape runs T writers against T *distinct* slots; there `atomic<shared_ptr>` scales (31 M/s → 230 M/s, T=1→24). So the collapse is caused by **sharing one slot**, not by unrelated vertices aliasing in libstdc++'s hashed lock-bit table.
 
 - **The "lock-free LKV" language in the code is currently wrong** wherever it describes the `atomic<shared_ptr>` load as lock-free. §2 is what would make it true; until then the comments should say *lock-free by contract, spin-locked in libstdc++*.
 
