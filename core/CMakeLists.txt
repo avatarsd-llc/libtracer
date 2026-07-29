@@ -190,8 +190,47 @@ endif()
 # switch only picks which one graph_t evaluates and how strict :acl parse is.
 option(LIBTRACER_ACL_FULL "Evaluate ACLs with the full security_acl host policy (DENY, ordered)"
        OFF)
+
+# Process-wide vertex lock-stripe count (#361 §2) — a per-target knob, delivered as
+# plain C++ through the generated config header below (ADR-0068), never as a -D.
+set(LIBTRACER_VERTEX_LOCK_STRIPES 16 CACHE STRING
+    "Vertex lock-stripe count (N mutexes + condvars process-wide; 4-8 for a small MCU node)")
+
+# ---- libtracer/config.hpp — per-target build configuration as plain C++ (ADR-0068) ----
+# Every compile-time knob is an `inline constexpr` / `using` binding in ONE generated
+# header that shadows the checked-in default (raw -Iinclude consumers build with stock
+# settings). One file per build ⇒ every TU agrees ⇒ no per-TU -D ODR hazard.
 if(LIBTRACER_ACL_FULL)
-    target_compile_definitions(libtracer PUBLIC LIBTRACER_ACL_FULL)
+    set(LIBTRACER_ACL_POLICY full_acl_policy_t)
+else()
+    set(LIBTRACER_ACL_POLICY allow_only_policy_t)
+endif()
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/libtracer/config.hpp.in
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config.hpp
+    @ONLY)
+target_include_directories(libtracer BEFORE PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated/include>)
+
+# Drift gate: the checked-in default config.hpp must be byte-identical to the template
+# rendered with default values — the template is the single source of truth, and a
+# hand-edited default cannot silently rot (the derive-don't-hand-maintain rule).
+set(_lt_saved_stripes "${LIBTRACER_VERTEX_LOCK_STRIPES}")
+set(_lt_saved_policy "${LIBTRACER_ACL_POLICY}")
+set(LIBTRACER_VERTEX_LOCK_STRIPES 16)
+set(LIBTRACER_ACL_POLICY allow_only_policy_t)
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/libtracer/config.hpp.in
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/drift-check/config.hpp
+    @ONLY)
+set(LIBTRACER_VERTEX_LOCK_STRIPES "${_lt_saved_stripes}")
+set(LIBTRACER_ACL_POLICY "${_lt_saved_policy}")
+file(READ ${CMAKE_CURRENT_SOURCE_DIR}/include/libtracer/config.hpp _lt_cfg_default)
+file(READ ${CMAKE_CURRENT_BINARY_DIR}/generated/drift-check/config.hpp _lt_cfg_rendered)
+if(NOT _lt_cfg_default STREQUAL _lt_cfg_rendered)
+    message(FATAL_ERROR "include/libtracer/config.hpp has drifted from config.hpp.in's "
+                        "default rendering — regenerate the checked-in default from the "
+                        "template (ADR-0068).")
 endif()
 
 option(LIBTRACER_WITH_CUDA "Build the mem_cuda GPU backend (needs CUDA toolkit)" OFF)
@@ -273,7 +312,13 @@ if(LIBTRACER_INSTALL)
         INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
     install(DIRECTORY include/libtracer
-        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+        PATTERN "config.hpp.in" EXCLUDE)
+    # Ship the GENERATED config.hpp (this build's knob values), overriding the
+    # checked-in default the directory copy above brought along — an installed
+    # non-default package must be self-consistent (ADR-0068).
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config.hpp
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/libtracer)
 
     set(LIBTRACER_CMAKE_CONFIG_DIR ${CMAKE_INSTALL_LIBDIR}/cmake/libtracer)
 

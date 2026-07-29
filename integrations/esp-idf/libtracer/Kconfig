@@ -64,12 +64,10 @@ menu "libtracer"
             small count (4-8) reclaims RAM at negligible contention cost; the
             host/multi-core default stays 16.
 
-            The core header (<libtracer/vertex.hpp>) already honors a
-            -DLIBTRACER_VERTEX_LOCK_STRIPES override; this option is the ESP-IDF
-            front door for it. The component propagates the value as a PUBLIC
-            compile definition so every translation unit that includes
-            <libtracer/vertex.hpp> agrees: the stripe table is an
-            `inline constinit` object, and a size mismatch across TUs is an ODR
-            violation.
+            The value is delivered as the ordinary constexpr
+            tr::graph::kVertexLockStripes in a generated <libtracer/config.hpp>
+            (ADR-0068) that shadows the checked-in default for every translation
+            unit of the build — one shared header, so the `inline constinit`
+            stripe table's size can never diverge across TUs.
 
 endmenu

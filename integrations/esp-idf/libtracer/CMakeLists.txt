@@ -170,9 +170,29 @@ if(NOT IDF_TARGET STREQUAL "linux")
     list(APPEND LIBTRACER_PRIV_INCLUDE_DIRS "compat/include")
 endif()
 
+# libtracer/config.hpp — per-target compile-time knobs delivered as plain C++
+# (ADR-0068). Generated here from the Kconfig values and listed BEFORE core/include,
+# so the generated file shadows the checked-in default for the component's own
+# sources AND every dependent (`REQUIRES libtracer`) — one file per build means every
+# TU agrees, which is what the old PUBLIC compile definition existed to guarantee.
+# CONFIG_* is defined only in the SECOND (build) CMake pass; in the early
+# requirement-expansion pass the fallback renders the stock default (16), which the
+# second pass then overwrites with the real value before anything compiles.
+if(CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES)
+    set(LIBTRACER_VERTEX_LOCK_STRIPES ${CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES})
+else()
+    set(LIBTRACER_VERTEX_LOCK_STRIPES 16)
+endif()
+set(LIBTRACER_ACL_POLICY allow_only_policy_t)  # the MCU profile — no full-ACL Kconfig yet
+configure_file(
+    "${LIBTRACER_ROOT}/core/include/libtracer/config.hpp.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config.hpp"
+    @ONLY)
+
 idf_component_register(
     SRCS ${LIBTRACER_SRCS}
     INCLUDE_DIRS
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/include"
         "${LIBTRACER_ROOT}/core/include"
         "include"
     PRIV_INCLUDE_DIRS ${LIBTRACER_PRIV_INCLUDE_DIRS}
@@ -191,27 +211,10 @@ idf_component_register(
 # C++ standard; pin it here so the component is correct regardless of project default.
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_23)
 
-# The sole process-global mutable buffer libtracer links is the vertex lock-stripe
-# table (core/include/libtracer/vertex.hpp, #361 §2). It is sized by
-# LIBTRACER_VERTEX_LOCK_STRIPES; expose that as the Kconfig knob
-# CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES (see Kconfig) so a chip node can shrink it
-# (fewer FreeRTOS mutexes/condvars) without patching the core header.
-#
-# PUBLIC, not PRIVATE: the table is an `inline constinit` object, so EVERY TU that
-# includes <libtracer/vertex.hpp> — the component's own sources AND every dependent
-# — must compile with the same value, or the differing std::array sizes are an ODR
-# violation. A PUBLIC definition propagates through `REQUIRES libtracer` to all
-# dependents.
-#
-# CONFIG_* is defined only in the SECOND (build) CMake pass, so guard the reference:
-# in the early requirement-expansion pass the symbol is unset and the header's own
-# `#ifndef LIBTRACER_VERTEX_LOCK_STRIPES` default (16) applies. The Kconfig default
-# (also 16) means the value passed matches the header at stock settings — no
-# footprint change unless a project lowers it in menuconfig.
-if(CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES)
-    target_compile_definitions(${COMPONENT_LIB} PUBLIC
-        "LIBTRACER_VERTEX_LOCK_STRIPES=${CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES}")
-endif()
+# The vertex lock-stripe count (CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES, see Kconfig) now
+# rides the generated config.hpp above — it reaches every TU as the ordinary constexpr
+# `tr::graph::kVertexLockStripes` through ONE shared header, so the old PUBLIC compile
+# definition (and the ODR essay that justified it) is gone (ADR-0068).
 
 # Ship the component archive as `libtracer.a`, not the double-prefixed
 # `liblibtracer.a` that ESP-IDF's `lib${COMPONENT_NAME}.a` convention produces for

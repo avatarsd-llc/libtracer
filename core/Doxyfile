@@ -20,7 +20,8 @@ GENERATE_XML           = YES
 XML_OUTPUT             = xml
 XML_PROGRAMLISTING     = NO
 
-INPUT                  = core/include/libtracer/backend.hpp \
+INPUT                  = core/include/libtracer/config.hpp \
+                         core/include/libtracer/backend.hpp \
                          core/include/libtracer/segment.hpp \
                          core/include/libtracer/view.hpp \
                          core/include/libtracer/rope.hpp \

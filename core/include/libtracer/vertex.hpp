@@ -32,6 +32,7 @@
 #include <utility>
 #include <vector>
 
+#include "libtracer/config.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/status.hpp"
@@ -654,15 +655,10 @@ class edge_snapshot_t {
     std::size_t n_ = 0; /**< @brief Constructed-view count. */
 };
 
-/**
- * @brief The number of lock stripes shared by every vertex in the process
- *        (#361 §2). A per-target config knob (RFC-0006: bounds are injected or
- *        per-target config, never magic): override with a compile definition,
- *        e.g. `-DLIBTRACER_VERTEX_LOCK_STRIPES=8` for a small MCU node.
- */
-#ifndef LIBTRACER_VERTEX_LOCK_STRIPES
-#define LIBTRACER_VERTEX_LOCK_STRIPES 16
-#endif
+// The stripe count lives in libtracer/config.hpp (ADR-0068): kVertexLockStripes is an
+// ordinary constexpr shared by every TU through ONE header, so a per-target override
+// (CMake cache variable / Kconfig) can never diverge across TUs the way a bare `-D`
+// compile definition could (the std::array size below would be an ODR violation).
 
 /**
  * @brief One shared lock stripe: the mutex + condvar a SET of vertices ride
@@ -701,7 +697,7 @@ struct alignas(64) vertex_stripe_t {  // one cache line per stripe: adjacent str
  *        can never be constant-initialized — only the cold await/wake paths reach it.
  */
 #if defined(__GTHREAD_MUTEX_INIT) || defined(_LIBCPP_VERSION)
-inline constinit std::array<vertex_stripe_t, LIBTRACER_VERTEX_LOCK_STRIPES> vertex_stripes{};
+inline constinit std::array<vertex_stripe_t, kVertexLockStripes> vertex_stripes{};
 
 /** @brief The stripe at table slot @p idx (guard-free constant-initialized table). */
 inline vertex_stripe_t& vertex_stripe_at(std::size_t idx) noexcept { return vertex_stripes[idx]; }
@@ -709,7 +705,7 @@ inline vertex_stripe_t& vertex_stripe_at(std::size_t idx) noexcept { return vert
 /** @brief The stripe at table slot @p idx (guarded-static fallback: this platform's
  *         `std::mutex` has no constexpr ctor, so the table cannot be `constinit`). */
 inline vertex_stripe_t& vertex_stripe_at(std::size_t idx) noexcept {
-    static std::array<vertex_stripe_t, LIBTRACER_VERTEX_LOCK_STRIPES> stripes{};
+    static std::array<vertex_stripe_t, kVertexLockStripes> stripes{};
     return stripes[idx];
 }
 #endif
@@ -719,7 +715,7 @@ inline vertex_stripe_t& vertex_stripe_at(std::size_t idx) noexcept {
 inline std::size_t vertex_stripe_index(const void* v) noexcept {
     std::uintptr_t h = reinterpret_cast<std::uintptr_t>(v);
     h ^= h >> 9;  // fold higher entropy into the allocation-aligned low bits
-    return (h >> 6) % LIBTRACER_VERTEX_LOCK_STRIPES;
+    return (h >> 6) % kVertexLockStripes;
 }
 
 /** @brief The stripe a vertex rides (mutex + waiter count). */
@@ -733,7 +729,7 @@ inline vertex_stripe_t& vertex_stripe_of(const void* v) noexcept {
  *        the waiterless publish (the hot path) never pays this table's init guard.
  */
 inline std::condition_variable& vertex_stripe_cv(std::size_t idx) {
-    static std::array<std::condition_variable, LIBTRACER_VERTEX_LOCK_STRIPES> cvs;
+    static std::array<std::condition_variable, kVertexLockStripes> cvs;
     return cvs[idx];
 }
 
