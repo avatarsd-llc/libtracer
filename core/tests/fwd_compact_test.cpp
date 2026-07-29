@@ -188,14 +188,19 @@ int main() {
     (void)graph_b.write(vB, make_value(b_value_u32(0)));
 
     fwd_router_t router_b(graph_b);
-    std::mutex bseen_m;
-    std::vector<std::byte> b_subscribe_src;  // the accumulated return route = the delivery route
-    router_b.on_inbound([&](std::string_view in, const tlv_t& fwd) {
-        if (in == "down" && fwd.children.size() >= 3 && fwd.children[2].type == type_t::PATH) {
-            const std::lock_guard lock(bseen_m);
-            b_subscribe_src = tr::wire::encode(fwd.children[2]);
-        }
-    });
+    struct b_obs_t {
+        std::mutex m;
+        std::vector<std::byte> subscribe_src;  // the accumulated return route = the delivery route
+    } b_obs;
+    router_b.on_inbound(
+        [](void* ctx, std::string_view in, const tlv_t& fwd) {
+            if (in == "down" && fwd.children.size() >= 3 && fwd.children[2].type == type_t::PATH) {
+                auto* o = static_cast<b_obs_t*>(ctx);
+                const std::lock_guard lock(o->m);
+                o->subscribe_src = tr::wire::encode(fwd.children[2]);
+            }
+        },
+        &b_obs);
     transport_ws_server srv_b(0);
     if (!srv_b.ok()) {
         std::fprintf(stderr, "node B: ws server failed to bind\n");
@@ -206,19 +211,28 @@ int main() {
     // ----- node A: forwarder. ws server (for C) + ws client (to B). --------------
     graph_t graph_a;
     fwd_router_t router_a(graph_a);
-    std::mutex araw_m;
-    std::size_t a_last_compact_in = 0;  // size of the last COMPACT seen inbound on "up"
-    int a_stale_hits = 0;
-    router_a.on_raw([&](std::string_view in, std::span<const std::byte> frame) {
-        if (in == "up" && !frame.empty() && frame[0] == static_cast<std::byte>(type_t::COMPACT)) {
-            const std::lock_guard lock(araw_m);
-            a_last_compact_in = frame.size();
-        }
-    });
-    router_a.on_stale_label([&](std::string_view, std::uint16_t) {
-        const std::lock_guard lock(araw_m);
-        ++a_stale_hits;
-    });
+    struct a_obs_t {
+        std::mutex m;
+        std::size_t last_compact_in = 0;  // size of the last COMPACT seen inbound on "up"
+        int stale_hits = 0;
+    } a_obs;
+    router_a.on_raw(
+        [](void* ctx, std::string_view in, std::span<const std::byte> frame) {
+            if (in == "up" && !frame.empty() &&
+                frame[0] == static_cast<std::byte>(type_t::COMPACT)) {
+                auto* o = static_cast<a_obs_t*>(ctx);
+                const std::lock_guard lock(o->m);
+                o->last_compact_in = frame.size();
+            }
+        },
+        &a_obs);
+    router_a.on_stale_label(
+        [](void* ctx, std::string_view, std::uint16_t) {
+            auto* o = static_cast<a_obs_t*>(ctx);
+            const std::lock_guard lock(o->m);
+            ++o->stale_hits;
+        },
+        &a_obs);
     transport_ws_server srv_a(0);
     if (!srv_a.ok()) {
         std::fprintf(stderr, "node A: ws server failed to bind\n");
@@ -239,15 +253,19 @@ int main() {
     fwd_router_t router_c(graph_c);
     mailbox_t delivered;    // ordered payload bytes delivered to C
     mailbox_t reply_inbox;  // subscribe / one-shot REPLY frames
-    router_c.on_reply([&](const tr::view::rope_t& reply) {
-        const tr::view::view_t mat = reply.materialize();
-        const auto b = mat.bytes();
-        reply_inbox.push(std::vector<std::byte>(b.begin(), b.end()));
-    });
+    router_c.on_reply(
+        [](void* ctx, const tr::view::rope_t& reply) {
+            const tr::view::view_t mat = reply.materialize();
+            const auto b = mat.bytes();
+            static_cast<mailbox_t*>(ctx)->push(std::vector<std::byte>(b.begin(), b.end()));
+        },
+        &reply_inbox);
     router_c.on_compact_delivery(
-        [&](std::span<const std::byte>, std::span<const std::byte> payload) {
-            delivered.push(std::vector<std::byte>(payload.begin(), payload.end()));
-        });
+        [](void* ctx, std::span<const std::byte>, std::span<const std::byte> payload) {
+            static_cast<mailbox_t*>(ctx)->push(
+                std::vector<std::byte>(payload.begin(), payload.end()));
+        },
+        &delivered);
     transport_ws_client c_to_a("127.0.0.1", srv_a.local_port());
     if (!c_to_a.ok()) {
         std::fprintf(stderr, "node C: ws client to A failed\n");
@@ -271,8 +289,8 @@ int main() {
 
     std::vector<std::byte> route;  // /c/sink — the delivery route B advertises
     {
-        const std::lock_guard lock(bseen_m);
-        route = b_subscribe_src;
+        const std::lock_guard lock(b_obs.m);
+        route = b_obs.subscribe_src;
     }
     check(route == b_path({"c", "sink"}),
           "B's stored return route accumulated to /c/sink (the delivery route)");
@@ -344,8 +362,8 @@ int main() {
     std::printf("Compaction byte-delta (COMPACT vs full-route FWD{WRITE}):\n");
     std::size_t compact_sz = 0;
     {
-        const std::lock_guard lock(araw_m);
-        compact_sz = a_last_compact_in;
+        const std::lock_guard lock(a_obs.m);
+        compact_sz = a_obs.last_compact_in;
     }
     // The equivalent full-route delivery B would have sent WITHOUT compaction.
     const std::size_t full_sz =
@@ -365,14 +383,14 @@ int main() {
     {
         const auto deadline = std::chrono::steady_clock::now() + 1500ms;
         while (std::chrono::steady_clock::now() < deadline) {
-            const std::lock_guard lock(araw_m);
-            if (a_stale_hits > 0) break;
+            const std::lock_guard lock(a_obs.m);
+            if (a_obs.stale_hits > 0) break;
             std::this_thread::yield();
         }
     }
     {
-        const std::lock_guard lock(araw_m);
-        check(a_stale_hits >= 1, "A flagged the unknown label as stale");
+        const std::lock_guard lock(a_obs.m);
+        check(a_obs.stale_hits >= 1, "A flagged the unknown label as stale");
     }
     check(delivered.size() == before_stale, "no delivery reached C for the stale label");
 
@@ -382,20 +400,21 @@ int main() {
     router_a.clear_link("up");
     router_a.clear_link("c");
     router_c.clear_link("a");
-    const int stale_before_reheal = a_stale_hits;
+    const int stale_before_reheal = a_obs.stale_hits;
     // The OLD label is now stale at A -> dropped + NACK, not a crash.
     router_b.send_compact("down", labelB, b_value_u32(0xFEED));
     {
         const auto deadline = std::chrono::steady_clock::now() + 1500ms;
         while (std::chrono::steady_clock::now() < deadline) {
-            const std::lock_guard lock(araw_m);
-            if (a_stale_hits > stale_before_reheal) break;
+            const std::lock_guard lock(a_obs.m);
+            if (a_obs.stale_hits > stale_before_reheal) break;
             std::this_thread::yield();
         }
     }
     {
-        const std::lock_guard lock(araw_m);
-        check(a_stale_hits > stale_before_reheal, "post-reconnect old label is stale (dropped)");
+        const std::lock_guard lock(a_obs.m);
+        check(a_obs.stale_hits > stale_before_reheal,
+              "post-reconnect old label is stale (dropped)");
     }
     // Re-advertise (the self-heal) and resume streaming byte-exact.
     const std::size_t resume_base = delivered.size();

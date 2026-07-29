@@ -25,6 +25,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   exists as a preprocessor symbol (it rebinds the `acl_policy_t` alias in the generated
   header). Pre-production, so no deprecation shims.
 
+- **BREAKING: `fwd_router_t`'s five observability/terminus sinks are fn-ptr + context**
+  (`on_reply` / `on_inbound` / `on_raw` / `on_compact_delivery` / `on_stale_label`), no longer
+  `std::function`. They fire on the per-frame RX path — the seam
+  [ADR-0047](../docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md) already
+  called "the largest avoidable embedded liability on the delivery path" when it rejected
+  `std::function` receivers — and now take `(fn, ctx)` in the same shape as
+  `graph_t::subscriber_fn_t`. Wiring-frequency `std::function`s elsewhere
+  (`posix_endpoint_t::start`, `peer_visitor_t`) are deliberately kept. Pre-production, no
+  deprecation shims ([ADR-0068](../docs/adr/0068-build-configuration-is-plain-cpp-config-header.md)
+  records the survey).
+
 ### Added
 
 - **`graph_t::delivery_drops()` — a dropped delivery is now countable** (#629). A path-target

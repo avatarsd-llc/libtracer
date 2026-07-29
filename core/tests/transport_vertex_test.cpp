@@ -259,12 +259,14 @@ void test_fwd_still_routes() {
     // arrived — the byte path is fwd_router's, untouched by the vertex shell.)
     std::promise<bool> got;
     auto fut = got.get_future();
-    router_b.on_raw([&got](std::string_view link, std::span<const std::byte>) {
-        if (link == "down") try {
-                got.set_value(true);
-            } catch (...) {
-            }
-    });
+    router_b.on_raw(
+        [](void* ctx, std::string_view link, std::span<const std::byte>) {
+            if (link == "down") try {
+                    static_cast<std::promise<bool>*>(ctx)->set_value(true);
+                } catch (...) {
+                }
+        },
+        &got);
 
     // Build FWD{ op=WRITE, dst=/up/temp, src=/reply, VALUE } and hand it to A's router
     // as if it arrived locally (inbound_name "self" names no child => forward by dst).
@@ -355,14 +357,17 @@ void test_config_constructed_udp() {
     // the same "configure before frames flow" contract as add_child.
     std::promise<std::vector<std::byte>> got;
     auto fut = got.get_future();
-    router_a.on_reply([&got](const tr::view::rope_t& reply) {
-        try {
-            const tr::view::view_t mat = reply.materialize();
-            const auto b = mat.bytes();
-            got.set_value(std::vector<std::byte>(b.begin(), b.end()));
-        } catch (...) {
-        }
-    });
+    router_a.on_reply(
+        [](void* ctx, const tr::view::rope_t& reply) {
+            try {
+                const tr::view::view_t mat = reply.materialize();
+                const auto b = mat.bytes();
+                static_cast<std::promise<std::vector<std::byte>>*>(ctx)->set_value(
+                    std::vector<std::byte>(b.begin(), b.end()));
+            } catch (...) {
+            }
+        },
+        &got);
 
     // B: a stored value at /temp (an encoded VALUE TLV — the reply embeds the LKV
     // verbatim), and a udp LISTENER on a fixed localhost port.

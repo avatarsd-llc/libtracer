@@ -186,9 +186,11 @@ int main() {
 
     observed_t b_seen;
     fwd_router_t router_b(graph_b);
-    router_b.on_inbound([&](std::string_view in, const tlv_t& fwd) {
-        if (in == "b-in") b_seen.set(fwd);
-    });
+    router_b.on_inbound(
+        [](void* ctx, std::string_view in, const tlv_t& fwd) {
+            if (in == "b-in") static_cast<observed_t*>(ctx)->set(fwd);
+        },
+        &b_seen);
     transport_ws_server srv_b(0);
     if (!srv_b.ok()) {
         std::fprintf(stderr, "node B: ws server failed to bind\n");
@@ -216,11 +218,13 @@ int main() {
     graph_t graph_c;
     mailbox_t inbox;
     fwd_router_t router_c(graph_c);
-    router_c.on_reply([&](const tr::view::rope_t& reply) {
-        const tr::view::view_t mat = reply.materialize();
-        const auto b = mat.bytes();
-        inbox.push(std::vector<std::byte>(b.begin(), b.end()));
-    });
+    router_c.on_reply(
+        [](void* ctx, const tr::view::rope_t& reply) {
+            const tr::view::view_t mat = reply.materialize();
+            const auto b = mat.bytes();
+            static_cast<mailbox_t*>(ctx)->push(std::vector<std::byte>(b.begin(), b.end()));
+        },
+        &inbox);
     transport_ws_client c_to_a("127.0.0.1", srv_a.local_port());
     if (!c_to_a.ok()) {
         std::fprintf(stderr, "client: ws client to A failed to connect\n");

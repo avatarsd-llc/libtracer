@@ -514,14 +514,17 @@ void test_config_constructed_tcp() {
     // A's reply sink is set BEFORE the sockets exist (configure before frames flow).
     std::promise<std::vector<std::byte>> got;
     auto fut = got.get_future();
-    router_a.on_reply([&got](const tr::view::rope_t& reply) {
-        try {
-            const tr::view::view_t mat = reply.materialize();
-            const auto b = mat.bytes();
-            got.set_value(std::vector<std::byte>(b.begin(), b.end()));
-        } catch (...) {
-        }
-    });
+    router_a.on_reply(
+        [](void* ctx, const tr::view::rope_t& reply) {
+            try {
+                const tr::view::view_t mat = reply.materialize();
+                const auto b = mat.bytes();
+                static_cast<std::promise<std::vector<std::byte>>*>(ctx)->set_value(
+                    std::vector<std::byte>(b.begin(), b.end()));
+            } catch (...) {
+            }
+        },
+        &got);
 
     // Pick a fresh OS-assigned free localhost port for B's listener. A hardcoded port
     // races leftover sockets across parallel/repeated runs and flakes (#440); a
