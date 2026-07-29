@@ -30,6 +30,7 @@ namespace tr::graph {
 
 struct allow_only_policy_t;  // security_acl.hpp — the ALLOW-only MCU profile (ADR-0020 subset)
 struct full_acl_policy_t;    // security_acl.hpp — ordered first-match-per-bit with DENY
+class sp_atomic_slot_t;      // lkv_slot.hpp — atomic<shared_ptr>; reclamation is the refcount
 
 /**
  * @brief The number of lock stripes shared by every vertex in the process (#361 §2).
@@ -49,5 +50,21 @@ inline constexpr std::size_t kVertexLockStripes = 16;
  * DENY) — a target-configuration change, never an edit to `graph.cpp`.
  */
 using acl_policy_t = allow_only_policy_t;
+
+/**
+ * @brief The target's selected LKV slot policy (ADR-0069 §1).
+ *
+ * How a vertex publishes and reads its last-known value. Default: `sp_atomic_slot_t`, the
+ * `std::atomic<std::shared_ptr<const rope_t>>` libtracer has always used, whose reclamation
+ * is the refcount and whose registry cost is zero — the right choice for a write-dominated
+ * single-core node, and the reason a raw `-I` consumer builds what it always built.
+ *
+ * A many-core host is the case for rebinding this: today's slot INVERTS under concurrent
+ * readers (measured 15.4 M `graph_t::read`/s at one reader falling to 1.8 at twenty-four),
+ * and a reclamation scheme that does not serialize recovers roughly 20× of that at
+ * twenty-four readers. CMake: `-DLIBTRACER_LKV_SLOT=<type>`. The named type must satisfy the
+ * policy contract in `lkv_slot.hpp` — in particular `load()` returns an OWNING handle.
+ */
+using lkv_slot_t = sp_atomic_slot_t;
 
 }  // namespace tr::graph
