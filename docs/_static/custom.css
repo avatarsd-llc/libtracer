@@ -71,30 +71,33 @@ dl.cpp > dt {
  *
  * Tradeoff, stated rather than hidden: at very wide viewports a paragraph line
  * gets long enough to hurt scanning. Prose blocks below therefore keep a
- * readable measure while tables, code, and figures take the full width.
+ * readable measure while tables, code, figures and charts take the full width.
  */
 .content {
   max-width: none;
   width: 100%;
 }
 
-/* Keep running prose at a readable measure while anything data-bearing spans the
-   full width. Without this, full-viewport body text is a regression in
-   readability, not an improvement. */
-article > p,
-article > ul,
-article > ol,
-article > blockquote {
+/*
+ * Keep running prose at a readable measure while anything data-bearing spans the
+ * full width. Without this, full-viewport body text is a regression in
+ * readability, not an improvement — so this rule is what makes the width change
+ * above defensible, not a nicety on top of it.
+ *
+ * DESCENDANT selectors, not child. Sphinx nests a section per heading level, so
+ * body copy lands at `article > section > section > p` and, under an `###`, at
+ * `article > section > section > section > p`. A `article > p` rule matches
+ * essentially nothing on a real page — verified in the browser, where all 99
+ * prose paragraphs computed `max-width: none`.
+ *
+ * Restricting the measure to `p` / `li` / `blockquote` is also why there is no
+ * companion rule re-widening tables, figures, code blocks or charts: none of
+ * them is a paragraph, so none is ever narrowed in the first place. The earlier
+ * `max-width: 100%` block existed only to undo an over-broad prose rule, and
+ * both halves of that pairing were dead.
+ */
+article p,
+article li,
+article blockquote {
   max-width: 62rem;
-}
-article > table,
-article > figure,
-article > .highlight,
-article > .ph-hist,
-article > div[class*="admonition"],
-article > section > table,
-article > section > figure,
-article > section > .highlight,
-article > section > .ph-hist {
-  max-width: 100%;
 }
