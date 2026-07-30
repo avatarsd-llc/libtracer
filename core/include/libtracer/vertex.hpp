@@ -55,6 +55,63 @@ enum class role_t : std::uint8_t {
 };
 
 /**
+ * @brief An owning reference to a vertex's PUBLISHED value — what @ref graph_t::read and
+ *        @ref graph_t::await hand back.
+ *
+ * The value a vertex publishes is already refcounted: the LKV slot holds it as a
+ * `std::shared_ptr<const rope_t>`, and the policy contract in `lkv_slot.hpp` fixes that shape
+ * because `load()` must return an OWNING handle. A read therefore has a choice — hand the
+ * caller that reference, or copy the rope out of it. Copying is not free: a rope copy clones
+ * one `segment_ptr_t` per link, and each clone is a contended refcount RMW on a line every
+ * reader of that vertex shares, so it costs more as links grow AND as readers grow.
+ *
+ * Measured on the real path, both arms alternating inside ONE binary (24-thread host, 102
+ * paired samples): median **1.37x** aggregate, 89/102 samples favouring the reference, and p50
+ * improving most where it hurts most — 2,104 ns to 1,193 ns at sixteen readers on one shared
+ * vertex. The composed BRANCH read, which must build a value rather than share one, measured
+ * **1.00x (15/30)**: the shape that cannot benefit does not pay either.
+ *
+ * The rule this draws: **a read of a PUBLISHED value returns a reference to it; a read that
+ * COMPOSES a new value returns the value.** That is why @ref graph_t::read_children_folded and
+ * its siblings still return a `rope_t` — there is no published object for them to reference.
+ *
+ * Holding one keeps that value alive, exactly as the reader's own reference did before. Under
+ * an injected `std::pmr::memory_resource` that is a real obligation: the value was allocated
+ * from the graph's resource, so an outstanding reference pins it (ADR-0069, deferred
+ * reclamation).
+ */
+class value_ref_t {
+   public:
+    value_ref_t() = default;
+
+    /** @brief Wrap a published value's handle. */
+    explicit value_ref_t(std::shared_ptr<const rope_t> p) noexcept : p_(std::move(p)) {}
+
+    /**
+     * @brief Take ownership of a freshly COMPOSED value, giving it a published value's shape.
+     *
+     * The composed branch read builds a rope no vertex published; this is what lets it answer
+     * the same signature. It allocates a control block, which the published path does not —
+     * measured neutral (1.00x over 30 paired samples), because a subtree walk dominates it.
+     */
+    [[nodiscard]] static value_ref_t composed(rope_t&& r) {
+        return value_ref_t{std::make_shared<const rope_t>(std::move(r))};
+    }
+
+    /** @brief The referenced value. Undefined if this reference is empty. */
+    [[nodiscard]] const rope_t& operator*() const noexcept { return *p_; }
+    /** @brief Member access on the referenced value. */
+    [[nodiscard]] const rope_t* operator->() const noexcept { return p_.get(); }
+    /** @brief The referenced value, or null. */
+    [[nodiscard]] const rope_t* get() const noexcept { return p_.get(); }
+    /** @brief Whether this reference names a value. */
+    [[nodiscard]] explicit operator bool() const noexcept { return static_cast<bool>(p_); }
+
+   private:
+    std::shared_ptr<const rope_t> p_;
+};
+
+/**
  * @brief The mandatory core QoS fields of a vertex (docs/reference/02 §core writable fields).
  *
  * **Members are ordered widest-first, and that ordering is load-bearing.** Every field is a

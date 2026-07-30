@@ -860,7 +860,7 @@ void run_graph(topo_t topo, std::size_t T, std::size_t subs, op_t op) {
             return 0;
         }
         const auto r = g.read(verts[t]);
-        return r ? r->total_length() : 0;
+        return r ? (*r)->total_length() : 0;
     };
 
     std::atomic<std::size_t> ready{0};

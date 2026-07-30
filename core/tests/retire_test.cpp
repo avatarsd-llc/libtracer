@@ -116,7 +116,7 @@ void test_retire_hides_vertex() {
     const auto kids = g.read(path_t("/dev:children"));
     check(kids.has_value(), "/dev:children still reads");
     if (kids.has_value()) {
-        const tr::view::view_t flat = kids->flatten();
+        const tr::view::view_t flat = (*kids)->flatten();
         const auto dec = tr::wire::decode(flat.bytes());
         const bool lists_b = dec && [&] {
             for (const auto& m : dec->children)
@@ -154,7 +154,7 @@ void test_revive_is_fresh() {
         const auto r2 = g.read(path_t("/dev/b"));
         bool ok = false;
         if (r2.has_value()) {
-            const tr::view::view_t f = r2->flatten();
+            const tr::view::view_t f = (*r2)->flatten();
             ok = f.bytes().size() == 1 && f.bytes()[0] == std::byte{0x22};
         }
         check(ok, "revived /dev/b takes a fresh write (reads 0x22)");

@@ -243,7 +243,7 @@ std::set<std::string> enumerate_local(graph_t& g, const char* path) {
     if (!r) return {};
     // A generic member listing is a FOLDED scatter-gather rope (L4 fold); flatten to
     // decode. The synthesized (on_children) listing stays single-link either way.
-    const tr::view::view_t flat = r->flatten();
+    const tr::view::view_t flat = (*r)->flatten();
     const auto dec = tr::wire::decode(flat.bytes());
     if (!dec || dec->type != type_t::POINT) return {};
     return member_names(*dec);
@@ -423,7 +423,7 @@ void test_enumeration_and_forwarding() {
     const auto stored = graph_p.read(vp);
     std::optional<tlv_t> inner;
     if (stored) {
-        if (auto t = tr::wire::decode(stored->only())) inner = std::move(*t);
+        if (auto t = tr::wire::decode((*stored)->only())) inner = std::move(*t);
     }
     check(inner && inner->type == type_t::VALUE && inner->payload.size() == 4 &&
               tr::detail::load_le<std::uint32_t>(inner->payload) == kWritten,

@@ -290,9 +290,9 @@ int main() {
         const auto sa = ga.read(*ga.find(path_t::parse("/sensor/temp")->key()));
         const auto sv = gv.read(*gv.find(path_t::parse("/sensor/temp")->key()));
         check(sa.has_value() && sv.has_value() &&
-                  sa->flatten().bytes().size() == sv->flatten().bytes().size() &&
-                  std::memcmp(sa->flatten().bytes().data(), sv->flatten().bytes().data(),
-                              sa->flatten().bytes().size()) == 0,
+                  (*sa)->flatten().bytes().size() == (*sv)->flatten().bytes().size() &&
+                  std::memcmp((*sa)->flatten().bytes().data(), (*sv)->flatten().bytes().data(),
+                              (*sa)->flatten().bytes().size()) == 0,
               "both tiers stored byte-identical LKV after the WRITE");
     }
 
@@ -327,10 +327,10 @@ int main() {
         check(reply.has_value(), "rope-tier WRITE over threshold produced a reply");
 
         const auto rd = g.read(v);
-        check(rd.has_value() && rd->link_count() > 1,
+        check(rd.has_value() && (*rd)->link_count() > 1,
               "multi-link payload PINNED as a subrope (segments kept, not copied to one buffer)");
-        check(rd.has_value() && rd->flatten().bytes().size() == big_tlv.size() &&
-                  std::memcmp(rd->flatten().bytes().data(), big_tlv.data(), big_tlv.size()) == 0,
+        check(rd.has_value() && (*rd)->flatten().bytes().size() == big_tlv.size() &&
+                  std::memcmp((*rd)->flatten().bytes().data(), big_tlv.data(), big_tlv.size()) == 0,
               "pinned store reads back byte-identical to the written VALUE TLV");
     }
 

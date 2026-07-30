@@ -76,15 +76,29 @@ std::vector<std::byte> value_tlv(std::string_view payload) {
     return out;
 }
 
-/** @brief Flatten a read result and compare against the exact expected bytes. */
-bool reads_back(const tr::graph::result_t<rope_t>& r, std::span<const std::byte> expect) {
+/** @brief A rope, whether held directly or behind a @ref tr::graph::value_ref_t. */
+inline const rope_t& deref_rope(const rope_t& r) noexcept { return r; }
+/** @brief Overload for the reference form a value read returns. */
+inline const rope_t& deref_rope(const tr::graph::value_ref_t& r) noexcept { return *r; }
+
+/**
+ * @brief Flatten a read result and compare against the exact expected bytes.
+ *
+ * Generic over the result's value type because the two read surfaces now differ: a value read
+ * hands back a `value_ref_t` (a reference to the PUBLISHED value), while a `:field` read is
+ * rope-valued because it composes one. Both dereference to a rope, so the helper only needs
+ * `*` — spelling the parameter concretely would force every caller to pick a surface.
+ */
+template <class T>
+bool reads_back(const tr::graph::result_t<T>& r, std::span<const std::byte> expect) {
     if (!r) return false;
-    const tr::view::view_t flat = r->flatten();
+    const tr::view::view_t flat = deref_rope(*r).flatten();
     const std::span<const std::byte> got = flat.bytes();
     return got.size() == expect.size() && std::equal(got.begin(), got.end(), expect.begin());
 }
 
-bool fails_with(const tr::graph::result_t<rope_t>& r, status_t s) {
+template <class T>
+bool fails_with(const tr::graph::result_t<T>& r, status_t s) {
     return !r.has_value() && r.error() == s;
 }
 bool fails_with(const tr::graph::result_t<void>& r, status_t s) {
@@ -131,9 +145,10 @@ struct decoded_t {
 };
 
 /** @brief Flatten + decode a read result into an owning @ref decoded_t (nullopt on failure). */
-std::optional<decoded_t> decode_read(const tr::graph::result_t<rope_t>& r) {
+template <class T>
+std::optional<decoded_t> decode_read(const tr::graph::result_t<T>& r) {
     if (!r) return std::nullopt;
-    const tr::view::view_t flat = r->flatten();
+    const tr::view::view_t flat = deref_rope(*r).flatten();
     std::optional<decoded_t> out(std::in_place);
     const std::span<const std::byte> b = flat.bytes();
     out->bytes.assign(b.begin(), b.end());

@@ -174,7 +174,7 @@ std::uint8_t read_link_state_byte(graph_t& g, std::string_view path) {
     if (!h) return 0xFF;
     const auto v = g.read(*h);
     if (!v) return 0xFF;
-    const auto bytes = v->materialize().bytes();
+    const auto bytes = (*v)->materialize().bytes();
     // VALUE TLV of a 1-byte payload — the payload is the last byte.
     return bytes.empty() ? 0xFF : static_cast<std::uint8_t>(bytes.back());
 }
@@ -396,7 +396,7 @@ void test_config_constructed_udp() {
     const auto lv = node_a.read(path_t("/net/udp-client/b"));
     bool up = false;
     if (lv) {
-        const auto t = tr::wire::decode(lv->only());
+        const auto t = tr::wire::decode((*lv)->only());
         up = t.has_value() && t->type == type_t::VALUE && t->payload.size() == 1 &&
              t->payload[0] == std::byte{static_cast<std::uint8_t>(link_state_t::UP)};
     }
@@ -609,7 +609,7 @@ std::set<std::string> member_names(const tr::wire::tlv_t& point) {
 std::set<std::string> enumerate_peers(graph_t& g, const char* path) {
     const auto r = g.read(*path_t::parse(path));
     if (!r) return {};
-    const tr::view::view_t flat = r->flatten();
+    const tr::view::view_t flat = (*r)->flatten();
     const auto dec = tr::wire::decode(flat.bytes());
     if (!dec || dec->type != type_t::POINT) return {};
     return member_names(*dec);

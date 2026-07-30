@@ -642,13 +642,20 @@ template <class N>
                              sub_len),
                     reply_dst_wire, reply_src_wire);
             }
-            result_t<rope_t> r =
-                has_field ? graph.read(v, field, inbound_link) : graph.read(v, inbound_link);
+            // A `:field` read composes a value and is rope-valued; a plain value read hands
+            // back a REFERENCE to the published one. Both feed the same reply assembly, which
+            // only ever reads the rope, so bind whichever arrived without copying it.
+            result_t<value_ref_t> r = has_field ? [&] {
+                auto composed = graph.read(v, field, inbound_link);
+                return composed ? result_t<value_ref_t>{value_ref_t::composed(std::move(*composed))}
+                                : result_t<value_ref_t>{std::unexpected(composed.error())};
+            }()
+                                                : graph.read(v, inbound_link);
             if (!r) return assemble_error(reply_dst_wire, reply_src_wire, r.error());
             // The composed-root case: graph.read may SUCCEED (a folded ~hundreds-of-links
             // snapshot) yet the reply's own link-table reserve fail on the fragmented heap.
             // or_backpressure keeps that from becoming a silent drop (the dead-web-ui bug).
-            return or_backpressure(assemble_result_rope(reply_dst_wire, reply_src_wire, *r),
+            return or_backpressure(assemble_result_rope(reply_dst_wire, reply_src_wire, **r),
                                    reply_dst_wire, reply_src_wire);
         }
         case fwd_op_t::WRITE: {
@@ -714,11 +721,11 @@ template <class N>
             const std::chrono::nanoseconds timeout =
                 req.has_await_timeout ? std::chrono::nanoseconds(req.await_timeout)
                                       : kDefaultAwaitTimeout;
-            result_t<rope_t> r = graph.await(v, timeout, inbound_link);
+            result_t<value_ref_t> r = graph.await(v, timeout, inbound_link);
             if (!r)
                 return assemble_error(reply_dst_wire, reply_src_wire,
                                       r.error());  // TIMEOUT => tr::flow::timeout
-            return or_backpressure(assemble_result_rope(reply_dst_wire, reply_src_wire, *r),
+            return or_backpressure(assemble_result_rope(reply_dst_wire, reply_src_wire, **r),
                                    reply_dst_wire, reply_src_wire);
         }
         case fwd_op_t::REPLY:

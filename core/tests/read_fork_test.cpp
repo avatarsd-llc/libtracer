@@ -68,7 +68,7 @@ void check(bool ok, std::string_view what) {
     const auto r = g.read(path_t(p));
     if (!r.has_value()) return false;
     std::vector<std::byte> flat;
-    for (const tr::view::view_t& l : r->links()) {
+    for (const tr::view::view_t& l : (*r)->links()) {
         const auto s = l.bytes();
         flat.insert(flat.end(), s.begin(), s.end());
     }
@@ -80,7 +80,7 @@ void check(bool ok, std::string_view what) {
     const auto r = g.read(path_t(p));
     if (!r.has_value()) return false;
     std::size_t n = 0;
-    for (const tr::view::view_t& l : r->links()) n += l.bytes().size();
+    for (const tr::view::view_t& l : (*r)->links()) n += l.bytes().size();
     return n > 1;
 }
 

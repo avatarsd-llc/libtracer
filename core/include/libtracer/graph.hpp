@@ -340,7 +340,7 @@ class graph_t {
      * a copy. Leaf reads are byte-identical to the pre-composed-read behavior, and a
      * HANDLER target's `on_read` seam keeps precedence over the composed read.
      */
-    [[nodiscard]] result_t<rope_t> read(vertex_handle_t v, std::string_view caller = {}) const;
+    [[nodiscard]] result_t<value_ref_t> read(vertex_handle_t v, std::string_view caller = {}) const;
     /**
      * @brief Write a resolved vertex's value: `assign` then deliver (RFC-0008 §D).
      *
@@ -392,8 +392,8 @@ class graph_t {
      * @brief Block until the vertex's value changes or @p timeout elapses; return the value.
      * @return The stored value as a rope, or a `status_t` (e.g. `TIMEOUT`).
      */
-    [[nodiscard]] result_t<rope_t> await(vertex_handle_t v, std::chrono::nanoseconds timeout,
-                                         std::string_view caller = {});
+    [[nodiscard]] result_t<value_ref_t> await(vertex_handle_t v, std::chrono::nanoseconds timeout,
+                                              std::string_view caller = {});
     /**
      * @brief Field-read by handle (the read dual of the field-write overload).
      *
@@ -676,13 +676,13 @@ class graph_t {
      * A read whose path has a field tail (e.g. `:settings.deadline_ns`, `:subscribers[]`,
      * `:schema`) is routed to the field surface.
      */
-    [[nodiscard]] result_t<rope_t> read(const path_t& path) const;
+    [[nodiscard]] result_t<value_ref_t> read(const path_t& path) const;
     /** @brief Write by path — resolve the key once, then @ref write(vertex_handle_t, rope_t,
      * std::string_view). */
     [[nodiscard]] result_t<void> write(const path_t& path, rope_t value);
     /** @brief Await by path — resolve the key once, then @ref await(vertex_handle_t,
      * std::chrono::nanoseconds, std::string_view). */
-    [[nodiscard]] result_t<rope_t> await(const path_t& path, std::chrono::nanoseconds timeout);
+    [[nodiscard]] result_t<value_ref_t> await(const path_t& path, std::chrono::nanoseconds timeout);
 
     /** @brief Resolve a canonical PATH-payload @p key to its vertex handle (`nullopt` if
      *         unknown). */
