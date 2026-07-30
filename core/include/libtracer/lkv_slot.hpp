@@ -18,12 +18,19 @@
  *
  * A slot type must provide, for `value_ptr_t = std::shared_ptr<const view::rope_t>`:
  *
- *   - `store(value_ptr_t)` — publish, sequentially consistent. `vertex_t::store` relies on
- *     this sharing one total order with the `write_seq_` bump and the waiter count, which
- *     is what makes the waiterless publish (#555) unable to lose a wakeup.
- *   - `store(value_ptr_t, std::memory_order)` — publish under a caller-chosen order. Only
- *     `revert_to_placeholder` uses it, to clear with `release`.
+ *   - `[[nodiscard]] bool store(value_ptr_t)` — publish, sequentially consistent. The order
+ *     matters: `vertex_t::store` relies on this sharing one total order with the `write_seq_`
+ *     bump and the waiter count, which is what makes the waiterless publish (#555) unable to
+ *     lose a wakeup. **`false` means nothing was published** and the previous value still
+ *     stands — the caller must soft-fail (#477), never report the write as taken.
+ *   - `void clear(std::memory_order)` — drop the published value. Cannot fail, and says so in
+ *     the return type: a clear releases resources rather than acquiring any. Only
+ *     `revert_to_placeholder` calls it, with `release`.
  *   - `load() const` — read the published value.
+ *
+ * `store` returning `bool` is not ceremony. A slot that reclaims lazily has to allocate to
+ * publish, and a policy surface that cannot say "I did not take this" forces the one thing
+ * #477 exists to prevent: a dropped write reported as a successful one.
  *
  * ## The constraint any future slot must satisfy
  *
@@ -99,13 +106,17 @@ class sp_atomic_slot_t {
      * @brief Publish. Sequentially consistent unless the caller says otherwise — the default
      *        is what orders the publish with `write_seq_` and the waiter count, which is what
      *        makes the waiterless publish (#555) unable to lose a wakeup.
-     *
-     * One function with a defaulted order, mirroring `std::atomic<T>::store`, rather than two
-     * overloads: it keeps this policy's call shape identical to the member it replaced.
+     * @return Always `true`. This policy allocates nothing to publish — it takes a reference
+     *         it was handed — so it has no failure to report. The signature exists because the
+     *         *contract* has one (see the file header), not because this implementation does.
      */
-    void store(value_ptr_t sp, std::memory_order order = std::memory_order_seq_cst) {
+    [[nodiscard]] bool store(value_ptr_t sp, std::memory_order order = std::memory_order_seq_cst) {
         v_.store(std::move(sp), order);
+        return true;
     }
+
+    /** @brief Drop the published value. Releases a reference; cannot fail. */
+    void clear(std::memory_order order = std::memory_order_seq_cst) { v_.store({}, order); }
 
     /**
      * @brief Read the published value.
@@ -396,15 +407,20 @@ inline void retire(lists_t& l, node_t* n) {
  * reason `sp_atomic_slot_t` stays the default.
  */
 inline void retire_and_flush(node_t* n) {
-    const std::size_t mine = self().index();
-    // A slot that held nothing, on a thread that parked nothing, has nothing to release —
-    // and a tree of never-written vertices should not pay a domain scan each to learn that.
-    if (n == nullptr && (mine == kNoIndex || registry().lists[mine].retired == nullptr)) return;
-    ticket_t t;
     registry_t& r = registry();
+    const std::size_t mine = self().index();
+    const bool mine_empty = mine == kNoIndex || r.lists[mine].retired == nullptr;
+    const bool orphans_empty = r.orphans.load(std::memory_order_relaxed) == nullptr;
+    // A slot that held nothing, on a thread that parked nothing, with nothing left behind by a
+    // thread that exited, has nothing to release — and a tree of never-written vertices should
+    // not pay a domain scan each to learn that. Orphans are normally absent, so the extra
+    // relaxed load costs nothing and buys the case that matters: a value written by a thread
+    // that has since exited is still released when its slot dies, not at process exit.
+    if (n == nullptr && mine_empty && orphans_empty) return;
+    ticket_t t;
     lists_t& l = r.lists[t.index()];
     if (n != nullptr) retire(l, n);
-    if (l.retired != nullptr) scan(r, l);
+    if (l.retired != nullptr || r.orphans.load(std::memory_order_relaxed) != nullptr) scan(r, l);
 }
 
 /**
@@ -508,11 +524,16 @@ inline final_sweep_t::~final_sweep_t() {
  * a publish that can fail. Bind this one from a host preset:
  * `-DLIBTRACER_LKV_SLOT=hazard_slot_t`.
  *
- * **Publish can drop a write under memory exhaustion**, which @ref sp_atomic_slot_t cannot:
- * an empty free list makes the first publish per participant allocate a 24-byte node, and a
- * `nullptr` there leaves the previous value published. Every later publish reuses the node
- * its own displacement recycled, so the window is a warm-up one — but it is a real difference
- * in the policy's failure surface, and a third reason the MCU does not bind this slot.
+ * **Publish can fail under memory exhaustion**, which @ref sp_atomic_slot_t cannot: an empty
+ * free list makes the first publish per participant allocate a 24-byte node. It is *reported*,
+ * not silent — `store` returns `false` and `vertex_t::store` turns that into the same
+ * `nullptr` → `BACKPRESSURE` soft-fail an LKV allocation failure already produces (#477), so
+ * no write is ever reported as taken when it was not. Every later publish reuses the node its
+ * own displacement recycled, so the window is a warm-up one — but it is still a real
+ * difference in the policy's failure surface, and a third reason the MCU does not bind this
+ * slot. Note also that the node comes from the **global heap**, not from a graph's injected
+ * `std::pmr::memory_resource`: the slot policy is never handed one, and a bounded target that
+ * needs every byte accounted for is another target that should keep the default.
  */
 class hazard_slot_t {
    public:
@@ -535,21 +556,37 @@ class hazard_slot_t {
 
     /**
      * @brief Publish, sequentially consistent unless the caller says otherwise.
+     * @return `false` if no node could be obtained for the value, in which case **nothing was
+     *         published** and the previous value still stands. Only a participant's first
+     *         publish can reach that: every later one reuses the node its own displacement
+     *         recycled, so the free list makes the steady state allocation-free.
      *
-     * An empty handle publishes `nullptr` and allocates nothing, so
-     * `vertex_t::revert_to_placeholder`'s clear stays as cheap as it was.
+     * An empty handle is not a publish — use @ref clear.
      */
-    void store(value_ptr_t sp, std::memory_order order = std::memory_order_seq_cst) {
+    [[nodiscard]] bool store(value_ptr_t sp, std::memory_order order = std::memory_order_seq_cst) {
+        if (!sp) {
+            clear(order);
+            return true;
+        }
         detail_hp::ticket_t t;
         detail_hp::lists_t& l = detail_hp::registry().lists[t.index()];
-        detail_hp::node_t* fresh = nullptr;
-        if (sp) {
-            fresh = detail_hp::acquire_node(l);
-            if (fresh == nullptr) return;  // OOM: the previous value stays published
-            fresh->sp = std::move(sp);
-        }
+        detail_hp::node_t* fresh = detail_hp::acquire_node(l);
+        if (fresh == nullptr) return false;  // nothing published; the caller soft-fails (#477)
+        fresh->sp = std::move(sp);
         detail_hp::node_t* old = slot_.exchange(fresh, rmw_order(order));
         if (old != nullptr) detail_hp::retire(l, old);
+        return true;
+    }
+
+    /**
+     * @brief Drop the published value. Cannot fail — it publishes `nullptr`, which needs no
+     *        node, so a clear allocates nothing even on a cold participant.
+     */
+    void clear(std::memory_order order = std::memory_order_seq_cst) {
+        detail_hp::node_t* old = slot_.exchange(nullptr, rmw_order(order));
+        if (old == nullptr) return;
+        detail_hp::ticket_t t;
+        detail_hp::retire(detail_hp::registry().lists[t.index()], old);
     }
 
     /**

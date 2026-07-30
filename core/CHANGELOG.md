@@ -51,8 +51,11 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   8 readers up, and indistinguishable at one — the gain is a concurrency gain only. Three
   differences from `sp_atomic_slot_t` that are not performance and are documented in the
   header: reclamation is deferred (so an injected `pmr` resource must outlive the threads that
-  wrote through it, not just the graph), publish can fail under memory exhaustion, and an
-  undersized `kHazardReaderSlots` costs throughput rather than correctness.
+  wrote through it, not just the graph); a publish can fail under memory exhaustion, which it
+  **reports** — `vertex_t::store` turns it into the same `nullptr` → `BACKPRESSURE` soft-fail an
+  LKV allocation failure already produces, and the node comes from the global heap rather than
+  from a graph's injected resource; and an undersized `kHazardReaderSlots` costs throughput
+  rather than correctness.
 
 - **`tr::graph::lkv_slot_t` — the LKV slot is now a per-target binding** (#604,
   [ADR-0069](../docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md) §1). The
@@ -69,7 +72,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   [ADR-0069](../docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md) §1). The
   new public header defines `tr::graph::sp_atomic_slot_t`, which is exactly the
   `std::atomic<std::shared_ptr<const rope_t>>` `vertex_t` has always held, behind the three
-  operations the vertex actually performs. **No behaviour change and no new configuration**: this
+  operations the vertex actually performs — `[[nodiscard]] bool store(value_ptr_t, order)`,
+  `void clear(order)`, `value_ptr_t load() const`. `store` reports rather than returns void
+  because a slot that reclaims lazily must allocate to publish, and a policy that cannot say
+  "I did not take this" would force the one thing [#477](https://github.com/avatarsd-llc/libtracer/issues/477)
+  exists to prevent: a dropped write reported as a successful one. `sp_atomic_slot_t` allocates
+  nothing and always returns `true`. **No behaviour change and no new configuration**: this
   slice only names the seam so a later one can bind a different reclamation strategy per target.
   The header also states the contract a replacement must satisfy — chiefly that `load()` returns
   an *owning* handle, because the composed branch read holds one per node across three passes.

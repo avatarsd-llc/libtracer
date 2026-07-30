@@ -25,7 +25,9 @@
  *   - **the bound** — a lone writer's parked set stays inside ADR-0069 §2's "one batch",
  *     which is the RAM argument that chose hazard over epoch;
  *   - **exhaustion** — with every hazard index claimed, readers and writers still agree,
- *     which is the fallback ADR-0069 §3 promised (by a different mechanism; see the header).
+ *     which is the fallback ADR-0069 §3 promised (by a different mechanism; see the header);
+ *   - **a declined publish is reported** — the whole point of `store` returning `bool`, driven
+ *     here by replacing this binary's nothrow `operator new` rather than by inspection.
  */
 
 #include "libtracer/lkv_slot.hpp"
@@ -36,6 +38,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <memory>
+#include <new>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -51,6 +54,9 @@ void check(bool ok, std::string_view what) {
     std::printf("  [%s] %.*s\n", ok ? "PASS" : "FAIL", static_cast<int>(what.size()), what.data());
     if (!ok) ++g_failures;
 }
+
+/** @brief Shorthand for the order the counters in this test use. */
+constexpr std::memory_order relaxed_ = std::memory_order_relaxed;
 
 /** @brief How many ropes this test has published and not yet seen freed. */
 std::atomic<std::size_t> g_live{0};
@@ -96,17 +102,17 @@ void contract(const char* name) {
         slot_t slot;
         check(slot.load() == nullptr, "a slot nobody wrote reads as empty");
 
-        slot.store(make_tagged(1));
+        check(slot.store(make_tagged(1)), "a publish onto a fresh slot reports success");
         const auto first = slot.load();
         check(intact(first) && tag_of(first) == 1, "the published value reads back");
 
-        slot.store(make_tagged(2));
+        check(slot.store(make_tagged(2)), "and so does a publish that replaces a value");
         check(intact(first) && tag_of(first) == 1,
               "a handle taken before the replace still owns its value");
         const auto second = slot.load();
         check(intact(second) && tag_of(second) == 2, "and the replacement is what reads back");
 
-        slot.store({}, std::memory_order_release);  // revert_to_placeholder's clear
+        slot.clear(std::memory_order_release);  // revert_to_placeholder's clear
         check(slot.load() == nullptr, "a release-ordered clear empties the slot");
         check(intact(second) && tag_of(second) == 2, "the cleared value is still the reader's");
     }
@@ -123,7 +129,7 @@ template <typename slot_t>
 void concurrent(const char* name, std::size_t writers, std::size_t readers, std::size_t rounds) {
     std::printf("%s — %zu writers / %zu readers on one slot:\n", name, writers, readers);
     slot_t slot;
-    slot.store(make_tagged(0));
+    (void)slot.store(make_tagged(0));
 
     std::atomic<bool> stop{false};
     std::atomic<std::size_t> bad{0};
@@ -147,7 +153,9 @@ void concurrent(const char* name, std::size_t writers, std::size_t readers, std:
     }
     for (std::size_t w = 0; w < writers; ++w) {
         pool.emplace_back([&, w] {
-            for (std::size_t i = 0; i < rounds; ++i) slot.store(make_tagged(w * rounds + i + 1));
+            for (std::size_t i = 0; i < rounds; ++i) {
+                if (!slot.store(make_tagged(w * rounds + i + 1))) bad.fetch_add(1, relaxed_);
+            }
         });
     }
     for (std::size_t i = readers; i < pool.size(); ++i) pool[i].join();
@@ -167,7 +175,7 @@ void bounded_parking(const char* name, std::size_t publishes) {
     {
         slot_t slot;
         for (std::size_t i = 0; i < publishes; ++i) {
-            slot.store(make_tagged(i + 1));
+            (void)slot.store(make_tagged(i + 1));
             peak = std::max(peak, g_live.load(std::memory_order_relaxed));
         }
     }
@@ -203,6 +211,93 @@ void exhausted_registry() {
     for (std::size_t i : taken) reg.cells[i].claimed.store(false);
 }
 
+/**
+ * @brief Whether nothrow allocation in this binary is currently rigged to fail.
+ *
+ * Only `hazard_slot_t::store`'s node allocation uses the nothrow form on the paths this test
+ * exercises, so flipping this starves exactly the allocation under test.
+ */
+std::atomic<bool> g_starve{false};
+
+}  // namespace
+
+/**
+ * @brief Replacement nothrow `operator new` — the only way to reach a declined publish.
+ *
+ * Forwards to the throwing form on success, so every pointer handed out is still a real
+ * `::operator new` pointer that the default `operator delete` (and a sanitizer's replacement
+ * of it) pairs with correctly. Replacing the whole new/delete family with `malloc`/`free`
+ * would have been simpler and would have blinded ASan for this translation unit, which is the
+ * one leg this test most needs.
+ */
+void* operator new(std::size_t n, const std::nothrow_t&) noexcept {
+    if (g_starve.load(std::memory_order_relaxed)) return nullptr;
+    try {
+        return ::operator new(n);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+/** @brief The paired deallocation, for a constructor that throws out of the nothrow form. */
+void operator delete(void* p, const std::nothrow_t&) noexcept { ::operator delete(p); }
+
+namespace {
+
+/**
+ * @brief A publish that cannot get a node must SAY SO, and must leave the old value standing.
+ *
+ * Runs on a fresh thread on purpose: a participant that has already published owns a recycled
+ * node and never allocates again, so the only reachable allocation is a cold participant's
+ * first one. That is also precisely the window the header claims is the whole exposure.
+ */
+void declined_publish() {
+    std::printf("hazard_slot_t — a publish that cannot allocate is reported, not swallowed:\n");
+    hazard_slot_t slot;
+    check(slot.store(make_tagged(1)), "the main thread publishes normally");
+
+    bool declined = false;
+    bool preserved = false;
+    bool recovered = false;
+    std::thread cold([&] {
+        g_starve.store(true, std::memory_order_relaxed);
+        declined = !slot.store(make_tagged(2));
+        const auto still = slot.load();
+        preserved = intact(still) && tag_of(still) == 1;
+        g_starve.store(false, std::memory_order_relaxed);
+        recovered = slot.store(make_tagged(3));
+    });
+    cold.join();
+
+    check(declined, "a cold participant with no memory reports the publish as declined");
+    check(preserved, "and the value that was already published is still the one that reads back");
+    check(recovered, "the same participant publishes fine once memory is back");
+
+    // A clear needs no node, so it is the one operation starvation cannot touch.
+    std::thread cold2([&] {
+        g_starve.store(true, std::memory_order_relaxed);
+        slot.clear();
+        g_starve.store(false, std::memory_order_relaxed);
+    });
+    cold2.join();
+    check(slot.load() == nullptr, "a clear succeeds even with no memory at all");
+}
+
+/** @brief The refcount slot allocates nothing to publish, so starvation cannot reach it. */
+void sp_atomic_never_declines() {
+    std::printf("sp_atomic_slot_t — nothing to allocate, so nothing to decline:\n");
+    sp_atomic_slot_t slot;
+    bool ok = false;
+    std::thread cold([&] {
+        g_starve.store(true, std::memory_order_relaxed);
+        ok = slot.store(make_tagged(1));
+        g_starve.store(false, std::memory_order_relaxed);
+    });
+    cold.join();
+    check(ok, "a publish succeeds with nothrow allocation rigged to fail");
+    slot.clear();
+}
+
 }  // namespace
 
 /** @brief Run every slot-policy probe. */
@@ -224,6 +319,10 @@ int main() {
 
     exhausted_registry();
     check(g_live.load() == 0, "the overflow run freed every rope too");
+
+    sp_atomic_never_declines();
+    declined_publish();
+    check(g_live.load() == 0, "the starvation probes freed every rope too");
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
