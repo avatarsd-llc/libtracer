@@ -27,12 +27,29 @@ There is **no wildcard grammar**. Subscriptions do not need one: every subscript
 
 - All names are UTF-8, case-sensitive, **case-folded NOT performed** (Unicode normalization is the application's responsibility — `/Sensor/temp` and `/sensor/temp` are different paths).
 - Maximum **single-name** length: 64 bytes (UTF-8 encoded).
-- Maximum **total path** length: 1024 bytes.
+- Maximum **total path** length: 1024 bytes, measured as the **encoded `PATH` body** — the
+  concatenated `NAME` TLVs, i.e. exactly the `PATH` TLV's `length` field. Each segment
+  therefore costs its 4-byte `NAME` header plus its UTF-8 bytes, not its bytes alone.
+  (Erratum 2026-07-31: this line and [§`0x06` PATH](05-protocol-tlvs.md) each stated the cap
+  in a *different* byte set from the one `path_t::parse` enforces — see the note below.)
 - Maximum **segment depth**: 32 (an addressing limit on PATH construction; the TLV parser itself has no depth cap — nesting is receiver-resource-bounded per [RFC-0006](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md)).
 - Maximum **field-chain depth**: 8 (e.g., `:settings.transport_tcp.tls.cipher.suite` is at the limit).
 - Maximum **index value**: 65535 (fits in u16).
 
 A path that violates any limit MUST be rejected with `ERROR{tr::path::invalid}`.
+
+> **Erratum (2026-07-31) — the total-path cap was stated in three incompatible units.**
+> This section said "total path length", readable as the string form `/a/b/c`;
+> [§`0x06` PATH](05-protocol-tlvs.md) said "sum of NAME bytes + segment separators", which
+> **excludes** the per-segment TLV header; and `core/src/path.cpp` enforces it against the
+> accumulated `emit_name` output, which **includes** a 4-byte header per segment. For 32 segments
+> of 29 bytes those give 960, 959 and 1056 — so a path both documents called conforming is
+> **rejected by every shipped implementation**. The encoded-body reading is what C++ and Rust both
+> implement, so the text is corrected to it and no behaviour changes. It does mean a path that was
+> nominally conforming under a literal reading of the old wording is not conforming under the new
+> one; nothing in the wild emits such a path, because nothing in the wild implemented the old
+> reading. See [RFC-0019](../spec/rfcs/0019-path-depth-bounded-by-bytes.md) §4.3, which depends on
+> this unit being unambiguous.
 
 ### Examples
 

@@ -272,7 +272,11 @@ PATH (PL=1) {
 ### Constraints
 
 - Each child MUST be a NAME TLV (`type=0x02`); other types are invalid in PATH context.
-- Total path length (sum of NAME bytes + segment separators) ≤ 1024 bytes.
+- Total path length ≤ 1024 bytes, measured as the **encoded `PATH` body** — the concatenated
+  `NAME` TLVs, i.e. exactly this TLV's own `length` field. (Erratum 2026-07-31: this read
+  "sum of NAME bytes + segment separators", a unit that excludes the per-segment 4-byte
+  `NAME` header and so admits paths `path_t::parse` rejects — see
+  [§path syntax](03-addressing.md) for the full note.)
 - Segment count ≤ 32.
 
 ### Enforcement of the PATH constraints
@@ -349,7 +353,7 @@ The encoder's invariants:
 - **No inner trailers.** Children inside a PATH carry no TS and no CRC; the outer (when in transit) covers everything.
 - **Reserved characters** (`/ : . [ ] * ?`) MUST NOT appear inside any segment_bytes.
 
-A path that resolves to more than 32 segments, has a single segment longer than 64 bytes, or whose total segment-bytes exceed the addressing-level cap MUST fail to encode.
+A path that resolves to more than 32 segments, has a single segment longer than 64 bytes, or whose **encoded `PATH` body** exceeds the addressing-level cap MUST fail to encode.
 
 #### Byte literal — `/sensor/temp`
 
