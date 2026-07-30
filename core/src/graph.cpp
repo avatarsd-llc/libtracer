@@ -1916,8 +1916,11 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
     };
 
     // Pass 1 — collect, under ONE shared map lock: an ITERATIVE pre-order stack machine
-    // (house style, parse_branch_node — graph depth is kMaxSegments-bounded structurally,
-    // so the heap-backed stack needs no synthetic cap). Per node: the ACL gate (a denied
+    // (house style, parse_branch_node). The stack is heap-backed, so its bound is the
+    // allocator and it needs no synthetic cap. This comment used to attribute that to graph
+    // depth being "kMaxSegments-bounded structurally"; it is not — kMaxSegments is enforced
+    // only in path_t::parse, and a wire-driven write-create never passes through it. Per node:
+    // the ACL gate (a denied
     // vertex PRUNES its whole subtree, siblings unaffected), the placeholder skip
     // (unregistered levels are not members, exactly as read_children), one read_stored()
     // load, and the node's OWN body contribution (its NAME record below the root; its

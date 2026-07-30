@@ -107,3 +107,46 @@ strength of `vertex.hpp` and this section; the link is what failed.
 Corrected here and at the three inheriting sites in
 [ADR-0061](0061-per-transport-mount-routing-strip-k-l5-demux.md) (§Status, §Context, §Decision 4),
 which took the citation from this document, and in `child_registry.hpp`'s header comment.
+
+## Erratum (2026-07-30): §3's "stateless per-frame segment cap" was never built, and must not be
+
+§3 states the bare-FWD loop bound as:
+
+> …**`dst`-monotonicity** (`dst` shrinks one segment per hop ⇒ termination in ≤ len(`dst`) hops,
+> itself MTU-bounded) plus a **stateless per-frame segment cap** (refuse a `dst` deeper than N,
+> N from `MAX_HOPS`) — a counter read, no set, no lock, no heap.
+
+§Consequences repeats it, retracting ADR-0037's invariant #3 in favour of "`dst`-monotonicity +
+a stateless segment cap on FWD".
+
+**No such cap exists.** `grep -rn 'MAX_HOPS\|hop_count\|kMaxHops' core/` matches no source file —
+only CHANGELOG history from the retired `ROUTER` machinery, an unrelated `byteorder.hpp` comment,
+and `core/README.md`, which states the opposite of this ADR as settled: *"loop-free by
+construction, no dedup, no `hop_count`"*. It was specified here and never implemented.
+
+**And it must not be implemented**, which is why this is a retraction rather than a defect report.
+It is precisely the shape [CONTEXT.md §Resource bound](../../CONTEXT.md) forbids — a hardcoded
+magic constant policing user designs — and [CONTEXT.md §Cycle termination](../../CONTEXT.md) already
+states the opposite of §3 as settled fact:
+
+> Both planes are **loop-free by construction** — no dedup state, hop counter, or depth cap exists
+> anywhere.
+
+with its `_Avoid_` line naming "the net plane needs a `hop_count`/dedup set" as a phrase not to use.
+[RFC-0006](../spec/rfcs/0006-resource-bounded-nesting-depth.md), [RFC-0007](../spec/rfcs/0007-delivery-terminates-at-target.md)
+and [ADR-0051](0051-delivery-terminates-at-target-no-dispatch-limits.md) ratified that doctrine —
+ADR-0051 deleted a depth cap **with no replacement**. This ADR predates them and was never revisited.
+
+**What actually bounds a bare-FWD route** is `dst`-monotonicity alone, and it is sufficient: `dst`
+strictly shrinks by at least one segment per hop, so a route terminates in at most `len(dst)` hops
+with no counter, no state and no cap. The MTU bounds `len(dst)`. The second clause added nothing
+the first did not already give.
+
+**Why it matters now.** On 2026-07-30 the maintainer ruled that the mount descent "must be limited
+by MRU or not limited at all — allow most complicated graphs." An unretracted ADR specifying a
+`MAX_HOPS` depth cap is the strongest in-tree argument *against* that ruling, and it is an argument
+from a document that describes code which does not exist. Leaving it standing would make the
+ruling look like it contradicts an accepted decision, when it contradicts an unbuilt one.
+
+§3's `dst`-monotonicity clause and the ADR-0037 invariant-#3 retraction both stand. Only the
+"stateless per-frame segment cap (N from `MAX_HOPS`)" clause is withdrawn, in both places.

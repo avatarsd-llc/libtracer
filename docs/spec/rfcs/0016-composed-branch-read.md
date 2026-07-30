@@ -147,8 +147,9 @@ graph's stored-value plane, where the composer operates.
 The composer is zero-copy end to end: per node one atomic LKV load, value links
 **refcount-cloned** (no byte copy), the child's canonical `NAME` record **borrowed in
 place** over the pinned vertex, and one owned per-level `POINT` header — no flatten
-anywhere. The walk is iterative (graph depth is `kMaxSegments`-bounded structurally —
-no synthetic cap, per RFC-0006 doctrine); allocation failure is `BACKPRESSURE`.
+anywhere. The walk is iterative over a **heap-backed stack**, so its bound is the allocator and
+it needs no synthetic cap (per RFC-0006 doctrine); allocation failure is `BACKPRESSURE`.
+See the erratum below — this clause previously attributed the bound to `kMaxSegments`.
 
 With a subject resolver installed, `acl_allows` — and therefore the resolver
 callback — runs **O(nodes) times per composed read under the shared map lock**
@@ -222,3 +223,39 @@ ruling recorded on RFC-0002/RFC-0005). The design was ruled in the 2026-07-20 se
 ("approved, go ahead") driven by the 2026-07-20 A/B benchmark, and implemented
 immediately in [PR #451](https://github.com/avatarsd-llc/libtracer/pull/451); this
 document records the ratified semantics and rationale. Sustained objections: none.
+
+---
+
+## Erratum (2026-07-30): §D attributed the walk's bound to `kMaxSegments`, which does not bound it
+
+§D read:
+
+> The walk is iterative (graph depth is `kMaxSegments`-bounded structurally — no synthetic cap,
+> per RFC-0006 doctrine)
+
+Two things are wrong with that parenthesis, and they pull in opposite directions.
+
+**`kMaxSegments` does not bound graph depth.** It is enforced in exactly one place —
+`path_t::parse` (`core/src/path.cpp:110`), the LOCAL string→bytes builder. `graph_t::ensure_vertex`
+takes raw key bytes and counts no segments, and `wire::path_key` / `path_lookup_key` count none
+either. A peer can therefore write-create a vertex at arbitrary depth today, and the walk this
+clause describes can already meet one. The word "structurally" claimed an invariant that is not
+enforced on the path that matters.
+
+**And citing "RFC-0006 doctrine" for a fixed constant inverts that doctrine.** RFC-0006 exists to
+*remove* a fixed 32 and replace it with a receiver-resource bound. A clause that reassures the
+reader by naming a magic number, and credits RFC-0006 for it, teaches the opposite of what
+RFC-0006 decided.
+
+**The walk was always safe, for a better reason.** It is iterative over a heap-backed stack, so
+the bound is the allocator and exhaustion surfaces as `BACKPRESSURE` — a real injected resource,
+exactly as [CONTEXT.md §Resource bound](../../../CONTEXT.md) requires. Nothing about the
+implementation changes; only the justification is corrected, and the corrected one is the one that
+survives `kMaxSegments` being lifted.
+
+Corrected at the two inheriting code sites that carried the same sentence:
+`core/include/libtracer/graph.hpp` (`parse_branch_node`'s contract) and `core/src/graph.cpp`
+(pass 1 of the composed read).
+
+**No normative requirement changes**, and the wire surface is untouched — hence an erratum per
+[GOVERNANCE.md](../../../.github/GOVERNANCE.md), not an amendment.

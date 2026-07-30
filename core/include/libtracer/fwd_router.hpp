@@ -332,11 +332,20 @@ class fwd_router_t {
      * instead of scanning the table for the inbound child, which removes one of the two
      * per-frame linear scans (`docs/performance.md` §2b).
      *
-     * A copy rather than a pointer into the registry slot is deliberate. Slot addresses are
-     * NOT stable across a connection-create — `children_` is a vector and `add` appends
-     * (#521) — so a cached slot pointer would be a use-after-free. This deque, by contrast,
-     * never invalidates a reference, and the run is a pure function of the child's name, so
-     * a copy cannot drift: re-adding a tombstoned name yields identical bytes.
+     * A copy rather than a pointer into the registry slot is deliberate — but NOT for the
+     * reason this comment used to give. It read: *"Slot addresses are NOT stable across a
+     * connection-create — `children_` is a vector and `add` appends (#521) — so a cached slot
+     * pointer would be a use-after-free."* That was true when written and is now the exact
+     * OPPOSITE of the shipped invariant: ADR-0063 replaced the vector with a chunked list
+     * precisely so slot addresses would become permanently stable, and calls that "a deliberate
+     * second effect, not a side effect". ADR-0062's forward cache DEPENDS on it — it holds a
+     * `const child_t*` and lets the teardown tombstone be the invalidation. Anyone reasoning
+     * about slot lifetime from the old sentence would reach the wrong conclusion, which is why
+     * it is corrected rather than deleted.
+     *
+     * The surviving reason for the copy is drift-freedom, not lifetime: the run is a pure
+     * function of the child's name, so re-adding a tombstoned name yields identical bytes, and
+     * this deque never invalidates a reference either.
      */
     struct child_rx_ctx_t {
         fwd_router_t* self;
