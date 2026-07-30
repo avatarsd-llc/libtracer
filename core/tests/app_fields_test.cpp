@@ -582,10 +582,10 @@ void test_borrowed_static_install() {
 
     // ADR-0058 erratum 2 — the argument type is the whole guard, so assert what binds to it.
     // Erratum 1 tightened this install's lifetime contract while the parameter was a
-    // std::span, so every stale caller kept compiling and started dangling (strawberry-fw
-    // #80: a function-local vector, found only by a downstream runtime suite). The container
-    // rows below are the ones that must NOT bind; without them the guard could rot silently
-    // back into a span and nothing here would notice.
+    // std::span, so every stale caller kept compiling and started dangling (a downstream firmware
+    // consumer #80: a function-local vector, found only by a downstream runtime suite). The
+    // container rows below are the ones that must NOT bind; without them the guard could rot
+    // silently back into a span and nothing here would notice.
     using guard_t = tr::graph::borrowed_fields_t;
     using decl_t = tr::graph::app_field_static_t;
     static_assert(std::is_constructible_v<guard_t, decl_t(&)[2]>,
@@ -594,8 +594,9 @@ void test_borrowed_static_install() {
                   "a std::array of declarations must install implicitly");
     static_assert(std::is_default_constructible_v<guard_t>,
                   "`{}` must remain the uninstall spelling");
-    static_assert(!std::is_constructible_v<guard_t, std::vector<decl_t>&>,
-                  "a vector must NOT install implicitly — that is strawberry-fw #80");
+    static_assert(
+        !std::is_constructible_v<guard_t, std::vector<decl_t>&>,
+        "a vector must NOT install implicitly — that is a downstream firmware consumer #80");
     static_assert(!std::is_constructible_v<guard_t, std::span<const decl_t>>,
                   "a bare span must NOT install implicitly — use borrowed_fields_t::unchecked");
 

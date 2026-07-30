@@ -51,9 +51,9 @@ This unblocks the transport-link half of
   ([RFC-0009](0009-vertex-removal-and-subscriber-eviction.md), merged) re-virginizes a vertex, but
   its own contract says *"there is **no wire operation** that reaches here — a peer goes through the
   creator endpoint."* That path is undefined until this RFC.
-- **The consumer is blocked on it.** The strawberry-fw web UI `network-page.component` ships a
-  **deferred create/delete stub** (its `endpointStubTitle` reads *"Creating/deleting an endpoint
-  needs the libtracer `:children[]` op (issue #82) — deferred"*) and forms cross-device wires by
+- **A consumer is blocked on it.** A downstream web UI ships a **deferred create/delete stub**
+  — its tooltip reads *"Creating/deleting an endpoint needs the libtracer `:children[]` op —
+  deferred"* — and forms cross-device wires by
   **browser-relaying** between boards (`relay.service.ts`) rather than owner-mediated links. RFC-0014
   supplies the *link* half of un-stubbing that (see §Scope boundary for the *wire* half it does
   **not** supply). Un-stubbing tracks **#82** (the code's cited issue) and **#407**.
@@ -292,8 +292,8 @@ fails-fast `link-down` and is reaped.
   `bad-payload-type`, `catalog-read`, `absent-endpoint-PATH_NOT_FOUND`, `gate-CREATE`, `gate-WRITE`,
   and the liveness transitions (`dormant→dialing→up`, `up→reconnecting→up`, `refcount-0→dormant`,
   `listen→listening`).
-- **Migration.** Additive; deployed devices keep working. The strawberry web UI's deferred stub
-  (`#82`) gains its *link* half; the browser-relay wires need the origination dependency above before
+- **Migration.** Additive; deployed devices keep working. The downstream web UI's deferred stub
+  gains its *link* half; the browser-relay wires need the origination dependency above before
   they become owner-mediated.
 
 ## Alternatives considered

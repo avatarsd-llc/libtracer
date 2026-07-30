@@ -322,9 +322,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   This closes a silent break. The previous release tightened this install's lifetime contract
   to cover the ARRAY, not just the bytes it points at — but a `std::span` binds implicitly to a
   `std::vector`, so a caller that built its table into a function-local vector kept compiling
-  and began viewing freed memory. That reached the reference firmware
-  ([strawberry-fw #80](https://github.com/avatarsd-llc/strawberry-fw/issues/80)) and cost a
-  188-commit bisect to find, because there was no compiler diagnostic anywhere.
+  and began viewing freed memory. That reached a downstream firmware consumer and cost a 188-commit bisect to find, because
+  there was no compiler diagnostic anywhere.
 
   **If this stops compiling for you, you had the bug.** Give the table storage that outlives the
   vertex. A genuinely runtime-sized table — a language binding mapping a foreign POD array into
@@ -748,7 +747,7 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   final link count), the FWD{REPLY} `assemble` head+payload chain (pre-`try_reserve`'d;
   an OOM yields an empty rope the router drops), and the `resolve_terminus` /
   `resolve_terminus_rope` egress span table (`try_to_iovec`). This finishes the residual
-  half of the Gorshok OOM crash begun by the `assemble_result_rope` link-table fix.
+  half of the production-node OOM crash begun by the `assemble_result_rope` link-table fix.
 
 ### Added
 
@@ -936,8 +935,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   through a fresh `std::vector<view_t>` before handing them to `assemble`, a per-reply
   transient that scaled with the value's link count (~9 KB for a composed-root read) and,
   on an `-fno-exceptions` MCU where the throwing `std::allocator` has no failure path,
-  turned heap exhaustion into `abort()` mid-request (decoded on-device: 3/3 Gorshok
-  browser-session crashes on the httpd task). `assemble` now takes
+  turned heap exhaustion into `abort()` mid-request (decoded on-device: 3/3 browser-session
+  crashes on the httpd task). `assemble` now takes
   `std::span<const view_t>` and borrows the payload rope's own link span — zero staging
   allocation. Internal helper (`core/src/`), no public-API change. The companion
   `integrations/esp-idf` fix makes the WS link's TX/RX buffers nothrow end-to-end

@@ -34,7 +34,7 @@ layer), so binding is by transport. Ports are **preferences** — *Edit → Pref
 
 | Transport | How it binds | Default |
 | --- | --- | --- |
-| **WebSocket** (strawberry-fw node) | subdissector on the WS payload for the configured TCP port | port **80** |
+| **WebSocket** (libtracer node) | subdissector on the WS payload for the configured TCP port | port **80** |
 | **Raw TCP** (`length_prefix_framer`) | `tcp.port` table; exact PDU reassembly via the fixed-width length | disabled (set the port) |
 | **Any TCP/WS** | conservative heuristic (known type code, reserved bits zero, and either a verified CRC or an exact frame fit) | on |
 | **QUIC / WebTransport** | inner bytes are inside TLS 1.3 — set `SSLKEYLOGFILE` on the endpoint and point *Preferences → TLS → (Pre)-Master-Secret log* at it, then the decrypted payload flows through the heuristic | needs keylog |

@@ -1,10 +1,14 @@
-All citations verified against the tree. The verified-claims corrections hold up against the source: `materialize` is a refcount bump on single-link (`rope.hpp:148-151`), the 4096 arena is structure storage independent of byte-source (`graph.cpp:929`), `own_wire`/`ensure_cache` carry the real ownership/contiguity flattens (`op_resolve_view.cpp:80,135-145`), and the WS TX gather already single-buffers (`httpd_ws_link.cpp:487-498`). Here is the document.
-
----
-
 # Zero-copy & the flatten question — do we really need to flatten?
 
-**A design document for libtracer's lwIP↔rope seam and the residual `materialize` fallbacks**
+> **Status:** design (post-audit record, not pre-ADR). **Target:** the C++23 reference
+> implementation under [`../../core/`](../../core/) and its ESP-IDF WS integration.
+> Nothing here is normative.
+>
+> Every citation was verified against the tree: `materialize` is a refcount bump on a
+> single-link rope (`rope.hpp:148-151`), the 4096 arena is structure storage independent of
+> byte source (`graph.cpp:929`), `own_wire`/`ensure_cache` carry the real
+> ownership/contiguity flattens (`op_resolve_view.cpp:80,135-145`), and the WS TX gather
+> already single-buffers (`httpd_ws_link.cpp:487-498`).
 
 > **Thesis under test:** *libtracer is rope-native zero-copy by design, and the residual flatten (`materialize`) is a `span_cursor` fallback removable by completing the `rope_cursor` migration (⑤/⑥), which also eliminates the 4096-byte on-stack decode arena (the deep-thread STACK lever).*
 >

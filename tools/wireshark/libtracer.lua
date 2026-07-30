@@ -646,7 +646,7 @@ if rawget(_G, "Proto") then
   }
   p.experts = { ef.crc_bad, ef.invalid, ef.trunc }
 
-  local pref_ws  = 80    -- WebSocket TCP port (strawberry-fw serves on :80)
+  local pref_ws  = 80    -- WebSocket TCP port (a node serving the SPA on :80)
   local pref_tcp = 0     -- raw-TCP length_prefix_framer port; 0 = disabled
   p.prefs.ws_port  = Pref.uint("WebSocket port", pref_ws,  "TCP port of the WebSocket carrying libtracer (0 = off)")
   p.prefs.tcp_port = Pref.uint("Raw TCP port", pref_tcp,  "TCP port for raw length-prefixed libtracer (0 = off)")

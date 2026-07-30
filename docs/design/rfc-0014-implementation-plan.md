@@ -140,7 +140,7 @@ enum. Land the conformance vectors named in the RFC (`create-via-SPEC`, `remove-
 `catalog-read`, `absent-endpoint-PATH_NOT_FOUND`, `gate-CREATE`, `gate-WRITE`, the liveness transitions).
 Only after the vectors land do the RFC's byte clauses become normative (the clause-kind rule).
 
-**S8 — strawberry web UI (strawberry-fw side).**
+**S8 — consumer web UI (downstream, out of tree).**
 Un-stub `network-page.component`'s create/delete (write `SPEC`/`NAME` to a remote board's `conn`
 endpoint over the WS link, addressed multi-hop). Render the liveness enum on the status dots
 (subscribe the connection vertex, apply the UI's own "unreachable" display threshold to `reconnecting`).
