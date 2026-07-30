@@ -196,6 +196,12 @@ option(LIBTRACER_ACL_FULL "Evaluate ACLs with the full security_acl host policy 
 set(LIBTRACER_VERTEX_LOCK_STRIPES 16 CACHE STRING
     "Vertex lock-stripe count (N mutexes + condvars process-wide; 4-8 for a small MCU node)")
 
+# False-sharing padding width, or 0 where the target has no second core to false-share with
+# (measured: 16 stripes cost 1,024 B of rv32 .bss at 64 and 128 B at 0). An optimization
+# knob only — 0 on a multi-core host costs control-plane throughput, never correctness.
+set(LIBTRACER_CACHE_LINE_BYTES 64 CACHE STRING
+    "Cache-line width for false-sharing padding, or 0 on a single-core target")
+
 # ---- libtracer/config.hpp — per-target build configuration as plain C++ (ADR-0068) ----
 # Every compile-time knob is an `inline constexpr` / `using` binding in ONE generated
 # header that shadows the checked-in default (raw -Iinclude consumers build with stock
@@ -228,10 +234,12 @@ set(_lt_saved_stripes "${LIBTRACER_VERTEX_LOCK_STRIPES}")
 set(_lt_saved_policy "${LIBTRACER_ACL_POLICY}")
 set(_lt_saved_slot "${LIBTRACER_LKV_SLOT}")
 set(_lt_saved_hp "${LIBTRACER_HAZARD_READER_SLOTS}")
+set(_lt_saved_line "${LIBTRACER_CACHE_LINE_BYTES}")
 set(LIBTRACER_VERTEX_LOCK_STRIPES 16)
 set(LIBTRACER_ACL_POLICY allow_only_policy_t)
 set(LIBTRACER_LKV_SLOT sp_atomic_slot_t)
 set(LIBTRACER_HAZARD_READER_SLOTS 64)
+set(LIBTRACER_CACHE_LINE_BYTES 64)
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/include/libtracer/config.hpp.in
     ${CMAKE_CURRENT_BINARY_DIR}/generated/drift-check/config.hpp
@@ -240,6 +248,7 @@ set(LIBTRACER_VERTEX_LOCK_STRIPES "${_lt_saved_stripes}")
 set(LIBTRACER_ACL_POLICY "${_lt_saved_policy}")
 set(LIBTRACER_LKV_SLOT "${_lt_saved_slot}")
 set(LIBTRACER_HAZARD_READER_SLOTS "${_lt_saved_hp}")
+set(LIBTRACER_CACHE_LINE_BYTES "${_lt_saved_line}")
 file(READ ${CMAKE_CURRENT_SOURCE_DIR}/include/libtracer/config.hpp _lt_cfg_default)
 file(READ ${CMAKE_CURRENT_BINARY_DIR}/generated/drift-check/config.hpp _lt_cfg_rendered)
 if(NOT _lt_cfg_default STREQUAL _lt_cfg_rendered)

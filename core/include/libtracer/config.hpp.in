@@ -38,10 +38,38 @@ class hazard_slot_t;         // lkv_slot.hpp — lock-free atomic<node*>; hazard
  *
  * A per-target config knob (RFC-0006: bounds are injected or per-target config, never
  * magic). CMake: `-DLIBTRACER_VERTEX_LOCK_STRIPES=8`; ESP-IDF: menuconfig
- * `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES`. N stripes cost N lazily-allocated mutexes and
- * condvars process-wide; a small single-core node reclaims RAM at 4–8.
+ * `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES`. A small single-core node reclaims RAM at 4–8.
+ *
+ * What N costs, precisely: `N * sizeof(vertex_stripe_t)` bytes of `.bss` reserved at LINK
+ * time (plus the same for the condvar table) — the table is not lazy, whatever the platform
+ * does. What IS lazy is the platform primitive behind each handle: on FreeRTOS a stripe's
+ * mutex costs ~90 B of heap on its first lock, so an untouched stripe costs its struct and
+ * no heap. Most of the struct is padding, and @ref kCacheLineBytes decides how much.
  */
 inline constexpr std::size_t kVertexLockStripes = @LIBTRACER_VERTEX_LOCK_STRIPES@;
+
+/**
+ * @brief The target's cache-line size for false-sharing padding — or **0 where false
+ *        sharing cannot happen**, because the target has no second core to share with.
+ *
+ * libtracer pads the shared tables whose slots unrelated threads hit concurrently (the
+ * vertex lock stripes; the hazard domain's cells and retire lists) up to this boundary, so
+ * two threads working on two slots never fight over one line. On a single-core node that
+ * padding buys nothing and the bytes are pure loss: measured on rv32 (`-Os`, real
+ * `core/src/graph.cpp`, GCC 15.2), 16 stripes cost **1,024 B of `.bss` at 64 and 128 B at
+ * 0** — 896 B of a single-core node's static RAM spent against a hazard it does not have.
+ *
+ * This is an OPTIMIZATION knob, never a correctness one: 0 on a multi-core target costs
+ * throughput under concurrent control-plane verbs and changes no observable behaviour.
+ * CMake: `-DLIBTRACER_CACHE_LINE_BYTES=0`. The ESP-IDF component derives it from
+ * `CONFIG_FREERTOS_UNICORE` — a unicore build has no second core by construction, so the
+ * right value is not a question the integrator should be asked.
+ *
+ * Values below a padded type's natural alignment are raised to it, not applied
+ * ([dcl.align]/5 makes a reduction ill-formed, and GCC ignores it *silently*); each padded
+ * type static_asserts that the alignment it asked for is the one it got.
+ */
+inline constexpr std::size_t kCacheLineBytes = @LIBTRACER_CACHE_LINE_BYTES@;
 
 /**
  * @brief The target's selected ACL policy (ADR-0047 §1 build-time module set).
@@ -76,11 +104,22 @@ using lkv_slot_t = @LIBTRACER_LKV_SLOT@;
  * knob rather than a thread ceiling picked out of the air (RFC-0006); CMake:
  * `-DLIBTRACER_HAZARD_READER_SLOTS=24`.
  *
- * Sizing: one index per such thread. The domain costs `(N + 1) * 128` bytes of `.bss`, and
- * **nothing at all** unless `lkv_slot_t` is bound to `hazard_slot_t` — the default binding
- * never references the registry, so it is never emitted. Undersizing is not a correctness
- * problem: threads past the bound share one reserved index under a spin lock, so they
- * serialize with each other and with nobody else.
+ * Sizing: one index per such thread, and **nothing at all** unless `lkv_slot_t` is bound to
+ * `hazard_slot_t` — the default binding never references the registry, so it is never
+ * emitted. Undersizing is not a correctness problem: threads past the bound share one
+ * reserved index under a spin lock, so they serialize with each other and with nobody else.
+ *
+ * What the domain costs when it IS bound, measured on rv32 at N = 64 (`-Os`, real
+ * `core/src/graph.cpp`, GCC 15.2) — the padding knob dominates it:
+ *
+ * | @ref kCacheLineBytes | registry `.bss` | TU `.bss` + `.sbss` |
+ * | ---: | ---: | ---: |
+ * | 64 | 8,384 B | 11,649 B |
+ * | 0 | 1,828 B | 4,197 B |
+ *
+ * Note the third term the registry figure does not cover: binding the slot also pulls in
+ * roughly 2 KB of libstdc++ `__waiter_pool_base` `.bss` (the `atomic::wait` back-end),
+ * which is why the TU column is not just the registry plus the stripes.
  */
 inline constexpr std::size_t kHazardReaderSlots = @LIBTRACER_HAZARD_READER_SLOTS@;
 

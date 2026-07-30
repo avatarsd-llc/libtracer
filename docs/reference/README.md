@@ -110,7 +110,7 @@ The wire format does not version per-frame. v1 is committed once; future incompa
 ## What this suite is NOT
 
 - Not an API/ABI specification. The reference implementation's headers describe its own API; this suite is language-agnostic.
-- Not a build / packaging guide (see the `core/` rebuild).
+- Not a build / packaging guide. The reference implementation's own configuration space — which module set a build contains, which sizes and policies it binds, what each costs per target — is in [`../design/config/`](../design/config/README.md).
 - Not a feature comparison vs Zenoh / DDS / MQTT. See [../../README.md](../../README.md).
 - Not a security architecture. The wire format is security-agnostic; security wraps it at the transport layer per [10-module-catalog.md](10-module-catalog.md).
 - Not a roadmap. See the issue tracker.

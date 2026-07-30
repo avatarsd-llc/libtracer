@@ -656,10 +656,24 @@ class edge_snapshot_t {
     std::size_t n_ = 0; /**< @brief Constructed-view count. */
 };
 
-// The stripe count lives in libtracer/config.hpp (ADR-0068): kVertexLockStripes is an
-// ordinary constexpr shared by every TU through ONE header, so a per-target override
-// (CMake cache variable / Kconfig) can never diverge across TUs the way a bare `-D`
-// compile definition could (the std::array size below would be an ODR violation).
+// The stripe count and the padding width both live in libtracer/config.hpp (ADR-0068):
+// kVertexLockStripes and kCacheLineBytes are ordinary constexprs shared by every TU
+// through ONE header, so a per-target override (CMake cache variable / Kconfig) can never
+// diverge across TUs the way a bare `-D` compile definition could (the std::array size
+// below, and now the stripe's alignment, would be an ODR violation).
+
+/**
+ * @brief The stripe's alignment: @ref kCacheLineBytes, floored at the payload's own
+ *        natural alignment.
+ *
+ * `alignas` may only ever STRENGTHEN alignment — [dcl.align]/5 makes a weaker request
+ * ill-formed, and GCC accepts it silently rather than diagnosing it, so a target that sets
+ * @ref kCacheLineBytes to 0 or 4 must not hand that number to `alignas` unchecked. Taking
+ * the max of the members' own alignments keeps every value of the knob well-formed, and the
+ * `static_assert` under the struct proves the request survived.
+ */
+inline constexpr std::size_t kStripeAlign =
+    std::max({kCacheLineBytes, alignof(std::mutex), alignof(std::atomic<int>)});
 
 /**
  * @brief One shared lock stripe: the mutex + condvar a SET of vertices ride
@@ -675,9 +689,10 @@ class edge_snapshot_t {
  * with a PER-VERTEX predicate (`write_seq_`), so a collision costs a spurious
  * wake + re-check, never a correctness change.
  */
-struct alignas(64) vertex_stripe_t {  // one cache line per stripe: adjacent stripes must
-                                      // never false-share under multi-threaded publish
-    std::mutex m;                     /**< @brief Serializes the stripe's vertices' verbs. */
+struct alignas(kStripeAlign) vertex_stripe_t {  // one cache line per stripe where a second
+                                                // core exists to false-share with (see
+                                                // kStripeAlign); packed tight where none does
+    std::mutex m; /**< @brief Serializes the stripe's vertices' verbs. */
     /** @brief Live `await` waiters on this stripe. Mutated only under @ref m, but READ
      *         without it by a publish that never takes the lock at all (#555), so it is
      *         atomic: the waiterless publish skips the mutex, not just the condvar call
@@ -685,6 +700,10 @@ struct alignas(64) vertex_stripe_t {  // one cache line per stripe: adjacent str
      *         makes the lock-free read safe against a lost wakeup. */
     std::atomic<int> waiters{0};
 };
+
+static_assert(alignof(vertex_stripe_t) == kStripeAlign,
+              "the stripe's alignas was silently dropped — kStripeAlign must never ask for "
+              "less than the payload's natural alignment (see its derivation above)");
 
 /**
  * @brief The stripe table: `constinit` where the platform's `std::mutex` is

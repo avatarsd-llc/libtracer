@@ -14,6 +14,7 @@ for an ADR, too specific to one implementation for the reference suite.
 | --- | --- |
 | [RAM](ram/README.md) | Making a unified transport→graph node RAM-lean on a single-core MCU without touching host latency: the bounded-reactor profile, the lwIP seam, the flatten question, and an adversarial re-audit that corrected several of its own figures. |
 | [Concurrency](concurrency/README.md) | Which serializers exist in the graph runtime and what each costs; the two independent limits on the read path; the cost budget; the ranked remaining levers; and a ledger of three mis-attributions in this area. |
+| [Build configuration](config/README.md) | Which knobs exist, what each costs on which target, and which constants are deliberately off-limits — the integrator question the reference suite is not allowed to answer. |
 | [RFC-0014 implementation](rfc-0014-implementation-plan.md) | Slice plan for the creator-endpoint and link-liveness work. |
 
 ```{toctree}
@@ -23,5 +24,6 @@ for an ADR, too specific to one implementation for the reference suite.
 
 RAM leanness <ram/README>
 Concurrency & scaling <concurrency/README>
+Build configuration <config/README>
 RFC-0014 implementation <rfc-0014-implementation-plan>
 ```
