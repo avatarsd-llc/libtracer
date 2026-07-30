@@ -101,7 +101,18 @@ Added 2026-07-30 with the hazard slice (#647). This ADR's own Consequences deman
 | 16 | 1.9 M/s | 5.7 M/s | 3.06× | 1.49× |
 | 24 | **1.7 M/s** | **7.4 M/s** | **4.22×** | **4.41×** |
 
-Run-to-run spread was 1.04–1.56× on this shape, so everything from T=8 up is decisive and T=1 is not a measurement of anything. The gap between 4.2× and the model's 20.8× is not a defect in either number: `hazard-ref` measured a slot, and a slot is one term of `graph_t::read`. Deleting the `_Sp_locker` lock bit exposes whatever is next, and what is next still does not scale — twenty-four readers remain 2.9× slower than one, against 12.1× before. **The inversion is softened, not removed**, and #635's stripe lock and the rope's own control-block increment are where the rest of it lives.
+Run-to-run spread was 1.04–1.56× on this shape, so everything from T=8 up is decisive and T=1 is not a measurement of anything. The gap between 4.2× and the model's 20.8× is not a defect in either number: `hazard-ref` measured a slot, and a slot is one term of `graph_t::read`. Deleting the `_Sp_locker` lock bit exposes whatever is next, and what is next still does not scale — twenty-four readers remain 2.9× slower than one, against 12.1× before. **The inversion is softened, not removed.**
+
+**Where the residual actually is** (corrected 2026-07-30; as first written this paragraph sent it to #635, which is wrong — `snapshot_edges` is on the *delivery* path and a read never calls it). The same run's distinct-vertex controls locate it without a profiler. Read rate at T=24 as a fraction of that build's own T=1 rate:
+
+| shape | `sp_atomic_slot_t` | `hazard_slot_t` |
+| --- | ---: | ---: |
+| `stripe1-read` — 24 readers, **distinct** vertices | 94% | 91% |
+| `hot1-read` — 24 readers, **one** vertex | 8% | **39%** |
+
+Distinct-vertex reads barely degrade under either slot, so nothing process-wide is serializing — not the map lock, not a stripe, not the hazard registry (each participant's announcement cell is its own cache line). The whole residual is one shared vertex, and on a read shape the only line every reader **modifies** is the rope's control block. That is the promotion §5 called irreducible for an owning read, and the measurement is that hazard reclamation moved the shared-vertex read from 8% to 39% of single-threaded while leaving that term untouched.
+
+**Which points at the next lever, and it is not a reclamation scheme.** Of the four `read_stored()` call sites, only `read_subtree_folded` (`graph.cpp:1939`) keeps the handle; the other three — the leaf read, `deliver_current`, and `await`'s return — are `const shared_ptr sp = v->read_stored(); … use *sp …` and drop it before returning. A **scoped** read that hands back a guard instead of an owning handle would skip the promotion entirely on those three, which is the non-owning contract the `hazard` arm measured at 2,357 M/s. That is an API question, not a slot question, and it is where the rest of this read lives.
 
 Every other shape — the distinct-vertex read controls (`stripe1`, `spread`), all three write topologies, both fan-outs — landed inside a 1.4–2.2× run-to-run spread in both directions. In particular **§1's predicted 0.64× write penalty is not observable through `graph_t::write`**, partly dilution and partly because the implementation recycles displaced nodes through a per-participant free list, so a steady-state publish allocates nothing at all. §5's "one 16-byte allocation per publish" is a warm-up cost, not a per-write one.
 
