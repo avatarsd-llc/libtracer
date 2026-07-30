@@ -1,12 +1,12 @@
-# Tree of ropes, not rope of ropes (three compositions)
+# Composition axes (L1 + L4 + transport)
 
-A tempting mental model of libtracer is *"one big rope of ropes"* — a single
-memory chain that **is** the graph, folds into the TLV tree, and grows every time
-a transport is attached. That model fuses three things the reference
+A libtracer node is a *tree of ropes*, not a *rope of ropes*. The tempting fused
+model — a single memory chain that **is** the graph, folds into the TLV tree, and
+grows every time a transport is attached — collapses three things the reference
 implementation keeps **orthogonal** ([CONTEXT.md](https://github.com/avatarsd-llc/libtracer/blob/main/CONTEXT.md)
-§"Two compositions", §"Graph (address) composition") — and that orthogonality is
-the zero-copy story. This example falsifies the fused model by exercising each
-axis on its own and asserting they never merge.
+§"Two compositions", §"Graph (address) composition"), and that orthogonality is
+the zero-copy story. The three axes below are exercised independently, and the
+example asserts they never merge.
 
 ## The three axes
 
@@ -21,10 +21,12 @@ axis on its own and asserting they never merge.
   flattens the memory chain), and a second vertex holds a wholly separate rope.
   **Tree-of-ropes, not rope-of-ropes.**
 - **A transport is an identity, not memory** — mounting a transport (ADR-0027) via
-  an in-band `/net:children[]` write adds exactly one addressable `/net/link0` vertex
-  whose value is a **1-byte link-state rope**. The transport's real bytes live
-  *outside* the graph, in the FWD router's demux; no per-peer vertex or memory is
-  added (ADR-0044). Attaching a bus does not "grow the rope."
+  an in-band `/net:children[]` write adds exactly one addressable vertex at
+  `/net/<module>/<name>` — here `/net/can/link0`, the module taken from the
+  `provide_link` staging key (`transport_vertex_t::provide_link`,
+  `core/src/transport_vertex.cpp:153`). The transport's real bytes live *outside*
+  the graph, in the FWD router's demux; no per-peer vertex or memory is added
+  (ADR-0044). Attaching a bus does not "grow the rope."
 
 ## What to notice
 
@@ -36,13 +38,19 @@ axis on its own and asserting they never merge.
   L1 rope through untouched.
 - **No global rope** — two vertices resolve to two independent ropes; the vertex tree
   is walked by *path* (parent/children), never by rope links.
-- **Mount = identity** — `/net/link0` reads back a one-byte link-state, while the live
-  transport is found in `router.registry().by_name("link0")`, outside the graph.
+- **Mount = identity** — a fresh `/net/can/link0` resolves as an address but holds no
+  value at all: the read returns `NOT_FOUND`. Only once the link reports state does
+  the vertex hold a value, and that value is a **single-link** rope carrying a
+  one-byte link-state VALUE TLV (`link_state_value`,
+  `core/src/transport_vertex.cpp:74`) — categorically not a chained payload. The live
+  transport is found in `router.registry().by_name("net/can/link0")`, outside the
+  graph.
 
 The transport half runs over the in-process `loopback_channel_t` so the example is
 deterministic and needs no hardware; the same `provide_link` seam accepts a real
 `transport_can` bus link on a Linux host with a (v)CAN interface, and the structural
-claims asserted here are identical.
+claims asserted here are identical. The transport axis is compiled only with the FWD
+net plane enabled (`LIBTRACER_NET_PLANE`).
 
 ## Source
 

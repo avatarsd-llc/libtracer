@@ -1,6 +1,6 @@
-# Reference 00 — Core Overview (the libtracer Standard)
+# Reference 00 — Core overview
 
-> **Status**: draft, v1, 2026-05-03. This is the standard. This document describes what *any* conforming implementation must do; design rationale is recorded in [../../docs/adr/](https://github.com/avatarsd-llc/libtracer/tree/main/docs/adr/) and git history.
+> This suite is the libtracer standard, at draft status for v1. It describes what *any* conforming implementation must do, independently of how the reference implementation does it. Design rationale is recorded in the [architecture decision records](https://github.com/avatarsd-llc/libtracer/tree/main/docs/adr/) and in git history.
 
 ---
 
@@ -17,14 +17,14 @@ The remaining sections of this reference suite specify byte format, graph semant
 A conforming **implementation** SHALL:
 
 1. Encode and decode TLV frames per [01-data-format.md](01-data-format.md).
-2. Honor the path syntax of [03-addressing.md](03-addressing.md) and the subtree-subscription semantics of [RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md) (every subscription observes its vertex and all descendants).
+2. Honor the path syntax of [03-addressing.md](03-addressing.md) and the subtree-subscription semantics of [RFC-0005 — subtree subscriptions](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md) (every subscription observes its vertex and all descendants).
 3. Implement the read / write / await primitives and the field-write control surface of [04-communication-flows.md](04-communication-flows.md).
 4. Reserve type codes per [05-protocol-tlvs.md](05-protocol-tlvs.md) and treat unknown codes safely.
 5. Maintain the same-substrate invariant of [02-graph-model.md](02-graph-model.md): any sequence of mix/split/concat operations on the in-memory view tree, followed by serialization, MUST produce the same wire bytes as the equivalent fresh-buffer construction.
 6. Forward `FWD` frames hop-by-hop per [07-host-embedding.md](07-host-embedding.md): strip the leading `dst` segment and prepend the inbound-link NAME to `src` when acting as a forwarder. Loop-freedom is by construction — `dst` shrinks monotonically, so a route is finite; there is no revisit check.
 7. Provide path handles per [../spec/v1.md](../spec/v1.md) §3.1: encode each address used more than once into a PATH TLV exactly once (build-time literal or init-time registration); reuse the encoded bytes on every read / write / await; do not require string parsing or allocation on the hot path.
 
-A conforming **node** MAY load any subset of transport, discovery, security, and executor modules. A node loading **zero** transport modules is still conforming — it is an in-process-only graph. A node loading **multiple** transport modules SHALL implement the FWD forwarding logic of [07-host-embedding.md](07-host-embedding.md).
+A conforming **node** MAY load any subset of transport, discovery, security, and executor modules. A node loading **zero** transport modules conforms — it is an in-process-only graph. A node loading **multiple** transport modules SHALL implement the FWD forwarding logic of [07-host-embedding.md](07-host-embedding.md).
 
 A conforming **TLV** SHALL fit in the header layout of [01-data-format.md](01-data-format.md), use a type code from a defined range, and pass CRC-32C verification when the `CR` bit is set.
 
@@ -150,12 +150,12 @@ The trailer is **append-only at egress, strip-only at ingress**. A forwarder or 
 
 ### Graph-data vs in-flight-message: the FWD envelope
 
-The TLV substrate plays two distinct roles, structurally distinguished by the `FWD` TLV (type `0x0F`, [RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md)):
+The TLV substrate plays two distinct roles, structurally distinguished by the `FWD` TLV (type `0x0F`, [RFC-0004 — remote operation addressing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md)):
 
 - **Graph data** at a vertex: just the payload, no envelope. Identity = vertex path.
 - **In-flight message** crossing a link: an `FWD` TLV (structured, PL=1) carrying the op `VALUE`, the `dst` PATH (the remaining route — it shrinks one segment per hop), the `src` PATH (the accumulated return route — it grows one segment per hop), and the payload TLV as its last child. Identity = the explicit source route the frame carries.
 
-The terminus sheds the `FWD` envelope: it applies the op locally, stores only the bare payload (trailer-less at rest), and replies with a fresh `FWD{REPLY}` routed by the accumulated `src`. Because every remote endpoint is addressed by its explicit source route, forwarding is loop-free by construction (`dst` shrinks monotonically per hop, so a route is finite — there is no revisit check) and needs no duplicate detection — the `0x0D ROUTER` code is a reserved wire codepoint with no assigned mechanism in this implementation. See [04-communication-flows.md](04-communication-flows.md) and [07-host-embedding.md](07-host-embedding.md).
+The terminus sheds the `FWD` envelope: it applies the op locally, stores only the bare payload (trailer-less at rest), and replies with a fresh `FWD{REPLY}` routed by the accumulated `src`. Because every remote endpoint is addressed by its explicit source route, forwarding is loop-free by construction (`dst` shrinks monotonically per hop, so a route is finite — there is no revisit check) and needs no duplicate detection — `0x0D ROUTER` is a reserved, decodable wire code with no implemented mechanism. See [04-communication-flows.md](04-communication-flows.md) and [07-host-embedding.md](07-host-embedding.md).
 
 ---
 
@@ -167,7 +167,16 @@ This framing matters because the so-called "core" itself is a bundle of modules 
 
 The full module catalog — everything across L0..L5 — is in [10-module-catalog.md](10-module-catalog.md), with a pairing table that says which L0 backends pair with which L1 view modules pair with which transports.
 
-A node's footprint is the sum of its loaded modules. The reference implementation targets ≤ 16 KB stripped (required modules only) on `arm-none-eabi-g++ -std=c++23 -Os -fno-exceptions -fno-rtti`. (A build-size sentinel now runs in CI, on a different profile: the `full-node` job of `.github/workflows/esp-idf.yml` measures the libtracer component's flash / static-RAM contribution to the esp32c3/c6 **full-node** build — all socket transports + CAN, far more than the required modules — publishes it per run (step summary + JSON artifact), and gates it via `tools/esp_size_gate.py`. The ≤ 16 KB Cortex-M0 required-modules bound now has its own sentinel too: the `footprint-cortexm0` workflow (`.github/workflows/footprint-cortexm0.yml`) cross-compiles the required modules plus the `core/tests/footprint/sentinel_node.cpp` fixture with exactly that MCU profile, links and strips a Cortex-M0 image, and gates its flash footprint via `tools/cortexm0_footprint.py` — the standing referee for the ADR-0047 compile-time doctrine. It runs **warn-mode** today because the measured full send+receive P0 node is ~0.9 KiB over 16 KiB: `std::pmr` pulls ~2.7 KiB of soft-float in through the ADR-0041 arena decoder's memory seam (a `std::pmr::memory_resource&` when this was measured; the decoder now takes a `tr::mem::block_source_t&` per [ADR-0065](../adr/0065-failable-allocation-gets-its-own-seam-block-source.md), and the figure has NOT been re-measured against it), and the CRC lookup tables add ~1.5 KiB. The gate flips to a hard fail once the Wave 2 arena/codec rework brings the required modules under the ceiling.) Adding `transport_tcp` brings ~5 KB on Linux / ~8 KB on Cortex-M (lwIP-dependent). A robot-fleet build pulling in TCP, UDP, mDNS, CAN, TLS lands in the 30–50 KB range; an RC-car build with only one UART transport stays under 25 KB.
+A node's footprint is the sum of its loaded modules. Each profile therefore carries a footprint target, stated as a design target for the profile — not as a number a conforming implementation is required to hit:
+
+| Build | Target |
+| ---- | ---- |
+| **P0**, required modules only, stripped, `arm-none-eabi-g++ -std=c++23 -Os -fno-exceptions -fno-rtti` | ≤ 16 KB |
+| adding `transport_tcp` | ~5 KB on Linux / ~8 KB on Cortex-M (lwIP-dependent) |
+| a single-UART-transport node | under 25 KB |
+| TCP + UDP + mDNS + CAN + TLS | 30–50 KB |
+
+> **The reference implementation does not meet the P0 target.** A Cortex-M0 footprint sentinel — the required modules plus a send-and-receive fixture, cross-compiled with the profile above, linked and stripped — measures 20,937 B, ~4.5 KiB over the 16 KiB bound (re-measured 2026-07-27). Measured against the `std::pmr::memory_resource&` form of the arena decoder's memory seam, the same fixture came in ~0.9 KiB over, decomposed as ~2.7 KiB of soft-float pulled in by `std::pmr` through that seam, plus ~1.5 KiB of CRC lookup tables. The decoder takes a `tr::mem::block_source_t&` per [ADR-0065 — failable allocation gets its own seam](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md), the ~0.9 KiB figure has **not** been re-measured against it, and the 20,937 B overage is not attributed. The measured footprints of this implementation, the sentinel that produces them and the build axes that move them are described in [the configuration space](../design/config/00-configuration-space.md), which is the record of this implementation's costs rather than part of the standard.
 
 The module ABI itself is an **implementation** concern, not a protocol property — two implementations need not share a module ABI; they need to share the wire format, addressing scheme, and flows. See [10-module-catalog.md](10-module-catalog.md) §module ABI for the reference implementation's seams.
 
@@ -175,7 +184,7 @@ The module ABI itself is an **implementation** concern, not a protocol property 
 
 ## Implementation-language portability
 
-The reference implementation is C++23 (chosen for `std::expected`, `std::span`, `std::byte`, designated initializers, `constexpr`, three-way comparison, `[[nodiscard]]`, and `<atomic>`; built `-fno-exceptions -fno-rtti` for the constrained profile). The choice is pragmatic: a freestanding-friendly C++23 subset produces a small portable binary, has broad MCU toolchain coverage (GCC 13+, Clang 18+, ESP-IDF 5.3+, arm-none-eabi-g++ 14.x), and still exposes a clean `extern "C"` FFI surface for higher-level wrappers. The wire format itself is language-neutral, so a C, Rust, or Zig node interoperates byte-for-byte.
+The reference implementation is C++23 (chosen for `std::expected`, `std::span`, `std::byte`, designated initializers, `constexpr`, three-way comparison, `[[nodiscard]]`, and `<atomic>`; built `-fno-exceptions -fno-rtti` for the constrained profile). The choice is pragmatic: a freestanding-friendly C++23 subset produces a small portable binary, has broad MCU toolchain coverage (GCC 13+, Clang 18+, ESP-IDF 5.3+, arm-none-eabi-g++ 14.x), and exposes a clean `extern "C"` FFI surface for higher-level wrappers. The wire format itself is language-neutral, so a C, Rust, or Zig node interoperates byte-for-byte.
 
 The protocol itself is implementable in **any language** with:
 
@@ -184,7 +193,7 @@ The protocol itself is implementable in **any language** with:
 | Atomic refcount with relaxed/acq_rel ordering | Buffer-view ownership | `std::atomic<uint32_t>` (C++); `Arc<T>` or `AtomicUsize` (Rust); `sync/atomic` (Go) |
 | Pointer + length view over external memory | Zero-copy view tree | `std::span<const std::byte>` (C++20); `&[u8]` borrows or `Bytes` (Rust); `[]byte` slices (Go) |
 | Packed struct with explicit endianness | TLV header layout | `#[repr(C, packed)]` (Rust); `#pragma pack` / `[[gnu::packed]]` (C++); `encoding/binary` (Go) |
-| Iterative parser with bounded depth | MCU stack safety | trivially portable |
+| Iterative (non-recursive) parser, its nesting depth bounded by the receiver's decode resources rather than by a constant | MCU stack safety | trivially portable |
 | LEB128 varint | length encoding | trivially portable |
 | CRC-32C, hardware-accelerated where present | integrity | x86 SSE 4.2, ARMv8 `+crc`, software fallback — present in any language |
 

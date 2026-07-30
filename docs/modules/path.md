@@ -21,17 +21,26 @@ canonical key — e.g. `/sensor/temp` → `02 00 06 00 'sensor' 02 00 04 00 'tem
 ## Interface
 
 ```cpp
-struct field_step_t { std::string name; bool indexed, append; std::uint16_t index; };
+struct field_step_t { std::string name; bool indexed, append, wildcard; std::uint16_t index; };
 struct field_path_t { std::vector<field_step_t> steps; };
 
 class path_t {
-    static result_t<path_t> parse(std::string_view);  // result_t = expected<T, status_t>
+    explicit path_t(std::string_view);               // known-good LITERAL: parses once, aborts if malformed
+    static result_t<path_t> parse(std::string_view);  // RUNTIME string; result_t = expected<T, status_t>
     std::span<const std::byte> key() const;          // canonical PATH payload bytes
     const field_path_t& field() const;               // the :field.sub[N] tail
     std::size_t segment_count() const;
 };
-struct path_key_t { std::vector<std::byte> bytes; };  struct path_key_hash_t { /* FNV-1a */ };
+class path_key_t { /* owned key bytes; ≤16 B inline, else one heap block */ };
+struct path_key_hash_t { /* FNV-1a over the key bytes */ };
 ```
+
+The two entry points differ in what failure means. `path_t::parse` is for a string whose
+validity is itself a runtime condition, and returns `status_t::INVALID_PATH`
+(`core/src/path.cpp:107-112,129-130`). The `explicit` constructor is for a compile-site
+literal, where a malformed path is a source bug: it hard-aborts rather than yielding a
+`result_t` the caller would only `*`-deref unchecked (`path.hpp:129-132`). Neither uses
+exceptions, so both hold under `-fno-exceptions`.
 
 ## String → bytes, once
 
@@ -45,14 +54,27 @@ flowchart LR
     class M e
 ```
 
-## Benefits
+## Consequences
 
-- **No strings on the hot path** — parse once at registration; every read/write
-  compares canonical bytes. A build-time PATH literal needs no parse at all.
-- **One key everywhere** — the same bytes key the local map and travel on the wire
-  (a PATH TLV), so local and remote addressing are byte-identical.
-- **Validated** — malformed paths fail at parse with a typed `status_t`, not deep in
-  dispatch.
+- **No string work reaches dispatch.** A path parses at one visible construction site and
+  the graph API takes `const path_t&`, so a held handle cannot re-parse; every subsequent
+  read, write and subscribe on that path is a byte compare against the map key. The cost
+  of the parse is paid once, at registration or at the literal, not per call.
+- **Local and remote addressing are the same bytes.** `key()` returns the PATH-TLV payload
+  that travels on the wire, so a forwarded frame carries the key it was matched on and a
+  remote address needs no translation into a local one.
+- **A malformed address fails at the boundary.** Empty segments (`//`), unrooted paths,
+  reserved characters and every limit overrun reject at parse with a typed `status_t`
+  rather than surfacing as a miss deep in dispatch.
+- **The limits are a receiver's buffer budget.** ≤64 B per segment, ≤1024 B total,
+  ≤32 segments and ≤8 field steps (`core/include/libtracer/path.hpp:30,32,34,36`) let a
+  component size fixed scratch instead of allocating per frame — the mount-prefix peek
+  declares `std::array<std::byte, kMaxSegmentBytes * kMountPeekMax>`
+  (`core/src/fwd_router.cpp:62`).
+- **Ordinary names cost no heap block.** `path_key_t` holds records up to 16 bytes inline
+  (`path_key_t::kInlineBytes`, `core/include/libtracer/path.hpp:150`) — a NAME record is a
+  4-byte TLV header plus the segment text, so a name of up to 12 characters never
+  allocates; longer records spill to a single owned block.
 
 ## API reference
 

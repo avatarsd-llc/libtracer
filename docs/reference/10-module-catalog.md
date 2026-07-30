@@ -1,15 +1,14 @@
-# Reference 10 — Module Catalog and Composition
+# Reference 10 — Module catalog and composition
 
-> **Status**: draft, v1, 2026-05-03. New material — this is the cross-cutting index of every module mentioned anywhere in the reference suite, with their layer assignment, required-vs-optional status, dependencies, and pairings.
-> **Audience**: anyone deciding what to compile in / out of a build; anyone porting libtracer to a new platform; anyone implementing a new module and needing to know what interface to satisfy.
+> **Audience**: anyone deciding what to compile into a node; anyone porting libtracer to a new platform; anyone implementing a new module and needing to know which contract to satisfy.
 
 ---
 
-## Framing
+## What this catalog is
 
-There is **no "core" carved out from "modules"**. A libtracer node is a chosen set of modules linked together. Some modules are required for any conforming node (frame codec, dispatcher, refcount/view machinery, forwarder logic) — they are tagged `required` below. Everything else is optional; you load it if you need its capability.
+A libtracer node is a chosen set of modules linked together. There is **no "core" carved out from "modules"**: some modules are required for any conforming node — frame codec, dispatcher, refcount/view machinery, forwarder logic — and the required set is identified here, by enumeration, not by architectural privilege. Everything else is optional and is loaded when its capability is wanted.
 
-This catalog is the source of truth for **what gets built and how it composes**. The byte-level wire spec is in [01-data-format.md](01-data-format.md); the graph spec is in [02-graph-model.md](02-graph-model.md); this doc names the implementation pieces and their interfaces.
+This catalog names every module the reference suite mentions, in one place: its layer, its required-vs-optional status, what it wraps, which modules it pairs with, and which contract it satisfies. The byte-level wire format is in [01-data-format.md](01-data-format.md) and the graph semantics are in [02-graph-model.md](02-graph-model.md); neither depends on how a node is split into modules.
 
 ---
 
@@ -17,18 +16,18 @@ This catalog is the source of truth for **what gets built and how it composes**.
 
 | Tag | Meaning |
 | ---- | ---- |
-| `required` | Every conforming node loads this. Loaded even at conformance profile P0. |
-| `transport` | Implements `tr::net::transport_t` — one wire technology (WebSocket, UDP, CAN, …). |
-| `discovery` | Provides a `discovery_vtable_t` — peer announcement and resolution. |
-| `security` | Wraps a transport with confidentiality / integrity / auth. |
+| `required` | Every conforming node loads this, down to conformance profile P0. |
+| `transport` | Carries one wire technology (WebSocket, UDP, CAN, …) and satisfies the transport contract. |
+| `discovery` | Announces and resolves peers. |
+| `security` | Wraps a transport with confidentiality, integrity or authentication. |
 | `executor` | Hosts vertex-side compute (C callbacks, scripting, WASM). |
-| `mem-backend` | L0 memory substrate — owns real bytes, exposes them as `tr::view::segment_t`. |
-| `block-source` | L0 failable-block seam — raw single-owner blocks, exhaustion reported by value (`tr::mem::block_source_t`). |
+| `mem-backend` | L0 memory substrate — owns real bytes and vends refcounted segments. |
+| `block-source` | L0 failable-block seam — raw single-owner blocks, exhaustion reported by value. |
 | `view-module` | L1 view + rope + cast layer — owns no bytes, owns the ownership semantics. |
 | `tool` | Out-of-process utility (CLI introspection, GUI, recorder). |
 | `future` | Named, not built for v1. Listed so the design space is explicit. |
 
-> **Status column:** `v1` / `v1, week N` mean *in v1 scope* — planned **or** built. This catalog is the design index, not a build report: several `v1` modules are still roadmap. The reference source tree (`core/`, `bindings/`, `integrations/`) is the source of truth for what is *currently* implemented. `post-MVP` = after the v1 MVP; `future` = named but not in v1.
+**Status column.** `v1` means *inside the v1 scope boundary* ([ADR-0013 — v1 scope boundaries](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0013-v1-scope-boundaries.md)); `post-MVP` means after the v1 minimum; `future` means named but outside v1. The column is hand-maintained and records **scope**, not the contents of any particular build: what a given implementation ships is decided by its own source tree, and a second implementation is free to ship a different subset and still conform.
 
 ---
 
@@ -36,31 +35,32 @@ This catalog is the source of truth for **what gets built and how it composes**.
 
 ### L0 — Memory substrate ([09-memory-substrate.md](09-memory-substrate.md))
 
-L0 has **two** seams. Most modules here are *backends* that own real bytes and implement `tr::mem::mem_backend_t`, vending refcounted `segment`s for payload. One is a *block source* (`tr::mem::block_source_t`): raw single-owner blocks with failure reported by value, for allocations a peer can provoke ([09 §the second L0 seam](09-memory-substrate.md), [ADR-0065](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md)).
+L0 has **two** seams. Most modules here are *backends* that own real bytes and vend refcounted segments for payload. One is a *block source*: raw single-owner blocks with failure reported by value, for allocations a peer can provoke ([09 §the second L0 seam](09-memory-substrate.md), [ADR-0065 — failable allocation gets its own seam](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md)).
 
 | Module | Tag | What it wraps | Status |
 | ---- | ---- | ---- | ---- |
 | `mem_heap` | mem-backend | malloc/free, jemalloc, mimalloc — any general-purpose heap | v1 |
-| `mem_source` | block-source | The nothrow failable-block seam (`block_source_t`) plus `heap_source()`, `null_source()`, a `bump_source_t` over a caller buffer, the bounded recycling `pool_source_t<Sync>`, and `block_array_t<T>` | v1 |
-| `mem_borrowed` | mem-backend | Caller-owned bytes wrapped as a non-owning segment (borrowed lifetime; the transparent byte-routing vehicle of [ADR-0012](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0012-modular-memory-binding-transparent-router.md)) | v1 |
-| `mem_pool_static` | mem-backend | A statically-allocated fixed-size slot pool | v1 |
+| `mem_source` | block-source | The nothrow failable-block seam: a heap source, a source that serves nothing, a bump source over a caller-supplied buffer with an upstream fallback, a bounded recycling pool source, and a relocating block array over any of them | v1 |
+| `mem_borrowed` | mem-backend | Caller-owned bytes wrapped as a non-owning segment — the transparent byte-routing vehicle of [ADR-0012 — memory binding is a modular spectrum](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0012-modular-memory-binding-transparent-router.md) | v1 |
+| `mem_pool_static` | mem-backend | A statically allocated fixed-size slot pool | v1 |
 | `mem_pool_class` | mem-backend | A small set of fixed-size slot pools partitioned by size class | v1 |
 | `mem_lwip_pbuf` | mem-backend | An lwIP `struct pbuf` chain (network-stack buffer) | v1 |
-| `mem_skbuff` | mem-backend | A Linux kernel `sk_buff` (for in-kernel libtracer ports) | future |
+| `mem_skbuff` | mem-backend | A Linux kernel `sk_buff`, for in-kernel ports | future |
 | `mem_dma_buffer` | mem-backend | A peripheral DMA buffer (preallocated, recycled, with cache hooks) | v1 |
-| `mem_mmio` | mem-backend | An MMIO range — bytes never moved; segment is a permanent fixture | v1 |
-| `mem_shared` | mem-backend | A POSIX SHM region (single-process refcounted, multi-process treats as MMIO) | v1 |
-| `mem_uart_rx_simple` | mem-backend | A circular UART RX buffer with byte-by-byte cursor | v1 |
+| `mem_mmio` | mem-backend | An MMIO range — bytes never move; the segment is a permanent fixture | v1 |
+| `mem_shared` | mem-backend | A POSIX SHM region (single-process refcounted; multi-process treats it as MMIO) | v1 |
+| `mem_uart_rx_simple` | mem-backend | A circular UART RX buffer with a byte-by-byte cursor | v1 |
 | `mem_uart_rx_dma` | mem-backend | A double-buffered DMA UART RX ring (half-complete and complete IRQs) | v1 |
-| `can_reassembly` | net (transport) | Multi-frame CAN/CAN-FD reassembly buffer (`tr::net`, `pmr`-backed, bounded — was mis-filed as an L0 `mem-backend`; rehomed per ADR-0048 round 2) | v1 |
 | `mem_iceoryx2` | mem-backend | An iceoryx2 publish-side block | future |
 | `mem_rdma` | mem-backend | An RDMA-registered memory region with ibv tags | future |
-| `mem_cuda` | mem-backend | CUDA device memory (`DEVICE` space — the codec must not CPU-deref it; backs a VALUE payload in a heterogeneous host+device rope, [ADR-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)) | v1, opt-in `LIBTRACER_WITH_CUDA` |
-| `mem_asio_streambuf` | mem-backend | A `boost::asio::streambuf` (consume-on-read semantics) | **OPEN — see §hard integrations** |
+| `mem_cuda` | mem-backend | CUDA device memory — a device address space the codec must not dereference; it backs a VALUE payload inside a heterogeneous host+device rope ([ADR-0024 — mem_cuda and the heterogeneous rope](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)) | v1, opt-in |
+| `mem_asio_streambuf` | mem-backend | A `boost::asio::streambuf` (consume-on-read semantics) | not in v1 — see [§hard integrations](#hard-integrations) |
+
+`can_reassembly` is **not** an L0 module. It is listed under transports below, for the reason given there.
 
 ### L1 — Views and ownership ([08-views-and-ownership.md](08-views-and-ownership.md))
 
-The view + rope + cast machinery itself is one `required` module; integrations with specific I/O facilities are separate optional modules. They expose the same uniform view API to L2+ but pair with specific L0 backends.
+The view + rope + cast machinery itself is one `required` module; integrations with specific I/O facilities are separate optional modules. They expose the same uniform view surface to L2 and above, but each pairs with specific L0 backends.
 
 | Module | Tag | Pairs with (L0) | Status |
 | ---- | ---- | ---- | ---- |
@@ -71,7 +71,7 @@ The view + rope + cast machinery itself is one `required` module; integrations w
 | `view_dma_descriptor` | view-module | `mem_dma_buffer` | v1 |
 | `view_uart_simple` | view-module | `mem_uart_rx_simple` | v1 |
 | `view_uart_dma` | view-module | `mem_uart_rx_dma` | v1 |
-| `view_can_frames` | view-module | `can_reassembly` | v1 |
+| `view_can_frames` | view-module | `can_reassembly` (transport plane) | v1 |
 | `view_shm` | view-module | `mem_shared` | v1 |
 | `view_iceoryx2` | view-module | `mem_iceoryx2` | future |
 | `view_rdma` | view-module | `mem_rdma` | future |
@@ -80,55 +80,58 @@ The view + rope + cast machinery itself is one `required` module; integrations w
 
 | Module | Tag | What it does |
 | ---- | ---- | ---- |
-| `frame_codec` | required | Header pack/unpack; `opt` bit interpretation; CRC-32C and CRC-16-CCITT; relative- and absolute-TS handling; trailer attach/strip |
-| `frame_iter` | required | Iterative parser with bounded depth (no recursion); handles flat-buffer and rope-walk contexts |
+| `frame_codec` | required | Header pack and unpack; `opt` bit interpretation; CRC-32C and CRC-16-CCITT; relative- and absolute-TS handling; trailer attach and strip |
+| `frame_iter` | required | Iterative parser — recursion is forbidden, so a deep frame cannot overflow a small call stack. Nesting depth is bounded by the receiver's own decode resources and by no constant; a frame that exhausts them is rejected with `TLV_NESTING_TOO_DEEP`. Handles both the flat-buffer and the rope-walk context |
 
 ### L3 — TLV semantics ([05-protocol-tlvs.md](05-protocol-tlvs.md))
 
 | Module | Tag | What it does |
 | ---- | ---- | ---- |
-| `tlv_registry` | required | Type-code dispatch; structured-vs-opaque decision via `opt.PL`; unknown-code passthrough rules |
+| `tlv_registry` | required | Type-code dispatch; the structured-vs-opaque decision via `opt.PL`; unknown-code passthrough rules |
 
 ### L4 — Graph endpoint logic ([02-graph-model.md](02-graph-model.md), [03-addressing.md](03-addressing.md), [04-communication-flows.md](04-communication-flows.md))
 
 | Module | Tag | What it does |
 | ---- | ---- | ---- |
-| `graph_runtime` | required | Vertex map, edge / subscription registry, dispatch loop |
-| `path_handle` | required | Build-time and init-time PATH TLV encoder; `.rodata` literal helpers; init-time path registration. Hot-path API takes handles only. ([03-addressing.md](03-addressing.md) §static path handles, [../spec/v1.md](../spec/v1.md) §3.1) |
-| `path_resolver` | required | Path EBNF parsing, wildcard match, field-chain resolution. Slow path only — string-form entry point used at init or for ergonomics. P0 builds MAY omit the string-form entry. |
-| `dispatcher` | required | Fan-out to subscribers, per-subscriber QoS / ACL gating. Vertex map is keyed on canonical PATH TLV bytes ([02-graph-model.md](02-graph-model.md) §dispatch keyed on canonical PATH TLV bytes). |
-| `fwd_router` | required | The stateless source-routed forwarder ([ADR-0035](../adr/0035-implementing-rfc-0004-remote-operation-addressing.md)): offset-dispatch forward hop (`dst`-shrink / `src`-grow, zero heap allocations), arena-decoded terminus (`wire::decode_into` → `tlv_arena_t` → `op_resolver_t`), route-handle compaction (ADVERTISE / COMPACT / NACK). |
-| `subscriber_mux` | required | Per-subscriber state slots, rate limit, deadline / liveness watchdog |
+| `graph_runtime` | required | Vertex map, edge and subscription registry, dispatch loop |
+| `path_handle` | required | Build-time and init-time PATH TLV encoder; read-only-segment literal helpers; init-time path registration. The hot-path surface takes handles only ([03-addressing.md](03-addressing.md) §static path handles, [../spec/v1.md](../spec/v1.md) §3.1) |
+| `path_resolver` | required | Path EBNF parsing, wildcard match, field-chain resolution. Slow path only — the string-form entry point is used at init or for ergonomics. P0 builds MAY omit it |
+| `dispatcher` | required | Fan-out to subscribers, per-subscriber QoS and ACL gating. The vertex map is keyed on canonical PATH TLV bytes ([02-graph-model.md](02-graph-model.md) §dispatch keyed on canonical PATH TLV bytes) |
+| `fwd_router` | required | The stateless source-routed forwarder ([ADR-0035 — implementing RFC-0004 remote-operation addressing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0035-implementing-rfc-0004-remote-operation-addressing.md)): an offset-dispatch forward hop that shrinks `dst` and grows `src` with no heap allocation, an arena-decoded terminus for frames whose leading `dst` segment is local, and route-handle compaction (ADVERTISE / COMPACT / NACK) |
+| `subscriber_mux` | required | Per-subscriber state slots, rate limit, deadline and liveness watchdog |
 | `schema_registry` | required | Per-vertex `:schema` storage and lookup |
 
-These are required even at profile P0 (in-process build). "Required" does not imply "monolithic" — they are distinct modules with clean interfaces between them. An implementer may swap any one of them for an alternative implementation as long as the protocol behavior is preserved.
+These are required down to profile P0, the in-process build. "Required" does not mean "monolithic": they are distinct modules with declared contracts between them, and any one may be swapped for an alternative implementation as long as the protocol behaviour is preserved.
 
-### Transports (L4 ↔ network) ([10-module-catalog.md](10-module-catalog.md))
+### Transports (L4 ↔ network)
 
 | Module | Tag | Wraps | Status |
 | ---- | ---- | ---- | ---- |
-| `transport_tcp` | transport | TCP socket | v1, week 2 |
+| `transport_tcp` | transport | TCP socket | v1 |
 | `transport_udp` | transport | UDP socket (unicast and multicast) | v1 |
-| `transport_quic` | transport | QUIC + WebTransport (implemented — optional `libtracer_quic` target, ADR-0043) | v1 opt-in |
-| `transport_ws` | transport | WebSocket (browser / WASM) | v1, week 5 |
-| `transport_unix` | transport | Unix domain socket | planned (no TU yet) |
+| `transport_quic` | transport | QUIC and WebTransport ([ADR-0043 — QUIC/WebTransport as an optional module](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0043-quic-webtransport-optional-module-msquic.md)) | v1, opt-in |
+| `transport_ws` | transport | WebSocket (browser and WASM reachable) | v1 |
+| `transport_can` | transport | CAN classic and CAN-FD, with `can_reassembly` | v1 |
+| `can_reassembly` | transport | Multi-frame CAN and CAN-FD reassembly (see the rule below) | v1 |
+| `transport_unix` | transport | Unix domain socket | v1 scope; no reference module |
+| `transport_uart` | transport | UART (simple and DMA modes) | v1 scope; no reference module |
 | `transport_shm` | transport | Iceoryx-style shared-memory ring | post-MVP |
-| `transport_uart` | transport | UART (simple + DMA modes) | planned (no TU yet) |
-| `transport_can` | transport | CAN classic + CAN-FD with reassembly | v1, week 6 |
 | `transport_i2c` | transport | I²C bus | future |
 | `transport_spi` | transport | SPI bus | future |
 | `transport_ble_gatt` | transport | BLE GATT characteristics | future |
 | `transport_rdma` | transport | RDMA (ibverbs) | future |
 
-### Discovery ([10-module-catalog.md](10-module-catalog.md))
+**The reassembly-buffer rule.** A multi-frame reassembly buffer is a **transport-plane** concern, not an L0 one, because it composes L1 views into a rope exactly as any transport does. Placing it at L0 would make an L0 type reference the L1 rope it assembles, which the layer model forbids ([ADR-0048 — one wire-grammar core behind a chunk cursor](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0048-one-wire-grammar-chunk-cursor-rope-aware-decode.md)). Its bounding behaviour follows the same discipline as every other libtracer resource: structure is drawn from an injected resource, the live group count is bounded by configuration, and overflow evicts the oldest group and increments a `dropped_groups` counter. A constrained node therefore degrades by a bounded drop rather than by unbounded growth, and no magic number appears anywhere in the buffer.
+
+### Discovery
 
 | Module | Tag | What it does | Status |
 | ---- | ---- | ---- | ---- |
-| `discovery_mdns` | discovery | mDNS / DNS-SD over local LAN | v1, week 3 |
-| `discovery_static` | discovery | TOML config file with explicit peer endpoints | v1 |
-| `discovery_gossip` | discovery | Gossip protocol over WAN-friendly transports | post-MVP |
+| `discovery_mdns` | discovery | mDNS / DNS-SD over the local LAN | v1 |
+| `discovery_static` | discovery | A config file with explicit peer endpoints | v1 |
+| `discovery_gossip` | discovery | Gossip over WAN-friendly transports | post-MVP |
 
-### Security ([10-module-catalog.md](10-module-catalog.md))
+### Security
 
 | Module | Tag | Pairs with | Status |
 | ---- | ---- | ---- | ---- |
@@ -138,24 +141,24 @@ These are required even at profile P0 (in-process build). "Required" does not im
 | `security_acl` | security | any transport | post-MVP |
 | `security_noise` | security | any transport | future |
 
-### Executors ([10-module-catalog.md](10-module-catalog.md))
+### Executors
 
 | Module | Tag | What it runs | Status |
 | ---- | ---- | ---- | ---- |
-| `executor_c` | executor | C callbacks bound by name to a vertex | v1, week 7 |
-| `executor_micropython` | executor | MicroPython on MCU class hardware | post-MVP |
+| `executor_c` | executor | C callbacks bound by name to a vertex | v1 |
+| `executor_micropython` | executor | MicroPython on MCU-class hardware | post-MVP |
 | `executor_python` | executor | CPython on Linux | post-MVP |
 | `executor_lua` | executor | Lua | post-MVP |
 | `executor_wasm` | executor | WASM (WAMR) | post-MVP |
-| `executor_dataflow` | executor | DAG dataflow scheduler | future |
-| `executor_fpga` | executor | FPGA-resident vertex compute | future, aspirational |
+| `executor_dataflow` | executor | A DAG dataflow scheduler | future |
+| `executor_fpga` | executor | FPGA-resident vertex compute | future |
 
 ### Tools (out-of-process)
 
 | Module | Tag | What it is | Status |
 | ---- | ---- | ---- | ---- |
-| `tracer-top` | tool | CLI — vertex / edge / sample-rate live view | v1, week 8 |
-| `diag-gui` | tool | Web UI introspector via `transport_ws` | post-MVP |
+| `tracer-top` | tool | CLI — live vertex, edge and sample-rate view | v1 |
+| `diag-gui` | tool | Web UI introspector over `transport_ws` | post-MVP |
 | `recorder` | tool | TLV stream-to-disk recorder | post-MVP |
 
 ---
@@ -164,190 +167,158 @@ These are required even at profile P0 (in-process build). "Required" does not im
 
 | Profile | Modules loaded |
 | ---- | ---- |
-| **P0** (in-process) | `view_core`, `view_basic`, `mem_heap` (or any L0 backend), `frame_codec`, `frame_iter`, `tlv_registry`, `graph_runtime`, `path_resolver`, `dispatcher`, `fwd_router`, `subscriber_mux`, `schema_registry` |
-| **P1** (single-transport leaf) | P0 + one transport (e.g., `transport_tcp` or `transport_uart`) + the L0 backend and L1 view module the transport pairs with |
-| **P2** (forwarder) | P1 + ≥1 additional transport — the forwarder routes `FWD` frames between them |
+| **P0** (in-process) | `view_core`, `view_basic`, `mem_heap` (or any L0 backend), `frame_codec`, `frame_iter`, `tlv_registry`, `graph_runtime`, `path_handle`, `path_resolver`, `dispatcher`, `fwd_router`, `subscriber_mux`, `schema_registry` |
+| **P1** (single-transport leaf) | P0 + one transport + the L0 backend and L1 view module that transport pairs with |
+| **P2** (forwarder) | P1 + at least one further transport — the forwarder routes `FWD` frames between them |
 | **P3** (full) | P2 + one discovery module + one executor module + one security module |
 
-A profile P0 build with `mem_heap` + `view_basic` is the minimum sentinel for the ≤ 16 KB stripped target on Cortex-M.
+A profile P0 build with `mem_heap` and `view_basic` is the minimum sentinel for the ≤ 16 KB stripped-image target on Cortex-M.
 
 ---
 
 ## Inter-module interfaces
 
-Each adjacent layer pair has a small contract. The interfaces are uniform — a transport doesn't care which L1 view module its L0 backend pairs with, as long as the pairing produces a `tr::view::view_t`.
+Each adjacent layer pair has a small contract, stated here in language-neutral terms. The contracts are uniform: a transport does not care which L1 view module its L0 backend pairs with, as long as the pairing produces views.
 
-### Module ABI (implementation-defined)
+### Module ABI
 
-The module ABI — the reference C++23 seams below (`tr::net::transport_t`, `tr::mem::mem_backend_t`, and the implementation's `abi_version`) — is **deliberately** an **implementation** concern, not a protocol property ([ADR-0013](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0013-v1-scope-boundaries.md)). The seams shown here are the **reference implementation's**, not a normative cross-language ABI. Two conforming implementations need not share it; what they share is the wire format ([01-data-format.md](01-data-format.md)) and addressing ([03-addressing.md](03-addressing.md)). A node assembled from one toolchain's modules interoperates over the wire with any other node, regardless of ABI.
+The module ABI — the shape of the seams below, and the version tag a loader checks — is **deliberately** an implementation concern, not a protocol property ([ADR-0013 — v1 scope boundaries](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0013-v1-scope-boundaries.md)). Two conforming implementations need not share it. What they share is the wire format ([01-data-format.md](01-data-format.md)) and addressing ([03-addressing.md](03-addressing.md)); a node assembled from one toolchain's modules interoperates over the wire with any other node whatever its ABI.
 
-Within a single implementation the ABI is declared **semver-stable**: the library exports a `tracer_abi_version` symbol, and every breaking change to a vtable layout or `abi_version` field bumps it. Loaders refuse modules whose `abi_version` does not match.
+Within a single implementation the ABI is declared semver-stable: the library exports an ABI-version symbol, every breaking change to a seam layout bumps it, and a loader refuses a module whose version does not match.
 
-Executor, security, and discovery modules are **post-MVP, opt-in** — none are linked into a P0 build. A node loads them only when it needs vertex-side compute, transport confidentiality/auth, or peer announcement.
+Executor, security and discovery modules are opt-in; none is linked into a P0 build. A node loads them only when it needs vertex-side compute, transport confidentiality or authentication, or peer announcement.
 
-### L0 ↔ L1: `tr::mem::mem_backend_t`
+### L0 ↔ L1 — the memory-backend contract
 
-A backend subclasses `tr::mem::mem_backend_t` (L0); the refcounted `tr::view::segment_t` it hands out is an L1 (`tr::view`) type because it carries the refcount. (Full seam in [09-memory-substrate.md](09-memory-substrate.md) §the backend abstraction.)
+A backend owns real bytes; the refcounted segment it hands out is an L1 object because it carries the refcount. The backend interface itself is L0 and must not depend on L1, which is why allocation yields a raw segment the caller adopts rather than an already-owning handle. (The corresponding L0 discussion is [09-memory-substrate.md](09-memory-substrate.md) §the backend abstraction.)
 
-```cpp
-namespace tr::mem {
+A segment is four things: an intrusive refcount, the backend that reclaims it, the byte range it covers, and the address space those bytes live in. Increments are relaxed; decrements are acquire-release; reclaim fires exactly on the transition to zero.
 
-enum class io_dir_t     : std::uint8_t  { DEVICE_TO_CPU = 1, CPU_TO_DEVICE = 2 };
-enum class alloc_hint_t : std::uint32_t { NONE = 0 };   // opaque, backend-private
+```c
+/* Language-neutral sketch of the backend contract, not an ABI. */
 
-class mem_backend_t {
-   public:
-    explicit mem_backend_t(const char* name) noexcept;
-    virtual ~mem_backend_t() = default;
+typedef enum { IO_DEVICE_TO_CPU = 1, IO_CPU_TO_DEVICE = 2 } io_dir_t;
+typedef enum { SPACE_HOST = 0, SPACE_DEVICE = 1 }           mem_space_t;
 
-    // refcount = 1, for the caller to adopt; nullptr on backpressure/OOM/MMIO.
-    // Returns a raw segment_t* (NOT a segment_ptr_t) to keep tr::mem from
-    // depending on tr::view; the caller adopts via segment_ptr_t::adopt(seg).
-    [[nodiscard]] virtual tr::view::segment_t* alloc(
-        std::size_t size, alloc_hint_t hint = alloc_hint_t::NONE);
+/* Yield a segment with refcount 1 for the caller to adopt, or nothing.
+   Declining is normal, not an error: MMIO and hardware-FIFO backends
+   decline every request. `hint` is opaque and backend-private. */
+segment_t *mem_alloc      (mem_backend_t *b, size_t size, uint32_t hint);
 
-    // The sole reclaim hook (no release()): segment_ptr_t calls this only when
-    // its acq_rel decrement takes the refcount to zero.
-    virtual void destroy(tr::view::segment_t* seg) noexcept = 0;
+/* The sole reclaim hook. Invoked exactly once, by the last handle's
+   decrement reaching zero. There is no per-segment reclaim pointer: a
+   backend with several internal pools dispatches inside its own hook. */
+void       mem_destroy    (mem_backend_t *b, segment_t *seg);
 
-    // Optional cache hooks; the method carries the timing, io_dir_t the
-    // direction. No-ops by default and on cacheless cores.
-    virtual void before_io(tr::view::segment_t* seg, io_dir_t dir) noexcept {}
-    virtual void after_io (tr::view::segment_t* seg, io_dir_t dir) noexcept {}
+/* Cache maintenance around a device transfer. The hook carries the
+   timing, `dir` carries which way the bytes move. No-ops by default
+   and on cacheless cores. */
+void       mem_before_io  (mem_backend_t *b, segment_t *seg, io_dir_t dir);
+void       mem_after_io   (mem_backend_t *b, segment_t *seg, io_dir_t dir);
 
-    [[nodiscard]] virtual std::size_t alignment()        const noexcept;
-    [[nodiscard]] virtual std::size_t max_segment_size() const noexcept;
-    [[nodiscard]] const char*         name()             const noexcept;
-};
-
-}  // namespace tr::mem
-
-namespace tr::view {
-struct segment_t {
-    detail::ref_count       refcount;   // inc relaxed / dec acq_rel
-    tr::mem::mem_backend_t* backend;
-    std::span<std::byte>    bytes;
-};
-}  // namespace tr::view
+/* Static properties a caller may query before allocating. */
+size_t      mem_alignment        (const mem_backend_t *b);
+size_t      mem_max_segment_size (const mem_backend_t *b);
+mem_space_t mem_space            (const mem_backend_t *b);  /* codec must not
+                                        dereference DEVICE bytes */
+const char *mem_name             (const mem_backend_t *b);
 ```
 
-A backend may decline `alloc` (return `nullptr`) — MMIO and hardware-FIFO backends do exactly that. A backend without cache hooks simply doesn't override `before_io` / `after_io` (they default to no-ops). `destroy` is a single backend virtual (not a per-segment function pointer); a backend with multiple internal pools dispatches inside its own override.
+A backend that cannot serve a request declines it; that is a value, not a fault, and callers must handle it on every path a peer can provoke. The reference implementation's C++ form of this seam is in [../modules/backends.md](../modules/backends.md).
 
-### L1 ↔ L2: `tr::view::view_t` / `rope_t` and the cast
+### L1 ↔ L2 — the view, rope and cast contract
 
-```cpp
-namespace tr::view {
+A **view** is one contiguous window into one segment: an owning handle plus an offset and a length, with the window required to lie inside the segment. Copying a view is a refcount bump on the owning segment and never a byte copy; releasing it is the handle's destruction. Narrowing a view yields another view over the same segment, sharing ownership.
 
-// One contiguous window into one segment. Copyable; copy == clone (an intrusive
-// refcount bump on the owning segment via segment_ptr_t — no byte copy).
-// Release is just RAII: the segment_ptr_t destructor does the acq_rel decrement.
-struct view_t {
-    segment_ptr_t owner;    // refcounted L0 segment (the owning handle)
-    std::size_t   offset;
-    std::size_t   length;
+A **rope** is an ordered chain of views forming one logical byte sequence that may span several segments. A view module must guarantee:
 
-    [[nodiscard]] std::span<const std::byte> bytes() const noexcept;
-    // A narrower window into the same segment (shares ownership, no copy).
-    [[nodiscard]] view_t subview(std::size_t off, std::size_t len) const;
-};
+- **Appending is chaining, never a memcpy.** Assembly of a scattered frame — a CAN reassembly group, a fragmented WebSocket message — crosses the ingress seam as the rope it already is.
+- **Order is stable and the total length is queryable** without walking the bytes.
+- **A sub-range yields a rope**, taking references to the links it overlaps rather than copying.
+- **A scatter-gather lowering** produces one span per link, in order, for `writev`/`sendmsg`-style egress. Each transport lowers the rope to its own native form; the rope itself is transport-agnostic.
+- **Flatten is the one contiguous copy**, taken from a named backend, and is called only where a consumer cannot span segments. A single-link rope is already contiguous and must not pay it.
 
-// A rope: an ordered chain of views forming one logical byte sequence that may
-// span several segments without copying. Assembly == chaining views here; it is
-// NEVER a memcpy. The rope is the transport-agnostic scatter-gather form — each
-// transport LOWERS it to its native DMA (iovec/sendmsg, CAN chains, RDMA verbs).
-class rope_t {
-   public:
-    void    append(view_t v);
-    rope_t& concat(const rope_t& other);
-    [[nodiscard]] std::size_t total_length() const noexcept;
-    // Spans into the original segments (no copy) for writev/sendmsg-style I/O.
-    [[nodiscard]] std::vector<std::span<const std::byte>> to_iovec() const;
-    // The single contiguous copy: only when a flat-buffer consumer demands it,
-    // at a substrate boundary a transport's DMA cannot span.
-    [[nodiscard]] view_t flatten(tr::mem::mem_backend_t& backend) const;
-};
+The **cast** turns a flat view into a TLV in place — a zero-copy reinterpretation that validates as it goes. The cast belongs to L2 even though its argument is L1, because it produces a TLV; the resulting TLV borrows the view's bytes, so the view must outlive it. The reference implementation's C++ forms are in [../modules/views.md](../modules/views.md) and [../modules/segment.md](../modules/segment.md).
 
-}  // namespace tr::view
+### L2 ↔ L3 — header-driven dispatch
 
-namespace tr::wire {
-// Cast a (flat) view to a TLV in place — zero-copy reinterpretation (the
-// decoder). The view overload of decode lives at L2 (tr::wire) because it
-// produces a tlv_t; the returned tlv borrows the view's bytes, so keep the
-// view alive.
-[[nodiscard]] std::expected<tlv_t, err_t> decode(const view::view_t& v);
-}  // namespace tr::wire
-```
+The frame codec parses `(type, opt, length)`. The TLV registry uses `type` and `opt.PL` to decide whether to descend into nested children or treat the payload as opaque bytes. The codec exposes the payload as a view; the registry exposes typed views over it by typed cast.
 
-### L2 ↔ L3: header-driven dispatch
-
-Frame codec parses `(type, opt, length)`. The TLV registry uses `type` and `opt.PL` to decide whether to recurse into nested children or treat the payload as opaque bytes. The frame codec exposes the payload as a `view_t`; the registry exposes typed views (`tlv_value_t`, `tlv_path_t`, …) by typed cast.
-
-### L3 ↔ L4: graph dispatch
+### L3 ↔ L4 — graph dispatch
 
 When a TLV arrives at the dispatcher, the registry tells the graph runtime what to do:
 
 - `VALUE` at a vertex path → store, then fan out to subscribers.
 - `PATH` → resolve and read.
-- `SUBSCRIBER` appended to `:subscribers[]` → register a fan-out target. (An **indexed** write, `:subscribers[N]`, is the *unsubscribe* — it clears slot N regardless of payload. See [02 §writing `:subscribers[N]`](02-graph-model.md#writing-subscribers-n-unsubscribes-it-does-not-register).)
-- `FWD` arriving via a transport → the forwarder's responsibility (forward onward, or terminus-resolve when the leading `dst` segment is local). `0x0D ROUTER` is a reserved code — it decodes generically; no mechanism consumes it.
-- Unknown user-range types with `PL=1` → store as opaque structured data; subscribers see what they handle.
+- `SUBSCRIBER` appended to `:subscribers[]` → register a fan-out target. An **indexed** write, `:subscribers[N]`, is resolved by what it carries: an empty `STATUS` sentinel clears slot `N`, a `SUBSCRIBER` replaces slot `N`'s edge through the same gate as an append, anything else answers `TYPE_MISMATCH` and leaves the slot untouched ([02-graph-model.md](02-graph-model.md) §writing `:subscribers[N]`).
+- `FWD` arriving over a transport → the forwarder's responsibility: forward onward, or terminus-resolve when the leading `dst` segment is local. `0x0D ROUTER` is a reserved code — it decodes generically, and no mechanism consumes it.
+- Unknown user-range types with `opt.PL=1` → store as opaque structured data; subscribers see what they can handle.
 
-### Transport ↔ L4: `tr::net::transport_t`
+### Transport ↔ L4 — the transport contract
 
-The transport seam is a small callback-based C++23 base class — one frame in, one frame out. A transport is **byte-level**: a frame is the contiguous bytes of one complete TLV. It never sees any TLV semantics — routing is the forwarder's job.
-
-```cpp
-namespace tr::net {
-
-// A 16-byte node/peer identity.
-using peer_id_t = std::array<std::byte, 16>;
-
-class transport_t {
-   public:
-    using receiver_t = std::function<void(std::span<const std::byte>)>;
-    virtual ~transport_t() = default;
-
-    // Emit one frame (a complete TLV's bytes) onto the wire.
-    virtual void send(std::span<const std::byte> frame) = 0;
-
-    // Scatter-gather send: emit the gathered spans as ONE frame, no flatten copy
-    // (a rope's to_iovec() goes straight to the wire). The default gathers into a
-    // temporary; transports with native sendmsg/writev override it.
-    virtual void send(std::span<const std::span<const std::byte>> iov);
-
-    // Register the sink for inbound frames (the forwarder's ingest). Must be set
-    // before frames flow; delivery may occur on an internal transport thread.
-    virtual void set_receiver(receiver_t receiver) = 0;
-};
-
-}  // namespace tr::net
-```
-
-`send` takes one frame — the contiguous bytes of a complete TLV (typically an `FWD`). Inbound frames are delivered to the `receiver_t` the forwarder registered via `set_receiver` (possibly on an internal transport thread). Where a payload physically lives as a `rope_t` scattered across segments, the forwarder lowers it to this seam at the egress boundary: a scatter-gather-capable transport consumes the rope's `to_iovec()` directly, while a contiguous-only transport receives a single frame the forwarder produced via `rope_t::flatten()` (one copy at egress). The transport itself sees only framed bytes.
-
-### Application ↔ L4: path-handle entry points
-
-The hot-path API surface is **handle-typed**, not string-typed. Per [../spec/v1.md](../spec/v1.md) §3.1.4:
+A transport carries one wire technology and is **byte-level**: a frame is the contiguous bytes of one complete TLV. It never sees TLV semantics — routing is the forwarder's job.
 
 ```c
-typedef const struct path_handle *path_handle_t;   // opaque pointer to a PATH TLV
-                                                    // (in .rodata or registered heap)
+/* Language-neutral sketch of the transport contract, not an ABI. */
+
+/* Emit one frame: the contiguous bytes of one complete TLV. */
+void tx_send      (transport_t *t, const void *frame, size_t len);
+
+/* Emit the gathered spans as ONE frame, with no flatten copy — a rope's
+   scatter-gather lowering goes straight to the wire. A transport with
+   native sendmsg/writev/RDMA-SGE overrides this; the fallback gathers
+   into a temporary and MUST DROP the frame when it cannot allocate,
+   because an egress that cannot allocate sheds, it does not abort. */
+void tx_send_iov  (transport_t *t, const iovec_t *iov, size_t n);
+
+/* Inbound sinks are a function pointer plus a caller-owned context, not
+   a type-erased closure: the context must outlive every delivery, and
+   delivery may land on an internal transport thread. Both must be set
+   before frames flow. */
+void tx_set_receiver      (transport_t *t,
+                           void (*fn)(void *ctx, const void *frame, size_t len),
+                           void *ctx);   /* BORROWED: valid only for the call */
+void tx_set_rope_receiver (transport_t *t,
+                           void (*fn)(void *ctx, rope_t frame),
+                           void *ctx);   /* OWNING: the receiver may keep it */
+
+/* True iff this transport honours the owning sink. */
+bool tx_delivers_ropes (const transport_t *t);
+
+/* Fired when this transport's one connection dies — remote hangup,
+   protocol close, or a fatal receive error. The forwarder uses it to
+   evict the link's subscriber edges. */
+void tx_set_down_notifier (transport_t *t, void (*fn)(void *ctx), void *ctx);
+```
+
+Two ingress flavours exist and they are one capability, not two tiers. A **borrowed** delivery hands up a span valid only for the duration of the callback. An **owning** delivery hands up a rope of refcounted links the receiver may pin, sub-range or forward beyond the callback; a contiguous frame is the trivial single-link case. A transport that honours the owning form declares the capability so the forwarder installs the matching sink. There is deliberately **no adapter** that wraps a borrowed span in a rope: its refcounts would lie about lifetime ([ADR-0042 — refcounted receiver seam](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md), generalized to ropes by [ADR-0053 — lazy rope-backed decode](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)).
+
+On egress, where a payload lives as a rope scattered across segments, the forwarder lowers it at the transport boundary: a scatter-gather-capable transport consumes the lowered spans directly, and a contiguous-only transport receives one frame the forwarder produced by flattening — one copy, at egress, not per subscriber. The reference implementation's C++ form of this seam is in [../modules/transport.md](../modules/transport.md).
+
+### Application ↔ L4 — path-handle entry points
+
+The hot-path surface is **handle-typed**, not string-typed. Per [../spec/v1.md](../spec/v1.md) §3.1.4:
+
+```c
+typedef const struct path_handle *path_handle_t;   /* opaque pointer to a PATH TLV
+                                                      (in read-only memory or
+                                                      registered at init) */
 
 int  tracer_write (path_handle_t h, const view_t *value);
 int  tracer_read  (path_handle_t h, view_t **out_value);
 int  tracer_await (path_handle_t h, uint64_t deadline_ns, view_t **out_value);
 ```
 
-The handle's bytes are the canonical PATH TLV; the dispatcher's vertex map is keyed by those bytes. No string formatting, no allocation, no parser walk on the hot path.
+The handle's bytes are the canonical PATH TLV, and the dispatcher's vertex map is keyed by exactly those bytes. No string formatting, no allocation, no parser walk on the hot path.
 
-A string-form convenience (`tracer_write_str(const char *path, ...)`) MAY be exposed by an implementation but MUST internally route through the same handle dispatch — typically via an init-time `tracer_path_register(...)` cache. P0 (in-process minimum) builds MAY omit the string entry entirely.
+A string-form convenience (`tracer_write_str(const char *path, ...)`) MAY be exposed, but MUST route internally through the same handle dispatch — typically via an init-time `tracer_path_register(...)` cache. P0 builds MAY omit the string entry entirely.
 
 ### Module composition for the hot path
 
 ```mermaid
 flowchart LR
     APP[application]
-    PH[path_handle module<br/>.rodata + register]
+    PH[path_handle module<br/>read-only literals + register]
     DISP[dispatcher<br/>PATH-TLV-keyed map]
     SUBM[subscriber_mux]
     FR[fwd_router]
@@ -365,135 +336,113 @@ flowchart LR
     style DISP fill:#dbeafe,stroke:#1e40af
 ```
 
-The handle module supplies bytes; the dispatcher uses them; the subscriber multiplexer fans out; the forwarder picks the transport per outbound (remote) subscriber's link. No module on this path takes a string.
+The handle module supplies bytes; the dispatcher keys on them; the subscriber multiplexer fans out; the forwarder picks the transport per outbound remote subscriber's link. No module on this path takes a string.
 
 ---
 
 ## Pairing table — picking a stack
 
-The natural pairings of L0 backend / L1 view module / transport. Other combinations are possible but cost an extra copy at one of the boundaries.
+The natural pairings of L0 backend, L1 view module and transport. Other combinations work, but cost an extra copy at whichever boundary the substrates disagree.
 
 | Use case | L0 backend | L1 view module | Transport | Notes |
 | ---- | ---- | ---- | ---- | ---- |
 | RC car over USB-CDC | `mem_uart_rx_simple` | `view_uart_simple` | `transport_uart` | Polling RX; tiny footprint |
-| ESP32 over Wi-Fi (TCP) | `mem_lwip_pbuf` | `view_pbuf` | `transport_tcp` | Pbuf chain becomes a rope; zero-copy through the forwarder |
+| MCU over Wi-Fi (TCP) | `mem_lwip_pbuf` | `view_pbuf` | `transport_tcp` | The pbuf chain becomes a rope; zero-copy through the forwarder |
 | Linux router | `mem_heap` + `mem_lwip_pbuf` | `view_basic` + `view_pbuf` | `transport_tcp` + `transport_quic` | Two backends, two view modules, two transports — the forwarder wires them |
-| ADC streaming | `mem_dma_buffer` | `view_dma_descriptor` (rope-capable) | `transport_udp` (multicast) | DMA-half-complete IRQ produces views; egress walks the rope |
-| MMIO sensor (GPIO, ADC raw register) | `mem_mmio` | `view_basic` | (in-process only, or via copy at transport egress) | Segment lifetime is permanent; reads always TOCTOU-snapshot at view-create — see §hard integrations |
-| CAN-linked peripheral | `mem_heap` / `mem_pool` | `view_can_frames` | `transport_can` (`can_reassembly`) | `transport_can`'s `can_reassembly` (tr::net) reassembles slices into a multi-frame view; egress fragments back into CAN frames |
-| Cross-process intra-host | `mem_shared` | `view_shm` | (no transport — shared memory) | Single-process refcount; cross-process treats as MMIO and copies — see §hard integrations |
-| Browser WASM | `mem_heap` | `view_basic` | `transport_ws` | Standard heap; WS framing |
+| ADC streaming | `mem_dma_buffer` | `view_dma_descriptor` (rope-capable) | `transport_udp` (multicast) | The DMA half-complete IRQ produces views; egress walks the rope |
+| MMIO sensor (GPIO, raw ADC register) | `mem_mmio` | `view_basic` | in-process, or a copy at transport egress | Segment lifetime is permanent; the recommended-safe binding snapshots at view creation — see [§hard integrations](#hard-integrations) |
+| CAN-linked peripheral | `mem_heap` or `mem_pool_*` | `view_can_frames` | `transport_can` with `can_reassembly` | Reassembly chains slices into a multi-frame rope; egress fragments back into CAN frames |
+| Cross-process intra-host | `mem_shared` | `view_shm` | none — shared memory | Single-process refcount; cross-process treats it as MMIO and copies — see [§hard integrations](#hard-integrations) |
+| Browser WASM | `mem_heap` | `view_basic` | `transport_ws` | Standard heap; WebSocket framing |
 
-Forwarding between two pairings (e.g., lwIP TCP → CAN) is **not free**: at the transport-egress boundary the egress side walks the source rope and constructs egress segments according to the target backend's rules. The cost is "one copy at the egress boundary, not per-fanout." See [08-views-and-ownership.md](08-views-and-ownership.md) §cross-substrate transitions for the two patterns (re-chain vs materialize).
-
----
-
-## Hard integrations — resolved (ADR-0012)
-
-These L0/L1 integrations are resolved as the **modular memory-binding contract** ([08-views-and-ownership.md](08-views-and-ownership.md) §memory-binding contract, [ADR-0012](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0012-modular-memory-binding-transparent-router.md)): libtracer is a transparent byte router, safety is recommended but not mandated, and each backend owns its per-architecture contract. The **Recommendation** under each item below is the v1 decision, not an open choice.
-
-### `mem_asio_streambuf`: do we wrap, or do we copy?
-
-`boost::asio::streambuf` is a read-write buffer with **consume-on-read** semantics — bytes the application reads are then logically removed from the buffer (advance of the get-area). Pinning the bytes via a libtracer view conflicts with this:
-
-- **Option A — wrap and pin**: A `view_t` over a streambuf prevents `streambuf::consume()` until the view's refcount drops to zero. Implementation: when libtracer creates a view, it bumps a per-streambuf "pinned bytes" counter; `consume()` becomes a no-op until the counter drops. This requires modifying or wrapping the streambuf — boost-side cooperation.
-- **Option B — copy on import**: At the boost-asio↔libtracer boundary, we copy the bytes into a `mem_heap` segment. Streambuf reverts to its normal consume behavior. Cost: one copy per ingress.
-- **Option C — don't integrate**: document a copy-on-import shim recipe the user writes themselves against the public API; do not ship `mem_asio_streambuf` in v1.
-
-**Recommendation**: Option C for v1, revisit in v1.0 if there is real demand. Option A is the clean integration but requires either upstream cooperation or a forked streambuf; Option B is correct but defeats the zero-copy claim.
-
-### `mem_mmio` reads: TOCTOU on a live register
-
-A view over an MMIO register's bytes is a view onto **bytes that change asynchronously**. If a CRC is computed over those bytes during egress, the bytes may differ from what the receiver later reads if they re-fetch the same view — the value is volatile.
-
-- **Option A — snapshot at view creation**: When `view_create_over_mmio()` is called, immediately copy the current register value into a small heap segment. The view points at the snapshot, not the live register. CRC is stable; subscribers see a consistent value.
-- **Option B — explicit "live view" type**: A separate view kind whose CRC is computed at egress time, accepting that two egresses may produce different bytes. Disallow as graph-stored value (must be explicitly read with side effect).
-
-**Recommendation**: ship both (ADR-0012). Snapshot-at-view-create is the recommended-safe default (*publish-a-moment*); a live/raw binding is **first-class** for users who own the hazard, the backend declaring its atomicity granularity and ordering. See [08-views-and-ownership.md](08-views-and-ownership.md) §MMIO register-as-view.
-
-### Cross-process refcount on `mem_shared`
-
-A POSIX SHM region can be mapped into multiple processes. Each process's libtracer instance has its own atomic refcount on segments. Two processes both holding views of the same SHM-backed segment cannot coordinate decrement — a `segment_ptr_t` reset in process B doesn't see process A's count.
-
-- **Option A — single-publisher, multi-reader**: Treat SHM as MMIO from non-publisher processes' point of view. The publisher owns the segment; readers create views that the publisher's heartbeat-based GC reaps. Acceptable for unidirectional pub/sub (the canonical iceoryx use case).
-- **Option B — robust shared refcount**: Use a robust mutex + atomic in the SHM region itself; every process participates. Complex; failure modes (process death holding the count) require a watchdog. Iceoryx2 essentially does this.
-- **Option C — copy at process boundary**: Each process treats the other's SHM as a foreign substrate; the boundary copies. No zero-copy across process; same cost as a fast loopback transport.
-
-**Recommendation**: Option A for v1 — it's what most pub/sub usage actually needs. Option B in a future `mem_iceoryx2` module that uses iceoryx2's existing robust-bookkeeping. Option C is the fallback when neither is available.
-
-### lwIP `pbuf` aliasing
-
-Two libtracer subscribers receiving the same pbuf-backed TLV both clone a `view_pbuf` over the same `pbuf*`. lwIP's `pbuf_ref / pbuf_free` is the lwIP-side refcount. Libtracer's `segment->refcount` is libtracer-side. The two refcounts are independent: libtracer holds `pbuf_ref` once for the whole segment lifetime; libtracer's segment refcount tracks fan-out.
-
-- The risk is double-free if libtracer's `destroy(segment)` calls `pbuf_free` and lwIP doesn't expect it (e.g., in interrupt context vs application context). lwIP's pbuf-free is not always interrupt-safe.
-
-**Recommendation**: A pbuf segment's `destroy` schedules a deferred `pbuf_free` via lwIP's `tcpip_callback` or equivalent — never frees synchronously from a non-lwIP-thread context. Document this explicitly in `mem_lwip_pbuf`'s spec.
-
-### Rope walk cost vs flat materialization
-
-A rope of N views walked at egress is N pointer chases. For a transport that does scatter-gather (`writev`, lwIP `pbuf` chain, RDMA scatter list), this is fine. For a transport that wants a single contiguous buffer (some MCU drivers, some legacy protocols), the rope is materialized via `rope_t::flatten()` — one alloc + one copy.
-
-- **Where does flatten live?**: At the egress boundary, just before `send`. Not at fan-out time (would defeat zero-copy). Not at the L4 dispatcher (it doesn't know transport capabilities).
-
-**Recommendation**: The forwarder picks per-transport: it hands a scatter-gather-capable transport the rope's `to_iovec()` as-is, and for a contiguous-only transport calls `rope_t::flatten()` once at egress. Document the rule in the transport ABI.
-
-### DMA cache coherency on heterogeneous SoCs
-
-Cortex-M with non-cache-coherent DMA: the device fills a buffer in main memory, but the CPU's cache may hold stale lines. `before_io` (clean cache before the device reads CPU writes) and `after_io` (invalidate cache before the CPU reads device writes) are the hooks. On a coherent SoC (most Cortex-A) these are no-ops.
-
-- **Risk**: missing `after_io` after a DMA-half-complete IRQ → CPU reads stale bytes → CRC fails or worse, silently bad data.
-- **Risk**: calling `before_io` while the CPU still has dirty bytes in cache → DMA writes get clobbered.
-
-**Recommendation**: The `mem_dma_buffer` backend's IRQ handler is the canonical place to call `after_io`. Application code never calls these directly; they are backend-internal. Document the expected interleaving as part of `mem_dma_buffer`'s spec.
-
-### Reference-to-a-value vs reference-to-bytes
-
-A common pattern: the user wants an endpoint whose value is "the contents of variable X". X may be:
-
-- A C `uint32_t` global — 4 bytes at a known address.
-- An MMIO register — 4 bytes at a known address.
-- A struct field that the publisher updates atomically.
-
-Two ways to model this:
-
-- **Option A — view over the live address**: A `mem_mmio`-style segment pointing at the live address. Reads always re-snapshot (per the MMIO discussion above). No ownership of the underlying memory; libtracer does not free it.
-- **Option B — register a "shadow" vertex**: The graph stores a value; the publisher writes the value when X changes. Subscribers read the shadow.
-
-**Recommendation**: ship both (ADR-0012). Option B (shadow vertex) is the recommended-safe default; Option A (live binding, `tracer_attach_register(&my_var)`) is **fully supported** — not a footgun helper — for users who own the hazard. See [08-views-and-ownership.md](08-views-and-ownership.md) §reference-to-a-value.
+Forwarding between two pairings — lwIP TCP to CAN, say — is **not free**: at the transport-egress boundary the egress side walks the source rope and constructs egress segments according to the target backend's rules. The cost is one copy at the egress boundary, not one per fan-out target. [08-views-and-ownership.md](08-views-and-ownership.md) §cross-substrate transitions gives the two patterns, re-chain and materialize.
 
 ---
 
-## DMA→ADC→network: end-to-end module trace
+## Hard integrations
 
-The full path of a single DMA-driven ADC sample, naming each module that touches it. Detailed walkthrough is in [08-views-and-ownership.md](08-views-and-ownership.md) §end-to-end trace; here is the module chain summary:
+Six L0/L1 integrations sit where libtracer's ownership model meets a foreign one. All six resolve under a single principle: **memory binding is a modular spectrum, and libtracer is a transparent byte router** ([08-views-and-ownership.md](08-views-and-ownership.md) §memory-binding contract, [ADR-0012 — memory binding is a modular spectrum](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0012-modular-memory-binding-transparent-router.md)). The protocol imposes no snapshot, copy or CRC semantics on a backend; each backend module owns and declares its own per-architecture contract — allocation, cache-coherency hooks, ISR safety, atomicity granularity, memory ordering, and reclaim thread-affinity. Each entry below states the hazard, then the rule, then the alternative the rule rejects.
+
+### Consume-on-read buffers
+
+A `boost::asio::streambuf` removes bytes from the buffer as the application reads them, so pinning some of those bytes behind a view is in direct conflict with the buffer's own advance. The rule: `mem_asio_streambuf` is **not shipped in v1**; the documented path is a copy-on-import shim the integrator writes against the public API at the boundary. Pinning the bytes instead would require upstream cooperation — a pin counter that suppresses the consume until the view refcount drops, which means modifying or forking the buffer — and a copy at import inside libtracer would defeat the zero-copy claim the L0/L1 seam exists to make, so neither is the shipped answer.
+
+### Volatile bytes behind an MMIO view
+
+A view over an MMIO register is a view onto bytes that change asynchronously: a CRC computed over them at egress may not describe what a later reader of the same view sees. The rule: **both bindings ship**, and the backend declares which it is. Snapshot-at-view-creation copies the register into a small segment and is the recommended-safe default — the *publish-a-moment* model, with stable bytes and a meaningful CRC. A live binding is first-class rather than a footgun helper, for an integrator who owns the hazard: it declares its atomicity granularity (an aligned 32-bit word is torn-read-free on ARM, MIPS and x86; a multi-word register block is not), MAY offer a lock-free consistent read such as a seqlock, and carries no CRC or snapshots at CRC-compute time. Shipping only the snapshot was rejected because it makes the byte router opaque exactly where transparency is the point ([08-views-and-ownership.md](08-views-and-ownership.md) §MMIO register-as-view).
+
+### Cross-process refcounts on shared memory
+
+A POSIX SHM region mapped into several processes carries an independent libtracer refcount in each, and they cannot decrement one another: a handle released in one process is invisible to the other. The rule for v1's `mem_shared` is **single-publisher, multi-reader** — the publisher owns the segment, and it MUST NOT reclaim a segment until readers have observably released it or a generation counter has invalidated stale views; the grace period is required, not optional. A robust shared refcount in the SHM region itself is rejected for v1 on complexity and on its failure mode — a process dying while holding the count needs a watchdog — and belongs in a future `mem_iceoryx2` module built on existing robust bookkeeping. Copying at the process boundary remains the fallback where neither is available, at the cost of a fast loopback transport.
+
+### Aliased refcounts on network-stack buffers
+
+Two subscribers cloning a `view_pbuf` over the same lwIP `pbuf` create two libtracer-side holds while libtracer holds exactly one `pbuf_ref` for the segment's lifetime; the hazard is a `pbuf_free` issued from a context lwIP does not expect, since lwIP's free is not always interrupt-safe. The rule: a pbuf segment's reclaim hook **schedules** the `pbuf_free` onto lwIP's own thread — via `tcpip_callback` or the equivalent — and never frees synchronously from outside it. Freeing inline from whichever thread happened to drop the last view is rejected: it is a double-free or a corrupted pool, not merely a slow path, and the required interleaving belongs in `mem_lwip_pbuf`'s declared contract.
+
+### Rope walk against flat materialization
+
+A rope of N views walked at egress is N pointer chases, which is free for a transport that does scatter-gather (`writev`, an lwIP pbuf chain, an RDMA scatter list) and impossible for a transport that wants one contiguous buffer. The rule: the forwarder decides **per transport, at the egress boundary, immediately before send** — it hands a scatter-gather-capable transport the lowered spans as they are, and flattens once for a contiguous-only transport. Flattening at fan-out time is rejected because it would defeat zero-copy for every subscriber at once, and flattening in the L4 dispatcher is rejected because the dispatcher does not know transport capabilities.
+
+### DMA cache coherency
+
+On a non-coherent SoC the device fills a buffer in main memory while the CPU's cache may hold stale lines for it. Missing the post-transfer invalidate yields stale CPU reads — a failed CRC if one is present, silently wrong data if not; issuing the pre-transfer clean while the CPU still holds dirty lines clobbers what the DMA wrote. The rule: `mem_dma_buffer`'s own IRQ handler is the single place that calls the after-transfer hook, application code never calls either hook, and the expected interleaving is part of `mem_dma_buffer`'s declared contract. Exposing the hooks as an application-callable API is rejected: correctness depends on a timing only the backend observes. On a coherent SoC both hooks are no-ops.
+
+### Binding a vertex to a live variable
+
+An endpoint whose value is "the contents of variable X" — a 32-bit global, an MMIO register, or a struct field the publisher updates atomically — can be modelled two ways, and **both ship**. A shadow vertex, where the graph stores a value and the publisher writes it when X changes, is the recommended-safe default: protocol-clean, no aliasing hazard. A live binding, a segment pointing at the live address with libtracer never owning or freeing the memory, is fully supported for an integrator who owns the hazard, under the same declared atomicity, ordering and ISR contract as an MMIO view. Restricting the API to the shadow vertex is rejected for the same reason as elsewhere: the byte router does not decide what the integrator is allowed to point at ([08-views-and-ownership.md](08-views-and-ownership.md) §reference-to-a-value).
+
+---
+
+## DMA → ADC → network: end-to-end module trace
+
+The path of a single DMA-driven ADC sample, naming each module that touches it. The full walkthrough is in [08-views-and-ownership.md](08-views-and-ownership.md) §end-to-end trace; the module chain is:
 
 ```
-1. ADC peripheral fills DMA ring half       — hardware
-2. DMA half-complete IRQ                    — hardware → mem_dma_buffer
-3. mem_dma_buffer.after_io                  — L0: cache invalidate
-4. view_dma_descriptor creates view_t over filled half
-                                            — L1: zero-copy
-5. frame_codec wraps view as USER_SAMPLE_RECORD TLV
-                                            — L2: tlv_t header construction (rope: [header_view, dma_payload_view])
-6. graph_runtime dispatch                   — L4: locate /adc/raw vertex
-7. dispatcher fan-out                       — L4: each subscriber gets a refcount-incremented view
-8. transport_udp.send (multicast)           — transport: emits framed bytes (the egress lowered the rope to the socket's scatter-gather)
-9. NIC DMAs out the bytes                   — hardware
-10. transport_udp done with the frame → segment_ptr_t reset  — L1: refcount-- on dma segment
-11. When all subscribers + transport done, mem_dma_buffer recycles segment back to pool — L0
+1. ADC peripheral fills a DMA ring half        — hardware
+2. DMA half-complete IRQ                       — hardware → mem_dma_buffer
+3. mem_dma_buffer's after-transfer hook        — L0: cache invalidate
+4. view_dma_descriptor creates a view over the filled half
+                                               — L1: zero-copy
+5. frame_codec wraps the view as a user-range record TLV
+                                               — L2: header construction; the frame is
+                                                 the rope [header view, DMA payload view]
+6. graph_runtime dispatch                      — L4: locate the /adc/raw vertex
+7. dispatcher fan-out                          — L4: each subscriber takes a refcount
+8. transport_udp send (multicast)              — transport: emits framed bytes; the egress
+                                                 lowered the rope to the socket's
+                                                 scatter-gather
+9. NIC DMAs the bytes out                      — hardware
+10. transport_udp releases the frame           — L1: refcount decrement on the DMA segment
+11. Last subscriber and transport released → mem_dma_buffer recycles the segment — L0
 ```
 
-No copy from step 1 to step 9. The single allocation cost is the small header_view at step 5, paid from `mem_heap` or a small-segment pool.
+No copy occurs between step 1 and step 9. The single allocation is the small header view at step 5, paid from `mem_heap` or a small-segment pool.
 
-This trace exists because the DMA→ADC→network path is the **acid test** for the zero-copy claim. If any module forces a copy, the claim collapses for streaming workloads.
+This path is the acid test for the zero-copy claim: if any module on it forces a copy, the claim collapses for streaming workloads.
 
 ---
 
-## What this catalog does NOT specify
+## Pitfalls
 
-- The exact ABI signatures of each module's exported symbols. See [10-module-catalog.md](10-module-catalog.md) §module ABI.
-- Build-system mechanics (CMake `add_library` patterns, separate compile units) — defined with the `core/` rebuild.
-- Configuration syntax for selecting which modules a binary loads — defined with the `core/` rebuild.
-- Per-module memory footprint estimates. See [00-overview.md](00-overview.md) §everything is a module for the rough numbers.
+| Rule | Failure mode |
+| ---- | ---- |
+| The Status column records v1 **scope**, not the contents of a build. | An integrator who reads `v1` as "present in the binary I linked" links against a module the implementation does not ship, or omits a capability check the deployment needs. |
+| "Required" names the set every conforming node loads, not a monolith. | An implementation that fuses the required modules into one unit loses the ability to swap a single one — the dispatcher, say, or the path resolver — and finds that a P0 build carries machinery it never uses. |
+| The nesting-depth bound is the receiver's decode resources, not a constant. | An implementation that hardcodes a depth limit rejects frames a well-resourced peer legitimately sends, and reports an exhaustion condition that has nothing to do with the sender's frame. |
+| Flatten is called once, at the egress boundary, for a contiguous-only transport. | Flattening at fan-out time turns one copy into one copy per subscriber and quietly deletes the zero-copy property for the whole path, while every measurement of the dispatcher still looks correct. |
+| An off-table pairing costs a copy at a substrate boundary. | A stack assembled by picking a backend and a transport independently appears to work, then shows an unexplained per-frame allocation at the boundary where the two substrates disagree. |
+| A backend declining an allocation is a value, not a fault. | Code that treats a decline as impossible turns a bounded drop into an abort on the one path a remote peer can provoke — the exact case the failable-block seam exists for. |
+| An inbound sink's context must outlive every possible delivery. | A context bound to a temporary or a scope-local object dangles on an internal transport thread, and the corruption surfaces far from the registration site. |
 
-The catalog is the **inventory of pieces** and **how they compose**. The byte-level wire format and graph behavior are independent of the module structure — you could implement libtracer as one monolithic .c file and still be conforming. The module split is an implementation discipline that keeps the code as small as the deployment warrants.
+---
+
+## Boundaries of the catalog
+
+This catalog does not fix:
+
+- The exported symbol signatures of each module — see [§module ABI](#module-abi), which declares them an implementation concern.
+- Build-system mechanics: how translation units are grouped, and how a build selects which modules to link.
+- The configuration syntax by which a binary chooses its module set.
+- Per-module memory footprint. [00-overview.md](00-overview.md) §everything is a module carries the rough envelope.
+
+The catalog is the **inventory of pieces and how they compose**. The byte-level wire format and the graph behaviour are independent of any module structure: an implementation may be one monolithic source file and still conform. The module split is an implementation discipline that keeps a node as small as its deployment warrants.

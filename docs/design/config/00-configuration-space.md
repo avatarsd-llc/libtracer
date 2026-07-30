@@ -1,15 +1,13 @@
 # The configuration space
 
-> **Status:** design (descriptive record of shipped behaviour). **Not normative** — the
-> [spec](../../spec/v1.md) constrains bytes on the wire, not build systems, and a second
-> implementer needs none of this. Every number is a measurement with its target and flags
-> named. Standard-level companions:
+> **Scope:** the build configuration of the C++23 reference implementation under
+> [`../../../core/`](../../../core/) — which knobs exist, what each costs on a given target, and
+> which constants are not knobs. **Not the standard:** the [spec](../../spec/v1.md) constrains
+> bytes on the wire, not build systems, and a second implementer needs none of this. Every
+> number here is a measurement with its target and flags named. Standard-level companions:
 > [`../../reference/10-module-catalog.md`](../../reference/10-module-catalog.md) for module
 > responsibilities, [`../../reference/12-deployment-profiles.md`](../../reference/12-deployment-profiles.md)
 > for which combinations serve which deployments.
-
-This document answers one question the reference suite deliberately cannot: **which knobs
-exist, what does each cost on my target, and which constants must I leave alone.**
 
 ## Framing
 
@@ -28,12 +26,13 @@ The configuration space therefore has exactly three kinds of axis, and no fourth
 | **policy types** | which implementation of a named seam is bound | `using` alias in the same header |
 
 All three are **plain C++ or build-system state — never a preprocessor feature macro**
-(ADR-0068). A knob is a constant or an alias, so a wrong value is a compile error in the
-build that set it rather than a silent behavioural fork between translation units.
+([ADR-0068 — build configuration is plain C++](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0068-build-configuration-is-plain-cpp-config-header.md)).
+A knob is a constant or an alias, so a wrong value is a compile error in the build that set it
+rather than a silent behavioural fork between translation units.
 
-The sizes and policies are members of **one named type**, `default_config_t`, bound once by
-`using config_t = …` (ADR-0070). An application declares its own by inheriting and overriding
-what differs:
+The sizes and policies are members of **one named type**, `default_config_t`
+(`core/include/libtracer/config.hpp.in:66`), bound once by `using config_t = default_config_t;`
+(`:192`). An application declares its own by inheriting and overriding what differs (`:56-60`):
 
 ```cpp
 struct my_node_config_t : tr::graph::default_config_t {
@@ -43,13 +42,16 @@ using config_t = my_node_config_t;
 ```
 
 Inheriting means a knob added later does not break the preset — it inherits the new default
-rather than failing to compile.
+rather than failing to compile. The rest of the library names the derived spellings re-exported
+below the traits type (`:199-208`), each of which is exactly its traits member, so introducing
+`config_t` moved no call site.
 
-It is **bound once, not threaded as a template parameter**, and ADR-0070 records why with
-measurements: a parameter produces byte-identical machine code, so it buys no latency; its one
-unique capability — two configurations in one binary — would fork the process-global stripe and
-hazard tables and so cost the RAM the configuration exists to save; and an app-declared traits
-type cannot reach the library's out-of-line translation units anyway.
+It is **bound once, not threaded as a template parameter**, and
+[ADR-0070 — configuration is a named traits type](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0070-configuration-is-a-named-traits-type.md)
+records why with measurements: a parameter produces byte-identical machine code, so it buys no
+latency; its one unique capability — two configurations in one binary — would fork the
+process-global stripe and hazard tables and so cost the RAM the configuration exists to save;
+and an app-declared traits type cannot reach the library's out-of-line translation units anyway.
 
 ## The delivery mechanism
 
@@ -79,15 +81,15 @@ disabled transport contributes no TU and no registration call, so nothing in the
 references it. Every option defaults ON — modularity is opt-*out*, so the default build is a
 full node.
 
-| option | module | what dropping it removes |
-| --- | --- | --- |
-| `LIBTRACER_NET_PLANE` | FWD routing plane (`op_resolve`, `route_handle`, `fwd_router`, `transport_vertex`) | inter-node forwarding; a pure in-process graph still works |
-| `LIBTRACER_TRANSPORT_TCP` | `tcp_transport_t` | — |
-| `LIBTRACER_TRANSPORT_UDP` | `udp_transport_t` | — |
-| `LIBTRACER_TRANSPORT_WS` | `transport_ws_*` | — |
-| `LIBTRACER_TRANSPORT_CAN` | `transport_can` + its platform link | — |
-| `LIBTRACER_WITH_QUIC` | `libtracer_quic` (needs msquic) | off by default |
-| `LIBTRACER_WITH_CUDA` | `mem_cuda` GPU backend (needs the CUDA toolkit) | off by default |
+| CMake option | module | ESP-IDF counterpart | what dropping it removes |
+| --- | --- | --- | --- |
+| `LIBTRACER_NET_PLANE` | FWD routing plane (`op_resolve`, `route_handle`, `fwd_router`, `transport_vertex`) | none — the component has no counterpart | inter-node forwarding; a pure in-process graph still works |
+| `LIBTRACER_TRANSPORT_TCP` | `tcp_transport_t` | `CONFIG_LIBTRACER_TRANSPORT_TCP` | — |
+| `LIBTRACER_TRANSPORT_UDP` | `udp_transport_t` | `CONFIG_LIBTRACER_TRANSPORT_UDP` | — |
+| `LIBTRACER_TRANSPORT_WS` | `transport_ws_*` | `CONFIG_LIBTRACER_TRANSPORT_WS` | — |
+| `LIBTRACER_TRANSPORT_CAN` | `transport_can` + its platform link | `CONFIG_LIBTRACER_TRANSPORT_CAN` | — |
+| `LIBTRACER_WITH_QUIC` | `libtracer_quic` (needs msquic) | none | off by default |
+| `LIBTRACER_WITH_CUDA` | `mem_cuda` GPU backend (needs the CUDA toolkit) | none | off by default |
 
 The always-compiled core is the L2/L3 wire codec, the L0/L1 substrate, `path`, and the L4
 graph runtime. See [10-module-catalog.md](../../reference/10-module-catalog.md) for what each module is
@@ -97,26 +99,54 @@ these combinations serve.
 Two of the three socket transports sharing one dependency (`posix_endpoint`) is handled by
 the build, not by the modules: it compiles when *any* of them is on.
 
+### The required-modules footprint ceiling
+
+The minimum-feature module set — `frame`, `tlv_arena`, `backend_set`, `mem_pool`, `mem_source`,
+`rope`, `path` — targets **≤ 16 KiB of stripped flash** on
+`arm-none-eabi-g++ -std=c++23 -Os -fno-exceptions -fno-rtti -mcpu=cortex-m0` with
+`--specs=nano.specs` (`tools/cortexm0_footprint.py:56,86-90,104-106`). Two committed sentinels
+measure against it: `tools/cortexm0_footprint.py`, driven by `.github/workflows/footprint-cortexm0.yml`
+over the `core/tests/footprint/sentinel_node.cpp` fixture, and `tools/esp_size_gate.py`, which
+gates the component's flash and static-RAM contribution to the esp32c3/c6 **full-node** image
+(all socket transports plus CAN — far more than the required modules).
+
+The Cortex-M0 sentinel runs in warn mode because the measured node is **20,937 B, about 4.5 KiB
+over the 16 KiB budget** (re-measured 2026-07-27; `.github/workflows/footprint-cortexm0.yml:13-20`).
+**The overage is not attributed to a module.** An attribution of roughly 2.7 KiB to `std::pmr`
+soft-float reaching the image through the arena decoder's `std::pmr::memory_resource&` seam does
+not survive the removal of that seam — the decoder takes a `tr::mem::block_source_t&`
+([ADR-0065 — failable allocation gets its own seam](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md))
+— and the residue has not been re-measured against that seam. The gate is a referee for
+the compile-time doctrine
+([ADR-0047 — build-time closed module sets](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md) §5):
+templating techniques are admissible exactly as far as it stays green, because it catches
+type-erasure bloat and template-instantiation bloat alike.
+
 ## The sized and bound axes
 
-| knob | kind | default | set by |
-| --- | --- | --- | --- |
-| `kVertexLockStripes` | count | 16 | `-DLIBTRACER_VERTEX_LOCK_STRIPES`; ESP-IDF menuconfig |
-| `kCacheLineBytes` | padding width | 64 | `-DLIBTRACER_CACHE_LINE_BYTES`; ESP-IDF derives it |
-| `kHazardReaderSlots` | count | 64 | `-DLIBTRACER_HAZARD_READER_SLOTS` |
-| `kMaxVertexBytes64` / `kMaxVertexBytes32` | RAM ceiling | 120 / 80 | the preset — deliberately not a CMake variable |
-| `acl_policy_t` | policy type | `allow_only_policy_t` | `-DLIBTRACER_ACL_FULL=ON` |
-| `lkv_slot_t` | policy type | `sp_atomic_slot_t` | `-DLIBTRACER_LKV_SLOT=<type>` |
+| knob | kind | default | CMake | ESP-IDF |
+| --- | --- | --- | --- | --- |
+| `kVertexLockStripes` (`config.hpp.in:79`) | count | 16 | `-DLIBTRACER_VERTEX_LOCK_STRIPES` | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` |
+| `kCacheLineBytes` (`:102`) | padding width | 64 | `-DLIBTRACER_CACHE_LINE_BYTES` | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:193-197`) |
+| `kHazardReaderSlots` (`:129`) | count | 64 | `-DLIBTRACER_HAZARD_READER_SLOTS` | hardcoded to 64 (`CMakeLists.txt:188`) |
+| `kMaxVertexBytes64` / `kMaxVertexBytes32` (`:146` / `:158`) | RAM ceiling | 120 / 80 | the preset — deliberately not a CMake variable | the preset |
+| `acl_policy_t` (`:167`) | policy type | `allow_only_policy_t` | `-DLIBTRACER_ACL_FULL=ON` | hardcoded to `allow_only_policy_t` (`CMakeLists.txt:186`) — the full policy is not selectable |
+| `lkv_slot_t` (`:183`) | policy type | `sp_atomic_slot_t` | `-DLIBTRACER_LKV_SLOT=<type>` | hardcoded to `sp_atomic_slot_t` (`CMakeLists.txt:187`) — the hazard slot is not selectable |
 
 Each is documented at its declaration with what it costs and when to move it; that header is
 the reference, not this table. What matters here is the shape: **five knobs, all named, all
 finite.** Two are counts, one is a width, two are type bindings.
 
+The ESP-IDF component exposes exactly five options — `LIBTRACER_TRANSPORT_{UDP,TCP,WS,CAN}` and
+`LIBTRACER_VERTEX_LOCK_STRIPES` — so an integrator reaching for the full ACL policy, the hazard
+slot, or the net-plane switch through menuconfig will not find them. Those choices are made by
+editing the component's render site or by building libtracer's sources from a CMake consumer.
+
 ### Where the bytes are
 
 The lock-stripe table is the only global mutable buffer libtracer links into a node. Its cost
-divides into a part reserved at link time and a part that really is lazy — a distinction the
-header used to get wrong:
+divides into a part reserved at link time and a part that really is lazy. The table's cost is
+commonly described as lazy in full; only the platform primitive behind each handle is:
 
 - **Static, not lazy.** `kVertexLockStripes` stripe structs plus the same number of condvar
   handles, in `.bss`, present whether or not a graph is ever constructed.
@@ -134,14 +164,60 @@ Measured on rv32 (`-Os -fno-exceptions -fno-rtti`, GCC 15.2, compiling the real
 | 0 | 128 B | 304 B |
 
 **896 B of a single-core node's static RAM, spent against a hazard it does not have** — there
-is no second core for two stripes on one line to contend over. The same knob governs the
-hazard domain's cells and retire lists, where at 64 slots it is worth a further 6.5 KB.
+is no second core for two stripes on one line to contend over.
 
-This is an optimization axis and never a correctness one: 0 on a multi-core target costs
-control-plane throughput under concurrent verb traffic and changes nothing observable. The
-ESP-IDF component therefore *derives* it from `CONFIG_FREERTOS_UNICORE` rather than exposing
+The same knob governs the hazard domain's cells and retire lists, where at 64 slots it is worth
+a further 6.5 KB. Measured on rv32 at N = 64, same instrument (`-Os`, real `core/src/graph.cpp`,
+GCC 15.2):
+
+| `kCacheLineBytes` | hazard registry `.bss` | TU `.bss` + `.sbss` |
+| ---: | ---: | ---: |
+| 64 | 8,384 B | 11,649 B |
+| 0 | 1,828 B | 4,197 B |
+
+The TU column is not the registry plus the stripes: binding `hazard_slot_t` also pulls in
+roughly 2 KB of libstdc++ `atomic::wait` back-end (`__waiter_pool_base`) `.bss` beyond the
+registry itself.
+
+`kCacheLineBytes` is an optimization axis and never a correctness one: 0 on a multi-core target
+costs control-plane throughput under concurrent verb traffic and changes nothing observable.
+The ESP-IDF component therefore *derives* it from `CONFIG_FREERTOS_UNICORE` rather than exposing
 it — a unicore build has no second core by construction, so the right value is not a question
 an integrator should be asked.
+
+### The LKV slot contract
+
+`lkv_slot_t` is the one knob whose value is a **name the integrator supplies**, so it is the one
+knob with a contract attached. The declaration instructs that the named type must satisfy the
+policy contract in `lkv_slot.hpp` (`config.hpp.in:183`, and the instruction itself at `:181`) —
+a header that is absent from `core/Doxyfile`'s `INPUT` list, so the generated API site does not
+serve the page that instruction points at. The contract, stated here, is three operations over
+`value_ptr_t = std::shared_ptr<const view::rope_t>`:
+
+| operation | signature | rule |
+| --- | --- | --- |
+| publish | `[[nodiscard]] bool store(value_ptr_t, std::memory_order = seq_cst)` | Sequentially consistent by default: `vertex_t::store` relies on this sharing one total order with the `write_seq_` bump and the waiter count, which is what makes the waiterless publish unable to lose a wakeup. **`false` means nothing was published** and the previous value still stands — the caller soft-fails; it never reports the write as taken. A slot that reclaims lazily has to allocate to publish, which is why the return type exists at all. |
+| drop | `void clear(std::memory_order)` | Cannot fail, and says so in the return type: a clear releases resources rather than acquiring any. Only `revert_to_placeholder` calls it, with `release`. |
+| read | `value_ptr_t load() const` | Returns an **owning** handle. |
+
+Owning is not negotiable. The composed branch read `graph_t::read_subtree_folded`
+(`core/include/libtracer/graph.hpp:475`) stashes one LKV per node into a vector that outlives
+the map lock and spans three passes, so **N values are held simultaneously**. A reclamation
+scheme that can protect only one value per reader at a time — hazard pointers, as classically
+stated — therefore cannot hand back a pinned pointer; it must promote the pin to a counted
+reference before releasing it, and that promotion is a read-modify-write on the one cache line
+every reader shares. That promotion, not the scheme, is what the measured win is net of; the
+numbers and their conditions are in
+[`../concurrency/00-scaling-and-serialization.md`](../concurrency/00-scaling-and-serialization.md),
+which is where they belong rather than repeated here.
+
+The default binding, `sp_atomic_slot_t`, is **lock-free by contract and spin-locked in
+practice**: `std::atomic<std::shared_ptr<T>>::is_lock_free()` returns 0 on libstdc++, so both
+load and store take its internal pointer-lock bit (`core/include/libtracer/lkv_slot.hpp:99-104`).
+Its reclamation is the refcount, so there is no scheme to implement and no registry to size —
+which is why a raw `-I` consumer and the stock ESP-IDF component build what they would have
+built without the policy seam
+([ADR-0069 — the LKV slot is a compile-time policy](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md)).
 
 ### Per-target nuances
 
@@ -157,12 +233,17 @@ Four differences that surprise people, each a property of the target rather than
   function whose static is never named under the default slot, so the default binding emits
   no registry at all. Binding `hazard_slot_t` also pulls in roughly 2 KB of libstdc++
   `atomic::wait` back-end `.bss` beyond the registry itself.
-- **`sizeof(vertex_t)` is gated in the header**, not in a test — so every build on every target
-  checks its own binding, for free. The ceilings are `config_t` members. This matters more than
-  it sounds: while the gate lived in a test it covered exactly one configuration and **never the
-  32-bit arm at all**, because no CI leg cross-compiled that test — and rv32 sits *exactly* on
-  its 80 B ceiling with zero headroom. The stripe's footprint is gated too: a member that pushes
-  a padded stripe one byte past the line would silently double the table.
+- **`sizeof(vertex_t)` is gated in the header, not in a test.** The ceilings are `config_t`
+  members and the assertions sit in `vertex.hpp` beside the type they constrain
+  (`core/include/libtracer/vertex.hpp:2248,2251`), so every build on every target checks its
+  own binding, for free. A test-resident gate covers only the configurations CI actually
+  builds: one, in practice, and never the 32-bit arm, because no CI leg cross-compiles that
+  test while the ESP-IDF legs compile `vertex_t` itself on every change. That distinction has
+  teeth here — **rv32 sits exactly on its 80 B ceiling with zero headroom** (`config.hpp.in:158`),
+  so the next 32-bit member is a build failure by design. The stripe carries a companion
+  assertion of a different kind: `alignof(vertex_stripe_t) == kStripeAlign` (`vertex.hpp:761`),
+  which catches an `alignas` that asked for less than the payload's natural alignment and was
+  therefore ignored — silently, by GCC, per `[dcl.align]/5`.
 - **A single-core target's constraint is RAM; a many-core host's is the read path.** The two
   policy-type knobs exist because of that split: see
   [15-concurrency-and-scaling.md](../../reference/15-concurrency-and-scaling.md) for which shapes scale and
@@ -180,9 +261,10 @@ Some constants look exactly like sizing knobs and are not:
   wants a smaller bound is asking for a *profile*, and that is a spec question.
 - **Anything derived from an injected resource.** Capacities that depend on how much memory
   the application handed the node come from that resource, not from a constant — bounds are
-  injected or per-target configuration, never a magic number (RFC-0006). Field depth is the
-  worked example: resource-keyed rather than configurable, precisely so it cannot diverge
-  between peers.
+  injected or per-target configuration, never a magic number
+  ([RFC-0006 — resource-bounded nesting depth](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md)).
+  Field depth is the worked example: resource-keyed rather than configurable, precisely so it
+  cannot diverge between peers.
 
 ## Adding an axis
 

@@ -1,8 +1,16 @@
 # Wire format, bit by bit
 
-A hands-on tour of the actual bytes — like a protobuf encoding guide, but for
-libtracer's TLV. Every example is a **real frame** you can reproduce with
-`encode()`. Read [frame-codec](frame-codec.md) for the API; this page is the bits.
+A byte-level tour of libtracer's TLV — the protobuf-encoding-guide view of the
+format. Every example is a **real frame**, reproducible with `tr::wire::encode`
+(`core/include/libtracer/frame.hpp`).
+
+This page is **implementation-independent**. It describes the bytes any conformant
+implementation puts on the wire, in any language; it lives under `docs/modules/`
+for URL stability, not because anything here is specific to the C++ reference
+implementation. The normative text is the
+[data-format reference](../reference/01-data-format.md) and the
+[TLV catalog](../reference/05-protocol-tlvs.md);
+[frame-codec](frame-codec.md) is the C++ API that reads and writes these bytes.
 
 The whole protocol is **one shape, recursively**: a *Type-Length-Value*. There are
 no field tags, no varints, no schema needed to walk the bytes — the header tells
@@ -22,7 +30,8 @@ you everything, and a structured value is just **more TLVs concatenated**.
   STATUS, `0x0B` SETTINGS, `0x0C` TIME, `0x0F` FWD … (`0x80–0xFF` is yours).
 - **opt** — eight flag bits (below).
 - **length** — payload size, **fixed-width** little-endian: `u16` normally, `u32`
-  when `opt.LL=1`. Fixed width means a parser jumps `header + length` to the next
+  when `opt.LL=1`. It counts payload bytes only: neither the header nor a trailer is
+  included. Fixed width means a parser jumps `header + length` to the next
   TLV with **no scanning** — the basis of the iterative (non-recursive) walk.
 
 ## The `opt` byte, bit by bit
@@ -45,7 +54,7 @@ you everything, and a structured value is just **more TLVs concatenated**.
 ```
 
 So `opt = 0x40` is `0b0100_0000` → **PL=1** (structured). `opt = 0x10` →
-**CR=1** (CRC trailer). You pay bytes only for the options you set; the default
+**CR=1** (CRC trailer). A frame pays bytes only for the options it sets; the default
 `opt = 0x00` is a bare opaque value with a 4-byte header.
 
 ## Worked frames
@@ -76,8 +85,8 @@ A boolean `true`.
 ```
 
 The payload bytes are **opaque** to the protocol — `0x01` means `true` only because
-*your* schema says so. libtracer never interprets application data (just like JSON
-doesn't know your field is a temperature).
+the application's schema says so. libtracer never interprets application data (just
+like JSON does not know a field is a temperature).
 
 ### 3 · a `VALUE` with a CRC trailer (13 bytes)
 
@@ -113,8 +122,8 @@ transit it grows a trailer; the payload is byte-identical through both.
 Walking it is the **same loop** as the outer frame: read a 4-byte header, jump
 `length`, repeat. No special list type, no nesting markers — structure *is*
 concatenation. And those 18 payload bytes are **exactly** the vertex-map key
-([path](path.md)): the address on the wire and the address in memory are the same
-bytes.
+([path](path.md); `path_t::key`, `core/include/libtracer/path.hpp`): the address on
+the wire and the address in memory are the same bytes.
 
 ### 5 · a `FWD` frame (the remote-operation envelope)
 
@@ -137,40 +146,45 @@ Every child is one of the shapes above — the frame is examples 2 and 4,
 concatenated. A forwarding hop reads just the three leading headers **by offset**:
 it strips `NAME "b"` from `dst` (shrinking it toward the target), prepends its own
 name for the inbound link to `src` (the return route), and sends the rest of the
-frame onward **untouched** — the payload bytes are never copied or re-encoded. When
-`dst` no longer starts with a link name, the frame has arrived: the terminus decodes
-it and applies the op. (`0x0D` is a reserved codepoint with no assigned mechanism.)
+frame onward **untouched** — the payload bytes are never copied or re-encoded
+(`rebuild_fwd_forward`, `core/include/libtracer/fwd_frame_view.hpp`, emits two
+rebuilt headers and gathers every other region as an offset window into the source).
+When `dst` no longer starts with a link name, the frame has arrived: the terminus
+decodes it and applies the op.
+
+Nothing wraps a FWD: routing is explicit and source-routed, and `0x0D` ROUTER is a
+reserved, decodable codepoint with no implemented mechanism
+([reference/05 §`0x0D`](../reference/05-protocol-tlvs.md)).
 
 ## The same bytes, three ways
 
-This is the payoff the byte layout buys: there is no separate "decode into a struct"
-step. The wire bytes, the in-memory value, and the graph node are one buffer.
+There is no separate "decode into a struct" step. The wire bytes, the in-memory
+value, and the graph node are one buffer.
 
 ```{mermaid}
 flowchart LR
     B["bytes:<br/>06 40 12 00 02 00 …"]:::b
     B --> W["on the wire<br/>(a frame)"]
-    B --> M["in memory<br/>(a view_t → tlv_t, borrowed)"]
+    B --> M["in memory<br/>(a borrowed view, no copy)"]
     B --> G["in the graph<br/>(the vertex's value / key)"]
     classDef b fill:#dbeafe,stroke:#1e40af;
 ```
 
-## Where the benefits live, in the bytes
+## Consequences of the layout
 
-| You see in the bytes… | …which buys |
+| In the bytes | Consequence |
 | --- | --- |
 | 4-byte header (`type opt len`) | tiny per-message overhead; fits MCU MTUs |
 | **fixed-width** length | jump to the next TLV with no varint scan → an *iterative*, bounded, recursion-free parser |
-| `opt` flag bits | pay for timestamp/CRC/wide-length **only when set**; default frame is 4 bytes |
+| `opt` flag bits | timestamp/CRC/wide-length cost bytes **only when set**; the default frame is 4 bytes |
 | **trailer**-positioned CRC/TS | attach/strip integrity & time without rewriting the payload (rest ⇄ transit) |
 | `PL=1` = concatenated children | structure with no list type; a structured value is parsed in place as sub-spans |
-| payload = opaque bytes | the protocol is a transparent carrier; *your* schema gives bytes meaning |
+| payload = opaque bytes | the protocol is a transparent carrier; the application's schema gives bytes meaning |
 | the key bytes = the PATH payload | one address for wire and memory; dispatch is a byte compare |
 
-Net: **the bytes you receive are the bytes you keep** — a decoded value is a set of
-`std::span`s into the received buffer ([views](views.md)), so reading a field is a
-pointer load and handing a value to N subscribers is N refcount bumps, not N copies.
-That is the entire performance argument, visible in the layout.
+The bytes received are the bytes kept: a decoded value is a set of spans into the
+received buffer ([views](views.md)), so reading a field is a pointer load and handing
+a value to N subscribers is N refcount bumps rather than N copies.
 
 ## API reference
 

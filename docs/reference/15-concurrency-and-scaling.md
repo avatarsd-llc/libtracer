@@ -1,4 +1,4 @@
-# 15 — Concurrency and scaling (cross-cutting)
+# Reference 15 — Concurrency and scaling
 
 > **Scope.** §1–§5 are part of the standard: obligations any conforming implementation must
 > meet, and properties of shared-memory hardware that constrain every one of them. §6 is a
@@ -10,7 +10,7 @@
 
 ---
 
-## 1. The short answer
+## 1. When adding threads helps
 
 Adding threads increases aggregate throughput **only when the threads touch different cache
 lines.** One line that any thread *writes* inverts that, and how badly depends entirely on what
@@ -21,7 +21,7 @@ guards it:
 - a *blocking* lock → plateaus at a worse constant;
 - a *spinning* lock → throughput **falls** as threads are added.
 
-Only the last case is genuinely retrograde, and it is the one people mean when they say
+Only the last case is retrograde, and it is the one people mean when they say
 concurrency made things slower. §3 measures all four.
 
 The practical consequence for libtracer is a design rule, not a tuning knob: **arrange for
@@ -117,8 +117,10 @@ where it is `β` and not `α` that bends the curve back down.
 
 **A flat aggregate is a serializer, not a success.** If T threads produce the same total as
 one, each thread is T× slower, and the shape is indistinguishable from a perfect lock. This is
-the single easiest mistake to make when reading a scaling table, and it hid a process-wide lock
-in the reference implementation for months.
+the single easiest mistake to make when reading a scaling table. The check that catches it:
+compare the aggregate at T threads against **T × the single-thread rate**, never against the
+T=1 aggregate. Against the T=1 number a flat curve reads as "no change"; against the linear
+expectation the same curve is a T-fold per-thread loss.
 
 ---
 
@@ -167,7 +169,7 @@ runtime choice available in any implementation is worth as much.
 
 ## 6. The reference implementation
 
-How the C++23 reference implementation places its locks, what each one costs, which of the
-above it currently achieves, and what remains — all of it measured, all of it specific to one
-codebase and one host — is [`../design/concurrency/`](../design/concurrency/README.md). None of
-it is normative, and a second implementer needs none of it.
+How the C++23 reference implementation places its locks, what each one costs, and which of the
+shapes above it achieves — all of it measured, all of it specific to one codebase and one host
+— is [`../design/concurrency/`](../design/concurrency/README.md). None of it is normative, and a
+second implementer needs none of it.

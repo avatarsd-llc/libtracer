@@ -1,7 +1,7 @@
-# Reference 11 — Vertex Roles, Address Grouping, and the Facade Principle
+# Reference 11 — Vertex roles and aggregation
 
-> **Status**: draft, v1, 2026-05-03. New material — generalizes the "vertex is unspecified beyond its API contract" remark from [02-graph-model.md](02-graph-model.md) §what the protocol does NOT specify into a worked-out taxonomy of the **kinds of things a path can name**, plus the rules for fronting multiple physical sources or sinks behind one logical address.
-> **Audience**: anyone designing a non-trivial graph topology; anyone wondering whether a "shared canvas" should be modeled as streamed bytes, a state-mirror, or both at once; anyone implementing a forwarder that joins several transports behind one path.
+> **Topic**: the kinds of thing a path can name, and the rules for fronting several physical sources or sinks behind one logical address. This generalizes the rule that a vertex is unspecified beyond its API contract ([02-graph-model.md](02-graph-model.md) §the graph imposes no shape) into a taxonomy of implementation patterns plus the addressing patterns that compose them.
+> **Audience**: anyone designing a non-trivial graph topology; anyone deciding whether a shared canvas is streamed bytes, a state mirror, or both at once; anyone implementing a forwarder that joins several transports behind one path.
 > **Prerequisites**: [02-graph-model.md](02-graph-model.md), [03-addressing.md](03-addressing.md), [04-communication-flows.md](04-communication-flows.md), [07-host-embedding.md](07-host-embedding.md).
 
 ---
@@ -20,7 +20,7 @@ The protocol's read/write/subscribe primitives ([04-communication-flows.md](04-c
 
 What lives behind the path is **deliberately unconstrained**. It can be a stored byte buffer, a stream of arrivals, a state-machine fed by writes, an MMIO snapshot, the output of a transform, or an aggregate of several remote vertices. Subscribers do not know which, and almost never need to.
 
-This is the **facade principle**. The `:schema` field ([02-graph-model.md](02-graph-model.md) §schema discipline) is the only mechanism the protocol gives a subscriber to *interrogate* the contract — but it never reveals the implementation.
+This is the **facade principle**. The `:schema` field ([02-graph-model.md](02-graph-model.md) §schema and field discipline) is the only mechanism the protocol gives a subscriber to *interrogate* the contract — and it never reveals the implementation.
 
 ```mermaid
 flowchart LR
@@ -42,7 +42,7 @@ flowchart LR
     style R fill:#fef3c7,stroke:#92400e
 ```
 
-A consumer holds a path handle and calls read / write / await. What's behind the role boundary is invisible. Two vertices with the same schema are observationally equivalent regardless of role.
+A consumer holds a path handle and calls read / write / await. What sits behind the role boundary is invisible. Two vertices with the same schema are observationally equivalent regardless of role.
 
 The rest of this document is the catalog of implementation kinds and the addressing patterns that compose them.
 
@@ -58,19 +58,19 @@ The simplest vertex. A single TLV is held; writes replace it; reads return it; s
 
 - **Behavior**: `read` → most recent `write`. `subscribe` → every future `write`.
 - **State size**: one TLV (typically a few bytes to a few KiB).
-- **Used for**: configuration values, sensor readings, the "shared variable" pattern from [06-user-data-packing.md](06-user-data-packing.md) §the shared variable.
+- **Used for**: configuration values, sensor readings, the shared-variable pattern of [06-user-data-packing.md](06-user-data-packing.md) §"Synchronize the value of a variable" pattern.
 
 ### 2. Stream (append-only, no replacement)
 
 Writes do not replace prior values; they append to a stream. Reads return the most recent value (or a window); subscribers receive the sequence.
 
 - **Behavior**: `read` → most recent OR a windowed list (`read("/x[..]")`). `write` → append, no displacement. `subscribe` → every append.
-- **State size**: bounded by `:settings.history.keep_last_n`.
+- **State size**: bounded by the vertex's configured history window (a `:settings` knob; the protocol fixes no depth).
 - **Used for**: log streams, sensor streams where each sample matters, address-shift slicing (each `[N]` slot is itself a stored value but the *parent* path acts as a stream).
 
 ### 3. Sink with internal model (mirror / state-machine)
 
-This is the **canvas Mode B** of the introductory question. Writes are *commands* that mutate an internal model held by the vertex. Reads return the *materialized current state* of the model.
+This is Mode B of the canvas example below. Writes are *commands* that mutate an internal model held by the vertex. Reads return the *materialized current state* of the model.
 
 - **Behavior**: `write({command: ...})` mutates internal state. `read` → serialized current state. `subscribe` → either the stream of mutations OR the materialized state on each change, configurable.
 - **State size**: arbitrary; bounded by the model.
@@ -106,7 +106,7 @@ The path fronts multiple physical sources or sinks. A read aggregates; a write f
 
 A view onto live memory whose value changes asynchronously to libtracer. Reads snapshot the current bytes; writes (if accepted) poke the memory.
 
-- **Behavior**: `read` → snapshot now (per the resolved memory-binding contract — [08-views-and-ownership.md](08-views-and-ownership.md) §MMIO register-as-view and [ADR-0012](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0012-modular-memory-binding-transparent-router.md): snapshot is the recommended-safe default, a live binding is supported). `write` → poke. `subscribe` → polled at `:settings.poll_hz`.
+- **Behavior**: `read` → snapshot now (per the resolved memory-binding contract — [08-views-and-ownership.md](08-views-and-ownership.md) §MMIO register-as-view and [ADR-0012](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0012-modular-memory-binding-transparent-router.md): snapshot is the recommended-safe default, a live binding is supported). `write` → poke. `subscribe` → polled at the vertex's configured poll interval (a `:settings` knob).
 - **State size**: zero (the bytes live in MMIO).
 - **Used for**: GPIO registers, peripheral status, anything memory-mapped.
 
@@ -122,13 +122,13 @@ A view onto live memory whose value changes asynchronously to libtracer. Reads s
 | Aggregate | combines | fans out | merges | config |
 | Live MMIO | snapshot | pokes | polls | none |
 
-The protocol surfaces *none* of these to the wire. The schema may *describe* the contract (e.g., "writes are JSON-encoded `{op, args}` mutation commands") but cannot promise an implementation.
+The protocol surfaces *none* of these to the wire. The schema may *describe* the contract (for example, "writes are JSON-encoded `{op, args}` mutation commands") but cannot promise an implementation.
 
 ---
 
 ## The canvas, worked through both ways
 
-Take the user's example: a canvas vertex at `/canvas`, with a 1024×1024×4-byte image as its observable state.
+A canvas vertex at `/canvas` holds a 1024×1024×4-byte image as its observable state.
 
 ### Mode A — Transferred (canvas as stored value or stream)
 
@@ -162,7 +162,7 @@ Implementation: a sink-with-model vertex at `/canvas`. Internally, it owns the r
 
 For a 4 MiB canvas updated at fine grain, this is a few hundred bytes per `:ops` write — the bandwidth scales with *operations*, not with canvas size. A one-pixel change costs ~30 bytes on the wire instead of 4 MiB.
 
-### The crucial interchangeability claim
+### Interchangeability of the two modes
 
 ```
 read("/canvas:image")  → 4 MiB raster bytes
@@ -177,7 +177,7 @@ This call works **identically** in Mode A and Mode B. From the consumer's API vi
 The vertex implementor chose the trade-off:
 
 - **Mode A**: simpler implementation, lossless, large bandwidth.
-- **Mode B**: smaller bandwidth (per-op), requires renderer logic in the vertex, model can drift if any subscriber missed an op (fixable by `:settings.history.keep_last_n` ≥ deadline window or by snapshot-and-resume on resubscribe).
+- **Mode B**: smaller bandwidth (per-op), requires renderer logic in the vertex, model can drift if any subscriber missed an op — repaired by a history window at least as long as the reconnect deadline, or by snapshot-and-resume on resubscribe.
 
 The protocol's contribution: **the addressing scheme makes the choice invisible**.
 
@@ -196,7 +196,10 @@ Late-joining subscriber:
     snap   = read("/canvas:image")
     cursor = read("/canvas:cursor")
     apply(snap)
-    subscribe("/canvas:ops", since = cursor)   ← starts replay from cursor+1
+    subscribe("/canvas:ops")
+    ← ops at or below `cursor` are folded into `snap`, so the subscriber
+      discards them. The join point is application logic, not a subscribe
+      parameter — the protocol has no replay-from-index surface.
 ```
 
 This is the same pattern Kafka, distributed log systems, and CRDT replicas use. The protocol does not impose it; the application composes it from the read/write/subscribe primitives plus the schema's choice of fields.
@@ -216,13 +219,13 @@ write("/peer:subscribers[]",
       SUBSCRIBER{ target = "/log/global" })
 ```
 
-Every subscription is a subtree subscription ([RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md)), so the edge at `/peer` observes every write to any `/peer/{id}/log` (and anything else under `/peer` — the consumer filters if the subtree carries more than logs; selecting only sibling-pattern paths like `/peer/*/log` would need the unratified per-segment wildcard grammar, [03-addressing.md](03-addressing.md) §future direction). `/log/global` becomes the place where every host's log lands *as if* they wrote there directly.
+Every subscription is a subtree subscription ([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md)), so the edge at `/peer` observes every write to any `/peer/{id}/log` — and anything else under `/peer`. The consumer filters if the subtree carries more than logs; selecting only sibling-pattern paths like `/peer/*/log` would need the unratified per-segment wildcard grammar ([03-addressing.md](03-addressing.md) §future direction: per-segment wildcards). `/log/global` becomes the place where every host's log lands *as if* they wrote there directly.
 
 This is **not** a special primitive — it falls out of subtree subscription plus the SUBSCRIBER target field. The aggregate-role vertex is just any vertex a subtree subscription pulls into.
 
 ### Multi-sink fan-out
 
-A vertex with multiple subscribers fans every write to each subscriber. This is the default behavior of [04-communication-flows.md](04-communication-flows.md) §write + fanout. Address grouping uses this directly:
+A vertex with multiple subscribers fans every write to each subscriber. This is the default behavior of [04-communication-flows.md](04-communication-flows.md) §write (publish + fanout). Address grouping uses this directly:
 
 ```
 Configure /actuator/all to fan out to specific physical actuators:
@@ -242,33 +245,36 @@ A vertex's children are themselves vertices. The parent path is a *grouping* of 
 /canvas/layer[0]    ← background, source = host A
 /canvas/layer[1]    ← drawing layer, source = host B
 /canvas/layer[2]    ← overlay, source = host C
-/canvas:image       ← derived: composite of all layers (computed/role-4)
+/canvas:image       ← derived: composite of all layers (computed, role 4)
 ```
 
 A subscriber that wants the live composite reads `/canvas:image`. A subscriber that wants only one layer subscribes to that child. The router behind `/canvas:image` is a computed-role vertex whose function joins its children.
 
 ### Redundant links are distinct explicit routes
 
-Two links to the same peer are two transport-vertices ([ADR-0027](../adr/0027-transport-and-connections-are-vertices.md)), hence two routed addresses for the same remote vertex:
+Two links to the same peer are two connection vertices ([ADR-0027](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0027-transport-and-connections-are-vertices.md)), hence two routed addresses for the same remote vertex:
 
 ```
-/net/can0/sensor/wheel/left    ← route #1 (over CAN)
-/net/tcp0/sensor/wheel/left    ← route #2 (over TCP), the same sensor
+/net/can-client/can0/sensor/wheel/left    ← route 1, over the CAN link named can0
+/net/tcp-client/tcp0/sensor/wheel/left    ← route 2, over the TCP link named tcp0
+                                            — the same sensor
 ```
+
+A routed address carries **two** segments before the remote path: the *module* the connection belongs to and the connection's own *name* ([ADR-0061](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md)). A module is one (transport, role) shape; a transport that does not declare a module name of its own falls back to `<kind>-client` for a dialling link and `<kind>-server` for a listening one. See §in-band creation and the type catalog below.
 
 A consumer that wants redundancy subscribes to **both** routes and receives both deliveries — that is the point: an `await` timeout on one route detects the dead link, so failover is a visible signal, not a hidden merge. There is no duplicate detection anywhere in the net plane, and none is needed — every arrival travels a route the consumer deliberately named. See [reference/13](13-network-formation.md).
 
-This is the practical realization of the earlier load-bearing claim ([00-overview.md](00-overview.md) §the six load-bearing claims #4): **forwarding is core**. A consumer can hold one route now, switch to another on failover, or hold both redundantly — the vertex's own path on its home node is unchanged throughout.
+This is the practical realization of load-bearing claim 4, *forwarding is core* ([00-overview.md](00-overview.md) §the six load-bearing claims): a consumer can hold one route, switch to another on failover, or hold both redundantly — the vertex's own path on its home node is unchanged throughout.
 
 ---
 
-## How the forwarder combines transports + endpoints
+## Transports and endpoints behind one path
 
-Section walked through with the canvas as the running example.
+The canvas vertex is the running example for this section.
 
 ### Step 1 — Configuration
 
-A host hosts the canvas. Its config selects a vertex role and the transports that should carry traffic to/from it (illustrative config, TOML-like):
+One node owns the canvas. Its configuration selects a vertex role and the connections that should carry traffic to and from it (illustrative, TOML-shaped):
 
 ```ini
 [[vertex]]
@@ -281,7 +287,9 @@ model = "raster_2d_renderer"
 target = "/local/snapshot_recorder"      # in-process subscriber for backups
 
 [[connection]]
-# Each link is a transport-vertex in the path tree: /net/tcp0, /net/udp0 (ADR-0027).
+# Each connection is a vertex mounted and routed at /net/<module>/<name>
+# (ADR-0027, ADR-0061); the module follows from (kind, role), so the dialling
+# TCP link below mounts at /net/tcp-client/tcp0.
 name = "tcp0"
 transport = "transport_tcp"
 
@@ -298,10 +306,10 @@ A peer writes `/canvas:ops` over TCP. The node:
 
 1. Receives the frame via the `tcp0` link's receiver.
 2. Validates the trailer (CRC, timestamp), strips it. (L2 → L3.)
-3. The frame is an `FWD{WRITE}` ([RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md)) whose `dst` names a local vertex — a terminus request: the forwarder decodes it and applies the op.
+3. The frame is an `FWD{WRITE}` ([RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md)) whose `dst` names a local vertex — a terminus request: the forwarder decodes it and applies the op.
 4. The bare payload TLV is dispatched to `/canvas:ops` (L3 → L4).
 5. The vertex's sink-with-model handler runs the renderer, mutating `:image`.
-6. Peers that subscribed via UDP hold remote-subscriber slots on the vertex; the fan-out emits each one an `FWD{WRITE}` delivery along its stored return route, out over `udp0`.
+6. Peers that subscribed over UDP hold remote-subscriber slots on the vertex; the fan-out emits each one an `FWD{WRITE}` delivery along its stored return route, out over `udp0`.
 7. The local subscriber `/local/snapshot_recorder` receives it via fan-out.
 
 Every transport boundary is a forwarder-internal concern. The application only sees `/canvas:ops` change.
@@ -313,29 +321,29 @@ A peer reads `/canvas:image`. The node:
 1. Receives the `FWD{READ}` request via the `tcp0` link.
 2. Resolves the path against the local graph; finds the sink-with-model vertex.
 3. Calls the vertex's `:image` accessor, which serializes the model into a 4 MiB TLV.
-4. Sends an `FWD{REPLY}` back over the link the request arrived on, routed by the request's accumulated `src` (per [04-communication-flows.md](04-communication-flows.md) §read flow).
+4. Sends an `FWD{REPLY}` back over the link the request arrived on, routed by the request's accumulated `src` (per [04-communication-flows.md](04-communication-flows.md) §read).
 
 The reader does not know the bytes were synthesized on the fly from a model rather than copied out of a stored buffer. They look identical. *That* is the facade principle in action.
 
 ### Step 4 — A screen addresses the canvas through a route
 
-A second host (a screen) wants to display the canvas without participating in the model. It names its TCP link to the canvas host (say `canvas-host`) and addresses the canvas **through** it — the path is the route:
+A second host (a screen) displays the canvas without participating in the model. It names its TCP link to the canvas host and addresses the canvas **through** it — the path is the route:
 
 ```toml
 [[connection]]
-name = "canvas-host"           # the screen's transport-vertex: /net/canvas-host
+name = "canvas-host"           # mounts at /net/tcp-client/canvas-host
 transport = "transport_tcp"
 ```
 
-The screen subscribes to `/net/canvas-host/canvas:image` and gets snapshots; or to `/net/canvas-host/canvas:ops` and runs its own renderer to apply ops locally. *Same single canvas* — just two views of it.
+The screen subscribes to `/net/tcp-client/canvas-host/canvas:image` and gets snapshots; or to `/net/tcp-client/canvas-host/canvas:ops` and runs its own renderer to apply ops locally. *Same single canvas* — just two views of it.
 
-If the screen later goes offline, the canvas-host doesn't notice (other than the TCP socket closing). When the screen reconnects, it reads `:image` once for resync, then resumes `:ops`. The canvas-host's vertex is unchanged across all of this.
+If the screen goes offline, the canvas host does not notice beyond the TCP socket closing. On reconnect the screen reads `:image` once for resync, then resumes `:ops`. The canvas host's vertex is unchanged across all of this.
 
 This works because:
 
 - The path is the contract; the transport is invisible.
-- The vertex role determines what reads/writes/subscriptions *do*; the protocol doesn't second-guess.
-- Forwarders are routing; they don't synthesize role.
+- The vertex role determines what reads/writes/subscriptions *do*; the protocol does not second-guess.
+- Forwarders are routing; they do not synthesize role.
 - Aggregation rules (fan-in / fan-out / compound) are configuration, not protocol surface.
 
 ---
@@ -347,7 +355,7 @@ The role is **invisible** to remote peers; the schema is **visible**. A well-des
 - What writes are accepted and what they mean.
 - What reads return.
 - Whether subscriptions are by-replacement or by-event.
-- Per-subscriber state shape (typically standard from [05-protocol-tlvs.md](05-protocol-tlvs.md) §SUBSCRIBER, but with module-namespaced extensions per [02-graph-model.md](02-graph-model.md) §schema discipline).
+- Per-subscriber state shape (typically standard from [05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x04` — SUBSCRIBER, but with module-namespaced extensions per [02-graph-model.md](02-graph-model.md) §schema and field discipline).
 
 Two vertices with the same schema are **observationally equivalent**. They may use different roles internally and still be drop-in replaceable. This is the discipline the protocol asks vertex authors to keep — the schema is the contract; the role is the implementation choice.
 
@@ -367,34 +375,49 @@ The schema cannot enumerate the role exhaustively; an implementer is free to inv
 
 ---
 
-> **In-band creation ([ADR-0017](../adr/0017-in-band-vertex-creation-controller-orchestration.md), superseded by [ADR-0059](../adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md)).** Vertex registration is not only an out-of-band, local act — creation is also an **in-band, ACL-gated write**: an orchestrator writes a *controller-spec* `{type, path, config}` to a device's **creator endpoint** (the earlier `:children[]`/`:controllers[]` creation-field spelling is superseded by ADR-0059's creator-endpoint write; ratified 2026-07-19 — RFC-0013 closed as superseded via #417, RFC-0009 merged via #424), and the device instantiates one of its **own known controller types** (the device's **controller-type catalog**, read from the creator endpoint per ADR-0059). Creation and **binding** are separate steps — creation exposes the controller's **port vertices**; binding wires them with SUBSCRIBER edges. *Roles* (the implementation pattern below) stay invisible; only the device's *type catalog* becomes visible.
+## In-band creation and the type catalog
 
-## What this document does NOT specify
+Vertex registration is not only an out-of-band, local act. Creation is also an **in-band, ACL-gated write**: an orchestrator writes a controller-spec `SPEC{type, path, config}` to a device's **creator endpoint**, and the device instantiates one of its **own known types** ([ADR-0017](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0017-in-band-vertex-creation-controller-orchestration.md), superseded by [ADR-0059](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md), which replaces the earlier `:children[]` / `:controllers[]` creation-field spelling). Creation and **binding** are separate steps: creation exposes the new vertex's port vertices, and binding wires them with SUBSCRIBER edges ([reference/13](13-network-formation.md)).
 
-- A **role-discovery wire format**. **Roles** (the seven implementation patterns below) are intentionally invisible — a peer cannot interrogate *how* a vertex is implemented. (This is distinct from a device's **controller-type catalog**, which *is* visible, per [ADR-0017](../adr/0017-in-band-vertex-creation-controller-orchestration.md): the catalog names *types the device can instantiate*, not the internal role of any existing vertex.) Schemas describe what a vertex *does*; they do not name how it does it.
-- A **CRDT or consistency protocol** for sink-with-model vertices. Out of scope; if your model needs convergence guarantees across replicas, lift them into the application layer (per [04-communication-flows.md](04-communication-flows.md) §coherency notes).
-- The **fan-in and fan-out scheduling** beyond "first-arrived-wins-by-timestamp." Implementations may add policies (`prefer_low_latency`, `quorum_n_of_m`); this document just observes the structural patterns.
+What this makes visible is the device's **type catalog** — the types it can instantiate. *Roles* stay invisible: no peer can interrogate how an existing vertex is implemented.
+
+The net plane carries the same shape for connections:
+
+- **The surface an implementation meets.** A connection is created by a `SPEC` write to the `/net:children[]` catalog carrying a `kind` field that selects the transport; the two catalog child types are the dial shape and the listen shape. The created connection vertex is mounted — and routed — at **`/net/<module>/<name>`**, where `<module>` is the module name the transport declares for that (kind, role) pair, defaulting to `<kind>-client` for a dialling link and `<kind>-server` for a listening one ([ADR-0061](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md)).
+- **The accepted direction.** [RFC-0014](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) replaces the single global catalog with a **per-module creator endpoint** at `/net/<module>/conn`: `SPEC{name, config}` creates `/net/<module>/<name>` (gated `CREATE`), `NAME{<name>}` retires it (gated `WRITE`), and a read of `conn:schema` *is* that module's catalog. The role becomes positional — it is the module — rather than a config field. **That endpoint is not implemented**; the global `/net:children[]` catalog with a `kind` selector is what a peer meets. The mount-and-route rule at `/net/<module>/<name>` is realised.
 
 ---
 
-## Verification against existing reference docs
+## Pitfalls
 
-| Concept here | Already covered in | Status |
+- **Role is not discoverable, so do not infer one.** An implementation that reads a schema, concludes "this is a stored value", and caches the last write as authoritative will serve stale bytes for a computed or live-MMIO vertex, whose read is defined to produce bytes *now*. The schema constrains the contract, never the backing.
+- **A Mode-B mirror without a resync point diverges silently.** A subscriber that only ever subscribes to `:ops` and never reads `:image` stays permanently wrong after missing one mutation, with no error to observe. A model-mirroring vertex needs either a history window at least as long as the reconnect deadline, or a snapshot-plus-cursor join point.
+- **A subtree subscription captures the whole subtree.** Subscribing at `/peer` to collect `/peer/{id}/log` also delivers every other write under `/peer`; the consumer filters. v1 has no per-segment wildcard, so there is no way to ask for the sibling pattern instead.
+- **Redundant routes are not deduplicated.** A consumer subscribed over two routes to the same remote vertex receives two deliveries per write. An implementation that suppresses the second as a duplicate destroys the failover signal that is the second route's entire purpose.
+- **A routed address is not `/net/<name>`.** The connection segment is two segments — module then name. An implementation that builds `/net/<name>/<remote path>` addresses a module vertex that does not exist and the route fails to resolve.
+- **Fan-out configuration appends.** `write("/x:subscribers[]", …)` appends an edge; `write("/x:subscribers[N]", …)` addresses slot `N`. Building a fan-out front by repeatedly writing `[0]` yields one subscriber, not three.
+
+---
+
+## Outside the scope of this document
+
+- A **role-discovery wire format**. The seven roles above are intentionally invisible — a peer cannot interrogate *how* a vertex is implemented. This is distinct from a device's **type catalog**, which *is* visible ([ADR-0017](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0017-in-band-vertex-creation-controller-orchestration.md)): the catalog names *types the device can instantiate*, not the internal role of any existing vertex. Schemas describe what a vertex *does*; they do not name how it does it.
+- A **CRDT or consistency protocol** for sink-with-model vertices. If a model needs convergence guarantees across replicas, they belong in the application layer (per [04-communication-flows.md](04-communication-flows.md) §network partition and recovery).
+- **Fan-in and fan-out scheduling** beyond first-arrived-wins-by-timestamp. Implementations may add policies (`prefer_low_latency`, `quorum_n_of_m`); this document observes the structural patterns only.
+
+---
+
+## Where these patterns are specified elsewhere
+
+| Concept | Specified in | Role here |
 | ---- | ---- | ---- |
-| Vertex backing is unspecified (RAM, MMIO, file, function-on-read) | [02-graph-model.md](02-graph-model.md) §what the protocol does NOT specify | Existed; this doc develops the taxonomy |
-| Shared variable pattern as `subscribe + transient_local` | [06-user-data-packing.md](06-user-data-packing.md) §the shared variable pattern | Existed; here it becomes role 1 (stored value) |
-| Route proxy as a vertex that forwards | [07-host-embedding.md](07-host-embedding.md) §per-host view | Existed; here it becomes role 5 (proxy) |
-| Subtree subscription mechanics | [03-addressing.md](03-addressing.md) §subtree subscriptions | Existed; here used to build aggregate-role vertices |
-| Address-shift slicing for big payloads | [03-addressing.md](03-addressing.md) §address-shift slicing | Existed; here it composes with role 2 (stream) and Mode A canvas |
-| Schema as the visible contract | [02-graph-model.md](02-graph-model.md) §schema discipline | Existed; here promoted to "the only role-discovery surface" |
-| Redundant links as distinct explicit routes | [07-host-embedding.md](07-host-embedding.md) | Existed; here used in §redundant links |
-| MMIO snapshot semantics | [10-module-catalog.md](10-module-catalog.md) §MMIO TOCTOU OPEN QUESTION | Existed; here it becomes role 7 |
+| Vertex backing is unspecified (RAM, MMIO, file, function-on-read) | [02-graph-model.md](02-graph-model.md) §the graph imposes no shape | The taxonomy that develops it |
+| Shared-variable pattern via subscribe + `transient_local` | [06-user-data-packing.md](06-user-data-packing.md) §"Synchronize the value of a variable" pattern | Role 1 (stored value) |
+| Route proxy as a vertex that forwards | [07-host-embedding.md](07-host-embedding.md) §per-host view | Role 5 (proxy) |
+| Subtree subscription mechanics | [03-addressing.md](03-addressing.md) §subtree subscriptions | Builds aggregate-role vertices |
+| Address-shift slicing for large payloads | [03-addressing.md](03-addressing.md) §address-shift slicing | Composes with role 2 and the Mode-A canvas |
+| Schema as the visible contract | [02-graph-model.md](02-graph-model.md) §schema and field discipline | The only role-adjacent discovery surface |
+| Redundant links as distinct explicit routes | [07-host-embedding.md](07-host-embedding.md) §global topology | §redundant links are distinct explicit routes |
+| MMIO snapshot semantics | [10-module-catalog.md](10-module-catalog.md) §hard integrations (`mem_mmio` reads: TOCTOU on a live register) | Role 7 (live MMIO) |
 
-**Genuinely new** in this document:
-
-- The seven-role taxonomy (most prior docs treated the vertex monolithically).
-- The explicit "Mode A vs Mode B canvas, same path" worked example.
-- The address-grouping patterns (multi-source fan-in, multi-sink fan-out, compound vertex, per-transport split) collected as one section.
-- The "schema vs role" contract distinction.
-
-If you read this doc and find a worked example of a vertex pattern that overlaps with one of the prior sections without naming it as the same pattern, please flag it — the goal is consolidation, not duplication.
+The toctree in [README.md](README.md) is the order of record for this suite.

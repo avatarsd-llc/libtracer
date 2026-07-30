@@ -12,7 +12,7 @@ legibility discipline; this page says exactly *what to build*.
 
 ---
 
-## The running example: a "vendor widget"
+## The running example: a vendor widget
 
 Take a deliberately ordinary device: a mains-powered widget with one ambient
 sensor, one actuator, and a push-button. Its entire public identity is one vertex
@@ -37,7 +37,7 @@ Everything a third party can do with this device follows from the uniform surfac
 - **Observe** — `write /sensor/temperature:subscribers[] SUBSCRIBER{target=...}`
   (consumer-initiated; the producer holds the edge and fans out).
 - **Actuate** — `write /actuator/level VALUE{0.7}`. Delivery *is* a write
-  (load-bearing claim 2); the device's apply seam turns the stored bytes into a PWM
+  (load-bearing claim 2); the device's apply seam turns the written bytes into a PWM
   duty, a relay state, whatever the hardware does.
 - **Wire it to another device** — an orchestrator subscribes this widget's
   `temperature` to another vendor's controller input, then departs. Neither vendor
@@ -47,29 +47,52 @@ The vendor's proprietary logic — filtering, safety interlocks, calibration —
 entirely *behind* the vertices, in the owner's handlers. Nothing of it leaks into
 the protocol surface, which is why it never has to be disclosed or standardized.
 
+### The apply seam
+
+A write to a `STORED_VALUE` vertex stores bytes and does nothing else. Hardware
+moves only where the owner attached a seam:
+
+| Written surface | Owner seam | Registration |
+| --- | --- | --- |
+| The vertex **value** (`write /actuator/level VALUE{…}`) | `handlers_t::on_write` — receives the written rope; the value is **consumed, not stored** | `register_vertex(path, role_t::HANDLER, handlers)` |
+| A declared **app field** (`write /actuator/level:settings.app.ramp_ms VALUE{…}`) | `handlers_t::on_app_field_write` — fires after the bytes are stored, with the field key and the written TLV | `register_vertex(…, handlers)`, or alongside a descriptor table |
+
+Both seams are declared on the same `handlers_t`; their signatures and the
+lock/re-entrancy rules are in
+[graph — declaring owner fields](../modules/graph.md#declaring-owner-fields) and
+[graph — interface](../modules/graph.md#interface). The runtime validates
+*addressing* only — declared or undeclared, writable or not. Range, dtype and
+interlock checking is the owner's, in the seam.
+
 ### The legibility part (what makes it integrable by a stranger)
 
 Names alone make the tree navigable; descriptors make it unambiguous. The vendor
 installs an owner field-descriptor table
-([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md))
+([RFC-0010 — owner-writable application property fields](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md))
 whose descriptor bytes the runtime serves **verbatim** from `:schema` — the ideal
 carrier for a semantic tag plus a natural-language brief:
 
 ```cpp
-/** @brief Legibility table for /actuator/level — served verbatim via :schema. */
-static constexpr auto kLevelFields = std::to_array<tr::graph::app_field_static_t>({
-    // name        access  descriptor (opaque to the runtime, legible to the reader)
-    {"unit",       ro,     "ratio 0..1, f32 LE"},
-    {"purpose",    ro,     "output level of the main actuator; 0=off, 1=full"},
-    {"tag",        ro,     "com.example.widget.actuator.level.f32"},
-});
+/** @brief Legibility table for /actuator/level — descriptors served verbatim via :schema. */
+static constexpr std::array<std::byte, kRampDescLen> kRampDesc = encode_ramp_descriptor();
+
+static constexpr std::array<tr::graph::app_field_static_t, 1> kLevelFields{{
+    // key below settings.app.  remote access                 descriptor bytes
+    {"ramp_ms",                 tr::graph::app_access_t::RW,  kRampDesc},
+}};
+
 graph.set_app_fields_static(level_vertex, kLevelFields);
 ```
 
-`set_app_fields_static` stores **views** over the caller's static data — the whole
-legibility layer can live in `.rodata` and cost zero heap. A reader (human or
-agent) that reads `:schema` now knows the type, range, direction and purpose
-without any out-of-band contract.
+A descriptor is a structured TLV the runtime never parses. Its vocabulary —
+`dtype`, `unit`, `min`/`max`, `label` — is a SHOULD-level convention so that
+generic consumers converge, and owner-defined extras ride alongside opaquely: a
+semantic tag such as `com.example.widget.actuator.ramp_ms` is exactly such an
+extra. `access` is the one member an owner must **not** supply: the runtime
+projects it from the table, so a descriptor cannot claim `rw` on a field the table
+declares `ro`. The bytes themselves are emitted at build time — a `constexpr`
+encoder, a code generator, or a hand-written byte literal — so the whole legibility
+layer can live in `.rodata` and cost zero heap.
 
 The `static` above is load-bearing: the runtime views **the array as well as the
 bytes it points at**, so both must outlive the vertex. The parameter type
@@ -94,13 +117,52 @@ none — and remains a conforming node that any forwarder routes and any peer re
 | **Remote-writable actuators** | third parties drive your hardware through the apply seam | device is observe-only |
 | **`:subscribers[]` fan-out** | push delivery, subtree subscriptions, lazy sources | peers poll with `read` |
 | **`:acl` (ALLOW-only MCU subset)** | device-local authorization: who may read/write/subscribe/create | open device (fine on a trusted bus) |
-| **Creator endpoint + type catalog** (ADR-0059) | orchestrators instantiate your controllers/connections in-band | fixed function; wiring baked at build |
+| **In-band creation** (`:children[]` `SPEC` write) | orchestrators instantiate your connections and controllers at run time, bounded by your own catalog | fixed function; wiring baked at build |
+| **Vertex retirement** | a dynamic child can be withdrawn: its address answers `PATH_NOT_FOUND`, its subscriber edges are evicted, and a later revive inherits nothing of the old owner | the tree only grows; a withdrawn child stays addressable and keeps delivering |
 | **Write-creates** | peers materialize vertices `mkdir -p`-style under CREATE ACL | static tree only |
 | **Multiple transports + FWD** | the device becomes a forwarder — one address space across CAN + IP | leaf node on one link |
 | **Header-elided framing** (e.g. CAN) | zero protocol overhead on constrained buses; the TLV header never hits the wire | full-TLV frames everywhere |
 | **Address-shift slicing** | payloads beyond one frame, grouped by `(origin, ts)` | payloads bounded by transport frame |
 | **Lazy production** | produce only while `:subscribers[]` is non-empty (the RTSP pattern) | always-on producers |
 | **Discovery module** (mDNS static/dynamic) | peers find you; versioning rides the service name | peers are configured with your address |
+
+### In-band creation: the surface to build against
+
+Creation is not a new verb. It is an **append of a `SPEC` TLV to a parent's
+`:children[]` field**, gated by that parent's `CREATE` right
+(`core/src/graph.cpp:1516`;
+[ADR-0020 — NFSv4-style ACEs with inheritance](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0020-acl-nfsv4-style-aces-with-inheritance.md)).
+The SPEC's `type` member names one of the device's registered child types and its
+optional `config` SETTINGS carries the instantiation parameters; an unregistered
+`type` answers `SCHEMA_NOT_FOUND`, the `ENOTTY` of an unsupported field
+(`graph_t::create_child`, `core/src/graph.cpp:1610-1637`). Reading `:children[]`
+returns the parent's **members**, never SPECs.
+
+On the `/net` plane the registered child types are `client` and `listener`
+(`core/src/transport_vertex.cpp:99-106`); the `config` member `kind` selects which
+transport factory builds the link (`core/src/transport_vertex.cpp:64`, factories
+registered through `register_transport_type` at `:128`). The created connection is
+mounted and routed at **`/net/<module>/<name>`**, where `module` defaults to
+`<kind>-client` for a dialling link and `<kind>-server` for a listening one unless
+the transport declares its own (`core/src/transport_vertex.cpp:144-150,186-195`).
+
+A per-module creator endpoint — `/net/<module>/conn`, one self-contained module per
+*(transport, role)*, replacing the single global catalog — is the accepted
+direction and is **not implemented**; no such vertex is served
+([RFC-0014 — creator endpoint: connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)).
+A vendor builds against the `:children[]` surface above and expects the endpoint to
+arrive beside it, not instead of it.
+
+Removal has no wire spelling on either surface: a `[N]` clear of `:children[]` is
+not implemented, and `graph_t::retire` is an owner-side call with no wire operation
+behind it (`core/include/libtracer/graph.hpp:257-261`). Retirement empties the
+vertex in place rather than freeing it — the handle stays dereferenceable and a
+holder that caches a resolution re-checks `retire_generation` before use — and it
+re-virginizes the address, clearing the previous owner's `:acl`, value seam, stored
+value, history, app fields and subscribers
+([RFC-0009 — vertex removal and subscriber eviction](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0009-vertex-removal-and-subscriber-eviction.md)).
+A device that exposes in-band creation without a retirement policy grows its tree
+monotonically.
 
 Two capabilities deserve emphasis because vendors habitually assume they are
 mandatory:
@@ -124,10 +186,15 @@ The irreducible floor — the required modules of conformance profile P0:
 2. **Path syntax and `:` field addressing** — including treating unsupported
    `:fields` as `SCHEMA_NOT_FOUND` (the `ENOTTY` default), never as a crash.
 3. **read / write / await semantics** — delivery terminates at the target
-   (RFC-0007); a write to your vertex is applied locally and never auto-relayed
-   onward.
-4. **Safe handling of unknown type codes** — ignore gracefully; new core codes may
-   appear in `0x0E–0x7F` within v1.
+   ([RFC-0007 — SUBSCRIBER delivery terminates at the target](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0007-delivery-terminates-at-target.md));
+   a write to your vertex is applied locally and never auto-relayed onward.
+4. **Safe handling of unknown type codes** — decode structurally, skip safely, do
+   not crash. Core codes `0x01`–`0x1F` are assigned or reserved by this document
+   set (`0x01`–`0x04`, `0x06`–`0x0C` and `0x0E` are assigned; `0x05` and `0x0D` are
+   reserved codepoints with no mechanism), `0x0F`–`0x1F` is the v1 fast-track range
+   and `0x20`–`0x7F` the long-term core registry — so a new core code may appear
+   anywhere in `0x0F`–`0x7F` within v1
+   ([reference 05 — protocol TLVs](../reference/05-protocol-tlvs.md)).
 5. **FWD hop logic — only if ≥ 2 transports are loaded.** A single-transport leaf
    never forwards.
 
@@ -140,7 +207,7 @@ silently forks the protocol:
 | ---- | ---- |
 | **Semantic wire types outside the user range** | a generic forwarder must route your frames without knowing you; core codes `0x01–0x7F` are registry-owned. User records use `0x80–0xFF` with `opt.PL=1` |
 | **Meaning encoded in framing** | payload semantics belong in data (VALUE bytes, app fields) — never in `opt` bits, lengths, or private trailer contents |
-| **Emitting protocol errors from application logic** | the error boundary is closed (ADR-0010): app failures are ordinary *data*, self-described by your schema. `tr::*` identities are for the stack only |
+| **Emitting protocol errors from application logic** | the error boundary is closed ([ADR-0010 — the protocol error namespace is closed](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0010-closed-protocol-error-boundary.md)): app failures are ordinary *data*, self-described by your schema. `tr::*` identities are for the stack only |
 | **A per-frame version bit** | v1 carries none, ever; incompatibility is versioned at discovery (`_libtracer-v2._tcp`), not per frame |
 | **Wire-level fragmentation / reassembly metadata** | the wire format has none by design; large payloads address-shift across `ep[0..N]` |
 | **Interpreting payload values in dispatch** | delivery policy may compare *bytes* (on-change), never interpret them; numeric filtering is an application filter-vertex |
@@ -164,9 +231,11 @@ A condensed contract a coding agent can execute against:
 - [ ] Name vertices the way you would want them read (`temperature`, not `t7`).
 - [ ] Install RFC-0010 descriptor tables with unit + purpose + tag on every vertex
       a stranger might integrate — static tables, `.rodata`, zero heap.
-- [ ] Route every remote actuation through the owner apply seam; validate there
+- [ ] Route every remote actuation through the owner apply seam — `on_write` for
+      the value, `on_app_field_write` for a declared field — and validate there
       (the runtime deliberately does not).
 - [ ] Pick transports by role; load only what the deployment uses.
+- [ ] If the tree is dynamic, pair every creation path with a retirement policy.
 - [ ] Keep proprietary logic behind the vertices; publish nothing but bytes,
       names, and legible descriptions.
 - [ ] Never touch the MUST-NOT table above.

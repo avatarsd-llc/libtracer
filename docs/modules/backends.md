@@ -4,16 +4,18 @@
 :class: tip
 **`tr::mem::mem_backend_t`** is a small, user-implementable interface: subclass it
 to bind libtracer to *any* memory — a heap, a fixed arena, live registers, a DMA
-ring. libtracer never allocates on its own; it asks a backend. Three ship today:
-**`mem_heap`** (owns malloc'd bytes), **`mem_borrowed`** (wraps your bytes, frees
-nothing), and **`mem_pool`** (a bounded fixed-slab, `alloc`-or-`null`).
+ring. libtracer never allocates on its own; it asks a backend. Three backends are
+provided: **`mem_heap`** (owns malloc'd bytes), **`mem_borrowed`** (wraps your
+bytes, frees nothing), and **`mem_pool`** (a bounded fixed-slab,
+`alloc`-or-`null`).
 ```
 
 ## What it does
 
 The protocol treats application *data* as opaque, and `mem_backend_t` extends that
-to the *memory plane*: libtracer is a **transparent byte router** ([ADR-0012] in the
-repo). A backend declares its own per-architecture contract (alignment, cache
+to the *memory plane*: libtracer is a **transparent byte router**
+([ADR-0012 — memory binding is a modular spectrum](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0012-modular-memory-binding-transparent-router.md)).
+A backend declares its own per-architecture contract (alignment, cache
 hooks, ISR-safety) and owns reclamation; the layers above see only `segment_t`s. The
 interface deliberately makes allocation *optional* (`alloc` may return `nullptr`)
 because many substrates — MMIO, hardware FIFOs — cannot allocate at all.
@@ -24,21 +26,34 @@ because many substrates — MMIO, hardware FIFOs — cannot allocate at all.
 | `mem_borrowed` | nothing (your bytes) | frees only the control block | live/raw, MMIO header, ROM |
 | `mem_pool` | a caller slab | returns the slot to a free list | bounded / MCU / deterministic |
 
+A fourth, `mem_cuda`, is compiled only when `LIBTRACER_WITH_CUDA` is set
+(`core/CMakeLists.txt:260-265`); it needs the CUDA toolkit and is not built in CI.
+
 `mem_pool` is the bounded "custom allocator": it carves a **caller-owned** slab
 into fixed slots with the free list threaded *through the slab* (no auxiliary
-heap), and returns `nullptr` when full — the BACKPRESSURE signal.
+heap), and returns `nullptr` when full — the BACKPRESSURE signal. `pool_t` is not
+synchronized; `sync_pool_t` (`core/include/libtracer/mem_pool.hpp`) composes over it
+and guards the free list with a spinlock, which is what a multi-core host's
+`value_backend_` needs — a segment self-routes its reclaim on whatever thread drops
+the last reference, concurrent with a writer's `alloc`.
+
+Each concrete backend also carries three compile-time traits the module set reads
+without a virtual call — `needs_cache_ops`, `is_isr_safe`, `owns_bytes`
+([ADR-0047 — build-time closed module sets](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md) §2).
+`owns_bytes` is the one a caller must respect: `mem_borrowed` sets it `false`, so a
+segment it produced must not be stored durably.
 
 The seam lives at L0 (`tr::mem`); the segments it produces are owned at L1
-(`tr::view`). A backend constructs and reclaims `tr::view::segment_t` (the one
-sanctioned L0↔L1 boundary type, [ADR-0016] §2) and `alloc` returns a **raw**
-`segment_t*` — the caller adopts it with `tr::view::segment_ptr_t::adopt`. The
-handle-producing conveniences `heap_alloc` / `borrow` / `borrow_const` therefore
-live in `tr::view`, not here.
+(`tr::view`). A backend constructs and reclaims `tr::view::segment_t` — the one
+sanctioned L0↔L1 boundary type, and the only `tr::view` symbol the L0 interface is
+permitted to name
+([ADR-0016 — substrate, zero-copy, layer namespaces](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md) §2).
+`alloc` returns a **raw** `segment_t*` with a refcount of 1; the caller adopts it
+with `tr::view::segment_ptr_t::adopt` (`core/include/libtracer/segment.hpp:116`).
+The handle-producing conveniences `heap_alloc` / `borrow` / `borrow_const`
+therefore live in `tr::view`, not here.
 
 ## Interface
-
-> Generated from the `core/` headers by Doxygen — these are the reference
-> implementation's own declarations, not a hand-maintained copy.
 
 ```{doxygenclass} tr::mem::mem_backend_t
 :project: libtracer
@@ -57,7 +72,18 @@ The DMA/allocation enums the seam uses:
 
 ### The failable-block seam — `block_source_t`
 
-The second L0 seam ([ADR-0065](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md), [reference/09](../reference/09-memory-substrate.md)). `mem_backend_t` above vends refcounted `segment`s for payload bytes; this one vends **raw single-owner blocks** and reports exhaustion **by value**, because `std::pmr::memory_resource` structurally cannot — and on a `-fno-exceptions` target its only failure mode is `abort()`, which a peer can provoke.
+The second L0 seam, and a distinct one
+([ADR-0065 — failable allocation gets its own seam](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md),
+[reference/09](../reference/09-memory-substrate.md)). `mem_backend_t` above vends
+refcounted `segment`s for payload bytes; this one vends **raw single-owner blocks**
+and reports exhaustion **by value**, because `std::pmr::memory_resource` structurally
+cannot — its `allocate` signals failure only by throwing, and on a `-fno-exceptions`
+target that lowers to the toolchain's `abort()` stub, which a peer can provoke.
+
+The policy the seam exists to serve — which allocations a peer can reach, which
+status each exhaustion answers with, and how to size a bounded source — is described
+in [failable allocation and backpressure](../design/allocation-and-backpressure.md).
+This page documents only the API.
 
 ```{doxygenclass} tr::mem::block_source_t
 :members:
@@ -112,13 +138,45 @@ classDiagram
     note for YourBackend "bind a DMA ring,\nlwIP pbuf, MMIO, …"
 ```
 
-## Benefits
+## Consequences
 
-- **Don't-limit-the-user** — the same protocol runs on a heap, a 4 KB MCU pool, or
-  a live register; you pick the point on the spectrum.
-- **Bounded by construction** — `mem_pool` makes memory use exactly the caller's
-  slab; exhaustion is a return value, not an OOM.
-- **Zero-copy live data** — `mem_borrowed` points a segment at bytes you already
-  have (a register, a program variable) with no copy and no CRC imposed.
+- The same protocol runs against a heap, a caller-sized MCU slab or a live register,
+  because the substrate is selected by binding a backend rather than by a build
+  variant of the core.
+- Memory use with `mem_pool` is exactly the caller's slab: the free list is threaded
+  through the slab, so there is no auxiliary heap allocation, and exhaustion is an
+  `alloc` returning `nullptr` rather than an OOM.
+- `mem_borrowed` puts a segment over bytes the caller already holds, so live data
+  reaches the wire with no copy and no CRC imposed; the cost is that those bytes are
+  outside libtracer's lifetime control.
+- A substrate that cannot allocate at all is still bindable, because `alloc` is
+  permitted to return `nullptr` unconditionally — MMIO windows and hardware FIFOs
+  bind as read-only borrowed segments.
+- Two seams rather than one means two failure contracts to hold in mind: a
+  `mem_backend_t` failure is a refcounted-segment allocation that failed, a
+  `block_source_t` failure is a single-owner block that failed. Neither throws.
 
-See: [segment](segment.md), [views](views.md), [interface map](interface-map.md).
+## Pitfalls
+
+- **A raw `segment_t*` that is never adopted leaks.** `alloc` hands back a pointer at
+  refcount 1 and the backend does not track it; the value is only safe once
+  `segment_ptr_t::adopt` owns it. The `tr::view` helpers (`heap_alloc`, `borrow`,
+  `borrow_const`) exist so that the common paths cannot get this wrong.
+- **Borrowed bytes must outlive every segment over them.** `borrowed_backend_t::destroy`
+  deletes the control block and nothing else (`core/include/libtracer/mem_borrowed.hpp:39`),
+  so a borrow over a stack buffer or a scratch frame becomes a dangling read the moment
+  that storage goes away. Durable storage of a value wants an owning backend.
+- **`bump_source_t` is scope-lifetime only.** Blocks carved from its buffer are never
+  individually reclaimed, so a bump source wired as a long-lived seam fills
+  monotonically and then refuses everything. Construct it per operation, or `reset` it
+  between operations; a long-lived bounded seam wants `pool_source_t`, which recycles.
+- **A `bump_source_t` buffer is not a hard bound by default.** Its upstream defaults to
+  `heap_source()`, so overflow spills to the platform heap. Passing `null_source()` as
+  the upstream is what makes the buffer the limit and turns overflow into a rejection.
+- **`block_source_t::release` is sized.** The `bytes` and `align` passed to `release`
+  must match the originating `try_alloc` call — that is what lets a bump or pool source
+  carry no per-block header. A mismatched pair corrupts the source's accounting rather
+  than failing loudly.
+
+See: [segment](segment.md), [views](views.md), [interface map](interface-map.md),
+[failable allocation and backpressure](../design/allocation-and-backpressure.md).

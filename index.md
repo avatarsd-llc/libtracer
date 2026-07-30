@@ -37,7 +37,7 @@ is descriptive; the design rationale (ADRs) and proposals (RFCs) live in the
 :link: docs/performance
 :link-type: doc
 
-Honest, reproducible numbers vs Eclipse Zenoh, a live auto-generated test report
+Reproducible numbers vs Eclipse Zenoh, a live auto-generated test report
 across every subsystem, and the 16KB zero-heap forward gate.
 :::
 
@@ -46,7 +46,7 @@ across every subsystem, and the 16KB zero-heap forward gate.
 :link-type: doc
 
 Build the C++ node and write your first vertex, pub/sub, and a two-node exchange
-in about ten minutes — then browse six compile-tested examples and the
+in about ten minutes — then browse seven compile-tested examples and the
 module-by-module guide.
 :::
 
@@ -63,7 +63,7 @@ read as one standard, independent of any implementation.
 :link-type: doc
 
 Which language core or platform port does what — native codecs, ports, bindings —
-and how far each is verified, in one honest capability matrix.
+and how far each is verified, in one capability matrix.
 :::
 
 :::{grid-item-card} Interoperate across vendors
@@ -87,7 +87,7 @@ other document disagree, the spec wins.
 ::::
 
 ```{toctree}
-:caption: Build with libtracer
+:caption: Getting started
 :hidden:
 :maxdepth: 2
 
@@ -97,18 +97,18 @@ C++ modules <docs/modules/index>
 ```
 
 ```{toctree}
-:caption: Understand the model
+:caption: Reference
 :hidden:
 :maxdepth: 2
 
 Reference (descriptive) <docs/reference/README>
-Design notes (reference impl) <docs/design/README>
+Design notes <docs/design/README>
 Capability matrix <docs/capability-matrix>
 Interoperability <docs/interoperability>
 ```
 
 ```{toctree}
-:caption: The specification (normative)
+:caption: Specification
 :hidden:
 :maxdepth: 1
 
@@ -117,7 +117,7 @@ About the specification <docs/spec/README>
 ```
 
 ```{toctree}
-:caption: Evaluate
+:caption: Evidence
 :hidden:
 :maxdepth: 1
 

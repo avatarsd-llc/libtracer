@@ -1,6 +1,6 @@
-# Reference 08 — Views and Ownership (L1)
+# Reference 08 — Views and ownership (L1)
 
-> **Status**: draft, v1, 2026-05-03. The view layer between raw memory ([09-memory-substrate.md](09-memory-substrate.md)) and the wire format ([01-data-format.md](01-data-format.md)). Specifies the canonical view struct, refcount semantics, rope structure, the TLV-as-cast operation, and the catalog of view-modules that integrate with specific I/O capabilities.
+> **Scope**: the view layer between raw memory ([09-memory-substrate.md](09-memory-substrate.md)) and the wire format ([01-data-format.md](01-data-format.md)) — the canonical view struct, refcount semantics, rope structure, the TLV-as-cast operation, and the catalog of view-modules that pair with specific I/O capabilities.
 > **Audience**: anyone implementing the view layer; anyone integrating libtracer with a specific I/O subsystem (UART simple, UART DMA, lwIP, CAN, SHM); anyone reasoning about zero-copy semantics or rope traversal.
 
 ---
@@ -21,7 +21,7 @@ The load-bearing claim of L1:
 
 Given a view whose bytes constitute a valid TLV, the L2 layer interprets the bytes in place. No copy. The TLV's payload is itself a view (or a sub-view, or a rope) into the same segment(s). Nested TLVs are views into the parent's bytes. The whole structure is one tree of views over one or more L0 segments.
 
-This is what separates libtracer from middleware that decodes wire bytes into in-memory message structs. There is no decode step. There is the wire bytes IS the view IS the in-memory representation.
+This is what separates libtracer from middleware that decodes wire bytes into in-memory message structs. There is no decode step in the sense that middleware means it: the wire bytes, the view and the in-memory representation are the same bytes.
 
 ---
 
@@ -42,13 +42,15 @@ struct view_t {
 }
 ```
 
-A **rope** is a separate composite type — an ordered chain of views (`rope_t`,
-holding its links in a contiguous `std::vector<view_t>`) — not an intrusive
-`next` pointer inside the view. A view is always exactly one window over one
-segment; the rope composes several of them into one logical payload. Keeping
-the chain out of the view keeps the single-link hot path allocation-free: a
-plain `view_t` allocates nothing, and only a multi-link `rope_t` allocates
-(one vector for the chain).
+A **rope** is a separate composite type — an ordered chain of views (`rope_t`) — not
+an intrusive `next` pointer inside the view. A view is always exactly one window
+over one segment; the rope composes several of them into one logical payload.
+Keeping the chain out of the view keeps the single-link hot path allocation-free:
+a plain `view_t` allocates nothing. How the rope stores its chain is an
+implementation choice, and short chains need not allocate at all — the reference
+implementation holds the first two links in inline storage and spills the whole
+chain to a heap vector on the third append
+([core/include/libtracer/rope.hpp](../../core/include/libtracer/rope.hpp)).
 
 Invariants:
 
@@ -63,7 +65,7 @@ Invariants:
 Sub-views are cheap: `subview(off, len)` produces a new view with the same `owner`
 (refcount bumped), narrower offset/length. Useful for zero-copy slicing. A view
 also knows whether its bytes are CPU-addressable (`is_host()` / `is_device()`) —
-a DEVICE window (e.g. GPU memory, [ADR-0024](../adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md))
+a DEVICE window (e.g. GPU memory, [ADR-0024 — CUDA/GPU backend and the heterogeneous rope](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md))
 must not be dereferenced on the CPU.
 
 ---
@@ -74,15 +76,16 @@ must not be dereferenced on the CPU.
 namespace tr::view {
 
 struct segment_t {
-    detail::ref_count       refcount;   // intrusive: inc relaxed, dec acq_rel
-    tr::mem::mem_backend_t* backend;    // who reclaims these bytes
-    std::span<std::byte>    bytes;      // the real bytes (data + capacity)
+    detail::ref_count_t     refcount;  // intrusive: inc relaxed, dec acq_rel
+    tr::mem::mem_backend_t* backend;   // who reclaims these bytes
+    std::span<std::byte>    bytes;     // the real bytes (data + capacity)
+    tr::mem::mem_space_t    space;     // HOST or DEVICE, inherited from the backend
 };
 
 }
 ```
 
-The view layer sees segments as nothing but a refcount, a backend pointer, and the byte span. Backend-specific state (lwIP `pbuf*`, DMA descriptor index, MMIO register table, etc.) lives behind the backend and is L0's concern; reclamation is `backend->destroy(seg)`, invoked by the owning handle (`segment_ptr_t`) when the count hits zero ([09-memory-substrate.md](09-memory-substrate.md) §the backend abstraction).
+The view layer sees segments as nothing but a refcount, a backend pointer, the byte span and the address space the bytes live in. The address space is inherited from the backend at construction, so a DEVICE segment is recognisable without asking the backend; a view over it must not be CPU-dereferenced. Backend-specific state (lwIP `pbuf*`, DMA descriptor index, MMIO register table, and any module-set tagging the implementation adds) lives behind the backend and is L0's concern; reclamation is `backend->destroy(seg)`, invoked by the owning handle (`segment_ptr_t`) when the count hits zero ([09-memory-substrate.md](09-memory-substrate.md) §the backend abstraction).
 
 ---
 
@@ -92,12 +95,14 @@ The atomic memory orderings for the segment refcount are specified once in [02-g
 
 | Operation | Order | Why |
 | ---- | ---- | ---- |
-| Increment (clone view) | `relaxed` | Caller already holds a reference; data dependency travels via that reference |
-| Decrement (release view) | `acq_rel` | release: flush all writes before someone else observes count drop; acquire: if we observe drop to zero, sync with all prior releases |
-| Read for inspection (debug/metrics) | `acquire` | Pairs with each decrement; gives consistent snapshot |
-| Weak-to-strong upgrade (CAS loop) | `acq_rel` on success, `acquire` on failure | Same logic as inc + sync with last decrementer |
+| Increment (clone view) | `relaxed` | The caller holds a reference of its own; the data dependency travels via that reference |
+| Decrement (release view) | `acq_rel` | release: flush all writes before another thread observes the count drop; acquire: the thread that observes the drop to zero synchronizes with every prior release |
+| Read for inspection (debug/metrics) | `acquire` | Pairs with each decrement; gives a consistent snapshot |
+| Weak-to-strong upgrade (CAS loop) | `acq_rel` on success, `acquire` on failure | Same logic as the increment, plus synchronization with the last decrementer |
 
-For Cortex-M0/M0+ (no LDREX/STREX) and bare-metal single-threaded contexts, the refcount can be a plain `uint32_t` under `LIBTRACER_NO_ATOMIC=ON`. The application must guarantee no cross-thread sharing of segments.
+The decrement returns the value *before* it, so a return of `1` is the "this caller dropped the last reference" test.
+
+On a target with no load-linked/store-conditional pair (Cortex-M0/M0+) and in bare-metal single-threaded contexts, the refcount may be a plain unsigned integer with the same three operations. The application then carries the obligation the atomics discharged: no segment is shared across threads or between an ISR and thread context.
 
 When a segment's refcount drops to zero, the owning handle invokes `backend->destroy(seg)`. Destruction returns the bytes to whichever L0 backend owns them.
 
@@ -117,11 +122,11 @@ Destroying (or reassigning) a `view_t` does the acq_rel decrement; at zero, the 
 
 ### `view_t::subview(sub_offset, sub_length) -> view_t`
 
-A narrower window into the same segment: `offset + sub_offset`, length `sub_length`, refcount bumped. A view is single-segment by definition — slicing across segment boundaries is a rope-level concern (walk to the appropriate link first).
+A narrower window into the same segment: `offset + sub_offset`, length `sub_length`, refcount bumped. A view is single-segment by definition — slicing across segment boundaries is a rope-level concern (walk to the appropriate link first, or take a `subrope`, which trims the covering links with `subview` and shares their segments).
 
 ### `rope_t::append(view)` / `rope_t::concat(rope)` / `operator+`
 
-Chain links onto the rope. Appending `rope2` extends the chain with all of `rope2`'s links, in order. **No bytes are copied** — assembly is chaining, never memcpy. A single `view_t` converts implicitly to a one-link rope.
+Chain links onto the rope. Appending `rope2` extends the chain with all of `rope2`'s links, in order. **No bytes are copied** — assembly is chaining, never memcpy. A single `view_t` converts implicitly to a one-link rope. There is no nested rope type: concatenation splices chains flat, because nesting belongs to the *meaning* axis (the TLV tree), not the storage axis.
 
 ### `rope_t::total_length() -> size_t`
 
@@ -133,17 +138,17 @@ Visits each link's contiguous bytes in order. Used by parsers, serializers, and 
 
 ### `rope_t::to_iovec() -> spans`
 
-Scatter-gather egress: one span per link, pointing into the original segments (no copy). Hand the result to `writev` / `sendmsg`-style I/O for true zero-copy transmit.
+Scatter-gather egress: one span per link, pointing into the original segments (no copy). Hand the result to `writev` / `sendmsg`-style I/O for true zero-copy transmit. Each transport lowers the same rope to its own native scatter-gather facility — iovec, CAN descriptors, RDMA verbs.
 
 ### `rope_t::flatten(backend) -> view_t`
 
-Materializes the rope into one contiguous segment allocated from `backend` — the **single bridge-boundary copy**, taken only when a flat-buffer consumer demands it. Fails (returns an empty view) if the backend cannot allocate or if the rope has a DEVICE link the CPU must not touch ([ADR-0024](../adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)).
+Materializes the rope into one contiguous segment allocated from `backend` — the **single bridge-boundary copy**, taken only when a flat-buffer consumer demands it. Fails (returns an empty view) if the backend cannot allocate or if the rope has a DEVICE link the CPU must not touch ([ADR-0024 — CUDA/GPU backend and the heterogeneous rope](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)). The failure is a value, not an exception: a caller that ignores the empty result loses the payload silently.
 
 ---
 
 ## Ropes: chains of views
 
-A **rope** (`rope_t`) is an ordered chain of views representing a logical sequence of bytes that may span multiple segments. The chain lives in the rope, not in the views: each link is an ordinary `view_t`, and the rope holds them in order in one contiguous vector.
+A **rope** (`rope_t`) is an ordered chain of views representing a logical sequence of bytes that may span multiple segments. The chain lives in the rope, not in the views: each link is an ordinary `view_t`, and the rope holds them in order.
 
 ```
 Logical TLV bytes:
@@ -219,11 +224,24 @@ Given a view whose bytes hold an L2 TLV, the cast decodes and **validates** it. 
 std::expected<tlv_t, tr::wire::err_t> tlv = tr::wire::decode(v);
 ```
 
-The cast is a `decode` overload over the view — `decode(v)` is exactly `decode(v.bytes())`: it **validates** the framing (minimum size, reserved-bit and type-`0x00` rejects, the `LL` length width, trailer sizing, CRC verification, and the nesting-depth cap) and, on success, materializes an owning `tlv_t` tree. The decoded payload spans (and every child's) **borrow** `v`'s bytes, so the view — and thus its refcounted segment (§refcount) — must outlive the returned `tlv_t`. On malformed input it yields the `err_t` the grammar rejected with (`FRAME_TRUNCATED` / `FRAME_INVALID` / `FRAME_CRC_FAIL` / `TLV_NESTING_TOO_DEEP`).
+The cast is a `decode` overload over the view — `decode(v)` is exactly `decode(v.bytes())` (`decode`, [core/include/libtracer/frame.hpp](../../core/include/libtracer/frame.hpp)): it **validates** the framing (minimum size, reserved-bit and type-`0x00` rejects, the `LL` length width, trailer sizing, CRC verification, and the receiver's decode-resource bound on nesting depth) and, on success, materializes an owning `tlv_t` tree. The decoded payload spans (and every child's) **borrow** `v`'s bytes, so the view — and thus its refcounted segment (§refcount semantics) — must outlive the returned `tlv_t`. On malformed input it yields the `err_t` the grammar rejected with (`FRAME_TRUNCATED` / `FRAME_INVALID` / `FRAME_CRC_FAIL` / `TLV_NESTING_TOO_DEEP`).
 
-There is **no** separate non-validating cast. The earlier draft's split — "the cast trusts the bytes; call `view_validate_as_tlv` first" — was dropped ([ADR-0048](../adr/0048-one-wire-grammar-chunk-cursor-rope-aware-decode.md) §4): the receive path always validates, and a non-validating lazy accessor had no consumer (the forwarder's hand-tuned offset peeks over already-validated framing are a net-plane optimization, not a public cast).
+Nesting depth has no constant: `TLV_NESTING_TOO_DEEP` means "exceeds *this* receiver's decode resources", and a receiver's open-node budget is the bound (RFC-0006). An implementation that hardcodes a depth number will reject frames a conforming peer may legitimately send.
 
-For a flat (single-link) view the decode reads `v.bytes()` directly. **Rope-aware** decode — casting a multi-link view without first flattening it, by reading the grammar through a chunk-cursor — is committed by [ADR-0048](../adr/0048-one-wire-grammar-chunk-cursor-rope-aware-decode.md) §1 but not yet implemented (the grammar core + span cursor have landed; the rope cursor has not); today a multi-link rope is `flatten()`ed to one contiguous view before the cast.
+There is **no non-validating cast**. The receive path always validates, so a lazy non-validating accessor has no consumer to serve; the forwarder's offset peeks over already-validated framing are a net-plane optimization, not a public cast ([ADR-0048 — one wire grammar, chunk cursor, rope-aware decode](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0048-one-wire-grammar-chunk-cursor-rope-aware-decode.md) §4). Validation may be *staged* rather than eager — the bounds anchored where the frame enters, each child's header as the walk steps over it, each TLV's CRC where that TLV is consumed — but no path hands a consumer bytes that no check has accepted.
+
+### Rope-aware decode
+
+A flat (single-link) view decodes by reading its bytes directly. A multi-link rope does not have to be flattened first: the same header/trailer grammar reads through a link-walking cursor instead of a contiguous span (`rope_cursor`, [core/include/libtracer/rope_decode.hpp](../../core/include/libtracer/rope_decode.hpp); [ADR-0048 — one wire grammar, chunk cursor, rope-aware decode](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0048-one-wire-grammar-chunk-cursor-rope-aware-decode.md) §1). A header or trailer that straddles a link boundary is stitched a byte at a time into a small bounded stack scratch — headers and trailers are small and bounded — and a payload the CRC must cover is fed to the CRC link by link. Payload spans stay zero-copy: a payload inside one link is a subview, a payload across links is a sub-rope.
+
+Two rope entry points exist, matching the two validation timings:
+
+| Entry point | What it checks | When |
+| ---- | ---- | ---- |
+| Ingress check | Root header, the total-size anchor, and — when `opt.CR` is set — the whole-frame trailer CRC, in one linear link-by-link scan. No descent. | Everything ingress is allowed to verify; a malformed child surfaces where that child is consumed. |
+| Strict whole-tree walk | The full grammar over every level of the rope, iteratively, without flattening. Rejects with the same `err_t` a flattened decode would. | Opt-in: a verify-all-then-apply consumer, or a differential test. |
+
+What rope-aware decode does *not* do is materialize a rope frame directly into an eager owning `tlv_t` or into a terminus arena node. Both of those sink node types hold a borrowed contiguous span, which cannot name a payload that straddles a link boundary ([ADR-0041 — terminus arena decode span contract](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0041-terminus-arena-decode-span-contract.md) §2). Producing those sinks from a rope therefore costs one explicit copy: either flatten the rope and cast the resulting contiguous view, or materialize from the lazy rope-backed node. The lazy node — one TLV holding its parsed header facts plus a refcounted sub-rope of the frame, materializing children one header at a time and never decoding what is not accessed — is the decode-side representation of a rope-delivered frame, and it may outlive the transport's read loop because each sub-rope keeps exactly its own links' segments alive ([ADR-0053 — lazy rope-backed decode view and partial-path routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)).
 
 ---
 
@@ -275,34 +293,36 @@ while (link_idx < rope.link_count()) {
 }
 ```
 
-Implementations share the iterative pattern (recurse on `PL=1`, bound depth at 32) but specialize the cursor advance per context. Most TLVs in practice fit within one link, so the rope-aware path is rare and hot-path performance is dominated by the flat case.
+Implementations share the iterative pattern (recurse on `PL=1`, bound depth by the receiver's own open-node budget rather than a constant) but specialize the cursor advance per context. Most TLVs in practice fit within one link, so the rope-aware path is rare and hot-path performance is dominated by the flat case.
+
+Recursion is not an acceptable substitute for the iterative walk in either context: a deep frame is attacker-chosen input, and a recursive descent turns it into a call-stack overflow on a small MCU ([01-data-format.md](01-data-format.md) §iterative parsing requirement).
 
 ---
 
 ## L1 module catalog
 
-L1 is core (the view + refcount machinery) **plus** module-style integrations with specific I/O paths. The integrations expose the same uniform view API to L2+ but pair with specific L0 backends and handle their idioms.
+L1 is core (the view + refcount machinery) **plus** module-style integrations with specific I/O paths. The integrations expose the same uniform view API to L2+ but pair with specific L0 backends and handle their idioms. **Maturity** below names how settled the module's contract is, not a schedule.
 
-### `view_basic` — week 1 MVP
+### `view_basic` — contiguous segments
 
-- **Status**: ships in v1.
+- **Maturity**: defined in v1.
 - **Pairs with**: any L0 backend that exposes contiguous segments (`mem_heap`, `mem_pool_*`, `mem_mmio`, `mem_dma_buffer`).
 - **What it provides**: the canonical view/rope ops (clone-on-copy, RAII release, `subview`, rope `append`/`concat`/`walk`).
 - **Footprint**: ~1 KB code.
 - **When to use**: every host. The default integration.
 
-### `view_pbuf` — week 3 / week 5 with lwIP transports
+### `view_pbuf` — lwIP pbuf chains
 
-- **Status**: planned with `transport_tcp` over lwIP.
+- **Maturity**: defined; realised alongside an lwIP-based TCP transport.
 - **Pairs with**: `mem_lwip_pbuf`.
 - **What it provides**: rope-aware wrap of lwIP pbuf chains. Each pbuf in a chain becomes one rope link; the rope's logical length equals the pbuf chain's `tot_len`.
 - **Footprint**: ~600 bytes code on top of `view_basic`.
 - **When to use**: lwIP-using hosts (ESP-IDF, mbed-OS, FreeRTOS+TCP).
 - **Special semantics**: `release` walks the chain and calls `pbuf_free` exactly once per pbuf head; sub-views into individual pbufs share the chain's refcount via lwIP's own pbuf-ref mechanism.
 
-### `view_iovec` — week 2 / week 5 for kernel-syscall transports
+### `view_iovec` — POSIX scatter-gather
 
-- **Status**: planned with the Linux `transport_tcp` epoll path.
+- **Maturity**: defined; realised alongside a syscall-based TCP transport.
 - **Pairs with**: any backend; converts a rope to/from POSIX `struct iovec` arrays.
 - **What it provides**:
   - rope → `iovec[]`: adapts `rope_t::to_iovec()`'s spans into an `iov[]` array so that `writev` / `sendmsg` emits the rope's bytes in one syscall.
@@ -310,51 +330,51 @@ L1 is core (the view + refcount machinery) **plus** module-style integrations wi
 - **Footprint**: ~400 bytes.
 - **When to use**: any time the underlying syscall accepts scatter-gather. Avoids one host-side copy per egress.
 
-### `view_dma_descriptor` — week 6 with `transport_can` / SPI / I²S DMA
+### `view_dma_descriptor` — DMA scatter-gather descriptor lists
 
-- **Status**: with the CAN demo.
+- **Maturity**: defined; realised alongside the CAN and SPI/I²S DMA paths.
 - **Pairs with**: `mem_dma_buffer`.
 - **What it provides**: wraps DMA scatter-gather descriptor lists as ropes. Cooperates with the DMA controller's scatter-gather engine when present (ESP32 GDMA, STM32 BDMA SG mode).
 - **Special semantics**: cache-coherency hooks (`before_io` / `after_io`) fire automatically at view egress / ingress boundaries.
 
-### `view_uart_simple` — pulled in by need
+### `view_uart_simple` — UART ring buffer
 
-- **Status**: per-target.
+- **Maturity**: per-target; pulled in by need.
 - **Pairs with**: `mem_uart_rx_simple`.
 - **What it provides**: a ring-buffer-style segment whose currently-valid bytes are exposed as a single contiguous view. Each completed-TLV detection produces a sub-view; the underlying ring's free space is reclaimed when all sub-views into the consumed range release.
 - **Footprint**: ~300 bytes per peripheral.
 - **When to use**: bare-metal MCU with UART-only I/O, no DMA available.
 
-### `view_uart_dma` — pulled in by need
+### `view_uart_dma` — UART double-buffered DMA
 
-- **Status**: per-target.
+- **Maturity**: per-target; pulled in by need.
 - **Pairs with**: `mem_uart_rx_dma`.
-- **What it provides**: same as `view_uart_simple` but with cache hooks and double-buffer / ping-pong semantics. Each DMA-half-complete IRQ produces a view over the just-filled half; framers detect TLV boundaries and emit sub-views.
+- **What it provides**: the `view_uart_simple` semantics plus cache hooks and double-buffer / ping-pong handling. Each DMA-half-complete IRQ produces a view over the just-filled half; framers detect TLV boundaries and emit sub-views.
 - **When to use**: Cortex-M7-class MCU with UART + DMA.
 
-### `view_can_frames` — week 6
+### `view_can_frames` — CAN reassembly slots
 
-- **Status**: with the CAN demo.
+- **Maturity**: defined; realised alongside the CAN transport ([14-can-transport.md](14-can-transport.md)).
 - **Pairs with**: `can_reassembly`.
 - **What it provides**: per-peer reassembly buffer surfaced as a view once a complete TLV's frames have arrived. The reassembly pool is per-`(peer × inflight)`; on RX-frame, bytes accumulate; on completion, a view is handed off and the slot is reclaimed when the view releases.
 - **Special semantics**: timeout reclamation if a reassembly never completes; emits `STATUS=ERROR(TIMEOUT)` at the transport ingress.
 
-### `view_shm` — post-MVP with `transport_shm`
+### `view_shm` — cross-process shared memory
 
-- **Status**: post-MVP.
+- **Maturity**: post-v1.
 - **Pairs with**: `mem_shared`.
 - **What it provides**: views into shared-memory regions visible to multiple processes. Refcounting uses cross-process atomic primitives (futex on Linux, equivalents elsewhere).
 - **When to use**: intra-host inter-process libtracer.
 
-### `view_iceoryx2` — future
+### `view_iceoryx2` — iceoryx2 sample loans
 
-- **Status**: future, sketched.
+- **Maturity**: sketched.
 - **Pairs with**: `mem_iceoryx2`.
 - **What it provides**: views over iceoryx2 sample loans. The view's lifetime is tied to the sample loan; release returns the sample to the publisher's pool.
 
-### `view_rdma` — aspirational
+### `view_rdma` — RDMA-registered regions
 
-- **Status**: aspirational.
+- **Maturity**: aspirational.
 - **Pairs with**: `mem_rdma`.
 - **What it provides**: views over RDMA-registered memory regions. Egress hands the view's iovec to libfabric / UCX for one-sided RDMA write; ingress wraps an incoming RDMA buffer.
 
@@ -380,7 +400,7 @@ Some L0 backend / L1 module pairings are natural and standard:
 | `mem_uart_rx_dma` | `view_uart_dma` |
 | `can_reassembly` | `view_can_frames` |
 
-A host loads only the pairings it needs. An RC-car build with one UART loads `mem_uart_rx_simple` + `view_uart_simple` plus a tiny `mem_pool_static` for outgoing TLVs. A gateway loads heap + pbuf + DMA + their corresponding view modules.
+A host loads only the pairings it needs. A one-UART bare-metal build loads `mem_uart_rx_simple` + `view_uart_simple` plus a tiny `mem_pool_static` for outgoing TLVs. A gateway loads heap + pbuf + DMA + their corresponding view modules.
 
 ---
 
@@ -400,7 +420,7 @@ If the target transport needs a contiguous buffer (CAN with limited DMA descript
 
 Example: TLV received over lwIP (pbuf rope) forwarded to CAN — the egress allocates a CAN-capable segment from `can_reassembly`'s TX pool, walks the pbuf rope, and copies bytes into the CAN segment. One copy at the transport boundary; no further copies during CAN egress.
 
-The transition cost is **per cross-substrate hop**, not per fanout. Subscribers on the lwIP side still see zero-copy delivery; only the cross-substrate traffic pays.
+The transition cost is **per cross-substrate hop**, not per fanout. Subscribers on the lwIP side see zero-copy delivery regardless; only the cross-substrate traffic pays.
 
 ---
 
@@ -429,7 +449,7 @@ rope_t tlv = rope_t{view_t::over(header_seg)} + view_t::over(idr_seg);
 tracer_register_read_only_vertex("/gpio/A/IDR", read_gpio_idr, tlv);
 ```
 
-Result: every `tracer_read("/gpio/A/IDR")` returns a 2-link rope. The header bytes are static (refcount-permanent); the payload bytes are at the live register address. **Zero copy, ever.** A subscriber reading the TLV's payload bytes literally reads from `0x40020010`.
+Result: every read of `/gpio/A/IDR` returns a 2-link rope. The header bytes are static (refcount-permanent); the payload bytes are at the live register address. **Zero copy, ever.** A subscriber reading the TLV's payload bytes literally reads from `0x40020010`.
 
 ### B. TCP receive over lwIP, fanout to two subscribers
 
@@ -442,7 +462,7 @@ Result: every `tracer_read("/gpio/A/IDR")` returns a 2-link rope. The header byt
      copy of the rope for sub 1  (refcounts on both pbufs += 1)
      copy of the rope for sub 2  (refcounts on both pbufs += 1)
 5. Original rope is dropped (refcounts -= 1).
-   Both pbufs now have refcount = 2 (one per subscriber).
+   Both pbufs hold refcount = 2 (one per subscriber).
 6. Sub 1 consumes and releases. Refcounts → 1.
 7. Sub 2 consumes and releases. Refcounts → 0.
 8. lwIP's pbuf_free fires for each pbuf. Memory returned to pbuf pool.
@@ -477,7 +497,7 @@ The DMA buffer's refcount is the back-pressure signal: if subscribers are slow, 
 6. When all subscribers release, the slot returns to the reassembly pool.
 ```
 
-CAN's hardware framing forces one copy per frame into the reassembly slot; from there to the graph it's zero-copy via the view.
+CAN's hardware framing forces one copy per frame into the reassembly slot; from there to the graph it is zero-copy via the view.
 
 ---
 
@@ -564,7 +584,7 @@ Step 10 — UDP transport consumes (subscriber 2).
 
 Step 11 — DMA half A is reusable.
    segment_A.refcount = 2 = (DMA static) + (no live views).
-   Wait — the static count means the segment never reaches 0. Instead,
+   The static count means the segment never reaches 0. Instead,
    mem_dma_buffer's accounting tracks "live views beyond the static count."
    When that count drops to zero on segment_A, half A is marked reusable.
    The next ADC half-complete IRQ for half A finds it free and starts the
@@ -577,25 +597,25 @@ NIC work:                The kernel constructs UDP/IP/Eth headers; the NIC
                          DMA-gathers from those + the libtracer iovec.
 ```
 
-### Where copies WOULD have appeared (but don't)
+### Where copies would have appeared, but do not
 
-- **Wire-format encoding step**: Naïve encoders allocate a contiguous output buffer and copy header + payload into it. Here, the rope avoids that — the iovec to the kernel walks the rope as-is.
-- **Fan-out step**: A single-buffer scheme would have to copy or arena-share. Here, refcount cloning of the rope hands every subscriber the same view tree.
-- **Transport egress**: A transport that demanded a contiguous buffer would force `rope_t::flatten()`, costing one copy. UDP's scatter-gather avoids this; CAN (which has its own framing model) is the case where flattening or per-frame splitting happens.
+- **Wire-format encoding step**: naïve encoders allocate a contiguous output buffer and copy header + payload into it. Here, the rope avoids that — the iovec to the kernel walks the rope as-is.
+- **Fan-out step**: a single-buffer scheme would have to copy or arena-share. Here, refcount cloning of the rope hands every subscriber the same view tree.
+- **Transport egress**: a transport that demanded a contiguous buffer would force `rope_t::flatten()`, costing one copy. UDP's scatter-gather avoids this; CAN, which has its own framing model, is the case where flattening or per-frame splitting happens.
 
-### When this breaks
+### Where the trace breaks down
 
-- **Egress to a transport that doesn't support scatter-gather** (e.g., some embedded UART drivers): the forwarder calls `rope_t::flatten()` once at egress. One copy at the transport boundary, paid only on that path; subscribers on scatter-gather-capable paths still see zero copies.
-- **Cross-process transport**: the SHM open-question (see below); the byte-flow leaves the publisher's address space and one copy is always paid.
-- **Slow subscriber stalls the DMA cycle**: if subscribers don't release fast enough, the back-pressure manifests as `segment_A.refcount` not dropping; the next half-complete IRQ finds the half busy. Per QoS, this is either a drop or a stall. The data path itself is still zero-copy; the failure mode is throughput, not integrity.
+- **Egress to a transport without scatter-gather** (some embedded UART drivers): the forwarder calls `rope_t::flatten()` once at egress. One copy at the transport boundary, paid only on that path; subscribers on scatter-gather-capable paths see zero copies.
+- **Cross-process transport**: the byte flow leaves the publisher's address space and one copy is always paid (§cross-process refcount on `mem_shared`).
+- **Slow subscriber stalls the DMA cycle**: if subscribers do not release fast enough, the back-pressure manifests as `segment_A.refcount` not dropping; the next half-complete IRQ finds the half busy. Per QoS, this is either a drop or a stall. The data path itself remains zero-copy; the failure mode is throughput, not integrity.
 
 This trace is the working specification for what "zero-copy" means in libtracer: the *bytes the application produced* (the ADC samples) are the *exact bytes the NIC sees*, with refcounted views threading them through every layer in between.
 
 ---
 
-## Memory-binding contract — modular (resolved, [ADR-0012](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0012-modular-memory-binding-transparent-router.md))
+## Memory-binding contract
 
-These were the design's identified-but-unresolved hard integrations; they now resolve under one principle. **Memory binding is a modular spectrum, and libtracer is a transparent byte router** — it imposes no snapshot/copy/CRC semantics on a backend. Each entry below has a **recommended-safe** default, but a backend module MAY offer any point on the spectrum (snapshot · shadow vertex · live/raw direct-register, lock-free, no-CRC). The protocol does not limit the user from "dangerous" access; instead **each backend module owns and declares its per-architecture contract** — allocation, cache-coherency hooks, ISR-safety, atomicity granularity, memory ordering (x86 TSO vs weak ARM/MIPS), and `destroy` thread-affinity. CRC is an optional higher-layer concern ([01-data-format.md](01-data-format.md) `opt.CR`); a live/no-copy binding simply carries no CRC (or snapshots at CRC-compute time).
+Memory binding is a **modular spectrum**, and libtracer is a **transparent byte router**: it imposes no snapshot, copy or CRC semantics on a backend ([ADR-0012 — modular memory binding, transparent router](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0012-modular-memory-binding-transparent-router.md)). Each hard integration below has a **recommended-safe** default, but a backend module may offer any point on the spectrum — snapshot, shadow vertex, or live/raw direct-register access, lock-free, no-CRC. The protocol does not stop a user reaching for the dangerous end; instead **each backend module owns and declares its per-architecture contract**: allocation, cache-coherency hooks, ISR-safety, atomicity granularity, memory ordering (x86 TSO versus weak ARM/MIPS), and `destroy` thread-affinity. CRC is an optional higher-layer concern ([01-data-format.md](01-data-format.md) `opt.CR`); a live, no-copy binding simply carries no CRC, or snapshots at CRC-compute time.
 
 ### Boost asio streambuf integration
 
@@ -605,17 +625,17 @@ A `boost::asio::streambuf` is a read-write buffer with **consume-on-read** seman
 - **Copy on import** — at the boost-asio↔libtracer boundary, copy bytes into a `mem_heap` segment. One copy per ingress.
 - **Don't integrate** — leave the boost-asio↔libtracer boundary to user code; a copy-on-import shim is trivial to write against the public API.
 
-**Default**: don't integrate in v1. Revisit if real demand surfaces. Documented in [10-module-catalog.md](10-module-catalog.md) §hard integrations.
+**Rule**: v1 does not integrate. The boundary is user code. Documented in [10-module-catalog.md](10-module-catalog.md) §hard integrations.
 
-### MMIO register-as-view: volatile bytes (modular)
+### MMIO register-as-view: volatile bytes
 
-A view over an MMIO register is a view onto bytes that change asynchronously. All three bindings ship — the user picks per backend:
+A view over an MMIO register is a view onto bytes that change asynchronously. All three bindings are first-class — the user picks per backend:
 
 - **Snapshot at view creation** (recommended-safe) — copy the register value into a small segment; stable bytes, any CRC consistent. Use for *publish-a-moment*.
-- **Live view** — a `mem_mmio` segment pointing at the live register; the byte router stays transparent (no copy, typically no CRC). The backend declares its **atomicity granularity** (an aligned `u32` is torn-read-free on ARM/MIPS/x86; a multi-word register block is not) and MAY offer a **lock-free consistent read** (e.g. a seqlock: the reader retries on a writer version bump) for multi-word live data. ISR/SMP safety and any memory barriers are the backend's declared contract.
-- **No-CRC raw** — a live binding with `opt.CR=0` is a pure transparent conduit; CRC over volatile bytes is meaningless, so a live binding either omits CRC or snapshots at compute time.
+- **Live view** — a `mem_mmio` segment pointing at the live register; the byte router stays transparent (no copy, typically no CRC). The backend declares its **atomicity granularity** (an aligned `u32` is torn-read-free on ARM/MIPS/x86; a multi-word register block is not) and may offer a **lock-free consistent read** (e.g. a seqlock: the reader retries on a writer version bump) for multi-word live data. ISR/SMP safety and any memory barriers are the backend's declared contract.
+- **No-CRC raw** — a live binding with `opt.CR=0` is a pure transparent conduit; a CRC over volatile bytes is meaningless, so a live binding either omits the CRC or snapshots at compute time.
 
-**Resolved**: ship all three. Snapshot is the recommended-safe default and *publish-a-moment* the recommended mental model, but live/raw/lock-free bindings are first-class for users who own the hazard ([ADR-0012](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0012-modular-memory-binding-transparent-router.md)).
+**Rule**: all three ship. Snapshot is the recommended-safe default and *publish-a-moment* the recommended mental model; live, raw and lock-free bindings are first-class for users who own the hazard.
 
 ### Cross-process refcount on `mem_shared`
 
@@ -625,38 +645,54 @@ A POSIX SHM region mapped into multiple processes has independent libtracer refc
 - **Robust shared refcount** — atomic + robust mutex in the SHM region; every process participates. Complex.
 - **Copy at process boundary** — each process treats the other's SHM as foreign; the boundary copies. No zero-copy across process.
 
-**Default**: single-publisher, multi-reader. v1's `mem_shared` documents this constraint. Robust shared refcount lives in a future `mem_iceoryx2` module.
+**Rule**: single-publisher, multi-reader, and v1's `mem_shared` documents that constraint. A robust shared refcount belongs to an iceoryx2-style module.
 
-### lwIP pbuf: aliasing libtracer refcount with `pbuf_ref/pbuf_free`
+### lwIP pbuf: aliasing the libtracer refcount with `pbuf_ref`/`pbuf_free`
 
-Two libtracer subscribers cloning a `view_pbuf` over the same `pbuf*` create two libtracer-side refcount holds; lwIP-side, libtracer holds **one** `pbuf_ref` for the segment's lifetime. The risk is calling `pbuf_free` from a non-lwIP-thread context (e.g., from an interrupt, or from a view destroyed on another thread).
+Two libtracer subscribers cloning a `view_pbuf` over the same `pbuf*` create two libtracer-side refcount holds; lwIP-side, libtracer holds **one** `pbuf_ref` for the segment's lifetime. The hazard is calling `pbuf_free` from a non-lwIP-thread context — from an interrupt, or from a view destroyed on another thread.
 
-**Default**: a pbuf segment's `destroy` callback schedules `pbuf_free` via `tcpip_callback` (or equivalent), never frees synchronously from outside lwIP's thread context. Document explicitly.
+**Rule**: a pbuf segment's `destroy` callback schedules `pbuf_free` via `tcpip_callback` (or the equivalent), never frees synchronously from outside lwIP's thread context. The backend documents this explicitly.
 
-### Rope walk vs flatten
+### Rope walk versus flatten
 
 A scatter-gather-capable transport walks the rope at egress (zero-copy). A flat-buffer-only transport must materialize via `rope_t::flatten()` (one copy).
 
-**Default**: each transport declares `wants_flat` capability. Forwarders and fan-out walk the rope into scatter-gather transports; call `rope_t::flatten()` once at egress for flat-buffer transports.
+**Rule**: each transport declares a `wants_flat` capability. Forwarders and fan-out walk the rope into scatter-gather transports and call `rope_t::flatten()` once at egress for flat-buffer transports.
 
-### DMA cache coherency races
+### DMA cache-coherency races
 
 On non-coherent SoCs, the `before_io` / `after_io` hooks must be called at exactly the right moment. Missing them yields stale CPU reads or clobbered DMA writes.
 
-**Default**: `mem_dma_buffer`'s ISR is the only place that calls `after_io`. Application code never calls these. Document the required interleaving in the backend's spec.
+**Rule**: `mem_dma_buffer`'s ISR is the only place that calls `after_io`. Application code never calls these hooks. The backend's spec documents the required interleaving.
 
-### Reference-to-a-value (live variable / register) (modular)
+### Reference to a live value (variable or register)
 
-The "I want an endpoint backed by `&my_uint32` directly" pattern — both bindings are first-class:
+The "expose an endpoint backed by `&my_uint32` directly" pattern — both bindings are first-class:
 
-- **Shadow vertex** (Option B, recommended) — the graph stores values; the publisher writes the value when the variable changes; subscribers read the shadow. Protocol-clean; no aliasing hazard.
-- **Live view** (Option A) — a `mem_mmio`-style segment over the live address; the byte router stays transparent. A real binding, not merely a footgun helper: the backend declares its atomicity/ordering/ISR contract per [§MMIO register-as-view](#mmio-register-as-view-volatile-bytes-modular), and atomic/lock-free access is the backend's to provide. Exposed as `tracer_attach_register(&my_var)`.
+- **Shadow vertex** (recommended) — the graph stores values; the publisher writes the value when the variable changes; subscribers read the shadow. Protocol-clean; no aliasing hazard.
+- **Live view** — a `mem_mmio`-style segment over the live address; the byte router stays transparent. A real binding, not merely a footgun helper: the backend declares its atomicity/ordering/ISR contract per [§MMIO register-as-view](#mmio-register-as-view-volatile-bytes), and atomic or lock-free access is the backend's to provide. Exposed as `tracer_attach_register(&my_var)`.
 
-**Resolved**: shadow vertex is the recommended-safe default; live binding is fully supported for users who own the hazard ([ADR-0012](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0012-modular-memory-binding-transparent-router.md)).
+**Rule**: shadow vertex is the recommended-safe default; the live binding is fully supported for users who own the hazard.
 
 ---
 
-## What L1 does NOT specify
+## Pitfalls
+
+| Rule | Failure mode when it is missed |
+| ---- | ---- |
+| A view borrows bytes; the segment refcount is the only thing keeping them alive. | Code that takes a raw pointer out of a view's byte span and keeps it after the view is destroyed reads reclaimed memory. The decoded TLV tree borrows too: releasing the view while a `tlv_t` decoded from it is live is the same bug one layer up. |
+| A DEVICE window is not CPU-addressable. | An implementation that memcpys or CRCs a rope without checking that every link is HOST dereferences device memory. `flatten` returns an empty view for a non-HOST rope and rope validation rejects a device link with `FRAME_INVALID` — a caller that ignores the empty view drops the payload silently and blames the transport. |
+| A link boundary may fall anywhere, including mid-TLV-header. | A reader that casts the first link's leading bytes as a header misreads any straddling frame, and does so only under fragmentation patterns the local transport rarely produces — so it passes on loopback and fails against a peer. Rope-aware readers stitch a straddling header through a small bounded scratch. |
+| Nesting depth is bounded by the receiver's decode resources, not by a constant. | An implementation that hardcodes a depth number rejects frames a conforming peer may legitimately send, and reports `TLV_NESTING_TOO_DEEP` for a frame that is not too deep for anyone else. |
+| Every path validates before a consumer sees bytes. | Skipping validation because "the forwarder does not validate either" is a misread: the forwarder peeks at framing an earlier step already accepted. A cast that trusts unvalidated bytes turns a malformed frame into out-of-bounds reads. |
+| Validation may be staged, so a check passing at ingress does not mean the whole tree is valid. | A consumer that mutates state per child as it walks can apply half a frame before a deeper child's CRC fails. An endpoint whose members form one transaction verifies all, then applies. |
+| Back-pressure appears as a refcount that does not drop. | Reading that as a leak sends the investigation into the L0 backend. The real question is which subscriber is holding a rope past its consume window. |
+| `flatten` is failable. | Its failure is an empty view, not an exception. On a target built without exceptions this is the only signal there is, and an unchecked result is a dropped payload. |
+| The pbuf `destroy` callback runs wherever the last view dies. | Freeing a pbuf from an ISR or a non-lwIP thread corrupts lwIP's pool; the crash surfaces later and elsewhere. |
+
+---
+
+## What L1 does not specify
 
 - The wire format that views are interpreted as — see [01-data-format.md](01-data-format.md).
 - The graph-level meaning of a TLV at a vertex — see [02-graph-model.md](02-graph-model.md).

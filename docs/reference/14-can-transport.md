@@ -1,8 +1,8 @@
-# Reference 14 — CAN transport: header-elided framing, a structured 29-bit ID, and self-healing in-band advertise
+# Reference 14 — CAN transport
 
 ```{admonition} In one paragraph
 :class: tip
-CAN is a **header-elided** transport ([ADR-0022](../adr/0022-transport-framing-modes-elided-full-tlv-advertise.md)):
+CAN is a **header-elided** transport ([ADR-0022 — transport framing modes: full-TLV, header-elided, advertise+id-match](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0022-transport-framing-modes-elided-full-tlv-advertise.md)):
 the CAN frame's **native identity — its 29-bit ID — *is* the path**, so the 4-byte
 TLV header never rides the constrained bus and the existing CAN frames are
 byte-unchanged (zero added overhead — the constraint that makes 100 ksps-over-CAN
@@ -10,19 +10,21 @@ feasible). The ID is **structured** — `[protocol-version prefix | node | endpo
 — and because **lower numeric ID = higher bus arbitration priority**, assigning
 the ID *also* assigns real-time priority. A payload larger than one frame (8 bytes
 classic, up to 64 CAN-FD) reassembles via libtracer's own **address-shift slicing /
-advertise+id-match** keyed by `(origin, ts) + index → rope`, **not** ISO-TP. The
-`identity↔path` map lives **inside `transport_can`**, is **dynamic**, and
+advertise+id-match** keyed by `(origin_peer_id, ts) + index → rope`, **not** ISO-TP.
+The `identity↔path` map lives **inside `transport_can`**, is **dynamic**, and
 **self-establishes decentrally** from in-band **advertise** frames on (re)connect —
-there is no gateway or orchestrator role ([ADR-0030](../adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md),
+there is no gateway or orchestrator role ([ADR-0030 — CAN transport: a dynamic in-transport map, a structured 29-bit ID, advertise+id-match reassembly](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md),
 [13-network-formation](13-network-formation.md) §self-healing).
 ```
 
-This document describes both the CAN transport's **pure framing layer** (the
-host-testable, syscall-free codecs) and — as of increment 2 of
-[#55](https://github.com/avatarsd-llc/libtracer/issues/55) — the **SocketCAN
-binding** that wires that framing to a live Linux CAN bus (the `transport_can :
-transport_t` driving a real `PF_CAN` socket). The §[SocketCAN binding](#the-socketcan-binding-transport_can)
-section below covers the binding; everything before it is the pure layer it builds on.
+This document has two halves. Everything up to §[The SocketCAN binding](#the-socketcan-binding-transport_can)
+describes the **framing layer** — the host-testable, syscall-free codecs that
+define what goes on the wire: the structured identifier, the two framing modes,
+the reassembly model and the advertise frame. That layer touches no socket and no
+kernel, so a second implementation can reproduce it from this page alone. The
+binding section describes the **SocketCAN binding**, which drives those codecs
+over a live `PF_CAN` socket and is the reference implementation's realization of
+them.
 
 The reference-implementation symbols are:
 
@@ -30,8 +32,8 @@ The reference-implementation symbols are:
 | --- | --- | --- | --- |
 | 29-bit ID + advertise codec | `tr::net::can` | `can.hpp` | transport plane |
 | header-elided framing | `tr::view::view_can_frames_t` | `view_can.hpp` | L1 |
-| multi-frame reassembly | `tr::net::can_reassembly_t` | `can_reassembly.hpp` | net |
-| **SocketCAN binding + raw-frame seam** | **`tr::net::transport_can`, `can_link_t`, `socketcan_link_t`** | **`transport_can.hpp`** | **transport plane** |
+| multi-frame reassembly | `tr::net::can_reassembly_t` | `can_reassembly.hpp` | transport plane |
+| SocketCAN binding + raw-frame seam | `tr::net::transport_can`, `can_link_t`, `socketcan_link_t` | `transport_can.hpp` | transport plane |
 
 ## The structured 29-bit extended ID
 
@@ -50,11 +52,13 @@ fields, most-significant first:
 | `endpoint` | 12 | 0–4095 | The per-node endpoint slot (the path leaf the map resolves). |
 
 `encode_can_id` / `decode_can_id` are exact inverses for any in-range value; an
-input beyond 29 bits decodes to `nullopt`.
+input beyond 29 bits decodes to `nullopt`. A distinct `version` prefix is a
+**disjoint protocol band**: a receiver ignores every frame whose prefix is not its
+own, so two protocol generations share one wire without interpreting each other.
 
 ```{admonition} Bit widths are a reference-impl modeling choice
 :class: note
-[ADR-0030](../adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md)
+[ADR-0030](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md)
 pins the *layout* (`version | node | endpoint`) and the priority semantics but not
 the exact widths. The `4 / 13 / 12` split is the reference implementation's choice:
 4 version bits cover protocol generations comfortably, while 13/12 balance node
@@ -62,7 +66,7 @@ count (8192) against endpoints-per-node (4096). Other deployments may repartitio
 the lower 25 bits; the version prefix and the priority ordering are the invariants.
 ```
 
-### ID assignment *is* priority assignment
+### ID assignment is priority assignment
 
 CAN arbitration is **dominant-bit** — when two nodes transmit simultaneously, the
 frame with the **numerically lower ID wins the bus**. Because `node` is more
@@ -76,32 +80,39 @@ CAN-specific knob exposed through the identity↔path map, with no side channel.
 The 29-bit ID deliberately carries **no bus field** — the bus is implicit (it is the
 wire the frame arrived on). A node with several CAN controllers (e.g. `can0`, `can1`)
 therefore distinguishes them **in the path, not in the ID**: under the path-as-route
-model ([RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md), [ADR-0027](../adr/0027-transport-and-connections-are-vertices.md))
-**each bus is a named child vertex of the CAN transport**:
+model ([RFC-0004 — remote operation addressing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md),
+[ADR-0027 — a transport and each connection within it is a first-class `/` vertex](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0027-transport-and-connections-are-vertices.md))
+**each bus is its own connection vertex under the CAN module**:
 
 ```
 /net/can/
-   ├─ 0/   :settings{ bitrate }  :stats{ bus_off, err_count }  :acl   ← controller can0
-   │   └─ <node>/<endpoint…>      ← devices on bus 0, resolved by the 29-bit ID
-   └─ 1/   :settings{ … }  :stats{ … }  :acl                          ← controller can1
-       └─ <node>/<endpoint…>
+   ├─ can0/  :settings{ bitrate }  :stats{ bus_off, err_count }  :acl   ← controller can0
+   │   └─ n<node>/…                ← peers audible on bus can0, synthesized per read
+   └─ can1/  :settings{ … }  :stats{ … }  :acl                         ← controller can1
+       └─ n<node>/…
 ```
 
-- The bus identifier (`0`, `1`) is a **`NAME` segment**, not a `[N]` index — `NAME`
-  excludes `[` `]`, and the bus is a distinct *identity*, not a slice (segment-`[N]`
-  indices stay reserved for address-shift data slicing below, never for bus
-  addressing). The default name is the controller index (à la SocketCAN), but it MAY
-  be semantic (`/net/can/powertrain`).
-- Each bus is its own vertex with independent `:settings` (bitrate), `:stats`
-  (bus-off / error counters), and `:acl` — two controllers are two hardware
-  identities, exactly the "distinct lifecycle ⇒ `/` vertex" rule of ADR-0027.
+- A connection vertex is mounted and routed at **`/net/<module>/<name>`**, so the
+  module segment (`can`) groups a node's buses and the connection NAME (`can0`)
+  identifies one controller.
+- The bus identifier (`can0`, `can1`) is a **`NAME` segment**, not a `[N]` index —
+  `NAME` excludes `[` `]`, and the bus is a distinct *identity*, not a slice
+  (segment-`[N]` indices stay reserved for address-shift data slicing below, never
+  for bus addressing). The default name is the controller interface (à la
+  SocketCAN), but it MAY be semantic (`/net/can/powertrain`).
+- Each bus is its own vertex with independent `:settings`, `:stats` (bus-off /
+  error counters), and `:acl` — two controllers are two hardware identities,
+  exactly the "distinct lifecycle ⇒ `/` vertex" rule of ADR-0027.
 
 :::{warning}
 `:stats` is **intended, not implemented** — including in the tree diagram above. A field read or
 write to `:stats` answers `ERROR{tr::schema::not_found}`; the field **namespace** the dispatcher recognises is `{subscribers, acl, children, settings, schema, identity}`. A recognised name can still answer `NOT_FOUND` when the facet is empty, or `SCHEMA_NOT_FOUND` for a spelling it does not accept (bare `:subscribers` requires `[N]`) or for a facet deliberately absent (`:identity` with no keypair, RFC-0011 §C.3) — so the set is a namespace, not a list of things that read. Whether per-transport `:stats` should
-exist at all is open at [#584](https://github.com/avatarsd-llc/libtracer/issues/584); the diagram is kept because the design
+exist at all is open ([#584](https://github.com/avatarsd-llc/libtracer/issues/584)); the diagram is kept because the design
 intent — per-bus counters on a per-bus vertex — is what that decision is about. `:settings` and
-`:acl` in the same diagram are real.
+`:acl` in the same diagram are real facets, but the per-knob spelling is not: bare `:settings`
+serves the settings container, while a selector naming a bus knob (`:settings.bitrate`) is outside
+the flat QoS-knob namespace and answers `SCHEMA_NOT_FOUND` on both read and write. Link parameters
+reach a bus through the config of the write that creates it.
 :::
 - The `identity↔path` map keys on **(which controller the frame arrived on) + (`node`
   | `endpoint`)** → `/net/can/<bus>/…`, so two buses carrying the **same `node` id
@@ -115,8 +126,10 @@ A multi-frame payload is spread across **consecutive endpoint slots** of the sam
 node — `endpoint[0..N]` — so slice *index* simply **shifts the endpoint sub-field**
 (`slice_can_id(base, index)`). The whole group therefore stays in one
 `version|node` band and keeps a single arbitration-priority class. This is exactly
-[ADR-0011](../adr/0011-address-shift-totality-opt-in.md) address-shift slicing
-applied to the CAN ID.
+[ADR-0011 — address-shift totality is opt-in](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0011-address-shift-totality-opt-in.md)
+address-shift slicing applied to the CAN ID. A group whose base slot plus its slice
+count would overrun the endpoint field is not representable on that node; the
+allocator wraps back to the first data slot, leaving the control slot free.
 
 ## Framing modes: classic vs CAN-FD
 
@@ -142,14 +155,14 @@ zero-copy subviews); applying the DLC padding is the SocketCAN binding's job.
 ## Multi-frame reassembly — address-shift, not ISO-TP
 
 `can_reassembly_t` reassembles a payload that spanned several CAN frames. Each
-frame is a **slice**; slices are grouped by the in-flight identity `(origin, ts)`
-(the same collision-free `(origin_peer_id, ts)` used for cycle-dedup and slice
-grouping, [CONTEXT.md](../../CONTEXT.md) *Address-shift slicing*) and ordered by
-`index`. `assemble()` chains the slices, in index order, into a `rope_t` — zero
-copies.
+frame is a **slice**; slices are grouped by the in-flight identity
+**`(origin_peer_id, ts)`** — the same collision-free identity used for cycle-dedup
+and for slice grouping everywhere else ([03-addressing](03-addressing.md),
+[CONTEXT.md](../../CONTEXT.md) *Address-shift slicing*) — and ordered by `index`.
+`assemble()` chains the slices, in index order, into a `rope_t` — zero copies.
 
 This deliberately reuses libtracer's **one reassembly model** rather than bolting
-on **ISO-TP** ([ADR-0030](../adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md)):
+on **ISO-TP** ([ADR-0030](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md)):
 the same mechanism that "spans a 9-byte elided CAN sample → a GB advertised rope
 group" serves CAN, UDP scatter-gather, and QUIC alike.
 
@@ -162,27 +175,27 @@ group" serves CAN, UDP scatter-gather, and QUIC alike.
 - **Totality is opt-in.** `set_expected_count()` (the advertise manifest's slice
   count) makes the group `is_complete()` only when every index `0..count-1` is
   present, and makes a dropped **trailing** slice detectable. Without it, a trailing
-  drop is invisible — exactly [ADR-0011](../adr/0011-address-shift-totality-opt-in.md)
+  drop is invisible — exactly [ADR-0011](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0011-address-shift-totality-opt-in.md)
   totality-opt-in. `assemble()` returns a rope only once the group is complete.
 
 ```{admonition} Layer placement of the reassembly buffer
 :class: note
-`can_reassembly_t` lives in **`tr::net`**, beside `transport_can` (header
-`can_reassembly.hpp`). ADR-0030/#55 originally named it for L0 (`tr::mem::mem_can_reassembly_t`),
-but that was a self-admitted layer inversion — an L0 type referencing the L1
-`rope_t` it assembles. The rehome (ADR-0048 round 2) resolves it: the reassembly
-is a transport-plane concern that composes L1 views into a rope, exactly as any
-transport does, so no `tr::mem` type reaches up into `tr::view`. Its structure is
-drawn from an injected `std::pmr::memory_resource` and the live group count is
-bounded by config (evict-oldest + a `dropped_groups` counter), so a constrained
-node degrades by a bounded drop rather than unbounded growth.
+A multi-frame reassembly buffer is a **transport-plane** concern, not an L0 one,
+because it composes L1 views into a rope exactly as any transport does. Placing it
+at L0 would make an L0 type reference the L1 `rope_t` it assembles, which the layer
+model forbids ([ADR-0048 — one wire-grammar core behind a chunk cursor](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0048-one-wire-grammar-chunk-cursor-rope-aware-decode.md)).
+Its bounding behaviour follows the same discipline as every other libtracer
+resource: structure is drawn from an injected resource, the live group count is
+bounded by configuration, and overflow evicts the oldest group and increments a
+`dropped_groups` counter. A constrained node therefore degrades by a bounded drop
+rather than by unbounded growth, and no magic number appears anywhere in the buffer.
 ```
 
 ## The in-band advertise frame and the dynamic map
 
 The `identity↔path` map is **dynamic config held inside `transport_can`** — not
 static, not held by a privileged node. It self-establishes from in-band
-**advertise** frames: an advertise is a full-TLV control frame that *establishes* a
+**advertise** frames: an advertise is a control frame that *establishes* a
 header-elided binding at runtime, mapping a CAN ID to a libtracer path, after which
 the **lean, id-matched** data frames carry only payload (the
 `discovery_static`/`discovery_mdns`-shaped "full caps sets up non-interactive
@@ -195,10 +208,10 @@ bindings" split, [CONTEXT.md](../../CONTEXT.md) *Framing modes*).
   carries the slice count and total length, and the lean id-matched **slice** frames
   that follow are chained into a rope by id+index. This is the advertise+id-match
   generalization ([CONTEXT.md](../../CONTEXT.md) *Advertise + id-match*), the
-  manifest [ADR-0011](../adr/0011-address-shift-totality-opt-in.md) otherwise carries
-  statically.
+  manifest [ADR-0011](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0011-address-shift-totality-opt-in.md)
+  otherwise carries statically.
 
-Two further forms serve the [ADR-0044](../adr/0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md)
+Two further forms serve the [ADR-0044 — transport-peer enumeration is stateless and synthesized from live traffic](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md)
 peer plane (both transport-internal framing in the same advertise family):
 
 - **Hello / presence** — `slice_count == 0`: binds nothing and precedes no data;
@@ -226,8 +239,9 @@ widened the v1 header with the explicit `target_node` field):
 | 18 | `path_len` | path bytes (UTF-8 libtracer path) |
 
 `encode_advertise` / `decode_advertise` round-trip this; decode rejects a wrong
-magic, an unknown format version, a non-zero reserved byte, or a truncated buffer
-(`nullopt` = need more / malformed), with an overflow-safe length check.
+magic, an unknown format version, a non-zero reserved byte, a `path_len` beyond the
+declared bound, or a truncated buffer (`nullopt` = need more / malformed), with an
+overflow-safe length check.
 
 ### Self-healing (no coordinator)
 
@@ -243,23 +257,24 @@ CAN-ID scheme); the map machinery runs in `transport_can` on whatever node hosts
 
 CAN's `identity↔path` map is **mandatory** because the ID *is* the path. On a
 **full-TLV** transport (ws/UDP) the same idea is **opt-in compaction**: the
-**route-handle** ([05-protocol-tlvs.md](05-protocol-tlvs.md) §route-handle, RFC-0004
-§E.1, ADR-0035 slice 4) is a per-link **u16 label** that aliases an established
-delivery route, advertised in-band exactly as a CAN binding is — but with the label
-**swapped each hop** (MPLS-style), since a ws label is meaningful only on its link.
-The mechanics mirror this section one-for-one: an `ADVERTISE` frame establishes
-`label ↔ route`, lean `COMPACT` frames then carry only the label + value, a stale
-label is dropped with a `HANDLE_NACK`, and **re-advertise on (re)connect is the
-self-heal**. The difference is policy, not mechanism: CAN always labels (no route
-fits in 8 bytes); ws labels **only** flows whose `SUBSCRIBER.qos_settings.delivery_compact`
-is set, so a ws node forwarding one-shot/cold traffic holds zero label state. The ws
-table lives in `tr::net::route_handle_t`, owned by `fwd_router_t`.
+**route-handle** ([05-protocol-tlvs.md](05-protocol-tlvs.md) §route-handle frames,
+RFC-0004 §E.1, [ADR-0035 — implementing RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0035-implementing-rfc-0004-remote-operation-addressing.md)
+slice 4) is a per-link **u16 label** that aliases an established delivery route,
+advertised in-band exactly as a CAN binding is — but with the label **swapped each
+hop** (MPLS-style), since a ws label is meaningful only on its link. The mechanics
+mirror this section one-for-one: an `ADVERTISE` frame establishes `label ↔ route`,
+lean `COMPACT` frames then carry only the label + value, a stale label is dropped
+with a `HANDLE_NACK`, and **re-advertise on (re)connect is the self-heal**. The
+difference is policy, not mechanism: CAN always labels (no route fits in 8 bytes);
+ws labels **only** flows whose `SUBSCRIBER.qos_settings.delivery_compact` is set, so
+a ws node forwarding one-shot/cold traffic holds zero label state. The ws table
+lives in `tr::net::route_handle_t`, owned by `fwd_router_t`.
 
 ## The SocketCAN binding (`transport_can`)
 
-Increment 2 realizes the binding: `tr::net::transport_can` is a `transport_t` that
-drives the framing above over a real Linux CAN bus. A forwarder hands it a complete
-libtracer frame via `send()`; the byte-exact frame surfaces at the peer's receiver.
+`tr::net::transport_can` is a `transport_t` that drives the framing above over a
+real Linux CAN bus. A forwarder hands it a complete libtracer frame via `send()`;
+the byte-exact frame surfaces at the peer's receiver.
 
 ### The `can_link_t` seam (testable without kernel CAN)
 
@@ -267,13 +282,15 @@ The raw frame I/O sits behind a small seam, `can_link_t` (`write_raw(frame)` + a
 `on_receive` callback), so the transport never touches a socket directly:
 
 - **`socketcan_link_t`** — the production impl: `socket(PF_CAN, SOCK_RAW, CAN_RAW)`,
-  `CAN_RAW_FD_FRAMES` enabled best-effort (a classic-only controller still works),
+  `CAN_RAW_FD_FRAMES` enabled best-effort (a classic-only controller works unchanged),
   bound to a named interface (`vcan0`/`can0`), with a receive thread that translates
-  each kernel `can_frame`/`canfd_frame` into a mode-agnostic `can_frame_data_t`. It is
-  compiled only under `#ifdef __linux__` (a no-op stub elsewhere) so sanitizer and
-  non-Linux builds stay clean. Concurrency mirrors `transport_ws`: serialized writes,
-  the fd reset under the write lock before close, a bounded receive timeout polling the
-  stop flag, destructor does stop→join→close.
+  each kernel `can_frame`/`canfd_frame` into a mode-agnostic `can_frame_data_t`.
+  Platform selection is a build-system concern, not an in-source `#ifdef`: the Linux
+  translation unit compiles on Linux and a no-op stub — whose `ok()` stays false, so
+  a port such as an ESP-IDF TWAI link can supply the real `can_link_t` — compiles
+  everywhere else, keeping sanitizer and non-Linux builds clean. Concurrency mirrors
+  `transport_ws`: serialized writes, the fd reset under the write lock before close,
+  a bounded receive timeout polling the stop flag, destructor does stop→join→close.
 - An **in-memory fake link** (in `core/tests/transport_can_test.cpp`) pairs two
   transports on one bus with no syscalls — this is what makes the binding fully
   testable in a plain container with no `vcan` module.
@@ -290,41 +307,43 @@ never interleave on the bus):
    windows** even on an FD bus, so no DLC padding can perturb the far-side stream
    decoder. The manifest carries the **exact total length** and **slice count**.
 3. The lean **data frames** follow, one per window, on consecutive endpoint slots
-   (`slice_can_id` address-shift). In CAN-FD mode a short tail window is **padded up
-   the DLC lattice** (`can_fd_dlc_round_up`) to a legal frame length.
+   starting at the first data slot (`slice_can_id` address-shift). In CAN-FD mode a
+   short tail window is **padded up the DLC lattice** (`can_fd_dlc_round_up`) to a
+   legal frame length; the pad bytes are zero.
 
 ### Ingress: learn, reassemble, trim
 
-The receive thread decodes each frame's CAN ID. A **control-slot** frame feeds the
-per-node advertise byte stream (`decode_advertise` pops each complete manifest),
-which **learns the `id ↔ path` binding** and sets the group's expected slice count.
-A **data-slot** frame is reassembled by `can_reassembly_t`, keyed by
-`(node, base-endpoint) + (endpoint − base) index` — all derived from the CAN ID, so
-no per-frame origin/ts ever rides the bus. On completion the slices are flattened and
-**trimmed back to the advertised total length**, which is what undoes CAN-FD tail
-padding so the delivered frame is byte-exact. A data frame that races ahead of its
-manifest (cross-ID arbitration) is held pending and re-driven when the manifest lands.
+The receive thread decodes each frame's CAN ID, discards any frame outside its own
+version band and any frame bearing its own node id (the self-echo guard). A
+**control-slot** frame feeds the per-node advertise byte stream (`decode_advertise`
+pops each complete manifest), which **learns the `id ↔ path` binding** and sets the
+group's expected slice count. A **data-slot** frame is reassembled by
+`can_reassembly_t`, keyed by `(node, base-endpoint) + (endpoint − base) index` — all
+derived from the CAN ID, so no per-frame origin/ts ever rides the bus. On completion
+the slices are flattened and **trimmed back to the advertised total length**, which
+is what undoes CAN-FD tail padding so the delivered frame is byte-exact. A data
+frame that races ahead of its manifest (cross-ID arbitration) is held pending and
+re-driven when the manifest lands.
 
-```{admonition} Increment-2 modeling choices
+```{admonition} Modeling choices of the binding
 :class: note
-- **Advertise-per-send.** This binding emits a fresh manifest for every `send()`. It
+- **Advertise-per-send.** The binding emits a fresh manifest for every `send()`. It
   keeps the data plane correct and uniform (single value and multi-frame group are the
   same path) and makes DLC-padding trim unconditional. The steady-state
-  *advertise-once-then-reuse* optimization (one binding, many lean values) is a future
-  refinement; the learned bindings already persist and self-heal by overwrite on
-  re-advertise.
+  *advertise-once-then-reuse* optimization (one binding, many lean values) is not
+  realized; the learned bindings persist and self-heal by overwrite on re-advertise.
 - **Ordering.** Correctness relies on per-bus in-order delivery of a group's frames
   (which a single producer gets on CAN); the pending-data buffer covers control/data
   cross-ID reordering.
 ```
 
-### Peer enumeration + transparent per-peer forwarding (ADR-0044)
+### Peer enumeration and transparent per-peer forwarding
 
 A CAN bus reaches many peers over one wire, so `transport_can` also implements
 the kind-neutral `tr::net::bus_link_t` capability (`transport_t::bus()`), which is
 how a client of the node holding the bus **enumerates** the currently-reachable
 peers and **forwards through** to them — with hard statelessness guarantees
-([ADR-0044](../adr/0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md)):
+([ADR-0044](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md)):
 
 - **No peer ever creates a vertex** — on this node or any other. The listing is
   synthesized per read; nothing persists in the graph; a peer's reboot mutates
@@ -339,13 +358,13 @@ peers and **forwards through** to them — with hard statelessness guarantees
 - **The transit node keeps zero per-request state**: forwarding rides the
   RFC-0004 frame-carried routes (`dst`-shrink / `src`-grow) unchanged.
 
-**Enumeration.** Peers appear as `n<node-id>` (decimal — the stable identity the
-structured 29-bit ID already carries; collision-safe within the bus). A read of
-the connection vertex's `:children[]` (e.g. `read("/net/can0:children[]")`,
-locally or via a remote `FWD{READ}`) serves a `POINT` whose children are
-`POINT{NAME n<id>}` members — a snapshot of who is currently audible, wired
-through the vertex's `on_children` handler by `transport_vertex_t` for any link
-whose `bus()` is non-null.
+**Enumeration.** Peers appear as `n<node-id>` (decimal, no leading zeros — the
+stable identity the structured 29-bit ID carries; collision-safe within the
+bus). A read of the connection vertex's `:children[]` (e.g.
+`read("/net/can/can0:children[]")`, locally or via a remote `FWD{READ}`) serves a
+`POINT` whose children are `POINT{NAME n<id>}` members — a snapshot of who is
+currently audible, wired through the vertex's `on_children` handler by
+`transport_vertex_t` for any link whose `bus()` is non-null.
 
 **Forwarding.** Each listed name doubles as a routable next-hop segment: when a
 `FWD`'s first `dst` segment names no static child, the router's
@@ -364,7 +383,7 @@ sequenceDiagram
     participant P as peer P (CAN node 5)
     participant Q as bystander Q (node 7)
     P->>T: hello advertise (join) — last-heard table gains n5
-    C->>T: FWD{READ, dst=/net/can0, :children[]}
+    C->>T: FWD{READ, dst=/net/can/can0, :children[]}
     T-->>C: POINT{ POINT{NAME n5}, … } (synthesized, no vertices)
     C->>T: FWD{READ, dst=/n5/a/b, src=/reply-ep}
     Note over T: "n5" = no static child → peer_link("n5")<br/>strip n5, grow src=/cli/reply-ep
@@ -379,17 +398,35 @@ The liveness model is deliberately minimal (design (b) of the ADR-0044
 implementation note): a peer is "reachable" iff it has been audible within
 `peer_ttl` — an idle-but-alive node ages out until it next speaks. Probe-on-read
 (a discovery probe emitted by the `:children[]` read, answered within a bounded
-window) is the recorded follow-on; it needs deferred reply completion at the
-`op_resolver_t` terminus, which is synchronous today.
+window) is the recorded follow-on and is **not implemented**: it needs deferred
+reply completion at the `op_resolver_t` terminus, which resolves synchronously.
 
-### Tested two ways
+### Test surface
 
 - **Docker-local, no kernel CAN** — `core/tests/transport_can_test.cpp` pairs two
   transports over the in-memory fake link and asserts a multi-CAN-frame TLV round-trips
   byte-exact (classic **and** CAN-FD), advertise/map learning works, FD DLC padding is
-  correct yet trimmed away, and the lifecycle is clean. Runs under ASan/UBSan and TSan.
+  correct yet trimmed away, and the lifecycle is clean.
+  `core/tests/transport_can_peers_test.cpp` covers the peer plane over the same fake
+  link: `:children[]` synthesizes exactly the audible peers, no peer vertex is created,
+  and a directed group reaches its target while a bystander delivers nothing. Both run
+  under the sanitizer builds.
 - **Real `vcan0`** — `core/tests/transport_can_vcan_test.cpp` drives two
   `socketcan_link_t` over a kernel virtual-CAN device and asserts a byte-exact frame
   each way. It **self-skips** when `vcan0` cannot bind, so the required gates never
   depend on kernel CAN; the dedicated **`can-vcan-e2e`** workflow sets `vcan0` up so the
   socket path runs for real.
+
+## Pitfalls
+
+| Rule | Failure mode it prevents |
+| --- | --- |
+| The 29-bit ID carries no bus field. | An implementation that packs a controller index into the ID collides with a deployment that repartitioned the lower 25 bits, and loses the property that one arbitration band belongs to one node. Two buses are two path segments, not two ID layouts. |
+| A slice group is `(origin_peer_id, ts) + index`. | Grouping by `ts` alone merges the slices of two publishers that emit at the same timestamp into one corrupt rope. |
+| Trailing-slice loss is only detectable with a declared count. | An implementation that infers `N` from the highest index observed reports a 100-slice group as complete when index 99 was dropped. The advertise manifest's `slice_count` is what makes the group total. |
+| A CAN-FD frame is trimmed back to the advertised total length. | Delivering the padded frame hands the receiver DLC pad bytes as payload, so a frame that round-trips on a classic bus fails on an FD one. |
+| The advertise rides classic ≤8-byte windows even on an FD bus. | Padding a manifest slice inserts pad bytes into the control byte stream, and the far side's `decode_advertise` desynchronizes for every subsequent manifest, not just the padded one. |
+| A frame whose version prefix is not the receiver's is ignored, as is one bearing the receiver's own node id. | Interpreting another protocol generation's frames yields garbage bindings; consuming self-echo (`CAN_RAW_RECV_OWN_MSGS`, or a second local socket) makes a node its own peer and pollutes the last-heard table. |
+| A peer name is `n<node-id>`, decimal, no leading zeros. | An implementation that accepts `n05` or `N5` resolves two names to one peer, and a route grown into `src` fails to round-trip as the inbound NAME the reply is matched against. |
+| Peer listings are synthesized, never stored. | An implementation that materializes a vertex per peer mutates every listener's tree on a peer reboot, and leaks one vertex per node ever heard. |
+| `:stats` is not in the field namespace. | An implementation that publishes bus-off or error counters by writing `/net/can/<bus>:stats` gets `tr::schema::not_found` on every emission and its subscribers never see the event. |
