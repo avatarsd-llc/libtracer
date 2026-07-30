@@ -213,7 +213,8 @@ struct registry_t {
 /** @brief This thread's claim on a domain index, released when the thread ends. */
 class participant_t {
    public:
-    participant_t() = default;
+    /** @brief Bind to the domain up front; see @ref self for why the timing matters. */
+    explicit participant_t(registry_t& reg) : reg_(reg) {}
     participant_t(const participant_t&) = delete;
     participant_t& operator=(const participant_t&) = delete;
     ~participant_t();
@@ -228,12 +229,23 @@ class participant_t {
     std::size_t claim();
 
    private:
+    registry_t& reg_;
     std::size_t idx_ = kNoIndex;
 };
 
-/** @brief This thread's participant. Function-local so an unused slot policy emits no TLS. */
+/**
+ * @brief This thread's participant. Function-local so an unused slot policy emits no TLS.
+ *
+ * The `registry()` call in the initializer is **load-bearing, not decoration**: it forces the
+ * domain (and the exit sweep registered with it) to be constructed BEFORE this thread_local,
+ * so the sweep is destroyed after it. Constructed the other way round — which is what happens
+ * if the participant reaches the domain lazily — the main thread's participant unwinds after
+ * the sweep has already run and orphans its parked nodes into a registry nobody will read
+ * again: a leak at exit, and one a leak checker only sees when a program happens to end with
+ * something parked.
+ */
 [[nodiscard]] inline participant_t& self() {
-    static thread_local participant_t p;
+    static thread_local participant_t p{registry()};
     return p;
 }
 
@@ -407,7 +419,7 @@ inline void retire_and_flush(node_t* n) {
 }
 
 inline std::size_t participant_t::claim() {
-    registry_t& r = registry();
+    registry_t& r = reg_;
     for (std::size_t i = 0; i < kHazardReaderSlots; ++i) {
         bool expected = false;
         if (r.cells[i].claimed.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
@@ -422,7 +434,7 @@ inline std::size_t participant_t::claim() {
 
 inline participant_t::~participant_t() {
     if (idx_ == kNoIndex) return;
-    registry_t& r = registry();
+    registry_t& r = reg_;
     lists_t& l = r.lists[idx_];
     r.cells[idx_].pinned.store(nullptr, std::memory_order_release);
 
@@ -538,8 +550,20 @@ class hazard_slot_t {
      *
      * Announce, re-read, then copy the `shared_ptr` out of the pinned node — the copy is the
      * promotion that lets the handle outlive the pin, and it is the one shared-cache-line RMW
-     * this scheme cannot remove. A slot nobody has written costs a single relaxed-ish load and
+     * this scheme cannot remove. A slot nobody has written costs a single acquire load and
      * never touches the domain at all.
+     *
+     * The announce and the **re-read** are both `seq_cst` so that both sit in one total order
+     * with the publisher's `exchange` and the reclaimer's fence: if a scan did not observe this
+     * announcement, then in that order the scan's read precedes it, the displacement precedes
+     * the scan, and so this re-read must observe the displacement and retry. `acquire` on the
+     * re-read is the usual spelling and is believed sound, but it leaves the argument resting
+     * on coherence rather than on the total order — and it costs nothing to close, since a
+     * `seq_cst` load is a plain `mov` on x86-64.
+     *
+     * Reusing a node is deliberately allowed to ABA: a reader can pin `n`, have it reclaimed
+     * and republished, and revalidate against the same address. That is not a bug — `n` is live
+     * and holds a value some writer published, which is all a read promises.
      */
     [[nodiscard]] value_ptr_t load() const {
         detail_hp::node_t* n = slot_.load(std::memory_order_acquire);
@@ -548,7 +572,7 @@ class hazard_slot_t {
         std::atomic<detail_hp::node_t*>& cell = detail_hp::registry().cells[t.index()].pinned;
         for (;;) {
             cell.store(n, std::memory_order_seq_cst);
-            detail_hp::node_t* again = slot_.load(std::memory_order_acquire);
+            detail_hp::node_t* again = slot_.load(std::memory_order_seq_cst);
             if (again == n) break;
             n = again;
             if (n == nullptr) {
