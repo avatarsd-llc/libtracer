@@ -168,10 +168,10 @@ struct mount_hit_t {
  * @brief The forward path's entry to @ref resolve_mount_segs — peeks `dst`, then descends.
  */
 template <class Cursor>
-[[nodiscard]] mount_hit_t resolve_mount(const child_registry_t& registry, const Cursor& cur,
-                                        seg_reader_t<Cursor>& rd, fwd_pre_t& pre) {
-    std::array<std::pair<std::size_t, std::size_t>, tr::net::kMountPeekMax> off{};
-    const std::size_t n = peek_fwd_dst_segs(cur, off, pre);
+[[nodiscard]] mount_hit_t resolve_mount_at(
+    const child_registry_t& registry, seg_reader_t<Cursor>& rd, fwd_pre_t& pre,
+    const std::array<std::pair<std::size_t, std::size_t>, tr::net::kMountPeekMax>& off,
+    std::size_t n) {
     if (n == 0) return {};
     std::array<std::string_view, tr::net::kMountPeekMax> seg;
     for (std::size_t i = 0; i < n; ++i) seg[i] = rd.read(off[i].first, off[i].second);
@@ -188,6 +188,21 @@ template <class Cursor>
         pre.valid = false;  // nothing to hand over — the rebuild parses for itself
     }
     return hit;
+}
+
+/**
+ * @brief Peek the `dst` segments and resolve the mount in one call.
+ *
+ * For a caller that has NOT already peeked. The rope arm has — it peeks to decide whether the
+ * frame is a structured FWD at all — so it calls @ref resolve_mount_at directly with the
+ * offsets it already holds, instead of paying a second walk of the same TLV headers.
+ */
+template <class Cursor>
+[[nodiscard]] mount_hit_t resolve_mount(const child_registry_t& registry, const Cursor& cur,
+                                        seg_reader_t<Cursor>& rd, fwd_pre_t& pre) {
+    std::array<std::pair<std::size_t, std::size_t>, tr::net::kMountPeekMax> off{};
+    const std::size_t n = peek_fwd_dst_segs(cur, off, pre);
+    return resolve_mount_at(registry, rd, pre, off, n);
 }
 
 /**
@@ -441,14 +456,20 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
         // Only a structured FWD enters the routing arm; ADVERTISE / COMPACT / HANDLE_NACK
         // fall through to the control path below, exactly as they did when this was gated on
         // peek_fwd_first_dst_seg.
+        // ONE peek serves both jobs: deciding that this is a structured FWD at all (the gate),
+        // and supplying the segment offsets the mount descent needs. It used to be two — the
+        // gate peeked and threw the result away, then `resolve_mount` walked the same TLV
+        // headers again. On a multi-link rope those headers may straddle links, so the second
+        // walk was the expensive kind. The span arm never had the duplicate.
         std::array<std::pair<std::size_t, std::size_t>, tr::net::kMountPeekMax> probe{};
-        if (peek_fwd_dst_segs(cur, probe) > 0) {
+        fwd_pre_t pre;
+        const std::size_t probe_n = peek_fwd_dst_segs(cur, probe, pre);
+        if (probe_n > 0) {
             // Resolve the mount prefix (ADR-0061 strip-K). Segments are read in place when
             // the rope keeps them contiguous and stitched into the reader's scratch when they
             // straddle a link; an over-long segment is not routable ⇒ fall to the terminus.
             seg_reader_t<wire::grammar::rope_cursor> rd{cur, {}, 0};
-            fwd_pre_t pre;
-            const mount_hit_t hit = resolve_mount(registry_, cur, rd, pre);
+            const mount_hit_t hit = resolve_mount_at(registry_, rd, pre, probe, probe_n);
             if (hit.link != nullptr) {
                 route_fwd_forward(inbound_name, inbound_ctx, from_peer, hit.strip_k, cur, *hit.link,
                                   &pre);
