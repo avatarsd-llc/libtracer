@@ -79,6 +79,10 @@ include_patterns = [
     "docs/performance.md",
     "docs/test-report.md",
     "docs/reference/**",
+    # Contributor design programs (RAM, concurrency): published because the
+    # measured per-target cost of the reference implementation is material to anyone
+    # deploying it. NOT the standard — docs/design/README.md says so in its first line.
+    "docs/design/**",
     "docs/modules/**",
     "docs/examples/**",
     "docs/spec/v1.md",

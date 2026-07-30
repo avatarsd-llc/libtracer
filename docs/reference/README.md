@@ -114,7 +114,7 @@ The wire format does not version per-frame. v1 is committed once; future incompa
 - Not a feature comparison vs Zenoh / DDS / MQTT. See [../../README.md](../../README.md).
 - Not a security architecture. The wire format is security-agnostic; security wraps it at the transport layer per [10-module-catalog.md](10-module-catalog.md).
 - Not a roadmap. See the issue tracker.
-- **Not a performance specification.** [15-concurrency-and-scaling.md](15-concurrency-and-scaling.md) is the one section that quotes measurements. It does so as *evidence for a claim about hardware*, with the host named — never as a number an implementation must hit. Anything specific to the reference implementation's own locks and costs is deliberately outside this suite, in `docs/design/concurrency/`, so that every section here stays writable from the spec alone.
+- **Not a performance specification.** [15-concurrency-and-scaling.md](15-concurrency-and-scaling.md) is the one section that quotes measurements. It does so as *evidence for a claim about hardware*, with the host named — never as a number an implementation must hit. Anything specific to the reference implementation's own locks and costs is deliberately outside this suite, in [`../design/concurrency/`](../design/concurrency/README.md), so that every section here stays writable from the spec alone.
 
 ```{toctree}
 :caption: Overview & cross-cutting

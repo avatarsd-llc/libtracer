@@ -28,3 +28,11 @@ The model arms in `bench_lkv_slot slot` are named `model_*` in the source precis
 of them once shared names with real library types, and this project's documentation has already
 been corrected twice for quoting a model arm as a path cost. Never quote a `slot`-mode number
 as a forecast for a real path.
+
+```{toctree}
+:caption: Concurrency program
+:hidden:
+:maxdepth: 1
+
+Scaling and serialization <00-scaling-and-serialization>
+```
