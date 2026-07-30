@@ -186,6 +186,15 @@ endif()
 set(LIBTRACER_ACL_POLICY allow_only_policy_t)  # the MCU profile — no full-ACL Kconfig yet
 set(LIBTRACER_LKV_SLOT sp_atomic_slot_t)  # write-dominated single core: keep the refcount slot
 set(LIBTRACER_HAZARD_READER_SLOTS 64)  # unused here: the refcount slot never builds the domain
+# False-sharing padding: DERIVED, not a Kconfig option. A unicore chip (C2/C3/C6/H2, or a
+# dual-core built with CONFIG_FREERTOS_UNICORE) has no second core to false-share with, so
+# the padding is pure static RAM loss — measured 896 B of .bss for 16 stripes on rv32 -Os.
+# Asking the integrator would only invite the wrong answer: the chip already knows.
+if(CONFIG_FREERTOS_UNICORE)
+    set(LIBTRACER_CACHE_LINE_BYTES 0)
+else()
+    set(LIBTRACER_CACHE_LINE_BYTES 64)
+endif()
 configure_file(
     "${LIBTRACER_ROOT}/core/include/libtracer/config.hpp.in"
     "${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config.hpp"

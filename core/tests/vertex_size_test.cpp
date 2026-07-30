@@ -59,6 +59,21 @@ static_assert(sizeof(void*) != 4 || sizeof(vertex_t) <= kMax32,
               "vertex_t grew past the 32-bit RAM-diet gate (#361) — move the new member "
               "behind vertex_ext_t, don't inline it");
 
+/**
+ * @brief The stripe table's footprint gate: a padded stripe must be EXACTLY one padding
+ *        unit wide.
+ *
+ * The table is `kVertexLockStripes` stripes of static RAM, so a member that pushes a stripe
+ * one byte past the line silently DOUBLES it — the same class of invisible regression the
+ * `vertex_t` ceilings above exist to catch, in the one global mutable buffer libtracer links
+ * into a node. Skipped where padding is switched off (`kCacheLineBytes == 0`): with no
+ * isolation requested the stripe is simply its payload, whatever that rounds to.
+ */
+static_assert(tr::graph::kCacheLineBytes == 0 ||
+                  sizeof(tr::graph::vertex_stripe_t) == tr::graph::kCacheLineBytes,
+              "a padded stripe must occupy exactly one cache line — a stripe that spans two "
+              "doubles the process-wide table for no false-sharing gain");
+
 /** @brief A view over a fresh, owned heap segment holding @p bytes (as graph_test). */
 tr::view::view_t make_value(std::span<const std::byte> bytes) {
     tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());

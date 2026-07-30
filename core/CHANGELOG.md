@@ -4,13 +4,31 @@ All notable changes to the **public API** of the `core/` reference implementatio
 (the headers under `include/libtracer/`) are recorded here, per
 [CONTRIBUTING](../.github/CONTRIBUTING.md) / [CLAUDE.md](../CLAUDE.md). This tracks the
 *implementation's* C++ API — which is implementation-defined per
-[ADR-0013](../docs/adr/0013-v1-scope-boundaries.md) and versioned independently of
-the immutable **protocol-v1** wire format it implements.
+[ADR-0013](../docs/adr/0013-v1-scope-boundaries.md) and versioned independently of the
+**protocol-v1** wire format it implements. (That format is still `DRAFT` — see
+[`docs/spec/v1.md`](../docs/spec/v1.md) — and becomes immutable on release, not before; the
+two surfaces differ in which instrument a change needs, not in whether one is permitted.)
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The
 reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
+
+### Added
+
+- **`tr::graph::kCacheLineBytes` — false-sharing padding becomes a per-target knob.** New
+  constant in `libtracer/config.hpp` (CMake: `-DLIBTRACER_CACHE_LINE_BYTES`, default 64), and
+  **0 means "this target has no second core to false-share with"**. It governs every shared
+  table libtracer pads: the vertex lock stripes and the hazard domain's cells and retire
+  lists. Measured on rv32 (`-Os -fno-exceptions -fno-rtti`, GCC 15.2, real `core/src/graph.cpp`),
+  16 stripes cost **1,024 B of `.bss` at 64 and 128 B at 0** — a 896 B static-RAM saving on a
+  single-core node, with the hazard domain worth a further 6.5 KB when bound. The ESP-IDF
+  component *derives* the value from `CONFIG_FREERTOS_UNICORE` rather than adding a Kconfig
+  option: a unicore build has no second core by construction. Purely an optimization axis —
+  the wrong value costs control-plane throughput and changes nothing observable. The host
+  default is unchanged, byte for byte. New: `tr::graph::kStripeAlign`,
+  `tr::graph::detail_hp::kDomainAlign` (both derived, both `static_assert`ed to have actually
+  taken effect), and a `sizeof(vertex_stripe_t)` gate in `vertex_size_test`.
 
 ### Changed
 

@@ -77,6 +77,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -164,14 +165,28 @@ struct node_t {
     node_t* next = nullptr;                 /**< @brief Retire / free-list link. */
 };
 
+/**
+ * @brief The domain's padding width: @ref tr::graph::kCacheLineBytes, floored at the widest
+ *        payload's natural alignment so every value of the knob stays well-formed.
+ *
+ * A single-core target sets the knob to 0 and the two tables below collapse to their
+ * payloads — there is no second core for a scan to false-share against. See the knob's own
+ * documentation for why `alignas` may not simply be handed the number.
+ */
+inline constexpr std::size_t kDomainAlign =
+    std::max({graph::kCacheLineBytes, alignof(std::atomic<node_t*>), alignof(std::size_t)});
+
 /** @brief One participant's announcement, cache-line isolated so a scan does not false-share. */
-struct alignas(64) cell_t {
+struct alignas(kDomainAlign) cell_t {
     std::atomic<node_t*> pinned{nullptr}; /**< @brief The node this thread is reading, or null. */
     std::atomic<bool> claimed{false};     /**< @brief Whether a live thread owns this index. */
 };
 
+static_assert(alignof(cell_t) == kDomainAlign,
+              "the cell's alignas was silently dropped — see kDomainAlign's derivation");
+
 /** @brief One participant's private node lists — touched only by its owner, so never atomic. */
-struct alignas(64) lists_t {
+struct alignas(kDomainAlign) lists_t {
     node_t* retired = nullptr;  /**< @brief Displaced nodes awaiting a scan. */
     std::size_t retired_n = 0;  /**< @brief Length of @ref retired. */
     std::size_t scan_at = 0;    /**< @brief Scan once @ref retired_n reaches this. */
