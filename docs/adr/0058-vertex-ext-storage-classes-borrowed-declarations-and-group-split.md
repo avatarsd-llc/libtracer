@@ -118,8 +118,7 @@ a `std::span<const app_field_static_t>` and **a `std::span` binds implicitly to 
 `std::vector`** — so a caller that built its table into a function-local vector kept compiling,
 unchanged, under a contract it no longer satisfied.
 
-That is what happened to the reference firmware's C shim
-([strawberry-fw #80](https://github.com/avatarsd-llc/strawberry-fw/issues/80)):
+That is what happened to a downstream firmware consumer's C shim:
 `trc_app_fields_set_static` converted a C POD array into a local
 `std::vector<app_field_static_t>`, installed it, and returned. Every `:settings.app.*` write on
 that node then read freed heap; it surfaced as `PERMISSION_DENIED` — garbage access bits, not an

@@ -164,7 +164,7 @@ namespace {
  *         item. A `unique_ptr` buffer, never a `std::vector` — the vector's THROWING
  *         allocator inside the braced initializer defeated the `new (std::nothrow)`
  *         guard on the shell: under `-fno-exceptions` a reply-sized copy hitting heap
- *         exhaustion aborted the node (the Gorshok browser-session crash). */
+ *         exhaustion aborted the node (the browser-session crash). */
 struct tx_work_t {
     httpd_handle_t handle;                /**< @brief Owning httpd instance. */
     int fd;                               /**< @brief Destination peer socket. */
