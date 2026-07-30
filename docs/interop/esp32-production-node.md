@@ -1,28 +1,28 @@
-# A production ESP32 node — the hardened profile
+# ESP32 node profile
 
-A detailed, opinionated recipe for running libtracer as the **main communication
-stack** of a real ESP32-class product — not a demo. Every rule on this page was
-learned the hard way on a shipped ESP32-C6 deployment (single-core RISC-V, 4 MB
-flash, Wi-Fi + CAN, a web UI, OTA, and libtracer as the graph plane) and then
-distilled here with the proprietary parts removed. Where the
-[custom-device guide](custom-device.md) says *what* to expose, this page says *how
-to run it* within an MCU's RAM, flash, and task budget.
+A node that runs libtracer as its **primary communication stack** on an ESP32-class
+MCU is a **bounded reactor**: every resource the graph plane touches is an injected,
+fixed-capacity pool declared at init, and every overload surfaces as backpressure
+rather than as an allocation failure. Where the
+[custom-device guide](custom-device.md) says *what* a device exposes, this page says
+how to run it within an MCU's RAM, flash and task budget.
 
 The compile-tested starting point is the bundled
 [`full_node` example](https://github.com/avatarsd-llc/libtracer/tree/main/integrations/esp-idf/examples/full_node)
-(`integrations/esp-idf/examples/full_node`) — this page is the production hardening
-layered on top of it.
+(`integrations/esp-idf/examples/full_node`); this page is the hardening layered on
+top of it.
 
 ---
 
 ## 1. The node profile: a bounded reactor
 
-The shape that survives production is a **bounded reactor**: every resource the
-graph plane touches is an injected, fixed-capacity pool declared at init, and
-every overload surfaces as **backpressure, never OOM**. On a single-core MCU there
-is no second core to absorb a leak — the heap watermark only ever ratchets down.
+On a single-core MCU there is no second core to absorb a leak — the heap watermark
+only ever ratchets down. So the whole graph plane draws from storage the application
+owns and sized, and reports exhaustion by value.
 
-Concretely (the `full_node` one-slab recipe, ADR-0039/0042):
+The one-slab recipe
+([ADR-0039 — pmr memory model](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0039-pmr-memory-model-host-aligned-allocation.md),
+[ADR-0042 — refcounted receiver seam](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md)):
 
 ```cpp
 /** @brief One static slab feeds BOTH memory seams — nothing grows at runtime. */
@@ -30,7 +30,7 @@ static std::byte g_slab[24 * 1024];
 
 // Front region: pool_t — RX segments for owning transport delivery.
 // Every inbound datagram lands in a pool slot; exhaustion = backpressure.
-tr::mem::pool_t rx_pool{front_region(g_slab), /*slot=*/1536};
+tr::mem::pool_t rx_pool{front_region(g_slab), /*slot_payload=*/1536};
 
 // Back region: monotonic + synchronized arena — the pmr seam (label tables,
 // LKV control blocks).
@@ -39,23 +39,41 @@ std::pmr::monotonic_buffer_resource arena{back_region(g_slab).data(),
 std::pmr::synchronized_pool_resource shared{&arena};
 
 // The FAILABLE seam is separate: everything a PEER can provoke (the terminus
-// decode arena today) draws from it, and it reports exhaustion by value instead
-// of throwing (ADR-0065). Injecting only `shared` above leaves those allocations
+// decode arena) draws from it, and it reports exhaustion by value instead of
+// throwing (ADR-0065). Injecting only `shared` above leaves those allocations
 // on the global heap — where they at least RECYCLE, which matters below.
 //
-// ... graph_t graph{&shared, &rx_pool_backend, /*ctl=*/&blocks};
+// ... graph_t graph{&shared, &rx_pool, /*ctl=*/&blocks};
 // ... fwd_router_t router{graph, &shared, /*rx=*/&blocks};
 ```
 
+Those are the three injection points of `graph_t`'s constructor — the pmr resource,
+the value backend and the failable control source
+(`core/include/libtracer/graph.hpp:187-189`) — and the matching three of
+`fwd_router_t` (`core/include/libtracer/fwd_router.hpp:91-93`). The full set of
+build-time and injected bounds is catalogued in
+[the configuration space](../design/config/00-configuration-space.md); the failure
+semantics of the third seam are in
+[failable allocation and backpressure](../design/allocation-and-backpressure.md).
+
 :::{warning}
-Do **not** reach for `tr::mem::bump_source_t` as `blocks` here. It is scope-lifetime
-only: a bump block is never reclaimed, so a long-lived bump seam fills monotonically and
-then refuses every frame — measured, an 8 KiB one decoded 6 frames and rejected the next
-194. Use `tr::mem::pool_source_t`, which recycles.
+Do **not** reach for `tr::mem::bump_source_t` as `blocks`. It is scope-lifetime only:
+a bump block is never reclaimed, so a long-lived bump seam fills monotonically and
+then refuses every frame. An 8 KiB bump source wired as a router's `rx`, decoding a
+53-byte FWD, served **six frames and rejected the next 194**
+([ADR-0067 — bounded recycling source](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md)
+§1; the same figure is carried on the type at
+`core/include/libtracer/mem_source.hpp:178-179`). A frames-served count without the
+payload size is not a measurement — 194 rejected 53-byte frames is a different fact
+from 194 rejected 1 KiB frames.
+
+Use `tr::mem::pool_source_t`, which recycles.
 :::
 
-`pool_source_t` takes the slab **and** a caller-owned span of `size_class_t` slots, so both
-bounds are yours rather than the library's:
+`pool_source_t` takes the slab **and** a caller-owned span of `size_class_t` slots
+(`core/include/libtracer/mem_source.hpp:325`), so both bounds belong to the caller
+rather than to the library
+([RFC-0006 — resource-bounded nesting depth](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md)):
 
 ```cpp
 // One region of the slab, plus a class table sized from what this node actually draws.
@@ -64,93 +82,128 @@ static tr::mem::pool_source_t<> blocks{ctl_region, ctl_classes};
 ```
 
 :::{warning}
-**Give each transport child its own source; do not share one across receive threads.** A
-shared free-list pool was measured at roughly a fifteenth of its single-thread rate on a
-12-core host while the platform heap scaled, and a lock-free CAS does not fix it
-(ADR-0060 erratum 1, ADR-0067 §3). Pass it per child instead — the bound then also becomes
-per-peer, so one noisy link cannot starve another's decode:
+**Give each transport child its own source; do not share one across receive
+threads.** A shared free-list pool measured at roughly **a fifteenth of its own
+single-thread rate** on a 12-core host while the platform heap scaled, and a
+lock-free `[index | ABA-tag]` CAS does not fix it — it replaces one contended word
+with the same word
+([ADR-0060 — LKV copy store](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0060-lkv-copy-store-injected-value-backend.md)
+erratum 1). Confirmed at the router's own RX draw by `bench_rx_source_topology`
+(median of three 300 ms runs, 12-core / 24-thread host): the shared pool falls to a
+**sixty-seventh** of its single-thread rate, 244 ns → 16,428 ns per thread, while a
+per-child pool tracks the scaling heap across the sweep (ADR-0067 §3).
+
+Pass the source per child instead — the bound then also becomes per-peer, so one
+noisy link cannot starve another's decode:
 
 ```cpp
 router.add_child("up", up_link, /*rx=*/&up_blocks);
 ```
 
-A source shared at **wiring** frequency — a graph's `ctl` — is fine with a locking `Sync`
-policy (`tr::mem::sync_mutex_t`, or a target's own interrupt-disable section).
+A source shared at **wiring** frequency — a graph's `ctl` — is fine with a locking
+`Sync` policy (`tr::mem::sync_mutex_t` from `mem_source_sync.hpp`, or a target's own
+interrupt-disable section). The policy is the `pool_source_t<Sync>` template
+parameter, defaulting to `sync_none_t`, which compiles to nothing.
 :::
 
-After it has run, `classes_used()` says how many slots the node really needed and
-`overflowed()` must read zero — a non-zero count means the class span is too small and
-blocks are being lost to the slab.
+After a soak run, `classes_used()` says how many slots the node really needed and
+`overflowed()` must read zero (`core/include/libtracer/mem_source.hpp:376,380`) — a
+non-zero count means the class span is too small and blocks are being lost to the
+slab.
 
-Rules that follow from it:
+Rules that follow:
 
-- **Steady state allocates from the slab, not the global heap.** After init, the
-  ESP-IDF heap trace should show libtracer flat.
-- **Never let allocation failure abort.** ESP-IDF's default C++ `new` throws → on
-  `-fno-exceptions` that is an instant `abort()`. A production node under memory
-  pressure once crash-looped exactly this way until every allocation on the
-  delivery path was converted to alloc-or-backpressure (drop the sample, count it,
-  publish the counter — see §6). Audit any code path that calls throwing `new`.
+- **Steady state allocates from the slab, not the global heap.** After init, an
+  ESP-IDF heap trace shows libtracer flat.
+- **Allocation failure must not abort.** ESP-IDF's default C++ `new` throws; under
+  `-fno-exceptions` that lowers to `abort()`. Every allocation on the delivery path
+  is alloc-or-backpressure: drop the sample, count it, publish the counter (§6).
+  Audit any path that calls throwing `new`.
 - **Size the pool from the transport, not from hope.** `udp_transport_t` sizes RX
-  segments to `min(64 KiB, backend->max_segment_size())` — give the pool MTU-sized
-  slots and datagrams arrive without a 64 KiB scratch buffer on a small thread
-  stack.
+  segments to `min(64 KiB, backend->max_segment_size())`
+  (`core/src/transport_udp.cpp:134`; `kMaxDatagram = 65536` at
+  `core/include/libtracer/transport_udp.hpp:40`). Give the pool MTU-sized slots and
+  datagrams arrive without a 64 KiB scratch buffer on a small thread stack.
 
-## 2. Compose the node for its role — transports are the RAM lever
+## 2. Role composition and the transport RAM lever
 
-The single biggest idle-RAM finding from production: **the core is lean; the
-threads are not free.** Each socket/CAN listener a node loads costs a dedicated
-FreeRTOS task — stack + TCB ≈ **12 KB apiece** — plus its protocol buffers. A node
-that enables TCP-listen "just in case" and CAN "because the silicon has it" carries
-~24 KB of idle RAM for capabilities nobody wired.
+**Transports, not the core, dominate idle RAM: each socket/CAN listener costs a
+dedicated FreeRTOS task.** Budget stack + TCB ≈ **12 KB apiece** plus the transport's
+own protocol buffers, and ~**24 KB** of idle RAM for a node that enables TCP-listen
+"just in case" and CAN "because the silicon has it".
+
+:::{note}
+Those two figures are a **budgeting rule of thumb**, not a measurement — they carry
+no named instrument or host. The 12 KB has a configuration basis rather than a
+measured one: on ESP-IDF a `std::thread` is a pthread on FreeRTOS, so every recv
+thread takes `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT`, which the bundled example
+pins at `12288` (`integrations/esp-idf/examples/full_node/sdkconfig.defaults`).
+Right-size against real high-water marks per §4 rather than against this number.
+:::
 
 So compose per deployment role, and load nothing else:
 
-| Role | Load | Don't load |
+| Role | Load | Do not load |
 | ---- | ---- | ---- |
 | Wi-Fi leaf publishing sensors | 1× WS **or** UDP listener | TCP-listen, CAN |
 | CAN sensor pod | `transport_can` (TWAI link) | all socket transports |
 | CAN↔IP gateway (forwarder) | CAN + one socket transport | the third transport |
-| Bench/debug image | whatever you're testing | ship image ≠ debug image |
+| Bench/debug image | whatever is under test | a ship image is not a debug image |
 
-Listeners are **config-created in-band** (`write /net:children[]
-SPEC{listener, kind=udp|tcp|ws, port}`), so role composition is deployment
-configuration, not a firmware fork — but the *type set* you compile in is the
-flash/RAM commitment, so trim `LIBTRACER_SRCS` to the kinds the product ships.
+Listeners are **config-created in-band**: a `SPEC` write to `/net:children[]`
+carrying a `kind` field creates a connection. The universal keys are `addr`, `kind`,
+`port`, `role`, `keepalive` (`core/src/transport_vertex.cpp:53`, read at `:64`); the
+two catalog child types are `client` and `listener` (`:99-107`); the created
+connection mounts and routes at `/net/<module>/<name>`, module defaulting to
+`<kind>-client` / `<kind>-server` (`:150`, `:174`, `:205`). The accepted direction is
+[RFC-0014 — creator endpoint, connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md),
+which replaces the single global catalog with a per-module creator endpoint
+`/net/<module>/conn`; that endpoint is not implemented, so a node built against this
+release writes `/net:children[]`.
 
-Budget honestly: a full graph plane (codec, graph, router, one socket transport)
-adds **tens of KB of idle heap over a bare-metal firmware.** That is the legitimate
-cost of a real comms stack, not a leak — reclaim RAM by shedding transports and
-retiring the legacy stacks libtracer replaces, not by shaving the core.
+Role composition is therefore deployment configuration, not a firmware fork — but the
+*type set* compiled in is the flash and RAM commitment, so trim `LIBTRACER_SRCS` to
+the kinds the product ships (§7).
+
+Budget for the plane itself: a full graph plane (codec, graph, router, one socket
+transport) adds **tens of KB of idle heap** over a bare-metal firmware. That figure
+is a hedged expectation, not a measurement. It is the cost of a real comms stack, not
+a leak — reclaim RAM by shedding transports and retiring the ad-hoc stacks libtracer
+replaces, not by shaving the core.
 
 ## 3. Single-core tuning
 
-- **`CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES=4`** (menuconfig → libtracer). The
-  stripe table is the only global mutable buffer libtracer links; 16 stripes suit
-  a multi-core host, while on a single-core chip 4–8 reclaims RAM at negligible
-  contention cost (the lock-free LKV read/write hot path never touches stripes).
+- **`CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES=4`** (menuconfig → libtracer;
+  `integrations/esp-idf/libtracer/Kconfig:48`). The stripe table is the only global
+  mutable buffer libtracer links: `N * sizeof(vertex_stripe_t)` bytes of `.bss`
+  reserved at link time, plus the same for the condvar table. Sixteen stripes suit a
+  multi-core host — that is the default (`kVertexLockStripes = 16`,
+  `core/include/libtracer/config.hpp:79`) — while a single-core chip reclaims RAM at
+  **4–8** (`config.hpp:70-71`). A stripe's platform mutex is lazy: on FreeRTOS it
+  costs ~90 B of heap on its first lock, so an untouched stripe costs its struct and
+  no heap.
 - **Pin task priorities deliberately**: transport RX threads just below the
-  application's control loop; the publish cadence belongs to the owner (the
-  producer owns cadence — no libtracer throttling exists to save you).
-- The TWAI RX callback runs in ISR context and only enqueues; dispatch happens in
-  a task. Keep your own handlers on the same discipline — an apply seam that does
-  real work must defer, not run in the delivery path of a transport thread.
+  application's control loop. Publish cadence belongs to the producer; no throttling
+  exists in the library.
+- **ISR handlers enqueue, they do not dispatch.** The TWAI RX callback runs in ISR
+  context and only enqueues; dispatch happens in a task. An application apply seam
+  that does real work defers likewise rather than running inside a transport thread's
+  delivery path.
 
-## 4. Task-stack discipline (the crash you will otherwise ship)
+## 4. Task-stack sizing
 
-Two production incidents, one rule each:
+**Size stacks from stressed high-water marks, never idle ones.** A stack that reads
+40 % free at idle can overflow on the first deep path. ESP-IDF's HTTP server task
+takes its stack from `httpd_config_t.stack_size`, which `HTTPD_DEFAULT_CONFIG()`
+leaves at **4096 B** — enough for plain request serving and not for a deep WS send
+path. Right-sizing means running the device at its boundary (max peers, churn of
+subscribe/unsubscribe, biggest frames, OTA in flight), then reading
+`uxTaskGetStackHighWaterMark` per task and adding margin. Publishing the census as
+vertices (§6) makes every later soak test re-check it.
 
-1. **Size stacks from stressed high-water marks, never idle ones.** A stack that
-   looks 40 % free at idle can overflow on the first deep path — the production
-   crash was an HTTP-server task at ESP-IDF's default 4096 B overflowing under a
-   deep WS send path, weeks after it "worked." Right-size = run the device at its
-   boundary (max peers, churn of subscribe/unsubscribe, biggest frames, OTA in
-   flight), then read `uxTaskGetStackHighWaterMark` per task and add margin.
-   Publish the census as vertices (§6) so every future soak test re-checks it.
-2. **Keep every stack override in versioned `sdkconfig.defaults`.** That 4096
-   regression happened because a working 8192 override lived only in a local
-   `sdkconfig` and silently reverted on a clean checkout. If a stack size matters,
-   it is configuration, and configuration lives in the repo:
+**A stack size is configuration: keep every override in versioned
+`sdkconfig.defaults`.** An override that lives only in a local `sdkconfig` reverts on
+a clean checkout, and the regression reappears weeks later on someone else's machine.
 
 ```ini
 # sdkconfig.defaults — stack sizes are product decisions, not local state
@@ -158,84 +211,102 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_HTTPD_TASK_STACK_SIZE=8192   # if the node serves HTTP/WS
 ```
 
+`CONFIG_ESP_MAIN_TASK_STACK_SIZE` is an upstream ESP-IDF symbol (IDF default 3584).
+`CONFIG_HTTPD_TASK_STACK_SIZE` is **not** — no such symbol exists in ESP-IDF, whose
+httpd stack is the runtime `httpd_config_t.stack_size` field. A product that wants
+the httpd stack under version control declares the symbol in its own
+`Kconfig.projbuild` and assigns it into the config struct before `httpd_start`; the
+`sdkconfig.defaults` line above is then the versioned record of that decision. Set
+without the project-side symbol, the line is inert.
+
 ## 5. Network behavior under pressure
 
-- **An oversized or unsendable WS frame is that frame's problem, not the
-  session's.** Drop the one delivery and count it; never tear down the peer's
-  session because one fan-out payload didn't fit. (A session-drop here turns one
-  slow subscriber into a reconnect storm.)
-- **Egress is gather, not copy**: the rope-to-wire path lowers to `sendmsg`/iovec
-  on lwIP unmodified. Don't "help" by flattening payloads before send — the only
-  legitimate flatten is a substrate boundary the DMA cannot span.
-- **Backpressure beats buffering.** A slow subscriber gets stale-drop (bounded
-  ring, newest wins) — an unbounded egress queue on a 512 KB-RAM chip is just a
-  crash with extra steps.
+- **An oversized or unsendable frame is that frame's problem, not the session's.**
+  Drop the one delivery and count it; never tear down a peer's session because one
+  fan-out payload did not fit. A session drop turns one slow subscriber into a
+  reconnect storm.
+- **Egress is gather, not copy.** The rope-to-wire path lowers to an iovec `sendmsg`
+  (`core/src/posix_endpoint.cpp:92,98`; the TCP assembly is at
+  `core/src/transport_tcp.cpp:57-73`), and lwIP provides `sendmsg` unmodified. Do not
+  flatten payloads before send; the only legitimate flatten is a substrate boundary
+  DMA cannot span.
+- **Backpressure beats buffering.** Where a node buffers for a slow subscriber, the
+  buffer is bounded and newest-wins. An unbounded egress queue on a 512 KB-RAM chip
+  is a crash with extra steps.
 
-## 6. Observability is vertices (self-describing, per the interop model)
+## 6. Observability vertices
 
-Everything you need during a soak test should be readable — and subscribable —
-through the node itself, described via `:schema` like any other data
+Everything a soak test needs is readable — and subscribable — through the node
+itself, described via `:schema` like any other data
 ([interoperability](../interoperability.md)):
 
 ```text
 /system/
 ├── heap/free          u32 bytes — current free heap
-├── heap/min_free      u32 bytes — lifetime low-watermark (the number that matters)
+├── heap/min_free      u32 bytes — lifetime low-watermark
 ├── tasks/<name>/hwm   u32 bytes — per-task stack high-water mark
 └── drops/<counter>    u32 — backpressure counters (WS drops, pool exhaustion, …)
 ```
 
-The `min_free` trend under stress is the single most predictive health signal a
-fleet dashboard can watch; per-task HWM vertices make §4's re-check a `read`, not
-a JTAG session.
+The backpressure counters come from `graph_t::delivery_drops()`
+(`core/include/libtracer/graph.hpp:768`), which snapshots three per-cause totals —
+`no_target`, `denied`, `out_of_memory` (`graph.hpp:751-758`). They are counted and
+never enforced: nothing in the library reads them, so the deployment decides what to
+alarm on. The three loads are individually relaxed rather than one atomic snapshot,
+so their useful reading is "is this growing", not an instant total.
 
-## 7. Build-system gotchas (ESP-IDF specifics that cost days)
+The `min_free` trend under stress is the most predictive health signal a fleet
+dashboard can watch; per-task HWM vertices make §4's re-check a `read` rather than a
+JTAG session.
+
+## 7. ESP-IDF build-system rules
 
 - **A `CONFIG_*`-gated `PRIV_REQUIRES` never propagates** — component requirements
   resolve before Kconfig runs. Gate **SRCS** on `CONFIG_*`, keep REQUIRES
-  unconditional, and make sure some CI job builds each Kconfig-gated TU.
-- **Every new core source must also be appended to the component's
-  `LIBTRACER_SRCS`** (`integrations/esp-idf/libtracer/CMakeLists.txt`) or the
-  chip build fails to link while host builds stay green.
-- **Platform TU selection is a build-system concern, not `#ifdef`s**: chip targets
-  compile `twai_link.cpp` + a SocketCAN stub; the `linux` target compiles real
-  SocketCAN and no TWAI. Extend the pattern, don't macro around it.
+  unconditional, and keep a CI job building each Kconfig-gated TU.
+- **Every new core source is also appended to the component's `LIBTRACER_SRCS`**
+  (`integrations/esp-idf/libtracer/CMakeLists.txt:41`) or the chip build fails to
+  link while host builds stay green.
+- **Platform TU selection is a build-system concern, not an `#ifdef`.** Chip targets
+  compile `twai_link.cpp` plus a SocketCAN stub; the `linux` target compiles real
+  SocketCAN and no TWAI (`integrations/esp-idf/libtracer/CMakeLists.txt:127-137`).
+  Extend that pattern rather than adding macros.
 - Build with `-fno-exceptions -fno-rtti` and treat any throwing construct on the
-  delivery path as a bug (§1).
+  delivery path as a defect (§1).
 
 ## 8. Flash layout
 
-- **Two OTA app slots + rollback** (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`): a
-  new image must confirm itself healthy or the bootloader reverts.
-- **Ship web assets in a dedicated data partition**, not inside the app image — a
-  UI tweak then doesn't burn an app slot, and the app image stays under the slot
-  ceiling. Beware the staleness footgun: a partition flashed once and forgotten
-  will happily serve last month's UI against this month's firmware; make the asset
-  write part of the same release step as the app OTA.
-- Expect the graph plane to be roughly flash-neutral-to-negative vs the ad-hoc
-  stacks it replaces (protocol handlers, bespoke framing, glue): the production
-  cutover measured the firmware **smaller** after migration, with the codec/graph
-  cost more than offset by deleted legacy.
+- **Two OTA app slots plus rollback** (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`): a
+  new image confirms itself healthy or the bootloader reverts.
+- **Web assets ship in a dedicated data partition**, not inside the app image — a UI
+  change then does not burn an app slot, and the app image stays under the slot
+  ceiling. The staleness footgun: a partition flashed once and forgotten serves last
+  month's UI against this month's firmware, so the asset write belongs to the same
+  release step as the app OTA.
+- Expect the graph plane to be roughly **flash-neutral-to-negative** against the
+  ad-hoc stacks it replaces — protocol handlers, bespoke framing, glue. The codec and
+  graph cost is offset by the deleted legacy; whether the net is negative on a given
+  product depends on how much legacy actually goes away.
 
-## 9. Validate like production, not like a demo
+## 9. Validation procedure
 
-The measurement discipline that made the numbers above trustworthy:
+Measurements of an embedded node are only comparable under these conditions:
 
-1. **Pin the config before comparing.** Idle-heap deltas between two images are
-   meaningless unless both `sdkconfig`s are diffed — most "regressions" were
-   config drift, not code.
-2. **Rebuild your own baselines.** Never trust a previously-flashed board's label;
-   flash both images yourself in the same session.
-3. **Churn is the real test**: hundreds of rounds of subscribe/unsubscribe,
-   create/delete, connect/disconnect while publishing at rate. Crashes hide in
-   the churn path, not the steady state.
-4. **Bank numbers only from the boundary**: min-free heap and per-task HWM read
-   *after* the stress run (§6), on the shipping image, with the shipping
-   transport set (§2).
+1. **The config is pinned before comparing.** Idle-heap deltas between two images
+   mean nothing unless both `sdkconfig`s are diffed; config drift reads as a code
+   regression.
+2. **Baselines are rebuilt, not inherited.** The label on an already-flashed board
+   is not evidence of what it is running; flash both images in the same session.
+3. **Churn is the test.** Hundreds of rounds of subscribe/unsubscribe, create/delete
+   and connect/disconnect while publishing at rate. Crashes live in the churn path,
+   not the steady state.
+4. **Numbers are banked from the boundary.** Min-free heap and per-task HWM are read
+   *after* the stress run (§6), on the shipping image, with the shipping transport
+   set (§2).
 
 ---
 
-## Putting it together
+## Bring-up order
 
 ```text
 boot ─► NVS/config ─► one-slab init (§1) ─► graph_t + vertices + :schema tables
@@ -245,12 +316,15 @@ boot ─► NVS/config ─► one-slab init (§1) ─► graph_t + vertices + :s
      ─► owner loop: sample hardware ─► write vertices (fan-out) ─► feed watchdog
 ```
 
-A node built to this profile runs libtracer as its primary stack in a few tens of
-KB of RAM, degrades under overload by dropping *data* instead of *sessions or
-uptime*, and exposes everything an integrator — or a fleet dashboard, or a
-stranger's coding agent — needs through the same three verbs and `:schema` as
-every other libtracer device.
+A node built to this profile runs libtracer as its primary stack in a few tens of KB
+of RAM, degrades under overload by dropping *data* rather than *sessions or uptime*,
+and exposes everything an integrator — or a fleet dashboard, or a stranger's coding
+agent — needs through the same three verbs and `:schema` as every other libtracer
+device.
 
-For wiring these ideas into an *existing* ESP-IDF firmware with its own legacy
-stack, see the [integration walkthrough](../getting-started.md) and the
-[custom-device guide](custom-device.md).
+Related reading: [building a custom interoperable device](custom-device.md) for what
+a device exposes, [failable allocation and
+backpressure](../design/allocation-and-backpressure.md) for the semantics of the
+`ctl` seam, and [the configuration
+space](../design/config/00-configuration-space.md) for the full set of build-time
+knobs and injected bounds.

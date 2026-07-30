@@ -1,74 +1,101 @@
-# Scaling and serialization in the reference implementation
+# Scaling and serialization
 
-> **Status:** design record, 2026-07-30. **Host for every number below:** AMD Ryzen AI 9
-> HX PRO 375 — 12 physical cores / 24 SMT threads, 1 socket, 1 NUMA node, 24 MiB L3 in **two**
-> instances. Release `-O3`, GCC 14, libstdc++. **Perfect scaling on this host is ~10× at
-> T=24, not 24×.** The hardware model these numbers sit in is
-> [`../../reference/15-concurrency-and-scaling.md`](../../reference/15-concurrency-and-scaling.md) §3.
->
-> **⚠ This document's subject has been mis-attributed three times.** §7 is the ledger. The
-> short version: the residual was blamed on the delivery-path stripe lock, then on "nothing
-> process-wide", before an ablation found a process-wide reader-writer lock on every read. Read
-> §7 before trusting any causal claim in this area from an older document.
+> **Host for every number below:** AMD Ryzen AI 9 HX PRO 375 — 12 physical cores / 24 SMT
+> threads, 1 socket, 1 NUMA node, 24 MiB L3 in **two** instances. Release `-O3`, GCC 14,
+> libstdc++. **Perfect scaling on this host is ~10× at T=24, not 24×.**
+
+Scope: what synchronization costs in this C++ implementation, on that one host. Not the
+standard. The implementation-independent obligations and the four hardware regimes are
+[`../../reference/15-concurrency-and-scaling.md`](../../reference/15-concurrency-and-scaling.md)
+§3, which every regime reference below points at.
+
+Causal claims in this area have repeatedly survived plausible reasoning and failed ablation. §7
+lists the checked cases and the rules they produce; read it before quoting any ratio from this
+page.
 
 ---
 
-## 1. What was wrong, and how it hid
+## 1. Reading a scaling curve
 
-A `graph_t::read` on distinct vertices ran at ~19.7 M ops/s aggregate at 24 readers — and at
-~18.7 M/s at *one* reader. Flat.
+A flat aggregate across thread counts is the signature of a **perfect serializer**, not of an
+absent one. T threads producing one thread's total means each thread is T× slower. A *blocking*
+lock plateaus rather than collapsing (reference §3 regime (c)), so nothing in the curve
+distinguishes "no contention" from "one global lock" — both are flat, and the flat one that
+looks healthy is the one to suspect. Only ablation separates them: short-circuit the suspected
+term, re-measure, and read the delta.
 
-Flat looks like health. It is the opposite: 24 threads producing the same total as one means
-each thread is 24× slower, which is the signature of a **perfect serializer**. Nothing in the
-scaling curve distinguishes "no contention" from "one global lock", because a *blocking* lock
-plateaus rather than collapsing (reference §3 regime (c)). Two documents concluded from the flat
-curve that nothing process-wide was serializing. Both were wrong, and the second one said so in
-as many words — *"nothing process-wide is serializing — not the map lock"* — about the exact
-lock that was.
-
-The lock was `map_mutex_`, taken **shared on every read** by `has_registered_child` to decide
-the leaf/branch fork. It was removed in #654.
+The instance on this codebase. With the branch/leaf fork check taking `map_mutex_` shared,
+`graph_t::read` on distinct vertices runs at ~19.7 M ops/s aggregate at 24 readers and ~18.7 M/s
+at *one* reader. Flat at both ends. Short-circuiting that single check lifts the 24-reader figure
+to 165.3 M ops/s (§3) — an 8.4× ceiling that the curve gives no hint of. The fork check answers
+from a per-vertex bit and takes no lock (§2.1,
+[#654](https://github.com/avatarsd-llc/libtracer/pull/654)).
 
 ---
 
 ## 2. The serializer inventory
 
-Every synchronization point in the graph runtime, what it protects, and where it sits.
-Line numbers are `core/src/graph.cpp` and `core/include/libtracer/vertex.hpp` as of #654.
+Every synchronization point in the graph runtime, what it protects, and where it sits. Line
+numbers are `core/src/graph.cpp` and `core/include/libtracer/vertex.hpp`.
 
 ### 2.1 `map_mutex_` — one `std::shared_mutex` per graph
 
-Process-wide by construction: one graph, one mutex. Guards the ADR-0057 Composite child links
-(`children_->sorted`, appended under the unique lock, so an unsynchronized iteration can
-observe a reallocation) and the `registered_` placeholder flag.
+Process-wide by construction: one graph, one mutex. Guards the Composite child links
+(`children_->sorted`, appended under the unique lock, so an unsynchronized iteration can observe
+a reallocation) and the `registered_` placeholder flag
+([ADR-0057 — graph composite vertex tree](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0057-graph-composite-vertex-tree.md)).
+
+The list below is the complete set of acquisitions in `graph.cpp`.
 
 | taken | where | frequency |
 | --- | --- | --- |
-| **unique** | `register_vertex_key` (`graph.cpp:333`), `retire` (`:398`, `:421`), `retire_subtree` (`:379`) | control plane |
-| shared | `find_ptr` (`:546`) — **so every `path_t` overload pays it once**; measured at ≥3× and non-scaling (§6) | per op, path-addressed only |
-| shared | `field_write` (`:1478`) | per `:field` write |
-| shared | `read_children` (`:1801`), `read_children_folded` (`:1848`), `read_subtree_folded` (`:1917`) | per composed read — these walk, so they need it |
+| **unique** | `register_vertex_key` (`:333`), `retire` (`:398`) | control plane |
+| shared | `find_ptr` (`:546`) — **so every `path_t` overload pays it once**; ≥3× and non-scaling (§6) | per op, path-addressed only |
+| shared | `field_write` (`:1494`) | per `:field` write |
+| shared | `read_children` (`:1817`), `read_children_folded` (`:1864`), `read_subtree_folded` (`:1933`) | per composed read — these walk, so they need it |
 | shared | `note_subscriber_added` / `_removed` (`:534`, `:540`), `evict_link_edges` (`:443`, `:448`), `has_first_level_child` (`:610`) | control plane |
-| ~~shared~~ | ~~`has_registered_child`~~ — **removed by #654**, was on every read | — |
 
-So after #654 a **handle**-addressed scalar read or write takes no map lock at all. A
-**path**-addressed one still resolves through `find_ptr` and pays it once. Every measurement in
-this document uses the handle overloads, which `bench_lkv_slot` benches exclusively — the
-path-addressed numbers are worse than anything here and have not been measured.
+`retire_subtree` (`:363`) takes nothing of its own: it is called from inside `retire`'s unique
+hold and recurses under it. The doc comment at `:421` states the same contract for the
+`evict_link_edges` snapshot helper — it documents a required hold, it is not an acquisition.
+
+The leaf/branch fork reads a per-vertex bit (`vertex_t::has_registered_child`,
+`core/include/libtracer/vertex.hpp:1055`), called from `core/src/graph.cpp:704`, and takes no
+lock. The symbol exists on the vertex rather than on the graph, so a reader grepping for it finds
+a flag test rather than a lock acquisition.
+
+A **handle**-addressed scalar read or write takes no map lock. A **path**-addressed one resolves
+through `find_ptr` and pays it once. Every measurement on this page uses the handle overloads,
+which `bench_lkv_slot` benches exclusively; the path-addressed figures are in §6 and are worse in
+kind, not only in degree.
 
 ### 2.2 The vertex lock stripes — `kVertexLockStripes` mutexes, process-wide
 
-`vertex.hpp:701`, sized by the ADR-0068 config knob (default 16), selected by
-`vertex_stripe_of` hashing the vertex address (`:719`). Guards the fan-out edge list, the STREAM
-ring, the write-sequence bump and the ACL state. Taken by `snapshot_edges` (`:1406`) on **every
-delivery**, and by `add_edge` / `clear_edge` / `set_acl`.
+The stripe count is an ordinary config constant shared through one header
+([ADR-0068 — build configuration is plain C++](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0068-build-configuration-is-plain-cpp-config-header.md);
+default 16, the sharing rationale at `vertex.hpp:717`). The stripe is selected by
+`vertex_stripe_of` (`:799`) from the vertex address, hashed `(h >> 6) % kVertexLockStripes`
+(`:795`). The stripes guard the fan-out edge list, the STREAM ring, the write-sequence bump and
+the ACL state. `snapshot_edges` (`:1482`) takes one on **every delivery**; so do `add_edge`,
+`clear_edge` and `set_acl`.
 
-Two vertices that hash to the same stripe contend even though they share nothing else — which
-is what the `stripe1` bench topology exists to measure.
+The table has two realizations, chosen by whether the platform's `std::mutex` has a constexpr
+constructor. Duplicated here from the configuration notes because a reader reasoning about
+stripe-lock cost looks in this section:
+
+| platform | table | cost |
+| --- | --- | --- |
+| host libstdc++ / libc++ | `inline constinit std::array<vertex_stripe_t, kVertexLockStripes> vertex_stripes` (`vertex.hpp:777`) | none — constant-initialized |
+| a target without a constexpr `std::mutex` | guarded function-local `static` (`:785`) | one predicted branch per control-plane verb |
+
+Two vertices that hash to the same stripe contend even though they share nothing else — which is
+what the `stripe1` bench topology exists to measure.
 
 ### 2.3 The LKV slot — per vertex, policy-selected
 
-`lkv_slot_t` in `config.hpp` (ADR-0069). Two bindings ship:
+`lkv_slot_t` is a compile-time policy (`core/include/libtracer/config.hpp:183`,
+[ADR-0069 — LKV slot is a compile-time policy](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md)).
+Two bindings ship:
 
 | binding | mechanism | regime (reference §3) |
 | --- | --- | --- |
@@ -77,16 +104,17 @@ is what the `stripe1` bench topology exists to measure.
 
 ### 2.4 What has no lock
 
-The write-sequence read, the subtree-listener counters (`own_subs_`, `listeners_above_`), the
-ACL `OWN_ACES` bit, the `#654` fork bit, the cold-extension pointer `ext_`, and — since #555 —
-the publish itself when no waiter is parked.
+The write-sequence read, the subtree-listener counters (`own_subs_`, `listeners_above_`), the ACL
+`OWN_ACES` bit, the branch/leaf fork bit, the cold-extension pointer `ext_`, and the publish
+itself when no waiter is parked
+([#555](https://github.com/avatarsd-llc/libtracer/pull/555)).
 
 ---
 
 ## 3. Two independent limits, and which binds where
 
-The ablation settles it. `has_registered_child` short-circuited to `return false`, tree otherwise
-unchanged, 3 runs, medians, default slot:
+Ablating the fork check isolates the map lock's share. `has_registered_child` short-circuited to
+`return false`, tree otherwise unchanged, 3 runs, medians, default slot:
 
 | shape | T | stock | ablated | |
 | --- | ---: | ---: | ---: | ---: |
@@ -96,17 +124,21 @@ unchanged, 3 runs, medians, default slot:
 | `hot1-read` — one shared vertex | 24 | 1.74 | 1.65 | **0.94×** |
 | `spread-fan0` — write | 8 | 35.4 | 35.4 | 1.00× (control) |
 
-Two limits, and the second hid the first:
+The 0.94× row and the 1.00× control are what make the 8.4× a lock rather than an artifact: a
+change that lifts distinct-vertex reads eightfold while moving the shared-vertex read and the
+write not at all is acting on exactly one term.
 
-1. **The map lock capped every read** at ~20 M/s per process, whatever the topology. That
+Two limits, and the second hides the first:
+
+1. **The map lock caps every read** at ~20 M/s per process, whatever the topology. That the
    `mutex`/`rwlock` calibration lands at 18.3–22.9 M/s aggregate at T=24 is not a coincidence —
    one blocking lock *is* the whole distinct-vertex read rate.
-2. **On one shared vertex the map lock was never what bound.** Removing it changes nothing
-   (0.94×). There the limit is the value's own reference count, and the `sp-load` calibration
-   arm — 1.4 M/s at T=24 — accounts for nearly all of the 1.74 M/s stock rate.
+2. **On one shared vertex the map lock is not what binds.** Removing it changes nothing (0.94×).
+   There the limit is the value's own reference count, and the `sp-load` calibration arm —
+   1.4 M/s at T=24 — accounts for nearly all of the 1.74 M/s stock rate.
 
-The write path takes no map lock (`write_impl`, `graph.cpp:890`), which is the entire "writes
-scale 5×, reads do not" asymmetry that looked mysterious for weeks.
+The write path takes no map lock (`write_impl`, `graph.cpp:899`), which is the entire "writes
+scale 5×, reads do not" asymmetry.
 
 **A caution on the calibration arms.** `sp-load` measures 710 ns/op at T=24 against a whole real
 read of 574 ns — the arm is 1.24× the thing it explains. It is a tight loop with no work between
@@ -116,47 +148,62 @@ applies to `rwlock` (54.7 ns) against the ablation's measured delta (44.6 ns). T
 
 ---
 
-## 4. What the two changes bought
+## 4. Measured cost of the map lock and of the slot binding
 
 `bench_lkv_slot graph`, four build combinations, medians, aggregate M ops/s.
 n = 6 / 6 / 6 / 4 rounds respectively.
 
 ### One shared vertex (`lkvgraph_hot1-fan0-read`)
 
-| T | stock | hazard slot | #654 | both | both/stock |
+| T | stock | hazard slot | map lock removed | hazard slot + map lock removed | ratio to stock |
 | ---: | ---: | ---: | ---: | ---: | ---: |
 | 1 | 21.13 | 18.70 | 31.59 | 23.99 | 1.14× |
 | 8 | 2.19 | 5.20 | 2.36 | 7.59 | 3.48× |
 | 16 | 1.86 | 5.69 | 1.86 | 9.84 | 5.29× |
 | 24 | **1.74** | 7.35 | 1.78 | **15.15** | **8.69×** |
 
-`#654` alone does nothing here, as §3 predicts. The hazard slot alone is 4.2×. Together, 8.69× —
-because removing the lock exposes the slot win that the lock was masking.
+Removing the map lock alone does nothing on this shape, as §3 predicts. The hazard slot alone is
+**4.2× at T=24** (7.35 against 1.74). Together, 8.69× — removing the lock exposes the slot win the
+lock masks.
 
 ### Distinct vertices (`lkvgraph_stripe1-fan0-read`)
 
-| T | stock | hazard slot | #654 | both | best |
+| T | stock | hazard slot | map lock removed | hazard slot + map lock removed | best |
 | ---: | ---: | ---: | ---: | ---: | --- |
-| 8 | 21.26 | 16.13 | **67.92** | 65.32 | #654 |
-| 16 | 22.10 | 15.32 | **122.72** | 103.21 | #654 |
-| 24 | 19.74 | 17.08 | **163.48** | 161.14 | #654 |
+| 8 | 21.26 | 16.13 | **67.92** | 65.32 | map lock removed |
+| 16 | 22.10 | 15.32 | **122.72** | 103.21 | map lock removed |
+| 24 | 19.74 | 17.08 | **163.48** | 161.14 | map lock removed |
+
+Both tables are the map-lock removal ([#654](https://github.com/avatarsd-llc/libtracer/pull/654))
+crossed with the `hazard_slot_t` binding.
 
 163.5 against the ablation's 165.3 — **99% of the ceiling**, so at most 1% remains in any
 reformulation of the fork check itself.
 
-**And the hazard slot is no longer worth binding for this shape.** With the map lock gone its
-pin overhead is exposed with no lock left to remove: `#654` alone beats `both` at every T from 2
-up (35.0/34.1, 35.5/32.1, 67.9/65.3, 122.7/103.2, 163.5/161.1). The direction is consistent five
-times out of five so the sign is real, but only the T=16 gap (19%) exceeds the run-to-run spread
-of 1.16–1.29×; at T=24 it is 1.4%. **Bind `hazard_slot_t` only for genuine many-readers-on-one-
-vertex**, which is narrower guidance than ADR-0069 shipped with.
+**The hazard slot is not worth binding for this shape.** With the map lock off the path its pin
+overhead is exposed and there is no lock left for it to remove: map-lock-removed beats the pair at
+every T from 2 up (35.0/34.1, 35.5/32.1, 67.9/65.3, 122.7/103.2, 163.5/161.1). The direction is
+consistent five times out of five so the sign is real, but only the T=16 gap (19%) exceeds the
+run-to-run spread of 1.16–1.29×; at T=24 it is 1.4%. **Bind `hazard_slot_t` only for genuine
+many-readers-on-one-vertex.** As guidance that is narrower than "bind it for read-heavy work":
+read-heaviness is not the axis — sharing of a single vertex is.
+
+**Reference-returning reads.** A read of a published value returns a reference to it rather than a
+copy: 1.48× median across shapes, 95 of 102 paired samples favouring it, and 3.07× on distinct
+vertices at T=8 ([#661](https://github.com/avatarsd-llc/libtracer/pull/661)).
+
+**Forward demux.** The router's mount scan is not on the graph read path but shares the same
+measurement discipline: a per-slot name digest cuts the marginal scan cost from 333 ns to 17 ns at
+64 links ([#660](https://github.com/avatarsd-llc/libtracer/pull/660)). Its *fixed* cost is the
+more instructive half — §7, rule 4. The delivery side of the runtime is described in
+[`01-write-and-delivery-path.md`](01-write-and-delivery-path.md).
 
 ---
 
 ## 5. The cost budget
 
-One shared-vertex read at T=24 with the hazard slot, before #654 (136 ns system-wide measured).
-Each term from the calibration, not fitted:
+One shared-vertex read at T=24 with the hazard slot and the map lock on the path, 136 ns
+system-wide measured. Each term comes from the calibration, not from a fit:
 
 | term | ns | source |
 | --- | ---: | --- |
@@ -167,75 +214,102 @@ Each term from the calibration, not fitted:
 | **modelled** | **121** | vs **136 measured — 89% explained** |
 
 The 11% unexplained is not the hazard pin's fence. That was measured separately and costs
-**0.30 ns of 136** (0.2%): a `seq_cst` announce on a private line is per-thread work that 24
-cores amortize, while every term above is serialized. A folly-style asymmetric fence
-(`membarrier` on the reclaimer) would be Linux-specific, add a syscall per scan, and buy
-nothing. **Dropped on measurement, not on taste.** This is the one number here from a scratch
-file rather than a committed bench.
+**0.30 ns of 136** (0.2%): a `seq_cst` announce on a private line is per-thread work that 24 cores
+amortize, while every term above is serialized. The alternative — a folly-style asymmetric fence,
+`membarrier` on the reclaimer — would be Linux-specific, add a syscall per scan, and buy nothing.
+Rejected on the measurement above.
+
+Provenance: a scratch harness, not a committed bench — the only such number on this page.
 
 ---
 
-## 6. What is left, ranked
+## 6. Remaining serializers on the read path
 
-| lever | shape | measured | left | tracked |
-| --- | --- | ---: | ---: | --- |
-| — | distinct-vertex read | 163.5 M/s vs 165.3 ceiling | **~0, exhausted** | — |
-| reference-returning read | any read | **1.48× median**, 95/102 paired; 3.07× distinct at T=8 | **landed** | [#661](https://github.com/avatarsd-llc/libtracer/pull/661) |
-| per-slot name digest | forward demux mount scan | marginal scan cost **333 → 17 ns at 64 links** | **landed** | [#660](https://github.com/avatarsd-llc/libtracer/pull/660) |
-| `find_ptr`'s map lock | path-addressed ops | **≥3× always**; ~13–16× quiet, ~4–5× oversubscribed; +8–17 ns/op even at T=1 | large, but TSAN reports 11–12 races when unlocked | [#635](https://github.com/avatarsd-llc/libtracer/issues/635) |
-| stripe lock on delivery | write / fan-out | ×16.6 at T=24 on the adversarial shape; **1.02× on the realistic one** | shape-dependent | [#635](https://github.com/avatarsd-llc/libtracer/issues/635) |
-| scoped non-owning read | the two INTERNAL sites whose value never escapes | 20–60× on those legs | open | [#649](https://github.com/avatarsd-llc/libtracer/issues/649) |
+### The branch/leaf fork
 
-The slot itself is finished: the promotion is two contended RMWs (`sp-copy` 32.5 ns against
-`rmw2` 27.9 — at the hardware floor), and the pin fence is 0.2%.
+Exhausted. The distinct-vertex read reaches 163.5 M/s against the ablation's 165.3 M/s ceiling —
+within 1% of the ablation ceiling; no reformulation of the fork check can recover more.
 
-**Path-addressed operations are no longer the unmeasured gap.** They are measured, and the
-result is worse in KIND than in degree: a path-addressed read is **8.23× slower than a
-handle-addressed one at T=24 and does not scale with cores at all** — 15.4 M/s at one thread
-falling to 12.8 at twenty-four. That is a serializer signature, not a cost. Ablation attributes
-roughly three quarters of it to `find_ptr`'s `map_mutex_`; the rest is the walk itself.
+### `find_ptr`'s map lock — path-addressed operations
 
-**Two things that look like the fix and are not.** Depth is nearly free under contention
-(`find` is 17.3 M/s at three segments and 17.7 at eight), so caching a path prefix buys ~1.5×
-single-threaded and ~0 at T=24. And porting ADR-0063's append-only container to `children_` —
-the obvious move, since the precedent looks exact — **regresses**: measured 0.30× at 1,024
-siblings and 0.078× at 4,096, because ADR-0063 replaced a binary search with a linear scan,
-which is right for tens of links and wrong for a wide composite. Crossover is around 256
-siblings at T=24. Any real fix needs a chunked structure that keeps an index, not a port.
+**A path-addressed read is a serializer, not a slower read.** It is 8.23× slower than a
+handle-addressed read at T=24 and does not scale with cores at all: 15.4 M/s at one thread falling
+to 12.8 at twenty-four. Ablation attributes roughly three quarters of that to `find_ptr`'s
+`map_mutex_`; the rest is the walk itself. The lock's own magnitude is **≥3× always** — ~13–16× on
+a quiet host, ~4–5× oversubscribed — and it costs +8–17 ns/op even at T=1
+([#635](https://github.com/avatarsd-llc/libtracer/issues/635)).
+
+Removing it is not a local edit: the shared hold is what excludes concurrent vertex creation
+during the walk. A count of 11–12 ThreadSanitizer-reported races with the lock removed circulates
+without a named build, shape set or test list, and is **not verified here**. The check that
+settles it: the CI ThreadSanitizer configuration — `-fsanitize=thread -g -O1`,
+`CMAKE_BUILD_TYPE=Debug`, both `LIBTRACER_LKV_SLOT` bindings, `ctest` over `core/`
+(`.github/workflows/core-ci.yml:95-106`) — rebuilt with `find_ptr`'s `shared_lock` removed,
+recording each reported race site rather than a count.
+
+### Two approaches that do not work
+
+Depth is nearly free under contention: `find` is 17.3 M/s at three segments and 17.7 at eight, so
+caching a path prefix buys ~1.5× single-threaded and ~0 at T=24.
+
+Porting the append-only connection-table container to `children_` — the obvious move, since the
+precedent looks exact — **regresses**: 0.30× at 1,024 siblings and 0.078× at 4,096, because that
+container replaced a binary search with a linear scan, which is right for tens of links and wrong
+for a wide composite. Crossover is around 256 siblings at T=24. Any real fix needs a chunked
+structure that keeps an index, not a port
+([ADR-0063 — connection table, lock-free reads](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0063-connection-table-lock-free-reads-trait-serialized-writes.md)).
+
+### The stripe lock on delivery
+
+×16.6 at T=24 on the adversarial shape (many vertices hashing to one stripe) and 1.02× on the
+realistic one. Both halves belong together or neither does: quoting the 16.6× without the 1.02×
+describes a topology nobody deploys, and quoting the 1.02× alone hides a real cliff
+([#635](https://github.com/avatarsd-llc/libtracer/issues/635)).
+
+### The scoped non-owning read
+
+20–60× on the two INTERNAL legs whose value never escapes the call. The magnitude depends on the
+value never outliving the scope, which is why it is confined to those two legs
+([#649](https://github.com/avatarsd-llc/libtracer/issues/649)).
+
+### The slot promotion floor
+
+The promotion is two contended read-modify-writes: `sp-copy` 32.5 ns against `rmw2` 27.9 ns — at
+the hardware floor for the shape. The pin fence is 0.2% (§5). There is nothing left in the slot
+itself.
 
 ---
 
-## 7. Ledger of corrections
+## 7. How measurement goes wrong here
 
-This area's causal claims have been wrong seven times now. Recorded because the *pattern* is
-the lesson, and by this point the pattern is unmistakable: **a magnitude that was reasoned to,
-rather than measured, has been wrong every single time — and usually wrong in the direction
-that made the proposed work look worthwhile.** Each was settled by an ablation or a paired
-re-measurement, never by more reasoning.
+Reasoned magnitudes in this area fail in a consistent direction: they overstate the value of the
+work being proposed. Every row below was settled by an ablation, a recomputation or a paired
+re-measurement — never by further reasoning about a curve.
 
-| # | Claimed | Actually | Settled by |
-| --- | --- | --- | --- |
-| 1 | The residual is `snapshot_edges`' stripe lock ([#635](https://github.com/avatarsd-llc/libtracer/issues/635)) | `snapshot_edges` is on the **delivery** path; `read` never calls it | reading the call graph |
-| 2 | "Nothing process-wide is serializing — not the map lock" | Every read took `map_mutex_` shared | the §3 ablation |
-| 3 | Distinct-vertex reads "retain 94%/91% of their T=1 rate", read as healthy | The arithmetic used the wrong shape's denominator (real figures 106%/96%), and retention of a T=1 *aggregate* is a serializer signature, not a health signature | recomputing it |
-| 4 | Only a config **traits template** could recover the stripe table's 896 B, "because the alignment is part of the type" | The *count* cannot reach the alignment; the **alignment itself is a config constant**. One `constexpr` and one token recovered the identical 896 B, zero templates | building it both ways on rv32 |
-| 5 | Unlocking `find_ptr` is worth **15.9×** | **≥3× always**, but 10.2× / 16.4× / 7.5× / 5.4× across four sessions — it tracks idle CPU, because the base is lock-bound and load-insensitive while the ablation is CPU-bound | four re-runs on a varying host |
-| 6 | Porting ADR-0063's append-only container to `children_` buys 7.33× on all 13 `find_ptr` sites | **Regresses**: 0.30× at 1,024 siblings, 0.078× at 4,096. The precedent replaced a binary search with a linear scan, right for tens of links and wrong for a wide composite | a sibling-width sweep nobody had run |
-| 7 | Returning the published value by reference is worth **2.1×** at T=24 | **1.27×** there; 1.48× median across all shapes. Real, and smaller than claimed | both arms alternating in ONE binary |
+| A plausible claim | What checking shows | The check that decides it |
+| --- | --- | --- |
+| The read-path residual is `snapshot_edges`' stripe lock | `snapshot_edges` (`vertex.hpp:1482`) is on the **delivery** path; `read` never calls it | reading the call graph |
+| "Nothing process-wide is serializing — not the map lock" | Every read acquired `map_mutex_` shared through the fork check — the one lock the claim named | the §3 ablation |
+| Distinct-vertex reads "retain 94%/91% of their T=1 rate", read as healthy | The arithmetic used the wrong shape's denominator — real figures 106%/96% — and retention of a T=1 *aggregate* is a serializer signature, not a health signature | recomputing it |
+| Only a config traits template can recover the stripe table's 896 B, "because the alignment is part of the type" | The *count* cannot reach the alignment; the **alignment itself is a config constant**. One `constexpr` and one token recover the identical 896 B, zero templates | building it both ways on rv32 |
+| Unlocking `find_ptr` is worth **15.9×** | **≥3× always**, but 10.2× / 16.4× / 7.5× / 5.4× across four sessions — it tracks idle CPU, because the base is lock-bound and load-insensitive while the ablation is CPU-bound | four re-runs on a varying host |
+| Porting the append-only connection-table container to `children_` buys 7.33× on all 13 `find_ptr` sites | **Regresses**: 0.30× at 1,024 siblings, 0.078× at 4,096. The precedent replaced a binary search with a linear scan — right for tens of links, wrong for a wide composite | a sibling-width sweep |
+| Returning the published value by reference is worth **2.1×** at T=24 | **1.27×** there; 1.48× median across all shapes. Real, and smaller than claimed | both arms alternating in ONE binary |
+| `hazard_slot_t` is the general read-path win | 4.2× on one shared vertex at T=24; a loss on distinct vertices with the map lock off the path (163.5 against 161.1 at T=24) | running both shapes, not only the shape the policy targets |
 
-Four habits this cost, all now standing rules:
+Four rules follow, and they apply to any measurement on this page:
 
-1. **Quote a bench arm only after checking its return type matches the real API's.** A
-   non-owning model read was quoted as a 1806× win against an achievable 20.8×.
+1. **Quote a bench arm only after checking its return type matches the real API's.** A non-owning
+   model read was quoted as a 1806× win against an achievable 20.8×.
 2. **Report the run-to-run spread beside every ratio.** On these shapes it is 1.0–2.8×, and it
    silently swallows anything under ~1.5×.
-3. **Prefer both arms in ONE binary over two builds.** Entry 7 was found that way: alternating
-   two *builds* leaves layout, allocator state and thermal drift in the comparison, and those
-   are the same size as the effect being measured.
-4. **An optimization's fixed cost is part of the measurement.** The first version of the mount
-   digest ([#660](https://github.com/avatarsd-llc/libtracer/pull/660)) removed 91% of the scan
-   cost and added ~30 ns — a fifth of a whole forward hop — to *every* lookup. Measuring only
-   the axis being improved hid it completely.
+3. **Prefer both arms in ONE binary over two builds.** Alternating two *builds* leaves layout,
+   allocator state and thermal drift in the comparison, and those are the same size as the effect
+   being measured.
+4. **An optimization's fixed cost is part of the measurement.** The first mount digest
+   ([#660](https://github.com/avatarsd-llc/libtracer/pull/660)) removed 91% of the scan cost and
+   added ~30 ns — a fifth of a whole forward hop — to *every* lookup. Measuring only the axis
+   being improved hid it completely.
 
 ---
 
@@ -244,8 +318,8 @@ Four habits this cost, all now standing rules:
 To decide which regime a workload is in, on your own machine:
 
 1. `cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release && cmake --build bench/build -j`
-2. `bench/build/bench_contention` — calibrate the host. Note `local`'s T24/T1: that is your
-   real scaling ceiling, and it is **not** your logical core count.
+2. `bench/build/bench_contention` — calibrate the host. Note `local`'s T24/T1: that is your real
+   scaling ceiling, and it is **not** your logical core count.
 3. `bench/build/bench_lkv_slot graph` — the real shapes. Compare `hot1` (one vertex) against
    `stripe1` and `spread` (distinct) at the same T.
 4. Run each **at least three times, alternating** between the builds you are comparing, and take
@@ -253,4 +327,4 @@ To decide which regime a workload is in, on your own machine:
 5. Read the result against reference §3: aggregate rising ≈ regime (a); flat ≈ a serializer;
    falling ≈ a spin lock.
 6. If a term is suspected, **ablate it** — short-circuit it in a scratch worktree and re-measure.
-   Every correction in §7 came from an ablation and none came from reasoning about a curve.
+   An ablation decides; a curve does not.

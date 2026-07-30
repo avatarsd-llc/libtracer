@@ -1,14 +1,14 @@
-# Reference 06 — User Data Packing into the Graph
+# Reference 06 — User data packing into the graph
 
-> **Status**: draft, v1, 2026-05-03. How application-level data of any size — from a single boolean to a streaming GB/s feed — gets put into the graph and delivered with appropriate copy semantics.
-> **Audience**: anyone designing the data layout for their application.
+> **Topic**: how application data of any size — from a single boolean to a streaming GB/s feed — is put into the graph and delivered with the intended copy semantics.
+> **Audience**: anyone designing the data layout for an application on top of libtracer.
 > **See also**: [02-graph-model.md](02-graph-model.md) §read-vs-write copy semantics; [03-addressing.md](03-addressing.md) §address-shift slicing; [05-protocol-tlvs.md](05-protocol-tlvs.md) §VALUE.
 
 ---
 
 ## The packing rules
 
-The protocol does not impose a serialization layer. The user picks the packing that fits their data; the protocol just moves TLVs.
+The protocol does not impose a serialization layer. The application picks the packing that fits its data; the protocol moves TLVs.
 
 | Data shape | Recommended TLV form |
 | ---- | ---- |
@@ -20,7 +20,7 @@ The protocol does not impose a serialization layer. The user picks the packing t
 | Large payload (anything where a single TLV is too big to ship) | Address-shift slicing across `ep[0..N]` with shared timestamp |
 | Multiple coherent streams (camera + LIDAR) | Separate vertices, common timestamp domain; subscriber joins by timestamp |
 
-The key insight: **the graph imposes no shape**. An endpoint is a name attached to a memory view. The protocol does not preordain payload shape, sample layout, or chunking strategy.
+The governing property: **the graph imposes no shape**. An endpoint is a name attached to a memory view. The protocol does not preordain payload shape, sample layout, or chunking strategy.
 
 ---
 
@@ -55,13 +55,13 @@ type = 0x01 VALUE
 
 **5 bytes total.** With CRC-16 trailer (`opt.CR=1, opt.CW=1`), 7 bytes. With CRC-32, 9 bytes. With absolute TS + CRC-32 (`opt.TS=1, opt.CR=1`), 17 bytes.
 
-Header overhead is **4 bytes** in the default case (`LL=0`, payload ≤ 64 KiB), or 6 bytes when `LL=1`. Trailer overhead is paid per-TLV only when the corresponding `opt` flags are set, and adds 0 / 2 / 4 / 6 / 8 / 10 / 12 / 14 / 16 bytes depending on which combinations of `TS`, `CR`, `TF`, `CW` are selected. See [01-data-format.md](01-data-format.md) §frame size summary for the full table.
+Header overhead is **4 bytes** in the default case (`LL=0`, payload ≤ 64 KiB), or 6 bytes when `LL=1`. Trailer overhead is paid per-TLV only when the corresponding `opt` flags are set, and adds 0, 2, 4, 6, 8, 10 or 12 bytes — the timestamp contributes 0 (off), 4 (`TF=1`, relative i32) or 8 (`TF=0`, absolute u64), the checksum 0 (off), 2 (`CW=1`, CRC-16) or 4 (`CW=0`, CRC-32). Header plus trailer therefore runs 4–16 bytes per TLV at `LL=0` and 6–18 at `LL=1`. See [01-data-format.md](01-data-format.md) §frame size summary for the enumerated table.
 
 Per-message overhead is the same whether the payload is 1 byte or 1 MiB; the cost amortizes immediately past the smallest payloads.
 
-### Casting trick for true zero-copy on the read side
+### Zero-copy on the read side
 
-If the publisher's source data is already a `bool` somewhere in memory (e.g., a struct field, a stack local with stable address), the TLV's view can point directly to it instead of being copied:
+If the publisher's source data is already a `bool` somewhere in memory (a struct field, a static with a stable address), the TLV's view can point directly at it instead of being copied:
 
 ```cpp
 struct dashboard_state {
@@ -80,15 +80,15 @@ tr::view::view_t value = tr::view::view_t::over(
 g.write(led, value);
 ```
 
-The published TLV reads the byte directly from `g_dash.led_on` at every fanout. If `g_dash` is updated between publish and subscriber-consume, the subscriber sees the new value. (Whether this is desired or a bug is application-dependent — usually you want a snapshot, in which case the explicit-copy form above is correct.)
+The published TLV reads the byte directly from `g_dash.led_on` at every fanout. If `g_dash` is updated between publish and subscriber-consume, the subscriber sees the new value. Whether that is the intent or a defect is application-dependent; where a snapshot is wanted, the explicit-copy form above is the correct one.
 
 For a **multi-byte scalar** (u32, f64) the same pattern applies; the protocol does not care about scalar size.
 
 ---
 
-## GPIO register (memory-mapped I/O as a vertex)
+## GPIO register as a memory-mapped vertex
 
-A hardware register is just memory at a fixed address. Wrap it in a view and it becomes a libtracer vertex with **zero-copy reads**.
+A hardware register is memory at a fixed address. Wrapped in a view it becomes a libtracer vertex with **zero-copy reads**.
 
 ```cpp
 constexpr std::uintptr_t GPIOA_IDR_ADDR = 0x40020010;   // STM32F4 GPIOA input data register
@@ -111,12 +111,19 @@ g.write(v_idr, idr_view);
 
 ### Subscriber side
 
+A read of a published value hands back a **reference to** that value, not a copy of it. In this binding the result type is `std::expected<value_ref_t, status_t>`: the outer `expected` carries the status, and the `value_ref_t` inside it dereferences to the stored rope.
+
 ```cpp
-auto r = g.read(v_idr);                         // r is std::expected<rope_t, …>
-std::span<const std::byte> bytes = r->only().bytes();
+auto r = g.read(v_idr);                    // std::expected<value_ref_t, status_t>
+if (!r) return;                            // r.error() is a status_t
+std::span<const std::byte> bytes = (*r)->only().bytes();   // (*r) is the reference; -> reaches the rope
 std::uint32_t idr_value;
 std::memcpy(&idr_value, bytes.data(), sizeof idr_value);   // first copy at the boundary
 ```
+
+The rule behind the type: *a read of a published value returns a reference to it; a read that composes a new value returns the value.* A folded or materialized subtree read has no published object to reference, so it hands back the composed value instead.
+
+Holding the reference keeps the value alive. Where an implementation draws values from an injected allocator, an outstanding reference **pins** that allocation, so a reference held across many writes holds a value the allocator cannot reclaim.
 
 The TLV's payload pointer points directly at `0x40020010`. The subscriber chooses whether to copy into local memory (for a stable snapshot) or operate on the view directly.
 
@@ -138,23 +145,23 @@ g.write(v_bsrr, value_u32(1u << 5));   // set pin PA5
 
 The vertex registered for `/gpio/A/BSRR` (Bit Set/Reset Register at `0x40020018`) has a write-handler that copies the incoming TLV's payload bytes into the register. **One copy** — from the TLV view into the register. This is the single-copy write semantic: the TLV is a view (no copies on the way in), but landing it in the register requires one write to `*(volatile uint32_t *)0x40020018`.
 
-### Why this matters
+### One substrate for software and hardware endpoints
 
-A single API substrate (`g.read` / `g.write`, see the [graph module](../modules/graph.md)) covers:
+A single API substrate (`read` / `write`, see the [graph module](../modules/graph.md)) covers:
 
 - Logical software-defined endpoints (sensor readings, control state).
 - Hardware-defined endpoints (GPIO registers, peripheral SFRs).
 - Remote endpoints (a register on another MCU, reached by its source route over CAN).
 
-To a subscriber, all three look identical. Tooling like `tracer-top` enumerates the entire address space — software and hardware — through one walk.
+To a subscriber, all three look identical. Tooling such as `tracer-top` enumerates the entire address space — software and hardware — through one walk.
 
 ---
 
 ## Structured record with named fields
 
-For self-describing data, define a user-range structured TLV (`opt.PL=1`) with NAME + value children. Pick a type code in `0x80–0xFF` and document its layout for your project.
+For self-describing data, define a user-range structured TLV (`opt.PL=1`) with NAME + value children. Pick a type code in `0x80–0xFF` and document its layout for the project.
 
-The reference impl models a structured node as a parent (`POINT`) TLV with `opt.PL=1` carrying `NAME` + `VALUE` children; the encoder emits it under a user-range type code (`0x80+`). See the [wire module](../modules/frame-codec.md).
+A structured node is a parent (`POINT`) TLV with `opt.PL=1` carrying `NAME` + `VALUE` children; the encoder emits it under a user-range type code (`0x80+`). See the [wire module](../modules/frame-codec.md).
 
 ```cpp
 struct imu_sample {
@@ -200,9 +207,9 @@ void publish_imu(const imu_sample& s, tr::graph::graph_t& g, tr::graph::vertex_h
 }
 ```
 
-A subscriber walks the children iteratively (per [01-data-format.md](01-data-format.md) §iterative parsing) and extracts fields by NAME match. This is **self-describing on the wire**: if the IMU record gains a `mag` field later, old subscribers ignore it; new subscribers read it.
+A subscriber walks the children iteratively (per [01-data-format.md](01-data-format.md) §iterative parsing) and extracts fields by NAME match. This is **self-describing on the wire**: if the IMU record gains a `mag` field, subscribers built against the older layout ignore it and subscribers built against the newer one read it.
 
-For a **fixed-shape** struct where schema evolution doesn't matter and bytes are precious, pack the whole struct as one VALUE TLV instead:
+For a **fixed-shape** struct where schema evolution does not matter and bytes are precious, pack the whole struct as one VALUE TLV instead:
 
 ```cpp
 // One opaque VALUE holding the packed struct.
@@ -241,7 +248,7 @@ void on_dma_complete(std::byte* adc_buf, std::size_t buf_len,
 }
 ```
 
-Each `g.write` is a view-clone (a refcount bump on the DMA segment's backend) and a router dispatch. **No byte copies happen between the DMA buffer and the network's egress.** The only copy is in the transport layer when bytes leave the host (`send` system call into kernel buffer); for SHM or RDMA transports, even that copy disappears.
+Each `write` is a view-clone (a refcount bump on the DMA segment's backend) and a router dispatch. **No byte copies happen between the DMA buffer and the network's egress.** The only copy is in the transport layer when bytes leave the host (`send` system call into kernel buffer); for shared-memory or RDMA transports, even that copy disappears.
 
 ### Subscriber (process-as-stream)
 
@@ -260,7 +267,7 @@ void on_adc_slice(const tr::view::view_t& delivered) {
 }
 ```
 
-The subscriber processes 4 KiB at a time, never holding more than one slice's worth of memory. Throughput is bounded by the DSP pipeline + transport, not by buffer allocation.
+The subscriber processes 4 KiB at a time, never holding more than one slice's worth of memory. Throughput is bounded by the DSP pipeline and the transport, not by buffer allocation.
 
 ### Subscriber (assemble for batch processing)
 
@@ -275,23 +282,25 @@ g.write(tr::graph::path_t("/local/batch-handler:settings"), assemble_settings_va
 g.write(tr::graph::path_t("/adc/raw:subscribers[]"), subscriber_value);
 ```
 
-The router buffers slices per timestamp group; once the group is complete (or deadline expires), it delivers one assembled TLV. This is the right shape for batch DSP that needs N-sample windows.
+The router buffers slices per timestamp group; once the group is complete (or the deadline expires), it delivers one assembled TLV. This is the shape that suits batch DSP needing N-sample windows.
 
-### Transport choice for 1 GB/s
+### Transport choice at 1 GB/s
 
-| Transport | Realistic max | When to use |
+The ceilings below are properties of the medium and its stack, not measurements of libtracer. They bound what any protocol on that medium can carry; libtracer's own per-operation costs are a separate question, treated in [15-concurrency-and-scaling.md](15-concurrency-and-scaling.md).
+
+| Transport class | Medium ceiling | When to use |
 | ---- | ---- | ---- |
-| `transport_shm` | 5–20 GB/s intra-host | Producer and consumer on same Linux box |
-| `transport_iceoryx2` (future) | 5–20 GB/s intra-host | Same as SHM but with safety-cert backbone |
-| `transport_rdma` (future) | 10–100 Gb/s inter-host | InfiniBand / RoCE LAN with HPC NICs |
-| `transport_tcp` | 10 Gb/s realistic | LAN with regular NICs |
-| `transport_can` | ~1 Mb/s | Don't even try for GB/s ADCs |
+| Shared memory | 5–20 GB/s intra-host | Producer and consumer on the same host |
+| Zero-copy IPC with a safety-certified backbone | 5–20 GB/s intra-host | Same as shared memory, where certification is required |
+| RDMA (InfiniBand / RoCE) | 10–100 Gb/s inter-host | HPC NICs on a LAN |
+| TCP | ~10 Gb/s | LAN with ordinary NICs |
+| CAN | ~1 Mb/s | Not viable for GB/s ADCs |
 
-libtracer is a **control plane** that negotiates the data plane in the GB/s case: the SHM segment, the RDMA queue pair, the iceoryx2 service. The TLV ownership-transfer semantic is what makes the handoff zero-copy at the libtracer layer; the underlying transport then delivers without further library involvement.
+At these rates libtracer is a **control plane** that negotiates the data plane: the shared-memory segment, the RDMA queue pair, the IPC service. The TLV ownership-transfer semantic is what makes the handoff zero-copy at the libtracer layer; the underlying transport then delivers without further library involvement.
 
 ---
 
-## High-speed camera + LIDAR with synchronization
+## High-speed camera and LIDAR with synchronization
 
 Two independent streams, common timestamp domain, subscriber joins by timestamp.
 
@@ -303,7 +312,7 @@ Two independent streams, common timestamp domain, subscriber joins by timestamp.
 /sensor/clock                 ← PTP-synced clock vertex (optional)
 ```
 
-Each producer publishes to its own vertex with its own slicing. **Both producers use the same wall-clock-ns timestamp** (typically PTP-synced via the host's hardware clock).
+Each producer publishes to its own vertex with its own slicing. **Both producers use the same wall-clock-ns timestamp**, typically PTP-synced via the host's hardware clock.
 
 ### Publisher: camera
 
@@ -371,17 +380,17 @@ void try_emit_pair(std::uint64_t ts) {
 }
 ```
 
-The subscriber owns the temporal-join policy (window size, slack tolerance, dropping behavior on missing partner). The protocol just delivers timestamped TLVs; **synchronization is the application's responsibility**, libtracer makes the timestamps comparable.
+The subscriber owns the temporal-join policy: window size, slack tolerance, and what happens when a partner is missing. The protocol delivers timestamped TLVs; **synchronization is the application's responsibility**, and libtracer's contribution is making the timestamps comparable.
 
-### Coherency note
+### Clock coherency
 
-For sub-microsecond synchronization (e.g., precise stereo-LIDAR fusion), use PTP-synced hardware clocks (STM32F7+, ESP32-S3 with HW PTP, Linux with PHC). For ~ms accuracy (most robotics), NTP-sync is sufficient. The protocol carries u64 nanoseconds and trusts the publisher's clock; clock sync is a host-level concern.
+For sub-microsecond synchronization (precise stereo-LIDAR fusion, for instance), use PTP-synced hardware clocks — STM32F7 and later, ESP32-S3 with hardware PTP, Linux with a PHC. For ~ms accuracy, which covers most robotics, NTP sync is sufficient. The protocol carries u64 nanoseconds and trusts the publisher's clock; clock sync is a host-level concern.
 
 ---
 
-## "Synchronize the value of a variable" pattern
+## Shared-variable pattern
 
-A common need: a configuration or state variable that lives in one process and should be reflected on every other interested process. libtracer's read/write/subscribe primitives handle this directly, no separate "shared variable" type:
+A configuration or state variable lives in one process and should be reflected in every other interested process. The read / write / subscribe primitives cover this directly; there is no separate "shared variable" type.
 
 ### Define the variable as a vertex
 
@@ -405,27 +414,28 @@ g.write(v_rpm, tr::view::view_t::over(tr::view::borrow(
 g.write(tr::graph::path_t("/local/cached/target_rpm:settings"), durability_settings_value);
 g.write(tr::graph::path_t("/control/target_rpm:subscribers[]"), subscriber_value);
 
-// Anytime the consumer wants the latest value:
+// Whenever the consumer wants the latest value:
 tr::graph::vertex_handle_t cached =
     g.register_vertex(tr::graph::path_t("/local/cached/target_rpm"), tr::graph::role_t::STORED_VALUE);
-auto r = g.read(cached);
+auto r = g.read(cached);                   // std::expected<value_ref_t, status_t>
+if (!r) return;
 std::int32_t rpm;
-std::memcpy(&rpm, r->only().bytes().data(), sizeof rpm);
+std::memcpy(&rpm, (*r)->only().bytes().data(), sizeof rpm);
 ```
 
 The combination of:
 
-- **Read of the local cached vertex** = always returns the last-known-value, no network round-trip.
-- **Subscription with `transient_local`** = late joiners get the current value, not just future updates.
-- **Write to `/control/target_rpm`** = updates the authoritative vertex, fans out to all subscribers, all caches converge.
+- **Read of the local cached vertex** — always returns the last-known-value, no network round-trip.
+- **Subscription with `transient_local`** — late joiners get the current value, not only future updates.
+- **Write to `/control/target_rpm`** — updates the authoritative vertex, fans out to all subscribers, all caches converge.
 
-…gives the "shared variable" semantic without any extra protocol surface. Updates are eventually consistent; ordering within a single subscription is preserved; concurrent writes from multiple authoritative hosts are last-write-wins by timestamp (no CRDT, no consensus — see [04-communication-flows.md](04-communication-flows.md) §network partition).
+…gives the shared-variable semantic without extra protocol surface. Updates are eventually consistent; ordering within a single subscription is preserved; concurrent writes from multiple authoritative hosts are last-write-wins by timestamp — no CRDT, no consensus (see [04-communication-flows.md](04-communication-flows.md) §network partition).
 
 ---
 
-## Worked example progression
+## Dynamic range of the worked examples
 
-The same vertex/edge primitives across **eight orders of magnitude** of payload rate:
+The same vertex/edge primitives cover **eight orders of magnitude** of payload rate. The wire-bytes column is an order-of-magnitude figure that includes per-TLV header and trailer.
 
 | Application | Payload | Rate | Wire bytes / sec | TLV form |
 | ---- | ---- | ---- | ---- | ---- |
@@ -438,25 +448,25 @@ The same vertex/edge primitives across **eight orders of magnitude** of payload 
 | Lidar + camera fusion | varies | 10 Hz | 250 MB/s | two vertex trees, ts-join |
 | 1 GS/s ADC | 4 KiB slices | 244 kHz | 1 GB/s | address-shift `raw[0..N]` |
 | Continuous shared variable | 4 bytes | 1 Hz | 32 B/s | VALUE + transient_local sub |
-| 100 GB/s data plane | varies | varies | 100 GB/s | libtracer = control plane only; data plane via RDMA / SHM |
+| 100 GB/s data plane | varies | varies | 100 GB/s | libtracer = control plane only; data plane via RDMA / shared memory |
 
-There is **no fundamental change** to the API, the wire format, or the addressing scheme across this range. What changes is:
+Across this range there is **no fundamental change** to the API, the wire format, or the addressing scheme. What changes is:
 
-- **Slice size** (chosen by the publisher to match transport MTU and processing granularity).
-- **Transport module loaded** (UART for RC, TCP for IMU, SHM for ADC, RDMA for HPC).
-- **QoS settings** (best-effort for high-rate, reliable for control, transient-local for shared state).
+- **Slice size** — chosen by the publisher to match transport MTU and processing granularity.
+- **Transport module loaded** — UART for RC, TCP for IMU, shared memory for ADC, RDMA for HPC.
+- **QoS settings** — best-effort for high-rate, reliable for control, transient-local for shared state.
 
-The protocol's job is to be invariant under these knobs; the user's job is to choose the knobs.
+The protocol's job is to be invariant under these knobs; the application's job is to choose them.
 
 ---
 
 ## Same-substrate operations: mix, split, concat
 
-A structured TLV (any type with `opt.PL=1`) can be manipulated structurally without touching bytes. These operations are useful in routers, transforms, and any code that aggregates / disassembles structured TLVs.
+A structured TLV (any type with `opt.PL=1`) can be manipulated structurally without touching bytes. These operations serve routers, transforms, and any code that aggregates or disassembles structured TLVs.
 
 ### Concat: merge two structured TLVs of the same type
 
-A structured `tr::wire::tlv_t` carries its members in a `children` vector, so these operations are expressed directly on that vector (see the [wire module](../modules/frame-codec.md)); the leaf `payload` spans keep borrowing their original buffers — no bytes are copied until you re-encode.
+A structured `tr::wire::tlv_t` carries its members in a `children` vector, so these operations are expressed directly on that vector (see the [wire module](../modules/frame-codec.md)); the leaf `payload` spans keep borrowing their original buffers — no bytes are copied until re-encoding.
 
 ```cpp
 tr::wire::tlv_t a = /* … */;   // SETTINGS {NAME "x", VALUE 1}
@@ -485,28 +495,28 @@ rest.children.assign(whole.children.begin() + K1, whole.children.end());
 ```cpp
 whole.children.insert(whole.children.begin() + K, new_child);
 // The children vector is updated; entries after K shift by one.
-// No bytes copied unless you re-encode.
+// No bytes copied unless the TLV is re-encoded.
 ```
 
 ### Serialize
 
 ```cpp
 std::vector<std::byte> out = tr::wire::encode(merged);
-// 'out' contains the canonical wire bytes for merged.
-// The proof obligation from [02-graph-model.md] guarantees this is identical
-// to the bytes that would result from constructing the same logical container
-// from scratch.
+// 'out' holds the canonical wire bytes for merged. The spec-level proof
+// obligation (02-graph-model.md, §spec-level proof obligation) guarantees these
+// are the same bytes that constructing the identical logical container from
+// scratch would produce.
 ```
 
-The proof obligation is the contract that makes mix/split/concat **safe to compose freely** — no operation can produce a TLV whose serialization differs from its logical content.
+That proof obligation is the contract that makes mix/split/concat **safe to compose freely**: no operation can produce a TLV whose serialization differs from its logical content.
 
 ---
 
-## What this section is NOT
+## Non-goals
 
-- A serialization framework. libtracer doesn't replace Cap'n Proto / FlatBuffers / Protobuf for **typed**, **schema-evolving**, **reflection-rich** payloads. If you need that, embed those formats inside VALUE TLVs.
-- A compression layer. libtracer doesn't compress; if your payload benefits from compression, do it in the publisher and document the encoding (NAME field "encoding" = "zstd-3" inside a structured (`PL=1`) TLV).
-- A type system. libtracer's "TLV type" is a transport routing concern, not a data type. The user-range `0x80..0xFF` is for *protocol* tagging, not for substituting a real schema language.
+- **Not a serialization framework.** libtracer does not replace Cap'n Proto, FlatBuffers or Protobuf for **typed**, **schema-evolving**, **reflection-rich** payloads. Where those are needed, embed them inside VALUE TLVs.
+- **Not a compression layer.** libtracer does not compress. Where a payload benefits from compression, compress it in the publisher and document the encoding — a NAME field `"encoding"` = `"zstd-3"` inside a structured (`PL=1`) TLV.
+- **Not a type system.** A TLV type is a transport routing concern, not a data type. The user range `0x80..0xFF` is for *protocol* tagging, not a substitute for a schema language.
 
 ---
 
@@ -515,9 +525,9 @@ The proof obligation is the contract that makes mix/split/concat **safe to compo
 > **Normative reference**: [../spec/v1.md](../spec/v1.md) §3.1.
 > **See also**: [03-addressing.md](03-addressing.md) §static path handles; [04-communication-flows.md](04-communication-flows.md) §the static-path write flow.
 
-The examples earlier in this document write by handle after registering a `path_t("/path/string")` (see the [graph module](../modules/graph.md)). On hosted platforms (Linux laptops, ESP32 with PSRAM and a relaxed code budget) this is fine. On a 16 KB Cortex-M0+ flashing telemetry from an ISR, it is unacceptable: `snprintf` alone is 2–6 KB of code, the parser walks the path string each call, and the segment allocator runs from interrupt context.
+The examples earlier in this document write by handle after registering a `path_t("/path/string")` (see the [graph module](../modules/graph.md)). On hosted platforms — Linux laptops, an ESP32 with PSRAM and a relaxed code budget — that is fine. On a 16 KB Cortex-M0+ flashing telemetry from an ISR it is not: `snprintf` alone costs **2–6 KB of code on Cortex-M, depending on the libc**, the parser walks the path string on every call, and the segment allocator runs from interrupt context.
 
-The MCU-friendly variant is to **encode the PATH TLV at build time** and pass a handle to the writer. Three orders of magnitude less per-write cost, and `snprintf` is no longer linked.
+The MCU-friendly variant **encodes the PATH TLV at build time** and passes a handle to the writer. Per-write cost is ~0.4 µs rather than the string form's 1–10 µs, and `snprintf` is not linked at all.
 
 ### Recipe — single sensor, build-time path
 
@@ -547,7 +557,7 @@ void tim2_irq_handler() {            // hard-real-time ISR
 }
 ```
 
-What the macro emits, verbatim, into `.rodata`:
+The encoded PATH TLV, verbatim, as it sits in `.rodata`:
 
 ```
 06 40 12 00                                ← outer PATH TLV: type=0x06, opt=PL=1 (0x40), length=18
@@ -557,9 +567,11 @@ What the macro emits, verbatim, into `.rodata`:
 
 22 bytes of flash. Zero RAM. Zero per-write allocation.
 
+The parse-once constructor and its validation contract are recorded in [ADR-0054, `path_t` parse-once constructor](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0054-path-t-parse-once-constructor.md).
+
 ### Recipe — N indexed slots, init-time registration
 
-When the path includes a runtime-derived index (an address-shift slice number, a peer-id), encode once at init and reuse the handle:
+Where the path includes a runtime-derived index — an address-shift slice number, a peer id — encode once at init and reuse the handle:
 
 ```cpp
 constexpr std::size_t N_SLICES = 64;
@@ -588,11 +600,11 @@ void dma_half_complete_irq(std::byte* bytes, std::size_t len, tr::graph::graph_t
 }
 ```
 
-The trade: a one-time RAM cost of ~1.6 KB (64 PATH TLVs averaging ~25 bytes each + bookkeeping) buys ISR-safe publishing of 64 distinct slot paths.
+The trade: a one-time RAM cost of ~1.6 KB — 64 PATH TLVs averaging ~25 bytes each, plus bookkeeping — buys ISR-safe publishing of 64 distinct slot paths.
 
-### Recipe — indexed slot paths (and a non-implemented optimization)
+### Recipe — indexed slot paths
 
-The reference core writes each slice by the handle of its real indexed path `/adc/raw[i]`:
+Each slice is written by the handle of its real indexed path `/adc/raw[i]`:
 
 ```cpp
 extern std::vector<tr::graph::vertex_handle_t> adc_raw;   // adc_raw[i] == /adc/raw[i], registered at init
@@ -607,27 +619,42 @@ void dma_half_complete_irq(std::byte* bytes, std::size_t S, std::size_t n_slices
 }
 ```
 
-For very large N (e.g., 4096 slices) where individual registration would burn RAM, a **single-PATH-plus-index** form — encoding the base `/adc/raw` once and supplying `i` at write time, expanding `[i]` into the dispatch key without allocating — would help. This is a **permitted-but-not-implemented** optimization (non-normative): the reference core has no separate indexed-handle write. It would be semantically equivalent to the real write to `/adc/raw[i]` shown above, and from the subscriber's perspective the wire bytes are identical.
+For very large N — 4096 slices, say — where individual registration would burn RAM, a **single-PATH-plus-index** form would help: encode the base `/adc/raw` once and supply `i` at write time, expanding `[i]` into the dispatch key without allocating. This is **permitted but not required**, and non-normative: no separate indexed-handle write exists in the reference core. It is semantically equivalent to the real write to `/adc/raw[i]` shown above, and from the subscriber's perspective the wire bytes are identical.
 
-### What this buys, concretely
+### Cost of each addressing mode
 
-For a representative Cortex-M4 RC-car build (1 transport, no GUI, 32 KB flash budget):
+For a representative Cortex-M4 build with one transport, no GUI and a 32 KB flash budget. Per-write costs are the same ballpark figures as [04-communication-flows.md](04-communication-flows.md) §performance envelope, quoted at 100 MHz.
 
-| Variant | Flash overhead | RAM overhead | Per-write cost | ISR-safe? |
+| Variant | Flash overhead | RAM overhead | Per-write cost | ISR-safe |
 | ---- | ---- | ---- | ---- | ---- |
-| String-form `path_t::parse(...)` on the hot path | +5 KB (`snprintf` etc.) | small heap alloc per write | 1–10 µs | No |
-| Parse-once `path_t("...")` literal | +bytes of the path | none | ~0.4 µs | Yes |
-| Init-registered handle | +bytes of the path | one PATH TLV per path | ~0.4 µs | Yes |
-| Indexed slot paths (per-`[i]` handle) | +bytes of each path | one PATH TLV per slot | ~0.5 µs | Yes |
+| String-form `path_t::parse(...)` on the hot path | `snprintf` at 2–6 KB depending on libc, plus the path parser | small heap alloc per write | 1–10 µs | No |
+| Parse-once `path_t("...")` literal | the path's own bytes | none | ~0.4 µs | Yes |
+| Init-registered handle | the path's own bytes | one PATH TLV per path | ~0.4 µs | Yes |
+| Indexed slot paths (per-`[i]` handle) | the bytes of each path | one PATH TLV per slot | ~0.4 µs — an indexed slot path is an init-registered handle, and the dispatch is identical | Yes |
 
-### When the string form is still the right answer
+### Where the string form is the right answer
 
-- Configuration tools / CLIs (`tracer-top`, REPLs) where path is a runtime user input — the user typed a string; parse it.
-- Glue code on hosted platforms where the publisher runs at human-speed (a few writes per second from a worker thread). The string form is more readable; the cost is unmeasurable.
-- Tests, where the verbosity is welcome and code size is irrelevant.
+- Configuration tools and CLIs (`tracer-top`, REPLs) where the path is runtime user input — a string was typed, so parse it.
+- Glue code on hosted platforms where the publisher runs at human speed, a few writes per second from a worker thread. The string form is more readable and the cost does not register.
+- Tests, where verbosity is welcome and code size is irrelevant.
 
-The string-form entry point is implementation-defined and OPTIONAL ([../spec/v1.md](../spec/v1.md) §3.1.4). A bare-metal build MAY omit it entirely; an ESP32 build with the IDE-companion module loaded will include it.
+The string-form entry point is implementation-defined and OPTIONAL ([../spec/v1.md](../spec/v1.md) §3.1.4). A bare-metal build MAY omit it entirely; a build carrying an interactive-tooling module will include it.
 
-### Don't conflate this with serialization
+### Path packing is not value packing
 
-The static-path optimization is purely about **the address of a vertex**, not about the value being written. The value TLV (`VALUE`, a user-range record, an MMIO view) is constructed per-write and follows the rules earlier in this document. What changed is only that the path side of `(path, value)` no longer requires runtime string work.
+The static-path optimization concerns **the address of a vertex**, not the value written to it. The value TLV — a `VALUE`, a user-range record, an MMIO view — is constructed per write and follows the rules earlier in this document. What the optimization changes is only that the path side of `(path, value)` no longer requires runtime string work.
+
+---
+
+## Pitfalls
+
+| Rule | Failure mode |
+| ---- | ---- |
+| A borrowed view is a live window, not a snapshot. | A publisher that borrows a mutable variable and then mutates it before fanout completes delivers the *new* bytes to subscribers that were sent the *old* value's notification. An implementation wanting snapshot semantics must copy into a fresh segment at write time. |
+| A read returns a reference to the published value, not a copy. | Code that stores the read result long-term keeps that value alive. Where values come from an injected allocator, a long-lived reference pins an allocation the allocator cannot reclaim, and the working set grows with the number of outstanding references rather than with the graph. |
+| A composed read (folded or materialized subtree) has no published object to reference. | An implementation that assumes every read hands back a reference into existing storage will get the ownership of a composed subtree read wrong — that result is a value the caller owns. |
+| Per-TLV overhead is fixed, not proportional. | Sizing a stream by payload alone under-counts. At 1-byte payloads the 4–16 bytes of header and trailer dominate; batching into one structured TLV, or accepting the overhead, is a deliberate choice rather than a default. |
+| An MMIO-backed vertex is read at read time, not at write time. | A subscriber that caches the view rather than the bytes reads the register again later and observes a different value than the one that triggered its notification. |
+| Address-shift slices carry no reassembly metadata. | An implementation expecting the wire format to identify slice order or completeness will find nothing there. Grouping is by the shared timestamp the publisher stamps, and reassembly is subscriber policy (assemble QoS), not a wire feature. |
+| The user type range `0x80..0xFF` carries no protocol meaning. | Two applications that assign different records to the same user type code and meet on one bus cannot be told apart by any protocol-level check. The code space is per-deployment and needs project-level registration. |
+| `snprintf` on a publishing hot path is a code-size and latency decision, not a style one. | Linking it costs 2–6 KB of Cortex-M code depending on the libc, and the string form is not ISR-safe. A build that only ever publishes from an ISR should not link it at all. |

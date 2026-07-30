@@ -1,7 +1,7 @@
-# Reference 01 — Data Format
+# Reference 01 — Data format
 
 > **Status**: normative, v1, 2026-05-03 (incorporated by [docs/spec/v1.md](../spec/v1.md) §3 per RFC-0001 §A.2). Byte-precise definition of every libtracer frame on the wire. A second-implementer SHOULD be able to write an interoperable parser/sender from this section alone.
-> **See also**: design rationale (CRC choice, atomic ordering, MCU stack safety) is in the ADRs ([../adr/](https://github.com/avatarsd-llc/libtracer/tree/main/docs/adr/)) and git history. To inspect real libtracer frames on the wire, the [**Wireshark dissector**](https://github.com/avatarsd-llc/libtracer/tree/main/tools/wireshark) decodes this format live (a single-file Lua dissector, vector-tested against the conformance frames).
+> **See also**: design rationale (CRC choice, atomic ordering, MCU stack safety) is in the [ADR set](https://github.com/avatarsd-llc/libtracer/tree/main/docs/adr/) and git history. For a worked byte-level walkthrough of these same rules — annotated frames, one byte at a time — see [wire format, bit by bit](../modules/wire-format-bits.md). To inspect real libtracer frames on the wire, the [**Wireshark dissector**](https://github.com/avatarsd-llc/libtracer/tree/main/tools/wireshark) decodes this format live (a single-file Lua dissector, vector-tested against the conformance frames).
 
 ---
 
@@ -83,7 +83,7 @@ R   Reserved (bit 0). MUST be zero. Receivers MUST reject non-zero as INVALID.
 
 Two reserved bits remain (bits 7 and 0) for unforeseen L2 needs.
 
-**Reserved bits are committed for the lifetime of v1.** They are not "reserved for later minor evolution"; protocol v1 is immutable, so they are forever-frozen. A protocol-v1 receiver that observes a reserved bit set MUST reject the TLV as `INVALID`, and the spec MUST NOT allocate them within v1. Forward-compatible extensions live exclusively in the type-code registry (`0x0E – 0x7F`); incompatible changes live at the discovery layer per §versioning. This makes it safe for receivers to harden the reserved-bit check at compile time without anticipating future thaw.
+**Reserved bits are committed for the lifetime of v1.** They are not "reserved for later minor evolution"; protocol v1 is immutable, so they are forever-frozen. A protocol-v1 receiver that observes a reserved bit set MUST reject the TLV as `INVALID`, and the spec MUST NOT allocate them within v1. Forward-compatible extensions live exclusively in the unassigned reaches of the type-code registry ([05-protocol-tlvs.md](05-protocol-tlvs.md) is the registry of record); incompatible changes live at the discovery layer per §versioning. This makes it safe for receivers to harden the reserved-bit check at compile time without anticipating future thaw.
 
 ### Default vs extended forms
 
@@ -238,7 +238,7 @@ This is a deliberate design commitment: get the wire format right once. The wire
 
 ### Handling unknown type codes
 
-A receiver encountering a TLV with an unassigned type code in `0x0E – 0x7F` (or the reserved `0x05`):
+A receiver encountering a TLV whose core-range type code it does not implement — any code not yet assigned in [05-protocol-tlvs.md](05-protocol-tlvs.md), or the reserved `0x05`:
 
 - MUST NOT crash; MUST continue parsing the surrounding stream.
 - MUST validate CRC (if present) and respect `length` when skipping over the unknown TLV.
@@ -246,7 +246,7 @@ A receiver encountering a TLV with an unassigned type code in `0x0E – 0x7F` (o
 - If nested inside a structured TLV (parent has `opt.PL=1`): treat as opaque bytes and continue.
 - Forwarders MAY pass-through unmodified.
 
-This is the **forward extension path**: new core type codes can be added in `0x0E – 0x7F` without breaking existing receivers. Receivers gracefully ignore what they don't understand.
+This is the **forward extension path**: new core type codes are added in the unassigned core range without breaking deployed receivers, which ignore what they do not understand.
 
 Reserved bits in `opt` non-zero MUST be rejected as INVALID — reserved-bit-non-zero is a hard error to prevent silent semantic drift.
 
@@ -256,10 +256,10 @@ Reserved bits in `opt` non-zero MUST be rejected as INVALID — reserved-bit-non
 
 Conforming implementations MUST parse nested TLVs (structured TLVs with `opt.PL=1`) iteratively, using an explicit work stack. Recursive parsing is forbidden.
 
-- **Nesting depth**: unbounded by the wire format ([RFC-0006](../spec/rfcs/0006-resource-bounded-nesting-depth.md)). A receiver's actual capability is bounded by its **decode resources**, drawn from the implementation's injected memory seam. Two shapes of exhaustion, both reported as `tr::tlv::nesting_too_deep`: **depth** — one work-stack entry per open level — and **breadth** — a materializing decoder also holds one node per TLV in the frame, so a wide-but-shallow frame can exhaust the same budget. The status name predates the second case and is kept, since [RFC-0006](../spec/rfcs/0006-resource-bounded-nesting-depth.md) reads it as "exceeds this receiver's decode resources". A frame exceeding them MUST be rejected with `ERROR{tr::tlv::nesting_too_deep}` ("exceeds this receiver's decode resources").
+- **Nesting depth**: unbounded by the wire format ([RFC-0006](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md)). **No depth constant exists at any layer of this protocol.** A receiver's actual capability is bounded by its **decode resources**, drawn from the implementation's injected memory seam. Two shapes of exhaustion, both reported as `tr::tlv::nesting_too_deep`: **depth** — one work-stack entry per open level — and **breadth** — a materializing decoder also holds one node per TLV in the frame, so a wide-but-shallow frame can exhaust the same budget. The status name describes the depth case; [RFC-0006](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md) reads it as "exceeds this receiver's decode resources", which covers both. A frame exceeding them MUST be rejected with `ERROR{tr::tlv::nesting_too_deep}` ("exceeds this receiver's decode resources").
 - **Work stack size**: an implementation/deployment property (the injected resource), never a protocol constant. Protocol-defined TLV shapes nest ≤ 5 by construction, so every conforming receiver parses every protocol frame at any budget; user-data depth (e.g. a deep branch-write `POINT` tree) is a per-receiver capability of the same kind as maximum frame size.
 
-Rationale: the former fixed cap of 32 guarded a *recursive* parser's call stack. Parsing is required to be iterative, so the per-level cost is an explicit node already bounded by the injected resource — a 16 KB node rejects what its pool cannot hold, a large host parses arbitrarily deep, and no constant serves both.
+Rationale: a fixed depth constant exists to guard a *recursive* parser's call stack, and parsing is required to be iterative. The per-level cost is therefore an explicit node already bounded by the injected resource — a 16 KB node rejects what its pool cannot hold, a large host parses arbitrarily deep, and no constant serves both.
 
 ### Two parser contexts
 
@@ -398,7 +398,7 @@ Header is 6 bytes (LL=1); total frame = 6 + 102400 + 4 = 102410 bytes.
 | LL=0, TS abs + CRC-32 (typical wire frame) | 4 | 8 | 4 | 16 |
 | LL=1 (extended length), TS abs + CRC-32 | 6 | 8 | 4 | 18 |
 
-For comparison: the previous fixed-u32-length-only revision had 6-byte header minimum and 18-byte typical-wire overhead. The new selectable-width design saves 2 bytes on every default-LL frame, plus an additional 2/4 bytes via CRC-16 / TS-relative when chosen.
+Selectable length width is what buys the 4-byte floor: a fixed-u32 length field would put the header minimum at 6 bytes and the typical wire frame at 18. `LL=0` saves 2 bytes on every default frame; `CW=1` saves a further 2 and `TF=1` a further 4, each where the smaller variant fits.
 
 ---
 
@@ -409,6 +409,21 @@ For comparison: the previous fixed-u32-length-only revision had 6-byte header mi
 A minimal-feature implementation MAY emit only the smaller variants (`LL=0`, `CW=1`, `TF=1` where applicable) for its outgoing TLVs. Because **every receiver MUST accept every variant** (above) and can pre-allocate worst-case, **no per-peer capability negotiation is needed or defined**: a sender simply SHOULD default to the smaller variants and use a larger one only when the smaller would not fit. There are no other negotiable wire features in protocol v1 — reserved bits are frozen, and any wire-incompatible change is a different protocol version selected at the discovery layer. See [ADR-0013](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0013-v1-scope-boundaries.md).
 
 The protocol guarantees: no conforming TLV exceeds the declared bounds (`u32` length, `CRC-32`, `u64` absolute TS). A minimum-feature implementation can pre-allocate worst-case buffers and CRC tables and never encounter a peer that exceeds them.
+
+---
+
+## Pitfalls
+
+Each entry pairs a rule stated above with the failure mode an implementation that misses it produces.
+
+- **No depth constant exists.** An implementation that hardcodes a nesting limit — 32 is the value most often assumed, because it is what a recursive parser needs — rejects frames a conforming peer is entitled to send, and passes its own round-trip tests because its sender never emits one. Bound the work stack by the decode resource actually injected, and report exhaustion as `tr::tlv::nesting_too_deep`.
+- **Breadth exhausts the same budget as depth.** A materializing decoder holds one node per TLV, not one per open level. An implementation that budgets only for open levels accepts a wide-but-shallow frame and then runs out of nodes mid-walk, at a point where the payload has already been partly committed.
+- **CRC coverage excludes the header.** An implementation that folds `type`, `opt` and `length` into the accumulator interoperates with itself and with nothing else. The symptom is a 100% `crc_fail` rate against a conforming peer, not an intermittent one — an intermittent rate points at the trailer-`TS` fold instead, which is included and must follow the payload bytes in that order.
+- **Trailer bytes are not payload bytes.** A forwarder that re-emits the received byte range verbatim carries the upstream's wire-time and a CRC computed over a different span. Strip at ingress, attach fresh at egress; the payload region is what stays byte-identical.
+- **Reserved bits are a reject, not a mask.** An implementation that clears bits 7 and 0 before decoding accepts frames a conforming receiver rejects, and absorbs exactly the silent semantic drift the reject exists to prevent. Both bits are frozen for the lifetime of v1, so the check can be hardened at compile time.
+- **Wire-trailer `TS` is not acquisition time.** An implementation that surfaces `trailer_ts` to the application as the sample timestamp reports every forwarding hop's queueing delay as sensor jitter. Acquisition time is a `TIME` TLV inside the payload.
+- **A relative timestamp without an anchor is an error, not a zero.** `TF=1` whose ancestor chain carries no `trailer_ts` MUST be rejected. An implementation that defaults the missing anchor to zero produces timestamps that parse, sort and plot — near the Unix epoch.
+- **`length` is validated before anything is allocated.** An implementation that sizes a buffer from `length` before checking it against the bytes actually available lets a `LL=1` frame claiming 4 GiB in a 60-byte datagram exhaust the receive pool, from an unauthenticated peer.
 
 ---
 

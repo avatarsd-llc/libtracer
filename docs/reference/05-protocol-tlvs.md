@@ -1,6 +1,6 @@
-# Reference 05 — Protocol-Defined TLVs
+# Reference 05 — Protocol-defined TLVs
 
-> **Status**: normative, v1, 2026-05-03 (incorporated by [docs/spec/v1.md](../spec/v1.md) §3 per RFC-0001 §A.2). Per-TLV byte-precise specification for every type code in the core-reserved range. The header layout, options bits, fixed-width length, and trailer (TS + CRC) are in [01-data-format.md](01-data-format.md); this document specifies what each type code's payload looks like.
+> **Status**: normative, v1 (incorporated by [docs/spec/v1.md](../spec/v1.md) §3 per [RFC-0001](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0001-v01-consistency-consolidation.md) §A.2). Per-TLV byte-precise specification for every type code in the core-reserved range. The header layout, options bits, fixed-width length, and trailer (TS + CRC) are in [01-data-format.md](01-data-format.md); this document specifies what each type code's payload looks like.
 
 ---
 
@@ -13,9 +13,9 @@
 | `0x20` – `0x7F` | Reserved for future core extensions |
 | `0x80` – `0xFF` | User-defined application payload types |
 
-Currently assigned: `0x01`–`0x04`, `0x06`–`0x0C`, `0x0E` (12 types). `0x05` is a **reserved code with no assigned meaning** in v1 (see §`0x05`); `0x0D` ROUTER is a **reserved, decodable codepoint with no implemented mechanism** (see §`0x0D`). `0x0E` is **SPEC** (vertex-creation spec, [ADR-0017](../adr/0017-in-band-vertex-creation-controller-orchestration.md)). The remaining `0x0F` – `0x1F` are reserved for v1 fast-track additions; `0x20` – `0x7F` is the long-term registry.
+Assigned in the first block: `0x01`–`0x04`, `0x06`–`0x0C`, `0x0E` (12 types). `0x05` is a **reserved code with no assigned meaning** in v1 (see §`0x05`); `0x0D` ROUTER is a **reserved, decodable codepoint with no implemented mechanism** (see §`0x0D`). `0x0E` is **SPEC** (vertex-creation spec, [ADR-0017](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0017-in-band-vertex-creation-controller-orchestration.md)). The `0x0F`–`0x1F` fast-track range holds the remote-operation and route-handle frames (`0x0F`–`0x13` assigned, §reserved range `0x0F` – `0x1F`); `0x20` – `0x7F` is the long-term registry.
 
-The names below are the canonical type-code names; the reference implementation's C enum (header under `core/include/libtracer/`, pending the protocol-v1 rebuild — [ADR-0001](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0001-extraction-from-production-firmware.md)) matches them.
+The names below are the canonical type-code names; an implementation's own enumeration matches them.
 
 ### Structured TLVs
 
@@ -163,7 +163,7 @@ SUBSCRIBER (PL=1) {
 }
 ```
 
-The `qos_settings` SETTINGS carries **per-subscriber encoding hints** (byte-agnostic; numeric filtering like deadband is an application *filter vertex*, never a field — ADR-0019's sibling decision). The value-based **delivery filter** it once held (`delivery_mode == ON_CHANGE` byte-diff) and the throttle (`min_interval_ns` / `keepalive_ns`) are **removed** ([RFC-0008](../spec/rfcs/0008-vertex-operations-assign-propagate.md)): the runtime no longer inspects values or times to decide delivery. Delivery selection is now **structural and per-vertex** — see `delivery_mode` below.
+The `qos_settings` SETTINGS carries **per-subscriber encoding hints** only (byte-agnostic; numeric filtering such as deadband is an application *filter vertex*, never a field — the sibling decision of [ADR-0019](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0019-per-producer-monotonic-origin-timestamp.md)). It carries **no value-based delivery filter and no throttle**: there is no `delivery_mode == ON_CHANGE` byte-diff, no `min_interval_ns` and no `keepalive_ns` ([RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md)) — the runtime inspects neither values nor times to decide delivery. Delivery selection is **structural and per-vertex**; see `delivery_mode` below.
 
 ```
 qos_settings = SETTINGS {
@@ -172,17 +172,17 @@ qos_settings = SETTINGS {
 }
 ```
 
-**Per-vertex `delivery_mode` ([RFC-0008](../spec/rfcs/0008-vertex-operations-assign-propagate.md)).** Whether a vertex rides an *ancestor's* `propagate` sweep is a value-agnostic property of the **vertex** (not the subscriber): `UNCONDITIONAL` (always swept), `IF_NEWER` (default — swept only if its write sequence advanced since the last covering sweep), `EXPLICIT` (never swept by an ancestor; deliverable only by a direct `propagate` on the vertex). `assign` and a direct `propagate` on the vertex are never gated by it. It is host state defaulting to `IF_NEWER`; wire configuration reuses the vertex's own `:settings` (a `delivery_mode` NAME/VALUE under the vertex `SETTINGS`) and is deferred.
+**Per-vertex `delivery_mode` ([RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md)).** Whether a vertex rides an *ancestor's* `propagate` sweep is a value-agnostic property of the **vertex** (not the subscriber): `UNCONDITIONAL` (always swept), `IF_NEWER` (default — swept only if its write sequence advanced since the last covering sweep), `EXPLICIT` (never swept by an ancestor; deliverable only by a direct `propagate` on the vertex). `assign` and a direct `propagate` on the vertex are never gated by it. It is host state defaulting to `IF_NEWER`. Wire configuration reuses the vertex's own `:settings` (a `delivery_mode` NAME/VALUE under the vertex `SETTINGS`) and is **deferred**, so the host call is the only way to set it.
 
-`delivery_compact` (RFC-0004 §E.1, ADR-0035 slice 4) is the consumer's **opt-in to label-compacted deliveries**: on a full-TLV transport (ws/UDP, default *full-route* deliveries) a producer MAY, for a subscriber that set it, advertise a per-link **label** aliasing that subscriber's return route and thereafter stream lean `COMPACT` frames instead of full-route `FWD{WRITE}` (see §route-handle). It is **optional and NAME-tagged**: an older parser (or a producer that does not honor it) simply keeps the full-route delivery path, so it does not perturb any existing conformance vector. Header-elided transports (CAN) always label and ignore the hint.
+`delivery_compact` ([RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md) §E.1, ADR-0035 slice 4) is the consumer's **opt-in to label-compacted deliveries**: on a full-TLV transport (ws/UDP, default *full-route* deliveries) a producer MAY, for a subscriber that set it, advertise a per-link **label** aliasing that subscriber's return route and thereafter stream lean `COMPACT` frames instead of full-route `FWD{WRITE}` (see §route-handle). It is **optional and NAME-tagged**: a parser that does not know it, or a producer that does not honor it, keeps the full-route delivery path, so it perturbs no conformance vector. Header-elided transports (CAN) always label and ignore the hint.
 
-The per-vertex `delivery_mode` is **enforced producer-side** (during the `propagate` sweep, before fan-out), and it applies to bubbled deliveries (below) exactly as to direct ones. The `capability` child carries the subscriber's **subject-token** ([ADR-0018](../adr/0018-access-control-authorization-pluggable-subject-token.md)); subscribe-authorization is gated by the *source's* `:acl`.
+The per-vertex `delivery_mode` is **enforced producer-side** (during the `propagate` sweep, before fan-out), and it applies to bubbled deliveries (below) exactly as to direct ones. The `capability` child carries the subscriber's **subject-token** ([ADR-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0018-access-control-authorization-pluggable-subject-token.md)); subscribe-authorization is gated by the *source's* `:acl`.
 
-### Subtree subscription — vertical bubbling ([RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md))
+### Subtree subscription — vertical bubbling
 
-Every subscription is a **subtree subscription**: a SUBSCRIBER at `<vertex>:subscribers[N]` observes writes to that vertex **and to any descendant of it** (a leaf subscription is the trivial case), so no wildcard `target_path` is needed — subscribing to the composite vertex *is* the subtree subscription. A write at vertex W MUST deliver, once per subscriber, to the subscribers of W and of each ancestor of W ("vertical bubbling"). The delivered payload is the **written TLV as-is** — the exact frame the producer wrote, at the granularity it chose (a leaf `VALUE`, or a whole branch `POINT` per §`0x07`); there is no re-encoding and no delivery-metadata envelope. Local subscribers receive the usual zero-copy view clone; remote subscribers receive the frame over the existing return-route `FWD{WRITE}` delivery path unchanged. Any provenance a consumer needs beyond the frame itself travels **in the data** ([CONTEXT.md](../../CONTEXT.md) §SUBSCRIBER direction); wire-level concrete-path tagging of remote deliveries remains the separate, still-draft [RFC-0003](../spec/rfcs/0003-bridged-wildcard-delivery-path.md) proposal.
+Every subscription is a **subtree subscription** ([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md)): a SUBSCRIBER at `<vertex>:subscribers[N]` observes writes to that vertex **and to any descendant of it** (a leaf subscription is the trivial case), so no wildcard `target_path` is needed — subscribing to the composite vertex *is* the subtree subscription. A write at vertex W MUST deliver, once per subscriber, to the subscribers of W and of each ancestor of W ("vertical bubbling"). The delivered payload is the **written TLV as-is** — the exact frame the producer wrote, at the granularity it chose (a leaf `VALUE`, or a whole branch `POINT` per §`0x07`); there is no re-encoding and no delivery-metadata envelope. Local subscribers receive the usual zero-copy view clone; remote subscribers receive the frame over the existing return-route `FWD{WRITE}` delivery path unchanged. Any provenance a consumer needs beyond the frame itself travels **in the data** ([CONTEXT.md](../../CONTEXT.md) §SUBSCRIBER direction); wire-level concrete-path tagging of remote deliveries is the separate, draft [RFC-0003](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0003-bridged-wildcard-delivery-path.md) proposal.
 
-The write path MUST stay near-free when nobody listens: an implementation maintains per-vertex listener bookkeeping (updated at subscribe/unsubscribe, at control-plane frequency) so a write performs the ancestor fan-out walk **only when a subscriber exists at or above it** — the reference implementation's idle write pays one relaxed atomic load ([RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md) §A cost model).
+The write path MUST stay near-free when nobody listens: an implementation maintains per-vertex listener bookkeeping (updated at subscribe/unsubscribe, at control-plane frequency) so a write performs the ancestor fan-out walk **only when a subscriber exists at or above it** — an idle write costs one relaxed atomic load ([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md) §A cost model).
 
 ```{mermaid}
 flowchart BT
@@ -194,7 +194,7 @@ flowchart BT
 
 ### Producer fan-out to remote subscribers
 
-When a SUBSCRIBER is written into `<vertex>:subscribers[N]` over a transport (an inbound `FWD{WRITE}` to `:subscribers[]`, RFC-0004 §D), the slot retains the request's **accumulated return route** (the FWD `src`) and the inbound link. The route bytes are copied **once**, at subscribe time, into a refcounted segment; the slot holds a `view_t` over it. Thereafter a write to that vertex fans out a delivery back to the consumer along that return route — a `FWD{WRITE, dst=<return route>, payload=<VALUE>}` (delivery-is-a-write), or, when the subscriber set `delivery_compact`, an auto-promoted `COMPACT` (advertised once per flow, then streamed; re-advertised after a reconnect — §route-handle). Each full-route delivery **refcount-clones** the stored route and scatter-gathers the frame from stack-built heads + the roped route + the roped value — no route or payload bytes are copied per delivery, and an in-flight rope keeps the route segment alive across a concurrent unsubscribe. This is the producer half of consumer-initiated subscription; it composes the existing field-writes and adds no wire verb (RFC-0004 / ADR-0035 slice 4, #136).
+When a SUBSCRIBER is written into `<vertex>:subscribers[N]` over a transport (an inbound `FWD{WRITE}` to `:subscribers[]`, RFC-0004 §D), the slot retains the request's **accumulated return route** (the FWD `src`) and the inbound link. The route bytes are copied **once**, at subscribe time, into a refcounted segment; the slot holds a view over it. Thereafter a write to that vertex fans out a delivery back to the consumer along that return route — a `FWD{WRITE, dst=<return route>, payload=<VALUE>}` (delivery-is-a-write), or, when the subscriber set `delivery_compact`, an auto-promoted `COMPACT` (advertised once per flow, then streamed; re-advertised after a reconnect — §route-handle). Each full-route delivery **refcount-clones** the stored route and scatter-gathers the frame from stack-built heads + the roped route + the roped value — no route or payload bytes are copied per delivery, and an in-flight rope keeps the route segment alive across a concurrent unsubscribe. This is the producer half of consumer-initiated subscription; it composes the existing field-writes and adds no wire verb (RFC-0004 / ADR-0035 slice 4).
 
 A **transient-local** producer (`:settings.durability == 1`, [02-graph-model.md](02-graph-model.md)) additionally **latches** its current value to a *fresh* subscriber: the subscribe itself emits one immediate delivery of the vertex's last-known value, so a late joiner paints the current state without waiting for the next write. A `volatile` producer (the default, `durability == 0`) delivers only writes that happen after the subscribe. The latch reuses the same delivery path (full-route or `COMPACT`); it carries no new wire bytes, so it is observable only as delivery *timing* and adds no conformance vector.
 
@@ -211,7 +211,7 @@ sequenceDiagram
     Note over Prod,V: durability==1 ⇒ latch the current LKV
     Prod-->>Cons: FWD{WRITE, dst=/cons, VALUE}  (delivery #1 — the latch)
     Prod-->>Cons: FWD{REPLY} (subscribe ack)
-    Note over V,Prod: later — a local write fans out via the injected sink
+    Note over V,Prod: a later local write fans out via the injected sink
     V->>Prod: write(new VALUE) → fan_out → remote sink
     Prod-->>Cons: ADVERTISE{ label, route=/cons }  (once per flow)
     Prod-->>Cons: COMPACT{ label, VALUE }          (then lean frames…)
@@ -252,7 +252,7 @@ A generic list would have no semantic meaning of its own — an un-named default
 
 ## `0x06` — PATH
 
-A hierarchical address. Structured TLV (`opt.PL=1`) whose children are NAME TLVs, one per segment. Distinct from a generic structured TLV in that the constraints below are *enforced*, not merely conventional — see [where](#where-the-path-constraints-are-enforced).
+A hierarchical address. Structured TLV (`opt.PL=1`) whose children are NAME TLVs, one per segment. Distinct from a generic structured TLV in that the constraints below are *enforced*, not merely conventional — see [enforcement](#enforcement-of-the-path-constraints).
 
 ### Payload layout
 
@@ -275,32 +275,27 @@ PATH (PL=1) {
 - Total path length (sum of NAME bytes + segment separators) ≤ 1024 bytes.
 - Segment count ≤ 32.
 
-### Where the PATH constraints are enforced
+### Enforcement of the PATH constraints
 
-An earlier revision of this section said *"the parser validates path-segment constraints
-up-front"*. That was a **description of behaviour that did not happen**, and it papered
-over a real defect for as long as it stood (#436): nothing checked the child type at any
-layer, and a resolver silently re-materialized a `PATH{VALUE "sensor"}` into the lookup key
-of the legal `PATH{NAME "sensor"}`, so two byte-different PATHs addressed one vertex.
+Enforcement sits at the resolver, not at the codec. Three rules, in the order a frame meets them:
 
-The corrected statement, which describes what implementations actually do:
-
-- **The codec does not enforce these constraints, and is not expected to.** A PATH's
-  children are decoded as a generic child sequence; the bytes above are well-formed TLV and
-  round-trip byte-identically. That is deliberate — the constraint is about what an address
-  *means*, not about what the octets *are*, and it keeps codec-only cores (TypeScript,
-  Rust) free of resolver semantics.
-- **The resolver enforces the child-type rule**, when it turns a PATH into a vertex lookup
-  key. A non-NAME child makes the address unspellable, so the op answers
-  `ERROR{tr::path::invalid}` (`0x0021`) — *not* `tr::path::not_found`, which would wrongly
-  suggest the address was well-formed but absent. Enforcement precedes any write-create:
-  a `WRITE` to an illegally-spelled path creates nothing.
+- **The codec does not enforce these constraints, and is not expected to.** A PATH's children
+  are decoded as a generic child sequence; the bytes above are well-formed TLV and round-trip
+  byte-identically. That is deliberate — the constraint is about what an address *means*, not
+  about what the octets *are*, and it keeps codec-only cores (TypeScript, Rust) free of
+  resolver semantics.
+- **The resolver enforces the child-type rule**, when it turns a PATH into a vertex lookup key.
+  A non-NAME child makes the address unspellable, so the op answers `ERROR{tr::path::invalid}`
+  (`0x0021`) — *not* `tr::path::not_found`, which would wrongly assert that the address was
+  well-formed but absent. Enforcement **precedes write-create**: a `WRITE` to an
+  illegally-spelled path creates nothing.
 - **The length and segment-count limits** are bounded where the address is constructed or
   admitted, not at decode.
 
 Conformance vector: `path/path-value-children-illegal` carries the illegal spelling next to
 `path/path-sensor-temp`'s legal one — the same 22 bytes, differing only in each child's
-type byte.
+type byte. It is an `input.bin` case, not a `reject.bin` one: decode must succeed, because
+decode is not where the rule lives.
 
 ### Where it appears
 
@@ -420,23 +415,23 @@ POINT (PL=1) {
 }
 ```
 
-Subscribers and children appear as direct children of POINT, identified by their type code. There is no intermediate "subscribers list" or "children list" wrapper — the type byte of each child tells its role. The optional `VALUE` child ([RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md)) carries the vertex's own value, making a POINT tree a value-bearing view of a subtree — the read-side dual of the branch write below. Since [RFC-0016](../spec/rfcs/0016-composed-branch-read.md), that dual is a served operation: a plain read of a vertex with ≥ 1 registered child returns exactly this shape — the **composed branch read**, a view composed over the live last-known values (per-node stored TLVs verbatim, READ-denied subtrees pruned, a names-only topology tree when the branch is value-free).
+Subscribers and children appear as direct children of POINT, identified by their type code. There is no intermediate "subscribers list" or "children list" wrapper — the type byte of each child tells its role. The optional `VALUE` child ([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md)) carries the vertex's own value, making a POINT tree a value-bearing view of a subtree — the read-side dual of the branch write below. That dual is a served operation ([RFC-0016](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0016-composed-branch-read.md)): a plain read of a vertex with ≥ 1 registered child returns exactly this shape — the **composed branch read**, a view composed over the live last-known values (per-node stored TLVs verbatim, READ-denied subtrees pruned, a names-only topology tree when the branch is value-free).
 
 ### Where it appears
 
-- Returned by `read("/some/parent")` — the **composed branch read** of the parent's registered subtree ([RFC-0016](../spec/rfcs/0016-composed-branch-read.md)); names-only member enumeration is `read(<parent>:children[])`.
+- Returned by `read("/some/parent")` — the **composed branch read** of the parent's registered subtree ([RFC-0016](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0016-composed-branch-read.md)); names-only member enumeration is `read(<parent>:children[])`.
 - **Written to a vertex as a branch write** (below) — the write-side dual of the composed branch read.
 - Returned by `read(<vertex>:schema)` — the **two-part schema read** (below).
-- Used by the future recorder/replay module to snapshot vertex state.
-- Used by discovery modules announcing exported vertex trees.
+- Snapshots of vertex state taken by a recorder/replay module.
+- Announcements of exported vertex trees by discovery modules.
 
-### The `:schema` read — two parts, defined precedence ([RFC-0010](../spec/rfcs/0010-owner-app-fields-and-schema.md) §B.2)
+### The `:schema` read — two parts, defined precedence
 
-`read <vertex>:schema` serves one POINT holding the **synthesized protocol part** and — iff the owner installed a field descriptor table — the **owner part**, appended verbatim:
+`read <vertex>:schema` ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §B.2) serves one POINT holding the **synthesized protocol part** and — iff the owner installed a field descriptor table — the **owner part**, appended verbatim:
 
 ```
 POINT (PL=1) {
-  NAME      <vertex name>            ; as today
+  NAME      <vertex name>
   SETTINGS  <protocol part>          ; synthesized by the runtime — authoritative for
                                      ; protocol fields; the owner part is never consulted
   NAME "app"  SETTINGS (PL=1) {      ; owner part — present iff a table is installed
@@ -450,17 +445,17 @@ POINT (PL=1) {
 }
 ```
 
-Precedence is by position, with zero merge logic: the two parts describe disjoint namespaces (flat protocol knobs vs the reserved `app` subtree, §`0x0B`), so a name collision cannot occur by construction. A vertex without a table serves the pre-RFC POINT byte-for-byte.
+Precedence is by position, with zero merge logic: the two parts describe disjoint namespaces (flat protocol knobs vs the reserved `app` subtree, §`0x0B`), so a name collision cannot occur by construction. A vertex without a table serves the protocol part alone, byte-for-byte the record a runtime without owner fields serves.
 
-### Branch write — decomposition ([RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md))
+### Branch write — decomposition
 
-A write whose payload TLV is a POINT is a **branch write**: the written tree is rooted **at the target vertex** — the root POINT's `NAME` MUST equal the target's leaf segment (mismatch ⇒ `ERROR{tr::path::invalid}`) — and it **decomposes**:
+A write whose payload TLV is a POINT is a **branch write** ([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md)): the written tree is rooted **at the target vertex** — the root POINT's `NAME` MUST equal the target's leaf segment (mismatch ⇒ `ERROR{tr::path::invalid}`) — and it **decomposes**:
 
 - Each **value-carrying node** (a POINT with a `VALUE` child) is stored at the corresponding descendant vertex — the target's path extended by the chain of NAMEs — as a refcount-bumped **subview of the written frame** (zero copy, never re-encoded). Values are the truth at the vertices where they land; a branch is a view.
 - A landing vertex that does not exist is **created**, `mkdir -p` style, gated by the `CREATE` access bit on the nearest existing ancestor's effective ACL (§`0x0A`) — this is the same **write-creates** rule that applies to any data write to a nonexistent path.
 - Each covered subscription point is notified **once** with the smallest subview covering every value landed at-or-below it: the `VALUE` slice at a leaf landing site, the node's whole POINT subtree at an interior node, and the written TLV as-is at the root (and, via §`0x04` bubbling, above it).
-- **Strict shape** in a branch write: a node's children are exactly the leading `NAME`, at most one `VALUE`, and zero or more POINT sub-branches; anything else — or any trailer-carrying node in the tree — is rejected with `ERROR{tr::schema::type_mismatch}` and nothing lands (stored values are trailer-less at rest, [ADR-0041](../adr/0041-terminus-arena-decode-span-contract.md) §4). A branch with no `VALUE` anywhere is a valid no-op.
-- **One store per vertex; no branch transaction.** A read of any vertex returns its latest stored value — never behind what a subscriber saw, legitimately newer. Admission (shape + ACL + creation gating) is all-or-nothing, but application is per-leaf: cross-leaf atomicity is **explicitly not promised**; snapshot coherence is the coherent-sampling `(origin, ts)` group ([ADR-0019](../adr/0019-per-producer-monotonic-origin-timestamp.md)).
+- **Strict shape** in a branch write: a node's children are exactly the leading `NAME`, at most one `VALUE`, and zero or more POINT sub-branches; anything else — or any trailer-carrying node in the tree — is rejected with `ERROR{tr::schema::type_mismatch}` and nothing lands (stored values are trailer-less at rest, [ADR-0041](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0041-terminus-arena-decode-span-contract.md) §4). A branch with no `VALUE` anywhere is a valid no-op.
+- **One store per vertex; no branch transaction.** A read of any vertex returns its latest stored value — never behind what a subscriber saw, legitimately newer. Admission (shape + ACL + creation gating) is all-or-nothing, but application is per-leaf: cross-leaf atomicity is **explicitly not promised**; snapshot coherence is the coherent-sampling `(origin, ts)` group ([ADR-0019](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0019-per-producer-monotonic-origin-timestamp.md)).
 
 ```{mermaid}
 sequenceDiagram
@@ -489,9 +484,9 @@ sequenceDiagram
 
 A single error condition. Used inside STATUS TLVs (which may carry zero or more ERRORs) and as the response payload for failed `read`/`write`/`await` calls.
 
-### Payload layout ([RFC-0002](../spec/rfcs/0002-protocol-error-model.md), accepted)
+### Payload layout
 
-`ERROR` is a **structured TLV (`opt.PL=1`) in all cases** — never special-cased; a
+`ERROR` ([RFC-0002](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0002-protocol-error-model.md), accepted) is a **structured TLV (`opt.PL=1`) in all cases** — never special-cased; a
 generic `PL=1` walker handles it. Its **first child is the identity**, selected by
 the child's type alone:
 
@@ -538,7 +533,7 @@ the peer) — both live in the registry, **never on the wire**.
 | `0x0070` | `tr::version::mismatch` | critical | fatal |
 
 There is **no OK code** (an empty `STATUS` means OK) and **no user/application
-error range** ([ADR-0010](../adr/0010-closed-protocol-error-boundary.md)): an
+error range** ([ADR-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0010-closed-protocol-error-boundary.md)): an
 application failure is ordinary data described by the application's schema. A
 module outside the frozen registry uses the **string form** (`tr::<vendor>::…`) —
 no registry entry, no RFC. `tr::frame::invalid` covers reserved-bit-set /
@@ -580,16 +575,18 @@ STATUS (PL=1) {
 ### Where it appears
 
 - Synchronous return from `read` / `write` / `await` on failure.
-> **Erratum (2026-07-30).** This section used to list "asynchronous signal at `<vertex>:status`
-> when subscribers should be notified of liveness/deadline/transport events" as a place STATUS
-> appears. **`:status` is not a valid selector.** No implementation has ever exposed it: a field
-> read or write to `:status` answers `ERROR{tr::schema::not_found}` (`0x0031`), the declared
-> reply for a field a vertex does not expose. The text was aspirational from its first commit,
-> not broken by a later change. `:status` is not in the field namespace at all: the field **namespace** the dispatcher recognises is `{subscribers, acl, children, settings, schema, identity}`. A recognised name can still answer `NOT_FOUND` when the facet is empty, or `SCHEMA_NOT_FOUND` for a spelling it does not accept (bare `:subscribers` requires `[N]`) or for a facet deliberately absent (`:identity` with no keypair, RFC-0011 §C.3) — so the set is a namespace, not a list of things that read. The
-> synchronous return and the unsubscribe sentinel below are both real. Whether an asynchronous
-> status surface **should** exist is open at [#584](https://github.com/avatarsd-llc/libtracer/issues/584).
-
 - Sentinel TLV used to clear subscriber slots (write empty STATUS to `:subscribers[N]`).
+
+STATUS is a **reply and a sentinel, not a field**. There is no asynchronous status surface:
+`<vertex>:status` is not a selector, and a field read or write to it answers
+`ERROR{tr::schema::not_found}` (`0x0031`), the declared reply for a field a vertex does not
+expose. The field **namespace** a dispatcher recognises is
+`{subscribers, acl, children, settings, schema, identity}`, and `status` is not in it.
+A recognised name can still answer `NOT_FOUND` when the facet is empty, or
+`SCHEMA_NOT_FOUND` for a spelling it does not accept (bare `:subscribers` requires `[N]`) or
+for a facet deliberately absent (`:identity` with no keypair, §`0x0B`) — the set is a
+namespace, not a list of things that read. Whether an asynchronous status surface should
+exist is open ([#584](https://github.com/avatarsd-llc/libtracer/issues/584)).
 
 ### Hex example
 
@@ -613,7 +610,7 @@ Access control list — a collection of capabilities granting permissions on a v
 
 ### Payload layout
 
-ACL is structured (`opt.PL=1`). Its children are themselves ACL TLVs, each one an **ACE** (access control entry, NFSv4-style — [ADR-0020](../adr/0020-acl-nfsv4-style-aces-with-inheritance.md)). (The recursion is deliberate: the outer ACL is the ACE collection; each inner ACL is one ACE with NAME-tagged fields.)
+ACL is structured (`opt.PL=1`). Its children are themselves ACL TLVs, each one an **ACE** (access control entry, NFSv4-style — [ADR-0020](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0020-acl-nfsv4-style-aces-with-inheritance.md)). (The recursion is deliberate: the outer ACL is the ACE collection; each inner ACL is one ACE with NAME-tagged fields.)
 
 ```
 ACL (PL=1) {                                ; outer = ACE collection
@@ -628,11 +625,11 @@ ACL (PL=1) {                                ; outer = ACE collection
 }
 ```
 
-`access_mask` bits: `READ=0x01 WRITE=0x02 SUBSCRIBE=0x04 CREATE=0x08 DELETE=0x10 READ_ACL=0x20 WRITE_ACL=0x40 WRITE_OWNER=0x80` (`0x100`+ reserved). The **`admin`** right is `WRITE_ACL` (modify the ACL / delegate); `CREATE` gates vertex creation — the [RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md) write-creates path (the earlier `:children[]` creation-field spelling of [ADR-0017](../adr/0017-in-band-vertex-creation-controller-orchestration.md) is superseded by [ADR-0059](../adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md)).
+`access_mask` bits: `READ=0x01 WRITE=0x02 SUBSCRIBE=0x04 CREATE=0x08 DELETE=0x10 READ_ACL=0x20 WRITE_ACL=0x40 WRITE_OWNER=0x80` (`0x100`+ reserved). The **`admin`** right is `WRITE_ACL` (modify the ACL / delegate); `CREATE` gates vertex creation — both the [RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md) write-creates path and the creator endpoint of §`0x0E` ([ADR-0059](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md), which supersedes the `:children[]` creation-field spelling of [ADR-0017](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0017-in-band-vertex-creation-controller-orchestration.md)).
 
-**Inheritance:** an ACE with `INHERIT` on a composite vertex applies to its whole subtree; a vertex's *effective* ACL is its own ACEs + inherited ancestor ACEs ([ADR-0020](../adr/0020-acl-nfsv4-style-aces-with-inheritance.md)). **Evaluation:** ALLOW/DENY, ordered, first-match-per-bit. The **wire layout is the full NFSv4 model**; the required-modules MCU profile enforces a subset (ALLOW-only, single `INHERIT` flag); full DENY/ordered evaluation is the `security_acl` host module.
+**Inheritance:** an ACE with `INHERIT` on a composite vertex applies to its whole subtree; a vertex's *effective* ACL is its own ACEs + inherited ancestor ACEs ([ADR-0020](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0020-acl-nfsv4-style-aces-with-inheritance.md)). **Evaluation:** ALLOW/DENY, ordered, first-match-per-bit. The **wire layout is the full NFSv4 model**; the required-modules MCU profile enforces a subset (ALLOW-only, single `INHERIT` flag); full DENY/ordered evaluation is the `security_acl` host module.
 
-**Enforcement (core subset).** The reference core enforces the MCU subset (#81): **ALLOW-only** (a `:acl` write carrying a DENY ACE — or any flag bit beyond the single `INHERIT` — is rejected with `TYPE_MISMATCH`, so stored ACEs never carry semantics the subset evaluator would silently weaken), and **open by default** twice over — enforcement is off until a **subject resolver** is installed (the pluggable-subject-token seam of [ADR-0018](../adr/0018-access-control-authorization-pluggable-subject-token.md): caller context → subject token; the FWD terminus passes the inbound link as the caller context, local API calls are trusted by default), and a vertex whose *effective* ACL is empty stays unrestricted. With a resolver set, an operation is allowed iff some non-expired ACE with a matching subject (byte-equal, or the special `EVERYONE@`) grants the operation's bit: data/field read and `await` need `READ`, data/field writes need `WRITE`, the `:subscribers[]` append needs `SUBSCRIBE` on the *producer* and delivery needs `WRITE` on the *target* (the two-ACL gate of [ADR-0026](../adr/0026-consumer-initiated-subscription-client-write.md)), `:children[]` creation needs `CREATE`, and `:acl` read/write need `READ_ACL`/`WRITE_ACL`. Denial is `PermissionDenied` (`tr::access::denied`, `0x0050`). The effective ACL is computed at check time by walking the ancestor keys — control-plane frequency; the lock-free data hot path pays one null check when no resolver is installed.
+**Enforcement (core subset).** A core implementing the MCU subset enforces **ALLOW-only** — an `:acl` write carrying a DENY ACE, or any flag bit beyond the single `INHERIT`, is rejected with `TYPE_MISMATCH`, so stored ACEs never carry semantics the subset evaluator would silently weaken — and is **open by default** twice over: enforcement is off until a **subject resolver** is installed (the pluggable-subject-token seam of [ADR-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0018-access-control-authorization-pluggable-subject-token.md): caller context → subject token; the FWD terminus passes the inbound link as the caller context, local API calls are trusted by default), and a vertex whose *effective* ACL is empty stays unrestricted. With a resolver set, an operation is allowed iff some non-expired ACE with a matching subject (byte-equal, or the special `EVERYONE@`) grants the operation's bit: data/field read and `await` need `READ`, data/field writes need `WRITE`, the `:subscribers[]` append needs `SUBSCRIBE` on the *producer* and delivery needs `WRITE` on the *target* (the two-ACL gate of [ADR-0026](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0026-consumer-initiated-subscription-client-write.md)), creation needs `CREATE`, and `:acl` read/write need `READ_ACL`/`WRITE_ACL`. The one named exemption is `:identity`, which resolves above the READ gate (§`0x0B`). Denial is `ERROR{tr::access::denied}` (`0x0050`). The effective ACL is computed at check time by walking the ancestor keys — control-plane frequency; the data hot path pays one null check when no resolver is installed.
 
 ### Header settings
 
@@ -640,8 +637,8 @@ ACL (PL=1) {                                ; outer = ACE collection
 
 ### Where it appears
 
-- `<vertex>:acl` field.
-- Core-subset enforcement (ALLOW-only, single `INHERIT`, resolver-gated — the paragraph above) lives in the reference core; the full DENY/ordered/audit model is the `security_acl` module (post-MVP per [10-module-catalog.md](10-module-catalog.md)).
+- `<vertex>:acl` field. The field is served whole: an ACE is not separately addressable, so `:acl[N]` names nothing and answers `SCHEMA_NOT_FOUND`.
+- Core-subset enforcement (ALLOW-only, single `INHERIT`, resolver-gated — the paragraph above) lives in the core; the full DENY/ordered/audit model is the `security_acl` module (post-MVP per [10-module-catalog.md](10-module-catalog.md)).
 
 ### Constraints
 
@@ -674,7 +671,7 @@ SETTINGS (PL=1) {
 
 Nested SETTINGS for module namespacing (instead of an unnamed structured wrapper) keeps the type byte semantically meaningful at every level.
 
-**The `app` key is reserved** ([RFC-0010](../spec/rfcs/0010-owner-app-fields-and-schema.md) §A.1): the protocol MUST never mint a QoS or machinery knob named `app`, and implementations MUST NOT accept `settings.app` as a protocol knob. Everything below `settings.app.` is **owner-defined** — names, nesting (the module-namespacing shape above), and value bytes are the application's, opaque to the runtime. Fields there are writable only where the owner's field descriptor table declares them (`ro`/`rw`/`wo`); undeclared names return `ERROR{tr::schema::not_found}` on read and write. One reservation, collision-proof both ways: the protocol keeps minting flat knob names forever; applications only ever mint below `.app.`.
+**The `app` key is reserved** ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §A.1): the protocol MUST never mint a QoS or machinery knob named `app`, and implementations MUST NOT accept `settings.app` as a protocol knob. Everything below `settings.app.` is **owner-defined** — names, nesting (the module-namespacing shape above), and value bytes are the application's, opaque to the runtime. Fields there are writable only where the owner's field descriptor table declares them (`ro`/`rw`/`wo`); undeclared names return `ERROR{tr::schema::not_found}` on read and write. One reservation, collision-proof both ways: the protocol keeps minting flat knob names forever; applications only ever mint below `.app.`.
 
 ### Header settings
 
@@ -682,9 +679,10 @@ Nested SETTINGS for module namespacing (instead of an unnamed structured wrapper
 
 ### Where it appears
 
-- `<vertex>:settings` for atomic multi-field reads; a bare `:settings` read serves the full container — the protocol knobs plus the nested `app` record when a descriptor table is installed — and `:settings.app` serves the app record alone ([RFC-0010](../spec/rfcs/0010-owner-app-fields-and-schema.md) §A.4). Writes are **per-knob** (`:settings.<knob>`); there is no atomic multi-field settings *write* (a bare `:settings` write resolves no knob and returns `SCHEMA_NOT_FOUND`).
+- `<vertex>:settings` for atomic multi-field reads; a bare `:settings` read serves the full container — the protocol knobs plus the nested `app` record when a descriptor table is installed — and `:settings.app` serves the app record alone ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §A.4). Writes are **per-knob** (`:settings.<knob>`); there is no atomic multi-field settings *write* (a bare `:settings` write resolves no knob and returns `SCHEMA_NOT_FOUND`).
 - Inside SUBSCRIBER as the `qos_settings` sub-field for per-subscription overrides.
 - Inside the `:schema` POINT (§`0x07`): the synthesized protocol part, and one `SETTINGS` per declared app field inside the owner part.
+- As the whole reply to `read <vertex>:identity` — the node-identity record below.
 
 ### Validation
 
@@ -703,7 +701,66 @@ Nested SETTINGS for module namespacing (instead of an unnamed structured wrapper
 | `deadline_ns` | u64 | 0 (off) | Maximum interval between writes; missed = STATUS=TIMEOUT |
 | `priority` | u8 | 0 (lowest) | Transport hint; 0 = lowest, 255 = highest |
 | `queue_max_bytes` | u32 | 0 (unbounded) | Per-subscriber back-pressure cap |
-| `store_ref_min_bytes` | u32 | 0 (disabled) | Store-by-reference threshold ([ADR-0042](../adr/0042-refcounted-receiver-seam-view-delivery.md) §3): a view-delivered WRITE whose payload is ≥ this many bytes (and carries no trailer) is stored as a zero-copy subview of the inbound frame; 0 disables referencing |
+| `store_ref_min_bytes` | u32 | 0 (disabled) | Store-by-reference threshold ([ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md) §3): a view-delivered WRITE whose payload is ≥ this many bytes (and carries no trailer) is stored as a zero-copy subview of the inbound frame; 0 disables referencing |
+
+### The node-identity record — `:identity`
+
+`read <vertex>:identity` ([RFC-0011](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0011-node-identity-facet.md)) serves one SETTINGS TLV carrying the node's public key. It reuses the NAME-keyed record shape of the `:` plane rather than a bare key blob, so a second identity kind can be added without a surface break.
+
+```
+SETTINGS (PL=1) {
+  NAME "kind"  VALUE <u8>          ; required, FIRST — identity-kind registry below
+  NAME "key"   VALUE <key bytes>   ; required, SECOND — the raw public key
+  ...                              ; optional future members; readers MUST ignore unknown NAMEs
+}
+```
+
+The two required members appear in that fixed order.
+
+**Identity-kind registry** (additions RFC-gated, like the error registry):
+
+| `kind` | Meaning | `key` length |
+| ---- | ---- | ---- |
+| `0x00` | reserved — invalid | — |
+| `0x01` | ed25519 raw public key (RFC 8032 encoding) | exactly 32 bytes |
+
+Worked bytes — the complete ed25519 record, **60 bytes**:
+
+```
+0B 40 38 00                                SETTINGS: type=0x0B opt=0x40(PL=1) len=56
+  02 00 04 00 6B 69 6E 64                  NAME "kind"                    (8 bytes)
+  01 00 01 00 01                           VALUE u8 = 0x01 (ed25519)      (5 bytes)
+  02 00 03 00 6B 65 79                     NAME "key"                     (7 bytes)
+  01 00 20 00 <32 raw pubkey bytes>        VALUE = ed25519 public key    (36 bytes)
+```
+
+`4 (header) + 56 (payload) = 60 bytes`; a trailer rides per the serving link's egress policy, as for any reply.
+
+Normative rules:
+
+- **Malformed records never reach the wire.** A `kind` outside the registry, a missing or
+  misordered required member, or a `key` length that contradicts the `kind` (kind `0x01` ⇒
+  exactly 32 bytes) is rejected with `ERROR{tr::schema::type_mismatch}` — at install time on
+  the serving side, and on decode at the reader.
+- **Absent keypair ⇒ `ERROR{tr::schema::not_found}` (`0x0031`).** A node with no keypair
+  answers byte-for-byte as it answers any field it does not expose. Absence is absence; an
+  empty record would fabricate an "identity exists but is vacant" state no consumer can act on.
+- **The whole `identity` namespace resolves.** The record is served whole and has no member or
+  indexed addressing, so `:identity.key`, `:identity[0]` and every other shape answer
+  `SCHEMA_NOT_FOUND` — **caller-independently**, the same answer for an authorized and an
+  unauthorized caller alike.
+- **Node-scoped and pre-serialized.** A node holding a keypair MUST serve the record at every
+  vertex of its graph, and all of them MUST return byte-identical bytes; a multi-homed node
+  MUST present the same record on every transport. That identity-per-node invariant is what
+  makes the record a valid cross-path dedup key — the surface a client-side topology walk uses
+  to tell "same node reached two ways" from "two nodes".
+- **Pre-auth readable — exempt from the READ gate.** The `:identity` read MUST be served
+  regardless of the caller's subject and the vertex's effective ACL, including to an anonymous
+  caller: `identity` resolves *above* the ACL check. The public key is precisely what an
+  unauthenticated peer must obtain in order to TOFU-pin, and the default ACL ships closed, so
+  an implementation that gates `:identity` behind `READ` deadlocks first contact. The exemption
+  is narrow and named: it applies to this field alone, and it discloses nothing an
+  authenticating handshake would not present as its static key anyway.
 
 ---
 
@@ -756,7 +813,7 @@ type = 0x80 (user-range record, sender and receiver agree on shape)
 
 ## `0x0D` — ROUTER (reserved)
 
-`0x0D` is a **reserved, decodable codepoint with no implemented mechanism** ([ADR-0040](../adr/0040-net-plane-is-explicit-source-routed-only.md)). The frame codec parses a `0x0D` TLV generically (a structured container when `opt.PL=1`, per the rules of [01-data-format.md](01-data-format.md)); no protocol mechanism emits or interprets it.
+`0x0D` is a **reserved, decodable codepoint with no implemented mechanism** ([ADR-0040](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0040-net-plane-is-explicit-source-routed-only.md)). The frame codec parses a `0x0D` TLV generically (a structured container when `opt.PL=1`, per the rules of [01-data-format.md](01-data-format.md)); no protocol mechanism emits or interprets it.
 
 The remote-operation plane is the source-routed **`FWD`** (`0x0F`, below): every remote endpoint is addressed by an explicit source route, and `dst` shrinks monotonically per hop, so a delivery travels exactly as far as its explicit route and no further — loop-free **by construction**, not by a revisit check (there is no visited-set and no revisit `ERROR`; a `dst` that spells out a physical cycle simply routes around it as many times as the route names, then stops). So **FWD source-routing needs no duplicate suppression**. Parallel links to one peer are different explicit addresses (deliberate redundancy), not auto-multipath, so no "same value arrived two ways" case exists to dedup.
 
@@ -769,7 +826,7 @@ The codepoint is held in reserve for a possible future *flooding profile* (an au
 
 ## `0x0E` — SPEC
 
-Vertex-creation spec. Writing a SPEC into a parent's `:children[]` field requests the device **instantiate a child vertex of a device-known type** ([ADR-0017](../adr/0017-in-band-vertex-creation-controller-orchestration.md)). It is one *optional, standard* control field (the vertex-`ioctl` model of [ADR-0021](../adr/0021-colon-field-plane-is-the-vertex-ioctl.md)); a device that does not support dynamic creation has no `:children[]` write capability (`SCHEMA_NOT_FOUND`).
+Vertex-creation spec. Writing a SPEC requests that the device **instantiate a child vertex of a device-known type** ([ADR-0017](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0017-in-band-vertex-creation-controller-orchestration.md)). Creation is an ordinary `write` — no new wire verb — and it is one *optional, standard* control surface (the vertex-`ioctl` model of [ADR-0021](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0021-colon-field-plane-is-the-vertex-ioctl.md)); a device that does not support dynamic creation exposes no creation surface and answers `SCHEMA_NOT_FOUND`.
 
 ### Payload layout
 
@@ -777,7 +834,7 @@ Structured (`opt.PL=1`):
 
 ```
 SPEC (0x0E, PL=1) {
-  NAME "type"     <catalog selector — a type from the device's controller-type catalog>
+  NAME "type"     <catalog selector — required only where the catalog is global>
   NAME "name"     <the new child's path component>
   SETTINGS "config"   ; optional — instantiation params
 }
@@ -785,13 +842,16 @@ SPEC (0x0E, PL=1) {
 
 ### Where it appears
 
-- Written into `<parent>:children[]` to create a child. **Superseded (ratified 2026-07-19):** [ADR-0059](../adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md) §Decision 1 makes creation a `write` of this `SPEC` to the owner-designated **creator endpoint** (conventionally `/net/export`); the `<parent>:children[]` spelling here is the retired ADR-0017 / ADR-0027 model (RFC-0013 closed as superseded via #417). The device validates `type` against its **catalog** (the `:children` field's `:schema`); an unknown type returns `ERROR{tr::schema::not_found}`. Reading `<parent>:children[]` returns the subtree **members**, not SPECs (write-spec / read-members asymmetry).
-- Creation requires the `CREATE` right in the parent's `:acl` ([ADR-0020](../adr/0020-acl-nfsv4-style-aces-with-inheritance.md)). The created controller exposes its own **port vertices**; wiring them is a *separate* binding step (SUBSCRIBER edges).
+- Written to the owner-designated **creator endpoint** ([ADR-0059](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md) §Decision 1): a creation *field* on the parent is superseded, because `:schema` is vertex-only and a field-hosted catalog has nowhere to live. The accepted surface ([RFC-0014](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) §1) is a **per-module creator-endpoint vertex**, conventionally `/net/<module>/conn`, where a module is one *(transport, role)* pair mounted flat under `/net` (`ws-client`, `ws-server`, `can`, …). There, both transport and role are positional — the path already says them — so the SPEC carries `{ name, config }` with no `type` and no `role` member, and `read /net/<module>/conn:schema` **is** the catalog of that module's accepted config. `write SPEC{name, config}` creates `/net/<module>/<name>` atomically; `write NAME{<name>}` to the same endpoint retires it. **The endpoint is accepted but unimplemented**, as is the per-module `:schema`-as-catalog it needs.
+- **Gating** ([RFC-0014](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) §5, [RFC-0009](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0009-vertex-removal-and-subscriber-eviction.md) §A.1.1): a `SPEC` (create) write needs `CREATE` (`0x08`) on the endpoint; the `NAME` (remove) write needs `WRITE` (`0x02`), **not** `DELETE`. The two rights are independent, so a peer can hold create-but-not-remove, or the reverse.
+- The device validates `type`/`config` against its catalog; an unknown or malformed selector returns `ERROR{tr::schema::not_found}`. A create naming an existing child returns `ERROR{tr::path::in_use}`.
+- Reading a parent's `:children[]` returns the subtree **members**, not SPECs (write-spec / read-members asymmetry).
+- The created controller exposes its own **port vertices**; wiring them is a *separate* binding step (SUBSCRIBER edges).
 
 ### Validation
 
 - `type` MUST name a type in the device's catalog, else `SCHEMA_NOT_FOUND`.
-- `name` MUST be a valid single path component (per [03-addressing.md](03-addressing.md)).
+- `name` MUST be a valid single path component (per [03-addressing.md](03-addressing.md)) and MUST NOT collide with a protocol-owned name on the endpoint.
 
 ---
 
@@ -799,10 +859,10 @@ SPEC (0x0E, PL=1) {
 
 Allocated on a fast-track basis during v1. Assigned so far:
 
-- `0x0F` **FWD** and `0x10` **FIELD** — the remote-operation frames ([RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md) §B/§C, ADR-0035).
+- `0x0F` **FWD** and `0x10` **FIELD** — the remote-operation frames ([RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md) §B/§C, ADR-0035).
 - `0x11`–`0x13` — the **route-handle transport-plane control frames** (below).
 
-Still unassigned: `0x14`–`0x1F`. Candidate uses: `CAPABILITY` (opaque token, lighter than full ACL), `HEARTBEAT` (explicit liveness ping, currently subsumed by writes to `:liveness.last_seen_ns`). Receivers MUST handle unknown codes in this range per the forward-compatibility rules of [01-data-format.md](01-data-format.md) §forward / backward compatibility.
+Unassigned: `0x14`–`0x1F`. Candidate uses: `CAPABILITY` (opaque token, lighter than full ACL), `HEARTBEAT` (an explicit liveness ping; the same need is met by writes to the `:liveness.last_seen_ns` field, [04-communication-flows.md](04-communication-flows.md)). Receivers MUST handle unknown codes in this range per the forward-compatibility rules of [01-data-format.md](01-data-format.md) §forward / backward compatibility.
 
 A single-hop `FWD` request → reply round-trip (the consumer reaches a terminus node directly). The reply's `dst` is the request's `src`; a failure comes back as `kind=ERROR` carrying `STATUS{ ERROR }`:
 
@@ -810,22 +870,22 @@ A single-hop `FWD` request → reply round-trip (the consumer reaches a terminus
 sequenceDiagram
     autonumber
     participant C as Consumer (client)
-    participant N as Node (op_resolver_t)
+    participant N as Node (resolver)
     participant V as Vertex
     C->>N: FWD{ op=READ, dst=/sensor/temp, src=/client }
     N->>V: resolve dst → local vertex, read LKV
-    V-->>N: view_t (zero-copy refcount clone)
+    V-->>N: zero-copy refcount clone of the stored value
     N-->>C: FWD{ op=REPLY, dst=/client, kind=RESULT, VALUE }
     Note over C,N: WRITE/AWAIT/subscribe ride the same shape<br/>an error returns kind=ERROR + STATUS{ERROR}
 ```
 
-At the terminus — the one place a node reads the whole FWD tree — the frame is decoded into a flat **arena** rather than an owning tree ([ADR-0041](../adr/0041-terminus-arena-decode-span-contract.md)): `wire::decode_into(frame, src)` parses it into a `tlv_arena_t` of pre-order span-nodes (`{type, opt, wire — trailer-excluded, body, end, canonical_path}`), every span pointing into the inbound frame; `op_resolver_t::resolve` runs over that arena. The nodes are drawn from an injected **nothrow** `tr::mem::block_source_t` — a host that supplies a bounded source over its own slab gets a terminus that allocates nothing from the global heap, and one whose exhaustion is a `tr::tlv::nesting_too_deep` reject rather than an allocation failure ([ADR-0065](../adr/0065-failable-allocation-gets-its-own-seam-block-source.md)).
+At the terminus — the one place a node reads the whole FWD tree — the frame is decoded into a flat **arena** rather than an owning tree ([ADR-0041](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0041-terminus-arena-decode-span-contract.md)): the decoder parses it into pre-order span-nodes (`{type, opt, wire — trailer-excluded, body, end, canonical_path}`), every span pointing into the inbound frame, and the resolver runs over that arena. The nodes are drawn from an injected **nothrow** block source — a host that supplies a bounded source over its own slab gets a terminus that allocates nothing from the global heap, and one whose exhaustion is a `tr::tlv::nesting_too_deep` reject rather than an allocation failure ([ADR-0065](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md)).
 
 ```{mermaid}
 flowchart LR
-    F["inbound FWD frame<br/>(bytes)"] --> D["wire::decode_into(frame, src)"]
-    D --> A["tlv_arena_t<br/>flat pre-order span-nodes"]
-    A --> R["op_resolver_t::resolve"]
+    F["inbound FWD frame<br/>(bytes)"] --> D["decode into a span arena"]
+    D --> A["flat pre-order span-nodes"]
+    A --> R["resolve"]
     R --> K["vertex lookup:<br/>span-aliased path key<br/>(canonical PATH body IS the map key)"]
     R --> S["WRITE store:<br/>one trailer-sliced copy<br/>(header+body, trailer-less at rest)"]
     R --> E["FWD{REPLY} head direct-emitted<br/>into ONE exactly-sized segment;<br/>payload refcount-roped, zero-copy"]
@@ -833,8 +893,8 @@ flowchart LR
 
 Three properties of the arena resolve:
 
-- **Span-aliased vertex lookup** — a canonical PATH body is byte-identical to the graph's vertex-map key, so dispatch uses the frame's own bytes as the key with zero materialization (a non-canonical PATH from a foreign encoder falls back to a re-emit).
-- **Trailer-sliced stores** — a stored WRITE value copies the node’s header+body span exactly once (or, when the frame arrived as an owning view and the target vertex opts in via `:settings.store_ref_min_bytes`, is **referenced** as a zero-copy subview of the refcounted frame — [ADR-0042](../adr/0042-refcounted-receiver-seam-view-delivery.md)); the trailer never lands at rest either way (a trailer-carrying payload always falls back to the sliced copy).
+- **Span-aliased vertex lookup** — a canonical PATH body is byte-identical to the graph's vertex-map key, so dispatch uses the frame's own bytes as the key with zero materialization (a non-canonical PATH from a foreign encoder falls back to a re-emit, which rejects a non-NAME child before re-emitting it — §PATH enforcement).
+- **Trailer-sliced stores** — a stored WRITE value copies the node's header+body span exactly once (or, when the frame arrived as an owning view and the target vertex opts in via `:settings.store_ref_min_bytes`, is **referenced** as a zero-copy subview of the refcounted frame — [ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md)); the trailer never lands at rest either way (a trailer-carrying payload always falls back to the sliced copy).
 - **Direct-emitted reply** — every reply-head length is known from the node spans, so the `FWD{REPLY}` head (including the route bytes, copied once) is emitted straight into one exactly-sized segment, and a READ's reply payload rides as a zero-copy refcounted rope.
 
 Across hops, `FWD` is **source-routed and stateless**: each forwarder strips the leading `dst` segment (the next link) and prepends its name for the inbound link to `src` (a zero-copy rope head-prepend), so `dst` shrinks toward the target while `src` grows into the return route. A `REPLY` retraces that accumulated `src` and does **not** itself accumulate:
@@ -855,7 +915,7 @@ sequenceDiagram
 
 ### Route-handle frames — `0x11` ADVERTISE, `0x12` COMPACT, `0x13` HANDLE_NACK
 
-The route-handle (RFC-0004 §E.1, ADR-0035 slice 4) is **ws/UDP delivery-compaction** — the full-TLV counterpart of `transport_can`'s `identity↔path` map ([14-can-transport.md](14-can-transport.md)). These three frames are **transport-plane control**, not core conformance TLVs: they ride a link *alongside* `FWD`, are emitted only for a `delivery_compact`-flagged flow, and a peer that ignores them simply keeps the full-route delivery path — so they carry **no conformance vectors** and do not perturb the cross-core machine. All are structured (`opt.PL=1`); the `label` is a per-link **u16** (`VALUE`, little-endian — **65 535** usable labels per link, since `0` is reserved to mean "none"), allocated monotonically per link and **swapped each hop** (MPLS-style).
+The route-handle (RFC-0004 §E.1, ADR-0035 slice 4) is **ws/UDP delivery-compaction** — the full-TLV counterpart of the CAN transport's `identity↔path` map ([14-can-transport.md](14-can-transport.md)). These three frames are **transport-plane control**, not core conformance TLVs: they ride a link *alongside* `FWD`, are emitted only for a `delivery_compact`-flagged flow, and a peer that ignores them simply keeps the full-route delivery path — so they carry **no conformance vectors** and do not perturb the cross-core machine. All are structured (`opt.PL=1`); the `label` is a per-link **u16** (`VALUE`, little-endian — **65 535** usable labels per link, since `0` is reserved to mean "none"), allocated monotonically per link and **swapped each hop** (MPLS-style).
 
 ```
 ADVERTISE (0x11, PL=1) {            ; bind a label to a delivery route, in-band
@@ -872,7 +932,7 @@ HANDLE_NACK (0x13, PL=1) {         ; "I have no binding for this label" — prom
 }
 ```
 
-A `COMPACT` whose `label` has no binding on its inbound link is **dropped** and a `HANDLE_NACK` is returned (never a crash); re-advertising on (re)connect — the same producer-holds reconnect trigger — **rebinds** the flow ([ADR-0030](../adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md) self-heal). A node holds label state **only** for the compact flows crossing it (bounded by the number of such subscriptions); one-shot / cold / non-compact traffic allocates none — the slice-3 stateless-forwarder property is preserved. Per-hop multiplexing of a reply to a specific request remains the transport's concern (RFC-0004 §D), so no end-to-end handle exists.
+A `COMPACT` whose `label` has no binding on its inbound link is **dropped** and a `HANDLE_NACK` is returned (never a crash); re-advertising on (re)connect — the same producer-holds reconnect trigger — **rebinds** the flow ([ADR-0030](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md) self-heal). A node holds label state **only** for the compact flows crossing it (bounded by the number of such subscriptions); one-shot / cold / non-compact traffic allocates none, which preserves the stateless-forwarder property. Per-hop multiplexing of a reply to a specific request remains the transport's concern (RFC-0004 §D), so no end-to-end handle exists.
 
 ---
 
@@ -885,3 +945,78 @@ Long-term registry for future core extensions, post-v1. Allocation procedure: PR
 ## User range (`0x80` – `0xFF`)
 
 128 type codes the protocol does not opine on. Senders and receivers agree out-of-band. Recommended convention: register a project-specific "magic" prefix (e.g., 4-byte UUID-derived bytes at the start of the payload) so multiple unrelated user types can coexist on the same wire without collision.
+
+---
+
+## Pitfalls
+
+Each entry states the rule, then the failure mode it produces when an implementation gets it
+the other way round.
+
+### Validating PATH in the codec
+
+The rule: PATH's child-type constraint is a **resolver** rule, not a codec rule. The codec
+decodes a PATH's children as a generic child sequence and round-trips them byte-identically;
+the resolver refuses to address a vertex through a non-NAME child, answering
+`ERROR{tr::path::invalid}` (`0x0021`).
+
+The failure mode: a codec that "validates" PATH pushes the check to the wrong layer, and the
+resolver — the layer that still has to build a lookup key — normalizes whatever it is handed.
+A resolver that re-materializes a non-canonical PATH by emitting every child body as a NAME,
+regardless of the child's actual type, silently rewrites `PATH{VALUE "sensor"}` into
+`PATH{NAME "sensor"}`'s key. Two byte-different PATHs then address one vertex, and every peer,
+cache and router keyed on PATH bytes has two spellings for one address. The fallback itself is
+legitimate — it exists for a foreign encoder's LL-widened or trailer-carrying NAMEs — so the
+correct shape is to reject a non-NAME child *before* re-emitting, not to delete the fallback.
+Vector: `path/path-value-children-illegal`.
+
+The related failure mode: answering `tr::path::not_found` instead of `tr::path::invalid`
+asserts that the address was well-formed but absent, which sends a peer retrying an address it
+can never spell. And because enforcement precedes write-create, an implementation that checks
+the child type *after* the mkdir-p branch materializes vertices for addresses the spec says
+cannot be spelled.
+
+### Treating the field namespace as a list of readable facets
+
+The rule: `{subscribers, acl, children, settings, schema, identity}` is the namespace a
+dispatcher recognises. A recognised name can still answer `NOT_FOUND` (the facet is empty),
+or `SCHEMA_NOT_FOUND` (a spelling it does not accept, such as bare `:subscribers` where `[N]`
+is required, or a facet deliberately absent, such as `:identity` with no keypair).
+
+The failure mode: an implementation that maps "recognised" to "always returns bytes" invents
+surfaces. `<vertex>:status` in particular is **not** a selector — it answers
+`ERROR{tr::schema::not_found}` — and a client that polls it as an asynchronous status channel
+polls something that never existed.
+
+### Gating `:identity` behind READ
+
+The rule: `identity` resolves above the ACL check, deliberately, and the whole namespace
+resolves there — any member or indexed spelling answers `SCHEMA_NOT_FOUND` caller-independently.
+
+The failure mode: an implementation that routes `:identity` through the ordinary
+"data/field read needs `READ`" gate deadlocks first contact, because the default ACL ships
+closed and the public key is exactly what an unauthenticated peer needs in order to TOFU-pin
+and authenticate. A second, subtler failure: resolving the bare spelling above the gate but
+letting `:identity.key` fall through to it makes the answer *caller-dependent* — a denied
+caller gets `PERMISSION_DENIED` where an allowed caller gets `SCHEMA_NOT_FOUND` — which leaks
+the caller's authorization state through an error code.
+
+### Serving a per-vertex identity record
+
+The rule: the record is node-scoped and pre-serialized; every vertex of one node, on every
+transport, serves byte-identical bytes.
+
+The failure mode: a node that derives or re-encodes the record per vertex (different member
+order, an added member, a trailer on one link) breaks the one property consumers depend on —
+byte-equality as a dedup key. A topology walk that reached the node two ways then counts it as
+two nodes, and orbits the cycle.
+
+### Reading a delivery filter into `qos_settings`
+
+The rule: `qos_settings` carries encoding hints only. There is no value-diff delivery filter
+and no throttle; delivery selection is the per-vertex, value-agnostic `delivery_mode`.
+
+The failure mode: a producer that suppresses a delivery because the bytes did not change makes
+a value-inspecting decision the protocol forbids, and a consumer that assumes suppression
+mis-reads a stream of identical samples as a stalled producer. Deadbands and rate limits are
+application filter vertices, not fields.

@@ -1,13 +1,13 @@
 # Interoperability
 
-**You get interop enforcement without a certification cartel.** libtracer reaches
+**Interop enforcement here needs no certification body.** libtracer reaches
 interoperability the opposite way to a consumer-appliance standard like Matter: not
 by pre-agreeing a normative catalog of device semantics and gating shipment behind a
 certification body, but by keeping the protocol a lean, byte-agnostic router and
 making every node **describe itself well enough that a competent reader can build the
-integration on the spot**. The "reader" is a developer — increasingly a developer's
-AI agent. This document is the direction for that reader, and for the vendor writing
-the device it will read.
+integration on the spot**. The "reader" is a developer, or a developer's coding
+agent. This page states the discipline for that reader, and for the vendor writing
+the device it reads.
 
 > **Audience**: a vendor (or a vendor's coding agent) building a libtracer device, or
 > an integration that must talk to devices it did not design. It tells you what you
@@ -34,15 +34,33 @@ is a **legibility discipline** you follow so the next reader can understand you.
 
 The action space a reader must master is tiny and uniform: **`read` / `write` /
 `await`** against path handles, the same three verbs for every vertex, every
-transport, every device. The discovery surface is uniform too: walk the vertex tree,
-read each vertex's [`:schema`](reference/00-overview.md), read a device's controller
-catalog from its creator endpoint (`read /net/export:schema`). A general-purpose
+transport, every device. The discovery surface is uniform too: walk the vertex tree
+and read each vertex's [`:schema`](reference/00-overview.md). A general-purpose
 reader does not need a per-vendor SDK — it needs to walk one graph and read its
 self-descriptions.
 
+### The connection surface a reader addresses
+
+Connections are ordinary vertices, so they are discovered by the same walk. Two
+spellings must be told apart, because the accepted specification and this
+implementation differ.
+
+| | Surface | Catalog |
+| ---- | ---- | ---- |
+| **What the implementation accepts** | a CREATE-gated `SPEC{ NAME "type", NAME "name", SETTINGS "config" }` write to `/net:children[]` (`graph_t::create_child`, `core/src/graph.cpp:1516-1518`) | one global set of registered child types — `client` and `listener` (`core/src/transport_vertex.cpp:99-107`); the concrete transport is selected by a `kind` key inside the `config` SETTINGS (`core/src/transport_vertex.cpp:53,64`), extended per transport module through `register_transport_type` (`core/src/transport_vertex.cpp:128`) |
+| **What RFC-0014 specifies** | a per-module creator endpoint `/net/<module>/conn` — `SPEC{ name, config }` creates, `NAME{ name }` retires, with the transport and the role both positional in `<module>` | each module's own `conn:schema` |
+
+The created connection vertex is mounted and routed at **`/net/<module>/<name>`**,
+`<module>` defaulting to `<kind>-client` / `<kind>-server`
+(`core/src/transport_vertex.cpp:150,174,191-195`). The per-module creator endpoint is
+the accepted direction and is **not implemented**: an integration written against
+this implementation writes the global `:children[]` catalog
+([RFC-0014 — Creator endpoint: connection lifecycle and link
+liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)).
+
 ---
 
-## What a vendor MUST do to stay interoperable
+## Vendor obligations
 
 There is no conformance stamp. There are three obligations, and they are cheap.
 
@@ -54,13 +72,14 @@ There is no conformance stamp. There are three obligations, and they are cheap.
 
 2. **Name things the way you would want them read.** A vertex's NAME is surfaced in
    its `:schema` for free, on every node, with no opt-in. Two devices that both call
-   an ambient-temperature reading `temperature` are already partially interoperable —
-   a reader can match on it. This is the lightest possible convention: *agree on
-   nothing centrally; just be nameable.*
+   an ambient-temperature reading `temperature` are partially interoperable by
+   construction — a reader can match on it. This is the lightest possible convention:
+   *agree on nothing centrally; just be nameable.*
 
 3. **Annotate yourself legibly where you can afford to.** For anything a name alone
    cannot disambiguate — units, direction, valid range, purpose — install an
-   [owner field descriptor table](spec/rfcs/0010-owner-app-fields-and-schema.md)
+   [owner field descriptor
+   table](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md)
    (RFC-0010). Its descriptor bytes are stored and served **verbatim; the runtime
    never interprets them** — which makes them the ideal carrier for a
    natural-language brief and a semantic tag (e.g. `org.example.temperature.celsius.f32`)
@@ -135,15 +154,16 @@ this work in practice:
   interop model here that tolerates vocabulary divergence instead of legislating it
   away. (It tolerates *legible* divergence, not *cryptic absence*: see obligation 3.)
 - **Feedback is legible.** The uniform `tr::<concept>::<error>` model
-  ([RFC-0002](spec/rfcs/0002-protocol-error-model.md)) plus the closed error boundary
-  (applications emit *data*, never protocol errors) gives a reader clean, structured
-  signals to self-correct against — eight concepts, not a per-vendor error soup.
+  ([RFC-0002](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0002-protocol-error-model.md))
+  plus the closed error boundary (applications emit *data*, never protocol errors)
+  gives a reader clean, structured signals to self-correct against — eight concepts,
+  not a per-vendor error soup.
 - **The integration is compiled away.** The agent's output is ordinary code on the
   three-verb API; the runtime never depends on the agent being present or correct.
 
 ---
 
-## The honest trade
+## The trade
 
 This buys **opportunistic, best-effort, gracefully-degrading** interoperability, not
 the *guaranteed* cross-vendor interop a certification stamp confers, and it carries no
@@ -169,8 +189,7 @@ The model above, made executable:
   device *can*, *must*, and *must not* implement.
 - **[A production ESP32 node](interop/esp32-production-node.md)** — the hardened
   embedded profile: memory slabs, transport composition, task-stack discipline,
-  backpressure behavior, and validation practice from a shipped ESP32-C6
-  deployment.
+  backpressure behavior, and validation practice for an ESP32-C6 target.
 
 ```{toctree}
 :hidden:
@@ -183,7 +202,8 @@ Production ESP32 node <interop/esp32-production-node>
 ---
 
 > **See also**: [reference/00-overview.md](reference/00-overview.md) (the six-layer
-> model and load-bearing claims), [RFC-0010](spec/rfcs/0010-owner-app-fields-and-schema.md)
+> model and load-bearing claims),
+> [RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md)
 > (owner app fields and `:schema`), [reference 13](reference/13-network-formation.md)
 > (how an orchestrator forms a graph across nodes), and the design rationale in the
 > repository's [ADRs](https://github.com/avatarsd-llc/libtracer/tree/main/docs/adr/).

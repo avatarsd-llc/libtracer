@@ -51,9 +51,9 @@ Integrations may be maintained by sub-maintainers separate from the core team. L
 Bridges are first-class citizens — translating Modbus, Z-Wave, proprietary vendor X, etc. into libtracer is exactly what this project exists to enable. A bridge can be:
 
 - **In-tree** — under `integrations/bridges/<protocol>/`. Use this if the bridge has no external dependencies that complicate the core build.
-- **Out-of-tree** — your own repo, listed in [docs/reference/bridges.md](../docs/reference/). Use this if the bridge depends on a proprietary SDK or has its own release cadence.
+- **Out-of-tree** — your own repo, registered in [docs/implementations.md](../docs/implementations.md). Use this if the bridge depends on a proprietary SDK or has its own release cadence.
 
-Either way, link it from the bridge registry so users can find it.
+Either way, add a row to the registry so users can find it.
 
 ## Spec changes
 

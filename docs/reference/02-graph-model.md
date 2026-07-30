@@ -1,8 +1,7 @@
-# Reference 02 — Graph Model and Same-Substrate Insight
+# Reference 02 — Graph model
 
-> **Status**: draft, v1, 2026-05-03. Defines what a graph IS in libtracer and the load-bearing claim that the in-memory graph and the wire bytes are the same substrate.
 > **Audience**: implementers writing the router/dispatcher; anyone reasoning about zero-copy semantics.
-> **See also**: [04-communication-flows.md](04-communication-flows.md) for API rationale; [01-data-format.md](01-data-format.md) for the byte layout this section interprets structurally.
+> **See also**: [04-communication-flows.md](04-communication-flows.md) for the operation surface; [01-data-format.md](01-data-format.md) for the byte layout this section interprets structurally.
 
 ---
 
@@ -14,9 +13,9 @@
 
 - **Path**: an ordered list of UTF-8 NAME segments rooted at `/`, addressing a vertex (or a field on a vertex). Syntax in [03-addressing.md](03-addressing.md).
 
-- **Schema**: a structured TLV (typically a `POINT` or a `SETTINGS`-shaped record) returned at `<vertex>:schema`, enumerating the writable fields the vertex exposes. Two parts with defined precedence ([RFC-0010](../spec/rfcs/0010-owner-app-fields-and-schema.md) §B.2): a **synthesized protocol part** — the core fields (`:subscribers[]`, `:settings.*`, `:liveness.*`, `:acl`) plus any module-namespaced fields, authoritative for protocol machinery — and, when the owner installed a field descriptor table, an **owner part** (`NAME "app" SETTINGS{…}`) served verbatim, authoritative for `settings.app.*`. Read-only.
+- **Schema**: a structured TLV (typically a `POINT` or a `SETTINGS`-shaped record) returned at `<vertex>:schema`, enumerating the writable fields the vertex exposes. Two parts with defined precedence ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §B.2): a **synthesized protocol part** — the core fields (`:subscribers[]`, `:settings.*`, `:liveness.*`, `:acl`) plus any module-namespaced fields, authoritative for protocol machinery — and, when the owner installed a field descriptor table, an **owner part** (`NAME "app" SETTINGS{…}`) served verbatim, authoritative for `settings.app.*`. Read-only.
 
-- **Forwarder** (router): the stateless component (`fwd_router_t`) that routes `FWD` frames between a node's local graph and its named transport links — each hop strips the leading `dst` segment and grows `src` with the way back. To a downstream subscriber a forwarded delivery is indistinguishable from a local write.
+- **Forwarder** (router): the stateless component that routes `FWD` frames between a node's local graph and its named transport links — each hop strips the leading `dst` segment and grows `src` with the way back. To a downstream subscriber a forwarded delivery is indistinguishable from a local write.
 
 - **Buffer segment**: a refcounted region of real memory backing one or more views. The unit of ownership.
 
@@ -109,9 +108,9 @@ Both are the **Composite pattern**, but they compose *different things* and are 
 
 - **A `FWD` uses a rope but is not one.** The remote-operation envelope ([07-host-embedding.md](07-host-embedding.md)) composes *meaning* (op + routes + the payload TLV); the bytes a hop forwards stay a rope. A forward hop is "adjust the route heads, re-emit the rest via scatter-gather, never copy" — the forwarder never inherits or becomes a rope.
 
-The two sections below are this same point made concrete: **How nested TLVs work** is the *meaning* axis; **How that structured TLV exists in memory** is the *storage* axis.
+The two sections below are this same point made concrete: **Nested TLV structure** is the *meaning* axis; **The structured TLV in memory** is the *storage* axis.
 
-### How nested TLVs work structurally
+### Nested TLV structure
 
 When the `PL` (payload-is-structured) bit is set in the header `opt` byte, the payload is interpreted as a sequence of child TLVs concatenated end-to-end. Each child has its own header (4 or 6 bytes per [01-data-format.md](01-data-format.md), depending on `opt.LL`) and optional trailer; any child may itself have `PL=1` for further nesting.
 
@@ -134,7 +133,7 @@ Inner TLVs typically carry no trailer of their own — the outer's CRC (if prese
 
 This structured TLV IS the graph node. To walk a vertex's children: parse the children, iterate them, recurse (iteratively, per [01-data-format.md](01-data-format.md)) into any with `PL=1`.
 
-### How that structured TLV exists in memory
+### The structured TLV in memory
 
 Underneath, each inner TLV is represented as a **view**: a struct holding `{owner_segment, offset, length}` where `owner_segment` is a refcounted pointer to the real memory backing the buffer. The graph "contains" inner TLVs by holding views into the parent's memory.
 
@@ -203,13 +202,13 @@ Underlying rope (in-memory case):
 - A wire-receive parser walks byte offsets within one buffer.
 - An in-memory walker steps across view boundaries when crossing from one rope link to the next.
 
-The same iterative pattern (recurse on `PL=1`, bound depth at 32) applies to both. Implementations typically share the parsing logic with two different cursor advance functions.
+The same iterative pattern applies to both: recurse on `PL=1`, with nesting depth bounded by the receiver's decode resources rather than by a protocol constant — exhaustion rejects the frame with `TLV_NESTING_TOO_DEEP` ([RFC-0006](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md)). Implementations typically share the parsing logic with two different cursor advance functions.
 
 ### Spec-level proof obligation
 
 > Any sequence of mix / split / concat operations on a view tree, followed by a `serialize_to_wire()` walk, MUST produce the same bytes as if the corresponding mutations had been applied to a fresh buffer.
 
-This invariant is testable: construct a view tree by parsing wire bytes, mutate it, serialize, and compare to the wire-bytes equivalent constructed from scratch. The reference implementation has `core/tests/substrate_test.cpp` exercising this.
+This invariant is testable: construct a view tree by parsing wire bytes, mutate it, serialize, and compare to the wire-bytes equivalent constructed from scratch. The reference implementation exercises it in `core/tests/substrate_test.cpp`.
 
 A second-language implementation that fails this invariant is **not conforming**, regardless of whether its wire output is otherwise valid.
 
@@ -223,7 +222,7 @@ This is the structural rule that lets [03-addressing.md](03-addressing.md) §sta
 - A write whose path argument is a build-time `.rodata` PATH TLV byte literal hashes / compares against that same key — no string is involved at any point.
 - A write whose path argument is the equivalent string `"sensor/temp"` is canonicalized into the same PATH TLV bytes once (by the slow-path string entry, if the implementation provides one) and then dispatched against the same key.
 
-**Implication.** Two paths that name the same vertex MUST canonicalize to byte-identical PATH TLV payload bytes. The canonicalization rules in [03-addressing.md](03-addressing.md) §path canonicalization are the spec for this; conformance test vectors at `tests/conformance/vectors/v1/path_canonical/` check byte equality.
+**Implication.** Two paths that name the same vertex MUST canonicalize to byte-identical PATH TLV payload bytes. The canonicalization rules in [03-addressing.md](03-addressing.md) §path canonicalization are the spec for this; conformance vectors under `tests/conformance/vectors/v1/path/` pin the encoded bytes.
 
 ```mermaid
 flowchart LR
@@ -280,7 +279,7 @@ Implementations on multi-threaded hosts MUST use atomic refcounts with these mem
 | Operation | Order | Why |
 | ---- | ---- | ---- |
 | Increment (clone view) | `relaxed` | Caller already holds a reference; data dependency travels via that existing reference |
-| Decrement (release view) | `acq_rel` | release: flush all writes before someone else observes count drop; acquire: if we observe drop to zero, sync with all prior releases |
+| Decrement (release view) | `acq_rel` | release: flush all writes before someone else observes count drop; acquire: if the drop to zero is observed, synchronize with all prior releases |
 | Read for inspection (debug, metrics) | `acquire` | Pairs with each decrement; gives consistent snapshot |
 | Weak-to-strong upgrade (CAS loop) | `acq_rel` on success, `acquire` on failure | Same logic as inc + sync with last decrementer |
 
@@ -288,23 +287,23 @@ Rationale is expanded in [01-data-format.md](01-data-format.md) §refcount memor
 
 ### Single-threaded mode
 
-For Cortex-M0/M0+ (no LDREX/STREX) and bare-metal single-threaded contexts, an implementation MAY substitute plain (non-atomic) integer refcount, provided the application guarantees no cross-thread sharing of segments. The reference implementation exposes this as `LIBTRACER_NO_ATOMIC=ON`.
+For Cortex-M0/M0+ (no LDREX/STREX) and bare-metal single-threaded contexts, an implementation MAY substitute a plain (non-atomic) integer refcount, provided the application guarantees no cross-thread sharing of segments. This is a build-time substitution, not a runtime mode: the two refcount flavours are never mixed within one image.
 
 ### Ownership transfer at endpoint delivery
 
 When a transport module receives bytes from the wire, it constructs a top-level view over the received memory and hands it to the router via the recv callback. The router walks the view tree, finds the destination endpoint, and delivers the view to the endpoint's queue.
 
-**At delivery, the view's ownership is *transferred* to the endpoint** — meaning the endpoint takes the existing refcount, no new copy is made. The transport module relinquishes its reference (refcount decrement; the segment survives because the endpoint now holds the count).
+**At delivery, the view's ownership is *transferred* to the endpoint** — the endpoint takes the existing refcount, no new copy is made. The transport module relinquishes its reference (refcount decrement; the segment survives because the endpoint now holds the count).
 
 If multiple subscribers are attached, the view is **cloned** (refcount bumped per subscriber, no byte-level copy). Each subscriber sees the same backing memory through its own view struct.
 
-This is the mechanism that makes "as fast as Cap'n Proto with pub/sub semantics" credible.
+Fan-out therefore costs one refcount increment per subscriber and no payload traffic, which is what puts pub/sub semantics on the same cost footing as a zero-copy serialization format.
 
 ---
 
-## Read is zero-copy; write is single-copy where the medium demands
+## Copy asymmetry between read and write
 
-The asymmetry is real and worth naming explicitly.
+Reads are zero-copy; writes are single-copy where the medium demands it. The asymmetry is real and worth naming explicitly.
 
 ### Read paths
 
@@ -333,7 +332,7 @@ The receive side on a stream/byte transport (UART, CAN, I²C, TCP) intrinsically
 
 A subscriber that processes the TLV synchronously and releases its view immediately allows the RX buffer segment to be returned to the transport's free pool quickly. A subscriber that holds the view (e.g. enqueues for later processing) keeps the segment alive — backpressure on the segment pool is one of the QoS knobs (`queue_max_bytes`).
 
-### The trailer enables payload-bytes invariance across boundaries
+### Payload invariance across boundaries
 
 The wire-format trailer (`trailer_ts`, `trailer_crc`; see [01-data-format.md](01-data-format.md)) is what makes the read/write asymmetry above clean. The trailer is **append-only at egress, strip-only at ingress** — the payload region is never touched.
 
@@ -354,15 +353,70 @@ A subscriber that wants the application-domain timestamp reads it from a sibling
 
 ---
 
-## Subtree subscriptions, branch writes, write-creates ([RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md))
+## Subtree subscriptions, branch writes, and write-creates
 
-Three ratified write/delivery semantics that make the vertex tree observable and writable **at any granularity** with the same three-call API:
+Three ratified write/delivery semantics ([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md)) make the vertex tree observable and writable **at any granularity** with the same three-call API:
 
 - **Every subscription is a subtree subscription (vertical bubbling).** A `SUBSCRIBER` edge on vertex V observes writes to V **and to every descendant** (a leaf subscription is the trivial case). A write at W delivers — once per subscriber — to the subscribers of W and of each ancestor of W, carrying the **written TLV as-is** (the frame at the producer's granularity; no re-encoding, no tagging envelope; provenance beyond that travels in the data). Local delivery is the usual view clone; remote delivery rides the existing return-route `FWD{WRITE}` path unchanged. The write path stays **near-free when nobody listens**: per-vertex listener counters (maintained at subscribe/unsubscribe and summed from ancestors at vertex creation) mean an idle write pays one relaxed atomic load and never walks ancestors.
-- **A branch write decomposes.** A write whose payload is a `POINT` tree ([05 §`0x07`](05-protocol-tlvs.md)) rooted at the target vertex lands each value-carrying node at the corresponding descendant vertex as a **refcount subview of the written frame** (zero copy), creating missing vertices on the way; each covered subscription point is notified once with its slice. Values are the truth at the vertices where they land; a branch is a view. The branch is **not a transaction** — admission (shape + ACL) is all-or-nothing, application is per-leaf; cross-leaf snapshot coherence is the coherent-sampling `(origin, ts)` group ([ADR-0019](../adr/0019-per-producer-monotonic-origin-timestamp.md)), never a write-side lock.
+- **A branch write decomposes.** A write whose payload is a `POINT` tree ([05 §`0x07`](05-protocol-tlvs.md)) rooted at the target vertex lands each value-carrying node at the corresponding descendant vertex as a **refcount subview of the written frame** (zero copy), creating missing vertices on the way; each covered subscription point is notified once with its slice. Values are the truth at the vertices where they land; a branch is a view. The branch is **not a transaction** — admission (shape + ACL) is all-or-nothing, application is per-leaf; cross-leaf snapshot coherence is the coherent-sampling `(origin, ts)` group ([ADR-0019](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0019-per-producer-monotonic-origin-timestamp.md)), never a write-side lock.
 - **A data write creates its target** (`mkdir -p`) when the vertex does not exist, gated by the existing `CREATE` access bit on the nearest existing ancestor's effective ACL. `:field` writes, `read`, and `await` keep `tr::path::not_found`.
 
-Reads keep the **one-store-per-vertex** invariant: a write at any granularity lands in the same canonical last-known-value a read serves, and a read returns the latest stored value — ≥ what any subscriber of that path last saw, never behind a notification, legitimately newer. Since [RFC-0016](../spec/rfcs/0016-composed-branch-read.md), a plain read of a **branch** (a vertex with ≥ 1 registered child) serves the **composed branch read** — the folded `POINT` tree of its registered subtree, each node's stored TLV verbatim, the read-side dual of the branch write (READ-denied subtrees pruned; a names-only topology tree when the branch is value-free); leaf reads are unchanged, and cross-leaf tearing remains allowed — the composed reply is a view over the live stores, not a transaction. The producer owns cadence: rate caps, flush intervals, dirty tracking and timers are application concerns; batching several subtrees is N self-contained frames in one `send(iov)`, never a wire batch container.
+Reads keep the **one-store-per-vertex** invariant: a write at any granularity lands in the same canonical last-known-value a read serves, and a read returns the latest stored value — ≥ what any subscriber of that path last saw, never behind a notification, legitimately newer. A plain read of a **branch** (a vertex with ≥ 1 registered child) serves the **composed branch read** ([RFC-0016](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0016-composed-branch-read.md)) — the folded `POINT` tree of its registered subtree, each node's stored TLV verbatim, the read-side dual of the branch write (READ-denied subtrees pruned; a names-only topology tree when the branch is value-free); leaf reads are unchanged, and cross-leaf tearing remains allowed — the composed reply is a view over the live stores, not a transaction. The producer owns cadence: rate caps, flush intervals, dirty tracking and timers are application concerns; batching several subtrees is N self-contained frames in one scatter-gather send, never a wire batch container.
+
+---
+
+## Assign, propagate, and the coalescing sweep
+
+A `write` is not a primitive. It is the composition of the **two irreducible operations** it hides ([RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md)), which act on disjoint planes of a vertex:
+
+| Operation | Plane | Effect |
+| --- | --- | --- |
+| **assign** | state | Replace the vertex's value (last-writer-wins), advance its monotonic **write sequence**, append to the history ring if the vertex is a stream, wake any `await` waiter, and mark the vertex for the next covering sweep. Reads no edge; sends nothing. |
+| **propagate** | edges | Deliver, along subscription edges, the vertex's **current stored value** and the qualifying descendants of its subtree. Takes no value argument — the last-known-value is the single source of truth. Mutates nothing. |
+
+`write(v, value)` is exactly `assign(v, value)` followed by `propagate(v)`. `read` and `await` live wholly in the state plane; `await` observes assigns at its own vertex and is independent of propagation.
+
+### The write sequence and pending vertices
+
+Every vertex carries a monotonic **write sequence**, incremented by every assign — never a hash or a comparison of the value's bytes. A sweep records, per vertex it includes, the sequence value at that inclusion. A vertex is **pending** exactly when its write sequence has advanced past the value the last covering sweep recorded.
+
+`propagate(root)` sweeps the subtree rooted at `root`, delivers each vertex it selects, and then advances that vertex's recorded sweep sequence. Two rules keep this consistent:
+
+1. **The `root` argument selects which vertices flush, not who receives them.** When a sweep selects a descendant `u`, `u` is delivered to *every* subscriber that observes it — `u`'s own edges and every ancestor carrying a subtree subscription, including ancestors **above** `root`. One sweep that covers `u` therefore satisfies both observers at once and clears `u`'s pending state, so an overlapping second sweep neither double-sends nor misses an observer. Capping delivery at `root` was rejected: it would force per-`(vertex, root)` bookkeeping instead of one counter per vertex.
+2. **Coalescing is free.** Assign overwrites the value and advances the sequence; it does not enqueue. *k* assigns to the same vertex between two sweeps flush **once**, with the latest value. A producer may assign at any rate and propagate on a timer at a lower rate; the timer rate is the delivery rate, and only touched vertices ride it.
+
+A default sweep costs *O(pending-in-subtree)*, not *O(subtree-size)*: pending vertices are held in an ordered set of canonical PATH keys, and a subtree is a contiguous prefix range of that order (a parent's key is a byte-prefix of every descendant's). A large, mostly-quiet subtree with three pending leaves flushes those three and touches nothing else.
+
+A branch write composes with this: the `POINT` tree decomposes as usual, the store half assigns at each value-carrying descendant, and one propagate at the branch root then flushes exactly the touched set.
+
+### Delivery mode
+
+**Delivery mode** is a per-vertex, value-agnostic attribute governing whether an **ancestor's** sweep includes that vertex. It is not a per-subscriber filter and it never reads a byte.
+
+| Mode | An ancestor sweep includes this vertex… |
+| --- | --- |
+| `IF_NEWER` *(default)* | only if pending — the structural coalescing flush |
+| `UNCONDITIONAL` | always — the current value on every covering sweep, a sweep-driven keepalive whose rate is the producer's timer |
+| `EXPLICIT` | never — deliverable only by a direct propagate on the vertex itself |
+
+Two invariants make the modes coherent:
+
+- **Assign is never gated.** Whatever the mode, assign swaps the value and advances the sequence. The mode governs propagation, not storage.
+- **A direct propagate always delivers its argument.** The mode governs only the descendants a sweep pulls in, which is what makes `EXPLICIT` reachable at all.
+
+Delivery mode is host state on the vertex, defaulting to `IF_NEWER`. It is **not** carried in `SUBSCRIBER.qos_settings` — the source vertex owns the policy, not the observer. Configuring it from a remote peer over the vertex `:settings` path is specified but deferred; the core semantics need only the attribute and its default. The value-based `ON_CHANGE` filter and the `min_interval_ns` / `keepalive_ns` throttles that once lived in `qos_settings` are removed for good: the runtime never compares stored bytes to decide delivery, because a vertex never parses its bytes and comparing an *N*-byte value costs the same memory traffic the delivery would. `delivery_compact` (label compaction) is orthogonal — it concerns how a route is encoded, not whether a value is delivered — and is retained.
+
+### Wire mapping
+
+The wire is unchanged by the split. A `FWD{WRITE}` carrying a `VALUE` and arriving at its terminus means **assign the addressed vertex, then propagate it** — delivering to that vertex's own subscribers, local and remote, and bubbling to ancestor subtree subscriptions. Because the terminus vertex is the *argument* of that propagate, it is delivered regardless of its own delivery mode: a directed write always lands.
+
+A producer's selective subtree flush reaches a **remote** subtree subscriber as one `FWD{WRITE}` per selected vertex, driven by the single host propagate, exactly as a local subscriber receives one delivery per selected vertex. No wire batch primitive exists; propagate simply drives the sends it selects.
+
+### Stream drain semantics
+
+The write-sequence coalescing above is the **stored-value** semantic (last-writer-wins: flush the latest once). A **stream** vertex — one with a bounded history ring — is a queue: its contract is "observe every buffered entry," not "the latest." Its propagation is a **drain**, in order, of the entries appended since the previous flush. Propagate dispatches on the vertex role.
+
+The host-side spelling of these operations is on [../modules/graph.md](../modules/graph.md); nothing in this section requires a particular signature.
 
 ---
 
@@ -374,7 +428,7 @@ A vertex exposes a **schema** describing every writable field. The schema lives 
 
 | Field path | Type | Writable | Meaning |
 | ---- | ---- | ---- | ---- |
-| `:subscribers[N]` | SUBSCRIBER | read; write **clears** | Subscription record N. A write UNSUBSCRIBES slot N — see the note below |
+| `:subscribers[N]` | SUBSCRIBER | read; write is payload-discriminating | Subscription record N — see the rule below |
 | `:subscribers[]` | sequence of SUBSCRIBER | read-only; write to `[]` appends | Full list (read) or new slot (write) |
 | `:settings.reliability` | u8 enum | yes | `0=best-effort, 1=reliable` |
 | `:settings.durability` | u8 enum | yes | `0=volatile, 1=transient-local` |
@@ -382,7 +436,7 @@ A vertex exposes a **schema** describing every writable field. The schema lives 
 | `:settings.deadline_ns` | u64 | yes | Max time between writes before liveness fault |
 | `:settings.priority` | u8 | yes | `0=low ... 255=critical` (transport hint) |
 | `:settings.queue_max_bytes` | u32 | yes | Per-subscriber queue cap (back-pressure threshold) |
-| `:settings.app.<name…>` | owner-defined TLV | owner-declared (`ro`/`rw`/`wo`) | Application property field ([RFC-0010](../spec/rfcs/0010-owner-app-fields-and-schema.md)): declared by the vertex owner in its field descriptor table; undeclared names stay `SCHEMA_NOT_FOUND` |
+| `:settings.app.<name…>` | owner-defined TLV | owner-declared (`ro`/`rw`/`wo`) | Application property field ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md)): declared by the vertex owner in its field descriptor table; undeclared names stay `SCHEMA_NOT_FOUND` |
 | `:liveness.heartbeat_hz` | u8 | yes | Subscriber heartbeat rate; 0 = no liveness check |
 | `:liveness.last_seen_ns` | u64 | read-only | Wall-clock of last write observed |
 | `:liveness.missed_deadlines` | u32 | read-only | Counter |
@@ -390,9 +444,9 @@ A vertex exposes a **schema** describing every writable field. The schema lives 
 | `:description` | UTF-8 | yes (with permission) | Human-readable description |
 | `:acl` | ACL | yes (with permission) | Access control list |
 
-### Writing `:subscribers[N]` is payload-discriminating
+### The payload-discriminating `:subscribers[N]` write
 
-An indexed write is resolved by **what it carries** ([RFC-0009 §D.1](../spec/rfcs/0009-vertex-removal-and-subscriber-eviction.md)):
+An indexed write is resolved by **what it carries** ([RFC-0009 §D.1](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0009-vertex-removal-and-subscriber-eviction.md)):
 
 | Payload written to `:subscribers[N]` | Effect |
 | --- | --- |
@@ -401,47 +455,40 @@ An indexed write is resolved by **what it carries** ([RFC-0009 §D.1](../spec/rf
 | anything else | `TYPE_MISMATCH`; the slot is untouched |
 | an `N` no slot answers to | `INVALID_PATH` — the slot vector is never grown to reach a wire-supplied index |
 
-A `[*]` selector is **not a write selector**: `:subscribers[*]` on a write answers
-`INVALID_PATH`, because the `WRITE` grammar has no wildcard axis.
+A `[*]` selector is **not a write selector**: `:subscribers[*]` on a write answers `INVALID_PATH`, because the `WRITE` grammar has no wildcard axis.
 
-> **Erratum (2026-07-28).** Until [#598](https://github.com/avatarsd-llc/libtracer/issues/598)
-> this page described the indexed write as clearing slot `N` *whatever the payload is*, and
-> said there was "no set-a-slot surface". That documented the implementation, which diverged
-> from the accepted RFC: a client writing a `SUBSCRIBER` to `:subscribers[3]` to retarget
-> record 3 silently unsubscribed whoever held slot 3 and was told it succeeded. And
-> `:subscribers[*]` cleared **slot 0** and answered `RESULT`
-> ([#579](https://github.com/avatarsd-llc/libtracer/issues/579)). Both are fixed; the table
-> above is the behaviour.
-
-`:subscribers` is also addressed **whole**: `:subscribers[N].<anything>` names nothing and
-answers `SCHEMA_NOT_FOUND`, matching the read half.
+`:subscribers` is also addressed **whole**: `:subscribers[N].<anything>` names nothing and answers `SCHEMA_NOT_FOUND`, matching the read half.
 
 | Intent | Spelling |
 | --- | --- |
 | subscribe | `write :subscribers[]` with a `SUBSCRIBER` |
-| unsubscribe slot N | `write :subscribers[N]` (any payload) |
-| retarget | unsubscribe, then subscribe — the new record may land in a **different** slot |
+| unsubscribe slot N | `write :subscribers[N]` with the empty-`STATUS` sentinel |
+| retarget | `write :subscribers[N]` with the replacement `SUBSCRIBER` |
 | list | `read :subscribers[]` |
 
-### Owner-declared application fields (`settings.app`) — RFC-0010
+Unsubscribe-then-subscribe remains available and is the only spelling that does not require knowing `N`; the new record may land in a **different** slot.
 
-The `app` key is **reserved inside the vertex `SETTINGS` namespace** ([05 §`0x0B`](05-protocol-tlvs.md)): the protocol MUST never mint a QoS or machinery knob named `app`, and everything below `settings.app.` is **owner-defined** — names, nesting, and value bytes are the application's, opaque to the runtime. This is the substrate for the device-private half of the field discipline ([ADR-0021](../adr/0021-vertex-field-list-with-standard-and-device-specific-fields.md) rule 3: fields are standard *and* device-private, like ioctls; the device owns the catalog of what each field accepts):
+### Owner-declared application fields (`settings.app`)
 
-- **Declaration is owner-initiated and local** ([RFC-0010](../spec/rfcs/0010-owner-app-fields-and-schema.md) §A.2 — the owner-initiated doctrine of the draft vertex-removal RFC-0009): the owner installs, through the local host API, a per-vertex **field descriptor table** — `{ name, access ∈ {ro, rw, wo}, descriptor bytes, initial value? }` per field. There is **no wire operation that declares a field**; a remote peer writes declared fields, never invents them. Undeclared names — under `settings.app.` and everywhere else — keep `SCHEMA_NOT_FOUND` (the `ENOTTY` default survives; the table opens only the holes the owner named).
+The `app` key is **reserved inside the vertex `SETTINGS` namespace** ([05 §`0x0B`](05-protocol-tlvs.md)): the protocol MUST never mint a QoS or machinery knob named `app`, and everything below `settings.app.` is **owner-defined** — names, nesting, and value bytes are the application's, opaque to the runtime. This is the substrate for the device-private half of the field discipline ([ADR-0021](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0021-colon-field-plane-is-the-vertex-ioctl.md) rule 3: fields are standard *and* device-private, like ioctls — the protocol owns the addressing, the device owns the catalog of what each field accepts):
+
+- **Declaration is owner-initiated and local** ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §A.2): the owner installs, through the local host API, a per-vertex **field descriptor table** — `{ name, access ∈ {ro, rw, wo}, descriptor bytes, initial value? }` per field. There is **no wire operation that declares a field**; a remote peer writes declared fields, never invents them. Undeclared names — under `settings.app.` and everywhere else — keep `SCHEMA_NOT_FOUND` (the `ENOTTY` default survives; the table opens only the holes the owner named).
 - **Writes**: the owner always reads and writes its own declared fields (`ro`/`wo` constrain remote callers). A caller-attributed write is admitted iff the field is declared `rw`/`wo` — otherwise `SCHEMA_NOT_FOUND`, caller-independent, before any ACL evaluation — and the caller holds the ordinary WRITE right on the vertex (otherwise `tr::access::denied`). The value is stored **verbatim**: the runtime performs no dtype/range validation against the descriptor (self-description for consumers; semantic validation is the owner's, in its apply step). Field writes to a nonexistent vertex do not create it.
 - **Reads**: a declared field serves its stored TLV verbatim, gated by the vertex READ right. A `wo` field has **no read surface** (`SCHEMA_NOT_FOUND` — a secret never mirrors back). A declared field never written reads `NOT_FOUND` (distinct from undeclared) and is omitted from container reads. `read <v>:settings.app` serves the app container; `read <v>:settings` serves the full settings container — protocol knobs and the nested `app` record in one traversal.
 - **Storage**: a declared field's value is a **bare TLV riding the vertex** — no subscriber list, no ACL slot, no vertex-map entry; cost = its bytes plus one table slot. A config datum that genuinely needs independent subscribers is **promoted to a child vertex** (field promotion, [CONTEXT.md](../../CONTEXT.md)) — that trade is the schema author's, per datum.
 
-**Change notification — the announce-write convention** ([RFC-0010](../spec/rfcs/0010-owner-app-fields-and-schema.md) §C). A field write — protocol or app, local or remote — does **not** wake `await`, does **not** advance the vertex's write sequence, and does **not** propagate along subscription edges: the property plane is silent by design. A property change consumers should notice is followed by an ordinary **announce write at the vertex** — the owner assigns + propagates once the change is actually applied (for a remote app-field write, in its apply handler; the graph never announces on the writer's behalf). Subscribers receive one ordinary delivery and re-read the property tree if they care which knob moved. Consumers MUST NOT poll fields for change detection and MUST NOT expect per-field wakeups.
+**Change notification — the announce-write convention** ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §C). A field write — protocol or app, local or remote — does **not** wake `await`, does **not** advance the vertex's write sequence, and does **not** propagate along subscription edges: the property plane is silent by design. A property change consumers should notice is followed by an ordinary **announce write at the vertex** — the owner assigns and propagates once the change is actually applied (for a remote app-field write, in its apply handler; the graph never announces on the writer's behalf). Subscribers receive one ordinary delivery and re-read the property tree if they care which knob moved. Consumers MUST NOT poll fields for change detection and MUST NOT expect per-field wakeups.
 
 ### Stale and invalid values
 
-A producer that has no good value to publish — a sensor that faulted, a reading not yet taken — does **not** need a dedicated "invalid" wire field. The two distinct concerns map onto mechanisms that already exist:
+A producer that has no good value to publish — a sensor that faulted, a reading not yet taken — does **not** need a dedicated "invalid" wire field. The two distinct concerns map onto mechanisms this model defines elsewhere:
 
 - **Stale** (the value is old, or the producer went quiet) is **consumer-derived**, never a flag the producer sets:
   - *Sample age*: the optional wire timestamp (`opt.TS`, [01-data-format.md](01-data-format.md)) carries when the sample was taken; a consumer treats `now − ts > tolerance` as stale.
   - *Producer liveness*: `:settings.deadline_ns` plus the read-only `:liveness.last_seen_ns` / `:liveness.missed_deadlines` fields (above) say whether the producer is still writing within its contract. A missed deadline is the canonical "this vertex went stale" signal, and it is observable without the producer doing anything.
-- **Invalid / fault** (the producer is alive but its value is meaningless right now) is a **`STATUS=ERROR(<reason>)` delivered in place of a VALUE**. Delivery is an ordinary write ([CONTEXT.md](../../CONTEXT.md) §delivery *is* a write), so a fault reaches subscribers through the same edge as a value; a type-aware consumer distinguishes a `STATUS` (type `0x09`) from a `VALUE` (type `0x01`) by its type code and reacts (hold last-good, alarm, fail over) exactly as it would for a liveness fault.
+- **Invalid / fault** (the producer is alive but its value is meaningless right now) is a **`STATUS=ERROR(<reason>)` written in place of a VALUE**. Delivery is an ordinary write ([CONTEXT.md](../../CONTEXT.md) §delivery *is* a write), so a fault reaches subscribers through the same edge as a value; a type-aware consumer distinguishes a `STATUS` (type `0x09`) from a `VALUE` (type `0x01`) by its type code and reacts (hold last-good, alarm, fail over) exactly as it would for a liveness fault.
+
+The second bullet is a **producer-side convention**, not a runtime behaviour. A vertex stores whatever TLV is written to it and the graph never mints a `STATUS` on a producer's behalf; a consumer must therefore not infer that a silent vertex is faulted, and must not assume every producer adopts the convention. A connection vertex's link state, for one, is published as an ordinary `VALUE` carrying the state code, not as a `STATUS`.
 
 This keeps the data plane byte-agnostic: L4 never interprets a payload to decide "is this valid." Validity is either a property of *time* (stale, derived from `ts`/liveness) or an explicit *typed record* (`STATUS`/`ERROR`), never a magic value or a per-VALUE flag bit.
 
@@ -449,39 +496,56 @@ This keeps the data plane byte-agnostic: L4 never interprets a payload to decide
 
 Watching a parent's child set change (devices appearing, a scanner discovering a 1-Wire/Modbus node) needs **no dedicated event type** — it falls out of composite subscription:
 
-- **Subscribe to the composite parent.** Subscribing to a composite vertex *is* the subtree subscription — every subscription observes its vertex and all descendants ([RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md) vertical bubbling). The subscriber receives each descendant write as the **written TLV as-is** (the producer's own frame — a leaf `VALUE`, or a whole branch `POINT`); the aggregate remains available as the **composed branch read** of the parent ([RFC-0016](../spec/rfcs/0016-composed-branch-read.md)). A newly **appeared** child surfaces as its first write bubbling up — and since a data write *creates* its target (write-creates), appearance **is** the first write; a child's **value change** surfaces the same way. There is no separate `:children_changed` facet — that would duplicate what subtree delivery already does. (Wire-level concrete-path tagging of remote deliveries remains the draft [RFC-0003](../spec/rfcs/0003-bridged-wildcard-delivery-path.md) proposal.)
-- **Enumerate the current members** with `read(<parent>:children[])`, which returns the subtree members (not SPECs — the write-spec / read-members asymmetry, [05 §SPEC](05-protocol-tlvs.md)). The common pattern is one composed read of the parent on join ([RFC-0016](../spec/rfcs/0016-composed-branch-read.md) — values and topology in a single reply), then subscribe (to the parent) for the tail.
+- **Subscribe to the composite parent.** Subscribing to a composite vertex *is* the subtree subscription — every subscription observes its vertex and all descendants ([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md) vertical bubbling). The subscriber receives each descendant write as the **written TLV as-is** (the producer's own frame — a leaf `VALUE`, or a whole branch `POINT`); the aggregate remains available as the **composed branch read** of the parent ([RFC-0016](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0016-composed-branch-read.md)). A newly **appeared** child surfaces as its first write bubbling up — and since a data write *creates* its target (write-creates), appearance **is** the first write; a child's **value change** surfaces the same way. There is no separate `:children_changed` facet — that would duplicate what subtree delivery already does. (Wire-level concrete-path tagging of remote deliveries is the draft [RFC-0003](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0003-bridged-wildcard-delivery-path.md) proposal.)
+- **Enumerate the current members** with `read(<parent>:children[])`, which returns the subtree members (not SPECs — the write-spec / read-members asymmetry, [05 §SPEC](05-protocol-tlvs.md)). The common pattern is one composed read of the parent on join ([RFC-0016](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0016-composed-branch-read.md) — values and topology in a single reply), then subscribe (to the parent) for the tail.
 
-**Child removal — mechanism settled, delivery still open.** The removal *mechanism* is now settled: [RFC-0009](../spec/rfcs/0009-vertex-removal-and-subscriber-eviction.md) is **accepted** (2026-07-19; the comment window was waived on this solo-maintained spec). A vertex is **retired, not erased** — the owner calls `retire()` locally, or a peer writes a request the device executes ([ADR-0059](../adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md) creator-endpoint) — and a retired path then reads `not_found` (`0x0020`), the same answer as a path that never existed, with **no distinct `retired` status** (the once-proposed `0x0023` was dropped). See §Vertex lifecycle below. What remains **future work** is only the *delivery* of a removal to a composite subscriber — a tombstone delta, a `NOT_FOUND` at the child's path, or snapshot-diff — which RFC-0009 §D explicitly parks back to [RFC-0005](../spec/rfcs/0005-subtree-subscriptions.md). The `DELETE` access-mask bit ([05 §ACL](05-protocol-tlvs.md)) gates the *right* to remove; it does not define the *notification*.
+Appearance is observable; **disappearance is not** — see §Retirement notification below.
 
 ### Vertex lifecycle: write-creates, retirement, revival
 
-A vertex enters the graph two ways: **explicit registration** (`register_vertex` — an init-time or catalog-driven create) or **write-creates** — a data write to an unregistered path materializes its target, and any missing ancestors along the way (`mkdir -p`-style), so *appearance is the first write* (§Observing structural change above).
+A vertex enters the graph two ways: **explicit registration** (an init-time or catalog-driven create) or **write-creates** — a data write to an unregistered path materializes its target, and any missing ancestors along the way (`mkdir -p`-style), so *appearance is the first write* (§Observing structural change above).
 
-Leaving is **retirement, not erasure** ([RFC-0009](../spec/rfcs/0009-vertex-removal-and-subscriber-eviction.md)). `retire(vertex)` **re-virginizes** the subtree in place: each vertex unwinds its subscriber contribution to its descendants, reverts to an unregistered placeholder, and its retired path then reads `not_found` — identical to never-existed. The vertex *object* is **not** freed — outstanding handles stay valid, and the detached value-seam block is parked and reclaimed only at graph teardown (an insert-only vertex lifetime, [ADR-0057](../adr/0057-graph-composite-vertex-tree.md)). The root cannot be retired, and retiring an already-retired or unregistered path is a no-op. There is **no wire operation** that reaches `retire()` directly: a peer removes by writing a request the device executes ([ADR-0059](../adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md) creator-endpoint), keeping removal owner-mediated.
+Leaving is **retirement, not erasure** ([RFC-0009](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0009-vertex-removal-and-subscriber-eviction.md)). Retiring a vertex **re-virginizes** the subtree in place: each vertex unwinds its subscriber contribution to its descendants, reverts to an unregistered placeholder, and its retired path then reads `not_found` (`0x0020`) — identical to never-existed, with **no distinct `retired` status** — no such code is allocated, and `0x0023` remains free. The vertex *object* is **not** freed — outstanding handles stay valid, and the detached value-seam block is parked and reclaimed only at graph teardown (an insert-only vertex lifetime, [ADR-0057](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0057-graph-composite-vertex-tree.md)). The root cannot be retired, and retiring an already-retired or unregistered path is a no-op. There is **no wire operation** that reaches retirement directly: a peer removes by writing a request the device executes ([ADR-0059](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md) creator-endpoint), keeping removal owner-mediated.
 
-A retired path may be **revived** by a later write-creates. The revived vertex inherits **nothing** of the retired owner — in particular it takes its *live ancestor's* ACL policy, never the retired one's, so a stale grant cannot outlive the retirement (RFC-0009 §Discussion-7).
+A retired path may be **revived** by a later write-creates. The revived vertex inherits **nothing** of the retired owner — in particular it takes its *live ancestor's* ACL policy, never the retired one's, so a stale grant cannot outlive the retirement.
 
-**Subscriber-edge eviction** is a *distinct*, lighter operation. When a **link** drops — a transport peer departs, a QUIC / WebTransport connection closes — the edges that fanned out over it are torn down *without* retiring their target vertices: `evict_link_edges(link_name)` clears every subscriber edge bound to that link (each vertex under its own stripe lock) and returns the count evicted, freeing the slots for reuse ([RFC-0009](../spec/rfcs/0009-vertex-removal-and-subscriber-eviction.md) §D, extended to peer departure). The vertices live on; only the dead delivery edges go. See [04-communication-flows.md](04-communication-flows.md) §Liveness loss for the flow.
+**Subscriber-edge eviction** is a *distinct*, lighter operation. When a **link** drops — a transport peer departs, a QUIC / WebTransport connection closes — the edges that fanned out over it are torn down *without* retiring their target vertices: `evict_link_edges(link_name)` clears every subscriber edge bound to that link (each vertex under its own stripe lock) and returns the count evicted, freeing the slots for reuse ([RFC-0009](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0009-vertex-removal-and-subscriber-eviction.md) §D, extended to peer departure). The vertices live on; only the dead delivery edges go. See [04-communication-flows.md](04-communication-flows.md) §Liveness loss for the flow.
+
+#### Retirement notification
+
+**A composite subscriber is never told that a child went away.** On the `live → retired` transition the vertex delivers nothing along any subscription edge: no tombstone record, no `STATUS`, no `NOT_FOUND` at the child's path, no snapshot diff. The `DELETE` access-mask bit ([05 §ACL](05-protocol-tlvs.md)) gates the *right* to remove; it does not define a *notification*, and no other mechanism supplies one. Enumeration agrees with the silence: a retired child MUST NOT appear in `read(<parent>:children[])`, exactly as a child that was never created.
+
+The consequence is asymmetry. Appearance is observable, because a data write creates its target and bubbles to every subtree subscriber. Disappearance is observable only by **polling** — re-reading the parent's member list, or reading the child's path and finding `not_found`.
+
+That answer is itself ambiguous. After retirement, `tr::path::not_found` carries three meanings a peer cannot tell apart:
+
+1. this path never existed;
+2. this path exists but was never written, so it has no last-known-value;
+3. this path existed and was deliberately retired.
+
+The collapse is an accepted cost, not an oversight: minting a distinct status code obliges every implementation to distinguish states no implementation can yet produce, and pins a wire identity in a format aiming at immutability. Re-adding a code later is cheap; withdrawing one is not. A consumer that must distinguish (3) from (2) — a topology view, a device inventory, a UI that shows "gone" differently from "quiet" — has to carry **its own expectation of what should exist**, keyed by an identity it chooses; the graph never remembers on the client's behalf.
+
+Delivery of a removal — a tombstone delta, a `NOT_FOUND` at the child's path, or a snapshot diff — is parked back to [RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md) and is unspecified. For anyone building a topology view over the graph model, this is the consequential gap.
+
+#### Registration racing a concurrent operation
+
+There is **no stated ordering between a registration and a concurrent operation on the address being registered**. Registration may happen at any time, concurrently with reads, writes and awaits on *other* addresses; for the *same* address an implementation is free to answer a racing read either way, and nothing lets a caller tell which answer it got. A caller that needs the answer must order the two itself. See [15-concurrency-and-scaling.md](15-concurrency-and-scaling.md).
 
 ### Module-namespaced extension fields
 
 A transport module MAY add module-namespaced settings, e.g. `:settings.transport_tcp.send_buf_kb`. Rules:
 
-```{note}
-This section previously used `:subscribers[N].settings.transport_tcp.send_buf_kb` as its example. That selector is **not addressable**: `:subscribers` is addressed whole (§above), so a multi-step selector answers `ERROR{tr::schema::not_found}` — and before that bound it silently cleared the slot instead. Per-subscriber module settings have no wire surface today; the vertex-level `:settings.<module>.<field>` form below is the one that resolves.
-```
-
-
 - Module fields MUST live under their own module name (here, `transport_tcp`).
-- The name `app` inside vertex `SETTINGS` is **reserved for the application** ([RFC-0010](../spec/rfcs/0010-owner-app-fields-and-schema.md) §A.1): no module or future protocol knob may claim it. The application is one more namespace owner under the same nesting shape; `app` is its name.
+- The name `app` inside vertex `SETTINGS` is **reserved for the application** ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §A.1): no module or future protocol knob may claim it. The application is one more namespace owner under the same nesting shape; `app` is its name.
 - Module names MUST match the module's directory in `libtracer/modules/` for the reference implementation; cross-implementation module-name uniqueness is a registry concern.
 - Module fields MUST appear in the vertex's `:schema` output if they apply to that vertex.
 - Reading a module field on a vertex where that module is not active returns `ERROR{tr::schema::not_found}`.
 
-### The graph imposes no shape
+The namespace is **vertex-level**. `:settings.<module>.<field>` resolves; a *per-subscriber* module setting has no wire surface, because `:subscribers` is addressed whole (§The payload-discriminating `:subscribers[N]` write).
 
-A vertex's writable fields are **whatever the schema says** — for the application namespace, whatever the owner's field descriptor table declares ([RFC-0010](../spec/rfcs/0010-owner-app-fields-and-schema.md) §B: the table *is* the app part of the schema, so the two cannot drift). The protocol specifies a small set of mandatory core fields and a namespacing rule for extensions; it does NOT specify:
+### Limits the protocol does not impose
+
+A vertex's writable fields are **whatever the schema says** — for the application namespace, whatever the owner's field descriptor table declares ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §B: the table *is* the app part of the schema, so the two cannot drift). The protocol specifies a small set of mandatory core fields and a namespacing rule for extensions; it does NOT specify:
 
 - How many subscribers a vertex may have.
 - How many child vertices a parent vertex may have.
@@ -537,7 +601,7 @@ At the **terminus** (the first `dst` segment names a local vertex):
 
 Forwarding is **loop-free by construction**: `dst` is consumed monotonically per hop, so a delivery travels exactly as far as its explicit route and no further — a physical cycle is harmless per-op, not rejected. There is no revisit check, no duplicate detection, and no hop counter — none is needed, because every remote endpoint is addressed by an explicit source route. (`0x0D` ROUTER is a reserved, decodable wire code with no implemented mechanism.)
 
-### Why this matters
+### Consequences
 
 - **Graph reads are clean.** A subscriber reading `/net/can0/wheel/left` gets the bare data TLV — same shape regardless of whether the value originated locally or arrived over CAN. No envelope pollution; no need for application code to skip routing metadata.
 - **Recorder is simple.** Recording a vertex's value writes the bare data TLV. Replay does NOT replay the original envelope (which would alias the original sender's route); replay is a fresh write from the recorder's identity.
@@ -565,3 +629,25 @@ sequenceDiagram
 A `dst` names its hops explicitly and is consumed one segment per hop, so even a route that re-enters a node it already crossed (`/b/c/a/b/c/…`) is finite: it simply terminates when the route is spent, delivering no further. **No cycle can persist** — loop-freedom is by construction, needing no revisit check.
 
 This shedding rule is what keeps the global topology safe for any shape — see [07-host-embedding.md](07-host-embedding.md).
+
+---
+
+## Pitfalls
+
+### An indexed `:subscribers[N]` write treated as an unconditional clear
+
+**Rule.** An indexed write is discriminated by its payload: the empty-`STATUS` sentinel clears, a `SUBSCRIBER` replaces, anything else is `TYPE_MISMATCH` with the slot untouched.
+
+**Failure mode.** An implementation that clears slot `N` whatever the payload is **silently unsubscribes a third party and reports success**. A client writing a `SUBSCRIBER` to `:subscribers[3]` to retarget record 3 destroys whoever held slot 3 and receives a `RESULT` byte-identical to a legitimate clear. Neither party can detect it: the writer's reply says success, and the victim simply stops receiving.
+
+**A second route to the same failure.** `[*]` sets both the wildcard and the indexed marker but never assigns an index. An implementation that tests "indexed" alone therefore reads the default index `0`, clears **slot 0**, and answers `RESULT`. The `WRITE` grammar has no wildcard axis, so `[*]` on a write is a malformed address (`INVALID_PATH`), not a selector.
+
+**A third.** Admitting a replace through the plain `WRITE` gate. A replace installs a *new* edge, so it must pass the `SUBSCRIBE` gate — the same door as an append. Routing it through `WRITE` alone lets a caller who may only write values install a delivery edge.
+
+### A multi-step selector under `:subscribers`
+
+**Rule.** `:subscribers` is addressed whole. A `SUBSCRIBER` record is stored and served as one TLV, never member-wise, so `:subscribers[N].<anything>` names nothing and answers `SCHEMA_NOT_FOUND` — the same answer the read half gives. The shape is resolved **before** the ACL gate: a selector that names nothing is not an access question.
+
+**Failure mode.** A field decoder that ignores the trailing steps falls into the indexed arm and destroys slot `N` on *any* mistyped tail — `:subscribers[0].liveness.last_seen_ns`, or a stray suffix — while answering `RESULT`. The caller wrote nothing, unbound a live subscriber, and was told it succeeded.
+
+**Corollary for module fields.** Per-subscriber module settings such as `:subscribers[N].settings.transport_tcp.send_buf_kb` are **not addressable** and never were; the resolving form is the vertex-level `:settings.<module>.<field>` (§Module-namespaced extension fields).
