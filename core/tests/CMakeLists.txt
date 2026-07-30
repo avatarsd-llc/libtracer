@@ -260,6 +260,16 @@ target_link_libraries(vertex_size_test PRIVATE libtracer)
 libtracer_test_warnings(vertex_size_test)
 add_test(NAME vertex_size COMMAND vertex_size_test)
 
+# #652 — the leaf/branch fork of graph_t::read, now answered from a bit on the vertex
+# instead of a map-lock-guarded child walk. Setting the bit was already covered; CLEARING
+# it was not (nothing in the suite retired a vertex and then read its parent), and that
+# transition is the whole risk: a stuck bit sends a leaf read down the composed path or
+# drops every descendant from a branch read. Ends on a reader/registrar race for TSan.
+add_executable(read_fork_test read_fork_test.cpp)
+target_link_libraries(read_fork_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(read_fork_test)
+add_test(NAME read_fork COMMAND read_fork_test)
+
 # ADR-0069 — both LKV slot policies, named explicitly rather than through the
 # `lkv_slot_t` alias, so ONE leg covers the binding this build did not choose. The
 # hazard slot is lock-free reclamation, so the legs that matter are the sanitizer

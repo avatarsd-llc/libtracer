@@ -257,8 +257,12 @@ The contract:
   address, so growing the map never moves an existing vertex). Hold the handle;
   do not re-resolve per call.
 - **Thread-safety**: registration takes the graph's writer lock and is safe to
-  call concurrently with reads/writes/awaits on other handles. Reads and writes
-  go through the vertex's LKV slot without taking the graph's lock, and a write
+  call concurrently with reads/writes/awaits on other handles. A handle read or
+  write goes through the vertex's LKV slot without taking the graph's lock — true
+  of `read` only since [#652](https://github.com/avatarsd-llc/libtracer/issues/652),
+  which moved the leaf/branch fork off a process-wide shared lock and took
+  twenty-four readers on distinct vertices from 19.7 to 163.5 M ops/s. A
+  **path**-addressed call still resolves the path under that lock. A write
   takes a short per-vertex lock only for the write-sequence bump + waiter notify
   — and skips even that when no waiter is parked. How much serialization the slot
   itself costs is a **build-time choice**

@@ -928,13 +928,57 @@ class vertex_t {
         role_ = role;
         adopt_identity(role, settings, std::move(handlers));
         registered_ = true;
+        // Maintain the parent's lock-free fork bit (#652). Setting is unconditional and
+        // idempotent; the root has no parent, and nothing asks about the root's parent.
+        if (parent_ != nullptr) parent_->set_flag(flag_t::REGISTERED_CHILD, true);
     }
 
     /** @brief Flip this vertex back to a placeholder (invisible to `find`) — retirement's
      *         inverse of the `registered_ = true` in @ref fill. Map-lock state; the caller
      *         (`graph_t::retire`) MUST hold the graph map lock, same as @ref fill's writer.
      *         Pairs with @ref revert_to_placeholder, which clears the vertex's own state. */
-    void mark_unregistered() noexcept { registered_ = false; }
+    void mark_unregistered() noexcept {
+        if (!registered_) return;  // `retire_subtree` walks placeholders too
+        registered_ = false;
+        // Clearing needs to know whether any SIBLING is still registered, so it recomputes
+        // rather than decrementing. That is a walk of the parent's children — but only at
+        // retirement, under the unique map lock the caller already holds, and only for a
+        // vertex that was actually registered. A counter would avoid the walk and cost four
+        // bytes of `vertex_t`, which the size gate does not have to spare.
+        if (parent_ != nullptr) parent_->refresh_registered_child();
+    }
+
+    /** @brief Recompute `flag_t::REGISTERED_CHILD`. Unique-map-lock callers only. */
+    void refresh_registered_child() noexcept {
+        bool any = false;
+        for_each_child([&any](const vertex_t& c) { any = any || c.registered(); });
+        set_flag(flag_t::REGISTERED_CHILD, any);
+    }
+
+    /**
+     * @brief True iff at least one DIRECT child is registered — the branch/leaf fork of the
+     *        plain read surface, answered without taking the graph's map lock (#652).
+     *
+     * This used to be `graph_t::has_registered_child`, which took `map_mutex_` shared and
+     * walked the child list to compute the same predicate. That lock was the single largest
+     * term on the read path and, being process-wide, it capped **every** read in the process
+     * at roughly 20 M/s no matter how many cores or how disjoint the vertices: short-circuit
+     * it and twenty-four readers on distinct vertices go from 19.7 to 165.3 M ops/s. A
+     * blocking lock does not collapse the way a spin lock does — it plateaus — which is
+     * exactly why this was invisible for so long: a flat aggregate reads like "scales fine"
+     * until you notice that flat across a 24x thread range means each thread is 24x slower.
+     *
+     * The counter is mutated only by @ref fill and @ref mark_unregistered, both of which run
+     * under the graph's UNIQUE map lock, so mutations are already serialized; the atomic is
+     * what makes the *read* race-free. A reader concurrent with a registration may observe
+     * either side of it — exactly as it could when the fork took a shared lock, since the
+     * API orders a `read` against a concurrent `register_vertex` no more strongly than this.
+     * The composed branch read re-acquires the map lock for its own walk, so the ordering
+     * that walk depends on is not this counter's to provide.
+     */
+    [[nodiscard]] bool has_registered_child() const noexcept {
+        return test_flag(flag_t::REGISTERED_CHILD, std::memory_order_acquire);
+    }
 
     /**
      * @brief Adopt @p child into this node's child list and link its parent pointer.
@@ -1432,14 +1476,14 @@ class vertex_t {
      */
     [[nodiscard]] value_handlers_t* revert_to_placeholder() {
         // Atomics first — no lock needed, and clearing own ACEs before anything else is
-        // fail-closed: the graph's bearing-ancestor walk (has_own_aces_) skips this vertex
+        // fail-closed: the graph's bearing-ancestor walk (the OWN_ACES bit) skips this vertex
         // immediately, so a concurrent gated op on a descendant stops seeing the retired
         // owner's policy at once (it climbs to the live ancestor instead).
         // Bump BEFORE anything else is torn down (ADR-0062): a holder comparing generations
         // must see the invalidation no later than it could observe the reverted state, so a
         // cached resolution can never be used against a vertex already mid-revert.
         retire_gen_.fetch_add(1, std::memory_order_release);
-        has_own_aces_.store(false, std::memory_order_release);
+        set_flag(flag_t::OWN_ACES, false);
         lkv_.clear(std::memory_order_release);  // a mid-read reader holds its own
                                                 // reference — safe under either policy.
         own_subs_.store(0, std::memory_order_relaxed);
@@ -1485,7 +1529,7 @@ class vertex_t {
         // Lock-free bearing flag (#361 §3): the graph's nearest-bearing-ancestor walk
         // reads it without touching any stripe. Publish under the lock, before the
         // dirty flag, same ordering discipline as the ACE list itself.
-        has_own_aces_.store(!e.aces.empty(), std::memory_order_release);
+        set_flag(flag_t::OWN_ACES, !e.aces.empty());
         // Publish-then-mark (ADR-0050 cache protocol): the new ACEs are visible
         // under m_ BEFORE the generation bump and dirty flag are raised, so a rebuild
         // that observes the flag always reads the new list (or leaves the flag set for
@@ -1773,7 +1817,7 @@ class vertex_t {
      *         racing `:acl` write is observed by the next gated op at worst, the same
      *         window the dirty-flag protocol already tolerates. */
     [[nodiscard]] bool has_own_aces() const noexcept {
-        return has_own_aces_.load(std::memory_order_relaxed);
+        return test_flag(flag_t::OWN_ACES, std::memory_order_relaxed);
     }
 
     /** @brief This vertex's own active-slot count (what a subtree walk sums). */
@@ -1799,6 +1843,27 @@ class vertex_t {
     }
 
    private:
+    /** @brief Bits packed into `flags_` — see its declaration for why they share a byte. */
+    enum class flag_t : std::uint8_t {
+        OWN_ACES = 1U << 0,         /**< @brief `ext_` holds a non-empty own-ACE list (#361 §3). */
+        REGISTERED_CHILD = 1U << 1, /**< @brief At least one DIRECT child is registered (#652). */
+    };
+
+    /** @brief Set or clear @p f. An RMW, because the two bits have two different writers. */
+    void set_flag(flag_t f, bool on) noexcept {
+        const auto bit = static_cast<std::uint8_t>(f);
+        if (on) {
+            flags_.fetch_or(bit, std::memory_order_release);
+        } else {
+            flags_.fetch_and(static_cast<std::uint8_t>(~bit), std::memory_order_release);
+        }
+    }
+
+    /** @brief Read @p f under @p order. */
+    [[nodiscard]] bool test_flag(flag_t f, std::memory_order order) const noexcept {
+        return (flags_.load(order) & static_cast<std::uint8_t>(f)) != 0;
+    }
+
     /**
      * @brief The @ref store LKV allocation (control block + rope), NOTHROW: `nullptr` on
      *        OOM instead of the bad_alloc that abort()s under the MCU profile's
@@ -2047,9 +2112,12 @@ class vertex_t {
     // Set at wiring time via graph_t::set_delivery_mode (the "configure before frames
     // flow" contract, like the QoS settings); read on the assign path. Default IF_NEWER.
     delivery_mode_t delivery_mode_ = delivery_mode_t::IF_NEWER;
-    // True iff ext_ holds a non-empty own-ACE list (#361 §3): maintained by set_acl,
-    // read lock-free by the graph's bearing-ancestor walk on every gated op.
-    std::atomic<bool> has_own_aces_{false};
+    // Two lock-free predicates, packed into ONE byte so the flag group stays exactly four
+    // bytes wide and `sizeof(vertex_t)` stays at the 112 the #361 diet measured — the size
+    // gate's own failure message says to put a new member behind vertex_ext_t rather than
+    // inline it, and a bit costs less than either. Written under a lock (a different one
+    // per bit), read lock-free off hot paths, so the writes are RMWs and compose.
+    std::atomic<std::uint8_t> flags_{0};
     bool registered_ = false;  // false => placeholder intermediate (invisible to find)
     /**
      * @brief Bumped every time this vertex is re-virginized by retirement (ADR-0062).

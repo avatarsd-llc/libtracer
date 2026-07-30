@@ -862,11 +862,6 @@ class graph_t {
     // vertex mutex — the ancestor mutex-walk happens only inside the lazy rebuild
     // of a dirty cache (after a :acl write marked the written vertex's subtree).
     [[nodiscard]] bool acl_allows(vertex_t* v, std::string_view caller, acl_right_t right) const;
-    /** @brief True iff `v` has at least one REGISTERED child — the branch/leaf fork of the
-     *         plain read surface (a branch serves the composed branch read; a leaf serves
-     *         its LKV byte-identically to before the composed read existed). Takes
-     *         map_mutex_ shared. */
-    [[nodiscard]] bool has_registered_child(vertex_t* v) const;
     // Subtree-precise ADR-0050 cache invalidation: mark `v` and every descendant's
     // cached effective-ACE merge stale (release stores) after a :acl write on `v`,
     // via the ADR-0057 child links — wiring-frequency. Call with map_mutex_ held
