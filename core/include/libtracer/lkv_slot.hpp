@@ -54,6 +54,13 @@
  * 2.9x slower than one, against 12x before. Every other shape (distinct vertices, and the
  * write shapes) landed inside the 1.4-2.2x run-to-run spread, so the projected single-core
  * write penalty is not observable through `graph_t::write`.
+ *
+ * The same run's controls say where the rest of it is. At twenty-four readers on **distinct**
+ * vertices the read still runs at 91% of its own single-threaded rate, against 39% on one
+ * shared vertex (8% before) — so nothing process-wide serializes, and the residual is the one
+ * line every reader modifies: the rope's control block. That is the promotion an owning read
+ * cannot skip, which makes the next lever an API question rather than a reclamation one — see
+ * ADR-0069 §6 on the three `read_stored()` call sites that never keep the handle.
  */
 #pragma once
 
