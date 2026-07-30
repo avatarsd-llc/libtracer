@@ -171,7 +171,7 @@ With a 2–4 B label, the 1 kHz example drops from ~16× to **~1.5×** overhead.
 
 **Implementation pins (ADR-0035 slice 4, ws side — descriptive, see [reference/05](../../reference/05-protocol-tlvs.md) §route-handle).** The C++ reference fixes the ws (full-TLV) encodings as **transport-plane control frames** that ride a link alongside `FWD` (not part of the `FWD` frame, no conformance vectors, so the cross-core machine is unperturbed):
 
-- **Label** — a per-link **u16** (`VALUE`, little-endian; 65 536 labels/link), allocated monotonically per link and **swapped each hop**.
+- **Label** — a per-link **u16** (`VALUE`, little-endian; **65 535** usable labels per link — `0` is reserved to mean "none"), allocated monotonically per link and **swapped each hop**.
 - **`ADVERTISE` (`0x11`)** — `{ VALUE label, PATH route }`: binds `label ↔ route`; each forwarding hop strips `route`'s leading segment, allocates its own out-label, re-advertises downstream.
 - **`COMPACT` (`0x12`)** — `{ VALUE label, <payload TLV> }`: the lean delivery; the terminus expands the label to the bound route and applies the write (delivery-is-a-write, §D).
 - **`HANDLE_NACK` (`0x13`)** — `{ VALUE label }`: returned for an unknown/stale label (drop, never crash); prompts a re-advertise. **Re-advertise on (re)connect is the self-heal** (the same producer-holds reconnect trigger).
