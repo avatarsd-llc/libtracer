@@ -45,7 +45,7 @@ observe a reallocation) and the `registered_` placeholder flag.
 | taken | where | frequency |
 | --- | --- | --- |
 | **unique** | `register_vertex_key` (`graph.cpp:333`), `retire` (`:398`, `:421`), `retire_subtree` (`:379`) | control plane |
-| shared | `find_ptr` (`:546`) — **so every `path_t` overload pays it once** | per op, path-addressed only |
+| shared | `find_ptr` (`:546`) — **so every `path_t` overload pays it once**; measured at ≥3× and non-scaling (§6) | per op, path-addressed only |
 | shared | `field_write` (`:1478`) | per `:field` write |
 | shared | `read_children` (`:1801`), `read_children_folded` (`:1848`), `read_subtree_folded` (`:1917`) | per composed read — these walk, so they need it |
 | shared | `note_subscriber_added` / `_removed` (`:534`, `:540`), `evict_link_edges` (`:443`, `:448`), `has_first_level_child` (`:610`) | control plane |
@@ -177,37 +177,65 @@ file rather than a committed bench.
 
 ## 6. What is left, ranked
 
-| lever | shape | now | ceiling | left | tracked |
-| --- | --- | ---: | ---: | ---: | --- |
-| — | distinct-vertex read | 163.5 M/s | 165.3 | **~0, exhausted** | — |
-| scoped non-owning read | shared-vertex read | 15.15 M/s | ~70 | **~4–5×** | [#649](https://github.com/avatarsd-llc/libtracer/issues/649) |
-| stripe lock on delivery | write / fan-out | — | — | ×16.6 at T=24 claimed | [#635](https://github.com/avatarsd-llc/libtracer/issues/635) |
-| `find_ptr`'s map lock | path-addressed ops | unmeasured | — | unknown | not filed |
+| lever | shape | measured | left | tracked |
+| --- | --- | ---: | ---: | --- |
+| — | distinct-vertex read | 163.5 M/s vs 165.3 ceiling | **~0, exhausted** | — |
+| reference-returning read | any read | **1.48× median**, 95/102 paired; 3.07× distinct at T=8 | **landed** | [#661](https://github.com/avatarsd-llc/libtracer/pull/661) |
+| per-slot name digest | forward demux mount scan | marginal scan cost **333 → 17 ns at 64 links** | **landed** | [#660](https://github.com/avatarsd-llc/libtracer/pull/660) |
+| `find_ptr`'s map lock | path-addressed ops | **≥3× always**; ~13–16× quiet, ~4–5× oversubscribed; +8–17 ns/op even at T=1 | large, but TSAN reports 11–12 races when unlocked | [#635](https://github.com/avatarsd-llc/libtracer/issues/635) |
+| stripe lock on delivery | write / fan-out | ×16.6 at T=24 on the adversarial shape; **1.02× on the realistic one** | shape-dependent | [#635](https://github.com/avatarsd-llc/libtracer/issues/635) |
+| scoped non-owning read | the two INTERNAL sites whose value never escapes | 20–60× on those legs | open | [#649](https://github.com/avatarsd-llc/libtracer/issues/649) |
 
 The slot itself is finished: the promotion is two contended RMWs (`sp-copy` 32.5 ns against
-`rmw2` 27.9 — at the hardware floor), and the pin fence is 0.2%. Its remaining cost is entirely
-its *contract*, which is what #649 changes rather than optimizes.
+`rmw2` 27.9 — at the hardware floor), and the pin fence is 0.2%.
 
-**Path-addressed operations are the unmeasured gap.** `find_ptr` takes the same lock this
-document is about, and every number here avoids it by using handles. Nothing has quantified it.
+**Path-addressed operations are no longer the unmeasured gap.** They are measured, and the
+result is worse in KIND than in degree: a path-addressed read is **8.23× slower than a
+handle-addressed one at T=24 and does not scale with cores at all** — 15.4 M/s at one thread
+falling to 12.8 at twenty-four. That is a serializer signature, not a cost. Ablation attributes
+roughly three quarters of it to `find_ptr`'s `map_mutex_`; the rest is the walk itself.
+
+**Two things that look like the fix and are not.** Depth is nearly free under contention
+(`find` is 17.3 M/s at three segments and 17.7 at eight), so caching a path prefix buys ~1.5×
+single-threaded and ~0 at T=24. And porting ADR-0063's append-only container to `children_` —
+the obvious move, since the precedent looks exact — **regresses**: measured 0.30× at 1,024
+siblings and 0.078× at 4,096, because ADR-0063 replaced a binary search with a linear scan,
+which is right for tens of links and wrong for a wide composite. Crossover is around 256
+siblings at T=24. Any real fix needs a chunked structure that keeps an index, not a port.
 
 ---
 
 ## 7. Ledger of corrections
 
-This area's causal claims have been wrong three times. Recorded because the *pattern* is the
-lesson: each error was an inference from a curve, and each was settled by an ablation.
+This area's causal claims have been wrong seven times now. Recorded because the *pattern* is
+the lesson, and by this point the pattern is unmistakable: **a magnitude that was reasoned to,
+rather than measured, has been wrong every single time — and usually wrong in the direction
+that made the proposed work look worthwhile.** Each was settled by an ablation or a paired
+re-measurement, never by more reasoning.
 
 | # | Claimed | Actually | Settled by |
 | --- | --- | --- | --- |
 | 1 | The residual is `snapshot_edges`' stripe lock ([#635](https://github.com/avatarsd-llc/libtracer/issues/635)) | `snapshot_edges` is on the **delivery** path; `read` never calls it | reading the call graph |
 | 2 | "Nothing process-wide is serializing — not the map lock" | Every read took `map_mutex_` shared | the §3 ablation |
 | 3 | Distinct-vertex reads "retain 94%/91% of their T=1 rate", read as healthy | The arithmetic used the wrong shape's denominator (real figures 106%/96%), and retention of a T=1 *aggregate* is a serializer signature, not a health signature | recomputing it |
+| 4 | Only a config **traits template** could recover the stripe table's 896 B, "because the alignment is part of the type" | The *count* cannot reach the alignment; the **alignment itself is a config constant**. One `constexpr` and one token recovered the identical 896 B, zero templates | building it both ways on rv32 |
+| 5 | Unlocking `find_ptr` is worth **15.9×** | **≥3× always**, but 10.2× / 16.4× / 7.5× / 5.4× across four sessions — it tracks idle CPU, because the base is lock-bound and load-insensitive while the ablation is CPU-bound | four re-runs on a varying host |
+| 6 | Porting ADR-0063's append-only container to `children_` buys 7.33× on all 13 `find_ptr` sites | **Regresses**: 0.30× at 1,024 siblings, 0.078× at 4,096. The precedent replaced a binary search with a linear scan, right for tens of links and wrong for a wide composite | a sibling-width sweep nobody had run |
+| 7 | Returning the published value by reference is worth **2.1×** at T=24 | **1.27×** there; 1.48× median across all shapes. Real, and smaller than claimed | both arms alternating in ONE binary |
 
-Two further habits this cost, both now standing rules: **quote a bench arm only after checking
-its return type matches the real API's** (a non-owning model read was quoted as a 1806× win
-against an achievable 20.8×), and **report the run-to-run spread beside every ratio** — on these
-shapes it is 1.0–2.8× and it silently swallows anything under ~1.5×.
+Four habits this cost, all now standing rules:
+
+1. **Quote a bench arm only after checking its return type matches the real API's.** A
+   non-owning model read was quoted as a 1806× win against an achievable 20.8×.
+2. **Report the run-to-run spread beside every ratio.** On these shapes it is 1.0–2.8×, and it
+   silently swallows anything under ~1.5×.
+3. **Prefer both arms in ONE binary over two builds.** Entry 7 was found that way: alternating
+   two *builds* leaves layout, allocator state and thermal drift in the comparison, and those
+   are the same size as the effect being measured.
+4. **An optimization's fixed cost is part of the measurement.** The first version of the mount
+   digest ([#660](https://github.com/avatarsd-llc/libtracer/pull/660)) removed 91% of the scan
+   cost and added ~30 ns — a fifth of a whole forward hop — to *every* lookup. Measuring only
+   the axis being improved hid it completely.
 
 ---
 
