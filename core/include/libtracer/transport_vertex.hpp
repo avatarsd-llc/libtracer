@@ -284,7 +284,7 @@ class transport_vertex_t {
      * creation; this remains the seam for later link events (and the only source for
      * provided links). Until the RFC-0014 S5 liveness engine lands, callers drive this
      * manually — the engine will become the sole writer of the DIAL transitions.
-     * @param name  The connection NAME.
+     * @param name  The connection's **qualified** key `net/<module>/<name>` (#605).
      * @param state The link-liveness state to publish (see link_state_t).
      * @return NotFound if @p name names no created connection vertex.
      */
@@ -302,12 +302,19 @@ class transport_vertex_t {
      *
      * This is the owner-internal operation the RFC-0014 `NAME`-write removal dispatch
      * (S2b) will call; it is not itself reachable from the wire.
-     * @param name The connection's NAME (the `/net/<name>` segment).
+     * @param name The connection's **qualified** key `net/<module>/<name>` — NOT the bare
+     *             connection NAME. RFC-0014 S2a re-keyed `conns_` to the qualified form so
+     *             the routing address equals the vertex path; these lookups moved with it
+     *             and the doc did not, so a caller following the old wording got a silent
+     *             `NOT_FOUND` / `nullptr` (#605).
      * @return NotFound if @p name names no created connection.
      */
     [[nodiscard]] graph::result_t<void> remove_connection(std::string_view name);
 
-    /** @brief The parsed transport-private settings of connection @p name (nullptr if none). */
+    /**
+     * @brief The parsed transport-private settings of connection @p name (nullptr if none).
+     * @param name The connection's **qualified** key `net/<module>/<name>` (#605).
+     */
     [[nodiscard]] const conn_settings_t* settings_of(std::string_view name) const;
 
     /**
@@ -318,7 +325,11 @@ class transport_vertex_t {
      * `link_of(name)->bus()->close_peer(peer)`). Returns nullptr for a connection
      * whose link was staged with @ref provide_link (the caller already owns that
      * link) and for an unknown NAME.
-     * @param name The connection's NAME (the `/net/<name>` segment).
+     * @param name The connection's **qualified** key `net/<module>/<name>` — NOT the bare
+     *             connection NAME. RFC-0014 S2a re-keyed `conns_` to the qualified form so
+     *             the routing address equals the vertex path; these lookups moved with it
+     *             and the doc did not, so a caller following the old wording got a silent
+     *             `NOT_FOUND` / `nullptr` (#605).
      */
     [[nodiscard]] transport_t* link_of(std::string_view name) const;
 

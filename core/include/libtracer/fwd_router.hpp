@@ -4,16 +4,19 @@
  *
  * RFC-0004 / ADR-0035 slice 3 — multi-hop FWD forwarding + zero-copy `src`
  * accumulation across transports. A node holds a set of NAMED transport-child
- * vertices (ADR-0027): each child is a link, addressed in THIS node's space by a
- * single NAME segment. On an inbound FWD that arrived on child `inbound_name`:
+ * vertices (ADR-0027): each child is a link, addressed in THIS node's space by its
+ * **mount run** `net/<module>/<name>[/<peer>]` — one to four NAME segments, not one
+ * (RFC-0014 S2a; @ref tr::net::resolve_mount_segs is the strip-K descent, ADR-0061).
+ * On an inbound FWD that arrived on child `inbound_name`:
  *
- *   - resolve the FIRST `dst` segment. If it names a local NON-transport vertex
- *     (terminus), apply the op via the slice-2 op_resolver_t, build FWD{REPLY},
- *     and send it back over the link the request arrived on;
- *   - if it names a transport-child vertex (forward), STRIP that segment from
- *     `dst`, PREPEND to `src` (zero-copy rope head-prepend) the NAME by which THIS
- *     node addresses the inbound link (the way back), and send the shortened FWD
- *     over the named child to the peer;
+ *   - resolve the LEADING `dst` segments against the child registry, longest mount
+ *     first. If nothing matches a mount, the address is local: apply the op via the
+ *     slice-2 op_resolver_t, build FWD{REPLY}, and send it back over the link the
+ *     request arrived on;
+ *   - if they name a transport-child vertex (forward), STRIP that whole matched run
+ *     from `dst`, PREPEND to `src` (zero-copy rope head-prepend) the mount run by
+ *     which THIS node addresses the inbound link (the way back), and send the
+ *     shortened FWD over the named child to the peer;
  *   - a FWD{op=REPLY} routes by the same step — its `dst` (the accumulated return
  *     route) is resolved segment-by-segment and forwarded hop-by-hop; a REPLY does
  *     NOT accumulate `src` (a reply expects no reply, RFC-0004 §B). When a REPLY's
