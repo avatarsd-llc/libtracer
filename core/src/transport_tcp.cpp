@@ -50,6 +50,14 @@ void set_nodelay(int fd) {
  *        vector.  `ok` is false when the record exceeds @p cap — the peer
  *        would reject it as malformed.  The prefix lives inside the struct, so
  *        the assembled iovec stays valid for the struct's (local) lifetime.
+ *
+ *        MEASURED (`bench_transport_iov`): the fallback fires at exactly **17
+ *        caller spans** — `inline_vec` holds `kMaxInlineIov + 1` because the
+ *        length prefix takes slot 0 — costing one allocation of ~288 B.
+ *        `bench_forward_heap`'s `allocs=0` gate cannot see it: that bench drives
+ *        a stub link which never assembles an iovec.  Headroom against
+ *        `kFwdMaxIov` (14) is **3 regions**, and a rope source may split any
+ *        region further.
  */
 struct prefixed_iov_t {
     static constexpr std::size_t kMaxInlineIov = 16;
