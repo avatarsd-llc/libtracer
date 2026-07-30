@@ -71,6 +71,14 @@ add_executable(bench_compact_delivery bench_compact_delivery.cpp)
 target_link_libraries(bench_compact_delivery PRIVATE libtracer)
 target_compile_options(bench_compact_delivery PRIVATE -Wall -Wextra)
 
+add_executable(bench_originate bench_originate.cpp)
+target_link_libraries(bench_originate PRIVATE libtracer)
+target_compile_options(bench_originate PRIVATE -Wall -Wextra)
+
+add_executable(bench_hop_chain bench_hop_chain.cpp)
+target_link_libraries(bench_hop_chain PRIVATE libtracer)
+target_compile_options(bench_hop_chain PRIVATE -Wall -Wextra)
+
 add_executable(bench_terminus_tier bench_terminus_tier.cpp)
 target_link_libraries(bench_terminus_tier PRIVATE libtracer)
 target_compile_options(bench_terminus_tier PRIVATE -Wall -Wextra)

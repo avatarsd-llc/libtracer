@@ -39,6 +39,7 @@
  * no thread handoff, and no allocation on the measured path.
  */
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -51,6 +52,7 @@
 #include <vector>
 
 #include "bench_common.hpp"
+#include "libtracer/fwd_frame_view.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -267,6 +269,81 @@ std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* m
     return s.p50;
 }
 
+/**
+ * @brief Split the fixed hop into the part a resolution cache could remove and the part it
+ *        cannot — the ceiling on any resolve-once scheme (ADR-0062 / RFC-0004 §E.1).
+ *
+ * A cache that turns a stable `dst` into a token can only remove work that depends on the
+ * DESTINATION. It cannot remove work that depends on the FRAME, because the frame is new on
+ * every hop. So the fixed per-hop cost divides in two:
+ *
+ *  - `resolve` — `peek_fwd_dst_segs` walks the `dst` PATH by offset and hands back the mount
+ *    run. Its answer is the same for every frame to the same destination, so a token that
+ *    names the resolved link makes it dead work. **This is the ceiling on caching**, and the
+ *    registry scan (axis 2) sits on top of it.
+ *  - `rebuild` — `rebuild_fwd_forward` strips the local mount run and grows `src` by it,
+ *    emitting the new head. Its output embeds THIS frame's residual `dst`, `src` and payload
+ *    offsets, so it must run per frame no matter how the link was found. **This is the floor.**
+ *
+ * Reporting them separately is the point: a resolve-once scheme is worth building only if
+ * `resolve` is a large share of the hop, and no amount of caching touches `rebuild`. Both are
+ * timed on the SAME frame the hop axes use, through the same public offset-dispatch entry
+ * points production takes, so this is a decomposition of the shipped path — not a model of a
+ * hypothetical one.
+ */
+[[nodiscard]] std::uint64_t run_leg(const char* mode, bool rebuild_leg) {
+    const std::byte payload[4] = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE},
+                                  std::byte{0xEF}};
+    const std::vector<std::byte> frame =
+        make_fwd({"net", "ws-client", "out", "sensor", "temp"}, {"reply"},
+                 std::span<const std::byte>(payload, 4));
+    const tr::wire::grammar::span_cursor cur{frame};
+
+    // Accumulated so the optimizer cannot delete the call it is here to time.
+    std::size_t sink = 0;
+    std::array<std::pair<std::size_t, std::size_t>, tr::net::kMountPeekMax> segs{};
+    tr::net::fwd_pre_t pre{};
+    // The mount TLV a real child carries precomputed (#508) — content is irrelevant to the
+    // timing, only that the rebuild emits it as one span.
+    const std::array<std::string_view, 2> mount_segs{"net", "ws-server"};
+    const std::vector<std::byte> mount_tlv =
+        tr::net::encode_mount_tlv(mount_segs).value_or(std::vector<std::byte>{});
+    // Production peeks ONCE and hands the parse to the rebuild via `pre`, so the rebuild leg
+    // is timed the same way — otherwise it would re-parse and double-count the very work
+    // this axis is trying to attribute to the peek.
+    (void)tr::net::peek_fwd_dst_segs(cur, segs, pre);
+
+    const auto leg = [&] {
+        if (rebuild_leg) {
+            // Strip the two-segment local mount run (`net` / `ws-client`) — the same K the hop
+            // strips, so the emitted head matches the one the hop builds.
+            const auto rb = tr::net::rebuild_fwd_forward(cur, mount_tlv, "in", 2, &pre);
+            sink += rb ? rb->head1.span().size() : 0;
+        } else {
+            tr::net::fwd_pre_t local{};
+            sink += tr::net::peek_fwd_dst_segs(cur, segs, local);
+        }
+    };
+
+    const std::size_t batch = calibrate_batch(leg);
+    bench::Latency lat;
+    const std::uint64_t deadline_ns = static_cast<std::uint64_t>(budget_seconds() * 1e9);
+    const std::uint64_t t0 = bench::now_ns();
+    std::size_t batches = 0;
+    std::uint64_t total = 0;
+    while (total < deadline_ns) {
+        const std::uint64_t a = bench::now_ns();
+        for (std::size_t i = 0; i < batch; ++i) leg();
+        lat.add((bench::now_ns() - a) / batch);
+        ++batches;
+        total = bench::now_ns() - t0;
+    }
+    const bench::Latency::Summary s = lat.summarize();
+    bench::emit("libtracer", mode, frame.size(), 1, 1, 0.0, 0.0, 0.0, s);
+    std::printf("NOTE mode=%s sink=%zu\n", mode, sink);
+    return s.p50;
+}
+
 }  // namespace
 
 int main() {
@@ -296,5 +373,27 @@ int main() {
         "\nSUMMARY fixed_per_hop_ns=%llu (size-independent — the term strip-K ADDS,\n"
         "        a segment[0]==\"net\" literal + a module compare, is measured against this)\n",
         static_cast<unsigned long long>(fixed.empty() ? 0 : fixed[0]));
+
+    // Axis 3 — what a resolution cache could and could not remove from that fixed hop.
+    std::printf("\n");
+    const std::uint64_t resolve_ns = run_leg("fwd-demux-resolve", false);
+    const std::uint64_t rebuild_ns = run_leg("fwd-demux-rebuild", true);
+
+    const double hop = static_cast<double>(fixed.empty() ? 0 : fixed[0]);
+    const double scan_hi = scan.empty() ? 0.0 : static_cast<double>(scan.back()) - hop;
+    std::printf("\n%-22s %-12s %s\n", "leg", "p50_ns", "share of the fixed hop");
+    std::printf("%-22s %-12llu %.1f%%   <- CEILING on a resolve-once cache\n",
+                "resolve (cacheable)", static_cast<unsigned long long>(resolve_ns),
+                hop == 0.0 ? 0.0 : 100.0 * static_cast<double>(resolve_ns) / hop);
+    std::printf("%-22s %-12llu %.1f%%   <- FLOOR: per-frame, no cache removes it\n",
+                "rebuild (per-frame)", static_cast<unsigned long long>(rebuild_ns),
+                hop == 0.0 ? 0.0 : 100.0 * static_cast<double>(rebuild_ns) / hop);
+    std::printf(
+        "\nSUMMARY a perfect resolve-once cache saves at most %llu ns of a %.0f ns hop"
+        " (%.1f%%),\n        plus the registry scan, which is %.0f ns at %zu links and"
+        " ~0 at <=16.\n",
+        static_cast<unsigned long long>(resolve_ns), hop,
+        hop == 0.0 ? 0.0 : 100.0 * static_cast<double>(resolve_ns) / hop, scan_hi,
+        kLinkCounts[std::size(kLinkCounts) - 1]);
     return 0;
 }
