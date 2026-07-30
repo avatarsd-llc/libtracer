@@ -107,11 +107,14 @@ void test_stored_value() {
     check(w.has_value(), "write succeeds");
 
     auto r = g.read(v);
-    check(r.has_value() && r->only().bytes().size() == 3, "read returns the written value");
-    check(r && std::to_integer<int>(r->only().bytes()[0]) == 0xAA, "value byte 0 == 0xAA");
-    // The LKV holds one reference; read returned an independent clone => use_count 2.
-    check(r && r->only().owner.use_count() == 2,
-          "read is a clone (segment use_count == 2), not a copy");
+    check(r.has_value() && (*r)->only().bytes().size() == 3, "read returns the written value");
+    check(r && std::to_integer<int>((*r)->only().bytes()[0]) == 0xAA, "value byte 0 == 0xAA");
+    // The read hands back a REFERENCE to the published rope rather than a clone of it, so the
+    // segment's refcount does not move at all: the LKV's own reference is the only one. This
+    // asserted `== 2` while a read copied the rope out, cloning one segment_ptr_t per link —
+    // the per-link contended RMW that returning the reference removes.
+    check(r && (*r)->only().owner.use_count() == 1,
+          "read shares the published segment (use_count stays 1), it does not clone it");
 
     check(!g.try_register_vertex(*path, role_t::STORED_VALUE).has_value(),
           "re-register same path fails");
@@ -136,7 +139,7 @@ void test_stream() {
     check(hist && std::to_integer<int>((*hist)[2].only().bytes()[0]) == 5,
           "newest kept is the 5th write");
     auto latest = g.read(v);
-    check(latest && std::to_integer<int>(latest->only().bytes()[0]) == 5,
+    check(latest && std::to_integer<int>((*latest)->only().bytes()[0]) == 5,
           "read returns the latest (5)");
 }
 
@@ -155,7 +158,7 @@ void test_handler() {
     tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::HANDLER, std::move(h));
 
     auto r = g.read(v);
-    check(r && std::to_integer<int>(r->only().bytes()[0]) == 0x2A,
+    check(r && std::to_integer<int>((*r)->only().bytes()[0]) == 0x2A,
           "on_read supplies the value (42)");
     (void)g.write(v, make_value({0x99}));
     check(written->size() == 1 && std::to_integer<int>((*written)[0]) == 0x99,
@@ -174,7 +177,7 @@ void test_await() {
     });
     auto r = g.await(v, 2s);
     writer.join();
-    check(r.has_value() && std::to_integer<int>(r->only().bytes()[0]) == 0x7E,
+    check(r.has_value() && std::to_integer<int>((*r)->only().bytes()[0]) == 0x7E,
           "await wakes on a concurrent write and delivers it");
 
     tr::graph::vertex_handle_t idle =
@@ -216,7 +219,7 @@ void test_concurrent_stress() {
             for (int i = 0; i < kReadsEach; ++i) {
                 auto rr = g.read(v);
                 // Any non-empty read must be a well-formed 8-byte value (no torn read).
-                if (rr && rr->only().bytes().size() != 8)
+                if (rr && (*rr)->only().bytes().size() != 8)
                     return;  // leaves reads_done short => FAIL
             }
             reads_done.fetch_add(kReadsEach, std::memory_order_relaxed);
@@ -229,7 +232,7 @@ void test_concurrent_stress() {
     check(reads_done.load() == static_cast<long>(kReaders) * kReadsEach,
           "all reads completed without crash under contention");
     auto fin = g.read(v);
-    check(fin.has_value() && fin->only().bytes().size() == 8,
+    check(fin.has_value() && (*fin)->only().bytes().size() == 8,
           "final read returns a valid 8-byte value");
 }
 
@@ -476,7 +479,7 @@ void test_schema_read() {
     (void)g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     auto schema = g.read(path_t("/sensor/temp:schema"));
     check(schema.has_value(), ":schema read returns a value");
-    auto point = tr::wire::decode(schema->only());
+    auto point = tr::wire::decode((*schema)->only());
     check(point && point->type == tr::wire::type_t::POINT, ":schema decodes to a POINT");
     check(point && point->children.size() == 2, "POINT has a NAME and a SETTINGS child");
     check(point && point->children[0].type == tr::wire::type_t::NAME &&
@@ -528,7 +531,7 @@ void test_admission_door_uniformity() {
         tr::graph::vertex_handle_t tgt = g.register_vertex(path_t("/tgt"), role_t::STORED_VALUE);
         (void)g.subscribe(path_t("/tl"), path_t("/tgt"));
         const auto latched = g.read(tgt);
-        check(latched.has_value() && std::to_integer<int>(latched->only().bytes()[0]) == 0x5A,
+        check(latched.has_value() && std::to_integer<int>((*latched)->only().bytes()[0]) == 0x5A,
               "target door: the LKV latches at subscribe (delivered as a write)");
     }
 
@@ -559,8 +562,8 @@ void test_delivery_terminates_at_target() {
     (void)g.subscribe(path_t("/b"), on_b);          // an observer on B's own subscribers
     (void)g.write(a, make_value({0x55}));
     const auto rb = g.find(path_t("/b").key());
-    const auto b_val = rb.has_value() ? g.read(*rb) : tr::graph::result_t<tr::view::rope_t>{};
-    check(b_val.has_value() && std::to_integer<int>(b_val->only().bytes()[0]) == 0x55,
+    const auto b_val = rb.has_value() ? g.read(*rb) : tr::graph::result_t<tr::graph::value_ref_t>{};
+    check(b_val.has_value() && std::to_integer<int>((*b_val)->only().bytes()[0]) == 0x55,
           "the delivery stored A's write AT B (delivery IS a write to the target)");
     check(*b_relayed == 0, "but B does NOT relay to its own subscribers (terminates at B)");
 

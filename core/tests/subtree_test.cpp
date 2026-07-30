@@ -241,15 +241,15 @@ void test_branch_write_decomposition() {
     tr::wire::emit_tlv(
         snap, type_t::POINT, opt_t{.pl = true},
         cat({value_tlv({0x07}), point_tlv("t", t_val), point_tlv("u", value_tlv({0xCC}))}));
-    check(r_s.has_value() && same_bytes(r_s->flatten(), snap),
+    check(r_s.has_value() && same_bytes((*r_s)->flatten(), snap),
           "read /s serves the composed subtree snapshot (own VALUE TLV leading)");
     const auto r_t = g.read(st);
-    check(r_t.has_value() && same_bytes(r_t->only(), t_val),
+    check(r_t.has_value() && same_bytes((*r_t)->only(), t_val),
           "read /s/t returns the leaf's VALUE TLV");
-    check(r_t.has_value() && is_subview_of(r_t->only(), frame),
+    check(r_t.has_value() && is_subview_of((*r_t)->only(), frame),
           "leaf store is a refcount SUBVIEW of the written frame (zero copy)");
     const auto r_u = g.read(path_t("/s/u"));
-    check(r_u.has_value() && same_bytes(r_u->only(), value_tlv({0xCC})),
+    check(r_u.has_value() && same_bytes((*r_u)->only(), value_tlv({0xCC})),
           "write-created /s/u holds its decomposed VALUE");
 
     // Notifications: one per covered subscription point, with its slice.
@@ -265,7 +265,7 @@ void test_branch_write_decomposition() {
     // Read-after-notify invariant: the LKV a read serves is never behind what the
     // subscriber just saw (it IS the same refcounted slice here).
     check(r_t.has_value() && at_st.size() == 1 &&
-              r_t->only().bytes().data() == at_st[0].bytes().data(),
+              (*r_t)->only().bytes().data() == at_st[0].bytes().data(),
           "read and notification serve the same stored slice");
 }
 
@@ -310,7 +310,7 @@ void test_write_creates() {
     check(g.write(path_t("/new/deep/leaf"), make_value(val)).has_value(),
           "write to a nonexistent path creates it");
     const auto r = g.read(path_t("/new/deep/leaf"));
-    check(r.has_value() && same_bytes(r->only(), val), "created leaf serves the written value");
+    check(r.has_value() && same_bytes((*r)->only(), val), "created leaf serves the written value");
     check(g.find(path_t::parse("/new/deep")->key()).has_value(),
           "intermediate levels are created too (mkdir-p)");
 

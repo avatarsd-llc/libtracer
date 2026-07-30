@@ -96,7 +96,7 @@ int main() {
     std::thread waiter([&] {
         auto r = g.await(temp, 2s);
         if (r) {
-            await_got = as_u32(r->only());
+            await_got = as_u32((*r)->only());
             std::printf("  [await sub] received %u\n", await_got);
         }
     });
@@ -108,7 +108,7 @@ int main() {
 
     // Read back the last-known-value (a clone — keeps the segment alive for us).
     auto rb = g.read(temp);
-    const std::uint32_t rb_got = rb ? as_u32(rb->only()) : 0u;
+    const std::uint32_t rb_got = rb ? as_u32((*rb)->only()) : 0u;
     std::printf("read-back /sensor/temp = %u\n", rb_got);
 
     // Field-write a QoS setting, then discover it via :schema.
@@ -116,7 +116,8 @@ int main() {
     auto schema = g.read(path_t("/sensor/temp:schema"));
     std::size_t schema_children = 0;
     if (schema) {
-        if (auto point = tr::wire::decode(schema->only())) schema_children = point->children.size();
+        if (auto point = tr::wire::decode((*schema)->only()))
+            schema_children = point->children.size();
     }
     std::printf(":schema is a POINT with %zu children\n", schema_children);
 

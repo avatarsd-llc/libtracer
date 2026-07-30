@@ -327,7 +327,7 @@ void test_slot_reuse_and_index_stability() {
     /** @brief The stored SUBSCRIBER bytes at :subscribers[idx] (empty on error). */
     const auto slot = [&](std::size_t idx) -> std::vector<std::byte> {
         const auto r = g.read(path_t(("/v:subscribers[" + std::to_string(idx) + "]").c_str()));
-        return r ? rope_bytes(*r) : std::vector<std::byte>{};
+        return r ? rope_bytes(**r) : std::vector<std::byte>{};
     };
     check(g.evict_link_edges("cli") == 2, "evict('cli') frees slots 0 and 2");
     check(slot(1) == b_subscriber("B"), "survivor B still reads at index 1 (no renumber)");

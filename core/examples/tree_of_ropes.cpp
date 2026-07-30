@@ -159,16 +159,16 @@ void axis3_address_composition(const rope_t& two_link) {
     check(w.has_value(), "write threads the L1 rope into the L4 vertex slot");
 
     const auto rd = g.read(temp);
-    check(rd.has_value() && rd->link_count() == 2,
+    check(rd.has_value() && (*rd)->link_count() == 2,
           "the vertex stored the rope AS-IS — still two links; the tree did not flatten it");
-    check(rd.has_value() && rd->links()[1].owner->btag == tr::mem::backend_tag::BORROWED,
+    check(rd.has_value() && (*rd)->links()[1].owner->btag == tr::mem::backend_tag::BORROWED,
           "the borrowed link survived the store (zero copy through the graph)");
 
     // A second vertex holds a wholly separate rope — there is no global rope.
     std::array<std::byte, 1> hbyte{std::byte{0x42}};
     const auto wh = g.write(humidity, view_t::over(tr::view::borrow(hbyte)));
     const auto rh = g.read(humidity);
-    check(wh.has_value() && rh.has_value() && rh->total_length() == 1,
+    check(wh.has_value() && rh.has_value() && (*rh)->total_length() == 1,
           "humidity holds a DIFFERENT rope — two vertices, two ropes, no shared chain");
 
     // The address axis is walked by path, independent of any rope's links.
@@ -207,7 +207,7 @@ void axis_transport_is_identity() {
     // categorically not the sensor's two-link memory chain.
     (void)net.set_link_state("net/can/link0", tr::net::link_state_t::UP);
     const auto ls = g.read(*link_h);
-    check(ls.has_value() && ls->link_count() == 1 && ls->total_length() <= 8,
+    check(ls.has_value() && (*ls)->link_count() == 1 && (*ls)->total_length() <= 8,
           "link-state is a single-link rope of a few bytes — never a chained payload");
     check(router.registry().by_name("net/can/link0") == &channel.a(),
           "the transport's real bytes live OUTSIDE the graph, in the router's demux");

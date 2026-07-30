@@ -84,9 +84,10 @@ void test_create_and_resolve() {
     const auto cw = g.write(path_t("/dev/temp"), val);
     check(cw.has_value(), "the created child accepts an ordinary value write");
     const auto cr = g.read(path_t("/dev/temp"));
-    check(cr.has_value() && cr->only().bytes().size() == val.bytes().size() &&
-              std::memcmp(cr->only().bytes().data(), val.bytes().data(), val.bytes().size()) == 0,
-          "and reads back the identical VALUE bytes (last-writer-wins)");
+    check(
+        cr.has_value() && (*cr)->only().bytes().size() == val.bytes().size() &&
+            std::memcmp((*cr)->only().bytes().data(), val.bytes().data(), val.bytes().size()) == 0,
+        "and reads back the identical VALUE bytes (last-writer-wins)");
 }
 
 void test_unknown_type() {

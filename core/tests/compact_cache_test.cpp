@@ -82,7 +82,7 @@ std::optional<std::uint8_t> stored_byte(graph_t& g, const char* p) {
     if (!v) return std::nullopt;
     const auto r = g.read(*v);
     if (!r) return std::nullopt;
-    const tr::view::view_t flat = r->flatten();
+    const tr::view::view_t flat = (*r)->flatten();
     const std::span<const std::byte> b = flat.bytes();
     if (b.size() < 3) return std::nullopt;
     return static_cast<std::uint8_t>(b[b.size() - 1]);

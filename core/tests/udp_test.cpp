@@ -315,12 +315,12 @@ void test_two_nodes_zero_copy_store() {
     check(arrived, "node B stores the FWD{WRITE} delivered over real UDP");
     if (arrived) {
         const auto rd = node_b.read(v);
-        check(rd.has_value() && rd->only().bytes().size() == payload.size() &&
-                  std::memcmp(rd->only().bytes().data(), payload.data(), payload.size()) == 0,
+        check(rd.has_value() && (*rd)->only().bytes().size() == payload.size() &&
+                  std::memcmp((*rd)->only().bytes().data(), payload.data(), payload.size()) == 0,
               "stored bytes equal the written payload TLV");
         const auto segs = rec.segments();
         check(!segs.empty(), "the RX backend allocated the frame segment");
-        check(rd.has_value() && !segs.empty() && rd->only().owner.get() == segs.front(),
+        check(rd.has_value() && !segs.empty() && (*rd)->only().owner.get() == segs.front(),
               "stored segment IS the RX frame segment (zero-copy socket -> LKV)");
     }
 }

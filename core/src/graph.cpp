@@ -677,7 +677,7 @@ void graph_t::mark_subtree_acl_dirty(vertex_t* v) {
     v->for_each_child([](vertex_t& child) { mark_subtree_acl_dirty(&child); });
 }
 
-result_t<rope_t> graph_t::read(vertex_handle_t vh, std::string_view caller) const {
+result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller) const {
     vertex_t* v = vh.get();
     if (!acl_allows(v, caller, acl_right_t::READ))
         return std::unexpected(status_t::PERMISSION_DENIED);
@@ -687,18 +687,34 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, std::string_view caller) cons
         // second load could see the cleared seam and throw bad_function_call. The parked
         // block keeps this reference valid even if the swap fires right after the load.
         const value_handlers_t& h = v->handlers();
-        if (h.on_read) return h.on_read();
+        // The handler seam is rope-valued (ADR-0053 section 6), so a handler read COMPOSES:
+        // it costs one control block that the published path does not pay. Converting the
+        // seam itself is a separate, lateral change.
+        if (h.on_read) {
+            auto produced = h.on_read();
+            if (!produced) return std::unexpected(produced.error());
+            return value_ref_t::composed(std::move(*produced));
+        }
         return std::unexpected(status_t::NOT_FOUND);
     }
     // The branch/leaf fork (RFC-0005 §C follow-on): a vertex with ≥ 1 registered child
     // serves the composed branch read — the folded POINT tree of its registered
     // descendants' landed LKVs. AFTER the handler seam (a HANDLER target's on_read keeps
     // precedence); a leaf falls through to the LKV path byte-identically to before.
-    if (v->has_registered_child()) return read_subtree_folded(vh, caller);
-    const std::shared_ptr<const rope_t> sp = v->read_stored();  // lock-free
+    if (v->has_registered_child()) {
+        // The composed branch read BUILDS a value, so it wraps rather than shares. Measured
+        // 1.00x against the old copy-out (30 paired samples): the subtree walk dominates the
+        // one control block this costs.
+        auto folded = read_subtree_folded(vh, caller);
+        if (!folded) return std::unexpected(folded.error());
+        return value_ref_t::composed(std::move(*folded));
+    }
+    std::shared_ptr<const rope_t> sp = v->read_stored();  // lock-free
     if (!sp) return std::unexpected(status_t::NOT_FOUND);
-    return *sp;  // copies the rope => clones each link's segment_ptr_t (refcount bump, no byte
-                 // copy)
+    // The published value is handed back BY REFERENCE. This used to be `return *sp`, which
+    // copied the rope and so cloned one segment_ptr_t per link — a contended refcount RMW per
+    // link, on the line every reader of this vertex shares.
+    return value_ref_t{std::move(sp)};
 }
 
 namespace {
@@ -1184,8 +1200,8 @@ result_t<void> graph_t::write(vertex_handle_t vh, const field_path_t& field, rop
     return field_write(v, field, head, caller);
 }
 
-result_t<rope_t> graph_t::await(vertex_handle_t vh, std::chrono::nanoseconds timeout,
-                                std::string_view caller) {
+result_t<value_ref_t> graph_t::await(vertex_handle_t vh, std::chrono::nanoseconds timeout,
+                                     std::string_view caller) {
     vertex_t* v = vh.get();
     // await is the readiness form of a data READ — same gate, checked up front so a
     // denied caller cannot camp on the condvar.
@@ -1193,9 +1209,9 @@ result_t<rope_t> graph_t::await(vertex_handle_t vh, std::chrono::nanoseconds tim
         return std::unexpected(status_t::PERMISSION_DENIED);
     const std::uint64_t seq0 = v->current_seq();
     if (!v->wait_for_change(seq0, timeout)) return std::unexpected(status_t::TIMEOUT);
-    const std::shared_ptr<const rope_t> sp = v->read_stored();
+    std::shared_ptr<const rope_t> sp = v->read_stored();
     if (!sp) return std::unexpected(status_t::NOT_FOUND);  // e.g. a Handler-role write
-    return *sp;
+    return value_ref_t{std::move(sp)};
 }
 
 result_t<std::vector<rope_t>> graph_t::history(vertex_handle_t vh) const {
@@ -2001,7 +2017,13 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
 result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
                                std::string_view caller) const {
     vertex_t* v = vh.get();
-    if (field.empty()) return read(vh, caller);  // value read → the stored rope
+    if (field.empty()) {
+        // The value read now returns a REFERENCE; this overload is rope-valued because every
+        // other branch below composes, so materialize here rather than widen the surface.
+        auto v_ref = read(vh, caller);
+        if (!v_ref) return std::unexpected(v_ref.error());
+        return **v_ref;
+    }
     // ":children[]" (or bare ":children") — member enumeration, the read dual of the
     // SPEC-creating append — is served FOLDED (L4 fold, Slice 0): a scatter-gather rope
     // (outer POINT header + per-child borrowed NAME), byte-identical on flatten() to the
@@ -2106,11 +2128,16 @@ result_t<std::vector<view_t>> graph_t::read_subscribers(vertex_handle_t vh,
     return v->edge_sources();  // each a clone (refcount bump, no byte copy)
 }
 
-result_t<rope_t> graph_t::read(const path_t& path) const {
+result_t<value_ref_t> graph_t::read(const path_t& path) const {
     vertex_t* v = find_ptr(path.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
-    // handle-based; one locus for the field surface + ACL gates
-    return read(vertex_handle_t{v}, path.field());
+    // A plain value read SHARES the published value; a `:field` read composes one, so it goes
+    // through the field surface and wraps. Splitting here rather than inside the field overload
+    // keeps the cheap path free of the wrap.
+    if (path.field().empty()) return read(vertex_handle_t{v});
+    auto composed = read(vertex_handle_t{v}, path.field());
+    if (!composed) return std::unexpected(composed.error());
+    return value_ref_t::composed(std::move(*composed));
 }
 
 result_t<void> graph_t::write(const path_t& path, rope_t value) {
@@ -2129,7 +2156,7 @@ result_t<void> graph_t::write(const path_t& path, rope_t value) {
     return write(vertex_handle_t{v}, path.field(), std::move(value));
 }
 
-result_t<rope_t> graph_t::await(const path_t& path, std::chrono::nanoseconds timeout) {
+result_t<value_ref_t> graph_t::await(const path_t& path, std::chrono::nanoseconds timeout) {
     vertex_t* v = find_ptr(path.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
     return await(vertex_handle_t{v}, timeout);

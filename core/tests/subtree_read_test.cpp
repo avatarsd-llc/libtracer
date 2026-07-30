@@ -209,7 +209,7 @@ std::optional<snap_map_t> read_snapshot_map(graph_t& g, const path_t& target,
     if (!h) return std::nullopt;
     const auto r = g.read(*h, caller);
     if (!r) return std::nullopt;
-    const view_t flat = r->flatten();
+    const view_t flat = (*r)->flatten();
     return parse_snapshot(flat.bytes());
 }
 
@@ -297,7 +297,7 @@ void test_differential_random_trees() {
                 ++bad_leaves;
                 continue;
             }
-            if (r && !same_bytes(r->flatten(), it->second)) ++bad_leaves;
+            if (r && !same_bytes((*r)->flatten(), it->second)) ++bad_leaves;
         }
     }
     check(leafless < kShapes, "the seed produced non-trivial tree shapes");
@@ -388,7 +388,7 @@ void test_acl_prune() {
         frontier.pop_back();
         const auto members = g.read(path_t("/p" + at + ":children"));
         if (!members) continue;  // READ denied here => cannot enumerate below
-        const view_t flat = members->flatten();
+        const view_t flat = (*members)->flatten();
         const auto listing = parse_snapshot(flat.bytes());  // POINT{ POINT{NAME}… } parses too
         if (!listing) continue;
         for (const std::string& child : listing->topology) {
@@ -416,7 +416,7 @@ void test_leaf_and_handler_regression() {
     const std::vector<std::byte> val = value_tlv({0x2A});
     check(g.write(leaf, make_value(val)).has_value(), "write the leaf value");
     const auto r = g.read(leaf);
-    check(r.has_value() && r->link_count() == 1 && same_bytes(r->only(), val),
+    check(r.has_value() && (*r)->link_count() == 1 && same_bytes((*r)->only(), val),
           "leaf read serves the stored TLV byte-identically (single-link, zero copy)");
 
     vertex_handle_t empty = g.register_vertex(path_t("/empty"), role_t::STORED_VALUE);
@@ -431,8 +431,8 @@ void test_leaf_and_handler_regression() {
     (void)g.register_vertex(path_t("/hnd/child"), role_t::STORED_VALUE);
     (void)g.write(path_t("/hnd/child"), make_value(value_tlv({0x11})));
     const auto hr = g.read(hv);
-    check(hr.has_value() && hr->link_count() == 1 &&
-              std::to_integer<int>(hr->only().bytes()[0]) == 0x2A,
+    check(hr.has_value() && (*hr)->link_count() == 1 &&
+              std::to_integer<int>((*hr)->only().bytes()[0]) == 0x2A,
           "handler-target read serves on_read, not the snapshot (precedence kept)");
 
     // A HANDLER without on_read stays NOT_FOUND — the hook sits AFTER the handler seam.
@@ -486,7 +486,7 @@ void test_names_only_topology() {
     const std::vector<std::byte> b_node = point_tlv("b", point_tlv("c", {}));
     std::vector<std::byte> expect;
     tr::wire::emit_tlv(expect, type_t::POINT, opt_t{.pl = true}, cat({a_node, b_node}));
-    check(same_bytes(r->flatten(), expect), "topology-only snapshot bytes are exact");
+    check(same_bytes((*r)->flatten(), expect), "topology-only snapshot bytes are exact");
 }
 
 // --- 7. ZERO-COPY accounting --------------------------------------------------
@@ -507,21 +507,21 @@ void test_zero_copy_link_structure() {
     if (!r) return;
     // Root: header + 1 LKV link. c1: header + borrowed name + 1 LKV link. c2 (value-less):
     // header + borrowed name. NEVER one flattened buffer.
-    check(r->link_count() == 7, "7 links: (hdr+lkv) + (hdr+name+lkv) + (hdr+name)");
+    check((*r)->link_count() == 7, "7 links: (hdr+lkv) + (hdr+name+lkv) + (hdr+name)");
     // The LKV links are refcount CLONES of the stored segments — the same bytes a leaf
     // read serves, at the same addresses (no byte copy anywhere).
     const auto leaf = g.read(c1);
-    check(leaf.has_value() && leaf->link_count() == 1, "leaf read of /z/c1 is single-link");
+    check(leaf.has_value() && (*leaf)->link_count() == 1, "leaf read of /z/c1 is single-link");
     if (leaf) {
         bool shared = false;
-        for (const view_t& l : r->links())
-            if (l.bytes().data() == leaf->only().bytes().data() &&
-                l.bytes().size() == leaf->only().bytes().size())
+        for (const view_t& l : (*r)->links())
+            if (l.bytes().data() == (*leaf)->only().bytes().data() &&
+                l.bytes().size() == (*leaf)->only().bytes().size())
                 shared = true;
         check(shared, "the snapshot's c1 LKV link aliases the stored segment (refcount clone)");
     }
     // And the flattened whole still parses to the right map.
-    const auto snap = parse_snapshot(r->flatten().bytes());
+    const auto snap = parse_snapshot((*r)->flatten().bytes());
     check(snap.has_value() && snap->values.size() == 2 && snap->topology.size() == 3,
           "the scatter-gather rope flattens to the same composed tree");
 }

@@ -147,7 +147,7 @@ void test_store_backpressure() {
               "OOM write soft-fails as BACKPRESSURE (never abort)");
     }
     const auto r = g.read(v);
-    check(r.has_value() && std::to_integer<int>(r->only().bytes()[0]) == 0x11,
+    check(r.has_value() && std::to_integer<int>((*r)->only().bytes()[0]) == 0x11,
           "the prior LKV survives the rejected write (no corruption)");
     check(g.write(v, make_value({0x33})).has_value(), "the vertex recovers once memory returns");
 }
@@ -238,7 +238,7 @@ void test_stream_ring_shed() {
         const hook_guard_t frag(fail_big);  // the ring-append probe exceeds 512 B
         check(g.write(v, make_value({0x10})).has_value(), "the stream write succeeds");
         const auto r = g.read(v);
-        check(r.has_value() && std::to_integer<int>(r->only().bytes()[0]) == 0x10,
+        check(r.has_value() && std::to_integer<int>((*r)->only().bytes()[0]) == 0x10,
               "the LKV published even though the ring entry was shed");
         const auto hist = g.history(v);
         check(hist.has_value() && hist->empty(), "the shed entry never entered the ring");

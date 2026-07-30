@@ -14,6 +14,25 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: `graph_t::read` and `graph_t::await` return `result_t<value_ref_t>`** — a
+  REFERENCE to the vertex's published value — instead of `result_t<rope_t>`, a copy of it. The
+  value was already refcounted (`shared_ptr<const rope_t>` is the LKV slot's value type); the
+  read then copied the rope out of it, cloning one `segment_ptr_t` per link, and each clone is
+  a contended refcount RMW on the line every reader of that vertex shares. Measured on the real
+  path with both binaries built once and alternated over 6 rounds: **median 1.48x aggregate,
+  95/102 paired samples**, up to **3.07x** on distinct vertices at 8 readers, with p50 falling
+  90 -> 60 ns on the uncontended shapes. New type: `tr::graph::value_ref_t` (dereferences to the
+  rope; `value_ref_t::composed` wraps a freshly built one).
+
+  **Migration:** `r->only()` becomes `(*r)->only()`, and `*r` becomes `**r` where a `rope_t` is
+  wanted. The rule the surface now follows: **a read of a PUBLISHED value returns a reference to
+  it; a read that COMPOSES a new value returns the value** — so `read(handle, field)`,
+  `read_children_folded`, `read_children_materialized` and `read_subtree_folded` are unchanged
+  and still rope-valued. The composed BRANCH read measured **1.00x** (30 paired samples), so the
+  shape that cannot benefit does not pay for the change either.
+
 ### Added
 
 - **`tr::graph::kCacheLineBytes` — false-sharing padding becomes a per-target knob.** New

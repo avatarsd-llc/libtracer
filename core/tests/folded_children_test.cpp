@@ -94,9 +94,9 @@ void assert_parent(graph_t& g, std::string_view parent) {
     const auto production = g.read(path_t(field));
     check(production.has_value(), "production :children read succeeds");
     if (production) {
-        check(production->link_count() == folded->link_count(),
+        check((*production)->link_count() == folded->link_count(),
               "production :children read IS the folded rope (link count)");
-        check(same_bytes(production->flatten(), folded->flatten()),
+        check(same_bytes((*production)->flatten(), folded->flatten()),
               "production :children read matches the fold byte-for-byte");
     }
 
