@@ -28,6 +28,7 @@
 
 #include "libtracer/byteorder.hpp"
 #include "libtracer/tlv.hpp"
+#include "libtracer/tlv_emit.hpp"
 #include "libtracer/transport.hpp"
 
 namespace tr::net {
@@ -419,12 +420,12 @@ class child_registry_t {
             const std::size_t slash = name.find('/', at);
             const std::string_view seg = name.substr(
                 at, slash == std::string_view::npos ? std::string_view::npos : slash - at);
+            // Refuse before emitting: `emit_tlv` would auto-widen a body past 0xFFFF to a
+            // 4-byte length, and this mount run is read back by offset against a fixed 4-byte
+            // NAME header. With the check first the bytes match the hand-rolled push exactly
+            // (ADR-0048 §3 — one representation of the header layout).
             if (seg.size() > 0xFFFFu) return {};
-            out.push_back(static_cast<std::byte>(std::to_underlying(wire::type_t::NAME)));
-            out.push_back(std::byte{0});
-            out.push_back(static_cast<std::byte>(seg.size() & 0xFF));
-            out.push_back(static_cast<std::byte>((seg.size() >> 8) & 0xFF));
-            for (const char c : seg) out.push_back(static_cast<std::byte>(c));
+            wire::emit_name(out, seg);
             if (slash == std::string_view::npos) break;
             at = slash + 1;
         }

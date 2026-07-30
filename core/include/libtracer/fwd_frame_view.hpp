@@ -28,6 +28,7 @@
 
 #include "libtracer/grammar.hpp"
 #include "libtracer/op_resolve.hpp"
+#include "libtracer/tlv_emit.hpp"
 
 /**
  * @file
@@ -662,13 +663,12 @@ template <class Cursor>
         total += 4u + s.size();
     }
     out.reserve(total);
-    for (const std::string_view s : segs) {
-        out.push_back(static_cast<std::byte>(std::to_underlying(wire::type_t::NAME)));
-        out.push_back(std::byte{0});
-        out.push_back(static_cast<std::byte>(s.size() & 0xFF));
-        out.push_back(static_cast<std::byte>((s.size() >> 8) & 0xFF));
-        for (const char c : s) out.push_back(static_cast<std::byte>(c));
-    }
+    // The oversize check above is what makes this a straight substitution: `emit_tlv`
+    // auto-widens a body past 0xFFFF to a 4-byte length (setting `opt.ll`), whereas a mount
+    // run is peeked by OFFSET against a fixed 4-byte NAME header. Refusing first means
+    // `emit_name` never widens here, so the bytes are identical to the hand-rolled push it
+    // replaces (ADR-0048 §3 — one representation of the header layout).
+    for (const std::string_view s : segs) wire::emit_name(out, s);
     return out;
 }
 
