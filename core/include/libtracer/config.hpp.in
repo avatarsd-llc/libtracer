@@ -31,6 +31,7 @@ namespace tr::graph {
 struct allow_only_policy_t;  // security_acl.hpp — the ALLOW-only MCU profile (ADR-0020 subset)
 struct full_acl_policy_t;    // security_acl.hpp — ordered first-match-per-bit with DENY
 class sp_atomic_slot_t;      // lkv_slot.hpp — atomic<shared_ptr>; reclamation is the refcount
+class hazard_slot_t;         // lkv_slot.hpp — lock-free atomic<node*>; hazard-pointer reclamation
 
 /**
  * @brief The number of lock stripes shared by every vertex in the process (#361 §2).
@@ -66,5 +67,21 @@ using acl_policy_t = @LIBTRACER_ACL_POLICY@;
  * policy contract in `lkv_slot.hpp` — in particular `load()` returns an OWNING handle.
  */
 using lkv_slot_t = @LIBTRACER_LKV_SLOT@;
+
+/**
+ * @brief How many threads may hold a hazard announcement at once (ADR-0069 §3).
+ *
+ * Read this as "threads that concurrently touch a vertex's LKV" — readers announce, writers
+ * park displaced nodes, and both claim one index for the life of the thread. A per-target
+ * knob rather than a thread ceiling picked out of the air (RFC-0006); CMake:
+ * `-DLIBTRACER_HAZARD_READER_SLOTS=24`.
+ *
+ * Sizing: one index per such thread. The domain costs `(N + 1) * 128` bytes of `.bss`, and
+ * **nothing at all** unless `lkv_slot_t` is bound to `hazard_slot_t` — the default binding
+ * never references the registry, so it is never emitted. Undersizing is not a correctness
+ * problem: threads past the bound share one reserved index under a spin lock, so they
+ * serialize with each other and with nobody else.
+ */
+inline constexpr std::size_t kHazardReaderSlots = @LIBTRACER_HAZARD_READER_SLOTS@;
 
 }  // namespace tr::graph

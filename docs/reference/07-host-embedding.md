@@ -257,10 +257,16 @@ The contract:
   address, so growing the map never moves an existing vertex). Hold the handle;
   do not re-resolve per call.
 - **Thread-safety**: registration takes the graph's writer lock and is safe to
-  call concurrently with reads/writes/awaits on other handles. A read is
-  lock-free on its own LKV slot; a write publishes to the slot lock-free and
-  then takes a short per-vertex lock only for the write-sequence bump + waiter
-  notify (a 0.4.0 optimization will skip it when no waiter is parked).
+  call concurrently with reads/writes/awaits on other handles. Reads and writes
+  go through the vertex's LKV slot without taking the graph's lock, and a write
+  takes a short per-vertex lock only for the write-sequence bump + waiter notify
+  — and skips even that when no waiter is parked. How much serialization the slot
+  itself costs is a **build-time choice**
+  ([ADR-0069](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md)):
+  the default `std::atomic<std::shared_ptr<…>>` is lock-free by contract but
+  spin-locked in libstdc++, which is why a host that fans many readers onto one
+  vertex should bind the hazard-reclamation slot instead
+  (`-DLIBTRACER_LKV_SLOT=hazard_slot_t`, measured 4.2× at 24 readers).
 - **NOT ISR-safe**: registration acquires a mutex, so it must run from a task /
   thread context, never from an interrupt. Register on the discovery task, not in
   the bus ISR.

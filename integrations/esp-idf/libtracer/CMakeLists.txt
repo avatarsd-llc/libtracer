@@ -185,6 +185,7 @@ else()
 endif()
 set(LIBTRACER_ACL_POLICY allow_only_policy_t)  # the MCU profile — no full-ACL Kconfig yet
 set(LIBTRACER_LKV_SLOT sp_atomic_slot_t)  # write-dominated single core: keep the refcount slot
+set(LIBTRACER_HAZARD_READER_SLOTS 64)  # unused here: the refcount slot never builds the domain
 configure_file(
     "${LIBTRACER_ROOT}/core/include/libtracer/config.hpp.in"
     "${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config.hpp"

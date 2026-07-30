@@ -20,15 +20,26 @@ jobs:
     # subset (acl_full=OFF) and the full security_acl host policy with DENY
     # (acl_full=ON). LIBTRACER_ACL_FULL swaps acl_policy_t at compile time, so
     # the full config is a distinct compilation the default job never covers (#345).
+    #
+    # The third leg rebinds tr::graph::lkv_slot_t to the hazard-reclamation slot
+    # (ADR-0069 §1). lkv_slot_test covers both policies in every leg by naming them,
+    # but only a rebound build puts one under graph_t — which is what caught the
+    # deferred-reclamation-vs-injected-pmr-resource break in graph_pmr_test.
     strategy:
       matrix:
-        acl_full: [OFF, ON]
-    name: build-test (acl_full=${{ matrix.acl_full }})
+        include:
+          - acl_full: OFF
+            lkv_slot: sp_atomic_slot_t
+          - acl_full: ON
+            lkv_slot: sp_atomic_slot_t
+          - acl_full: OFF
+            lkv_slot: hazard_slot_t
+    name: build-test (acl_full=${{ matrix.acl_full }}, slot=${{ matrix.lkv_slot }})
     steps:
       - uses: actions/checkout@v4
       - name: Configure + build (C++23) + ctest
         run: |
-          cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLIBTRACER_ACL_FULL=${{ matrix.acl_full }}
+          cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLIBTRACER_ACL_FULL=${{ matrix.acl_full }} -DLIBTRACER_LKV_SLOT=${{ matrix.lkv_slot }}
           cmake --build core/build -j
           ctest --test-dir core/build --output-on-failure
 
@@ -56,13 +67,23 @@ jobs:
           cmake --build core/build-gcc15 -j
           ctest --test-dir core/build-gcc15 --output-on-failure
 
+  # Both sanitizer legs run against both LKV slot bindings (ADR-0069 §1) as parallel
+  # matrix jobs rather than extra steps, so the second binding costs no wall clock.
+  # hazard_slot_t is hand-rolled lock-free reclamation: ASan/LSan is what proves a
+  # displaced node is neither freed under a reader nor leaked, and TSan is what proves
+  # the announce/re-read protocol actually orders. A green single-threaded run does not.
   sanitizers:
     runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        lkv_slot: [sp_atomic_slot_t, hazard_slot_t]
+    name: sanitizers (slot=${{ matrix.lkv_slot }})
     steps:
       - uses: actions/checkout@v4
       - name: ASan + UBSan build + ctest
         run: |
           cmake -S core -B core/build-asan -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug \
+            -DLIBTRACER_LKV_SLOT=${{ matrix.lkv_slot }} \
             -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -g"
           cmake --build core/build-asan -j
           # ASLR can make ASan/TSan abort in this runner; pin it off.
@@ -70,11 +91,16 @@ jobs:
 
   tsan:
     runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        lkv_slot: [sp_atomic_slot_t, hazard_slot_t]
+    name: tsan (slot=${{ matrix.lkv_slot }})
     steps:
       - uses: actions/checkout@v4
       - name: ThreadSanitizer build + ctest (graph concurrency)
         run: |
           cmake -S core -B core/build-tsan -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug \
+            -DLIBTRACER_LKV_SLOT=${{ matrix.lkv_slot }} \
             -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"
           cmake --build core/build-tsan -j
           setarch "$(uname -m)" -R ctest --test-dir core/build-tsan --output-on-failure

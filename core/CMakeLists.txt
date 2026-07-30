@@ -210,6 +210,10 @@ endif()
 # named type must satisfy the contract in lkv_slot.hpp and be visible to vertex.hpp.
 set(LIBTRACER_LKV_SLOT sp_atomic_slot_t CACHE STRING
     "LKV slot policy type (tr::graph::<type> from lkv_slot.hpp)")
+# Hazard-domain size (ADR-0069 §3) — threads that may concurrently touch a vertex's LKV.
+# Costs (N+1)*128 bytes of .bss, and zero unless LIBTRACER_LKV_SLOT=hazard_slot_t.
+set(LIBTRACER_HAZARD_READER_SLOTS 64 CACHE STRING
+    "Hazard-pointer domain size (threads that may concurrently touch an LKV slot)")
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/include/libtracer/config.hpp.in
     ${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config.hpp
@@ -223,9 +227,11 @@ target_include_directories(libtracer BEFORE PUBLIC
 set(_lt_saved_stripes "${LIBTRACER_VERTEX_LOCK_STRIPES}")
 set(_lt_saved_policy "${LIBTRACER_ACL_POLICY}")
 set(_lt_saved_slot "${LIBTRACER_LKV_SLOT}")
+set(_lt_saved_hp "${LIBTRACER_HAZARD_READER_SLOTS}")
 set(LIBTRACER_VERTEX_LOCK_STRIPES 16)
 set(LIBTRACER_ACL_POLICY allow_only_policy_t)
 set(LIBTRACER_LKV_SLOT sp_atomic_slot_t)
+set(LIBTRACER_HAZARD_READER_SLOTS 64)
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/include/libtracer/config.hpp.in
     ${CMAKE_CURRENT_BINARY_DIR}/generated/drift-check/config.hpp
@@ -233,6 +239,7 @@ configure_file(
 set(LIBTRACER_VERTEX_LOCK_STRIPES "${_lt_saved_stripes}")
 set(LIBTRACER_ACL_POLICY "${_lt_saved_policy}")
 set(LIBTRACER_LKV_SLOT "${_lt_saved_slot}")
+set(LIBTRACER_HAZARD_READER_SLOTS "${_lt_saved_hp}")
 file(READ ${CMAKE_CURRENT_SOURCE_DIR}/include/libtracer/config.hpp _lt_cfg_default)
 file(READ ${CMAKE_CURRENT_BINARY_DIR}/generated/drift-check/config.hpp _lt_cfg_rendered)
 if(NOT _lt_cfg_default STREQUAL _lt_cfg_rendered)

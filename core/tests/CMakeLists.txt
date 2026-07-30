@@ -260,6 +260,16 @@ target_link_libraries(vertex_size_test PRIVATE libtracer)
 libtracer_test_warnings(vertex_size_test)
 add_test(NAME vertex_size COMMAND vertex_size_test)
 
+# ADR-0069 — both LKV slot policies, named explicitly rather than through the
+# `lkv_slot_t` alias, so ONE leg covers the binding this build did not choose. The
+# hazard slot is lock-free reclamation, so the legs that matter are the sanitizer
+# ones: contract, ownership across a replace, reclamation, concurrent read/write,
+# the parked-set bound ADR-0069 §2 chose hazard for, and the exhausted registry.
+add_executable(lkv_slot_test lkv_slot_test.cpp)
+target_link_libraries(lkv_slot_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(lkv_slot_test)
+add_test(NAME lkv_slot COMMAND lkv_slot_test)
+
 # #361 §5 / ADR-0039 §1 — graph_t's injected memory_resource: per-write LKV
 # allocations route through it (counting pass-through), released in full at
 # graph destruction; a default graph never touches a foreign resource.
