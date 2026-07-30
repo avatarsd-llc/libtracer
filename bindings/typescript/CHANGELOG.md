@@ -7,6 +7,34 @@ versioning/publish strategy.
 
 ## Unreleased
 
+### Changed
+
+- **BREAKING — `walkTopology` composes routes from mount paths, not bare connection names**
+  ([RFC-0014](../../docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
+  §1, [ADR-0061](../../docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md)).
+  A connection's routing key **is** its vertex path, `/net/<module>/<name>`. Every entry in
+  `TopologyNode.routes` therefore changes shape:
+
+  ```
+  before:  ['b']  →  ['b', 'c']
+  after:   ['net', 'ws-client', 'b']  →  ['net', 'ws-client', 'b', 'net', 'ws-client', 'c']
+  ```
+
+  Any consumer that reads `routes`, joins them into a path, uses a route as a map key, or
+  counts hops by array length sees different values. A hop is now three segments, not one.
+
+  **A connection NAME is no longer a unique key.** Link discovery is two levels — `/net`
+  enumerates the per-(transport, role) modules and each module enumerates its own connections —
+  so the same NAME may legitimately appear under two modules (`ws-client/b` and `tcp-server/b`
+  are different links). Code that indexed links by NAME alone must key on `(module, name)`.
+
+  **A module that cannot be read no longer fails the walk.** It appends to `warnings` and the
+  walk continues, so a partially reachable topology returns a partial graph instead of throwing.
+
+  This also closes the `/net` routing-prefix contradiction: the reference docs described the
+  prefixed form throughout, and the bare-NAME demux was the divergence — not the other way
+  round.
+
 ## 0.6.0 — 2026-07-23
 
 ## 0.5.0 — 2026-07-21
