@@ -36,6 +36,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   deprecation shims ([ADR-0068](../docs/adr/0068-build-configuration-is-plain-cpp-config-header.md)
   records the survey).
 
+### Changed
+
+- **`graph_t::read` no longer takes the graph map lock**
+  ([#652](https://github.com/avatarsd-llc/libtracer/issues/652)). The leaf/branch fork — "does
+  this vertex have a registered child?" — was computed by walking the child list under
+  `map_mutex_` shared, on **every** read. Being process-wide, that lock capped the whole
+  process at roughly 20 M reads/s no matter how many cores were reading or how disjoint the
+  vertices, and a blocking lock plateaus rather than collapsing, so a flat aggregate read like
+  "scales fine" until you notice flat across a 24× thread range means each thread is 24×
+  slower. The predicate is now a bit on the vertex, set when a child is filled and recomputed
+  when one is retired, both under the unique lock the graph already held. No API change.
+  Measured, twenty-four readers on distinct vertices: **19.7 → 163.5 M ops/s (8.28×)**, which
+  is 99% of what short-circuiting the call entirely achieves; 3.19× at eight readers.
+  Shared-vertex reads and every write shape land inside their run-to-run spread, as expected —
+  that lock was never what bound them. `sizeof(vertex_t)` is unchanged at 112 B: the bit
+  shares a byte with the existing `OWN_ACES` flag rather than taking a word of its own.
+
 ### Added
 
 - **`tr::graph::hazard_slot_t` — the host LKV slot, reclaimed with hazard pointers** (#604,

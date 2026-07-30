@@ -694,18 +694,11 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, std::string_view caller) cons
     // serves the composed branch read — the folded POINT tree of its registered
     // descendants' landed LKVs. AFTER the handler seam (a HANDLER target's on_read keeps
     // precedence); a leaf falls through to the LKV path byte-identically to before.
-    if (has_registered_child(v)) return read_subtree_folded(vh, caller);
+    if (v->has_registered_child()) return read_subtree_folded(vh, caller);
     const std::shared_ptr<const rope_t> sp = v->read_stored();  // lock-free
     if (!sp) return std::unexpected(status_t::NOT_FOUND);
     return *sp;  // copies the rope => clones each link's segment_ptr_t (refcount bump, no byte
                  // copy)
-}
-
-bool graph_t::has_registered_child(vertex_t* v) const {
-    bool has = false;
-    const std::shared_lock lock(map_mutex_);
-    v->for_each_child([&has](const vertex_t& c) { has = has || c.registered(); });
-    return has;
 }
 
 namespace {
