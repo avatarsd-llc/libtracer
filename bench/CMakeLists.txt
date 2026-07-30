@@ -104,6 +104,15 @@ add_executable(bench_lkv_slot bench_lkv_slot.cpp)
 target_link_libraries(bench_lkv_slot PRIVATE libtracer)
 target_compile_options(bench_lkv_slot PRIVATE -Wall -Wextra)
 
+# What one shared cache line costs, with libtracer entirely out of the picture: nine
+# primitives (private counter, read-only share, 1/2/4 contended RMWs, shared_mutex read
+# lock, mutex, atomic<shared_ptr> load, shared_ptr copy) swept across thread counts. The
+# instrument behind docs/design/concurrency/ — committed so its constants are reproducible
+# on the reader's own box, which is the point. Diagnostic, never a perf gate.
+add_executable(bench_contention bench_contention.cpp)
+target_link_libraries(bench_contention PRIVATE libtracer)
+target_compile_options(bench_contention PRIVATE -Wall -Wextra)
+
 # Zenoh side — built only when the prebuilt is vendored (run bench/fetch_zenoh.sh).
 set(ZC ${CMAKE_CURRENT_SOURCE_DIR}/vendor/zenoh-c)
 set(ZCPP ${CMAKE_CURRENT_SOURCE_DIR}/vendor/zenoh-cpp-1.9.0)
