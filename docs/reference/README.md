@@ -48,6 +48,7 @@ The reference is ordered with most-significant concerns first (graph mental mode
 | [12-deployment-profiles.md](12-deployment-profiles.md) | all | The deployment-rung spectrum (in-process → single-transport leaf → forwarder → RTSP → ROS 2 → flagship GPU); which optional modules each rung adds; conformance profile per rung. |
 | [13-network-formation.md](13-network-formation.md) | L4 | How a third party (typically a web UI) forms a graph across nodes: discover → delegate admin → create (controllers *and* transport connections, one in-band mechanism) → bind (consumer-initiated subscribe-writes) → depart, leaving devices wired. The two-ACL fan-in/fan-out guard; consumer-dials/producer-pushes; arbitrary folding. |
 | [14-can-transport.md](14-can-transport.md) | L0/L1/transport | Header-elided CAN: the structured 29-bit extended ID (`version\|node\|endpoint`, lower ID = higher bus priority); classic/CAN-FD framing modes; multi-frame reassembly via address-shift slicing / advertise+id-match (not ISO-TP); the in-band advertise frame and the dynamic, self-healing identity↔path map held inside `transport_can`. |
+| [15-concurrency-and-scaling.md](15-concurrency-and-scaling.md) | cross-cutting | What a conforming implementation must guarantee under concurrency; the four hardware regimes that decide whether adding threads helps (disjoint / one contended RMW / a blocking lock / a spinning lock) and how to recognise each in your own data; why an owning read is a write; which graph topologies scale and which cannot. Reference-implementation measurements live in `docs/design/concurrency/`, not here. |
 
 > **Note on file numbering vs significance ordering**: 00–07 follows the original layer-agnostic narrative (overview → wire → graph → addressing → flows → TLV registry → user data → host embedding). 08–09 are the substrate layers (added when the L(-1)/L(-2) design split out into its own pair of docs); they sit at the end because most readers reach them only after the protocol layers click. 10 is the cross-cutting catalog. Layer numbers (L0..L5) are bottom-up by architecture, not by file order.
 
@@ -113,6 +114,7 @@ The wire format does not version per-frame. v1 is committed once; future incompa
 - Not a feature comparison vs Zenoh / DDS / MQTT. See [../../README.md](../../README.md).
 - Not a security architecture. The wire format is security-agnostic; security wraps it at the transport layer per [10-module-catalog.md](10-module-catalog.md).
 - Not a roadmap. See the issue tracker.
+- **Not a performance specification.** [15-concurrency-and-scaling.md](15-concurrency-and-scaling.md) is the one section that quotes measurements. It does so as *evidence for a claim about hardware*, with the host named — never as a number an implementation must hit. Anything specific to the reference implementation's own locks and costs is deliberately outside this suite, in `docs/design/concurrency/`, so that every section here stays writable from the spec alone.
 
 ```{toctree}
 :caption: Overview & cross-cutting
@@ -122,6 +124,7 @@ The wire format does not version per-frame. v1 is committed once; future incompa
 Overview — the six-layer model <00-overview>
 Module catalog & composition <10-module-catalog>
 Deployment profiles <12-deployment-profiles>
+Concurrency & scaling <15-concurrency-and-scaling>
 ```
 
 ```{toctree}
