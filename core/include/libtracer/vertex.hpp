@@ -1019,7 +1019,11 @@ class vertex_t {
     std::shared_ptr<const rope_t> store(rope_t value, std::pmr::memory_resource* mr = nullptr) {
         std::shared_ptr<const rope_t> sp = try_make_lkv(std::move(value), mr);
         if (!sp) return nullptr;  // OOM: nothing published — the caller soft-fails (#477)
-        lkv_.store(sp);  // publish the new last-known-value (lock-free by CONTRACT; see lkv_)
+        // Publish the new last-known-value (lock-free by CONTRACT; see lkv_). A slot that
+        // reclaims lazily has to allocate to publish, so this can decline — and when it does,
+        // NOTHING was published: fail exactly as an LKV allocation failure does, rather than
+        // returning a handle to a value the vertex is not actually holding.
+        if (!lkv_.store(sp)) return nullptr;  // #477 soft-fail — the graph maps it to BACKPRESSURE
 
         // WAITERLESS PUBLISH: no ring to append and nobody in `await` ⇒ take no lock at all
         // (#555). #370 already skipped the condvar CALL on this path; the mutex itself was
@@ -1436,8 +1440,8 @@ class vertex_t {
         // cached resolution can never be used against a vertex already mid-revert.
         retire_gen_.fetch_add(1, std::memory_order_release);
         has_own_aces_.store(false, std::memory_order_release);
-        lkv_.store({}, std::memory_order_release);  // atomic<shared_ptr>: a mid-read reader
-                                                    // holds its own refcount — safe.
+        lkv_.clear(std::memory_order_release);  // a mid-read reader holds its own
+                                                // reference — safe under either policy.
         own_subs_.store(0, std::memory_order_relaxed);
         role_ = role_t::STORED_VALUE;                // the placeholder default (see graph.cpp)
         delivery_mode_ = delivery_mode_t::IF_NEWER;  // graph drops the unconditional_ entry

@@ -50,7 +50,7 @@
  *               shared payload — the same class of operation that makes `sp-atomic`'s read
  *               collapse. This arm exists because ADR-0069 §1 quoted `hazard`'s number as
  *               the host read cost, and `hazard`'s number was bought with a contract the
- *               library cannot honour (see @ref hazard_ref_slot_t).
+ *               library cannot honour (see @ref model_hazard_ref_t).
  *
  * Three shapes, because the arms do not rank the same way in all of them:
  *
@@ -185,7 +185,7 @@ struct alignas(64) retire_list_t {
  * Reclamation is the refcount, so there is no scheme to implement; the cost shows up as
  * the lock bit on both sides plus the RMW on the read side.
  */
-class sp_atomic_slot_t {
+class model_sp_atomic_t {
    public:
     void publish(std::size_t, std::uint64_t tag) {
         auto sp = std::make_shared<payload_t>();
@@ -334,7 +334,7 @@ class epoch_slot_t2 {
  * but the read side pays a `seq_cst` store plus a second load — which is precisely the class
  * of serializing operation ADR-0064's own finding says is what actually costs.
  */
-class hazard_slot_t {
+class model_hazard_t {
    public:
     void publish(std::size_t tid, std::uint64_t tag) {
         auto* p = new payload_t;
@@ -424,7 +424,7 @@ struct alignas(64) rc_slot_ptr_t {
     std::atomic<rc_payload_t*> v{nullptr};
 };
 
-/** @brief Per-thread retire list for @ref hazard_ref_slot_t, cache-line isolated. */
+/** @brief Per-thread retire list for @ref model_hazard_ref_t, cache-line isolated. */
 struct alignas(64) rc_retire_list_t {
     std::vector<rc_payload_t*> items;
     std::size_t peak = 0;
@@ -448,7 +448,7 @@ struct alignas(64) rc_retire_list_t {
  * read cost is the libstdc++ lock bit (which hazard deletes) and how much is the refcount
  * RMW (which it does not)" — and only this arm answers it.
  */
-class hazard_ref_slot_t {
+class model_hazard_ref_t {
    public:
     void publish(std::size_t tid, std::uint64_t tag) {
         auto* p = new rc_payload_t;
@@ -678,11 +678,11 @@ void run_slot(const char* arm, shape_t shape, std::size_t T) {
 
 /** @brief Every arm at one (shape, T), so the five are always read as a set. */
 void run_all_arms(shape_t shape, std::size_t T) {
-    run_slot<sp_atomic_slot_t>("sp-atomic", shape, T);
+    run_slot<model_sp_atomic_t>("sp-atomic", shape, T);
     run_slot<raw_lag_slot_t>("raw-lag", shape, T);
     run_slot<epoch_slot_t2>("epoch", shape, T);
-    run_slot<hazard_slot_t>("hazard", shape, T);
-    run_slot<hazard_ref_slot_t>("hazard-ref", shape, T);
+    run_slot<model_hazard_t>("hazard", shape, T);
+    run_slot<model_hazard_ref_t>("hazard-ref", shape, T);
 }
 
 // --- Part B: the real write path ----------------------------------------------------------
