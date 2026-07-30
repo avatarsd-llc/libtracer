@@ -1255,7 +1255,9 @@ namespace {
 void parse_subscriber_tlv(const tlv_t& sub, subscriber_t& s) {
     for (const tlv_t& child : sub.children) {
         if (child.type == type_t::PATH && !s.target_key) {
-            s.target_key = try_make_target_key(wire::path_key(child));
+            // An illegally-spelled target leaves target_key unset, which falls back to the
+            // full-route delivery path exactly as an older parser would (#681).
+            if (auto k = wire::path_key(child)) s.target_key = try_make_target_key(*std::move(k));
         } else if (child.type == type_t::SETTINGS) {
             const std::vector<tlv_t>& q = child.children;
             for (std::size_t i = 0; i + 1 < q.size(); ++i) {

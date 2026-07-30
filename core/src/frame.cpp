@@ -163,16 +163,25 @@ std::vector<std::byte> encode(const tlv_t& tlv) {
     return out;
 }
 
-std::vector<std::byte> path_key(const tlv_t& path) {
+std::optional<std::vector<std::byte>> path_key(const tlv_t& path) {
     // The canonical PATH-payload key = the concatenated NAME-child encodings. Emit each
     // NAME TLV in place (wire::emit_name appends `02 00 <len> <bytes>` directly) instead
     // of encode()-per-child into a temporary vector — one reserve + N appends, no per-
     // segment allocation. A PATH's children are plain NAMEs (opt 0, no trailer), so this
     // is byte-identical to encode(name); and it matches what path_t/register_vertex store
     // (which also use emit_name), so the vertex-map key round-trips exactly.
-    std::vector<std::byte> key;
+    //
+    // The child-type check is the point of the two-pass shape: the loop below used to trust
+    // "a PATH's children are plain NAMEs", which is true of paths THIS node emits and not of
+    // paths a PEER sends. Rejecting BEFORE the first append means a malformed route never
+    // produces a partial key either (#681). `path_lookup_key` in the arena tier has carried
+    // the same check since #436; this locus was missed.
     std::size_t total = 0;
-    for (const tlv_t& name : path.children) total += 4 + name.payload.size();
+    for (const tlv_t& name : path.children) {
+        if (name.type != type_t::NAME) return std::nullopt;
+        total += 4 + name.payload.size();
+    }
+    std::vector<std::byte> key;
     key.reserve(total);
     for (const tlv_t& name : path.children) wire::emit_name(key, name.payload);
     return key;

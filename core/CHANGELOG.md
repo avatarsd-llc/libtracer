@@ -16,6 +16,11 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`wire::path_key` returns `std::optional<std::vector<std::byte>>`** and rejects a `PATH` whose
+  children are not all `NAME`. Two callers updated. Returning `nullopt` rather than an empty vector
+  is deliberate: `graph_t::find_ptr` walks segments from the root, so an **empty key resolves the
+  ROOT vertex** — an empty-key rejection would have turned #681 into a misroute to `/`.
+
 - **`tr::net::kFwdMaxIov` is now a structural `9`, counted from `fwd_rebuild_t::gather`'s emit
   sequence, rather than `6 + 2 * kMountPeekMax` (= 14).** The `2 * kMountPeekMax` term described a
   header-and-bytes pair per prepended mount segment; **that emission has not happened since #508**,
@@ -26,6 +31,16 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   emitted region count is unchanged.
 
 ### Fixed
+
+- **An ADVERTISE route with a non-`NAME` child no longer binds a label (#681).** `wire::path_key`
+  re-emitted **every** child's payload through `wire::emit_name` with no type check, so a peer's
+  `PATH{VALUE "sensor"}` composed byte-identical key bytes to the legal `PATH{NAME "sensor"}` and
+  resolved `/sensor` on the wire-facing ADVERTISE path — while the arena tier
+  (`path_lookup_key`), given the same bytes, answered `INVALID_PATH`. The two tiers disagreed:
+  #436's shape, one layer up, and the fix landed only in the arena tier at the time. Gated by a
+  new `compact_cache_test` case that drives the malformed route through `on_frame`, i.e. the
+  production wiring — the RFC-0014 lesson was that two silent misroutes shipped because no test
+  used it.
 
 - **The contiguous forward arm now DROPS an over-wide gather instead of truncating it.** Its iov
   guard filled what fitted and sent the partial span list, putting a **truncated frame on the

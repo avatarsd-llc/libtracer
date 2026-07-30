@@ -96,10 +96,21 @@ struct tlv_t {
  *
  * The concatenated NAME-child encodings. One locus for what `graph_t`, `op_resolver_t`,
  * and `fwd_router_t` each previously rebuilt inline.
+ * Every child MUST be a `NAME` (`docs/reference/05-protocol-tlvs.md`: *"Each child MUST be a
+ * NAME TLV (`type=0x02`); other types are invalid in PATH context"*). A non-`NAME` child yields
+ * `std::nullopt` rather than a key: this used to re-emit ANY child's payload through
+ * `wire::emit_name`, so a peer's `PATH{VALUE "sensor"}` composed byte-identical key bytes to the
+ * legal `PATH{NAME "sensor"}` and resolved `/sensor` — #436's shape, one tier up, and #681.
+ *
+ * @note Returning `nullopt` rather than an empty vector is load-bearing. `graph_t::find_ptr`
+ *       walks segments from the root, so an EMPTY key exits its loop immediately and resolves
+ *       the ROOT vertex — an empty-key rejection would convert this bug into a misroute to `/`,
+ *       which is worse than the bug.
+ *
  * @param path A decoded PATH @ref tlv_t.
- * @return The canonical key bytes.
+ * @return The canonical key bytes, or `nullopt` if any child is not a `NAME`.
  */
-[[nodiscard]] std::vector<std::byte> path_key(const tlv_t& path);
+[[nodiscard]] std::optional<std::vector<std::byte>> path_key(const tlv_t& path);
 
 /**
  * @brief Decode exactly one TLV from a flat view (the L1↔L2 cast, zero-copy).

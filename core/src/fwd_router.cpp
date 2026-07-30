@@ -958,7 +958,11 @@ std::optional<graph::vertex_handle_t> fwd_router_t::resolve_route_vertex(
     // sources of truth for "which vertex does this label mean".
     const auto route = wire::decode(route_path);
     if (!route || route->type != type_t::PATH) return std::nullopt;
-    return graph_.find(wire::path_key(*route));
+    // A route with a non-NAME child is not an address (#681): binding a label to it would
+    // resolve a vertex the sender never named. No vertex, no binding, no delivery.
+    const auto key = wire::path_key(*route);
+    if (!key) return std::nullopt;
+    return graph_.find(*key);
 }
 
 bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
