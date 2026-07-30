@@ -742,8 +742,15 @@ void fwd_router_t::on_control_rope(std::string_view inbound_name, view::rope_t f
     // non-all-host rope is not one; drop it (as the old flatten→failed-decode path did).
     if (!frame.all_host()) return;
     const wire::grammar::rope_cursor cur{frame};
-    const auto head = peek_control(cur);
-    if (!head) return;
+    // `crc_check_t::VERIFY` is passed explicitly, for the same reason and with the same
+    // weight as the span arm above: a control frame MUTATES routing state, so it is applied
+    // only after the trailer proves the bytes intact (CONTEXT.md §Frame integrity,
+    // ADR-0041 §1). `peek_control` defaults to DEFER because every forward-hop caller wants
+    // that — a hop relays bytes it never interprets — so the default is right and the
+    // explicit argument is what carries the policy. Fragmenting a frame must not change
+    // whether it is applied.
+    const auto head = peek_control(cur, wire::grammar::crc_check_t::VERIFY);
+    if (!head) return;  // malformed / not a control frame / CRC failure ⇒ drop
     switch (head->type) {
         case type_t::HANDLE_NACK:
             // Label only — no materialize at all.

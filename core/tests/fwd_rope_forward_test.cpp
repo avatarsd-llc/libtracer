@@ -425,6 +425,55 @@ int main() {
         }
     }
 
+    // A corrupt-CRC COMPACT must be dropped on the ROPE control arm too. `compact_cache_test`
+    // pins this for the span arm and says in its own comment that "nothing else in the suite
+    // would notice if that argument were dropped" — which was exactly true of the rope arm,
+    // where VERIFY was never passed at all. Same frame, same corruption: fragmenting it must
+    // not change whether it is applied.
+    {
+        std::printf("corrupt-CRC COMPACT is dropped on the ROPE arm too (verify-before-apply):\n");
+        graph_t g;
+        const auto sensor = path_t::parse("/sensor");
+        tr::graph::vertex_handle_t v = g.register_vertex(*sensor, role_t::STORED_VALUE);
+        fwd_router_t router(g);
+        fake_rope_link_t in;
+        router.add_child("in", in);
+        const std::uint16_t kLabel = 0x0043u;
+        in.inject(rope_split(tr::net::encode_advertise(kLabel, b_path({"sensor"})),
+                             std::array<std::size_t, 0>{}));
+
+        // Re-emit a COMPACT carrying a whole-frame CRC-32C trailer.
+        const std::uint32_t kGood = 0x0BADF00Du;
+        const std::vector<std::byte> plain = tr::net::encode_compact(kLabel, b_value_u32(kGood));
+        tr::wire::tlv_t crc_tlv = *tr::wire::decode(plain);
+        crc_tlv.opt.cr = true;
+        const std::vector<std::byte> crc_frame = tr::wire::encode(crc_tlv);
+        check(crc_frame.size() == plain.size() + 4, "the CRC frame carries a 4-byte trailer");
+
+        // Split so the corrupted byte and the trailer land in DIFFERENT links — the shape a
+        // contiguous arm cannot produce, and the one a stitching cursor has to get right.
+        const std::array<std::size_t, 1> cuts{crc_frame.size() - 2};
+
+        // Intact-with-CRC must deliver, or the drop below proves nothing.
+        in.inject(rope_split(crc_frame, cuts));
+        const auto good = g.read(v);
+        check(good.has_value(), "an intact CRC-carrying COMPACT still delivers as a rope");
+
+        // Now corrupt a BODY byte under that trailer: grammar stays valid, CRC breaks.
+        std::vector<std::byte> corrupt = crc_frame;
+        corrupt[corrupt.size() - 5] ^= std::byte{0xFF};
+        in.inject(rope_split(corrupt, cuts));
+        const auto after = g.read(v);
+        check(after.has_value(), "the LKV still holds a value");
+        if (after) {
+            const auto inner = tr::wire::decode((*after)->only());
+            check(inner && inner->payload.size() == 4 &&
+                      tr::detail::load_le<std::uint32_t>(inner->payload) == kGood,
+                  "a corrupt-CRC multi-link COMPACT is DROPPED — the LKV holds the last good "
+                  "value");
+        }
+    }
+
     // #596: the rope forward hop's egress iov is the one allocation on this path whose
     // ELEMENT COUNT a peer chooses — one sub-span per link crossed, per region. It used to
     // be a `std::pmr::vector`, so exhaustion threw, and on -fno-exceptions that is abort():
