@@ -55,6 +55,14 @@ build/
 */build/
 build-*/
 */build-*/
+# An out-of-source CMake tree is identifiable by what CMake itself writes into it, whatever the
+# directory is called. The name patterns above only catch `build`-prefixed ones, so a throwaway
+# `cmake -S core -B b` lands ~800 generated files in `git add -A` -- which has happened twice.
+# Ignoring the marker files rather than the directory keeps this working for any name.
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
 compile_commands.json
 .cache/
 
