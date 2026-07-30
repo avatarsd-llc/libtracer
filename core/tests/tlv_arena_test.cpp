@@ -239,7 +239,9 @@ int main() {
         const auto tree = decode(bytes);
         check(arena && arena->root().canonical_path, "canonical PATH flagged");
         if (arena && tree) {
-            check(std::ranges::equal(arena->root().body, path_key(*tree)),
+            const auto key = path_key(*tree);
+            check(key.has_value(), "a canonical PATH yields a key (all children are NAMEs)");
+            check(key && std::ranges::equal(arena->root().body, *key),
                   "canonical PATH body == path_key bytes");
         }
     }

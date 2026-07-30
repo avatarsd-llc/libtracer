@@ -383,6 +383,50 @@ void test_iov_gather_drops_on_oom() {
 
 }  // namespace
 
+/**
+ * @brief An ADVERTISE whose route is an ILLEGALLY-SPELLED PATH must bind nothing (#681).
+ *
+ * `wire::path_key` re-emitted EVERY child's payload through `wire::emit_name` with no type
+ * check, so a peer's `PATH{VALUE "sink"}` composed the same key bytes as the legal
+ * `PATH{NAME "sink"}` and bound a label to `/sink`. The arena tier, given the identical bytes,
+ * answers `INVALID_PATH` (`op_resolve_walk.hpp`'s `path_lookup_key` rejects a non-NAME child) —
+ * so the two tiers disagreed, which is the #436 shape one layer up.
+ *
+ * Driven through `on_frame` rather than by calling `path_key` directly: the defect lives in what
+ * `resolve_route_vertex` accepts off the wire, and the RFC-0014 lesson here was that two silent
+ * misroutes shipped because no test used the production wiring.
+ */
+void test_advertise_with_non_name_child_binds_nothing() {
+    std::printf("an illegally-spelled ADVERTISE route binds no label (#681)\n");
+    graph_t g;
+    (void)g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
+    fwd_router_t router{g};
+    rec_link_t up;
+    router.add_child("net/ws-client/up", up);
+
+    // PATH{ VALUE "sink" } — same payload bytes as the legal PATH{ NAME "sink" }, illegal child
+    // type. `docs/reference/05-protocol-tlvs.md` states the rule: "Each child MUST be a NAME TLV
+    // (type=0x02); other types are invalid in PATH context."
+    std::vector<std::byte> body;
+    const std::string_view seg = "sink";
+    tr::wire::emit_tlv(
+        body, type_t::VALUE, opt_t{},
+        std::span<const std::byte>(reinterpret_cast<const std::byte*>(seg.data()), seg.size()));
+    std::vector<std::byte> bad_route;
+    tr::wire::emit_tlv(bad_route, type_t::PATH, opt_t{.pl = true}, body);
+
+    router.on_frame("net/ws-client/up", tr::net::encode_advertise(21, bad_route));
+    router.on_frame("net/ws-client/up", tr::net::encode_compact(21, value_tlv(7)));
+
+    check(stored_byte(g, "/sink") != 7,
+          "a PATH{VALUE} route does not resolve /sink and delivers nothing");
+
+    // The legal spelling still works, so the fix rejects the malformed child rather than the op.
+    router.on_frame("net/ws-client/up", tr::net::encode_advertise(22, path_tlv({"sink"})));
+    router.on_frame("net/ws-client/up", tr::net::encode_compact(22, value_tlv(5)));
+    check(stored_byte(g, "/sink") == 5, "the legal PATH{NAME} spelling still binds and delivers");
+}
+
 int main() {
     test_warm_terminus_delivers();
     test_retire_invalidates_cached_handle();
@@ -392,6 +436,7 @@ int main() {
     test_label_tlv_matches_the_generic_emitter();
     test_gathered_egress_matches_the_built_frame();
     test_iov_gather_drops_on_oom();
+    test_advertise_with_non_name_child_binds_nothing();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
