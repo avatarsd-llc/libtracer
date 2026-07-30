@@ -16,6 +16,13 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Tracking issue** | [#125](https://github.com/avatarsd-llc/libtracer/issues/125) |
 | **Target spec version** | v1 (draft refinement — no released v1 yet, so no v2 needed) |
 
+> **Erratum (2026-07-30), [#583](https://github.com/avatarsd-llc/libtracer/issues/583):** §A's facet list includes `:stats` and
+> `:status`. **Neither was ever implemented**, in this RFC's lifetime or before it; a field read
+> or write to either answers `ERROR{tr::schema::not_found}`. Neither name is in the field
+> namespace, which is `{subscribers, acl, children, settings, schema, identity}`. §A's bullet is left as written rather than edited, because deleting the
+> two spellings from an accepted record would decide [#584](https://github.com/avatarsd-llc/libtracer/issues/584) — which asks
+> whether they should exist — by silently editing the decision it is meant to inform.
+
 > **Amended by [RFC-0017](0017-element-addressing-value-plane-index.md) (2026-07-28):** §C's `FIELD`
 > grammar admits **K = 0** — a selector carrying only `index` / `index_mode` and no leading `NAME`
 > addresses the **vertex's own value**, so `[n]` reaches the value plane and not only a `:field`.
@@ -50,7 +57,7 @@ The whole point of the reference suite is cross-implementation interop. A second
 
 This is the keystone wire gap for everything "remote."
 
-## Proposed change — **Proposed (open for comment)**
+## Proposed change
 
 ### A. Path-as-route (normative model)
 

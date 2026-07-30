@@ -417,9 +417,18 @@ Every flow that can fail returns a STATUS TLV. The body of STATUS contains zero 
 A subscriber's view of errors is via:
 
 - **Synchronous return** from `read` / `write` / `await`.
-- **STATUS write** to `/path:status` for asynchronous events (deadline, liveness, transport-down). Subscribers can subscribe to `/path:status` if they want async error notification; the field is in every vertex's schema.
+- **STATUS write** to `/path:status` for asynchronous events (deadline, liveness, transport-down). Subscribers can subscribe to `/path:status` if they want async error notification.
 
-The `:status` subscription channel is a normal subscription using the normal subscribe-via-field-write flow — no special API.
+:::{warning}
+`:status` is **not a valid selector**, and "the field is in every vertex's schema" — which this
+paragraph used to claim — is directly refuted by the schema a vertex actually emits. A field read
+or write to `:status` answers `ERROR{tr::schema::not_found}`. No replacement asynchronous-status
+spelling is ratified; the surface is under review at [#584](https://github.com/avatarsd-llc/libtracer/issues/584), so treat the two
+bullets above and the paragraph below as descriptive of intent, not as a wire recipe. The
+*synchronous* return of STATUS from `read` / `write` / `await` is real and unaffected.
+:::
+
+The `:status` subscription channel, once it exists, is intended to be a normal subscription using the normal subscribe-via-field-write flow — no special API.
 
 ---
 
