@@ -62,12 +62,18 @@
  * write shapes) landed inside the 1.4-2.2x run-to-run spread, so the projected single-core
  * write penalty is not observable through `graph_t::write`.
  *
- * The same run's controls say where the rest of it is. At twenty-four readers on **distinct**
- * vertices the read still runs at 91% of its own single-threaded rate, against 39% on one
- * shared vertex (8% before) — so nothing process-wide serializes, and the residual is the one
- * line every reader modifies: the rope's control block. That is the promotion an owning read
- * cannot skip, which makes the next lever an API question rather than a reclamation one — see
- * ADR-0069 §6 on the three `read_stored()` call sites that never keep the handle.
+ * Two limits sit above this slot, and only the second is the slot's business (ADR-0069 §6,
+ * second erratum — measured by ablation, after two wrong inferences):
+ *
+ *   - **Every `graph_t::read` takes `map_mutex_` shared** before it reaches the slot, to decide
+ *     the leaf/branch fork (`graph.cpp:697` -> `:706`). That caps all reads at roughly 20 M/s
+ *     per process whatever the topology; short-circuiting it takes the distinct-vertex read
+ *     from 19.7 to 165.3 M/s at twenty-four readers. No slot policy can move it.
+ *   - **On one shared vertex that lock is not what binds** — removing it changes nothing
+ *     (1.74 -> 1.64 M/s). There the limit is the rope's control-block increment, the promotion
+ *     an owning read cannot skip, which makes the next lever for THAT shape an API question
+ *     rather than a reclamation one: the three `read_stored()` call sites that never keep the
+ *     handle could take a scoped read instead.
  */
 #pragma once
 
