@@ -464,9 +464,16 @@ class graph_t {
      * Per node: one atomic `read_stored()` load, LKV links refcount-**cloned** (no byte
      * copy), the child's NAME record borrowed **in place** over the pinned vertex, and an
      * owned per-level POINT header (`opt.ll` auto-widened at the same 0xFFFF boundary as
-     * `wire::emit_tlv`). The walk is an ITERATIVE stack machine (graph depth is
-     * `kMaxSegments`-bounded structurally — no synthetic cap); allocation failure is
-     * `BACKPRESSURE`.
+     * `wire::emit_tlv`). The walk is an ITERATIVE stack machine over a HEAP-BACKED stack, so
+     * it needs no synthetic cap: the bound is the allocator, and exhaustion is `BACKPRESSURE`.
+     *
+     * It does NOT rely on `kMaxSegments`, and this comment used to claim it did ("graph depth
+     * is `kMaxSegments`-bounded structurally"). That claim is false: `kMaxSegments` is enforced
+     * only in `path_t::parse` (`core/src/path.cpp:110`), the LOCAL string→bytes builder.
+     * `ensure_vertex` takes raw key bytes and counts nothing, so a wire-driven write-create
+     * already registers a vertex at any depth. The iterative walk is safe because it is
+     * iterative and resource-bounded — which is the real reason, and the only one that survives
+     * `kMaxSegments` being lifted.
      *
      * Resolver contract: with a subject resolver installed, `acl_allows` — and therefore
      * the resolver callback — runs O(nodes) times per composed read **under the shared
