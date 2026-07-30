@@ -56,6 +56,12 @@ add_executable(bench_forward_demux bench_forward_demux.cpp)
 target_link_libraries(bench_forward_demux PRIVATE libtracer)
 target_compile_options(bench_forward_demux PRIVATE -Wall -Wextra)
 
+# The ROPE forward arm (#668). bench_forward_demux drives the SPAN arm; nothing reached
+# on_frame_rope, so changes there could only be argued structurally.
+add_executable(bench_forward_rope bench_forward_rope.cpp)
+target_link_libraries(bench_forward_rope PRIVATE libtracer)
+target_compile_options(bench_forward_rope PRIVATE -Wall -Wextra)
+
 # Terminus tier comparison (ADR-0053): the eager arena reader vs the lazy view reader on
 # the SAME frame. Replaces argument with measurement on whether the single-link
 # short-circuit in on_frame_rope_impl is a fast path or a missed one.
