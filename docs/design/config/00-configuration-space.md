@@ -31,6 +31,26 @@ All three are **plain C++ or build-system state — never a preprocessor feature
 (ADR-0068). A knob is a constant or an alias, so a wrong value is a compile error in the
 build that set it rather than a silent behavioural fork between translation units.
 
+The sizes and policies are members of **one named type**, `default_config_t`, bound once by
+`using config_t = …` (ADR-0070). An application declares its own by inheriting and overriding
+what differs:
+
+```cpp
+struct my_node_config_t : tr::graph::default_config_t {
+    static constexpr std::size_t kCacheLineBytes = 0;   // single-core: no false sharing
+};
+using config_t = my_node_config_t;
+```
+
+Inheriting means a knob added later does not break the preset — it inherits the new default
+rather than failing to compile.
+
+It is **bound once, not threaded as a template parameter**, and ADR-0070 records why with
+measurements: a parameter produces byte-identical machine code, so it buys no latency; its one
+unique capability — two configurations in one binary — would fork the process-global stripe and
+hazard tables and so cost the RAM the configuration exists to save; and an app-declared traits
+type cannot reach the library's out-of-line translation units anyway.
+
 ## The delivery mechanism
 
 One header, `<libtracer/config.hpp>`, carries every size and policy. Two renderings of a
@@ -84,6 +104,7 @@ the build, not by the modules: it compiles when *any* of them is on.
 | `kVertexLockStripes` | count | 16 | `-DLIBTRACER_VERTEX_LOCK_STRIPES`; ESP-IDF menuconfig |
 | `kCacheLineBytes` | padding width | 64 | `-DLIBTRACER_CACHE_LINE_BYTES`; ESP-IDF derives it |
 | `kHazardReaderSlots` | count | 64 | `-DLIBTRACER_HAZARD_READER_SLOTS` |
+| `kMaxVertexBytes64` / `kMaxVertexBytes32` | RAM ceiling | 120 / 80 | the preset — deliberately not a CMake variable |
 | `acl_policy_t` | policy type | `allow_only_policy_t` | `-DLIBTRACER_ACL_FULL=ON` |
 | `lkv_slot_t` | policy type | `sp_atomic_slot_t` | `-DLIBTRACER_LKV_SLOT=<type>` |
 
@@ -136,9 +157,12 @@ Four differences that surprise people, each a property of the target rather than
   function whose static is never named under the default slot, so the default binding emits
   no registry at all. Binding `hazard_slot_t` also pulls in roughly 2 KB of libstdc++
   `atomic::wait` back-end `.bss` beyond the registry itself.
-- **`sizeof(vertex_t)` is gated per pointer width** (`core/tests/vertex_size_test.cpp`), and
-  the stripe's footprint is gated too — a member that pushes a padded stripe one byte past
-  the line would silently double the table.
+- **`sizeof(vertex_t)` is gated in the header**, not in a test — so every build on every target
+  checks its own binding, for free. The ceilings are `config_t` members. This matters more than
+  it sounds: while the gate lived in a test it covered exactly one configuration and **never the
+  32-bit arm at all**, because no CI leg cross-compiled that test — and rv32 sits *exactly* on
+  its 80 B ceiling with zero headroom. The stripe's footprint is gated too: a member that pushes
+  a padded stripe one byte past the line would silently double the table.
 - **A single-core target's constraint is RAM; a many-core host's is the read path.** The two
   policy-type knobs exist because of that split: see
   [15-concurrency-and-scaling.md](../../reference/15-concurrency-and-scaling.md) for which shapes scale and

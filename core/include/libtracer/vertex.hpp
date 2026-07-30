@@ -2231,4 +2231,26 @@ class vertex_t {
     std::unique_ptr<children_t> children_;
 };
 
+/**
+ * @brief The RAM-diet gate (#361 §8), enforced beside the type it constrains.
+ *
+ * This is the whole of the diet's enforcement, and it is deliberately HERE rather than in a
+ * test. A `static_assert` in the header is evaluated by every translation unit that includes it
+ * — so every target, every configuration, every consumer's build checks its OWN binding, for
+ * free, with no CI job to remember to add. It previously lived in `vertex_size_test.cpp`, where
+ * it gated exactly one configuration: the 32-bit arm was never evaluated at all, because no CI
+ * leg cross-compiled that test, while the ESP-IDF legs compiled `vertex_t` itself on every PR.
+ *
+ * The ceilings are members of @ref config_t, so a target that must carry a bigger vertex says so
+ * in its configuration, where the change is visible in a diff, rather than by editing a test
+ * until it passes.
+ */
+static_assert(sizeof(void*) != 8 || sizeof(vertex_t) <= config_t::kMaxVertexBytes64,
+              "vertex_t grew past the 64-bit RAM-diet gate (#361) — move the new member behind "
+              "vertex_ext_t, don't inline it");
+static_assert(sizeof(void*) != 4 || sizeof(vertex_t) <= config_t::kMaxVertexBytes32,
+              "vertex_t grew past the 32-bit RAM-diet gate (#361) — move the new member behind "
+              "vertex_ext_t, don't inline it. This ceiling has NO headroom: rv32 sits exactly on "
+              "it, so any added 32-bit member fails here by design");
+
 }  // namespace tr::graph

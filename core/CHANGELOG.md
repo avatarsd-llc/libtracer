@@ -16,6 +16,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **Configuration is one named type: `tr::graph::default_config_t`, bound by `using config_t`**
+  ([ADR-0070](../docs/adr/0070-configuration-is-a-named-traits-type.md)). Every compile-time knob
+  is a member; the loose names (`kVertexLockStripes`, `lkv_slot_t`, …) remain and are **derived**
+  from it, so no call site moved. An application declares its own by inheriting
+  `default_config_t` and overriding what differs. **Verified byte-identical codegen** against the
+  previous shape — same disassembly and same section sizes for `core/src/graph.cpp` on host
+  x86-64 `-O2` and rv32 `-Os`.
+
+  It is bound **once**, not threaded as a template parameter. ADR-0070 supersedes ADR-0068 §2's
+  `basic_graph_t<config_t>` plan on measurement: a parameter is latency-neutral by construction,
+  its one unique capability (two configs per binary) forks the process-global stripe and hazard
+  tables and so costs RAM, and an app-declared traits type cannot reach the library's
+  out-of-line TUs.
+
+- **The `sizeof(vertex_t)` RAM-diet gate moved from `vertex_size_test.cpp` into `vertex.hpp`**,
+  keyed on `config_t::kMaxVertexBytes{64,32}`. A `static_assert` in the header is evaluated by
+  every TU that includes it, so **every target and every configuration now checks its own
+  binding** — including the 32-bit arm, which was never checked before (no CI leg cross-compiled
+  that test, while the ESP-IDF legs compile `vertex_t` on every PR). Note that the 32-bit ceiling
+  has **zero headroom**: rv32 sits exactly on 80 B, so the next inlined 32-bit member is a build
+  failure by design.
+
+### Changed
+
 - **BREAKING: `graph_t::read` and `graph_t::await` return `result_t<value_ref_t>`** — a
   REFERENCE to the vertex's published value — instead of `result_t<rope_t>`, a copy of it. The
   value was already refcounted (`shared_ptr<const rope_t>` is the LKV slot's value type); the

@@ -54,6 +54,20 @@ CMake option names (`LIBTRACER_ACL_FULL`, Kconfig knobs) are unchanged — CI ma
 
 ### 2. Policy selection is an alias in that header, not a template on the public type
 
+> **⚠ SUPERSEDED by [ADR-0070](0070-configuration-is-a-named-traits-type.md).** The
+> `basic_graph_t<slot_t>` / explicit-instantiation plan below was **withdrawn on measurement**
+> and never built. Threading configuration through a template parameter produces byte-identical
+> machine code (eight knob combinations, five optimization levels, two targets), so it buys no
+> latency; its one unique capability — two configurations in one binary — forks the
+> process-global stripe and hazard tables and so *costs* RAM; and an app-declared traits type
+> cannot reach this library's out-of-line translation units at all. The `~3 s per extra
+> instantiation` figure below was also measured optimistically (6.60 s locally for `graph.cpp`
+> alone, before counting the other four TUs). **What survives from this section is its first
+> clause and its last: the public spelling stays untemplated, and a policy is bound by an alias
+> in this header.** ADR-0070 keeps that and adds the one thing this section was reaching for —
+> a *named* configuration type — without the parameter.
+
+
 Where §1 of ADR-0047 grants a seam compile-time dispatch and the policy is **stateful** (it lives in a type's layout — the LKV slot, the segment refcount), the public spelling stays untemplated: the implementation type takes the policy parameter (`basic_graph_t<slot_t>`), and `config.hpp` binds the public name (`using graph_t = basic_graph_t<>;` with the default drawn from the alias). Explicit instantiation in the `.cpp` keeps `graph.cpp` a translation unit; CMake emits which instantiations a target opts into (host: both, so one test binary covers both; MCU: one, so no dead code reaches flash). Measured before adopting: the public header costs 1.05 s/TU and `graph.cpp` 3.68 s — a second instantiation adds ~3 s **once per build**, which clears the bar. Stateless policies (ACL) need no template at all — the alias alone binds them, exactly as today.
 
 ### 3. Per-frame callbacks are function-pointer + context
