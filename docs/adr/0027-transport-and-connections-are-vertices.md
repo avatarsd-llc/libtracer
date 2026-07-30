@@ -2,6 +2,17 @@
 
 Status: accepted. **Refined by [ADR-0059](0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md)** on one narrow point: the **`:children[]` spelling** of the §Decision worked example (`write /B/net/quic:children[] += SPEC{type=client, …}`, and "*its catalog is `{client, listener}`*") is superseded — creation is a write to a **creator endpoint vertex** (`write /net/export SPEC{type,name,config}`), and the catalog is that endpoint's own `:schema`. **This ADR's substance is untouched and is what ADR-0059 leans on**: transports and connections are `/` vertices, and distinct identity ⇒ `/`. Only the *spelling* of the creation write changes; what gets created, and that it is a vertex, does not.
 
+> **Erratum (2026-07-30), [#583](https://github.com/avatarsd-llc/libtracer/issues/583):** the §Decision worked example shows
+> `(read):stats   await (link up / down)` on a connection vertex. **`:stats` is not implemented
+> and never was** — it is not in the field namespace `{subscribers, acl, children, settings,
+> schema, identity}`; a field read or write to it answers `ERROR{tr::schema::not_found}`, and
+> `await` additionally ignores a `:field` selector entirely ([#585](https://github.com/avatarsd-llc/libtracer/issues/585)). The
+> example is annotated rather than rewritten: whether per-transport `:stats` should exist is
+> [#584](https://github.com/avatarsd-llc/libtracer/issues/584), and this ADR's substance — distinct identity ⇒ `/` vertex — does
+> not depend on the spelling. Prose elsewhere in this ADR that uses the *word* "stats" to mean
+> "a subsystem with its own lifecycle and counters" is the correct statement of that rule and is
+> untouched.
+
 [ADR-0021](0021-colon-field-plane-is-the-vertex-ioctl.md) established the `:` field plane as a vertex's `ioctl` and **rejected** turning a vertex's *control facets* (`/v/acl`, `/v/subscribers`) into `/` sub-vertices, because that dissolves one-identity atomicity. [ADR-0017](0017-in-band-vertex-creation-controller-orchestration.md) made vertex creation an in-band, ACL-gated `:children[]` write. The open question for third-party network formation: **how does an orchestrator (typically a web UI) bring up a transport link — e.g. a QUIC connection from B to A?** A first sketch squeezed it into a `transport_quic:peers[]` field. This ADR rejects that and places the transport in the path tree.
 
 ## Decision

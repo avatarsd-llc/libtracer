@@ -95,6 +95,14 @@ model ([RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md), [ADR-0027](
 - Each bus is its own vertex with independent `:settings` (bitrate), `:stats`
   (bus-off / error counters), and `:acl` — two controllers are two hardware
   identities, exactly the "distinct lifecycle ⇒ `/` vertex" rule of ADR-0027.
+
+:::{warning}
+`:stats` is **intended, not implemented** — including in the tree diagram above. A field read or
+write to `:stats` answers `ERROR{tr::schema::not_found}`; the field **namespace** the dispatcher recognises is `{subscribers, acl, children, settings, schema, identity}`. A recognised name can still answer `NOT_FOUND` when the facet is empty, or `SCHEMA_NOT_FOUND` for a spelling it does not accept (bare `:subscribers` requires `[N]`) or for a facet deliberately absent (`:identity` with no keypair, RFC-0011 §C.3) — so the set is a namespace, not a list of things that read. Whether per-transport `:stats` should
+exist at all is open at [#584](https://github.com/avatarsd-llc/libtracer/issues/584); the diagram is kept because the design
+intent — per-bus counters on a per-bus vertex — is what that decision is about. `:settings` and
+`:acl` in the same diagram are real.
+:::
 - The `identity↔path` map keys on **(which controller the frame arrived on) + (`node`
   | `endpoint`)** → `/net/can/<bus>/…`, so two buses carrying the **same `node` id
   never collide** — the bus segment disambiguates them while the ID stays compact.

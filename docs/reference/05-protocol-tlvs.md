@@ -580,7 +580,15 @@ STATUS (PL=1) {
 ### Where it appears
 
 - Synchronous return from `read` / `write` / `await` on failure.
-- Asynchronous signal at `<vertex>:status` when subscribers should be notified of liveness/deadline/transport events.
+> **Erratum (2026-07-30).** This section used to list "asynchronous signal at `<vertex>:status`
+> when subscribers should be notified of liveness/deadline/transport events" as a place STATUS
+> appears. **`:status` is not a valid selector.** No implementation has ever exposed it: a field
+> read or write to `:status` answers `ERROR{tr::schema::not_found}` (`0x0031`), the declared
+> reply for a field a vertex does not expose. The text was aspirational from its first commit,
+> not broken by a later change. `:status` is not in the field namespace at all: the field **namespace** the dispatcher recognises is `{subscribers, acl, children, settings, schema, identity}`. A recognised name can still answer `NOT_FOUND` when the facet is empty, or `SCHEMA_NOT_FOUND` for a spelling it does not accept (bare `:subscribers` requires `[N]`) or for a facet deliberately absent (`:identity` with no keypair, RFC-0011 §C.3) — so the set is a namespace, not a list of things that read. The
+> synchronous return and the unsubscribe sentinel below are both real. Whether an asynchronous
+> status surface **should** exist is open at [#584](https://github.com/avatarsd-llc/libtracer/issues/584).
+
 - Sentinel TLV used to clear subscriber slots (write empty STATUS to `:subscribers[N]`).
 
 ### Hex example

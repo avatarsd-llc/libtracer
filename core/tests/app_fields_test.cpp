@@ -208,6 +208,65 @@ void test_undeclared_enotty() {
 }
 
 // ---------------------------------------------------------------------------
+/**
+ * @brief The `:`-field set is CLOSED, and these are its members (#583).
+ *
+ * Three documents — one of them normative — taught `<vertex>:status` and per-transport
+ * `:stats` as real facets for three months. Neither was ever implemented. Nothing caught it
+ * because nothing asserted the field set by NAME: the cases above test one *generic* unknown
+ * field (`:frobnicate`), which passes whether the set has six members or eight.
+ *
+ * So this pins both directions of the closed set positively, and pins the two phantoms
+ * negatively. If `:status` or `:stats` ever land, this test is the thing that has to change,
+ * which is exactly the notice the docs did not get.
+ */
+void test_field_set_is_closed() {
+    std::printf("the `:`-field set is closed (#583):\n");
+    graph_t g;
+    const auto v = g.register_vertex(path_t("/dev/closed"), role_t::STORED_VALUE);
+    const std::vector<std::byte> val = {std::byte{0x01}};
+    (void)g.write(v, make_value(val));
+
+    // The phantoms. Both spellings appeared in reference/05 (normative), reference/04,
+    // reference/14, RFC-0004 §A and ADR-0027's worked example.
+    for (const char* phantom : {"/dev/closed:status", "/dev/closed:stats"}) {
+        check(fails_with(g.read(path_t(phantom)), status_t::SCHEMA_NOT_FOUND),
+              std::string("read ") + phantom + " -> SCHEMA_NOT_FOUND (never implemented)");
+        check(fails_with(g.write(path_t(phantom), make_value(val)), status_t::SCHEMA_NOT_FOUND),
+              std::string("write ") + phantom + " -> SCHEMA_NOT_FOUND");
+    }
+
+    // The positive namespace. Pinned per SPELLING, because "is `x` in the field set" is not a
+    // yes/no question: a recognised name still answers SCHEMA_NOT_FOUND for a spelling it does
+    // not accept, and NOT_FOUND when the facet is simply empty. Writing this test is what
+    // caught the first draft of the #583 erratum claiming a flat list of six readable names.
+    check(g.read(path_t("/dev/closed:children")).has_value(), ":children reads");
+    check(g.read(path_t("/dev/closed:schema")).has_value(), ":schema reads");
+    check(g.read(path_t("/dev/closed:settings")).has_value(), ":settings reads");
+    // Recognised, and NOT_FOUND rather than SCHEMA_NOT_FOUND is the proof of that: this vertex
+    // has no ACEs and no subscriber in slot 0, but the dispatcher knows both names.
+    check(fails_with(g.read(path_t("/dev/closed:acl")), status_t::NOT_FOUND),
+          ":acl is recognised and empty -> NOT_FOUND, not SCHEMA_NOT_FOUND");
+    check(fails_with(g.read(path_t("/dev/closed:subscribers[0]")), status_t::NOT_FOUND),
+          ":subscribers[0] is recognised and empty -> NOT_FOUND");
+    // BARE `:subscribers` is not a spelling the read side accepts — an index is required.
+    check(fails_with(g.read(path_t("/dev/closed:subscribers")), status_t::SCHEMA_NOT_FOUND),
+          "bare :subscribers is NOT readable — `[N]` is required");
+    // `:identity` is in the namespace but ABSENT until a keypair is installed, deliberately:
+    // RFC-0011 C.3 rejected an empty record because it would fabricate an "identity exists but
+    // is vacant" state. So it answers SCHEMA_NOT_FOUND with no keypair and reads once there is
+    // one — which is the only way to tell it apart from a phantom.
+    check(fails_with(g.read(path_t("/dev/closed:identity")), status_t::SCHEMA_NOT_FOUND),
+          ":identity with no keypair -> SCHEMA_NOT_FOUND (absent, not empty)");
+    const std::vector<std::byte> key(32, std::byte{0xA5});
+    check(g.set_identity(1, key).has_value(), "install a node identity");
+    check(g.read(path_t("/dev/closed:identity")).has_value(),
+          ":identity reads once installed — so it IS in the namespace, unlike :status/:stats");
+    check(fails_with(g.read(path_t("/dev/closed:status")), status_t::SCHEMA_NOT_FOUND),
+          ":status is still absent — it is not in the namespace at all");
+}
+
+// ---------------------------------------------------------------------------
 // RFC-0010 sketch 3 — access gating: ro / rw / wo, remote vs owner, gate order.
 void test_gating() {
     std::printf("access gating (RFC-0010 sketch 3):\n");
@@ -572,6 +631,7 @@ void test_borrowed_static_install() {
 int main() {
     test_declare_read_write();
     test_undeclared_enotty();
+    test_field_set_is_closed();
     test_gating();
     test_schema_merge();
     test_announce_flow();
