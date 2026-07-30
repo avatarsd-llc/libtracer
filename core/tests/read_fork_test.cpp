@@ -171,12 +171,25 @@ void test_idempotent_retire() {
 /**
  * @brief Readers racing registration and retirement on the vertex they are forking on.
  *
- * The fork read is now lock-free while `fill` and `mark_unregistered` mutate the bit under the
- * graph's unique lock. This is the shape that carries the change under ThreadSanitizer; the
- * assertion is only that every read is well-formed, since which side of a concurrent
- * registration a reader lands on was never ordered by anything the caller can observe.
+ * The fork read is lock-free while `fill` and `mark_unregistered` mutate the bit under the
+ * graph's unique lock. Which side of a concurrent registration a reader lands on was never
+ * ordered by anything a caller can observe, so the assertion is that every read is
+ * WELL-FORMED — never that it saw a particular side.
+ *
+ * The overlap is asserted, not hoped for. A first version of this test ran 300 rounds against
+ * four readers, finished in 5 ms, and asserted only `reads > 0` — which four freshly-spawned
+ * threads satisfy before the writer has finished starting them. It passed while racing almost
+ * nothing. `kMinReadsPerRound` is the fix: if the readers do not keep up with the writer by a
+ * wide margin, the shape under test did not happen and the test says so instead of passing.
  */
 void test_concurrent_fork() {
+    constexpr std::size_t kRounds = 4000;
+    constexpr std::size_t kReaders = 4;
+    // Each round is a register + write + retire, all three taking the graph's UNIQUE lock; a
+    // lock-free read is orders of magnitude cheaper, so anything below this means the readers
+    // were starved or never scheduled and the interleaving was not exercised.
+    constexpr std::size_t kMinReadsPerRound = 2;
+
     std::printf("readers forking while a writer registers and retires:\n");
     graph_t g;
     const auto p = g.register_vertex(path_t("/r"), role_t::STORED_VALUE);
@@ -185,9 +198,11 @@ void test_concurrent_fork() {
     std::atomic<bool> stop{false};
     std::atomic<std::size_t> bad{0};
     std::atomic<std::size_t> reads{0};
+    std::atomic<std::size_t> ready{0};
     std::vector<std::thread> pool;
-    for (int i = 0; i < 4; ++i) {
+    for (std::size_t i = 0; i < kReaders; ++i) {
         pool.emplace_back([&] {
+            ready.fetch_add(1, std::memory_order_release);
             std::size_t n = 0;
             while (!stop.load(std::memory_order_relaxed)) {
                 if (!g.read(path_t("/r")).has_value()) bad.fetch_add(1, std::memory_order_relaxed);
@@ -196,7 +211,11 @@ void test_concurrent_fork() {
             reads.fetch_add(n, std::memory_order_relaxed);
         });
     }
-    for (int round = 0; round < 300; ++round) {
+    // Do not start the writer until every reader is in its loop, or the early rounds race
+    // nothing but thread start-up.
+    while (ready.load(std::memory_order_acquire) < kReaders) { /* spin to a common start */
+    }
+    for (std::size_t round = 0; round < kRounds; ++round) {
         const auto kid = g.register_vertex(path_t("/r/kid"), role_t::STORED_VALUE);
         (void)g.write(kid, val_u8(0xEE));
         (void)g.retire(kid);
@@ -204,8 +223,11 @@ void test_concurrent_fork() {
     stop.store(true, std::memory_order_relaxed);
     for (auto& t : pool) t.join();
 
-    check(bad.load() == 0, "every concurrent read of the forking vertex succeeded");
-    check(reads.load() > 0, "the readers actually ran");
+    std::printf("    %zu rounds x %zu readers -> %zu reads, %zu malformed\n", kRounds, kReaders,
+                reads.load(), bad.load());
+    check(bad.load() == 0, "every concurrent read of the forking vertex was well-formed");
+    check(reads.load() >= kRounds * kMinReadsPerRound,
+          "the readers kept up with the writer, so the interleaving actually happened");
     check(reads_as_leaf_scalar(g, "/r", 0xDD), "and the vertex settles back to a leaf");
 }
 
