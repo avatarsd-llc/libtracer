@@ -372,14 +372,26 @@ void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& k
     //  (4) flip it unregistered (map-lock state — invisible to find from here on);
     //  (5) recurse. Placeholders are walked too (§B.3): reverting one is a harmless no-op,
     //      but a registered descendant may hang below it.
-    const std::uint32_t k = v->own_subs();
-    if (k > 0) bump_subtree_listeners(v, -static_cast<std::int32_t>(k));
-    keys.push_back(build_key(v));
-    // Park the detached value seam (if any): a lock-free reader may still hold the old
-    // pointer, so it is reclaimed only at teardown, never freed here. Under map_mutex_.
-    if (value_handlers_t* seam = v->revert_to_placeholder()) retired_seams_.emplace_back(seam);
-    v->mark_unregistered();
-    v->for_each_child([this, &keys](vertex_t& c) { retire_subtree(&c, keys); });
+    // Step (5) is now ITERATIVE rather than a recursive call per level (#690): the per-vertex
+    // body is hoisted into one lambda applied to `v` and then, in the same pre-order, to every
+    // descendant. Steps (1)-(4) keep their order within each vertex, which is what the note
+    // above is about; only the descent changed.
+    //
+    // The lambda mutates vertex STATE (listeners, value seam, registered flag) but never the
+    // tree's SHAPE, so it honours for_each_descendant's no-structural-mutation contract -- the
+    // walk re-reads the sibling list on each ascent and an insert or erase mid-walk would move
+    // the position it resumes from.
+    const auto retire_one = [this, &keys](vertex_t& x) {
+        const std::uint32_t k = x.own_subs();
+        if (k > 0) bump_subtree_listeners(&x, -static_cast<std::int32_t>(k));
+        keys.push_back(build_key(&x));
+        // Park the detached value seam (if any): a lock-free reader may still hold the old
+        // pointer, so it is reclaimed only at teardown, never freed here. Under map_mutex_.
+        if (value_handlers_t* seam = x.revert_to_placeholder()) retired_seams_.emplace_back(seam);
+        x.mark_unregistered();
+    };
+    retire_one(*v);
+    v->for_each_descendant(retire_one);
 }
 
 std::uint32_t graph_t::retire_generation(vertex_handle_t vh) const noexcept {
@@ -424,8 +436,13 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
  *        ADR-0057 — so the collected pointers stay valid past the lock).
  */
 static void collect_subscribed(vertex_t* v, std::vector<vertex_t*>& out) {
-    if (v->own_subs() > 0) out.push_back(v);
-    v->for_each_child([&out](vertex_t& c) { collect_subscribed(&c, out); });
+    // Iterative (#690): the recursive form cost ~80 B a frame at a depth no peer-facing check
+    // bounds. `out` still grows on the heap -- that is the caller's snapshot, not the walk.
+    const auto take = [&out](vertex_t& c) {
+        if (c.own_subs() > 0) out.push_back(&c);
+    };
+    take(*v);
+    v->for_each_descendant(take);
 }
 
 std::size_t graph_t::evict_link_edges(std::string_view link_name) {
@@ -519,10 +536,9 @@ graph_t::delivery_drops_t graph_t::delivery_drops() const noexcept {
 }
 
 void graph_t::bump_subtree_listeners(vertex_t* v, std::int32_t delta) {
-    v->for_each_child([delta](vertex_t& c) {
-        c.bump_listeners_above(delta);
-        bump_subtree_listeners(&c, delta);
-    });
+    // Iterative (vertex_t::for_each_descendant): this was self-recursion at ~208 B a frame, and
+    // graph depth is a peer-chosen segment count -- see #690 and that function's docs.
+    v->for_each_descendant([delta](vertex_t& c) { c.bump_listeners_above(delta); });
 }
 
 void graph_t::note_subscriber_added(vertex_t* v) {
@@ -673,8 +689,9 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
 }
 
 void graph_t::mark_subtree_acl_dirty(vertex_t* v) {
+    // Iterative (#690). Reached from the `:acl` write, so its depth is peer-chosen.
     v->mark_acl_cache_dirty();
-    v->for_each_child([](vertex_t& child) { mark_subtree_acl_dirty(&child); });
+    v->for_each_descendant([](vertex_t& c) { c.mark_acl_cache_dirty(); });
 }
 
 result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller) const {

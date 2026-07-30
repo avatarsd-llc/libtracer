@@ -1110,6 +1110,55 @@ class vertex_t {
         for (const std::unique_ptr<vertex_t>& c : children_->sorted) f(*c);
     }
 
+    /**
+     * @brief Run @p f over every DESCENDANT (this vertex excluded), pre-order, **iteratively**.
+     *
+     * The subtree counterpart of @ref for_each_child, and the reason it exists is stack safety:
+     * the four subtree walks in `graph.cpp` were **self-recursion**, one frame per graph level at
+     * 32–208 B a level, and graph depth is a vertex's path segment count — which nothing on the
+     * wire path bounds. `kMaxSegments` is enforced only in `path_t::parse`, the *local* string
+     * builder; `graph_t::ensure_vertex` takes raw key bytes and counts nothing, so a peer could
+     * already create a vertex deep enough to overflow the stack of a walk it then triggers
+     * (`:subscribers[]`, RETIRE, `:acl`). See #690.
+     *
+     * **Descends with no auxiliary storage at all** — no explicit stack, so nothing to allocate
+     * and nothing to fail. It ascends via the parent link and re-finds its position among its
+     * siblings by binary search on its own NAME record, which the `sorted` list already supports
+     * (the same `lower_bound` `child_by_record` uses). That costs O(log children) per ascent
+     * instead of the O(1) an explicit stack would give, and buys back an error channel the two
+     * `void` callers could not have carried without a signature change.
+     *
+     * @note Same contract as @ref for_each_child — called under the graph's map lock, and @p f
+     *       MUST NOT mutate the tree — the walk holds no snapshot and re-reads `sorted` on every
+     *       ascent, so an insertion mid-walk would move the position it is about to resume from.
+     */
+    template <typename F>
+    void for_each_descendant(F&& f) {
+        vertex_t* cur = first_child();
+        if (cur == nullptr) return;
+        for (;;) {
+            f(*cur);
+            if (vertex_t* const down = cur->first_child(); down != nullptr) {
+                cur = down;
+                continue;
+            }
+            // Leaf: climb until some ancestor has a next sibling. `this` is the sentinel and is
+            // never visited — but the sibling test must come FIRST even when the parent IS
+            // `this`, or the walk returns at the end of the leftmost spine and never reaches
+            // this vertex's second child. (It did exactly that; `edge_eviction` caught it.)
+            for (;;) {
+                vertex_t* const up = cur->parent_;
+                if (up == nullptr) return;
+                if (vertex_t* const sib = up->next_sibling_of(*cur); sib != nullptr) {
+                    cur = sib;
+                    break;
+                }
+                if (up == this) return;  // no sibling left at the top level — subtree exhausted
+                cur = up;
+            }
+        }
+    }
+
     // -- storage & readiness ----------------------------------------------------------
 
     /**
@@ -2229,6 +2278,40 @@ class vertex_t {
         std::vector<std::unique_ptr<vertex_t>> sorted; /**< @brief Sorted owned children. */
     };
     std::unique_ptr<children_t> children_;
+
+    /** @brief First child in sorted name-record order, or null for a leaf (@ref
+     * for_each_descendant). */
+    [[nodiscard]] vertex_t* first_child() const noexcept {
+        if (!children_ || children_->sorted.empty()) return nullptr;
+        return children_->sorted.front().get();
+    }
+
+    /**
+     * @brief The child that follows @p c among THIS vertex's children, or null if @p c is last.
+     *
+     * Finds @p c by binary search on its own NAME record rather than by a stored index, which is
+     * what lets @ref for_each_descendant ascend with no auxiliary storage. The list is kept
+     * sorted by that record (@ref add_child), so this is the same `lower_bound` @ref
+     * child_by_record performs — O(log children).
+     *
+     * Identity is by ADDRESS, not by name: `lower_bound` lands on the first record that is not
+     * less than @p c's, and a vertex's own entry is necessarily at or after that point. Comparing
+     * pointers rather than trusting the first hit keeps this correct even if two children ever
+     * shared a record, where a name compare would silently return the wrong sibling.
+     */
+    [[nodiscard]] vertex_t* next_sibling_of(const vertex_t& c) const noexcept {
+        if (!children_) return nullptr;
+        const std::vector<std::unique_ptr<vertex_t>>& sorted = children_->sorted;
+        auto it =
+            std::lower_bound(sorted.begin(), sorted.end(), c.name().bytes(),
+                             [](const std::unique_ptr<vertex_t>& e, std::span<const std::byte> n) {
+                                 return std::ranges::lexicographical_compare(e->name().bytes(), n);
+                             });
+        while (it != sorted.end() && it->get() != &c) ++it;
+        if (it == sorted.end()) return nullptr;  // not our child — caller error, walk stops
+        ++it;
+        return it == sorted.end() ? nullptr : it->get();
+    }
 };
 
 /**
