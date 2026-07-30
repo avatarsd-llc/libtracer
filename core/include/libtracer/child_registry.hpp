@@ -8,7 +8,7 @@
  * named, shareable owner, so the connection table is not duplicated between the
  * router and `transport_vertex_t` (Brick 3a of the #83 Stage-2 flip).
  *
- * Layering (ADR-0016): this lives in `tr::net` (L5) and holds `transport_t*` — it is
+ * Layering (ADR-0038 §3b.1): this lives in `tr::net` (L5) and holds `transport_t*` — it is
  * NOT `graph.find` against the L4 vertex map, because an L4 `vertex_t` must never
  * know about a transport (`vertex.hpp`). ADR-0037 §Stage-2 phrased the dissolution as
  * "graph.find(child)"; the layering-safe realization is this single tr::net-owned

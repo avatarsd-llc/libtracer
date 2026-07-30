@@ -43,7 +43,7 @@ Invariant #3 is **restated honestly**, split by responsibility (SRP: learning an
 
 [ADR-0037](0037-net-side-channels-dissolve-into-vertex-tree-compositor.md) §Decision phrases the transport-vertex demux as *"`graph.find(child)` against the vertex map that already exists"* and §Stage-2 bundles *"delete `bridge_t::export_vertex` + ROUTER egress **and** `fwd_router_t::children_`"* as one step. Implementing it surfaced two corrections:
 
-1. **`graph.find` cannot return a transport without inverting the layers.** `graph_t::find` returns an L4 `vertex_t`, and `vertex.hpp` is explicit that this L4 struct *"never depends on `tr::net`"* — a vertex must not carry a `transport_t*` ([ADR-0016](0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md)). So the demux cannot literally be `graph.find(child) → transport`. The **layering-safe realization** (Brick 3a, landed) is a single `tr::net`-owned `child_registry_t` (the `NAME → transport*` table + `by_segment`/`by_name`) that `fwd_router_t` holds and `transport_vertex_t` populates — **one owner, no duplicated table**, achieving ADR-0037's "no children-table duplication" goal without an L4→L5 dependency. The registry is `tr::net`, exactly where knowing a transport is allowed. The eventual "a `/net/<conn>` path resolves to its connection" addressing still routes *through* the vertex tree; it just resolves the *link* via the L5 registry keyed by the same NAME, not by storing a transport in an L4 vertex.
+1. **`graph.find` cannot return a transport without inverting the layers.** `graph_t::find` returns an L4 `vertex_t`, and `vertex.hpp` is explicit that this L4 struct *"never depends on `tr::net`"* — a vertex must not carry a `transport_t*` (this section is the authority; see the erratum below — ADR-0016 states the layering *principle* for L0↔L1 and does not contain this rule). So the demux cannot literally be `graph.find(child) → transport`. The **layering-safe realization** (Brick 3a, landed) is a single `tr::net`-owned `child_registry_t` (the `NAME → transport*` table + `by_segment`/`by_name`) that `fwd_router_t` holds and `transport_vertex_t` populates — **one owner, no duplicated table**, achieving ADR-0037's "no children-table duplication" goal without an L4→L5 dependency. The registry is `tr::net`, exactly where knowing a transport is allowed. The eventual "a `/net/<conn>` path resolves to its connection" addressing still routes *through* the vertex tree; it just resolves the *link* via the L5 registry keyed by the same NAME, not by storing a transport in an L4 vertex.
 2. **The `children_` dissolution and the `bridge_t`/ROUTER retirement are different bricks.** [RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md) keeps `ROUTER` *"unchanged … on the cyclic/multi-path delivery side"* — and `bridge_t` **is** the ROUTER-plane implementation. So `bridge_t` cannot be deleted as a side effect of unifying the FWD registry; the cyclic-delivery mechanism it carries needs a replacement home first. Brick 3a unifies the registry (FWD plane) with zero behavior change; the ROUTER-plane migration + `bridge_t` retirement is a **later, separate brick** with its own design (where the `(origin, ts)` dedup + `hop_count` guard live once `bridge_t` dissolves — the per-connection ingress-guard of ADR-0037 §Decision, but only for ROUTER-wrapped cyclic deliveries, per §1 above).
 
 ### 3a. The intra-device path pays nothing (hard invariant)
@@ -76,3 +76,34 @@ Most-to-least reliable-by-construction: **stateless full-route** (survives a hop
 - **Sequencing is proven-ness-ordered:** ship the synchronous 16KB path first (borrow-and-release, no refcount seam exercised, zero-heap measurable, TSan-clean by construction); gate async zero-copy behind the typed seam (M5+, the lwIP `PBUF_REF` work ADR-0037 already scoped out).
 - **No wire change, no spec change.** FWD/FIELD/ROUTER/ADVERTISE/COMPACT/HANDLE_NACK are unchanged; this is an L4/`tr::net` implementation-shape decision, like [ADR-0035](0035-implementing-rfc-0004-remote-operation-addressing.md). The symmetric-naming profile, *if* ever pursued, is the one piece that would need an RFC-0004 amendment.
 - **Feeds the [#86](https://github.com/avatarsd-llc/libtracer/issues/86) reference sweep:** `route_handle_t`'s node-global mutex and the per-frame decode are named here as the concrete divergences to retire, alongside the ROUTER-bridge prose still current in reference 00/03/04/07/10/11.
+
+## Erratum (2026-07-30): §3b.1 cites the wrong ADR for the vertex/transport rule
+
+§3b.1 states, correctly, that an L4 `vertex_t` must not carry a `transport_t*`, and attributes
+that rule to [ADR-0016](0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md).
+**ADR-0016 does not contain it.** The strings `vertex_t` and `transport_t` appear **zero** times
+in that document; its two decisions are (1) rope-chaining assembly and (2) namespaces mirroring
+the layer model, and Decision 2 names exactly one pair — *"The namespace boundary **is** the
+L0↔L1 contract"* (`tr::mem` ↔ `tr::view`). It never reaches L4 or L5.
+
+**The rule is real; only the citation is wrong.** Its actual sources are:
+
+- **`core/include/libtracer/vertex.hpp`**, which says in its own words *"an opaque view, so L4
+  never depends on `tr::net`"* — the sentence §3b.1 quotes. The quote is accurate.
+- **§3b.1 itself**, which is where the L4↔L5 application of ADR-0016's principle is first stated
+  and reasoned. ADR-0038 is the authority for this rule, not a document citing one.
+
+ADR-0016 remains the right citation for the *principle* — namespace boundaries are the layer
+contract, dependencies point up the layers only. It is the wrong citation for *this specific
+rule*, and a reader who follows the link finds nothing.
+
+**Why this is worth an erratum rather than a silent fix.** On 2026-07-30 the maintainer
+challenged the rule directly — *"ADR-0016 still forbids the vertex→transport pointer, I guess
+it's wrong"* — and checking ADR-0016 returns zero hits, which reads as confirmation that the rule
+was invented. It was not. **A broken citation chain makes a sound rule look fabricated**, and the
+cost lands exactly when someone is right to question it. The rule survived that challenge on the
+strength of `vertex.hpp` and this section; the link is what failed.
+
+Corrected here and at the three inheriting sites in
+[ADR-0061](0061-per-transport-mount-routing-strip-k-l5-demux.md) (§Status, §Context, §Decision 4),
+which took the citation from this document, and in `child_registry.hpp`'s header comment.
