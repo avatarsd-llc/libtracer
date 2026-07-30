@@ -275,6 +275,61 @@ void test_slot_addresses_are_stable() {
     check(slots[0]->link.load() == nullptr, "and the tombstoned slot reads null in place");
 }
 
+/**
+ * @brief The scan's two digest paths must agree — pinned DIRECTLY, not only through a lookup.
+ *
+ * `by_segments` pre-filters candidates on `digest_segments(segs)` and every slot carries
+ * `digest_name(name)` computed at `add` time. If those two ever disagreed, nothing would throw
+ * and no test would obviously break: the registry would simply stop resolving the affected
+ * name, which reads as a routing bug arbitrarily far away. So compare the two functions on
+ * their own, across the shapes that actually stress the split — one segment, three segments,
+ * an empty segment, a name whose bytes contain no separator, and names differing only in the
+ * last byte (the pair the digest most needs to tell apart).
+ */
+void test_digest_paths_agree() {
+    using reg_t = tr::net::child_registry_t;
+    const std::vector<std::vector<std::string>> cases = {
+        {"net"},
+        {"net", "ws-client"},
+        {"net", "ws-client", "peer-a"},
+        {"net", "ws-client", "peer-b"},
+        {"net", "can", "0"},
+        {"net", "can", "1"},
+        {"", "x"},
+        {"a", "", "b"},
+        {"averyverylongmodulename", "andaverylongchildnametoo"},
+    };
+    bool agree = true;
+    for (const auto& segs : cases) {
+        std::string joined;
+        std::vector<std::string_view> views;
+        views.reserve(segs.size());
+        for (std::size_t i = 0; i < segs.size(); ++i) {
+            if (i != 0) joined += '/';
+            joined += segs[i];
+        }
+        // The views must point INTO the finished string's segments, not into `segs`, so this
+        // exercises the same borrowed-span shape the forward path hands in.
+        std::size_t at = 0;
+        for (std::size_t i = 0; i < segs.size(); ++i) {
+            views.emplace_back(joined.data() + at, segs[i].size());
+            at += segs[i].size() + 1;
+        }
+        if (reg_t::digest_name(joined) != reg_t::digest_segments(views)) {
+            std::printf("  [FAIL] digest disagreement on \"%s\"\n", joined.c_str());
+            agree = false;
+        }
+    }
+    check(agree, "digest_name and digest_segments agree on every shape");
+
+    // Discrimination, not just agreement: the pairs above that differ only in their last byte
+    // must land on different digests, or the filter degenerates to the length check alone.
+    const std::vector<std::string_view> a = {"net", "can", "0"};
+    const std::vector<std::string_view> b = {"net", "can", "1"};
+    check(reg_t::digest_segments(a) != reg_t::digest_segments(b),
+          "names differing only in the last byte get different digests");
+}
+
 }  // namespace
 
 int main() {
@@ -286,6 +341,7 @@ int main() {
 
     test_duplicate_add_rebinds();
     test_slot_addresses_are_stable();
+    test_digest_paths_agree();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

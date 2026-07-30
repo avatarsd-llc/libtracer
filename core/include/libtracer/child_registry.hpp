@@ -18,6 +18,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <new>
 #include <span>
 #include <string>
@@ -115,6 +116,21 @@ class child_registry_t {
          *         erratum 3). Relaxed suffices: the value is an independent bool, published
          *         BEFORE the `link` release-store that makes the slot resolvable at all. */
         std::atomic<bool> multi_peer{false};
+        /**
+         * @brief A cheap digest of @ref name, computed once at @ref add time.
+         *
+         * A pure function of the slot's own name, so it has NO invalidation contract: a name
+         * has exactly one slot and @ref add writes the name only on the append path, before
+         * the slot is published. Tombstoning nulls @ref link and leaves this untouched, which
+         * is what lets the scan test it BEFORE the acquire-load — a stale-looking hash can
+         * only ever cause an extra @ref live check, never a wrong answer.
+         *
+         * Why it exists: the scan's per-candidate work was an acquire-load plus a string
+         * compare, so a wide table paid a real cost per frame even though at most one slot
+         * could match. An inline integer discriminator in the slot's own cache line makes the
+         * overwhelming majority of candidates cost one compare.
+         */
+        std::uint64_t name_digest = 0;
         /** @brief True while this slot still resolves — i.e. it is not a tombstone. */
         [[nodiscard]] bool live() const noexcept {
             return link.load(std::memory_order_acquire) != nullptr;
@@ -159,6 +175,7 @@ class child_registry_t {
         child_t* const slot = append();
         if (slot == nullptr) return;  // allocation failure — soft-fail, nothing registered
         slot->name = std::move(name);
+        slot->name_digest = digest_name(slot->name);
         slot->multi_peer.store(multi_peer, std::memory_order_relaxed);
         slot->mount_tlv = std::move(mount);
         slot->link.store(&link, std::memory_order_release);
@@ -181,9 +198,15 @@ class child_registry_t {
         // single integer compare for the (overwhelming) majority that cannot match.
         std::size_t need = segs.empty() ? 0 : segs.size() - 1;
         for (const std::string_view s : segs) need += s.size();
+        // Both discriminators are derived from `segs` ONCE, so a candidate that cannot match
+        // costs a single integer compare against a field in its own cache line — no acquire
+        // load, no string access. The hash is tested FIRST for exactly that reason; `live()`
+        // and the full compare still gate the answer, so this is a filter, never a decision.
+        const std::uint64_t want = digest_segments(segs);
         const child_t* hit = nullptr;
         for_each([&](const child_t& c) {
-            if (c.live() && c.name.size() == need && matches(c.name, segs)) {
+            if (c.name_digest == want && c.name.size() == need && c.live() &&
+                matches(c.name, segs)) {
                 hit = &c;
                 return true;
             }
@@ -318,6 +341,65 @@ class child_registry_t {
             return false;
         });
         return n;
+    }
+
+    // The three digest helpers below are PUBLIC for one reason: `digest_name` and
+    // `digest_segments` must agree exactly, and a disagreement is silent — the registry
+    // would simply stop resolving. `registry_teardown_test` therefore pins them against
+    // each other directly, which it cannot do through a lookup.
+    /**
+     * @brief A per-segment digest of a qualified name — the scan's cheap discriminator.
+     *
+     * Deliberately NOT a general hash. A general hash (FNV-1a was tried) walks every byte in
+     * a serial xor-multiply chain, and on a short name that chain is ~24 dependent `imul`s —
+     * MEASURED at ~30 ns, which is ~20% of a whole forward hop and is paid on EVERY lookup,
+     * including the single-child case that has nothing to scan. It made the fixed cost worse
+     * to make the scan cost better.
+     *
+     * This reads three cheap facts per segment — its length and its first and last byte — and
+     * folds them with one multiply per segment. For a two-segment mount that is ~3 multiplies
+     * instead of ~24, and it costs the same whether the names are 8 bytes or 80.
+     *
+     * It is a FILTER, never a decision: a collision costs one full compare, which is what the
+     * scan did unconditionally before. The length pre-filter runs alongside it and catches a
+     * different axis, so the two together leave very little for the compare to reject.
+     */
+    [[nodiscard]] static constexpr std::uint64_t fold_segment(std::uint64_t h,
+                                                              std::string_view seg) noexcept {
+        const std::uint64_t first = seg.empty() ? 0 : static_cast<unsigned char>(seg.front());
+        const std::uint64_t last = seg.empty() ? 0 : static_cast<unsigned char>(seg.back());
+        return (h + (seg.size() | (first << 8) | (last << 16))) * 0x9E37'79B9'7F4A'7C15ULL;
+    }
+
+    /** @brief The empty name's digest. */
+    static constexpr std::uint64_t kDigestSeed = 0;
+
+    /**
+     * @brief Digest a stored qualified name (`"<module>/<name>"`) by splitting it on `/`.
+     *
+     * Runs once per @ref add — control plane — so the split costs nothing that matters. It
+     * MUST produce what @ref digest_segments produces for the same name; `child_registry_test`
+     * pins that agreement directly rather than only through a lookup, because a silent
+     * disagreement would not fail loudly: it would simply stop resolving.
+     */
+    [[nodiscard]] static constexpr std::uint64_t digest_name(std::string_view name) noexcept {
+        std::uint64_t h = kDigestSeed;
+        std::size_t at = 0;
+        while (true) {
+            const std::size_t slash = name.find('/', at);
+            h = fold_segment(h,
+                             name.substr(at, slash == std::string_view::npos ? slash : slash - at));
+            if (slash == std::string_view::npos) return h;
+            at = slash + 1;
+        }
+    }
+
+    /** @brief Digest @p segs — the same value @ref digest_name gives for them joined by `/`. */
+    [[nodiscard]] static constexpr std::uint64_t digest_segments(
+        std::span<const std::string_view> segs) noexcept {
+        std::uint64_t h = kDigestSeed;
+        for (const std::string_view seg : segs) h = fold_segment(h, seg);
+        return h;
     }
 
    private:

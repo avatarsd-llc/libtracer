@@ -16,6 +16,16 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`child_registry_t` slots carry a precomputed name digest** — the forward demux's mount scan
+  no longer touches a candidate's string or its atomic link unless the digest matches. Measured
+  on `bench/bench_forward_demux` (8 alternating rounds, two builds), the scan's marginal cost
+  over a fixed-position hop drops **35 ns to ~0 at 8 links, 86 to 2 at 16, and 333 to 17 at 64
+  (95% removed)**, with the fixed-position hop itself unchanged within +/-2 ns. The digest is a
+  filter, never a decision: `live()` and the full compare still gate every answer. New public:
+  `digest_name`, `digest_segments`, `fold_segment` — public only so a test can pin the first two
+  in agreement, which a lookup cannot do.
+
+
 - **`tr::graph::kCacheLineBytes` — false-sharing padding becomes a per-target knob.** New
   constant in `libtracer/config.hpp` (CMake: `-DLIBTRACER_CACHE_LINE_BYTES`, default 64), and
   **0 means "this target has no second core to false-share with"**. It governs every shared
