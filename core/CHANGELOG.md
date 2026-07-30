@@ -38,6 +38,22 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`tr::graph::hazard_slot_t` — the host LKV slot, reclaimed with hazard pointers** (#604,
+  [ADR-0069](../docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md) §2/§5/§6).
+  A lock-free `std::atomic<node*>` over a 24-byte indirection node that owns the rope's
+  `shared_ptr`; a read pins the node, copies the handle out, and unpins, so `read_stored()`
+  keeps its owning signature and nothing in `graph.cpp` changed. Bind it per target with
+  `-DLIBTRACER_LKV_SLOT=hazard_slot_t`; the new `tr::graph::kHazardReaderSlots` knob
+  (`-DLIBTRACER_HAZARD_READER_SLOTS`, default 64) sizes the process-wide domain at
+  `(N + 1) * 128` bytes — **zero** unless the slot is bound, since the default binding never
+  references the registry. Measured against the default slot through `graph_t::read` on one
+  shared LKV: **4.2× aggregate and 4.4× p50 at 24 readers** (1.7 → 7.4 M ops/s), decisive from
+  8 readers up, and indistinguishable at one — the gain is a concurrency gain only. Three
+  differences from `sp_atomic_slot_t` that are not performance and are documented in the
+  header: reclamation is deferred (so an injected `pmr` resource must outlive the threads that
+  wrote through it, not just the graph), publish can fail under memory exhaustion, and an
+  undersized `kHazardReaderSlots` costs throughput rather than correctness.
+
 - **`tr::graph::lkv_slot_t` — the LKV slot is now a per-target binding** (#604,
   [ADR-0069](../docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md) §1). The
   slot type `vertex_t` holds is selected in `config.hpp` through the same forward-declare-plus-alias
