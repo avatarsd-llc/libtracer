@@ -102,6 +102,7 @@ C++ modules <docs/modules/index>
 :maxdepth: 2
 
 Reference (descriptive) <docs/reference/README>
+Design notes (reference impl) <docs/design/README>
 Capability matrix <docs/capability-matrix>
 Interoperability <docs/interoperability>
 ```

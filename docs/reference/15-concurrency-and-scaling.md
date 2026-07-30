@@ -5,7 +5,7 @@
 > pointer. Numbers appear here only as *evidence for a general claim*, always with the host
 > named, and never as a specification — see ["What this suite is NOT"](README.md).
 > Measurements of the C++23 reference implementation live in
-> [`docs/design/concurrency/`](https://github.com/avatarsd-llc/libtracer/blob/main/docs/design/concurrency/README.md), which is design material, not
+> [`../design/concurrency/`](../design/concurrency/README.md), which is design material, not
 > standard.
 
 ---
@@ -169,5 +169,5 @@ runtime choice available in any implementation is worth as much.
 
 How the C++23 reference implementation places its locks, what each one costs, which of the
 above it currently achieves, and what remains — all of it measured, all of it specific to one
-codebase and one host — is [`docs/design/concurrency/`](https://github.com/avatarsd-llc/libtracer/blob/main/docs/design/concurrency/README.md). None of
+codebase and one host — is [`../design/concurrency/`](../design/concurrency/README.md). None of
 it is normative, and a second implementer needs none of it.

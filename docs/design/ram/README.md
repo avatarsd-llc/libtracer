@@ -58,3 +58,15 @@ gather` → `O5/O6/O7 (lower ROI)` (doc 1 §5 / doc 2 §6). **Independently:** *
 d2d listener thread, −12 KB; at `can_en=1` this zeroes dedicated libtracer transport threads) and
 **retirement** (doc 0 §6 — ~11–12 KB but a *migration program*, 0 B reclaimable until consumers move to the
 graph seam). Copy-elision beyond O2/O3 is **not worth it** (doc 4): the chain is already near-optimal.
+
+```{toctree}
+:caption: RAM leanness program
+:hidden:
+:maxdepth: 1
+
+Bounded-reactor node profile <00-bounded-reactor-node-profile>
+The lwIP ↔ libtracer seam <10-lwip-libtracer-seam>
+Zero-copy and flatten <20-zero-copy-and-flatten>
+Second-pass reconciliation (errata) <30-second-pass-reconciliation>
+Buffer-chain whole analysis <40-buffer-chain-whole-analysis>
+```
