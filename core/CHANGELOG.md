@@ -14,6 +14,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A fragmented control frame now gets the same CRC check as a contiguous one.**
+  `fwd_router_t::on_control_rope` called `peek_control` without a `crc_check_t`, so it took the
+  `DEFER` default: a multi-link `ADVERTISE` / `COMPACT` / `HANDLE_NACK` carrying the `CR` bit had
+  its trailer read as structure and never verified, while the **byte-identical unfragmented
+  frame** was dropped by the span arm's explicit `VERIFY`. Whether a control frame mutated
+  routing state therefore depended on how a peer chose to fragment it.
+
+  Not a regression: before the `crc_check_t` parameter existed, `read_fwd_header` hard-coded
+  `DEFER`, so `peek_control` never verified on either arm. The commit that introduced the
+  parameter added `VERIFY` to the span arm and left the rope arm on the default — a gap that was
+  half-closed, not one that opened. ADR-0041 §1's 2026-07-26 amendment already states the intended
+  rule ("`crc_check_t::VERIFY` passed explicitly so verify-before-apply is preserved"); the code
+  now matches it on both arms, so the ADR needs no erratum.
+
+  The `DEFER` default is deliberate and stays: a forward hop relays bytes it never interprets, and
+  making it verify would put a CRC pass on the hot path. The policy travels with the explicit
+  argument at the two call sites that apply a frame, not with the default.
+
+  Regression guard added in `fwd_rope_forward_test` — it corrupts a body byte under a valid
+  trailer and splits the frame so the corruption and the trailer land in **different links**, the
+  shape a contiguous arm cannot produce. Verified to fail before the change and pass after.
+
 ### Changed
 
 - **Configuration is one named type: `tr::graph::default_config_t`, bound by `using config_t`**
