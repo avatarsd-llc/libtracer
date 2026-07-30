@@ -79,7 +79,7 @@ include_patterns = [
     "docs/performance.md",
     "docs/test-report.md",
     "docs/reference/**",
-    # Contributor design programs (RAM, concurrency): published because the
+    # Contributor design programs (concurrency, configuration): published because the
     # measured per-target cost of the reference implementation is material to anyone
     # deploying it. NOT the standard — docs/design/README.md says so in its first line.
     "docs/design/**",
@@ -95,6 +95,12 @@ exclude_patterns = [
     "docs/_doxygen/**",  # Breathe consumes this XML; it is not a Sphinx source doc
     "docs/adr/**",
     "docs/spec/rfcs/**",
+    # A design program whose measurements are of ONE downstream consumer's firmware —
+    # its buffer budget, its release baselines — is that consumer's document, not this
+    # project's, and publishing it here disclosed their release-to-release figures. The
+    # exclusion is belt-and-braces: the set has been moved out of the tree entirely, and
+    # this keeps a future re-add from silently republishing it.
+    "docs/design/ram/**",
     "**/LICENSE",
 ]
 
