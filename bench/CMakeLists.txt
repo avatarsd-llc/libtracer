@@ -148,3 +148,9 @@ endif()
 add_executable(bench_transport_iov bench_transport_iov.cpp)
 target_link_libraries(bench_transport_iov PRIVATE libtracer)
 target_compile_options(bench_transport_iov PRIVATE -Wall -Wextra)
+
+# Aggregate throughput vs concurrent peer count — prices transport_tcp_server's SINGLE poll
+# thread (the "MCU-shaped choice, #362") on a many-core host, which nothing else measures.
+add_executable(bench_tcp_fanin bench_tcp_fanin.cpp)
+target_link_libraries(bench_tcp_fanin PRIVATE libtracer)
+target_compile_options(bench_tcp_fanin PRIVATE -Wall -Wextra)
