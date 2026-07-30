@@ -5,6 +5,14 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
+ * @warning **What this gate does NOT cover.** It drives `capture_transport_t`, a stub link that
+ * only sums the span sizes it is handed. The shipping transports assemble an `::iovec` table
+ * before the syscall and **both fall back to the heap above 16 spans** (`transport_udp.cpp`,
+ * `transport_tcp.cpp`). `allocs=0` here therefore says nothing about the real wire: measured at
+ * 17 spans / ~288 B by **`bench_transport_iov`**, which exists because that term was invisible.
+ * Headroom from `kFwdMaxIov` (14) to the spill (17) is **3 regions**, and a rope source may split
+ * any region further. Read the two benches together; neither is sufficient alone.
+ *
  * Four armed windows: (1) one FWD *forward hop* — offset-dispatch + stack heads +
  * stack iov (ADR-0038 invariants #1/#2), hard-gated at ZERO allocations by CI
  * (`ZEROHEAP_MAX=0`); (2) one *terminus* resolve (ADR-0041) — REPORT-ONLY, since a

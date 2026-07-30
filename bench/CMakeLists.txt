@@ -142,3 +142,9 @@ if(EXISTS ${ZC}/lib/libzenohc.so AND EXISTS ${ZCPP}/include/zenoh.hxx)
 else()
     message(STATUS "bench: zenoh not vendored; skipping zenoh benches (run bench/fetch_zenoh.sh)")
 endif()
+
+# The scatter-gather width at which a REAL transport starts allocating — the term
+# bench_forward_heap's stub link cannot see (its capture_transport_t never assembles an iovec).
+add_executable(bench_transport_iov bench_transport_iov.cpp)
+target_link_libraries(bench_transport_iov PRIVATE libtracer)
+target_compile_options(bench_transport_iov PRIVATE -Wall -Wextra)

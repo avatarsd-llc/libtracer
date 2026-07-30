@@ -415,6 +415,22 @@ inline constexpr std::size_t kFwdSrcHdrCap = 6;
  * remaining dst, optional selector, src header, original src body, tail) plus one
  * header-and-bytes PAIR per prepended mount segment. A rope source may split any region
  * further and so gathers into a growable container instead.
+ *
+ * @warning This bound is **over-provisioned**, and it is the wrong shape to grow. Since #508
+ * `gather` pushes the whole mount run as ONE precomputed span (`push(mount_tlv)`), plus at most
+ * one header+bytes pair for a dynamically-named bus peer — so a contiguous source emits at most
+ * **9** regions regardless of mount width. The `2 * kMountPeekMax` term describes a per-segment
+ * emission that no longer happens.
+ *
+ * That matters because of what sits just above: `bench_transport_iov` measures **both** shipping
+ * transports falling back to a heap-allocated iovec table at exactly **17 spans**
+ * (`transport_udp.cpp`, `transport_tcp.cpp` — `kMaxInlineIov = 16`). So the headroom between this
+ * ceiling and a per-frame allocation on the real wire is **3 regions**, and `bench_forward_heap`'s
+ * `allocs=0` gate cannot see the crossing: it drives a stub link that never assembles an iovec.
+ *
+ * If `kMountPeekMax` is lifted (the 2026-07-30 mount-depth ruling), re-deriving this as
+ * `6 + 2 * depth` would cross 17 at depth 6 and put a heap allocation on every deep-mount
+ * forward hop, silently. Keep the mount one span and this constant does not need to move at all.
  */
 inline constexpr std::size_t kFwdMaxIov = 6 + 2 * kMountPeekMax;
 
