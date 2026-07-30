@@ -21,13 +21,44 @@
  * The third question is the one `bench_originate` already answered at one hop and this extends:
  * how the per-operation saving grows with distance.
  *
- * **Both arms carry the same operation to the same vertex over the same five graphs**, differing
- * only in how the destination is named. Every hop is a real `fwd_router_t` with its own
- * `graph_t`; the links are in-process pairs that hand bytes to the next node's receiver, so the
- * routing work at each hop is the real thing and only the socket is absent.
+ * Every hop is a real `fwd_router_t` with its own `graph_t`; the links are in-process pairs that
+ * hand bytes to the next node's receiver, so the routing work at each hop is the real thing and
+ * only the socket is absent.
  *
  * NOT a wall-clock throughput number: the whole chain runs synchronously on this thread, so a
  * reported latency is the sum of four hops' router cost with no I/O and no thread handoff.
+ *
+ * @section confound The arms are NOT like-for-like, and this file used to claim they were
+ *
+ * This header previously read *"both arms carry the same operation to the same vertex over the
+ * same five graphs, differing only in how the destination is named."* **That was false**, and it
+ * is why the bench's first published figures were wrong:
+ *
+ *  - `chain-path` sends `FWD{op=WRITE, dst, src}`. A WRITE terminus assembles a `RESULT` reply
+ *    that routes back through **every** hop — measured at 459 B across 5 reverse frames per
+ *    operation.
+ *  - `chain-label` sends a `COMPACT`, which generates **no reply at all**.
+ *
+ * Roughly **40% of the reported warm delta was that reply leg**, not addressing. Two further
+ * figures did not hold: the frame-size row compares an FWD against a COMPACT carrying no
+ * FWD envelope, op, `dst` or `src` (a fully folded FWD is 40 B, not 18 B); and the cold
+ * breakeven does not reproduce — it swings 13.0–32.7 us and goes negative on some runs.
+ *
+ * @section guard Why the existing guard did not catch it
+ *
+ * The bench already asserted **terminus delivery**, and that assertion earned its keep: it caught
+ * an earlier revision reporting a 10x "win" for a label arm that bound nothing and delivered zero
+ * frames, timing the cost of a drop. But a delivery assertion proves an arm is not *empty* — it
+ * says nothing about whether two arms are *comparable*.
+ *
+ * So the emitted traffic is now counted **per direction** (@ref chain_t::forward_frames,
+ * @ref chain_t::reverse_frames) and compared between arms. A mismatch **voids the headline and
+ * exits non-zero** rather than footnoting it, because the first wrong number was quoted onward
+ * into an RFC, an issue and two published pages before anyone re-read the bench.
+ *
+ * The general rule this cost: for an A/B arm, enumerate what each side *emits* — frames, bytes,
+ * directions — and assert they match except for the variable under test. Reply legs, retries and
+ * acks are the classic asymmetry.
  */
 
 #include <array>
@@ -216,11 +247,62 @@ struct chain_t {
         for (const wire_link_t& l : down) n += l.bytes;
         return n;
     }
+
+    /**
+     * @brief Frames this operation pushed FORWARD, summed over every hop.
+     *
+     * Counted per direction because the two arms of this bench turned out not to emit the same
+     * traffic, and a single total hid it — see @ref reverse_frames.
+     */
+    [[nodiscard]] std::size_t forward_frames() const {
+        std::size_t n = 0;
+        for (const wire_link_t& l : down) n += l.frames;
+        return n;
+    }
+
+    /**
+     * @brief Frames this operation pushed BACK toward the originator, summed over every hop.
+     *
+     * The term this bench previously did not count, and the reason its first published delta was
+     * wrong by ~40%. `reset_counters` and @ref wire_bytes both walked `down` only, so a reply
+     * routing home through every `up` end was invisible: the path arm sends `FWD{op=WRITE}`, whose
+     * terminus assembles a `RESULT` that travels the chain in reverse, while the label arm sends a
+     * `COMPACT` that generates nothing. Both arms delivered, so the delivery assertion passed —
+     * it proves an arm is not EMPTY, never that two arms are COMPARABLE.
+     */
+    [[nodiscard]] std::size_t reverse_frames() const {
+        std::size_t n = origin.frames;  // node 0's last leg back to its own application
+        for (const wire_link_t& l : up) n += l.frames;
+        return n;
+    }
+
+    /**
+     * @brief Bytes pushed back toward the originator, summed over every hop.
+     *
+     * `origin` is included: it is the link node 0's application injects THROUGH, and `inject`
+     * does not increment the counters — only `send` does. So `origin.frames` is exactly the
+     * reply's final leg out to the application, and omitting it undercounts the reverse census
+     * by one frame per operation.
+     */
+    [[nodiscard]] std::size_t reverse_bytes() const {
+        std::size_t n = origin.bytes;
+        for (const wire_link_t& l : up) n += l.bytes;
+        return n;
+    }
+
     void reset_counters() {
         for (wire_link_t& l : down) {
             l.bytes = 0;
             l.frames = 0;
         }
+        // `up` and `origin` are reset too, or the reverse census accumulates across the warm-up
+        // loop and reports a per-operation figure several times too large.
+        for (wire_link_t& l : up) {
+            l.bytes = 0;
+            l.frames = 0;
+        }
+        origin.bytes = 0;
+        origin.frames = 0;
     }
     [[nodiscard]] bool delivered() const {
         return graphs[kNodes - 1]->read(*tr::graph::path_t::parse("/sink")).has_value();
@@ -251,6 +333,10 @@ struct arm_result_t {
     std::uint64_t warm_ns = 0;
     std::size_t first_frame_bytes = 0;
     std::size_t wire_bytes = 0;
+    /** @brief Frames emitted per operation, per direction — the like-for-like evidence. */
+    std::size_t fwd_frames = 0;
+    std::size_t rev_frames = 0;
+    std::size_t rev_bytes = 0;
     bool delivered = false;
 };
 
@@ -289,6 +375,9 @@ struct arm_result_t {
     c.reset_counters();
     op();
     r.wire_bytes = c.wire_bytes();
+    r.fwd_frames = c.forward_frames();
+    r.rev_frames = c.reverse_frames();
+    r.rev_bytes = c.reverse_bytes();
 
     const std::size_t batch = calibrate_batch(op);
     bench::Latency lat;
@@ -309,9 +398,11 @@ struct arm_result_t {
     const double ops = static_cast<double>(batches) * static_cast<double>(batch);
     const double per_s = total == 0 ? 0.0 : ops * 1e9 / static_cast<double>(total);
     bench::emit("libtracer", mode, r.first_frame_bytes, kNodes - 1, 1, per_s, per_s, 0.0, s);
-    std::printf("NOTE mode=%s hops=%zu cold_ns=%llu first_frame=%zuB wire=%zuB delivered=%d\n",
-                mode, kNodes - 1, static_cast<unsigned long long>(r.cold_ns), r.first_frame_bytes,
-                r.wire_bytes, r.delivered ? 1 : 0);
+    std::printf(
+        "NOTE mode=%s hops=%zu cold_ns=%llu first_frame=%zuB wire=%zuB fwd_frames=%zu"
+        " rev_frames=%zu rev_bytes=%zuB delivered=%d\n",
+        mode, kNodes - 1, static_cast<unsigned long long>(r.cold_ns), r.first_frame_bytes,
+        r.wire_bytes, r.fwd_frames, r.rev_frames, r.rev_bytes, r.delivered ? 1 : 0);
     return r;
 }
 
@@ -329,22 +420,25 @@ int main() {
     }
 
     std::printf("\n%zu nodes, %zu hops\n\n", kNodes, kNodes - 1);
-    std::printf("%-14s %-12s %-12s %-16s %s\n", "arm", "cold_ns", "warm_ns", "first_frame_B",
-                "delivered");
-    std::printf("%-14s %-12llu %-12llu %-16zu %s\n", "chain-path",
+    std::printf("%-14s %-12s %-12s %-16s %-11s %-11s %s\n", "arm", "cold_ns", "warm_ns",
+                "first_frame_B", "fwd_frames", "rev_frames", "delivered");
+    std::printf("%-14s %-12llu %-12llu %-16zu %-11zu %-11zu %s\n", "chain-path",
                 static_cast<unsigned long long>(path.cold_ns),
                 static_cast<unsigned long long>(path.warm_ns), path.first_frame_bytes,
-                path.delivered ? "yes" : "NO");
-    std::printf("%-14s %-12llu %-12llu %-16zu %s\n", "chain-label",
+                path.fwd_frames, path.rev_frames, path.delivered ? "yes" : "NO");
+    std::printf("%-14s %-12llu %-12llu %-16zu %-11zu %-11zu %s\n", "chain-label",
                 static_cast<unsigned long long>(label.cold_ns),
                 static_cast<unsigned long long>(label.warm_ns), label.first_frame_bytes,
-                label.delivered ? "yes" : "NO");
+                label.fwd_frames, label.rev_frames, label.delivered ? "yes" : "NO");
 
-    // The collapse claim, asserted rather than assumed.
+    // The collapse claim, asserted rather than assumed. Stated against the frame each arm
+    // ACTUALLY emits — a COMPACT carries no FWD envelope, no op, no dst and no src, so this is
+    // not "the same frame with a shorter address" and the printout must not imply that it is.
     const bool collapsed = label.first_frame_bytes < path.first_frame_bytes;
     std::printf(
-        "\nADDRESS COLLAPSE  %zu-segment path (%zu B frame) -> one uint16 label (%zu B frame)"
-        " : %s\n",
+        "\nADDRESS COLLAPSE  %zu-segment path in a FWD (%zu B) -> one uint16 label in a COMPACT"
+        " (%zu B) : %s\n"
+        "                  NOTE different frame TYPES, not the same frame shortened.\n",
         3 * (kNodes - 1) + 1, path.first_frame_bytes, label.first_frame_bytes,
         collapsed ? "CONFIRMED" : "NOT OBSERVED");
 
@@ -352,6 +446,28 @@ int main() {
         std::printf(
             "\nFAILED: an arm did not reach the terminus, so its latency measures a DROP,\n"
             "        not a delivery. Numbers above are void.\n");
+        return 1;
+    }
+
+    // A delivery assertion proves an arm is not EMPTY. It does not prove two arms are
+    // COMPARABLE, and this bench's first published delta was ~40% reply leg for exactly that
+    // reason: `chain-path` sends FWD{op=WRITE}, whose terminus assembles a RESULT that routes
+    // home through every hop; `chain-label` sends a COMPACT and generates none. Both delivered.
+    // So the emitted work is now compared explicitly, and a mismatch VOIDS the headline rather
+    // than decorating it — a footnote nobody reads is how the first number got quoted onward.
+    const bool symmetric =
+        path.fwd_frames == label.fwd_frames && path.rev_frames == label.rev_frames;
+    if (!symmetric) {
+        std::printf(
+            "\nNOT LIKE-FOR-LIKE: the arms do not emit the same traffic.\n"
+            "        chain-path   %zu forward + %zu reverse frames (%zu B back)\n"
+            "        chain-label  %zu forward + %zu reverse frames (%zu B back)\n"
+            "        The warm difference below therefore prices the ADDRESSING **and** the\n"
+            "        reply leg together. It is NOT a per-hop addressing saving and must not\n"
+            "        be quoted as one. Give both arms the same op, or ablate the reply,\n"
+            "        before publishing any figure from this bench.\n",
+            path.fwd_frames, path.rev_frames, path.rev_bytes, label.fwd_frames, label.rev_frames,
+            label.rev_bytes);
         return 1;
     }
 
@@ -364,7 +480,10 @@ int main() {
         "\nSUMMARY over %zu hops a minted label is worth %.0f ns per warm operation.\n"
         "        Its binding costs %.0f ns more on the FIRST one, so it pays for itself\n"
         "        after ~%.0f operations to the same destination — below that, the full\n"
-        "        path is cheaper and a caller that writes once should not bind at all.\n",
+        "        path is cheaper and a caller that writes once should not bind at all.\n"
+        "        The cold figure is HIGH-VARIANCE: it has been observed between 13 and 33 us\n"
+        "        across runs, which is wider than the difference it is being used to derive,\n"
+        "        so the breakeven above is an order of magnitude, never a threshold.\n",
         kNodes - 1, d_warm, static_cast<double>(label.cold_ns) - static_cast<double>(path.cold_ns),
         breakeven > 0.0 ? breakeven : 0.0);
     return 0;
