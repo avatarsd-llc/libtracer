@@ -14,7 +14,26 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **`tr::net::kFwdMaxIov` is now a structural `9`, counted from `fwd_rebuild_t::gather`'s emit
+  sequence, rather than `6 + 2 * kMountPeekMax` (= 14).** The `2 * kMountPeekMax` term described a
+  header-and-bytes pair per prepended mount segment; **that emission has not happened since #508**,
+  which made the mount run one precomputed span. The constant was therefore over-provisioned by 5
+  and — the part that mattered — tied to a mount width the region count had long been independent
+  of. Callers reading it as a buffer size get a smaller, exactly-fitting bound; the contiguous
+  forward hop's stack array shrinks by 5 spans (80 B on a 64-bit host). No behaviour change: the
+  emitted region count is unchanged.
+
 ### Fixed
+
+- **The contiguous forward arm now DROPS an over-wide gather instead of truncating it.** Its iov
+  guard filled what fitted and sent the partial span list, putting a **truncated frame on the
+  wire** — the exact outcome the rope arm's own comment two branches down calls *"worse than
+  none"*. Two arms of one hop disagreeing on a drop policy is the shape of the CRC divergence
+  fixed above and of #516. Unreachable today (`gather` emits at most `kFwdMaxIov` regions for a
+  contiguous source by construction); it is a guard against a future region being added without
+  the count moving, and there a counted drop is recoverable where a corrupt frame is not.
 
 - **A fragmented control frame now gets the same CRC check as a contiguous one.**
   `fwd_router_t::on_control_rope` called `peek_control` without a `crc_check_t`, so it took the

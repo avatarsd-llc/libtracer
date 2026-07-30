@@ -10,7 +10,7 @@
  * before the syscall and **both fall back to the heap above 16 spans** (`transport_udp.cpp`,
  * `transport_tcp.cpp`). `allocs=0` here therefore says nothing about the real wire: measured at
  * 17 spans / ~288 B by **`bench_transport_iov`**, which exists because that term was invisible.
- * Headroom from `kFwdMaxIov` (14) to the spill (17) is **3 regions**, and a rope source may split
+ * Headroom from `kFwdMaxIov` (9) to the spill (17) is **8 regions**, and a rope source may split
  * any region further. Read the two benches together; neither is sufficient alone.
  *
  * Four armed windows: (1) one FWD *forward hop* — offset-dispatch + stack heads +

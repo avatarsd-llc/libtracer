@@ -646,14 +646,31 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     // known at run time).
     if constexpr (std::is_same_v<Cursor, wire::grammar::span_cursor>) {
         // Contiguous source: each region is a single sub-span — a stack array sized by
-        // kFwdMaxIov, which is derived from the layout (see its docs), not a chosen budget.
-        // The write is bounds-guarded regardless: this array was previously a bare 6 with an
-        // unchecked `iov[n++]`, so any growth in the region count was a silent overrun.
+        // kFwdMaxIov, which is COUNTED from gather's emit sequence (see its docs), not a chosen
+        // budget. The write is bounds-guarded regardless: this array was previously a bare 6
+        // with an unchecked `iov[n++]`, so any growth in the region count was a silent overrun.
+        //
+        // Overflow DROPS the frame, matching the rope arm below rather than diverging from it.
+        // This guard used to truncate — it filled what fitted and sent `n` spans — which put a
+        // TRUNCATED frame on the wire, the precise outcome the rope arm's own comment calls
+        // "worse than none" two branches down. Two arms of one hop disagreeing on a drop policy
+        // is the shape of #673 (the arms disagreed on CRC verification) and of #516, so the
+        // policy is now stated once and implemented identically on both sides.
+        //
+        // Unreachable today: gather emits at most kFwdMaxIov regions for a contiguous source by
+        // construction. It is a guard against a future region being added without the count
+        // moving, and in that event a counted drop is recoverable where a corrupt frame is not.
         std::array<std::span<const std::byte>, kFwdMaxIov> iov;
         std::size_t n = 0;
+        bool ok = true;
         rebuilt->gather(cur_src, [&](std::span<const std::byte> s) {
-            if (n < iov.size()) iov[n++] = s;
+            if (n < iov.size()) {
+                iov[n++] = s;
+            } else {
+                ok = false;
+            }
         });
+        if (!ok) return;
         child.send(std::span<const std::span<const std::byte>>(iov.data(), n));
     } else {
         // Rope source: a region may cross several links, so the sub-span count is only known

@@ -93,7 +93,7 @@ void udp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
     // one allocation of ~288 B. `bench_forward_heap`'s `allocs=0` gate CANNOT see it — that
     // bench drives a stub link which never assembles an iovec — so this is the one per-frame
     // heap allocation on the shipping forward path with no gate over it. Headroom against
-    // `kFwdMaxIov` (14) is **3 regions**, and a rope source may split any region further.
+    // `kFwdMaxIov` (9) is **8 regions**, and a rope source may split any region further.
     constexpr std::size_t kMaxInlineIov = 16;
     std::array<::iovec, kMaxInlineIov> inline_vec;
     std::vector<::iovec> heap_vec;

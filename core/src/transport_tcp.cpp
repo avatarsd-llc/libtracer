@@ -56,7 +56,7 @@ void set_nodelay(int fd) {
  *        length prefix takes slot 0 — costing one allocation of ~288 B.
  *        `bench_forward_heap`'s `allocs=0` gate cannot see it: that bench drives
  *        a stub link which never assembles an iovec.  Headroom against
- *        `kFwdMaxIov` (14) is **3 regions**, and a rope source may split any
+ *        `kFwdMaxIov` (9) is **8 regions**, and a rope source may split any
  *        region further.
  */
 struct prefixed_iov_t {

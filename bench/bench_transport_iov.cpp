@@ -18,7 +18,8 @@
  *
  * @section why Why it matters now
  *
- * Today the hop stays under the ceiling: `kFwdMaxIov = 6 + 2 * kMountPeekMax` = **14**, and
+ * Today the hop stays well under the ceiling: `kFwdMaxIov` is a structural **9** (counted from
+ * `gather`'s emit sequence), and
  * `fwd_rebuild_t::gather` emits at most **9** regions for a contiguous source (since #508 the
  * whole mount run is ONE precomputed span, not one per segment). 9 < 17, so nothing allocates.
  *

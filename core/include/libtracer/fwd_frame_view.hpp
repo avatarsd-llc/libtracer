@@ -411,28 +411,34 @@ inline constexpr std::size_t kFwdSrcHdrCap = 6;
 /**
  * @brief Upper bound on the regions @ref fwd_rebuild_t::gather emits for a CONTIGUOUS source.
  *
- * Structural, derived from the layout rather than budgeted: the six fixed regions (head1,
- * remaining dst, optional selector, src header, original src body, tail) plus one
- * header-and-bytes PAIR per prepended mount segment. A rope source may split any region
- * further and so gathers into a growable container instead.
+ * Structural, and now counted from @ref fwd_rebuild_t::gather's actual emit sequence rather than
+ * budgeted — one region per `push`, in wire order:
  *
- * @warning This bound is **over-provisioned**, and it is the wrong shape to grow. Since #508
- * `gather` pushes the whole mount run as ONE precomputed span (`push(mount_tlv)`), plus at most
- * one header+bytes pair for a dynamically-named bus peer — so a contiguous source emits at most
- * **9** regions regardless of mount width. The `2 * kMountPeekMax` term describes a per-segment
- * emission that no longer happens.
+ *   1. `head1`            5. `mount_tlv`        (ONE span, whatever the mount's width)
+ *   2. `rem_dst`          6. `extra_hdr`        \_ at most one PAIR, for a dynamically
+ *   3. `sel`              7. `extra_seg`        /  named bus peer
+ *   4. `head2`            8. `src_body`
+ *                         9. `tail`
  *
- * That matters because of what sits just above: `bench_transport_iov` measures **both** shipping
- * transports falling back to a heap-allocated iovec table at exactly **17 spans**
- * (`transport_udp.cpp`, `transport_tcp.cpp` — `kMaxInlineIov = 16`). So the headroom between this
- * ceiling and a per-frame allocation on the real wire is **3 regions**, and `bench_forward_heap`'s
- * `allocs=0` gate cannot see the crossing: it drives a stub link that never assembles an iovec.
+ * A rope source may split any region further and so gathers into a growable container instead;
+ * this bound is the CONTIGUOUS arm's, and only that arm uses a stack array.
  *
- * If `kMountPeekMax` is lifted (the 2026-07-30 mount-depth ruling), re-deriving this as
- * `6 + 2 * depth` would cross 17 at depth 6 and put a heap allocation on every deep-mount
- * forward hop, silently. Keep the mount one span and this constant does not need to move at all.
+ * It previously read `6 + 2 * kMountPeekMax` = **14**, describing a header-and-bytes pair per
+ * prepended mount segment. **That emission has not happened since #508**, which made the mount run
+ * one precomputed span — so the constant was over-provisioned by 5 and, worse, was the wrong
+ * SHAPE: tied to mount width when the region count has been independent of it for some time.
+ *
+ * The shape mattered. Had the 2026-07-30 mount-depth ruling been implemented by re-deriving this
+ * as `6 + 2 * depth`, it would have crossed **17** at depth 6 — and 17 is exactly where both
+ * shipping transports fall back to a heap-allocated iovec table (`transport_udp.cpp`,
+ * `transport_tcp.cpp`, `kMaxInlineIov = 16`; measured by `bench_transport_iov`). That would have
+ * put a per-frame allocation on every deep-mount forward hop while `bench_forward_heap` still
+ * reported `allocs=0`, because that gate drives a stub link which never assembles an iovec.
+ *
+ * At 9 the headroom to the transport spill is **8 regions**. Keep the mount one span and this
+ * constant does not move when the descent is uncapped.
  */
-inline constexpr std::size_t kFwdMaxIov = 6 + 2 * kMountPeekMax;
+inline constexpr std::size_t kFwdMaxIov = 9;
 
 /**
  * @brief The rebuilt forward-hop frame: fresh stack heads + the untouched source
@@ -475,7 +481,9 @@ struct fwd_rebuild_t {
      * `for_each_span`, which yields exactly one sub-span for a contiguous source
      * and one per straddled link for a rope — so only the caller's iov container
      * varies (a stack array for the span path, a pmr vector for the rope path).
-     * At most 6 regions for a contiguous source.
+     * At most @ref kFwdMaxIov regions for a contiguous source — see that constant
+     * for the region-by-region count. (This line previously said "at most 6",
+     * which omitted `head2`, `mount_tlv` and the peer pair.)
      *
      * @tparam Cursor A grammar byte-source cursor (span or rope) — the SAME
      *                source @ref rebuild_fwd_forward read the offsets from.
