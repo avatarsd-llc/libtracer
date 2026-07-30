@@ -43,21 +43,12 @@ void require(bool ok, const char* what) {
     }
 }
 
-/** @brief The 64-bit hot-core ceiling (measured 112 B post-#380-§1 children collapse;
- *         144 post-packing, 168 post-§3, 160 post-§2, 248 post-§1, 536 pre-split). */
-constexpr std::size_t kMax64 = 120;
-/** @brief The 32-bit (MCU target) hot-core ceiling — pointer-halved with the same
- *         headroom. Raised 72 -> 80 with the #380 §2 name-key SBO: the key's inline
- *         buffer adds <= 8 struct bytes on 32-bit but deletes a ~32 B heap block per
- *         named vertex (net RAM win; the heap is what the C6 measures). */
-constexpr std::size_t kMax32 = 80;
-
-static_assert(sizeof(void*) != 8 || sizeof(vertex_t) <= kMax64,
-              "vertex_t grew past the 64-bit RAM-diet gate (#361) — move the new member "
-              "behind vertex_ext_t, don't inline it");
-static_assert(sizeof(void*) != 4 || sizeof(vertex_t) <= kMax32,
-              "vertex_t grew past the 32-bit RAM-diet gate (#361) — move the new member "
-              "behind vertex_ext_t, don't inline it");
+// The `sizeof(vertex_t)` ceilings are NOT asserted here any more. They live with the type, in
+// `vertex.hpp`, keyed on `config_t::kMaxVertexBytes{64,32}` — so every build on every target
+// evaluates them under its own configuration. Asserting them here gated exactly one binding,
+// and never the 32-bit one at all: no CI leg cross-compiled this test, while the ESP-IDF legs
+// compiled `vertex_t` itself on every PR. What remains below is what a header cannot express —
+// the runtime probes that prove the cold extension block is not allocated for a default leaf.
 
 /**
  * @brief The stripe table's footprint gate: a padded stripe must be EXACTLY one padding
@@ -131,7 +122,8 @@ void late_settings_write_allocates_lazily() {
 /** @brief Run the gate's runtime probes and print the measured sizes for the CI log. */
 int main() {
     std::printf("sizeof(vertex_t)      = %zu (gate: <= %zu on this ABI)\n", sizeof(vertex_t),
-                sizeof(void*) == 8 ? kMax64 : kMax32);
+                sizeof(void*) == 8 ? tr::graph::config_t::kMaxVertexBytes64
+                                   : tr::graph::config_t::kMaxVertexBytes32);
     std::printf("sizeof(vertex_ext_t)  = %zu (lazily allocated, cold)\n",
                 sizeof(tr::graph::vertex_ext_t));
     default_leaf_shares_default_settings();
