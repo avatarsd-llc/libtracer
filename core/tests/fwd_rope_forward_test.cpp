@@ -126,6 +126,19 @@ tr::view::rope_t rope_split(std::span<const std::byte> bytes, std::span<const st
     return r;
 }
 
+/**
+ * @brief The label carried by an ADVERTISE frame — its first child, a 2-byte opaque VALUE.
+ *
+ * Needed because labels are PER-LINK: when this node re-advertises downstream it allocates a
+ * FRESH label for that link rather than reusing the inbound one, so a NACK fixture that reuses
+ * the inbound label looks up a route that was never bound and gets the silent return.
+ */
+[[nodiscard]] std::uint16_t advertise_label(std::span<const std::byte> frame) {
+    const auto dec = tr::wire::decode(frame);
+    if (!dec || dec->children.empty() || dec->children[0].payload.size() < 2) return 0;
+    return tr::detail::load_le<std::uint16_t>(dec->children[0].payload);
+}
+
 // --- fake transports ----------------------------------------------------------
 /** @brief A span link: records every send()'s bytes (the downstream egress under test). */
 class fake_link_t : public transport_t {
@@ -146,9 +159,22 @@ class fake_link_t : public transport_t {
  */
 class fake_rope_link_t : public transport_t {
    public:
-    void send(std::span<const std::byte>) override {}  // unused inbound-only link
+    /**
+     * @brief Records every send, because a rope link is not always inbound-only.
+     *
+     * `on_nack` re-advertises back on the link the NACK ARRIVED on, so for the self-heal the
+     * inbound link is also the egress. Discarding sends here made that whole path unobservable
+     * — the test could not tell a served NACK from a dropped one.
+     */
+    void send(std::span<const std::byte> frame) override {
+        sent_.emplace_back(frame.begin(), frame.end());
+    }
     [[nodiscard]] bool delivers_ropes() const override { return true; }
     void inject(tr::view::rope_t frame) { rx_.deliver_rope(std::move(frame)); }
+    std::vector<std::vector<std::byte>>& sent() { return sent_; }
+
+   private:
+    std::vector<std::vector<std::byte>> sent_;
 };
 
 /**
@@ -539,6 +565,130 @@ int main() {
         cli2.inject(rope_split(frame, every_byte));
         check(std::move(up2.sent()) == oracle, "a child with no source of its own still routes");
         check(only_default.served > 0, "drawing from the router's default, as before");
+    }
+
+    // HANDLE_NACK over a multi-link rope (#667). The gap this closes is not "one more opcode":
+    // a control frame misrouted into the FWD routing arm is SILENT — no error, no egress, no
+    // counter — so "nothing was sent" cannot tell correct handling from the bug. Ablating the
+    // rope routing gate was measured to take nack from 1 to 0 with the whole suite still green.
+    //
+    // The observable is an ADVERTISE back on the link the NACK ARRIVED on, not a stale-label
+    // callback: `on_nack` looks up `egress_route(inbound, label)` and returns SILENTLY when no
+    // route is bound. So the fixture must bind one first, which it does the way the wire does —
+    // an inbound ADVERTISE naming a child makes this node re-advertise downstream, and THAT is
+    // what records the egress route on the downstream link.
+    {
+        std::printf("HANDLE_NACK self-heal over a multi-link rope (#667):\n");
+        constexpr std::uint16_t kLabel = 0x2468u;
+
+        // The oracle: the same NACK routed contiguously, on a fixture built the same way.
+        const auto build = [](auto& router, auto& cli, auto& up) {
+            router.add_child("cli", cli);
+            router.add_child("up", up);
+            // Binds the egress route for ("up", kLabel) by making this node re-advertise.
+            cli.inject(tr::net::encode_advertise(kLabel, b_path({"up", "sensor"})));
+        };
+
+        std::vector<std::vector<std::byte>> oracle;
+        std::uint16_t down_label = 0;
+        {
+            graph_t g;
+            fwd_router_t router(g);
+            fake_link_t cli;
+            fake_link_t up;
+            build(router, cli, up);
+            check(up.sent().size() == 1, "the fixture's ADVERTISE bound an egress route on 'up'");
+            down_label = up.sent().empty() ? 0 : advertise_label(up.sent()[0]);
+            check(down_label != 0, "the downstream ADVERTISE carries the link's own label");
+            up.sent().clear();
+            up.inject(tr::net::encode_handle_nack(down_label));
+            oracle = std::move(up.sent());
+        }
+        check(oracle.size() == 1, "a contiguous HANDLE_NACK re-advertises exactly one frame");
+        if (!oracle.empty()) {
+            const auto dec = tr::wire::decode(oracle[0]);
+            check(dec && dec->type == type_t::ADVERTISE,
+                  "the self-heal emits an ADVERTISE, on the link the NACK arrived on");
+        }
+
+        // Every interior split of the NACK frame must reproduce it byte-for-byte.
+        const std::vector<std::byte> nack = tr::net::encode_handle_nack(down_label);
+        int checked = 0;
+        int mismatches = 0;
+        for (std::size_t cut = 1; cut < nack.size(); ++cut) {
+            graph_t g;
+            fwd_router_t router(g);
+            fake_link_t cli;
+            fake_rope_link_t up;  // rope-delivering AND recording — the NACK arrives here
+            router.add_child("cli", cli);
+            router.add_child("up", up);
+            cli.inject(tr::net::encode_advertise(kLabel, b_path({"up", "sensor"})));
+            up.sent().clear();
+            const std::size_t cuts[] = {cut};
+            up.inject(rope_split(nack, cuts));
+            ++checked;
+            if (up.sent() != oracle) ++mismatches;
+        }
+        check(checked > 0, "swept every interior split of the NACK frame");
+        check(mismatches == 0, "every 2-link NACK split self-heals byte-identically");
+
+        // And the adversarial extreme: one link per byte.
+        {
+            graph_t g;
+            fwd_router_t router(g);
+            fake_link_t cli;
+            fake_rope_link_t up;
+            router.add_child("cli", cli);
+            router.add_child("up", up);
+            cli.inject(tr::net::encode_advertise(kLabel, b_path({"up", "sensor"})));
+            up.sent().clear();
+            std::vector<std::size_t> every_byte;
+            for (std::size_t i = 1; i < nack.size(); ++i) every_byte.push_back(i);
+            up.inject(rope_split(nack, every_byte));
+            check(up.sent() == oracle, "one-link-per-byte NACK rope self-heals byte-identically");
+        }
+
+        // #667's unconfirmed rider, now pinned either way: is the NACK self-heal dead after
+        // clear_link? clear_link drops the link's whole table, and on_nack re-advertises from
+        // exactly the egress_route that table held — so after a (re)connect the self-heal has
+        // nothing to answer from. Whatever the answer, it stops being folklore.
+        {
+            graph_t g;
+            fwd_router_t router(g);
+            fake_link_t cli;
+            fake_rope_link_t up;
+            router.add_child("cli", cli);
+            router.add_child("up", up);
+            cli.inject(tr::net::encode_advertise(kLabel, b_path({"up", "sensor"})));
+            const std::uint16_t lbl = up.sent().empty() ? 0 : advertise_label(up.sent()[0]);
+            router.clear_link("up");  // what a transport calls on (re)connect
+            up.sent().clear();
+            std::vector<std::size_t> every_byte;
+            for (std::size_t i = 1; i < nack.size(); ++i) every_byte.push_back(i);
+            up.inject(rope_split(tr::net::encode_handle_nack(lbl), every_byte));
+            check(up.sent().empty(),
+                  "after clear_link the NACK self-heal sends NOTHING — the route it would "
+                  "re-advertise from is the one clear_link erased, so a peer that NACKs after a "
+                  "reconnect gets no answer and the flow only recovers on a fresh advertise");
+        }
+
+        // The silent-return leg, asserted so it cannot be mistaken for the bug it resembles:
+        // with NO egress route bound, on_nack returns before sending, and that is CORRECT.
+        {
+            graph_t g;
+            fwd_router_t router(g);
+            fake_link_t cli;
+            fake_rope_link_t up;
+            router.add_child("cli", cli);
+            router.add_child("up", up);
+            std::vector<std::size_t> every_byte;
+            for (std::size_t i = 1; i < nack.size(); ++i) every_byte.push_back(i);
+            up.inject(rope_split(nack, every_byte));
+            check(up.sent().empty(),
+                  "a NACK for an unbound label sends nothing — the silent "
+                  "return is by design, and is why the bound case above is "
+                  "the assertion that has teeth");
+        }
     }
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
