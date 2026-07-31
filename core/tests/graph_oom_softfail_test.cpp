@@ -217,14 +217,28 @@ void test_target_clone_drop() {
         r.append(make_value({0x0C}));
         return r;
     };
+    const std::uint64_t oom_before = g.delivery_drops().out_of_memory;
     {
         g_reject_size = 3 * sizeof(view_t);  // exactly the clone's chain reserve
         const hook_guard_t oom(fail_exact);
         check(g.write(a, three_link()).has_value(), "the source write itself succeeds");
     }
     check(!g.read(b).has_value(), "the target delivery leg was dropped (no partial write)");
+
+    // ASSERT THE OBSERVABLE, not only the behaviour. A dropped delivery is otherwise
+    // indistinguishable from one that never had a target, and `delivery_drops()` is the only
+    // thing that tells an operator which happened. This path was already exercised here and
+    // the counter was never checked, so `out_of_memory` could have stopped counting without
+    // any test noticing.
+    const auto d = g.delivery_drops();
+    check(d.out_of_memory == oom_before + 1, "the OOM drop is counted once, by its own cause");
+    check(d.no_target == 0 && d.denied == 0,
+          "and is not attributed to a missing target or a denied write");
+
     check(g.write(a, three_link()).has_value() && g.read(b).has_value(),
           "the target edge delivers again once memory returns");
+    check(g.delivery_drops().out_of_memory == oom_before + 1,
+          "and the successful redelivery counts no further drop");
 }
 
 /** @brief A stream's ring append is shed under OOM (bounded-lossy), the LKV still lands. */
