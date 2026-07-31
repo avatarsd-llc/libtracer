@@ -277,6 +277,74 @@ void test_await() {
           "ERROR payload == STATUS{ ERROR{ VALUE u16=0x0041 tr::flow::timeout } }");
 }
 
+/**
+ * @brief #585: an AWAIT carrying a FIELD selector answers SCHEMA_NOT_FOUND instead of
+ *        silently awaiting the whole vertex.
+ *
+ * Pre-fix, the selector was decoded, validated, and then DISCARDED, so `await <v>:<anything>`
+ * was byte-identical to `await <v>` — a peer asking to be woken on one facet got the vertex,
+ * or `tr::flow::timeout`, which it cannot tell from a quiet link.
+ *
+ * Verified against a build with the guard deleted: exactly TWO assertions flip — the two
+ * status-CODE checks, which see 0x0041 `tr::flow::timeout` there instead of 0x0031. Read those
+ * two. The `-> ERROR` checks beside them pass on the broken build too (a timeout is also an
+ * ERROR reply), and the field-less case is an explicit CONTROL that must pass both ways,
+ * pinning that ordinary await is untouched.
+ */
+void test_await_field_selector_is_enotty() {
+    std::printf("AWAIT + :field -> ERROR(SCHEMA_NOT_FOUND), never a silent vertex await:\n");
+    graph_t g;
+    op_resolver_t resolver(g);
+    const auto path = path_t::parse("/sensor/temp");
+    (void)g.register_vertex(*path, role_t::STORED_VALUE);
+
+    std::vector<std::byte> tbuf(8);
+    tr::detail::store_le<std::uint64_t>(tbuf, 1'000'000ull);  // 1ms, so the control is quick
+
+    const auto await_with = [&](const std::vector<std::byte>& sel) {
+        const auto f = b_fwd(fwd_op_t::AWAIT, b_path({"sensor", "temp"}), b_path({"reply-ep"}), sel,
+                             b_value(tbuf));
+        auto reply = resolve_bytes(resolver, f);
+        check(reply.has_value(), "resolve AWAIT returned");
+        return decode_reply(*reply);
+    };
+    const auto field_named = [](const char* name) {
+        std::vector<std::byte> out;
+        tr::wire::emit_tlv(out, type_t::FIELD, opt_t{.pl = true}, b_name(name));
+        return out;
+    };
+
+    // A field that does not exist for ANY verb.
+    {
+        const auto d = await_with(field_named("zzz_no_such_field"));
+        const tlv_t& r = d.tlv;
+        check(value_u8(r.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR),
+              "AWAIT :zzz_no_such_field -> ERROR");
+        check(status_error_code(r.children[4]) == 0x0031 /*tr::schema::not_found*/,
+              "... and the code is SCHEMA_NOT_FOUND, not flow::timeout");
+    }
+
+    // A field that DOES exist for read and write. Still ENOTTY: the field is real, the
+    // await surface is not (RFC-0010 §C). This is what separates "unknown field" from
+    // "await has no field surface" — the fix is the second, not the first.
+    {
+        const auto d = await_with(field_named("subscribers"));
+        const tlv_t& r = d.tlv;
+        check(value_u8(r.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR),
+              "AWAIT :subscribers -> ERROR (the field is real; the await is not)");
+        check(status_error_code(r.children[4]) == 0x0031 /*tr::schema::not_found*/,
+              "... SCHEMA_NOT_FOUND, though READ/WRITE serve :subscribers fine");
+    }
+
+    // CONTROL — passes with or without the fix. Ordinary await must still time out.
+    {
+        const auto d = await_with({});
+        const tlv_t& r = d.tlv;
+        check(status_error_code(r.children[4]) == 0x0041 /*tr::flow::timeout*/,
+              "control: a field-less AWAIT still answers flow::timeout");
+    }
+}
+
 void test_subscribers_field() {
     std::printf(":subscribers[] — WRITE a SUBSCRIBER, then READ the array (rope of slot views):\n");
     graph_t g;
@@ -667,6 +735,7 @@ int main() {
     test_read_zero_copy();
     test_write();
     test_await();
+    test_await_field_selector_is_enotty();
     test_subscribers_field();
     test_write_trailer_sliced();
     test_store_ref_threshold();
