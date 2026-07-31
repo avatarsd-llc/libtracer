@@ -390,6 +390,11 @@ add_test(NAME edge_eviction COMMAND edge_eviction_test)
 # ADR-0053 ④b — the FWD forward hop over a MULTI-LINK rope, without flattening: an oracle
 # equality that every adversarial split routes byte-identically to the contiguous path,
 # plus the terminus flatten fallback.
+add_executable(fwd_terminus_reject_test fwd_terminus_reject_test.cpp)
+target_link_libraries(fwd_terminus_reject_test PRIVATE libtracer)
+libtracer_test_warnings(fwd_terminus_reject_test)
+add_test(NAME fwd_terminus_reject COMMAND fwd_terminus_reject_test)
+
 add_executable(fwd_malformed_control_test fwd_malformed_control_test.cpp)
 target_link_libraries(fwd_malformed_control_test PRIVATE libtracer)
 libtracer_test_warnings(fwd_malformed_control_test)
