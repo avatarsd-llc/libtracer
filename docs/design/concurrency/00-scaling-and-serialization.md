@@ -77,7 +77,11 @@ default 16, the sharing rationale at `vertex.hpp:717`). The stripe is selected b
 `vertex_stripe_of` (`:799`) from the vertex address, hashed `(h >> 6) % kVertexLockStripes`
 (`:795`). The stripes guard the fan-out edge list, the STREAM ring, the write-sequence bump and
 the ACL state. `snapshot_edges` (`:1482`) takes one on **every delivery**; so do `add_edge`,
-`clear_edge` and `set_acl`.
+`clear_edge` and `set_acl`. It is reached only when the written vertex has an edge of its own:
+`fan_out` returns on a zero `own_subs_ordered()` first, so an unobserved write — and every
+placeholder ancestor a bubble walks past — touches no stripe at all
+([#635](https://github.com/avatarsd-llc/libtracer/issues/635); before 2026-07-31 it did, which
+is why the same-stripe write arm scaled negatively).
 
 The table has two realizations, chosen by whether the platform's `std::mutex` has a constexpr
 constructor. Duplicated here from the configuration notes because a reader reasoning about
@@ -108,6 +112,13 @@ The write-sequence read, the subtree-listener counters (`own_subs_`, `listeners_
 `OWN_ACES` bit, the branch/leaf fork bit, the cold-extension pointer `ext_`, and the publish
 itself when no waiter is parked
 ([#555](https://github.com/avatarsd-llc/libtracer/pull/555)).
+
+Since [#635](https://github.com/avatarsd-llc/libtracer/issues/635) the **whole delivery decision
+for an unobserved write** is on this list: two counter loads and no lock. One of them,
+`own_subs_ordered()`, is read `seq_cst` rather than relaxed — it is the only read that decides
+whether to deliver at all, so it pairs against a subscribe taking ADR-0049's latch. Every other
+reader of the same counter stays relaxed, because deciding *how much* work to do can safely be
+one publish behind; deciding *whether* cannot.
 
 ---
 
