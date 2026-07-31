@@ -151,8 +151,58 @@ ruling look like it contradicts an accepted decision, when it contradicts an unb
 §3's `dst`-monotonicity clause and the ADR-0037 invariant-#3 retraction both stand. Only the
 "stateless per-frame segment cap (N from `MAX_HOPS`)" clause is withdrawn, in both places.
 
+*(Correction, 2026-07-31: "both places" undercounted. The clause has a **third** site —
+[ADR-0037](0037-net-side-channels-dissolve-into-vertex-tree-compositor.md)'s Status line, which
+inherited it from this document while describing what corrects it, and which a reader meets before
+either of the two sites above. Now annotated there. The lesson is the one
+[#605](https://github.com/avatarsd-llc/libtracer/issues/605) recorded: a retraction has to sweep
+the documents that **cite** it, not only the one it lives in.)*
+
 **One arithmetic note, which does not affect the bound.** §3 says `dst` "shrinks one segment per
 hop". Since RFC-0014 S2a a hop strips its whole `net/<module>/<name>[/<peer>]` **mount run** — one
 to four segments. The monotonicity argument is unchanged and if anything stronger: `dst` shrinks by
 **at least** one segment per hop, so a route still terminates in at most `len(dst)` hops. The
 historical text is left as written; this note is the correction.
+
+## Erratum (2026-07-31): §3's `route_handle_t` description is historical, and its target landed in a different shape
+
+Two passages describe `route_handle_t` in the **present tense**, and neither matches the code any
+more. This erratum does not retract the decision — the per-connection split §3 called for did
+happen — it records that the structure it names is gone and the realization diverged.
+
+§3's "Wrong claim 2" bullet names `route_handle_t::egress_`, `egress_label_` and `next_label_`, and
+says *"`route_handle.hpp:158` is a node-global `std::mutex` today"*. §3's egress bullet then says
+*"the node-global `std::mutex` + four `std::map` of today's `route_handle_t` dies; each connection
+owns its slice as a **fixed-capacity open-addressed table** (`u16` → slot, routes in pooled
+segments), sized by `:settings`"*.
+
+**What is actually in tree:**
+
+| §3 says | today (`route_handle.hpp:279-296`) |
+| --- | --- |
+| `egress_` / `egress_label_` / `next_label_` node-global members | none exist; the state is a per-link `link_tables_t` |
+| a node-global `std::mutex` at `:158` | `:158` is a doc comment; each link has its own `std::mutex m` (`:279`) and `links_m_` (`:295`) is a `shared_mutex` over the **registry only** |
+| four `std::map` | one `std::pmr::map` registry (`:296`) plus **two `std::pmr::vector`** per link (`:280-281`) |
+| a fixed-capacity open-addressed table | growable pmr vectors with a linear scan — deliberate, per their own comment: a link carries few compact flows, so a linear scan beats a node-based map |
+| `next_label_` becomes one `std::atomic<u16>` fetch-add | a plain `std::uint16_t` (`:282`) under the per-link mutex |
+
+So the *goal* of the egress bullet — "hot path lock-free, flow-setup per-connection-spinlocked", no
+cross-link contention — was met by a different mechanism than the one specified, and the
+node-global lock the bullet indicts is genuinely gone.
+
+**Two clauses are still unbuilt, and they are tracked, not withdrawn:**
+
+- ***"sized by `:settings`"*** — there is **no bound of any kind** on the per-link tables today.
+  `ingress` is push_back-only and peer-driven. This is [#603](https://github.com/avatarsd-llc/libtracer/issues/603)
+  defect 2, and this clause is the ADR-side warrant for fixing it with an **injected** bound rather
+  than a constant — matching `can_reassembly_t`'s `max_groups` and the
+  [CONTEXT.md §Resource bound](../../CONTEXT.md) rule.
+- ***"routes in pooled segments"*** — routes are `std::pmr::vector<std::byte>` drawn from `mr_`,
+  which is host-chosen memory but not the pooled-segment substrate this bullet describes.
+
+**One clause was unbuilt and is now built.** *"Exhaustion falls back to full-route `FWD{WRITE}`"*
+was specified here for a table that never shipped, so nothing implemented it: the allocator wrapped
+through the reserved `0` and back onto **live** labels, which is a silent misroute
+([#603](https://github.com/avatarsd-llc/libtracer/issues/603) defect 3). #701 made the allocator
+saturate and `deliver_remote` fall through to the full-route form on exhaustion — this bullet's
+semantics, without the table rewrite.
