@@ -1949,9 +1949,35 @@ class vertex_t {
     [[nodiscard]] std::uint32_t own_subs() const noexcept {
         return own_subs_.load(std::memory_order_relaxed);
     }
-    /** @brief Adjust the own active-slot count by @p delta (subscribe/unsubscribe). */
+    /**
+     * @brief The same count under `seq_cst` — the SUBSCRIBE half of a Dekker pair, and the
+     *        only read that may be used to SKIP a fan-out (#635).
+     *
+     * A relaxed read is fine for every consumer that only decides how much work to do
+     * (@ref own_subs above). It is NOT fine for one that decides whether to deliver at all:
+     * a publisher that skips `snapshot_edges` on a zero count must be ordered against a
+     * subscribe that is concurrently taking ADR-0049's durability latch, or the new
+     * subscriber gets the latch's OLD value and never sees the publish that raced it.
+     *
+     * The pairing is the one @ref store already documents for `waiters`. PUBLISHER: store
+     * the LKV, THEN load this count. SUBSCRIBER: bump this count, THEN load the LKV into
+     * the latch. Both sides `seq_cst`, so they share one total order: a publisher that
+     * reads zero is ordered before the subscriber's bump, hence before the subscriber's
+     * latch load — so the latch carries the value the skipped fan-out would have delivered.
+     * The other interleaving (count already bumped, slot not yet appended) costs one
+     * pointless lock acquisition that snapshots nothing, never a lost delivery.
+     */
+    [[nodiscard]] std::uint32_t own_subs_ordered() const noexcept {
+        return own_subs_.load(std::memory_order_seq_cst);
+    }
+    /**
+     * @brief Adjust the own active-slot count by @p delta (subscribe/unsubscribe).
+     * @note `seq_cst`, not relaxed: this is the subscriber's half of the pair
+     *       @ref own_subs_ordered describes. Subscribe is control-plane-cold, so the
+     *       stronger order costs nothing that is measured.
+     */
     void bump_own_subs(std::int32_t delta) noexcept {
-        own_subs_.fetch_add(static_cast<std::uint32_t>(delta), std::memory_order_relaxed);
+        own_subs_.fetch_add(static_cast<std::uint32_t>(delta), std::memory_order_seq_cst);
     }
     /** @brief The active subscriber slots on strict ancestors — the one relaxed load the
      *         write hot path pays before deciding whether to walk ancestors at all. */

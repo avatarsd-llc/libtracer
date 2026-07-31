@@ -48,6 +48,13 @@ graph. The edge list therefore has to be copied out first. `fan_out` (`graph.cpp
 in one call to `snapshot_edges` (`core/include/libtracer/vertex.hpp:1482`), which takes the
 vertex stripe mutex, walks `subs_`, and fills one of two buffers.
 
+It reaches that call only when something subscribes here. `fan_out` opens on
+`own_subs_ordered() == 0 ⇒ return` (#635), so an unobserved write — and every placeholder
+ancestor a `bubble_up` walks past — never touches the stripe at all. That gate is why the
+count is read `seq_cst` in this one place and relaxed everywhere else: it is the only read
+that decides whether to deliver, so it has to be ordered against a subscribe taking ADR-0049's
+latch, or a write racing the subscribe reaches neither leg.
+
 The two-buffer split is the point. `fan_out` chooses which pair of buffers to hand in from the
 lock-free `own_subs()` count:
 
@@ -84,7 +91,7 @@ Declared in `core/include/libtracer/graph.hpp`, all private:
 | function | declaration | role |
 | --- | --- | --- |
 | `deliver_vertex` | `graph.hpp:820` | the per-vertex delivery unit both `write` and `propagate` build on: `fan_out`, then `bubble_up` if anyone listens above |
-| `fan_out` | `graph.hpp:800` | snapshot under the stripe lock, then `dispatch_edge` per view, outside it |
+| `fan_out` | `graph.hpp:800` | return at once if nothing subscribes here; else snapshot under the stripe lock, then `dispatch_edge` per view, outside it |
 | `dispatch_edge` | `graph.hpp:806` | the one dispatch of an edge's three legs, shared by `fan_out` and the admission durability latch so the legs cannot diverge |
 | `dispatch_edge_target` | `graph.hpp:812` | the local re-dispatch leg — a delivery into another vertex |
 | `dispatch_edge_remote` | `graph.hpp:813` | the remote leg — a `FWD{WRITE}` through the injected sink |
@@ -99,6 +106,8 @@ non-empty link name.
 `bubble_up` (`graph.cpp:866`, entered only when `listeners_above() > 0`, `:1062`) walks parent pointers, which
 are immutable once linked, and so takes **no lock at all**; a placeholder ancestor holds no edges
 and its `fan_out` is a no-op. An idle write — nobody subscribed above — pays one relaxed load.
+
+> **This paragraph was false until 2026-07-31 ([#635](https://github.com/avatarsd-llc/libtracer/issues/635)), and so were the three reference-doc statements of the same cost model.** A placeholder ancestor's `fan_out` was *not* a no-op and an idle write did *not* pay one relaxed load: `fan_out` reached `snapshot_edges` unconditionally, and `snapshot_edges` takes the vertex **stripe mutex** before it looks at anything. So an unobserved write took a lock shared with `kVertexLockStripes`-many unrelated vertices, and each ancestor `bubble_up` visited took another. `fan_out` now gates on `own_subs_ordered()` first, which is what makes the sentence above true as written — modulo the load being `seq_cst` rather than relaxed, because it is the one read that decides whether to deliver at all (see `vertex_t::own_subs_ordered` for the pairing that requires it).
 
 ---
 
@@ -260,5 +269,6 @@ same risk.
 | The stripe lock is the residual on the read path | `snapshot_edges` is on the **delivery** path; `graph_t::read` never calls it | Read the call graph before attributing a cost to a lock |
 | A digest that removes 91% of a scan is a win | It also added ~30 ns to every lookup — a fifth of a forward hop — which the improved axis does not show | Measure the axis **not** being improved, on the same binary |
 | A ×16.6 lock removal describes the workload | ×16.6 is the shape built to collide on one stripe; the shape that does not collide measures 1.02× | Run the adversarial and the realistic shape in the same session, and quote both |
-| A zero-subscriber write skips the delivery machinery | `fan_out` reaches `snapshot_edges` unconditionally, so a write with no subscribers takes the stripe lock too | Bench the fan-0 topology, not only fan-1 |
+| A zero-subscriber write skips the delivery machinery | It does **since #635** and did not before — `fan_out` reached `snapshot_edges` unconditionally, so an unobserved write took the stripe lock too. Three reference docs asserted the near-free-when-idle model this whole time | Bench the fan-0 topology, not only fan-1 — and when a doc states a cost model, check the code keeps it |
+| Removing a lock cannot make a shape slower | On the ONE-shared-vertex fan-0 arm, removing the stripe lock from the idle path made it **slower**: the mutex was accidental admission control in front of libstdc++'s spin-locked `atomic<shared_ptr>`, and unthrottled spinners thrash it. Two independent changes (the #635 gate, and a `shared_mutex` split) reproduced it at the same magnitude | Keep a true-sharing arm alongside the false-sharing one; a change that helps one can hurt the other |
 | A wide fan-out allocates per publish | A **warm** wide publish reuses the thread-local buffer's capacity; a cold one, and a nested re-entrant one, allocate | Time the second publish and the first separately; a re-entrant callback puts you on the local-buffer path |

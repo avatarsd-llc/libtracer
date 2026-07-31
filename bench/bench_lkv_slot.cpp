@@ -76,15 +76,19 @@
  *   stripe1     T threads driving T DISTINCT vertices deliberately chosen to collide on a
  *               single `vertex_stripe_t`. After #555 a waiterless non-STREAM publish takes
  *               no stripe lock at all, so the expectation was that this arm now matches
- *               `spread`. **It does not** — `fan_out` reaches `snapshot_edges`, which takes
- *               the stripe mutex unconditionally, and that lock costs ×16.6 at T=24. See
- *               ADR-0064's corrected "Considered options" entry.
+ *               `spread`. It did not, because `fan_out` reached `snapshot_edges` — and its
+ *               stripe mutex — unconditionally. **#635 (2026-07-31) gated that on the
+ *               subscriber count**, which closes the gap at fan-0 (×10.4 at T=24) and
+ *               leaves it wide open at fan-1, where the gate cannot fire. This arm is now
+ *               the measure of what a lock-free EDGE SNAPSHOT would buy on top.
  *   spread      T threads writing T distinct vertices on T distinct stripes. Capped at
  *               tr::graph::kVertexLockStripes threads, since beyond that a collision is
  *               forced by the pigeonhole.
  *
  * Each topology runs at fan-0 (the store leg alone) and fan-1 (`inproc`, the reference point
- * the rest of the suite sweeps around), because the stripe lock is taken on both.
+ * the rest of the suite sweeps around). Since #635 the two differ in KIND, not just degree:
+ * fan-0 returns from `fan_out` before the lock, fan-1 still takes it once per publish. Keep
+ * both — fan-0 is what guards the gate, fan-1 is what still has headroom in it.
  *
  * DIAGNOSTIC, not a CI gate: thread-contention numbers are runner-dependent, so this is
  * deliberately not wired into perf.yml's regression gate — the same call
@@ -777,10 +781,10 @@ enum class op_t { WRITE, READ };
  *
  * @p subs selects the leg: 0 subscribers is the STORE leg alone (the 233-of-335 cycles
  * ADR-0064 attributes to it); 1 subscriber is `inproc`, the fan-1 reference point the rest
- * of the suite sweeps around. Both are run, because `graph_t::fan_out` takes the stripe
- * mutex in `snapshot_edges` **unconditionally** — a zero-subscriber write pays it too — so
- * measuring only the empty case would leave the finding open to "that is just the idle
- * path".
+ * of the suite sweeps around. Both are run because they now exercise DIFFERENT code: since
+ * #635 `graph_t::fan_out` returns on a zero subscriber count without reaching the stripe
+ * mutex at all, so fan-0 is the guard on that gate and fan-1 is the arm that still pays the
+ * lock once per publish.
  */
 void run_graph(topo_t topo, std::size_t T, std::size_t subs, op_t op) {
     if (topo == topo_t::SPREAD && T > tr::graph::kVertexLockStripes) return;  // pigeonhole
