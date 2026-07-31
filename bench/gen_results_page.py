@@ -19,6 +19,7 @@ Stdlib only.
 """
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import os
 import pathlib
@@ -74,210 +75,474 @@ def cross_core_block() -> str:
     return body, ("CONFORMANCE: PASS" in out)
 
 
-DEMUX_BLOCK = """\
-What one **FWD forward hop** costs in the router — before any payload is touched, measured
-by `bench/bench_forward_demux.cpp`.
+# ---------------------------------------------------------------------------
+# the page's own chapter list — numbering and cross-references are DERIVED
+# ---------------------------------------------------------------------------
+# Chapter numbers used to be typed into the heading AND into every sentence that
+# referenced one ("§4's counted bytes", "see #8-raw-data-provenance"). They drifted:
+# the surface table pointed at §1-§6 while the chapters it described were §5-§10, and
+# the raw-browser link in `charts_for` pointed at an anchor no heading produced. One
+# ordered list, numbered here, is what stops that.
+CHAPTERS: tuple[tuple[str, str], ...] = (
+    ("metrics", "What the metrics mean"),
+    ("gates", "What actually stops a regression"),
+    ("noise", "Noise, variance, and what one number is worth"),
+    ("surfaces", "The measurement surfaces, and the instruments behind them"),
+    ("conformance", "Cross-core conformance (every native core must agree byte-for-byte)"),
+    ("dispatch", "Dispatch — in-process latency & throughput"),
+    ("routing", "Wire & routing — what a framed hop costs"),
+    ("memory", "Memory & allocation"),
+    ("zenoh", "libtracer vs Zenoh — measured, absolute"),
+    ("codec", "Cross-core codec performance (decode→encode roundtrip, same v1 vectors)"),
+    ("tests", "Test rollup (live ctest, unified with the perf surface)"),
+    ("repro", "Reproducing this page locally"),
+    ("raw", "Raw data & provenance"),
+)
+_CH_NUM = {cid: n for n, (cid, _) in enumerate(CHAPTERS, start=1)}
+_CH_TITLE = dict(CHAPTERS)
 
-A hop performs **two** linear scans of the connection registry, and the bench is arranged so
-both are visible:
 
-- `by_segments` resolves the `dst` mount (`net/<module>/<name>`, ADR-0061);
-- `entry_by_name` fetches the **inbound** child's precomputed `src` prefix.
+def ch(cid: str) -> str:
+    """@brief A chapter cross-reference (`§7`), numbered from CHAPTERS."""
+    return f"§{_CH_NUM[cid]}"
 
-`fixed` places the target child first, so its lookup hits immediately and that chart isolates the
-size-independent part of a hop. `scan` places it last, so the lookup walks the whole table — the
-rise of the `scan` chart over the `fixed` one, at the same registry size, is the scan's marginal
-cost. Read them as a pair; neither is meaningful alone."""
 
-DEMUX_NOTES_BLOCK = """\
-### Two corrections this bench exists to prevent
+def head(cid: str) -> str:
+    """@brief A chapter's `##` heading line, numbered from CHAPTERS."""
+    return f"## {_CH_NUM[cid]} · {_CH_TITLE[cid]}"
 
-**Timing must be batch-amortized.** A hop costs the same order as `clock_gettime`, so timing
-each hop individually measures the clock. An early draft did exactly that and reported the
-whole-table scan *beating* the first-hit lookup — the signature of a clock-dominated window.
-The bench calibrates its batch size against the host's own clock and prints what it chose,
-rather than hardcoding a number tuned on one machine.
 
-**Both scans must be visible.** An earlier revision registered the inbound child *first*, so
-`entry_by_name` always hit at position 1 and was invisible: the bench reported one scan's cost
-and called it the hop. Registering it *last* was supposed to fix that — but the bench then
-registered the inbound link **twice**, once at each end, so the lookup matched the first slot
-at position 1 regardless and the fix never took effect. (That duplicate was also a real
-registry bug: a shadow slot that survived `erase`.) Both are gone; the numbers above are the
-first that actually include the second scan.
+def anchor(cid: str) -> str:
+    """@brief The MyST heading anchor a chapter's heading produces."""
+    slug = re.sub(r"[^a-z0-9]+", "-", f"{_CH_NUM[cid]} {_CH_TITLE[cid]}".lower())
+    return "#" + slug.strip("-")
 
-**The timed path must be the production path.** The bench used to call `on_frame` by name — a
-ctx-less entry only tests and SDK hosts take. A real transport delivers through the receiver
-`add_child` installs, which is bound to a stable per-child ctx. The hop is now driven through
-the inbound link's receiver, so what is timed is what ships.
 
-The two scans are not interchangeable: `entry_by_name` compares whole strings (a length check
-rejects most candidates), while `by_segments` compares a qualified key piecewise — which is
-why the `dst` scan dominates, at roughly 7:1 measured.
+# ---------------------------------------------------------------------------
+# the instrument registry — every table on this page is derived from it
+# ---------------------------------------------------------------------------
+@dataclasses.dataclass(frozen=True)
+class surface_t:
+    """@brief One measurement surface: the unit of comparability on this page."""
 
-### Where the hop stops, and why
+    id: str
+    title: str
+    measures: str
+    rule: str
+    extra: tuple[str, ...] = ()     # harnesses that are not a `bench/bench_*.cpp`
+    extra_at: tuple[str, ...] = ()  # chapters those extra harnesses appear in
 
-After the duplicate header parse was removed the hop sits at ~86 ns, and **~85% of that is still
-TLV header parsing** — but it is now nine *distinct* header reads, none of them a duplicate: the
-FWD header, the op VALUE, the dst PATH and four `dst` segments in the peek, plus the selector peek
-and the src PATH in the rebuild. Each header is read exactly once.
 
-Two source-level levers were implemented and measured, and **both regress**, so neither was taken:
+SURFACES: tuple[surface_t, ...] = (
+    surface_t("conformance", "Cross-core conformance", "byte-exactness across cores, not speed",
+              "any DISAGREE fails CI", ("tests/conformance/run-all.py",), ("conformance",)),
+    surface_t("inproc", "In-process timing", "per-operation latency and throughput in one process",
+              "gated per PR and per `main` push, same-runner"),
+    surface_t("framed", "Framed-hop timing", "what one wire frame costs, before and after the payload",
+              "batch-amortized against the host clock, self-calibrating"),
+    surface_t("counted", "Allocation counting", "exact allocations and bytes around ONE operation — counted, never timed",
+              "forward hop hard-gated at zero; per-vertex block count ratcheted exactly"),
+    surface_t("net", "Network timing", "one-way latency over a real socket, two processes",
+              "same topology for both engines; p50, the p99 tail and the p999 deep tail — "
+              "published, never gated"),
+    surface_t("compare", "Engine comparison", "libtracer and Zenoh side by side, absolute",
+              "same runner, same pass — no ratios"),
+    surface_t("codec", "Cross-core codec", "decode→encode roundtrip per implementation",
+              "the same v1 vectors for every core",
+              ("bindings/typescript/…/bench/perf.mjs", "bindings/rust/examples/perf.rs"),
+              ("codec",)),
+    surface_t("scaling", "Concurrency & scaling", "how one shared object behaves as threads are added",
+              "many-core host, run on demand — not part of the published sweep"),
+    surface_t("meta", "Instrument self-check", "that the harness's own estimator reproduces a distribution it was given",
+              "run before trusting a published percentile; touches neither clock nor library"),
+)
 
-| variant | p50 |
-| --- | ---: |
-| as shipped | **86–87 ns** |
-| `read_fwd_header` forced `always_inline` | 95–96 ns (+10%) |
-| narrowed header struct (48 → 40 bytes) | 95–96 ns (+10%) |
 
-The reasoning that motivated them was sound and the measurement still refuted it. `read_fwd_header`
-parses into a seven-field grammar struct through a `std::expected`, then repacks into a six-field
-one through a `std::optional`, for a path that reads four fields — which looks like obvious waste.
-Disassembly says otherwise: at `-O3` the parse is fully inlined with values flowing in registers
-straight into the narrow struct's stores. There is no intermediate object and no copy, so the
-repack costs **zero instructions** and removing it at source level can only make things worse.
-Forcing the inline is worse still — nine copies of a ~450-byte parser cost more in instruction
-cache than the single well-predicted out-of-line call it replaces.
+@dataclasses.dataclass(frozen=True)
+class instrument_t:
+    """@brief One harness: what it drives, what it reports, and where that lands.
 
-The gather is not a lever either: it measures ~1.6 ns, not the ~11 ns an earlier profile
-attributed to it. It fills a stack `std::array` of spans and allocates nothing, which the
-`allocs=0` gate pins.
+    `what` is the whole description a reader gets — one or two sentences, present
+    tense, no history. If a bench needs more than that to be understood, the place
+    for it is the bench's own file header, an ADR, or the CHANGELOG.
+    """
 
-So the forward hop is at a local optimum for its current structure. Recording that here is
-deliberate — "the compiler already did it" is not visible from the source, and the two obvious
-edits both look like clear wins right up until they are measured.
-### What the shape means
+    src: str
+    surface: str
+    sections: tuple[str, ...]  # chart sections this bench feeds; () = not charted here
+    what: str
+    units: str
+    gate: str = "—"
 
-The size-independent term is flat across N, as the design predicted. The term that grows is
-the **scan**.
 
-**Per-module scoping does not narrow it.** ADR-0061 and an earlier revision of this page both
-claimed that keying the registry per module turns a whole-table walk into a walk of one
-module's members. That was an inference, and measurement refuted it: scoping changed the
-*key*, not the *container*. Building the implied module-bucketed index moved N=64 from 363 ns
-to 390 ns — no win. A node's links overwhelmingly sit in **one** module (a device has many
-`ws-server` peers, not many modules), so bucketing relocates the scan instead of shortening
-it. The per-module key earns its place by keeping two modules' same-named connections
-distinct — a **correctness** property. It buys no lookup time.
+INSTRUMENTS: tuple[instrument_t, ...] = (
+    # -- the published sweep ------------------------------------------------
+    instrument_t(
+        "bench_libtracer.cpp", "inproc", ("dispatch", "routing", "memory"),
+        "Drives the in-process hot path — resolve a vertex, write a value, notify, deliver — "
+        "swept over fan-out, payload size, topic count, thread count, endpoint type, value "
+        "backend and dispatch mode. Every `<mode>` row has a `<mode>-batch` twin timed over a "
+        "calibrated batch instead of one operation at a time. Its `fold-*`, `lkv-*` and "
+        "`*alloc-mt*` rows are what the routing and memory chapters chart.",
+        "ns p50 / p99 / mean · deliveries/s",
+        "per-PR + per-push gate, six canonical points"),
+    instrument_t(
+        "bench_forward_demux.cpp", "framed", ("routing",),
+        "Drives one FWD forward hop through the inbound link's own receiver against a registry "
+        "of N links, with the target child registered first (`fixed`) or last (`scan`). It "
+        "never resolves a vertex, so it measures routing alone.",
+        "ns p50, batch-amortized",
+        "recorded per `main` push"),
+    instrument_t(
+        "bench_compact_delivery.cpp", "framed", ("routing",),
+        "Drives the Nth `COMPACT` frame on an already-advertised binding — the steady state of "
+        "an established flow — in both its forms: the label resolves locally (`terminus`) or "
+        "swaps and re-emits downstream (`forward`).",
+        "ns p50 · allocations per frame",
+        "recorded per `main` push"),
+    instrument_t(
+        "bench_forward_heap.cpp", "counted", ("memory",),
+        "Replaces the global allocator with a counting wrapper and arms it around exactly one "
+        "operation, so every number is an exact count rather than a sample. Eight probes: the "
+        "forward hop, a terminus resolve, five resident-vertex shapes, and a wire-driven "
+        "registration's escape from the injected memory seam.",
+        "allocations · live usable-size bytes",
+        "forward hop = 0 allocations; per-vertex bytes +2%, block counts exact"),
+    instrument_t(
+        "bench_codec.cpp", "codec", ("codec",),
+        "Decodes and re-encodes every shared v1 conformance vector through the C++ core — the "
+        "`lang` axis of the cross-core codec surface, run identically by the TypeScript and "
+        "Rust cores over the same inputs.",
+        "ns per roundtrip · roundtrips/s",
+        "—"),
+    instrument_t(
+        "bench_zenoh.cpp", "compare", ("zenoh",),
+        "The Zenoh side of the in-process comparison: intra-session peer pub/sub over zenoh-c, "
+        "sweeping the same fan-out / payload / endpoint matrix and emitting the same RESULT rows.",
+        "ns p50 / p99 · deliveries/s",
+        "—"),
+    instrument_t(
+        "bench_transports.cpp", "net", ("zenoh",),
+        "libtracer's network latency: a publisher and a subscriber process on one host, one "
+        "transport each (UDP / TCP / WebSocket), payload carrying a send timestamp so one-way "
+        "latency is valid across the two processes. Every paced probe is kept, so the same run "
+        "yields the deep tail and the sample count that backs it.",
+        "ns p50 / p99 / p999 / max, one-way · samples per point",
+        "—"),
+    instrument_t(
+        "bench_zenoh_net.cpp", "net", ("zenoh",),
+        "The Zenoh side of the same two-process network measurement, over a configured UDP "
+        "endpoint with multicast scouting disabled so the pair talks only over that socket. It "
+        "shares the subscriber-side accumulator with the libtracer arm, so both engines' tails "
+        "are estimated by the same code from the same number of samples.",
+        "ns p50 / p99 / p999 / max, one-way · samples per point",
+        "—"),
+    # -- the wire plane, run on demand --------------------------------------
+    instrument_t(
+        "bench_forward_rope.cpp", "framed", (),
+        "Forwards a frame that arrives as a multi-link rope, where TLV headers straddle link "
+        "boundaries and every peek is a walk with stitching, swept over link count at a fixed "
+        "frame and registry size.",
+        "ns p50 · allocations per hop"),
+    instrument_t(
+        "bench_terminus_tier.cpp", "framed", (),
+        "Resolves the same frame through both reader tiers — the eager arena reader and the "
+        "lazy rope reader — plus a flatten-then-arena arm, swept over frame size and link count.",
+        "ns p50 · allocations per resolve"),
+    instrument_t(
+        "bench_originate.cpp", "framed", (),
+        "Drives the node that *starts* a remote operation: no inbound frame to read an address "
+        "out of, so it encodes the `dst` and `src` PATHs from scratch, measured against the "
+        "minted-label form of the same operation.",
+        "ns p50 · wire bytes per frame"),
+    instrument_t(
+        "bench_hop_chain.cpp", "framed", (),
+        "Five nodes and four hops: a full-path address against a minted label, and the cold "
+        "first operation against the warm steady state, recording the frame bytes each hop "
+        "actually carries so the address collapse is asserted rather than assumed.",
+        "ns p50 per hop · wire bytes per hop"),
+    instrument_t(
+        "bench_mount_descent.cpp", "framed", (),
+        "Times the mount descent's width loop — key widths `k = W..1`, each pass walking the "
+        "whole child table — against a single-pass alternative, swept over registry size and "
+        "widest registered mount.",
+        "ns p50 · slot visits per descent"),
+    instrument_t(
+        "bench_transport_iov.cpp", "counted", (),
+        "Assembles the real transports' `::iovec` table at rising span counts to find the width "
+        "at which it stops fitting inline and allocates.",
+        "allocations · bytes, per span count"),
+    instrument_t(
+        "bench_iov_spill_cost.cpp", "counted", (),
+        "Censuses the egress span counts the rope forward arm actually hands a transport, then "
+        "times the gather at the spill width against an inline control pair at the same +1 delta.",
+        "spans per frame · ns p50"),
+    instrument_t(
+        "bench_wire_heap.cpp", "counted", (),
+        "Drives real loopback TCP/UDP/WS sockets with thread-local allocation counters, so one "
+        "frame's egress cost on the sending thread and its ingress cost on the transport's "
+        "receive thread are attributed separately.",
+        "allocations · bytes, per frame per direction"),
+    instrument_t(
+        "bench_conn_ram.cpp", "counted", (),
+        "Stands up a real server transport and drives K raw client peers at it, reading the live "
+        "heap balance when the server is up and quiesced, at K established connections, and "
+        "after teardown.",
+        "live bytes per link · live bytes per connection"),
+    instrument_t(
+        "bench_failable_census.cpp", "counted", (),
+        "Counts the blocks each peer-driven control-plane operation draws from the injected "
+        "resource against those that escape to the global heap, and A/Bs the two growable-array "
+        "guard shapes a nothrow migration chooses between.",
+        "blocks per operation · ns per growth"),
+    instrument_t(
+        "bench_tcp_fanin.cpp", "net", (),
+        "Raises the number of simultaneous TCP peers against the server's single poll thread and "
+        "counts frames delivered, to find where that thread saturates before the host does.",
+        "frames/s, per peer count"),
+    instrument_t(
+        "bench_tcp_baseline.cpp", "net", (),
+        "The same fan-in topology with timestamped payloads, on a fresh server per sweep point, "
+        "so aggregate throughput and the full one-way latency distribution come from one run.",
+        "frames/s · ns p50 / p99 / p999 / max"),
+    # -- concurrency & scaling, run locally on a many-core host -------------
+    instrument_t(
+        "bench_fanout_clone_storm.cpp", "scaling", (),
+        "T threads clone and release one shared segment view — the per-subscriber delivery "
+        "primitive, with T standing in for fan-out width — as T scales 1 → 128.",
+        "clone+release/s, aggregate and per thread"),
+    instrument_t(
+        "bench_await_wakeup_storm.cpp", "scaling", (),
+        "One writer storms writes at a hot vertex while W threads each loop on `await` for it, "
+        "as W scales 1 → 128.",
+        "writes/s · wakeups/s"),
+    instrument_t(
+        "bench_route_handle_contention.cpp", "scaling", (),
+        "T threads hammer `ensure_egress` reuse-reads on one already-advertised `(link, route)` "
+        "flow — the steady-state read every remote delivery takes — as T scales 1 → 128.",
+        "ops/s, aggregate and per thread"),
+    instrument_t(
+        "bench_rx_source_topology.cpp", "scaling", (),
+        "T receive threads forward rope frames with the RX block source shared across all "
+        "children, one pool shared, or one pool per child.",
+        "frames/s · ns p50, per thread count"),
+    instrument_t(
+        "bench_lkv_slot.cpp", "scaling", (),
+        "Concurrent publishers and readers on one last-known-value slot across five reclamation "
+        "arms, plus `graph_t::write` driven from T threads against distinct vertices that share "
+        "nothing but a lock stripe.",
+        "ops/s · ns p50, per thread count"),
+    instrument_t(
+        "bench_contention.cpp", "scaling", (),
+        "Measures the machine rather than libtracer: nine arms isolating a thread-private "
+        "counter, a shared read, contended read-modify-writes, false sharing and lock costs, so "
+        "a claim about a shared line can be checked against the box in front of you.",
+        "ns per op · ops/s, per thread count"),
+    # -- the instrument that measures an instrument -------------------------
+    instrument_t(
+        "bench_tail_validate.cpp", "meta", (),
+        "Feeds the shared latency accumulator distributions whose quantiles are known by "
+        "construction and prints measured against analytic. It touches neither the clock nor "
+        "libtracer, so a failure is a defect in the estimator and nowhere else.",
+        "quantile ns, measured vs analytic"),
+)
 
-**One of the two scans is gone.** A hop no longer looks the inbound child up at all: its mount
-run is carried on the link's own receiver ctx, created once in `add_child`. Measured against
-the corrected bench, that is **-36 ns at N=64 (-9%)**, and the saving grows linearly with the
-link count — 128 -> 117 at N=8, 258 -> 229 at N=32 — exactly the shape of deleting one of two
-linear scans. A copy on the ctx rather than a pointer into the registry slot is deliberate:
-slot addresses are not stable across a connection-create (#521), whereas the ctx deque never
-invalidates a reference.
 
-**Is the remaining scan a per-frame or a first-frame cost?** It depends on the path, and
-ADR-0062 changed the answer for one of them:
+@dataclasses.dataclass(frozen=True)
+class probe_t:
+    """@brief One armed window of the allocation-counting instrument."""
 
-| Path | Registry work per frame | |
-| --- | --- | --- |
-| Plain `FWD` write | mount descent + inbound `entry_by_name` | **per-frame** — the frame carries the full path, so there is nothing to cache against |
-| `COMPACT` on a bound label | one dereference of the cached registry slot | **first-frame** — resolved once, then memoized |
-| Remote delivery to a subscriber | `by_name(sub.link)` | **per-frame** — the subscriber record still holds a name |
+    id: str
+    what: str
+    gate: str
 
-Compaction (RFC-0004 §E.1) shrinks the *wire*; ADR-0062 shrinks the *resolution*. A binding
-now holds the resolved target rather than a name, and both cached forms self-invalidate
-without a callback: the terminus compares a **retirement generation**, and the forwarding hop
-reads the registry **slot**, whose `link` teardown nulls in place — so a departed link reads
-`nullptr`, the same clean miss an unresolved lookup gives. The tombstone *is* the
-invalidation, which is why this needed neither a second generation concept nor a teardown
-sweep. (It also required slot addresses to be stable, which is what ADR-0063's chunked list
-provides; the container decision had to land first.)
 
-Two changes landed on this path, and the second was the larger. ADR-0062 removed the
-*resolution*; then the span control arm stopped building an owning `tlv_t` at all, reading
-`COMPACT` by offset through `peek_control` exactly as the rope arm already did. Measured on the
-warm path (`bench_compact_delivery`, host p50):
+PROBES: tuple[probe_t, ...] = (
+    probe_t("forward", "one FWD forward hop, from arrival to egress",
+            "**zero** allocations, every CI run (ADR-0038 §16KB-RAM)"),
+    probe_t("terminus", "one terminus resolve, which may allocate (ADR-0041)", "report-only"),
+    probe_t("vertex", "a bare default leaf vertex at rest", "bytes +2% · blocks exact"),
+    probe_t("vertex_value", "the same leaf plus the increment one small LKV write adds",
+            "bytes +2% · blocks exact"),
+    probe_t("vertex_app5", "a leaf carrying an owning five-field app descriptor table (ADR-0058)",
+            "bytes +2% · blocks exact"),
+    probe_t("vertex_app5_static", "the same table installed borrowed, its slots viewing caller flash",
+            "bytes +2% · blocks exact"),
+    probe_t("fanout_wide", "one publish at a large subscriber count", "report-only"),
+    probe_t("reg_escape",
+            "a wire-driven `/net/<module>/<name>` registration on a graph with a memory resource "
+            "injected — what the resource never saw. Target: zero (ADR-0065)",
+            "report-only"),
+)
 
-| | before ADR-0062 | after ADR-0062 | after the offset read | after exact-reserve egress | after gathered egress |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| terminus delivery | 298 ns | 202 ns | **~110 ns** | — | — |
-| terminus allocations | 15 | 11 | **3** | — | — |
-| forwarding hop | 202 ns | 180 ns | ~90 ns | ~70 ns | **~45 ns** |
-| forwarding allocations | 18 | 17 | 9 | 4 | **0** |
 
-End to end that is **−63% on the terminus** and **−78% on the forwarding hop**, with per-frame
-allocations down 15 → 3 and 18 → **0**.
+def _sources() -> set[str]:
+    """@brief Every bench translation unit on disk, the registry's join key."""
+    return {p.name for p in (REPO / "bench").glob("bench_*.cpp")}
 
-The last column is the one that ends the sequence: the forwarding hop no longer *builds* a frame
-at all. A `COMPACT` is a 6-byte frame header, a 6-byte label child, and a payload that is already
-contiguous in the inbound frame — so the head is written to a 12-byte stack buffer and the payload
-is handed to the transport **by reference**, as a two-element scatter-gather list. The two
-allocations and two payload copies that produced bytes the transport was about to gather anyway
-are simply gone.
 
-That shows up as more than the average suggests, because the cost it removes **scaled with the
-payload** while the rest of the hop did not. Same-machine A/B against `main`, three runs each:
+def check_registry() -> None:
+    """@brief Fail the build on a registry that has drifted from the tree.
 
-| payload | before | after |
-| ---: | ---: | ---: |
-| 4 B | 70–75 ns | 44–47 ns |
-| 64 B | 70–74 ns | 43–47 ns |
-| 512 B | 76–77 ns | 43–47 ns |
+    Three ways a hand-maintained list goes stale, and all three are checked here
+    rather than noticed later: a bench lands with no description, a description
+    outlives the bench it describes, or a chart section is drawn on this page with
+    no instrument claiming it. Failing the docs build is the point — a new bench
+    cannot reach the page without a sentence saying what it does.
+    """
+    on_disk, described = _sources(), {i.src for i in INSTRUMENTS}
+    if missing := sorted(on_disk - described):
+        raise SystemExit("gen_results_page: bench(es) with no INSTRUMENTS entry — add one "
+                         f"sentence saying what each drives and reports: {', '.join(missing)}")
+    if extra := sorted(described - on_disk):
+        raise SystemExit(f"gen_results_page: INSTRUMENTS describes deleted bench(es): {', '.join(extra)}")
+    known = {s.id for s in SURFACES}
+    if bad := sorted({i.surface for i in INSTRUMENTS} - known):
+        raise SystemExit(f"gen_results_page: unknown surface(s) in INSTRUMENTS: {', '.join(bad)}")
+    charted = {f.get("section", "other") for f in render_history.FAMILIES}
+    claimed = {s for i in INSTRUMENTS for s in i.sections}
+    if orphan := sorted(charted - claimed):
+        raise SystemExit("gen_results_page: chart section(s) with no instrument behind them: "
+                         f"{', '.join(orphan)}")
+    if ghost := sorted(claimed - set(_CH_NUM)):
+        raise SystemExit(f"gen_results_page: instrument(s) claim a chapter that does not exist: {', '.join(ghost)}")
+    probed = {m.group(1) for f in render_history.FAMILIES
+              for name, _ in f.get("names", [])
+              if (m := re.match(r"heap (?:allocs|bytes) per (\w+) \(probe\)", name))}
+    if gap := sorted(probed - {p.id for p in PROBES}):
+        raise SystemExit(f"gen_results_page: charted probe(s) with no PROBES entry: {', '.join(gap)}")
 
-The *flatness* is the result worth reading: the old hop grew with payload size because it copied
-the payload twice, and the gathered hop does not grow at all. The terminus leg is untouched by
-this change (~106–110 ns before and after) — it writes into the graph rather than re-emitting.
 
-Zero allocations *in the router* is not zero in the transport. A link that overrides the gather
-form (tcp, udp, ws-server) writes these spans straight to the socket; one that does not (can,
-loopback, ws-client) falls into the default concatenation in `transport_t::send(iov)`, which
-allocates once. That is still strictly better than the two allocations and two copies it
-replaces, so no transport regresses — but the honest claim is "zero in the router", not "zero on
-the wire".
+def surfaces_table() -> str:
+    """@brief The comparability table. Harness and chapter columns are JOINED from
+    INSTRUMENTS, so a surface can never claim a bench that no longer feeds it."""
+    rows = ["| surface | what it measures | harness | where it appears | discipline |",
+            "| --- | --- | --- | --- | --- |"]
+    for s in SURFACES:
+        members = [i for i in INSTRUMENTS if i.surface == s.id]
+        harness = ", ".join([f"`{n}`" for n in s.extra] + [f"`{i.src[:-4]}`" for i in members])
+        where = [ch(c) for c in dict.fromkeys(s.extra_at + tuple(c for i in members for c in i.sections))]
+        if any(not i.sections for i in members):
+            where.append("on demand")
+        rows.append(f"| {s.title} | {s.measures} | {harness} | {', '.join(where) or 'on demand'} "
+                    f"| {s.rule} |")
+    return "\n".join(rows)
 
-### The parse nobody was measuring
 
-`path_t::parse` turns an address into the canonical PATH-TLV payload, and **every** path-keyed
-read, write and subscribe calls it. Nothing in this suite measured it: `inproc-path` parses its
-addresses once into a vector and reuses the `path_t`s, so it times the registry lookup on an
-already-parsed key.
+def lands(i: instrument_t) -> str:
+    """@brief Where one instrument's numbers actually end up — chapters, gate, or nowhere.
 
-That mattered, because the parse built its payload by geometric doubling — a two-segment address
-walked a 1→2→4→8→16 realloc chain, four throwaway blocks and four frees to produce fifteen bytes.
-Pre-sizing it exactly (the separator count *is* the segment count, so the total is
-`4*segments + address bytes` with no estimate) removes them:
+    Derived from the same two fields the rest of the page is built from, so it cannot
+    disagree with the charts: `sections` is where the numbers are drawn, `gate` is
+    whether anything at all watches them between builds. An instrument with neither
+    produces numbers that live only in the terminal of whoever last ran it — a real
+    state, worth naming on the page rather than hiding. Some of those are deliberate
+    (the many-core scaling arms have no shared-runner equivalent) and some are a
+    standing gap; the surface column is what tells them apart.
 
-| segments | before | after |
-| ---: | ---: | ---: |
-| 1 | 34 ns | **12 ns** |
-| 2 | 49 ns | **20 ns** |
-| 4 | 75 ns | **29 ns** |
-| 8 | 80 ns | **38 ns** |
+    This deliberately does NOT try to classify `gate` as "gates" versus "records". That
+    field is free prose describing a discipline, and a keyword sniff over it gets the
+    answer wrong — `bench_forward_heap`'s "forward hop = 0 allocations" is one of the
+    hardest gates in the tree and contains no such keyword. The exact discipline is
+    already printed verbatim in the same row's **Gate:** clause, so this column answers
+    only the question the row cannot otherwise answer: does anything watch it at all.
+    """
+    where = [ch(c) for c in i.sections]
+    if i.gate != "—":
+        where.append("watched")
+    return ", ".join(where) if where else "**neither** — on demand only"
 
-Per-vertex registration drops from **7 allocations to 3**, and a by-path write's window from 6 to
-2 — visible in the `heap allocs per … (probe)` series above. Resident bytes are unchanged, because
-this was transient churn, not residency.
 
-Worth stating plainly: these are **host** figures, where glibc's tcache serves a hot same-size
-malloc/free in tens of nanoseconds. On an MCU allocator a round-trip is hundreds, so the same four
-saved round-trips are worth proportionally more on the target than this table shows.
+def instruments_table(section: str | None = None) -> str:
+    """@brief What each harness does, in one or two sentences. `section` filters to a chapter.
 
-This lever was found by *refuting* the framing of the issue that asked for a vertex arena. That
-issue assumed a registration made 5-7 resident sub-allocations dominated by allocator headers; a
-bare leaf actually leaves **one** resident block, and the ESP-IDF header is 4 bytes. The real cost
-was never in the vertex at all — it was in the parse every caller runs first.
+    The full table carries a "where it lands" column and the per-chapter ones do not:
+    inside a chapter every listed instrument lands in that chapter by construction, so
+    the column would repeat the heading. In the full table it is the only place a
+    reader can see that a bench exists whose numbers reach no chart and no gate.
+    """
+    picked = [i for i in INSTRUMENTS if section is None or section in i.sections]
+    full = section is None
+    head_row = "| harness | what it does | reports |"
+    rows = [head_row + (" where it lands |" if full else ""),
+            "| --- | --- | --- |" + (" --- |" if full else "")]
+    for i in picked:
+        gate = "" if i.gate == "—" else f" **Gate:** {i.gate}."
+        rows.append(f"| [`{i.src[:-4]}`](https://github.com/avatarsd-llc/libtracer/blob/main/"
+                    f"bench/{i.src}) | {i.what}{gate} | {i.units} |"
+                    + (f" {lands(i)} |" if full else ""))
+    return "\n".join(rows)
 
-The owning decode cost three allocations for the tree spine plus five more re-encoding a payload
-that was **already contiguous in the frame** — together more than half a warm terminus frame. It
-had been justified as flow-setup cost (ADR-0041 §5), a classification ADR-0062 invalidated by
-making a warm `COMPACT` the steady-state per-sample data frame rather than setup.
 
-`crc_check_t::VERIFY` is passed explicitly on that path: the decode being replaced verified every
-node's CRC as a side effect, so reading by offset without asking for it would silently start
-accepting a frame whose own trailer says it is corrupt. That is pinned by a test which fails if
-the argument is dropped.
+def unpublished_note() -> str:
+    """@brief A counted, derived statement of the gap — not a hand-kept list.
 
-The last column swaps the forwarding leg's egress to the **nothrow exact-reserve** encoder, which
-also removes an abort path: the growth-doubling encoder grows `std::vector`s, and under
-`-fno-exceptions` an exhausted heap aborts rather than shedding the frame (#477). One caveat when
-reading its bytes column: the counter sums *requested* bytes, so an exact reservation totals
-higher than a doubling ladder at large payloads while peak footprint and fragmentation are
-strictly better — judge that change on allocation count and latency, not on bytes.
+    Every previous attempt to keep a list of "benches that are not published" went
+    stale within a release, because nothing failed when it did. This one is computed
+    from INSTRUMENTS at render time, so it is correct by construction or the docs build
+    is broken. `check_registry` already guarantees the registry covers the tree.
+    """
+    orphans = [i for i in INSTRUMENTS if not i.sections and i.gate == "—"]
+    if not orphans:
+        return ("Every harness in the table above reaches a chart or a gate — there is no"
+                " bench whose numbers land nowhere.")
+    by_surface: dict[str, list[str]] = {}
+    for i in orphans:
+        by_surface.setdefault(i.surface, []).append(f"`{i.src[:-4]}`")
+    parts = "; ".join(f"**{dict((s.id, s.title) for s in SURFACES)[k]}** — {', '.join(v)}"
+                      for k, v in by_surface.items())
+    return (f"**{len(orphans)} of {len(INSTRUMENTS)} harnesses reach neither a chart on this"
+            f" page nor a gate**, by surface: {parts}. They are run on demand and read in a"
+            " terminal. That is a deliberate state for the concurrency arms — they need a"
+            " many-core host and a shared CI runner cannot produce a number worth recording"
+            " — and a standing gap for the rest. A measurement that is neither published nor"
+            " gated decays into a number nobody can check, so this count is derived here"
+            " rather than kept in a list that could quietly go stale.")
 
-The forward hop remains **zero-heap** regardless (`bench_forward_heap`, `allocs=0`, CI-gated)."""
+
+def probes_table() -> str:
+    """@brief The armed windows of the allocation-counting instrument, and what ratchets."""
+    rows = ["| probe | what is armed around | gate |", "| --- | --- | --- |"]
+    rows += [f"| `{p.id}` | {p.what} | {p.gate} |" for p in PROBES]
+    return "\n".join(rows)
+
+
+ROUTING_NOTES = """\
+### Reading the two demux arms
+
+`fixed` registers the target child first, so its lookup hits on the first compare and the
+chart isolates the size-independent part of a hop. `scan` registers it last, so the lookup
+walks the whole table. The rise of `scan` over `fixed` at the same registry size **is** the
+scan's marginal cost. Read them as a pair; neither means anything alone.
+
+Per-module keying does not narrow that scan — it changes the key, not the container, and a
+node's links overwhelmingly sit in one module. It earns its place by keeping two modules'
+same-named connections distinct, which is correctness, not lookup time (ADR-0061).
+
+### What the scan costs a real frame
+
+| path | registry work per frame |
+| --- | --- |
+| plain `FWD` write | mount descent + inbound lookup, **per frame** — the frame carries the full path, so there is nothing to cache against |
+| `COMPACT` on a bound label | one dereference of the cached registry slot, **first frame only** — resolved once, then memoized |
+| remote delivery to a subscriber | one lookup by link name, **per frame** — the subscriber record holds a name |
+
+A binding holds the resolved target rather than a name, and both cached forms self-invalidate
+without a callback: the terminus compares a retirement generation, and the forwarding hop
+reads the registry slot, whose `link` teardown nulls in place — so a departed link reads
+`nullptr`, the same clean miss an unresolved lookup gives (ADR-0062, ADR-0063).
+
+The dominant term in a hop is TLV header parsing — the FWD header, the op, the `dst` PATH and
+its segments, the selector peek and the `src` PATH on rebuild, each read exactly once — and it
+sits at a local optimum for that structure. At `-O3` the parse inlines with values flowing in
+registers into the narrow struct's stores, so there is no intermediate object to remove:
+forcing the inline, or narrowing the header struct, each *regress* the hop by about 10 %.
+
+A `COMPACT` re-emit builds no frame: the head goes to a 12-byte stack buffer and the payload
+is handed to the transport by reference as a scatter-gather list, which is why the forward
+charts are flat in payload size. Zero allocations **in the router** is not zero on the wire —
+a transport that does not override the gather form concatenates once in
+`transport_t::send(iov)`."""
 
 
 def _parse_codec(out: str) -> list[tuple[int, float, int, int]]:
@@ -350,231 +615,91 @@ def codec_block() -> str:
     return body
 
 
-HOW_TO_READ = """\
+def how_to_read() -> str:
+    """@brief The reader's obligations: comparability, then the one chart idiom.
+
+    Everything derivable was removed from here rather than restated. The surface
+    table below is joined from INSTRUMENTS; what stops a regression and what one
+    number is worth against runner noise are chapters of their own, spliced from
+    `docs/methodology.md`, and are not summarized twice.
+    """
+    return f"""\
 ## How to read this page
 
-Every number below belongs to exactly ONE measurement surface. Surfaces use different
-harnesses, processes and units — **a value is only comparable to values from the same
-surface**, never across surfaces.
+Every number here belongs to exactly ONE **measurement surface**, and **a value is only
+comparable to values from the same surface** — surfaces use different harnesses, processes
+and units. A surface is a property of the series, not of the chapter it is drawn in: a
+chapter groups by subject, a subject can be answered by more than one instrument, and this
+table is what settles whether two numbers may be compared at all.
 
-**A surface is a property of a series, not of a chapter.** The chapters below group by
-*subject* — everything about allocation in one place, everything about routing in
-another — because that is how a reader arrives with a question. A subject can be
-answered by more than one instrument, so §3 and §4 each carry two, and the column
-saying which is the one that matters when comparing two numbers.
+{surfaces_table()}
 
-| surface | what it measures | harness | where it appears | discipline |
-| --- | --- | --- | --- | --- |
-| Cross-core conformance | byte-exactness across cores (not speed) | `run-all.py` | §1 | any DISAGREE fails CI |
-| In-process timing | per-op latency and throughput in one process | `bench_libtracer` | §2, and the timed charts in §3 (fold, `path_t::parse`) and §4 (LKV, allocator-under-contention) | gated per PR **and** per `main` push, same-runner |
-| In-process timing, batch-amortized | the same operations, timed over a calibrated batch so the clock is not what is measured | `bench_libtracer` `-batch` rows | §2 | latency only — no p99 (averaging has no tail), no throughput (the bulk phase measures it better) |
-| Framed-hop timing | what one wire frame costs before any payload is touched | `bench_forward_demux` + `bench_compact_delivery` | §3 | batch-amortized, self-calibrating |
-| Allocation counting | exact allocs and bytes around ONE operation — counted, never timed | `bench_forward_heap` probes + max RSS | §4 | forward hop hard-gated at ZERO allocs; per-vertex block count ratcheted exactly |
-| Engine comparison | absolute side-by-side, both engines in one pass | `bench_libtracer` + `bench_zenoh` (+ loopback net) | §5 | same runner, same pass — no ratios |
-| Cross-core codec | decode→encode roundtrip per implementation | cpp / ts / rust codec benches | §6 | same v1 vectors for all cores |
-
-The two that share a chapter are the pair most easily confused: **§4's counted bytes and
-its timed nanoseconds answer different questions** — how much an object holds, versus
-what it costs to get and give back. Neither number bounds the other.
-
-**Enforcement (what actually stops a pullback).** Absolute nanoseconds vary ~2× with
-the CI runner drawn, so raw chart height is a *trend* signal, not a gate. The gates are
-all **same-runner relative** comparisons, where machine speed cancels:
-
-- **per PR** — `bench/perf_gate.py` builds `main`'s bench *and* the PR's bench on one
-  runner and fails the PR if any of six canonical points regresses (p50 **+15 %** /
-  deliveries/s **−12 %**, best-of-3 runs), **or** if a vertex grows: resident bytes
-  **+2 %** and **any** increase in heap-block count. The two memory quantities ratchet
-  differently on purpose — bytes are host-allocator-dependent (glibc rounds to 16 with an
-  8 B header where ESP-IDF TLSF rounds to 4 with 4) and so carry a tolerance, while a
-  block *count* is a count of `operator new` calls, identical on every host and exactly
-  reproducible, so it gets none: one extra block per vertex fails;
-- **per `main` push** — the same gate re-runs HEAD against its **parent commit** on
-  **three independently-drawn runners** (the redundant no-pullback ratchet; each
-  replica is a complete same-runner experiment): a regression that lands anyway
-  turns `main` red, and a single noisy runner cannot manufacture the verdict;
-- **trend soft-alert** — the history tracker comments on a commit whose series drifts
-  past 125 % of the previous point (cross-runner, so an alert is a prompt to look,
-  not a verdict).
+{ch("gates")} is what stops a regression, {ch("noise")} is what one number is worth against
+the runner lottery, and {ch("surfaces")} says what each harness actually drives.
 
 ### Every chart on this page is the same chart
 
-There is one chart type here and no second one. Each is a **family** — a set of series
-answering one question, drawn as lines on shared axes. Most vary a single parameter
-(fan-out, payload size, thread count, fold width, registry size, engine) and those get
-the extra views described below; a few are deliberate matrices, such as the LKV chart
-(operation × backend × payload) and the allocator-under-contention chart (allocator ×
-thread count), where the comparison IS the cross-product. The x-axis is recorded `main`
-commits, oldest to newest, except in §5 where it is the swept parameter. Learn to read
-one and you have read all of them.
+One idiom, learned once. A **family** is a set of series answering one question, drawn as
+lines on shared axes; the x-axis is recorded `main` commits, oldest to newest, except in
+{ch("zenoh")} where it is the swept parameter. Each chart names its own swept variable and
+pinned scenario beneath its title — which is also why two charts both titled "throughput"
+are not comparable to each other: different denominator, by construction.
 
-- **Two kinds of vertical marker, and they mean different things.** 🏷 *dashed* = a release
-  tag (**≈** when the tag's own commit is not a recorded point, so the marker sits at the
-  nearest following one). 🔧 *dotted* = the **benchmark itself** changed at that commit.
-  A release marker says the code moved; an instrument marker says the ruler moved, so
-  points on either side of one are **not comparable**. Core changes are deliberately not
-  marked — a core change moving the line is the signal the chart exists to show.
-- **Colors are global within the history charts.** A series label is assigned one color
-  once, so "fan 8" is the same color on the latency chart and on the throughput chart
-  beside it, in any chapter. The §5 comparison charts are the exception and use a fixed
-  three-color engine palette instead: their line dimension is which engine, not which
-  parameter, so borrowing a parameter's color would suggest a relationship that is not
-  there.
-- **Families with a numeric parameter carry four views.** *trend* (value vs commit, one
-  line per parameter), *sweep* (value vs parameter, one line per commit, recency-faded),
-  *heatmap* (commit × parameter, color = value) and an isometric *3D* surface — the same
-  three-axis data, switchable per chart. The sweep and heatmap views are drawn only over
-  the commit sub-grid where **every** series of the family has a value, so a series that
-  started late cannot fake a trend.
-- **Hover any chart for exact values.** On a history chart the tooltip also names the
-  commit and its subject line; on a §5 comparison chart it names the swept parameter
-  value. Every point is readable this way, including the interior ones that carry no
-  printed label.
+- 🏷 *dashed* marker = a release tag (**≈** when the tag's commit is not itself a recorded
+  point). 🔧 *dotted* = **the bench changed** at that commit, so points either side were
+  taken with different rulers and are not comparable. Core changes are deliberately not
+  marked: a core change moving the line is the signal the chart exists to show.
+- A series label keeps one color across every history chart. The {ch("zenoh")} comparison
+  charts use a fixed engine palette instead — their line dimension is which engine, not
+  which parameter.
+- Families with a numeric parameter carry four switchable views — trend, sweep, heatmap and
+  an isometric 3D surface — drawn only over the commits where **every** series of the family
+  has a value, so a series that started late cannot fake a trend.
+- Hover any point for its exact value, the commit and its subject line.
 
-### Reading the numbers
+### Two latency series per in-process mode
+
+Every `<mode>` row is timed one operation at a time; every `<mode>-batch` row times a
+calibrated batch of the same operation and divides. The clock is a large fraction of a
+sub-100 ns write, so the per-op percentiles snap to coarse steps and read high at small
+fan-out, converging on the batch row as the operation outgrows the clock — the *Clock
+quantization* chart in {ch("dispatch")} plots exactly that gap. Use `-batch` to resolve a
+small delta; use the per-op row for **tail shape**, since it is the one with a real p99. A
+percentile of batch means measures interference between batches rather than the tail of an
+operation, so the `-batch` rows publish no p99 at all rather than a fabricated one."""
 
 
-- **Sign conventions.** The history store charts one direction per suite: the
-  *latency* suite is smaller-is-better nanoseconds — throughput also appears there
-  inverted as `ns/delivery` (`1e9 / deliveries-per-second`) so a slowdown always
-  charts as a rise — and memory-footprint metrics (bytes, KB) live in the same
-  smaller-is-better suite. The *throughput* suite is bigger-is-better, natural
-  `deliveries/s`. On this page, throughput is shown in natural units.
-- **Three thresholds, three jobs.** The **hard PR gate** (`bench/perf_gate.py`)
-  fails a PR whose p50 exceeds **115 %** of its own same-runner `main` baseline or
-  whose throughput drops below **88 %**, over six canonical points, best-of-3 runs.
-  The **push ratchet** re-runs the same gate on every `main` push — HEAD against its
-  parent commit on one runner — so a pullback that lands anyway turns `main` red.
-  The **soft alert** (trend tracker, per `main` commit, cross-runner) comments at
-  **125 %** commit-to-commit; because it compares across runners it is a prompt to
-  look at the trend, not a verdict.
-- **Noise floor.** Each recorded point is the **median of the repeated RESULT
-  rows** one run emits, so single-iteration jitter does not move the series — but
-  shared CI runners still vary ~2× in absolute speed — which is why each point is
-  recorded as the best across three runner draws — and sub-µs points sit on a
-  ~10 ns timer grain. The tell: **a move that hits every series at once —
-  including unrelated ones like the pure-codec `fold-b*` rows — is the runner; a
-  move confined to one family is the code.** Read trends across several commits,
-  not the third digit of one point. Reproducing locally: build Release
-  (`-O3`), take the best of several runs, and compare only numbers measured on the same
-  machine in the same session. If you pin with `taskset`, **check what you pinned to** —
-  on a hybrid CPU the core numbering mixes performance and efficiency clusters, and
-  pinning to the wrong one silently rescales every figure by the clock ratio while
-  cycles-per-operation stay identical. Pinning is not required; comparing same-machine,
-  same-session numbers is.
-- **Two latency series per in-process mode, and they are not redundant.** Every
-  `<mode>` row is timed one operation at a time; every `<mode>-batch` row times a
-  calibrated batch of the same operation and divides. An in-process write costs ~70–85 ns
-  and the clock's granularity plus its two reads is a large fraction of that, so the
-  per-op percentiles **snap to coarse steps** — 90 / 110 / 120 / 150 / 180 — and anything
-  under roughly 10 ns is invisible in them. Measured side by side, the per-op column runs
-  **19–26 % high at fan-out 1** (`inproc-borrow` 90 → 73 ns, `inproc` 110 → 81 ns) and
-  **converges to within 1 %** by fan-out 1024, where one operation is ~11 µs and the clock
-  is noise. Use `-batch` when resolving a small delta; use the per-op row for **tail
-  shape**, because it is the one with a real p99 — a percentile of batch means measures
-  interference between batches, not the tail of an operation, so the `-batch` rows
-  publish no p99 at all rather than a fabricated one. The per-op series are also the
-  unbroken long-run history: they were deliberately **not** converted, because renaming
-  what a series measures would make every point before the change incomparable to every
-  point after it.
-- **`inproc-path` is a resolver canary, not a hot pattern.** The write-by-path
-  rows exercise the registry lookup on every write *on purpose*, so a resolver-cost
-  regression is visible as its own series. Hot paths resolve the path once and
-  write through the held vertex handle (the `inproc` / `inproc-borrow` rows) —
-  compare against those, not `inproc-path`, when judging dispatch cost.
+def compare_intro() -> str:
+    """@brief The comparison chapter's lede. Fairness is the methodology section below it."""
+    return f"""\
+{head("zenoh")}
 
-### Why "throughput" means different numbers in different chapters
+Both engines in **one pass on one runner**, so the numbers are directly comparable on
+identical hardware: three **in-process** axes — subscriber fan-out, payload size and topic
+count — and a **network latency** comparison over the real loopback kernel path, one socket
+and one paced value per transport in two processes. The charts plot **absolute** throughput,
+latency and bandwidth as series on shared axes; there are no speed-up ratios.
 
-Several charts below are titled "throughput" and their absolute values differ by orders
-of magnitude. That is expected: **each chart sweeps a different variable while pinning a
-different scenario**, so each has a different denominator. Compare series *within* one
-chart (same scenario, both engines); never compare heights *across* charts.
-
-| chart | swept variable | pinned scenario | unit | expected shape |
-| --- | --- | --- | --- | --- |
-| Throughput vs fan-out | subscribers per write | 64 B payload · 1 topic · in-process | deliveries/s | rises with fan-out (per-write dispatch amortizes) |
-| Throughput vs payload | payload size | fan-out 1 · 1 topic · in-process | deliveries/s | falls as payload grows (copy-bound) |
-| Bandwidth vs payload | payload size | **same run** as "vs payload" | MB/s | same data re-expressed in bytes — rises with payload |
-| Throughput vs topic count | number of vertices | 64 B · fan-out 1 · in-process | deliveries/s | ~flat; probes registry pressure |
-
-The per-commit history store adds one more deliberate duplication: throughput is
-recorded **twice** — natural `deliveries/s` in the bigger-is-better suite *and* inverted
-`ns/delivery` in the smaller-is-better latency suite (so a slowdown always charts as a
-rise there). Same measurement, two units.
-"""
+libtracer is compiled from source at `-O3`; Zenoh is the upstream prebuilt `zenoh-c 1.9.0`
+release binary that `bench/fetch_zenoh.sh` downloads, so its optimization profile is
+upstream's rather than a flag this repo sets. Both are optimized builds. Which rows do equal
+work, why there is no network *throughput* comparison, and which transports are absent and
+why, are all below."""
 
 
-COMPARE_INTRO = """\
-## 9 · libtracer vs Zenoh — measured, absolute
+def raw_data() -> str:
+    """@brief Where the store comes from and how to read it directly."""
+    return f"""\
+{head("raw")}
 
-A side-by-side comparison against [Eclipse Zenoh](https://zenoh.io) (zenoh-c 1.9.0, peer
-mode). Two surfaces: three **in-process** axes — subscriber **fan-out**, **payload** size,
-and **topic count** — and a **network** comparison over the real loopback kernel path. Both are measured in the
-**same pass on the same runner**, so the numbers are directly comparable on identical
-hardware. libtracer is compiled from source at `-O3`; Zenoh is the upstream prebuilt
-`zenoh-c 1.9.0` release binary, which `bench/fetch_zenoh.sh` downloads — we do not build it,
-so its optimization profile is upstream's Rust release build rather than a flag this repo
-sets. Both are optimized builds; neither is a debug build. The charts plot **absolute** throughput / latency /
-bandwidth — libtracer and Zenoh as series on shared axes — so you read the real
-numbers off the graph; there are no speed-up ratios.
-
-**Semantic fairness.** libtracer's `write` row also **persists** the value (it becomes
-the vertex's last-known-value) and bumps the `await`/readiness sequence on every op;
-Zenoh's `put` is transient delivery only — so the libtracer write row does **strictly
-more semantic work** per op than the Zenoh row it is charted against. The
-**deliver-only (`propagate`)** series is the apples-to-apples counterpart: the value is
-stored once and each op only delivers, matching Zenoh's put semantics. Note also that
-**ACL enforcement is disabled** in the comparison rows (no subject resolver installed,
-so the gate is a single null check); the gated cost is measured separately by the
-`acl-inherit-d4` rows on this page.
-
-There is **no network throughput comparison on this page**, and that is deliberate. One
-existed and was removed rather than restyled: its Zenoh side declared a publisher with no
-subscriber and no peer, so `put()` never reached the wire — measured, **5 `sendto` calls for
-520 000 puts**, and those five were multicast scouting beacons. It then reported one
-K-independent put rate for every K. The libtracer side measured a real `sendmsg` rate but
-published `rate × K`, egress-only with no receiver counting deliveries. Both K-curves were
-arithmetic rather than measured, only one engine performed any I/O, and this page described
-the scenario as "loopback UDP · two processes" when it was a single process. A valid version
-needs a real subscriber in a second process on both sides with delivery counted at the
-receiver — a new benchmark, not a fix, and it is tracked separately rather than left as a
-placeholder. Network **latency** is the separate per-transport (**UDP** / **TCP**),
-single-value, two-process measurement — the same two-process topology (one socket, one
-paced value) for both engines, so it is fair. Each engine runs its own minimal transport
-path (libtracer's framed `transport_t` send/receive vs Zenoh's session `put`/subscriber),
-so this isolates **transport-substrate** latency, not a full graph write. Both **p50** and
-the **p99 tail** are charted per transport: for a latency-first, RDMA-style substrate the
-*tail* is the load-bearing number (jitter, not the median, is what a real-time consumer
-feels), so it earns its own axis. The tail is also where the transports separate — an
-unreliable datagram path can win the median yet spike at p99, which the p50 chart alone
-would hide.
-
-WebSocket and QUIC are not charted here, and that gap is stated in the **Transport
-coverage** note under the network charts rather than left silent: libtracer's WebSocket
-transport shows large single-run latency spikes under this bench (order-of-magnitude p50
-jitter) and Zenoh has no WebSocket transport to compare against, while QUIC needs the
-optional `-DLIBTRACER_WITH_QUIC` module (msquic + TLS). Full harness in
-[`bench/`](https://github.com/avatarsd-llc/libtracer/tree/main/bench)."""
-
-
-RAW_DATA_BLOCK = """\
-## 13 · Raw data & provenance
-
-The charts above are one view of a persisted store; this is where the store comes from
-and how to get at it directly.
-
-Every push to `main` runs the full bench on **three independently-drawn runners**, archives
-all raw transcripts as a per-commit CI artifact (`bench-results-<sha>`, on the `perf`
-workflow run), and records **every** `(mode, size, fanout, endpoints)` point — latency
-(p50/p99 ns), throughput (deliveries/s), and memory footprint (heap-probe bytes per hop,
-whole-run max RSS) as **separate series** — to a build-to-build history on the
-machine-maintained `gh-pages` branch
+The charts above are one view of a persisted store. Every push to `main` runs the full bench
+on **three independently-drawn runners**, archives all raw transcripts as a per-commit CI
+artifact (`bench-results-<sha>`, on the `perf` workflow run), and records every
+`(mode, size, fanout, endpoints)` point — latency, throughput and memory footprint as
+**separate series** — to a build-to-build history on the machine-maintained `gh-pages` branch
 ([benchmark-action/github-action-benchmark](https://github.com/benchmark-action/github-action-benchmark)).
-Per metric the recorded value is the **best across the three runners** (min latency / max
-throughput): machine speed varies ~2× between runner draws, so best-of-3 approximates the
-code\'s capability rather than the machine lottery. A commit that drifts a series past
-**125 %** of the previous point gets an automatic soft-alert comment; the hard per-PR gate
-stays in `bench/perf_gate.py`.
+Per metric the recorded value is the **best across the three runners**, which approximates
+the code's capability rather than the machine lottery.
 
 The store carries roughly three times as many series as this page charts — every recorded
 point, including the ones no family groups. **[Open the raw per-series trend
@@ -643,7 +768,7 @@ def charts_for(sections: tuple[dict[str, str], str], name: str) -> str:
     blocks, reason = sections
     if name in blocks:
         return blocks[name]
-    return (f"_({reason} — the [raw per-series browser](#8-raw-data-provenance)"
+    return (f"_({reason} — the [raw per-series browser]({anchor('raw')})"
             " serves the full store once published)_")
 
 
@@ -849,6 +974,7 @@ def check_heading_depth(page: str) -> None:
 
 
 def main() -> int:
+    check_registry()
     summary, passed = cross_core_block()
     M = _methodology()
     history = _load_history()
@@ -859,151 +985,95 @@ def main() -> int:
 
 ```{{note}}
 This page is **auto-generated** from the live test + benchmark harnesses on each docs
-build (`bench/gen_results_page.py`, ADR-0032). It is the published response surface,
-not a hand-edited snapshot. All rates and latencies are **absolute measured values**,
-representative of the CI runner (shared-runner variance is real — read trends, not the
-third digit); the libtracer-vs-Zenoh charts plot both engines on the same axes. How each
-number is produced is documented **beside the number itself** — every chapter opens with
-the method for its own surface, and the cross-cutting rules (what the metrics mean, what
-actually stops a regression, how to read the noise) are chapters 1-3.
+build (`bench/gen_results_page.py`, ADR-0032) — the published response surface, not a
+hand-edited snapshot. All rates and latencies are **absolute measured values**,
+representative of the CI runner. Each chapter opens with the method for its own surface;
+the cross-cutting rules are {ch("metrics")}–{ch("noise")}, and {ch("surfaces")} says what
+every harness in `bench/` drives and reports.
 
 {provenance()}
 ```
 
-{HOW_TO_READ}
+{how_to_read()}
 
-## 1 · What the metrics mean
+{head("metrics")}
 
 {mprose(M, "The metric taxonomy")}
 
-## 2 · What actually stops a regression
+{head("gates")}
 
 {mprose(M, "What actually stops a regression")}
 
-## 3 · Noise, variance, and what one number is worth
+{head("noise")}
 
 {mprose(M, "Reading the numbers (noise & variance)")}
 
-## 4 · The measurement surfaces
+{head("surfaces")}
 
 {mprose(M, "The measurement surfaces")}
 
-## 5 · Cross-core conformance (every native core must agree byte-for-byte)
+Every harness in [`bench/`](https://github.com/avatarsd-llc/libtracer/tree/main/bench),
+including the ones whose results are not charted here — each one drives something specific
+and reports it in its own units:
+
+{instruments_table()}
+
+{unpublished_note()}
+
+{head("conformance")}
 
 {mprose(M, "1 · Cross-core conformance (correctness, not speed)", keep_heading=True)}
 
-The shared conformance vectors are decoded+re-encoded by every enabled core; a DISAGREE
-fails CI (ADR-0028). Live driver summary:
+Live driver summary:
 
 {summary}
 
-## 6 · Dispatch — in-process latency & throughput
+{head("dispatch")}
 
 {mprose(M, "2 · In-process latency & throughput (the dispatch thesis)", keep_heading=True)}
 
-The µs-latency / zero-copy thesis (ADR-0031), measured by `bench_libtracer`: what one
-write costs when publisher and subscriber are in the same process, swept over fan-out,
-payload size, topic count, thread count, endpoint type and dispatch path.
-
-Four dispatch paths recur across these charts. **`inproc`** is a full write — store the
-value, bump the readiness sequence, deliver. **`inproc-deliver`** stores once and then
-only delivers, which is the apples-to-apples counterpart to a Zenoh `put` (§5).
-**`inproc-borrow`** is the loaned path: the subscriber sees a borrowed view and nothing
-is copied. **`inproc-path`** resolves the address on every write — a resolver canary,
-not a hot pattern.
-
-All four subscribe with an **in-process callback**, which is one of the three legs a
-subscription edge can take. The **`inproc-target-*`** charts measure a different one:
-edges that carry a target **path** — the form a remote `SUBSCRIBER` actually takes on the
-wire, where the callback form is host-SDK sugar (ADR-0049). That leg resolves the target
-through the registry, passes the fan-in ACL gate, clones the rope nothrow, and then applies
-the target's own write effects, so it costs **roughly ten times a callback edge** at
-fan-out. `inproc-target-stored` lands in a `STORED_VALUE` target's LKV;
-`inproc-target-handler` lands in a `HANDLER`'s `on_write`, and the gap between the two is
-what the target's own store costs. Read either against `inproc` at the same fan-out.
+{instruments_table("dispatch")}
 
 {charts_for(charts, "dispatch")}
 
-## 7 · Wire & routing — what a framed hop costs
+{head("routing")}
 
 {mprose(M, "3b · Routing & delivery (the network plane, per frame)", keep_heading=True)}
 
-{DEMUX_BLOCK}
+{instruments_table("routing")}
 
 {charts_for(charts, "routing")}
 
-{DEMUX_NOTES_BLOCK}
+{ROUTING_NOTES}
 
-## 8 · Memory & allocation
+{head("memory")}
 
 {mprose(M, "3 · Memory footprint (allocations counted, not sampled)", keep_heading=True)}
 
-A different instrument entirely: `bench_forward_heap` replaces the global allocator
-with a counting wrapper and arms it around exactly one operation — so its probes are
-exact allocation counts and bytes, not statistics. Seven probes feed the store:
+{instruments_table("memory")}
 
-- **forward hop** — hard-gated at **zero** allocations every CI run (ADR-0038 §16KB-RAM);
-- **terminus resolve** — report-only; a terminus may allocate (ADR-0039), the probe
-  keeps the cost visible;
-- **per-vertex steady heap** — LIVE usable-size bytes a default leaf holds, and the
-  increment one small LKV write adds (the vertex-diet trend, #361);
-- **per-vertex app-field table** — what an RFC-0010 five-field descriptor table adds
-  on top of that leaf, measured for BOTH installs (ADR-0058): the owning
-  `set_app_fields`, which copies the declaration into the table\'s backing, and the
-  borrowed `set_app_fields_static`, whose slots view caller flash. The pair is what
-  decides whether per-endpoint schemas beat the `/meta` child-vertex workaround on an
-  MCU (#388), so both are gated rather than argued. Gating them is what showed the
-  borrowed path was **not** the promised zero-declaration-RAM install — it still copied
-  the caller\'s array into a vector, the largest single block on that path — which is now
-  fixed (592 → 392 B per vertex, ADR-0058 erratum 1);
-- **wide fan-out publish** — the per-write cost at large subscriber counts;
-- **registration escapes** — how much of a **runtime** vertex registration bypasses the
-  graph's own injected `memory_resource`. ADR-0039 carves init/setup allocations out of
-  the seam, and under that carve-out registering a vertex was fine: it happened once, at
-  startup. RFC-0014 ended that — a connection CREATE arriving on the wire now registers a
-  vertex on whichever transport thread received the frame, so a *peer* drives the
-  allocation. This probe registers a connection-shaped path (a long, peer-chosen name that
-  overflows the inline name buffer, plus a handler) on a graph with a resource injected,
-  and reports what the resource never saw. #551 has since been RULED (ADR-0065): the
-  target is not "route it through that `memory_resource`" — `std::pmr` cannot report
-  exhaustion by value, and on the shipping `-Os` profile a caller's null check is deleted
-  outright. Registration will instead draw from the nothrow `tr::mem::block_source_t`
-  seam, so the number to drive to **zero** is what escapes *both* injected seams. Today
-  it is not zero: registration has not migrated yet, and this probe still measures the
-  pmr escape. It is charted separately from the per-vertex rows above rather than beside them,
-  because it measures a different fixture — reading its block count against a bare leaf's
-  would compare two different objects;
-- **whole-run max RSS** — the coarse process-level footprint.
+Eight armed windows feed the store, each counted around exactly one operation:
 
-Each probe reports two independent quantities, and **both now ratchet**: `bytes=`, the
-live usable-size balance, and `allocs=`, the number of heap blocks. Until #571 only bytes
-were gated — block counts were pushed to the store and charted but nothing stopped them
-climbing, which is why the 7 → 3 reduction was visible in the chart yet unprotected. They
-are gated on different terms because they are different kinds of number: bytes carry a
-2 % tolerance since a size-class flip is not a regression, block counts carry none.
+{probes_table()}
 
-The timed rows in this chapter are a separate question from the probes: what the
-*allocator* costs, pooled against the default heap, on one thread and under contention.
+Every probe reports two independent quantities and **both ratchet**: `bytes=`, the live
+usable-size balance, and `allocs=`, the number of heap blocks. They ratchet on different
+terms because they are different kinds of number — bytes carry a 2 % tolerance since an
+allocator size-class flip is not a regression, block counts carry none.
 
 {charts_for(charts, "memory")}
 
 ```{{note}}
 **Allocation churn is not resident footprint, and this page charts both — separately.**
-"Resident bytes per vertex" is what a live object *holds*; "Heap & memory footprint" is
-the transient churn of one forward or terminus operation; the timed charts are what it
-costs to get a block and give it back. A release cycle can cut per-frame allocations from
-14 to 0 — as this one did — and move resident bytes almost not at all, because churn buys
-latency and fights fragmentation rather than shrinking the idle heap. Shrinking that is a
-different lever: retiring mechanisms, not tuning the core. Read the resident chart before
-concluding a release shrank anything.
-
-Churn also matters more on the target than these host numbers suggest. glibc\'s tcache
-serves a hot same-size malloc/free in tens of nanoseconds; an MCU allocator takes
-hundreds. A host measurement of churn is therefore a *lower* bound on what it costs
-where libtracer actually ships.
+Resident bytes are what a live object *holds*; the heap-footprint series are the transient
+churn of one operation; the timed rows are what it costs to get a block and give it back.
+Neither number bounds the other: a release can take per-frame allocations to zero and move
+resident bytes almost not at all. Churn also costs more on the target than these host
+figures show — glibc's tcache serves a hot same-size malloc/free in tens of nanoseconds,
+an MCU allocator in hundreds — so a host reading of churn is a *lower* bound.
 ```
 
-{COMPARE_INTRO}
+{compare_intro()}
 
 {mprose(M, "4 · libtracer vs Zenoh (absolute, one pass, same runner)")}
 
@@ -1013,27 +1083,23 @@ where libtracer actually ships.
 
 {zenoh_compare_block()}
 
-## 10 · Cross-core codec performance (decode→encode roundtrip, same v1 vectors)
-
-Every native core (cpp-core / ts-core / rust-core) runs the SAME per-vector
-decode→encode roundtrip over the shared v1 conformance vectors (ADR-0032 `lang`
-axis, #96), so this is a like-for-like codec surface across implementations.
-Figures are the **median across all v1 vectors** (one decode + one encode == one
-roundtrip); a core whose toolchain is absent in this build degrades to a note.
+{head("codec")}
 
 {mprose(M, "5 · Cross-core codec (like-for-like across implementations)", keep_heading=True)}
 
+{instruments_table("codec")}
+
 {codec_block()}
 
-## 11 · Test rollup (live ctest, unified with the perf surface)
+{head("tests")}
 
 {tests_block()}
 
-## 12 · Reproducing this page locally
+{head("repro")}
 
 {mprose(M, "Reproducing locally")}
 
-{RAW_DATA_BLOCK}
+{raw_data()}
 
 ### Provenance & auditability
 
@@ -1043,7 +1109,7 @@ roundtrip); a core whose toolchain is absent in this build degrades to a note.
 """
     check_heading_depth(page)
     OUT.write_text(page)
-    print(f"wrote {OUT.relative_to(REPO)} ({'conformance PASS' if passed else 'conformance check ran'})")
+    print(f"wrote {OUT} ({'conformance PASS' if passed else 'conformance check ran'})")
     return 0
 
 

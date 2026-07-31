@@ -40,15 +40,10 @@ Two ideas run through everything below:
 ## The measurement surfaces
 
 Every number belongs to exactly one of these. They are deliberately kept separate
-so a value is never silently compared against an incomparable one.
-
-| § | surface | what it measures | harness | discipline |
-| --- | --- | --- | --- | --- |
-| 1 | Cross-core conformance | byte-exactness across cores (not speed) | [`run-all.py`](https://github.com/avatarsd-llc/libtracer/blob/main/tests/conformance/run-all.py) | any DISAGREE fails CI |
-| 2 | In-process latency & throughput | single-process dispatch cost (the µs thesis) | [`bench_libtracer`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/bench_libtracer.cpp) | gated per PR **and** per `main` push, same-runner |
-| 3 | Memory footprint | heap allocations counted, not timed | [`bench_forward_heap`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/bench_forward_heap.cpp) probes + max RSS | forward hop hard-gated at ZERO allocs |
-| 4 | libtracer vs Zenoh | absolute side-by-side, both engines one pass | `bench_libtracer` + [`bench_zenoh`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/bench_zenoh.cpp) (+ loopback net) | same runner, same pass — no ratios |
-| 5 | Cross-core codec | decode→encode roundtrip per implementation | cpp / ts / rust codec benches | same v1 vectors for all cores |
+so a value is never silently compared against an incomparable one. Which surface a
+harness serves, and which chapter it lands in, is the table at the top of this page —
+joined from the instrument registry in `bench/gen_results_page.py`, so it cannot
+disagree with the benches on disk.
 
 ### 1 · Cross-core conformance (correctness, not speed)
 
@@ -58,7 +53,7 @@ of versioned conformance vectors (`tests/conformance/vectors/v1`) is decoded and
 re-encoded by every enabled core; the driver diffs the results, and a single
 `DISAGREE` fails CI
 ([ADR-0028](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0028-native-cores-kept-consistent-by-conformance-vectors.md)).
-This surface measures **truth, not time** — it is what lets the other four surfaces
+This surface measures **truth, not time** — it is what lets every timed surface below
 trust that a fast C++ number describes the same protocol the other cores speak.
 
 ### 2 · In-process latency & throughput (the dispatch thesis)
@@ -89,8 +84,7 @@ Several named *modes* isolate distinct costs on the same axes:
   `stored` / `handler` pair separates the target's own store from the dispatch itself.
 
 Every mode above except the `inproc-target-*` pair subscribes with an in-process
-callback. Fan-out curves published before those rows existed describe the callback leg
-only; they are not wrong, but they are not the whole dispatch surface.
+callback, so a fan-out curve reads the **callback** leg unless its mode says otherwise.
 
 This is the surface that carries the microsecond thesis — the zero-copy substrate
 ([ADR-0016](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md))
@@ -101,65 +95,41 @@ closely.
 
 A different instrument entirely. `bench_forward_heap` replaces the global allocator
 with a counting wrapper and **arms it around exactly one operation**, so these are
-*exact* allocation counts and byte totals — not statistics, not sampling. Four
-probes:
+*exact* allocation counts and byte totals — not statistics, not sampling. Bytes are
+read from `malloc_usable_size`, so a resident figure is what the allocator really
+holds rather than what the caller asked for; whole-run max RSS comes from
+`/usr/bin/time -v` and is the coarse process-level number beside them.
 
-- **forward hop** — a value forwarded to a remote subscriber. **Hard-gated at zero
-  allocations** every CI run: the two-plane forwarding model
-  ([ADR-0038](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md))
-  requires the steady-state hop to touch no heap, so a single stray `malloc` on the
-  forward path fails the build.
-- **terminus resolve** — report-only; a terminus *may* allocate
-  ([ADR-0041](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0041-terminus-arena-decode-span-contract.md)),
-  and the probe keeps that cost visible without gating it.
-- **per-vertex steady heap** — the **live usable-size bytes** a default leaf vertex
-  holds at rest (measured against `malloc_usable_size`, so it is the real resident
-  cost, not the requested size), plus the increment one small last-known-value write
-  adds. This is the vertex-diet trend, and the per-vertex figure is now **gated
-  same-runner** (a >2% growth fails the build): the count is exact — the allocator
-  wrapper is deterministic, not sampled — so a few bytes per vertex is a hard
-  regression, not noise, on the constrained target's budget.
-- **whole-run max RSS** — the coarse process-level footprint, read from
-  `/usr/bin/time -v`.
-
-The per-vertex figure is the one that matters for the constrained targets (the
-ESP32 profile lives inside a ~16 KB RAM budget), which is why it is tracked as its
-own series rather than folded into RSS.
+Two invariants sit on this surface. The steady-state forward hop must touch no heap
+at all — the two-plane forwarding model
+([ADR-0038](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md))
+requires it, so a single stray `malloc` there fails the build — while a terminus
+*may* allocate
+([ADR-0041](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0041-terminus-arena-decode-span-contract.md))
+and is measured rather than gated. The per-vertex resident figure is the one the
+constrained profile lives or dies by (a ~16 KB RAM budget on the ESP32 target),
+which is why it is a series of its own rather than folded into RSS.
 
 ### 3b · Routing & delivery (the network plane, per frame)
 
-The in-process surfaces above measure the graph. Three benches measure the **network
-plane** — what a frame costs between arriving and being applied — because the two move
-independently and an improvement to one can hide a regression in the other.
+The in-process surfaces above measure the graph. A separate set of benches measures the
+**network plane** — what a frame costs between arriving and being applied — because the two
+move independently and an improvement to one can hide a regression in the other. They cover
+the three shapes a frame takes: a transit hop that never resolves, a cold terminus resolve
+an established flow pays once, and the warm `COMPACT` frame that dominates a running system.
 
-- **`bench_forward_demux`** — one FWD forward hop: resolving the `dst` mount against the
-  connection table and scatter-gathering the egress. Swept over registry size, on two axes
-  (`fixed` = target first, isolating the size-independent term; `scan` = target last,
-  exposing the marginal per-link cost). It never resolves a vertex, so it measures routing
-  alone.
-- **`bench_terminus_tier`** — the terminus *resolve*, driven through both reader tiers on
-  the **same frame**: the eager arena reader and the lazy rope reader, plus a
-  flatten-then-arena arm. This is the surface that settled the
-  [ADR-0053](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)
-  erratum — the eager arena wins 2.2–2.5× on latency *and* allocations for single-link
-  frames at every size, and the flatten crossover sits at roughly 16–64 KB.
-- **`bench_compact_delivery`** — the **steady state**: the Nth `COMPACT` frame on a warm
-  binding, which is the case delivery compaction exists for and the one the other two miss
-  (the demux bench never resolves; the terminus bench measures a *cold* resolve an
-  established flow pays once).
-
-All three report latency **and** exact allocation counts, and all three calibrate their own
-batch size against the host clock rather than hardcoding one — a routing operation costs the
-same order as `clock_gettime`, so per-op timing measures the clock. An early revision did
-exactly that and reported a whole-table scan *beating* a first-hit lookup.
+Every bench on this surface reports latency **and** exact allocation counts, and every one
+calibrates its own batch size against the host clock rather than hardcoding a number: a
+routing operation costs the same order as `clock_gettime`, so timing one operation at a time
+measures the clock instead of the code.
 
 `bench_forward_demux` and `bench_compact_delivery` are recorded into the build-to-build
 history alongside the in-process series, so a routing or delivery regression shows up as a
 trend rather than being noticed later. They emit the same `RESULT` rows as `bench_libtracer`,
 so they need no separate aggregation. Their transcripts are tolerated-empty — a bench that
-fails to run must not cost a commit its whole history point — but an empty one now emits a
-build warning naming the file, because a silently-empty transcript once produced a green job
-that recorded nothing at all.
+fails to run must not cost a commit its whole history point — but an empty one emits a build
+warning naming the file, because a silently-empty transcript is otherwise a green job that
+recorded nothing.
 
 ### 4 · libtracer vs Zenoh (absolute, one pass, same runner)
 
@@ -272,26 +242,30 @@ of work per operation*.
 - **ACL is disabled in the comparison rows.** No subject resolver is installed, so
   the access gate is a single null check. The *cost of enforcement* is measured
   separately (the `acl-inherit` rows), never hidden inside the comparison.
-- **There is no network throughput comparison, and the one that existed was
-  withdrawn rather than restyled.** It charted effective values/s against composition
-  size K, on the argument that libtracer ships a K-link rope as one datagram while
-  Zenoh's timer-batched put rate is K-independent and plots as a flat reference. The
-  argument was fine; the measurement was not. Its Zenoh side declared a publisher with
-  **no subscriber and no peer**, so `put()` never reached the wire — measured under
-  `strace`, **5 `sendto` calls for 520 000 puts**, and all five were multicast scouting
-  beacons. The libtracer side measured a real `sendmsg` rate but published `rate × K`,
-  egress-only, with no receiver counting deliveries. Both K-curves were therefore
-  arithmetic rather than measured, only one engine performed any I/O, and the page
-  described the scenario as "loopback UDP · two processes" when it was a single
-  process. A valid version needs a real subscriber in a second process on **both**
-  sides with delivery counted at the receiver — that is a new benchmark, not a fix, and
-  it is tracked separately rather than left on the page as a placeholder.
+- **There is no network throughput comparison.** A valid one needs a real subscriber in
+  a second process on **both** sides, with deliveries counted at the receiver rather
+  than sends counted at the publisher — an engine whose publisher has no peer emits
+  nothing to the wire at all, and a per-send rate multiplied by a composition width is
+  arithmetic, not a measurement. Until such a bench exists the chapter states the gap;
+  it does not show a number.
 - **Network latency is the surviving network comparison**, and it is fair: a
   single-value, two-process, same-clock measurement over the real loopback kernel path,
-  identical topology for both engines. Both **p50** and the **p99 tail** are charted per
-  transport — for a latency-first substrate the tail is the load-bearing number, and it
-  is where transports separate, since an unreliable datagram path can win the median and
-  still spike at p99.
+  identical topology for both engines. **p50**, the **p99 tail** and the **p999 deep
+  tail** are charted per transport — for a latency-first substrate the tail is the
+  load-bearing number, and it is where transports separate, since an unreliable datagram
+  path can win the median and still spike at p99.
+- **The p999 has to earn its own publication.** It is the cost of one message in a
+  thousand — on a control path, the size of the deadline it misses — and it is the one
+  figure on this page whose *publication* is gated rather than only its value. A p999
+  read off `n` samples is the order statistic at `floor(0.999·n)`, so only
+  `n − 1 − floor(0.999·n)` samples lie above it: **three** at n = 4 000, and **none at
+  all** at n ≤ 1 000, where "p999" is the maximum wearing a percentile's name. The
+  accumulator records `n` beside every percentile and flags whether it clears its own
+  adequacy floor; below the floor the number is **withheld**, and the shortfall is
+  named in the transport-coverage note instead of being drawn as a line that moves for
+  reasons the code never touched. The sample count, the number of samples above the
+  p999, and the worst single message of the pass are printed under the charts,
+  computed from the same rows that drew them.
 
 A transport that is **not** charted always says so in the transport-coverage note under
 the charts, including when neither engine produced rows for it. WebSocket and QUIC are
@@ -312,6 +286,51 @@ optional TLS module. An absent transport must never be readable as a tie.
   are then recorded as the **best across three runner draws**, approximating the
   code's capability rather than the machine lottery. Sub-microsecond points sit on a
   ~10 ns timer grain — do not over-read a 5 ns wiggle.
+- **Tail percentiles are published, not gated — and here is the measurement that
+  decided it.** The deeper into a distribution a statistic reaches, the fewer samples
+  stand behind it and the more it moves for reasons that are not the code. Running the
+  *same binary* against itself and taking the worst ratio between repeats gives the
+  floor any threshold on that leg would have to clear before it stopped firing on its
+  own noise. On the **in-process gated points** (18 runs, replayed through the gate's
+  own best-of-3 estimator, worst of 15 disjoint pairs):
+
+  | leg | worst same-binary ratio | threshold it would need | gated today |
+  | --- | ---: | ---: | --- |
+  | p50 | 1.16× | +16 % | yes, at +15 % |
+  | mean | 1.22× | +22 % | yes, at +12 % |
+  | deliveries/s | 1.36× | −36 % | yes, at −12 % |
+  | **p99** | **1.67×** | **+67 %** | **no — published only** |
+
+  A p99 gate would have to sit near **+67 %**, and a regression that large has already
+  tripped the +15 % p50 gate several times over: the leg would add no detection while
+  adding a new false-fail source on every PR.
+
+  On the **two-process network bench**, the same experiment run at two probe counts
+  isolates how much of the tail's instability is simply too few samples (5 repeats each,
+  same idle host, only `n` changed):
+
+  | probes per point | p50 | p99 | p999 | worst sample |
+  | ---: | ---: | ---: | ---: | ---: |
+  | 4 000 | 1.09× | 5.01× | 62× | 21× |
+  | **10 000** (published) | **1.09×** | **1.40×** | **17×** | **13×** |
+
+  The median does not care — it is 1.09× either way — while the p99 tightens 3.6× and
+  the p999 3.7× purely from sample count. That is why the published run pays for the
+  larger count. Even so the deep tail stays **17×** unstable: a loopback p999 is
+  dominated by scheduler wake-up, not by either engine's code path. Read the p999 chart
+  as the **jitter floor this topology inherits**, and read engine-against-engine on the
+  p50 and p99 charts, which at the published probe count are stable enough to carry a
+  comparison. (Measured on an idle 24-core host; a shared CI runner is not quieter than
+  that, so these are lower bounds.)
+- **A throughput pullback with flat latency is a machine, not a regression.** Every
+  gated point is measured by two instruments over the same operation — a per-op clock
+  (p50, mean) and a bulk timer (deliveries/s) — and a change in what the operation costs
+  moves both. When only the bulk timer moves and both latency legs come back
+  flat-or-better, the two instruments contradict each other, and the gate reports the
+  contradiction rather than failing on it. This is not hypothetical: one PR that touched
+  only L4 was failed at −33 % throughput on an L0 codec point it has no call path to,
+  with p50 identical and the mean *better*. The guard is deliberately narrow — any
+  upward move in either latency leg, of any size, leaves the failure standing.
 - **Sign conventions in the history store.** The latency suite is
   smaller-is-better nanoseconds; throughput also appears there **inverted** as
   `ns/delivery` so a slowdown always charts as a *rise*; memory metrics live in that
