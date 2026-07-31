@@ -2,8 +2,7 @@
 
 Native Rust implementation of the libtracer wire codec. The crate is `libtracer`,
 versioned in **lockstep** with the C++ core (one `vX.Y.Z` tag releases everything
-at that version). **Not yet published to crates.io** — it publishes on the next
-release tag (see [Releasing](#releasing)); until then, depend on the git repo.
+at that version) and published to [crates.io](https://crates.io/crates/libtracer).
 
 ## Status
 
@@ -33,8 +32,7 @@ implementations" cheaper to keep consistent than one impl behind two language wr
 
 ```toml
 [dependencies]
-# Not yet on crates.io — depend on the git repo until the first crate release:
-libtracer = { git = "https://github.com/avatarsd-llc/libtracer" }
+libtracer = "0.6"
 ```
 
 ## Security posture

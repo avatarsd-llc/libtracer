@@ -51,11 +51,11 @@ cmake -S core -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
 ```
 Then `find_package(libtracer)` + `target_link_libraries(app PRIVATE libtracer::libtracer)`. See the **[getting‑started guide](https://libtracer.avatarsd.com/docs/getting-started.html)**.
 
-**Other surfaces** (available once `v0.3.0` is published — the pipeline publishes them in lockstep):
+**Other surfaces** (published in lockstep by the same release tag):
 
 ```bash
 npm install @avatarsd-llc/libtracer          # TypeScript codec
-cargo add libtracer                          # Rust codec (git dep until first crate release)
+cargo add libtracer                          # Rust codec
 # ESP-IDF:  idf.py add-dependency "avatarsd-llc/libtracer"
 ```
 
