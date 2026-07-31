@@ -643,6 +643,84 @@ void test_borrowed_static_install() {
           "borrowed: empty table uninstalls (back to SCHEMA_NOT_FOUND)");
 }
 
+// ---------------------------------------------------------------------------
+/**
+ * @brief The three shape gates a mutation sweep found no test defends — two of them
+ *        silent MISROUTES.
+ *
+ * Wrapping each field-shape condition in `graph.cpp` as `if (false && (COND))` and running
+ * the suite caught 6 of 9. Reassuringly, the two guards that exist because of shipped
+ * data-loss bugs were both covered (`:1483`, the `[*]`-clears-slot-0 of #579, and `:1562`,
+ * the `:children[].bogus` creation). These three were not:
+ *
+ *   - **`graph.cpp:59`** (`app_field_key`) returns an empty key when any step below
+ *     `settings.app.` carries a `[...]` selector — no app field has an indexed surface.
+ *     With it gone, `:settings.app.kp[0]` joins to the key `"kp"` and resolves to the
+ *     SCALAR field. An indexed address silently reads and writes the unindexed field.
+ *   - **`graph.cpp:1577`** rejects a selector on the `app` step itself. `app_field_key`
+ *     starts at index 2, so it never inspects step 1 — with this gone,
+ *     `:settings.app[0].kp` also resolves to `kp`.
+ *   - **`graph.cpp:1254`** — `history()` is STREAM-only; on any other role the contract
+ *     is SCHEMA_NOT_FOUND, not an empty snapshot.
+ *
+ * The misroute cases assert the declared field's value is UNCHANGED after the bogus write.
+ * Asserting only that the write failed would pass against a guard that rejects everything;
+ * the surviving bytes are what say the write went nowhere rather than somewhere wrong.
+ */
+void test_shape_gates_no_test_defended() {
+    std::printf("the field-shape gates a mutation sweep found undefended:\n");
+    graph_t g;
+    const vertex_handle_t v = g.register_vertex(path_t("/ctrl/pid"), role_t::STORED_VALUE);
+
+    const std::vector<std::byte> good = value_tlv("kp-original");
+    std::vector<app_field_t> table;
+    table.push_back(app_field_t{
+        .name = "kp", .access = app_access_t::RW, .descriptor = dtype_desc("f32"), .value = good});
+    g.set_app_fields(v, std::move(table));
+    check(reads_back(g.read(path_t("/ctrl/pid:settings.app.kp")), good),
+          "the declared field is readable to begin with");
+
+    const std::vector<std::byte> poison = value_tlv("POISON");
+
+    // graph.cpp:59 — an indexed step BELOW `settings.app.` has no surface.
+    for (const char* addr : {"/ctrl/pid:settings.app.kp[0]", "/ctrl/pid:settings.app.kp[]"}) {
+        const auto parsed = path_t::parse(addr);
+        check(parsed.has_value(), std::string(addr) + " parses (the address is expressible)");
+        if (!parsed) continue;
+        check(fails_with(g.read(*parsed), status_t::SCHEMA_NOT_FOUND),
+              std::string("read ") + addr + " -> SCHEMA_NOT_FOUND (not the scalar field)");
+        check(fails_with(g.write(*parsed, make_value(poison)), status_t::SCHEMA_NOT_FOUND),
+              std::string("write ") + addr + " -> SCHEMA_NOT_FOUND");
+    }
+
+    // graph.cpp:1577 — a selector on the `app` step itself. `app_field_key` starts at
+    // index 2 and never sees step 1, so only this gate stands between it and `kp`.
+    {
+        const auto parsed = path_t::parse("/ctrl/pid:settings.app[0].kp");
+        check(parsed.has_value(), ":settings.app[0].kp parses (the address is expressible)");
+        if (parsed) {
+            check(fails_with(g.read(*parsed), status_t::SCHEMA_NOT_FOUND),
+                  "read :settings.app[0].kp -> SCHEMA_NOT_FOUND (not the scalar field)");
+            check(fails_with(g.write(*parsed, make_value(poison)), status_t::SCHEMA_NOT_FOUND),
+                  "write :settings.app[0].kp -> SCHEMA_NOT_FOUND");
+        }
+    }
+
+    // The assertion that makes the two above mean something: none of those writes landed
+    // ANYWHERE. A guard that merely rejected would satisfy the checks above; only the
+    // original bytes prove nothing was misrouted into the scalar field.
+    check(reads_back(g.read(path_t("/ctrl/pid:settings.app.kp")), good),
+          "the declared field still holds its ORIGINAL bytes — no indexed form misrouted");
+
+    // graph.cpp:1254 — history() is STREAM-only.
+    check(fails_with(g.history(v), status_t::SCHEMA_NOT_FOUND),
+          "history() on a STORED_VALUE -> SCHEMA_NOT_FOUND (STREAM-only)");
+    {
+        const vertex_handle_t s = g.register_vertex(path_t("/ctrl/stream"), role_t::STREAM);
+        check(g.history(s).has_value(), "history() on a STREAM succeeds (the gate is not blanket)");
+    }
+}
+
 int main() {
     test_declare_read_write();
     test_undeclared_enotty();
@@ -655,6 +733,7 @@ int main() {
     test_apply_seam();
     test_table_replace();
     test_borrowed_static_install();
+    test_shape_gates_no_test_defended();
     std::printf(g_failures == 0 ? "\napp_fields: PASS\n" : "\napp_fields: FAIL (%d)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
