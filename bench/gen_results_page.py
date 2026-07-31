@@ -301,6 +301,15 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "counts frames delivered, to find where that thread saturates before the host does.",
         "frames/s, per peer count"),
     instrument_t(
+        "bench_tcp_peer_scaling.cpp", "net", (),
+        "Separates the single poll thread's three costs by moving one axis at a time: an "
+        "`idle-fanout` arm holds the load at one active sender and raises the number of "
+        "connected-but-silent peers, so any loss is descriptor scanning alone, and an "
+        "`active-fanout` arm raises active peers below the core count to price the thread "
+        "itself. Reports each point as a median with min/max and declines to state a ratio "
+        "when the sweep's ends overlap.",
+        "frames/s + ns p50 / p99, per peer count"),
+    instrument_t(
         "bench_tcp_baseline.cpp", "net", (),
         "The same fan-in topology with timestamped payloads, on a fresh server per sweep point, "
         "so aggregate throughput and the full one-way latency distribution come from one run.",
