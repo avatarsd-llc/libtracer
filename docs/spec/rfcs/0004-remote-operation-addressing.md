@@ -106,7 +106,7 @@ FWD (0x0F, PL=1) {
 - **REPLY** is itself a `FWD` routed *back*: `dst = src` (the accumulated return route), `kind ∈ {RESULT, ERROR}`, payload = the result. A reply expects no reply, so it **does not accumulate** `src`; the `src` child of a REPLY is still required and is set to the **responder's own endpoint** (the vertex that produced the result) — uniform with the other ops, available as provenance, unchanged hop-to-hop.
 - **Terminus-reply asymmetry (load-bearing).** Each `src` segment is meaningful only **at the node that prepended it** (its local name for an inbound link), so the **terminus does *not* resolve `dst[0]` of the reply** — it emits the `FWD{REPLY}` (whose `dst` is the request's accumulated `src`) **unmodified over the link the request arrived on**. The **first reverse hop** performs the first `dst`-strip (by the same forward step), and so on back to the originator. A REPLY routes by the ordinary forward step but **never accumulates `src`**. This asymmetry is what makes the per-node-local return route compose correctly.
 - `op` is the first child so a forwarder can dispatch without parsing the whole frame.
-- `FWD` is **loop-free by construction** (the forward `dst` is explicit; a `dst` revisiting a node is malformed → `ERROR=INVALID_PATH`). It carries **no** `origin`/`hop_count`/dedup — those stay in `ROUTER` on the multi-path delivery side (§E).
+- `FWD` is **loop-free by construction**: the forward `dst` is explicit and **shrinks monotonically** per hop, so a delivery travels exactly as far as its route names and no further. There is no visited-set and no revisit `ERROR` — a `dst` that spells out a physical cycle simply routes around it as many times as the route names, then stops. It carries **no** `origin`/`hop_count`/dedup — those stay in `ROUTER` on the multi-path delivery side (§E). See the erratum below — this clause previously required `ERROR=INVALID_PATH` for a `dst` revisiting a node.
 
 ### C. `FIELD` — `0x10` (control-plane selector)
 
@@ -245,3 +245,50 @@ Add to `tests/conformance/vectors/v1/`, so the 3-core machine (C++/TS/Rust) vali
 - [ADR-0034](../../adr/0034-typescript-client-sdk.md) — the TS client SDK whose higher ops this unblocks.
 - [RFC-0003](0003-bridged-wildcard-delivery-path.md) — concrete-path delivery (the delivery-side companion).
 - [reference/03](../../reference/03-addressing.md) (addressing grammar), [reference/04](../../reference/04-communication-flows.md) (flows + mount), [reference/05](../../reference/05-protocol-tlvs.md) (TLV registry).
+
+---
+
+## Erratum (2026-07-31): §B required `ERROR=INVALID_PATH` for a revisiting `dst`, which no forwarder can emit
+
+Follows [#445](https://github.com/avatarsd-llc/libtracer/issues/445) (with
+[#420](https://github.com/avatarsd-llc/libtracer/issues/420) /
+[#444](https://github.com/avatarsd-llc/libtracer/issues/444)). This was the last **normative** site;
+[reference/05](../../reference/05-protocol-tlvs.md) was corrected by
+[#490](https://github.com/avatarsd-llc/libtracer/issues/490) and
+[ADR-0040](../../adr/0040-net-plane-is-explicit-source-routed-only.md) §Context by
+[#721](https://github.com/avatarsd-llc/libtracer/issues/721).
+
+A full-tree sweep taken with this erratum found the phantom in **three more descriptive places**
+that #444's and #721's sweeps had both missed — [CONTEXT.md](../../../CONTEXT.md) §loop-freedom
+(the canonical glossary, where it self-contradicted the same sentence's "no dedup state, hop
+counter, or depth cap exists anywhere"), [reference/README](../../reference/README.md)'s index
+row for `07-host-embedding`, and ADR-0040's Decision item 4, which the #721 erratum did not reach.
+All three are corrected in the same change. The count is the point: a claim repeated in six
+places took four passes to retire, because each pass swept the documents it expected to find it in.
+
+**What the text said.** §B's last bullet read:
+
+> `FWD` is **loop-free by construction** (the forward `dst` is explicit; a `dst` revisiting a node
+> is malformed → `ERROR=INVALID_PATH`). It carries **no** `origin`/`hop_count`/dedup …
+
+**What the behaviour is.** `fwd_router_t` (`core/src/fwd_router.cpp`) has **no visited-set, no hop
+counter, and no `INVALID_PATH` emission of any kind**. Every hop does exactly one thing to `dst`:
+resolve its first segment, strip it, re-emit. Loop-freedom is the monotonic shrink, not a check.
+
+**Which change made them diverge — none, and that is the point.** The two were never together.
+The clause was **not implementable** on the forwarder this same RFC mandates: recognising that a
+`dst` revisits a node requires remembering the nodes already visited, and the very same sentence
+forbids carrying that state. §A's stateless source-router and §B's revisit `ERROR` contradicted
+each other on the day the RFC was accepted. `ERROR=INVALID_PATH` here is a requirement no
+conforming implementation has ever satisfied, or could.
+
+**Why this is an erratum and not an amendment.** Per
+[GOVERNANCE.md](../../../.github/GOVERNANCE.md) — *"if applying it would change what a conforming
+implementation does, it is not an erratum."* Applying this changes nothing: no implementation
+emits the error, so no peer has ever observed it, so no byte on any wire moves. The wire surface
+is untouched and no MUST that was ever satisfiable is altered. The normative surface is not
+moving; it is being described accurately for the first time.
+
+**Scope.** The *other* `INVALID_PATH` clauses in this RFC are real, different, and untouched —
+§C's rejection of `[*]` outside a subscriber-path context (`:131`) and its `fwd-wildcard-reject`
+vector (`:205`) are implemented, in `core/src/op_resolve_walk.hpp`.
