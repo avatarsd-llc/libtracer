@@ -339,6 +339,25 @@ re-driven when the manifest lands.
 
 ### Peer enumeration and transparent per-peer forwarding
 
+> **Erratum (2026-07-31) — this section taught two forms that no longer route.**
+> Both predate RFC-0014 S2a and [ADR-0061](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md), and neither is a cosmetic
+> difference:
+>
+> 1. **A bare peer `dst` (`/n5/a/b`).** A peer segment is only reachable *through* its
+>    connection's mount run — `resolve_mount_segs` matches `net/<module>/<name>` first and
+>    resolves the peer as the segment *after* it. A bare `/n5/…` matches no mount, so it falls
+>    through to the terminus and is not forwarded at all. The sequence diagram below carried this
+>    form while the very next line already used the correct `dst=/net/can/can0`.
+> 2. **"asks each bus child to resolve it as a peer."** That global cross-bus scan is exactly what
+>    `child_registry_t::resolve_peer` replaced, and the in-code rationale says why: it resolves
+>    "against the multi-peer child it was addressed *through*, so two servers' same-named peers
+>    stay distinct and **a peer is never reachable through the wrong module**." Believing the old
+>    wording means believing a misroute is correct behaviour.
+>
+> Tracked under [#605](https://github.com/avatarsd-llc/libtracer/issues/605); the rest of that
+> sweep is still open.
+
+
 A CAN bus reaches many peers over one wire, so `transport_can` also implements
 the kind-neutral `tr::net::bus_link_t` capability (`transport_t::bus()`), which is
 how a client of the node holding the bus **enumerates** the currently-reachable
@@ -366,10 +385,13 @@ bus). A read of the connection vertex's `:children[]` (e.g.
 currently audible, wired through the vertex's `on_children` handler by
 `transport_vertex_t` for any link whose `bus()` is non-null.
 
-**Forwarding.** Each listed name doubles as a routable next-hop segment: when a
-`FWD`'s first `dst` segment names no static child, the router's
-`child_registry_t` asks each bus child to resolve it as a peer
-(`bus_link_t::peer_link`), yielding a **directed** per-peer endpoint — the group's
+**Forwarding.** Each listed name doubles as a routable next-hop segment *on this
+transport* (whether that generalises to every bus kind is
+[#426](https://github.com/avatarsd-llc/libtracer/issues/426), still open): once a
+`FWD`'s leading `dst` segments have matched this connection's **mount run**
+`net/<module>/<name>`, the router resolves the segment that follows it as a peer
+**within that endpoint's own table** (`child_registry_t::resolve_peer` →
+`bus_link_t::peer_link`), yielding a **directed** per-peer endpoint — the group's
 advertise carries `target_node`, so on the broadcast bus only the addressed peer
 delivers it. Inbound frames arrive tagged with the **sender's** peer name
 (`bus_link_t::set_peer_receiver`), which the router uses as the hop's inbound
@@ -385,8 +407,8 @@ sequenceDiagram
     P->>T: hello advertise (join) — last-heard table gains n5
     C->>T: FWD{READ, dst=/net/can/can0, :children[]}
     T-->>C: POINT{ POINT{NAME n5}, … } (synthesized, no vertices)
-    C->>T: FWD{READ, dst=/n5/a/b, src=/reply-ep}
-    Note over T: "n5" = no static child → peer_link("n5")<br/>strip n5, grow src=/cli/reply-ep
+    C->>T: FWD{READ, dst=/net/can/can0/n5/a/b, src=/reply-ep}
+    Note over T: match mount net/can/can0, then peer "n5"<br/>strip all four, grow src=/cli/reply-ep
     T->>P: directed group (target_node=5): FWD{READ, dst=/a/b}
     Note over Q: consumes slices, delivers nothing
     Note over P: terminus: read /a/b<br/>inbound NAME = "n1" (sender's peer name)
