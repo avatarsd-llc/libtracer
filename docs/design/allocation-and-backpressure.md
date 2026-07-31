@@ -88,7 +88,7 @@ std::array<std::byte, 4096> stack;
 mem::bump_source_t src(stack, *ctl_);
 ```
 
-(`core/src/graph.cpp:974-975`.) Three properties follow, and each closes a different failure mode:
+(`core/src/graph.cpp:1009-1010`.) Three properties follow, and each closes a different failure mode:
 
 - **A bounded node that injected `ctl` gets its own store here too.** The overflow leg draws from
   that injection rather than from the global heap, so the node's memory bound covers the arena
@@ -114,13 +114,13 @@ defines for "exceeds this receiver's decode resources".
 
 | Allocation | Site | Failure answer |
 | --- | --- | --- |
-| Branch-write flatten into the value backend | `core/src/graph.cpp:961-962` | empty head with a non-zero rope length → `BACKPRESSURE` |
-| Field-write flatten into the value backend | `core/src/graph.cpp:1198-1199` | empty head with a non-zero rope length → `BACKPRESSURE` |
-| Branch-write root key render (`try_build_key`) | `core/src/graph.cpp:993-994` | `false` → `BACKPRESSURE` |
-| Branch-write parse-key copy (`detail::try_assign`) | `core/src/graph.cpp:996` | `false` → `BACKPRESSURE` |
-| Branch-write decode arena | `core/src/graph.cpp:974-978` | decode error → `TYPE_MISMATCH` |
-| Per-delivery COMPACT flatten | `core/src/fwd_router.cpp:970-971` | the delivery is **dropped** |
-| Per-delivery frame build | `core/src/fwd_router.cpp:976` | the delivery is **dropped** |
+| Branch-write flatten into the value backend | `core/src/graph.cpp:996-997` | empty head with a non-zero rope length → `BACKPRESSURE` |
+| Field-write flatten into the value backend | `core/src/graph.cpp:1233-1234` | empty head with a non-zero rope length → `BACKPRESSURE` |
+| Branch-write root key render (`try_build_key`) | `core/src/graph.cpp:1028-1029` | `false` → `BACKPRESSURE` |
+| Branch-write parse-key copy (`detail::try_assign`) | `core/src/graph.cpp:1031` | `false` → `BACKPRESSURE` |
+| Branch-write decode arena | `core/src/graph.cpp:1011-1013` | decode error → `TYPE_MISMATCH` |
+| Per-delivery COMPACT flatten | `core/src/fwd_router.cpp:1021-1022` | the delivery is **dropped** |
+| Per-delivery frame build | `core/src/fwd_router.cpp:1026` | the delivery is **dropped** |
 
 The key render and its parse copy are nothrow so that OOM soft-fails the branch write as
 `BACKPRESSURE`, the injected-resource status — **never an abort on the writer thread**
@@ -130,7 +130,7 @@ The remote-delivery leg answers differently on purpose. A stored write that reac
 succeeded; the fan-out to one subscriber is a separate obligation, and a subscriber missing
 one value under heap exhaustion is valid delivery behaviour where failing the write is not. Every
 per-delivery allocation on that writer-thread leg is nothrow, and a failed flatten or frame build
-drops that one delivery (`core/src/fwd_router.cpp:966-971`). Dropping *invisibly* is the part that
+drops that one delivery (`core/src/fwd_router.cpp:1021-1027`). Dropping *invisibly* is the part that
 needs an answer, which is why `graph_t::delivery_drops()` exists
 (`core/include/libtracer/graph.hpp:768`): three relaxed monotonic counters — `no_target`, `denied`,
 `out_of_memory` (`graph.hpp:751-758`) — incremented only on a drop, so the delivering path is

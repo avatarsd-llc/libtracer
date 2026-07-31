@@ -60,7 +60,7 @@ hold and recurses under it. The doc comment at `:421` states the same contract f
 `evict_link_edges` snapshot helper — it documents a required hold, it is not an acquisition.
 
 The leaf/branch fork reads a per-vertex bit (`vertex_t::has_registered_child`,
-`core/include/libtracer/vertex.hpp:1055`), called from `core/src/graph.cpp:704`, and takes no
+`core/include/libtracer/vertex.hpp:1055`), called from `core/src/graph.cpp:721`, and takes no
 lock. The symbol exists on the vertex rather than on the graph, so a reader grepping for it finds
 a flag test rather than a lock acquisition.
 
