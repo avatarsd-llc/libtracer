@@ -13,7 +13,21 @@
 
 - **Path**: an ordered list of UTF-8 NAME segments rooted at `/`, addressing a vertex (or a field on a vertex). Syntax in [03-addressing.md](03-addressing.md).
 
-- **Schema**: a structured TLV (typically a `POINT` or a `SETTINGS`-shaped record) returned at `<vertex>:schema`, enumerating the writable fields the vertex exposes. Two parts with defined precedence ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §B.2): a **synthesized protocol part** — the core fields (`:subscribers[]`, `:settings.*`, `:liveness.*`, `:acl`) plus any module-namespaced fields, authoritative for protocol machinery — and, when the owner installed a field descriptor table, an **owner part** (`NAME "app" SETTINGS{…}`) served verbatim, authoritative for `settings.app.*`. Read-only.
+- **Schema**: a structured TLV (typically a `POINT` or a `SETTINGS`-shaped record) returned at `<vertex>:schema`, enumerating the writable fields the vertex exposes. Two parts with defined precedence ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §B.2): a **synthesized protocol part**, authoritative for protocol machinery — and, when the owner installed a field descriptor table, an **owner part** (`NAME "app" SETTINGS{…}`) served verbatim, authoritative for `settings.app.*`. Read-only.
+
+> **What the synthesized part actually emits today, and why it under-reports** ([#586](https://github.com/avatarsd-llc/libtracer/issues/586)). This paragraph used to say the synthesized part enumerates "`:subscribers[]`, `:settings.*`, `:liveness.*`, `:acl`". It enumerates **none of those as such**. `graph_t::read_schema` emits exactly:
+>
+> ```
+> POINT{ NAME <vertex name>
+>        SETTINGS{ NAME "deadline_ns"        VALUE u64
+>                  NAME "history_keep_last"  VALUE u32 }
+>        [ NAME "app" SETTINGS{…} ]   // only when a descriptor table is installed
+> }
+> ```
+>
+> The gap is not only the fictional rows. **Four of the six real, writable QoS knobs are missing from it** — `reliability`, `durability`, `priority` and `queue_max_bytes` all accept writes, and none appears in `:schema`. A client that discovers the write surface by reading `:schema`, which is that field's entire purpose, will not find them.
+
+
 
 - **Forwarder** (router): the stateless component that routes `FWD` frames between a node's local graph and its named transport links — each hop strips the leading `dst` segment and grows `src` with the way back. To a downstream subscriber a forwarded delivery is indistinguishable from a local write.
 
@@ -424,7 +438,7 @@ The host-side spelling of these operations is on [../modules/graph.md](../module
 
 A vertex exposes a **schema** describing every writable field. The schema lives at `<vertex>:schema` as a read-only structured TLV (typically a `POINT` whose children describe each field, or a `SETTINGS`-shaped record).
 
-### Core writable fields (frozen for v1)
+### Core writable fields (frozen for v1 — ⚠️ four rows are unimplemented, see below)
 
 | Field path | Type | Writable | Meaning |
 | ---- | ---- | ---- | ---- |
@@ -437,12 +451,18 @@ A vertex exposes a **schema** describing every writable field. The schema lives 
 | `:settings.priority` | u8 | yes | `0=low ... 255=critical` (transport hint) |
 | `:settings.queue_max_bytes` | u32 | yes | Per-subscriber queue cap (back-pressure threshold) |
 | `:settings.app.<name…>` | owner-defined TLV | owner-declared (`ro`/`rw`/`wo`) | Application property field ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md)): declared by the vertex owner in its field descriptor table; undeclared names stay `SCHEMA_NOT_FOUND` |
-| `:liveness.heartbeat_hz` | u8 | yes | Subscriber heartbeat rate; 0 = no liveness check |
-| `:liveness.last_seen_ns` | u64 | read-only | Wall-clock of last write observed |
-| `:liveness.missed_deadlines` | u32 | read-only | Counter |
+| ⚠️ `:liveness.heartbeat_hz` | u8 | **unimplemented** | Subscriber heartbeat rate; 0 = no liveness check |
+| ⚠️ `:liveness.last_seen_ns` | u64 | **unimplemented** | Wall-clock of last write observed |
+| ⚠️ `:liveness.missed_deadlines` | u32 | **unimplemented** | Counter |
 | `:schema` | structured TLV | read-only | Self-describing schema of fields and types |
-| `:description` | UTF-8 | yes (with permission) | Human-readable description |
+| ⚠️ `:description` | UTF-8 | **unimplemented** | Human-readable description |
 | `:acl` | ACL | yes (with permission) | Access control list |
+
+> ⚠️ **The four marked rows have no implementation, in either direction** ([#586](https://github.com/avatarsd-llc/libtracer/issues/586)). There is no liveness surface, no heartbeat engine and no description field anywhere in the reference implementation; a read or a write of any of them answers `tr::schema::not_found` (`0x0031`) — the ENOTTY contract [CONTEXT.md](../../CONTEXT.md) §Field-write declares (*"an unsupported one returns `SCHEMA_NOT_FOUND` — the `ENOTTY` of an unsupported ioctl"*). The complete implemented field set is `{children, acl, identity, schema, settings, subscribers}`.
+>
+> They are **marked rather than deleted** because whether deadline/liveness enforcement is a v1 commitment is an open design question ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) liveness is the pending work). Marking removes the fiction without foreclosing either answer; deleting would foreclose one. If liveness lands, drop the markers — if it is ruled out of v1, drop the rows.
+>
+> **Reads and writes are not symmetric for `:settings.*` either.** All six protocol knobs above accept **writes**. Per-knob **reads** (`:settings.deadline_ns`) are unimplemented and answer `SCHEMA_NOT_FOUND`; only the bare `:settings` container, `:settings.app`, and `:settings.app.<name…>` are readable. The "Writable" column is accurate; do not read it as a claim about readability.
 
 ### The payload-discriminating `:subscribers[N]` write
 
@@ -485,7 +505,7 @@ A producer that has no good value to publish — a sensor that faulted, a readin
 
 - **Stale** (the value is old, or the producer went quiet) is **consumer-derived**, never a flag the producer sets:
   - *Sample age*: the optional wire timestamp (`opt.TS`, [01-data-format.md](01-data-format.md)) carries when the sample was taken; a consumer treats `now − ts > tolerance` as stale.
-  - *Producer liveness*: `:settings.deadline_ns` plus the read-only `:liveness.last_seen_ns` / `:liveness.missed_deadlines` fields (above) say whether the producer is still writing within its contract. A missed deadline is the canonical "this vertex went stale" signal, and it is observable without the producer doing anything.
+  - *Producer liveness* ⚠️ **intended, not implemented**: `:settings.deadline_ns` plus the read-only `:liveness.last_seen_ns` / `:liveness.missed_deadlines` fields (above) are meant to say whether the producer is still writing within its contract, and a missed deadline would be the canonical "this vertex went stale" signal, observable without the producer doing anything. `deadline_ns` is writable but nothing enforces it, and the two `:liveness.*` fields do not exist — see the marked rows above ([#586](https://github.com/avatarsd-llc/libtracer/issues/586)). The *staleness* concept below stands on `ts` alone today.
 - **Invalid / fault** (the producer is alive but its value is meaningless right now) is a **`STATUS=ERROR(<reason>)` written in place of a VALUE**. Delivery is an ordinary write ([CONTEXT.md](../../CONTEXT.md) §delivery *is* a write), so a fault reaches subscribers through the same edge as a value; a type-aware consumer distinguishes a `STATUS` (type `0x09`) from a `VALUE` (type `0x01`) by its type code and reacts (hold last-good, alarm, fail over) exactly as it would for a liveness fault.
 
 The second bullet is a **producer-side convention**, not a runtime behaviour. A vertex stores whatever TLV is written to it and the graph never mints a `STATUS` on a producer's behalf; a consumer must therefore not infer that a silent vertex is faulted, and must not assume every producer adopts the convention. A connection vertex's link state, for one, is published as an ordinary `VALUE` carrying the state code, not as a `STATUS`.

@@ -140,8 +140,8 @@ Free-form UTF-8 human-readable description of a vertex or field. Optional in eve
 
 ### Where it appears
 
-- `<vertex>:description` field.
-- Inside `:schema` responses annotating fields.
+- ⚠️ `<vertex>:description` field — **unimplemented**; a read or write answers `tr::schema::not_found` ([#586](https://github.com/avatarsd-llc/libtracer/issues/586)).
+- Inside `:schema` responses annotating fields — reachable only through the RFC-0010 owner part, whose descriptor bytes are served verbatim; the synthesized protocol part emits no `TEXT`.
 - Inside ERROR TLVs as the human-readable detail.
 
 ---
@@ -866,7 +866,7 @@ Allocated on a fast-track basis during v1. Assigned so far:
 - `0x0F` **FWD** and `0x10` **FIELD** — the remote-operation frames ([RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md) §B/§C, ADR-0035).
 - `0x11`–`0x13` — the **route-handle transport-plane control frames** (below).
 
-Unassigned: `0x14`–`0x1F`. Candidate uses: `CAPABILITY` (opaque token, lighter than full ACL), `HEARTBEAT` (an explicit liveness ping; the same need is met by writes to the `:liveness.last_seen_ns` field, [04-communication-flows.md](04-communication-flows.md)). Receivers MUST handle unknown codes in this range per the forward-compatibility rules of [01-data-format.md](01-data-format.md) §forward / backward compatibility.
+Unassigned: `0x14`–`0x1F`. Candidate uses: `CAPABILITY` (opaque token, lighter than full ACL), `HEARTBEAT` (an explicit liveness ping; the intended alternative is writes to the `:liveness.last_seen_ns` field, [04-communication-flows.md](04-communication-flows.md) — ⚠️ which is itself unimplemented, so *neither* spelling exists today, [#586](https://github.com/avatarsd-llc/libtracer/issues/586)). Receivers MUST handle unknown codes in this range per the forward-compatibility rules of [01-data-format.md](01-data-format.md) §forward / backward compatibility.
 
 A single-hop `FWD` request → reply round-trip (the consumer reaches a terminus node directly). The reply's `dst` is the request's `src`; a failure comes back as `kind=ERROR` carrying `STATUS{ ERROR }`:
 

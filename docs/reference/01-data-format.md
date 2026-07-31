@@ -207,7 +207,7 @@ Application-domain timestamps (sample acquisition time, sensor exposure window, 
 | ---- | ---- |
 | When did the sender put this on the wire? | wire-trailer `TS` (this section) |
 | When was the sample acquired / produced? | `TIME` TLV inside a structured payload |
-| When did this vertex last receive a write? | `:liveness.last_seen_ns` field |
+| When did this vertex last receive a write? | ⚠️ *no mechanism today* — `:liveness.last_seen_ns` is unimplemented ([#586](https://github.com/avatarsd-llc/libtracer/issues/586)) |
 
 Conflating them is a bug; the protocol keeps them separate by construction.
 
