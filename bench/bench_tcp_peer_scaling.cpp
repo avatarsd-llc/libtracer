@@ -75,6 +75,19 @@
  *
  * The general form, worth carrying to the next instrument: when a sweep produces an
  * IMPOSSIBLE result, the instrument is telling you which variable you failed to hold.
+ *
+ * **Third: a negative result was a width, not an answer.** Swept to 512 idle peers the arm
+ * reports that limits 2 and 3 do not bind, and that reading is correct AT 512. Swept to 8192
+ * the server delivers ~77% of a pinned 100k frames/s while the sender's own p50 stays flat —
+ * the shortfall is entirely the server, and 8,193 `pollfd` entries rebuilt under a mutex per
+ * pass is what it is. The knee sits between 4096 and 8192. `LIBTRACER_BENCH_IDLE_MAX` exists
+ * so the width is a parameter rather than a constant somebody has to notice.
+ *
+ * That failure mode is also why the paced arm checks whether the PACER STILL HOLDS. Pinning
+ * the offered rate makes latency the signal, but only while the server can drain what is
+ * offered; past that the shortfall lands in the throughput column the paced verdict is
+ * deliberately not reading, and a latency-only verdict announces "does not bind" at exactly
+ * the width where it finally does.
  */
 
 #include <netinet/in.h>
@@ -104,8 +117,22 @@ namespace {
 using namespace std::chrono_literals;
 using namespace bench;  // Latency, now_ns — the shared harness helpers
 
-/** @brief Idle (connected, silent) peer counts swept while the active load is held at one. */
-constexpr std::size_t kIdleCounts[] = {0, 8, 32, 128, 512};
+/**
+ * @brief Idle (connected, silent) peer counts swept while the active load is held at one.
+ *
+ * Doubling from 8 up to `LIBTRACER_BENCH_IDLE_MAX` (default 512). Configurable because the
+ * question this arm answers is width-dependent: a negative result at 512 says the O(peers)
+ * terms do not bind AT 512, and the only way to find where they do is to widen. The server
+ * accepts at most one peer per poll pass, so a deep sweep spends real time forming its
+ * fixture — which the fixture wait handles rather than assumes.
+ */
+[[nodiscard]] std::vector<std::size_t> idle_counts() {
+    const char* const env = std::getenv("LIBTRACER_BENCH_IDLE_MAX");
+    const std::size_t cap = env != nullptr ? std::strtoull(env, nullptr, 10) : 512;
+    std::vector<std::size_t> v{0};
+    for (std::size_t n = 8; n <= cap; n *= 2) v.push_back(n);
+    return v;
+}
 
 /** @brief Active peer counts. Capped at 8 on a 24-core host so dialers never starve the server —
  *         the confound that makes `bench_tcp_fanin`'s widest point unreadable. */
@@ -122,7 +149,11 @@ constexpr std::size_t kFrameBytes = 64;
  * sweep. That is the whole point: at max load the batch grows with the poll-pass duration
  * and hides the scan behind an amortisation win.
  */
-constexpr std::uint64_t kPacedGapNs = 10000;
+[[nodiscard]] std::uint64_t paced_gap_ns() {
+    const char* const env = std::getenv("LIBTRACER_BENCH_PACED_HZ");
+    const std::uint64_t hz = env != nullptr ? std::strtoull(env, nullptr, 10) : 100000;
+    return hz > 0 ? 1000000000ULL / hz : 0;
+}
 
 /** @brief Repeats per sweep point. Medians of fewer than five have misled this project before. */
 constexpr int kReps = 5;
@@ -322,20 +353,24 @@ void sweep(bool vary_idle, double seconds) {
     std::printf("%-10s %-14s %-12s %-12s %-10s %-10s\n", vary_idle ? "idle" : "active",
                 "median f/s", "min f/s", "max f/s", "p50 ns", "p99 ns");
 
+    const double offered_hz =
+        vary_idle && paced_gap_ns() > 0 ? 1e9 / static_cast<double>(paced_gap_ns()) : 0.0;
+    double last_rate_med = 0.0;
     std::vector<double> first_med;
     std::vector<double> last_med;
     std::vector<double> first_all;
     std::vector<double> last_all;
-    const std::size_t n_points = vary_idle ? std::size(kIdleCounts) : std::size(kActiveCounts);
+    const std::vector<std::size_t> idles = idle_counts();
+    const std::size_t n_points = vary_idle ? idles.size() : std::size(kActiveCounts);
 
     for (std::size_t pi = 0; pi < n_points; ++pi) {
-        const std::size_t idle = vary_idle ? kIdleCounts[pi] : 0;
+        const std::size_t idle = vary_idle ? idles[pi] : 0;
         const std::size_t active = vary_idle ? 1 : kActiveCounts[pi];
         std::vector<double> rates;
         std::vector<std::uint64_t> p50s;
         std::vector<std::uint64_t> p99s;
         for (int r = 0; r < kReps; ++r) {
-            const rep_t rep = run_point(active, idle, seconds, vary_idle ? kPacedGapNs : 0);
+            const rep_t rep = run_point(active, idle, seconds, vary_idle ? paced_gap_ns() : 0);
             rates.push_back(rep.frames_per_s);
             p50s.push_back(rep.p50_ns);
             p99s.push_back(rep.p99_ns);
@@ -356,6 +391,7 @@ void sweep(bool vary_idle, double seconds) {
         else
             signal = rates;
         const double sig_med = median_of(signal);
+        if (pi + 1 == n_points) last_rate_med = med;
         if (pi == 0) {
             first_med.push_back(sig_med);
             first_all = signal;
@@ -382,12 +418,29 @@ void sweep(bool vary_idle, double seconds) {
             vary_idle ? "p50 ns" : "frames/s", lo_first, hi_first, lo_last, hi_last);
         return;
     }
+    // THE PACER LOSING CONTROL IS ITSELF THE RESULT. This arm pins the offered rate so that
+    // latency is the signal — but that only holds while the server can still drain what is
+    // offered. Once it cannot, the shortfall moves into the throughput column that the paced
+    // verdict is deliberately NOT reading, and a latency-only verdict would report "does not
+    // bind" at exactly the width where it finally does. Check for it explicitly.
+    if (vary_idle && offered_hz > 0.0) {
+        const double achieved = last_rate_med;
+        if (achieved < 0.95 * offered_hz) {
+            std::printf(
+                "  VERDICT BINDS at %zu idle peers — the server delivered %.0f f/s against a "
+                "pinned %.0f f/s offered (%.0f%%).\n           The sender kept writing (p50 is "
+                "flat), so the shortfall is the server: that IS the O(peers) poll + locked "
+                "rebuild, and this width is the knee.\n",
+                idles.back(), achieved, offered_hz, 100.0 * achieved / offered_hz);
+            return;
+        }
+    }
     const double ratio = last_med[0] / first_med[0];
     if (vary_idle)
         std::printf(
             "  VERDICT p50 x%.2f across %zu idle peers doing NOTHING, at a PINNED offered "
             "rate.\n           %s\n",
-            ratio, static_cast<std::size_t>(kIdleCounts[std::size(kIdleCounts) - 1]),
+            ratio, idles.back(),
             ratio > 1.0 ? "ABOVE 1.0 — that rise IS the O(peers) poll + locked rebuild."
                         : "AT OR BELOW 1.0 — limits 2+3 do NOT bind at this width. A ratio "
                           "under 1.0 is NOT a win and is not claimed as one: nothing here "
