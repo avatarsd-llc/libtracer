@@ -619,13 +619,16 @@ Memory binding is a **modular spectrum**, and libtracer is a **transparent byte 
 
 ### Boost asio streambuf integration
 
-A `boost::asio::streambuf` is a read-write buffer with **consume-on-read** semantics. A view pinning some of its bytes is in conflict with `streambuf::consume()`:
+A `boost::asio::streambuf` is a read-write buffer with **consume-on-read** semantics: `prepare()` may move or reallocate the underlying storage, so a view pinning some of its bytes is in conflict with the buffer's own advance. Four bindings resolve that conflict:
 
 - **Wrap and pin** — modify or fork streambuf so consume waits on libtracer's view refcount.
+- **Supply the buffer** — libtracer provides a type satisfying asio's `DynamicBuffer_v2` concept, backed by libtracer segments. libtracer then owns `consume()` and honours the pin itself, so nothing upstream changes and no bytes are copied.
 - **Copy on import** — at the boost-asio↔libtracer boundary, copy bytes into a `mem_heap` segment. One copy per ingress.
 - **Don't integrate** — leave the boost-asio↔libtracer boundary to user code; a copy-on-import shim is trivial to write against the public API.
 
-**Rule**: v1 does not integrate. The boundary is user code. Documented in [10-module-catalog.md](10-module-catalog.md) §hard integrations.
+**Rule**: v1 does not integrate. The boundary is user code.
+
+Supplying the buffer is the only binding that is both copy-free and fork-free, and it is measured to buy nothing here: it costs 64 KiB of ring per connection against 232 B for an entire established connection, and the shipped transports already allocate nothing per frame on egress without it. Rationale in [ADR-0071 — the host transport is a separate TU](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0071-host-transport-is-a-separate-tu-with-shared-nothing-epoll.md); catalog entry in [10-module-catalog.md](10-module-catalog.md) §hard integrations.
 
 ### MMIO register-as-view: volatile bytes
 

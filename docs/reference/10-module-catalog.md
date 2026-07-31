@@ -365,7 +365,9 @@ Six L0/L1 integrations sit where libtracer's ownership model meets a foreign one
 
 ### Consume-on-read buffers
 
-A `boost::asio::streambuf` removes bytes from the buffer as the application reads them, so pinning some of those bytes behind a view is in direct conflict with the buffer's own advance. The rule: `mem_asio_streambuf` is **not shipped in v1**; the documented path is a copy-on-import shim the integrator writes against the public API at the boundary. Pinning the bytes instead would require upstream cooperation — a pin counter that suppresses the consume until the view refcount drops, which means modifying or forking the buffer — and a copy at import inside libtracer would defeat the zero-copy claim the L0/L1 seam exists to make, so neither is the shipped answer.
+A `boost::asio::streambuf` removes bytes from the buffer as the application reads them, and `prepare()` may move or reallocate the underlying storage, so pinning some of those bytes behind a view is in direct conflict with the buffer's own advance. The rule: `mem_asio_streambuf` is **not shipped in v1**; the documented path is a copy-on-import shim the integrator writes against the public API at the boundary.
+
+Three alternatives are rejected. Pinning the bytes in place requires upstream cooperation — a pin counter that suppresses the consume until the view refcount drops — which means modifying or forking the buffer. A copy at import inside libtracer defeats the zero-copy claim the L0/L1 seam exists to make. Supplying the buffer instead — a libtracer type satisfying asio's `DynamicBuffer_v2` concept, where libtracer owns `consume()` and honours the pin itself — needs neither a fork nor a copy, but costs 64 KiB of ring per connection against 232 B for an entire established connection, and buys nothing the shipped transports do not already have: they allocate nothing per frame on egress without asio ([ADR-0071](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0071-host-transport-is-a-separate-tu-with-shared-nothing-epoll.md)).
 
 ### Volatile bytes behind an MMIO view
 
