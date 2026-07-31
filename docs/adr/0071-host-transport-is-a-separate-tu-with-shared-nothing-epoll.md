@@ -1,6 +1,6 @@
 # The host transport is a separate translation unit with a shared-nothing epoll model
 
-Status: **accepted (design); not implemented.** Records two decisions that were previously unrecorded: *why the shipped TCP server multiplexes on one `poll()` thread* (a choice that has lived only as a code comment citing [#362](https://github.com/avatarsd-llc/libtracer/issues/362)), and *what a many-core host does instead*. Binds through [ADR-0047](0047-build-time-closed-module-sets-compile-time-seams.md)'s build-time module sets; upholds [ADR-0065](0065-failable-allocation-gets-its-own-seam-block-source.md) (allocation reports failure by value). **This ADR is not justified by a measured bottleneck — see §Consequences, "What this ADR does not establish".**
+Status: **accepted (design); not implemented.** Records two decisions that were previously unrecorded: *why the shipped TCP server multiplexes on one `poll()` thread* (a choice that has lived only as a code comment citing [#362](https://github.com/avatarsd-llc/libtracer/issues/362)), and *what a many-core host does instead*. Binds through [ADR-0047](0047-build-time-closed-module-sets-compile-time-seams.md)'s build-time module sets; upholds [ADR-0065](0065-failable-allocation-gets-its-own-seam-block-source.md) (allocation reports failure by value). **Bounded by its own erratum: the prerequisite bench now measures the threshold — limits 2 and 3 bind above ~4 000 concurrent peers, and below that width this decision is not yet paid for. See §Consequences.**
 
 ## Context
 
@@ -43,7 +43,22 @@ Shared-nothing is the substance of the decision, not an implementation detail: b
 
 ### What this ADR does not establish
 
-**No measurement shows the single poll thread is the host's limit.** `bench_tcp_fanin`'s 16→32 peer ratio measured **1.08× with overlapping ranges**, so that instrument cannot establish its own conclusion. The decision was taken as design debt — a structural single-core cap that should not be discovered later — and not as a response to an observed bottleneck. **Do not cite this ADR as evidence of a measured win.** A peer-scaling bench that can resolve the question is prerequisite to claiming one.
+~~**No measurement shows the single poll thread is the host's limit.** `bench_tcp_fanin`'s 16→32 peer ratio measured **1.08× with overlapping ranges**, so that instrument cannot establish its own conclusion. The decision was taken as design debt — a structural single-core cap that should not be discovered later — and not as a response to an observed bottleneck. **Do not cite this ADR as evidence of a measured win.** A peer-scaling bench that can resolve the question is prerequisite to claiming one.~~
+
+**Erratum: the prerequisite bench now exists, and it measured the threshold.** `bench/bench_tcp_peer_scaling.cpp` holds the offered load at one sender paced below saturation and sweeps connected-but-silent peers, so descriptor scanning is priced with the work held constant. Median of 5 per point:
+
+| idle peers | delivered, against 100 000 f/s offered | sender p50 |
+| ---: | ---: | ---: |
+| 512 | 100 005 | 1 093 ns |
+| 2 048 | 100 059 | 1 052 ns |
+| 4 096 | 101 203 | 992 ns |
+| **8 192** | **76 720 — 77 %** (min 72 264) | 1 052 ns |
+
+**Limits 2 and 3 bind, and the knee is between 4 096 and 8 192 idle peers.** At 8 192 the server cannot drain what is offered while the sender's own p50 stays flat, so the shortfall is entirely server-side — 8 193 `pollfd` entries rebuilt under a mutex on every pass is what that is. Limit 1 is a separate story and is still **not** demonstrated: the active arm rises ×12.25 aggregate across 1→8 active peers, so the thread itself is not saturated there.
+
+**What this bounds.** The decision above stands and is now paid for **at deployments above roughly 4 000 concurrent peers**. Below that width nothing in this ADR is shown to bind and the implementation is not yet justified — a host serving hundreds of peers should keep the portable file. That is a sharper claim than either "build it" or "do not", and it is the one the numbers support.
+
+**One caution carried from the bench's own header, because it produced three confident wrong answers first.** A *narrow* sweep reports "does not bind", which was true at 512 and false as a conclusion; the width is a parameter (`LIBTRACER_BENCH_IDLE_MAX`), not a constant. And a paced arm stops being valid the moment the server cannot keep up, because the shortfall then moves into the throughput column a latency-only verdict does not read.
 
 Related: `p999` is not a reportable statistic on this project's harness at any sample count yet tested (run-to-run 17× at n=10 000, 23.8–35.7× at n=20 000). Tail claims about any transport change must use `p99`, which is stable as a median-of-N at n ≥ 10 000.
 
