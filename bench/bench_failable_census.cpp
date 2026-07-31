@@ -1,0 +1,517 @@
+/**
+ * @file
+ * @brief Costs the ADR-0065 `block_source_t` migration: (A) how many BLOCKS each peer-driven
+ *        control-plane operation allocates and through which seam, and (B) what the two
+ *        candidate guard shapes cost in ns.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * Two modes, because the migration has two costs and they are measured differently.
+ *
+ * `blocks` — a DETERMINISTIC census (counts, not times). A counting `std::pmr::memory_resource`
+ * plus this TU's global operator-new override separate the blocks a route-handle operation draws
+ * from the injected resource (`mr_served`) from those that ESCAPE to the global heap. Every one
+ * of the pmr-served blocks is a throwing allocation on a peer-driven path: on the shipping
+ * `-fno-exceptions` profile that is an `abort()`, which is what ADR-0065 exists to remove.
+ * The operations mirror `fwd_router_t::on_advertise` / `on_nack`'s calls one for one.
+ *
+ * `grow` — an INTERLEAVED A/B of the two guard shapes for a growable array of trivially-copyable
+ * elements, which is what the 29 `detail::try_reserve` / `try_push_back` sites and the ADR-0065
+ * destination respectively are:
+ *   - `base`  `std::vector<T>` + `tr::detail::try_push_back` — today. Each growth probes the
+ *             GLOBAL heap with a throwaway `operator new` + `operator delete`, then runs the real
+ *             (throwing) reserve: THREE allocator round trips per growth.
+ *   - `cand`  `tr::mem::block_array_t<T>` over an injected `block_source_t` — ADR-0065. ONE
+ *             `try_alloc` (a virtual call) per growth, `memcpy` relocation, no probe.
+ *   - `ctrl`  a raw `std::vector<T>::push_back` with no guard at all — the unguarded floor, a
+ *             control arm that must not move between conditions.
+ * Rep-interleaved (base, cand, ctrl, base, ...) so a thermal/frequency drift hits all three arms;
+ * every rep's value is printed so a reader can run the overlap check, not just the median.
+ *
+ * Single-threaded by construction: both modes measure per-operation allocation shape, and the
+ * global counter is process-wide.
+ */
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <memory_resource>
+#include <new>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "bench_common.hpp"
+#include "libtracer/frame.hpp"
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_source.hpp"
+#include "libtracer/route_handle.hpp"
+#include "libtracer/tlv_emit.hpp"
+
+// --- global operator-new counter (this TU owns the override) -----------------
+
+namespace {
+
+bool g_armed = false;
+std::size_t g_allocs = 0;
+std::size_t g_frees = 0;
+std::size_t g_bytes = 0;
+
+void* counted_alloc(std::size_t size) {
+    if (g_armed) {
+        ++g_allocs;
+        g_bytes += size;
+    }
+    return std::malloc(size != 0 ? size : 1);
+}
+
+void counted_free(void* p) {
+    if (p == nullptr) return;
+    if (g_armed) ++g_frees;
+    std::free(p);
+}
+
+}  // namespace
+
+void* operator new(std::size_t size) {
+    void* p = counted_alloc(size);
+    if (p == nullptr) throw std::bad_alloc();
+    return p;
+}
+void* operator new[](std::size_t size) {
+    void* p = counted_alloc(size);
+    if (p == nullptr) throw std::bad_alloc();
+    return p;
+}
+void* operator new(std::size_t size, const std::nothrow_t&) noexcept { return counted_alloc(size); }
+void* operator new[](std::size_t size, const std::nothrow_t&) noexcept {
+    return counted_alloc(size);
+}
+void* operator new(std::size_t size, std::align_val_t) { return operator new(size); }
+void* operator new(std::size_t size, std::align_val_t, const std::nothrow_t&) noexcept {
+    return counted_alloc(size);
+}
+void* operator new[](std::size_t size, std::align_val_t) { return operator new(size); }
+void operator delete(void* p) noexcept { counted_free(p); }
+void operator delete[](void* p) noexcept { counted_free(p); }
+void operator delete(void* p, std::size_t) noexcept { counted_free(p); }
+void operator delete[](void* p, std::size_t) noexcept { counted_free(p); }
+void operator delete(void* p, std::align_val_t) noexcept { counted_free(p); }
+void operator delete(void* p, std::size_t, std::align_val_t) noexcept { counted_free(p); }
+void operator delete(void* p, const std::nothrow_t&) noexcept { counted_free(p); }
+void operator delete(void* p, std::align_val_t, const std::nothrow_t&) noexcept { counted_free(p); }
+
+namespace {
+
+/** @brief A `std::pmr::memory_resource` that counts what it serves (blocks and bytes). */
+class counting_resource_t final : public std::pmr::memory_resource {
+   public:
+    std::size_t allocs = 0; /**< @brief Blocks served since construction. */
+    std::size_t bytes = 0;  /**< @brief Bytes served since construction. */
+
+   private:
+    void* do_allocate(std::size_t n, std::size_t align) override {
+        ++allocs;
+        bytes += n;
+        return std::pmr::get_default_resource()->allocate(n, align);
+    }
+    void do_deallocate(void* p, std::size_t n, std::size_t align) override {
+        std::pmr::get_default_resource()->deallocate(p, n, align);
+    }
+    [[nodiscard]] bool do_is_equal(const std::pmr::memory_resource& o) const noexcept override {
+        return this == &o;
+    }
+};
+
+/** @brief One census row: blocks through the injected seam and blocks that escaped to the heap. */
+struct census_t {
+    std::size_t mr_blocks = 0;
+    std::size_t mr_bytes = 0;
+    std::size_t heap_blocks = 0;
+    std::size_t heap_bytes = 0;
+};
+
+void print_census(const char* op, const census_t& c, std::size_t n, const char* note) {
+    std::printf(
+        "RESULT failable blocks op=%s mr_blocks=%.2f heap_blocks=%.2f mr_bytes=%.1f "
+        "heap_bytes=%.1f n=%zu note=%s\n",
+        op, static_cast<double>(c.mr_blocks) / static_cast<double>(n),
+        static_cast<double>(c.heap_blocks) / static_cast<double>(n),
+        static_cast<double>(c.mr_bytes) / static_cast<double>(n),
+        static_cast<double>(c.heap_bytes) / static_cast<double>(n), n, note);
+}
+
+/** @brief A NAME-only PATH TLV of @p segs segments — a plausible learned route. */
+std::vector<std::byte> make_route(std::size_t segs) {
+    std::vector<std::byte> body;
+    for (std::size_t i = 0; i < segs; ++i) {
+        char nb[24];
+        std::snprintf(nb, sizeof nb, "seg%04zu", i);
+        tr::wire::emit_name(body, std::string_view(nb));
+    }
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, tr::wire::type_t::PATH, tr::wire::opt_t{.pl = true}, body);
+    return out;
+}
+
+/**
+ * @brief The block census of the route-handle control path.
+ *
+ * Each armed window brackets exactly one peer-driven operation repeated @p n times, on a
+ * fresh table set, so the per-op figure is an average over a clean state machine rather
+ * than a steady-state one.
+ */
+int run_blocks() {
+    constexpr std::size_t kN = 256;
+    const std::vector<std::byte> route = make_route(4);
+
+    // (1) FIRST bind on a NEW link — `fwd_router_t::on_advertise`'s terminus leg reaches this
+    //     through `bind_ingress`, which calls `tables()`: the #603-defect-1 `allocate_shared`.
+    {
+        counting_resource_t mr;
+        tr::net::route_handle_t rh{&mr};
+        census_t c;
+        const std::size_t mr0 = mr.allocs;
+        const std::size_t mrb0 = mr.bytes;
+        g_allocs = g_frees = g_bytes = 0;
+        g_armed = true;
+        for (std::size_t i = 0; i < kN; ++i) {
+            char lb[32];
+            std::snprintf(lb, sizeof lb, "link-%05zu", i);
+            tr::net::handle_binding_t b;
+            b.terminus = true;
+            b.local_route.assign(route.begin(), route.end());
+            (void)rh.bind_ingress(std::string_view(lb), 1, std::move(b));
+        }
+        g_armed = false;
+        c.mr_blocks = mr.allocs - mr0;
+        c.mr_bytes = mr.bytes - mrb0;
+        c.heap_blocks = g_allocs;
+        c.heap_bytes = g_bytes;
+        print_census("bind_ingress_new_link", c, kN,
+                     "first-touch:allocate_shared+pmr_string+map_node+entry_vector");
+    }
+
+    // (2) A further bind on an EXISTING link — the steady-state learn.
+    {
+        counting_resource_t mr;
+        tr::net::route_handle_t rh{&mr};
+        {
+            tr::net::handle_binding_t b;
+            b.terminus = true;
+            (void)rh.bind_ingress("link-0", 0, std::move(b));
+        }
+        census_t c;
+        const std::size_t mr0 = mr.allocs;
+        const std::size_t mrb0 = mr.bytes;
+        g_allocs = g_frees = g_bytes = 0;
+        g_armed = true;
+        for (std::size_t i = 0; i < kN; ++i) {
+            tr::net::handle_binding_t b;
+            b.terminus = true;
+            b.local_route.assign(route.begin(), route.end());
+            (void)rh.bind_ingress("link-0", static_cast<std::uint16_t>(i + 1), std::move(b));
+        }
+        g_armed = false;
+        c.mr_blocks = mr.allocs - mr0;
+        c.mr_bytes = mr.bytes - mrb0;
+        c.heap_blocks = g_allocs;
+        c.heap_bytes = g_bytes;
+        print_census("bind_ingress_same_link", c, kN, "steady:entry_vector_growth+local_route");
+    }
+
+    // (3) `record_egress` — `on_advertise`'s forwarding leg, once per learned label.
+    {
+        counting_resource_t mr;
+        tr::net::route_handle_t rh{&mr};
+        (void)rh.record_egress("link-0", 1, route);
+        census_t c;
+        const std::size_t mr0 = mr.allocs;
+        const std::size_t mrb0 = mr.bytes;
+        g_allocs = g_frees = g_bytes = 0;
+        g_armed = true;
+        for (std::size_t i = 0; i < kN; ++i)
+            (void)rh.record_egress("link-0", static_cast<std::uint16_t>(i + 2), route);
+        g_armed = false;
+        c.mr_blocks = mr.allocs - mr0;
+        c.mr_bytes = mr.bytes - mrb0;
+        c.heap_blocks = g_allocs;
+        c.heap_bytes = g_bytes;
+        print_census("record_egress", c, kN, "route_bytes_copy+egress_vector_growth");
+    }
+
+    // (4) `ensure_egress` — the DELIVERY path's label allocation (`deliver_remote`).
+    {
+        counting_resource_t mr;
+        tr::net::route_handle_t rh{&mr};
+        (void)rh.ensure_egress("link-0", route);
+        std::vector<std::vector<std::byte>> routes;
+        routes.reserve(kN);
+        for (std::size_t i = 0; i < kN; ++i) routes.push_back(make_route(4 + (i % 3)));
+        census_t c;
+        const std::size_t mr0 = mr.allocs;
+        const std::size_t mrb0 = mr.bytes;
+        g_allocs = g_frees = g_bytes = 0;
+        g_armed = true;
+        for (const std::vector<std::byte>& r : routes)
+            (void)rh.ensure_egress("link-0", std::span<const std::byte>(r));
+        g_armed = false;
+        c.mr_blocks = mr.allocs - mr0;
+        c.mr_bytes = mr.bytes - mrb0;
+        c.heap_blocks = g_allocs;
+        c.heap_bytes = g_bytes;
+        print_census("ensure_egress_new_route", c, kN, "linear_scan_miss+route_copy");
+    }
+
+    // (5) `egress_route` — `on_nack`'s owning read: a std::vector COPY out of the table,
+    //     on the GLOBAL heap (the return type is a plain vector, not a pmr one).
+    {
+        counting_resource_t mr;
+        tr::net::route_handle_t rh{&mr};
+        for (std::size_t i = 0; i < 64; ++i)
+            (void)rh.record_egress("link-0", static_cast<std::uint16_t>(i + 1), route);
+        census_t c;
+        const std::size_t mr0 = mr.allocs;
+        const std::size_t mrb0 = mr.bytes;
+        g_allocs = g_frees = g_bytes = 0;
+        g_armed = true;
+        for (std::size_t i = 0; i < kN; ++i)
+            (void)rh.egress_route("link-0", static_cast<std::uint16_t>((i % 64) + 1));
+        g_armed = false;
+        c.mr_blocks = mr.allocs - mr0;
+        c.mr_bytes = mr.bytes - mrb0;
+        c.heap_blocks = g_allocs;
+        c.heap_bytes = g_bytes;
+        print_census("egress_route_lookup", c, kN, "on_nack:owning_copy_to_GLOBAL_heap");
+    }
+
+    // (6) The control-frame encoders `on_advertise` / `on_compact` / `on_nack` call: the
+    //     THROWING pair, then the nothrow pair that already exists beside them.
+    {
+        census_t c;
+        g_allocs = g_frees = g_bytes = 0;
+        g_armed = true;
+        for (std::size_t i = 0; i < kN; ++i) {
+            const std::vector<std::byte> adv = tr::net::encode_advertise(1, route);
+            asm volatile("" : : "r"(adv.data()) : "memory");
+        }
+        g_armed = false;
+        c.heap_blocks = g_allocs;
+        c.heap_bytes = g_bytes;
+        print_census("encode_advertise_throwing", c, kN, "body+out:UNGUARDED_on_peer_path");
+    }
+    {
+        census_t c;
+        std::vector<std::byte> out;
+        g_allocs = g_frees = g_bytes = 0;
+        g_armed = true;
+        for (std::size_t i = 0; i < kN; ++i) {
+            (void)tr::net::try_encode_advertise(out, 1, route);
+            asm volatile("" : : "r"(out.data()) : "memory");
+        }
+        g_armed = false;
+        c.heap_blocks = g_allocs;
+        c.heap_bytes = g_bytes;
+        print_census("try_encode_advertise_guarded", c, kN,
+                     "reused_out_buffer:probe+reserve_per_call");
+    }
+    {
+        census_t c;
+        static constexpr char kSeg[] = "segment";
+        const std::span<const std::byte> seg(reinterpret_cast<const std::byte*>(kSeg), 7);
+        const tr::wire::tlv_t tlv = [&] {
+            tr::wire::tlv_t t;
+            t.type = tr::wire::type_t::PATH;
+            t.opt = tr::wire::opt_t{.pl = true};
+            for (std::size_t i = 0; i < 4; ++i) {
+                tr::wire::tlv_t n;
+                n.type = tr::wire::type_t::NAME;
+                n.payload = seg;
+                t.children.push_back(std::move(n));
+            }
+            return t;
+        }();
+        g_allocs = g_frees = g_bytes = 0;
+        g_armed = true;
+        for (std::size_t i = 0; i < kN; ++i) {
+            const std::vector<std::byte> b = tr::wire::encode(tlv);
+            asm volatile("" : : "r"(b.data()) : "memory");
+        }
+        g_armed = false;
+        c.heap_blocks = g_allocs;
+        c.heap_bytes = g_bytes;
+        print_census("wire_encode_4seg_path", c, kN,
+                     "on_advertise:strip+re-encode:UNGUARDED_recursive");
+
+        // `on_advertise` also DEEP-COPIES the decoded route TLV before stripping
+        // (`tlv_t stripped = route;`) — one `std::vector<tlv_t>` per node, also unguarded.
+        census_t d;
+        g_allocs = g_frees = g_bytes = 0;
+        g_armed = true;
+        for (std::size_t i = 0; i < kN; ++i) {
+            tr::wire::tlv_t copy = tlv;
+            asm volatile("" : : "r"(copy.children.data()) : "memory");
+        }
+        g_armed = false;
+        d.heap_blocks = g_allocs;
+        d.heap_bytes = g_bytes;
+        print_census("tlv_deep_copy_4seg", d, kN, "on_advertise:stripped=route:UNGUARDED");
+    }
+    return 0;
+}
+
+// --- mode B: the guard-shape A/B --------------------------------------------
+
+/** @brief A 48-byte trivially-copyable element — the arena/plan node shape these arrays hold. */
+struct elem_t {
+    std::uint64_t a, b, c, d, e, f;
+};
+
+/** @brief `std::vector` + the global-heap probe guard: today's shape at the 29 call sites. */
+[[gnu::noinline]] std::uint64_t arm_try_push_back(std::size_t n) {
+    std::vector<elem_t> v;
+    for (std::size_t i = 0; i < n; ++i) {
+        elem_t x{i, i, i, i, i, i};
+        if (!tr::detail::try_push_back(v, std::move(x))) return 0;
+    }
+    return v.back().a + v.size();
+}
+
+/** @brief `block_array_t` over an injected source: the ADR-0065 destination shape. */
+[[gnu::noinline]] std::uint64_t arm_block_array(std::size_t n, tr::mem::block_source_t& src) {
+    tr::mem::block_array_t<elem_t> v{src};
+    for (std::size_t i = 0; i < n; ++i) {
+        elem_t* s = v.push_slot();
+        if (s == nullptr) return 0;
+        *s = elem_t{i, i, i, i, i, i};
+    }
+    return v.back().a + v.size();
+}
+
+/** @brief Unguarded `std::vector::push_back` — the control arm; must not move. */
+[[gnu::noinline]] std::uint64_t arm_raw_vector(std::size_t n) {
+    std::vector<elem_t> v;
+    for (std::size_t i = 0; i < n; ++i) v.push_back(elem_t{i, i, i, i, i, i});
+    return v.back().a + v.size();
+}
+
+double median(std::vector<double> v) {
+    std::sort(v.begin(), v.end());
+    return v[v.size() / 2];
+}
+
+/** @brief Time one arm: @p iters arrays of @p n elements, returns ns per ELEMENT. */
+template <class F>
+double time_arm(F&& f, std::size_t n, std::size_t iters) {
+    std::uint64_t sink = 0;
+    const std::uint64_t t0 = bench::now_ns();
+    for (std::size_t i = 0; i < iters; ++i) sink += f();
+    const std::uint64_t t1 = bench::now_ns();
+    asm volatile("" : : "r"(sink) : "memory");
+    return static_cast<double>(t1 - t0) / static_cast<double>(iters * n);
+}
+
+int run_grow(std::size_t n, std::size_t reps) {
+    // Size the batch so ONE rep of ONE arm runs ~100 ms: short reps are dominated by
+    // scheduler noise, and the overlap check then reports noise instead of the effect.
+    const std::size_t kIters = std::max<std::size_t>(20000, 30'000'000 / n);
+    tr::mem::block_source_t& src = tr::mem::heap_source();
+    std::vector<double> a, b, c;
+    // Warm the allocator so the first rep does not pay page faults the others do not.
+    (void)arm_try_push_back(n);
+    (void)arm_block_array(n, src);
+    (void)arm_raw_vector(n);
+    for (std::size_t r = 0; r < reps; ++r) {
+        // INTERLEAVED: one rep of each arm, in turn — never all-of-one-then-the-other.
+        a.push_back(time_arm([&] { return arm_try_push_back(n); }, n, kIters));
+        b.push_back(time_arm([&] { return arm_block_array(n, src); }, n, kIters));
+        c.push_back(time_arm([&] { return arm_raw_vector(n); }, n, kIters));
+    }
+    for (std::size_t r = 0; r < reps; ++r)
+        std::printf(
+            "SAMPLE grow n=%zu rep=%zu try_push_back=%.3f block_array=%.3f raw_vector=%.3f\n", n, r,
+            a[r], b[r], c[r]);
+    const auto mn = [](const std::vector<double>& v) {
+        return *std::min_element(v.begin(), v.end());
+    };
+    const auto mx = [](const std::vector<double>& v) {
+        return *std::max_element(v.begin(), v.end());
+    };
+    std::printf(
+        "RESULT failable grow n=%zu reps=%zu try_push_back_med=%.3f block_array_med=%.3f "
+        "raw_vector_med=%.3f try_min=%.3f try_max=%.3f blk_min=%.3f blk_max=%.3f "
+        "raw_min=%.3f raw_max=%.3f unit=ns_per_element\n",
+        n, reps, median(a), median(b), median(c), mn(a), mx(a), mn(b), mx(b), mn(c), mx(c));
+    return 0;
+}
+
+/** @brief Time one `try_reserve`-style growth in isolation: probe+reserve vs a bare try_alloc. */
+int run_probe(std::size_t reps) {
+    constexpr std::size_t kIters = 200000;
+    constexpr std::size_t kBytes = 1024;
+    tr::mem::block_source_t& src = tr::mem::heap_source();
+    std::vector<double> a, b;
+    for (std::size_t r = 0; r < reps; ++r) {
+        {
+            const std::uint64_t t0 = bench::now_ns();
+            std::size_t ok = 0;
+            for (std::size_t i = 0; i < kIters; ++i) {
+                std::vector<std::byte> v;
+                ok += tr::detail::try_reserve(v, kBytes) ? 1u : 0u;
+                asm volatile("" : : "r"(v.data()) : "memory");
+            }
+            const std::uint64_t t1 = bench::now_ns();
+            asm volatile("" : : "r"(ok) : "memory");
+            a.push_back(static_cast<double>(t1 - t0) / static_cast<double>(kIters));
+        }
+        {
+            const std::uint64_t t0 = bench::now_ns();
+            std::size_t ok = 0;
+            for (std::size_t i = 0; i < kIters; ++i) {
+                void* p = src.try_alloc(kBytes, alignof(std::max_align_t));
+                ok += p != nullptr ? 1u : 0u;
+                asm volatile("" : : "r"(p) : "memory");
+                src.release(p, kBytes, alignof(std::max_align_t));
+            }
+            const std::uint64_t t1 = bench::now_ns();
+            asm volatile("" : : "r"(ok) : "memory");
+            b.push_back(static_cast<double>(t1 - t0) / static_cast<double>(kIters));
+        }
+    }
+    for (std::size_t r = 0; r < reps; ++r)
+        std::printf("SAMPLE probe rep=%zu try_reserve=%.2f try_alloc=%.2f\n", r, a[r], b[r]);
+    const auto mn = [](const std::vector<double>& v) {
+        return *std::min_element(v.begin(), v.end());
+    };
+    const auto mx = [](const std::vector<double>& v) {
+        return *std::max_element(v.begin(), v.end());
+    };
+    std::printf(
+        "RESULT failable probe reps=%zu try_reserve_med=%.2f try_alloc_med=%.2f "
+        "res_min=%.2f res_max=%.2f alloc_min=%.2f alloc_max=%.2f unit=ns_per_growth\n",
+        reps, median(a), median(b), mn(a), mx(a), mn(b), mx(b));
+    return 0;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    const std::string_view mode = argc > 1 ? std::string_view(argv[1]) : std::string_view("blocks");
+    if (mode == "blocks") return run_blocks();
+    if (mode == "grow") {
+        const std::size_t n = argc > 2 ? std::strtoul(argv[2], nullptr, 10) : 64;
+        const std::size_t reps = argc > 3 ? std::strtoul(argv[3], nullptr, 10) : 9;
+        return run_grow(n, reps);
+    }
+    if (mode == "probe") {
+        const std::size_t reps = argc > 2 ? std::strtoul(argv[2], nullptr, 10) : 9;
+        return run_probe(reps);
+    }
+    std::printf("usage: bench_failable_census [blocks|grow N REPS|probe REPS]\n");
+    return 2;
+}
