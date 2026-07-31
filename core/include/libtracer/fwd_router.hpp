@@ -90,11 +90,23 @@ class fwd_router_t {
      *              Appended with a default, so every existing call site is unchanged;
      *              a bounded node points this at the same slab as @p mr. Must outlive
      *              the router.
+     * @param max_label_bindings_per_link
+     *              Ceiling on one link's ingress table and, separately, its egress table
+     *              (#603). `0` ⇒ unbounded, the default and the prior behavior. Without it
+     *              the tables are peer-driven and grow to the whole 16-bit label space —
+     *              megabytes per link on a 16 KB node. A full table refuses NEW flows, which
+     *              then deliver over the full-route `FWD{WRITE}` form; established flows are
+     *              untouched. See @ref route_handle_t::refused_bindings for the counter.
      */
     explicit fwd_router_t(graph::graph_t& graph,
                           std::pmr::memory_resource* mr = std::pmr::get_default_resource(),
-                          mem::block_source_t* rx = &mem::heap_source())
-        : graph_(graph), resolver_(graph), mr_(mr), rx_(rx), handles_(mr) {
+                          mem::block_source_t* rx = &mem::heap_source(),
+                          std::size_t max_label_bindings_per_link = 0)
+        : graph_(graph),
+          resolver_(graph),
+          mr_(mr),
+          rx_(rx),
+          handles_(mr, max_label_bindings_per_link) {
         graph_.set_remote_delivery_sink(
             [this](const graph::remote_delivery_t& sub, const view::rope_t& value) {
                 deliver_remote(sub, value);

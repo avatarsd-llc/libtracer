@@ -43,17 +43,29 @@ std::shared_ptr<route_handle_t::link_tables_t> route_handle_t::find_tables(
     return it == links_.end() ? nullptr : it->second;  // a pinning copy; per-link mutex inside
 }
 
-void route_handle_t::bind_ingress(std::string_view in_link, std::uint16_t label,
+bool route_handle_t::bind_ingress(std::string_view in_link, std::uint16_t label,
                                   handle_binding_t binding) {
     const std::shared_ptr<link_tables_t> t = tables(in_link);
     const std::lock_guard lock(t->m);
     for (ingress_entry_t& e : t->ingress) {
         if (e.label == label) {
             e.binding = std::move(binding);
-            return;
+            return true;  // rebind in place — adds no entry, so the bound cannot refuse it
         }
     }
+    // REFUSE rather than evict (#603). Evict-oldest is right for `can_reassembly_t`, whose
+    // groups are short-lived so oldest ~ stalest; a label binding is the opposite -- it
+    // exists precisely because a flow is long-running, so evicting the oldest preferentially
+    // kills the longest-lived stream and makes it re-advertise, forever. True LRU would need
+    // a write on `resolved()`, which is the per-delivery hot path, to solve a flow-setup
+    // problem. Refusing keeps every established flow untouched and degrades only NEW ones,
+    // down the path a full label space already takes.
+    if (max_bindings_ != 0 && t->ingress.size() >= max_bindings_) {
+        refused_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
     t->ingress.push_back(ingress_entry_t{.label = label, .binding = std::move(binding)});
+    return true;
 }
 
 std::optional<handle_binding_t> route_handle_t::lookup_ingress(std::string_view in_link,
@@ -102,18 +114,23 @@ void route_handle_t::cache_resolution(std::string_view in_link, std::uint16_t la
     // simply resolves again. Never an error: this is best-effort memoization, not state.
 }
 
-void route_handle_t::record_egress(std::string_view out_link, std::uint16_t label,
+bool route_handle_t::record_egress(std::string_view out_link, std::uint16_t label,
                                    std::vector<std::byte> route) {
     const std::shared_ptr<link_tables_t> t = tables(out_link);
     const std::lock_guard lock(t->m);
     for (egress_entry_t& e : t->egress) {
         if (e.label == label) {
             e.route.assign(route.begin(), route.end());
-            return;
+            return true;  // re-record in place — adds no entry
         }
+    }
+    if (max_bindings_ != 0 && t->egress.size() >= max_bindings_) {
+        refused_.fetch_add(1, std::memory_order_relaxed);
+        return false;
     }
     t->egress.push_back(egress_entry_t{
         .label = label, .route = std::pmr::vector<std::byte>(route.begin(), route.end(), mr_)});
+    return true;
 }
 
 std::optional<std::vector<std::byte>> route_handle_t::egress_route(std::string_view out_link,
@@ -143,6 +160,13 @@ std::pair<std::uint16_t, bool> route_handle_t::ensure_egress(std::string_view ou
     // Exhaustion returns `{0, false}`, records nothing, and leaves the caller to send the
     // full-route FWD (which carries its own route and needs no label).
     if (t->next_label == 0) return {0, false};
+    // Table full (#603): refuse, same answer and same caller degrade as an exhausted label
+    // space. Checked AFTER the reuse scan above, so an established flow is never refused —
+    // only a new one, and only into the full-route form that always works.
+    if (max_bindings_ != 0 && t->egress.size() >= max_bindings_) {
+        refused_.fetch_add(1, std::memory_order_relaxed);
+        return {0, false};
+    }
     const std::uint16_t label = t->next_label++;
     t->egress.push_back(egress_entry_t{
         .label = label, .route = std::pmr::vector<std::byte>(route.begin(), route.end(), mr_)});

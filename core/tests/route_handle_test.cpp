@@ -16,7 +16,8 @@
  * state) while staying UAF-free under a concurrent writer x clear_link race (the
  * shared_ptr pin — a TSan gate, run instrumented by the core-ci tsan job). #603: the label
  * allocator saturates at 65535 instead of wrapping through the reserved 0 back onto labels
- * that still alias live routes.
+ * that still alias live routes, and the per-link tables honour an injected binding bound —
+ * refusing new flows rather than growing without limit, and never refusing an established one.
  */
 
 #include "libtracer/route_handle.hpp"
@@ -45,21 +46,39 @@ std::vector<std::byte> route_bytes(std::uint8_t tag) {
     return {std::byte{0x06}, std::byte{0x40}, std::byte{0x01}, std::byte{0x00}, std::byte{tag}};
 }
 
+/**
+ * @brief Build a terminus binding field by field.
+ *
+ * A designated-initializer brace naming only some members trips
+ * `-Werror=missing-field-initializers` on the ESP toolchain — the same reason `fwd_router.cpp`
+ * builds its bindings field by field rather than with a brace.
+ */
+handle_binding_t terminus_binding(std::string_view down = {}) {
+    handle_binding_t b;
+    b.terminus = down.empty();
+    b.down_link = down;
+    return b;
+}
+
 void exercise(route_handle_t& h) {
     // Per-link label spaces are independent and start at 1.
     check(h.alloc_label("a") == 1 && h.alloc_label("a") == 2 && h.alloc_label("b") == 1,
           "labels are per-link monotonic from 1");
 
     // Ingress: bind, lookup, rebind replaces, unknown label is stale.
-    h.bind_ingress(
-        "a", 7,
-        handle_binding_t{
-            .terminus = true, .down_link = {}, .out_label = 0, .local_route = route_bytes(1)});
+    check(
+        h.bind_ingress(
+            "a", 7,
+            handle_binding_t{
+                .terminus = true, .down_link = {}, .out_label = 0, .local_route = route_bytes(1)}),
+        "an unbounded table accepts every bind");
     auto b = h.lookup_ingress("a", 7);
     check(b && b->terminus && b->local_route == route_bytes(1), "ingress bind + lookup");
-    h.bind_ingress(
-        "a", 7,
-        handle_binding_t{.terminus = false, .down_link = "b", .out_label = 9, .local_route = {}});
+    check(
+        h.bind_ingress("a", 7,
+                       handle_binding_t{
+                           .terminus = false, .down_link = "b", .out_label = 9, .local_route = {}}),
+        "a rebind is accepted (it adds no entry)");
     b = h.lookup_ingress("a", 7);
     check(b && !b->terminus && b->down_link == "b" && b->out_label == 9,
           "rebinding a label replaces the binding");
@@ -67,7 +86,7 @@ void exercise(route_handle_t& h) {
           "unknown label / unknown link ⇒ stale (nullopt)");
 
     // Egress: record + retrieve (the NACK re-advertise path).
-    h.record_egress("b", 3, route_bytes(2));
+    check(h.record_egress("b", 3, route_bytes(2)), "an unbounded table accepts every record");
     const auto r = h.egress_route("b", 3);
     check(r && *r == route_bytes(2), "egress route retained for re-advertise");
 
@@ -130,8 +149,8 @@ void churn_and_race() {
             char name[8];
             std::snprintf(name, sizeof name, "L%d", (seed + i) % 6);
             (void)h.ensure_egress(name, route_bytes(static_cast<std::uint8_t>(i)));
-            h.bind_ingress(name, static_cast<std::uint16_t>((i & 0x7FFF) + 1),
-                           handle_binding_t{.terminus = true});
+            (void)h.bind_ingress(name, static_cast<std::uint16_t>((i & 0x7FFF) + 1),
+                                 terminus_binding());
             (void)h.lookup_ingress(name, static_cast<std::uint16_t>((i & 0x7FFF) + 1));
         }
     };
@@ -210,6 +229,70 @@ void label_space_exhaustion() {
     check(h.alloc_label("x") == 1, "clear_link restores the exhausted link's space");
 }
 
+/**
+ * @brief #603 defect 2: the per-link tables honour an INJECTED bound, refusing new bindings
+ *        rather than growing without limit — and never refusing an established flow.
+ *
+ * The bound is a constructor argument, not a constant (CONTEXT.md §Resource bound); `0`
+ * stays unbounded, so every existing caller is unchanged. Refusal, not eviction: a label
+ * binding exists precisely because a flow is long-running, so evict-oldest would
+ * preferentially kill the longest-lived stream and make it re-advertise forever.
+ *
+ * Every assertion here fails against an unbounded build EXCEPT the two `unbounded` ones,
+ * which are the control — they pin that `0` really does mean "no bound" and so must pass
+ * both ways.
+ */
+void bounded_tables() {
+    std::printf(" #603 injected per-link binding bound:\n");
+    constexpr std::size_t kMax = 4;
+    route_handle_t h(std::pmr::get_default_resource(), kMax);
+
+    // Fill the ingress table to the bound.
+    for (std::uint16_t i = 1; i <= kMax; ++i)
+        check(h.bind_ingress("a", i, terminus_binding()), "a bind below the bound is accepted");
+    check(h.ingress_count() == kMax, "the ingress table stops exactly at the bound");
+    check(h.refused_bindings() == 0, "nothing refused while there was room");
+
+    // A NEW label is refused ...
+    check(!h.bind_ingress("a", 99, terminus_binding()),
+          "a new label is refused once the table is full");
+    check(h.ingress_count() == kMax, "a refused bind grows the table by nothing");
+    check(h.refused_bindings() == 1, "the refusal is counted, not silent");
+
+    // ... but an ESTABLISHED flow is not. This is the whole point of refusing over
+    // evicting: a full table degrades new flows and leaves running ones alone.
+    check(h.bind_ingress("a", 2, terminus_binding("z")),
+          "an already-bound label still rebinds when the table is full");
+    const auto b = h.lookup_ingress("a", 2);
+    check(b && !b->terminus && b->down_link == "z", "and the rebind actually took effect");
+    check(h.refused_bindings() == 1, "a rebind is not a refusal");
+
+    // The bound is per link, not per node.
+    check(h.bind_ingress("b", 1, terminus_binding()), "a different link has its own budget");
+
+    // Egress is bounded independently, and reports exhaustion the same way a drained label
+    // space does — so the caller's degrade to the full-route form is one path, not two.
+    for (std::uint16_t i = 0; i < kMax; ++i)
+        check(h.ensure_egress("c", route_bytes(static_cast<std::uint8_t>(i))).second,
+              "an egress flow below the bound is minted");
+    const auto [label, fresh] = h.ensure_egress("c", route_bytes(200));
+    check(label == 0 && !fresh, "a full egress table refuses like an exhausted label space");
+    check(h.egress_count() == kMax, "and records nothing");
+    // Reuse is checked BEFORE the bound, so an established egress flow still resolves.
+    const auto [reused, reused_fresh] = h.ensure_egress("c", route_bytes(0));
+    check(reused != 0 && !reused_fresh, "an established egress flow is reused, not refused");
+
+    // clear_link releases the whole budget — the (re)connect self-heal.
+    h.clear_link("a");
+    check(h.bind_ingress("a", 42, terminus_binding()), "clear_link frees the link's budget");
+
+    // Control: 0 means unbounded. These two must pass on BOTH builds.
+    route_handle_t u;
+    for (std::uint16_t i = 1; i <= 64; ++i) (void)u.bind_ingress("a", i, terminus_binding());
+    check(u.ingress_count() == 64, "unbounded: the default bound of 0 refuses nothing");
+    check(u.refused_bindings() == 0, "unbounded: nothing counted");
+}
+
 }  // namespace
 
 int main() {
@@ -233,6 +316,7 @@ int main() {
 
     churn_and_race();
     label_space_exhaustion();
+    bounded_tables();
 
     if (g_failures == 0) {
         std::printf("route_handle: ALL PASS\n");

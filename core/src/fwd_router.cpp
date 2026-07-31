@@ -400,8 +400,11 @@ std::uint16_t fwd_router_t::advertise(std::string_view link_name,
     if (link == nullptr) return 0;
     const std::uint16_t label = handles_.alloc_label(link_name);
     if (label == 0) return 0;  // link's label space exhausted (#603) — no binding, no frame
-    handles_.record_egress(link_name, label,
-                           std::vector<std::byte>(route_path.begin(), route_path.end()));
+    // Never advertise a label this node cannot re-advertise on a NACK: a full egress table
+    // refuses, and the caller stays on the full-route form (#603).
+    if (!handles_.record_egress(link_name, label,
+                                std::vector<std::byte>(route_path.begin(), route_path.end())))
+        return 0;
     const std::vector<std::byte> adv = encode_advertise(label, route_path);
     link->send(std::span<const std::byte>(adv));
     return label;
@@ -842,22 +845,31 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
         // Built field-by-field rather than with a designated-initializer brace: the binding
         // now carries ADR-0062's memoized resolution too, and an aggregate init that names
         // only some members trips -Werror=missing-field-initializers on the ESP toolchain.
+        // Egress FIRST, then ingress, then the wire (#603). Both tables can refuse when
+        // full, and the order makes every partial outcome safe: a refused egress means no
+        // swap is bound at all, and a refused ingress leaves an unused egress slot but
+        // sends nothing — never an advertised label with no route to re-advertise, and
+        // never a bound swap pointing at a label the downstream was never told about. The
+        // out-label burned on a refusal is harmless: the allocator is monotonic, so it
+        // simply skips a number.
+        if (!handles_.record_egress(down_name, out_label, stripped_bytes)) return;
         handle_binding_t fwd;
         fwd.terminus = false;
         fwd.down_link = down_name;
         fwd.out_label = out_label;
-        handles_.bind_ingress(inbound_name, label, std::move(fwd));
-        handles_.record_egress(down_name, out_label, stripped_bytes);
+        if (!handles_.bind_ingress(inbound_name, label, std::move(fwd))) return;
         const std::vector<std::byte> adv2 = encode_advertise(out_label, stripped_bytes);
         hit.link->send(std::span<const std::byte>(adv2));
         return;
     }
 
-    // Terminus: the route resolves locally here — bind the label to the local route.
+    // Terminus: the route resolves locally here — bind the label to the local route. A
+    // refusal (full ingress table) leaves the label unbound, so the peer's COMPACT draws the
+    // same HANDLE_NACK a stale label draws and the flow stays on the full-route form.
     handle_binding_t term;
     term.terminus = true;
     term.local_route = wire::encode(route);
-    handles_.bind_ingress(inbound_name, label, std::move(term));
+    (void)handles_.bind_ingress(inbound_name, label, std::move(term));
 }
 
 void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label,

@@ -26,6 +26,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -125,25 +126,50 @@ struct handle_binding_t {
 class route_handle_t {
    public:
     /**
-     * @brief Draw all label state from @p mr (ADR-0039 §1).
+     * @brief Draw all label state from @p mr (ADR-0039 §1), bounding each link's tables at
+     *        @p max_bindings_per_link entries.
      *
      * A bounded node passes a pool resource over its slab and the label tables
      * live entirely in host-chosen memory; the default is the standard heap.
      * @p mr must outlive this object.
+     *
+     * **The bound is injected, never assumed** ([CONTEXT.md §Resource bound]). `0` means
+     * unbounded — the default, and the pre-#603 behavior. A bounded host sizes it from its
+     * own slab; ADR-0038 §3 calls for exactly this (*"sized by `:settings`"*).
+     *
+     * Without a bound the tables are peer-driven and grow to the whole label space: a link
+     * can accumulate 65535 ingress bindings, each a `handle_binding_t` carrying a
+     * `std::string` and a `std::vector`. That is megabytes per link on a node whose whole
+     * budget is 16 KB.
+     *
+     * @param mr                     Where all label state is allocated.
+     * @param max_bindings_per_link  Ceiling on a link's ingress table AND, separately, its
+     *                               egress table; `0` ⇒ unbounded.
      */
-    explicit route_handle_t(std::pmr::memory_resource* mr = std::pmr::get_default_resource())
-        : mr_(mr), links_(mr) {}
+    explicit route_handle_t(std::pmr::memory_resource* mr = std::pmr::get_default_resource(),
+                            std::size_t max_bindings_per_link = 0)
+        : mr_(mr), max_bindings_(max_bindings_per_link), links_(mr) {}
 
     route_handle_t(const route_handle_t&) = delete;
     route_handle_t& operator=(const route_handle_t&) = delete;
 
     /**
      * @brief Record an ingress binding: a @p label arriving on @p in_link means @p binding.
+     *
+     * Rebinding a label already present always succeeds — it replaces in place and adds no
+     * entry. Only a NEW label can be refused, and only when the link is at
+     * `max_bindings_per_link`.
+     *
      * @param in_link This node's NAME for the link the ADVERTISE/COMPACT arrives on.
      * @param label   The label as seen on that inbound link.
      * @param binding Its meaning (forward-swap or local terminus).
+     * @retval false The link's ingress table is full — nothing was recorded, and
+     *               @ref refused_bindings was incremented. A COMPACT on the unbound label
+     *               then takes the same drop-and-HANDLE_NACK path a stale label already
+     *               takes, which prompts the peer to re-advertise.
      */
-    void bind_ingress(std::string_view in_link, std::uint16_t label, handle_binding_t binding);
+    [[nodiscard]] bool bind_ingress(std::string_view in_link, std::uint16_t label,
+                                    handle_binding_t binding);
 
     /**
      * @brief Look up what a @p label arriving on @p in_link means (nullopt ⇒ stale/unknown).
@@ -184,9 +210,12 @@ class route_handle_t {
      * @param out_link This node's NAME for the downstream link the ADVERTISE went out on.
      * @param label    The label this node assigned for that downstream flow.
      * @param route    The (possibly stripped) dst PATH TLV bytes the label aliases.
+     * @retval false The link's egress table is full — nothing was recorded and
+     *               @ref refused_bindings was incremented. The caller must not advertise a
+     *               label it cannot re-advertise on a NACK.
      */
-    void record_egress(std::string_view out_link, std::uint16_t label,
-                       std::vector<std::byte> route);
+    [[nodiscard]] bool record_egress(std::string_view out_link, std::uint16_t label,
+                                     std::vector<std::byte> route);
 
     /**
      * @brief Find this link's label for @p route, or allocate + record a fresh one (#136).
@@ -203,8 +232,11 @@ class route_handle_t {
      * @param out_link This node's NAME for the downstream link.
      * @param route    A complete PATH TLV's bytes — the delivery route the label aliases.
      * @return `{label, fresh}` — the (reused or new) label, and whether it was just created.
-     *         `{0, false}` ⇒ this link's label space is exhausted (see @ref alloc_label);
-     *         nothing was recorded and the caller must deliver over the full-route FWD path.
+     *         `{0, false}` ⇒ **no label is available**: either this link's label space is
+     *         exhausted (see @ref alloc_label) or its egress table is at
+     *         `max_bindings_per_link`. Nothing was recorded; the caller delivers over the
+     *         full-route FWD path. A flow ALREADY in the table is never refused — reuse is
+     *         checked before the bound, so a full table degrades new flows only.
      */
     [[nodiscard]] std::pair<std::uint16_t, bool> ensure_egress(std::string_view out_link,
                                                                std::span<const std::byte> route);
@@ -261,6 +293,19 @@ class route_handle_t {
      */
     [[nodiscard]] std::size_t link_count() const;
 
+    /**
+     * @brief Count of bindings refused because a link's table was at its bound (diagnostic).
+     *
+     * The counted-drop half of the bounded-resource contract (`can_reassembly_t` keeps
+     * `dropped_groups` for the same reason): a bound that silently discards work is
+     * indistinguishable from one that is never reached. A non-zero value here means some
+     * flows on this node are delivering over the full-route form rather than compacted —
+     * degraded throughput, never a wrong or missing delivery.
+     */
+    [[nodiscard]] std::size_t refused_bindings() const noexcept {
+        return refused_.load(std::memory_order_relaxed);
+    }
+
    private:
     // One connection's label state (ADR-0038 §3): flat pmr entry arrays (a link
     // carries FEW compact flows, so a linear label scan beats a node-based map —
@@ -292,7 +337,9 @@ class route_handle_t {
     [[nodiscard]] std::shared_ptr<link_tables_t> find_tables(std::string_view link) const;
 
     std::pmr::memory_resource* mr_;
-    mutable std::shared_mutex links_m_;  // registry only: create/clear, never per delivery
+    std::size_t max_bindings_ = 0;         // 0 => unbounded; injected, never assumed
+    std::atomic<std::size_t> refused_{0};  // counted drops (diagnostic)
+    mutable std::shared_mutex links_m_;    // registry only: create/clear, never per delivery
     std::pmr::map<std::pmr::string, std::shared_ptr<link_tables_t>, std::less<>> links_;
 };
 
