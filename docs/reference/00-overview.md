@@ -153,7 +153,7 @@ The trailer is **append-only at egress, strip-only at ingress**. A forwarder or 
 The TLV substrate plays two distinct roles, structurally distinguished by the `FWD` TLV (type `0x0F`, [RFC-0004 — remote operation addressing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md)):
 
 - **Graph data** at a vertex: just the payload, no envelope. Identity = vertex path.
-- **In-flight message** crossing a link: an `FWD` TLV (structured, PL=1) carrying the op `VALUE`, the `dst` PATH (the remaining route — it shrinks one segment per hop), the `src` PATH (the accumulated return route — it grows one segment per hop), and the payload TLV as its last child. Identity = the explicit source route the frame carries.
+- **In-flight message** crossing a link: an `FWD` TLV (structured, PL=1) carrying the op `VALUE`, the `dst` PATH (the remaining route — it shrinks by a whole mount run per hop), the `src` PATH (the accumulated return route — it grows by the same run), and the payload TLV as its last child. Identity = the explicit source route the frame carries.
 
 The terminus sheds the `FWD` envelope: it applies the op locally, stores only the bare payload (trailer-less at rest), and replies with a fresh `FWD{REPLY}` routed by the accumulated `src`. Because every remote endpoint is addressed by its explicit source route, forwarding is loop-free by construction (`dst` shrinks monotonically per hop, so a route is finite — there is no revisit check) and needs no duplicate detection — `0x0D ROUTER` is a reserved, decodable wire code with no implemented mechanism. See [04-communication-flows.md](04-communication-flows.md) and [07-host-embedding.md](07-host-embedding.md).
 

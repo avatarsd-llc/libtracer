@@ -265,7 +265,8 @@ Two properties of this net plane are worth knowing from the first frame:
 - **A forward hop never touches the heap.** The router reads three headers by offset,
   builds the shrunk-`dst` and grown-`src` heads on the stack, and scatter-gathers them
   with untouched views of the inbound frame — zero allocations, CI-gated.
-- **Routes cannot loop.** `dst` only ever shrinks, one segment per hop, so a route is
+- **Routes cannot loop.** `dst` only ever shrinks — by a whole mount run per hop, never by
+  nothing — so a route is
   finite and a physical cycle is harmless per-op: there is no revisit check and none is
   needed. No dedup tables, no hop counters — loop-freedom is by construction.
 
