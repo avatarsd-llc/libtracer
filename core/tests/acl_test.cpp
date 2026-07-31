@@ -756,6 +756,108 @@ void test_remote_path() {
     }
 }
 
+/**
+ * @brief The ACL gates a mutation sweep found NO test defends.
+ *
+ * Disabling each `acl_allows` call site in `core/src/graph.cpp` one at a time — turning
+ * `if (!acl_allows(...))` into `if (false && !acl_allows(...))` — and running the whole
+ * suite caught **14 of 20**. The six that survived meant the gate could be deleted
+ * outright and every test would still pass. Five were real; this covers them.
+ *
+ * (The sixth, `history()`'s gate at `graph.cpp:1255`, passes a hardcoded EMPTY caller
+ * because it is a local-only helper with no wire path. It cannot deny under any resolver
+ * that maps "" to no subject, which is every resolver we ship — correct by design, and
+ * deliberately not tested here.)
+ *
+ * Each gate is asserted in BOTH directions. A one-sided "denied" check would pass just as
+ * well against a gate wired to refuse everyone, which is the failure this file exists to
+ * catch on the other side.
+ */
+void test_gates_no_test_defended() {
+    std::printf("the ACL gates a mutation sweep found undefended:\n");
+    graph_t g;
+    g.set_subject_resolver(caller_is_subject);
+    const vertex_handle_t v = g.register_vertex(path_t("/g"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/g/kid"), role_t::STORED_VALUE);
+    (void)write_u8(g, v, 7);  // trusted local write seeds an LKV
+
+    check(
+        g.write(path_t("/g:acl"),
+                make_value(make_acl({{.subject = "peer-a",
+                                      .mask = bit(acl_right_t::READ) | bit(acl_right_t::WRITE)}})))
+            .has_value(),
+        "installed an ALLOW-only :acl granting peer-a READ+WRITE");
+
+    // graph.cpp:973 — assign() is RFC-0008's STATE half. It is a full write of the
+    // last-known value and carries its own WRITE gate, separate from write_impl's.
+    {
+        std::vector<std::byte> one;
+        tr::wire::emit_tlv(one, type_t::VALUE, opt_t{}, as_bytes("1"));
+        std::vector<std::byte> two;
+        tr::wire::emit_tlv(two, type_t::VALUE, opt_t{}, as_bytes("2"));
+        check(g.assign(v, tr::view::rope_t{make_value(one)}, "peer-a").has_value(),
+              "assign() allowed for a WRITE-granted subject");
+        check(denied(g.assign(v, tr::view::rope_t{make_value(two)}, "peer-b")),
+              "assign() DENIED without the WRITE bit");
+    }
+
+    // graph.cpp:1485 — the `:subscribers[N]` INDEXED write (RFC-0009 D.1 clear/replace).
+    // Distinct from the `[]` append gate, which rides SUBSCRIBE and is already covered:
+    // this one rides WRITE, and it is what stops an unauthorized peer from clearing a
+    // subscriber slot out from under its owner.
+    {
+        const auto slot = path_t::parse("/g:subscribers[0]");
+        std::vector<std::byte> evict;  // the empty-STATUS eviction sentinel
+        tr::wire::emit_tlv(evict, type_t::STATUS, opt_t{}, std::span<const std::byte>{});
+        check(denied(g.write(v, slot->field(), make_value(evict), "peer-b")),
+              "an indexed :subscribers[N] write is DENIED without the WRITE bit");
+        check(!denied(g.write(v, slot->field(), make_value(evict), "peer-a")),
+              "and is not denied for a WRITE-granted subject");
+    }
+
+    // graph.cpp:1945 — read_subtree_folded's ROOT gate. The composed branch read walks
+    // descendants and prunes per-child (that inner gate at :2012 was already covered);
+    // nothing covered the root itself, so the whole subtree was readable without READ.
+    check(g.read_subtree_folded(v, "peer-a").has_value(),
+          "a folded subtree read is allowed for a READ-granted subject");
+    check(denied(g.read_subtree_folded(v, "peer-b")),
+          "a folded subtree read is DENIED at the ROOT without the READ bit");
+
+    // graph.cpp:2087 — the `:children` folded-read gate. It sits ABOVE the shared field
+    // gate at :2124 because the folded rope bypasses the single-view wrap, so it needs
+    // its own check and had none.
+    {
+        const auto kids = path_t::parse("/g:children");
+        check(g.read(v, kids->field(), "peer-a").has_value(),
+              ":children readable by a READ-granted subject");
+        check(denied(g.read(v, kids->field(), "peer-b")), ":children DENIED without the READ bit");
+    }
+
+    // graph.cpp:2177 — read_subscribers()'s gate. Its own comment calls it "a
+    // control-surface read, like `:schema`", but unlike `:schema` it is a DIRECT API, not
+    // a field path, so it never passes the :2124 gate above — it is the only thing
+    // standing between an unauthorized caller and the whole subscriber list, which is a
+    // topology disclosure (who is listening to this vertex, and at what return route).
+    //
+    // This one was nearly missed: the FIRST mutation run reported it caught. Re-running
+    // the mutation alone, three times, showed it survives deterministically — the earlier
+    // result was a flake in that run, not a property of the code.
+    check(g.read_subscribers(v, "peer-a").has_value(),
+          "read_subscribers allowed for a READ-granted subject");
+    check(denied(g.read_subscribers(v, "peer-b")),
+          "read_subscribers DENIED without the READ bit (topology disclosure)");
+
+    // graph.cpp:2124 — the shared field-read gate, below the pre-auth `:identity` arm.
+    // Everything after it (:schema, :settings, :subscribers[N]) depends on it alone.
+    {
+        const auto schema = path_t::parse("/g:schema");
+        check(g.read(v, schema->field(), "peer-a").has_value(),
+              ":schema readable by a READ-granted subject");
+        check(denied(g.read(v, schema->field(), "peer-b")),
+              ":schema DENIED without the READ bit (the shared field-read gate)");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -769,6 +871,7 @@ int main() {
     test_inheritance();
     test_two_acl_fan_in();
     test_remote_path();
+    test_gates_no_test_defended();
     std::printf(g_failures == 0 ? "\nACL: PASS\n" : "\nACL: FAIL (%d)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
