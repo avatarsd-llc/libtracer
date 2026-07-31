@@ -137,6 +137,12 @@ std::pair<std::uint16_t, bool> route_handle_t::ensure_egress(std::string_view ou
             std::equal(e.route.begin(), e.route.end(), route.begin()))
             return {e.label, false};  // already advertised on this link - reuse the label
     }
+    // Saturate, never wrap (#603): a wrapped `next_label` handed out the reserved 0 and
+    // then re-issued 1, 2, ... while those labels still aliased LIVE routes — a delivery
+    // on the reused label resolves the wrong route, which is a misroute, not a drop.
+    // Exhaustion returns `{0, false}`, records nothing, and leaves the caller to send the
+    // full-route FWD (which carries its own route and needs no label).
+    if (t->next_label == 0) return {0, false};
     const std::uint16_t label = t->next_label++;
     t->egress.push_back(egress_entry_t{
         .label = label, .route = std::pmr::vector<std::byte>(route.begin(), route.end(), mr_)});
@@ -146,6 +152,10 @@ std::pair<std::uint16_t, bool> route_handle_t::ensure_egress(std::string_view ou
 std::uint16_t route_handle_t::alloc_label(std::string_view link) {
     const std::shared_ptr<link_tables_t> t = tables(link);
     const std::lock_guard lock(t->m);
+    // Saturating, monotonic, never 0 (see ensure_egress): 1..65535 then permanently
+    // exhausted. Sticky by construction -- handing out 65535 leaves `next_label` at 0, and
+    // this returns before incrementing, so the state cannot walk back into live labels.
+    if (t->next_label == 0) return 0;
     return t->next_label++;
 }
 

@@ -14,7 +14,9 @@
  * table state — the ADR-0039 host-owned-memory claim). #488: clear_link reclaims
  * the per-link shell (churn of N distinct names returns link_count() to steady
  * state) while staying UAF-free under a concurrent writer x clear_link race (the
- * shared_ptr pin — a TSan gate, run instrumented by the core-ci tsan job).
+ * shared_ptr pin — a TSan gate, run instrumented by the core-ci tsan job). #603: the label
+ * allocator saturates at 65535 instead of wrapping through the reserved 0 back onto labels
+ * that still alias live routes.
  */
 
 #include "libtracer/route_handle.hpp"
@@ -153,6 +155,61 @@ void churn_and_race() {
     check(h.link_count() <= 6, "concurrent churn + clear keeps shells bounded to live names");
 }
 
+/**
+ * @brief #603 defect 3: the label allocator saturates instead of wrapping through the
+ *        reserved 0 and back onto labels that still alias live routes.
+ *
+ * The pre-fix failure is a MISROUTE, not a drop: `next_label` was a bare `uint16_t`
+ * incremented unchecked, so allocation 65536 handed out 0 ("none") and 65537 handed out 1
+ * — while label 1's egress entry still named the first flow's route. A COMPACT on the
+ * reused label then resolved the wrong route, silently.
+ *
+ * Verified against a build with the two saturation guards deleted: FOUR assertions flip to
+ * FAIL there — "stays exhausted" (x2), "a new flow is refused", and "records no egress
+ * binding". The rest PASS on the broken build too and are corroborating, not separating:
+ *   - "returns the reserved 0" passes because the wrap lands ON 0 exactly once, which is
+ *     precisely the bug — the very next call returns 1;
+ *   - "label 1 still aliases the first route" passes because `egress_route` returns the
+ *     FIRST match and the colliding entry is appended after it. The duplicate is invisible
+ *     through that accessor; `egress_count` is what sees it.
+ * Read the four, not the eleven.
+ */
+void label_space_exhaustion() {
+    std::printf(" #603 label-space exhaustion (saturate, never wrap):\n");
+    route_handle_t h;
+
+    // A real flow holds label 1 for the whole test — this is what a wrapped allocator
+    // would collide with.
+    const auto [first, first_fresh] = h.ensure_egress("x", route_bytes(1));
+    check(first == 1 && first_fresh, "the first compact flow takes label 1");
+
+    // Drain the rest of the 16-bit space. alloc_label does not touch the egress table, so
+    // this is O(1) per call rather than a 65k linear rescan.
+    std::uint16_t last = 0;
+    for (std::uint32_t i = 2; i <= 65535; ++i) last = h.alloc_label("x");
+    check(last == 65535, "the allocator issues the whole space, 1..65535, in order");
+
+    // Exhausted, and STICKY. Pre-fix this returned 0 once (the wrap) and then 1, 2, ... —
+    // so the second call is the assertion that actually separates the builds.
+    check(h.alloc_label("x") == 0, "an exhausted allocator returns the reserved 0");
+    check(h.alloc_label("x") == 0, "and stays exhausted rather than walking back to 1");
+    check(h.alloc_label("x") == 0, "and stays exhausted indefinitely");
+
+    // The misroute itself: a NEW flow must be refused, never handed label 1, which still
+    // aliases the first flow's route.
+    const std::size_t egress_before = h.egress_count();
+    const auto [second, second_fresh] = h.ensure_egress("x", route_bytes(2));
+    check(second == 0 && !second_fresh, "a new flow is refused, not given a live label");
+    check(h.egress_count() == egress_before, "a refused flow records no egress binding");
+    check(h.egress_route("x", 1) == route_bytes(1), "label 1 still aliases the first route");
+
+    // Exhaustion is per link (the label space is per-link by design, ADR-0038 §3) ...
+    check(h.alloc_label("y") == 1, "a different link's space is untouched");
+    // ... and clear_link — the (re)connect self-heal — restores it.
+    h.clear_link("x");
+    check(h.alloc_label("x") == 1, "clear_link restores the exhausted link's space");
+}
+
 }  // namespace
 
 int main() {
@@ -175,6 +232,7 @@ int main() {
     }
 
     churn_and_race();
+    label_space_exhaustion();
 
     if (g_failures == 0) {
         std::printf("route_handle: ALL PASS\n");

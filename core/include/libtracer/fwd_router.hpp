@@ -255,7 +255,9 @@ class fwd_router_t {
      * @param link_name  This node's NAME for the downstream link to advertise over.
      * @param route_path A complete PATH TLV's bytes — the delivery route to alias.
      * @return The allocated label (to stamp on subsequent @ref send_compact), or 0 if
-     *         @p link_name names no child.
+     *         @p link_name names no child, or if that link's 16-bit label space is
+     *         exhausted (`route_handle_t::alloc_label` saturates rather than wrapping onto
+     *         a live label — #603). No ADVERTISE is sent in either case.
      */
     std::uint16_t advertise(std::string_view link_name, std::span<const std::byte> route_path);
 
