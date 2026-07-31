@@ -72,6 +72,29 @@ inline bool (*probe_fail_hook)(std::size_t bytes) noexcept = nullptr;
 }
 
 /**
+ * @brief DO NOT generalize the `try_*` helpers below to `std::pmr::vector`.
+ *
+ * It is the obvious next step — the templates differ only in the allocator parameter — and
+ * it is wrong, because @ref probe_bytes tests the **global heap** while a `std::pmr` container
+ * allocates from its **injected resource**. The probe would answer "yes" about memory the
+ * container will never touch, the real allocation would still throw, and on `-fno-exceptions`
+ * that is the `abort()` these helpers exist to prevent.
+ *
+ * The failure mode is worse than a plain bug because it hides: under the default resource the
+ * two allocators ARE the global heap, so the generalization looks correct in most tests. It
+ * breaks only on a node whose resource is a slab with a null upstream — the configuration
+ * `route_handle_test`'s "slab resource (null upstream — zero global heap)" case exists to
+ * cover, and the one an MCU actually ships.
+ *
+ * A `std::pmr` container cannot be made failable this way at all: `polymorphic_allocator`
+ * reports exhaustion by throwing, which is the whole reason
+ * [ADR-0065](../../../docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md)
+ * introduced `tr::mem::block_source_t` (`try_alloc` returns `nullptr`) as a separate seam
+ * rather than widening this one. A pmr-backed structure that must survive exhaustion migrates
+ * to that seam; it does not get a `try_reserve` overload.
+ */
+
+/**
  * @brief The capacity-doubling grow target for a full vector (min 1) — a non-template
  *        helper so the size math is not duplicated per `try_push_back<T>`.
  */
