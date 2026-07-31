@@ -718,6 +718,25 @@ template <class N>
                 reply_dst_wire, reply_src_wire);  // OK, empty payload
         }
         case fwd_op_t::AWAIT: {
+            // A FIELD selector has no await surface, and silently dropping it was a lie
+            // (#585). The selector is decoded and validated above and was then discarded,
+            // so `await <v>:<anything>` behaved exactly like `await <v>` — a peer asking
+            // to be woken on one facet was instead woken on the whole vertex, or told
+            // `tr::flow::timeout`, which is indistinguishable from a quiet link.
+            //
+            // RFC-0010 §C settles the direction rather than leaving it open: a field write
+            // "does NOT wake `await` on the vertex, does not advance the vertex's write
+            // sequence, and does not propagate ... `await` on a single field is
+            // deliberately unsupported." Nothing can ever fire such a wait, so answering
+            // it is the ENOTTY of an unsupported ioctl -- SCHEMA_NOT_FOUND, the same code
+            // READ and WRITE already return for a facet they do not serve (CONTEXT.md
+            // §Field-write). This holds for EVERY selector, including `:subscribers` and
+            // `:acl`, which read and write fine: the field exists, the await does not.
+            //
+            // `graph_t::await` takes no field parameter at all, so the local API never
+            // offered this -- only the wire path decoded a selector it could not honour.
+            if (has_field)
+                return assemble_error(reply_dst_wire, reply_src_wire, status_t::SCHEMA_NOT_FOUND);
             const std::chrono::nanoseconds timeout =
                 req.has_await_timeout ? std::chrono::nanoseconds(req.await_timeout)
                                       : kDefaultAwaitTimeout;

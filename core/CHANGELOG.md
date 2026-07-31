@@ -45,6 +45,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **An `AWAIT` carrying a `:field` selector is rejected instead of silently awaiting the whole
+  vertex (#585).** ⚠️ **Wire-visible behaviour change**: the reply status for such a frame moves
+  from `tr::flow::timeout` (`0x0041`, after the full await deadline) to `tr::schema::not_found`
+  (`0x0031`, immediately). The selector was decoded and validated and then **discarded**, so
+  `await <v>:<anything>` was byte-identical to `await <v>` — a peer asking to be woken on one
+  facet was woken on the whole vertex, or told `timeout`, which it cannot tell from a quiet link.
+  RFC-0010 §C settles the direction (*"`await` on a single field is deliberately unsupported"*),
+  and `reference/02` already carried the MUST NOT (*"Consumers … MUST NOT expect per-field
+  wakeups"*) — this enforces it. It applies to **every** selector, including `:subscribers` and
+  `:acl`, which read and write normally: the field is real, the await surface is not.
+  `graph_t::await` takes no field parameter, so the local API is unaffected.
+
 - **The per-link label allocator no longer wraps onto live labels (#603).** `next_label` was a
   bare `std::uint16_t` incremented unchecked, so allocation 65536 handed out the **reserved 0**
   and 65537 handed out **1** — while label 1's egress entry still aliased the first flow's route.
