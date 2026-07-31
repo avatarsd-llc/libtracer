@@ -149,14 +149,60 @@ add_executable(bench_transport_iov bench_transport_iov.cpp)
 target_link_libraries(bench_transport_iov PRIVATE libtracer)
 target_compile_options(bench_transport_iov PRIVATE -Wall -Wextra)
 
+# Per-frame heap allocations on the REAL wire, EGRESS and INGRESS. bench_transport_iov counts
+# only the sending thread's gather; nothing has ever counted the receive loop. Thread-local
+# counters attribute each side separately.
+add_executable(bench_wire_heap bench_wire_heap.cpp)
+target_link_libraries(bench_wire_heap PRIVATE libtracer)
+target_compile_options(bench_wire_heap PRIVATE -Wall -Wextra)
+
 # Aggregate throughput vs concurrent peer count — prices transport_tcp_server's SINGLE poll
 # thread (the "MCU-shaped choice, #362") on a many-core host, which nothing else measures.
 add_executable(bench_tcp_fanin bench_tcp_fanin.cpp)
 target_link_libraries(bench_tcp_fanin PRIVATE libtracer)
 target_compile_options(bench_tcp_fanin PRIVATE -Wall -Wextra)
 
+# Validates the tail estimator itself against analytically known distributions. Links nothing:
+# bench::Latency is header-only, and the point is that a p999 failure here is a defect in the
+# instrument and not in libtracer. Exit status is the FAIL count, so it can gate.
+add_executable(bench_tail_validate bench_tail_validate.cpp)
+target_compile_options(bench_tail_validate PRIVATE -Wall -Wextra)
+
 # The mount descent's k=W..1 width loop vs one full-table scan — the headroom a single-pass
 # descent could win, measured at W>3 where the shipped cap makes it invisible.
 add_executable(bench_mount_descent bench_mount_descent.cpp)
 target_link_libraries(bench_mount_descent PRIVATE libtracer)
 target_compile_options(bench_mount_descent PRIVATE -Wall -Wextra)
+
+# The TCP server's END-TO-END baseline (throughput AND the p50/p99/p999/max latency
+# distribution) swept over concurrent peers — the join of bench_tcp_fanin's fan-in topology
+# with bench_transports' timestamped payload. Diagnostic, not a perf gate.
+add_executable(bench_tcp_baseline bench_tcp_baseline.cpp)
+target_link_libraries(bench_tcp_baseline PRIVATE libtracer)
+target_compile_options(bench_tcp_baseline PRIVATE -Wall -Wextra)
+
+# Per-connection RAM census (the transport plane's half of the ADR-0038 memory gate):
+# a counting operator-new measures the LIVE heap a real established connection holds,
+# across accept -> established -> big frame -> teardown -> reconnect, for tcp / ws /
+# udp / can. Diagnostic, not a perf gate — it stands up real loopback sockets.
+add_executable(bench_conn_ram bench_conn_ram.cpp)
+target_link_libraries(bench_conn_ram PRIVATE libtracer)
+target_compile_options(bench_conn_ram PRIVATE -Wall -Wextra)
+
+# What the transport iovec spill COSTS and how often it is reached. bench_transport_iov found
+# WHERE the boundary sits (17 caller spans); this one measures the egress span count a real
+# rope forward hop produces, the latency of one spill (isolated and behind a real sendmsg),
+# and prices it against transport_t::send(iov)'s always-allocating default. Diagnostic.
+add_executable(bench_iov_spill_cost bench_iov_spill_cost.cpp)
+target_link_libraries(bench_iov_spill_cost PRIVATE libtracer)
+target_compile_options(bench_iov_spill_cost PRIVATE -Wall -Wextra)
+
+# Costs the ADR-0065 `block_source_t` migration (#603 defect 1): a deterministic BLOCK census
+# of the peer-driven route-handle control path (which blocks go through the injected seam and
+# which escape to the global heap), plus an interleaved A/B of the two guard shapes — the
+# `std::vector` + `detail::try_push_back` probe pattern the 29 call sites use today against
+# `block_array_t` over an injected `block_source_t`, with an unguarded `push_back` control arm.
+# Diagnostic, not a perf gate.
+add_executable(bench_failable_census bench_failable_census.cpp)
+target_link_libraries(bench_failable_census PRIVATE libtracer)
+target_compile_options(bench_failable_census PRIVATE -Wall -Wextra)

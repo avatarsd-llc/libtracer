@@ -21,6 +21,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <span>
 #include <string>
@@ -32,7 +33,26 @@
 namespace bench::net {
 
 inline constexpr std::size_t kSizes[] = {16, 256, 1024, 8192};  // ≥ 9 (ts+phase)
-inline constexpr std::size_t kLatencyMsgs = 4000;
+
+/**
+ * @brief Paced latency probes per payload size — the sample count behind that size's percentiles.
+ *
+ * 4000 is the historical default and it is BELOW @ref bench::kTailSampleFloor: at n=4000 the
+ * p999 is the 4th-largest sample of the run, which is a draw and not an estimate. The p50 and
+ * p99 are unaffected (p99 at n=4000 still has 39 samples above it), so the default is left
+ * alone and the knob below is what a tail measurement turns up.
+ *
+ * `LIBTRACER_BENCH_LAT_MSGS` overrides it. At @ref kPaceNs the cost is linear and cheap:
+ * 4000 probes is 0.6 s per size, 10000 is 1.5 s, so clearing the floor on all four sizes adds
+ * about 3.6 s to a publisher run. Raise `run_net.sh`'s `timeout` alongside it.
+ */
+[[nodiscard]] inline std::size_t latency_msgs() {
+    const char* const env = std::getenv("LIBTRACER_BENCH_LAT_MSGS");
+    if (env == nullptr) return 4000;
+    const auto v = std::strtoull(env, nullptr, 10);
+    return v > 0 ? static_cast<std::size_t>(v) : 4000;
+}
+
 inline constexpr std::size_t kThroughputMsgs = 20000;
 inline constexpr std::uint64_t kPaceNs = 150000;  // 150 µs between latency sends
 /**
@@ -89,9 +109,13 @@ struct SubState {
             if (cur_size && thru_count) {
                 const double secs = (thru_last - thru_first) / 1e9;
                 const double mps = secs > 0 ? thru_count / secs : 0;
+                // Summarize ONCE: summarize() sorts in place, and calling it twice would
+                // re-sort an already-sorted vector for no reason and, worse, invite the two
+                // lines to disagree if the collector were ever mutated between them.
+                const Latency::Summary s = lat.summarize();
                 emit(system.c_str(), mode.c_str(), cur_size, 1, 1, mps, mps,
-                     thru_count * static_cast<double>(cur_size) / (secs > 0 ? secs : 1) / 1e6,
-                     lat.summarize());
+                     thru_count * static_cast<double>(cur_size) / (secs > 0 ? secs : 1) / 1e6, s);
+                emit_tail(system.c_str(), mode.c_str(), cur_size, 1, 1, s);
             }
             cur_size = 0;
             thru_first = thru_last = thru_count = 0;

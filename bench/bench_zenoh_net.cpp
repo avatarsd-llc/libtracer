@@ -73,8 +73,9 @@ void run_pub(std::string_view proto, std::uint16_t port) {
         net::make_payload(payload, S, ph);
         pub.put(Bytes(payload));
     };
+    const std::size_t lat_msgs = net::latency_msgs();
     for (std::size_t S : net::kSizes) {
-        for (std::size_t i = 0; i < net::kLatencyMsgs; ++i) {
+        for (std::size_t i = 0; i < lat_msgs; ++i) {
             send(S, net::kLatency);
             const auto until = Clock::now() + std::chrono::nanoseconds(net::kPaceNs);
             while (Clock::now() < until) {
