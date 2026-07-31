@@ -106,6 +106,69 @@ tr::view::view_t make_value(std::span<const std::byte> bytes) {
 }
 
 /**
+ * @brief A backend whose bytes are ordinary host memory but whose segments are TAGGED
+ *        `DEVICE` — the vehicle for driving `rope_t::materialize()` to refuse.
+ *
+ * `rope_t::flatten` returns an EMPTY view for a rope that is not `all_host()`, because a
+ * CPU `memcpy` of device bytes would fault (ADR-0024). That refusal — not only a heap OOM
+ * — is a way `materialize()` hands back nothing, and it is the one a test can trigger
+ * deterministically: the COMPACT ingress arm materializes through the DEFAULT
+ * `mem::heap_backend()`, so no failing backend can be injected there.
+ *
+ * The shape is the sanctioned one, not a contrivance. `mem_space_t`'s own contract says a
+ * DEVICE segment "may back only an opaque VALUE payload, with the header/trailer kept in a
+ * HOST segment (a heterogeneous host+device rope)" — which is exactly a COMPACT whose
+ * payload VALUE body arrived in device memory. `peek_control` reads only headers, all of
+ * which stay HOST here, so the frame parses normally and reaches the materialize.
+ */
+class device_tag_backend_t final : public tr::mem::mem_backend_t {
+   public:
+    device_tag_backend_t() noexcept : mem_backend_t("test_device_tag") {}
+
+    tr::view::segment_t* alloc(std::size_t size,
+                               tr::mem::alloc_hint_t = tr::mem::alloc_hint_t::NONE) override {
+        auto* raw = static_cast<std::byte*>(::operator new(size, std::nothrow));
+        if (raw == nullptr) return nullptr;
+        auto* seg = new (std::nothrow) tr::view::segment_t(this, std::span<std::byte>(raw, size));
+        if (seg == nullptr) {
+            ::operator delete(raw);
+            return nullptr;
+        }
+        return seg;
+    }
+
+    void destroy(tr::view::segment_t* seg) noexcept override {
+        ::operator delete(seg->bytes.data());
+        delete seg;
+    }
+
+    [[nodiscard]] tr::mem::mem_space_t space() const noexcept override {
+        return tr::mem::mem_space_t::DEVICE;
+    }
+};
+
+device_tag_backend_t g_device_backend;
+
+/** @brief `make_value`'s twin over @ref device_tag_backend_t — a DEVICE-tagged link. */
+tr::view::view_t make_device_value(std::span<const std::byte> bytes) {
+    tr::view::segment_t* seg = g_device_backend.alloc(bytes.size());
+    if (seg == nullptr) return tr::view::view_t{};
+    if (!bytes.empty()) std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
+    return tr::view::view_t::over(tr::view::segment_ptr_t::adopt(seg));
+}
+
+/**
+ * @brief `rope_split` with the FINAL link allocated DEVICE-tagged: header bytes stay
+ *        CPU-addressable, the trailing payload body does not.
+ */
+tr::view::rope_t rope_split_device_tail(std::span<const std::byte> bytes, std::size_t cut) {
+    tr::view::rope_t r;
+    if (cut > 0) r.append(make_value(bytes.subspan(0, cut)));
+    if (cut < bytes.size()) r.append(make_device_value(bytes.subspan(cut)));
+    return r;
+}
+
+/**
  * @brief Build a rope over `bytes` split at the given cut points (each cut is a link boundary).
  *
  * Every link owns its own heap segment — a genuine scatter-gather
@@ -448,6 +511,75 @@ int main() {
             check(inner && inner->type == type_t::VALUE && inner->payload.size() == 4 &&
                       tr::detail::load_le<std::uint32_t>(inner->payload) == kVal,
                   "LKV updated to the label-compacted value (payload sub-rope decoded)");
+        }
+    }
+
+    // `on_control_rope`'s `if (!frame.all_host()) return;` is LOAD-BEARING, and nothing
+    // asserted it. This pins it, and pins what it costs to lose.
+    //
+    // Downstream of that guard, nothing else stops a heterogeneous rope. `on_control_rope`
+    // materializes the COMPACT payload sub-rope and hands the result to `on_compact`
+    // WITHOUT checking it; `rope_t::flatten` returns an EMPTY view for a rope that is not
+    // `all_host()` (a CPU memcpy of device bytes would fault — ADR-0024); and
+    // `view::over_bytes` maps an empty span to an ENGAGED-empty optional by design ("a
+    // legitimately-empty input"), so `on_compact`'s `if (!payload_view) return;` does not
+    // fire either. The empty rope reaches `graph_.write`, which stores it and reports
+    // success — the subscriber's last-known value replaced by nothing.
+    //
+    // Verified by ablation, not by reading: deleting the `all_host` line makes the final
+    // check below fail with the LKV holding an empty value. Restoring it passes.
+    //
+    // The assertion is on the value SURVIVING, not on the absence of a write: asserting
+    // "nothing happened" would pass just as well if the frame never reached the arm at
+    // all. The preceding good delivery is what makes the survival meaningful.
+    {
+        std::printf("heterogeneous (host+device) COMPACT rope is dropped at the door:\n");
+        graph_t g;
+        const auto sensor = path_t::parse("/sensor");
+        tr::graph::vertex_handle_t v = g.register_vertex(*sensor, role_t::STORED_VALUE);
+        fwd_router_t router(g);
+        fake_rope_link_t in;
+        router.add_child("in", in);
+        const std::uint16_t kLabel = 0x0044u;
+        in.inject(rope_split(tr::net::encode_advertise(kLabel, b_path({"sensor"})),
+                             std::array<std::size_t, 0>{}));
+
+        // A good all-HOST delivery first — proves the vehicle and seeds the value that the
+        // un-flattenable frame must not be able to erase.
+        const std::uint32_t kGood = 0xA5A5A5A5u;
+        in.inject(rope_split(tr::net::encode_compact(kLabel, b_value_u32(kGood)),
+                             std::array<std::size_t, 1>{4}));
+        {
+            const auto stored = g.read(v);
+            check(stored.has_value(), "the good COMPACT landed (vehicle works)");
+            if (stored) {
+                const auto inner = tr::wire::decode((*stored)->only());
+                check(inner && inner->payload.size() == 4 &&
+                          tr::detail::load_le<std::uint32_t>(inner->payload) == kGood,
+                      "LKV seeded with the good value");
+            }
+        }
+
+        // Now the same frame shape with the payload VALUE's 4 BODY bytes in a DEVICE
+        // segment: headers stay HOST so `peek_control` parses it, but the payload sub-rope
+        // is heterogeneous, so `materialize()` refuses and returns empty.
+        const std::uint32_t kPoison = 0xDEADBEEFu;
+        const std::vector<std::byte> comp = tr::net::encode_compact(kLabel, b_value_u32(kPoison));
+        const tr::view::rope_t het = rope_split_device_tail(comp, comp.size() - 4);
+        check(het.link_count() == 2 && !het.all_host(),
+              "the fixture really is a heterogeneous host+device rope");
+        check(het.subrope(0, comp.size()).materialize().empty(),
+              "materialize() really does refuse this rope — the empty view the arm would "
+              "otherwise apply");
+        in.inject(het);
+
+        const auto after = g.read(v);
+        check(after.has_value(), "the vertex still holds a value");
+        if (after) {
+            const auto inner = tr::wire::decode((*after)->only());
+            check(inner && inner->payload.size() == 4 &&
+                      tr::detail::load_le<std::uint32_t>(inner->payload) == kGood,
+                  "the heterogeneous COMPACT did NOT overwrite the LKV with an empty value");
         }
     }
 
