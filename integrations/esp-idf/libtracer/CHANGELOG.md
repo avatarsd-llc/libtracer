@@ -21,6 +21,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`esp_ws_client_link_t` — an ESP-IDF `esp_transport_ws`-backed WebSocket *client*
+  `transport_t` (dial-out).** The embedded-native counterpart to core's portable
+  `transport_ws_client` and the dial mirror of `httpd_ws_link_t`: the RFC 6455 opening
+  handshake, masking/framing, and PING/PONG/CLOSE control frames run inside ESP-IDF's
+  tested `esp_transport_ws` (over core `tcp_transport`), instead of the raw-socket client's
+  hand-rolled handshake that does not reliably complete on lwIP silicon. One inbound BINARY
+  message is one libtracer TLV, read directly into a reusable buffer (server→client frames
+  are unmasked, so RX is a zero-copy fill) and delivered borrowed in-call to the router;
+  `send()` emits one masked BINARY frame, copied once into a reusable scratch (client
+  masking is in-place, so a shared frame must not be mutated). Point-to-point: `bus()` is
+  nullptr, `delivers_ropes()` is false. A single recv thread owns the read side and re-dials
+  with backoff (a transient drop keeps subscriber edges, resuming on reconnect); all handle
+  access is serialized by one syscall-brief mutex. Chip-only, gated on
+  `CONFIG_LIBTRACER_TRANSPORT_WS` (default `y`); adds `tcp_transport` (core IDF) to the
+  unconditional `PRIV_REQUIRES`. The portable `transport_ws_client` still compiles; a node
+  that binds this link leaves it unreferenced for `--gc-sections` to drop, the same
+  coexistence as `httpd_ws_link_t` vs the raw server.
+
 - **`CONFIG_LIBTRACER_TRANSPORT_{UDP,TCP,WS,CAN}` — per-transport Kconfig knobs (#393).**
   The component now gates each built-in transport's translation units on its own
   menuconfig bool, mirroring the core CMake options `LIBTRACER_TRANSPORT_{UDP,TCP,WS,CAN}`.
