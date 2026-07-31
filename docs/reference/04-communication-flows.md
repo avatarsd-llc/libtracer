@@ -164,7 +164,7 @@ Effects once the subscribe write returns:
 
 - A SUBSCRIBER TLV exists at `/sensor/temp:subscribers[N]`.
 - Every future write to `/sensor/temp` produces a delivery to `/local/handler` carrying the publisher's payload — and, per the previous section, stops there.
-- The subscriber's `liveness` state begins. With `:liveness.heartbeat_hz > 0` the subscriber is expected to refresh its liveness periodically; the spelling for that refresh is unratified (see [Pitfalls](#pitfalls)).
+- ⚠️ *Intent, not behaviour.* The subscriber's `liveness` state is meant to begin here: with `:liveness.heartbeat_hz > 0` the subscriber would refresh its liveness periodically. **No `:liveness.*` field is implemented** — a read or write of one answers `tr::schema::not_found` ([#586](https://github.com/avatarsd-llc/libtracer/issues/586)) — and the spelling for the refresh is unratified besides (see [Pitfalls](#pitfalls)).
 
 The SUBSCRIBER TLV layout is defined in [05-protocol-tlvs.md](05-protocol-tlvs.md) §`SUBSCRIBER`.
 
@@ -338,7 +338,7 @@ Subscriber                         Publisher's vertex
    |                                       |   to peer subscribers (if any)
 ```
 
-The intended granularity is per subscriber: the subscriber refreshes its own `liveness.last_seen_ns` at `heartbeat_hz`, the publisher's liveness checker runs locally and observes the field, and no separate heartbeat protocol exists. **No wire spelling for that refresh is ratified** — the only spelling this page ever gave is invalid, and no replacement exists (see [Pitfalls](#pitfalls)). Treat this flow as a description of intent, not as a wire recipe.
+The intended granularity is per subscriber: the subscriber refreshes its own `liveness.last_seen_ns` at `heartbeat_hz`, the publisher's liveness checker runs locally and observes the field, and no separate heartbeat protocol exists. **No wire spelling for that refresh is ratified** — the only spelling this page ever gave is invalid, and no replacement exists (see [Pitfalls](#pitfalls)). ⚠️ **And the field is not merely unratified in spelling: no `:liveness.*` field is implemented at all**, in either direction, so there is nothing for a checker to observe ([#586](https://github.com/avatarsd-llc/libtracer/issues/586)). Treat this whole flow as a description of intent, not as a wire recipe.
 
 A subscriber with `:liveness.heartbeat_hz = 0` opts out of liveness checking. Best-effort subscriptions with no liveness check are valid.
 
