@@ -102,7 +102,7 @@ class esp_ws_client_link_t : public transport_t {
      *                   for in-call delivery through the graph's on_write seam).
      */
     explicit esp_ws_client_link_t(std::string host, std::uint16_t port, std::string ws_path = "/ws",
-                                  std::size_t rx_bytes = 1024, std::size_t tx_bytes = 1024,
+                                  std::size_t rx_bytes = 2048, std::size_t tx_bytes = 2048,
                                   std::size_t recv_stack = 0);
 
     /** @brief Stop the recv thread, then close + destroy the esp_transport handles. */
