@@ -286,7 +286,8 @@ framing modes. The bounds to design within:
   consumed monotonically, so a delivery travels exactly as far as its explicit source
   route — segment count ≤ the PATH segment cap of 32 ([03 — Addressing](03-addressing.md);
   `kMaxSegments`, `core/include/libtracer/path.hpp:34`).
-- **Loops cannot form.** Because `dst` is consumed one segment per hop, a physical cycle
+- **Loops cannot form.** Because `dst` is consumed by at least one segment per hop (a whole
+  `net/<module>/<name>[/<peer>]` mount run, RFC-0014 S2a), a physical cycle
   is harmless per-op rather than rejected. There is no revisit check — loop-freedom is
   by construction, not by rejection — and no flooding, so no duplicate deliveries and no
   dedup state anywhere. Parallel links to one peer are distinct explicit addresses:

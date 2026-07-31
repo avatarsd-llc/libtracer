@@ -150,3 +150,9 @@ ruling look like it contradicts an accepted decision, when it contradicts an unb
 
 §3's `dst`-monotonicity clause and the ADR-0037 invariant-#3 retraction both stand. Only the
 "stateless per-frame segment cap (N from `MAX_HOPS`)" clause is withdrawn, in both places.
+
+**One arithmetic note, which does not affect the bound.** §3 says `dst` "shrinks one segment per
+hop". Since RFC-0014 S2a a hop strips its whole `net/<module>/<name>[/<peer>]` **mount run** — one
+to four segments. The monotonicity argument is unchanged and if anything stronger: `dst` shrinks by
+**at least** one segment per hop, so a route still terminates in at most `len(dst)` hops. The
+historical text is left as written; this note is the correction.

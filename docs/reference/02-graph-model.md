@@ -626,7 +626,7 @@ sequenceDiagram
     LB-->>STM: FWD{ REPLY, dst=/stm }
 ```
 
-A `dst` names its hops explicitly and is consumed one segment per hop, so even a route that re-enters a node it already crossed (`/b/c/a/b/c/…`) is finite: it simply terminates when the route is spent, delivering no further. **No cycle can persist** — loop-freedom is by construction, needing no revisit check.
+A `dst` names its hops explicitly and is consumed by at least one segment per hop (a whole mount run, RFC-0014 S2a), so even a route that re-enters a node it already crossed (`/b/c/a/b/c/…`) is finite: it simply terminates when the route is spent, delivering no further. **No cycle can persist** — loop-freedom is by construction, needing no revisit check.
 
 This shedding rule is what keeps the global topology safe for any shape — see [07-host-embedding.md](07-host-embedding.md).
 
