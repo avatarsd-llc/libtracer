@@ -465,7 +465,8 @@ export class LibtracerClient {
    * additionally needs the producer auto-promote / flush seam (#136 / RFC-0004 §E)
    * — out of scope for this client slice. `unsubscribe()` is a LOCAL detach: it
    * stops firing `handler` but does not clear the remote slot (an indexed
-   * `:subscribers[N]` field-write, additive).
+   * `:subscribers[N]` field-write, which REPLACES that slot rather than adding
+   * to it — RFC-0009 §D.1).
    *
    * @param producerPath the producer vertex path (string or segments)
    * @param handler      invoked with each inbound VALUE delivery

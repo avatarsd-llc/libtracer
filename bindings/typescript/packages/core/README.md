@@ -61,5 +61,7 @@ step** — that keeps the polyglot conformance driver
 
 ## Releasing
 
-Tag the repo with `ts-vX.Y.Z` to trigger publish (see
-`.github/workflows/publish-npm.yml` once added).
+Publishing is driven by the repo's release tag: `tools/sync-version.py` stamps
+every artifact from the root `VERSION` file, so one `vX.Y.Z` tag releases the
+TypeScript packages, the Rust crate and the C++ core at the same version
+(`.github/workflows/publish-npm.yml`).

@@ -10,13 +10,14 @@ Vectors are organized **by protocol surface (category)**, one directory per test
 tests/conformance/
 └── vectors/
     └── v1/                         Protocol version 1 (see ADR-0002 — protocol vs release version)
-        ├── framing/                header, opt bits, length widths, minimum frame
-        ├── path/                   PATH TLVs, path handles, segment limits
-        ├── tlv-types/              per-type-code payloads (VALUE, NAME, SUBSCRIBER, …)
-        ├── errors/                 ERROR / STATUS, the error-code registry
+        ├── acl/                    :acl gating on a forwarded op
         ├── crc/                    CRC-32C / CRC-16 trailer verification
-        ├── address-shift/          ep[0..N] slicing and reassembly
-        └── router-dedup/           ROUTER envelope, (origin_peer_id, ts) dedup
+        ├── errors/                 ERROR / STATUS, the error-code registry
+        ├── field/                  :field addressing and its payload shapes
+        ├── framing/                header, opt bits, length widths, minimum frame
+        ├── fwd/                    FWD ops, labels, compaction, rejection cases
+        ├── path/                   PATH TLVs, path handles, segment limits
+        └── tlv-types/              per-type-code payloads (VALUE, NAME, SUBSCRIBER, …)
             └── <case-name>/
                 ├── input.bin       raw bytes the parser receives
                 ├── expected.json   the decoded structure (machine-readable)
@@ -27,7 +28,7 @@ Negative cases (bytes every core MUST refuse — e.g. a reserved opt bit set) ca
 `reject.bin` **instead of** `input.bin`, and their `expected.json` names the
 required decode error in a top-level `"reject"` field. See [HARNESS.md](HARNESS.md).
 
-> This category layout (per r1 Q5.1) is canonical. It supersedes the earlier `encode/decode/roundtrip/` sketch and the `path_canonical/` mention in `docs/reference/02-graph-model.md`; those are reconciled by the v0.1 consolidation RFC. A driver in each implementation walks `input.bin` → decode → compare against `expected.json`, and re-encodes `expected.json` → compare against `input.bin` (round-trip).
+> **The directory is the source of truth for which categories exist** — the tree above is a reading aid, and a category is whatever `vectors/v1/` holds. The v1 partition itself (per r1 Q5.1) is canonical: It supersedes the earlier `encode/decode/roundtrip/` sketch and the `path_canonical/` mention in `docs/reference/02-graph-model.md`; those are reconciled by the v0.1 consolidation RFC. A driver in each implementation walks `input.bin` → decode → compare against `expected.json`, and re-encodes `expected.json` → compare against `input.bin` (round-trip).
 
 ## Seed vectors
 
