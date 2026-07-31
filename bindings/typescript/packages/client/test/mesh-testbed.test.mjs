@@ -322,31 +322,30 @@ test('mesh testbed: form a cyclic multi-node mesh in band, then route across it'
 
 /* ------------------------------------------------------------------ xfails --- */
 /*
- * The absences this testbed EXPOSES rather than blocks on. Each is a `todo` that
- * documents current behaviour, so the day the gap closes the assertion goes red and
- * forces the update. See tests/testbed/README.md for the full register.
+ * The absences this testbed EXPOSES rather than blocks on. See tests/testbed/README.md
+ * for the full register.
+ *
+ * THESE DO NOT FORCE ANYTHING, and this comment used to claim they did (#606): "the day
+ * the gap closes the assertion goes red and forces the update". A `todo` whose body is
+ * entirely comments has no assertions, so it can never go red — the forcing function was
+ * asserted, never built. It had already failed silently: the identity xfail sat here
+ * describing a gap that #406 and #409 closed, while `compose.yml` in the same directory
+ * gives every node a `--identity` and the #409 walk step depends on it working.
+ *
+ * They are kept as a documented register, honestly labelled. Promoting one to a real
+ * assertion of current behaviour is the fix the README promises, and it needs the compose
+ * stack — which is the `mesh-testbed` CI job, not a local run.
  */
 
-test('xfail: a node has no identity independent of the path it was reached by (#406, RFC-0011)', { todo: true }, () => {
-  // /node/name is a SEEDED APPLICATION VALUE, not an identity — a node can claim anything,
-  // and nothing binds the claim to the device. There is no identity surface at all today:
-  // peer_id_t has zero call sites, and RFC-0011's `:identity` facet is unmerged.
-  //
-  // The consequence is exactly what the ring above demonstrates: `b` reached as /b and as
-  // /c/a/b is TWO UNRELATED PATHS, and libtracer will never tell you they are one device
-  // (ADR-0044 pt 2 — the core never dedups, at any layer, on any node). So a recursive
-  // topology walk cannot terminate on the cycle by itself: dedup is the client's job, keyed
-  // by an identity it chooses (#409's stitch utility), and #406 is the keystone that makes
-  // that key trustworthy rather than a guess.
-});
-
 test('xfail: killing a node does not drive its peers\' link state down (#407, #66)', { todo: true }, () => {
-  // set_link_state(name, true) is called exactly once, at creation. Kill container `c` and
-  // /net/c on b still reads UP forever: there is no liveness signal, no reconnect anywhere
-  // ("Reconnect is out of scope" — transport_tcp.hpp), and no child removal, so a link
-  // cannot even be recreated under the same name after a failure (PATH_IN_USE). Recovery
-  // needs a NEW name — which is precisely why teardown is a hard blocker for the
-  // stable-identity reconnection #407 has to design.
+  // NARROWED (#606). The liveness half has LANDED: RFC-0014 §4 gave transport_vertex.hpp a
+  // six-state link_state_t (:96) including RECONNECTING, plus backoff_ms (:134) and
+  // connect_timeout_ms (:137). "There is no liveness signal, no reconnect anywhere" was
+  // this test's claim and it is no longer true.
+  //
+  // What remains is the TEARDOWN half: no child removal, so a link cannot be recreated
+  // under the same name after a failure (PATH_IN_USE) — recovery needs a NEW name, which is
+  // why teardown is the hard blocker for the stable-identity reconnection #407 must design.
 });
 
 test('xfail: close_peer cannot evict a peer from a SPEC-created listener (#407)', { todo: true }, () => {
