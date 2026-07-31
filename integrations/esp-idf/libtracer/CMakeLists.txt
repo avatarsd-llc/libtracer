@@ -150,6 +150,15 @@ if(NOT IDF_TARGET STREQUAL "linux")
     if(CONFIG_LIBTRACER_TRANSPORT_WS AND CONFIG_HTTPD_WS_SUPPORT)
         list(APPEND LIBTRACER_SRCS "httpd_ws_link.cpp")
     endif()
+    # Chip targets: the esp_transport_ws-backed WS *client* link (esp_ws_client_link_t) — the
+    # embedded-native replacement for core's raw-socket transport_ws_client (which fails the
+    # handshake on lwIP silicon), the dial mirror of httpd_ws_link_t. Uses tcp_transport (core
+    # IDF), so gated on CONFIG_LIBTRACER_TRANSPORT_WS alone (no esp_http_server dependency).
+    # transport_ws.cpp's portable client still compiles; a node that binds this link leaves it
+    # unreferenced for --gc-sections to drop (same coexistence as httpd_ws_link vs the server).
+    if(CONFIG_LIBTRACER_TRANSPORT_WS)
+        list(APPEND LIBTRACER_SRCS "esp_ws_client_link.cpp")
+    endif()
     # esp_driver_gpio (twai_link.cpp names its pins via <driver/gpio.h>), esp_driver_twai
     # (the TWAI peripheral) and esp_http_server (httpd_ws_link.cpp's native WS API) MUST be
     # UNCONDITIONAL requirements — NOT gated on the transport bools or CONFIG_HTTPD_WS_SUPPORT.
@@ -163,7 +172,7 @@ if(NOT IDF_TARGET STREQUAL "linux")
     # --gc-sections drops the link dep and libtracer.a is byte-identical (no footprint change
     # to a transport-trimmed build the sentinel measures). lwip stays unconditional for the
     # same reason (the socket transports' <sys/socket.h> resolves into it).
-    list(APPEND LIBTRACER_PRIV_REQUIRES lwip esp_driver_twai esp_driver_gpio esp_http_server)
+    list(APPEND LIBTRACER_PRIV_REQUIRES lwip esp_driver_twai esp_driver_gpio esp_http_server tcp_transport)
     # compat/include: POSIX headers IDF's libc spells differently (<poll.h> ->
     # <sys/poll.h>) — private, so core sources stay pure POSIX and dependents
     # never see the shim.
