@@ -162,6 +162,13 @@ add_executable(bench_tcp_fanin bench_tcp_fanin.cpp)
 target_link_libraries(bench_tcp_fanin PRIVATE libtracer)
 target_compile_options(bench_tcp_fanin PRIVATE -Wall -Wextra)
 
+# Resolves what bench_tcp_fanin cannot: its idle-fanout arm holds the work constant and sweeps
+# CONNECTED-BUT-SILENT peers, so the O(peers) poll and the locked pollfd rebuild are priced apart
+# from the thread's own saturation (ADR-0071).
+add_executable(bench_tcp_peer_scaling bench_tcp_peer_scaling.cpp)
+target_link_libraries(bench_tcp_peer_scaling PRIVATE libtracer)
+target_compile_options(bench_tcp_peer_scaling PRIVATE -Wall -Wextra)
+
 # Validates the tail estimator itself against analytically known distributions. Links nothing:
 # bench::Latency is header-only, and the point is that a p999 failure here is a defect in the
 # instrument and not in libtracer. Exit status is the FAIL count, so it can gate.
