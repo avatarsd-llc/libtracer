@@ -154,3 +154,9 @@ target_compile_options(bench_transport_iov PRIVATE -Wall -Wextra)
 add_executable(bench_tcp_fanin bench_tcp_fanin.cpp)
 target_link_libraries(bench_tcp_fanin PRIVATE libtracer)
 target_compile_options(bench_tcp_fanin PRIVATE -Wall -Wextra)
+
+# The mount descent's k=W..1 width loop vs one full-table scan — the headroom a single-pass
+# descent could win, measured at W>3 where the shipped cap makes it invisible.
+add_executable(bench_mount_descent bench_mount_descent.cpp)
+target_link_libraries(bench_mount_descent PRIVATE libtracer)
+target_compile_options(bench_mount_descent PRIVATE -Wall -Wextra)
