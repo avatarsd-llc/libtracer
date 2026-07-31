@@ -76,25 +76,40 @@ core/build/tests/mesh_node --name bus --ctrl-port 47404 --peer-named-listen mesh
 # then point LIBTRACER_MESH_CTRL / _PEERS at 127.0.0.1 with those ports.
 ```
 
-## Addressing: `/b/c/...`, **not** `/net/b/net/c/...`
+## Addressing: the routing key **is** the vertex path
 
-A connection's **routing key is its bare name**; its `/net/<name>` key is the *vertex*.
-`transport_vertex.cpp` registers the router child under the bare `name` while the graph
-composes the vertex at `/net/<name>`, and `fwd_router_t` resolves a FWD's first `dst`
-segment against the child-link registry **before** the local graph.
+A connection's routing key is its **full vertex path** — `/net/<module>/<name>` — so the
+address you read the link at and the address you route *through* it are the same string
+(RFC-0014 S2a, [ADR-0061](../../docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md)).
+`transport_vertex.cpp` registers the router child under that **qualified** key
+(`router_.add_child(qualified, *link)`), and `fwd_router_t` matches a FWD's **leading**
+`dst` segments against the child registry, longest mount first — not its first segment.
 
-- `/net/b` — where you **read** the link's state, settings, `await` its bring-up
-- `b` — the first `dst` segment that **routes through** it
+- `/net/ws-client/b` — where you **read** the link's state, settings, `await` its bring-up
+- `/net/ws-client/b` — and the same run a `dst` **routes through**
 
-So `a` reaches `c` through `b` at **`/b/c/sensor/temp`**. This is deliberate: #373 exists
-precisely *because* link names share the top-level namespace with first-level vertices,
-which is only true under bare-name routing.
+So `a` reaches `c` through `b` at **`/net/ws-client/b/net/ws-client/c/sensor/temp`**, which
+is what `via('b', 'c')` builds in the driver.
 
-**[reference/03](../../docs/reference/03-addressing.md) and
-[reference/07](../../docs/reference/07-host-embedding.md) are stale here**, and the
-conformance vectors encode a *third* form — tracked in **#419**. The driver pins the
-implementation and asserts the documented form does **not** resolve, so the docs cannot
-quietly become true without this going red.
+> **Erratum (2026-07-31).** This section previously said the opposite — *"a connection's
+> routing key is its bare name"*, `/b/c/sensor/temp`, and that
+> [reference/03](../../docs/reference/03-addressing.md) and
+> [reference/07](../../docs/reference/07-host-embedding.md) *"are stale here"*. Every part of
+> that was inverted by RFC-0014 S2a, including the direction of the staleness: the reference
+> chapters describe the shipped model and this file did not.
+>
+> It also claimed *"the driver pins the implementation and asserts the documented form does
+> not resolve, so the docs cannot quietly become true without this going red."* The driver
+> does pin the implementation — `mesh-testbed.test.mjs:24-25` states the qualified rule and
+> `:222` tests `/net/ws-client/b/node/name`. It pinned the **new** form while this file kept
+> describing the old one, so the guard was green and the doc was wrong at the same time. A
+> guard only protects the claim it actually checks.
+>
+> #373's rationale went with it: link names no longer share the top-level namespace with
+> first-level vertices, because a connection is addressed under `/net`, never at the root.
+
+The conformance vectors still encode a *third* form — that part stands, and is tracked in
+**[#419](https://github.com/avatarsd-llc/libtracer/issues/419)**.
 
 ## Why no healthchecks
 
