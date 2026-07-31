@@ -190,15 +190,28 @@ So the *goal* of the egress bullet — "hot path lock-free, flow-setup per-conne
 cross-link contention — was met by a different mechanism than the one specified, and the
 node-global lock the bullet indicts is genuinely gone.
 
-**Two clauses are still unbuilt, and they are tracked, not withdrawn:**
+**One clause is still unbuilt, and it is tracked, not withdrawn:**
 
-- ***"sized by `:settings`"*** — there is **no bound of any kind** on the per-link tables today.
-  `ingress` is push_back-only and peer-driven. This is [#603](https://github.com/avatarsd-llc/libtracer/issues/603)
-  defect 2, and this clause is the ADR-side warrant for fixing it with an **injected** bound rather
-  than a constant — matching `can_reassembly_t`'s `max_groups` and the
-  [CONTEXT.md §Resource bound](../../CONTEXT.md) rule.
 - ***"routes in pooled segments"*** — routes are `std::pmr::vector<std::byte>` drawn from `mr_`,
   which is host-chosen memory but not the pooled-segment substrate this bullet describes.
+
+***"sized by `:settings`"* is now built in substance, not in mechanism.** When this erratum was
+first written there was **no bound of any kind** on the per-link tables — `ingress` was
+push_back-only and peer-driven. That is
+[#603](https://github.com/avatarsd-llc/libtracer/issues/603) defect 2, and this clause was its
+ADR-side warrant for an **injected** bound rather than a constant. The bound now exists as a
+**constructor argument** on `route_handle_t` and `fwd_router_t` (`0` = unbounded, the default),
+matching `can_reassembly_t`'s `max_groups` and the
+[CONTEXT.md §Resource bound](../../CONTEXT.md) rule. It is **not** literally read from a
+`:settings` field, so the clause's *mechanism* is still unrealized; if `:settings` later becomes
+the carrier, this is the seam it plugs into.
+
+One design point this ADR did not anticipate: a full table **refuses** rather than evicting.
+Evict-oldest is right for `can_reassembly_t`, whose groups are short-lived so oldest ≈ stalest — a
+label binding is the opposite, since it exists precisely *because* a flow is long-running, so
+evict-oldest would preferentially kill the longest-lived stream. Refusal reuses §3's own exhaustion
+answer (the full-route `FWD{WRITE}` fallback below), so table-full and label-space-exhausted are
+one degrade path, not two.
 
 **One clause was unbuilt and is now built.** *"Exhaustion falls back to full-route `FWD{WRITE}`"*
 was specified here for a table that never shipped, so nothing implemented it: the allocator wrapped

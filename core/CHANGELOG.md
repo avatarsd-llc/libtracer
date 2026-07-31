@@ -30,6 +30,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   forward hop's stack array shrinks by 5 spans (80 B on a 64-bit host). No behaviour change: the
   emitted region count is unchanged.
 
+- **`route_handle_t` and `fwd_router_t` take an optional per-link binding bound (#603).**
+  `route_handle_t(mr, max_bindings_per_link = 0)` and
+  `fwd_router_t(graph, mr, rx, max_label_bindings_per_link = 0)`; `0` keeps the prior
+  unbounded behaviour, so every existing call site is unchanged. `route_handle_t::bind_ingress`
+  and `record_egress` now return `[[nodiscard]] bool` — `false` means the link's table was at
+  its bound and nothing was recorded. New `route_handle_t::refused_bindings()` counts them.
+
 - **`route_handle_t::alloc_label` and `ensure_egress` now report label-space exhaustion**
   instead of wrapping. `alloc_label` returns `0` (the reserved "none") once a link has issued
   1..65535; `ensure_egress` returns `{0, false}` and records nothing. Callers **must** treat
@@ -47,8 +54,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   [ADR-0038](../docs/adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md)
   §3 already specified (*"exhaustion falls back to full-route `FWD{WRITE}`"*) and nothing
   implemented. Labels are still not reclaimed individually; `clear_link` (the (re)connect
-  self-heal) restores a link's whole space. The remaining halves of #603 — the unbounded
-  ingress/egress growth and the throwing pmr allocation — are unfixed.
+  self-heal) restores a link's whole space.
+
+- **The per-link label tables are no longer unbounded (#603).** `ingress` was push_back-only and
+  peer-driven, bounded only by the 16-bit label space — 65535 `handle_binding_t` (each carrying a
+  `std::string` and a `std::vector`) is megabytes per link on a node whose whole budget is 16 KB.
+  Both tables now honour an **injected** ceiling, and a full table **refuses** rather than evicts:
+  evict-oldest is right for `can_reassembly_t`, whose groups are short-lived so oldest ≈ stalest,
+  but a label binding exists precisely *because* a flow is long-running, so evicting the oldest
+  would preferentially kill the longest-lived stream and make it re-advertise forever. True LRU
+  would need a write on `resolved()` — the per-delivery hot path — to solve a flow-setup problem.
+  A refused flow delivers over the full-route `FWD{WRITE}` form; established flows are untouched.
+  The remaining half of #603 — the throwing pmr allocation under `-fno-exceptions` — is unfixed.
 
 - **An ADVERTISE route with a non-`NAME` child no longer binds a label (#681).** `wire::path_key`
   re-emitted **every** child's payload through `wire::emit_name` with no type check, so a peer's
