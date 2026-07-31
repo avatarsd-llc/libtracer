@@ -350,7 +350,7 @@ The fix shape is in the same file: the iterative heap-backed stack machine at
 `status_t::BACKPRESSURE`). Two of the four return `void`, so an error channel changes their
 signatures — that is the open design question in #690, not something this RFC decides.
 
-Note that `vertex_t` carries an immutable `parent_` link (`core/include/libtracer/vertex.hpp:2224`,
+Note that `vertex_t` carries an immutable `parent_` link (`core/include/libtracer/vertex.hpp:2299`,
 accessor `:976`), so an O(1)-memory parent-link traversal is also available and would need no error
 channel at all. #690 should weigh both.
 

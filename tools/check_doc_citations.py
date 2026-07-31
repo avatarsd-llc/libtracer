@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-"""Verify that CONTEXT.md's `file:line` code citations still point at what they claim.
+"""Verify that the docs' `file:line` code citations still point at what they claim.
 
-CONTEXT.md is the canonical glossary, and it cites exact source locations. Line
-numbers drift silently when the cited file gains lines above them: the citation
-still resolves, still looks precise, and now points at unrelated code. Two audits
-(#725, #726) found the same rot in hand-maintained doc summaries; this makes the
-CONTEXT.md instance of it fail loudly instead.
+The documentation cites exact source locations — CONTEXT.md (the canonical
+glossary), the module pages, and the design notes. Line numbers drift silently
+when the cited file gains lines above them: the citation still resolves, still
+looks precise, and now points at unrelated code. #725/#726 found this rot in
+hand-maintained doc summaries, #727 found 11 stale citations in CONTEXT.md, and
+#728 found 29 more across the design and module pages — every one of them in
+`graph.cpp` or `fwd_router.cpp`, the two files that churn. This makes it fail
+loudly instead.
 
 Each entry below pins a citation to a substring the cited line must contain. When
 code moves, this fails AND reports the line the anchor moved to, so the fix is
 mechanical rather than a re-investigation.
 
-Usage:  python3 tools/check_context_citations.py
+Usage:  python3 tools/check_doc_citations.py
 Exits non-zero on the first stale citation, listing every one it found.
 """
 
@@ -61,17 +64,41 @@ ANCHORS = [
     ("core/include/libtracer/grammar.hpp:210", "receiver-resource depth bound"),
     ("core/src/graph.cpp:1013", "!arena"),
     ("core/include/libtracer/segment.hpp:78", "struct segment_t"),
+    # --- the design + module pages (#728). Every one of these had drifted. ---
+    ("core/src/graph.cpp:721", "has_registered_child()"),
+    ("core/src/graph.cpp:811", "void graph_t::fan_out"),
+    ("core/src/graph.cpp:934", "graph_t::write_impl"),
+    ("core/src/graph.cpp:996", "value.materialize(*value_backend_)", "graph_t::write_branch"),
+    ("core/src/graph.cpp:997", "head.empty() && value.total_length()", "graph_t::write_branch"),
+    ("core/src/graph.cpp:1009", "std::array<std::byte, 4096> stack;"),
+    ("core/src/graph.cpp:1010", "bump_source_t src(stack"),
+    ("core/src/graph.cpp:1012", "decode_into(head.bytes(), src)"),
+    ("core/src/graph.cpp:1028", "std::vector<std::byte> root_key;"),
+    ("core/src/graph.cpp:1029", "try_build_key(v, root_key)"),
+    ("core/src/graph.cpp:1031", "try_assign(parse_key, root_key)"),
+    ("core/src/graph.cpp:1233", "value.materialize(*value_backend_)", "field_write read it back"),
+    ("core/src/graph.cpp:1437", "result_t<void> graph_t::field_write"),
+    ("core/src/graph.cpp:1564", "acl_right_t::CREATE", 'step0.name == "children"'),
+    ("core/src/fwd_router.cpp:1000", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1021", "value.materialize()"),
+    ("core/src/fwd_router.cpp:1022", "flatten OOM"),
+    ("core/src/fwd_router.cpp:1026", "try_encode_compact", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1058", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
+    ("core/include/libtracer/vertex.hpp:2299", "vertex_t* parent_"),
 ]
 
 
 def cited_locations(context: str) -> set:
     """Every `path:line` citation in CONTEXT.md, with bare `:line` resolved to the last path.
 
-    Handles the three spellings the document actually uses: `file.hpp:12`, a range
-    `file.cpp:12-20`, and a comma list `file.hpp:145,153`. A bare `` `:99` `` inherits
-    the most recently named file, which is how CONTEXT.md writes sibling citations.
+    Handles every spelling the docs actually use: `file.hpp:12`, a range
+    `file.cpp:12-20` (which registers EVERY line in it, not just the first — a doc
+    citing `996-997` is citing both), a comma list `file.hpp:145,153`, and the
+    UNBACKTICKED form that appears inside annotated code-excerpt blocks. A bare
+    `` `:99` `` inherits the most recently named file, which is how CONTEXT.md
+    writes sibling citations.
     """
-    tok = re.compile(r"`(core/[a-z_/]+\.(?:hpp|cpp)):([\d,\-]+)`|`:([\d,\-]+)`")
+    tok = re.compile(r"`?(core/[a-z_/]+\.(?:hpp|cpp)):([\d,\-]+)`?|`:([\d,\-]+)`")
     found, last = set(), None
     for m in tok.finditer(context):
         if m.group(1):
@@ -81,15 +108,34 @@ def cited_locations(context: str) -> set:
         else:
             continue
         for part in spec.split(","):
-            start = part.split("-")[0]
-            if start.isdigit():
-                found.add(f"{last}:{start}")
+            ends = part.split("-")
+            if not ends[0].isdigit():
+                continue
+            lo = int(ends[0])
+            hi = int(ends[1]) if len(ends) > 1 and ends[1].isdigit() else lo
+            # A citation is a pointer, not a listing — an implausible span is a
+            # parse artifact (a hyphenated word), so ignore it rather than flood.
+            if hi < lo or hi - lo > 40:
+                hi = lo
+            for n in range(lo, hi + 1):
+                found.add(f"{last}:{n}")
     return found
 
 
+def all_docs() -> list:
+    """Every tracked markdown file. `_build` is generated Sphinx output; the
+    `.claude/worktrees/fw-pin-*` trees are pinned history. Neither is a source."""
+    skip = ("_build", "node_modules", ".claude", ".git")
+    return [p for p in REPO.rglob("*.md") if not any(s in p.parts for s in skip)]
+
+
 def main() -> int:
-    context = (REPO / "CONTEXT.md").read_text()
-    present = cited_locations(context)
+    present = set()
+    for doc in all_docs():
+        try:
+            present |= cited_locations(doc.read_text())
+        except (OSError, UnicodeDecodeError):
+            continue
     failures, drifted = [], []
 
     for entry in ANCHORS:
@@ -119,7 +165,7 @@ def main() -> int:
         loc = entry[0]
         path, lineno = loc.rsplit(":", 1)
         if loc not in present and f"{path}:{lineno}" not in present:
-            failures.append(f"{loc}: pinned here but CONTEXT.md no longer cites it — drop the anchor")
+            failures.append(f"{loc}: pinned here but no doc cites it any more — drop the anchor")
 
     for f in failures:
         print(f"FAIL  {f}")
@@ -127,9 +173,9 @@ def main() -> int:
         print(f"DRIFT {d}")
 
     if failures or drifted:
-        print(f"\n{len(failures) + len(drifted)} stale citation(s) in CONTEXT.md.")
+        print(f"\n{len(failures) + len(drifted)} stale citation(s) in the docs.")
         return 1
-    print(f"OK    {len(ANCHORS)} CONTEXT.md citations verified against source.")
+    print(f"OK    {len(ANCHORS)} doc citations verified against source.")
     return 0
 
 
