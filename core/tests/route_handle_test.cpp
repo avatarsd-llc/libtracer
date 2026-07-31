@@ -31,6 +31,8 @@
 #include <thread>
 #include <vector>
 
+#include "libtracer/mem_heap.hpp"
+
 namespace {
 
 using namespace tr::net;
@@ -295,6 +297,43 @@ void bounded_tables() {
 
 }  // namespace
 
+/**
+ * @brief `egress_route`'s copy-out soft-fails instead of aborting (#603 defect 1).
+ *
+ * This runs on a transport receive thread — `fwd_router_t::on_nack` reaches it from an
+ * inbound HANDLE_NACK — so a throwing allocation there is an `abort()` under the shipping
+ * `-fno-exceptions` profile. Exhaustion must take the SAME `nullopt` the "no route bound"
+ * case already takes, so no caller learns a new shape.
+ *
+ * The hook gates `tr::detail::probe_bytes` only, never real `operator new`. That is what
+ * makes this test discriminating rather than decorative: the previous
+ * `std::vector(begin, end)` never consulted the probe, so under this same hook it would
+ * allocate successfully and hand back the route — the middle assertion is what fails.
+ */
+void egress_route_soft_fails_on_exhaustion() {
+    std::printf(" #603 egress_route copy-out is nothrow:\n");
+    route_handle_t h;
+    const std::array<std::byte, 8> route{};
+    check(h.record_egress("up", 7, std::vector<std::byte>(route.begin(), route.end())),
+          "the egress route binds");
+    check(h.egress_route("up", 7).has_value(), "and reads back while memory is available");
+
+    {
+        struct hook_guard_t {
+            hook_guard_t() {
+                tr::detail::probe_fail_hook = [](std::size_t) noexcept { return false; };
+            }
+            ~hook_guard_t() { tr::detail::probe_fail_hook = nullptr; }
+        } const starve;
+        check(!h.egress_route("up", 7).has_value(),
+              "under exhaustion it answers nullopt — the same answer as an unbound label, "
+              "never an abort");
+    }
+
+    check(h.egress_route("up", 7).has_value(), "and reads back again once memory returns");
+    check(h.egress_route("up", 8) == std::nullopt, "an unbound label still answers nullopt");
+}
+
 int main() {
     std::printf("route_handle_t (Brick 4 — per-connection pmr label tables):\n");
 
@@ -317,6 +356,7 @@ int main() {
     churn_and_race();
     label_space_exhaustion();
     bounded_tables();
+    egress_route_soft_fails_on_exhaustion();
 
     if (g_failures == 0) {
         std::printf("route_handle: ALL PASS\n");
