@@ -203,6 +203,8 @@ class route_handle_t {
      * @param out_link This node's NAME for the downstream link.
      * @param route    A complete PATH TLV's bytes — the delivery route the label aliases.
      * @return `{label, fresh}` — the (reused or new) label, and whether it was just created.
+     *         `{0, false}` ⇒ this link's label space is exhausted (see @ref alloc_label);
+     *         nothing was recorded and the caller must deliver over the full-route FWD path.
      */
     [[nodiscard]] std::pair<std::uint16_t, bool> ensure_egress(std::string_view out_link,
                                                                std::span<const std::byte> route);
@@ -218,8 +220,18 @@ class route_handle_t {
 
     /**
      * @brief Allocate a fresh, per-link, monotonic label (≥1; 0 is reserved "none").
+     *
+     * The allocator SATURATES rather than wrapping (#603). It issues 1..65535 in order and
+     * is then permanently exhausted, returning 0 — because a wrapped counter re-issues
+     * labels that still alias live routes, and a delivery on a reused label resolves the
+     * WRONG route (a misroute, not a drop). Labels are not reclaimed individually today;
+     * @ref clear_link drops a link's whole table and restores its space, which is the
+     * self-heal a (re)connect already performs.
+     *
      * @param link This node's NAME for the link the label is scoped to.
-     * @return A label unique among this link's currently allocated labels.
+     * @return A label unique among this link's currently allocated labels, or **0** when the
+     *         link's 16-bit space is exhausted — callers MUST treat 0 as "cannot compact"
+     *         and fall back to the full-route form, never stamp it on a frame.
      */
     [[nodiscard]] std::uint16_t alloc_label(std::string_view link);
 

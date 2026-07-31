@@ -30,7 +30,25 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   forward hop's stack array shrinks by 5 spans (80 B on a 64-bit host). No behaviour change: the
   emitted region count is unchanged.
 
+- **`route_handle_t::alloc_label` and `ensure_egress` now report label-space exhaustion**
+  instead of wrapping. `alloc_label` returns `0` (the reserved "none") once a link has issued
+  1..65535; `ensure_egress` returns `{0, false}` and records nothing. Callers **must** treat
+  `0` as "cannot compact" and never stamp it on a frame — `fwd_router_t::advertise` already
+  documented `0` as its failure return, and now uses it for this case too.
+
 ### Fixed
+
+- **The per-link label allocator no longer wraps onto live labels (#603).** `next_label` was a
+  bare `std::uint16_t` incremented unchecked, so allocation 65536 handed out the **reserved 0**
+  and 65537 handed out **1** — while label 1's egress entry still aliased the first flow's route.
+  A COMPACT on the reused label resolved the **wrong route**: a silent misroute, not a drop. The
+  allocator now saturates. On exhaustion `deliver_remote` falls through to the full-route
+  `FWD{WRITE}` form, which carries its own route and needs no label — the degrade
+  [ADR-0038](../docs/adr/0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md)
+  §3 already specified (*"exhaustion falls back to full-route `FWD{WRITE}`"*) and nothing
+  implemented. Labels are still not reclaimed individually; `clear_link` (the (re)connect
+  self-heal) restores a link's whole space. The remaining halves of #603 — the unbounded
+  ingress/egress growth and the throwing pmr allocation — are unfixed.
 
 - **An ADVERTISE route with a non-`NAME` child no longer binds a label (#681).** `wire::path_key`
   re-emitted **every** child's payload through `wire::emit_name` with no type check, so a peer's

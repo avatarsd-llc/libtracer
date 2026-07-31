@@ -399,6 +399,7 @@ std::uint16_t fwd_router_t::advertise(std::string_view link_name,
     transport_t* const link = registry_.by_name(link_name);
     if (link == nullptr) return 0;
     const std::uint16_t label = handles_.alloc_label(link_name);
+    if (label == 0) return 0;  // link's label space exhausted (#603) — no binding, no frame
     handles_.record_egress(link_name, label,
                            std::vector<std::byte>(route_path.begin(), route_path.end()));
     const std::vector<std::byte> adv = encode_advertise(label, route_path);
@@ -833,6 +834,11 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
         const std::vector<std::byte> stripped_bytes = wire::encode(stripped);
 
         const std::uint16_t out_label = handles_.alloc_label(down_name);
+        // Exhausted downstream label space (#603): bind nothing and re-advertise nothing.
+        // The alternative -- reusing a live label -- would swap this flow onto another
+        // flow's route. The upstream's COMPACTs then draw a HANDLE_NACK, the same signal a
+        // stale label already produces; the uncompacted FWD path is unaffected.
+        if (out_label == 0) return;
         // Built field-by-field rather than with a designated-initializer brace: the binding
         // now carries ADR-0062's memoized resolution too, and an aggregate init that names
         // only some members trips -Werror=missing-field-initializers on the ESP toolchain.
@@ -995,15 +1001,23 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
         // failed flatten or frame build DROPS the delivery (the subscriber misses one
         // value under heap exhaustion — valid delivery behavior), never an abort. A
         // dropped fresh ADVERTISE self-heals via the peer's HANDLE_NACK (§E.1).
-        const view_t flat = value.materialize();
-        if (flat.empty() && value.total_length() != 0) return;  // flatten OOM — drop
+        // Resolve the label BEFORE flattening: an exhausted label space (#603) falls
+        // through to the full-route form below, which gathers the rope's links and needs
+        // no flatten at all — so the wasted materialize is skipped rather than discarded.
         const auto [label, fresh] = handles_.ensure_egress(sub.link, route);
-        std::vector<std::byte> frame;
-        if (fresh && try_encode_advertise(frame, label, route))
+        if (label != 0) {
+            const view_t flat = value.materialize();
+            if (flat.empty() && value.total_length() != 0) return;  // flatten OOM — drop
+            std::vector<std::byte> frame;
+            if (fresh && try_encode_advertise(frame, label, route))
+                link->send(std::span<const std::byte>(frame));
+            if (!try_encode_compact(frame, label, flat.bytes())) return;  // OOM — drop
             link->send(std::span<const std::byte>(frame));
-        if (!try_encode_compact(frame, label, flat.bytes())) return;  // OOM — drop
-        link->send(std::span<const std::byte>(frame));
-        return;
+            return;
+        }
+        // label == 0: this link has issued all 65535 labels. Compaction is an optimization
+        // over a delivery form that carries its own route, so the flow degrades to that
+        // form instead of dropping — fall through.
     }
     // Default: full-route `FWD{ op=WRITE, dst=<return route>, src=<empty PATH>,
     // payload=<VALUE> }` (delivery-is-a-write, RFC-0004 §D / #136), scatter-gathered over
