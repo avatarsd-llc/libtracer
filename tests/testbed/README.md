@@ -125,49 +125,68 @@ add nothing.
 
 ## Known absences (xfail)
 
-Documented rather than blocked on. Each is a `todo` in the driver asserting *current*
-behaviour, so the day the gap closes the test goes red and forces the update.
+Documented rather than blocked on.
 
-### 1. Node identity — #406 / RFC-0011
+> **This register has no forcing function, and used to claim one** ([#606]). The text here
+> read *"Each is a `todo` in the driver asserting current behaviour, so the day the gap
+> closes the test goes red and forces the update."* Every `todo` in the driver has a body
+> made **entirely of comments** — no assertions — so none of them can ever go red. The
+> mechanism was asserted, never built.
+>
+> It had already failed silently, in the most visible way available: entry 1 below
+> described an identity gap that **#406 and #409 closed**, while `compose.yml` **in this
+> same directory** gives every node a `--identity` and the CI job's #409 walk step depends
+> on that working. Entry 3 described a docs contradiction that **#420 fixed**, so the
+> register outlived the thing it was registering. Both are retired below.
+>
+> Promoting an entry to a real assertion of current behaviour is the fix. It needs the
+> compose stack, so it belongs to the `mesh-testbed` CI job.
 
-**`/node/name` is a seeded application value, not an identity.** A node can claim anything,
-and nothing binds the claim to the device. There is no identity surface at all today:
-`peer_id_t` (`transport.hpp`) has **zero call sites**, and RFC-0011's `:identity` facet is
-unmerged.
+[#606]: https://github.com/avatarsd-llc/libtracer/issues/606
 
-The ring makes the consequence concrete: **`b` reached as `/b` and as `/c/a/b` is two
-unrelated paths**, and libtracer will never tell you they are one device — ADR-0044 pt 2,
-by design, at any layer, on any node. So the whole-network graph stays a client-side
-projection, and a recursive walk cannot terminate on the cycle by itself. Dedup is the
-client's job, keyed by an identity **it** chooses (#409's stitch utility); #406 is the
-keystone that makes that key trustworthy rather than a guess.
+### 1. ~~Node identity~~ — RETIRED, #406 / #409 closed
 
-> Note also that `reference/07` describes a 128-bit `peer_id_t` with generation rules. **No
-> such thing exists in code.** Reconcile in #406.
+This entry claimed *"There is no identity surface at all today: `peer_id_t` has zero call
+sites, and RFC-0011's `:identity` facet is unmerged."* Both clauses are false:
+`graph_t::set_identity` / `clear_identity` / `read_identity` implement the RFC-0011 §B kind
+registry, and `compose.yml` gives each node a distinct `--identity` precisely so the #409
+walk collapses the ring into 4 devices instead of unrolling it into ~170 route-nodes.
 
-### 2. Teardown and link lifecycle — #407 / #66
+**What is still true is a design property, not an absence.** `b` reached as `/b` and as
+`/c/a/b` is two unrelated *paths*, and libtracer will never tell you they are one device —
+ADR-0044 pt 2, by design, at any layer, on any node. So the whole-network graph stays a
+client-side projection and dedup is the client's job, keyed by the identity facet. That is
+the architecture working as intended; it does not belong in a register of gaps.
 
-- **Link state never falls.** `set_link_state(name, true)` is called exactly once, at
-  creation. Kill container `c` and `/net/c` on `b` still reads **up** forever.
-- **No reconnect anywhere.** A torn dial exits and stays dead.
-- **No child removal**, so a link cannot even be recreated under the same name after a
-  failure (`PATH_IN_USE`). Recovery needs a **new name** — a hard blocker for
-  stable-identity reconnection, and the sharpest argument for #407.
+> One phantom outlives #406: `reference/07` describes a 128-bit `peer_id_t` with generation
+> rules, while `transport.hpp:33` declares `using peer_id_t = std::array<std::byte, 16>`
+> with no generation rules. #406 closed without reconciling it, and it is covered by neither
+> #599 nor #586 — tracked in [#606].
+
+### 2. Teardown and link lifecycle — #407 / #66 (narrowed)
+
+- ~~**No reconnect anywhere.**~~ **Landed.** RFC-0014 §4 gave `transport_vertex.hpp` a
+  six-state `link_state_t` (`:96`) including `RECONNECTING`, plus `backoff_ms` (`:134`) and
+  `connect_timeout_ms` (`:137`).
+- **No child removal**, so a link cannot be recreated under the same name after a failure
+  (`PATH_IN_USE`). Recovery needs a **new name** — a hard blocker for stable-identity
+  reconnection, and the sharpest argument for #407.
 - **`close_peer` has no in-band surface.** #418 made the documented
   `link_of(name)->bus()->close_peer(peer)` path *reachable* (the bus's listener is now both
   config-constructed and `peer_named`), but invoking it needs the removal model #407 owns.
 
-### 3. The revisit error is fiction — #420
+### 3. ~~The revisit error is fiction~~ — RETIRED, #420 closed the docs side
 
-`reference/03` and `/07` promise `ERROR{tr::path::invalid}` when a `dst` revisits a node.
-**No visited-set, no hop counter, no check exists** — and a stateless forwarder cannot have
-one (`fwd_compact_test` *asserts* zero per-request state). `/b/c/a/b/c/a/node/name` orbits
-the cycle twice and succeeds.
+This entry claimed *"`reference/03` and `/07` promise `ERROR{tr::path::invalid}` when a
+`dst` revisits a node."* They no longer do — #420 corrected them, and
+`reference/07-host-embedding.md:79` now states the opposite outright: *"There is no revisit
+check, no visited-set, and no error status for a route that re-enters a node."* `:285` makes
+it a rule an implementation must not "fix".
 
-Loop-freedom does hold, by a different and stronger mechanism: **`dst` is consumed
-monotonically**, so a delivery travels exactly as far as its explicit source route. The
-testbed asserts the implementation and records the contradiction rather than encoding the
-docs' fiction.
+The behaviour the entry described is unchanged and correct — loop-freedom holds by
+**monotonic `dst` consumption**, so a delivery travels exactly as far as its explicit source
+route, and `/b/c/a/b/c/a/node/name` orbits the cycle twice and succeeds. There is simply no
+longer a contradiction to register.
 
 ## Layout
 
