@@ -5,7 +5,10 @@
 block for the Performance docs page (and a plain-text table for a PR comment).
 
 Input is the combined ``RESULT`` stream from ``bench_libtracer grid`` +
-``bench_zenoh grid`` (the mode-tagged 12-field line in bench_common.hpp). We plot
+``bench_zenoh grid`` (the mode-tagged 12-field line in bench_common.hpp), plus the
+``RESULT_TAIL`` companion line the two-process transport benches emit for their paced
+one-way probes — p999, worst sample, sample count, and the accumulator's own verdict on
+whether that count backs a p999 at all. We plot
 ABSOLUTE measured values — throughput / latency / bandwidth vs fan-out, payload,
 and topic count — with libtracer and Zenoh as two series on shared axes. No speed-up
 ratios and no prose claim that isn't a measured point: every "reading" under a chart
@@ -62,13 +65,44 @@ def f_count(v: int) -> str:
 
 
 def parse(text: str) -> list[dict]:
-    rows = []
+    """@brief The combined stream -> one dict per measured point, tail folded in.
+
+    Two tags are read, not one. ``RESULT`` carries the twelve historical columns;
+    ``RESULT_TAIL`` (bench_common.hpp ``emit_tail``) carries the same point's p999,
+    worst sample, sample count and the instrument's own adequacy flag. They ride
+    separate lines because five parsers gate on the RESULT line's exact arity and a
+    thirteenth column would make all five match ZERO rows — silently, since a table
+    that renders empty looks like "nothing measured", not like a broken parser.
+
+    Both tags happen to be twelve fields wide, so the arity test alone does NOT
+    separate them; the tag test does, which is why the branch below is on ``f[0]``
+    and the width check is shared.
+
+    The join is on the full ``(system, mode, size, fanout, endpoints)`` key the two
+    lines share, so a tail can never attach to the wrong point. Points with no tail
+    line — every in-process row today, since only the two-process net bench emits one —
+    keep zeroed tail fields and ``tail_ok=False``, which is what stops them being
+    charted as a tail of zero nanoseconds.
+    """
+    rows: list[dict] = []
+    keys: list[tuple] = []
+    tails: dict[tuple, dict] = {}
     for line in text.splitlines():
         f = line.rstrip("\n").split("\t")
-        if len(f) == 12 and f[0] == "RESULT":
+        if len(f) != 12:
+            continue
+        key = (f[1], f[2], f[3], f[4], f[5])
+        if f[0] == "RESULT":
             rows.append(dict(sys=f[1], mode=f[2], size=int(f[3]), fan=int(f[4]), ep=int(f[5]),
                              pub=float(f[6]), deliv=float(f[7]), mbps=float(f[8]),
-                             p50=int(f[9]), p99=int(f[10]), mean=int(f[11])))
+                             p50=int(f[9]), p99=int(f[10]), mean=int(f[11]),
+                             p999=0, lat_max=0, lat_n=0, tail_ok=False))
+            keys.append(key)
+        elif f[0] == "RESULT_TAIL":
+            tails[key] = dict(lat_n=int(f[6]), p999=int(f[9]), lat_max=int(f[10]),
+                              tail_ok=f[11] == "1")
+    for row, key in zip(rows, keys):
+        row.update(tails.get(key, {}))
     return rows
 
 
@@ -87,6 +121,41 @@ def _series(rows, sys, mode, fixed, axis, cols):
 
 def has_zenoh(rows) -> bool:
     return any(r["sys"] == "zenoh" for r in rows)
+
+
+def tail_ready(rows: list[dict], mode: str) -> tuple[bool, str]:
+    """@brief May this transport's p999 be charted, and if not, the reason to publish.
+
+    A p999 is the order statistic at ``floor(0.999 * n)``, so the number of samples
+    strictly above it is ``n - 1 - floor(0.999 * n)`` — three at n=4000, zero at
+    n<=1000. Below the accumulator's own floor the figure is not an estimate of a tail,
+    it is a draw from one, and charting it would put a line on this page that moves for
+    reasons the code never touched.
+
+    The floor itself is NOT duplicated here. `bench::kTailSampleFloor` lives in
+    bench_common.hpp and the emitter already resolved the comparison into the
+    ``tail_ok`` column, so this reads the verdict rather than re-deriving it; a change
+    to the floor propagates without a second edit on the Python side. The observed
+    sample count is quoted in the note only so a reader can see how far short it fell.
+
+    Returns ``(chartable, why_not)`` — the reason is surfaced in the transport-coverage
+    note, never swallowed, because an absent tail chart beside a present p50 chart
+    otherwise reads as "this transport has no tail worth showing".
+    """
+    sel = [r for r in rows if r["mode"] == mode]
+    if not sel:
+        return False, ""
+    if not any(r["lat_n"] for r in sel):
+        return False, ("no <code>RESULT_TAIL</code> rows — the transport bench that produced "
+                       "these numbers predates the tail instrument")
+    short = sorted({r["lat_n"] for r in sel if not r["tail_ok"]})
+    if short:
+        counts = ", ".join(f"{n:,}" for n in short)
+        return False, (f"p999 not charted — only {counts} paced probes per point, below the "
+                       "accumulator's own adequacy floor, so the figure would be one of the "
+                       "top few draws rather than an estimate of the tail (p50 and p99 are "
+                       "unaffected and are charted)")
+    return True, ""
 
 
 def build(rows: list[dict]) -> dict:
@@ -194,12 +263,24 @@ def build(rows: list[dict]) -> dict:
     # engine produced rows. That case used to emit nothing at all, so a transport the prose
     # promised simply vanished while the WS and QUIC notes stayed visible, implying the
     # missing one HAD been charted and tied.
+    #
+    # THREE percentiles per transport, not two. p50 says what a message usually costs;
+    # p99 says what one in a hundred costs; p999 says what one in a thousand costs, and
+    # on a control path that is the number a deadline is missed by. The three are charted
+    # separately rather than as one "latency" chart because they are three orders of
+    # magnitude apart here — a shared axis would flatten the p50 curve into the x-axis.
+    #
+    # p999 is charted only when the accumulator says the sample count backs it (see
+    # `tail_ready`); otherwise the reason goes in the coverage note. That is deliberately
+    # a HARDER bar than p50/p99 face, because the tail is where too few samples stops
+    # being a wide error bar and starts being a different quantity altogether.
     net_notes: list[str] = []
     for proto in ("udp", "tcp", "ws", "quic"):
         mode = f"net-{proto}"
         fixed = {"fan": 1, "ep": 1}
         p50 = two(mode, fixed, "size", "p50")
         p99 = two(mode, fixed, "size", "p99")
+        p999 = two(mode, fixed, "size", "p999")
         have_lt, have_zn = bool(p50["libtracer"]), bool(p50["zenoh"])
         if have_lt and have_zn:
             add(f"ltz-net-lat-{proto}", f"{proto.upper()} — p50 latency vs payload",
@@ -208,6 +289,15 @@ def build(rows: list[dict]) -> dict:
             add(f"ltz-net-p99-{proto}", f"{proto.upper()} — p99 tail latency vs payload",
                 "one-way, same-clock · loopback · single value · TAIL (jitter / determinism)",
                 p99, X_SIZE, "ns", "p99 latency", True, reading(p99, f_ns, label_x=f_bytes))
+            ok, why = tail_ready(rows, mode)
+            if ok:
+                add(f"ltz-net-p999-{proto}", f"{proto.upper()} — p999 tail latency vs payload",
+                    "one-way, same-clock · loopback · single value · DEEP TAIL "
+                    "(1 message in 1000 — the deadline-miss number)",
+                    p999, X_SIZE, "ns", "p999 latency", True,
+                    reading(p999, f_ns, label_x=f_bytes))
+            elif why:
+                net_notes.append(f"<b>{proto.upper()}</b>: {why}.")
         elif have_lt or have_zn:
             who = "libtracer" if have_lt else "Zenoh"
             net_notes.append(f"<b>{proto.upper()}</b>: measured for {who} only — not charted "
@@ -262,6 +352,47 @@ def raw_table(rows: list[dict]) -> list[dict]:
 
 
 
+def _tail_note_html(rows: list[dict]) -> str:
+    """@brief What the published tail figures ARE, computed from this pass's own rows.
+
+    Every number in this note is derived from the `RESULT_TAIL` lines that produced the
+    charts above it — the sample count behind each percentile, how many samples sit
+    above the p999, the worst single message of the pass, and how far the deep tail
+    runs from the median. Nothing is hand-maintained, so nothing here can go stale
+    against the charts the way a written-in figure would.
+
+    It exists because a percentile with no sample count beside it is not a
+    measurement a reader can weigh. The p50 rows on this page are backed by thousands
+    of samples each; the p999 row is backed by whatever is left above index
+    ``floor(0.999 n)``, and that number belongs next to the chart, not in a commit
+    message.
+    """
+    sel = [r for r in rows if r["mode"].startswith("net-") and r["lat_n"]]
+    if not sel:
+        return ""
+    ns = sorted({r["lat_n"] for r in sel})
+    above = min(n - 1 - int(0.999 * n) for n in ns)
+    worst = max(r["lat_max"] for r in sel)
+    ratios = [r["p999"] / r["p50"] for r in sel if r["p50"] and r["p999"]]
+    ok = all(r["tail_ok"] for r in sel)
+    count = " / ".join(f"{n:,}" for n in ns)
+    spread = (f" Across the charted points the p999 runs <b>{min(ratios):.0f}×–"
+              f"{max(ratios):.0f}×</b> the p50 of the same point." if ratios else "")
+    verdict = ("Every charted point clears the accumulator's adequacy floor."
+               if ok else "Points below that floor are named in the coverage note above; "
+                          "their p999 is withheld rather than drawn.")
+    return ('<div class="ph-note ph-tail"><b>What one tail point is worth</b><p>'
+            f"Each percentile here comes from <b>{count}</b> paced one-way probes at that "
+            f"payload, so at least <b>{above}</b> samples sit above the p999 and the worst "
+            f"single message of the whole pass was <b>{f_ns(worst)}</b>.{spread} {verdict}</p>"
+            "<p>These are <b>published, not gated</b>. A two-process loopback tail is "
+            "dominated by scheduler wake-up, not by either engine's code path, and it is "
+            "unstable run-to-run by far more than the gate thresholds — measured, and "
+            "quoted, in the noise chapter above. Read the deep tail as the jitter floor a "
+            "real-time consumer on this topology inherits, and read engine-vs-engine on the "
+            "p50 and p99 charts, which are stable enough to carry a comparison.</p></div>")
+
+
 def _net_notes_html(net_notes: list[str]) -> str:
     """A labeled 'transport coverage' note — what could NOT be charted, and why. Surfaced
     rather than silently dropped, so an absent transport is never read as a tie."""
@@ -299,6 +430,7 @@ def html_block(rows: list[dict], provenance: str) -> str:
   the page whose x-axis is not a commit).</p>
   <div class="ph-grid ph-charts"></div>
   {_net_notes_html(data.get("net_notes", []))}
+  {_tail_note_html(rows)}
   <p class="ph-prov">{provenance}</p>
   <script type="application/json" class="ph-data">{payload}</script>
 </div>

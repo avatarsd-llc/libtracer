@@ -34,6 +34,13 @@ Exit 0 = PERF: PASS, 1 = PERF: FAIL (p50 up >15%, mean up >12%, deliveries/s dow
 baseline — past the absolute floors). The memory points come from bench_forward_heap
 (counting allocator, deterministic); pass --bench-fwd to record the baseline binary's
 bytes same-runner, mirroring --bench for latency.
+
+One failure is downgraded to a `~` warning rather than a fail: a THROUGHPUT-only
+pullback whose own p50 and mean both came back flat-or-better. Two instruments over one
+operation cannot honestly disagree, so that combination is a machine-state signature,
+not a code one — see `TPUT_NEEDS_SECOND_OPINION`. Latency percentiles beyond p50/mean
+(p99, and the p999 the transport benches now emit) are PUBLISHED but not gated; the
+measurement behind that decision is recorded beside the thresholds below.
 Stdlib only; no zenoh needed.
 """
 from __future__ import annotations
@@ -93,9 +100,114 @@ LAT_TICK_NS = 25     # sub-100ns baselines: one ~10ns clock tick already exceeds
                      # p50 of 30 for a real ~11 ns op, so its latency legs needed a
                      # >100% regression to fire. Making the tick guard per-point is the
                      # real fix and is not attempted here.
+                     #
+                     # What IS done about it: `TPUT_NEEDS_SECOND_OPINION` below. The
+                     # inert legs are not re-enabled — a silenced GATE is still a live
+                     # MEASUREMENT, and the check reads their values rather than their
+                     # verdicts.
 FLOOR_P50_NS = 1000  # absolute backstop if no baseline (canonical is ~100 ns)
 FLOOR_DELIV = 1_000_000
 DEFAULT_RUNS = 3
+
+# --- a throughput pullback on its own needs a second opinion (#464, PR #708) ------
+# Every gated point is measured by TWO instruments over the SAME operation: a per-op
+# clock (p50, mean) and a bulk timer (deliveries/s). A change in what the operation
+# costs moves both. When only the bulk timer moves and BOTH latency legs came back
+# flat-or-better against the same baseline, the two instruments contradict each other,
+# and the honest verdict for a contradiction is "inconclusive" — not "fail".
+#
+# The concrete case. PR #708 touched only L4 (`graph.cpp`, `vertex.hpp`); `fold-b4` is
+# the L0 inline-fold codec tier and no call path connects them. The gate failed it:
+#
+#   fold-b4/512/1/1  p50=8ns  mean=7ns  deliv/s=34,960,881  (base p50=8ns, 52,471,790)
+#   ! fold-b4/512/1/1 throughput pullback: -33%
+#
+# p50 IDENTICAL, mean BETTER, throughput -33%. Nine interleaved same-binary A/B pairs
+# put both distributions at ~251 M/s, with the low sample landing on run 3 for BOTH
+# binaries — a time-correlated depression of the machine that best-of-N cannot reject
+# because it outlasts all N runs. Best-of-N turns such an arm into a CONFIDENT wrong
+# answer rather than a noisy one.
+#
+# Why `fold-b4` in particular had no second opinion: LAT_TICK_NS silences both latency
+# GATES below ~28 ns and the point runs at ~3 ns, so throughput was its only live leg.
+# This check restores the second opinion without unsilencing anything, because it reads
+# the latency legs' VALUES rather than their verdicts. The mean is the load-bearing one:
+# averaging clock-quantized samples recovers a sub-tick op cost (a 3 ns op read on a
+# ~10 ns grain still averages to ~3 ns), so a genuine 33% slowdown WOULD lift the mean
+# even where the mean's own threshold can never fire.
+#
+# The guard is deliberately narrow, and that narrowness is the safety argument: ANY
+# upward move in EITHER latency leg — of any size, threshold or not — leaves the
+# throughput failure standing. It fires only on strict contradiction, and it downgrades
+# to a loud warning rather than silence, so the disagreement is still on the record.
+#
+# That the latency VALUES do move when the operation really slows down is measured, not
+# assumed. Running the same binary against a quiet baseline while co-tenants were pinned
+# to the box, `fold-b4` went p50 3 -> 7 ns and mean 3 -> 7 ns — a 2.3x slowdown, plainly
+# visible in both legs — while its throughput fell to 0.49x. The guard did NOT fire
+# there, because the latency legs had risen; the failure stood, as it should. And note
+# what that same run says about the tick guard: a 2.3x latency regression could not fail
+# the LATENCY gate, because 7 - 3 is under LAT_TICK_NS. The values are informative
+# exactly where the thresholds are not, which is what this check exploits.
+#
+# Over 30 base-vs-base comparisons on an idle host the guard fired zero times, so it
+# costs no detection there either. Its one demonstrated firing is the #708 shape:
+# throughput down, p50 identical, mean flat or better.
+TPUT_NEEDS_SECOND_OPINION = True
+
+
+def tput_contradicted(cur: dict, base: dict) -> bool:
+    """@brief Do the latency legs refuse to corroborate a throughput pullback?
+
+    True only when p50 AND mean both came back flat-or-better than the baseline. A
+    baseline that predates `mean_ns` cannot corroborate anything, so it returns False
+    and the failure stands — the fail-safe direction, since the alternative is a gate
+    that gets quieter the older its baseline is.
+    """
+    if not TPUT_NEEDS_SECOND_OPINION or "mean_ns" not in base:
+        return False
+    return cur["p50_ns"] <= base["p50_ns"] and cur["mean_ns"] <= base["mean_ns"]
+
+
+# --- p99 / p999: PUBLISHED, NOT GATED (measured decision, do not re-litigate blind) -
+# The RESULT line has carried a p99 since the first bench and `RESULT_TAIL` now adds a
+# p999; neither gates, and that is a measurement, not an oversight.
+#
+# Base-vs-base on one binary, 18 runs on an idle 24-core host, replayed through this
+# file's own estimator (per-run median of repeated rows, then best-of-3 across runs),
+# worst ratio over all 15 disjoint group pairs:
+#
+#   leg     worst base-vs-base    threshold that would be false-fail-free
+#   p50            1.158x                        +16%
+#   mean           1.222x                        +22%
+#   deliv          1.355x                        -36%
+#   p99            1.667x                        +67%
+#
+# A p99 gate would have to sit near +67% to stop firing on its own noise, and a +67%
+# latency regression already trips the +15% p50 gate several times over. So the p99 leg
+# would add no detection the existing legs lack, while adding a new false-fail source
+# on every PR.
+#
+# The two-process net bench's p999 is worse again, and its instability is mostly SAMPLE
+# COUNT rather than the transport. Five repeats per configuration, same idle host, only
+# the probe count changed:
+#
+#   probes/point    p50      p99     p999    worst sample
+#   4 000          1.09x    5.01x     62x       21x
+#   10 000         1.09x    1.40x     17x       13x
+#
+# The median is indifferent; the tails tighten ~3.6x purely from more samples, which is
+# why run_net.sh now pays for 10 000. Even then the p999 stays 17x unstable — a loopback
+# deep tail is scheduler wake-up, not either engine's code — so it is charted and never
+# gated. The p99, at the published count, IS stable enough to compare engines with, and
+# it is charted for that; it still does not gate, because the gate does not run the
+# two-process bench at all.
+#
+# They are published instead — charted per transport on docs/performance.md — because
+# an ungated number is still worth having when the alternative is not measuring the
+# tail at all. What would change this verdict is a per-point measurement showing some
+# specific point's p99 is stable to within a threshold tighter than its own p50 gate.
+# Nothing in POINTS is, today.
 
 # --- memory footprint gate (bench_forward_heap counting-allocator probes) --------
 # The live usable-size bytes a default leaf vertex holds at rest, plus the increment
@@ -241,6 +353,7 @@ def main() -> int:
     cur.update(mem_probe(bench_fwd))  # fold the mem:* points into the same baseline dict
     base = json.loads(BASELINE.read_text()) if BASELINE.exists() else None
     fails = []
+    warns: list[str] = []  # measured, reported, does not fail the gate
     mem_hdr = (f" / mem +{(MEM_REGRESS - 1) * 100:.0f}% / blocks +0"
                if any(k.startswith("mem:") for k in cur) else "")
     print(f"Per-loop perf gate (libtracer in-process, best of {runs} run(s), "
@@ -291,8 +404,17 @@ def main() -> int:
             # zero against a zero is vacuous; gating a zero against a real baseline would
             # fail every run for a metric the row never claimed to produce.
             if b["deliv_s"] > 0 and v["deliv_s"] > 0 and v["deliv_s"] < b["deliv_s"] * TPUT_REGRESS:
-                fails.append(f"{k} throughput pullback: {v['deliv_s']:,.0f} vs base "
-                             f"{b['deliv_s']:,.0f} ({(v['deliv_s'] / b['deliv_s'] - 1) * 100:.0f}%)")
+                msg = (f"{k} throughput pullback: {v['deliv_s']:,.0f} vs base "
+                       f"{b['deliv_s']:,.0f} ({(v['deliv_s'] / b['deliv_s'] - 1) * 100:.0f}%)")
+                if tput_contradicted(v, b):
+                    warns.append(
+                        f"{msg} — NOT FAILED: the same point's latency legs contradict it "
+                        f"(p50 {v['p50_ns']} vs {b['p50_ns']} ns, mean {v['mean_ns']} vs "
+                        f"{b['mean_ns']} ns — both flat or better). Two instruments over one "
+                        f"operation disagree, which is a machine-state signature, not a code "
+                        f"one. If this repeats on a quiet runner, it is real: re-run.")
+                else:
+                    fails.append(msg)
             line += f"   (base p50={b['p50_ns']}ns deliv/s={b['deliv_s']:,.0f})"
         else:
             floor = FLOOR_P50_OVERRIDE.get(k, FLOOR_P50_NS)
@@ -308,6 +430,11 @@ def main() -> int:
     print("PERF: PASS" if not fails else "PERF: FAIL")
     for x in fails:
         print("  ! " + x)
+    # Warnings print AFTER the verdict and under their own marker, never merged into
+    # the fail list. A downgraded failure that printed nothing would be indistinguishable
+    # from a point that never regressed, which is how a guard turns into a blind spot.
+    for x in warns:
+        print("  ~ " + x)
     return 0 if not fails else 1
 
 
