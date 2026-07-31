@@ -334,6 +334,56 @@ void egress_route_soft_fails_on_exhaustion() {
     check(h.egress_route("up", 8) == std::nullopt, "an unbound label still answers nullopt");
 }
 
+/**
+ * @brief `cache_resolution` on a link that departed between resolve and cache must be a
+ *        no-op, not a null dereference.
+ *
+ * A mutation sweep found `route_handle.cpp:103` — `if (!t) return;` — undefended: it is the
+ * only thing between a departed link and `t->m`. The window is real and routine, not
+ * exotic: `on_compact` resolves a binding, calls `deliver_local`, and only THEN caches the
+ * resolution, while `clear_link` runs on every reconnect (RFC-0004 §E.1 self-heal).
+ *
+ * The rest of this file already covers the label allocator, the per-link tables, and the
+ * `clear_link` teardown itself. This is the one gap the sweep left: the seven other guards
+ * in `route_handle.cpp` were caught, and the remaining two are `try_reserve` OOM paths that
+ * need an allocation-injection seam (#730) to reach.
+ */
+void cache_after_teardown() {
+    std::printf(" cache_resolution after clear_link (the teardown window):\n");
+    route_handle_t h;
+
+    check(h.bind_ingress("gone", 5, terminus_binding()), "a binding exists on the link");
+    check(h.resolved("gone", 5).found, "and resolves before teardown");
+
+    h.clear_link("gone");
+    check(!h.resolved("gone", 5).found, "clear_link dropped the binding");
+
+    // The window: a resolution computed BEFORE the teardown, cached after it. Without the
+    // guard this dereferences the departed link's table.
+    resolved_binding_t late;
+    late.found = true;
+    late.terminus = true;
+    late.warm = true;
+    h.cache_resolution("gone", 5, late);
+
+    // Asserted positively: the departed link must still be departed. A cache that
+    // resurrected the table would be worse than a crash — it would route to a dead link.
+    check(!h.resolved("gone", 5).found,
+          "caching against a departed link neither crashes NOR resurrects the binding");
+    check(h.link_count() == 0, "and no link shell was re-created by the late cache");
+
+    // The positive control: caching still WORKS on a live link, so the guard is not
+    // swallowing every call.
+    check(h.bind_ingress("live", 9, terminus_binding()), "a live link binds");
+    check(!h.resolved("live", 9).warm, "its binding starts cold");
+    resolved_binding_t warm;
+    warm.found = true;
+    warm.terminus = true;
+    warm.warm = true;
+    h.cache_resolution("live", 9, warm);
+    check(h.resolved("live", 9).warm, "and cache_resolution warms a LIVE link's binding");
+}
+
 int main() {
     std::printf("route_handle_t (Brick 4 — per-connection pmr label tables):\n");
 
@@ -357,6 +407,8 @@ int main() {
     label_space_exhaustion();
     bounded_tables();
     egress_route_soft_fails_on_exhaustion();
+
+    cache_after_teardown();
 
     if (g_failures == 0) {
         std::printf("route_handle: ALL PASS\n");
