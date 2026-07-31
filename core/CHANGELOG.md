@@ -16,6 +16,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **A write to a vertex nobody subscribes to no longer takes the vertex lock stripe (#635).**
+  `graph_t::fan_out` gated `snapshot_edges` on nothing, so every write acquired the stripe mutex
+  whether or not an edge existed — and a stripe is shared by `kVertexLockStripes` vertices, so two
+  unrelated vertices serialised against each other on a hash collision alone. RFC-0005's
+  near-free-when-idle promise was already kept this way by `mark_pending` / `clear_pending`;
+  `fan_out` was the write-path verb that did not keep it. **New `vertex_t::own_subs_ordered()`** —
+  the same count as `own_subs()` under `seq_cst`, and the only read that may be used to SKIP a
+  fan-out. **`vertex_t::bump_own_subs` is now `seq_cst`** rather than relaxed; it is the subscriber
+  half of a Dekker pair with that read, and subscribe is control-plane-cold. Behaviour is
+  unchanged: the count now rises *before* the slot it stands for, which is what keeps a write that
+  races a subscribe from being lost by the new gate. Measured at **×10.5** aggregate write
+  throughput at 24 threads on distinct vertices sharing a stripe (9.30 → 97.73 M writes/s,
+  median of 11 interleaved pairs), with the fan-1 arm flat at ×0.99–1.14 as the control.
+
 - **`wire::path_key` returns `std::optional<std::vector<std::byte>>`** and rejects a `PATH` whose
   children are not all `NAME`. Two callers updated. Returning `nullopt` rather than an empty vector
   is deliberate: `graph_t::find_ptr` walks segments from the root, so an **empty key resolves the

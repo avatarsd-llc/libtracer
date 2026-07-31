@@ -547,6 +547,86 @@ void test_admission_door_uniformity() {
     }
 }
 
+/**
+ * @brief #635: the fan-out gate must not open a hole in ADR-0049's latch.
+ *
+ * `fan_out` now SKIPS `snapshot_edges` entirely when the vertex's own-subscriber count
+ * reads zero, which is what stops unrelated vertices from serialising on a shared lock
+ * stripe. That gate is only sound if the count rises BEFORE the slot it stands for, and
+ * this is the assertion that says so.
+ *
+ * A transient-local (`durability == 1`) vertex has exactly two legs a value can reach a
+ * brand-new subscriber by: the latch taken inside the edge verb (when the write got there
+ * first) and the fan-out (when the subscribe did). The racing write must arrive by ONE of
+ * them, always — never neither. Move the bump in `graph_t::admit_subscriber` back to
+ * trailing the append and this fails: a write landing in the gap stores its value, reads a
+ * zero count, skips the snapshot, and the latch one line earlier already holds the OLD one.
+ *
+ * **Why it is shaped like this.** The gap is one stripe unlock plus one shared-lock
+ * acquire — tens of nanoseconds — because `note_subscriber_added` bumps the count as its
+ * first act. Two earlier drafts of this test could not see it. Spawning a thread per round
+ * failed outright (creation alone is ~20 us, so the subscribe always finished first, and
+ * the test passed against the bug it targets); parking that thread first found it once in
+ * ~8000 rounds, because the spawn jitter still swamped the window. Both threads therefore
+ * stay HOT here and hand off through one atomic, which drops the per-round noise to the
+ * order of the window itself and turns a stochastic near-miss into a reliable failure.
+ */
+void test_subscribe_never_misses_a_racing_write() {
+    std::printf("#635: a write racing subscribe arrives by the latch or the fan-out:\n");
+    constexpr int kRounds = 20000;
+    constexpr int kOffsets = 64;  // interleaving positions the writer's arrival is swept over
+
+    graph_t g;
+    settings_t s;
+    s.durability = 1;  // transient-local — the latch leg is armed
+    std::vector<tr::graph::vertex_handle_t> verts;
+    std::vector<path_t> paths;
+    verts.reserve(kRounds);
+    paths.reserve(kRounds);
+    for (int i = 0; i < kRounds; ++i) {
+        // A FRESH vertex per round: the gate only fires from a zero count, so a reused one
+        // would test nothing after the first subscribe.
+        const std::string name = "/race/v" + std::to_string(i);
+        paths.emplace_back(name);
+        verts.push_back(g.register_vertex(paths.back(), role_t::STORED_VALUE, {}, s));
+        (void)g.write(verts.back(), make_value({0x01}));  // the OLD value the latch may hold
+    }
+
+    std::atomic<unsigned> seen{0};
+    std::atomic<int> gate{-1};  // the round the writer may start
+    std::atomic<int> done{-1};  // the round the writer has finished
+    auto on_value = [&seen](const tr::view::rope_t& v) {
+        seen.fetch_or(1U << std::to_integer<unsigned>(v.only().bytes()[0]),
+                      std::memory_order_relaxed);
+    };
+
+    std::thread w([&] {
+        for (int i = 0; i < kRounds; ++i) {
+            while (gate.load(std::memory_order_acquire) != i) { /* hot handoff */
+            }
+            std::atomic<int> step{0};  // a REAL RMW — a signal fence is compiler-only, and
+            for (int k = 0; k < i % kOffsets; ++k)  // an empty loop optimizes to nothing
+                step.fetch_add(1, std::memory_order_relaxed);
+            (void)g.write(verts[i], make_value({0x02}));
+            done.store(i, std::memory_order_release);
+        }
+    });
+
+    int missed = 0;
+    for (int i = 0; i < kRounds; ++i) {
+        seen.store(0, std::memory_order_relaxed);
+        gate.store(i, std::memory_order_release);
+        (void)g.subscribe(paths[i], on_value);
+        while (done.load(std::memory_order_acquire) != i) { /* both legs have run */
+        }
+        if ((seen.load(std::memory_order_relaxed) & (1U << 2)) == 0) ++missed;
+    }
+    w.join();
+
+    check(missed == 0, "no write racing a subscribe is lost by the zero-subscriber gate");
+    if (missed != 0) std::printf("    (%d of %d rounds lost the racing write)\n", missed, kRounds);
+}
+
 void test_delivery_terminates_at_target() {
     std::printf("delivery terminates at the target (ADR-0051): no chained relay, no cycle:\n");
     graph_t g;
@@ -682,6 +762,7 @@ int main() {
     test_subscribers_indexed_write_discriminates();
     test_subscribers_addressed_whole();
     test_admission_door_uniformity();
+    test_subscribe_never_misses_a_racing_write();
     test_schema_read();
     test_delivery_terminates_at_target();
     test_concurrent_stress();

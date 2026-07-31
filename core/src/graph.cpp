@@ -809,6 +809,24 @@ inline void graph_t::dispatch_edge(const edge_view_t& e, const rope_t& value) {
 }
 
 void graph_t::fan_out(vertex_t* v, const rope_t& value) {
+    // NOBODY SUBSCRIBED HERE ⇒ take no lock at all (#635). `snapshot_edges` acquires the
+    // vertex STRIPE mutex, and a stripe is shared by kVertexLockStripes-many vertices, so
+    // without this gate two unrelated vertices serialise their writes against each other for
+    // no reason but a hash collision — measured at ×8.6 (fan-0) and ×12.3 (fan-1) against the
+    // same write on distinct stripes, and NEGATIVELY scaling: aggregate throughput falls as
+    // threads are added. RFC-0005's near-free-when-idle promise is already kept this way by
+    // mark_pending / clear_pending; fan_out was the one write-path verb that did not keep it.
+    //
+    // This is the delivery-skipping read, so it is the ORDERED one — see
+    // vertex_t::own_subs_ordered for the Dekker pairing against ADR-0049's subscribe latch,
+    // and graph_t::field_write for the bump that has to precede the slot append to close it.
+    // Unsubscribe needs no such care: its decrement lands AFTER clear_edge, so a stale
+    // non-zero count only costs a snapshot that finds nothing.
+    //
+    // It does NOT gate bubbling: an ancestor's subscribers are listeners_above_'s business
+    // and both callers check that separately.
+    if (v->own_subs_ordered() == 0) return;
+
     // Snapshot every active edge UNDER the vertex lock (vertex_t::snapshot_edges), then
     // dispatch OUTSIDE it (callbacks / re-dispatch may re-enter the graph). Delivery is
     // value-agnostic — no per-subscriber comparison — so every active edge receives
@@ -1292,20 +1310,31 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     // write fans out with.
     edge_latch_t latch;
     std::size_t idx = 0;
+    // The listener count goes up BEFORE the slot exists, not after (#635). fan_out now SKIPS
+    // the entire snapshot when this count reads zero, so a bump that TRAILED the append would
+    // leave a window where the edge is live and invisible: a publish landing in it delivers to
+    // nobody, while the latch taken inside the edge verb below already holds the PREVIOUS
+    // value — the new subscriber would miss that write outright. Bumping first inverts the
+    // window into the harmless direction (a count with no slot yet ⇒ one snapshot that finds
+    // nothing). vertex_t::own_subs_ordered carries the ordering argument.
+    note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
     if (slot) {
         // RFC-0009 §D.1 replace: the SAME door, so the SUBSCRIBE gate above and the latch
         // below apply identically to a replace and to an append (ADR-0049). An index no
         // slot answers to is a malformed address, not a silent no-op — and refusing it is
         // what stops a wire-supplied `:subscribers[65535]` from growing the slot vector.
         const vertex_t::edge_replace_t r = v->replace_edge(*slot, std::move(s), &latch);
+        // Only filling a CLEARED slot is genuinely a new listener; swapping a live one leaves
+        // the count be, and a refused index adds nothing — both give the speculative bump
+        // back. The unwind costs a second subtree walk on a control-plane-COLD path, which is
+        // the right side to pay on: over-counting only ever buys a snapshot that finds
+        // nothing, while under-counting drops a delivery.
+        if (r != vertex_t::edge_replace_t::FILLED_EMPTY) note_subscriber_removed(v);
         if (r == vertex_t::edge_replace_t::OUT_OF_RANGE)
             return std::unexpected(status_t::INVALID_PATH);
-        // Filling a CLEARED slot adds a listener; swapping a live one leaves the count be.
-        if (r == vertex_t::edge_replace_t::FILLED_EMPTY) note_subscriber_added(v);
         idx = *slot;
     } else {
         idx = v->add_edge(std::move(s), &latch);
-        note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
     }
 
     if (latch.value) dispatch_edge(latch.edge, *latch.value);
