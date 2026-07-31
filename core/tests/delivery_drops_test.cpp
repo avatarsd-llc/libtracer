@@ -21,9 +21,12 @@
  * zero, which is the real regression risk — an increment accidentally moved onto the
  * delivering path would be invisible in behaviour and would make the counters lie.
  *
- * `out_of_memory` is deliberately NOT exercised: reaching it needs the global allocator to
- * fail under a live graph, which no test harness in this tree provides, and a counter whose
- * test is a fiction is worse than one that is honestly untested. Tracked separately.
+ * `out_of_memory` is exercised in `graph_oom_softfail_test`, not here — that file already owns
+ * the allocator-failure harness (`tr::detail::probe_fail_hook`), so the assertion lives beside
+ * the injection rather than duplicating it. This file's own header used to say the counter was
+ * unreachable "which no test harness in this tree provides"; that stopped being true when the
+ * hook landed, and the path had in fact been exercised there for some time with the counter
+ * simply never checked.
  */
 
 #include <cstddef>
