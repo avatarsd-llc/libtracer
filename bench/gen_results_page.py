@@ -301,6 +301,13 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "counts frames delivered, to find where that thread saturates before the host does.",
         "frames/s, per peer count"),
     instrument_t(
+        "bench_qos_census.cpp", "counted", (),
+        "Counts, per vertex shape, whether an extension block is allocated at all and whether "
+        "the QoS it holds is byte-identical to the default — the ratio that decides whether "
+        "interning the settings profile pays. Classifies by comparing the address returned by "
+        "`settings()` against `kDefaultSettings`, so it needs no accessor of its own.",
+        "vertices per bucket"),
+    instrument_t(
         "bench_tcp_peer_scaling.cpp", "net", (),
         "Separates the single poll thread's three costs by moving one axis at a time: an "
         "`idle-fanout` arm holds the load at one active sender and raises the number of "

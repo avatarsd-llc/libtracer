@@ -165,6 +165,12 @@ target_compile_options(bench_tcp_fanin PRIVATE -Wall -Wextra)
 # Resolves what bench_tcp_fanin cannot: its idle-fanout arm holds the work constant and sweeps
 # CONNECTED-BUT-SILENT peers, so the O(peers) poll and the locked pollfd rebuild are priced apart
 # from the thread's own saturation (ADR-0071).
+# The census #617 turns on: which vertices carry an extension block, and how many of those
+# hold QoS byte-identical to the default. Counted, never timed.
+add_executable(bench_qos_census bench_qos_census.cpp)
+target_link_libraries(bench_qos_census PRIVATE libtracer)
+target_compile_options(bench_qos_census PRIVATE -Wall -Wextra)
+
 add_executable(bench_tcp_peer_scaling bench_tcp_peer_scaling.cpp)
 target_link_libraries(bench_tcp_peer_scaling PRIVATE libtracer)
 target_compile_options(bench_tcp_peer_scaling PRIVATE -Wall -Wextra)
