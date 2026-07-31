@@ -138,8 +138,25 @@ std::optional<std::vector<std::byte>> route_handle_t::egress_route(std::string_v
     const std::shared_ptr<link_tables_t> t = find_tables(out_link);
     if (!t) return std::nullopt;
     const std::lock_guard lock(t->m);
-    for (const egress_entry_t& e : t->egress)
-        if (e.label == label) return std::vector<std::byte>(e.route.begin(), e.route.end());
+    for (const egress_entry_t& e : t->egress) {
+        if (e.label != label) continue;
+        // NOTHROW copy-out (#603 defect 1, ADR-0065's direction). This ran on a transport
+        // receive thread — `on_nack` reaches it from an inbound HANDLE_NACK — where a
+        // throwing allocation is an abort() under the shipping `-fno-exceptions` profile.
+        // Exhaustion now takes the SAME `nullopt` the "no route bound for this label" case
+        // already takes, so no caller learns a new shape: `on_nack` returns silently either
+        // way, and a peer that NACKs simply gets no re-advertise, exactly as when the label
+        // was never bound.
+        //
+        // This is the nothrow half only. The seam half — drawing from an injected
+        // `block_source_t` rather than probing the global heap — still owes ADR-0065, and
+        // cannot be done here without an API change: `link_tables_t` holds `std::pmr::vector`s
+        // and `detail::try_*` is typed to plain `std::vector`, which is the structural reason
+        // this file is half-migrated.
+        std::vector<std::byte> out;
+        if (!detail::try_assign(out, std::span<const std::byte>(e.route))) return std::nullopt;
+        return out;
+    }
     return std::nullopt;
 }
 
