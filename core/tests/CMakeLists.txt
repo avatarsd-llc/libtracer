@@ -423,6 +423,13 @@ target_link_libraries(fwd_malformed_control_test PRIVATE libtracer)
 libtracer_test_warnings(fwd_malformed_control_test)
 add_test(NAME fwd_malformed_control COMMAND fwd_malformed_control_test)
 
+# #730 — the router's flatten seam: every materialize() draws from the injected
+# mem_backend_t, and a refused flatten is answered by value (never stored empty).
+add_executable(fwd_flatten_backend_test fwd_flatten_backend_test.cpp)
+target_link_libraries(fwd_flatten_backend_test PRIVATE libtracer)
+libtracer_test_warnings(fwd_flatten_backend_test)
+add_test(NAME fwd_flatten_backend COMMAND fwd_flatten_backend_test)
+
 add_executable(fwd_rope_forward_test fwd_rope_forward_test.cpp)
 target_link_libraries(fwd_rope_forward_test PRIVATE libtracer)
 libtracer_test_warnings(fwd_rope_forward_test)

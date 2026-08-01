@@ -572,7 +572,13 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
                 // Bus NAME + residual: never broadcast, never terminus. The rejection reply
                 // needs a contiguous decode; this is a COLD error path, so the one flatten
                 // is the ADR-0052 legitimate kind (exactly the control-plane precedent).
-                const view_t flat = frame.subrope(0, frame.total_length()).materialize();
+                // Through the injected byte backend (#730), so a bounded node's memory bound
+                // covers this flatten too.
+                const view_t flat = frame.subrope(0, frame.total_length()).materialize(*flat_);
+                // Flatten OOM ⇒ drop the frame, which is what the peer would see anyway: an
+                // empty span decodes to nothing and `reject_bus_name_hop` returns without
+                // replying. Explicit so the reason is the OOM and not the codec's leniency.
+                if (flat.empty()) return;
                 reject_bus_name_hop(registry_, inbound_name, flat.bytes());
                 return;
             }
@@ -882,8 +888,14 @@ void fwd_router_t::on_control_rope(std::string_view inbound_name, view::rope_t f
             if (head->child1_off == 0) return;
             // Materialize ONLY the route sub-rope: on_advertise strips its leading segment
             // and re-encodes, which needs a contiguous tree (ADR-0052 legitimate flatten).
+            // Through the injected byte backend (#730) — an ingress flatten is peer-provoked,
+            // so a bounded node's bound must cover it.
             const view_t route_flat =
-                frame.subrope(head->child1_off, head->child1_total).materialize();
+                frame.subrope(head->child1_off, head->child1_total).materialize(*flat_);
+            // Flatten OOM ⇒ bind NOTHING. Redundant with the decode below (an empty span
+            // does not decode), and deliberately so: the binding must fail because the
+            // flatten failed, not because the codec happens to reject what OOM produced.
+            if (route_flat.empty() && head->child1_total != 0) return;
             const auto route = wire::decode(route_flat.bytes());
             if (!route) return;
             on_advertise(inbound_name, head->label, *route);
@@ -894,8 +906,16 @@ void fwd_router_t::on_control_rope(std::string_view inbound_name, view::rope_t f
             // Materialize ONLY the payload sub-rope: it is stored (deliver_local) or
             // re-wrapped (encode_compact) as contiguous bytes — a transport-egress / local-
             // store boundary (ADR-0055 §2). Hold the owning view while reading its span.
+            // Through the injected byte backend (#730), as the ADVERTISE arm above.
             const view_t payload_flat =
-                frame.subrope(head->child1_off, head->child1_total).materialize();
+                frame.subrope(head->child1_off, head->child1_total).materialize(*flat_);
+            // Flatten OOM ⇒ DROP the delivery (#730). Nothing downstream catches it: an
+            // empty span is an engaged-empty `view::over_bytes` BY DESIGN, `graph_t::write`
+            // stores it and reports success — so without this line a heap exhaustion here
+            // REPLACES the subscriber's last-known value with nothing and calls it a
+            // delivery. Missing one value under exhaustion is valid; corrupting the stored
+            // one is not.
+            if (payload_flat.empty() && head->child1_total != 0) return;
             on_compact(inbound_name, head->label, payload_flat.bytes());
             return;
         }
@@ -1177,7 +1197,10 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
         // no flatten at all — so the wasted materialize is skipped rather than discarded.
         const auto [label, fresh] = handles_.ensure_egress(sub.link, route);
         if (label != 0) {
-            const view_t flat = value.materialize();
+            // Through the injected byte backend (#730): this egress flatten is the writer
+            // thread's, but it is the same store the ingress ones draw from, so ONE
+            // injection bounds every flatten the router performs.
+            const view_t flat = value.materialize(*flat_);
             if (flat.empty() && value.total_length() != 0) return;  // flatten OOM — drop
             std::vector<std::byte> frame;
             if (fresh && try_encode_advertise(frame, label, route))

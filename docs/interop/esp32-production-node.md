@@ -44,13 +44,17 @@ std::pmr::synchronized_pool_resource shared{&arena};
 // on the global heap — where they at least RECYCLE, which matters below.
 //
 // ... graph_t graph{&shared, &rx_pool, /*ctl=*/&blocks};
-// ... fwd_router_t router{graph, &shared, /*rx=*/&blocks};
+// ... fwd_router_t router{graph, &shared, /*rx=*/&blocks, /*flat=*/&rx_pool};
 ```
 
 Those are the three injection points of `graph_t`'s constructor — the pmr resource,
 the value backend and the failable control source
 (`core/include/libtracer/graph.hpp:187-189`) — and the matching three of
-`fwd_router_t` (`core/include/libtracer/fwd_router.hpp:91-93`). The full set of
+`fwd_router_t`: the pmr resource, the failable `rx` source and the `flat` byte backend
+its rope flattens draw from (`core/include/libtracer/fwd_router.hpp:116-118`). Leave
+`flat` defaulted and every flatten the router performs — the ingress `ADVERTISE`/`COMPACT`
+sub-rope flattens and the per-delivery egress one — still comes off the global heap,
+outside the node's bound (#730). The full set of
 build-time and injected bounds is catalogued in
 [the configuration space](../design/config/00-configuration-space.md); the failure
 semantics of the third seam are in

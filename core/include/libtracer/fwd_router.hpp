@@ -45,6 +45,7 @@
 #include "libtracer/child_registry.hpp"
 #include "libtracer/frame.hpp"
 #include "libtracer/graph.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/op_resolve.hpp"
 #include "libtracer/route_handle.hpp"
 #include "libtracer/transport.hpp"
@@ -90,6 +91,19 @@ class fwd_router_t {
      *              Appended with a default, so every existing call site is unchanged;
      *              a bounded node points this at the same slab as @p mr. Must outlive
      *              the router.
+     * @param flat  The byte backend every FLATTEN the router performs draws its owned
+     *              `segment` from (#730) — the ingress control-frame sub-rope flattens
+     *              (`ADVERTISE` route, `COMPACT` payload), the cold bus-name rejection
+     *              flatten, and the per-delivery `COMPACT` egress flatten. Split from
+     *              @p rx because these are BYTE buffers with cache hooks and an owning
+     *              refcount (a @ref mem::mem_backend_t), not the arena's raw blocks —
+     *              the same split `graph_t` makes between its `ctl` and its
+     *              `value_backend` (ADR-0060). Until #730 all four took
+     *              @ref mem::heap_backend by default, so a bounded node's memory bound
+     *              did NOT cover them; now a node that points this at its own slab
+     *              bounds them, and every flatten failure is answered by value (the
+     *              frame is dropped, never stored empty). A bounded node points this at
+     *              the same slab as @p mr / @p rx. Must outlive the router.
      * @param max_label_bindings_per_link
      *              Ceiling on one link's ingress table and, separately, its egress table
      *              (#603). `0` ⇒ unbounded, the default and the prior behavior. Without it
@@ -101,11 +115,13 @@ class fwd_router_t {
     explicit fwd_router_t(graph::graph_t& graph,
                           std::pmr::memory_resource* mr = std::pmr::get_default_resource(),
                           mem::block_source_t* rx = &mem::heap_source(),
+                          mem::mem_backend_t* flat = &mem::heap_backend(),
                           std::size_t max_label_bindings_per_link = 0)
         : graph_(graph),
           resolver_(graph),
           mr_(mr),
           rx_(rx),
+          flat_(flat),
           handles_(mr, max_label_bindings_per_link) {
         graph_.set_remote_delivery_sink(
             [this](const graph::remote_delivery_t& sub, const view::rope_t& value) {
@@ -570,6 +586,8 @@ class fwd_router_t {
     std::pmr::memory_resource* mr_;        // route_handle label-table resource (ADR-0039 §1)
     mem::block_source_t* rx_;              // DEFAULT terminus-arena source, NOTHROW (#588);
                                            // a child may carry its own (ADR-0067 §3)
+    mem::mem_backend_t* flat_;             // every rope flatten the router performs (#730);
+                                           // a null result is answered by value, never stored
     child_registry_t registry_;            // the one NAME→link demux table (Brick 3a, ADR-0037)
     route_handle_t handles_;               // per-link label tables (compact flows only)
     std::deque<child_rx_ctx_t> child_rx_;  // stable receiver contexts, one per child
