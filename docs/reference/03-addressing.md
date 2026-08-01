@@ -57,7 +57,7 @@ A path that violates any limit MUST be rejected with `ERROR{tr::path::invalid}`.
 /sensor/temp                           — a vertex
 /sensor/temp:subscribers[0]            — a control field on a vertex
 /sensor/temp:subscribers[]             — append-or-list view of subscribers
-/sensor/temp:settings.history_keep_last — a nested control field
+/sensor/temp:settings.app.setpoint     — a nested control field (owner-declared)
 /sensor/temp:settings.transport_tcp.send_buf_kb  — module-namespaced field
 /net/can0/wheel-encoder/left           — a remote vertex, routed through a transport-vertex
 /camera/frame[7]                       — an indexed child endpoint (one vertex per index)
@@ -123,8 +123,8 @@ The five characters `/ : . [ ]` plus `*` and `?` cannot appear inside a NAME seg
 The `:` separator divides a path into the **vertex address** (left of `:`) and the **field chain** (right of `:`).
 
 ```
-/sensor/temp:settings.history_keep_last
-  └────┬────┘└──────────┬───────────────┘
+/sensor/temp:settings.app.setpoint
+  └────┬────┘└──────────┬──────────┘
    vertex addr      field chain
 ```
 
@@ -150,13 +150,16 @@ A single `write(path, tlv)` is atomic: a concurrent reader sees either the full 
 // See the graph module: ../modules/graph.md
 tr::graph::graph_t g;
 
-// Non-atomic (reader between calls sees inconsistent state):
-g.write(tr::graph::path_t("/x:settings.history_keep_last"), depth_value);
-g.write(tr::graph::path_t("/x:settings.store_ref_min_bytes"), threshold_value);
+// Non-atomic (a reader between the calls sees a mixture):
+g.write(tr::graph::path_t("/x:settings.app.kp"), kp_value);
+g.write(tr::graph::path_t("/x:settings.app.ki"), ki_value);
 
-// An atomic multi-field settings WRITE is not implemented: writes are per-knob, and a bare
-// `:settings` write resolves no knob (SCHEMA_NOT_FOUND). Reads ARE atomic — `read /x:settings`
+// An atomic multi-field settings WRITE is not implemented: writes are per-field, and a bare
+// `:settings` write resolves nothing (SCHEMA_NOT_FOUND). Reads ARE atomic — `read /x:settings`
 // serves the whole container in one traversal.
+//
+// The flat `:settings.<knob>` core namespace is EMPTY since RFC-0022 §3.B: every name in it
+// answers SCHEMA_NOT_FOUND. Only `settings.app.*` is writable below `settings`.
 ```
 
 ---

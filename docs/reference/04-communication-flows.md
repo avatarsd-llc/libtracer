@@ -208,31 +208,38 @@ After a clear:
 
 ---
 
-## Field-write storage-policy update
+## Storage policy is declared owner-side — there is no flow
 
 ```
-Operator                          Vertex
+Owner (host API, no wire)         Vertex
+   |                                |
+   | g.set_history_depth(v, 8)      |
+   |───────────────────────────────>|
+   |                                |── (the next store trims to the new depth)
+   |                                |
+
+Peer                              Vertex
    |                                |
    | write("/sensor/temp:settings.history_keep_last",
    |       VALUE{u32=8})            |
    |───────────────────────────────>|
-   |                                |── update settings.history_keep_last
-   |                                |── (the next store trims to the new depth)
-   | <── OK ────────────────────────|
+   | <── ERROR{tr::schema::not_found} ──|
 ```
 
-A storage-policy change applies to the **next** store. In-flight dispatches carrying the prior
-settings are not re-evaluated. The vertex's `:settings` core namespace is exactly
-`history_keep_last` and `store_ref_min_bytes` ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.B); a write naming any other core
-knob answers `SCHEMA_NOT_FOUND`.
+The vertex's `:settings` **core namespace is empty** ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.B): every flat knob name
+answers `SCHEMA_NOT_FOUND`, on read and on write, caller-independently. The two survivors of the
+old knob set are declared through the host API — `set_history_depth` for the STREAM ring depth
+(§3.C) and `set_store_ref_min_bytes` for the store-by-reference threshold — and **neither has any
+wire surface at all**. A declaration applies to the **next** store; in-flight dispatches are not
+re-evaluated.
 
-The write also reaches **inheriting descendants**: storage policy is copied at registration, so an
-override is pushed to every descendant that was still carrying the old value and stops at one that
-has its own (§3.C). That is a control-plane walk at configuration frequency — the hot readers stay
-a single inline load.
+A declaration reaches exactly the vertex it names. **Nothing is inherited** (§3.F): no subtree
+push, no ancestor walk, and no propagation question when a parent is reconfigured after its
+children exist.
 
-There is **no** atomic multi-field settings write: a bare `:settings` write resolves no knob and
-answers `SCHEMA_NOT_FOUND`. Writes are per-knob.
+`settings.app.*` is the only writable namespace below `settings` (RFC-0010 §A), and there is no
+atomic multi-field settings write: writes are per-field, and a bare `:settings` write resolves
+nothing.
 
 **Delivery** policy is not written here at all — it belongs to the subscription, and travels in
 its `SUBSCRIBER` record (§Subscribe via field-write).
@@ -444,25 +451,19 @@ Caller                              Vertex
    | read("/sensor/temp:schema")       |
    |──────────────────────────────────>|
    | <── POINT (PL=1) {                |
-   |       NAME "subscribers"           |
-   |       SUBSCRIBER ...               |
-   |       ...                          |
-   |       NAME "settings"              |
-   |       SETTINGS (PL=1) {            |
-   |         NAME "history_keep_last"   |
-   |                        VALUE u32   |
-   |         NAME "store_ref_min_bytes" |
-   |                        VALUE u32   |
-   |         NAME "transport_tcp"       |
-   |         SETTINGS (PL=1) {          |
-   |           NAME "send_buf_kb" VALUE u32 |
-   |         }                          |
+   |       NAME "temp"                  |
+   |       SETTINGS (PL=1) { }          |  ; the synthesized protocol part: EMPTY
+   |       NAME "app"                   |  ; the owner part, iff a descriptor
+   |       SETTINGS (PL=1) {            |  ; table is installed
+   |         NAME "setpoint"            |
+   |         SETTINGS (PL=1) { ... }    |
    |       }                            |
-   |       ...                          |
    |     } ───────────────────────────|
 ```
 
 `:schema` is the introspection root. Tooling — a live-graph browser, a conformance test, a code generator — walks `:schema` on every vertex of interest. A field absent from the emitted schema is a field the vertex does not answer to; the schema is the authority, not a documented field table.
+
+The synthesized protocol part enumerates the implemented `settings.*` knobs, and since [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.B there are none — so it is empty, and therefore for the first time complete. The empty `SETTINGS` is emitted rather than omitted, so a generic renderer walks the same record shape whatever the vertex declares.
 
 ### Vertex enumeration
 

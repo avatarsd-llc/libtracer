@@ -4,7 +4,7 @@ Status: accepted. Supersedes the in-process dispatch-depth cap of [ADR-0015](001
 
 ## Context
 
-`kMaxDispatchDepth = 32` existed because delivery was implemented as a *recursive write*: `fan_out` re-entered `write_impl` on each SUBSCRIBER target (`graph.cpp:466`), so a subscription cycle recursed forever without a cap, and the cap silently truncated deep legitimate chains while the originating `write()` reported success. A first redesign (chain dedup + drain queue) managed the cascade; the maintainer cut deeper: **the cascade itself is wrong.** The runtime must not police user designs with synthetic limits — and it doesn't need to, because automatic transitive relay was never the intended semantics of the wiring model (edges deliver producer → consumer; *controllers* mediate propagation).
+`kMaxDispatchDepth = 32` existed because delivery was implemented as a *recursive write*: `fan_out` re-entered `write_impl` on each SUBSCRIBER target (`graph.cpp:429`), so a subscription cycle recursed forever without a cap, and the cap silently truncated deep legitimate chains while the originating `write()` reported success. A first redesign (chain dedup + drain queue) managed the cascade; the maintainer cut deeper: **the cascade itself is wrong.** The runtime must not police user designs with synthetic limits — and it doesn't need to, because automatic transitive relay was never the intended semantics of the wiring model (edges deliver producer → consumer; *controllers* mediate propagation).
 
 ## Decision
 

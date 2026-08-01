@@ -19,13 +19,12 @@
 >
 > ```
 > POINT{ NAME <vertex name>
->        SETTINGS{ NAME "history_keep_last"    VALUE u32
->                  NAME "store_ref_min_bytes"  VALUE u32 }
+>        SETTINGS{ }                  // the implemented protocol knobs: NONE
 >        [ NAME "app" SETTINGS{…} ]   // only when a descriptor table is installed
 > }
 > ```
 >
-> Those two knobs are now **exactly** the vertex's `:settings` core namespace, so the synthesized part is complete and true. It was neither before RFC-0022: it advertised `deadline_ns`, which nothing consumed, and omitted `store_ref_min_bytes`, which the write path reads on every write — the reported set was not even a subset of the working set. RFC-0022 removed the four inert knobs and moved delivery policy to the subscription, which dissolved [#706](https://github.com/avatarsd-llc/libtracer/issues/706) rather than fixing it. The `:liveness.*` and `:description` rows below remain fictional and are still marked as such.
+> The knob enumeration is **empty**, and therefore for the first time **complete**. It was neither before RFC-0022: it advertised `deadline_ns`, which nothing consumed, and omitted `store_ref_min_bytes`, which the write path read on every write — the reported set was not even a subset of the working set. RFC-0022 §3.B deleted `settings_t` outright, which dissolved [#706](https://github.com/avatarsd-llc/libtracer/issues/706) rather than fixing it. The empty `SETTINGS` is **emitted, not omitted**, so the record keeps its shape whatever the vertex declares. The `:liveness.*` and `:description` rows below remain fictional and are still marked as such.
 
 
 
@@ -444,8 +443,6 @@ A vertex exposes a **schema** describing every writable field. The schema lives 
 | ---- | ---- | ---- | ---- |
 | `:subscribers[N]` | SUBSCRIBER | read; write is payload-discriminating | Subscription record N — see the rule below |
 | `:subscribers[]` | sequence of SUBSCRIBER | read-only; write to `[]` appends | Full list (read) or new slot (write) |
-| `:settings.history_keep_last` | u32 | yes | STREAM ring depth — N samples retained; re-read on every store |
-| `:settings.store_ref_min_bytes` | u32 | yes | Store-by-reference threshold ([ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md) §3); `0` = off. Read on every write |
 | `:settings.app.<name…>` | owner-defined TLV | owner-declared (`ro`/`rw`/`wo`) | Application property field ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md)): declared by the vertex owner in its field descriptor table; undeclared names stay `SCHEMA_NOT_FOUND` |
 | ⚠️ `:liveness.heartbeat_hz` | u8 | **unimplemented** | Subscriber heartbeat rate; 0 = no liveness check |
 | ⚠️ `:liveness.last_seen_ns` | u64 | **unimplemented** | Wall-clock of last write observed |
@@ -458,9 +455,9 @@ A vertex exposes a **schema** describing every writable field. The schema lives 
 >
 > They are **marked rather than deleted** because whether deadline/liveness enforcement is a v1 commitment is an open design question ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) liveness is the pending work). Marking removes the fiction without foreclosing either answer; deleting would foreclose one. If liveness lands, drop the markers — if it is ruled out of v1, drop the rows.
 >
-> **Reads and writes are not symmetric for `:settings.*` either.** Both storage knobs above accept **writes**. Per-knob **reads** (`:settings.history_keep_last`) are unimplemented and answer `SCHEMA_NOT_FOUND`; only the bare `:settings` container, `:settings.app`, and `:settings.app.<name…>` are readable. The "Writable" column is accurate; do not read it as a claim about readability.
+> **The whole flat `:settings.<knob>` namespace was REMOVED, not deprecated** ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.B/§4). All seven historical names — `reliability`, `priority`, `durability`, `deadline_ns`, `queue_max_bytes`, `history_keep_last`, `store_ref_min_bytes` — answer `SCHEMA_NOT_FOUND` on read **and** on write, caller-independently. `reliability`, `priority` and `durability` describe one producer→subscriber *relationship*, not a vertex, so they moved to the subscription's packed delivery policy (§Subscriber delivery policy below); `deadline_ns` and `queue_max_bytes` were inert *and* had no coherent per-vertex meaning, so they were deleted outright; the two survivors are construction parameters, not QoS, and became **owner-side declarations with no wire surface at all** (§Storage is declared owner-side, below). There is no deprecation window: the protocol is DRAFT, and of the seven only three ever drove behaviour.
 >
-> **Five knobs were REMOVED, not deprecated** ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3/§4). `reliability`, `priority` and `durability` describe one producer→subscriber *relationship*, not a vertex, so they moved to the subscription's packed delivery policy (§Subscriber delivery policy below); `deadline_ns` and `queue_max_bytes` were inert *and* had no coherent per-vertex meaning, so they were deleted outright. A write to any of the five now answers `SCHEMA_NOT_FOUND` — the honest answer, and the one an unsupported field already gives. There is no deprecation window: the protocol is DRAFT and none of the five ever functioned.
+> **The bare `:settings` read keeps its container and loses its knobs.** It is now `SETTINGS{ [NAME "app" SETTINGS{…}] }`; a vertex declaring no app fields reads an **empty** `SETTINGS{}`, which is honest rather than absent. `:settings.app` and `:settings.app.<name…>` are unchanged.
 
 ### The payload-discriminating `:subscribers[N]` write
 
@@ -518,19 +515,33 @@ on the reader/writer pair. `durability` in particular became strictly more corre
 vertex flag used to replay the last value to *every* subscriber, including the ones that never
 asked, and there was no way to say "not for me".
 
-### Storage policy inherits by copy at registration
+### Storage is declared owner-side, and nothing is inherited
 
-The two surviving `:settings` knobs are **storage** policy — what it costs this vertex to hold a
-value. A child **copies its parent's values at registration** ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.C); an intermediate
-placeholder level carries them down, so a deep registration inherits too. An **override** — stated
-at registration, or written later through `:settings.<knob>` — materialises the extension block on
-the overriding vertex and on its inheriting descendants, and stops at a descendant that has its own
-policy: *the override grows the subtree that opted in, and nothing else.*
+The two survivors of the old knob set are not protocol QoS at all — they are **construction
+parameters** ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.C, Amendment 1):
 
-Resolution is **not** an ancestor walk. `store_ref_min_bytes` is read on every write and
-`history_keep_last` on every store, so a walk on those paths is disqualifying under this project's
-latency-first ordering; copy-at-registration keeps both reads a single inline load. A vertex whose
-whole ancestry is at the defaults allocates **no extension block at all**, exactly as before.
+| what | who supplies it | how |
+| ---- | ---- | ---- |
+| STREAM ring depth | the application — a retention *intent* no peer and no injected resource can supply | `graph_t::set_history_depth(v, keep)` |
+| store-by-reference threshold | the deployment — a copy/pin trade ([ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md) §3) | `graph_t::set_store_ref_min_bytes(v, bytes)` |
+
+Both are owner-side wiring calls in the shape of `set_delivery_mode` and `set_app_fields` —
+declarations the owner makes host-side after registration — and **neither has any wire surface**:
+no peer can read one and none can write one. What was withdrawn is the *remote write surface*, not
+owner-side configuration.
+
+**Nothing is inherited** (§3.F). A declaration reaches exactly the vertex it names: there is no
+ancestor walk, no cached ancestor reference, and no propagation question when a parent's
+configuration changes after its children exist. Both readers therefore stay a single inline load
+off the vertex's own extension block — `store_ref_min_bytes` is read on every view-delivered write
+and the ring depth on every STREAM store, so a walk on either path would be disqualifying under
+this project's latency-first ordering.
+
+The RAM consequence runs the same way. Registration no longer carries a policy parameter, so it
+can no longer force the cold extension block onto a vertex, and neither can an ancestor: **strictly
+more vertices stay extension-less than before RFC-0022**. A vertex allocates the block when it is a
+STREAM, carries a handler, holds app fields or an `:acl` — or when its owner declares one of the
+two magnitudes on it, which is the only case storage itself pays for.
 
 ### Owner-declared application fields (`settings.app`)
 

@@ -14,7 +14,7 @@ string parse on the hot path.
 strip a trailing `/`, reject empty segments (`//`) and unrooted paths, enforce the
 limits (≤64 B/segment, ≤1024 B total, ≤32 segments, ≤8 field steps). It emits the
 canonical key — e.g. `/sensor/temp` → `02 00 06 00 'sensor' 02 00 04 00 'temp'`
-(18 bytes) — and parses the `:`-tail into a `field_path_t` (`settings.history_keep_last`,
+(18 bytes) — and parses the `:`-tail into a `field_path_t` (`settings.app.setpoint`,
 `subscribers[]`, `subscribers[3]`) for the field-write surface. `path_key_t` +
 `path_key_hash_t` (FNV-1a over the bytes) key the `unordered_map`.
 
@@ -46,9 +46,9 @@ exceptions, so both hold under `-fno-exceptions`.
 
 ```{mermaid}
 flowchart LR
-    S["/sensor/temp:settings.history_keep_last"] --> P[path_t::parse]
+    S["/sensor/temp:settings.app.setpoint"] --> P[path_t::parse]
     P --> K["key bytes<br/>NAME sensor · NAME temp"]
-    P --> F["field<br/>settings → history_keep_last"]
+    P --> F["field<br/>settings → app → setpoint"]
     K --> M{{"vertex map<br/>(byte-keyed)"}}
     classDef e fill:#dbeafe,stroke:#1e40af
     class M e

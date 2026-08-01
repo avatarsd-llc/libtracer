@@ -683,9 +683,7 @@ QoS and configuration block. Structured (`opt.PL=1`); children are NAME-keyed va
 
 ```
 SETTINGS (PL=1) {
-  ; the vertex's STORAGE policy — the whole core namespace (RFC-0022 §3.B)
-  NAME "history_keep_last"   VALUE <u32>
-  NAME "store_ref_min_bytes" VALUE <u32>
+  ; the vertex core namespace is EMPTY (RFC-0022 §3.B) — no flat knob is minted today
   ; module-namespaced fields use a nested SETTINGS:
   NAME "transport_tcp"     SETTINGS (PL=1) { NAME "send_buf_kb" VALUE <u32> ... }
   ; the application's own fields use the same shape under the RESERVED key `app`:
@@ -704,7 +702,7 @@ Nested SETTINGS for module namespacing (instead of an unnamed structured wrapper
 
 ### Where it appears
 
-- `<vertex>:settings` for atomic multi-field reads; a bare `:settings` read serves the full container — the protocol knobs plus the nested `app` record when a descriptor table is installed — and `:settings.app` serves the app record alone ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §A.4). Writes are **per-knob** (`:settings.<knob>`); there is no atomic multi-field settings *write* (a bare `:settings` write resolves no knob and returns `SCHEMA_NOT_FOUND`).
+- `<vertex>:settings` for atomic multi-field reads; a bare `:settings` read serves the container — the nested `app` record when a descriptor table is installed, and an **empty** `SETTINGS{}` when none is ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §A.4 as amended by [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §4) — and `:settings.app` serves the app record alone. Writes are **per-field** under `settings.app.`; the flat core namespace takes none, and there is no atomic multi-field settings *write* (a bare `:settings` write resolves nothing and returns `SCHEMA_NOT_FOUND`).
 - Inside SUBSCRIBER as the `qos_settings` sub-field for per-subscription overrides.
 - Inside the `:schema` POINT (§`0x07`): the synthesized protocol part, and one `SETTINGS` per declared app field inside the owner part.
 - As the whole reply to `read <vertex>:identity` — the node-identity record below.
@@ -714,28 +712,31 @@ Nested SETTINGS for module namespacing (instead of an unnamed structured wrapper
 - Unknown NAMEs MUST be either (a) ignored if module-namespaced and the module is not loaded, or (b) rejected with `ERROR{tr::schema::not_found}` if in the core namespace.
 - Type mismatches (e.g., a u32 where u8 expected) MUST return `ERROR{tr::schema::type_mismatch}`.
 
-### The two core storage knobs
+### The core knob namespace is empty
 
-(Full semantics in [04-communication-flows.md](04-communication-flows.md) §QoS knobs.)
+([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.B/§4 — full rationale in
+[04-communication-flows.md](04-communication-flows.md) §Storage policy is declared owner-side.)
 
-| Field | Type | Default | Effect |
-| ---- | ---- | ---- | ---- |
-| `history_keep_last` | u32 | 1 | STREAM ring depth — samples retained; re-read on every store |
-| `store_ref_min_bytes` | u32 | 0 (disabled) | Store-by-reference threshold ([ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md) §3): a view-delivered WRITE whose payload is ≥ this many bytes (and carries no trailer) is stored as a zero-copy subview of the inbound frame; 0 disables referencing |
+All seven names the vertex `SETTINGS` core namespace ever held are gone. A read or a write of any
+of them answers `ERROR{tr::schema::not_found}` — the honest answer, and the one an unsupported
+field already gives — **caller-independently**, since an unknown core-namespace NAME resolves
+before any ACL gate:
 
-Both are **magnitudes the vertex owns as a value holder**, decided before any subscriber exists.
-A child **inherits them by value at registration** and an override grows only the subtree that
-opted in ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.C); resolution is never an ancestor walk, because both are read on a hot
-path.
+| removed name | where it went |
+| ---- | ---- |
+| `reliability`, `priority`, `durability` | the subscription's packed delivery policy (§`0x04` SUBSCRIBER) — they describe a producer→subscriber *relationship*, not a vertex |
+| `deadline_ns`, `queue_max_bytes` | deleted: inert, and with no coherent per-vertex meaning |
+| `history_keep_last` | owner-side vertex state (`graph_t::set_history_depth`) — an application retention intent, with no wire surface |
+| `store_ref_min_bytes` | owner-side vertex state — a deployment copy/pin trade ([ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md) §3), with no wire surface |
 
-**Removed knobs** ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3/§4). `reliability`, `priority` and `durability` moved to the
-subscription's packed delivery policy (§`0x04` SUBSCRIBER); `deadline_ns` and `queue_max_bytes`
-were inert and had no coherent per-vertex meaning, so they were deleted. A write to any of the
-five answers `ERROR{tr::schema::not_found}` — the honest answer, and the one an unsupported field
-already gives. No deprecation window: the protocol is DRAFT and none of them ever functioned.
-Conformance vector: `settings/removed-knob`. The `:schema` and bare-`:settings` reads enumerate
-exactly the two knobs above (`settings/schema-enumerates-storage`), so the read surface and the
-write gate cannot disagree.
+No deprecation window: the protocol is DRAFT, and of the seven only three ever drove behaviour —
+none of them as remotely writable QoS. Conformance vectors: `settings/removed-knob`,
+`stream/history-depth-host-only`.
+
+The `:schema` and bare-`:settings` reads therefore enumerate **nothing** in the core namespace
+(`settings/schema-enumerates-nothing`, `settings/read-container-shape`), so the read surface and
+the write gate cannot disagree. `settings.app.*` (RFC-0010 §A) is untouched, and the reservation of
+the `app` key means a future protocol knob can still be minted flat without colliding with it.
 
 ### The node-identity record — `:identity`
 
@@ -928,7 +929,7 @@ flowchart LR
 Three properties of the arena resolve:
 
 - **Span-aliased vertex lookup** — a canonical PATH body is byte-identical to the graph's vertex-map key, so dispatch uses the frame's own bytes as the key with zero materialization (a non-canonical PATH from a foreign encoder falls back to a re-emit, which rejects a non-NAME child before re-emitting it — §PATH enforcement).
-- **Trailer-sliced stores** — a stored WRITE value copies the node's header+body span exactly once (or, when the frame arrived as an owning view and the target vertex opts in via `:settings.store_ref_min_bytes`, is **referenced** as a zero-copy subview of the refcounted frame — [ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md)); the trailer never lands at rest either way (a trailer-carrying payload always falls back to the sliced copy).
+- **Trailer-sliced stores** — a stored WRITE value copies the node's header+body span exactly once (or, when the frame arrived as an owning view and the target vertex's OWNER opted in via `graph_t::set_store_ref_min_bytes`, is **referenced** as a zero-copy subview of the refcounted frame — [ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md)); the trailer never lands at rest either way (a trailer-carrying payload always falls back to the sliced copy).
 - **Direct-emitted reply** — every reply-head length is known from the node spans, so the `FWD{REPLY}` head (including the route bytes, copied once) is emitted straight into one exactly-sized segment, and a READ's reply payload rides as a zero-copy refcounted rope.
 
 Across hops, `FWD` is **source-routed and stateless**: each forwarder strips the leading `dst` segment (the next link) and prepends its name for the inbound link to `src` (a zero-copy rope head-prepend), so `dst` shrinks toward the target while `src` grows into the return route. A `REPLY` retraces that accumulated `src` and does **not** itself accumulate:

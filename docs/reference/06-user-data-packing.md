@@ -275,7 +275,7 @@ Set the assembly QoS on the subscriber, then register the subscription. The
 `address_shift.*` fields are the v1 QoS **design**, not implemented — see
 [03-addressing.md](03-addressing.md) §subscriber assembly policies, whose deadline is a
 module-namespaced magnitude of its own (the core `deadline_ns` knob it used to borrow was removed
-as inert by [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.D):
+as inert by [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.E):
 
 ```cpp
 // Per-knob settings writes: assemble=true, expected_count for 100 ms batches,

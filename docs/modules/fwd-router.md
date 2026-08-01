@@ -200,7 +200,7 @@ the role default. Extra transport kinds join the catalog through `register_trans
 file ever learning about it.
 
 **The write is ACL-gated.** The `:children[]` append is gated on the parent vertex's `CREATE`
-right and denied with `PERMISSION_DENIED` otherwise (`core/src/graph.cpp:1653-1655`). Under
+right and denied with `PERMISSION_DENIED` otherwise (`core/src/graph.cpp:1605-1607`). Under
 [RFC-0014 — creator endpoint, connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
 that gate relocates onto the creator endpoint's own ACL and gains its removal counterpart: a `NAME`
 write is gated on `WRITE` — **not** `DELETE` — per
@@ -250,8 +250,10 @@ originate the **wires** ([#491]).
 a **device-private `:settings` facet** of a connection vertex
 ([ADR-0021 — the colon-field plane is the vertex ioctl](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0021-colon-field-plane-is-the-vertex-ioctl.md)
 draws the standard / device-private line). They live on the `tr::net` leaf record and are **never**
-the L4 `settings_t` that every sensor vertex carries — conflating the two would put `addr`, `port`
-and `kind` into the universal settings surface of every vertex in the graph.
+the L4 vertex `:settings` surface — conflating the two would put `addr`, `port` and `kind` into
+the universal settings surface of every vertex in the graph. (That surface's core namespace is
+now empty anyway — RFC-0022 §3.B — which makes the separation structural rather than merely
+disciplined.)
 
 The record carries only the keys **every** transport kind shares. A kind's private configuration —
 a QUIC certificate and key path, for instance — never lands here; that kind's own factory parses it

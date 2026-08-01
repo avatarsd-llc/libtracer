@@ -117,7 +117,7 @@ FIELD (0x10, PL=1) {
   level_1 ... level_K            ; K ≤ 8
 }
 where each level =
-  NAME    field_name            ; e.g. "subscribers", "settings", "history_keep_last"
+  NAME    field_name            ; e.g. "subscribers", "settings", "app"
   VALUE   index                 ; optional — u32 index for [N];
                                 ;   absent + index_mode=ELEMENT ⇒ append/list "[]";
                                 ;   index_mode=WILDCARD ⇒ "[*]" (subscriber-path targets only)
@@ -127,7 +127,7 @@ where each level =
 
 `:subscribers[3]` → `FIELD{ NAME "subscribers", VALUE u32=3, VALUE u8 index_mode=ELEMENT }`.
 `:subscribers[]` (append) → `FIELD{ NAME "subscribers", VALUE u8 index_mode=ELEMENT }` (no index VALUE).
-`:settings.history_keep_last` → `FIELD{ NAME "settings", NAME "history_keep_last" }` (the example knob changed with [RFC-0022](0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md); the FIELD grammar did not).
+`:settings.app` → `FIELD{ NAME "settings", NAME "app" }` (the example changed with [RFC-0022](0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md), which emptied the flat `settings.<knob>` namespace; the FIELD grammar did not).
 `[*]` (`index_mode=WILDCARD`) MUST be rejected with `ERROR=INVALID_PATH` outside a subscriber-path context, mirroring [reference/03](../../reference/03-addressing.md).
 
 `PATH` (`0x06`) is **untouched** — its "children MUST be NAME" invariant and every existing parser stand.
