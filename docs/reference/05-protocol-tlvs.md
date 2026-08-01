@@ -163,14 +163,39 @@ SUBSCRIBER (PL=1) {
 }
 ```
 
-The `qos_settings` SETTINGS carries **per-subscriber encoding hints** only (byte-agnostic; numeric filtering such as deadband is an application *filter vertex*, never a field — the sibling decision of [ADR-0019](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0019-per-producer-monotonic-origin-timestamp.md)). It carries **no value-based delivery filter and no throttle**: there is no `delivery_mode == ON_CHANGE` byte-diff, no `min_interval_ns` and no `keepalive_ns` ([RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md)) — the runtime inspects neither values nor times to decide delivery. Delivery selection is **structural and per-vertex**; see `delivery_mode` below.
+The `qos_settings` SETTINGS carries **per-subscriber encoding hints and this subscription's delivery policy** (byte-agnostic; numeric filtering such as deadband is an application *filter vertex*, never a field — the sibling decision of [ADR-0019](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0019-per-producer-monotonic-origin-timestamp.md)). It carries **no value-based delivery filter and no throttle**: there is no `delivery_mode == ON_CHANGE` byte-diff, no `min_interval_ns` and no `keepalive_ns` ([RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md)) — the runtime inspects neither values nor times to decide delivery. Delivery selection is **structural and per-vertex**; see `delivery_mode` below.
 
 ```
 qos_settings = SETTINGS {
   NAME "delivery_scope"    VALUE <u8: DELTA=0, SNAPSHOT=1>   ; reserved (RFC-0005: as-written is the delivery; SNAPSHOT re-aggregation deferred)
   NAME "delivery_compact"  VALUE <u8: 0=off, 1=on>  ; opt into route-handle compaction (§route-handle)
+  NAME "delivery_policy"   VALUE <u16>              ; this subscription's DELIVERY policy (RFC-0022 §3.A)
 }
 ```
+
+**`delivery_policy`** ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.A) is one packed 16-bit value carried in this **same**
+`SETTINGS` child, so the per-subscription policy introduced no new wire structure:
+
+| bits | field | values |
+| ---: | --- | --- |
+| 0–1 | `reliability` | `0` = best-effort, `1` = reliable; `2`–`3` reserved |
+| 2–4 | `priority` | `0`–`7`, `0` = default |
+| 5 | `durability_request` | `1` = deliver the producer's latched last value on join |
+| 6–15 | reserved | MUST be written `0`, MUST be **ignored** on read |
+
+**Absent ⇒ all-zero ⇒ the default behaviour**, byte-identically — a sender that predates the key
+is a conforming sender (`subscriber/policy-absent`). Reserved bits MUST be ignored, never
+rejected, and are carried verbatim so they read back unchanged from `:subscribers[]`
+(`subscriber/policy-reserved-bits`). Only `durability_request` is honoured today (§the latch
+above, `subscriber/policy-durability`); `reliability` and `priority` are stored and read back,
+awaiting the transport work that honours them.
+
+These three were per-**vertex** `:settings` knobs until RFC-0022: a single `reliability` or
+`priority` has no coherent meaning across a heterogeneous fan-out (one vertex to a CAN peer and a
+WebSocket peer at once), which is why nothing ever consumed them. **No magnitude may be packed
+here** — a deadline or queue bound is a magnitude, and a bit-width on a magnitude is a synthetic
+limit this project forbids; one would arrive as a full-width field in the subscription's cold
+half, never in these bits.
 
 **Per-vertex `delivery_mode` ([RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md)).** Whether a vertex rides an *ancestor's* `propagate` sweep is a value-agnostic property of the **vertex** (not the subscriber): `UNCONDITIONAL` (always swept), `IF_NEWER` (default — swept only if its write sequence advanced since the last covering sweep), `EXPLICIT` (never swept by an ancestor; deliverable only by a direct `propagate` on the vertex). `assign` and a direct `propagate` on the vertex are never gated by it. It is host state defaulting to `IF_NEWER`. Wire configuration reuses the vertex's own `:settings` (a `delivery_mode` NAME/VALUE under the vertex `SETTINGS`) and is **deferred**, so the host call is the only way to set it.
 
@@ -196,7 +221,7 @@ flowchart BT
 
 When a SUBSCRIBER is written into `<vertex>:subscribers[N]` over a transport (an inbound `FWD{WRITE}` to `:subscribers[]`, RFC-0004 §D), the slot retains the request's **accumulated return route** (the FWD `src`) and the inbound link. The route bytes are copied **once**, at subscribe time, into a refcounted segment; the slot holds a view over it. Thereafter a write to that vertex fans out a delivery back to the consumer along that return route — a `FWD{WRITE, dst=<return route>, payload=<VALUE>}` (delivery-is-a-write), or, when the subscriber set `delivery_compact`, an auto-promoted `COMPACT` (advertised once per flow, then streamed; re-advertised after a reconnect — §route-handle). Each full-route delivery **refcount-clones** the stored route and scatter-gathers the frame from stack-built heads + the roped route + the roped value — no route or payload bytes are copied per delivery, and an in-flight rope keeps the route segment alive across a concurrent unsubscribe. This is the producer half of consumer-initiated subscription; it composes the existing field-writes and adds no wire verb (RFC-0004 / ADR-0035 slice 4).
 
-A **transient-local** producer (`:settings.durability == 1`, [02-graph-model.md](02-graph-model.md)) additionally **latches** its current value to a *fresh* subscriber: the subscribe itself emits one immediate delivery of the vertex's last-known value, so a late joiner paints the current state without waiting for the next write. A `volatile` producer (the default, `durability == 0`) delivers only writes that happen after the subscribe. The latch reuses the same delivery path (full-route or `COMPACT`); it carries no new wire bytes, so it is observable only as delivery *timing* and adds no conformance vector.
+A subscriber that sets **`durability_request`** (bit 5 of its `delivery_policy`, below) additionally receives a **latch**: the subscribe itself emits one immediate delivery of the producer's last-known value, so a late joiner paints the current state without waiting for the next write. A subscriber that does not ask (the default) receives only writes that happen after its subscribe — and the two may sit on the same producer at the same time, which is the point of [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.A: this was a producer-side `:settings.durability` flag that replayed to every subscriber, including the ones that never asked. The latch reuses the same delivery path (full-route or `COMPACT`) and carries no new wire bytes of its own, so it is observable only as delivery *timing*; the vectors pin the REQUEST (`subscriber/policy-durability`, `subscriber/policy-absent`).
 
 The producer fan-out, end to end — the subscribe binds a remote subscriber, the transient-local latch fires immediately, and later writes stream out (auto-promoted to lean `COMPACT` when the subscriber opted in):
 
@@ -208,7 +233,7 @@ sequenceDiagram
     participant V as Vertex (transient-local)
     Cons->>Prod: FWD{WRITE, dst=/V, :subscribers[], src=/cons,<br/>SUBSCRIBER{ delivery_compact=1 }}
     Prod->>V: subscribe_wire — the ADR-0049 admission door<br/>(retain return_route=/cons + inbound link)
-    Note over Prod,V: durability==1 ⇒ latch the current LKV
+    Note over Prod,V: durability_request ⇒ latch the current LKV
     Prod-->>Cons: FWD{WRITE, dst=/cons, VALUE}  (delivery #1 — the latch)
     Prod-->>Cons: FWD{REPLY} (subscribe ack)
     Note over V,Prod: a later local write fans out via the injected sink
@@ -658,12 +683,8 @@ QoS and configuration block. Structured (`opt.PL=1`); children are NAME-keyed va
 
 ```
 SETTINGS (PL=1) {
-  NAME "reliability"       VALUE <u8>
-  NAME "durability"        VALUE <u8>
-  NAME "history_keep_last" VALUE <u32>
-  NAME "deadline_ns"       VALUE <u64>
-  NAME "priority"          VALUE <u8>
-  NAME "queue_max_bytes"   VALUE <u32>
+  ; the vertex's STORAGE policy — the whole core namespace (RFC-0022 §3.B)
+  NAME "history_keep_last"   VALUE <u32>
   NAME "store_ref_min_bytes" VALUE <u32>
   ; module-namespaced fields use a nested SETTINGS:
   NAME "transport_tcp"     SETTINGS (PL=1) { NAME "send_buf_kb" VALUE <u32> ... }
@@ -693,19 +714,28 @@ Nested SETTINGS for module namespacing (instead of an unnamed structured wrapper
 - Unknown NAMEs MUST be either (a) ignored if module-namespaced and the module is not loaded, or (b) rejected with `ERROR{tr::schema::not_found}` if in the core namespace.
 - Type mismatches (e.g., a u32 where u8 expected) MUST return `ERROR{tr::schema::type_mismatch}`.
 
-### The seven core QoS knobs
+### The two core storage knobs
 
 (Full semantics in [04-communication-flows.md](04-communication-flows.md) §QoS knobs.)
 
 | Field | Type | Default | Effect |
 | ---- | ---- | ---- | ---- |
-| `reliability` | u8 | 0 (best-effort) | 1 = reliable, transport-dependent guarantee |
-| `durability` | u8 | 0 (volatile) | 1 = transient-local, late joiners see history |
-| `history_keep_last` | u32 | 1 | Samples retained for transient-local |
-| `deadline_ns` | u64 | 0 (off) | Maximum interval between writes; missed = STATUS=TIMEOUT |
-| `priority` | u8 | 0 (lowest) | Transport hint; 0 = lowest, 255 = highest |
-| `queue_max_bytes` | u32 | 0 (unbounded) | Per-subscriber back-pressure cap |
+| `history_keep_last` | u32 | 1 | STREAM ring depth — samples retained; re-read on every store |
 | `store_ref_min_bytes` | u32 | 0 (disabled) | Store-by-reference threshold ([ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md) §3): a view-delivered WRITE whose payload is ≥ this many bytes (and carries no trailer) is stored as a zero-copy subview of the inbound frame; 0 disables referencing |
+
+Both are **magnitudes the vertex owns as a value holder**, decided before any subscriber exists.
+A child **inherits them by value at registration** and an override grows only the subtree that
+opted in ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.C); resolution is never an ancestor walk, because both are read on a hot
+path.
+
+**Removed knobs** ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3/§4). `reliability`, `priority` and `durability` moved to the
+subscription's packed delivery policy (§`0x04` SUBSCRIBER); `deadline_ns` and `queue_max_bytes`
+were inert and had no coherent per-vertex meaning, so they were deleted. A write to any of the
+five answers `ERROR{tr::schema::not_found}` — the honest answer, and the one an unsupported field
+already gives. No deprecation window: the protocol is DRAFT and none of them ever functioned.
+Conformance vector: `settings/removed-knob`. The `:schema` and bare-`:settings` reads enumerate
+exactly the two knobs above (`settings/schema-enumerates-storage`), so the read surface and the
+write gate cannot disagree.
 
 ### The node-identity record — `:identity`
 

@@ -38,7 +38,7 @@ Caller                              Local router                Vertex
 ```
 
 - A vertex with no last-known-value answers `STATUS=ERROR(NOT_FOUND)` (or NULL/None, per language binding).
-- With `:settings.reliability = reliable` set on the read-side QoS, a read MAY block until the next write, degenerating into `await`.
+- With `reliability = reliable` in the **subscription's** delivery policy ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.A — it was a per-vertex `:settings.reliability` knob until then, and nothing consumed it), a read MAY block until the next write, degenerating into `await`.
 - Reading a control field (`:subscribers[]`, `:settings.X`, `:schema`) returns that field's current value. `:schema` answers with the vertex's introspectable schema whether or not data has ever been written.
 
 ---
@@ -143,7 +143,7 @@ Subscriber              Local router        Publisher's vertex
    |                       |                       |
    | tlv_t *sub = tlv_new_subscriber(            |
    |     target_path = "/local/handler",         |
-   |     settings   = {reliability=best_effort}  |
+   |     settings   = {delivery_policy=0}        |  ; absent/0 = best-effort, no latch
    | );                                            |
    |                       |                       |
    | write("/sensor/temp:subscribers[]", sub)    |
@@ -208,27 +208,34 @@ After a clear:
 
 ---
 
-## Field-write QoS update
+## Field-write storage-policy update
 
 ```
 Operator                          Vertex
    |                                |
-   | write("/sensor/temp:settings.deadline_ns",
-   |       VALUE{u64=5000000})      |
+   | write("/sensor/temp:settings.history_keep_last",
+   |       VALUE{u32=8})            |
    |───────────────────────────────>|
-   |                                |── update settings.deadline_ns
-   |                                |── (next fanout uses new deadline)
+   |                                |── update settings.history_keep_last
+   |                                |── (the next store trims to the new depth)
    | <── OK ────────────────────────|
 ```
 
-A QoS change applies to the **next** dispatch from the vertex. In-flight dispatches carrying the prior settings are not re-evaluated.
+A storage-policy change applies to the **next** store. In-flight dispatches carrying the prior
+settings are not re-evaluated. The vertex's `:settings` core namespace is exactly
+`history_keep_last` and `store_ref_min_bytes` ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.B); a write naming any other core
+knob answers `SCHEMA_NOT_FOUND`.
 
-For an atomic multi-field update, write a SETTINGS TLV carrying both fields to the parent path:
+The write also reaches **inheriting descendants**: storage policy is copied at registration, so an
+override is pushed to every descendant that was still carrying the old value and stops at one that
+has its own (§3.C). That is a control-plane walk at configuration frequency — the hot readers stay
+a single inline load.
 
-```
-write("/sensor/temp:settings",
-      SETTINGS { reliability=reliable, deadline_ns=5000000 })
-```
+There is **no** atomic multi-field settings write: a bare `:settings` write resolves no knob and
+answers `SCHEMA_NOT_FOUND`. Writes are per-knob.
+
+**Delivery** policy is not written here at all — it belongs to the subscription, and travels in
+its `SUBSCRIBER` record (§Subscribe via field-write).
 
 ---
 
@@ -293,10 +300,18 @@ Subscriber assembly follows `:settings.address_shift.*` — see [03-addressing.m
 
 ---
 
-## Deadline expiry
+## Deadline expiry ⚠️ not implemented, and the knob is gone
+
+> ⚠️ **This flow describes no implemented behaviour.** There is no deadline engine, no liveness
+> checker and no `:liveness.*` field anywhere in the reference implementation
+> ([#586](https://github.com/avatarsd-llc/libtracer/issues/586)), and the `:settings.deadline_ns`
+> knob that used to accept writes nothing read was **removed** by [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.D — a writable
+> knob no code honours is worse than an absent one, which at least answers `SCHEMA_NOT_FOUND`. The
+> sketch below is kept as the intended shape should deadlines ever land; if they do, they arrive as
+> a magnitude on the **subscription**, never as a bit-packed field and never as a per-vertex knob.
 
 ```
-Vertex with deadline_ns=D             Subscriber
+Vertex with deadline D                Subscriber
    |                                       |
    | write at T0                            |
    |───────────────────────────────────────>|
@@ -407,7 +422,8 @@ Forwarder             Transport module      External peer
    |                       |<──────── reconnect ──|
    |                       |── notify_connect(peer_id)
    |                       |─────────────────────>|
-   |── re-emit any transient-local cached data    |
+   |── re-emit the latched value to any subscriber|
+   |   that requested durability                  |
    |   for paths routed via this link             |
    |── normal traffic resumes                     |
 ```
@@ -433,8 +449,10 @@ Caller                              Vertex
    |       ...                          |
    |       NAME "settings"              |
    |       SETTINGS (PL=1) {            |
-   |         NAME "reliability" VALUE u8|
-   |         NAME "deadline_ns" VALUE u64|
+   |         NAME "history_keep_last"   |
+   |                        VALUE u32   |
+   |         NAME "store_ref_min_bytes" |
+   |                        VALUE u32   |
    |         NAME "transport_tcp"       |
    |         SETTINGS (PL=1) {          |
    |           NAME "send_buf_kb" VALUE u32 |

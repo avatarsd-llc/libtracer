@@ -16,7 +16,7 @@ Verified against `main` during the RFC's adversarial pass:
 | Area | Today | RFC-0014 needs |
 | --- | --- | --- |
 | Connection path | flat `/net/<name>` | per-module `/net/<module>/<name>` (ADR-0061) |
-| Creation surface | one global `client`/`listener` catalog, a `:children[]` target on `/net` (`graph.cpp:1521`); `quic` extends it via `register_transport_type` | a **per-module `conn` endpoint vertex** owning its own catalog |
+| Creation surface | one global `client`/`listener` catalog, a `:children[]` target on `/net` (`graph.cpp:1584`); `quic` extends it via `register_transport_type` | a **per-module `conn` endpoint vertex** owning its own catalog |
 | Catalog read | none; `:schema` is whole-vertex-only (`graph.cpp:1955`, `size()==1`) | `read /net/<module>/conn:schema` returns the module's config catalog |
 | Removal wire path | none (`retire()` has "no wire path") | `write NAME{name}` → `retire()` |
 | Gating | `CREATE` (0x08) enforced on `:children[]`/write-creates (`graph.cpp:1401`,`:475`,`:956`) | `SPEC`→`CREATE` (relocated to endpoint ACL); `NAME`→`WRITE` (0x02) |

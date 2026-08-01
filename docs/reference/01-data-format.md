@@ -91,7 +91,7 @@ The default header is **4 bytes**. A typical small TLV has no trailer (4-byte to
 
 ### Why no priority bits
 
-There are no priority bits in `opt`. Priority is a **transport-time, per-link, non-coherent** concern; the L2 header carries only coherent things or things every forwarder must see. Per-TLV priority bits would buy nothing that `:settings.priority` cached at the egress link doesn't already cover. See [02-graph-model.md](02-graph-model.md) §the six-layer model — priority lives at L4.
+There are no priority bits in `opt`. Priority is a **transport-time, per-link, non-coherent** concern; the L2 header carries only coherent things or things every forwarder must see. Per-TLV priority bits would buy nothing that the subscription's cached priority at the egress link doesn't already cover ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.A bits 2-4; a per-vertex knob until then, because one vertex fanning out to a CAN peer and a WebSocket peer has no single priority to hold). See [02-graph-model.md](02-graph-model.md) §the six-layer model — priority lives at L4.
 
 ---
 
@@ -438,7 +438,7 @@ For future readers wondering about paths not taken:
 - **Generic `LIST` type code** — a generic structured-container type code with no specific semantic. Every structured TLV in the registry has a specific purpose (SUBSCRIBER, PATH, POINT, ACL, SETTINGS, STATUS, ERROR); user-defined structured records use user-range type codes (`0x80–0xFF`) with `PL=1`. The `PL` bit alone signals "has nested children"; the type byte tells what those children mean. Type code `0x05` is reserved with no assigned meaning and is not available for reuse (collision-prevention).
 
 - **Per-frame version bit (`VR`)** — bit 7 of `opt` as a version-bump flag. Rejected. The wire format is committed once and not bumped per-frame; future incompatible changes (if ever needed) are versioned at the discovery layer (mDNS service name, port, etc.). The bit stays reserved.
-- **Per-TLV priority bits in `opt`** — priority is transport-time and per-link; cached `:settings.priority` at L4 covers it. The bits are reclaimed for `LL`/`CW`/`TF` instead.
+- **Per-TLV priority bits in `opt`** — priority is transport-time and per-link; the subscription's cached priority at L4 covers it ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.A). The bits are reclaimed for `LL`/`CW`/`TF` instead.
 - **Alignment-promise bit** — modern CPUs handle unaligned loads efficiently; promising alignment requires sender padding, which forces variable framing. Net loss. Rejected.
 - **Variable-width TS field beyond {abs-u64, rel-i32}** — exhaustively explored; no third form earns its complexity.
 - **u64 length** — intentionally absent. Capping at u32 forces address-shift discipline and protects minimum-impl interop.

@@ -6,7 +6,7 @@ Status: accepted (maintainer-ratified 2026-07-21 in a grill-with-docs session). 
 
 [ADR-0042](0042-refcounted-receiver-seam-view-delivery.md) gave an **owning** (view-delivered) frame a zero-copy store: a large WRITE stores a **subview** of the refcounted frame (`store_ref_min_bytes`). But it deliberately left three cases **copying** the value into a fresh owned `segment`: a **borrowed** (span-delivered) frame — a borrowed span cannot be pinned — a **small** payload (a copy beats pinning a whole frame), and a **trailered** oversized payload. That copy is where a `STORED_VALUE` vertex's last-known-value (LKV) gets its durable bytes.
 
-Today that copy allocates from the **default `heap_backend()`** — the write path calls `value.materialize()` with no backend argument (`graph.cpp:1017`, `:825`). So on any node whose transport delivers borrowed — which includes the ESP-IDF `httpd_ws_link` the reference firmware runs — **every stored write allocates on the general heap**. It is the one remaining unpoolable allocation on the write hot path, and a source of the heap fragmentation / low `min_free` pressure observed on-device (the `svc_gate` sheds WS work near the service floor).
+Today that copy allocates from the **default `heap_backend()`** — the write path calls `value.materialize()` with no backend argument (`graph.cpp:1051`, `:825`). So on any node whose transport delivers borrowed — which includes the ESP-IDF `httpd_ws_link` the reference firmware runs — **every stored write allocates on the general heap**. It is the one remaining unpoolable allocation on the write hot path, and a source of the heap fragmentation / low `min_free` pressure observed on-device (the `svc_gate` sheds WS work near the service floor).
 
 ## Decision
 

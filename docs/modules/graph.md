@@ -15,7 +15,8 @@ bump, no copy). The last-known-value path takes **no per-vertex mutex**.
 
 `graph_t` owns the vertex map (keyed on canonical [path](path.md) bytes). Each vertex
 has a **role**: *stored-value* (last-writer-wins), *stream* (a bounded ring sized by
-`:settings.history_keep_last`), or *handler* (`on_read` / `on_write` — covering
+`:settings.history_keep_last`, which a child inherits from its parent BY VALUE at
+registration — [RFC-0022](../spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.C), or *handler* (`on_read` / `on_write` — covering
 computed, proxy, sink, live-MMIO patterns). The last-known-value slot is an
 `atomic<shared_ptr<const rope_t>>` swap, so `read` / `write` of the value take **no
 per-vertex mutex**; that mutex guards the subscriber list, the history ring and the
@@ -47,14 +48,13 @@ re-emitting on its execution. `:schema` reads return a `POINT` descriptor.
 enum class role_t { STORED_VALUE, STREAM, HANDLER };
 enum class delivery_mode_t { IF_NEWER, UNCONDITIONAL, EXPLICIT };
 
-struct settings_t {  // widest-first; fixed-width, so identical on 32- and 64-bit
-    std::uint64_t deadline_ns;         // 0 = off; max ns between writes before a liveness fault
-    std::uint32_t history_keep_last;   // stream ring depth (>= 1)
-    std::uint32_t queue_max_bytes;     // 0 = unbounded; per-subscriber back-pressure cap
-    std::uint32_t store_ref_min_bytes; // 0 = off; store-by-reference threshold
-    std::uint8_t  reliability;         // 0 = best-effort, 1 = reliable
-    std::uint8_t  durability;          // 0 = volatile, 1 = transient-local
-    std::uint8_t  priority;            // transport hint, not a wire bit
+struct settings_t {  // the vertex's STORAGE policy (RFC-0022 §3.B) — 8 B, fixed-width
+    std::uint32_t history_keep_last;   // stream ring depth (>= 1); re-read on every store
+    std::uint32_t store_ref_min_bytes; // 0 = off; store-by-reference threshold, read per write
+};
+
+struct delivery_policy_t {  // ONE subscription's delivery policy (RFC-0022 §3.A) — 2 B packed
+    std::uint16_t bits;     // 0-1 reliability | 2-4 priority | 5 durability_request | 6-15 rsvd
 };
 
 struct handlers_t {                                       // four seams, not two
@@ -106,8 +106,10 @@ class graph_t {
     result_t<value_ref_t> await(const path_t&, std::chrono::nanoseconds);
 
     // subscriptions
-    result_t<void>           subscribe(const path_t& src, const path_t& target);
-    result_t<subscription_t> subscribe(const path_t& src, subscriber_fn_t fn, void* ctx);
+    result_t<void>           subscribe(const path_t& src, const path_t& target,
+                                       delivery_policy_t policy = {});
+    result_t<subscription_t> subscribe(const path_t& src, subscriber_fn_t fn, void* ctx,
+                                       delivery_policy_t policy = {});
     template <typename F>
     result_t<subscription_t> subscribe(const path_t& src, F& callback);   // lvalue only
     result_t<void>           unsubscribe(const subscription_t&);
@@ -170,9 +172,9 @@ pool exhaustion surfaces as `BACKPRESSURE`, never a silent heap fallback. See
 
 ```cpp
 // idiomatic: encode the path once (parse-once ctor), reuse the handle
-path_t p("/x:settings.reliability");                     // once — no *-deref
+path_t p("/x:settings.history_keep_last");               // once — no *-deref
 auto v = *g.find(p.key());                               // once — find → optional<vertex_handle_t>
-for (...) g.write(v, p.field(), reliable_tlv);           // hot loop — zero strings
+for (...) g.write(v, p.field(), depth_tlv);              // hot loop — zero strings
 ```
 
 ## What a read hands back

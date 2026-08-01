@@ -195,7 +195,7 @@ Element deliveries **retain the self-repair property** for any element that is w
 once: a reordered element is corrected by the next write to that same element, exactly as a
 reordered whole value is corrected by the next whole write. The two differ only for an element
 written **once and never again**, on a transport that reorders. A deployment that requires more
-already has the knob: `settings.reliability`.
+already has the concept: `reliability` is bits 0–1 of the subscription's delivery policy ([RFC-0022](0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.A; it was the per-vertex `settings.reliability` knob when this was written).
 
 ### F. Conformance vectors (proposed)
 

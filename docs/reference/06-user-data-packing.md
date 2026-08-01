@@ -271,12 +271,16 @@ The subscriber processes 4 KiB at a time, never holding more than one slice's wo
 
 ### Subscriber (assemble for batch processing)
 
-Set the assembly QoS atomically on the subscriber's `:settings` object, then register the subscription. The `address_shift.*` / `deadline_ns` fields are the v1 QoS design (see [03-addressing.md](03-addressing.md) §subscriber assembly policies):
+Set the assembly QoS on the subscriber, then register the subscription. The
+`address_shift.*` fields are the v1 QoS **design**, not implemented — see
+[03-addressing.md](03-addressing.md) §subscriber assembly policies, whose deadline is a
+module-namespaced magnitude of its own (the core `deadline_ns` knob it used to borrow was removed
+as inert by [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.D):
 
 ```cpp
-// Atomic whole-object settings write (SETTINGS 0x0B): assemble=true,
-// expected_count for 100 ms batches, deadline_ns=200 ms safety window.
-g.write(tr::graph::path_t("/local/batch-handler:settings"), assemble_settings_value);
+// Per-knob settings writes: assemble=true, expected_count for 100 ms batches,
+// address_shift.deadline_ns = a 200 ms safety window. (Design; unimplemented.)
+g.write(tr::graph::path_t("/local/batch-handler:settings.address_shift.assemble"), on_value);
 
 // Register the subtree subscription: observes every /adc/raw[i].
 g.write(tr::graph::path_t("/adc/raw:subscribers[]"), subscriber_value);
@@ -406,13 +410,14 @@ g.write(v_rpm, tr::view::view_t::over(tr::view::borrow(
     std::span<std::byte>{reinterpret_cast<std::byte*>(&target_rpm), sizeof target_rpm})));
 ```
 
-### Other hosts subscribe with `transient_local` durability
+### Other hosts subscribe requesting durability
 
 ```cpp
-// On a consumer host: set durability=transient_local + history_keep_last=1 on the
-// cached subscriber's :settings, then register the subtree subscription.
-g.write(tr::graph::path_t("/local/cached/target_rpm:settings"), durability_settings_value);
-g.write(tr::graph::path_t("/control/target_rpm:subscribers[]"), subscriber_value);
+// On a consumer host: the subscription REQUESTS the producer's latched last value
+// (RFC-0022 §3.A bit 5) — durability is a property of THIS subscription, not of the
+// producer, so a sibling subscriber that does not ask is unaffected. The producer's own
+// `:settings` carries only storage policy.
+g.write(tr::graph::path_t("/control/target_rpm:subscribers[]"), durable_subscriber_value);
 
 // Whenever the consumer wants the latest value:
 tr::graph::vertex_handle_t cached =
@@ -426,7 +431,7 @@ std::memcpy(&rpm, (*r)->only().bytes().data(), sizeof rpm);
 The combination of:
 
 - **Read of the local cached vertex** — always returns the last-known-value, no network round-trip.
-- **Subscription with `transient_local`** — late joiners get the current value, not only future updates.
+- **A subscription that sets `durability_request`** (RFC-0022 §3.A) — late joiners get the current value, not only future updates. It is the SUBSCRIBER's request, so a sibling subscription that does not ask is unaffected.
 - **Write to `/control/target_rpm`** — updates the authoritative vertex, fans out to all subscribers, all caches converge.
 
 …gives the shared-variable semantic without extra protocol surface. Updates are eventually consistent; ordering within a single subscription is preserved; concurrent writes from multiple authoritative hosts are last-write-wins by timestamp — no CRDT, no consensus (see [04-communication-flows.md](04-communication-flows.md) §network partition).
@@ -447,14 +452,14 @@ The same vertex/edge primitives cover **eight orders of magnitude** of payload r
 | 4K camera stream | 8 MiB | 30 Hz | 240 MB/s | address-shift `frame[0..N]` |
 | Lidar + camera fusion | varies | 10 Hz | 250 MB/s | two vertex trees, ts-join |
 | 1 GS/s ADC | 4 KiB slices | 244 kHz | 1 GB/s | address-shift `raw[0..N]` |
-| Continuous shared variable | 4 bytes | 1 Hz | 32 B/s | VALUE + transient_local sub |
+| Continuous shared variable | 4 bytes | 1 Hz | 32 B/s | VALUE + a durability-requesting sub |
 | 100 GB/s data plane | varies | varies | 100 GB/s | libtracer = control plane only; data plane via RDMA / shared memory |
 
 Across this range there is **no fundamental change** to the API, the wire format, or the addressing scheme. What changes is:
 
 - **Slice size** — chosen by the publisher to match transport MTU and processing granularity.
 - **Transport module loaded** — UART for RC, TCP for IMU, shared memory for ADC, RDMA for HPC.
-- **QoS settings** — best-effort for high-rate, reliable for control, transient-local for shared state.
+- **QoS** — best-effort for high-rate, reliable for control, `durability_request` for shared state: all three are the SUBSCRIPTION's (RFC-0022 §3.A), not the producer's.
 
 The protocol's job is to be invariant under these knobs; the application's job is to choose them.
 

@@ -59,7 +59,7 @@ This unblocks the transport-link half of
   **not** supply). Un-stubbing tracks **#82** (the code's cited issue) and **#407**.
 - **The current creation path is the superseded spelling.** `transport_vertex_t` registers ONE
   global `client`/`listener` catalog through `register_child_type` as a `:children[]` target on
-  `/net` (`graph.cpp:1521`), and the `quic` module extends the *same* catalog via
+  `/net` (`graph.cpp:1584`), and the `quic` module extends the *same* catalog via
   `register_transport_type` with a `kind` selector (open/closed). RFC-0014 keeps that module
   ownership but **replaces the single-global-catalog mechanism** with a per-*(transport, role)*
   module endpoint (§1); the per-module structure, the positional role, and `conn:schema`-as-catalog

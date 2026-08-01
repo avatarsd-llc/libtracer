@@ -306,6 +306,17 @@ POINT (PL=1) {
   (`:subscribers[]`, `:acl`, `:children[]`, the implemented `settings.*`
   knobs). The owner part MUST NOT be consulted for them; an owner cannot lie
   about — or hide — protocol machinery.
+
+  > **Erratum (2026-08-01), [RFC-0022](0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md):** "the implemented `settings.*` knobs"
+  > now enumerates **exactly two** — `history_keep_last` and `store_ref_min_bytes`. RFC-0022
+  > moved `reliability`, `priority` and `durability` to the subscription's packed delivery
+  > policy (they describe one producer→subscriber relationship, not a vertex) and deleted
+  > `deadline_ns` and `queue_max_bytes` outright (inert, and with no coherent per-vertex
+  > meaning). §Motivation item 1 below still lists the pre-RFC-0022 set of seven; read it as
+  > the historical record it is. The clause above is unchanged in force — the runtime is
+  > still authoritative for the protocol part — and it is now also *complete and true*, which
+  > is the condition [#706](https://github.com/avatarsd-llc/libtracer/issues/706) was filed
+  > about and RFC-0022 dissolved rather than fixed.
 - The **owner part is authoritative for `settings.app.*`** and is served
   verbatim (no runtime merge *into* it — precedence by position, zero merge
   logic on an MCU: the read is two stored/synthesized byte runs concatenated
