@@ -1677,7 +1677,13 @@ result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value)
             config = &ch[i + 1];
         }
     }
-    if (type_sel.empty() || child_name.empty()) return std::unexpected(status_t::INVALID_PATH);
+    // The wire boundary runs THE segment predicate (ADR-0073 §1, #688): a peer-supplied
+    // name must be expressible in the addressing grammar, or the vertex it creates is
+    // enumerable but unaddressable — and a `/` inside one NAME breaks the injectivity of
+    // the address→vertex map (reference/02). Same predicate, same INVALID_PATH answer as
+    // the local parser, so the tiers cannot drift.
+    if (type_sel.empty() || !valid_segment(detail::as_string_view(child_name)))
+        return std::unexpected(status_t::INVALID_PATH);
 
     // Look up the catalog type (ADR-0017): unknown => SCHEMA_NOT_FOUND (ENOTTY). The
     // map is read-only once frames flow (populated at setup), so no lock here.

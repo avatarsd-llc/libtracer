@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstring>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -178,6 +179,47 @@ void test_custom_factory() {
 
 }  // namespace
 
+/**
+ * @brief #688 / ADR-0073 §1 — the wire creation boundary runs THE segment predicate.
+ *
+ * A peer-supplied child name arrives as raw `NAME` payload bytes, bypassing
+ * `path_t::parse` entirely — so before the fix, `SPEC{NAME "name" "a/b"}` registered a
+ * vertex no conforming client could ever address (enumerable but unaddressable), and a
+ * `/` inside one NAME broke the injectivity of the address→vertex map. Each rejection
+ * case here failed before the fix (the write succeeded); the positive control pins that
+ * the predicate does not over-reject.
+ */
+void test_wire_name_predicate() {
+    std::printf("A peer-supplied child name must pass the segment predicate (#688):\n");
+    graph_t g;
+    (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
+
+    // One case per reserved character (reference/03 §Reserved characters).
+    for (const std::string_view bad : {"a/b", "a:b", "a.b", "a*b", "a?b"}) {
+        const auto w = g.write(path_t("/dev:children[]"), spec("stored_value", bad));
+        char label[64];
+        std::snprintf(label, sizeof label, "name \"%.*s\" => INVALID_PATH, nothing created",
+                      static_cast<int>(bad.size()), bad.data());
+        check(!w.has_value() && w.error() == status_t::INVALID_PATH, label);
+    }
+
+    // Over kMaxSegmentBytes: same rejection the local parser gives the same bytes.
+    const std::string long_name(tr::graph::kMaxSegmentBytes + 1, 'x');
+    const auto wl = g.write(path_t("/dev:children[]"), spec("stored_value", long_name));
+    check(!wl.has_value() && wl.error() == status_t::INVALID_PATH,
+          "an over-kMaxSegmentBytes name => INVALID_PATH");
+
+    // And none of the rejects left residue: the parent still has no children at all.
+    check(!g.find(path_t::parse("/dev/a")->key()).has_value(), "no partial registration");
+
+    // Positive control: a legal name still creates, resolves, and is addressable
+    // end-to-end through the SAME string grammar that rejects the cases above.
+    const auto ok = g.write(path_t("/dev:children[]"), spec("stored_value", "ok-name"));
+    check(ok.has_value(), "a legal name still creates");
+    check(g.find(path_t::parse("/dev/ok-name")->key()).has_value(),
+          "and the created child is addressable via path_t::parse");
+}
+
 int main() {
     test_create_and_resolve();
     test_unknown_type();
@@ -185,6 +227,7 @@ int main() {
     test_duplicate_name();
     test_non_spec_value();
     test_custom_factory();
+    test_wire_name_predicate();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");

@@ -24,6 +24,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   rebind updates only `multi_peer`/`link`, and a debug assert pins the purity invariant. No
   signature change; the reconnect path drops one alloc+free.
 
+- **A peer-supplied child name must pass the segment predicate (#688, ADR-0073 §1).** The wire
+  creation path (`graph_t::create_child`) now rejects a SPEC `name` containing a reserved
+  character (`/ : . * ?`) or exceeding `kMaxSegmentBytes` with `INVALID_PATH` — the same answer
+  `path_t::parse` gives the same bytes. Previously the name was checked only for non-emptiness,
+  so a peer could register a vertex that is enumerable but addressable by no conforming client.
+  **New public `tr::graph::valid_segment(std::string_view)`** (path.hpp) is THE shared segment
+  predicate; both tiers call it, so they cannot drift. Wire-visible: a create that used to
+  "succeed" with an unaddressable name now errors.
+
 - **A write to a vertex nobody subscribes to no longer takes the vertex lock stripe (#635).**
   `graph_t::fan_out` gated `snapshot_edges` on nothing, so every write acquired the stripe mutex
   whether or not an edge existed — and a stripe is shared by `kVertexLockStripes` vertices, so two
