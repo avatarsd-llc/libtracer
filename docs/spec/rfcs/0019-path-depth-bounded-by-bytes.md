@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0019 |
 | **Title** | Path depth is bounded by bytes: the 32-segment `PATH` cap is deleted |
-| **Status** | **draft** (2026-07-31) |
+| **Status** | **superseded** (2026-08-02) by [RFC-0023](0023-path-segment-cap-repriced-32-to-255.md) — the maintainer ruled that a normative bound stays (this RFC's own §12.5 falsifier), so the cap was **repriced 32 → 255** rather than deleted. This document's body is retained unrewritten as the groundwork RFC-0023 inherits (§6.1 corpus census, §6.2 core audit, §6.5 bindings audit). |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-07-31 |
 | **Comment window** | waived by default while solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke explicitly if outside input is wanted. Verified: `docs/implementations.md` still reads `_(none yet)_`, so the waiver's revert trigger has not fired. |

@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0023 |
 | **Title** | The path segment cap is repriced: 32 → 255, derived from the wire's own widths |
-| **Status** | **draft** (2026-08-01) |
+| **Status** | **accepted** (2026-08-02, maintainer-ratified; spec + code edits landed in the acceptance train, [#767](https://github.com/avatarsd-llc/libtracer/issues/767)) |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-08-01 |
 | **Comment window** | waived by default while solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke explicitly if outside input is wanted. Verified: `docs/implementations.md` still reads `_(none yet)_`, so the waiver's revert trigger has not fired. |

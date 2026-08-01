@@ -204,8 +204,12 @@ it is a bug against a published rule, not a consequence of this proposal.)
 - `opt.PL` MUST be `0`. The body is not a child sequence.
 - The body is zero or more **segment records**, each `[u8 len][len bytes of UTF-8]`, in order.
 - `len` MUST be in `1..64`. `len == 0` is **reserved** (§8) and MUST be rejected by a resolver.
-- Total path length ≤ 1024 bytes; segment count ≤ 32. *(Unchanged, and both are already
-  normative in `docs/reference/03-addressing.md` §path syntax.)*
+- Total path length ≤ 1024 bytes; segment count ≤ 255
+  ([RFC-0023](0023-path-segment-cap-repriced-32-to-255.md)). *(Unchanged by this RFC, and both
+  are already normative in `docs/reference/03-addressing.md` §path syntax. Under the packed body
+  the 255 becomes a **binding** cap for short segments — `1 + len` per record admits 512
+  segments in 1024 bytes — so this RFC additionally owns the `path/path-deep-255-packed` vector
+  and the crossover note, RFC-0023 §4.2.)*
 
 `docs/reference/05-protocol-tlvs.md:274` — *"Each child MUST be a NAME TLV (`type=0x02`); other
 types are invalid in PATH context"* — is replaced by the body grammar above. This is an
