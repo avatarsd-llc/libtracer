@@ -312,7 +312,7 @@ Subscriber assembly follows `:settings.address_shift.*` — see [03-addressing.m
 > ⚠️ **This flow describes no implemented behaviour.** There is no deadline engine, no liveness
 > checker and no `:liveness.*` field anywhere in the reference implementation
 > ([#586](https://github.com/avatarsd-llc/libtracer/issues/586)), and the `:settings.deadline_ns`
-> knob that used to accept writes nothing read was **removed** by [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.D — a writable
+> knob that used to accept writes nothing read was **removed** by [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.E — a writable
 > knob no code honours is worse than an absent one, which at least answers `SCHEMA_NOT_FOUND`. The
 > sketch below is kept as the intended shape should deadlines ever land; if they do, they arrive as
 > a magnitude on the **subscription**, never as a bit-packed field and never as a per-vertex knob.

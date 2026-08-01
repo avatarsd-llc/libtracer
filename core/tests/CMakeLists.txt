@@ -353,8 +353,8 @@ target_link_libraries(app_fields_test PRIVATE libtracer)
 libtracer_test_warnings(app_fields_test)
 add_test(NAME app_fields COMMAND app_fields_test)
 
-# RFC-0022 — the per-subscription delivery policy, the removed vertex knobs, and the
-# copy-at-registration inheritance of the two surviving storage knobs.
+# RFC-0022 (as amended) — the per-subscription delivery policy, the removed vertex knobs,
+# and §3.F: the two surviving storage declarations are owner-side and inherited by NOBODY.
 add_executable(qos_policy_test qos_policy_test.cpp)
 target_link_libraries(qos_policy_test PRIVATE libtracer)
 libtracer_test_warnings(qos_policy_test)

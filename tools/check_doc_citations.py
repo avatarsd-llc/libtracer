@@ -66,7 +66,7 @@ ANCHORS = [
     ("core/src/transport_vertex.cpp:238", "register_vertex_key(mod_key"),
     ("core/src/transport_vertex.cpp:318", "if (constructed)"),
     ("core/src/transport_vertex.cpp:320", "link_state_t::LISTENING : link_state_t::UP"),
-    ("core/include/libtracer/transport_vertex.hpp:262", "result_t<void> register_module"),
+    ("core/include/libtracer/transport_vertex.hpp:266", "result_t<void> register_module"),
     ("core/include/libtracer/transport_vertex.hpp:96", "enum class link_state_t"),
     ("core/src/graph.cpp:1499", "field.steps.size() != 1", 'step0.name == "subscribers"'),
     ("core/src/graph.cpp:1566", "field.steps.size() != 1 || !plain_step(step0)"),

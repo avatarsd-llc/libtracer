@@ -103,11 +103,15 @@ enum class link_state_t : std::uint8_t {
 };
 
 /**
- * @brief One connection's transport-private settings — NOT the graph's `settings_t`.
+ * @brief One connection's transport-private settings — a `tr::net` record, not part of
+ *        any vertex's protocol `:settings` surface.
  *
  * `addr`/`port`/`role`/`keepalive_ms`/`kind` are a *device-private* `:settings` facet of
  * a connection vertex (ADR-0021: standard vs device-private fields), so they live here on
- * the `tr::net` leaf record, never polluting the L4 `settings_t` every sensor carries.
+ * the `tr::net` leaf record. They are reached through this transport's own config door,
+ * never through the vertex `:settings` core namespace — which RFC-0022 §3.B emptied
+ * outright, so there is no shared per-vertex policy record for these to be confused with
+ * or to leak into.
  * `kind` selects the transport factory (e.g. `"udp"`, `"ws"`) used to construct the
  * socket when no @ref transport_vertex_t::provide_link was staged; empty = pre-supplied
  * link only.

@@ -248,7 +248,7 @@ Two further grouping rules:
 The subscriber's QoS at `:settings.address_shift.*` controls assembly behavior. (Field names are
 defined here as the v1 **design**; none of them is implemented, and the two knobs this table used
 to borrow from the core namespace — `deadline_ns` and `queue_max_bytes` — no longer exist, having
-been removed as inert by [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.D. When assembly lands, its deadline and its bound are
+been removed as inert by [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.E. When assembly lands, its deadline and its bound are
 its own module-namespaced magnitudes under `address_shift.`, not core knobs.)
 
 | Field | Type | Default | Effect |

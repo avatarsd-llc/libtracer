@@ -116,9 +116,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
   **A vertex-RAM win falls out of it.** `adopt_identity`'s extension-block gate loses its
   `settings == kDefaultSettings` term, so **strictly more vertices stay extension-less than
-  before**: registration can no longer force the cold block, and neither can an ancestor. Where an
-  override used to materialise a whole `vertex_ext_t` (120 B on x86-64) on every descendant of its
-  subtree, a declaration now reaches exactly the vertex it names.
+  before**: REGISTRATION can no longer force the cold block. That was the only way an ancestor's
+  settings ever reached a descendant — they were copied at registration time, never consulted
+  afterwards — so removing the parameter removes the whole mechanism. Where a non-default
+  `settings_t` passed to `register_vertex` used to materialise a whole `vertex_ext_t` (120 B on
+  x86-64) on the new vertex, a declaration now reaches exactly the vertex it names and costs
+  nothing anywhere else.
 
 - **BREAKING (RFC-0022 §4): the whole `:settings.<knob>` write surface is REMOVED.** All seven
   historical names — `reliability`, `priority`, `durability`, `deadline_ns`, `queue_max_bytes`,
