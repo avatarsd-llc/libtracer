@@ -17,7 +17,7 @@ lock each stage takes, where the buffers come from, and what the delivery legs c
 
 ## 1. Write path
 
-`write_impl` (`core/src/graph.cpp:975`) is the one body behind every write overload. It takes
+`write_impl` (`core/src/graph.cpp:988`) is the one body behind every write overload. It takes
 **no map lock**. The stages, in order:
 
 | stage | what it does |
@@ -35,7 +35,7 @@ first, and `find_ptr` takes `map_mutex_` in shared mode (`graph.cpp:546`), so th
 Two allocation-shaped details on the store leg. A `HANDLER`-role write clones the rope before
 storing, because the user handler consumes the value and there is no published pointer to
 deliver afterwards; the clone is `try_clone_rope`, nothrow, and on failure the handler still
-runs and only the subscriber delivery drops (`graph.cpp:907-919`, `try_clone_rope` at `:730`).
+runs and only the subscriber delivery drops (`graph.cpp:907-919`, `try_clone_rope` at `:743`).
 Every other role delivers **the exact pointer `store_value` handed back**, so the hot write path
 reclones nothing (`graph.cpp:928-930`).
 
@@ -103,7 +103,7 @@ inline estimate small, because the in-process callback leg is the hot case. The 
 independent and any subset may fire for one edge: a callback pointer, a target key, and a
 non-empty link name.
 
-`bubble_up` (`core/src/graph.cpp:942`, entered only when `listeners_above() > 0`, `:1128`) walks parent pointers, which
+`bubble_up` (`core/src/graph.cpp:955`, entered only when `listeners_above() > 0`, `:1141`) walks parent pointers, which
 are immutable once linked, and so takes **no lock at all**; a placeholder ancestor holds no edges
 and its `fan_out` is a no-op. An idle write — nobody subscribed above — pays one relaxed load.
 

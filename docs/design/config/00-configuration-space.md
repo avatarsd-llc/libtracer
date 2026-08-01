@@ -129,13 +129,21 @@ type-erasure bloat and template-instantiation bloat alike.
 | `kVertexLockStripes` (`config.hpp.in:79`) | count | 16 | `-DLIBTRACER_VERTEX_LOCK_STRIPES` | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` |
 | `kCacheLineBytes` (`:102`) | padding width | 64 | `-DLIBTRACER_CACHE_LINE_BYTES` | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:193-197`) |
 | `kHazardReaderSlots` (`:129`) | count | 64 | `-DLIBTRACER_HAZARD_READER_SLOTS` | hardcoded to 64 (`CMakeLists.txt:188`) |
-| `kMaxVertexBytes64` / `kMaxVertexBytes32` (`:146` / `:158`) | RAM ceiling | 120 / 80 | the preset — deliberately not a CMake variable | the preset |
-| `acl_policy_t` (`:167`) | policy type | `allow_only_policy_t` | `-DLIBTRACER_ACL_FULL=ON` | hardcoded to `allow_only_policy_t` (`CMakeLists.txt:186`) — the full policy is not selectable |
-| `lkv_slot_t` (`:183`) | policy type | `sp_atomic_slot_t` | `-DLIBTRACER_LKV_SLOT=<type>` | hardcoded to `sp_atomic_slot_t` (`CMakeLists.txt:187`) — the hazard slot is not selectable |
+| `kReclaimAnnounceSlots` (`:159`) | count | 0 | `-DLIBTRACER_RECLAIM_ANNOUNCE_SLOTS` | hardcoded to 0 |
+| `kSeamAnnounceCounter` (`:174`) | flag | off (on for the repo's own builds) | `-DLIBTRACER_SEAM_ANNOUNCE_COUNTER` | hardcoded off |
+| `kMaxVertexBytes64` / `kMaxVertexBytes32` (`:191` / `:203`) | RAM ceiling | 120 / 80 | the preset — deliberately not a CMake variable | the preset |
+| `acl_policy_t` (`:212`) | policy type | `allow_only_policy_t` | `-DLIBTRACER_ACL_FULL=ON` | hardcoded to `allow_only_policy_t` (`CMakeLists.txt:186`) — the full policy is not selectable |
+| `lkv_slot_t` (`:228`) | policy type | `sp_atomic_slot_t` | `-DLIBTRACER_LKV_SLOT=<type>` | hardcoded to `sp_atomic_slot_t` (`CMakeLists.txt:187`) — the hazard slot is not selectable |
 
 Each is documented at its declaration with what it costs and when to move it; that header is
-the reference, not this table. What matters here is the shape: **five knobs, all named, all
-finite.** Two are counts, one is a width, two are type bindings.
+the reference, not this table. What matters here is the shape: **seven knobs, all named, all
+finite.** Three are counts, one is a width, one is a flag, two are type bindings.
+
+`kReclaimAnnounceSlots` is the one whose default is 0 on purpose. It reserves announcement
+participants for the ADR-0072 reclamation domain, which — unlike the LKV slot's registry above —
+every `graph_t` builds, so a reserved table is unconditional `.bss` on a node that never runs a
+second reader thread. Participants are claimed per thread on first use instead; the knob buys
+*determinism* (no allocator touch on a reader path), never capacity.
 
 The ESP-IDF component exposes exactly five options — `LIBTRACER_TRANSPORT_{UDP,TCP,WS,CAN}` and
 `LIBTRACER_VERTEX_LOCK_STRIPES` — so an integrator reaching for the full ACL policy, the hazard

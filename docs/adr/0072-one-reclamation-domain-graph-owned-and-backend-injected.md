@@ -83,7 +83,9 @@ The record is **one word**, and that is a measured requirement rather than an ae
 
 A thread now claims one participant (a cache-line-isolated group of announcement words) **once**, and releases it at thread exit. The participant table is process-global, which is sound because **announcements are matched by address**: two live blocks cannot share one, so a foreign domain's announcement can never match a parked block. Per-instance RAM drops (one table, not one per graph); the per-instance bound §2 wanted is a property of the retired list, which stays per instance.
 
-The `detail_hp` overflow policy — a shared cell under a **non-recursive spin lock** — is replaced by a per-domain **stall counter**: a guard that can get no announcement word (more reader threads than participants, or nesting deeper than a participant's words) increments it, and a scan frees nothing while it is non-zero. It is a counter, not a lock: it nests to any depth, it never waits, and it cannot self-deadlock — which matters because the library's own call sites hold a guard across a user callback that may re-enter the graph and announce again. Nesting is therefore SAFE at any depth; past `kAnnouncePerThread` it costs reclamation throughput on that thread and nothing else.
+The `detail_hp` overflow policy — a shared cell under a **non-recursive spin lock** — is replaced by a per-domain **stall counter**: a guard that can get no announcement word increments it, and a scan frees nothing while it is non-zero. It is a counter, not a lock: it nests to any depth, it never waits, and it cannot self-deadlock — which matters because the library's own call sites hold a guard across a user callback that may re-enter the graph and announce again. Nesting is therefore SAFE at any depth.
+
+> **Corrected by Erratum 2 (E2.2).** This paragraph originally continued: *"past `kAnnouncePerThread` it costs reclamation throughput on that thread and nothing else."* **That sentence was false.** `stall_` is per-DOMAIN, so a single thread nesting one level too deep — or a single thread past a fixed participant table — paused reclamation for every tenant of that domain, which is #576's own defect with a different trigger. Erratum 2 removes both triggers (participants and nesting depth are unbounded) and states what remains true: a stall is domain-wide while it lasts, it is reachable only through an allocation failure, and a scan under one costs O(1) rather than O(parked).
 
 ### E1.3 — §4's fold is NOT the remedy; the remedy is an asymmetric barrier
 
@@ -94,3 +96,57 @@ The remedy is to move that ordering to the side that is cold. Where the OS can s
 ### E1.4 — The gate counter is a build option, not a shipped member
 
 `seam_announces()` is the §4 gate's structural observable, and a relaxed RMW on a shared word measured at roughly a tenth of a handler read. It is now `std::optional`, maintained only when `kSeamAnnounceCounter` is on (the repo's own builds), and `nullopt` — never a plausible-looking `0` — everywhere else.
+
+## Erratum 2 (2026-08-01, [#576](https://github.com/avatarsd-llc/libtracer/issues/576) round-2 review)
+
+Erratum 1 removed the *waiting* from retirement and left three things wrong with it. Each was found with a working reproducer; each is a correctness or hard-constraint defect rather than a preference.
+
+### E2.1 — `retire` must not FREE either: reclamation is a caller-scheduled event
+
+E1.1's argument was that a retirer holding `map_mutex_` must never wait for a reader. It is half the argument. Freeing a parked block runs the tenant's reclaimer, which runs the block's destructor — for this tenant, `~value_handlers_t`, i.e. the destructors of the embedder's `std::function` captures. RFC-0010 §A.3 grants a callback the freedom to re-enter the graph, and nothing distinguishes a capture's destructor from the callback itself. So the threshold-crossing scan E1.1 left inside `retire()` ran **arbitrary user code under `graph_t::map_mutex_` held UNIQUE**.
+
+Reproduced: a handler capturing a `shared_ptr` whose destructor calls `g.find(...)`. At the batch-th cycle the scan fires, the destructor asks for a mutex its own thread already holds, and glibc throws `std::system_error: Resource deadlock avoided` — out of a `void scan() noexcept`, so `std::terminate` and a core dump here, and a silent hang on any implementation that does not detect EDEADLK. This is a **regression against `main`**, where a parked seam was freed only in `~graph_t`, with no lock held.
+
+The rule is therefore stronger than E1.1 stated, and it is the whole of this erratum: **no user-supplied destructor may run under a graph lock.** `retire(link)` parks and does nothing else — no allocation, no wait, and no reclaimer call — which is what makes it safe under any lock. Reclamation moves to `collect()`, which the tenant calls where it holds nothing; `graph_t::retire` calls it past both `map_mutex_` and `sweep_mutex_`, gated on `reclaim_due()` so the scan (and its process-wide barrier) stays batched. The final sweep is unchanged, and the domain member's POSITION in `graph_t` is what keeps it legal: members die in reverse declaration order, so the domain is torn down with the rest of the graph still alive and no lock held.
+
+The header sentence *"safe to call while holding a lock a reader's user callback might take: the whole point of the design"* was true of the waiting and false of the freeing; it now says which operation is which.
+
+### E2.2 — A stalled participant may not freeze the domain, and may not make `retire` O(parked)
+
+E1.2's stall counter made a scan free **nothing** while it was non-zero, re-park the whole batch, and decrement the parked count by zero — so the count never fell back below the batch threshold and *every* subsequent retire ran a full scan, each carrying a `membarrier` IPI broadcast, under the map lock. Measured: 0.062 µs/retire unstalled against 13.4 → 39.2 → 70.9 → 105.3 µs/retire as the parked set grew 0 → 15 000, still climbing linearly.
+
+And it was reachable with no artificial nesting at all. `kParticipants` was `kHazardReaderSlots` = 64, claimed once per THREAD, so 64 long-lived reader threads starved the 65th on every guard: 12 159 live blocks after 20 000 retires and growing. `kAnnouncePerThread` = 2 did the same to any thread at the third level of callback re-entrancy. That is precisely the failure mode §4 of the PR uses to *reject* epoch/QSBR — one slow participant stalling all reclamation, unbounded — reintroduced by the mechanism meant to avoid it.
+
+Three changes, in the order they matter:
+
+- **Participants are unbounded.** A thread claims one on its first protected read and releases it at thread exit; past the statically reserved count it allocates one (once per thread, cold, reused by later threads, never freed). There is no 65th thread. This is also the no-synthetic-limits rule applied where E1.2 broke it: "how many threads read this node" is not a number the library gets to pick.
+- **Nesting depth is unbounded.** A thread that nests past its participant's inline words extends it with a **grow-only** chain link. Grow-only, not pop-on-unwind: unlinking would hand a concurrently scanning thread a pointer into storage the reader is about to reuse.
+- **A stall is O(1), and it raises its own threshold.** What remains of the stall — reachable only when the process cannot allocate announcement storage at all — declines to scan instead of re-walking and re-parking, and doubles the collect threshold. Both properties are asserted, the second structurally (`reclaim_due()` must be false after a scan under a stall), because a branch nothing exercises is a vacuous guard.
+
+Measured after, same shape: peak live blocks 20 039 → **80**, per-retire cost 55.5 → 141.0 µs/retire → **3.5 → 2.5 µs/retire** (flat).
+
+### E2.3 — The announcement registry may not be unconditional `.bss`
+
+E1.2's process-global table was sized by `kHazardReaderSlots` and emitted unconditionally: **4 096 B of `.bss` in every build**, including the MCU one. `kHazardReaderSlots` sizes the LKV slot's registry, which the default `sp_atomic_slot_t` binding never references and the linker therefore never emits — but every `graph_t` builds the reclamation domain, so the same knob meant something completely different here. On the ESP32-C6 half of the dual target that is ~25 % of the static-RAM budget, and RAM is a hard constraint, not a ranked goal.
+
+The registry is now **grown, not reserved**: a new knob, `tr::graph::kReclaimAnnounceSlots` (`-DLIBTRACER_RECLAIM_ANNOUNCE_SLOTS`), reserves the first N participants in `.bss` and **defaults to 0**. It is a *determinism* knob for a target that must not touch the allocator on a reader path, never a capacity one. Measured (`-Os`, real `core/src/graph.cpp` + `hazard_domain.cpp`, rv32 GCC 15.2, checked-in default `config.hpp`): `main` 1 200 B, the pre-erratum branch 5 253 B (**+4 053**), this design 1 158 B (**−42**, the deleted `vertex_t::handlers()::kNoHandlers` static outweighing the domain's globals). On the host, linked-binary `.bss`: 2 152 → 6 225 (+4 073) → **2 097 (−55)**; at `kReclaimAnnounceSlots=64` the 4 KB comes back, opt-in.
+
+The header claim that *"the static-RAM census does not move"* was true only against the branch's own first push, and is deleted.
+
+### E2.4 — The residual is the announce pair, and nothing else
+
+Erratum 1 closed with a shortfall stated honestly and left open: the read leg was inside the noise band and the write leg was not (+1.5…2.1 ns, ≈ +3.3 %), with §5 recording *"find where the last ~1.5 ns on the write leg goes — that is a bisect, not a design change."*
+
+The bisect was run, and it says there is nothing else to find. Three arms, interleaved, 21 reps, `taskset -c 2`, Release `-O2`, with the `plain` control **flat across all three** (13.39 / 13.39 / 13.16 ns) — the third arm is this head with the two `guard.protect()` calls replaced by a plain `slot->load(acquire)`, i.e. one line different on each of the read and write paths:
+
+| arm | handler read | handler write | `plain` (control) | Δ read | Δ write |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `main` (`a239b03`) | 26.58 ns | 45.08 ns | 13.39 ns | — | — |
+| this head | 28.56 ns | 47.01 ns | 13.39 ns | **+1.98** | **+1.94** |
+| this head, announce ablated | 26.71 ns | 44.68 ns | 13.16 ns | +0.13 | −0.40 |
+
+So the residual is **not** the retire record's effect on the seam block's size class, **not** `graph_t`'s new member, **not** the retire path, and **not** an asymmetry between the two legs (they cost the same ~1.9 ns once measured against a flat control). It is the announce pair itself: a plain store, a dependent re-read of the source, and a release clear, on every protected operation.
+
+That is the floor for per-read protection of a lock-free block, and it is not reducible without removing the protection: something must publish "I hold p" before a reclaimer may decide p is unheld. The alternatives were all priced and rejected in the PR's §4 — epoch/QSBR re-creates exactly the unbounded-stall defect E2.2 just removed; keeping the block immortal and recycling it moves the race into the `std::function`s a reader is calling; a lock costs more *and* re-creates E2.1's re-entrancy deadlock; and skipping the announce until the domain has first retired is unsafe without a grace period for the readers already in flight.
+
+The reclamation domain therefore costs ≈ 2 ns on both seam legs. Whether that is acceptable is the maintainer's call, and this ADR records it as a measured, argued cost rather than as noise.

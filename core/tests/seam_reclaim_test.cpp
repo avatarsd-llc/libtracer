@@ -288,6 +288,68 @@ void test_retire_never_waits_for_an_announced_reader() {
           "the announced reader's callback re-entered the graph and completed");
 }
 
+// ---------------------------------------------------------------------------
+// (5) The round-2 blocker: freeing a seam block runs the handler's CAPTURES' destructors,
+//     which are embedder code — and RFC-0010 §A.3 lets that code re-enter the graph. So
+//     the free may not happen under a graph lock, however non-blocking the parking is.
+//
+//     PRE-FIX this DIES at the batch-th cycle: `retire()` scanned inline, under
+//     `std::unique_lock(map_mutex_)`, so the capture's destructor re-entered `find()` on
+//     a mutex the same thread already held — `std::system_error: Resource deadlock
+//     avoided`, thrown out of a `noexcept` scan, i.e. `std::terminate` (and a hard hang on
+//     any implementation that does not detect EDEADLK). Retiring is now a park and the
+//     scan runs past the lock, so this returns.
+//
+//     Note what the assertion is: not just "it did not die" but that the re-entrant call
+//     actually RAN and SUCCEEDED, which is the only way to know the destructor reached the
+//     graph rather than being skipped.
+void test_capture_destructor_may_reenter_the_graph() {
+    std::printf("#576 round 2: a freed seam's capture destructor re-enters the graph:\n");
+    graph_t g;
+    (void)g.register_vertex(path_t("/target"), role_t::STORED_VALUE);
+
+    /** @brief A capture whose DESTRUCTOR calls back into the graph — the shape an embedder
+     *         gets for free by capturing any handle-owning object in a handler. */
+    struct reentrant_capture_t {
+        graph_t* g = nullptr;
+        std::atomic<int>* destroyed = nullptr;
+        std::atomic<int>* resolved = nullptr;
+        ~reentrant_capture_t() {
+            if (g == nullptr) return;
+            if (g->find(path_t("/target").key()).has_value())
+                resolved->fetch_add(1, std::memory_order_relaxed);
+            destroyed->fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+
+    std::atomic<int> destroyed{0};
+    std::atomic<int> resolved{0};
+    // Well past the collect threshold, so the scan that frees these blocks certainly fires
+    // while the loop is running rather than only in ~graph_t.
+    constexpr std::size_t kCycles = 4 * hazard_domain_t::kRetireBatch;
+    bool all_ok = true;
+    for (std::size_t i = 0; i < kCycles; ++i) {
+        tr::graph::handlers_t h;
+        auto cap = std::make_shared<reentrant_capture_t>();
+        cap->g = &g;
+        cap->destroyed = &destroyed;
+        cap->resolved = &resolved;
+        h.on_read = [cap]() -> tr::graph::result_t<tr::view::rope_t> {
+            return tr::view::rope_t{val_u8(0x11)};
+        };
+        const auto vh = g.try_register_vertex(path_t("/reenter"), role_t::HANDLER, std::move(h));
+        if (!vh.has_value() || !g.retire(*vh).has_value()) {
+            all_ok = false;
+            break;
+        }
+    }
+    check(all_ok, "every register/retire cycle returned (no deadlock, no terminate)");
+    check(destroyed.load() > 0,
+          "seam blocks were actually freed during the loop (the scan ran, not just ~graph_t)");
+    check(resolved.load() == destroyed.load(),
+          "every capture destructor re-entered the graph and RESOLVED — no lock was held");
+}
+
 }  // namespace
 
 int main() {
@@ -295,6 +357,7 @@ int main() {
     test_slow_reader_vs_retire();
     test_no_announce_without_ext();
     test_retire_never_waits_for_an_announced_reader();
+    test_capture_destructor_may_reenter_the_graph();
     test_concurrent_read_vs_retire_churn();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,

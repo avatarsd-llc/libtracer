@@ -26,20 +26,31 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   Observability: `graph_t::seam_domain()` (census / accounting) and
   `graph_t::seam_announces()` (the announce-gate counter — see the BREAKING note below).
 
-  Per ADR-0072 erratum 1 the domain's shape is not what the ADR first specified:
-  **`retire` allocates nothing and never blocks.** The retire record is a one-word
-  `tr::mem::retire_link_t` the tenant embeds as the FIRST member of the block it retires
-  (`retire(link)`), so there is no allocation, no exhaustion, and no
+  Per ADR-0072 errata 1 and 2 the domain's shape is not what the ADR first specified:
+  **`retire` allocates nothing, never blocks, and frees nothing.** The retire record is a
+  one-word `tr::mem::retire_link_t` the tenant embeds as the FIRST member of the block it
+  retires (`retire(link)`), so there is no allocation, no exhaustion, and no
   wait-for-readers fallback — a retirer holding the map lock can never wait for a reader
-  whose user callback wants that lock. Readers announce into a per-thread participant
-  (claimed once, released at thread exit) rather than a per-operation cell, and a guard
-  that can get no announcement word — more reader threads than
-  `kHazardReaderSlots`, or guards nested deeper than a participant's words — increments a
-  **stall counter** that pauses reclamation instead of taking a lock, so guards nest to
-  any depth and a user callback may always re-enter the graph. Where the platform can
-  serialize other CPUs on demand (Linux `membarrier`), the announcement is a plain store
-  and the reclaimer carries the ordering; elsewhere both sides use the classical `seq_cst`
-  protocol.
+  whose user callback wants that lock. Freeing is a separate, caller-scheduled event
+  (`collect()`, gated by `reclaim_due()`) because it runs the retired block's destructor,
+  which is embedder code — see the BREAKING note below. Readers announce into a per-thread
+  participant (claimed on first use, released at thread exit) rather than a per-operation
+  cell; participants and nesting depth are both unbounded, so no reader count and no
+  callback re-entrancy depth can pause reclamation. Where the platform can serialize other
+  CPUs on demand (Linux `membarrier`), the announcement is a plain store and the reclaimer
+  carries the ordering; elsewhere both sides use the classical `seq_cst` protocol.
+
+- **`LIBTRACER_RECLAIM_ANNOUNCE_SLOTS` build option / `tr::graph::kReclaimAnnounceSlots`
+  (#576, ADR-0072 erratum 2).** How many reclamation-domain announcement participants are
+  reserved in `.bss` at link time. **Defaults to 0**, which is the whole point: every
+  `graph_t` builds the domain, so a table sized off `kHazardReaderSlots` (as the first cut
+  did) was 4 KB of unconditional static RAM even on a node that runs one reader thread —
+  ~25 % of the ESP32-C6 budget. Participants are claimed per thread on first use, released
+  at thread exit and reused, so the census follows the threads a node actually runs. Raise
+  it on a target that must not touch the allocator on a reader path; it is a determinism
+  knob, never a capacity one (participants are unbounded either way). Measured `.bss` vs
+  `main`, rv32 `-Os`: 1 200 B → 1 158 B at the default; host linked binary 2 152 B →
+  2 097 B.
 
 - **`LIBTRACER_SEAM_ANNOUNCE_COUNTER` build option / `tr::graph::kSeamAnnounceCounter`
   (#576, ADR-0072 erratum 1).** Maintains `graph_t::seam_announces()`. Defaults to the
@@ -58,6 +69,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   (no directed registry entry to store yet — the #741 work's territory).
 
 ### Changed
+
+- **BREAKING: `tr::mem::hazard_domain_t::retire()` no longer reclaims — call `collect()`
+  (#576, ADR-0072 erratum 2).** `retire(link)` now only parks the block; a threshold
+  crossing no longer runs the scan inline. A tenant pairs it with
+  `if (d.reclaim_due()) d.collect();` **at a point where it holds no lock**, which is what
+  `graph_t::retire` does past `map_mutex_`. The reason is a correctness one, not a taste
+  one: freeing a parked block runs that block's destructor, and for the value seam that is
+  the destructor of the embedder's `std::function` captures — code RFC-0010 §A.3 permits
+  to re-enter the graph. Scanning inside `retire()` therefore ran arbitrary user code under
+  the graph's write lock (`std::system_error: Resource deadlock avoided`, thrown out of a
+  `noexcept` scan, on a capture whose destructor called `graph_t::find`). A domain whose
+  `collect()` is never called reclaims only in its destructor — the pre-ADR-0072 behaviour,
+  never a use-after-free.
+
+- **BREAKING (behaviour): a retired handler's captured storage is now freed, so a view
+  borrowing it does not outlive the retire (#576).** Under the park-forever vector a
+  `value_handlers_t` block was never destroyed, so a handler that returned a `view_t`
+  borrowing its OWN captured buffer kept working for as long as the process lived, even
+  after the vertex was retired. A domain scan now frees that block once no reader announces
+  it, and the borrowed bytes go with it. **This is a lifetime narrowing, and it is
+  deliberate** — the old behaviour was an unbounded leak, not a guarantee. Every in-repo
+  caller is safe (handlers return owning ropes, or views over segments the backend owns);
+  an embedder whose handler hands out a view into its own capture must return owning
+  storage instead, or keep that storage alive independently of the handler.
 
 - **BREAKING: `vertex_t::handlers()` is gone; use `handlers_slot()` + the graph's domain
   (#576, ADR-0072).** The old accessor returned a bare reference whose safety rested on

@@ -1059,11 +1059,17 @@ class graph_t {
     // so a swapped-out block cannot be freed at retire() time; the domain parks it and a
     // scan frees it once no reader announces it, which is what BOUNDS live seam blocks
     // under peer-driven churn (#576 — the old park-forever vector grew monotonically).
-    // Records draw from value_backend_ (constructor-injected); ~graph_t runs the final
-    // sweep. APPENDED after ctl_ under the same layout-stability rule its note states:
-    // the domain embeds a multi-KB announcement-cell table, which mid-object would shift
-    // every member below it. `mutable`: the const read paths announce through it, like
-    // the instrumentation counters above.
+    // Records ride inside the retired blocks (ADR-0072 erratum 1); value_backend_ is what
+    // a reclaimer returns backend-allocated blocks to. ~graph_t runs the final sweep — and
+    // this member's POSITION is what makes that sweep legal: members die in reverse
+    // declaration order, so the domain is torn down while root_, mr_ and map_mutex_ are
+    // still alive and no lock is held, which is what a freed seam block's `std::function`
+    // captures need if their destructors re-enter the graph (RFC-0010 §A.3). It is
+    // APPENDED after ctl_ under that member's layout-stability rule — the object is six
+    // words (backend, reclaimer, list head, count, threshold, stall) and the announcement
+    // storage is process-global rather than embedded here, but inserting even six words
+    // mid-object would shift every member below it. `mutable`: the const read paths
+    // announce through it, like the instrumentation counters above.
     mutable mem::hazard_domain_t seam_domain_;
     // Announce-pair instrumentation — see seam_announces(). The RFC-0005
     // near-free-when-idle observable applied to ADR-0072 §4's gate: bumped ONLY on the

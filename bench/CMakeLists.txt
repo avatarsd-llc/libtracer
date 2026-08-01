@@ -233,3 +233,10 @@ target_compile_options(bench_seam_guard PRIVATE -Wall -Wextra)
 add_executable(probe_seam_churn probe_seam_churn.cpp)
 target_link_libraries(probe_seam_churn PRIVATE libtracer)
 target_compile_options(probe_seam_churn PRIVATE -Wall -Wextra)
+
+# The round-2 starvation probe (ADR-0072 erratum 2): more long-lived readers than a fixed
+# announcement table would hold, against a retire storm. Reports the live-block bound and
+# the per-retire cost — the two numbers the erratum's E2.2 quotes.
+add_executable(probe_seam_starvation probe_seam_starvation.cpp)
+target_link_libraries(probe_seam_starvation PRIVATE libtracer)
+target_compile_options(probe_seam_starvation PRIVATE -Wall -Wextra)

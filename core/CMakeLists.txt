@@ -221,6 +221,14 @@ set(LIBTRACER_LKV_SLOT sp_atomic_slot_t CACHE STRING
 # Costs (N+1)*128 bytes of .bss, and zero unless LIBTRACER_LKV_SLOT=hazard_slot_t.
 set(LIBTRACER_HAZARD_READER_SLOTS 64 CACHE STRING
     "Hazard-pointer domain size (threads that may concurrently touch an LKV slot)")
+# Statically reserved announcement participants for the ADR-0072 reclamation domain, which
+# EVERY graph_t builds — so unlike the knob above, a table here is unconditional .bss on a
+# node that never runs a second reader thread. Default 0: participants are claimed per
+# thread on first use and released at thread exit, so the static cost is zero and the
+# dynamic cost is one small allocation per reader thread. Raise it on a target that must
+# not touch the allocator on a reader path.
+set(LIBTRACER_RECLAIM_ANNOUNCE_SLOTS 0 CACHE STRING
+    "Reclamation-domain announcement participants reserved in .bss (0 = claim per thread)")
 # The value-seam announce counter (ADR-0072 §4's gate observable). ON for the repo's own
 # builds — its tests assert the gate structurally — and OFF for everyone else, because it
 # is a shared relaxed RMW on the seam read/write path and this project ranks latency first.
@@ -246,12 +254,14 @@ set(_lt_saved_stripes "${LIBTRACER_VERTEX_LOCK_STRIPES}")
 set(_lt_saved_policy "${LIBTRACER_ACL_POLICY}")
 set(_lt_saved_slot "${LIBTRACER_LKV_SLOT}")
 set(_lt_saved_hp "${LIBTRACER_HAZARD_READER_SLOTS}")
+set(_lt_saved_ras "${LIBTRACER_RECLAIM_ANNOUNCE_SLOTS}")
 set(_lt_saved_line "${LIBTRACER_CACHE_LINE_BYTES}")
 set(_lt_saved_sac "${LIBTRACER_SEAM_ANNOUNCE_COUNTER_CXX}")
 set(LIBTRACER_VERTEX_LOCK_STRIPES 16)
 set(LIBTRACER_ACL_POLICY allow_only_policy_t)
 set(LIBTRACER_LKV_SLOT sp_atomic_slot_t)
 set(LIBTRACER_HAZARD_READER_SLOTS 64)
+set(LIBTRACER_RECLAIM_ANNOUNCE_SLOTS 0)
 set(LIBTRACER_CACHE_LINE_BYTES 64)
 set(LIBTRACER_SEAM_ANNOUNCE_COUNTER_CXX false)
 configure_file(
@@ -262,6 +272,7 @@ set(LIBTRACER_VERTEX_LOCK_STRIPES "${_lt_saved_stripes}")
 set(LIBTRACER_ACL_POLICY "${_lt_saved_policy}")
 set(LIBTRACER_LKV_SLOT "${_lt_saved_slot}")
 set(LIBTRACER_HAZARD_READER_SLOTS "${_lt_saved_hp}")
+set(LIBTRACER_RECLAIM_ANNOUNCE_SLOTS "${_lt_saved_ras}")
 set(LIBTRACER_CACHE_LINE_BYTES "${_lt_saved_line}")
 set(LIBTRACER_SEAM_ANNOUNCE_COUNTER_CXX "${_lt_saved_sac}")
 file(READ ${CMAKE_CURRENT_SOURCE_DIR}/include/libtracer/config.hpp _lt_cfg_default)

@@ -405,10 +405,14 @@ void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& k
         // is never freed here; a domain scan frees it once no announcement covers it,
         // which is what bounds live seam blocks under peer-driven churn (#576).
         //
-        // The record rides INSIDE the block (`hz_link`, its first member), so this
-        // allocates nothing and cannot fail — which is what makes it safe to call with
-        // map_mutex_ held: nothing here may ever wait for a reader, because the announcing
-        // readers run their user callbacks outside this lock and may re-enter the graph.
+        // The record rides INSIDE the block (`hz_link`, its first member), so parking it
+        // allocates nothing, cannot fail, and frees nothing — which is what makes it safe
+        // to call with map_mutex_ held. Both halves of that matter: nothing here may wait
+        // for a reader (the announcing readers run their user callbacks outside this lock
+        // and may re-enter the graph), and nothing here may RUN a reader's code either —
+        // freeing a seam block destroys its `std::function` captures, whose destructors
+        // RFC-0010 §A.3 lets re-enter the graph. The scan that frees runs in `retire()`
+        // below, past the lock (ADR-0072 erratum 2).
         if (value_handlers_t* seam = x.revert_to_placeholder()) seam_domain_.retire(seam->hz_link);
         x.mark_unregistered();
     };
@@ -447,6 +451,15 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
             if (pending_.erase(key) != 0) pending_count_.fetch_sub(1, std::memory_order_relaxed);
         }
     }
+    // Reclaim HERE — holding nothing (ADR-0072 erratum 2). Freeing a parked seam block runs
+    // `~value_handlers_t`, which destroys the embedder's `std::function` captures, and a
+    // capture's destructor is user code RFC-0010 §A.3 permits to call back into this graph.
+    // Under `map_mutex_` that is a self-deadlock — `find()` from such a destructor threw
+    // `Resource deadlock avoided` out of a `noexcept` scan and terminated the process — so
+    // the parking above and the freeing here are deliberately two different events, at two
+    // different lock depths. `reclaim_due()` keeps the scan (and its process-wide barrier)
+    // batched rather than per-retire.
+    if (seam_domain_.reclaim_due()) seam_domain_.collect();
     return {};
 }
 

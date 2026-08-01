@@ -1,0 +1,38 @@
+# ADR-0072 erratum 2 — static-RAM census of the reclamation domain, and the starvation bound.
+#
+# HOST: .bss of a linked probe binary that registers a HANDLER vertex, reads it and retires
+# it (so the whole seam path is pulled in), Release -O2, GCC 14.3, x86-64.
+#   `size <binary>` | .bss column
+#
+#   arm                                              .bss      vs main
+#   main            (a239b03)                        2152 B         —
+#   branch          (c9a3b0f, erratum 1)             6225 B     +4073 B   <- the defect
+#   branch          (erratum 2, kReclaimAnnounceSlots=0, the default)
+#                                                    2097 B       -55 B
+#   branch          (erratum 2, kReclaimAnnounceSlots=64)
+#                                                    6225 B     +4073 B   <- opt-in, unchanged
+#
+# The -55 B at the default is not the domain paying for itself: it is `main`'s
+# `vertex_t::handlers()::kNoHandlers` static (96 B + an 8 B guard), deleted with that
+# accessor, outweighing the domain's ~26 B of globals and ~19 B of per-thread storage.
+#
+# rv32 (the MCU half of the dual target): .bss + .sbss of the real TUs, -Os -fno-exceptions
+# -fno-rtti, riscv32-esp-elf GCC 15.2, checked-in default config.hpp (kCacheLineBytes = 64).
+#   riscv32-esp-elf-size -A graph.o hazard_domain.o | sum every .bss*/.sbss* section
+#
+#   arm                                          graph.o   hazard_domain.o     total   vs main
+#   main            (a239b03)                     1200 B                 -    1200 B        —
+#   branch          (c9a3b0f, erratum 1)          5244 B               9 B    5253 B   +4053 B
+#   branch          (erratum 2, default)          1149 B               9 B    1158 B     -42 B
+#
+# STARVATION BOUND (the round-2 shape, `starve_ablation`: 65 long-lived reader threads each
+# taking a nested pair of guards continuously, while the control plane retires 20 000 blocks).
+# Same source against each library; peak_live is the high-water count of un-reclaimed blocks.
+#
+#   arm                                    peak_live   us/retire (1st half -> 2nd half)
+#   branch (c9a3b0f, erratum 1)               20039     55.543 -> 140.959   (unbounded, O(parked))
+#   branch (erratum 2)                           80      3.530 ->   2.475   (bounded, flat)
+#
+# The erratum-1 figure is every block ever retired: with a fixed 64-participant table the
+# 65th thread got no announcement word on every guard, set the per-domain stall, and no scan
+# freed anything for the whole run.

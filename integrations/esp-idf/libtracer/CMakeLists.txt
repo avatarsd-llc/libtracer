@@ -196,6 +196,11 @@ endif()
 set(LIBTRACER_ACL_POLICY allow_only_policy_t)  # the MCU profile — no full-ACL Kconfig yet
 set(LIBTRACER_LKV_SLOT sp_atomic_slot_t)  # write-dominated single core: keep the refcount slot
 set(LIBTRACER_HAZARD_READER_SLOTS 64)  # unused here: the refcount slot never builds the domain
+# The ADR-0072 reclamation domain's announcement participants. 0 = none in .bss: a node
+# claims one per reader thread on first use, which is what keeps the domain off the C6's
+# ~16 KB static-RAM budget entirely (a reserved table would be unconditional, and every
+# graph_t builds this domain).
+set(LIBTRACER_RECLAIM_ANNOUNCE_SLOTS 0)
 # The ADR-0072 §4 gate counter: an instrument, and a shared RMW on the seam read/write
 # path. A node never wants it (the repo's own test builds are the only ones that do).
 set(LIBTRACER_SEAM_ANNOUNCE_COUNTER_CXX false)

@@ -1,0 +1,10 @@
+arm                            read ns      write ns      plain ns      d read     d write
+main                             27.40         45.10         13.47       +0.00       +0.00
+final                            28.65         47.22         13.25       +1.25       +2.12
+
+spread main                 read   n=21  min=26.11 med=27.40 max=31.10
+spread main                 write  n=21  min=43.56 med=45.10 max=49.78
+spread main                 plain  n=21  min=13.25 med=13.47 max=13.83
+spread final                read   n=21  min=28.27 med=28.65 max=32.55
+spread final                write  n=21  min=45.56 med=47.22 max=55.60
+spread final                plain  n=21  min=12.80 med=13.25 max=13.79

@@ -1,0 +1,14 @@
+arm                            read ns      write ns      plain ns      d read     d write
+main                             26.58         45.08         13.39       +0.00       +0.00
+final                            28.56         47.01         13.39       +1.98       +1.94
+noannounce                       26.71         44.68         13.16       +0.13       -0.40
+
+spread main                 read   n=21  min=25.37 med=26.58 max=27.64
+spread main                 write  n=21  min=43.44 med=45.08 max=46.08
+spread main                 plain  n=21  min=11.34 med=13.39 max=13.88
+spread final                read   n=21  min=27.93 med=28.56 max=30.20
+spread final                write  n=21  min=45.28 med=47.01 max=50.19
+spread final                plain  n=21  min=11.22 med=13.39 max=13.69
+spread noannounce           read   n=21  min=25.95 med=26.71 max=30.79
+spread noannounce           write  n=21  min=43.08 med=44.68 max=46.30
+spread noannounce           plain  n=21  min=11.36 med=13.16 max=14.62
