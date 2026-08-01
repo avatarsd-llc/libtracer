@@ -1,12 +1,12 @@
 {
   "name": "removed-knob",
   "category": "settings",
-  "hex": "08401E000100020031000300140073657474696E67732E646561646C696E655F6E73",
-  "total_bytes": 34,
+  "hex": "08400600010002003100",
+  "total_bytes": 10,
   "decoded": {
     "type": "0x08 ERROR",
     "structured": true,
-    "meaning": "ERROR{ VALUE u16=0x0031 (tr::schema::not_found), DESCRIPTION \"settings.deadline_ns\" } — the declared reply to a write of any knob RFC-0022 removed (§5.4)",
-    "note": "the same answer an unsupported field already gives; the detail child names the unresolved knob and is optional (RFC-0002 §B)"
+    "meaning": "ERROR{ VALUE u16=0x0031 (tr::schema::not_found) } — the reply the golden core actually builds for a write of any knob RFC-0022 removed (§5.4)",
+    "note": "the registered-code identity child is the WHOLE error: assemble_error emits ERROR{VALUE} and nothing else, so the reply does not echo the unresolved knob name. Byte-identical to stream/history-depth-host-only, and that is the point — the answer carries no per-knob detail to tell the two apart."
   }
 }

@@ -448,9 +448,9 @@ void test_gated_ops() {
 }
 
 /**
- * @brief The flat protocol-knob write surface is withdrawn CALLER-INDEPENDENTLY (RFC-0022
- *        §3.B / §4): every core-namespace `settings.<name>` answers SCHEMA_NOT_FOUND, for
- *        every caller, granted or denied.
+ * @brief The flat protocol-knob surface is withdrawn CALLER-INDEPENDENTLY on BOTH halves
+ *        (RFC-0022 §3.B / §4): every core-namespace `settings.<name>` answers
+ *        SCHEMA_NOT_FOUND to a read AND to a write, for every caller, granted or denied.
  *
  * The normative rule is the docs/reference/05 §`0x0B` validation clause — "unknown NAMEs
  * MUST be ... rejected with `ERROR{tr::schema::not_found}` if in the core namespace" —
@@ -464,6 +464,14 @@ void test_gated_ops() {
  * vertex, same two callers, same door — which still gates a DECLARED field on the WRITE
  * right. Without it this test would pass just as well against a `:settings` write door
  * that had been deleted wholesale, app fields and all.
+ *
+ * The READ half is checked at the SAME three callers, because the two doors used to
+ * disagree: the read gate ran BEFORE name resolution, so one removed name answered
+ * PERMISSION_DENIED on read and SCHEMA_NOT_FOUND on write — a caller-DEPENDENT split
+ * across the halves of one name, which is precisely what §3.B and docs/reference/05
+ * §`0x0B` forbid. Its ablation is the same `settings.app.` branch: a declared `rw` field
+ * still answers a denied caller PERMISSION_DENIED on read, so the loop below measures the
+ * withdrawn namespace and not a read door that stopped gating.
  */
 void test_flat_knob_surface_is_withdrawn() {
     std::printf("flat protocol knobs: withdrawn, caller-independently (RFC-0022 §3.B):\n");
@@ -493,6 +501,16 @@ void test_flat_knob_surface_is_withdrawn() {
                        status_t::SCHEMA_NOT_FOUND);
         check(all_three, std::string("`:settings.") + name +
                              "`: SCHEMA_NOT_FOUND for denied, granted AND local callers");
+        // The READ half of the SAME name, at the SAME three callers. `peer-none` holds
+        // nothing at all — not even READ — so it is the caller a gate-first read answers
+        // PERMISSION_DENIED, and the one that discriminates a name-first read from a
+        // gated one.
+        const bool read_all_three =
+            fails_with(g.read(v, knob->field(), "peer-none"), status_t::SCHEMA_NOT_FOUND) &&
+            fails_with(g.read(v, knob->field(), "peer-a"), status_t::SCHEMA_NOT_FOUND) &&
+            fails_with(g.read(v, knob->field(), {}), status_t::SCHEMA_NOT_FOUND);
+        check(read_all_three, std::string("`:settings.") + name +
+                                  "` READ: SCHEMA_NOT_FOUND for the same three callers");
     }
 
     // A trailing step / an indexed selector name nothing either — they never did, and the
@@ -518,6 +536,16 @@ void test_flat_knob_surface_is_withdrawn() {
           "ablation: a declared app field is still PERMISSION_DENIED for a denied caller");
     check(g.write(v, field->field(), make_value(value_tlv(le)), "peer-a").has_value(),
           "ablation: ... and still LANDS for a granted one (the door is alive)");
+    // The READ ablation. `peer-none` holds no rights at all, so a READ of the app field it
+    // is NOT allowed must still be PERMISSION_DENIED — that is what proves the loop's
+    // read half measured the withdrawn core namespace and not a read gate that vanished.
+    check(denied(g.read(v, field->field(), "peer-none")),
+          "ablation: a declared app field READ is still PERMISSION_DENIED for a denied caller");
+    // And the bare `:settings` container stays gated too: it is a KNOWN name, so the
+    // name-first arm must not have swallowed it.
+    const auto container = path_t::parse("/x:settings");
+    check(denied(g.read(v, container->field(), "peer-none")),
+          "ablation: the bare `:settings` container READ is still gated (a KNOWN name)");
 }
 
 /**

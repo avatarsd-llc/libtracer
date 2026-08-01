@@ -73,7 +73,7 @@ ANCHORS = [
     ("core/src/graph.cpp:1603", "field.steps.size() != 1", 'step0.name == "children"'),
     ("core/src/graph.cpp:1524", "step0.wildcard"),
     ("core/src/graph.cpp:2083", '"children" && !field.steps[0].wildcard'),
-    ("core/src/graph.cpp:2162", "!field.steps[0].wildcard", 'field.steps[0].name == "subscribers"'),
+    ("core/src/graph.cpp:2183", "!field.steps[0].wildcard", 'field.steps[0].name == "subscribers"'),
     ("core/src/op_resolve_walk.hpp:237", "enum class index_mode_t"),
     ("core/src/op_resolve_walk.hpp:594", 'field.steps[0].name != "subscribers"'),
     ("core/include/libtracer/mem_heap.hpp:149", "try_assign"),

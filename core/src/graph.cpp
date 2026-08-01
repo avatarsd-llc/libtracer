@@ -2119,6 +2119,27 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
                 return std::unexpected(status_t::SCHEMA_NOT_FOUND);
             return read_identity();
         }
+        // An UNKNOWN core-namespace `:settings` NAME resolves HERE, above the READ gate —
+        // the exact mirror of the write door (see `field_write`'s settings arm: only
+        // `settings.app.…` reaches a gate; every other spelling under `settings` falls
+        // through to a terminal, ungated SCHEMA_NOT_FOUND). RFC-0022 §3.B deleted
+        // `settings_t` outright, so the core namespace is EMPTY and every name in it is an
+        // unknown name — which docs/reference/05 §`0x0B` answers with
+        // `ERROR{tr::schema::not_found}`, a rule stated with NO caller qualifier.
+        //
+        // Below this line sits the READ gate, and a denied caller reaching it would be told
+        // PERMISSION_DENIED on the READ of a name whose WRITE already answers
+        // SCHEMA_NOT_FOUND — one name, two answers, split by who is asking. That is exactly
+        // the caller-DEPENDENT disclosure §3.B forbids, so the read must resolve the name
+        // first, at the same narrowness the write door does.
+        //
+        // Nothing leaks: "the core knob namespace is empty" is published spec text, so the
+        // narrower answer discloses only what docs/reference/05 already states. Bare
+        // `:settings` (the container) and the whole `settings.app.` subtree are untouched —
+        // both are KNOWN names and keep their gates.
+        if (field.steps[0].name == "settings" && field.steps.size() >= 2 &&
+            field.steps[1].name != "app")
+            return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         if (!acl_allows(v, caller, acl_right_t::READ))
             return std::unexpected(status_t::PERMISSION_DENIED);
         // One synthesized POINT, served whole — not an array field, so no `[N]` surface.

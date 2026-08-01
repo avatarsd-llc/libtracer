@@ -55,8 +55,11 @@
 namespace {
 
 using tr::graph::delivery_policy_t;
+using tr::graph::fwd_op_t;
 using tr::graph::graph_t;
+using tr::graph::op_resolver_t;
 using tr::graph::path_t;
+using tr::graph::reply_kind_t;
 using tr::graph::role_t;
 using tr::graph::status_t;
 using tr::graph::vertex_handle_t;
@@ -430,22 +433,51 @@ std::vector<std::byte> vector_bytes(std::string_view case_dir) {
  * @return the delivery count, or -1 if the subscribe itself was refused.
  */
 int g_client_writes = 0;
+std::uint8_t g_client_last = 0;
 
-int latches_for(graph_t& g, const path_t& producer, std::string_view vector_case) {
+/** @brief Register the `/client` Handler every SUBSCRIBER vector targets, counting the
+ *         deliveries it receives and remembering the first byte of the last one. */
+void register_client(graph_t& g) {
     g_client_writes = 0;
+    g_client_last = 0;
     tr::graph::handlers_t h;
-    h.on_write = [](const rope_t&) -> tr::graph::result_t<void> {
+    h.on_write = [](const rope_t& v) -> tr::graph::result_t<void> {
         ++g_client_writes;
+        const tr::view::view_t flat = v.flatten();
+        const std::span<const std::byte> b = flat.bytes();
+        if (!b.empty()) g_client_last = std::to_integer<std::uint8_t>(b[0]);
         return {};
     };
     (void)g.register_vertex(path_t("/client"), role_t::HANDLER, std::move(h));
+}
+
+/** @brief Append @p vector_case's bytes through the `:subscribers[]` door.
+ *  @return true iff the field write was admitted. */
+bool append_vector(graph_t& g, const path_t& producer, std::string_view vector_case) {
     tr::graph::field_path_t field;
     field.steps.push_back(
         tr::graph::field_step_t{.name = "subscribers", .indexed = true, .append = true});
     const std::optional<vertex_handle_t> v = g.find(producer.key());
-    if (!v) return -1;
-    const auto w = g.write(*v, field, make_value(vector_bytes(vector_case)));
-    return w.has_value() ? g_client_writes : -1;
+    if (!v) return false;
+    return g.write(*v, field, make_value(vector_bytes(vector_case))).has_value();
+}
+
+/** @brief Write @p vector_case's bytes AT `:subscribers[idx]` — the RFC-0009 §D.1 REPLACE
+ *         door, which is a distinct arm from the append above.
+ *  @return true iff the field write was admitted. */
+bool replace_vector(graph_t& g, const path_t& producer, std::uint16_t idx,
+                    std::string_view vector_case) {
+    tr::graph::field_path_t field;
+    field.steps.push_back(
+        tr::graph::field_step_t{.name = "subscribers", .indexed = true, .index = idx});
+    const std::optional<vertex_handle_t> v = g.find(producer.key());
+    if (!v) return false;
+    return g.write(*v, field, make_value(vector_bytes(vector_case))).has_value();
+}
+
+int latches_for(graph_t& g, const path_t& producer, std::string_view vector_case) {
+    register_client(g);
+    return append_vector(g, producer, vector_case) ? g_client_writes : -1;
 }
 
 /** @brief The §5 vectors, exercised against the implementation that must honour them. */
@@ -560,6 +592,167 @@ void test_conformance_vectors() {
     }
 }
 
+/**
+ * @brief The RFC-0009 §D.1 REPLACE door honours the REPLACING subscriber's durability
+ *        request — the latch arm no append test can reach.
+ *
+ * `vertex_t::replace_edge` snapshots the latch under the same single lock hold as
+ * `add_edge`, predicated on the REPLACING edge's `policy.durability_request()`. Nothing
+ * exercised that predicate: every policy case above enters through `[]` (append), which is
+ * `add_edge`'s arm, so forcing the replace arm's predicate to `false` left the whole suite
+ * green. This drives the WIRE door in both halves — a policy-less SUBSCRIBER appended into
+ * slot 0, then a durability-requesting SUBSCRIBER written AT `:subscribers[0]` — and asserts
+ * the latched value is delivered on join.
+ *
+ * Both bytes come from the conformance vectors, so the door is fed exactly what a peer sends.
+ */
+void test_replace_door_latches() {
+    std::printf("§D.1 replace door — the REPLACING subscriber's request is honoured:\n");
+    graph_t g;
+    const vertex_handle_t src = g.register_vertex(path_t("/rep/src"), role_t::STORED_VALUE);
+    (void)g.write(src, byte_value(0x5A));  // the producer's LKV, held before either subscribe
+    register_client(g);
+
+    // Slot 0 arrives through `[]` carrying NO policy — nothing is latched.
+    check(append_vector(g, path_t("/rep/src"), "subscriber/policy-absent"),
+          "a policy-less SUBSCRIBER is appended into slot 0");
+    check(g_client_writes == 0, "... and its join latches nothing");
+
+    // The §D.1 REPLACE: the SAME slot, a subscriber that DOES request durability.
+    check(replace_vector(g, path_t("/rep/src"), 0, "subscriber/policy-durability"),
+          "`:subscribers[0]` takes a SUBSCRIBER — a replace, not a clear");
+    check(g_client_writes == 1,
+          "the REPLACING subscriber's durability request latches on join (replace_edge's arm)");
+    check(g_client_last == 0x5A, "... delivering the producer's CURRENT value");
+
+    // The other sign, on the same door: a replace by a policy-LESS subscriber latches
+    // nothing. Without this the count above would also pass against a replace arm that
+    // latched unconditionally — it would be measuring "a replace happened", not the predicate.
+    check(replace_vector(g, path_t("/rep/src"), 0, "subscriber/policy-absent"),
+          "ablation: `:subscribers[0]` takes a policy-less SUBSCRIBER too");
+    check(g_client_writes == 1, "... and THAT replace latches nothing — the predicate is READ");
+
+    // And the replacing edge is live, not inert: the next producer write reaches it once.
+    (void)g.write(src, byte_value(0x77));
+    check(g_client_writes == 2 && g_client_last == 0x77,
+          "the surviving edge takes the next write — the replace left exactly ONE live listener");
+}
+
+// ---------------------------------------------------------------------------
+// The two ERROR vectors, against the reply the RESOLVER actually assembles.
+
+/** @brief A PATH TLV over @p segs, built through the production emit helpers. */
+std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
+    std::vector<std::byte> body;
+    for (std::string_view s : segs) tr::wire::emit_name(body, s);
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    return out;
+}
+
+/** @brief A FIELD selector TLV whose steps are the dotted NAMEs @p steps. */
+std::vector<std::byte> b_field(std::initializer_list<std::string_view> steps) {
+    std::vector<std::byte> body;
+    for (std::string_view s : steps) tr::wire::emit_name(body, s);
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::FIELD, opt_t{.pl = true}, body);
+    return out;
+}
+
+/** @brief A FWD frame in RFC-0004 §B child order: op, dst, [selector], src, [payload]. */
+std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
+                             const std::vector<std::byte>& selector,
+                             const std::vector<std::byte>& payload) {
+    std::vector<std::byte> body;
+    const std::byte opb{static_cast<std::uint8_t>(op)};
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&opb, 1));
+    body.insert(body.end(), dst.begin(), dst.end());
+    body.insert(body.end(), selector.begin(), selector.end());
+    const std::vector<std::byte> src = b_path({"reply-ep"});
+    body.insert(body.end(), src.begin(), src.end());
+    body.insert(body.end(), payload.begin(), payload.end());
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
+    return out;
+}
+
+/**
+ * @brief Resolve @p frame and re-encode the ERROR child of the reply's STATUS — the exact
+ *        bytes a peer receives inside the `kind=ERROR` reply.
+ * @return the ERROR TLV bytes, or an empty vector if the reply was not a well-formed error.
+ */
+std::vector<std::byte> error_child_bytes(op_resolver_t& resolver,
+                                         std::span<const std::byte> frame) {
+    const auto arena = tr::wire::decode_into(frame, tr::mem::heap_source());
+    if (!arena) return {};
+    const auto reply = resolver.resolve(*arena, {});
+    if (!reply) return {};
+    const tr::view::view_t flat = reply->flatten();
+    const auto dec = tr::wire::decode(flat.bytes());
+    if (!dec || dec->children.size() < 5) return {};
+    if (dec->children[3].type != type_t::VALUE || dec->children[3].payload.size() != 1) return {};
+    if (std::to_integer<std::uint8_t>(dec->children[3].payload[0]) !=
+        static_cast<std::uint8_t>(reply_kind_t::ERROR))
+        return {};
+    const tlv_t& status = dec->children[4];
+    if (status.type != type_t::STATUS || status.children.size() != 1) return {};
+    return tr::wire::encode(status.children[0]);
+}
+
+/**
+ * @brief The `settings/removed-knob` and `stream/history-depth-host-only` vectors are the
+ *        bytes the RESOLVER builds — not a shape a document declared.
+ *
+ * Both vectors used to be hand-written `ERROR{VALUE, DESCRIPTION}` frames, and no code path
+ * in the core produced them: `assemble_error` emits `ERROR{VALUE}` and `type_t::DESCRIPTION`
+ * has no producer at all. Nothing caught that, because the codec round-trip a harness runs
+ * (`encode(decode(input.bin)) == input.bin`) is satisfied by any well-formed TLV, invented or
+ * not. So the claim is made HERE, where it can be false: drive the real
+ * `FWD{WRITE, :settings.<knob>}` through `op_resolver_t` and byte-compare the reply's ERROR
+ * child. This is also the `status_t` → `err_t` mapping gate — the vector now pins the mapped
+ * code, not just a hand-typed constant.
+ */
+void test_removed_knob_reply_bytes() {
+    std::printf("§5.4 / §5.7 — the ERROR vectors are the bytes the RESOLVER assembles:\n");
+    graph_t g;
+    op_resolver_t resolver(g);
+    (void)g.register_vertex(path_t("/rk"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/hd"), role_t::STREAM);
+
+    const std::vector<std::byte> one = {std::byte{0x01}};
+    std::vector<std::byte> payload;
+    tr::wire::emit_tlv(payload, type_t::VALUE, opt_t{}, one);
+
+    // §5.4: a WRITE of a removed knob.
+    const std::vector<std::byte> knob_err = error_child_bytes(
+        resolver,
+        b_fwd(fwd_op_t::WRITE, b_path({"rk"}), b_field({"settings", "deadline_ns"}), payload));
+    check(knob_err == vector_bytes("settings/removed-knob"),
+          "settings/removed-knob == the ERROR child of the reply a `:settings.deadline_ns` "
+          "WRITE gets, exactly");
+
+    // §5.7: the ring depth, on BOTH halves — the vector's own claim is "read OR write".
+    const std::vector<std::byte> depth_w =
+        error_child_bytes(resolver, b_fwd(fwd_op_t::WRITE, b_path({"hd"}),
+                                          b_field({"settings", "history_keep_last"}), payload));
+    check(depth_w == vector_bytes("stream/history-depth-host-only"),
+          "stream/history-depth-host-only == the WRITE reply's ERROR child, exactly");
+    const std::vector<std::byte> depth_r = error_child_bytes(
+        resolver,
+        b_fwd(fwd_op_t::READ, b_path({"hd"}), b_field({"settings", "history_keep_last"}), {}));
+    check(depth_r == vector_bytes("stream/history-depth-host-only"),
+          "... and the READ reply's ERROR child is the SAME bytes (the §3.B read/write "
+          "agreement, over the wire)");
+
+    // THE ABLATION. A test that only ever compared against one constant would pass against a
+    // resolver that answered every request with that constant. A name that IS served must
+    // come back as a RESULT, not as this error.
+    const std::vector<std::byte> served = error_child_bytes(
+        resolver, b_fwd(fwd_op_t::READ, b_path({"rk"}), b_field({"settings"}), {}));
+    check(served.empty(),
+          "ablation: a bare `:settings` READ is NOT an error reply (the resolver still serves)");
+}
+
 }  // namespace
 
 /** @brief Run the RFC-0022 conformance sketches. */
@@ -574,6 +767,8 @@ int main() {
     test_history_depth_is_host_only();
     test_nothing_is_inherited();
     test_conformance_vectors();
+    test_replace_door_latches();
+    test_removed_knob_reply_bytes();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;
