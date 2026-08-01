@@ -88,7 +88,7 @@ Reproduced today on `main` (in tree, three runs × three reps): `chain-path` p50
 The two arms do not differ only in how the destination is named. `chain-path` injects
 `FWD{op=WRITE}`, and a `WRITE` terminus **always** assembles a `RESULT` reply
 (`core/src/op_resolve_walk.hpp:713-718`) which then routes four hops home. `chain-label` injects
-`COMPACT`, and the `COMPACT` terminus **never** replies (`core/src/fwd_router.cpp:861-895`).
+`COMPACT`, and the `COMPACT` terminus **never** replies (`core/src/fwd_router.cpp:864-898`).
 Instrumented (`scratchpad/probe_chain.cpp`, reverse counters added to `wire_link_t`):
 
 | arm | forward | **reverse** |
@@ -191,7 +191,7 @@ enforcement note at `docs/reference/05-protocol-tlvs.md:279-299` and the conform
 **A second, still-unfixed locus of that same bug is closed by this RFC.** `wire::path_key`
 (`core/src/frame.cpp:166-178`) emits **every** child's payload through `wire::emit_name`
 with no type check — the #436 fix landed only in the arena tier. Its wire-facing caller
-`resolve_route_vertex` (`core/src/fwd_router.cpp:943-945`) resolves an ADVERTISE route, so a peer
+`resolve_route_vertex` (`core/src/fwd_router.cpp:949-951`) resolves an ADVERTISE route, so a peer
 sending `PATH{VALUE "sensor"}` binds a label to `/sensor` today while the arena tier correctly
 answers `INVALID_PATH`. With a packed body there are no child TLVs to mistype, and the divergence
 is structurally impossible. (If this RFC is rejected, that locus still needs fixing on its own —

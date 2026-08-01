@@ -88,8 +88,8 @@ identifiers for the rest of this page.
 | ⑦ | `deliver_rope` span fallback (`core/include/libtracer/receiver_slot.hpp:138`) | no | yes — only when no rope sink is installed | Fallback — the cost of a span-only sink | Yes — installing the rope sink removes it; see §4.1 |
 | ⑧ | WS RX reassembly — `asm_buf_t` (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:102`), regrow-and-memcpy at `:126-127` | no — unfragmented delivers borrowed (`:403-404`) | yes — O(n²) across fragments | Fallback | Enables ⑦'s removal; the copy itself is a pool-recv question, not a cursor one |
 | ⑨ | WS TX gather — `new[]` + memcpy in `queue_send` (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:476`, gather at `:487-494`) | yes — per frame per peer | yes | Structural within the `esp_http_server` seam | **No** — TX-side; the cursor is irrelevant |
-| ⑩ | COMPACT remote delivery — `deliver_remote` (`core/src/fwd_router.cpp:1179`, materialize at `:1203`, from the router's injected backend) | no — adopt | yes — auto-promotion leg only | Fallback, narrow | Yes — a scatter-gather compact encoder |
-| ⑪ | Control-child strip — `on_control_rope` (`core/src/fwd_router.cpp:867`, sub-rope materialize at `:894` and `:911`, from the router's injected backend) | no | only a multi-link ADVERTISE / COMPACT sub-rope | Fallback, and fused rather than eliminated — the next consumer re-encodes anyway | Yes, with a near-zero saving |
+| ⑩ | COMPACT remote delivery — `deliver_remote` (`core/src/fwd_router.cpp:1185`, materialize at `:1213`, from the router's injected backend) | no — adopt | yes — auto-promotion leg only | Fallback, narrow | Yes — a scatter-gather compact encoder |
+| ⑪ | Control-child strip — `on_control_rope` (`core/src/fwd_router.cpp:870`, sub-rope materialize at `:897` and `:917`, from the router's injected backend) | no | only a multi-link ADVERTISE / COMPACT sub-rope | Fallback, and fused rather than eliminated — the next consumer re-encodes anyway | Yes, with a near-zero saving |
 | ⑫ | Reply-route synthesis — `tlv_sliced` (`core/src/op_resolve_walk.hpp:392`, called at `:445-446`) | yes | yes | Bounded frame synthesis: the route wires are rewritten | No — these are emitted bytes, not a copy of payload |
 
 On the single-link path the only copies that fire are ① (the recv floor), ④ (the structure arena),
@@ -215,24 +215,24 @@ exhaustion is representable. The general failable-allocation contract is
 - `check_frame` and `validate_rope` (`core/src/rope_decode.cpp:32`, `:46`) validate structure and
   CRC straight over a rope.
 - The lazy `tlv_view_t` tier walks children one header at a time off a refcounted subrope.
-- `on_control_rope` / `peek_control` (`core/src/fwd_router.cpp:867`, `:880`) read a control frame's
+- `on_control_rope` / `peek_control` (`core/src/fwd_router.cpp:870`, `:883`) read a control frame's
   label off the rope and materialize only the sub-rope a re-encoding consumer needs contiguous
-  (`:894`, `:911`) — out of the router's injected `flat` backend, and a refused flatten drops the
+  (`:897`, `:917`) — out of the router's injected `flat` backend, and a refused flatten drops the
   frame rather than delivering an empty value (#730).
 - The FWD request terminus: `resolve_terminus_rope`
-  (`core/include/libtracer/fwd_router.hpp:417-433`) adopts a fragmented request as
+  (`core/include/libtracer/fwd_router.hpp:441-457`) adopts a fragmented request as
   `tlv_view_t::over(rope)` and resolves it through `op_resolver_t::resolve(tlv_view_t)`.
 
 The forward hop scatter-gathers a multi-link frame over the rope cursor with no flatten; the egress
 gathers each region's per-link sub-spans into a `block_array_t` drawn from the injected `rx_`, and
-exhaustion drops the frame rather than throwing (`core/include/libtracer/fwd_router.hpp:434-449`,
+exhaustion drops the frame rather than throwing (`core/include/libtracer/fwd_router.hpp:458-473`,
 [#596]).
 
 Two limits on that tier are load-bearing. First, **a single-link rope never reaches
 `resolve_terminus_rope`** — `on_frame_rope_impl` short-circuits it deliberately into the
 single-link view path (`core/src/fwd_router.cpp:434`, the check at `:440-445`). Second, the tier earns its place only on large, lightly
 fragmented frames: at 64 KB across 2 links it is ~12% ahead of flatten-then-arena, and behind it
-everywhere smaller (`core/include/libtracer/fwd_router.hpp:422-425`, recorded as an erratum to
+everywhere smaller (`core/include/libtracer/fwd_router.hpp:446-449`, recorded as an erratum to
 [ADR-0053, lazy rope-backed decode view](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)).
 That figure carries no host, sample count or spread in the source that records it, so it is a
 direction, not a budget.
@@ -242,7 +242,7 @@ Row ⑦ has changed shape rather than disappearing. The span fallback in
 slot with no rope sink installed, but the router does not flatten on the reply path: a REPLY that
 reaches its originator is handed to the sink rope-native
 (`core/src/fwd_router.cpp:486-488`). The contract at
-`core/include/libtracer/fwd_router.hpp:249-253` states it — the router performs no decode and no
+`core/include/libtracer/fwd_router.hpp:273-277` states it — the router performs no decode and no
 flatten, a rope-delivered reply reaches the sink zero-copy, a sink that wants contiguous bytes
 holds `const view_t m = reply.materialize()`, and only a multi-link reply pays one flatten, on
 demand. The escape hatch is the consumer's, not the router's.
