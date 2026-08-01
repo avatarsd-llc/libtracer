@@ -73,6 +73,15 @@ class fwd_router_t {
     bool remove_child(std::string_view name);   // removal, not departure
     void link_down(std::string_view link_name); // departure: evict edges + drop label state
 
+    // Bind a LOCAL producer's subscription toward a MOUNT-PATH target (#739): resolves
+    // `target` through the SAME strip-K cached descent the forward path uses (ADR-0061),
+    // derives (link, return route), and admits through graph_t::subscribe_wire — so a
+    // caller never hand-splits, and an arbitrarily nested /net/A/net/B/x target works.
+    // Bind-time resolution, link-lifetime durability: teardown drops the binding, and
+    // re-binding is the application's job. A bus-PEER first hop answers INVALID_PATH.
+    graph::result_t<void> subscribe_toward(const graph::path_t& producer,
+                                           const graph::path_t& target);
+
     // Per-frame sinks: function pointer + opaque context, never std::function (ADR-0047).
     using reply_fn_t            = void (*)(void* ctx, const view::rope_t& reply);
     using inbound_fn_t          = void (*)(void* ctx, std::string_view inbound,
@@ -115,9 +124,10 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 }  // namespace tr::net
 ```
 
-Signature source: `core/include/libtracer/fwd_router.hpp:91-93` (constructor), `:137`
-(`add_child`), `:164-175` (the sink function-pointer types);
-`core/include/libtracer/child_registry.hpp:193,227,242,286,327,337`.
+Signature source: `core/include/libtracer/fwd_router.hpp:101` (constructor), `:152`
+(`add_child`), `:202` (`subscribe_toward`), `:212-223` (the sink function-pointer types);
+`core/include/libtracer/child_registry.hpp:169` (`add`), `:243` (`resolve_peer`), `:258`
+(`erase`), `:281` (`entry_by_name`), `:302` (`by_name`), `:343`/`:353` (`size`/`live_size`).
 
 ## Routing one inbound frame
 
@@ -266,6 +276,14 @@ out of the raw config `SETTINGS` TLV handed to it alongside these settings.
 - **Configure children and sinks before frames flow.** `add_child` and the sink setters are
   control-plane calls; the forward path deliberately takes no lock, so concurrent reconfiguration
   is not part of the contract.
+- **A bus link's own connection NAME is not a routable next-hop.** A `dst` that names a
+  multi-peer link's NAME with a residual below it — rather than naming one of its peers — is
+  **rejected** with `tr::path::invalid` (`0x0021`), never forwarded
+  ([RFC-0020](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0020-bus-name-not-a-routable-next-hop.md)).
+  Forwarding it would reach the bus endpoint's `send()`, which **broadcasts**, so one directed
+  request would draw one reply per peer and scramble any client that correlates replies FIFO.
+  Naming the mount *exactly* still terminates locally, and a peer-directed hop
+  (`/net/<module>/<name>/<peer>/…`) still forwards — only the broadcast shape is refused.
 - **A stale `COMPACT` label is dropped, never fatal.** A label with no ingress binding on its link
   produces a `HANDLE_NACK` back to the producer, which re-advertises. An implementation that treats
   an unknown label as a protocol error breaks the self-heal.
