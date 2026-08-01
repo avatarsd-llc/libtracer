@@ -96,8 +96,9 @@ conformance-validated slices.**
    `route_handle_t::ensure_egress` advertises a label once per `(link, route)` flow, then streams
    `COMPACT`; `clear_link` on reconnect drops the binding so the next delivery re-advertises (lazy
    self-heal, no transport "up" event). The sink is an opaque `std::function`, so L4 (`graph`) gains
-   no dependency on `tr::net`. A **transient-local** producer (`durability == 1`) latches its LKV to a
-   fresh subscriber on subscribe. Tested in `core/tests/fwd_fanout_test.cpp` (full-route routing, the
+   no dependency on `tr::net`. A producer latches its LKV to a fresh subscriber that
+   REQUESTED durability (RFC-0022 §3.A bit 5 — this ADR predates that split and read
+   `durability == 1` on the PRODUCER, which is where the flag lived then). Tested in `core/tests/fwd_fanout_test.cpp` (full-route routing, the
    latch, the auto-promote byte-delta, reconnect re-advertise, a TSan writer×`clear_link` race) and
    end-to-end against the TS client over a live socket (`fwd_node_server.cpp` no longer hand-rolls a
    delivery — the real fan-out drives it). Delivery semantics are described in

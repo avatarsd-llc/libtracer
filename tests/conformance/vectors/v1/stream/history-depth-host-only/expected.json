@@ -1,0 +1,12 @@
+{
+  "name": "history-depth-host-only",
+  "category": "stream",
+  "hex": "08400600010002003100",
+  "total_bytes": 10,
+  "decoded": {
+    "type": "0x08 ERROR",
+    "structured": true,
+    "meaning": "ERROR{ VALUE u16=0x0031 (tr::schema::not_found) } — the reply the golden core actually builds when a peer names the STREAM ring depth, which has NO wire surface at all (§5.7)",
+    "note": "the wire-observable half of RFC-0022 §3.C: the depth is set host-side by graph_t::set_history_depth and is neither read nor written remotely, so both a read and a write of the old knob name resolve to nothing. Byte-identical to settings/removed-knob — the ERROR identity carries no name detail, so `history_keep_last` is answered exactly as any other withdrawn knob is."
+  }
+}

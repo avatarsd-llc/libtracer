@@ -757,14 +757,16 @@ template <class N>
             // subrope of the frame (refcount, zero copy; multi-link on the rope tier). An
             // empty rope is an allocation failure.
             //
-            // K comes from the vertex's u32 when set and from `config_t::kPinPayloadRatio`
-            // otherwise. The per-vertex override exists ONLY so RFC-0022 §6's arms rotate
-            // inside ONE process: measuring them as separate binaries is what produced the
-            // 2.8x swing on identical code that the standing interleave rule was written
-            // against. §3.D's landing form is the config constant alone, and the sentinel is
-            // both defaults — so this branch changes no observable behaviour by itself.
-            const std::uint32_t pin_k = graph.settings(v).store_ref_min_bytes != 0
-                                            ? graph.settings(v).store_ref_min_bytes
+            // K comes from the vertex's owner-declared u32 when set and from
+            // `config_t::kPinPayloadRatio` otherwise. The per-vertex override exists ONLY so
+            // RFC-0022 §6's arms rotate inside ONE process: measuring them as separate
+            // binaries is what produced the 2.8x swing on identical code that the standing
+            // interleave rule was written against. §3.D's landing form is the config constant
+            // alone, and the sentinel is both defaults — so this branch changes no observable
+            // behaviour by itself. (The declaration's NAME still says min-bytes; since the
+            // §6 bench its value is the RATIO — tracked for rename.)
+            const std::uint32_t pin_k = graph.store_ref_min_bytes(v) != 0
+                                            ? graph.store_ref_min_bytes(v)
                                             : tr::graph::kPinPayloadRatio;
             const rope_t value = own_or_ref_tlv(payload_node, frame_view, pin_k);
             if (value.total_length() == 0)

@@ -1,0 +1,12 @@
+{
+  "name": "read-container-shape",
+  "category": "settings",
+  "hex": "0B401900020003006170700B400E00020002006B700100040007000000",
+  "total_bytes": 29,
+  "decoded": {
+    "type": "0x0B SETTINGS",
+    "structured": true,
+    "meaning": "SETTINGS{ NAME \"app\" SETTINGS{ NAME \"kp\" VALUE u32=7 } } \u2014 the `:settings` container after RFC-0022 \u00a74: the shape is KEPT, the knobs are gone (\u00a75.5)",
+    "note": "a vertex that declares NO app fields reads the empty container `0B 40 00 00` instead; the reserved `app` subkey and the single-traversal renderer contract of RFC-0010 \u00a7A.4 both survive"
+  }
+}

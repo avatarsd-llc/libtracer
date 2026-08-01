@@ -57,7 +57,7 @@ A path that violates any limit MUST be rejected with `ERROR{tr::path::invalid}`.
 /sensor/temp                           — a vertex
 /sensor/temp:subscribers[0]            — a control field on a vertex
 /sensor/temp:subscribers[]             — append-or-list view of subscribers
-/sensor/temp:settings.reliability      — a nested control field
+/sensor/temp:settings.app.setpoint     — a nested control field (owner-declared)
 /sensor/temp:settings.transport_tcp.send_buf_kb  — module-namespaced field
 /net/can0/wheel-encoder/left           — a remote vertex, routed through a transport-vertex
 /camera/frame[7]                       — an indexed child endpoint (one vertex per index)
@@ -123,9 +123,9 @@ The five characters `/ : . [ ]` plus `*` and `?` cannot appear inside a NAME seg
 The `:` separator divides a path into the **vertex address** (left of `:`) and the **field chain** (right of `:`).
 
 ```
-/sensor/temp:settings.deadline_ns
-  └────┬────┘└─────────┬─────────┘
-   vertex addr     field chain
+/sensor/temp:settings.app.setpoint
+  └────┬────┘└──────────┬──────────┘
+   vertex addr      field chain
 ```
 
 Resolution proceeds in two stages:
@@ -150,12 +150,16 @@ A single `write(path, tlv)` is atomic: a concurrent reader sees either the full 
 // See the graph module: ../modules/graph.md
 tr::graph::graph_t g;
 
-// Non-atomic (reader between calls sees inconsistent state):
-g.write(tr::graph::path_t("/x:settings.reliability"), reliability_value);
-g.write(tr::graph::path_t("/x:settings.deadline_ns"), deadline_value);
+// Non-atomic (a reader between the calls sees a mixture):
+g.write(tr::graph::path_t("/x:settings.app.kp"), kp_value);
+g.write(tr::graph::path_t("/x:settings.app.ki"), ki_value);
 
-// Atomic (reader sees both fields update together):
-g.write(tr::graph::path_t("/x:settings"), settings_value);   // one SETTINGS (0x0B) object, not a generic container
+// An atomic multi-field settings WRITE is not implemented: writes are per-field, and a bare
+// `:settings` write resolves nothing (SCHEMA_NOT_FOUND). Reads ARE atomic — `read /x:settings`
+// serves the whole container in one traversal.
+//
+// The flat `:settings.<knob>` core namespace is EMPTY since RFC-0022 §3.B: every name in it
+// answers SCHEMA_NOT_FOUND. Only `settings.app.*` is writable below `settings`.
 ```
 
 ---
@@ -241,14 +245,18 @@ Two further grouping rules:
 
 ### Subscriber assembly policies
 
-The subscriber's QoS at `:settings.address_shift.*` controls assembly behavior. (Field names are defined here as the v1 design.)
+The subscriber's QoS at `:settings.address_shift.*` controls assembly behavior. (Field names are
+defined here as the v1 **design**; none of them is implemented, and the two knobs this table used
+to borrow from the core namespace — `deadline_ns` and `queue_max_bytes` — no longer exist, having
+been removed as inert by [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.E. When assembly lands, its deadline and its bound are
+its own module-namespaced magnitudes under `address_shift.`, not core knobs.)
 
 | Field | Type | Default | Effect |
 | ---- | ---- | ---- | ---- |
-| `:settings.address_shift.assemble` | bool | false | If true, hold slices in a per-timestamp buffer until the group is complete or deadline expires; deliver one assembled message. If false, deliver each slice immediately as it arrives. |
-| `:settings.address_shift.expected_count` | u32 | 0 (unknown) | If non-zero, declares N up-front; missing indices are detectable before deadline. |
-| `:settings.address_shift.on_gap` | enum | `surface` | `surface` = deliver partial group with `STATUS=ADDRESS_SHIFT_GAP`; `drop` = silently discard incomplete groups; `wait_forever` = never give up (bounded by `queue_max_bytes`). |
-| `:settings.deadline_ns` | u64 | unset | Per-group assembly deadline. After the deadline relative to the first observed slice, the group is finalized per `on_gap`. |
+| `:settings.address_shift.assemble` | bool | false | If true, hold slices in a per-timestamp buffer until the group is complete or the deadline expires; deliver one assembled message. If false, deliver each slice immediately as it arrives. |
+| `:settings.address_shift.expected_count` | u32 | 0 (unknown) | If non-zero, declares N up-front; missing indices are detectable before the deadline. |
+| `:settings.address_shift.on_gap` | enum | `surface` | `surface` = deliver partial group with `STATUS=ADDRESS_SHIFT_GAP`; `drop` = silently discard incomplete groups; `wait_forever` = never give up (bounded by the assembler's injected buffer, which is where its backpressure comes from). |
+| `:settings.address_shift.deadline_ns` | u64 | unset | Per-group assembly deadline. After the deadline relative to the first observed slice, the group is finalized per `on_gap`. |
 
 ### Loss detection
 

@@ -1,0 +1,12 @@
+{
+  "name": "removed-knob",
+  "category": "settings",
+  "hex": "08400600010002003100",
+  "total_bytes": 10,
+  "decoded": {
+    "type": "0x08 ERROR",
+    "structured": true,
+    "meaning": "ERROR{ VALUE u16=0x0031 (tr::schema::not_found) } — the reply the golden core actually builds for a write of any knob RFC-0022 removed (§5.4)",
+    "note": "the registered-code identity child is the WHOLE error: assemble_error emits ERROR{VALUE} and nothing else, so the reply does not echo the unresolved knob name. Byte-identical to stream/history-depth-host-only, and that is the point — the answer carries no per-knob detail to tell the two apart."
+  }
+}

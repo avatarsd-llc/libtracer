@@ -306,9 +306,9 @@ int main() {
         graph_t g;
         tr::graph::vertex_handle_t v =
             g.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE);
-        // Opt in via the :settings field-write (parses the u32), matching the arena test.
-        (void)g.write(path_t("/sensor/blob:settings.store_ref_min_bytes"),
-                      make_value(b_value({0x08, 0x00, 0x00, 0x00})));
+        // Opt in through the OWNER-side declaration (RFC-0022 §3.B withdrew the wire knob),
+        // matching the arena test.
+        g.set_store_ref_min_bytes(v, 8);
 
         std::vector<std::byte> big(32);
         for (std::size_t i = 0; i < big.size(); ++i) big[i] = static_cast<std::byte>(i);

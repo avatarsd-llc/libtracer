@@ -1,0 +1,12 @@
+{
+  "name": "policy-durability",
+  "category": "subscriber",
+  "hex": "04402B0006400A0002000600636C69656E740B40190002000F0064656C69766572795F706F6C696379010002002000",
+  "total_bytes": 47,
+  "decoded": {
+    "type": "0x04 SUBSCRIBER",
+    "structured": true,
+    "meaning": "SUBSCRIBER{ PATH{ NAME \"client\" }, SETTINGS{ NAME \"delivery_policy\" VALUE u16=0x0020 } } — bit 5 set: this subscriber requests the latched last value on join (RFC-0022 §5.2)",
+    "note": "the producer carries no durability flag any more; the latch fires because THIS subscription asked for it, and not for a sibling subscription that did not"
+  }
+}

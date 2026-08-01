@@ -297,13 +297,11 @@ int main(int argc, char** argv) {
     const auto name_v = graph.register_vertex(*path_t::parse("/node/name"), role_t::STORED_VALUE);
     (void)graph.write(name_v, value_text(g_name));
 
-    // Transient-local (durability=1) so a fresh subscribe LATCHES the current value
-    // (RFC-0004 §D / #136): the driver's multi-hop subscribe gets one delivery with no
-    // producer thread, and a later remote WRITE fans out a live delivery.
-    tr::graph::settings_t producer;
-    producer.durability = 1;
-    const auto temp_v =
-        graph.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE, {}, producer);
+    // A plain producer: since RFC-0022 §3.A the transient-local latch is the SUBSCRIBER's
+    // request (`delivery_policy` bit 5), not a producer flag. The driver's multi-hop
+    // subscribe asks for it and gets one delivery with no producer thread; a later remote
+    // WRITE fans out a live delivery either way.
+    const auto temp_v = graph.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
     (void)graph.write(temp_v, value_u32(kSeededTemp));
 
     // ----- every LISTENER, created IN BAND ------------------------------------------

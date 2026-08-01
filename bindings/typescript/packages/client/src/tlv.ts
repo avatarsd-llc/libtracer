@@ -283,12 +283,28 @@ export function encodeConnSpec(o: ConnSpecOptions): Uint8Array {
   return encode(spec);
 }
 
-/** @brief Options for {@link encodeSubscriber}. Optional QoS/ACL/id children are deferred (ADR-0034). */
+/** @brief Options for {@link encodeSubscriber}. The ACL-capability and subscriber_id
+ * children remain deferred (ADR-0034); the delivery policy is RFC-0022 §3.A. */
 export interface SubscriberOptions {
-  // Intentionally empty for the conservative slice. The optional SUBSCRIBER
-  // children (SETTINGS qos, ACL capability, NAME subscriber_id — reference/05
-  // §SUBSCRIBER) are additive and land when their semantics are exercised.
+  /**
+   * @brief This subscription's DELIVERY policy — the packed 16-bit field of RFC-0022 §3.A,
+   * carried as `SETTINGS{ NAME "delivery_policy" VALUE u16 }` (the same `SETTINGS` child
+   * `delivery_compact` uses, so no new wire structure).
+   *
+   * Bit 0–1 reliability (0 = best-effort, 1 = reliable), bits 2–4 priority (0–7, 0 =
+   * default), bit 5 `durability_request` (deliver the producer's latched last value on
+   * join), bits 6–15 reserved — a sender MUST write them 0 and a receiver MUST ignore them.
+   *
+   * Omitted or `0` emits **no** SETTINGS child at all: absent ⇒ all-zero ⇒ today's
+   * behaviour, byte-identically (the `subscriber/policy-absent` vector).
+   */
+  deliveryPolicy?: number;
 }
+
+/** @brief `durability_request` (RFC-0022 §3.A bit 5): ask the producer to deliver its
+ * latched last value once, on join. Before RFC-0022 this was the producer's
+ * `:settings.durability`, which applied to every subscriber at once. */
+export const DELIVERY_DURABILITY_REQUEST = 0x0020;
 
 /**
  * @brief Build a SUBSCRIBER TLV (`type=0x04`, PL=1) wrapping a target PATH —
@@ -301,15 +317,28 @@ export interface SubscriberOptions {
  * dispatches matched writes (reference/05 §SUBSCRIBER).
  *
  * @param targetPath the delivery target path segments
- * @param _opts      reserved for future optional children (none in this slice)
+ * @param opts       optional children — currently the RFC-0022 §3.A delivery policy
  * @returns the encoded SUBSCRIBER TLV bytes
  */
-export function encodeSubscriber(targetPath: string[], _opts: SubscriberOptions = {}): Uint8Array {
+export function encodeSubscriber(targetPath: string[], opts: SubscriberOptions = {}): Uint8Array {
+  const children: Tlv[] = [pathTlv(targetPath)];
+  const policy = opts.deliveryPolicy ?? 0;
+  if (policy !== 0) {
+    if (!Number.isInteger(policy) || policy < 0 || policy > 0xffff)
+      throw new RangeError('deliveryPolicy must be a u16');
+    children.push({
+      type: TYPE.SETTINGS,
+      opt: opt({ pl: true }),
+      payload: new Uint8Array(0),
+      children: [textTlv('delivery_policy'), valueLe(policy, 2)],
+      trailer: null,
+    });
+  }
   const tlv: Tlv = {
     type: TYPE.SUBSCRIBER,
     opt: opt({ pl: true }),
     payload: new Uint8Array(0),
-    children: [pathTlv(targetPath)],
+    children,
     trailer: null,
   };
   return encode(tlv);

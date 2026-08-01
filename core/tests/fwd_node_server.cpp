@@ -104,12 +104,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "fwd_node_server: failed to parse /sensor/temp\n");
         return 1;
     }
-    // Transient-local (durability=1) so a fresh subscribe LATCHES the current value
-    // (RFC-0004 §D / #136) — the interop test's first delivery, with no producer thread.
-    tr::graph::settings_t producer_settings;
-    producer_settings.durability = 1;
-    const auto vertex =
-        graph.register_vertex(*temp_path, tr::graph::role_t::STORED_VALUE, {}, producer_settings);
+    // A plain producer: since RFC-0022 §3.A the transient-local latch is the SUBSCRIBER's
+    // request (`delivery_policy` bit 5), not a producer flag — the interop client asks for
+    // it and gets the current value as its first delivery, with no producer thread.
+    const auto vertex = graph.register_vertex(*temp_path, tr::graph::role_t::STORED_VALUE);
     (void)graph.write(vertex, make_value(value_u32(kSeededTemp)));
 
     // ----- the FWD router + ws server. The server link is the node's only child,

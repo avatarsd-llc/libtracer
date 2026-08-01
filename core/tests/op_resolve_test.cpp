@@ -470,7 +470,7 @@ void test_non_canonical_dst() {
 }
 
 /**
- * @brief ADR-0042 §3 — the per-vertex `store_ref_min_bytes` referenced WRITE store: a view-
+ * @brief ADR-0042 §3 — the owner-declared `store_ref_min_bytes` referenced WRITE store: a view-
  *        delivered frame's big trailer-less payload stores as a SUBVIEW of the frame (segment-
  *        pointer identity, zero copy, frame pinned); the default (0), a small payload, a trailered
  *        payload, and a span-delivered frame all keep the ADR-0041 one-copy trailer-sliced store.
@@ -505,11 +505,16 @@ void test_store_ref_threshold() {
               "copied store holds the payload TLV bytes");
     }
 
-    // Opt in via the `:settings` field-write (the wire path that parses the u32).
-    (void)g.write(path_t("/sensor/blob:settings.store_ref_min_bytes"),
-                  make_value(b_value({0x08, 0x00, 0x00, 0x00})));
-    check(g.settings(v).store_ref_min_bytes == 8,
-          ":settings.store_ref_min_bytes field-write parses the u32 (8)");
+    // Opt in through the OWNER-side declaration. RFC-0022 §3.B withdrew the
+    // `:settings.store_ref_min_bytes` write surface — the copy/pin trade is a deployment
+    // call, not remotely-writable QoS — so this is now the only door, and a peer's write
+    // of the old name answers SCHEMA_NOT_FOUND.
+    check(!g.write(path_t("/sensor/blob:settings.store_ref_min_bytes"),
+                   make_value(b_value({0x08, 0x00, 0x00, 0x00})))
+               .has_value(),
+          "the removed `:settings.store_ref_min_bytes` write surface refuses");
+    g.set_store_ref_min_bytes(v, 8);
+    check(g.store_ref_min_bytes(v) == 8, "the owner-side declaration takes the threshold (8)");
 
     // Big trailer-less payload >= threshold => the stored view IS the frame segment.
     {
@@ -579,9 +584,8 @@ void test_store_ref_concurrent() {
     graph_t g;
     op_resolver_t resolver(g);
     const auto path = path_t::parse("/sensor/blob");
-    tr::graph::settings_t s;
-    s.store_ref_min_bytes = 8;
-    tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::STORED_VALUE, {}, s);
+    tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::STORED_VALUE);
+    g.set_store_ref_min_bytes(v, 8);
 
     std::vector<std::byte> big(64);
     for (std::size_t i = 0; i < big.size(); ++i) big[i] = static_cast<std::byte>(0xA0 + i);

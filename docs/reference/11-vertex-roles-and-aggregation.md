@@ -416,7 +416,7 @@ The net plane carries the same shape for connections:
 | Concept | Specified in | Role here |
 | ---- | ---- | ---- |
 | Vertex backing is unspecified (RAM, MMIO, file, function-on-read) | [02-graph-model.md](02-graph-model.md) §the graph imposes no shape | The taxonomy that develops it |
-| Shared-variable pattern via subscribe + `transient_local` | [06-user-data-packing.md](06-user-data-packing.md) §"Synchronize the value of a variable" pattern | Role 1 (stored value) |
+| Shared-variable pattern via a subscribe requesting durability (`durability_request`, RFC-0022 §3.A) | [06-user-data-packing.md](06-user-data-packing.md) §"Synchronize the value of a variable" pattern | Role 1 (stored value) |
 | Route proxy as a vertex that forwards | [07-host-embedding.md](07-host-embedding.md) §per-host view | Role 5 (proxy) |
 | Subtree subscription mechanics | [03-addressing.md](03-addressing.md) §subtree subscriptions | Builds aggregate-role vertices |
 | Address-shift slicing for large payloads | [03-addressing.md](03-addressing.md) §address-shift slicing | Composes with role 2 and the Mode-A canvas |

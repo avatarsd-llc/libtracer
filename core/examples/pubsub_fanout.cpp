@@ -91,17 +91,17 @@ int main() {
     for (std::size_t fanout : {std::size_t{1}, std::size_t{8}, std::size_t{64}})
         run_fanout(fanout, kWrites, ok);
 
-    // Field-write a QoS setting, then discover the vertex shape via :schema.
+    // Declare the STREAM ring depth OWNER-SIDE (RFC-0022 §3.C — it has no wire surface),
+    // then discover the vertex shape via :schema.
     tr::graph::graph_t g;
-    (void)g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
-    (void)g.write(path_t("/sensor/temp:settings.deadline_ns"), value_u32(5000));
+    const auto temp = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+    g.set_history_depth(temp, 8);
     auto schema = g.read(path_t("/sensor/temp:schema"));
     std::size_t schema_children = 0;
     if (schema)
         if (auto point = tr::wire::decode((*schema)->only()))
             schema_children = point->children.size();
-    std::printf(":schema resolves to a POINT with %zu children after the field-write\n",
-                schema_children);
+    std::printf(":schema resolves to a POINT with %zu children\n", schema_children);
     check(ok, schema_children == 2, ":schema is a 2-child POINT");
 
     std::printf("%s\n", ok ? "pub/sub fan-out OK" : "pub/sub fan-out FAILED");

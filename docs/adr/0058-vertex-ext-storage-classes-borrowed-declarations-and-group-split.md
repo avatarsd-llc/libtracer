@@ -59,6 +59,8 @@ Move the two independently-sheddable feature groups behind their own lazy pointe
 - **ACL is not sheddable per-vertex.** The ADR-0050 effective-ACE cache (`eff_aces`/`eff_aces_inherit`) is stored on **every gated vertex, including bare descendants** — a leaf with no own ACEs still caches its inherited merge, and `mark_acl_cache_dirty` is a *lock-free* release-store on the hot subtree-invalidation walk. Behind a lazy pointer, any gated leaf would allocate the group anyway (so no RAM is saved for the app-field-leaf case that motivates this ADR), and the lock-free dirty-mark would have to allocate-or-skip on a null group — real concurrency risk for zero benefit. The inline ACL cost is load-bearing, not dead weight.
 - **`settings` stays inline** because `settings()` is a lock-free `const settings_t&` reader; keeping it inline avoids a second pointer-hop on that path, and `settings_t` is small and common. `history` is already lazy (#389); `last_flushed_seq` is 8 B.
 
+  > **Erratum (2026-08-01), [RFC-0022](../spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.B:** `settings_t` no longer exists. The two magnitudes it held are now plain `std::uint32_t` members of the extension block (`history_keep_last`, `store_ref_min_bytes`), and the inline-vs-lazy ruling above carries over to them verbatim — the threshold is still read lock-free on every view-delivered write, so it stays one inline load off this block. Nothing else in this decision changes.
+
 So Step 2 as shipped is the two *unconditionally-dead-for-a-leaf* groups (value handlers, app-field), which is where the entire measured #388 win lives.
 
 ## Consequences

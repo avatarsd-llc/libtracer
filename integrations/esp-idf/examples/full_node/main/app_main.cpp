@@ -16,8 +16,8 @@
  *       inbound datagram lands in a pool slot, exhaustion is backpressure) and
  *       a `monotonic_buffer_resource` region for the router/label containers
  *       (wrapped in a `synchronized_pool_resource` so recv threads share it);
- *     - a sensor vertex `/sensor/temp` (transient-local, so a fresh subscriber
- *       latches the current value);
+ *     - a sensor vertex `/sensor/temp` (a subscriber that requests durability
+ *       latches the current value — RFC-0022 §3.A);
  *     - `transport_vertex_t` with the built-in udp/tcp/ws transport catalog;
  *       the UDP listener connection is created IN-BAND via a
  *       `write /net:children[] SPEC{listener, kind=udp, port}` — config-created,
@@ -38,6 +38,7 @@
  * creds via menuconfig) can dial the same listener — the on-silicon e2e.
  */
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
@@ -167,10 +168,29 @@ std::vector<std::byte> b_field_subscribers_append() {
     return out;
 }
 
-/** @brief SUBSCRIBER{ PATH target } — the remote-subscriber record a subscribe appends. */
-std::vector<std::byte> b_subscriber(const std::vector<std::byte>& target) {
+/**
+ * @brief SUBSCRIBER{ PATH target, SETTINGS{ NAME "delivery_policy" VALUE u16 }? } — the
+ *        remote-subscriber record a subscribe appends.
+ *
+ * The optional SETTINGS child carries this subscription's DELIVERY policy (RFC-0022 §3.A):
+ * bits 0–1 reliability, 2–4 priority, 5 `durability_request`, 6–15 reserved. A zero policy
+ * emits no child at all — absent ⇒ all-zero ⇒ the default behaviour, byte-identically to
+ * what a sender that predates the key produces.
+ */
+std::vector<std::byte> b_subscriber(const std::vector<std::byte>& target,
+                                    std::uint16_t delivery_policy = 0) {
+    std::vector<std::byte> body(target);
+    if (delivery_policy != 0) {
+        std::vector<std::byte> members;
+        tr::wire::emit_name(members, "delivery_policy");
+        const std::array<std::byte, 2> bits{
+            std::byte{static_cast<std::uint8_t>(delivery_policy & 0xFF)},
+            std::byte{static_cast<std::uint8_t>(delivery_policy >> 8)}};
+        tr::wire::emit_tlv(members, type_t::VALUE, opt_t{}, std::span<const std::byte>(bits));
+        tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, members);
+    }
     std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SUBSCRIBER, opt_t{.pl = true}, target);
+    tr::wire::emit_tlv(out, type_t::SUBSCRIBER, opt_t{.pl = true}, body);
     return out;
 }
 
@@ -267,11 +287,10 @@ struct device_node_t {
         if (!net.register_module(std::string(tr::net::kUdpServerSuggestedModule), "udp",
                                  conn_role_t::LISTEN))
             return false;
-        // The sensor vertex: transient-local (durability=1) so a fresh remote
-        // subscriber LATCHES the current value — one immediate delivery.
-        tr::graph::settings_t s;
-        s.durability = 1;
-        sensor = graph.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE, {}, s);
+        // The sensor vertex: a plain producer. Since RFC-0022 §3.A a fresh remote
+        // subscriber LATCHES the current value by ASKING for it (the SUBSCRIBER's
+        // `delivery_policy` bit 5), so the producer carries no durability flag.
+        sensor = graph.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
         if (!write_sensor(21)) return false;
 
         // The UDP listener, created IN-BAND from config — the production path.
@@ -354,12 +373,16 @@ int run_host_probe(device_node_t& dev) {
     }
     check(read_ok && got == 21, "FWD{READ} round-trip: /dev/sensor/temp == 21");
 
-    // 2) Subscribe: a `:subscribers[]` append WRITE binds a REMOTE subscriber at
-    //    the device; transient-local latches the current value immediately.
+    // 2) Subscribe: a `:subscribers[]` append WRITE binds a REMOTE subscriber at the
+    //    device. This subscription REQUESTS durability (RFC-0022 §3.A bit 5), so the
+    //    producer latches its current value to it immediately — the producer carries no
+    //    durability flag of its own, and a sibling subscriber that does not ask gets no
+    //    replay.
     router.on_frame(
         "self",
         b_fwd(tr::graph::fwd_op_t::WRITE, b_path({"net", "udp-client", "dev", "sensor", "temp"}),
-              b_path({"probe"}), b_field_subscribers_append(), b_subscriber(b_path({"probe"}))));
+              b_path({"probe"}), b_field_subscribers_append(),
+              b_subscriber(b_path({"probe"}), tr::graph::delivery_policy_t::kDurabilityRequest)));
 
     // The latch delivery races our next call, so poll-read until it lands.
     bool latched = false;
@@ -368,7 +391,7 @@ int run_host_probe(device_node_t& dev) {
         latched = lkv.has_value() && value_u32_of((*lkv)->only()) == 21;
         if (!latched) std::this_thread::sleep_for(50ms);
     }
-    check(latched, "subscribe latched the current value (transient-local)");
+    check(latched, "a durability_request subscribe latched the current value");
 
     // 3) Producer fan-out: a plain device-side graph.write fans a FWD{WRITE}
     //    out to us; observed with graph.await on the host side (await is the

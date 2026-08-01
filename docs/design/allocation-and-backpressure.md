@@ -33,9 +33,9 @@ heap and byte-identical behaviour (`core/include/libtracer/graph.hpp:187-189`).
 
 | Seam | Type | What it allocates | Exhaustion |
 | --- | --- | --- | --- |
-| `mr_` (`graph.hpp:946`) | `std::pmr::memory_resource*` | the small control *objects* of a stored write: the `shared_ptr` control block and the `rope_t` wrapping the value's links | throws — structurally cannot report by value |
-| `value_backend_` (`graph.hpp:955`) | `mem::mem_backend_t*` | the durable byte `segment` holding a vertex's last-known value when the write path must own its bytes | `nullptr` → write rejects `BACKPRESSURE` |
-| `ctl_` (`graph.hpp:1015`) | `mem::block_source_t*` | every allocation a peer can provoke | `nullptr` → the operation answers a status |
+| `mr_` (`graph.hpp:971`) | `std::pmr::memory_resource*` | the small control *objects* of a stored write: the `shared_ptr` control block and the `rope_t` wrapping the value's links | throws — structurally cannot report by value |
+| `value_backend_` (`graph.hpp:977`) | `mem::mem_backend_t*` | the durable byte `segment` holding a vertex's last-known value when the write path must own its bytes | `nullptr` → write rejects `BACKPRESSURE` |
+| `ctl_` (`graph.hpp:1038`) | `mem::block_source_t*` | every allocation a peer can provoke | `nullptr` → the operation answers a status |
 
 Three seams rather than one because the three contracts differ: cache hooks, `owns_bytes` and
 ISR-safety belong to a byte buffer; object construction belongs to `std::pmr`; reporting exhaustion
@@ -44,7 +44,7 @@ the two contracts — may-be-null versus must-not-be-null — cannot be transpos
 and so retiring `mr_` later is a compile error rather than a silent rebind (`graph.hpp:174-186`).
 `ctl_` is declared last in the object on purpose: no hot path reads it, so placing it there leaves
 every other member at the byte offset it had before the seam existed, which keeps the forward-hop
-bench measuring the same layout (`graph.hpp:1009-1013`).
+bench measuring the same layout (`graph.hpp:1032-1036`).
 
 `fwd_router_t` carries the same failable seam separately as its `rx` parameter
 (`core/include/libtracer/fwd_router.hpp:141`), because the terminus arena decode belongs to the
@@ -120,11 +120,11 @@ std::array<std::byte, 4096> stack;
 mem::bump_source_t src(stack, *ctl_);
 ```
 
-(`core/src/graph.cpp:1035-1036`.) Three properties follow, and each closes a different failure mode:
+(`core/src/graph.cpp:1021-1022`.) Three properties follow, and each closes a different failure mode:
 
 - **A bounded node that injected `ctl` gets its own store here too.** The overflow leg draws from
   that injection rather than from the global heap, so the node's memory bound covers **this
-  arena** (`graph.cpp:971-973`). Read that literally: it is a statement about the decode arena, not
+  arena** (`graph.cpp:923-925`). Read that literally: it is a statement about the decode arena, not
   a general one about every allocation near it. Each seam is covered because it was injected and
   the site was pointed at it, one site at a time — the router's flattens went uncovered for a
   release precisely because they looked like they were included in a sentence like this one (#730).
@@ -149,11 +149,11 @@ defines for "exceeds this receiver's decode resources".
 
 | Allocation | Site | Failure answer |
 | --- | --- | --- |
-| Branch-write flatten into the value backend | `core/src/graph.cpp:1022-1023` | empty head with a non-zero rope length → `BACKPRESSURE` |
-| Field-write flatten into the value backend | `core/src/graph.cpp:1259-1260` | empty head with a non-zero rope length → `BACKPRESSURE` |
-| Branch-write root key render (`try_build_key`) | `core/src/graph.cpp:1054-1055` | `false` → `BACKPRESSURE` |
-| Branch-write parse-key copy (`detail::try_assign`) | `core/src/graph.cpp:1057` | `false` → `BACKPRESSURE` |
-| Branch-write decode arena | `core/src/graph.cpp:1037-1039` | decode error → `TYPE_MISMATCH` |
+| Branch-write flatten into the value backend | `core/src/graph.cpp:1008-1009` | empty head with a non-zero rope length → `BACKPRESSURE` |
+| Field-write flatten into the value backend | `core/src/graph.cpp:1245-1246` | empty head with a non-zero rope length → `BACKPRESSURE` |
+| Branch-write root key render (`try_build_key`) | `core/src/graph.cpp:1040-1041` | `false` → `BACKPRESSURE` |
+| Branch-write parse-key copy (`detail::try_assign`) | `core/src/graph.cpp:1043` | `false` → `BACKPRESSURE` |
+| Branch-write decode arena | `core/src/graph.cpp:1021-1024` | decode error → `TYPE_MISMATCH` |
 | Per-delivery COMPACT flatten (egress) | `core/src/fwd_router.cpp:1213-1214` | the delivery is **dropped** |
 | Per-delivery frame build | `core/src/fwd_router.cpp:1218` | the delivery is **dropped** |
 | Ingress `ADVERTISE` route flatten | flatten `core/src/fwd_router.cpp:897`, answered at `:905` | the empty flatten **fails the `wire::decode`** ⇒ the frame is **dropped**; the label stays **unbound** (the peer's COMPACTs draw a `HANDLE_NACK`) |
@@ -182,7 +182,7 @@ can fail is a guard nobody can prove.
 
 The key render and its parse copy are nothrow so that OOM soft-fails the branch write as
 `BACKPRESSURE`, the injected-resource status — **never an abort on the writer thread**
-(`graph.cpp:989-992`).
+(`graph.cpp:975-978`).
 
 The remote-delivery leg answers differently on purpose. A stored write that reached its LKV has
 succeeded; the fan-out to one subscriber is a separate obligation, and a subscriber missing
@@ -190,8 +190,8 @@ one value under heap exhaustion is valid delivery behaviour where failing the wr
 per-delivery allocation on that writer-thread leg is nothrow, and a failed flatten or frame build
 drops that one delivery (`core/src/fwd_router.cpp:1213-1214`). Dropping *invisibly* is the part that
 needs an answer, which is why `graph_t::delivery_drops()` exists
-(`core/include/libtracer/graph.hpp:817`): three relaxed monotonic counters — `no_target`, `denied`,
-`out_of_memory` (`graph.hpp:751-758`) — incremented only on a drop, so the delivering path is
+(`core/include/libtracer/graph.hpp:848`): three relaxed monotonic counters — `no_target`, `denied`,
+`out_of_memory` (`graph.hpp:781-788`) — incremented only on a drop, so the delivering path is
 byte-identical while nothing drops. Nothing in the library reads them; a deployment chooses whether
 to alarm.
 

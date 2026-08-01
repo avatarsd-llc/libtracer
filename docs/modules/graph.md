@@ -14,8 +14,9 @@ bump, no copy). The last-known-value path takes **no per-vertex mutex**.
 ## What it does
 
 `graph_t` owns the vertex map (keyed on canonical [path](path.md) bytes). Each vertex
-has a **role**: *stored-value* (last-writer-wins), *stream* (a bounded ring sized by
-`:settings.history_keep_last`), or *handler* (`on_read` / `on_write` — covering
+has a **role**: *stored-value* (last-writer-wins), *stream* (a bounded ring whose depth the
+owner declares host-side with `set_history_depth`, and which no peer can read or write —
+[RFC-0022](../spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.C), or *handler* (`on_read` / `on_write` — covering
 computed, proxy, sink, live-MMIO patterns). The last-known-value slot is an
 `atomic<shared_ptr<const rope_t>>` swap, so `read` / `write` of the value take **no
 per-vertex mutex**; that mutex guards the subscriber list, the history ring and the
@@ -47,14 +48,13 @@ re-emitting on its execution. `:schema` reads return a `POINT` descriptor.
 enum class role_t { STORED_VALUE, STREAM, HANDLER };
 enum class delivery_mode_t { IF_NEWER, UNCONDITIONAL, EXPLICIT };
 
-struct settings_t {  // widest-first; fixed-width, so identical on 32- and 64-bit
-    std::uint64_t deadline_ns;         // 0 = off; max ns between writes before a liveness fault
-    std::uint32_t history_keep_last;   // stream ring depth (>= 1)
-    std::uint32_t queue_max_bytes;     // 0 = unbounded; per-subscriber back-pressure cap
-    std::uint32_t store_ref_min_bytes; // 0 = off; store-by-reference threshold
-    std::uint8_t  reliability;         // 0 = best-effort, 1 = reliable
-    std::uint8_t  durability;          // 0 = volatile, 1 = transient-local
-    std::uint8_t  priority;            // transport hint, not a wire bit
+// There is NO per-vertex settings type. RFC-0022 §3.B deleted `settings_t` outright: four
+// of its seven knobs were inert, `durability` became the subscription's (below), and the two
+// survivors are construction parameters an OWNER declares — see set_history_depth /
+// set_store_ref_min_bytes. Nothing is inherited (§3.F).
+
+struct delivery_policy_t {  // ONE subscription's delivery policy (RFC-0022 §3.A) — 2 B packed
+    std::uint16_t bits;     // 0-1 reliability | 2-4 priority | 5 durability_request | 6-15 rsvd
 };
 
 struct handlers_t {                                       // four seams, not two
@@ -73,9 +73,8 @@ class graph_t {
                      mem::block_source_t* ctl          = &mem::heap_source());
 
     // registration and removal
-    vertex_handle_t register_vertex(const path_t&, role_t, handlers_t = {}, settings_t = {});
-    result_t<vertex_handle_t> try_register_vertex(const path_t&, role_t,
-                                                  handlers_t = {}, settings_t = {});
+    vertex_handle_t register_vertex(const path_t&, role_t, handlers_t = {});
+    result_t<vertex_handle_t> try_register_vertex(const path_t&, role_t, handlers_t = {});
     result_t<void> retire(vertex_handle_t);                       // logical absence, subtree-wide
     std::uint32_t  retire_generation(vertex_handle_t) const noexcept;
     void           collect();                    // free the parked value seams — CALLER-timed
@@ -92,6 +91,11 @@ class graph_t {
     void                  set_delivery_mode(vertex_handle_t, delivery_mode_t);
     result_t<std::vector<rope_t>> history(vertex_handle_t) const;   // stream window
 
+    // owner-side storage declarations (RFC-0022 §3.C) — host API only, NO wire surface
+    void          set_history_depth     (vertex_handle_t, std::uint32_t keep);
+    void          set_store_ref_min_bytes(vertex_handle_t, std::uint32_t bytes);
+    std::uint32_t store_ref_min_bytes   (vertex_handle_t) const noexcept;
+
     // composed reads — they build a value, so they return one
     result_t<rope_t> read_children_folded(vertex_handle_t) const;
     result_t<rope_t> read_children_materialized(vertex_handle_t) const;
@@ -106,8 +110,10 @@ class graph_t {
     result_t<value_ref_t> await(const path_t&, std::chrono::nanoseconds);
 
     // subscriptions
-    result_t<void>           subscribe(const path_t& src, const path_t& target);
-    result_t<subscription_t> subscribe(const path_t& src, subscriber_fn_t fn, void* ctx);
+    result_t<void>           subscribe(const path_t& src, const path_t& target,
+                                       delivery_policy_t policy = {});
+    result_t<subscription_t> subscribe(const path_t& src, subscriber_fn_t fn, void* ctx,
+                                       delivery_policy_t policy = {});
     template <typename F>
     result_t<subscription_t> subscribe(const path_t& src, F& callback);   // lvalue only
     result_t<void>           unsubscribe(const subscription_t&);
@@ -128,7 +134,7 @@ Subscription edges are never destroyed while the graph lives. `unsubscribe` only
 **deactivates** the slot; an in-flight delivery has already snapshotted the edge and
 completes. The caller-owned `ctx` (or, for the templated overload, the callable itself)
 must therefore stay alive past any delivery that may still be running, not merely past
-the `unsubscribe` call (`core/include/libtracer/graph.hpp:552-555`).
+the `unsubscribe` call (`core/include/libtracer/graph.hpp:582-585`).
 ```
 
 ```{admonition} No strings on the hot path
@@ -170,16 +176,16 @@ pool exhaustion surfaces as `BACKPRESSURE`, never a silent heap fallback. See
 
 ```cpp
 // idiomatic: encode the path once (parse-once ctor), reuse the handle
-path_t p("/x:settings.reliability");                     // once — no *-deref
+path_t p("/x:settings.app.setpoint");                    // once — no *-deref
 auto v = *g.find(p.key());                               // once — find → optional<vertex_handle_t>
-for (...) g.write(v, p.field(), reliable_tlv);           // hot loop — zero strings
+for (...) g.write(v, p.field(), setpoint_tlv);           // hot loop — zero strings
 ```
 
 ## What a read hands back
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
-(`core/include/libtracer/graph.hpp:392,444` by handle, `:728,734` by path;
-`value_ref_t` at `core/include/libtracer/vertex.hpp:83`). A `value_ref_t` is an **owning
+(`core/include/libtracer/graph.hpp:390,444` by handle, `:758,734` by path;
+`value_ref_t` at `core/include/libtracer/vertex.hpp:84`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds it as a
 `std::shared_ptr<const rope_t>`, so handing that reference back costs a refcount clone of
 one control block instead of one `segment_ptr_t` clone per link.
@@ -239,8 +245,9 @@ value — it reads the last-known-value — and always delivers the vertex named
 vertex is the explicit target; the mode gates only what an **ancestor's** sweep sweeps up.
 Its cost is O((pending + unconditional) in subtree).
 
-`set_delivery_mode(v, mode)` sets that per-vertex policy. It is a wiring-time call, like
-settings.
+`set_delivery_mode(v, mode)` sets that per-vertex policy. It is a wiring-time host API call,
+in the same family as `set_history_depth`, `set_store_ref_min_bytes` and `set_app_fields` — an
+owner declaration with no wire surface.
 
 | `delivery_mode_t` | An ancestor's sweep includes this vertex |
 | --- | --- |
@@ -315,7 +322,7 @@ a lock precisely because nothing writes them once traffic starts.
 | `set_identity(kind, key)` / `clear_identity()` | installs the node-scoped record `read <vertex>:identity` serves, byte-identical from every vertex | absent — `:identity` answers `SCHEMA_NOT_FOUND` |
 | `set_remote_delivery_sink(sink)` | where the producer fan-out hands each **remote** subscriber's delivery | **null — remote subscriber slots are stored but never deliver** |
 | `set_subject_resolver(resolver)` | maps a caller context to a subject token, enabling ACL evaluation | **none — enforcement is entirely off; every operation is allowed** |
-| `subscribe_wire(v, source, route, link)` | the inbound `:subscribers[]` append: one parse, the SUBSCRIBE gate, the slot append, the transient-local latch | — (called by the FWD resolver, not a default) |
+| `subscribe_wire(v, source, route, link)` | the inbound `:subscribers[]` append: one parse, the SUBSCRIBE gate, the slot append, the durability latch the subscriber requested | — (called by the FWD resolver, not a default) |
 
 The two defaults in bold are load-bearing and are the two failure modes a node wired by
 hand hits first. A graph with no remote-delivery sink accepts remote subscribes and

@@ -210,8 +210,7 @@ class graph_t {
      * For a genuine runtime path whose collision is a real outcome, use @ref try_register_vertex.
      */
     [[nodiscard]] vertex_handle_t register_vertex(const path_t& path, role_t role,
-                                                  handlers_t handlers = {},
-                                                  settings_t settings = {});
+                                                  handlers_t handlers = {});
 
     /**
      * @brief Register a vertex at @p path — FALLIBLE (the runtime-path form of
@@ -220,8 +219,7 @@ class graph_t {
      *         registered.
      */
     [[nodiscard]] result_t<vertex_handle_t> try_register_vertex(const path_t& path, role_t role,
-                                                                handlers_t handlers = {},
-                                                                settings_t settings = {});
+                                                                handlers_t handlers = {});
 
     /**
      * @brief Register a vertex by its canonical PATH-payload @p key directly (the in-band
@@ -234,8 +232,7 @@ class graph_t {
      */
     [[nodiscard]] result_t<vertex_handle_t> register_vertex_key(std::vector<std::byte> key,
                                                                 role_t role,
-                                                                handlers_t handlers = {},
-                                                                settings_t settings = {});
+                                                                handlers_t handlers = {});
 
     /**
      * @brief Retire a vertex and its whole subtree — the owner-facing mirror of
@@ -248,7 +245,8 @@ class graph_t {
      * dereferenceable forever (ADR-0057 insert-only) — the vertex is *emptied*, not
      * erased. Retirement **re-virginizes** each vertex (§B.6): it clears the previous
      * owner's `:acl`, value seam, stored value, history, app-field table, subscribers,
-     * settings, and delivery mode, so a later write-creates revive of the same address
+     * owner-side storage declarations, and delivery mode, so a later write-creates revive
+     * of the same address
      * inherits **nothing** of the retired owner — in particular the revived path inherits
      * its live ancestor's ACL policy, never the retired one's (the §Discussion-7 ruling:
      * an ACL does not survive churn). `write_seq_` survives (monotonic per address).
@@ -438,6 +436,38 @@ class graph_t {
      */
     void set_delivery_mode(vertex_handle_t v, delivery_mode_t mode);
     /**
+     * @brief Declare how many entries @p v's STREAM ring retains (RFC-0022 §3.C).
+     *
+     * The ring depth is **not** protocol QoS: it encodes what the APPLICATION wants kept,
+     * and only the application can supply it. So it is an owner-side wiring call in the
+     * shape of @ref set_delivery_mode and @ref set_app_fields — a declaration the owner
+     * makes host-side after registration — and it has **no wire surface at all**: no peer
+     * can read it and none can write it. Callable at any time; the next append trims to
+     * the new depth. @p keep of 0 behaves as 1 (the ring always keeps the last value).
+     *
+     * Meaningful on the STREAM role, which is the only role that appends a ring; setting
+     * it on another role stores the number and changes nothing. Costs a STREAM vertex zero
+     * additional bytes — a STREAM identity already allocates the extension block.
+     */
+    void set_history_depth(vertex_handle_t v, std::uint32_t keep);
+    /**
+     * @brief Declare @p v's store-by-reference threshold in bytes (ADR-0042 §3); 0 (the
+     *        default) disables referencing.
+     *
+     * A view-delivered WRITE whose payload TLV is at least this large, and carries no
+     * trailer bits, is stored as a refcounted SUBVIEW of the inbound frame — no allocation
+     * and no copy — instead of the one-copy trailer-sliced store. Pinning holds the WHOLE
+     * inbound segment for the value's lifetime, so it buys latency and pays in RAM; that
+     * trade is a deployment call, which is why this is an owner-side declaration and not,
+     * since RFC-0022 §3.B, a remotely writable knob. Nothing is inherited (§3.F).
+     *
+     * @note RFC-0022 §3.D replaces this absolute threshold with the amplification ratio
+     *       `payload * K >= segment`. That change is gated by §6 on a dual-target
+     *       measurement which has not been run, so the predicate here is still the
+     *       absolute one, defaulting off exactly as it did before the RFC.
+     */
+    void set_store_ref_min_bytes(vertex_handle_t v, std::uint32_t bytes);
+    /**
      * @brief Block until the vertex's value changes or @p timeout elapses; return the value.
      * @return The stored value as a rope, or a `status_t` (e.g. `TIMEOUT`).
      */
@@ -543,8 +573,15 @@ class graph_t {
      * field-write admission door as a wire subscribe — one parse, one SUBSCRIBE gate, one
      * durability latch, and the edge's stored SUBSCRIBER view reads back byte-identically
      * from `:subscribers[]`.
+     *
+     * @param policy This subscription's DELIVERY policy (RFC-0022 §3.A) — the same packed
+     *               16 bits a wire subscriber sends in its `SETTINGS` child, and encoded
+     *               into exactly that child here so the two doors stay byte-identical.
+     *               Defaulted to all-zero: best-effort, default priority, no durability
+     *               request — today's behaviour for every caller that says nothing.
      */
-    [[nodiscard]] result_t<void> subscribe(const path_t& src, const path_t& target);
+    [[nodiscard]] result_t<void> subscribe(const path_t& src, const path_t& target,
+                                           delivery_policy_t policy = {});
     /**
      * @brief Subscribe @p src to an in-process `{fn, ctx}` callback (sugar; fires inline
      *        on each delivery to src with the rope value).
@@ -560,24 +597,30 @@ class graph_t {
      * @param ctx Caller-owned context; must outlive every possible delivery (edges are
      *            never destroyed while the graph lives — an unsubscribe only deactivates
      *            the slot, but an in-flight delivery may still be running).
+     * @param policy This subscription's DELIVERY policy (RFC-0022 §3.A); defaulted to
+     *               all-zero, i.e. today's behaviour. A callback edge carries no TLV, so
+     *               the policy is set on the slot directly rather than parsed out of one.
      * @return A @ref subscription_t handle for @ref unsubscribe; error on an unknown @p src
      *         or a denied SUBSCRIBE gate.
      */
     [[nodiscard]] result_t<subscription_t> subscribe(const path_t& src, subscriber_fn_t fn,
-                                                     void* ctx);
+                                                     void* ctx, delivery_policy_t policy = {});
 
     /**
      * @brief Subscribe @p src to a caller-owned callable (sugar over the `{fn, ctx}` form).
      *
      * Zero-erasure sugar mirroring `transport_t::set_receiver`: @p callback is bound by
      * address (lvalues only — a temporary would dangle) and MUST outlive every delivery.
+     * @param policy This subscription's DELIVERY policy (RFC-0022 §3.A); all-zero default.
      * @return A @ref subscription_t handle for @ref unsubscribe (as the `{fn, ctx}` form).
      */
     template <typename F>
         requires std::invocable<F&, const view::rope_t&>
-    [[nodiscard]] result_t<subscription_t> subscribe(const path_t& src, F& callback) {
+    [[nodiscard]] result_t<subscription_t> subscribe(const path_t& src, F& callback,
+                                                     delivery_policy_t policy = {}) {
         return subscribe(
-            src, [](void* c, const view::rope_t& v) { (*static_cast<F*>(c))(v); }, &callback);
+            src, [](void* c, const view::rope_t& v) { (*static_cast<F*>(c))(v); }, &callback,
+            policy);
     }
 
     /**
@@ -719,9 +762,9 @@ class graph_t {
      * segment — the ONE copy of the route; every later delivery clones the refcount,
      * ADR-0041 §2) over @p link via the remote sink. Admission is the single ADR-0049
      * step: SUBSCRIBE gate on @p v's `:acl` under @p link (#81, ADR-0026,
-     * `PERMISSION_DENIED` on denial) → slot append → durability latch (if @p v is
-     * transient-local, `settings.durability == 1`, and holds a value, the LKV is latched
-     * to this subscriber — one synchronous sink call, RFC-0004 §D).
+     * `PERMISSION_DENIED` on denial) → slot append → durability latch (if the parsed
+     * `delivery_policy_t` sets `durability_request` and @p v holds a value, the LKV is
+     * latched to this subscriber — one synchronous sink call, RFC-0004 §D / RFC-0022 §3.A).
      */
     [[nodiscard]] result_t<void> subscribe_wire(vertex_handle_t v, view_t source_view,
                                                 view_t return_route, std::string link);
@@ -729,7 +772,7 @@ class graph_t {
     /**
      * @brief Read by path — resolve the path key once (guarded map lookup), then the hot path.
      *
-     * A read whose path has a field tail (e.g. `:settings.deadline_ns`, `:subscribers[]`,
+     * A read whose path has a field tail (e.g. `:settings.app.kp`, `:subscribers[]`,
      * `:schema`) is routed to the field surface.
      */
     [[nodiscard]] result_t<value_ref_t> read(const path_t& path) const;
@@ -758,13 +801,14 @@ class graph_t {
     [[nodiscard]] bool has_first_level_child(std::span<const std::byte> record) const;
 
     /**
-     * @brief The QoS settings of the vertex @p v names (ADR-0056).
+     * @brief @p v's store-by-reference threshold in bytes (ADR-0042 §3); 0 ⇒ referencing off.
      *
-     * The read accessor the opaque handle does not expose directly: a resolver that needs a
-     * per-vertex knob (e.g. `store_ref_min_bytes`, ADR-0042 §3) queries it here instead of
-     * dereferencing the vertex. Wiring-stable — settings change only via `:settings` writes.
+     * The read accessor the opaque handle does not expose directly: the WRITE resolver
+     * (`op_resolve_walk.hpp`) queries it here instead of dereferencing the vertex. One
+     * inline load, and nothing is inherited (RFC-0022 §3.F) — a vertex whose owner never
+     * called @ref set_store_ref_min_bytes answers 0 whatever its ancestors hold.
      */
-    [[nodiscard]] const settings_t& settings(vertex_handle_t v) const noexcept;
+    [[nodiscard]] std::uint32_t store_ref_min_bytes(vertex_handle_t v) const noexcept;
 
     /**
      * @brief Find-or-create the vertex at @p key (write-creates, RFC-0005).
@@ -943,9 +987,10 @@ class graph_t {
     // ":acl" read => the raw stored ACL TLV bytes verbatim (#81-A, ADR-0018/0020). The
     // caller-facing gate (READ_ACL) runs in read(v, field, caller) before reaching here.
     [[nodiscard]] result_t<view_t> read_acl(vertex_t* v) const;
-    // Bare ":settings" read (RFC-0010 §A.4) => the full settings container: the
-    // implemented protocol QoS knobs, plus the nested `app` record iff a descriptor
-    // table is installed — the one-traversal property tree a generic renderer walks.
+    // Bare ":settings" read (RFC-0010 §A.4 as amended by RFC-0022 §4) => the settings
+    // container: the reserved `app` record iff a descriptor table is installed, and
+    // NOTHING else — the core knob namespace is empty. An empty SETTINGS{} is the honest
+    // answer for a vertex that declares no app fields.
     [[nodiscard]] result_t<view_t> read_settings(vertex_t* v) const;
     // ":settings.app" read (RFC-0010 §A.4) => the app container alone: declared,
     // non-`wo` fields that hold a value, in table order, values verbatim.

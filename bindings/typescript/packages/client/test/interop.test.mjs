@@ -29,7 +29,7 @@ import { existsSync } from 'node:fs';
 import { WebSocket } from 'ws';
 import { TransportWs } from '@avatarsd-llc/libtracer-ws';
 import { TYPE } from '@avatarsd-llc/libtracer';
-import { LibtracerClient, FwdError, encodeValue } from '../dist/index.js';
+import { LibtracerClient, FwdError, encodeValue, DELIVERY_DURABILITY_REQUEST } from '../dist/index.js';
 
 const SERVER = process.env.LIBTRACER_FWD_NODE_SERVER;
 const skip = !SERVER || !existsSync(SERVER);
@@ -139,11 +139,11 @@ test(
       const read2 = await client.read('/sensor/temp');
       assert.ok(sameBytes(read2.payload, le32(WRITTEN)), 'written value reads back');
 
-      // 3) subscribe — the REAL #136 producer fan-out. /sensor/temp is transient-local,
-      //    so the subscribe LATCHES the producer's current value (delivery #1); a later
-      //    producer WRITE then fans out a live delivery (#2). Both arrive via the handler
-      //    (registered before the ack, so neither is dropped). We set the current sample
-      //    just before subscribing so delivery #1 is a known, distinct value.
+      // 3) subscribe — the REAL #136 producer fan-out. The subscribe REQUESTS durability
+      //    (RFC-0022 §3.A bit 5), so the producer LATCHES its current value (delivery #1);
+      //    a later producer WRITE then fans out a live delivery (#2). Both arrive via the
+      //    handler (registered before the ack, so neither is dropped). We set the current
+      //    sample just before subscribing so delivery #1 is a known, distinct value.
       await client.write('/sensor/temp', encodeValue(le32(PUSHED_SAMPLE)));
       const deliveries = [];
       let resolveTwo;
@@ -154,14 +154,18 @@ test(
           res();
         };
       });
-      const unsubscribe = await client.subscribe('/sensor/temp', (value) => {
-        deliveries.push(value);
-        if (deliveries.length === 2) resolveTwo();
-      });
+      const unsubscribe = await client.subscribe(
+        '/sensor/temp',
+        (value) => {
+          deliveries.push(value);
+          if (deliveries.length === 2) resolveTwo();
+        },
+        { deliveryPolicy: DELIVERY_DURABILITY_REQUEST },
+      );
       // A fresh producer write — fans out a live delivery to the subscribed client.
       await client.write('/sensor/temp', encodeValue(le32(SECOND_SAMPLE)));
       await gotTwo;
-      assert.ok(sameBytes(deliveries[0], le32(PUSHED_SAMPLE)), 'transient-local latch on subscribe');
+      assert.ok(sameBytes(deliveries[0], le32(PUSHED_SAMPLE)), 'durability_request latch on subscribe');
       assert.ok(sameBytes(deliveries[1], le32(SECOND_SAMPLE)), 'live write-driven fan-out delivery');
       unsubscribe();
 

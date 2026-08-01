@@ -37,9 +37,9 @@ SCOPE_LINES = 80
 ANCHORS = [
     ("core/include/libtracer/tlv.hpp:59", "struct opt_t"),
     ("core/include/libtracer/tlv.hpp:28", "enum class type_t"),
-    ("core/src/graph.cpp:1779", "graph_t::set_identity"),
-    ("core/src/graph.cpp:1805", "graph_t::read_identity"),
-    ("core/src/graph.cpp:2151", 'field.steps[0].name == "identity"'),
+    ("core/src/graph.cpp:1758", "graph_t::set_identity"),
+    ("core/src/graph.cpp:1784", "graph_t::read_identity"),
+    ("core/src/graph.cpp:2117", 'field.steps[0].name == "identity"'),
     ("core/src/transport_vertex.cpp:64", 'cfg.name("kind")'),
     ("core/src/transport_vertex.cpp:99", "register_child_type"),
     ("core/src/transport_vertex.cpp:128", "register_transport_type"),
@@ -72,14 +72,14 @@ ANCHORS = [
     ("core/src/transport_vertex.cpp:238", "register_vertex_key(mod_key"),
     ("core/src/transport_vertex.cpp:318", "if (constructed)"),
     ("core/src/transport_vertex.cpp:320", "link_state_t::LISTENING : link_state_t::UP"),
-    ("core/include/libtracer/transport_vertex.hpp:262", "result_t<void> register_module"),
+    ("core/include/libtracer/transport_vertex.hpp:266", "result_t<void> register_module"),
     ("core/include/libtracer/transport_vertex.hpp:96", "enum class link_state_t"),
-    ("core/src/graph.cpp:1484", "field.steps.size() != 1", 'step0.name == "subscribers"'),
-    ("core/src/graph.cpp:1551", "field.steps.size() != 1 || !plain_step(step0)"),
-    ("core/src/graph.cpp:1588", "field.steps.size() != 1", 'step0.name == "children"'),
-    ("core/src/graph.cpp:1509", "step0.wildcard"),
-    ("core/src/graph.cpp:2117", '"children" && !field.steps[0].wildcard'),
-    ("core/src/graph.cpp:2195", "!field.steps[0].wildcard", 'field.steps[0].name == "subscribers"'),
+    ("core/src/graph.cpp:1499", "field.steps.size() != 1", 'step0.name == "subscribers"'),
+    ("core/src/graph.cpp:1566", "field.steps.size() != 1 || !plain_step(step0)"),
+    ("core/src/graph.cpp:1603", "field.steps.size() != 1", 'step0.name == "children"'),
+    ("core/src/graph.cpp:1524", "step0.wildcard"),
+    ("core/src/graph.cpp:2083", '"children" && !field.steps[0].wildcard'),
+    ("core/src/graph.cpp:2183", "!field.steps[0].wildcard", 'field.steps[0].name == "subscribers"'),
     ("core/src/op_resolve_walk.hpp:255", "enum class index_mode_t"),
     ("core/src/op_resolve_walk.hpp:644", 'field.steps[0].name != "subscribers"'),
     ("core/include/libtracer/mem_heap.hpp:149", "try_assign"),
@@ -91,45 +91,34 @@ ANCHORS = [
     ("core/include/libtracer/backend.hpp:101", "class mem_backend_t"),
     ("core/include/libtracer/backend.hpp:145", "before_io"),
     ("core/include/libtracer/grammar.hpp:210", "receiver-resource depth bound"),
-    ("core/src/graph.cpp:1039", "!arena"),
+    ("core/src/graph.cpp:1025", "!arena"),
     ("core/include/libtracer/segment.hpp:78", "struct segment_t"),
     # --- the design + module pages (#728). Every one of these had drifted. ---
-    ("core/src/graph.cpp:747", "has_registered_child()"),
-    ("core/src/graph.cpp:837", "void graph_t::fan_out"),
-    ("core/src/graph.cpp:960", "graph_t::write_impl"),
-    ("core/src/graph.cpp:1022", "value.materialize(*value_backend_)", "graph_t::write_branch"),
-    ("core/src/graph.cpp:1023", "head.empty() && value.total_length()", "graph_t::write_branch"),
-    ("core/src/graph.cpp:1035", "std::array<std::byte, 4096> stack;"),
-    ("core/src/graph.cpp:1036", "bump_source_t src(stack"),
-    ("core/src/graph.cpp:1038", "decode_into(head.bytes(), src)"),
-    ("core/src/graph.cpp:1054", "std::vector<std::byte> root_key;"),
-    ("core/src/graph.cpp:1055", "try_build_key(v, root_key)"),
-    ("core/src/graph.cpp:1057", "try_assign(parse_key, root_key)"),
-    ("core/src/graph.cpp:1259", "value.materialize(*value_backend_)", "field_write read it back"),
-    ("core/src/graph.cpp:1463", "result_t<void> graph_t::field_write"),
-    ("core/src/graph.cpp:1590", "acl_right_t::CREATE", 'step0.name == "children"'),
+    ("core/src/graph.cpp:733", "has_registered_child()"),
+    ("core/src/graph.cpp:823", "void graph_t::fan_out"),
+    ("core/src/graph.cpp:946", "graph_t::write_impl"),
+    ("core/src/graph.cpp:1008", "value.materialize(*value_backend_)", "graph_t::write_branch"),
+    ("core/src/graph.cpp:1009", "head.empty() && value.total_length()", "graph_t::write_branch"),
+    ("core/src/graph.cpp:1021", "std::array<std::byte, 4096> stack;"),
+    ("core/src/graph.cpp:1022", "bump_source_t src(stack"),
+    ("core/src/graph.cpp:1024", "decode_into(head.bytes(), src)"),
+    ("core/src/graph.cpp:1040", "std::vector<std::byte> root_key;"),
+    ("core/src/graph.cpp:1041", "try_build_key(v, root_key)"),
+    ("core/src/graph.cpp:1043", "try_assign(parse_key, root_key)"),
+    ("core/src/graph.cpp:1245", "value.materialize(*value_backend_)", "field_write read it back"),
+    ("core/src/graph.cpp:1478", "result_t<void> graph_t::field_write"),
+    ("core/src/graph.cpp:1605", "acl_right_t::CREATE", 'step0.name == "children"'),
     ("core/src/fwd_router.cpp:1185", "fwd_router_t::deliver_remote"),
     ("core/src/fwd_router.cpp:1213", "value.materialize(*flat_)"),
     ("core/src/fwd_router.cpp:1214", "flatten OOM"),
     ("core/src/fwd_router.cpp:1218", "try_encode_compact", "fwd_router_t::deliver_remote"),
     ("core/src/fwd_router.cpp:1250", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
-    # #730 — the THREE ingress flatten SITES, plus the one guard that is independently
-    # observable. Anchored because the whole point of the seam is that these are testable;
-    # a citation to them silently rotting would be the first step back to "the guard nobody
-    # can prove still works". The `ADVERTISE` and bus-name `empty()` early-outs are NOT
-    # anchored: both are redundant with the `wire::decode` that follows them and their
-    # removal is not observable, so pinning them would claim a dead line is a guard.
-    ("core/src/fwd_router.cpp:577", "materialize(*flat_)", "hit.rejected"),
-    ("core/src/fwd_router.cpp:897", "materialize(*flat_)", "case type_t::ADVERTISE"),
-    ("core/src/fwd_router.cpp:917", "materialize(*flat_)", "case type_t::COMPACT"),
+    # #730 — the two INGRESS flatten guards. Anchored because the whole point of the
+    # seam is that these are testable; a citation to them silently rotting would be the
+    # first step back to "the guard nobody can prove still works".
+    ("core/src/fwd_router.cpp:904", "route_flat.empty()"),
     ("core/src/fwd_router.cpp:924", "payload_flat.empty()"),
-    # #766 — the terminus resolver's rope-tier flattens, which `flat` does NOT cover. Pinned
-    # so the corrected scope sentences cannot drift off the sites that make them true.
-    ("core/src/op_resolve_view.cpp:80", "return sub.flatten()"),
-    ("core/src/op_resolve_view.cpp:166", "cache_ = v_->wire().materialize()"),
-    # The in-tree pool/synchronisation composition the thread-safety contract names.
-    ("core/include/libtracer/mem_pool.hpp:118", "class sync_pool_t"),
-    ("core/include/libtracer/vertex.hpp:2299", "vertex_t* parent_"),
+    ("core/include/libtracer/vertex.hpp:2386", "vertex_t* parent_"),
 ]
 
 

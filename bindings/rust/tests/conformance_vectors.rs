@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use libtracer::error_registry::ErrorId;
 use libtracer::field::FieldMode;
 use libtracer::fwd::{fwd_kind, fwd_op, FieldSel};
-use libtracer::structured::{self, Ace};
+use libtracer::structured::{self, Ace, DeliveryPolicy};
 use libtracer::{
     decode, decode_fwd, encode, encode_field, encode_fwd, error_code, parse_error, parse_field_tlv,
     reply_error_code, status_ok, status_with_errors, subscriber, value, value_opts, value_u32,
@@ -371,11 +371,11 @@ fn field_indexed() {
 #[test]
 fn field_nested() {
     let bin = assert_vector_consistent("field/field-nested");
-    assert_eq!(encode(&encode_field(":settings.deadline_ns").unwrap()), bin);
+    assert_eq!(encode(&encode_field(":settings.app").unwrap()), bin);
     let levels = parse_field_tlv(&decode(&bin).unwrap()).unwrap();
     assert_eq!(levels.len(), 2);
     assert_eq!(levels[0].name, "settings");
-    assert_eq!(levels[1].name, "deadline_ns");
+    assert_eq!(levels[1].name, "app");
     assert_eq!(levels[0].mode, FieldMode::Scalar);
     assert_eq!(levels[1].mode, FieldMode::Scalar);
 }
@@ -603,4 +603,101 @@ fn fwd_wildcard_reject() {
     let f = decode_fwd(&bin).unwrap();
     let levels = parse_field_tlv(&f.field.unwrap()).unwrap();
     assert_eq!(levels[0].mode, FieldMode::Wildcard);
+}
+
+/* ------------------------------------------- RFC-0022 §3.A delivery policy --- */
+
+/**
+ * @brief `subscriber/policy-absent` — a SUBSCRIBER naming no `delivery_policy`.
+ *
+ * The vector carries a `SETTINGS` child that names a DIFFERENT key
+ * (`delivery_compact`), which is the trap: a parser that read the policy by POSITION
+ * rather than by NAME would decode `0x0001` here. Absent MUST decode as all-zero, and
+ * the builder MUST emit no `SETTINGS` child at all for an all-zero policy — so its
+ * bytes stay byte-identical to what a pre-RFC-0022 sender emits.
+ */
+#[test]
+fn subscriber_policy_absent() {
+    let bin = assert_vector_consistent("subscriber/policy-absent");
+    let t = decode(&bin).unwrap();
+    let p = structured::subscriber_policy(&t).unwrap();
+    assert_eq!(
+        p,
+        DeliveryPolicy::default(),
+        "a neighbouring key is NOT the policy"
+    );
+    assert!(!p.durability_request());
+
+    // The builder's absent case: no SETTINGS child, byte-identical to plain `subscriber`.
+    let built = structured::subscriber_with_policy(&["client"], DeliveryPolicy::default()).unwrap();
+    assert_eq!(encode(&built), encode(&subscriber(&["client"]).unwrap()));
+}
+
+/**
+ * @brief `subscriber/policy-durability` — bit 5 set, and nothing else.
+ *
+ * Both directions against the SAME bytes: the builder must produce the vector, and the
+ * accessor must read `durability_request` back out of it.
+ */
+#[test]
+fn subscriber_policy_durability() {
+    let bin = assert_vector_consistent("subscriber/policy-durability");
+    let policy = DeliveryPolicy::from_bits(DeliveryPolicy::DURABILITY_REQUEST);
+    let built = structured::subscriber_with_policy(&["client"], policy).unwrap();
+    assert_eq!(
+        encode(&built),
+        bin,
+        "the builder produces the vector byte-for-byte"
+    );
+
+    let t = decode(&bin).unwrap();
+    let got = structured::subscriber_policy(&t).unwrap();
+    assert_eq!(got.bits, 0x0020);
+    assert!(got.durability_request());
+    assert_eq!(got.reliability(), 0);
+    assert_eq!(got.priority(), 0);
+    assert_eq!(
+        structured::subscriber_target_path(&t).unwrap(),
+        Some("/client".to_string())
+    );
+}
+
+/**
+ * @brief `subscriber/policy-reserved-bits` — every reserved bit set, reliability=1 under
+ * them.
+ *
+ * The vector's own note names the two ways to fail it: reject the unknown bits, or let
+ * them leak into an honoured field. Both are asserted here, plus the round trip that
+ * proves the word is stored VERBATIM rather than masked on the way through.
+ */
+#[test]
+fn subscriber_policy_reserved_bits() {
+    let bin = assert_vector_consistent("subscriber/policy-reserved-bits");
+    let t = decode(&bin).unwrap();
+    // Not rejected — decoding a word with unknown bits is an ignore, not an error.
+    let got = structured::subscriber_policy(&t).unwrap();
+    assert_eq!(got.bits, 0xFFC1);
+    // No leak: only bits 0-1 are reliability, only 2-4 priority, only 5 durability.
+    assert_eq!(got.reliability(), 1);
+    assert_eq!(got.priority(), 0);
+    assert!(!got.durability_request());
+    assert_eq!(got.reserved(), 0x03FF);
+    // Verbatim: re-emitting keeps 6-15, so a future sender's bits survive the hop.
+    let built = structured::subscriber_with_policy(&["client"], got).unwrap();
+    assert_eq!(encode(&built), bin);
+}
+
+/** @brief The packed layout is RFC-0022 §3.A's table, and it is the C++ core's. */
+#[test]
+fn delivery_policy_bit_layout() {
+    assert_eq!(DeliveryPolicy::from_bits(0x0001).reliability(), 1);
+    assert_eq!(DeliveryPolicy::from_bits(0x0003).reliability(), 3);
+    assert_eq!(DeliveryPolicy::from_bits(0x001C).priority(), 7);
+    assert!(DeliveryPolicy::from_bits(0x0020).durability_request());
+    assert!(!DeliveryPolicy::from_bits(0x001F).durability_request());
+    // Reserved bits decode into NO honoured field.
+    let all_reserved = DeliveryPolicy::from_bits(0xFFC0);
+    assert_eq!(all_reserved.reliability(), 0);
+    assert_eq!(all_reserved.priority(), 0);
+    assert!(!all_reserved.durability_request());
 }

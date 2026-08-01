@@ -1,0 +1,12 @@
+{
+  "name": "policy-reserved-bits",
+  "category": "subscriber",
+  "hex": "04402B0006400A0002000600636C69656E740B40190002000F0064656C69766572795F706F6C69637901000200C1FF",
+  "total_bytes": 47,
+  "decoded": {
+    "type": "0x04 SUBSCRIBER",
+    "structured": true,
+    "meaning": "SUBSCRIBER{ PATH{ NAME \"client\" }, SETTINGS{ NAME \"delivery_policy\" VALUE u16=0xFFC1 } } — every reserved bit (6–15) set: MUST be ignored, never rejected; reliability=1 below them still applies (RFC-0022 §5.3)",
+    "note": "an implementation that rejects unknown bits fails this vector; so does one that lets them leak into reliability or priority"
+  }
+}

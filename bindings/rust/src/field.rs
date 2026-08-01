@@ -95,7 +95,7 @@ impl FieldLevel {
  * (append), or `[*]` (wildcard).
  *
  * `":subscribers[]"` → one append level; `":subscribers[3]"` → one indexed
- * level; `":settings.deadline_ns"` → two scalar levels.
+ * level; `":settings.app"` → two scalar levels.
  *
  * # Errors
  * [`BuildError::InvalidField`] on an empty selector or a malformed level,

@@ -284,11 +284,11 @@ call sites. The named loci: `fwd_frame_view.hpp` (both `peek_fwd_dst_segs` overl
 (`path_key`), `graph.cpp` (`parse_subscriber_tlv`), `child_registry.hpp` (`encode_mount_name`),
 `path.cpp`, `key_view.hpp`.
 
-**Vertex-map key.** The graph key **is** the `PATH` body (`path.hpp:114,124`; `graph.cpp:1639`;
-`vertex.hpp:541` subscription keys), so it moves with the encoding. A `/sensor/temp` key goes
+**Vertex-map key.** The graph key **is** the `PATH` body (`path.hpp:114,124`; `graph.cpp:1590`;
+`vertex.hpp:497` subscription keys), so it moves with the encoding. A `/sensor/temp` key goes
 18 B → 12 B. **RAM effect: UNMEASURED**, and this project's own record says a static-RAM census
 belongs on rv32, not host — and that `std::vector` has no small-buffer optimisation
-(`vertex.hpp:547`), so logical bytes are not heap bytes.
+(`vertex.hpp:503`), so logical bytes are not heap bytes.
 
 **Bindings.** Rust: 5 files (`path.rs`, `fwd.rs`, `tlv_builders.rs`, `structured.rs`, `lib.rs`) —
 `path.rs:95-98` currently returns `TypeMismatch` on a non-`NAME` child and must be rewritten to a

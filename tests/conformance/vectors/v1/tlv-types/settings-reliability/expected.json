@@ -6,7 +6,7 @@
   "decoded": {
     "type": "0x0B SETTINGS",
     "structured": true,
-    "meaning": "SETTINGS{NAME \"reliability\", VALUE u8=1} \u2014 emitted by the library encoder (read_schema pattern)",
-    "note": "bytes emitted by the libtracer reference encoder; structurally faithful"
+    "meaning": "SETTINGS{NAME \"reliability\", VALUE u8=1} — a named-knob SETTINGS record as the library encoder emits one",
+    "note": "bytes emitted by the libtracer reference encoder; structurally faithful. NOTE: since RFC-0022 `reliability` is no longer a VERTEX knob — it is bits 0-1 of the per-subscription `delivery_policy` — so this vector pins the SETTINGS record SHAPE, not a `:settings` knob name."
   }
 }

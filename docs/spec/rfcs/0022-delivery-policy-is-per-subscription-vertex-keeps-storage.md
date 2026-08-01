@@ -140,6 +140,8 @@ Earlier drafts of this RFC (see Amendment 1) specified subtree inheritance of a 
 
 ## 6. Implementation gate — measurement before landing
 
+*(Measured — see Amendment 2: the flip does not land; the default is the sentinel.)*
+
 §D turns pinning on by default. That is a latency win on every large write and a RAM cost bounded by `K`, and it must be **measured on both halves of the dual target before it lands**, not asserted:
 
 - the ESP32-C6 profile, where the RAM constraint binds and the receive pool is small;
@@ -162,7 +164,7 @@ If the MCU numbers are unfavourable, `kPinPayloadRatio`'s sentinel is already th
 
 1. Should the STREAM ring depth eventually be **derived from an injected resource** (RFC-0006) rather than declared, making the ring bounded by the store it draws from? Out of scope: unlike the pin threshold, a retention depth encodes application intent that no resource can supply.
 2. Does the delivery policy interact with route-handle compaction (RFC-0004 §E.1)? Expected not — compaction is keyed on `(link, route)`, both unchanged — but vector 2 should be run in a compacted flow.
-3. What value should `kPinPayloadRatio` default to? To be set by §6's measurement, not by argument.
+3. What value should `kPinPayloadRatio` default to? To be set by §6's measurement, not by argument. *(Answered — Amendment 2: the sentinel, on both targets.)*
 
 ## Amendment 1 — 2026-08-01: the residual vertex policy dissolves
 
@@ -178,3 +180,32 @@ The RFC as first accepted kept a two-field `settings_t` on the vertex (`history_
 Removing the per-vertex policy resolves all four at once: there is nothing to inherit, so the hole and the lock edge do not arise; nothing to copy, so no extension block is forced; and the predicate measures amplification directly instead of approximating it.
 
 **Changed:** §3.B (was "the vertex keeps storage policy only" — now "`settings_t` is deleted"), §3.C (was inheritance by copy at registration — now the STREAM ring depth's owner-side home), §3.D (was the removal of the two inert magnitudes — now the pin predicate; the removal moved to §3.E), and consequently §4, §5, §6 and §7. §3.A is unchanged and was not in question.
+
+## Amendment 2 — 2026-08-02: §6's measurement is in; the default is the sentinel
+
+**Status: accepted.** §6 demanded numbers before §D's on-by-default flip could land; the numbers
+are in ([PR #771](https://github.com/avatarsd-llc/libtracer/pull/771) — a 21-cell
+payload×segment host grid over 30 interleaved rounds with a control and a same-binary sentinel
+arm, plus 6 on-silicon ESP32-C6 rounds, all adversarially re-run in an independent worktree),
+and they answer §8's question 3 against the flip:
+
+- **`kPinPayloadRatio` defaults to the sentinel (never pin) on both targets.** The predicate and
+  its plumbing landed with §6's bench, off by default; nothing pins unless a target's
+  `config_t` sets a non-sentinel `K`.
+- **The measured effect does not track the §3.D ratio — it tracks absolute payload size.**
+  Pinning is indistinguishable from the copy at every cell ≤ 1 KB *including* amplification 1.0
+  (the case this RFC called dominant), and is 1.17–1.98× faster at every cell ≥ 4 KB *including*
+  amplification 4.0. §3.D selects on a variable that does not carry the effect.
+- **`K` cannot be sized on the RAM side.** The receive-pool exhaustion quantity is
+  (live pinned values × segment bytes); `K` bounds waste per value, not the number of values, so
+  every `K` that pins the deployed workload collapses the pool identically. The two acceptance
+  bounds do not intersect, on either target.
+- **On the reference UDP transport the predicate is inert as specified**: every datagram lands in
+  a `kMaxDatagram` (64 KB) receive segment, so a 1 KB payload needs `K ≥ 64` to pin. The lever
+  there is the RX backend's `max_segment_size`, not `K`.
+
+A future proposal that wants pinning on by default starts from an **absolute-size predicate**
+(the measured threshold is ≈ 4 KB on the host) and must price the rope tier (unbenchmarked —
+every measured arm resolved single-link) and re-run the C6 half against a true untouched-main
+control image. The out-of-scope retention hazard recorded in §6 was observed in the pool traces
+exactly as predicted and remains tracked separately.

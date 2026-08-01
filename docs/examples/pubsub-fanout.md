@@ -14,8 +14,8 @@ clone of the *same* [rope](../modules/views.md) value — **no byte copy per sub
   trend visible.
 - **The value is cloned by refcount, not by bytes** — 64 subscribers means 64 refcount
   bumps on one segment, not 64 copies.
-- **`:schema` discovery** — after a `:settings.deadline_ns` field-write, the vertex's shape
-  is read back structurally as a 2-child `POINT`.
+- **`:schema` discovery** — the vertex's shape is read back structurally as a 2-child `POINT`
+  (`NAME` plus the synthesized, and since RFC-0022 §3.B empty, `SETTINGS`).
 - **The `RESULT` line is informational** — timing never fails CI; the self-checks assert
   every subscriber saw every write.
 

@@ -306,12 +306,12 @@ void test_two_nodes_zero_copy_store() {
     tr::net::udp_transport_t ta(47112, "127.0.0.1", 47113);
     tr::net::udp_transport_t tb(47113, "127.0.0.1", 47112, &rec);
 
-    // B's target vertex carries the §3.D ratio K. 68 * 1024 >= 65,536 => pin; K = 8 (the old
-    // absolute threshold's value) would copy, because 68 * 8 is 544 against a 64 KB segment.
-    tr::graph::settings_t s;
-    s.store_ref_min_bytes = 1024;
+    // B's target vertex carries the §3.D ratio K as its OWNER-side declaration (RFC-0022
+    // §3.B, never a remote write). 68 * 1024 >= 65,536 => pin; K = 8 (the old absolute
+    // threshold's value) would copy, because 68 * 8 is 544 against a 64 KB segment.
     tr::graph::vertex_handle_t v =
-        node_b.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE, {}, s);
+        node_b.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE);
+    node_b.set_store_ref_min_bytes(v, 1024);
     router_a.add_child("b", ta);
     router_b.add_child("a", tb);  // tb delivers views => the owning receiver is installed
 
@@ -320,7 +320,7 @@ void test_two_nodes_zero_copy_store() {
     auto on_blob = [&written](const tr::view::rope_t&) { written.set_value(); };
     (void)node_b.subscribe(path_t("/sensor/blob"), on_blob);
 
-    // A 64-byte payload => a 68-byte trailer-less VALUE TLV, well over the threshold.
+    // A 64-byte payload => a 68-byte trailer-less VALUE TLV; 68 * K clears the 64 KB segment.
     std::vector<std::byte> pb(64);
     for (std::size_t i = 0; i < pb.size(); ++i) pb[i] = static_cast<std::byte>(i);
     std::vector<std::byte> payload;

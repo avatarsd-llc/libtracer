@@ -1,0 +1,12 @@
+{
+  "name": "policy-absent",
+  "category": "subscriber",
+  "hex": "04402B0006400A0002000600636C69656E740B4019000200100064656C69766572795F636F6D706163740100010000",
+  "total_bytes": 47,
+  "decoded": {
+    "type": "0x04 SUBSCRIBER",
+    "structured": true,
+    "meaning": "SUBSCRIBER{ PATH{ NAME \"client\" }, SETTINGS{ NAME \"delivery_compact\" VALUE u8=0 } } — a SETTINGS child that names NO delivery_policy: absent ⇒ all-zero ⇒ today's behaviour (RFC-0022 §5.1)",
+    "note": "byte-identical to what a pre-RFC-0022 sender emits; a receiver MUST NOT read a neighbouring SETTINGS key as the policy"
+  }
+}

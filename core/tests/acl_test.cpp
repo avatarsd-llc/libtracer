@@ -448,24 +448,33 @@ void test_gated_ops() {
 }
 
 /**
- * @brief Gate order on the flat protocol-knob write surface: the NAME resolves BEFORE the
- *        ACL right, so an unknown knob is SCHEMA_NOT_FOUND regardless of caller.
+ * @brief The flat protocol-knob surface is withdrawn CALLER-INDEPENDENTLY on BOTH halves
+ *        (RFC-0022 §3.B / §4): every core-namespace `settings.<name>` answers
+ *        SCHEMA_NOT_FOUND to a read AND to a write, for every caller, granted or denied.
  *
  * The normative rule is the docs/reference/05 §`0x0B` validation clause — "unknown NAMEs
  * MUST be ... rejected with `ERROR{tr::schema::not_found}` if in the core namespace" —
- * which carries no caller qualifier, so a denied caller may not convert it into
- * PERMISSION_DENIED. The `settings.app.` branch already resolves the name first (its own
- * gate-1 test asserts the ENOTTY of an undeclared name), and the terminal branch has no
- * gate at all; this pins the flat branch to the same order, which is what makes the rule
- * hold uniformly across all three.
+ * which carries no caller qualifier. With `settings_t` deleted the core namespace is
+ * EMPTY, so every name in it is an unknown name and the clause covers the whole branch:
+ * a denied caller may not convert the answer into PERMISSION_DENIED, and a granted one
+ * may not convert it into a write.
  *
- * The discriminating case is a caller the ACL DENIES writing a name that does not exist:
- * only a name-first gate can answer SCHEMA_NOT_FOUND there. The converse — a known knob,
- * denied caller — must still be PERMISSION_DENIED, or the hoist would have leaked the
- * write itself.
+ * The discriminating case is a caller the ACL DENIES: only a name-first answer gives
+ * SCHEMA_NOT_FOUND there. The ABLATION is the `settings.app.` branch beside it — same
+ * vertex, same two callers, same door — which still gates a DECLARED field on the WRITE
+ * right. Without it this test would pass just as well against a `:settings` write door
+ * that had been deleted wholesale, app fields and all.
+ *
+ * The READ half is checked at the SAME three callers, because the two doors used to
+ * disagree: the read gate ran BEFORE name resolution, so one removed name answered
+ * PERMISSION_DENIED on read and SCHEMA_NOT_FOUND on write — a caller-DEPENDENT split
+ * across the halves of one name, which is precisely what §3.B and docs/reference/05
+ * §`0x0B` forbid. Its ablation is the same `settings.app.` branch: a declared `rw` field
+ * still answers a denied caller PERMISSION_DENIED on read, so the loop below measures the
+ * withdrawn namespace and not a read door that stopped gating.
  */
-void test_flat_knob_name_before_acl() {
-    std::printf("flat protocol knobs: the NAME resolves before the ACL right:\n");
+void test_flat_knob_surface_is_withdrawn() {
+    std::printf("flat protocol knobs: withdrawn, caller-independently (RFC-0022 §3.B):\n");
     graph_t g;
     g.set_subject_resolver(caller_is_subject);
     vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
@@ -476,40 +485,67 @@ void test_flat_knob_name_before_acl() {
           "trusted local caller installs the :acl");
 
     const std::array<std::byte, 8> le{std::byte{0x88}, std::byte{0x13}};  // 5000 LE
-    const auto knob = path_t::parse("/x:settings.deadline_ns");
-    const auto unknown = path_t::parse("/x:settings.bogus");
 
-    // The property under test: an unknown NAME is caller-independent.
-    check(fails_with(g.write(v, unknown->field(), make_value(value_tlv(le)), "peer-none"),
-                     status_t::SCHEMA_NOT_FOUND),
-          "unknown knob + denied caller: SCHEMA_NOT_FOUND (the name gates first)");
-    check(fails_with(g.write(v, unknown->field(), make_value(value_tlv(le)), "peer-a"),
-                     status_t::SCHEMA_NOT_FOUND),
-          "unknown knob + granted caller: SCHEMA_NOT_FOUND");
-    check(fails_with(g.write(v, unknown->field(), make_value(value_tlv(le)), {}),
-                     status_t::SCHEMA_NOT_FOUND),
-          "unknown knob + trusted local caller: SCHEMA_NOT_FOUND (all three agree)");
+    // Every name the protocol ever minted under `settings.`, plus one that never existed —
+    // all seven RFC-0022 removed, and `bogus`. The answer must not depend on the caller.
+    for (const char* name :
+         {"history_keep_last", "store_ref_min_bytes", "durability", "reliability", "priority",
+          "deadline_ns", "queue_max_bytes", "bogus"}) {
+        const auto knob = path_t::parse(std::string("/x:settings.") + name);
+        const bool all_three =
+            fails_with(g.write(v, knob->field(), make_value(value_tlv(le)), "peer-none"),
+                       status_t::SCHEMA_NOT_FOUND) &&
+            fails_with(g.write(v, knob->field(), make_value(value_tlv(le)), "peer-a"),
+                       status_t::SCHEMA_NOT_FOUND) &&
+            fails_with(g.write(v, knob->field(), make_value(value_tlv(le)), {}),
+                       status_t::SCHEMA_NOT_FOUND);
+        check(all_three, std::string("`:settings.") + name +
+                             "`: SCHEMA_NOT_FOUND for denied, granted AND local callers");
+        // The READ half of the SAME name, at the SAME three callers. `peer-none` holds
+        // nothing at all — not even READ — so it is the caller a gate-first read answers
+        // PERMISSION_DENIED, and the one that discriminates a name-first read from a
+        // gated one.
+        const bool read_all_three =
+            fails_with(g.read(v, knob->field(), "peer-none"), status_t::SCHEMA_NOT_FOUND) &&
+            fails_with(g.read(v, knob->field(), "peer-a"), status_t::SCHEMA_NOT_FOUND) &&
+            fails_with(g.read(v, knob->field(), {}), status_t::SCHEMA_NOT_FOUND);
+        check(read_all_three, std::string("`:settings.") + name +
+                                  "` READ: SCHEMA_NOT_FOUND for the same three callers");
+    }
 
-    // The ACL still gates every knob that DOES exist — the hoist reorders, it never opens.
-    check(denied(g.write(v, knob->field(), make_value(value_tlv(le)), "peer-none")),
-          "known knob + denied caller: PERMISSION_DENIED (the write stays gated)");
-    check(g.write(v, knob->field(), make_value(value_tlv(le)), "peer-a").has_value(),
-          "known knob + granted caller: the write lands");
-    check(g.settings(v).deadline_ns == 5000, "... and it actually took effect");
-
-    // A knob NAME is exactly two plain steps. `settings.reliability.bogus` and
-    // `settings.reliability[2]` name NO knob — the read surface already rejects both
-    // (it checks `plain_step` on every step), and before the name-first hoist the write
-    // surface silently ACCEPTED them as writes to `reliability`, ignoring the tail.
-    check(fails_with(g.write(v, path_t::parse("/x:settings.reliability.bogus")->field(),
+    // A trailing step / an indexed selector name nothing either — they never did, and the
+    // answer stays the same shape now that the bare name names nothing either.
+    check(fails_with(g.write(v, path_t::parse("/x:settings.store_ref_min_bytes.bogus")->field(),
                              make_value(value_tlv(le)), "peer-a"),
                      status_t::SCHEMA_NOT_FOUND),
-          "a trailing step names no knob: SCHEMA_NOT_FOUND (the tail is not ignored)");
-    check(fails_with(g.write(v, path_t::parse("/x:settings.reliability[2]")->field(),
+          "a trailing step names nothing: SCHEMA_NOT_FOUND");
+    check(fails_with(g.write(v, path_t::parse("/x:settings.store_ref_min_bytes[2]")->field(),
                              make_value(value_tlv(le)), "peer-a"),
                      status_t::SCHEMA_NOT_FOUND),
-          "a selector step names no knob: SCHEMA_NOT_FOUND (no knob has an indexed surface)");
-    check(g.settings(v).reliability == 0, "... and neither malformed write reached `reliability`");
+          "a selector step names nothing: SCHEMA_NOT_FOUND");
+
+    // THE ABLATION. The `settings.app.` branch is untouched by RFC-0022, so on the SAME
+    // vertex the SAME two callers still get the RFC-0010 §A.3 answers: a declared `rw`
+    // field is PERMISSION_DENIED for the denied caller and lands for the granted one.
+    // This is what proves the loop above measured the knob namespace and not a dead door.
+    std::vector<tr::graph::app_field_t> table;
+    table.push_back(tr::graph::app_field_t{.name = "kp", .access = tr::graph::app_access_t::RW});
+    g.set_app_fields(v, std::move(table));
+    const auto field = path_t::parse("/x:settings.app.kp");
+    check(denied(g.write(v, field->field(), make_value(value_tlv(le)), "peer-none")),
+          "ablation: a declared app field is still PERMISSION_DENIED for a denied caller");
+    check(g.write(v, field->field(), make_value(value_tlv(le)), "peer-a").has_value(),
+          "ablation: ... and still LANDS for a granted one (the door is alive)");
+    // The READ ablation. `peer-none` holds no rights at all, so a READ of the app field it
+    // is NOT allowed must still be PERMISSION_DENIED — that is what proves the loop's
+    // read half measured the withdrawn core namespace and not a read gate that vanished.
+    check(denied(g.read(v, field->field(), "peer-none")),
+          "ablation: a declared app field READ is still PERMISSION_DENIED for a denied caller");
+    // And the bare `:settings` container stays gated too: it is a KNOWN name, so the
+    // name-first arm must not have swallowed it.
+    const auto container = path_t::parse("/x:settings");
+    check(denied(g.read(v, container->field(), "peer-none")),
+          "ablation: the bare `:settings` container READ is still gated (a KNOWN name)");
 }
 
 /**
@@ -865,7 +901,7 @@ int main() {
     test_subset_rejections();
     test_open_by_default();
     test_gated_ops();
-    test_flat_knob_name_before_acl();
+    test_flat_knob_surface_is_withdrawn();
     test_acl_and_schema_are_addressed_whole();
     test_expiry();
     test_inheritance();

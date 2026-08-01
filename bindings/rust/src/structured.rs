@@ -15,7 +15,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::path::tlv_to_path;
-use crate::tlv_builders::{name, value, value_u16, value_u64, value_u8, BuildError};
+use crate::tlv_builders::{name, subscriber, value, value_u16, value_u64, value_u8, BuildError};
 use crate::{type_code, Opt, Tlv};
 
 fn named_value(key: &str, val: Tlv) -> Result<[Tlv; 2], BuildError> {
@@ -141,6 +141,141 @@ pub fn subscriber_target_path(tlv: &Tlv) -> Result<Option<String>, BuildError> {
         Some(p) => Ok(Some(tlv_to_path(p)?)),
         None => Ok(None),
     }
+}
+
+/** @brief The SETTINGS key the packed delivery policy travels under (RFC-0022 §3.A). */
+pub const DELIVERY_POLICY_KEY: &str = "delivery_policy";
+
+/**
+ * @brief One subscription's DELIVERY policy — the packed 16-bit word RFC-0022 §3.A
+ * carries in a SUBSCRIBER's `SETTINGS{ NAME "delivery_policy" VALUE u16 }` child.
+ *
+ * Delivery policy describes one **producer→subscriber relationship**, not the producer:
+ * before RFC-0022 these lived on the vertex, where one setting decided the behaviour of
+ * every subscriber at once. The bit layout mirrors the C++ core's `delivery_policy_t`
+ * exactly, because the same bytes cross between them:
+ *
+ * | bits | field |
+ * | --- | --- |
+ * | 0–1 | `reliability` (0 = best-effort, 1 = reliable) |
+ * | 2–4 | `priority` (0–7, 0 = default) |
+ * | 5 | `durability_request` — deliver the producer's latched last value on join |
+ * | 6–15 | reserved |
+ *
+ * The reserved bits are **round-tripped verbatim and never interpreted**: §3.A says a
+ * sender MUST write 0 and a receiver MUST *ignore* them, which is an ignore, not a
+ * reject. So [`bits`](Self::bits) keeps whatever arrived, while every accessor masks —
+ * a future sender's bits survive a hop through this binding instead of being refused or
+ * silently normalised away.
+ */
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeliveryPolicy {
+    /** @brief The packed word, VERBATIM — reserved bits included. */
+    pub bits: u16,
+}
+
+impl DeliveryPolicy {
+    /** @brief Bit 5: ask the producer to deliver its latched last value once, on join. */
+    pub const DURABILITY_REQUEST: u16 = 0x0020;
+
+    /** @brief Wrap a packed word as it arrived, keeping every reserved bit. */
+    #[must_use]
+    pub const fn from_bits(bits: u16) -> Self {
+        Self { bits }
+    }
+
+    /** @brief Bits 0–1 — the reliability class. */
+    #[must_use]
+    pub const fn reliability(self) -> u8 {
+        (self.bits & 0x0003) as u8
+    }
+
+    /** @brief Bits 2–4 — the priority class (0–7). */
+    #[must_use]
+    pub const fn priority(self) -> u8 {
+        ((self.bits >> 2) & 0x0007) as u8
+    }
+
+    /** @brief Bit 5 — `durability_request`. */
+    #[must_use]
+    pub const fn durability_request(self) -> bool {
+        (self.bits & Self::DURABILITY_REQUEST) != 0
+    }
+
+    /** @brief Bits 6–15 — the reserved field, as it arrived. Never interpreted; exposed
+     * so a caller can assert it survived a round trip. */
+    #[must_use]
+    pub const fn reserved(self) -> u16 {
+        self.bits >> 6
+    }
+
+    /** @brief True when no honoured bit is set AND nothing is reserved — the "absent"
+     * case, which emits no `SETTINGS` child at all. */
+    #[must_use]
+    pub const fn is_default(self) -> bool {
+        self.bits == 0
+    }
+}
+
+/**
+ * @brief The delivery policy a SUBSCRIBER carries, or [`DeliveryPolicy::default`] when it
+ * names none — absent ⇒ all-zero ⇒ today's behaviour (RFC-0022 §3.A).
+ *
+ * A `SETTINGS` child that names a DIFFERENT key (e.g. `delivery_compact`) is not the
+ * policy: the word must be read by name, never by position. Returning the default for
+ * such a record is what the `subscriber/policy-absent` vector pins.
+ *
+ * # Errors
+ * [`BuildError::TypeMismatch`] if the TLV is not a SUBSCRIBER, or if a `delivery_policy`
+ * key is present but its value is not a 2-byte VALUE.
+ */
+pub fn subscriber_policy(tlv: &Tlv) -> Result<DeliveryPolicy, BuildError> {
+    if tlv.type_code != type_code::SUBSCRIBER {
+        return Err(BuildError::TypeMismatch);
+    }
+    for child in tlv.children_of_type(type_code::SETTINGS) {
+        for f in named_fields(child)? {
+            if f.key != DELIVERY_POLICY_KEY {
+                continue;
+            }
+            if f.value.type_code != type_code::VALUE || f.value.payload.len() != 2 {
+                return Err(BuildError::TypeMismatch);
+            }
+            return Ok(DeliveryPolicy::from_bits(u16::from_le_bytes([
+                f.value.payload[0],
+                f.value.payload[1],
+            ])));
+        }
+    }
+    Ok(DeliveryPolicy::default())
+}
+
+/**
+ * @brief Build a SUBSCRIBER TLV carrying a target PATH and this subscription's packed
+ * delivery policy (RFC-0022 §3.A) — the payload of a subscribe-write.
+ *
+ * An all-zero policy emits **no** `SETTINGS` child, so the bytes are byte-identical to
+ * [`crate::subscriber`]'s and to what a pre-RFC-0022 sender emits (the
+ * `subscriber/policy-absent` vector). Reserved bits in `policy` are emitted verbatim.
+ *
+ * # Errors
+ * Any error from building the target path.
+ */
+pub fn subscriber_with_policy(
+    target_path: &[&str],
+    policy: DeliveryPolicy,
+) -> Result<Tlv, BuildError> {
+    let mut tlv = subscriber(target_path)?;
+    if !policy.is_default() {
+        tlv.children.push(Tlv {
+            type_code: type_code::SETTINGS,
+            opt: Opt::structured(),
+            payload: Vec::new(),
+            children: alloc::vec![name(DELIVERY_POLICY_KEY)?, value_u16(policy.bits)],
+            trailer: None,
+        });
+    }
+    Ok(tlv)
 }
 
 /* -------------------------------------------------------------------- POINT --- */

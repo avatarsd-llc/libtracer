@@ -7,10 +7,7 @@ The RFC-0010 §B.2 **two-part `:schema` read**, byte-for-byte as the reference
 ```
 POINT (PL=1) {
   NAME "temp"                          ; vertex name
-  SETTINGS (PL=1) {                    ; synthesized protocol part (unchanged shape)
-    NAME "deadline_ns"       VALUE u64=0
-    NAME "history_keep_last" VALUE u32=1
-  }
+  SETTINGS (PL=1) { }                  ; synthesized protocol part — EMPTY (RFC-0022 §3.B)
   NAME "app"                           ; owner part — present iff a table is installed
   SETTINGS (PL=1) {
     NAME "kp" SETTINGS (PL=1) {
@@ -21,6 +18,13 @@ POINT (PL=1) {
 }
 ```
 
+**Regenerated for [RFC-0022](../../../../../../docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md)**:
+the protocol part used to enumerate `deadline_ns` (u64) and `history_keep_last` (u32). §3.B
+deleted `settings_t` outright, so it now enumerates **nothing** — the same (empty) set the write
+gate accepts, which is what makes the synthesized part complete for the first time. The empty
+`SETTINGS` is emitted rather than omitted, so the two-part record keeps its shape. The owner part
+is unchanged, and this vector is what pins the two parts' ORDER and their precedence-by-position.
+
 ```
-074079000200040074656d700b40380002000b00646561646c696e655f6e7301000800000000000000000002001100686973746f72795f6b6565705f6c6173740100040001000000020003006170700b402a00020002006b700b4020000200060061636365737301000200727702000500647479706502000300663332
+074041000200040074656d700b400000020003006170700b402a00020002006b700b4020000200060061636365737301000200727702000500647479706502000300663332
 ```

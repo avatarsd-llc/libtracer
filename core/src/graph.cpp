@@ -68,40 +68,13 @@ void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
     return !s.indexed && !s.append && !s.wildcard;
 }
 
-/** @brief The implemented flat protocol QoS knobs — the writable core-namespace names of the
- *         vertex SETTINGS container (docs/reference/05 §`0x0B`). */
-enum class qos_knob_t : std::uint8_t {
-    RELIABILITY,
-    DURABILITY,
-    PRIORITY,
-    HISTORY_KEEP_LAST,
-    QUEUE_MAX_BYTES,
-    DEADLINE_NS,
-    STORE_REF_MIN_BYTES,
-};
-
-/**
- * @brief Resolve a `settings.<knob>` field path to its knob, or nullopt when it names none.
- *
- * The core-namespace name lookup of the §`0x0B` validation rule, factored out so it can run
- * BEFORE the ACL gate (an unknown name is caller-independent). A knob is addressed by exactly
- * two plain steps: `settings` then the name. A trailing step (`settings.reliability.bogus`) or
- * any `[...]` selector names no knob — no knob has a nested or indexed surface — which is the
- * shape the read surface already requires.
- */
-[[nodiscard]] std::optional<qos_knob_t> qos_knob(const field_path_t& field) noexcept {
-    if (field.steps.size() != 2 || !plain_step(field.steps[0]) || !plain_step(field.steps[1]))
-        return std::nullopt;
-    const std::string& f = field.steps[1].name;
-    if (f == "reliability") return qos_knob_t::RELIABILITY;
-    if (f == "durability") return qos_knob_t::DURABILITY;
-    if (f == "priority") return qos_knob_t::PRIORITY;
-    if (f == "history_keep_last") return qos_knob_t::HISTORY_KEEP_LAST;
-    if (f == "queue_max_bytes") return qos_knob_t::QUEUE_MAX_BYTES;
-    if (f == "deadline_ns") return qos_knob_t::DEADLINE_NS;
-    if (f == "store_ref_min_bytes") return qos_knob_t::STORE_REF_MIN_BYTES;
-    return std::nullopt;
-}
+// The flat protocol-knob name table is GONE (RFC-0022 §3.B): `settings_t` is deleted, so
+// the vertex `:settings` core namespace has no writable member left. All seven historical
+// names — `reliability`, `priority`, `durability`, `deadline_ns`, `queue_max_bytes`,
+// `history_keep_last`, `store_ref_min_bytes` — answer `SCHEMA_NOT_FOUND`, which is the
+// honest answer an unsupported field already gives. The two survivors did not move to
+// another name; they stopped being remotely writable at all and became owner-side
+// declarations (`graph_t::set_history_depth`, `graph_t::set_store_ref_min_bytes`).
 
 /** @brief Emit the RFC-0010 §A.4 app-container members into @p out: each declared,
  *         non-`wo` field HOLDING a value, in table order — `NAME <name>` then the stored
@@ -292,8 +265,7 @@ graph_t::graph_t(std::pmr::memory_resource* mr, mem::mem_backend_t* value_backen
                  mem::block_source_t* ctl)
     : mr_(mr),
       value_backend_(value_backend),
-      root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, settings_t{},
-                                       handlers_t{})),
+      root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, handlers_t{})),
       ctl_(ctl) {
     // The one built-in creation-catalog type (#82, ADR-0017): `stored_value` makes a
     // plain last-writer-wins vertex at the composed child key. Its optional SPEC
@@ -312,9 +284,8 @@ void graph_t::register_child_type(std::string type, child_factory_t factory) {
     child_types_.insert_or_assign(std::move(type), std::move(factory));
 }
 
-vertex_handle_t graph_t::register_vertex(const path_t& path, role_t role, handlers_t handlers,
-                                         settings_t settings) {
-    result_t<vertex_handle_t> h = try_register_vertex(path, role, std::move(handlers), settings);
+vertex_handle_t graph_t::register_vertex(const path_t& path, role_t role, handlers_t handlers) {
+    result_t<vertex_handle_t> h = try_register_vertex(path, role, std::move(handlers));
     // PATH_IN_USE on a compile-site literal is a source bug, not a runtime outcome — fail loud
     // (ADR-0056, mirroring path_t(std::string_view)) rather than hand back a result the caller
     // would only `*`-deref unchecked. A genuine runtime path uses try_register_vertex.
@@ -323,17 +294,22 @@ vertex_handle_t graph_t::register_vertex(const path_t& path, role_t role, handle
 }
 
 result_t<vertex_handle_t> graph_t::try_register_vertex(const path_t& path, role_t role,
-                                                       handlers_t handlers, settings_t settings) {
+                                                       handlers_t handlers) {
     return register_vertex_key(std::vector<std::byte>(path.key().begin(), path.key().end()), role,
-                               std::move(handlers), settings);
+                               std::move(handlers));
 }
 
 result_t<vertex_handle_t> graph_t::register_vertex_key(std::vector<std::byte> key, role_t role,
-                                                       handlers_t handlers, settings_t settings) {
+                                                       handlers_t handlers) {
     const std::unique_lock lock(map_mutex_);
     // Descend the Composite tree (ADR-0057), creating unregistered PLACEHOLDER nodes for
     // missing intermediate levels — invisible to find/read_children until a registration
     // fills them in place (matching the flat map, where intermediates did not exist).
+    // NOTHING is inherited (RFC-0022 §3.F). The descent carries no policy down with it:
+    // with `settings_t` deleted there is no per-vertex policy left to inherit, so there is
+    // no ancestor walk, no cached ancestor reference, and no question about what happens to
+    // descendants when a parent's configuration changes after they exist. The two owner-side
+    // magnitudes are declared per vertex, by the owner, or they are at their defaults.
     vertex_t* node = root_.get();
     std::size_t i = 0;
     while (i < key.size()) {
@@ -341,8 +317,10 @@ result_t<vertex_handle_t> graph_t::register_vertex_key(std::vector<std::byte> ke
         const std::span<const std::byte> record{key.data() + i, e - i};
         vertex_t* child = node->child_by_record(record);
         if (child == nullptr) {
-            auto fresh = std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{record},
-                                                    settings_t{}, handlers_t{});
+            // A placeholder is a plain STORED_VALUE with no handlers, so `adopt_identity`'s
+            // early return fires and it allocates NO extension block.
+            auto fresh =
+                std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{record}, handlers_t{});
             // Subtree-subscription init (RFC-0005): a vertex born under a subscribed
             // ancestor starts with the ancestor-listener count already summed — O(1) from
             // the parent's maintained counters (under the same unique lock the
@@ -356,7 +334,7 @@ result_t<vertex_handle_t> graph_t::register_vertex_key(std::vector<std::byte> ke
         i = e;
     }
     if (node->registered()) return std::unexpected(status_t::PATH_IN_USE);
-    node->fill(role, settings, std::move(handlers));
+    node->fill(role, std::move(handlers));
     return vertex_handle_t{node};
 }
 
@@ -656,8 +634,16 @@ bool graph_t::has_first_level_child(std::span<const std::byte> record) const {
     return root_->child_by_record(record) != nullptr;
 }
 
-const settings_t& graph_t::settings(vertex_handle_t v) const noexcept {
-    return v.get()->settings();
+std::uint32_t graph_t::store_ref_min_bytes(vertex_handle_t v) const noexcept {
+    return v.get()->store_ref_min_bytes();
+}
+
+void graph_t::set_history_depth(vertex_handle_t v, std::uint32_t keep) {
+    v.get()->set_history_depth(keep);
+}
+
+void graph_t::set_store_ref_min_bytes(vertex_handle_t v, std::uint32_t bytes) {
+    v.get()->set_store_ref_min_bytes(bytes);
 }
 
 void graph_t::set_subject_resolver(subject_resolver_t resolver) {
@@ -1290,11 +1276,18 @@ namespace {
  *        (ADR-0049; the resolver's parallel subscriber_compact() parse is retired).
  *
  * Extracts
- * the first PATH child's target key (may stay empty — the wire door ignores it) and
- * the optional qos_settings `delivery_compact` opt-in (NAME "delivery_compact" VALUE
- * u8, RFC-0004 §E.1 / docs/reference/05). Back-compat: a SUBSCRIBER without it (or an
- * older parser) just keeps the full-route delivery path — existing conformance vectors
- * unaffected.
+ * the first PATH child's target key (may stay empty — the wire door ignores it) and, from
+ * the SETTINGS child, the `delivery_compact` opt-in (NAME "delivery_compact" VALUE u8,
+ * RFC-0004 §E.1 / docs/reference/05) and the packed `delivery_policy` (NAME
+ * "delivery_policy" VALUE u16, RFC-0022 §3.A) — the SAME child, so the per-subscription
+ * policy introduced no new wire structure. Back-compat: a SUBSCRIBER carrying neither (or
+ * an older parser) keeps the full-route delivery path and the all-zero default policy —
+ * existing conformance vectors unaffected.
+ *
+ * The policy's reserved bits (6–15) are stored VERBATIM and never interpreted: §3.A says a
+ * sender MUST write 0 and a receiver MUST ignore them, which is an ignore, not a reject —
+ * so a future sender's bits round-trip through `:subscribers[]` instead of being refused by
+ * a node that predates their meaning.
  */
 void parse_subscriber_tlv(const tlv_t& sub, subscriber_t& s) {
     for (const tlv_t& child : sub.children) {
@@ -1306,9 +1299,12 @@ void parse_subscriber_tlv(const tlv_t& sub, subscriber_t& s) {
             const std::vector<tlv_t>& q = child.children;
             for (std::size_t i = 0; i + 1 < q.size(); ++i) {
                 if (q[i].type != type_t::NAME || q[i + 1].type != type_t::VALUE) continue;
-                if (detail::as_string_view(q[i].payload) == "delivery_compact" &&
+                const std::string_view key = detail::as_string_view(q[i].payload);
+                if (key == "delivery_compact" &&
                     detail::load_le<std::uint8_t>(q[i + 1].payload) != 0)
                     s.ensure_remote().delivery_compact = true;  // cold half only when opted in
+                else if (key == "delivery_policy")
+                    s.policy.bits = detail::load_le<std::uint16_t>(q[i + 1].payload);
             }
         }
     }
@@ -1327,9 +1323,12 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     if (!acl_allows(v, caller, acl_right_t::SUBSCRIBE))
         return std::unexpected(status_t::PERMISSION_DENIED);
 
-    // Latch the current value to the new subscriber iff the producer is transient-local
-    // (durability == 1) and already holds an LKV (RFC-0004 §D / Q4) — for EVERY door, not
-    // just the wire one (the ADR-0049 behavior alignment). vertex_t::add_edge appends the
+    // Latch the current value to the new subscriber iff THIS SUBSCRIBER asked for it
+    // (`policy.durability_request()`, RFC-0022 §3.A) and the producer already holds an LKV
+    // (RFC-0004 §D / Q4) — for EVERY door, not just the wire one (the ADR-0049 behavior
+    // alignment). Before RFC-0022 the predicate was the producer's single
+    // `settings.durability` flag, which latched for every subscriber of a transient-local
+    // vertex whether or not it wanted the replay. vertex_t::add_edge appends the
     // slot and snapshots the latch's dispatch view + the LKV atomically under the vertex
     // lock; delivery runs OUTSIDE it (the remote sink does transport I/O; a callback /
     // target re-dispatch may re-enter the graph) through the SAME dispatch_edge legs a
@@ -1367,7 +1366,8 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     return subscription_t{v, idx};
 }
 
-result_t<void> graph_t::subscribe(const path_t& src, const path_t& target) {
+result_t<void> graph_t::subscribe(const path_t& src, const path_t& target,
+                                  delivery_policy_t policy) {
     vertex_t* v = find_ptr(src.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
     // ADR-0049: the sugar ENCODES the same SUBSCRIBER{PATH} TLV a wire subscribe carries
@@ -1378,11 +1378,23 @@ result_t<void> graph_t::subscribe(const path_t& src, const path_t& target) {
     // the empty (local) caller context, so a resolver that assigns local callers a
     // subject sees these too (#81, ADR-0026).
     const std::span<const std::byte> key = target.key();
+    // The optional SETTINGS child, built first so its size is known when the SUBSCRIBER
+    // header is emitted. An all-zero policy emits NOTHING — the absent case of RFC-0022
+    // §3.A — so a caller that states no policy produces the exact bytes it did before, and
+    // the existing `subscriber-path` conformance vector still describes this encoder.
+    std::vector<std::byte> qos;
+    if (policy.bits != 0) {
+        std::vector<std::byte> members;
+        wire::emit_name(members, "delivery_policy");
+        emit_value(members, policy.bits, 2);
+        wire::emit_tlv(qos, type_t::SETTINGS, opt_t{.pl = true}, members);
+    }
     std::vector<std::byte> sub;
-    sub.reserve(8 + key.size());
-    wire::emit_header(sub, type_t::SUBSCRIBER, opt_t{.pl = true}, 4 + key.size());
+    sub.reserve(8 + key.size() + qos.size());
+    wire::emit_header(sub, type_t::SUBSCRIBER, opt_t{.pl = true}, 4 + key.size() + qos.size());
     wire::emit_header(sub, type_t::PATH, opt_t{.pl = true}, key.size());
     sub.insert(sub.end(), key.begin(), key.end());
+    sub.insert(sub.end(), qos.begin(), qos.end());
     const std::optional<view_t> value = view::over_bytes(sub);
     if (!value) return std::unexpected(status_t::BACKPRESSURE);
     field_path_t field;
@@ -1390,15 +1402,18 @@ result_t<void> graph_t::subscribe(const path_t& src, const path_t& target) {
     return field_write(v, field, *value, {});
 }
 
-result_t<subscription_t> graph_t::subscribe(const path_t& src, subscriber_fn_t fn, void* ctx) {
+result_t<subscription_t> graph_t::subscribe(const path_t& src, subscriber_fn_t fn, void* ctx,
+                                            delivery_policy_t policy) {
     vertex_t* v = find_ptr(src.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
     // A callback cannot ride a TLV, so this sugar has no parse to share — it still
     // enters the same single admission step as every other door (ADR-0049), under the
-    // empty (local) caller context.
+    // empty (local) caller context. The policy lands on the slot directly, which is where
+    // the wire door's parse would have put it.
     subscriber_t s;
     s.callback = fn;
     s.callback_ctx = ctx;
+    s.policy = policy;
     return admit_subscriber(v, std::move(s), {});
 }
 
@@ -1633,50 +1648,11 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
         return {};
     }
 
-    if (step0.name == "settings" && field.steps.size() >= 2) {
-        // The flat protocol-knob surface. The NAME resolves FIRST: an unknown core-namespace
-        // name is `tr::schema::not_found` (docs/reference/05 §`0x0B` validation) — a rule
-        // stated with no caller qualifier, so a denied caller may not convert it into
-        // PERMISSION_DENIED. That order is what the `settings.app.` branch above already
-        // does (undeclared is ENOTTY before the ACL right) and what the terminal branch
-        // below does by having no gate at all; the three now agree. The accepted cost is
-        // narrow and deliberate: an unauthorized caller can enumerate flat knob NAMES by
-        // probing, exactly as it already can for app fields — knob names are a fixed,
-        // published constant of the protocol, not a per-node secret.
-        const std::optional<qos_knob_t> knob = qos_knob(field);
-        if (!knob) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-        if (!acl_allows(v, caller, acl_right_t::WRITE))  // QoS knobs are control writes
-            return std::unexpected(status_t::PERMISSION_DENIED);
-        const auto tlv = wire::decode(value);
-        if (!tlv || tlv->type != type_t::VALUE) return std::unexpected(status_t::TYPE_MISMATCH);
-        const std::uint64_t n = detail::load_le(tlv->payload);
-        return v->update_settings([&](settings_t& st) -> result_t<void> {
-            switch (*knob) {
-                case qos_knob_t::RELIABILITY:
-                    st.reliability = static_cast<std::uint8_t>(n);
-                    break;
-                case qos_knob_t::DURABILITY:
-                    st.durability = static_cast<std::uint8_t>(n);
-                    break;
-                case qos_knob_t::PRIORITY:
-                    st.priority = static_cast<std::uint8_t>(n);
-                    break;
-                case qos_knob_t::HISTORY_KEEP_LAST:
-                    st.history_keep_last = static_cast<std::uint32_t>(n);
-                    break;
-                case qos_knob_t::QUEUE_MAX_BYTES:
-                    st.queue_max_bytes = static_cast<std::uint32_t>(n);
-                    break;
-                case qos_knob_t::DEADLINE_NS:
-                    st.deadline_ns = n;
-                    break;
-                case qos_knob_t::STORE_REF_MIN_BYTES:
-                    st.store_ref_min_bytes = static_cast<std::uint32_t>(n);
-                    break;
-            }
-            return {};
-        });
-    }
+    // Everything else under `settings` — every `:settings.<knob>` name the protocol ever
+    // minted, and every shape that resolves to none — falls through to the terminal
+    // SCHEMA_NOT_FOUND below. RFC-0022 §3.B withdrew the flat core-namespace write surface
+    // whole: there is no `settings_t` to write into, so the answer is caller-INDEPENDENT
+    // (never PERMISSION_DENIED) and there is no gate here to get the order wrong.
 
     return std::unexpected(status_t::SCHEMA_NOT_FOUND);
 }
@@ -1727,14 +1703,17 @@ result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value)
 }
 
 result_t<view_t> graph_t::read_schema(vertex_t* v) const {
-    const settings_t s = v->settings_snapshot();
-    // POINT { NAME <vertex name>, SETTINGS { NAME "deadline_ns" VALUE u64,
-    //                                        NAME "history_keep_last" VALUE u32 } }
-    std::vector<std::byte> settings_children;
-    wire::emit_name(settings_children, "deadline_ns");
-    emit_value(settings_children, s.deadline_ns, 8);
-    wire::emit_name(settings_children, "history_keep_last");
-    emit_value(settings_children, s.history_keep_last, 4);
+    // POINT { NAME <vertex name>, SETTINGS { } }
+    //
+    // The synthesized protocol part enumerates the implemented `settings.*` knobs, and after
+    // RFC-0022 §3.B there are NONE: `settings_t` is deleted, so the vertex's `:settings` core
+    // namespace is empty — and therefore, for the first time, COMPLETE. That is the condition
+    // #706 was filed about (the schema advertised `deadline_ns`, which nothing consumed, and
+    // omitted the one live threshold), dissolved by removing the inputs rather than by
+    // extending the view. The empty SETTINGS is emitted rather than omitted so the record
+    // keeps its shape: a renderer walks `POINT{ NAME, SETTINGS, [NAME "app" SETTINGS] }`
+    // whatever the vertex declares.
+    const std::vector<std::byte> settings_children;
 
     std::vector<std::byte> point_body;
     wire::emit_name(point_body, key_view_t{v->name().bytes()}.last_segment());
@@ -1816,27 +1795,14 @@ result_t<view_t> graph_t::read_identity() const {
 }
 
 result_t<view_t> graph_t::read_settings(vertex_t* v) const {
-    // The full settings container (RFC-0010 §A.4): the implemented protocol QoS knobs —
-    // in the docs/reference/05 §0x0B payload-layout order, each `NAME <knob> VALUE <int>`
-    // — plus the nested `app` record iff a descriptor table is installed. One traversal
-    // serves a generic settings renderer protocol knobs and app config in one record,
-    // distinguished by the reserved subkey.
-    const settings_t s = v->settings_snapshot();
+    // The settings container KEEPS ITS SHAPE and LOSES ITS KNOBS (RFC-0010 §A.4 as amended
+    // by RFC-0022 §4): `SETTINGS{ [NAME "app" SETTINGS{…}] }`. The reserved `app` subkey and
+    // the single-traversal renderer contract survive; the core knob namespace is empty
+    // because `settings_t` is deleted, so the read still enumerates exactly what the WRITE
+    // gate accepts — which is now nothing, honestly, rather than seven names of which four
+    // were never honoured. A vertex with no declared app fields reads an EMPTY `SETTINGS{}`,
+    // which is honest rather than absent.
     std::vector<std::byte> children;
-    wire::emit_name(children, "reliability");
-    emit_value(children, s.reliability, 1);
-    wire::emit_name(children, "durability");
-    emit_value(children, s.durability, 1);
-    wire::emit_name(children, "history_keep_last");
-    emit_value(children, s.history_keep_last, 4);
-    wire::emit_name(children, "deadline_ns");
-    emit_value(children, s.deadline_ns, 8);
-    wire::emit_name(children, "priority");
-    emit_value(children, s.priority, 1);
-    wire::emit_name(children, "queue_max_bytes");
-    emit_value(children, s.queue_max_bytes, 4);
-    wire::emit_name(children, "store_ref_min_bytes");
-    emit_value(children, s.store_ref_min_bytes, 4);
     const std::vector<app_field_t> table = v->app_fields_snapshot();
     if (!table.empty()) {
         std::vector<std::byte> app_children;
@@ -2153,6 +2119,27 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
                 return std::unexpected(status_t::SCHEMA_NOT_FOUND);
             return read_identity();
         }
+        // An UNKNOWN core-namespace `:settings` NAME resolves HERE, above the READ gate —
+        // the exact mirror of the write door (see `field_write`'s settings arm: only
+        // `settings.app.…` reaches a gate; every other spelling under `settings` falls
+        // through to a terminal, ungated SCHEMA_NOT_FOUND). RFC-0022 §3.B deleted
+        // `settings_t` outright, so the core namespace is EMPTY and every name in it is an
+        // unknown name — which docs/reference/05 §`0x0B` answers with
+        // `ERROR{tr::schema::not_found}`, a rule stated with NO caller qualifier.
+        //
+        // Below this line sits the READ gate, and a denied caller reaching it would be told
+        // PERMISSION_DENIED on the READ of a name whose WRITE already answers
+        // SCHEMA_NOT_FOUND — one name, two answers, split by who is asking. That is exactly
+        // the caller-DEPENDENT disclosure §3.B forbids, so the read must resolve the name
+        // first, at the same narrowness the write door does.
+        //
+        // Nothing leaks: "the core knob namespace is empty" is published spec text, so the
+        // narrower answer discloses only what docs/reference/05 already states. Bare
+        // `:settings` (the container) and the whole `settings.app.` subtree are untouched —
+        // both are KNOWN names and keep their gates.
+        if (field.steps[0].name == "settings" && field.steps.size() >= 2 &&
+            field.steps[1].name != "app")
+            return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         if (!acl_allows(v, caller, acl_right_t::READ))
             return std::unexpected(status_t::PERMISSION_DENIED);
         // One synthesized POINT, served whole — not an array field, so no `[N]` surface.
@@ -2160,11 +2147,12 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
             plain_step(field.steps[0]))
             return read_schema(v);
         if (field.steps[0].name == "settings" && plain_step(field.steps[0])) {
-            // The RFC-0010 §A.4 read surfaces. Bare ":settings" — the full container
-            // (protocol knobs + the nested app record); ":settings.app" — the app
-            // container alone; ":settings.app.<name…>" — one declared field's stored
-            // TLV verbatim. Per-knob protocol reads (":settings.deadline_ns") remain
-            // unimplemented and fall through to SCHEMA_NOT_FOUND, as before.
+            // The RFC-0010 §A.4 read surfaces. Bare ":settings" — the container
+            // (RFC-0022 §4: the nested app record, and nothing else); ":settings.app" —
+            // the app container alone; ":settings.app.<name…>" — one declared field's
+            // stored TLV verbatim. A per-knob protocol read (":settings.deadline_ns")
+            // names nothing and falls through to SCHEMA_NOT_FOUND, exactly as its write
+            // now does.
             if (field.steps.size() == 1) return read_settings(v);
             if (field.steps[1].name == "app" && plain_step(field.steps[1])) {
                 if (field.steps.size() == 2) return read_settings_app(v);

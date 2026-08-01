@@ -15,17 +15,16 @@
 
 - **Schema**: a structured TLV (typically a `POINT` or a `SETTINGS`-shaped record) returned at `<vertex>:schema`, enumerating the writable fields the vertex exposes. Two parts with defined precedence ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §B.2): a **synthesized protocol part**, authoritative for protocol machinery — and, when the owner installed a field descriptor table, an **owner part** (`NAME "app" SETTINGS{…}`) served verbatim, authoritative for `settings.app.*`. Read-only.
 
-> **What the synthesized part actually emits today, and why it under-reports** ([#586](https://github.com/avatarsd-llc/libtracer/issues/586)). This paragraph used to say the synthesized part enumerates "`:subscribers[]`, `:settings.*`, `:liveness.*`, `:acl`". It enumerates **none of those as such**. `graph_t::read_schema` emits exactly:
+> **What the synthesized part emits** ([#586](https://github.com/avatarsd-llc/libtracer/issues/586), [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md)). This paragraph used to say the synthesized part enumerates "`:subscribers[]`, `:settings.*`, `:liveness.*`, `:acl`". It enumerates **none of those as such**. `graph_t::read_schema` emits exactly:
 >
 > ```
 > POINT{ NAME <vertex name>
->        SETTINGS{ NAME "deadline_ns"        VALUE u64
->                  NAME "history_keep_last"  VALUE u32 }
+>        SETTINGS{ }                  // the implemented protocol knobs: NONE
 >        [ NAME "app" SETTINGS{…} ]   // only when a descriptor table is installed
 > }
 > ```
 >
-> The gap is not only the fictional rows. **Four of the six real, writable QoS knobs are missing from it** — `reliability`, `durability`, `priority` and `queue_max_bytes` all accept writes, and none appears in `:schema`. A client that discovers the write surface by reading `:schema`, which is that field's entire purpose, will not find them.
+> The knob enumeration is **empty**, and therefore for the first time **complete**. It was neither before RFC-0022: it advertised `deadline_ns`, which nothing consumed, and omitted `store_ref_min_bytes`, which the write path read on every write — the reported set was not even a subset of the working set. RFC-0022 §3.B deleted `settings_t` outright, which dissolved [#706](https://github.com/avatarsd-llc/libtracer/issues/706) rather than fixing it. The empty `SETTINGS` is **emitted, not omitted**, so the record keeps its shape whatever the vertex declares. The `:liveness.*` and `:description` rows below remain fictional and are still marked as such.
 
 
 
@@ -77,7 +76,7 @@ flowchart BT
 
 The `type` byte sits at the L2 / L3 boundary. It is **carried** in the wire header (so a router can decide whether to recurse without parsing payload) but its **meaning** is L3. A pure-framing parser that just dispatches by `length + CRC` could ignore `type` entirely; a TLV-aware router uses `type` (and `opt.PL`) to decide whether to walk into nested children.
 
-Priority is **NOT** an L2 concern. The `opt` byte carries no priority bits — priority is transport-time and per-link, not coherent across the network. A router that wants priority-aware dispatch reads `:settings.priority` once per subscription (L4) and caches it. See [01-data-format.md](01-data-format.md) §why no priority bits.
+Priority is **NOT** an L2 concern. The `opt` byte carries no priority bits — priority is transport-time and per-link, not coherent across the network. A router that wants priority-aware dispatch reads the **subscription's** priority (bits 2–4 of its delivery policy, [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.A) once at admission (L4) and caches it. It was a per-vertex `:settings.priority` until RFC-0022 observed that one vertex fanning out to a CAN peer and a WebSocket peer has no single priority to hold — which is why nothing ever consumed the knob. See [01-data-format.md](01-data-format.md) §why no priority bits.
 
 Implementations MAY refactor `type` out of the wire header (into "first byte of payload") in a future major version without semantic change; this is a layout question internal to L2/L3, not a protocol-level decision.
 
@@ -344,7 +343,7 @@ The medium under a transport module determines whether a copy happens at the wir
 
 The receive side on a stream/byte transport (UART, CAN, I²C, TCP) intrinsically needs an **RX buffer** because the bytes arrive incrementally and the framer needs to reconstitute a complete TLV. Once reconstituted, the framed TLV is a **view over the RX buffer**, and from that point on no further copies happen — the same view propagates through the router, fans out to subscribers, and is read by application code.
 
-A subscriber that processes the TLV synchronously and releases its view immediately allows the RX buffer segment to be returned to the transport's free pool quickly. A subscriber that holds the view (e.g. enqueues for later processing) keeps the segment alive — backpressure on the segment pool is one of the QoS knobs (`queue_max_bytes`).
+A subscriber that processes the TLV synchronously and releases its view immediately allows the RX buffer segment to be returned to the transport's free pool quickly. A subscriber that holds the view (e.g. enqueues for later processing) keeps the segment alive. Backpressure is therefore a property of the **injected pool** — exhaustion surfaces as `tr::flow::backpressure` ([CONTEXT.md](../../CONTEXT.md) §No synthetic limits) — not of a per-vertex knob: the `queue_max_bytes` knob this paragraph used to name was inert and was removed by [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.E.
 
 ### Payload invariance across boundaries
 
@@ -444,12 +443,6 @@ A vertex exposes a **schema** describing every writable field. The schema lives 
 | ---- | ---- | ---- | ---- |
 | `:subscribers[N]` | SUBSCRIBER | read; write is payload-discriminating | Subscription record N — see the rule below |
 | `:subscribers[]` | sequence of SUBSCRIBER | read-only; write to `[]` appends | Full list (read) or new slot (write) |
-| `:settings.reliability` | u8 enum | yes | `0=best-effort, 1=reliable` |
-| `:settings.durability` | u8 enum | yes | `0=volatile, 1=transient-local` |
-| `:settings.history_keep_last` | u32 | yes | N samples retained for late joiners |
-| `:settings.deadline_ns` | u64 | yes | Max time between writes before liveness fault |
-| `:settings.priority` | u8 | yes | `0=low ... 255=critical` (transport hint) |
-| `:settings.queue_max_bytes` | u32 | yes | Per-subscriber queue cap (back-pressure threshold) |
 | `:settings.app.<name…>` | owner-defined TLV | owner-declared (`ro`/`rw`/`wo`) | Application property field ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md)): declared by the vertex owner in its field descriptor table; undeclared names stay `SCHEMA_NOT_FOUND` |
 | ⚠️ `:liveness.heartbeat_hz` | u8 | **unimplemented** | Subscriber heartbeat rate; 0 = no liveness check |
 | ⚠️ `:liveness.last_seen_ns` | u64 | **unimplemented** | Wall-clock of last write observed |
@@ -462,7 +455,9 @@ A vertex exposes a **schema** describing every writable field. The schema lives 
 >
 > They are **marked rather than deleted** because whether deadline/liveness enforcement is a v1 commitment is an open design question ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) liveness is the pending work). Marking removes the fiction without foreclosing either answer; deleting would foreclose one. If liveness lands, drop the markers — if it is ruled out of v1, drop the rows.
 >
-> **Reads and writes are not symmetric for `:settings.*` either.** All six protocol knobs above accept **writes**. Per-knob **reads** (`:settings.deadline_ns`) are unimplemented and answer `SCHEMA_NOT_FOUND`; only the bare `:settings` container, `:settings.app`, and `:settings.app.<name…>` are readable. The "Writable" column is accurate; do not read it as a claim about readability.
+> **The whole flat `:settings.<knob>` namespace was REMOVED, not deprecated** ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.B/§4). All seven historical names — `reliability`, `priority`, `durability`, `deadline_ns`, `queue_max_bytes`, `history_keep_last`, `store_ref_min_bytes` — answer `SCHEMA_NOT_FOUND` on read **and** on write, caller-independently. `reliability`, `priority` and `durability` describe one producer→subscriber *relationship*, not a vertex, so they moved to the subscription's packed delivery policy (§Subscriber delivery policy below); `deadline_ns` and `queue_max_bytes` were inert *and* had no coherent per-vertex meaning, so they were deleted outright; the two survivors are construction parameters, not QoS, and became **owner-side declarations with no wire surface at all** (§Storage is declared owner-side, below). There is no deprecation window: the protocol is DRAFT, and of the seven only three ever drove behaviour.
+>
+> **The bare `:settings` read keeps its container and loses its knobs.** It is now `SETTINGS{ [NAME "app" SETTINGS{…}] }`; a vertex declaring no app fields reads an **empty** `SETTINGS{}`, which is honest rather than absent. `:settings.app` and `:settings.app.<name…>` are unchanged.
 
 ### The payload-discriminating `:subscribers[N]` write
 
@@ -488,6 +483,66 @@ A `[*]` selector is **not a write selector**: `:subscribers[*]` on a write answe
 
 Unsubscribe-then-subscribe remains available and is the only spelling that does not require knowing `N`; the new record may land in a **different** slot.
 
+### Subscriber delivery policy
+
+Delivery policy is a property of **one producer→subscriber relationship**, not of the producer
+([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.A). A `SUBSCRIBER` MAY carry it in its
+**existing `SETTINGS` child** — the same child `delivery_compact` uses, so this introduced no
+new wire structure — as one packed 16-bit value under the key `delivery_policy`:
+
+| bits | field | values |
+| ---: | --- | --- |
+| 0–1 | `reliability` | `0` = best-effort, `1` = reliable; `2`–`3` reserved |
+| 2–4 | `priority` | `0`–`7`, `0` = default |
+| 5 | `durability_request` | `1` = deliver the producer's latched last value on join |
+| 6–15 | reserved | MUST be written `0`, MUST be **ignored** on read — never rejected |
+
+**Absent ⇒ all-zero ⇒ the default behaviour**, byte-identically: a sender that predates the
+policy is a conforming sender. Only `durability_request` is honoured today (§the transient-local
+latch, [05 §`0x04`](05-protocol-tlvs.md)); `reliability` and `priority` are carried and read back,
+awaiting the transport work that honours them — the honest shape RFC-0022 chose over moving dead
+per-vertex fields into a new home.
+
+**No magnitude is packed here.** A deadline or a queue bound added later is a *magnitude*, and a
+bit-width on a magnitude is a synthetic limit, which this project forbids
+([CONTEXT.md](../../CONTEXT.md) §No synthetic limits): it would arrive as a full-width field in the
+subscription's cold half, never in these bits.
+
+Why per-subscription at all: a single per-vertex `reliability` or `priority` has no coherent
+meaning when one vertex fans out to a CAN peer and a WebSocket peer at once. That is why the
+per-vertex knobs were writable for a year and consumed by nothing, and why DDS puts exactly these
+on the reader/writer pair. `durability` in particular became strictly more correct by moving: one
+vertex flag used to replay the last value to *every* subscriber, including the ones that never
+asked, and there was no way to say "not for me".
+
+### Storage is declared owner-side, and nothing is inherited
+
+The two survivors of the old knob set are not protocol QoS at all — they are **construction
+parameters** ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.C, Amendment 1):
+
+| what | who supplies it | how |
+| ---- | ---- | ---- |
+| STREAM ring depth | the application — a retention *intent* no peer and no injected resource can supply | `graph_t::set_history_depth(v, keep)` |
+| store-by-reference threshold | the deployment — a copy/pin trade ([ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md) §3) | `graph_t::set_store_ref_min_bytes(v, bytes)` |
+
+Both are owner-side wiring calls in the shape of `set_delivery_mode` and `set_app_fields` —
+declarations the owner makes host-side after registration — and **neither has any wire surface**:
+no peer can read one and none can write one. What was withdrawn is the *remote write surface*, not
+owner-side configuration.
+
+**Nothing is inherited** (§3.F). A declaration reaches exactly the vertex it names: there is no
+ancestor walk, no cached ancestor reference, and no propagation question when a parent's
+configuration changes after its children exist. Both readers therefore stay a single inline load
+off the vertex's own extension block — `store_ref_min_bytes` is read on every view-delivered write
+and the ring depth on every STREAM store, so a walk on either path would be disqualifying under
+this project's latency-first ordering.
+
+The RAM consequence runs the same way. Registration no longer carries a policy parameter, so it
+can no longer force the cold extension block onto a vertex, and neither can an ancestor: **strictly
+more vertices stay extension-less than before RFC-0022**. A vertex allocates the block when it is a
+STREAM, carries a handler, holds app fields or an `:acl` — or when its owner declares one of the
+two magnitudes on it, which is the only case storage itself pays for.
+
 ### Owner-declared application fields (`settings.app`)
 
 The `app` key is **reserved inside the vertex `SETTINGS` namespace** ([05 §`0x0B`](05-protocol-tlvs.md)): the protocol MUST never mint a QoS or machinery knob named `app`, and everything below `settings.app.` is **owner-defined** — names, nesting, and value bytes are the application's, opaque to the runtime. This is the substrate for the device-private half of the field discipline ([ADR-0021](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0021-colon-field-plane-is-the-vertex-ioctl.md) rule 3: fields are standard *and* device-private, like ioctls — the protocol owns the addressing, the device owns the catalog of what each field accepts):
@@ -507,7 +562,7 @@ A producer that has no good value to publish — a sensor that faulted, a readin
 
 - **Stale** (the value is old, or the producer went quiet) is **consumer-derived**, never a flag the producer sets:
   - *Sample age*: the optional wire timestamp (`opt.TS`, [01-data-format.md](01-data-format.md)) carries when the sample was taken; a consumer treats `now − ts > tolerance` as stale.
-  - *Producer liveness* ⚠️ **intended, not implemented**: `:settings.deadline_ns` plus the read-only `:liveness.last_seen_ns` / `:liveness.missed_deadlines` fields (above) are meant to say whether the producer is still writing within its contract, and a missed deadline would be the canonical "this vertex went stale" signal, observable without the producer doing anything. `deadline_ns` is writable but nothing enforces it, and the two `:liveness.*` fields do not exist — see the marked rows above ([#586](https://github.com/avatarsd-llc/libtracer/issues/586)). The *staleness* concept below stands on `ts` alone today.
+  - *Producer liveness* ⚠️ **intended, not implemented, and no longer half-present**: a deadline plus the read-only `:liveness.last_seen_ns` / `:liveness.missed_deadlines` fields (above) would say whether the producer is still writing within its contract, and a missed deadline would be the canonical "this vertex went stale" signal, observable without the producer doing anything. None of it exists. The `:settings.deadline_ns` knob that used to accept writes nothing enforced was **removed** by [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.E — a writable knob no code reads is worse than an absent one, which at least answers honestly. If deadlines land later they arrive as a magnitude on the subscription, when something implements them. The *staleness* concept below stands on `ts` alone today.
 - **Invalid / fault** (the producer is alive but its value is meaningless right now) is a **`STATUS=ERROR(<reason>)` written in place of a VALUE**. Delivery is an ordinary write ([CONTEXT.md](../../CONTEXT.md) §delivery *is* a write), so a fault reaches subscribers through the same edge as a value; a type-aware consumer distinguishes a `STATUS` (type `0x09`) from a `VALUE` (type `0x01`) by its type code and reacts (hold last-good, alarm, fail over) exactly as it would for a liveness fault.
 
 The second bullet is a **producer-side convention**, not a runtime behaviour. A vertex stores whatever TLV is written to it and the graph never mints a `STATUS` on a producer's behalf; a consumer must therefore not infer that a silent vertex is faulted, and must not assume every producer adopts the convention. A connection vertex's link state, for one, is published as an ordinary `VALUE` carrying the state code, not as a `STATUS`.

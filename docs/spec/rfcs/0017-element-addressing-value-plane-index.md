@@ -118,7 +118,7 @@ It is a selector over bytes the vertex already holds; it introduces no storage c
   a child is a TLV at an offset, and its type code is the application's business
   ([CONTEXT.md](../../../CONTEXT.md) §Application field).
 - `[n]` MUST NOT be read as an index into a vertex's `STREAM` history ring
-  (`role_t::STREAM`, `settings.history_keep_last`). The ring is **not** addressable by this
+  (`role_t::STREAM`, whose depth is the owner-declared `set_history_depth`). The ring is **not** addressable by this
   RFC and remains drain-only. `[n]` indexes *content*; the ring indexes *time*, and one
   syntax must not mean both.
 
@@ -195,7 +195,7 @@ Element deliveries **retain the self-repair property** for any element that is w
 once: a reordered element is corrected by the next write to that same element, exactly as a
 reordered whole value is corrected by the next whole write. The two differ only for an element
 written **once and never again**, on a transport that reorders. A deployment that requires more
-already has the knob: `settings.reliability`.
+already has the concept: `reliability` is bits 0–1 of the subscription's delivery policy ([RFC-0022](0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.A; it was the per-vertex `settings.reliability` knob when this was written).
 
 ### F. Conformance vectors (proposed)
 

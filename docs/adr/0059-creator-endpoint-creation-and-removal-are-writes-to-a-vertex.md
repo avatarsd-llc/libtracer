@@ -109,7 +109,7 @@ read  /net:children[]                             ; enumerate members
    per creatable parent**, never one per knob.
 
 6. **ACL-gating relocates, and the right's identity is deferred.** ADR-0017 gated creation on the
-   parent's `CREATE` right (`vertex.hpp:260`; enforced on `:children[]` in `graph.cpp`). A creator
+   parent's `CREATE` right (`vertex.hpp:216`; enforced on `:children[]` in `graph.cpp`). A creator
    endpoint carries its own ACL, so the create right becomes delegable **without granting any right
    on the parent at all** — a *different* cut than `CREATE`-vs-`WRITE` on one mask, not a finer one
    (those are already distinct bits: `WRITE = 0x02`, `CREATE = 0x08`). Whether the creator's gate is

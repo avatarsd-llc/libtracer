@@ -317,10 +317,11 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "deliveries/s · free slots · rx drops"),
     instrument_t(
         "bench_qos_census.cpp", "counted", (),
-        "Counts, per vertex shape, whether an extension block is allocated at all and whether "
-        "the QoS it holds is byte-identical to the default — the ratio that decides whether "
-        "interning the settings profile pays. Classifies by comparing the address returned by "
-        "`settings()` against `kDefaultSettings`, so it needs no accessor of its own.",
+        "Counts, per vertex shape, whether an extension block is allocated at all — the "
+        "pay-for-what-you-use split RFC-0022 §3.B widened by deleting the registration "
+        "parameter that could force one. Classifies through `vertex_t::has_extension_block`, "
+        "the census observable that replaced comparing `settings()`'s returned address "
+        "against a shared defaults constant.",
         "vertices per bucket"),
     instrument_t(
         "bench_tcp_peer_scaling.cpp", "net", (),

@@ -111,8 +111,9 @@ int main() {
     const std::uint32_t rb_got = rb ? as_u32((*rb)->only()) : 0u;
     std::printf("read-back /sensor/temp = %u\n", rb_got);
 
-    // Field-write a QoS setting, then discover it via :schema.
-    (void)g.write(path_t("/sensor/temp:settings.deadline_ns"), value_u32(5000));
+    // Declare the STREAM ring depth OWNER-SIDE (RFC-0022 §3.C — it has no wire surface),
+    // then discover the vertex shape via :schema.
+    g.set_history_depth(temp, 8);
     auto schema = g.read(path_t("/sensor/temp:schema"));
     std::size_t schema_children = 0;
     if (schema) {

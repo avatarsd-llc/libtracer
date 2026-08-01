@@ -52,7 +52,6 @@ using tr::graph::fwd_op_t;
 using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
-using tr::graph::settings_t;
 using tr::net::fwd_router_t;
 using tr::net::transport_t;
 using tr::wire::opt_t;
@@ -106,13 +105,30 @@ std::vector<std::byte> b_field_subscribers_append() {
     tr::wire::emit_tlv(out, type_t::FIELD, opt_t{.pl = true}, body);
     return out;
 }
-/** @brief SUBSCRIBER{ PATH target, SETTINGS qos{ NAME "delivery_compact" VALUE u8 } }. */
-std::vector<std::byte> b_subscriber(const std::vector<std::byte>& target, bool compact) {
+/** @brief A VALUE TLV holding the little-endian 16 bits of @p v (the RFC-0022 §3.A
+ *         `delivery_policy` shape). */
+std::vector<std::byte> b_value_u16(std::uint16_t v) {
+    const std::array<std::byte, 2> b{std::byte{static_cast<std::uint8_t>(v & 0xFF)},
+                                     std::byte{static_cast<std::uint8_t>(v >> 8)}};
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, std::span<const std::byte>(b));
+    return out;
+}
+/** @brief SUBSCRIBER{ PATH target, SETTINGS qos{ NAME "delivery_compact"  VALUE u8,
+ *                                                NAME "delivery_policy"   VALUE u16 } } —
+ *         both keys in the ONE SETTINGS child, per RFC-0022 §3.A. The policy member is
+ *         omitted when zero, which is the absent (default) case. */
+std::vector<std::byte> b_subscriber(const std::vector<std::byte>& target, bool compact,
+                                    std::uint16_t policy = 0) {
     std::vector<std::byte> body;
     append(body, target);
     std::vector<std::byte> qos;
     append(qos, b_name("delivery_compact"));
     append(qos, b_value_u8(compact ? 1 : 0));
+    if (policy != 0) {
+        append(qos, b_name("delivery_policy"));
+        append(qos, b_value_u16(policy));
+    }
     std::vector<std::byte> settings;
     tr::wire::emit_tlv(settings, type_t::SETTINGS, opt_t{.pl = true}, qos);
     append(body, settings);
@@ -391,13 +407,15 @@ void test_transient_local_latch() {
     router.add_child("client", link);
 
     const auto p = path_t::parse("/sensor/temp");
-    settings_t s;
-    s.durability = 1;  // transient-local
-    auto v = graph.register_vertex(*p, role_t::STORED_VALUE, {}, s);
+    auto v = graph.register_vertex(*p, role_t::STORED_VALUE);
     (void)graph.write(v, make_value(b_value_u32(0x11223344)));  // seed BEFORE subscribe
 
-    link.inject(b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"client"}),
-                      b_field_subscribers_append(), b_subscriber(b_path({"client"}), false)));
+    // RFC-0022 §3.A: the REMOTE subscriber asks for the latch in its SETTINGS child; the
+    // producer carries no durability flag any more.
+    link.inject(b_fwd(
+        fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"client"}),
+        b_field_subscribers_append(),
+        b_subscriber(b_path({"client"}), false, tr::graph::delivery_policy_t::kDurabilityRequest)));
     const auto sent = link.drain();
     int writes = 0;
     std::uint32_t latched = 0;
@@ -410,6 +428,18 @@ void test_transient_local_latch() {
     }
     check(writes == 1, "exactly one latched delivery on subscribe");
     check(latched == 0x11223344, "latched delivery carries the current LKV");
+
+    // The ablation: the same producer, the same seeded LKV, a second remote subscriber
+    // that asks for nothing. It gets NO replay — which before RFC-0022 was impossible to
+    // express, because the producer's one flag latched for every subscriber.
+    link.inject(b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"client"}),
+                      b_field_subscribers_append(), b_subscriber(b_path({"client"}), false)));
+    int plain_writes = 0;
+    for (const auto& f : link.drain()) {
+        const auto d = tr::wire::decode(f);
+        if (d && fwd_op(*d) == static_cast<int>(fwd_op_t::WRITE)) ++plain_writes;
+    }
+    check(plain_writes == 0, "a subscriber that did NOT request durability gets no latch");
 }
 
 void test_compact_auto_promote() {

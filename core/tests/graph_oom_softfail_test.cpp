@@ -39,7 +39,6 @@ using tr::graph::op_resolver_t;
 using tr::graph::path_t;
 using tr::graph::reply_kind_t;
 using tr::graph::role_t;
-using tr::graph::settings_t;
 using tr::graph::status_t;
 using tr::view::rope_t;
 using tr::view::view_t;
@@ -245,9 +244,8 @@ void test_target_clone_drop() {
 void test_stream_ring_shed() {
     std::printf("stream ring — the deque append is shed under OOM, the LKV still lands:\n");
     graph_t g;
-    settings_t s;
-    s.history_keep_last = 4;
-    auto v = g.register_vertex(path_t("/s/log"), role_t::STREAM, {}, s);
+    auto v = g.register_vertex(path_t("/s/log"), role_t::STREAM);
+    g.set_history_depth(v, 4);
     {
         const hook_guard_t frag(fail_big);  // the ring-append probe exceeds 512 B
         check(g.write(v, make_value({0x10})).has_value(), "the stream write succeeds");
@@ -265,9 +263,8 @@ void test_stream_ring_shed() {
 void test_stream_drain_defer() {
     std::printf("stream drain — an OOM propagate defers the batch, never loses it:\n");
     graph_t g;
-    settings_t s;
-    s.history_keep_last = 8;
-    auto v = g.register_vertex(path_t("/s/tail"), role_t::STREAM, {}, s);
+    auto v = g.register_vertex(path_t("/s/tail"), role_t::STREAM);
+    g.set_history_depth(v, 8);
     int count = 0;
     (void)g.subscribe(path_t("/s/tail"), count_cb, &count);
     (void)g.assign(v, make_value({0x01}));

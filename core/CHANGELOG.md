@@ -49,6 +49,37 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   is not merged (three rounds, three blocking defects, +19/+29 % on the read path), and #635
   keeps the open reclamation question.
 
+- **`tr::graph::delivery_policy_t` — the per-subscription delivery policy (RFC-0022 §3.A).** A
+  packed `u16`: bits 0–1 `reliability`, 2–4 `priority`, 5 `durability_request`, 6–15 reserved
+  (written 0, **ignored** on read — never rejected, and carried verbatim so they read back
+  unchanged). It rides the `SUBSCRIBER` TLV's **already-existing `SETTINGS` child** under the key
+  `delivery_policy` — the same child `delivery_compact` uses — so no new wire structure exists.
+  Absent ⇒ all-zero ⇒ today's behaviour, byte-identically. Both `subscribe` sugars take it as a
+  defaulted trailing argument (`subscribe(src, target, policy)`, `subscribe(src, fn, ctx, policy)`,
+  `subscribe(src, callable, policy)`), so every existing call site compiles and behaves unchanged.
+  Only `durability_request` is consumed today; `reliability` and `priority` are stored and read
+  back, awaiting the transport work that honours them.
+
+- **`graph_t::set_history_depth(vertex_handle_t, std::uint32_t)` — the STREAM ring depth, declared
+  owner-side (RFC-0022 §3.C).** Shaped like `set_delivery_mode` / `set_app_fields`: a declaration
+  the owner makes host-side after registration, with **no wire surface at all** — no peer can read
+  it and none can write it. The depth is what the *application* wants retained, which no peer and
+  no injected resource can supply, so it is not protocol QoS and does not belong on a remote write
+  surface. Costs a STREAM vertex zero extra bytes (a STREAM identity already allocates the cold
+  block). Default 1, as before.
+
+- **`graph_t::set_store_ref_min_bytes(vertex_handle_t, std::uint32_t)` and
+  `graph_t::store_ref_min_bytes(vertex_handle_t)`.** The ADR-0042 §3 store-by-reference threshold,
+  rehomed the same way and for the same reason — it is a deployment copy/pin trade, not a
+  quality-of-service property. Semantics are **unchanged**: an absolute byte threshold, `0` (the
+  default) disables referencing, read on every view-delivered write as one inline load. RFC-0022
+  §3.D replaces that predicate with an amplification ratio whose constant §6 gates on a
+  dual-target measurement; that measurement has not been run, so the predicate is untouched here.
+
+- **`vertex_t::has_extension_block()`.** The RAM-census observable that replaced comparing
+  `settings()`'s returned address against `kDefaultSettings` — both of which RFC-0022 deleted.
+  Used by `bench_qos_census` and the vertex-size gate; not a data-plane predicate.
+
 - **`fwd_router_t::subscribe_toward(producer, target)` (#739).** Binds a local producer's
   subscription toward ONE ordinary mount-path target (`/net/<module>/<name>/<consumer...>`,
   arbitrarily nested), resolved through the SAME ADR-0061 strip-K cached descent the forward
@@ -114,6 +145,67 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     now pin the three flatten SEAMS (which the test does prove) plus the one guard that is
     independently observable, and both redundant early-outs say plainly in code that they are
     redundant early-outs.
+
+- **BREAKING (RFC-0022 §3.B): `tr::graph::settings_t` and `kDefaultSettings` are DELETED, and
+  `register_vertex` / `try_register_vertex` / `register_vertex_key` lose their fourth parameter.**
+  The type is removed, not shrunk. Four of its seven knobs (`reliability`, `priority`,
+  `deadline_ns`, `queue_max_bytes`) were inert — writable, readable, consumed by no code;
+  `durability` describes a *delivery relationship* and moved to the subscription
+  (`delivery_policy_t::kDurabilityRequest`); the two survivors are construction parameters, not
+  QoS, and became owner-side declarations (above). Nothing is inherited (§3.F): there is no
+  ancestor walk, no cached ancestor reference, and no propagation question when a parent's
+  configuration changes after its children exist.
+
+  `graph_t::settings(vertex_handle_t)` and `vertex_t::settings()` are removed with it. Code that
+  passed a `settings_t` no longer compiles; that is deliberate — a silent behaviour change would
+  be worse, since four of the fields never functioned and the other three moved.
+
+  **A vertex-RAM win falls out of it.** `adopt_identity`'s extension-block gate loses its
+  `settings == kDefaultSettings` term, so **strictly more vertices stay extension-less than
+  before**: REGISTRATION can no longer force the cold block. The caller's `settings_t` was copied
+  onto the new vertex at registration time and never consulted afterwards — so removing the
+  parameter removes the whole mechanism. Where a non-default
+  `settings_t` passed to `register_vertex` used to materialise a whole `vertex_ext_t` (120 B on
+  x86-64) on the new vertex, a declaration now reaches exactly the vertex it names and costs
+  nothing anywhere else.
+
+- **BREAKING (RFC-0022 §4): the whole `:settings.<knob>` write surface is REMOVED.** All seven
+  historical names — `reliability`, `priority`, `durability`, `deadline_ns`, `queue_max_bytes`,
+  `history_keep_last`, `store_ref_min_bytes` — answer `SCHEMA_NOT_FOUND`, the honest answer and
+  the one an unsupported field already gives. The answer is **caller-independent**: an unknown
+  core-namespace NAME resolves to nothing before any ACL gate, so a denied caller sees
+  `tr::schema::not_found` and never `tr::access::denied`. **There is no deprecation window:** the
+  protocol is DRAFT, and of the seven only three ever drove behaviour — none of them as remotely
+  writable QoS ([#756](https://github.com/avatarsd-llc/libtracer/issues/756)). `settings.app.*`
+  writes (RFC-0010 §A) are untouched.
+
+- **BREAKING (RFC-0022 §4): the `:schema` and bare-`:settings` reads keep their SHAPE and lose
+  their KNOBS.** The bare `:settings` read becomes `SETTINGS{ [NAME "app" SETTINGS{…}] }` — the
+  reserved `app` subkey and RFC-0010 §A.4's single-traversal renderer contract both survive, and a
+  vertex with no declared app fields reads an **empty** `SETTINGS{}`, which is honest rather than
+  absent. `:schema`'s synthesized protocol part becomes `SETTINGS{}` — an empty enumeration, and
+  therefore for the first time a **complete** one. `:schema` previously advertised `deadline_ns`
+  (u64), which nothing consumed, and omitted `store_ref_min_bytes`, which the write path reads on
+  every write, so the reported set was not even a subset of the working set: that dissolves
+  [#706](https://github.com/avatarsd-llc/libtracer/issues/706) rather than fixing it.
+  `:settings.app` and `:settings.app.<name…>` are unchanged. The `tlv-types/point-schema-app` and
+  `field/field-nested` conformance vectors were regenerated (the latter now spells the two-level
+  field with the surviving `app` subkey); six new vectors were added under `subscriber/`,
+  `settings/` and `stream/`.
+
+- **BREAKING (RFC-0022): the transient-local durability latch is now the SUBSCRIBER's request.**
+  It fires when *that* subscription set `durability_request`, not when the producer carries a
+  flag. This changes which subscribers are latched: a producer's `durability = 1` used to replay
+  its last value to **every** subscriber of that vertex, including ones that never asked, and
+  there was no way to decline. A producer that relied on the flag must now let its consumers ask
+  (they are the ones who know whether they want the replay). ADR-0049's one-door decision is
+  unaffected — the latch still fires at the single admission step, for every door.
+
+- **TypeScript client: `encodeSubscriber` / `LibtracerClient.subscribe` take an optional
+  `deliveryPolicy`** (`SubscriberOptions.deliveryPolicy`, with the `DELIVERY_DURABILITY_REQUEST`
+  constant exported). Omitted or `0` emits no `SETTINGS` child at all, so existing callers produce
+  byte-identical frames.
+
 
 - **BREAKING: the derived `"<kind>-client"` / `"<kind>-server"` module name is gone (#621,
   ADR-0073 §4).** `transport_vertex_t::module_for` no longer invents a module for an undeclared

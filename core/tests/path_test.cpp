@@ -57,9 +57,9 @@ int main() {
     ok_parse("/sensor/temp");
     ok_parse("/a/b/c");
     ok_parse("/i2c-bus/0x68/accel");
-    ok_parse("/x:settings.reliability");  // dot is the field-chain separator (not a NAME char)
-    ok_parse("/x:subscribers[]");         // append field
-    ok_parse("/x:subscribers[3]");        // indexed field
+    ok_parse("/x:settings.anything");  // dot is the field-chain separator (not a NAME char)
+    ok_parse("/x:subscribers[]");      // append field
+    ok_parse("/x:subscribers[3]");     // indexed field
 
     std::printf("Reserved characters in a NAME segment are rejected (reference/03 §Reserved):\n");
     rejected("/a.b");  // '.' is the field separator, illegal in a NAME

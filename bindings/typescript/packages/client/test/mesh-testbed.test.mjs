@@ -37,7 +37,7 @@ import assert from 'node:assert/strict';
 import { WebSocket } from 'ws';
 import { TransportWs } from '@avatarsd-llc/libtracer-ws';
 import { TYPE, decode } from '@avatarsd-llc/libtracer';
-import { LibtracerClient, encodeValue, encodeConnSpec } from '../dist/index.js';
+import { LibtracerClient, encodeValue, encodeConnSpec, DELIVERY_DURABILITY_REQUEST } from '../dist/index.js';
 
 /** @brief `name=host:port,…` → `{name: {host, port}}`. */
 function parseEndpoints(spec) {
@@ -272,11 +272,15 @@ test('mesh testbed: form a cyclic multi-node mesh in band, then route across it'
     let resolveFirst;
     const first = new Promise((r) => (resolveFirst = r));
     // ValueHandler is (payloadBytes, tlv) — the opaque VALUE payload comes first.
-    await cli.a.subscribe([...via('b', 'c'), 'sensor', 'temp'], (value) => {
-      seen.push(new Uint8Array(value));
-      resolveFirst();
-    });
-    // /sensor/temp is transient-local (durability=1), so the subscribe LATCHES the
+    await cli.a.subscribe(
+      [...via('b', 'c'), 'sensor', 'temp'],
+      (value) => {
+        seen.push(new Uint8Array(value));
+        resolveFirst();
+      },
+      { deliveryPolicy: DELIVERY_DURABILITY_REQUEST },
+    );
+    // The subscribe REQUESTS durability (RFC-0022 §3.A bit 5), so the producer LATCHES the
     // current value: one delivery with no producer thread. The producer's return route is
     // the ACCUMULATED src, so the delivery retraces c -> b -> a -> driver.
     await first;
