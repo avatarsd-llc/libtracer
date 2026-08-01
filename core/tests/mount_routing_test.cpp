@@ -519,6 +519,79 @@ void test_bus_name_hop_reject_from_peer() {
     check(bob.received == 0, "the other peer never hears about it");
 }
 
+/** @brief A rope-delivering inbound link (ADR-0053 §5) — drives the ROPE arm's reject glue. */
+struct rope_in_link_t : tr::net::transport_t {
+    std::vector<std::vector<std::byte>> sent; /**< @brief Frames answered back on this link. */
+    void send(std::span<const std::byte> f) override { sent.emplace_back(f.begin(), f.end()); }
+    void send(std::span<const std::span<const std::byte>> iov) override {
+        std::vector<std::byte> whole;
+        for (const auto s : iov) whole.insert(whole.end(), s.begin(), s.end());
+        sent.push_back(std::move(whole));
+    }
+    [[nodiscard]] bool delivers_ropes() const override { return true; }
+    /** @brief Hand the frame up as a rope, as a scatter-gather transport does. */
+    void inject(tr::view::rope_t frame) { rx_.deliver_rope(std::move(frame)); }
+};
+
+/** @brief A rope over @p bytes split at every @p cuts boundary (each cut = a link). */
+tr::view::rope_t rope_over(std::span<const std::byte> bytes,
+                           std::initializer_list<std::size_t> cuts) {
+    tr::view::rope_t r;
+    std::size_t prev = 0;
+    const auto add = [&](std::size_t from, std::size_t to) {
+        if (to <= from) return;
+        tr::view::segment_ptr_t seg = tr::view::heap_alloc(to - from);
+        std::memcpy(seg->bytes.data(), bytes.data() + from, to - from);
+        r.append(tr::view::view_t::over(std::move(seg)));
+    };
+    for (const std::size_t c : cuts) {
+        add(prev, c);
+        prev = c;
+    }
+    add(prev, bytes.size());
+    return r;
+}
+
+/**
+ * @brief The ROPE arm's bus-NAME rejection (the on_frame_rope materialize-then-reject
+ *        glue) — the one leg the span-arm tests cannot reach, closed per the repo's
+ *        untested-guard discipline.
+ */
+void test_bus_name_hop_rejected_rope_arm() {
+    std::printf("bus NAME + residual is rejected on the ROPE arm too\n");
+    bus_link_impl_t bus;
+    p2p_link_t alice;
+    bus.peers.emplace_back("alice", &alice);
+    rope_in_link_t in;
+
+    tr::graph::graph_t graph;
+    tr::net::fwd_router_t router{graph};
+    router.add_child("net/ws-server/srv", bus);
+    router.add_child("net/ws-client/in", in);
+
+    // The broadcast shape, delivered as a MULTI-LINK rope split mid-header (an
+    // adversarial boundary the rope cursor must stitch across).
+    const std::vector<std::byte> f =
+        make_fwd({"net", "ws-server", "srv", "sensor", "temp"}, {"origin"});
+    in.inject(rope_over(f, {2, 11}));
+    check(bus.broadcasts == 0, "the rope frame never egresses the bus endpoint");
+    check(alice.received == 0, "no peer endpoint sees it");
+    check(in.sent.size() == 1, "the inbound link is ANSWERED (one directed reply)");
+    if (in.sent.size() == 1) {
+        const auto shape = reply_shape(in.sent[0]);
+        check(shape[0] == static_cast<int>(tr::graph::fwd_op_t::REPLY) && shape[1] == 1 &&
+                  shape[2] == 0x0021,
+              "REPLY kind=ERROR with tr::path::invalid — same shape as the span arm");
+    }
+
+    // Positive control: the same rope split, peer-directed — still forwards.
+    const std::vector<std::byte> ok =
+        make_fwd({"net", "ws-server", "srv", "alice", "sensor"}, {"origin"});
+    in.inject(rope_over(ok, {2, 11}));
+    check(alice.received == 1, "a peer-directed rope hop still reaches the peer endpoint");
+    check(bus.broadcasts == 0, "and nothing broadcast");
+}
+
 /** @brief A route naming the mount EXACTLY still terminates here (ADR-0038 §3a). */
 void test_advertise_exact_mount_terminates() {
     std::printf("ADVERTISE naming the mount exactly\n");
@@ -550,6 +623,7 @@ int main() {
     test_grown_src_round_trips();
     test_bus_name_hop_is_rejected();
     test_bus_name_hop_reject_from_peer();
+    test_bus_name_hop_rejected_rope_arm();
     test_advertise_exact_mount_terminates();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,

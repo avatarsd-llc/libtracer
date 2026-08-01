@@ -142,7 +142,7 @@ stays on the full-route `FWD` form, where the rejection above answers.
   (a peer) or deterministically rejected (anything else).
 - Wire-visible change: a frame that used to fan out (and draw N replies) now draws exactly
   one ERROR reply — the protocol is `DRAFT`, so this rides the ordinary amendment route.
-- Depends on ADR-0073 §2 / #426 (merged): peers are universally addressable (`p<slot>`)
+- Depends on ADR-0073 §2 / #426 (closed — the fix merged in PR #744): peers are universally addressable (`p<slot>`)
   before the NAME hop may reject, so no reachable terminus is lost.
 
 ## Relates
