@@ -20,11 +20,11 @@
  * multi-hop form, where the residual itself begins with the NEXT node's mount run.
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <initializer_list>
-#include <algorithm>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -140,9 +140,9 @@ void test_multi_hop_residual() {
         router.subscribe_toward(path_t("/s/t"), path_t("/net/ws-client/b/net/can/c/leaf"));
     check(s.has_value(), "a nested /net/A/net/.../x target binds");
     (void)g.write(path_t("/s/t"), owned({0x01, 0x00, 0x01, 0x00, 0x07}));
-    check(!b.sent().empty() &&
-              is_write_toward(b.sent().back(), b_path({"net", "can", "c", "leaf"})),
-          "dst carries the whole residual — B's own descent resolves the next mount");
+    check(
+        !b.sent().empty() && is_write_toward(b.sent().back(), b_path({"net", "can", "c", "leaf"})),
+        "dst carries the whole residual — B's own descent resolves the next mount");
 }
 
 void test_rejections() {
@@ -153,8 +153,7 @@ void test_rejections() {
     router.add_child("net/ws-client/b", b);
     (void)g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
 
-    const auto no_vertex =
-        router.subscribe_toward(path_t("/nope"), path_t("/net/ws-client/b/x"));
+    const auto no_vertex = router.subscribe_toward(path_t("/nope"), path_t("/net/ws-client/b/x"));
     check(!no_vertex.has_value() && no_vertex.error() == status_t::NOT_FOUND,
           "an unknown producer => NOT_FOUND");
 
