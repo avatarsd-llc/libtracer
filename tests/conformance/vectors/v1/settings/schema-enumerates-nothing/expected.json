@@ -1,0 +1,12 @@
+{
+  "name": "schema-enumerates-nothing",
+  "category": "settings",
+  "hex": "07400C000200040074656D700B400000",
+  "total_bytes": 16,
+  "decoded": {
+    "type": "0x07 POINT",
+    "structured": true,
+    "meaning": "POINT{ NAME \"temp\", SETTINGS{} } \u2014 the synthesized `:schema` protocol part after RFC-0022 Amendment 1: the knob enumeration is EMPTY, and therefore complete (\u00a75.6)",
+    "note": "bytes emitted by the libtracer reference encoder (read_schema on a vertex named `temp` with no field descriptor table installed)"
+  }
+}

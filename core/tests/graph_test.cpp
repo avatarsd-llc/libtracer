@@ -39,7 +39,6 @@ using tr::graph::delivery_policy_t;
 using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
-using tr::graph::settings_t;
 using tr::graph::status_t;
 
 /** @brief A subscription that REQUESTS the transient-local latch (RFC-0022 §3.A bit 5) —
@@ -131,9 +130,8 @@ void test_stream() {
     std::printf("Stream vertex (bounded history ring):\n");
     graph_t g;
     const auto path = path_t::parse("/log/events");
-    settings_t s;
-    s.history_keep_last = 3;
-    tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::STREAM, {}, s);
+    tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::STREAM);
+    g.set_history_depth(v, 3);
 
     for (std::uint8_t i = 1; i <= 5; ++i) (void)g.write(v, make_value({i}));
 
@@ -294,30 +292,36 @@ void test_subscribe_target() {
 }
 
 void test_field_write_settings() {
-    std::printf("field-write :settings.<field>:\n");
+    std::printf("field-write :settings.<field> — the core namespace is closed (RFC-0022):\n");
     graph_t g;
     tr::graph::vertex_handle_t v = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     const auto payload = std::array<std::byte, 4>{std::byte{0x88}, std::byte{0x13}};  // 5000 LE
-    auto w = g.write(path_t("/sensor/temp:settings.history_keep_last"), value_tlv(payload));
-    check(w.has_value(), "field-write returns OK");
-    check(g.settings(v).history_keep_last == 5000,
-          "history_keep_last updated to 5000 via field-write");
+    // `settings_t` is deleted, so a flat knob name is exactly as unknown as `bogus`.
+    check(
+        !g.write(path_t("/sensor/temp:settings.history_keep_last"), value_tlv(payload)).has_value(),
+        "a former knob name => SchemaNotFound");
     check(!g.write(path_t("/sensor/temp:settings.bogus"), value_tlv(payload)).has_value(),
           "unknown settings field => SchemaNotFound");
+    // The owner-side declaration is where the ring depth lives now, and it takes effect.
+    g.set_history_depth(v, 5000);
+    check(g.write(v, make_value({0x01})).has_value(), "the vertex still takes ordinary writes");
 }
 
 void test_field_write_handle() {
     std::printf("Handle-based field-write (no strings on the hot path):\n");
     graph_t g;
     auto v = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
-    // Parse the field path ONCE; reuse the vertex_t* handle + field_path_t thereafter
+    std::vector<tr::graph::app_field_t> table;
+    table.push_back(tr::graph::app_field_t{.name = "kp", .access = tr::graph::app_access_t::RW});
+    g.set_app_fields(v, std::move(table));
+    // Parse the field path ONCE; reuse the vertex_handle_t + field_path_t thereafter
     // (no per-call string parse, no map lookup).
-    const auto fp = path_t::parse("/sensor/temp:settings.history_keep_last");
+    const auto fp = path_t::parse("/sensor/temp:settings.app.kp");
     const std::array<std::byte, 4> le{std::byte{0x10}, std::byte{0x27}};  // 10000 LE
     check(g.write(v, fp->field(), value_tlv(le)).has_value(),
-          "write(vertex_t*, field_path_t, view_t) returns OK");
-    check(g.settings(v).history_keep_last == 10000,
-          "history_keep_last updated via the handle (no string parse, no map lookup)");
+          "write(vertex_handle_t, field_path_t, view_t) returns OK");
+    check(g.read(v, fp->field()).has_value(),
+          "the field read serves it back via the handle (no string parse, no map lookup)");
     check(g.write(v, tr::graph::field_path_t{}, make_value({0x55})).has_value(),
           "an empty field_path_t is an ordinary value write");
 }

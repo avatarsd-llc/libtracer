@@ -290,11 +290,11 @@ void test_two_nodes_zero_copy_store() {
     tr::net::udp_transport_t ta(47112, "127.0.0.1", 47113);
     tr::net::udp_transport_t tb(47113, "127.0.0.1", 47112, &rec);
 
-    // B's target vertex opts in to the referenced store (threshold 8 bytes).
-    tr::graph::settings_t s;
-    s.store_ref_min_bytes = 8;
+    // B's target vertex opts in to the referenced store (threshold 8 bytes) — an
+    // OWNER-side declaration since RFC-0022 §3.B, never a remote write.
     tr::graph::vertex_handle_t v =
-        node_b.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE, {}, s);
+        node_b.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE);
+    node_b.set_store_ref_min_bytes(v, 8);
     router_a.add_child("b", ta);
     router_b.add_child("a", tb);  // tb delivers views => the owning receiver is installed
 

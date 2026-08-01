@@ -451,7 +451,8 @@ void test_storage_shape() {
 }
 
 // ---------------------------------------------------------------------------
-// RFC-0010 sketch 7 — container reads: :settings (knobs + app) and :settings.app.
+// RFC-0010 sketch 7 — container reads: :settings (the app record alone, since RFC-0022
+// §4 emptied the core knob namespace) and :settings.app.
 void test_container_reads() {
     std::printf("container reads (RFC-0010 sketch 7):\n");
     graph_t g;
@@ -464,10 +465,9 @@ void test_container_reads() {
     const std::optional<decoded_t> bare_settings =
         decode_read(g.read(path_t("/dev/bare:settings")));
     check(bare_settings.has_value() && bare_settings->tlv.type == type_t::SETTINGS &&
-              bare_settings->tlv.children.size() == 4 &&
-              name_at(bare_settings->tlv, 0, "history_keep_last") &&
-              name_at(bare_settings->tlv, 2, "store_ref_min_bytes"),
-          ":settings on a table-less vertex: the 2 storage knobs, no app member");
+              bare_settings->tlv.children.empty(),
+          ":settings on a table-less vertex: an EMPTY container (RFC-0022 §4) — present, "
+          "not absent, and carrying no knobs");
 
     std::vector<app_field_t> table;
     table.push_back(
@@ -486,10 +486,11 @@ void test_container_reads() {
           "a declared-but-unset field reads NOT_FOUND (distinct from SCHEMA_NOT_FOUND)");
 
     const std::optional<decoded_t> full = decode_read(g.read(path_t("/dev/c:settings")));
-    check(full.has_value() && full->tlv.children.size() == 6 && name_at(full->tlv, 4, "app") &&
-              full->tlv.children[5].type == type_t::SETTINGS &&
-              full->tlv.children[5].children.size() == 2,
-          ":settings: protocol knobs + nested app record in ONE traversal");
+    check(full.has_value() && full->tlv.children.size() == 2 && name_at(full->tlv, 0, "app") &&
+              full->tlv.children[1].type == type_t::SETTINGS &&
+              full->tlv.children[1].children.size() == 2,
+          ":settings: `SETTINGS{ NAME \"app\" SETTINGS{…} }` — the container keeps its shape "
+          "and the single-traversal contract, with nothing ahead of the app record");
 }
 
 // ---------------------------------------------------------------------------

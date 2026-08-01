@@ -1,13 +1,13 @@
 {
   "name": "field-nested",
   "category": "field",
-  "hex": "104021000200080073657474696E677302001100686973746F72795F6B6565705F6C617374",
-  "total_bytes": 37,
+  "hex": "104013000200080073657474696E677302000300617070",
+  "total_bytes": 23,
   "decoded": {
     "type": "0x10 FIELD",
     "structured": true,
-    "field": ":settings.history_keep_last",
-    "meaning": "FIELD{ NAME \"settings\", NAME \"history_keep_last\" } — :settings.history_keep_last (two scalar levels)",
-    "note": "RFC-0004 §B/§C canonical bytes; structured TLV, opt.PL=1, no trailers (at-rest form)"
+    "field": ":settings.app",
+    "meaning": "FIELD{ NAME \"settings\", NAME \"app\" } — :settings.app (two scalar levels)",
+    "note": "RFC-0004 §B/§C canonical bytes; structured TLV, opt.PL=1, no trailers (at-rest form). The reserved `app` subkey (RFC-0010 §A.1) is the two-level field that survives RFC-0022 — the flat `settings.<knob>` namespace it used to be spelled with is empty."
   }
 }

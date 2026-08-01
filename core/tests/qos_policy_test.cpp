@@ -1,31 +1,37 @@
 /**
  * @file
- * @brief RFC-0022: delivery policy is per-subscription; the vertex keeps only storage.
+ * @brief RFC-0022 (as amended): delivery policy is per-subscription; `settings_t` dissolves.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * The RFC's six conformance sketches (§5) as host tests, plus the ablation each one needs
- * to be worth running:
+ * The RFC's conformance sketches (§5) as host tests, plus the ablation each one needs to be
+ * worth running. Amendment 1 replaced §3.B-§3.D before any implementation landed, so what is
+ * tested here is the AMENDED shape: nothing per-vertex survives as QoS, and nothing is
+ * inherited.
  *
- *   1. `subscriber/policy-absent`            — a SUBSCRIBER with no `SETTINGS` child behaves
- *                                              exactly as before, and the edge's stored bytes
- *                                              are byte-identical to the pre-RFC encoder's.
- *   2. `subscriber/policy-durability`        — `durability_request` set ⇒ the latched value is
- *                                              delivered on join; unset ⇒ it is NOT, on the
- *                                              SAME producer holding the SAME value.
- *   3. `subscriber/policy-reserved-bits`     — bits 6–15 are ignored, not an error, and the
- *                                              honoured bits below them still act.
- *   4. `settings/removed-knob`               — every knob RFC-0022 removed answers
- *                                              SCHEMA_NOT_FOUND, on the write AND with the
- *                                              two survivors still accepted beside them.
- *   5. `settings/schema-enumerates-storage`  — `:schema` and `:settings` enumerate EXACTLY the
- *                                              two storage knobs, in that order.
- *   6. `settings/inherit-storage`            — §3.C copy-at-registration: a child inherits by
- *                                              value, a later-registered child likewise, an
- *                                              overriding child stops inheriting (and its own
- *                                              descendants inherit from IT), and a vertex at
- *                                              the defaults still allocates NO extension block.
+ *   1. `subscriber/policy-absent`             — a SUBSCRIBER with no `SETTINGS` child behaves
+ *                                               exactly as before, and the edge's stored bytes
+ *                                               are byte-identical to the pre-RFC encoder's.
+ *   2. `subscriber/policy-durability`         — `durability_request` set => the latched value is
+ *                                               delivered on join; unset => it is NOT, on the
+ *                                               SAME producer holding the SAME value.
+ *   3. `subscriber/policy-reserved-bits`      — bits 6-15 are ignored, not an error, and the
+ *                                               honoured bits below them still act.
+ *   4. `settings/removed-knob`                — every one of the seven historical knob names
+ *                                               answers SCHEMA_NOT_FOUND, the two survivors
+ *                                               included; the app-field door beside them still
+ *                                               works (the ablation).
+ *   5. `settings/read-container-shape`        — `:settings` keeps its container and loses its
+ *                                               knobs: `SETTINGS{ [NAME "app" SETTINGS{...}] }`,
+ *                                               empty when no app fields are declared.
+ *   6. `settings/schema-enumerates-nothing`   — `:schema` carries no protocol-knob entries.
+ *   7. `stream/history-depth-host-only`       — `set_history_depth` changes the retained ring
+ *                                               depth, and no wire operation reaches it.
+ *
+ * §5.8 `store/pin-ratio` is deliberately ABSENT: §3.D's amplification predicate is gated by §6
+ * on a dual-target measurement that has not been run, so `store_ref_min_bytes` keeps the
+ * absolute threshold it shipped with — rehomed owner-side, but otherwise untouched.
  */
 
 #include <array>
@@ -50,10 +56,8 @@ namespace {
 
 using tr::graph::delivery_policy_t;
 using tr::graph::graph_t;
-using tr::graph::kDefaultSettings;
 using tr::graph::path_t;
 using tr::graph::role_t;
-using tr::graph::settings_t;
 using tr::graph::status_t;
 using tr::graph::vertex_handle_t;
 using tr::view::rope_t;
@@ -99,10 +103,10 @@ bool fails_with(const tr::graph::result_t<void>& r, status_t s) {
 }
 
 /** @brief The vertex behind a handle — the bench-side `std::bit_cast` escape hatch, used here
- *         for the one fact no public surface exposes: whether an extension block EXISTS.
- *         `settings()` returns `kDefaultSettings` BY ADDRESS when it does not (#361 §1). */
+ *         for the one fact no public surface exposes: whether an extension block EXISTS
+ *         (`bench_qos_census` uses the same one, for the same reason). */
 [[nodiscard]] bool has_ext(const vertex_handle_t& v) {
-    return &std::bit_cast<tr::graph::vertex_t*>(v)->settings() != &kDefaultSettings;
+    return std::bit_cast<tr::graph::vertex_t*>(v)->has_extension_block();
 }
 
 /** @brief A flattened, DECODED read result that owns its bytes (the decoded spans point
@@ -135,12 +139,6 @@ std::optional<decoded_t> decode_read(const tr::graph::result_t<T>& r) {
 bool name_at(const tlv_t& t, std::size_t i, std::string_view want) {
     return i < t.children.size() && t.children[i].type == type_t::NAME &&
            tr::detail::as_string_view(t.children[i].payload) == want;
-}
-
-/** @brief True iff @p t's child @p i is a VALUE whose little-endian payload is @p want. */
-bool value_at(const tlv_t& t, std::size_t i, std::uint64_t want) {
-    return i < t.children.size() && t.children[i].type == type_t::VALUE &&
-           tr::detail::load_le(t.children[i].payload) == want;
 }
 
 // ---------------------------------------------------------------------------
@@ -249,157 +247,159 @@ void test_policy_bit_layout() {
 }
 
 // ---------------------------------------------------------------------------
-// §5.4 + §5.5 — the vertex settings surface.
+// §5.4 + §5.5 + §5.6 + §5.7 — the vertex settings surface, after `settings_t` dissolved.
 
-/** @brief Every knob RFC-0022 removed answers SCHEMA_NOT_FOUND; the two survivors still land. */
+/** @brief EVERY historical `:settings.<knob>` name answers SCHEMA_NOT_FOUND — the two
+ *         survivors included, since they are owner-side state now, not knobs. */
 void test_removed_knobs_are_schema_not_found() {
-    std::printf("§5.4 removed-knob — the four inert knobs and durability are gone:\n");
+    std::printf("§5.4 removed-knob — the whole flat knob namespace is withdrawn:\n");
     graph_t g;
     const vertex_handle_t v = g.register_vertex(path_t("/s/knobs"), role_t::STORED_VALUE);
 
-    for (const char* knob :
-         {"deadline_ns", "queue_max_bytes", "reliability", "priority", "durability"}) {
+    for (const char* knob : {"deadline_ns", "queue_max_bytes", "reliability", "priority",
+                             "durability", "history_keep_last", "store_ref_min_bytes"}) {
         const std::string p = std::string("/s/knobs:settings.") + knob;
         const auto w = g.write(path_t(p), value_le(1, 8));
         check(fails_with(w, status_t::SCHEMA_NOT_FOUND),
               std::string("`:settings.") + knob + "` write => SCHEMA_NOT_FOUND");
+        // The READ half of the same name, which was never implemented and still is not.
+        check(fails_with(g.read(path_t(p)), status_t::SCHEMA_NOT_FOUND),
+              std::string("`:settings.") + knob + "` read  => SCHEMA_NOT_FOUND");
     }
 
-    // The ablation: the same door, the same caller, the two knobs that SURVIVED still land.
-    // Without this the loop above would pass just as well against a settings write surface
-    // that had been removed wholesale.
-    check(g.write(path_t("/s/knobs:settings.history_keep_last"), value_le(9, 4)).has_value() &&
-              g.settings(v).history_keep_last == 9,
-          "`:settings.history_keep_last` still writes (the surface is not simply closed)");
-    check(g.write(path_t("/s/knobs:settings.store_ref_min_bytes"), value_le(64, 4)).has_value() &&
-              g.settings(v).store_ref_min_bytes == 64,
-          "`:settings.store_ref_min_bytes` still writes");
+    // THE ABLATION. A loop that only ever expects SCHEMA_NOT_FOUND would pass just as well
+    // against a `:settings` door deleted wholesale — app fields, `:acl`, everything. So the
+    // reserved `app` subkey beside it must still take a write and serve it back.
+    std::vector<tr::graph::app_field_t> table;
+    table.push_back(tr::graph::app_field_t{.name = "kp", .access = tr::graph::app_access_t::RW});
+    g.set_app_fields(v, std::move(table));
+    check(g.write(path_t("/s/knobs:settings.app.kp"), value_le(7, 4)).has_value(),
+          "ablation: `:settings.app.kp` still writes (the door is alive, not deleted)");
+    check(g.read(path_t("/s/knobs:settings.app.kp")).has_value(), "ablation: ... and reads back");
 }
 
-/** @brief `:schema` and `:settings` enumerate EXACTLY the storage knobs. */
-void test_schema_enumerates_storage_only() {
-    std::printf("§5.5 schema-enumerates-storage — exactly two knobs, no more:\n");
+/** @brief The bare `:settings` read KEEPS its container and LOSES its knobs (§4). */
+void test_settings_container_keeps_its_shape() {
+    std::printf("§5.5 read-container-shape — the container survives, the knobs do not:\n");
     graph_t g;
-    const vertex_handle_t v = g.register_vertex(path_t("/s/shape"), role_t::STORED_VALUE);
-    (void)g.write(path_t("/s/shape:settings.history_keep_last"), value_le(4, 4));
-    (void)g.write(path_t("/s/shape:settings.store_ref_min_bytes"), value_le(128, 4));
-    (void)v;
+    const vertex_handle_t bare = g.register_vertex(path_t("/s/bare"), role_t::STORED_VALUE);
+    (void)bare;
 
-    const std::optional<decoded_t> schema = decode_read(g.read(path_t("/s/shape:schema")));
+    // A vertex that declares nothing reads an EMPTY container — honest, not absent.
+    const std::optional<decoded_t> empty = decode_read(g.read(path_t("/s/bare:settings")));
+    check(empty.has_value() && empty->tlv.type == type_t::SETTINGS && empty->tlv.children.empty(),
+          "a vertex with no app fields reads an EMPTY `SETTINGS{}` (not SCHEMA_NOT_FOUND)");
+
+    // A vertex that DOES reads `SETTINGS{ NAME "app" SETTINGS{...} }` — and nothing before it.
+    const vertex_handle_t v = g.register_vertex(path_t("/s/shape"), role_t::STORED_VALUE);
+    std::vector<tr::graph::app_field_t> table;
+    table.push_back(tr::graph::app_field_t{.name = "kp", .access = tr::graph::app_access_t::RW});
+    g.set_app_fields(v, std::move(table));
+    check(g.write(path_t("/s/shape:settings.app.kp"), value_le(7, 4)).has_value(),
+          "the owner's app field takes a value");
+
+    const std::optional<decoded_t> full = decode_read(g.read(path_t("/s/shape:settings")));
+    check(
+        full.has_value() && full->tlv.type == type_t::SETTINGS && full->tlv.children.size() == 2,
+        ":settings is `SETTINGS{ NAME \"app\", SETTINGS }` — TWO children, no knobs ahead of them");
+    check(full.has_value() && name_at(full->tlv, 0, "app"),
+          "... whose first child is the reserved `app` subkey (RFC-0010 §A.4 survives)");
+}
+
+/** @brief `:schema`'s synthesized protocol part enumerates NOTHING, and is therefore complete. */
+void test_schema_enumerates_nothing() {
+    std::printf("§5.6 schema-enumerates-nothing — an empty knob enumeration:\n");
+    graph_t g;
+    (void)g.register_vertex(path_t("/s/sch"), role_t::STORED_VALUE);
+
+    const std::optional<decoded_t> schema = decode_read(g.read(path_t("/s/sch:schema")));
     check(
         schema.has_value() && schema->tlv.type == type_t::POINT && schema->tlv.children.size() == 2,
         ":schema is POINT{ NAME, SETTINGS } — no app table installed");
     const tlv_t* sset =
         (schema && schema->tlv.children.size() == 2) ? &schema->tlv.children[1] : nullptr;
-    check(sset != nullptr && sset->type == type_t::SETTINGS && sset->children.size() == 4,
-          ":schema's SETTINGS holds exactly 2 knobs (4 children: NAME/VALUE pairs)");
-    check(sset != nullptr && name_at(*sset, 0, "history_keep_last") && value_at(*sset, 1, 4) &&
-              name_at(*sset, 2, "store_ref_min_bytes") && value_at(*sset, 3, 128),
-          ":schema names history_keep_last then store_ref_min_bytes, with their live values");
+    check(sset != nullptr && sset->type == type_t::SETTINGS && sset->children.empty(),
+          ":schema's SETTINGS is EMPTY — zero protocol-knob entries");
 
-    const std::optional<decoded_t> settings = decode_read(g.read(path_t("/s/shape:settings")));
-    check(settings.has_value() && settings->tlv.type == type_t::SETTINGS &&
-              settings->tlv.children.size() == 4,
-          ":settings serves the same two knobs (4 children)");
-    check(settings.has_value() && name_at(settings->tlv, 0, "history_keep_last") &&
-              value_at(settings->tlv, 1, 4) && name_at(settings->tlv, 2, "store_ref_min_bytes") &&
-              value_at(settings->tlv, 3, 128),
-          ":settings and :schema enumerate the identical set — read and write gate agree");
+    // The ablation: the owner part must still appear when a table IS installed, or "empty"
+    // would be indistinguishable from "read_schema stopped emitting the settings part".
+    const vertex_handle_t v = g.register_vertex(path_t("/s/sch2"), role_t::STORED_VALUE);
+    std::vector<tr::graph::app_field_t> table;
+    table.push_back(tr::graph::app_field_t{.name = "kp", .access = tr::graph::app_access_t::RW});
+    g.set_app_fields(v, std::move(table));
+    const std::optional<decoded_t> owned = decode_read(g.read(path_t("/s/sch2:schema")));
+    check(owned.has_value() && owned->tlv.children.size() == 4 && name_at(owned->tlv, 2, "app"),
+          "ablation: the OWNER part still follows it (POINT{ NAME, SETTINGS, NAME \"app\", "
+          "SETTINGS })");
 }
 
 // ---------------------------------------------------------------------------
-// §5.6 — storage-policy inheritance (§3.C).
+// §5.7 — the ring depth is owner-side, and nothing is inherited (§3.F).
 
-/** @brief Copy-at-registration inheritance, its overrides, and the no-ext default. */
-void test_storage_policy_inheritance() {
-    std::printf("§5.6 inherit-storage — copy at registration, override by subtree:\n");
+/** @brief `set_history_depth` drives the ring; no wire operation reaches it. */
+void test_history_depth_is_host_only() {
+    std::printf("§5.7 history-depth-host-only — owner-side, no wire surface:\n");
     graph_t g;
+    const vertex_handle_t stream = g.register_vertex(path_t("/h/s"), role_t::STREAM);
 
-    // A default vertex allocates NO extension block. This is the invariant §3.B promises to
-    // preserve, and the reason the inherited value must be a plain `settings_t{}` when the
-    // ancestry is at the defaults.
-    const vertex_handle_t plain = g.register_vertex(path_t("/i/plain"), role_t::STORED_VALUE);
-    check(!has_ext(plain), "a default vertex allocates NO extension block");
-    const vertex_handle_t plain_kid =
-        g.register_vertex(path_t("/i/plain/kid"), role_t::STORED_VALUE);
-    check(!has_ext(plain_kid), "... and neither does its child (inheriting the defaults is free)");
+    // Default depth is 1: the ring keeps the last value only.
+    for (std::uint8_t i = 1; i <= 4; ++i) (void)g.write(stream, byte_value(i));
+    const auto shallow = g.history(stream);
+    check(shallow.has_value() && shallow->size() == 1, "an undeclared ring keeps ONE entry");
 
-    settings_t policy;
-    policy.store_ref_min_bytes = 256;
-    policy.history_keep_last = 4;
-    const vertex_handle_t parent =
-        g.register_vertex(path_t("/i/root"), role_t::STORED_VALUE, {}, policy);
-    check(g.settings(parent).store_ref_min_bytes == 256, "the overriding parent holds its policy");
+    // The owner declares a depth; the STORE PATH must read the new value, not merely report it.
+    g.set_history_depth(stream, 3);
+    for (std::uint8_t i = 1; i <= 5; ++i) (void)g.write(stream, byte_value(i));
+    const auto deep = g.history(stream);
+    check(deep.has_value() && deep->size() == 3,
+          "set_history_depth(3) => the ring TRIMS to three (the store path read it)");
 
-    // A child registered AFTER the parent's override inherits BY VALUE.
-    const vertex_handle_t child = g.register_vertex(path_t("/i/root/a"), role_t::STORED_VALUE);
-    check(g.settings(child).store_ref_min_bytes == 256 && g.settings(child).history_keep_last == 4,
-          "a child inherits the parent's storage policy by value");
-    check(has_ext(child), "... which materialises its extension block (the RAM an override buys)");
-
-    // A LATER child inherits identically — inheritance is not a one-shot at first descent.
-    const vertex_handle_t later = g.register_vertex(path_t("/i/root/b"), role_t::STORED_VALUE);
-    check(g.settings(later).store_ref_min_bytes == 256,
-          "a later-registered child inherits likewise");
-
-    // A grandchild under an intermediate PLACEHOLDER inherits too: the placeholder carried
-    // the value down. Without that, a deep registration would silently drop to the defaults.
-    const vertex_handle_t deep =
-        g.register_vertex(path_t("/i/root/mid/deep"), role_t::STORED_VALUE);
-    check(g.settings(deep).store_ref_min_bytes == 256,
-          "a grandchild under a fresh intermediate inherits (the placeholder carries it)");
-
-    // An OVERRIDING child stops inheriting, and its own subtree inherits from IT.
-    settings_t own;
-    own.store_ref_min_bytes = 32;
-    const vertex_handle_t overrider =
-        g.register_vertex(path_t("/i/root/c"), role_t::STORED_VALUE, {}, own);
-    check(g.settings(overrider).store_ref_min_bytes == 32, "an overriding child keeps its own");
-    const vertex_handle_t under = g.register_vertex(path_t("/i/root/c/x"), role_t::STORED_VALUE);
-    check(g.settings(under).store_ref_min_bytes == 32,
-          "... and ITS children inherit the override, not the grandparent's");
-
-    // A `:settings` write is an override too: it reaches the descendants that were still
-    // carrying the old value, and stops at the one that has its own.
-    check(g.write(path_t("/i/root:settings.store_ref_min_bytes"), value_le(512, 4)).has_value(),
-          "the parent overrides its threshold through the `:settings` door");
-    check(g.settings(parent).store_ref_min_bytes == 512, "the written vertex takes the new value");
-    check(g.settings(child).store_ref_min_bytes == 512 &&
-              g.settings(later).store_ref_min_bytes == 512 &&
-              g.settings(deep).store_ref_min_bytes == 512,
-          "every INHERITING descendant follows it");
-    check(g.settings(overrider).store_ref_min_bytes == 32 &&
-              g.settings(under).store_ref_min_bytes == 32,
-          "the overriding subtree does NOT follow it (the ablation: the push prunes)");
-
-    // And an unrelated default subtree is untouched — the override grows only what opted in.
-    check(!has_ext(plain) && !has_ext(plain_kid),
-          "an unrelated default subtree gains no extension block");
+    // And no wire operation reaches it — write or read, whatever the caller.
+    check(fails_with(g.write(path_t("/h/s:settings.history_keep_last"), value_le(9, 4)),
+                     status_t::SCHEMA_NOT_FOUND),
+          "a `:settings.history_keep_last` write answers SCHEMA_NOT_FOUND");
+    const auto after = g.history(stream);
+    check(after.has_value() && after->size() == 3, "... and did not change the depth");
+    const std::optional<decoded_t> settings = decode_read(g.read(path_t("/h/s:settings")));
+    check(settings.has_value() && settings->tlv.children.empty(),
+          "... nor does a bare `:settings` read carry the value");
 }
 
-/**
- * @brief The write path still reads `store_ref_min_bytes` off ONE inline load, and the store
- *        path `history_keep_last` — asserted behaviourally, since the cost claim is the bench's.
- *
- * What is checkable here is that the inherited value is the one the STORE PATH actually
- * reads — not merely the one `:settings` reports back. The child states no policy of its
- * own, so if the copy had not been taken it would carry the default depth of 1 and the ring
- * would keep one entry; it keeps three. The COST of that read is the bench's question
- * (`bench/bench_storage_policy.cpp`), which sweeps depth because that is the only shape
- * that separates a load from a walk.
- */
-void test_hot_reads_see_the_local_copy() {
-    std::printf("§3.C — the hot readers see a LOCAL copy, not an ancestor walk:\n");
+/** @brief NOTHING is inherited (§3.F), and a registration can no longer force the cold block. */
+void test_nothing_is_inherited() {
+    std::printf("§3.F — no inheritance, and no registration-forced extension block:\n");
     graph_t g;
-    settings_t policy;
-    policy.history_keep_last = 3;
-    (void)g.register_vertex(path_t("/h/root"), role_t::STORED_VALUE, {}, policy);
-    const vertex_handle_t stream = g.register_vertex(path_t("/h/root/s"), role_t::STREAM);
-    check(g.settings(stream).history_keep_last == 3, "the STREAM child inherited the ring depth");
-    for (std::uint8_t i = 1; i <= 5; ++i) (void)g.write(stream, byte_value(i));
-    const auto hist = g.history(stream);
-    check(hist.has_value() && hist->size() == 3,
-          "... and the ring TRIMMED to it — the inherited value is the one the store path read");
+    const vertex_handle_t parent = g.register_vertex(path_t("/i/root"), role_t::STORED_VALUE);
+    g.set_store_ref_min_bytes(parent, 256);
+    g.set_history_depth(parent, 4);
+    check(g.store_ref_min_bytes(parent) == 256, "the parent holds its own declared threshold");
+
+    // A child registered UNDER it inherits nothing — the whole hole Amendment 1 closed.
+    const vertex_handle_t child = g.register_vertex(path_t("/i/root/a"), role_t::STORED_VALUE);
+    check(g.store_ref_min_bytes(child) == 0, "a child inherits NOTHING (§3.F)");
+    check(!has_ext(child), "... and pays no extension block for the parent's declaration");
+
+    // A child registered LATER, and one under a fresh intermediate placeholder, likewise.
+    g.set_store_ref_min_bytes(parent, 512);
+    const vertex_handle_t later = g.register_vertex(path_t("/i/root/b"), role_t::STORED_VALUE);
+    const vertex_handle_t deep =
+        g.register_vertex(path_t("/i/root/mid/deep"), role_t::STORED_VALUE);
+    check(g.store_ref_min_bytes(later) == 0 && g.store_ref_min_bytes(deep) == 0,
+          "a later child and a grandchild under a placeholder inherit nothing either");
+    check(g.store_ref_min_bytes(parent) == 512,
+          "... while the parent's own later declaration still lands on the parent");
+
+    // The RAM half of §3.B: registration cannot force the cold block any more, because the
+    // parameter that used to is gone. A STREAM or a handler still does — that is the ablation.
+    const vertex_handle_t plain = g.register_vertex(path_t("/i/plain"), role_t::STORED_VALUE);
+    check(!has_ext(plain), "a plain leaf allocates NO extension block");
+    const vertex_handle_t stream = g.register_vertex(path_t("/i/stream"), role_t::STREAM);
+    check(has_ext(stream),
+          "ablation: a STREAM identity still allocates one (has_ext is not stuck)");
+    // A declaration is what materialises it — the owner pays only when the owner asks.
+    g.set_store_ref_min_bytes(plain, 8);
+    check(has_ext(plain) && g.store_ref_min_bytes(plain) == 8,
+          "an owner-side declaration materialises the block, and takes effect");
 }
 
 // ---------------------------------------------------------------------------
@@ -452,28 +452,73 @@ int latches_for(graph_t& g, const path_t& producer, std::string_view vector_case
 void test_conformance_vectors() {
     std::printf("§5 vectors — the bytes on disk, against the reference implementation:\n");
 
-    // §5.5: read_schema on a default vertex named `temp` must emit the vector byte for byte.
+    // §5.6: read_schema on a default vertex named `temp` must emit the vector byte for byte.
     {
         graph_t g;
         (void)g.register_vertex(path_t("/temp"), role_t::STORED_VALUE);
         const std::optional<decoded_t> got = decode_read(g.read(path_t("/temp:schema")));
-        const std::vector<std::byte> want = vector_bytes("settings/schema-enumerates-storage");
+        const std::vector<std::byte> want = vector_bytes("settings/schema-enumerates-nothing");
         check(got.has_value() && got->bytes == want,
-              "settings/schema-enumerates-storage == read_schema's bytes, exactly");
+              "settings/schema-enumerates-nothing == read_schema's bytes, exactly");
     }
 
-    // §5.6: the `:settings` an INHERITING child serves must equal the vector.
+    // §5.5: the `:settings` container, in BOTH its shapes.
     {
         graph_t g;
-        settings_t policy;
-        policy.history_keep_last = 4;
-        policy.store_ref_min_bytes = 256;
-        (void)g.register_vertex(path_t("/inh"), role_t::STORED_VALUE, {}, policy);
-        (void)g.register_vertex(path_t("/inh/kid"), role_t::STORED_VALUE);
-        const std::optional<decoded_t> got = decode_read(g.read(path_t("/inh/kid:settings")));
-        const std::vector<std::byte> want = vector_bytes("settings/inherit-storage");
+        const vertex_handle_t v = g.register_vertex(path_t("/cs"), role_t::STORED_VALUE);
+        const std::optional<decoded_t> bare = decode_read(g.read(path_t("/cs:settings")));
+        const std::vector<std::byte> empty_want = {std::byte{0x0B}, std::byte{0x40},
+                                                   std::byte{0x00}, std::byte{0x00}};
+        check(bare.has_value() && bare->bytes == empty_want,
+              "an app-field-less vertex serves the empty container `0B 40 00 00`");
+
+        std::vector<tr::graph::app_field_t> table;
+        table.push_back(
+            tr::graph::app_field_t{.name = "kp", .access = tr::graph::app_access_t::RW});
+        g.set_app_fields(v, std::move(table));
+        (void)g.write(path_t("/cs:settings.app.kp"), value_le(7, 4));
+        const std::optional<decoded_t> got = decode_read(g.read(path_t("/cs:settings")));
+        const std::vector<std::byte> want = vector_bytes("settings/read-container-shape");
         check(got.has_value() && got->bytes == want,
-              "settings/inherit-storage == the inheriting child's :settings bytes, exactly");
+              "settings/read-container-shape == the app-bearing container's bytes, exactly");
+    }
+
+    // The TWO-PART :schema vector (RFC-0010 §B.2). Nothing pinned it to the implementation
+    // before, so it silently kept the pre-amendment protocol part; now a drift fails here.
+    {
+        graph_t g;
+        const vertex_handle_t v = g.register_vertex(path_t("/temp"), role_t::STORED_VALUE);
+        std::vector<tr::graph::app_field_t> table;
+        std::vector<std::byte> desc;
+        tr::wire::emit_name(desc, "dtype");
+        tr::wire::emit_name(desc, "f32");
+        table.push_back(tr::graph::app_field_t{
+            .name = "kp", .access = tr::graph::app_access_t::RW, .descriptor = std::move(desc)});
+        g.set_app_fields(v, std::move(table));
+        const std::optional<decoded_t> got = decode_read(g.read(path_t("/temp:schema")));
+        const std::vector<std::byte> want = vector_bytes("tlv-types/point-schema-app");
+        check(got.has_value() && got->bytes == want,
+              "tlv-types/point-schema-app == read_schema's bytes with an app table, exactly");
+    }
+
+    // §5.7: the ring-depth vector names the error the removed knob actually answers with.
+    {
+        const std::vector<std::byte> bytes = vector_bytes("stream/history-depth-host-only");
+        const auto dec = tr::wire::decode(bytes);
+        check(dec.has_value() && dec->type == type_t::ERROR && !dec->children.empty() &&
+                  tr::detail::load_le<std::uint16_t>(dec->children[0].payload) ==
+                      static_cast<std::uint16_t>(tr::wire::err_t::SCHEMA_NOT_FOUND),
+              "stream/history-depth-host-only carries tr::schema::not_found (0x0031)");
+        graph_t g;
+        const vertex_handle_t s = g.register_vertex(path_t("/hd"), role_t::STREAM);
+        check(fails_with(g.write(path_t("/hd:settings.history_keep_last"), value_le(4, 4)),
+                         status_t::SCHEMA_NOT_FOUND),
+              "... which is the status the ring-depth write returns");
+        g.set_history_depth(s, 2);
+        for (std::uint8_t i = 1; i <= 3; ++i) (void)g.write(s, byte_value(i));
+        const auto hist = g.history(s);
+        check(hist.has_value() && hist->size() == 2,
+              "... while the HOST-side declaration does take effect (the vector's other half)");
     }
 
     // §5.4: the vector names the error the write actually answers with.
@@ -524,9 +569,10 @@ int main() {
     test_policy_reserved_bits_are_ignored();
     test_policy_bit_layout();
     test_removed_knobs_are_schema_not_found();
-    test_schema_enumerates_storage_only();
-    test_storage_policy_inheritance();
-    test_hot_reads_see_the_local_copy();
+    test_settings_container_keeps_its_shape();
+    test_schema_enumerates_nothing();
+    test_history_depth_is_host_only();
+    test_nothing_is_inherited();
     test_conformance_vectors();
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");

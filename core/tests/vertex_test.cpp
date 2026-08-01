@@ -38,7 +38,6 @@ using tr::graph::edge_snapshot_t;
 using tr::graph::edge_view_t;
 using tr::graph::path_key_t;
 using tr::graph::role_t;
-using tr::graph::settings_t;
 using tr::graph::subscriber_t;
 using tr::graph::vertex_t;
 using tr::view::rope_t;
@@ -69,7 +68,7 @@ path_key_t key_of(std::initializer_list<std::uint8_t> bytes) {
 
 void test_store_and_lkv() {
     std::printf("store / read_stored — the LKV publish + seq bump:\n");
-    vertex_t v{role_t::STORED_VALUE, key_of({0x01}), settings_t{}, {}};
+    vertex_t v{role_t::STORED_VALUE, key_of({0x01}), {}};
     check(v.read_stored() == nullptr, "a never-assigned vertex holds no LKV");
     const std::uint64_t seq0 = v.current_seq();
     v.store(make_value(0x42));
@@ -85,12 +84,11 @@ void test_store_and_lkv() {
 
 void test_stream_ring_trim_and_drain() {
     std::printf("STREAM ring — keep-last trim + the RFC-0008 §E drain cursor:\n");
-    settings_t st;
-    st.history_keep_last = 3;
-    vertex_t v{role_t::STREAM, key_of({0x02}), st, {}};
+    vertex_t v{role_t::STREAM, key_of({0x02}), {}};
+    v.set_history_depth(3);
     for (std::uint8_t b = 1; b <= 5; ++b) v.store(make_value(b));
     const std::vector<rope_t> hist = v.history_snapshot();
-    check(hist.size() == 3, "the ring keeps exactly history_keep_last entries");
+    check(hist.size() == 3, "the ring keeps exactly the owner-declared depth");
     check(hist.size() == 3 && first_byte(hist[0]) == 3 && first_byte(hist[2]) == 5,
           "trim drops the oldest entries (ring holds 3,4,5)");
 
@@ -110,7 +108,7 @@ void test_stream_ring_trim_and_drain() {
 
 void test_await_wake_and_timeout() {
     std::printf("wait_for_change — wake on store, timeout when idle:\n");
-    vertex_t v{role_t::STORED_VALUE, key_of({0x03}), settings_t{}, {}};
+    vertex_t v{role_t::STORED_VALUE, key_of({0x03}), {}};
     check(!v.wait_for_change(v.current_seq(), 20ms), "no writer => timeout (returns false)");
 
     const std::uint64_t seq0 = v.current_seq();
@@ -128,7 +126,7 @@ void test_await_wake_and_timeout() {
 void test_edges_snapshot_clear_latch() {
     std::printf("edges — add/snapshot/clear + the per-subscription durability latch:\n");
     // RFC-0022 §3.A: the latch predicate is the SUBSCRIBER's request, not a vertex flag.
-    vertex_t v{role_t::STORED_VALUE, key_of({0x04}), settings_t{}, {}};
+    vertex_t v{role_t::STORED_VALUE, key_of({0x04}), {}};
 
     int hits = 0;
     // subscriber_t is move-only (#380 §3 cold-half unique_ptr): mint a fresh edge per add.
@@ -177,7 +175,7 @@ void test_edges_snapshot_clear_latch() {
 
 void test_snapshot_under_concurrent_add() {
     std::printf("snapshot_edges under a concurrent add_edge storm:\n");
-    vertex_t v{role_t::STORED_VALUE, key_of({0x05}), settings_t{}, {}};
+    vertex_t v{role_t::STORED_VALUE, key_of({0x05}), {}};
     std::atomic<int> dummy{0};
     const auto mk_proto = [&dummy] {
         subscriber_t s;
@@ -218,7 +216,7 @@ void test_snapshot_under_concurrent_add() {
 
 void test_acl_verbs() {
     std::printf("ACL verbs — set_acl / acl_bytes / with_aces:\n");
-    vertex_t v{role_t::STORED_VALUE, key_of({0x06}), settings_t{}, {}};
+    vertex_t v{role_t::STORED_VALUE, key_of({0x06}), {}};
     check(v.acl_bytes().empty(), "no :acl set => empty raw bytes");
     check(v.with_aces([](const std::vector<ace_t>& aces) { return aces.empty(); }),
           "no :acl set => empty ACE list");
@@ -240,7 +238,7 @@ void test_acl_verbs() {
 
 void test_bookkeeping_counters() {
     std::printf("RFC-0005 listener bookkeeping counters:\n");
-    vertex_t v{role_t::STORED_VALUE, key_of({0x07}), settings_t{}, {}};
+    vertex_t v{role_t::STORED_VALUE, key_of({0x07}), {}};
     check(v.own_subs() == 0 && v.listeners_above() == 0, "counters start at zero");
     v.bump_own_subs(+1);
     v.bump_own_subs(+1);

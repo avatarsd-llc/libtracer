@@ -1,7 +1,11 @@
 # field/field-nested
 
-FIELD{ NAME "settings", NAME "history_keep_last" } — :settings.history_keep_last (two scalar levels)
+FIELD{ NAME "settings", NAME "app" } — :settings.app (two scalar levels)
+
+The reserved `app` subkey (RFC-0010 §A.1) is what a two-level `:settings.<x>` field addresses
+now: RFC-0022 §3.B deleted the flat core-namespace knobs, so the second level is either `app`
+or it resolves to nothing.
 
 ```
-104021000200080073657474696e677302001100686973746f72795f6b6565705f6c617374
+104013000200080073657474696e677302000300617070
 ```

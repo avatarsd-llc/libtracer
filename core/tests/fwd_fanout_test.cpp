@@ -52,7 +52,6 @@ using tr::graph::fwd_op_t;
 using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
-using tr::graph::settings_t;
 using tr::net::fwd_router_t;
 using tr::net::transport_t;
 using tr::wire::opt_t;

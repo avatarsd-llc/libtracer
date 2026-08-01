@@ -76,22 +76,44 @@ struct scratch_pool_t {
 int main() {
     std::printf("graph_t value_backend_ seam (ADR-0060):\n");
 
-    // The field-write value: a 4-byte history_keep_last knob (5000 LE), as graph_test.
+    // The field-write value: a 4-byte VALUE (5000 LE) written to an owner-declared app
+    // field. Any field write flattens a multi-link value at the ONE ADR-0060 seam site
+    // (`graph.cpp`'s `value.materialize(*value_backend_)`), so `settings.app.kp` exercises
+    // exactly what `settings.history_keep_last` used to, before RFC-0022 deleted the flat
+    // knob namespace.
     const std::array<std::byte, 4> le{std::byte{0x88}, std::byte{0x13}};  // 5000
     const std::vector<std::byte> tlv = value_tlv_bytes(le);
-    const auto fp = path_t::parse("/s/temp:settings.history_keep_last");
+    const auto fp = path_t::parse("/s/temp:settings.app.kp");
     check(fp.has_value() && !fp->field().steps.empty(), "field path parses");
+
+    /** @brief Register `/s/temp` with one declared `rw` app field `kp` — the write target. */
+    const auto with_field = [&](graph_t& g) {
+        const auto v = g.register_vertex(path_t("/s/temp"), role_t::STORED_VALUE);
+        std::vector<tr::graph::app_field_t> table;
+        table.push_back(
+            tr::graph::app_field_t{.name = "kp", .access = tr::graph::app_access_t::RW});
+        g.set_app_fields(v, std::move(table));
+        return v;
+    };
+
+    /** @brief The bytes `:settings.app.kp` serves back, or empty when it holds none. */
+    const auto stored_bytes = [&](graph_t& g, tr::graph::vertex_handle_t v) {
+        const auto r = g.read(v, fp->field());
+        if (!r) return std::vector<std::byte>{};
+        const tr::view::view_t flat = r->flatten();
+        const std::span<const std::byte> b = flat.bytes();
+        return std::vector<std::byte>(b.begin(), b.end());
+    };
 
     // ROUTING + BEHAVIOUR: a pool with room accepts the multi-link field write and
     // reads it back exactly — the flatten drew from the injected pool.
     {
         scratch_pool_t sp(/*slot=*/64);
         graph_t g(std::pmr::get_default_resource(), &sp.pool);
-        auto v = g.register_vertex(path_t("/s/temp"), role_t::STORED_VALUE);
+        const auto v = with_field(g);
         const auto w = g.write(v, fp->field(), multilink(tlv));
         check(w.has_value(), "multi-link field write through a pool-backed graph succeeds");
-        check(g.settings(v).history_keep_last == 5000,
-              "value read back byte-exact (history_keep_last=5000)");
+        check(stored_bytes(g, v) == tlv, "value read back byte-exact (the flattened VALUE TLV)");
         // A plain single-link value write never materializes — the seam is untouched
         // and the ordinary store path is unaffected.
         const std::array<std::byte, 3> pv_bytes{std::byte{0xAA}, std::byte{0xBB}, std::byte{0xCC}};
@@ -106,17 +128,17 @@ int main() {
     {
         scratch_pool_t tiny(/*slot=*/4);  // < the ~10-byte flattened TLV
         graph_t g(std::pmr::get_default_resource(), &tiny.pool);
-        auto v = g.register_vertex(path_t("/s/temp"), role_t::STORED_VALUE);
+        const auto v = with_field(g);
         const auto w = g.write(v, fp->field(), multilink(tlv));
         check(!w.has_value() && w.error() == status_t::BACKPRESSURE,
               "an undersized pool BACKPRESSUREs the write (no heap fallback, no TYPE_MISMATCH)");
-        check(g.settings(v).history_keep_last != 5000, "the rejected write landed nothing");
+        check(stored_bytes(g, v).empty(), "the rejected write landed nothing");
     }
     {
         graph_t heap;  // default heap backend
-        auto v = heap.register_vertex(path_t("/s/temp"), role_t::STORED_VALUE);
+        const auto v = with_field(heap);
         const auto w = heap.write(v, fp->field(), multilink(tlv));
-        check(w.has_value() && heap.settings(v).history_keep_last == 5000,
+        check(w.has_value() && stored_bytes(heap, v) == tlv,
               "the identical write on the default-heap graph accepts (contrast: seam is live)");
     }
 
