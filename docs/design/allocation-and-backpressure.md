@@ -154,10 +154,10 @@ defines for "exceeds this receiver's decode resources".
 | Branch-write root key render (`try_build_key`) | `core/src/graph.cpp:1040-1041` | `false` → `BACKPRESSURE` |
 | Branch-write parse-key copy (`detail::try_assign`) | `core/src/graph.cpp:1043` | `false` → `BACKPRESSURE` |
 | Branch-write decode arena | `core/src/graph.cpp:1021-1024` | decode error → `TYPE_MISMATCH` |
-| Per-delivery COMPACT flatten (egress) | `core/src/fwd_router.cpp:1213-1214` | the delivery is **dropped** |
-| Per-delivery frame build | `core/src/fwd_router.cpp:1218` | the delivery is **dropped** |
+| Per-delivery COMPACT flatten (egress) | `core/src/fwd_router.cpp:1381-1382` | the delivery is **dropped** |
+| Per-delivery frame build | `core/src/fwd_router.cpp:1386` | the delivery is **dropped** |
 | Ingress `ADVERTISE` route flatten | flatten `core/src/fwd_router.cpp:897`, answered at `:905` | the empty flatten **fails the `wire::decode`** ⇒ the frame is **dropped**; the label stays **unbound** (the peer's COMPACTs draw a `HANDLE_NACK`) |
-| Ingress `COMPACT` payload flatten | flatten `core/src/fwd_router.cpp:917`, answered at `:924` | the delivery is **dropped**; the subscriber keeps its last-known value |
+| Ingress `COMPACT` payload flatten | flatten `core/src/fwd_router.cpp:917`, answered at `:1054` | the delivery is **dropped**; the subscriber keeps its last-known value |
 | Bus-name rejection reply flatten (cold) | flatten `core/src/fwd_router.cpp:577`, answered by the `wire::decode` opening `reject_bus_name_hop` | the frame is **dropped** by value — no reply |
 
 All three router-ingress rows draw from the router's injected `flat` backend, and all three are
@@ -167,7 +167,7 @@ verify pass reverted both halves of that site and the suite still reported 72/72
 its own case now, and reverting the site's seam fails it (1 of 72).
 
 **Two of those three rows are answered by a decode, not by a guard.** The `empty()` early-outs
-beside the `ADVERTISE` (`:904`) and bus-name (`:584`) flattens are redundant with the `wire::decode`
+beside the `ADVERTISE` (`:1034`) and bus-name (`:584`) flattens are redundant with the `wire::decode`
 that follows each — deleting either changes nothing observable, verified by ablation — and the code
 says so at both sites. They are kept so the *reason* the operation failed is the OOM rather than the
 codec's leniency, and nothing here cites them as proven guards. What the test pins at those two
@@ -188,7 +188,7 @@ The remote-delivery leg answers differently on purpose. A stored write that reac
 succeeded; the fan-out to one subscriber is a separate obligation, and a subscriber missing
 one value under heap exhaustion is valid delivery behaviour where failing the write is not. Every
 per-delivery allocation on that writer-thread leg is nothrow, and a failed flatten or frame build
-drops that one delivery (`core/src/fwd_router.cpp:1213-1214`). Dropping *invisibly* is the part that
+drops that one delivery (`core/src/fwd_router.cpp:1381-1382`). Dropping *invisibly* is the part that
 needs an answer, which is why `graph_t::delivery_drops()` exists
 (`core/include/libtracer/graph.hpp:848`): three relaxed monotonic counters — `no_target`, `denied`,
 `out_of_memory` (`graph.hpp:781-788`) — incremented only on a drop, so the delivering path is

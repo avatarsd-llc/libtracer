@@ -5,8 +5,8 @@
  * RFC-0004 / ADR-0035 slice 3 — multi-hop FWD forwarding + zero-copy `src`
  * accumulation across transports. A node holds a set of NAMED transport-child
  * vertices (ADR-0027): each child is a link, addressed in THIS node's space by its
- * **mount run** `net/<module>/<name>[/<peer>]` — one to four NAME segments, not one
- * (RFC-0014 S2a; @ref tr::net::resolve_mount_segs is the strip-K descent, ADR-0061).
+ * **mount run** `net/<module>/<name>[/<peer>]` — a run of NAME segments of ANY width,
+ * not one (RFC-0014 S2a; the strip-K descent of ADR-0061, single-pass since #523).
  * On an inbound FWD that arrived on child `inbound_name`:
  *
  *   - resolve the LEADING `dst` segments against the child registry, longest mount
@@ -159,9 +159,9 @@ class fwd_router_t {
     /**
      * @brief Register a named transport-child vertex (ADR-0027).
      *
-     * @p name is the single NAME segment by which THIS node addresses @p link —
-     * both the segment a `dst` names to route onward through @p link, and the
-     * segment prepended to `src` when a frame arrives on @p link (the way back).
+     * @p name is the mount RUN by which THIS node addresses @p link — both the leading
+     * `dst` segments that route onward through @p link, and the run prepended to `src`
+     * when a frame arrives on @p link (the way back).
      * Installs a receiver on @p link that funnels each inbound frame to
      * `on_frame(name, ...)`. Call once per link, during setup (before frames flow).
      *
@@ -171,25 +171,31 @@ class fwd_router_t {
      * stays span-based zero-heap; the refcounts ride only to the terminus);
      * every other link keeps the borrowed-span receiver unchanged.
      *
-     * **@p name must have 1 to 3 segments** (#523) — `"up"`, `"ws-server/up"`, or the RFC-0014
-     * mount `"net/<module>/<name>"`. The mount descent matches key widths from
-     * `kMountPeekMax - 1` down to 1, so a 4-segment name registers a slot that resolves for
-     * *nothing*: every forward to it misses and falls through to the terminus, while `size()`
-     * and `live_size()` report it as a healthy child. That silent misroute is the same shape
-     * as #516. The bound is DERIVED from the mount grammar `net / <module> / <name> / <peer>`,
-     * not chosen, so it is not a synthetic limit (RFC-0006/0007, ADR-0051) — widening it is an
-     * addressing-model change and belongs in an RFC.
+     * **@p name may have ANY number of segments** — `"up"`, `"ws-server/up"`, the RFC-0014
+     * mount `"net/<module>/<name>"`, or something far deeper. The 1..3 bound is GONE (#523):
+     * the mount descent no longer tries key widths from a compile-time constant downward, it
+     * makes ONE pass over the registry and matches each slot against the prefix of that slot's
+     * own width. Mount width is therefore bounded by the path-depth budget every address
+     * spends from, and by nothing else — there is no constant to raise.
      *
-     * Debug builds `assert` this; release behaviour is unchanged, since rejecting at the door
-     * means changing this `void` signature.
+     * The one thing still refused, and now refused ALWAYS rather than in debug builds only, is
+     * a name **no address could ever name**: empty, containing an empty segment, or wider than
+     * `graph::kMaxSegments` (a `dst` cannot carry that many segments, so nothing could ever
+     * prefix-match it). Such a name used to append a slot that `size()` and `live_size()`
+     * reported as a healthy child while every forward to it missed and fell through to the
+     * terminus with no error anywhere — the #516 failure shape, one layer up.
      *
-     * @param name This node's local NAME for the link (e.g. "up", "cli"), 1..3 segments.
+     * @param name This node's local mount name for the link (e.g. "up", "ws-server/up").
      * @param link The transport carrying the next/previous hop.
      * @param rx   Optional per-child failable-block source; null uses the router's. Give
      *             each child its OWN when injecting a bounded one — see ADR-0067 3
      *             for why sharing one across receive threads is the wrong shape.
+     * @return false ⇔ @p name is unaddressable and NOTHING was registered. Deliberately not
+     *         `[[nodiscard]]`: the return is an upgrade from a debug-only assert, and every
+     *         existing call site — which registers a name it composed itself — stays correct
+     *         ignoring it.
      */
-    void add_child(std::string name, transport_t& link, mem::block_source_t* rx = nullptr);
+    bool add_child(std::string name, transport_t& link, mem::block_source_t* rx = nullptr);
 
     /**
      * @brief Un-register child @p name — it stops resolving, and its routing state goes.

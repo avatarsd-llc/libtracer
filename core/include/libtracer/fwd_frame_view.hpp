@@ -26,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include "libtracer/config.hpp"
 #include "libtracer/grammar.hpp"
 #include "libtracer/op_resolve.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -90,21 +91,18 @@ template <class Cursor>
                      .total = h->total};
 }
 
-/** @brief The most `dst` segments the mount descent ever inspects: net / module / name / peer. */
-inline constexpr std::size_t kMountPeekMax = 4;
-
 /**
  * @brief What a `dst` peek already learned about a FWD frame, so the head rebuild need not
  *        re-derive it (ADR-0038 inv. #1 — the forward hop parses each header ONCE).
  *
- * A forward hop used to walk the same TLV headers twice: `peek_fwd_dst_segs` read the FWD
+ * A forward hop used to walk the same TLV headers twice: the `dst` peek read the FWD
  * header, the op VALUE, the dst PATH and every leading dst segment to decide where the frame
  * goes — then @ref rebuild_fwd_forward threw all of it away and re-read the identical bytes to
  * build the outgoing heads. Profiling a 1-link hop put ~88% of it in header parsing, most of it
  * that duplicate. Carrying the offsets forward is what removes it.
  *
  * Offsets, not spans, for the same reason the peeks are: the source may be a rope, so a caller
- * re-slices from its own cursor. Filled by the `peek_fwd_dst_segs` overload that takes one;
+ * re-slices from its own cursor. Filled by @ref peek_fwd_dst;
  * @ref strip_at is filled by the CALLER once the mount descent has decided how many segments
  * this hop consumes, since the peek runs before that is known.
  */
@@ -131,73 +129,45 @@ struct fwd_pre_t {
 };
 
 /**
- * @brief The leading `dst` segments of a FWD, read by OFFSET with no allocation.
+ * @brief Open the `dst` window of a FWD frame — the mount descent's gate, read by OFFSET.
  *
- * The strip-K generalization of @ref peek_fwd_first_dst_seg (ADR-0061): a mount path is
- * `/net/<module>/<name>[/<peer>]`, so the demux needs the first few segments rather than
- * exactly one. Returns each segment's `[body_off, body_len)` in order, up to
- * @ref kMountPeekMax; a shorter `dst` simply yields fewer. Offsets, not spans, so the
- * result is source-agnostic — the caller re-slices from its own cursor (contiguous or
- * rope). Empty iff the frame is not a structured FWD with an op VALUE and a non-empty dst.
+ * Fills @p pre with everything the descent and the head rebuild need about the frame's
+ * structure: where the op VALUE and the `dst` PATH body are, and where the body ends. It
+ * reads NO segments and materializes nothing, so its cost and its stack are the same
+ * whatever the `dst`'s depth — which is the point (#523). Segments are then walked lazily
+ * through @ref dst_seg_walk_t, one at a time, only as far as the registry actually asks.
+ *
+ * This replaces `peek_fwd_dst_segs`, which eagerly filled a `kMountPeekMax`-sized array of
+ * offsets. That array was the width bound's last physical residue: it decided in advance
+ * how many segments the descent could ever look at, and sizing it by the widest mount would
+ * have put a W-sized array on every rope frame (measured on rv32: 592 B of stack at W=4,
+ * 2912 B at W=33). Nothing here is sized by a width at all.
  *
  * @tparam Cursor A grammar byte-source cursor (span or rope).
  * @param  cur    The cursor positioned at the frame's first byte.
- */
-
-template <class Cursor>
-[[nodiscard]] std::size_t peek_fwd_dst_segs(
-    const Cursor& cur, std::array<std::pair<std::size_t, std::size_t>, kMountPeekMax>& out) {
-    const auto fwd_h = read_fwd_header(cur, 0);
-    if (!fwd_h || fwd_h->type != wire::type_t::FWD || !fwd_h->opt.pl) return 0;
-    const std::size_t body_end = fwd_h->body_off + fwd_h->body_len;
-    const auto op_h = read_fwd_header(cur, fwd_h->body_off);
-    if (!op_h || op_h->type != wire::type_t::VALUE) return 0;
-    const std::size_t dst_pos = fwd_h->body_off + op_h->total;
-    if (dst_pos >= body_end) return 0;
-    const auto dst_h = read_fwd_header(cur, dst_pos);
-    if (!dst_h || dst_h->type != wire::type_t::PATH || dst_h->body_len == 0) return 0;
-    const std::size_t dst_end = dst_h->body_off + dst_h->body_len;
-    std::size_t pos = dst_h->body_off;
-    std::size_t n = 0;
-    while (n < kMountPeekMax && pos < dst_end) {
-        const auto seg_h = read_fwd_header(cur, pos);
-        if (!seg_h || seg_h->type != wire::type_t::NAME) break;
-        out[n++] = {seg_h->body_off, seg_h->body_len};
-        pos += seg_h->total;
-    }
-    return n;
-}
-
-/**
- * @brief `peek_fwd_dst_segs`, additionally recording what it parsed into @p pre.
- *
- * Identical result and identical rejections — it only stops throwing the offsets away, so the
- * head rebuild can skip re-reading the same four headers. @p pre is left `valid = false` on
- * every path that returns 0, so a caller cannot pass stale offsets to the rebuild.
+ * @param  pre    Filled on success; reset with `valid = false` on every failure, so a caller
+ *                cannot pass stale offsets to the rebuild.
+ * @retval false  Not a structured FWD with an op VALUE, a non-empty `dst` PATH, and a
+ *                leading NAME segment — the caller falls through to the terminus/control
+ *                arms exactly as it did on the old `n == 0`.
  */
 template <class Cursor>
-[[nodiscard]] std::size_t peek_fwd_dst_segs(
-    const Cursor& cur, std::array<std::pair<std::size_t, std::size_t>, kMountPeekMax>& out,
-    fwd_pre_t& pre) {
+[[nodiscard]] bool peek_fwd_dst(const Cursor& cur, fwd_pre_t& pre) {
     pre = fwd_pre_t{};
     const auto fwd_h = read_fwd_header(cur, 0);
-    if (!fwd_h || fwd_h->type != wire::type_t::FWD || !fwd_h->opt.pl) return 0;
+    if (!fwd_h || fwd_h->type != wire::type_t::FWD || !fwd_h->opt.pl) return false;
     const std::size_t body_end = fwd_h->body_off + fwd_h->body_len;
     const auto op_h = read_fwd_header(cur, fwd_h->body_off);
-    if (!op_h || op_h->type != wire::type_t::VALUE) return 0;
+    if (!op_h || op_h->type != wire::type_t::VALUE) return false;
     const std::size_t dst_pos = fwd_h->body_off + op_h->total;
-    if (dst_pos >= body_end) return 0;
+    if (dst_pos >= body_end) return false;
     const auto dst_h = read_fwd_header(cur, dst_pos);
-    if (!dst_h || dst_h->type != wire::type_t::PATH || dst_h->body_len == 0) return 0;
-    const std::size_t dst_end = dst_h->body_off + dst_h->body_len;
-    std::size_t pos = dst_h->body_off;
-    std::size_t n = 0;
-    while (n < kMountPeekMax && pos < dst_end) {
-        const auto seg_h = read_fwd_header(cur, pos);
-        if (!seg_h || seg_h->type != wire::type_t::NAME) break;
-        out[n++] = {seg_h->body_off, seg_h->body_len};
-        pos += seg_h->total;
-    }
+    if (!dst_h || dst_h->type != wire::type_t::PATH || dst_h->body_len == 0) return false;
+    // The leading NAME is the gate the old peek expressed as "returned at least one segment".
+    // Kept EXACTLY: a `dst` whose first child is not a NAME is not an address, and it must
+    // still fall to the terminus arm rather than into the descent.
+    const auto seg_h = read_fwd_header(cur, dst_h->body_off);
+    if (!seg_h || seg_h->type != wire::type_t::NAME) return false;
     pre.valid = true;
     pre.body_end = body_end;
     pre.op_pos = fwd_h->body_off;
@@ -205,11 +175,169 @@ template <class Cursor>
     pre.op_body_off = op_h->body_off;
     pre.op_body_len = op_h->body_len;
     pre.dst_body_off = dst_h->body_off;
-    pre.dst_end = dst_end;
+    pre.dst_end = dst_h->body_off + dst_h->body_len;
     pre.after_dst = dst_pos + dst_h->total;
     pre.strip_at = dst_h->body_off;  // caller overwrites once strip_k is known
-    return n;
+    return true;
 }
+
+/**
+ * @brief A FORWARD-ONLY walker over a `dst`'s leading NAME segments (#523).
+ *
+ * Hands out segment `i` as `[body_off, body_len)` on demand and remembers where it stopped,
+ * so the descent's natural ascending access pattern (`0, 1, 2, …`) costs ONE walk of the
+ * headers however many slots ask. A request for an index BEHIND the cursor restarts from the
+ * `dst` body — which happens only when a narrower registry slot is tested after a wider one,
+ * and costs a handful of 4-byte header reads.
+ *
+ * Its whole state is three integers. That is what lets the mount width be unbounded: there is
+ * no array to size, so the router's stack frame does not grow with the deepest `dst` it may
+ * ever see, and no deep-peek scratch has to be drawn from the injected `flat` backend either.
+ *
+ * Offsets, not spans, for the reason every peek here uses them: the source may be a rope, so
+ * the caller re-slices from its own cursor.
+ *
+ * @tparam Cursor A grammar byte-source cursor (span or rope).
+ */
+/**
+ * @brief How many segment offsets a @ref dst_seg_walk_t keeps inline: ONE CACHE LINE's worth.
+ *
+ * NOT a width bound and not a new constant to raise — it is a CACHE. The walk is correct, and
+ * gives the same answers, at any width with any value here (including the structural floor of
+ * two); past the cached run it simply re-reads headers. Nothing about which mounts resolve
+ * depends on it, which is exactly what `kMountPeekMax` could not say.
+ *
+ * Sized from `tr::kCacheLineBytes`, the config quantity a target already declares (ADR-0068
+ * §3; `-DLIBTRACER_CACHE_LINE_BYTES`), because the whole point is that the cached run costs no
+ * extra line fetch. A config that declares no cache line (`0`, the single-core profile) still
+ * gets the floor of TWO — the two the descent structurally needs, since it reads segment `k`
+ * to see whether the address continues and then asks where segment `k-1` ended.
+ */
+inline constexpr std::size_t kDstSegCacheSlots =
+    graph::kCacheLineBytes / sizeof(std::pair<std::size_t, std::size_t>) < 2
+        ? std::size_t{2}
+        : graph::kCacheLineBytes / sizeof(std::pair<std::size_t, std::size_t>);
+
+/**
+ * @brief A FORWARD-ONLY walker over a `dst`'s leading NAME segments (#523).
+ *
+ * Hands out segment `i` as `[body_off, body_len)` on demand. The mount descent walks a `dst`
+ * TWICE by nature — once to fold the digest chain the registry scan filters on, once to
+ * CONFIRM the one candidate that survived it — so a purely forward walker re-parsed every
+ * header of the run per frame, and that showed up as a measured latency regression on the
+ * `W <= 3` shapes that already worked. The first @ref kDstSegCacheSlots offsets are therefore
+ * remembered; past them a backwards ask resumes from the last cached one rather than from the
+ * `dst` body, so even a very deep mount re-reads only the uncached tail.
+ *
+ * Its whole state is that fixed cache plus three integers — a CONSTANT, config-derived stack
+ * cost. That is what lets the mount width be unbounded: nothing here is sized by W, so the
+ * router's stack frame does not grow with the deepest `dst` it may ever see, and no deep-peek
+ * scratch has to be drawn from the injected `flat` backend either. (The measured alternative —
+ * a W-sized peek array — cost 592 B of rv32 stack at W=4 and 2912 B at W=33, per rope frame.)
+ *
+ * Offsets, not spans, for the reason every peek here uses them: the source may be a rope, so
+ * the caller re-slices from its own cursor.
+ *
+ * @tparam Cursor A grammar byte-source cursor (span or rope).
+ */
+template <class Cursor>
+class dst_seg_walk_t {
+   public:
+    /** @brief Walk the `dst` window @p pre describes, over @p cur. */
+    dst_seg_walk_t(const Cursor& cur, const fwd_pre_t& pre) noexcept
+        : cur_(&cur), body_off_(pre.dst_body_off), end_(pre.dst_end), pos_(pre.dst_body_off) {}
+
+    /**
+     * @brief Segment @p i's `[body_off, body_len)`.
+     * @retval std::nullopt The `dst` has no segment @p i — it ended, or the next child is
+     *                      not a NAME (a selector, say), which is where an ADDRESS stops.
+     */
+    /**
+     * @brief Fill the inline cache NOW, in ONE tight loop.
+     *
+     * The descent's first act is to materialize the cached run, and doing it through `at`
+     * meant one out-of-line walk call per segment — a profile of the forward hop put a quarter
+     * of it there, because the header parse makes that half of `at` too large to inline.
+     * One call fills the whole run; every later ask is then the inlined cache half of `at`.
+     *
+     * Purely an optimisation. Every answer is identical without it, and a `dst` deeper than
+     * the cached run is still walked on demand — which is exactly what makes this a CACHE and
+     * not the fixed peek window it replaced.
+     */
+    void prefill() {
+        while (cached_ < kDstSegCacheSlots && pos_ < end_) {
+            const auto h = read_fwd_header(*cur_, pos_);
+            if (!h || h->type != wire::type_t::NAME) return;
+            last_ = {h->body_off, h->body_len};
+            cache_[cached_++] = last_;
+            pos_ += h->total;
+            ++have_;
+        }
+    }
+
+    /**
+     * @brief Segment @p i's `[body_off, body_len)`.
+     * @retval std::nullopt The `dst` has no segment @p i — it ended, or the next child is
+     *                      not a NAME (a selector, say), which is where an ADDRESS stops.
+     */
+    [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> at(std::size_t i) {
+        // Split deliberately: this half is a bounds compare and a load, so it inlines into
+        // every call site, and the descent calls it several times per frame. Fused with the
+        // walk below it did NOT inline — the header parse makes the body too large — and a
+        // profile of the forward hop put 35% of it in this one out-of-line call.
+        if (i < cached_) return cache_[i];
+        return walk_to(i);
+    }
+
+   private:
+    /** @brief The uncached half of `at`: walk forward (restarting from the cache if the
+     *         ask is behind it) until segment @p i is in hand. */
+    [[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> walk_to(std::size_t i) {
+        if (i < have_) {
+            // Behind the walk but past the cache: resume from the last cached segment. A NAME
+            // body is its TLV's tail, so the next header starts at `off + len` — no stored
+            // "next position" and no second field per entry.
+            have_ = cached_;
+            pos_ =
+                cached_ == 0 ? body_off_ : cache_[cached_ - 1].first + cache_[cached_ - 1].second;
+        }
+        while (have_ <= i) {
+            if (pos_ >= end_) return std::nullopt;
+            const auto h = read_fwd_header(*cur_, pos_);
+            if (!h || h->type != wire::type_t::NAME) return std::nullopt;
+            last_ = {h->body_off, h->body_len};
+            if (have_ < kDstSegCacheSlots) cache_[cached_++] = last_;
+            pos_ += h->total;
+            ++have_;
+        }
+        return last_;
+    }
+
+   public:
+    /**
+     * @brief Where segment @p i ENDS — the `strip_at` the head rebuild wants.
+     *
+     * A NAME body is its TLV's tail, so the consumed run ends at `body_off + body_len` of the
+     * last stripped segment. Returns `std::nullopt` if that segment does not exist.
+     */
+    [[nodiscard]] std::optional<std::size_t> end_of(std::size_t i) {
+        const auto s = at(i);
+        if (!s) return std::nullopt;
+        return s->first + s->second;
+    }
+
+   private:
+    const Cursor* cur_;
+    std::size_t body_off_;
+    std::size_t end_;
+    std::size_t pos_;
+    std::size_t have_ = 0;   /**< @brief Segments walked; `last_` is number `have_-1`. */
+    std::size_t cached_ = 0; /**< @brief Entries of `cache_` filled (`<= have_`). */
+    std::pair<std::size_t, std::size_t> last_{0, 0};
+    /** @brief Uninitialised on purpose: `cached_` gates every read, and zeroing a
+     *         cache line per frame is a cost the pre-lift descent did not pay. */
+    std::array<std::pair<std::size_t, std::size_t>, kDstSegCacheSlots> cache_;
+};
 
 /**
  * @brief The forward dispatch decision, read by OFFSET with no allocation

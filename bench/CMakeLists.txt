@@ -183,9 +183,11 @@ target_compile_options(bench_tail_validate PRIVATE -Wall -Wextra)
 
 # The mount descent's k=W..1 width loop vs one full-table scan — the headroom a single-pass
 # descent could win, measured at W>3 where the shipped cap makes it invisible.
-add_executable(bench_mount_descent bench_mount_descent.cpp)
-target_link_libraries(bench_mount_descent PRIVATE libtracer)
-target_compile_options(bench_mount_descent PRIVATE -Wall -Wextra)
+# The A/B the width lift is gated on (#523). Deliberately written to compile UNCHANGED
+# against the pre-lift tree, so the two binaries can be interleaved on one machine.
+add_executable(bench_mount_resolve bench_mount_resolve.cpp)
+target_link_libraries(bench_mount_resolve PRIVATE libtracer)
+target_compile_options(bench_mount_resolve PRIVATE -Wall -Wextra)
 
 # The TCP server's END-TO-END baseline (throughput AND the p50/p99/p999/max latency
 # distribution) swept over concurrent peers — the join of bench_tcp_fanin's fan-in topology

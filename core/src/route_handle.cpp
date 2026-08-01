@@ -92,6 +92,7 @@ resolved_binding_t route_handle_t::resolved(std::string_view in_link, std::uint1
         out.down_slot = e.binding.down_slot;
         out.target = e.binding.target;
         out.target_gen = e.binding.target_gen;
+        out.mount_gen = e.binding.mount_gen;
         return out;  // ~24 trivially copyable bytes — no string, no vector, no allocation
     }
     return out;

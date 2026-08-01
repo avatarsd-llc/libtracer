@@ -16,6 +16,47 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **The mount WIDTH bound is lifted — one registry pass, any width (#523, #765).**
+  `core/include/libtracer/child_registry.hpp`, `fwd_frame_view.hpp`, `fwd_router.hpp`,
+  `route_handle.hpp`. A mount key of **any** number of segments now registers and resolves; the
+  1..3 bound is gone and `tr::net::kMountPeekMax` is **deleted**, not raised. The descent is
+  INVERTED to a single pass: `child_registry_t::longest_prefix` walks the table ONCE, matching
+  each slot against the prefix of that slot's own `seg_count` (a new `child_t` field), so it is
+  O(N) in the table and independent of width. The `k = W..1` retry loop and
+  `child_registry_t::by_segments` are gone with it.
+
+  **API changes, all source-compatible except where noted:**
+  - `fwd_router_t::add_child` returns **`bool`** instead of `void` — `false` ⇔ the name is
+    unaddressable and NOTHING was registered. Deliberately not `[[nodiscard]]`, so existing
+    call sites compile and behave unchanged. The check is ALWAYS ON, replacing a debug-only
+    `assert` that compiled out under `NDEBUG` and therefore left every release build with no
+    bound at all. What it refuses is only what no address could ever name: an empty name, a
+    name with an empty segment, or one wider than `graph::kMaxSegments` — the path-depth
+    budget being the ONLY real bound on mount width.
+  - `tr::net::kMountPeekMax` — **removed.**
+  - `tr::net::peek_fwd_dst_segs` — **removed**, replaced by `tr::net::peek_fwd_dst` (opens the
+    `dst` window, materializes nothing) plus `tr::net::dst_seg_walk_t` (reads leading segments
+    on demand). Nothing on the forward path is sized by mount width any more: the walk's state
+    is a cache of `tr::net::kDstSegCacheSlots` offsets — one cache line, from the existing
+    `kCacheLineBytes` config — and re-reads beyond it, so a 33-segment mount costs the router
+    no more stack than a 1-segment one.
+  - `child_registry_t::by_segments` — **removed** (it existed to serve the width loop). Use
+    `longest_prefix`, which answers the routing question directly.
+  - `handle_binding_t` / `resolved_binding_t` gain `mount_gen`; `child_registry_t` gains
+    `mount_generation()`.
+
+- **Label bindings are stamped with the mount shape (#765).** A binding records where an
+  address SPLIT into "local mount" and "remote residual". Registering a deeper mount moves that
+  split, and nothing noticed: a full `FWD` resolved against the new mount while a `COMPACT`
+  riding the old label still used the old one — the two planes disagreeing about the same
+  address, silently. Until this change that was unreachable only because NEITHER plane could
+  reach a deeper mount, which the width lift ends. `child_registry_t::mount_generation()` is
+  bumped on every registration and teardown; a binding carries the value it was resolved
+  against and is validated on use, and a mismatch takes the SAME RFC-0004 §E.1 self-heal an
+  unknown label takes (drop, fire `on_stale_label`, `HANDLE_NACK`, re-advertise). Third
+  validate-on-use stamp, beside `graph_t::retire_generation` and the registry tombstone — no
+  second invalidation mechanism, no new error code.
+
 - **`kMaxSegments` repriced 32 → 255 (RFC-0023, accepted; #767).** `core/include/libtracer/path.hpp`
   — a **monotone widening** of `path_t::parse`: every path that parsed before still parses, and a
   33–255-segment address that used to answer `INVALID_PATH` is now legal. The 32 was inherited

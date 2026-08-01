@@ -69,9 +69,9 @@ flowchart LR
 - **The limits are a receiver's buffer budget.** ≤64 B per segment, ≤1024 B total,
   ≤255 segments (RFC-0023; the byte cap binds first under the current encoding, at 204)
   and ≤8 field steps (`core/include/libtracer/path.hpp:30,32,34,36`) let a
-  component size fixed scratch instead of allocating per frame — the mount-prefix peek
-  declares `std::array<std::byte, kMaxSegmentBytes * kMountPeekMax>`
-  (`core/src/fwd_router.cpp:63`).
+  component size fixed scratch instead of allocating per frame — the mount-prefix walk's
+  stitch buffer is two segments' worth, `std::array<std::byte, kMaxSegmentBytes * 2>`
+  (`core/src/fwd_router.cpp`), and no longer scales with how wide a mount is (#523).
 - **Ordinary names cost no heap block.** `path_key_t` holds records up to 16 bytes inline
   (`path_key_t::kInlineBytes`, `core/include/libtracer/path.hpp:150`) — a NAME record is a
   4-byte TLV header plus the segment text, so a name of up to 12 characters never

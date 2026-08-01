@@ -66,10 +66,13 @@ class fwd_router_t {
                           std::pmr::memory_resource* mr = std::pmr::get_default_resource(),
                           mem::block_source_t* rx = &mem::heap_source());
 
-    // `name` is this node's NAME for `link`: the dst segment that routes onward through it,
-    // and the segment prepended to src on the way back. 1..3 segments. Optional per-child
-    // failable source; null falls back to the router's.
-    void add_child(std::string name, transport_t& link, mem::block_source_t* rx = nullptr);
+    // `name` is this node's mount RUN for `link`: the leading dst segments that route onward
+    // through it, and the run prepended to src on the way back. ANY width (#523) -- the
+    // descent makes one registry pass and matches each slot against the prefix of its own
+    // width, so the only bound is the path-depth budget. Returns false, always (not only in
+    // debug), for a name no address could ever name: empty, with an empty segment, or wider
+    // than kMaxSegments. Optional per-child failable source; null falls back to the router's.
+    bool add_child(std::string name, transport_t& link, mem::block_source_t* rx = nullptr);
     bool remove_child(std::string_view name);   // removal, not departure
     void link_down(std::string_view link_name); // departure: evict edges + drop label state
 
@@ -115,7 +118,9 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
                      std::vector<std::byte> mount_tlv; bool live() const noexcept; };
     void add(std::string name, transport_t& link);        // rebinds an existing name
     bool erase(std::string_view name);                    // tombstones in place
-    const child_t* by_segments(std::span<const std::string_view> segs) const;  // the demux
+    // ONE pass, each slot matched against the prefix of its OWN seg_count (#523) — so a
+    // mount of any width resolves and there is no per-width retry. Longest match wins.
+    template <class SegAt> const child_t* longest_prefix(SegAt&& at) const;  // the demux
     transport_t*   by_name(std::string_view name) const;
     static transport_t* resolve_peer(const child_t&, std::string_view peer);
     std::size_t size() const noexcept;  std::size_t live_size() const noexcept;
@@ -124,10 +129,10 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 }  // namespace tr::net
 ```
 
-Signature source: `core/include/libtracer/fwd_router.hpp:139` (constructor), `:192`
-(`add_child`), `:242` (`subscribe_toward`), `:252-263` (the sink function-pointer types);
-`core/include/libtracer/child_registry.hpp:169` (`add`), `:243` (`resolve_peer`), `:258`
-(`erase`), `:281` (`entry_by_name`), `:302` (`by_name`), `:343`/`:353` (`size`/`live_size`).
+Signature source: `core/include/libtracer/fwd_router.hpp:139` (constructor), `:198`
+(`add_child`), `:248` (`subscribe_toward`), `:258-269` (the sink function-pointer types);
+`core/include/libtracer/child_registry.hpp:190` (`add`), `:438` (`resolve_peer`), `:453`
+(`erase`), `:479` (`entry_by_name`), `:500` (`by_name`), `:541`/`:551` (`size`/`live_size`).
 
 ## Routing one inbound frame
 
@@ -135,7 +140,7 @@ Signature source: `core/include/libtracer/fwd_router.hpp:139` (constructor), `:1
 flowchart TB
     IN["inbound frame on child NAME"] --> RAW["on_raw observer"]
     RAW --> PEEK["offset peek: first dst segment"]
-    PEEK --> DEMUX{"child_registry_t<br/>by_segments"}
+    PEEK --> DEMUX{"child_registry_t<br/>longest_prefix"}
     DEMUX -->|"resolves to a link"| FWD["strip dst segment<br/>prepend inbound NAME to src"]
     FWD --> SG["stack-built heads<br/>+ untouched frame views"]
     SG -->|"send(iov)"| OUT(["transport_t"])
@@ -161,8 +166,8 @@ flowchart TB
   consumer that did not need contiguity. `m` must stay alive while its span is read.
 - **The default delivery leg copies nothing.** A full-route `FWD{WRITE}` fan-out scatter-gathers a
   fresh stack head, the stored return-route bytes, an empty `src`, and one span per link of the
-  stored value (`core/src/fwd_router.cpp:1250`). The `COMPACT` leg is the one that flattens,
-  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:1213`) — single-link, that
+  stored value (`core/src/fwd_router.cpp:1418`). The `COMPACT` leg is the one that flattens,
+  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:1381`) — single-link, that
   flatten is a zero-copy adopt, and multi-link it draws from the router's injected `flat` backend
   (#730), not the global heap.
 - **Delivery is nothrow and drops rather than aborts.** Every per-delivery allocation on the writer
