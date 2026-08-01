@@ -86,6 +86,13 @@ pub fn tlv_to_path(tlv: &Tlv) -> Result<String, BuildError> {
     if tlv.children.is_empty() {
         return Ok(String::from("/"));
     }
+    // MISPLACED TIER, repriced not relocated (RFC-0023 §5.6). `reference/05` §"Enforcement of
+    // the PATH constraints" puts the count bound where an address is CONSTRUCTED or ADMITTED,
+    // not at decode — "the codec does not enforce these constraints, and is not expected to".
+    // This is the decode side (an already-parsed `&Tlv`, reached from `fwd_dst_path` /
+    // `fwd_src_path` / `subscriber_target_path`), where an accumulated `src` return route is
+    // legal at any byte-reachable depth. Repricing 32 -> 255 removes the live regression;
+    // moving the check to the resolver tier is a named follow-up, not this train's work.
     if tlv.children.len() > MAX_SEGMENTS {
         return Err(BuildError::TooManySegments);
     }

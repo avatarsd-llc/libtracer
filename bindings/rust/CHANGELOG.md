@@ -8,6 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **SEMVER-VISIBLE — `MAX_SEGMENTS` repriced 32 → 255 (RFC-0023, accepted; #767).** The exported
+  constant (`libtracer::MAX_SEGMENTS`) changes value, so any consumer that mirrors it in an array
+  size or a message must be recompiled. `split_path` / `tlv_builders::path` / `tlv_to_path` accept
+  33–255 segments where they previously answered `BuildError::TooManySegments`; the error variant
+  itself is unchanged and still maps to `tr::path::invalid`. Under the current NAME-TLV body
+  encoding the `MAX_PATH_BYTES` (1024) check binds first at 204 segments, so `path_to_tlv` answers
+  `BuildError::PathTooLong` — not `TooManySegments` — for a 205-segment path.
+  **Known misplacement, repriced not relocated:** the count check in `tlv_to_path`
+  (`src/path.rs`) sits at the **decode** tier, which `docs/reference/05-protocol-tlvs.md`
+  §"Enforcement of the PATH constraints" places at construction/admission instead. Repricing it
+  removes the live regression on accumulated `src` return routes; moving it to the resolver tier
+  is a named follow-up (RFC-0023 §5.6).
+
 ## [0.6.0] — 2026-07-23
 
 ## [0.5.0] — 2026-07-21
