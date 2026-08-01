@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0021 |
 | **Title** | The frame of reference of a wire SUBSCRIBER's PATH target |
-| **Status** | **proposed** — awaiting the maintainer's ruling on §3's fork. The comment window is waived for a sole maintainer (precedent: RFC-0020), but the *direction* here has not been ruled; this RFC exists to put the fork on the record, not to record a decision already taken. |
+| **Status** | **accepted** — maintainer ruling 2026-08-01: §3's fork is resolved in favour of **(b), the producer's frame**, and §E is answered **1 — `SUBSCRIBE` is sufficient authority**. Comment window waived for a sole maintainer (precedent: RFC-0020). **Implementation is deferred past v0.7.0**: the wire is `DRAFT` and explicitly unstable (`docs/spec/v1.md` — *"Pin to a specific commit if you depend on this"*), so nothing is lost by landing it in a later release. |
 | **Author** | filed from the #491 refutation, 2026-08-01 |
 | **Amends** | [RFC-0004](0004-remote-operation-addressing.md) §D (operation semantics), §E (delivery/fanout) |
 | **Tracking** | [#491](https://github.com/avatarsd-llc/libtracer/issues/491) |
@@ -76,6 +76,8 @@ But (b) grants a genuinely new power: **a third party holding `SUBSCRIBE` on a p
 
 Answer 1 is the smallest and is probably right — the forwarding argument is strong — but the asymmetry deserves to be stated deliberately rather than inherited.
 
+**Ruled 2026-08-01: answer 1.** The power (b) appears to grant is not new. A peer holding `SUBSCRIBE` on a producer can already subscribe, receive every value, and forward it wherever it likes; (b) makes that path *efficient* and *survivable*, it does not extend the peer's reach. A distinct "wire-elsewhere" right would gate a capability the existing right already implies, and a gate that can be walked around is not a control. The asymmetry is therefore accepted deliberately, which is what §E existed to force.
+
 ### F. Errors
 
 A `PATH` child that fails §B.3 answers `tr::path::invalid` (`0x0021`), the code RFC-0020 uses for an unroutable next-hop, carried in the ordinary `REPLY{kind=ERROR}`. It MUST NOT silently degrade to the arrival-session binding — a silent degradation is precisely the failure mode that made #491 look like it worked (the write answered `RESULT` while binding something else).
@@ -102,7 +104,7 @@ A `PATH` child that fails §B.3 answers `tr::path::invalid` (`0x0021`), the code
 
 ## 7. Open questions
 
-1. §3's fork: reading (a) or (b)? Everything else follows.
-2. §E: is `SUBSCRIBE` sufficient authority to direct a producer's data to a third node?
+1. ~~§3's fork: reading (a) or (b)?~~ **Ruled 2026-08-01: (b), the producer's frame.** The decisive argument is §3's own: a `FWD`'s `dst` is resolved from the receiver's root and a subscription's delivery *is* a write, so under (a) the `SUBSCRIBER` `PATH` would be the only address on the wire spelled in the *sender's* frame. An inconsistency that arbitrary is far likelier to be an accident of implementation than a design. §5's one real caveat — that (b) is a behaviour change for a sender relying on the field being ignored — is void while the wire is `DRAFT` and pinning is instructed.
+2. ~~§E: is `SUBSCRIBE` sufficient authority?~~ **Ruled 2026-08-01: yes** — see §4.E.
 3. Should outcome B.2 (a local target through the wire door) be permitted at all, or is the wire door restricted to mount-routed targets? Permitting it makes the two doors uniform; restricting it keeps the wire door's blast radius smaller.
 4. Does the delivery-compaction opt-in (RFC-0004 §E.1) interact with a mount-routed target? The route handle is per `(link, route)`, and both are now the mount's — expected to work unchanged, but it wants a vector.
