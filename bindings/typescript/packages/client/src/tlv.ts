@@ -23,6 +23,20 @@ import type { Opt, Tlv } from '@avatarsd-llc/libtracer';
 
 /** @brief Path-segment constraints from reference/03-addressing.md §path syntax. */
 const MAX_SEGMENT_BYTES = 64;
+/**
+ * @brief Maximum NAME segments in one PATH (reference/03 §path syntax; `core` `kMaxSegments`).
+ *
+ * Repriced 32 -> 255 by RFC-0023 — chosen so every per-segment quantity stays u8-representable,
+ * not inherited from a parser guard. Under this body encoding each segment costs `4 + len`, so
+ * {@link MAX_PATH_BYTES} admits at most 204 segments and the BYTE cap binds first; this is the
+ * encoding-independent ceiling.
+ */
+const MAX_SEGMENTS = 255;
+/**
+ * @brief Maximum encoded PATH body — the concatenated NAME TLVs, i.e. exactly the PATH TLV's own
+ * `length` field (reference/03 §path syntax, 2026-07-31 erratum; `core` `kMaxPathBytes`).
+ */
+const MAX_PATH_BYTES = 1024;
 /** @brief Reserved characters that MUST NOT appear inside a NAME segment (reference/03, /05 §NAME). */
 const RESERVED_SEGMENT_CHARS = /[/:.[\]*?]/;
 
@@ -122,12 +136,21 @@ export function encodePath(segments: string[]): Uint8Array {
 /** @brief The PATH TLV node (shared by {@link encodePath}, {@link encodeSubscriber}, and `./fwd.ts`). */
 export function pathTlv(segments: string[]): Tlv {
   if (segments.length < 1) throw new RangeError('a path must have at least one segment');
-  if (segments.length > 32) throw new RangeError(`a path may have at most 32 segments (got ${segments.length})`);
+  if (segments.length > MAX_SEGMENTS)
+    throw new RangeError(`a path may have at most ${MAX_SEGMENTS} segments (got ${segments.length})`);
+  const children = segments.map(nameTlv);
+  // The encode-time byte check the spec has always required and this client never had
+  // (RFC-0023 §5.6): the 1024-byte budget is measured as the PATH TLV's own `length` field —
+  // each NAME costs its 4-byte header plus its UTF-8 bytes. It binds BEFORE the segment count
+  // under this encoding (204 * 5 = 1020), so it is the bound that actually fires.
+  const bodyBytes = children.reduce((n, child) => n + 4 + child.payload.length, 0);
+  if (bodyBytes > MAX_PATH_BYTES)
+    throw new RangeError(`a path's encoded body may be at most ${MAX_PATH_BYTES} bytes (got ${bodyBytes})`);
   return {
     type: TYPE.PATH,
     opt: opt({ pl: true }),
     payload: new Uint8Array(0),
-    children: segments.map(nameTlv),
+    children,
     trailer: null,
   };
 }

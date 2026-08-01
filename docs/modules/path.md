@@ -12,7 +12,7 @@ string parse on the hot path.
 
 `path_t::parse` validates and canonicalizes per the addressing rules (`reference/03`):
 strip a trailing `/`, reject empty segments (`//`) and unrooted paths, enforce the
-limits (≤64 B/segment, ≤1024 B total, ≤32 segments, ≤8 field steps). It emits the
+limits (≤64 B/segment, ≤1024 B total, ≤255 segments, ≤8 field steps). It emits the
 canonical key — e.g. `/sensor/temp` → `02 00 06 00 'sensor' 02 00 04 00 'temp'`
 (18 bytes) — and parses the `:`-tail into a `field_path_t` (`settings.deadline_ns`,
 `subscribers[]`, `subscribers[3]`) for the field-write surface. `path_key_t` +
@@ -67,10 +67,11 @@ flowchart LR
   reserved characters and every limit overrun reject at parse with a typed `status_t`
   rather than surfacing as a miss deep in dispatch.
 - **The limits are a receiver's buffer budget.** ≤64 B per segment, ≤1024 B total,
-  ≤32 segments and ≤8 field steps (`core/include/libtracer/path.hpp:30,32,34,36`) let a
+  ≤255 segments (RFC-0023; the byte cap binds first under the current encoding, at 204)
+  and ≤8 field steps (`core/include/libtracer/path.hpp:30,32,34,36`) let a
   component size fixed scratch instead of allocating per frame — the mount-prefix peek
   declares `std::array<std::byte, kMaxSegmentBytes * kMountPeekMax>`
-  (`core/src/fwd_router.cpp:62`).
+  (`core/src/fwd_router.cpp:63`).
 - **Ordinary names cost no heap block.** `path_key_t` holds records up to 16 bytes inline
   (`path_key_t::kInlineBytes`, `core/include/libtracer/path.hpp:150`) — a NAME record is a
   4-byte TLV header plus the segment text, so a name of up to 12 characters never

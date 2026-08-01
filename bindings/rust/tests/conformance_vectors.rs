@@ -250,8 +250,28 @@ fn path_rejects_reserved_and_overlong() {
         libtracer::path::path_to_tlv("sensor/temp").unwrap_err(),
         BuildError::NotRooted
     );
-    // too many segments (> 32)
-    let many = format!("/{}", vec!["a"; 33].join("/"));
+    // RFC-0023 repriced the cap 32 -> 255: 33 segments is now LEGAL, and this case was
+    // inverted from a must-reject. 33 * (4 + 1) = 165 encoded bytes, far under MAX_PATH_BYTES.
+    let thirty_three = format!("/{}", vec!["a"; 33].join("/"));
+    assert_eq!(
+        libtracer::path::split_path(&thirty_three).unwrap().len(),
+        33
+    );
+    assert!(libtracer::path::path_to_tlv(&thirty_three).is_ok());
+    // 204 segments = 1020 bytes: the byte-derived ceiling under this body encoding, and the
+    // deepest PATH today's NAME-TLV grammar can express (RFC-0023 §4.2).
+    let two_oh_four = format!("/{}", vec!["a"; 204].join("/"));
+    assert!(libtracer::path::path_to_tlv(&two_oh_four).is_ok());
+    // 205 = 1025 bytes: rejected by the BYTE cap, not the count. Under this encoding the count
+    // clause can never fire; it becomes binding only under RFC-0018's packed body.
+    let two_oh_five = format!("/{}", vec!["a"; 205].join("/"));
+    assert_eq!(
+        libtracer::path::path_to_tlv(&two_oh_five).unwrap_err(),
+        BuildError::PathTooLong
+    );
+    // too many segments (> 255) — the count clause itself, checked at the split tier where no
+    // byte budget has been accumulated yet.
+    let many = format!("/{}", vec!["a"; 256].join("/"));
     assert_eq!(
         libtracer::path::split_path(&many).unwrap_err(),
         BuildError::TooManySegments

@@ -11,8 +11,10 @@
  */
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdio>
 #include <ranges>
+#include <string>
 #include <string_view>
 
 #include "libtracer/tracer.hpp"
@@ -39,6 +41,14 @@ void rejected(std::string_view text) {
     check(!r.has_value() && r.error() == status_t::INVALID_PATH, text);
 }
 
+/** @brief `"/a/a/…"` with @p n single-byte segments — a depth probe, printed by count. */
+std::string repeat_segments(std::size_t n) {
+    std::string s;
+    s.reserve(2 * n);
+    for (std::size_t i = 0; i < n; ++i) s += "/a";
+    return s;
+}
+
 }  // namespace
 
 int main() {
@@ -61,6 +71,29 @@ int main() {
     std::printf("Structural limits still hold:\n");
     rejected("relative/no/root");  // must be rooted at '/'
     rejected("/a//b");             // empty segment
+
+    std::printf("The segment cap is 255, and the byte cap binds first (RFC-0023):\n");
+    {
+        const auto accepts = [](std::size_t n) {
+            const auto r = path_t::parse(repeat_segments(n));
+            return r.has_value() && r->segment_count() == n;
+        };
+        const auto refuses = [](std::size_t n) {
+            const auto r = path_t::parse(repeat_segments(n));
+            return !r.has_value() && r.error() == status_t::INVALID_PATH;
+        };
+        // A depth the inherited cap of 32 rejected. 33 single-byte segments encode to
+        // 33 * (4 + 1) = 165 bytes, far under kMaxPathBytes — legal at cap 255.
+        check(accepts(33), "33 segments parse (the inherited 32-segment cap rejected this)");
+        // 204 segments = 1020 bytes: the byte-derived ceiling under this body encoding, and
+        // the deepest path today's NAME-TLV grammar can express (RFC-0023 §4.2).
+        check(accepts(204), "204 segments parse (1020 B — the byte-derived ceiling)");
+        // 205 segments = 1025 bytes. Rejected by kMaxPathBytes, NOT by kMaxSegments: under
+        // this encoding the count clause can never fire, which RFC-0023 §4.2 states rather
+        // than smuggles. The count becomes binding only under RFC-0018's packed body.
+        check(refuses(205), "205 segments reject (1025 B — the BYTE cap, not the count)");
+        check(refuses(256), "256 segments reject (over both caps)");
+    }
 
     std::printf("The parse-once constructor yields the same key as parse():\n");
     {

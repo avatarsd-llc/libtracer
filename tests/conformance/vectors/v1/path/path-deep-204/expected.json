@@ -1,0 +1,1048 @@
+{
+  "name": "path-deep-204",
+  "category": "path",
+  "hex": "0640FC03020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061020001006102000100610200010061",
+  "total_bytes": 1024,
+  "decoded": {
+    "type": "0x06 PATH",
+    "opt": {
+      "raw": "0x40",
+      "PL": 1,
+      "TS": 0,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 1020,
+    "children": [
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      },
+      {
+        "type": "0x02 NAME",
+        "length": 1,
+        "payload_utf8": "a"
+      }
+    ],
+    "trailer": {
+      "ts": null,
+      "crc": null
+    },
+    "meaning": "/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a"
+  }
+}
