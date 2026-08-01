@@ -183,6 +183,12 @@ target_link_libraries(retire_test PRIVATE libtracer)
 libtracer_test_warnings(retire_test)
 add_test(NAME retire COMMAND retire_test)
 
+# #576 / ADR-0072 — the reclamation domain, first tenant: retired value seams.
+add_executable(seam_reclaim_test seam_reclaim_test.cpp)
+target_link_libraries(seam_reclaim_test PRIVATE libtracer)
+libtracer_test_warnings(seam_reclaim_test)
+add_test(NAME seam_reclaim COMMAND seam_reclaim_test)
+
 # #82 — in-band :children[] SPEC vertex creation (ADR-0017).
 add_executable(children_test children_test.cpp)
 target_link_libraries(children_test PRIVATE libtracer)

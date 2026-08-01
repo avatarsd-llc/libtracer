@@ -29,6 +29,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "libtracer/hazard_domain.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/path.hpp"
@@ -187,6 +188,19 @@ class graph_t {
     explicit graph_t(std::pmr::memory_resource* mr = std::pmr::get_default_resource(),
                      mem::mem_backend_t* value_backend = &mem::heap_backend(),
                      mem::block_source_t* ctl = &mem::heap_source());
+
+    /**
+     * @brief Tear the graph down, running the reclamation domain's final sweep
+     *        (ADR-0072 §2): every value-seam block a retire parked is freed through the
+     *        domain, so nothing retired outlives the graph.
+     *
+     * New with ADR-0072 — `~graph_t` previously did not exist, which is half of what
+     * #576 recorded (the other half, the unbounded growth, is fixed by the domain's
+     * scans during the graph's LIFETIME; the destructor only finishes the job). The
+     * usual quiescence precondition applies: no operation may be in flight.
+     */
+    ~graph_t();
+
     graph_t(const graph_t&) = delete;
     graph_t& operator=(const graph_t&) = delete;
 
@@ -741,6 +755,26 @@ class graph_t {
     [[nodiscard]] std::uint64_t ancestor_walks() const noexcept;
 
     /**
+     * @brief How many operations opened a value-seam announce window — instrumentation.
+     *
+     * The ADR-0072 §4 gate observable, in the mold of @ref ancestor_walks — the four
+     * lock-free seam readers (read / store-value / read-children / read-children-folded)
+     * announce the seam pointer to the reclamation domain ONLY behind the existing
+     * has-extension check, so this stays 0 across placeholder / plain-leaf operations —
+     * which is what lets a test assert "the fan-0 write path paid nothing" structurally
+     * rather than by timing. Relaxed monotonic counter.
+     */
+    [[nodiscard]] std::uint64_t seam_announces() const noexcept;
+
+    /**
+     * @brief The ADR-0072 reclamation domain this graph owns — exposed, like
+     *        @ref control_source, so a host can include it in a memory census and a test
+     *        can read its accounting (`retired_count`). Tenants inside the library
+     *        borrow it directly; embedders never need to call it.
+     */
+    [[nodiscard]] mem::hazard_domain_t& seam_domain() const noexcept { return seam_domain_; }
+
+    /**
      * @brief Why a subscription edge's delivery was dropped, counted per cause.
      *
      * A path-target edge — the form a wire `SUBSCRIBER` produces, naming a target PATH —
@@ -922,18 +956,10 @@ class graph_t {
     // RFC-0009 §B.6: pre-order re-virginize of @p v's subtree — unwind each vertex's
     // subscriber contribution to its descendants' listeners_above_, revert it to a
     // placeholder, and flip it unregistered. Collects each retired vertex's key into
-    // @p keys for the caller's sweep-set cleanup, and parks each detached value-seam block
-    // into @ref retired_seams_. Call with map_mutex_ held UNIQUE (it flips registered_ and
-    // appends to retired_seams_, both map-lock-guarded).
+    // @p keys for the caller's sweep-set cleanup, and hands each detached value-seam
+    // block to @ref seam_domain_ (freed once no announced reader remains — ADR-0072).
+    // Call with map_mutex_ held UNIQUE (it flips registered_).
     void retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& keys);
-
-    // Value-seam blocks detached by retirement (RFC-0009 §B.6). A seam is read lock-free,
-    // so a swapped-out block cannot be freed while a reader might still hold the old
-    // pointer — it is parked here and reclaimed only at graph teardown (ADR-0057 insert-
-    // only, applied to the seam). Kept on the GRAPH, not per-vertex, so an app-field / leaf
-    // vertex pays zero extra bytes. Appended only under map_mutex_ (unique); bounded by the
-    // node's total retire count — the "memory is not reclaimed under churn" trade §B books.
-    std::vector<std::unique_ptr<value_handlers_t>> retired_seams_;
 
     mutable std::shared_mutex map_mutex_;
     // The Composite vertex tree's root (ADR-0057): an unregistered structural node whose
@@ -1020,6 +1046,23 @@ class graph_t {
      *         can see and nothing gains from.
      */
     mem::block_source_t* ctl_ = &mem::heap_source();
+    // The ADR-0072 reclamation domain — the one answer to "a control-plane writer
+    // replaced a heap block a lock-free reader may still hold". First tenant: the
+    // value-seam blocks retirement detaches (RFC-0009 §B.6) — a seam is read lock-free,
+    // so a swapped-out block cannot be freed at retire() time; the domain parks it and a
+    // scan frees it once no reader announces it, which is what BOUNDS live seam blocks
+    // under peer-driven churn (#576 — the old park-forever vector grew monotonically).
+    // Records draw from value_backend_ (constructor-injected); ~graph_t runs the final
+    // sweep. APPENDED after ctl_ under the same layout-stability rule its note states:
+    // the domain embeds a multi-KB announcement-cell table, which mid-object would shift
+    // every member below it. `mutable`: the const read paths announce through it, like
+    // the instrumentation counters above.
+    mutable mem::hazard_domain_t seam_domain_;
+    // Announce-pair instrumentation — see seam_announces(). The RFC-0005
+    // near-free-when-idle observable applied to ADR-0072 §4's gate: bumped ONLY on the
+    // gated announce path, so tests assert structurally that a placeholder / no-ext
+    // operation executed no announce.
+    mutable std::atomic<std::uint64_t> seam_announces_{0};
 };
 
 }  // namespace tr::graph

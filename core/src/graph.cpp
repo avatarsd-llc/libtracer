@@ -294,7 +294,8 @@ graph_t::graph_t(std::pmr::memory_resource* mr, mem::mem_backend_t* value_backen
       value_backend_(value_backend),
       root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, settings_t{},
                                        handlers_t{})),
-      ctl_(ctl) {
+      ctl_(ctl),
+      seam_domain_(*value_backend) {
     // The one built-in creation-catalog type (#82, ADR-0017): `stored_value` makes a
     // plain last-writer-wins vertex at the composed child key. Its optional SPEC
     // `config` SETTINGS is ignored for now (a stored-value has no instantiation params
@@ -307,6 +308,14 @@ graph_t::graph_t(std::pmr::memory_resource* mr, mem::mem_backend_t* value_backen
                                                          role_t::STORED_VALUE);
                         });
 }
+
+/**
+ * @brief Defaulted out of line: the final sweep IS `seam_domain_`'s destructor
+ *        (ADR-0072 §2) — every parked value-seam block's deleter fires there. Declared
+ *        explicitly so the teardown point #576/#551 recorded as missing exists as a
+ *        named, documented event rather than an implicit one.
+ */
+graph_t::~graph_t() = default;
 
 void graph_t::register_child_type(std::string type, child_factory_t factory) {
     child_types_.insert_or_assign(std::move(type), std::move(factory));
@@ -385,9 +394,17 @@ void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& k
         const std::uint32_t k = x.own_subs();
         if (k > 0) bump_subtree_listeners(&x, -static_cast<std::int32_t>(k));
         keys.push_back(build_key(&x));
-        // Park the detached value seam (if any): a lock-free reader may still hold the old
-        // pointer, so it is reclaimed only at teardown, never freed here. Under map_mutex_.
-        if (value_handlers_t* seam = x.revert_to_placeholder()) retired_seams_.emplace_back(seam);
+        // Hand the detached value seam (if any) to the reclamation domain (ADR-0072 §4):
+        // a lock-free reader may still hold — and have ANNOUNCED — the old pointer, so it
+        // is never freed here; a domain scan frees it once no announcement covers it,
+        // which is what bounds live seam blocks under peer-driven churn (#576). The
+        // block came from `new` (vertex_t::adopt_identity), so its deleter is `delete`
+        // and the backend argument is unused.
+        if (value_handlers_t* seam = x.revert_to_placeholder()) {
+            seam_domain_.retire(
+                seam,
+                +[](void* p, mem::mem_backend_t&) { delete static_cast<value_handlers_t*>(p); });
+        }
         x.mark_unregistered();
     };
     retire_one(*v);
@@ -527,6 +544,10 @@ result_t<vertex_t*> graph_t::ensure_vertex_ptr(std::span<const std::byte> key,
 
 std::uint64_t graph_t::ancestor_walks() const noexcept {
     return ancestor_walks_.load(std::memory_order_relaxed);
+}
+
+std::uint64_t graph_t::seam_announces() const noexcept {
+    return seam_announces_.load(std::memory_order_relaxed);
 }
 
 graph_t::delivery_drops_t graph_t::delivery_drops() const noexcept {
@@ -699,18 +720,23 @@ result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller)
     if (!acl_allows(v, caller, acl_right_t::READ))
         return std::unexpected(status_t::PERMISSION_DENIED);
     if (v->role() == role_t::HANDLER) {
-        // Load the seam ONCE: it is an atomic pointer a concurrent retire may swap to
-        // null (RFC-0009 §B.6), so a check-then-call across two loads would race — the
-        // second load could see the cleared seam and throw bad_function_call. The parked
-        // block keeps this reference valid even if the swap fires right after the load.
-        const value_handlers_t& h = v->handlers();
-        // The handler seam is rope-valued (ADR-0053 section 6), so a handler read COMPOSES:
-        // it costs one control block that the published path does not pay. Converting the
-        // seam itself is a separate, lateral change.
-        if (h.on_read) {
-            auto produced = h.on_read();
-            if (!produced) return std::unexpected(produced.error());
-            return value_ref_t::composed(std::move(*produced));
+        // Announce-protected seam window (ADR-0072 §4): protect() loads the seam ONCE,
+        // announces it to the reclamation domain, and re-reads — so a concurrent retire
+        // (RFC-0009 §B.6) can swap the seam out but a scan cannot free the block until
+        // the guard clears, AFTER the user callback returns. Gated on the has-extension
+        // check (handlers_slot() null ⇒ no ext ⇒ no announce machinery at all).
+        if (const std::atomic<value_handlers_t*>* slot = v->handlers_slot(); slot != nullptr) {
+            seam_announces_.fetch_add(1, std::memory_order_relaxed);
+            mem::hazard_domain_t::guard_t guard{seam_domain_};
+            const value_handlers_t* h = guard.protect(*slot);
+            // The handler seam is rope-valued (ADR-0053 section 6), so a handler read
+            // COMPOSES: it costs one control block that the published path does not pay.
+            // Converting the seam itself is a separate, lateral change.
+            if (h != nullptr && h->on_read) {
+                auto produced = h->on_read();
+                if (!produced) return std::unexpected(produced.error());
+                return value_ref_t::composed(std::move(*produced));
+            }
         }
         return std::unexpected(status_t::NOT_FOUND);
     }
@@ -879,12 +905,21 @@ void graph_t::fan_out(vertex_t* v, const rope_t& value) {
 
 result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t value) {
     if (v->role() == role_t::HANDLER) {
-        const value_handlers_t& h = v->handlers();  // load once — a retire may swap it out
-        if (!h.on_write) return std::unexpected(status_t::NOT_FOUND);
-        result_t<void> r = h.on_write(value);
-        if (!r) return std::unexpected(r.error());
-        v->note_write();
-        return std::shared_ptr<const rope_t>{};  // handler consumed it — nothing stored
+        // Announce-protected seam window (ADR-0072 §4): a concurrent retire may swap the
+        // seam out, but the announced block is not freed until the guard clears — after
+        // on_write returns. Gated on the has-extension check; a placeholder / plain-leaf
+        // write (no ext) never reaches the announce machinery.
+        if (const std::atomic<value_handlers_t*>* slot = v->handlers_slot(); slot != nullptr) {
+            seam_announces_.fetch_add(1, std::memory_order_relaxed);
+            mem::hazard_domain_t::guard_t guard{seam_domain_};
+            const value_handlers_t* h = guard.protect(*slot);
+            if (h == nullptr || !h->on_write) return std::unexpected(status_t::NOT_FOUND);
+            result_t<void> r = h->on_write(value);
+            if (!r) return std::unexpected(r.error());
+            v->note_write();
+            return std::shared_ptr<const rope_t>{};  // handler consumed it — nothing stored
+        }
+        return std::unexpected(status_t::NOT_FOUND);
     }
     // The storage verb owns the invariant order: LKV publish (lock-free) BEFORE the
     // lock; ring append + keep-last trim + seq bump + await wake under it.
@@ -1861,8 +1896,15 @@ result_t<view_t> graph_t::read_acl(vertex_t* v) const {
 result_t<view_t> graph_t::read_children(vertex_t* v) const {
     // The synthesized listing wins (ADR-0044): a transport/connection vertex serves
     // its live bus peers here — a snapshot of traffic, never stored graph structure.
-    // Load once — a concurrent retire may swap the seam out between check and call.
-    if (const value_handlers_t& h = v->handlers(); h.on_children) return h.on_children();
+    // Announce-protected seam window (ADR-0072 §4): protect() pins the block a
+    // concurrent retire may swap out, and the guard clears only after on_children
+    // returned. Gated on the has-extension check (no ext ⇒ no announce).
+    if (const std::atomic<value_handlers_t*>* slot = v->handlers_slot(); slot != nullptr) {
+        seam_announces_.fetch_add(1, std::memory_order_relaxed);
+        mem::hazard_domain_t::guard_t guard{seam_domain_};
+        if (const value_handlers_t* h = guard.protect(*slot); h != nullptr && h->on_children)
+            return h->on_children();
+    }
     // Generic member enumeration (reference 05 §SPEC read-members): the DIRECT
     // children of v in the vertex map — keys of the form <v.key><one NAME record>.
     // Each member is a minimal POINT{NAME} descriptor; order is unspecified.
@@ -1898,10 +1940,15 @@ result_t<rope_t> graph_t::read_children_folded(vertex_handle_t vh) const {
     // Synthesized listing (ADR-0044): a live bus-peer snapshot, already one contiguous
     // view — a fold has nothing to gather, so it crosses as a single-link rope,
     // byte-identical to the read_children path.
-    if (const value_handlers_t& h = v->handlers(); h.on_children) {
-        const result_t<view_t> sv = h.on_children();
-        if (!sv) return std::unexpected(sv.error());
-        return rope_t{*sv};
+    // Announce-protected seam window (ADR-0072 §4), same shape as read_children.
+    if (const std::atomic<value_handlers_t*>* slot = v->handlers_slot(); slot != nullptr) {
+        seam_announces_.fetch_add(1, std::memory_order_relaxed);
+        mem::hazard_domain_t::guard_t guard{seam_domain_};
+        if (const value_handlers_t* h = guard.protect(*slot); h != nullptr && h->on_children) {
+            const result_t<view_t> sv = h->on_children();
+            if (!sv) return std::unexpected(sv.error());
+            return rope_t{*sv};
+        }
     }
     // The folded projection of read_children: instead of concatenating every member into
     // one buffer and copying the whole listing (twice — into `out`, then into a segment),

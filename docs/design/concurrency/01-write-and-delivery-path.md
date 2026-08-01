@@ -17,7 +17,7 @@ lock each stage takes, where the buffers come from, and what the delivery legs c
 
 ## 1. Write path
 
-`write_impl` (`core/src/graph.cpp:934`) is the one body behind every write overload. It takes
+`write_impl` (`core/src/graph.cpp:969`) is the one body behind every write overload. It takes
 **no map lock**. The stages, in order:
 
 | stage | what it does |

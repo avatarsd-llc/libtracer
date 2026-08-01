@@ -88,7 +88,7 @@ std::array<std::byte, 4096> stack;
 mem::bump_source_t src(stack, *ctl_);
 ```
 
-(`core/src/graph.cpp:1009-1010`.) Three properties follow, and each closes a different failure mode:
+(`core/src/graph.cpp:1044-1045`.) Three properties follow, and each closes a different failure mode:
 
 - **A bounded node that injected `ctl` gets its own store here too.** The overflow leg draws from
   that injection rather than from the global heap, so the node's memory bound covers the arena
@@ -114,11 +114,11 @@ defines for "exceeds this receiver's decode resources".
 
 | Allocation | Site | Failure answer |
 | --- | --- | --- |
-| Branch-write flatten into the value backend | `core/src/graph.cpp:996-997` | empty head with a non-zero rope length → `BACKPRESSURE` |
-| Field-write flatten into the value backend | `core/src/graph.cpp:1233-1234` | empty head with a non-zero rope length → `BACKPRESSURE` |
-| Branch-write root key render (`try_build_key`) | `core/src/graph.cpp:1028-1029` | `false` → `BACKPRESSURE` |
-| Branch-write parse-key copy (`detail::try_assign`) | `core/src/graph.cpp:1031` | `false` → `BACKPRESSURE` |
-| Branch-write decode arena | `core/src/graph.cpp:1011-1013` | decode error → `TYPE_MISMATCH` |
+| Branch-write flatten into the value backend | `core/src/graph.cpp:1031-1032` | empty head with a non-zero rope length → `BACKPRESSURE` |
+| Field-write flatten into the value backend | `core/src/graph.cpp:1268-1269` | empty head with a non-zero rope length → `BACKPRESSURE` |
+| Branch-write root key render (`try_build_key`) | `core/src/graph.cpp:1063-1064` | `false` → `BACKPRESSURE` |
+| Branch-write parse-key copy (`detail::try_assign`) | `core/src/graph.cpp:1066` | `false` → `BACKPRESSURE` |
+| Branch-write decode arena | `core/src/graph.cpp:1046-1048` | decode error → `TYPE_MISMATCH` |
 | Per-delivery COMPACT flatten | `core/src/fwd_router.cpp:1180-1181` | the delivery is **dropped** |
 | Per-delivery frame build | `core/src/fwd_router.cpp:1185` | the delivery is **dropped** |
 

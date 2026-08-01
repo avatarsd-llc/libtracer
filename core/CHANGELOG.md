@@ -16,6 +16,16 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`~graph_t` now exists and reclaims (#576, ADR-0072).** The graph owns a
+  `tr::mem::hazard_domain_t` (new header `hazard_domain.hpp`) — a type-erased,
+  backend-injected hazard-pointer reclamation domain generalized from the `lkv_slot.hpp`
+  protocol. `retire()` hands the detached value seam to the domain instead of parking it
+  forever, so live seam blocks stay BOUNDED under peer-driven connection churn (they
+  previously grew monotonically, one block per retire of a handler-bearing vertex), and
+  the new destructor runs the final sweep — nothing retired outlives the graph.
+  Observability: `graph_t::seam_domain()` (census / accounting) and
+  `graph_t::seam_announces()` (the announce-gate counter, `ancestor_walks()` mold).
+
 - **`fwd_router_t::subscribe_toward(producer, target)` (#739).** Binds a local producer's
   subscription toward ONE ordinary mount-path target (`/net/<module>/<name>/<consumer...>`,
   arbitrarily nested), resolved through the SAME ADR-0061 strip-K cached descent the forward
@@ -26,6 +36,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   (no directed registry entry to store yet — the #741 work's territory).
 
 ### Changed
+
+- **BREAKING: `vertex_t::handlers()` is gone; use `handlers_slot()` + the graph's domain
+  (#576, ADR-0072).** The old accessor returned a bare reference whose safety rested on
+  the park-forever guarantee this release deletes — an unannounced load-then-deref now
+  races reclamation. `handlers_slot()` returns the atomic seam slot (or `nullptr` when
+  the vertex has no extension block — the placeholder/fan-0 gate), and a dereference goes
+  through `hazard_domain_t::guard_t::protect` on `graph_t::seam_domain()`, which pins the
+  block for the length of the callback.
 
 - **BREAKING: the derived `"<kind>-client"` / `"<kind>-server"` module name is gone (#621,
   ADR-0073 §4).** `transport_vertex_t::module_for` no longer invents a module for an undeclared
