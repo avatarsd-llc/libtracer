@@ -40,7 +40,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 Replace the normative "segment limit 32" with **"segment limit 255"** everywhere it is stated —
 `docs/spec/v1.md:58` and `:95`, `docs/reference/03-addressing.md:35`,
-`docs/reference/05-protocol-tlvs.md:280` and `:356` — and reprice
+`docs/reference/05-protocol-tlvs.md:280` and `:358` — and reprice
 `kMaxSegments` (`core/include/libtracer/path.hpp:34`) and the bindings' mirrors to match.
 
 The value is not asserted; it falls out of three prices computed in §4 from the spec's own
@@ -139,7 +139,7 @@ PATH, not FWD, not SUBSCRIBER. The physical widths in play are only:
 | width | value | bound it implies |
 | --- | --- | --- |
 | PATH `length` field | u16 (u32 with `opt.LL=1`) | 65 535 B raw; **normatively capped at 1024 B** |
-| per-segment cost, today | `4 + len` (NAME header + bytes, `reference/05:351`) | min 5 B ⇒ **≤ 204 segments** in 1024 B |
+| per-segment cost, today | `4 + len` (NAME header + bytes, `reference/05:353`) | min 5 B ⇒ **≤ 204 segments** in 1024 B |
 | per-segment cost, RFC-0018 packed | `1 + len` (`u8` length + bytes, RFC-0018:37) | min 2 B ⇒ **≤ 512 segments** in 1024 B |
 
 So a segment cap cannot be read off a field width; it can only be **chosen** in the corridor the
@@ -280,7 +280,7 @@ degenerate between incorporated documents — RFC-0019 §4.4's finding, unchange
 >   ([RFC-0023](rfcs/0023-path-segment-cap-repriced-32-to-255.md)), NAME limit 64 bytes,
 >   PATH `length` ≤ 1024 bytes, reserved characters, UTF-8).
 
-### 5.2 `docs/spec/v1.md:95` — the encode-time MUST (§3.1.2)
+### 5.2 `docs/spec/v1.md:96` — the encode-time MUST (§3.1.2)
 
 > - Path constraints from [docs/reference/03-addressing.md](../reference/03-addressing.md) §path
 >   syntax (segment limit **255**, name limit 64 bytes, total ≤ 1024 bytes measured as the PATH
@@ -298,7 +298,7 @@ degenerate between incorporated documents — RFC-0019 §4.4's finding, unchange
 >   has no depth cap — nesting is receiver-resource-bounded per
 >   [RFC-0006](../spec/rfcs/0006-resource-bounded-nesting-depth.md).)
 
-### 5.4 `docs/reference/05-protocol-tlvs.md:280` and `:356`
+### 5.4 `docs/reference/05-protocol-tlvs.md:280` and `:358`
 
 > - Segment count ≤ **255** ([RFC-0023](../spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md)).
 
@@ -348,7 +348,7 @@ enforce; resolver enforces child-type; count/length bound where constructed or a
   not expressible under today's encoding** (255 × 5 = 1275 > 1024) — it becomes expressible only
   under RFC-0018's packing, and that RFC owns adding it (`path/path-deep-255-packed`).
 - A 256-segment **reject** vector is not expressible in the round-trip harness at all — the cap is
-  an encode-time MUST, and `v1.md:130-142`'s conformance procedure has no encode-reject shape
+  an encode-time MUST, and `v1.md:131-143`'s conformance procedure has no encode-reject shape
   (RFC-0019 §10's structural point, unchanged by repricing). The Rust/TS unit suites carry the
   reject case instead.
 
