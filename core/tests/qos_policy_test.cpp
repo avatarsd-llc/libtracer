@@ -265,9 +265,16 @@ void test_removed_knobs_are_schema_not_found() {
         const auto w = g.write(path_t(p), value_le(1, 8));
         check(fails_with(w, status_t::SCHEMA_NOT_FOUND),
               std::string("`:settings.") + knob + "` write => SCHEMA_NOT_FOUND");
-        // The READ half of the same name, which was never implemented and still is not.
+        // NOT §5.4 coverage, and NOT new: the read half of a flat knob name was never
+        // implemented, so this LOCAL-caller read answered SCHEMA_NOT_FOUND before RFC-0022
+        // too. It is kept as a regression pin only. The read half that RFC-0022 §3.B does
+        // newly constrain is the CALLER-INDEPENDENCE of that answer — a denied caller used
+        // to hear PERMISSION_DENIED here, because the read gate ran before name resolution
+        // — and it is asserted in acl_test's `test_flat_knob_surface_is_withdrawn`, at three
+        // callers, with its own ablation. An empty caller cannot discriminate that.
         check(fails_with(g.read(path_t(p)), status_t::SCHEMA_NOT_FOUND),
-              std::string("`:settings.") + knob + "` read  => SCHEMA_NOT_FOUND");
+              std::string("(pre-RFC pin, not §5.4) `:settings.") + knob +
+                  "` local read => SCHEMA_NOT_FOUND");
     }
 
     // THE ABLATION. A loop that only ever expects SCHEMA_NOT_FOUND would pass just as well
@@ -406,6 +413,67 @@ void test_nothing_is_inherited() {
 }
 
 // ---------------------------------------------------------------------------
+// The two ERROR vectors, against the reply the RESOLVER actually assembles.
+
+/** @brief A PATH TLV over @p segs, built through the production emit helpers. */
+std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
+    std::vector<std::byte> body;
+    for (std::string_view s : segs) tr::wire::emit_name(body, s);
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
+    return out;
+}
+
+/** @brief A FIELD selector TLV whose steps are the dotted NAMEs @p steps. */
+std::vector<std::byte> b_field(std::initializer_list<std::string_view> steps) {
+    std::vector<std::byte> body;
+    for (std::string_view s : steps) tr::wire::emit_name(body, s);
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::FIELD, opt_t{.pl = true}, body);
+    return out;
+}
+
+/** @brief A FWD frame in RFC-0004 §B child order: op, dst, [selector], src, [payload]. */
+std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
+                             const std::vector<std::byte>& selector,
+                             const std::vector<std::byte>& payload) {
+    std::vector<std::byte> body;
+    const std::byte opb{static_cast<std::uint8_t>(op)};
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&opb, 1));
+    body.insert(body.end(), dst.begin(), dst.end());
+    body.insert(body.end(), selector.begin(), selector.end());
+    const std::vector<std::byte> src = b_path({"reply-ep"});
+    body.insert(body.end(), src.begin(), src.end());
+    body.insert(body.end(), payload.begin(), payload.end());
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
+    return out;
+}
+
+/**
+ * @brief Resolve @p frame and re-encode the ERROR child of the reply's STATUS — the exact
+ *        bytes a peer receives inside the `kind=ERROR` reply.
+ * @return the ERROR TLV bytes, or an empty vector if the reply was not a well-formed error.
+ */
+std::vector<std::byte> error_child_bytes(op_resolver_t& resolver,
+                                         std::span<const std::byte> frame) {
+    const auto arena = tr::wire::decode_into(frame, tr::mem::heap_source());
+    if (!arena) return {};
+    const auto reply = resolver.resolve(*arena, {});
+    if (!reply) return {};
+    const tr::view::view_t flat = reply->flatten();
+    const auto dec = tr::wire::decode(flat.bytes());
+    if (!dec || dec->children.size() < 5) return {};
+    if (dec->children[3].type != type_t::VALUE || dec->children[3].payload.size() != 1) return {};
+    if (std::to_integer<std::uint8_t>(dec->children[3].payload[0]) !=
+        static_cast<std::uint8_t>(reply_kind_t::ERROR))
+        return {};
+    const tlv_t& status = dec->children[4];
+    if (status.type != type_t::STATUS || status.children.size() != 1) return {};
+    return tr::wire::encode(status.children[0]);
+}
+
+// ---------------------------------------------------------------------------
 // The §5 vectors as BYTES: each one is fed to (or compared against) the reference
 // implementation, so a vector that drifts from the code fails here rather than sitting
 // on disk describing a protocol nobody implements.
@@ -421,6 +489,26 @@ std::vector<std::byte> vector_bytes(std::string_view case_dir) {
     for (std::size_t i = 0; i < raw.size(); ++i)
         out[i] = static_cast<std::byte>(static_cast<unsigned char>(raw[i]));
     return out;
+}
+
+/**
+ * @brief The packed `delivery_policy` word a SUBSCRIBER's `SETTINGS` child carries
+ *        (RFC-0022 §3.A), read straight out of @p sub's bytes — `nullopt` when the record
+ *        names no policy at all (the `policy-absent` case).
+ */
+std::optional<std::uint16_t> policy_word_of(std::span<const std::byte> sub) {
+    const auto dec = tr::wire::decode(sub);
+    if (!dec || dec->type != type_t::SUBSCRIBER) return std::nullopt;
+    for (const tlv_t& child : dec->children) {
+        if (child.type != type_t::SETTINGS) continue;
+        const std::vector<tlv_t>& q = child.children;
+        for (std::size_t i = 0; i + 1 < q.size(); ++i) {
+            if (q[i].type != type_t::NAME || q[i + 1].type != type_t::VALUE) continue;
+            if (tr::detail::as_string_view(q[i].payload) == "delivery_policy")
+                return tr::detail::load_le<std::uint16_t>(q[i + 1].payload);
+        }
+    }
+    return std::nullopt;
 }
 
 /**
@@ -589,6 +677,43 @@ void test_conformance_vectors() {
         (void)g.write(src, byte_value(0x5A));
         check(latches_for(g, path_t("/vec/src"), "subscriber/policy-reserved-bits") == 0,
               "subscriber/policy-reserved-bits: admitted (not rejected), bit 5 clear => no latch");
+
+        // The vector's OTHER two claims, which "admitted, no latch" does not reach: the word
+        // under the reserved bits still decodes (an implementation that let 6-15 leak into
+        // reliability or priority fails here), and the record round-trips VERBATIM through
+        // `:subscribers[0]` — §3.A stores unknown bits, it does not normalise them away.
+        const std::vector<std::byte> want = vector_bytes("subscriber/policy-reserved-bits");
+        const std::optional<std::uint16_t> word = policy_word_of(want);
+        check(word.has_value() && *word == 0xFFC1,
+              "... the vector's delivery_policy word is 0xFFC1 (every reserved bit, plus "
+              "reliability=1)");
+        const delivery_policy_t p{word.value_or(0)};
+        check(p.reliability() == 1 && p.priority() == 0 && !p.durability_request(),
+              "... which decodes to reliability=1 and NOTHING else — no leak from 6-15");
+        const std::optional<decoded_t> back =
+            decode_read(g.read(path_t("/vec/src:subscribers[0]")));
+        check(back.has_value() && back->bytes == want,
+              "... and `:subscribers[0]` serves the record back byte-identically (6-15 kept)");
+    }
+
+    // `field/field-nested` is a SELECTOR, so its behaviour is which door it opens: the
+    // reserved `app` subkey. Fed to the resolver verbatim, it must reach the app container —
+    // and the sibling spelling one NAME away must reach nothing (RFC-0022 §3.B).
+    {
+        graph_t g;
+        op_resolver_t resolver(g);
+        const vertex_handle_t v = g.register_vertex(path_t("/fn"), role_t::STORED_VALUE);
+        std::vector<tr::graph::app_field_t> table;
+        table.push_back(
+            tr::graph::app_field_t{.name = "kp", .access = tr::graph::app_access_t::RW});
+        g.set_app_fields(v, std::move(table));
+        const std::vector<std::byte> sel = vector_bytes("field/field-nested");
+        check(error_child_bytes(resolver, b_fwd(fwd_op_t::READ, b_path({"fn"}), sel, {})).empty(),
+              "field/field-nested: the vector's own bytes select `:settings.app` and are SERVED");
+        check(!error_child_bytes(resolver, b_fwd(fwd_op_t::READ, b_path({"fn"}),
+                                                 b_field({"settings", "reliability"}), {}))
+                   .empty(),
+              "... while the same shape one NAME away resolves to nothing (the ablation)");
     }
 }
 
@@ -636,67 +761,6 @@ void test_replace_door_latches() {
     (void)g.write(src, byte_value(0x77));
     check(g_client_writes == 2 && g_client_last == 0x77,
           "the surviving edge takes the next write — the replace left exactly ONE live listener");
-}
-
-// ---------------------------------------------------------------------------
-// The two ERROR vectors, against the reply the RESOLVER actually assembles.
-
-/** @brief A PATH TLV over @p segs, built through the production emit helpers. */
-std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
-    std::vector<std::byte> body;
-    for (std::string_view s : segs) tr::wire::emit_name(body, s);
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
-    return out;
-}
-
-/** @brief A FIELD selector TLV whose steps are the dotted NAMEs @p steps. */
-std::vector<std::byte> b_field(std::initializer_list<std::string_view> steps) {
-    std::vector<std::byte> body;
-    for (std::string_view s : steps) tr::wire::emit_name(body, s);
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FIELD, opt_t{.pl = true}, body);
-    return out;
-}
-
-/** @brief A FWD frame in RFC-0004 §B child order: op, dst, [selector], src, [payload]. */
-std::vector<std::byte> b_fwd(fwd_op_t op, const std::vector<std::byte>& dst,
-                             const std::vector<std::byte>& selector,
-                             const std::vector<std::byte>& payload) {
-    std::vector<std::byte> body;
-    const std::byte opb{static_cast<std::uint8_t>(op)};
-    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&opb, 1));
-    body.insert(body.end(), dst.begin(), dst.end());
-    body.insert(body.end(), selector.begin(), selector.end());
-    const std::vector<std::byte> src = b_path({"reply-ep"});
-    body.insert(body.end(), src.begin(), src.end());
-    body.insert(body.end(), payload.begin(), payload.end());
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
-}
-
-/**
- * @brief Resolve @p frame and re-encode the ERROR child of the reply's STATUS — the exact
- *        bytes a peer receives inside the `kind=ERROR` reply.
- * @return the ERROR TLV bytes, or an empty vector if the reply was not a well-formed error.
- */
-std::vector<std::byte> error_child_bytes(op_resolver_t& resolver,
-                                         std::span<const std::byte> frame) {
-    const auto arena = tr::wire::decode_into(frame, tr::mem::heap_source());
-    if (!arena) return {};
-    const auto reply = resolver.resolve(*arena, {});
-    if (!reply) return {};
-    const tr::view::view_t flat = reply->flatten();
-    const auto dec = tr::wire::decode(flat.bytes());
-    if (!dec || dec->children.size() < 5) return {};
-    if (dec->children[3].type != type_t::VALUE || dec->children[3].payload.size() != 1) return {};
-    if (std::to_integer<std::uint8_t>(dec->children[3].payload[0]) !=
-        static_cast<std::uint8_t>(reply_kind_t::ERROR))
-        return {};
-    const tlv_t& status = dec->children[4];
-    if (status.type != type_t::STATUS || status.children.size() != 1) return {};
-    return tr::wire::encode(status.children[0]);
 }
 
 /**

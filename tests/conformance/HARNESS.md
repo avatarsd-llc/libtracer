@@ -26,6 +26,53 @@ arena tests, the coverage audit) on valid frames only.
 The **C++ reference is golden**: when the wire changes, it blesses new/updated
 vectors and every other core must match them.
 
+## What a vector gates — and what it does NOT
+
+A vector gates the **codec, and only the codec**. The harness contract below is
+`encode(decode(input.bin)) == input.bin`, which is satisfied by *any* well-formed TLV —
+including one whose bytes no implementation ever produces or acts on. Passing a vector
+therefore proves that a core can carry those bytes across its decoder and encoder without
+losing a bit. It proves **nothing** about what the core does when it receives them.
+
+This is not a gap to be closed by making the vectors cleverer; it is a boundary. Two
+consequences follow, and both are load-bearing:
+
+1. **A vector whose `description.md` states a behaviour is making a claim the harness
+   cannot check.** Reverting the feature the behaviour names leaves every harness at a
+   full score. So the claim must additionally be made where it *can* be false — a host
+   test in the implementation that owns the behaviour, which fails when the behaviour is
+   removed. Every behavioural vector below names that test.
+2. **A core may score `ok` on a vector whose behaviour it does not implement at all.** A
+   pure-codec binding round-trips a `SUBSCRIBER` carrying a `delivery_policy` word without
+   ever interpreting a bit of it. That is a correct `ok` — the codec really is
+   conformant — and it is why the score alone must never be read as "this core implements
+   the feature". `run-all.py` reports codec agreement; the table below is where the
+   behavioural gate lives.
+
+Behavioural conformance is gated by **each implementation's own host suite**, not here.
+
+### Behavioural vectors and their binding tests
+
+| Vector | Behaviour claimed | Bound by |
+| --- | --- | --- |
+| `subscriber/policy-absent` | A `SUBSCRIBER` naming no `delivery_policy` behaves exactly as a pre-RFC-0022 one: no latch on join, later writes still delivered. | C++ `core/tests/qos_policy_test.cpp` — `test_policy_absent_is_todays_behaviour`, `test_conformance_vectors`, `test_replace_door_latches`. TS `bindings/typescript/packages/client/test/vectors.test.mjs`. |
+| `subscriber/policy-durability` | Bit 5 set ⇒ the producer's latched value is delivered once on join, for **this** subscription and not its siblings — through the append door and the RFC-0009 §D.1 replace door alike. | C++ `qos_policy_test.cpp` — `test_policy_durability_is_per_subscriber`, `test_conformance_vectors`, `test_replace_door_latches`. Rust `bindings/rust/src/structured.rs` tests. TS `vectors.test.mjs`. |
+| `subscriber/policy-reserved-bits` | Bits 6–15 are **ignored, never rejected**; they do not leak into `reliability`/`priority`; and the record round-trips through `:subscribers[N]` verbatim. | C++ `qos_policy_test.cpp` — `test_policy_reserved_bits_are_ignored`, `test_conformance_vectors`. Rust `structured.rs` tests. TS `vectors.test.mjs`. |
+| `settings/removed-knob` | A write of any withdrawn `:settings.<knob>` answers `ERROR{tr::schema::not_found}`, caller-independently, and these are the bytes the resolver builds. | C++ `qos_policy_test.cpp` — `test_removed_knobs_are_schema_not_found`, `test_removed_knob_reply_bytes`; `core/tests/acl_test.cpp` — `test_flat_knob_surface_is_withdrawn` (read **and** write, three callers). |
+| `settings/read-container-shape` | A bare `:settings` read serves `SETTINGS{ NAME "app", SETTINGS{…} }` — the container survives, the knobs do not. | C++ `qos_policy_test.cpp` — `test_settings_container_keeps_its_shape`, `test_conformance_vectors` (byte-exact against `read_settings`). |
+| `settings/schema-enumerates-nothing` | `:schema`'s synthesized protocol part enumerates zero knobs, and the owner part still follows it. | C++ `qos_policy_test.cpp` — `test_schema_enumerates_nothing`, `test_conformance_vectors` (byte-exact against `read_schema`). |
+| `stream/history-depth-host-only` | The STREAM ring depth is owner-side (`set_history_depth` trims the ring) and has **no** wire surface: read and write both answer these bytes. | C++ `qos_policy_test.cpp` — `test_history_depth_is_host_only`, `test_removed_knob_reply_bytes`. |
+| `field/field-nested` | `:settings.app` is the two-level field that survives §3.B; a second level that is not `app` resolves to nothing. | C++ `qos_policy_test.cpp` — `test_conformance_vectors` (the vector's own bytes fed to `op_resolver_t` as the selector, with the sibling spelling as the ablation). |
+| `tlv-types/point-schema-app` | `read_schema` emits `POINT{ NAME, SETTINGS, NAME "app", SETTINGS }` for a vertex with a declared app table. | C++ `qos_policy_test.cpp` — `test_conformance_vectors` (byte-exact). |
+
+`tlv-types/settings-reliability` is **not** in this table on purpose: since RFC-0022 it pins
+a `SETTINGS` record *shape* and no longer names any protocol knob, so it is a pure codec
+vector with no behaviour to bind.
+
+When a core does not implement a vector's behaviour, the honest state is *not* a silent
+`ok` on the codec score plus an empty row here — it is either a binding test in that core's
+suite, or an explicit note in [`harnesses.json`](harnesses.json) that the surface is absent.
+
 ## What a harness must do
 
 A harness is a single command:
