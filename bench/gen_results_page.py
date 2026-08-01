@@ -354,6 +354,15 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "counter, a shared read, contended read-modify-writes, false sharing and lock costs, so "
         "a claim about a shared line can be checked against the box in front of you.",
         "ns per op · ops/s, per thread count"),
+    instrument_t(
+        "bench_seam_guard.cpp", "scaling", (),
+        "Times ONE thing: `graph_t::read` and `graph_t::write` on a HANDLER-role vertex, whose "
+        "value seam is a user callback protected by the ADR-0072 reclamation domain. A "
+        "`STORED_VALUE` read rides along as a control leg that must not move. Built from one "
+        "source at two revisions and interleaved by `run_seam_ab.sh`, so the arms differ only "
+        "in the library they linked — which is what lets a reclamation lever be priced on its "
+        "own instead of inside a whole release.",
+        "ns per operation, per arm"),
     # -- the instrument that measures an instrument -------------------------
     instrument_t(
         "bench_tail_validate.cpp", "meta", (),
