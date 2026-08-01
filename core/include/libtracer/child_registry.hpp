@@ -18,6 +18,7 @@
 #pragma once
 
 #include <atomic>
+#include <cassert>
 #include <cstdint>
 #include <new>
 #include <span>
@@ -138,7 +139,16 @@ class child_registry_t {
         }
         /** @brief The mount path PRE-ENCODED as a run of NAME TLVs (#508), built once here so
          *         a forward hop emits the grown `src` prefix as ONE span with no per-segment
-         *         work — and so no fixed buffer bounds how long a NAME may be. */
+         *         work — and so no fixed buffer bounds how long a NAME may be.
+         *
+         *         IMMUTABLE AFTER PUBLISH (ADR-0073's sibling ruling on #684): the encoding
+         *         is a pure function of the slot's key (`encode_mount_name(name)`), and a
+         *         rebind matches by name — so a live slot's replacement bytes are identical
+         *         by construction, and @ref add never reassigns them. That immutability is
+         *         what lets the forward path read this vector as a span with NO lock while
+         *         @ref add runs concurrently on a control thread; reassigning here would be
+         *         a use-after-free on the reader (#684). Slot reuse under a DIFFERENT name
+         *         (should teardown ever recycle slots) inherits this invariant. */
         std::vector<std::byte> mount_tlv;
     };
 
@@ -158,7 +168,6 @@ class child_registry_t {
      */
     void add(std::string name, transport_t& link) {
         const bool multi_peer = link.bus() != nullptr;
-        std::vector<std::byte> mount = encode_mount_name(name);
         child_t* hit = nullptr;
         for_each([&](const child_t& c) {
             if (c.name == name) {
@@ -168,11 +177,17 @@ class child_registry_t {
             return false;
         });
         if (hit != nullptr) {
+            // Rebind updates ONLY the fields a reconnect can change. `mount_tlv` is
+            // immutable after publish (see the member doc): a reader on a transport
+            // receive thread may hold it as a span right now, and the bytes a rebind
+            // would write are identical anyway — `encode_mount_name` is pure and the
+            // slot was matched by name. The assert pins that purity invariant.
+            assert(hit->mount_tlv == encode_mount_name(name));
             hit->multi_peer.store(multi_peer, std::memory_order_relaxed);
-            hit->mount_tlv = std::move(mount);
             hit->link.store(&link, std::memory_order_release);
             return;
         }
+        std::vector<std::byte> mount = encode_mount_name(name);
         child_t* const slot = append();
         if (slot == nullptr) return;  // allocation failure — soft-fail, nothing registered
         slot->name = std::move(name);

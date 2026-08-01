@@ -228,6 +228,13 @@ target_link_libraries(route_handle_test PRIVATE libtracer)
 libtracer_test_warnings(route_handle_test)
 add_test(NAME route_handle COMMAND route_handle_test)
 
+# #684 — the rebind-vs-forward race on the published mount run (a TSan vehicle that is
+# also a functional misroute detector on every build).
+add_executable(registry_rebind_race_test registry_rebind_race_test.cpp)
+target_link_libraries(registry_rebind_race_test PRIVATE libtracer)
+libtracer_test_warnings(registry_rebind_race_test)
+add_test(NAME registry_rebind_race COMMAND registry_rebind_race_test)
+
 # M1 — conformance harness (links the built library).
 add_executable(conformance_runner conformance_runner.cpp)
 target_link_libraries(conformance_runner PRIVATE libtracer)

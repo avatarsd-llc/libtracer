@@ -16,6 +16,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **A rebind of a live connection name no longer touches the published mount run (#684, ADR-0072
+  §4).** `child_registry_t::add`'s rebind branch move-assigned `mount_tlv` while the forward
+  path may read it as a span on a transport receive thread — a use-after-free whose symptom is
+  a corrupted mount prefix on an emitted frame. The bytes were identical anyway (the encoding is
+  a pure function of the slot's key); the member is now documented immutable-after-publish, the
+  rebind updates only `multi_peer`/`link`, and a debug assert pins the purity invariant. No
+  signature change; the reconnect path drops one alloc+free.
+
 - **A write to a vertex nobody subscribes to no longer takes the vertex lock stripe (#635).**
   `graph_t::fan_out` gated `snapshot_edges` on nothing, so every write acquired the stripe mutex
   whether or not an edge existed — and a stripe is shared by `kVertexLockStripes` vertices, so two
