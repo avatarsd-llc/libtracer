@@ -436,8 +436,21 @@ struct value_handlers_t {
     std::function<result_t<view_t>()> on_children; /**< @brief Synthesized `:children[]` listing. */
 };
 
+// `offsetof` on a type with `std::function` members is conditionally-supported rather than
+// ill-formed (the members make it non-standard-layout), and every real ABI answers it
+// correctly — but ESP-IDF builds `-Werror`, so the diagnostic is suppressed HERE and only
+// here. Losing the assertion would be worse than suppressing the warning: the reclamation
+// domain identifies a parked block BY its link's address, so a reorder of the members above
+// is a use-after-free, not a style change.
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+#endif
 static_assert(offsetof(value_handlers_t, hz_link) == 0,
               "value_handlers_t::hz_link must be the block's first member (ADR-0072 erratum 1)");
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 /**
  * @brief One right bit of an ACE `access_mask` (docs/reference/05 §0x0A, ADR-0020).

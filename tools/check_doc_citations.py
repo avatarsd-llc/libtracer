@@ -93,7 +93,7 @@ ANCHORS = [
     ("core/src/fwd_router.cpp:1181", "flatten OOM"),
     ("core/src/fwd_router.cpp:1185", "try_encode_compact", "fwd_router_t::deliver_remote"),
     ("core/src/fwd_router.cpp:1217", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
-    ("core/include/libtracer/vertex.hpp:2336", "vertex_t* parent_"),
+    ("core/include/libtracer/vertex.hpp:2349", "vertex_t* parent_"),
 ]
 
 
