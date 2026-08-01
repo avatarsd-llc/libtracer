@@ -82,6 +82,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: API docs gate (Doxygen, strict — undocumented public symbol fails)
         run: doxygen core/Doxyfile
+      # Doc-citation gate: every anchored `file:line` citation in the docs must still
+      # land on the line it names. Hand-maintained pointers rot silently — a stale
+      # citation still RESOLVES, reads authoritative, and sends the reader somewhere
+      # else, so nothing fails without this check. Run it here rather than in core-ci
+      # because it gates documentation, and it needs no build.
+      - name: Doc-citation gate (anchored file:line citations still resolve)
+        run: python3 tools/check_doc_citations.py
       # Auto-generate the Performance & Conformance page from the LIVE harnesses
       # (cross-core matrix + perf bench + coverage), replacing the static snapshot
       # (ADR-0032 §auto-published). Regenerated in-place each build; the artifact
