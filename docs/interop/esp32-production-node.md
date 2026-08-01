@@ -28,9 +28,13 @@ The one-slab recipe
 /** @brief One static slab feeds BOTH memory seams — nothing grows at runtime. */
 static std::byte g_slab[24 * 1024];
 
-// Front region: pool_t — RX segments for owning transport delivery.
-// Every inbound datagram lands in a pool slot; exhaustion = backpressure.
-tr::mem::pool_t rx_pool{front_region(g_slab), /*slot_payload=*/1536};
+// Front region: RESERVED for the RX segment pool — but the receive seam is a
+// mem_backend_t too, and it carries the same thread-safety obligation as the
+// other two: every endpoint allocates on its own receive thread and a delivered
+// segment reclaims on whichever thread drops the last reference. Until the
+// arch-selected synchronised pool exists (#770), the receive seam ALSO stays on
+// heap_backend() — see the warning below.
+// ... transport_vertex_t net{graph, router, "/net", &tr::mem::heap_backend()};
 
 // Back region: monotonic + synchronized arena — the pmr seam (label tables,
 // LKV control blocks).
@@ -83,10 +87,15 @@ interrupt-disable critical-section pool ADR-0060 §2 names, selected as an
 [ADR-0047 — build-time closed module sets](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)
 §2 module-set trait — and **it is not built**
 ([zero-copy and flatten](../design/zero-copy-and-flatten.md) §5 records the same gap for
-the receive backend, which is why `rx_pool` above feeds transport delivery and nothing
-else). Until it exists these two seams stay on `heap_backend()`, which is thread-safe.
-That is the honest state of "one slab, whole stack" on a single-core target, not a
-licence to inject the pool anyway.
+the receive backend). The transport **receive** seam sits on the same unsynchronised
+primitive and is NOT a safe residual use: `transport_vertex_t`'s `rx_backend` is handed
+unchanged to every endpoint, each endpoint allocates on its own receive thread, and a
+delivered segment reclaims on whichever thread drops the last reference — a bare
+`pool_t` there is the identical race (#770; the `full_node` example still wires one and
+is tracked by that issue). Until the critical-section pool exists all **three** seams —
+`value_backend`, `flat` and the receive backend — stay on `heap_backend()`, which is
+thread-safe. That is the honest state of "one slab, whole stack" on a single-core
+target, not a licence to inject the pool anyway.
 :::
 
 Keeping `flat` on the heap means the router's four flattens — the ingress

@@ -47,6 +47,12 @@ ANCHORS = [
     ("core/src/transport_vertex.cpp:157", "SCHEMA_NOT_FOUND", "transport_vertex_t::module_for"),
     # fwd-router.md's "Signature source" line — bare :NNN shorthands that had ALL rotted
     # silently (they cited the pre-#739 header). Anchored so they cannot rot again.
+    # zero-copy-and-flatten.md's rope-tier citations and ADR-0072's stale-comment pointer —
+    # all four had rotted on main and were re-asserted by a mechanical +24 shift (#768 verify).
+    ("core/include/libtracer/fwd_router.hpp:516", "Terminus over a MULTI-LINK rope"),
+    ("core/include/libtracer/fwd_router.hpp:522", "64 KB / 2 links"),
+    ("core/include/libtracer/fwd_router.hpp:534", "The forward hop, read entirely by OFFSET"),
+    ("core/include/libtracer/fwd_router.hpp:426", "Slot addresses are NOT stable"),
     ("core/include/libtracer/fwd_router.hpp:139", "explicit fwd_router_t"),
     ("core/include/libtracer/fwd_router.hpp:192", "void add_child"),
     ("core/include/libtracer/fwd_router.hpp:242", "subscribe_toward"),
