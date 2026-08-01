@@ -219,3 +219,30 @@ target_compile_options(bench_iov_spill_cost PRIVATE -Wall -Wextra)
 add_executable(bench_failable_census bench_failable_census.cpp)
 target_link_libraries(bench_failable_census PRIVATE libtracer)
 target_compile_options(bench_failable_census PRIVATE -Wall -Wextra)
+
+# RFC-0022 §6's implementation gate: does turning §3.D's pin predicate on by default buy
+# latency, and at what K? Two halves, because §6 demands both halves of the dual target.
+#
+#   bench_pin_ratio — the WRITE store leg over a (payload x segment) grid, every arm rotating
+#     inside ONE process (the recorded 2.8x sequential swing is what that defends against).
+#   bench_pin_net   — two PROCESSES over real UDP with a delivery-COUNTING receiver and a
+#     bounded RX pool, so the throughput claim is a receiver's count and the RAM claim is a
+#     measured free-slot floor rather than arithmetic.
+#
+# LIBTRACER_PIN_INSTRUMENT arms the decision site's pin/copy counters. It is defined on the
+# libtracer target too (PUBLIC would leak it into every consumer), because the counter is
+# incremented inside the library's TU and read from the bench's. Both benches ALSO carry an
+# instrument that needs no such define — segment-pointer identity between the stored value and
+# the frame — which is what lets this exact source build as the untouched-main control arm.
+option(LIBTRACER_PIN_INSTRUMENT "Arm the RFC-0022 §6 pin/copy branch counters" ON)
+if(LIBTRACER_PIN_INSTRUMENT)
+    target_compile_definitions(libtracer PUBLIC LIBTRACER_PIN_INSTRUMENT)
+endif()
+
+add_executable(bench_pin_ratio bench_pin_ratio.cpp)
+target_link_libraries(bench_pin_ratio PRIVATE libtracer)
+target_compile_options(bench_pin_ratio PRIVATE -Wall -Wextra)
+
+add_executable(bench_pin_net bench_pin_net.cpp)
+target_link_libraries(bench_pin_net PRIVATE libtracer)
+target_compile_options(bench_pin_net PRIVATE -Wall -Wextra)

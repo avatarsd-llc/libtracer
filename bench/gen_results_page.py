@@ -301,6 +301,21 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "counts frames delivered, to find where that thread saturates before the host does.",
         "frames/s, per peer count"),
     instrument_t(
+        "bench_pin_ratio.cpp", "counted", (),
+        "Times the WRITE store leg over a (payload x segment) grid with the copy branch and the "
+        "pinned-subview branch rotating as interleaved arms inside one process, and reports each "
+        "cell's pin/copy split two independent ways so no timing is read off an arm that never "
+        "reached the branch. Pairs with `bench_pin_net.cpp`; the control arm is this same source "
+        "built against untouched main.",
+        "ns per store · pins and copies per cell"),
+    instrument_t(
+        "bench_pin_net.cpp", "net", (),
+        "Drives FWD{WRITE} across two processes over real UDP into a receiver whose RX backend is "
+        "a bounded pool, counting deliveries in the receiver's own graph and sampling the pool's "
+        "free-slot floor and refusal count while the load runs — so the throughput figure is a "
+        "receiver's count and the RAM figure is an observed exhaustion rather than arithmetic.",
+        "deliveries/s · free slots · rx drops"),
+    instrument_t(
         "bench_qos_census.cpp", "counted", (),
         "Counts, per vertex shape, whether an extension block is allocated at all and whether "
         "the QoS it holds is byte-identical to the default — the ratio that decides whether "
