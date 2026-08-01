@@ -30,8 +30,8 @@ namespace tr::graph {
 inline constexpr std::size_t kMaxSegmentBytes = 64;
 /** @brief Max bytes in a whole canonical PATH payload (docs/reference/03 §limits). */
 inline constexpr std::size_t kMaxPathBytes = 1024;
-/** @brief Max NAME segments in a path (docs/reference/03 §limits). */
-inline constexpr std::size_t kMaxSegments = 32;
+/** @brief Max NAME segments in a path (reference/03 §limits; RFC-0023: min(255, byte cap)). */
+inline constexpr std::size_t kMaxSegments = 255;
 /** @brief Max steps in a `:field` tail (docs/reference/03 §limits). */
 inline constexpr std::size_t kMaxFieldDepth = 8;
 

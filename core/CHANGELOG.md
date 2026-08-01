@@ -14,6 +14,22 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **`kMaxSegments` repriced 32 → 255 (RFC-0023, accepted; #767).** `core/include/libtracer/path.hpp`
+  — a **monotone widening** of `path_t::parse`: every path that parsed before still parses, and a
+  33–255-segment address that used to answer `INVALID_PATH` is now legal. The 32 was inherited
+  from the extraction (ADR-0001) as a string-parser guard and was never priced; 255 is chosen so
+  every per-segment quantity (count, slot index, table dimension) stays `u8`-representable.
+  **Nothing in `core/` is dimensioned by the constant** — `segments_` is already a `std::size_t`,
+  the parse-time reserve is keyed to `kMaxPathBytes`, and the one cap-sized scratch
+  (`core/src/fwd_router.cpp`) is keyed to `kMaxSegmentBytes × kMountPeekMax` — so the static-RAM
+  delta is **zero by construction** (RFC-0023 §4.4, re-verified on this tree). Under the current
+  NAME-TLV body encoding each segment costs `4 + len`, so the **1024-byte `kMaxPathBytes` cap
+  binds first at 204 segments** and the count clause cannot fire; it becomes binding only under
+  RFC-0018's packed body. The observable widening today is therefore 32 → 204.
+  `kMaxSegmentBytes`, `kMaxPathBytes` and `kMaxFieldDepth` are unchanged.
+
 ### Added
 
 - **`graph_t::collect()` and `graph_t::parked_seam_count()` (#576, ADR-0072 §Supersession).**
