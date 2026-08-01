@@ -183,6 +183,15 @@ target_link_libraries(retire_test PRIVATE libtracer)
 libtracer_test_warnings(retire_test)
 add_test(NAME retire COMMAND retire_test)
 
+# #576 — graph_t::collect() / parked_seam_count(): the explicit end of retirement's
+# value-seam park. The load-bearing case is that the free runs OUTSIDE every graph lock
+# (a seam destructor that re-enters the graph must not deadlock), so this test carries a
+# watchdog and reports rather than hanging.
+add_executable(collect_test collect_test.cpp)
+target_link_libraries(collect_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(collect_test)
+add_test(NAME collect COMMAND collect_test)
+
 # #82 — in-band :children[] SPEC vertex creation (ADR-0017).
 add_executable(children_test children_test.cpp)
 target_link_libraries(children_test PRIVATE libtracer)

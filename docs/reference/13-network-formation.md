@@ -206,7 +206,7 @@ remain in the devices — RAM, or NVS where the device persists them.
 ([#491](https://github.com/avatarsd-llc/libtracer/issues/491), verified 2026-08-01).
 A subscription written *over the wire* binds to the **arrival session**, not to the
 target the writer named: `graph_t::subscribe_wire` discards the SUBSCRIBER's PATH
-target (`core/src/graph.cpp:1422`) and delivery rides the accumulated `src` back to
+target (`core/src/graph.cpp:1448`) and delivery rides the accumulated `src` back to
 whoever wrote it — the orchestrator. Its departure then evicts the edge outright
 (`fwd_router_t::link_down` → `graph_t::evict_link_edges`). So the paragraph above
 holds today only for a subscription the **consumer itself** wrote. Closing it needs a

@@ -16,6 +16,23 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`graph_t::collect()` and `graph_t::parked_seam_count()` (#576, ADR-0072 §Supersession).**
+  `retire()` detaches a HANDLER-role vertex's value seam and parks it — the seam is read
+  lock-free, so the retiring thread cannot free a block a reader may still hold. Until now the
+  park had one append site and **zero** release sites, and `transport_vertex_t::remove_connection`
+  retires the `/net/<name>` identity vertex, so **every connection teardown leaked ~96 B of
+  `std::function`** permanently: peer-driven growth, not operator action. `collect()` is the
+  park's other end — it swaps the park into a local under the map lock and lets the local
+  destruct **after** the lock is released, so the free runs on the **caller's thread, outside
+  every graph lock** (a seam callback's destructor may re-enter the graph). `parked_seam_count()`
+  makes an uncollected park observable rather than silent. **Caller obligation:** `collect()`
+  MUST be called from a point where no lock-free reader holds a value seam — the library cannot
+  know that moment, so it is published rather than hidden. An embedder that never calls it keeps
+  today's behaviour. Nothing was added to the read or write path; no existing call site changes.
+  This supersedes the ADR-0072 reclamation domain for this site — PR #750's hazard-domain design
+  is not merged (three rounds, three blocking defects, +19/+29 % on the read path), and #635
+  keeps the open reclamation question.
+
 - **`fwd_router_t::subscribe_toward(producer, target)` (#739).** Binds a local producer's
   subscription toward ONE ordinary mount-path target (`/net/<module>/<name>/<consumer...>`,
   arbitrarily nested), resolved through the SAME ADR-0061 strip-K cached descent the forward

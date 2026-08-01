@@ -831,8 +831,8 @@ struct vertex_ext_t {
      *         registration publishes with `store(release)` and retirement
      *         (`vertex_t::revert_to_placeholder`) swaps it to `nullptr` with
      *         `exchange(acq_rel)`. A swapped-out
-     *         block is **never freed under a concurrent reader** — the graph parks it and
-     *         reclaims it only at teardown (`graph_t::retired_seams_`; ADR-0057's
+     *         block is **never freed under a concurrent reader** — the graph parks it, and
+     *         the embedder frees the park through `graph_t::collect()` (#576; ADR-0057's
      *         insert-only discipline extended to the seam: emptied, never dangled). Keeping
      *         the park OFF the per-vertex block costs an app-field / leaf vertex zero extra
      *         bytes. The live block here is freed by this ext's destructor. */
@@ -1594,8 +1594,8 @@ class vertex_t {
      * @note `registered_` is NOT touched here — it is map-lock state the graph flips. The
      *       caller MUST hold the graph map lock. This RETURNS the swapped-out value-seam
      *       block (or nullptr) rather than freeing it: a lock-free reader may still hold
-     *       the old pointer, so the graph parks it (`graph_t::retired_seams_`) and frees
-     *       it at teardown. The per-vertex stripe lock is taken internally.
+     *       the old pointer, so the graph parks it and the embedder frees the park through
+     *       `graph_t::collect()` (#576). The per-vertex stripe lock is taken internally.
      *
      * @return the detached seam block to park, or nullptr if this vertex had none.
      */

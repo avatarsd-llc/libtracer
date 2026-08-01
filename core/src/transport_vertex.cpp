@@ -332,6 +332,12 @@ result_t<void> transport_vertex_t::remove_connection(std::string_view name) {
     // connection may take the same name — which is exactly the tombstone the registry
     // reuses. Retiring an already-retired or unregistered vertex is a no-op, so a
     // half-built connection tears down cleanly too.
+    //
+    // #576: this is the peer-driven append site of the value-seam park — the identity
+    // vertex bears a value seam, so every teardown parks one. We do NOT collect here: we
+    // are under ctl_m_ and on whatever thread the teardown arrived on, which is precisely
+    // the free location graph_t::collect() exists to take out of the library's hands. The
+    // embedder calls collect() where it knows no reader holds a seam.
     const auto retired = graph_.retire(it->second.vertex);
     // Erasing the entry destroys `owned` — the config-constructed socket — which joins
     // its recv thread. A provided link is borrowed and is left untouched.

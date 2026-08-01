@@ -277,6 +277,55 @@ class graph_t {
     [[nodiscard]] std::uint32_t retire_generation(vertex_handle_t vh) const noexcept;
 
     /**
+     * @brief Free every value seam @ref retire parked — the EXPLICIT collector (#576).
+     *
+     * @ref retire detaches a HANDLER-role vertex's value seam and **parks** it: the seam
+     * is read lock-free, so the retiring thread cannot free the block a concurrent reader
+     * may still be dereferencing. Parking alone has no other end — every connection
+     * teardown parks one `value_handlers_t` (~96 B of `std::function`, plus each
+     * callback's captures), so peer churn grows the park forever. This is that other end,
+     * and it is the embedder's call, not the library's.
+     *
+     * @warning **The caller MUST call this from a point where no lock-free reader holds a
+     *          value seam.** The library cannot know that moment — a reader holds the raw
+     *          seam pointer across the user callback it invokes — so naming it is an API
+     *          obligation this method hands to the embedder. On a single-threaded node any
+     *          point between operations qualifies. On a threaded node, a point where the
+     *          graph is quiescent for reads does: after the transport plane's receive
+     *          threads are joined or paused, or on the one thread that runs every graph
+     *          operation. Calling it while another thread is inside `read` / `write` /
+     *          `:children[]` on a *retired* handler-bearing vertex is a use-after-free.
+     *
+     * The free runs on the CALLER's thread and OUTSIDE every graph lock: the parked list is
+     * swapped into a local under the map lock, and the local destructs after the lock is
+     * released. So a seam callback's destructor may re-enter the graph (drop a handle,
+     * `find` a path, retire something else) without deadlocking, and an arbitrarily slow
+     * destructor blocks no reader or writer.
+     *
+     * Idempotent, and a no-op when nothing is parked. Not itself a reader-safety
+     * mechanism: it neither waits for nor detects readers. An embedder that never calls it
+     * keeps the pre-#576 behaviour — the park grows without bound — which @ref
+     * parked_seam_count makes observable.
+     *
+     * @note Whatever is still parked when the graph is destroyed is freed by the graph's
+     *       own teardown, AFTER the vertex tree and the map lock are gone. A seam callback
+     *       whose destructor re-enters the graph is therefore safe HERE and only here —
+     *       such an owner must be collected explicitly, not left to teardown.
+     */
+    void collect();
+
+    /**
+     * @brief How many retired value seams are currently parked, awaiting @ref collect.
+     *
+     * The observability half of the collector: an embedder that never calls @ref collect
+     * has a number it can watch (a health field, an assert in a soak test) instead of a
+     * silent, peer-driven leak. Grows by one per retired HANDLER-role vertex — including
+     * every `/net/<name>` identity vertex a connection teardown retires — and drops to
+     * zero on @ref collect. A retired vertex with no value seam parks nothing.
+     */
+    [[nodiscard]] std::size_t parked_seam_count() const;
+
+    /**
      * @brief Evict every subscriber edge a departed link left behind — the graph half
      *        of link-teardown eviction (RFC-0009 §D, extended to peer departure).
      *
@@ -929,10 +978,12 @@ class graph_t {
 
     // Value-seam blocks detached by retirement (RFC-0009 §B.6). A seam is read lock-free,
     // so a swapped-out block cannot be freed while a reader might still hold the old
-    // pointer — it is parked here and reclaimed only at graph teardown (ADR-0057 insert-
-    // only, applied to the seam). Kept on the GRAPH, not per-vertex, so an app-field / leaf
-    // vertex pays zero extra bytes. Appended only under map_mutex_ (unique); bounded by the
-    // node's total retire count — the "memory is not reclaimed under churn" trade §B books.
+    // pointer — it is PARKED here (ADR-0057 insert-only, applied to the seam). Kept on the
+    // GRAPH, not per-vertex, so an app-field / leaf vertex pays zero extra bytes. Appended
+    // only under map_mutex_ (unique). #576: the park's other end is the public collect(),
+    // which the EMBEDDER calls at a moment it knows no reader holds a seam; the graph's own
+    // destructor is the backstop. Until then the size is peer-driven (one per connection
+    // teardown) — hence the public parked_seam_count().
     std::vector<std::unique_ptr<value_handlers_t>> retired_seams_;
 
     mutable std::shared_mutex map_mutex_;

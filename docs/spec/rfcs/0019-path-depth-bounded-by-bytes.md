@@ -94,7 +94,7 @@ Verified from source, not assumed. Nothing on the wire path counts segments:
   No cap test.
 - `core/src/op_resolve_walk.hpp:547-556` (`path_lookup_key`) rejects a non-`NAME` child and counts
   nothing.
-- `core/src/graph.cpp:467-492` (`ensure_vertex_ptr`) calls `key_view_t::split_levels`, which checks
+- `core/src/graph.cpp:493-518` (`ensure_vertex_ptr`) calls `key_view_t::split_levels`, which checks
   only `NAME` framing and exactness (`core/include/libtracer/key_view.hpp:122-136`), then
   `mkdir -p`s every missing level with no count or byte check.
 
@@ -112,7 +112,7 @@ amendment:
 > one that survives `kMaxSegments` being lifted.
 
 PR #685 corrected the three code comments that claimed "graph depth is `kMaxSegments`-bounded
-structurally" (`core/include/libtracer/graph.hpp:470-476`, `core/src/graph.cpp:1921`).
+structurally" (`core/include/libtracer/graph.hpp:519-525`, `core/src/graph.cpp:1947`).
 
 ### 2.4 Doctrine
 
@@ -258,8 +258,8 @@ One comparison, no restructuring.
 - The reserve guard at `path.cpp:99` (`want <= kMaxPathBytes`) is **untouched** — this RFC keeps
   `kMaxPathBytes`, so the ~1 KiB reserve ceiling on a 16 KB node is preserved exactly. (A design that
   dissolved the byte cap would have had to re-derive it; see §9.1.)
-- Comment-only sites needing the corrected wording: `core/include/libtracer/graph.hpp:470-476`,
-  `core/src/graph.cpp:1921`, `docs/modules/path.md:15` and `:69-72`.
+- Comment-only sites needing the corrected wording: `core/include/libtracer/graph.hpp:519-525`,
+  `core/src/graph.cpp:1947`, `docs/modules/path.md:15` and `:69-72`.
 
 ## 5. The arithmetic — measured, and the maintainer's redundancy hypothesis is refuted
 
@@ -346,7 +346,7 @@ removes is the last *local-only* speed bump. It is nonetheless a hard **prerequi
 [#690](https://github.com/avatarsd-llc/libtracer/issues/690), and this RFC MUST NOT land before it.
 
 The fix shape is in the same file: the iterative heap-backed stack machine at
-`core/src/graph.cpp:1935-1945` (`std::vector<work_t>` + `detail::try_push_back` →
+`core/src/graph.cpp:1961-1971` (`std::vector<work_t>` + `detail::try_push_back` →
 `status_t::BACKPRESSURE`). Two of the four return `void`, so an error channel changes their
 signatures — that is the open design question in #690, not something this RFC decides.
 
