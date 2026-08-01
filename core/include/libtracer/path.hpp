@@ -44,7 +44,7 @@ inline constexpr std::size_t kMaxFieldDepth = 8;
  * not any single missing check, is the recurring defect — cf. #681). A name that fails
  * here answers `INVALID_PATH` wherever it is rejected.
  *
- * Checks: non-empty, at most @ref kMaxSegmentBytes, and none of the reserved characters
+ * Checks: non-empty, at most `kMaxSegmentBytes`, and none of the reserved characters
  * of reference/03 — `/` and `:` are separators, `.` separates field levels, `*` is the
  * wildcard selector, `?` is reserved for the future. `[` / `]` are deliberately NOT
  * rejected: they delimit an address index suffix (`/camera/frame[7]`, reference/03
