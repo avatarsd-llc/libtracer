@@ -40,7 +40,6 @@ using namespace bench;
 using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
-using tr::graph::settings_t;
 using tr::graph::vertex_handle_t;
 using tr::view::rope_t;
 using tr::view::view_t;
@@ -598,10 +597,9 @@ void run_inproc_mt(std::size_t T) {
 void run_eptype_stream() {
     constexpr std::size_t S = 64;
     graph_t g;
-    settings_t st{};
-    st.history_keep_last = 16;  // a real bounded ring: retention work on every write
     const path_t path = *path_t::parse("/bench/stream");
-    auto v = g.register_vertex(path, role_t::STREAM, {}, st);
+    auto v = g.register_vertex(path, role_t::STREAM);
+    g.set_history_depth(v, 16);  // a real bounded ring: retention work on every write
     std::atomic<std::uint64_t> recv{0};
     auto cb = [&](const rope_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
     (void)g.subscribe(path, cb);

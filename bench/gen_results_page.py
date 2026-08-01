@@ -301,21 +301,12 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "counts frames delivered, to find where that thread saturates before the host does.",
         "frames/s, per peer count"),
     instrument_t(
-        "bench_storage_policy.cpp", "counted", (),
-        "Times the two RFC-0022 storage knobs on the paths that read them — the policy read at "
-        "graph depth 1 and depth 8 (the only shape that separates one inline load from an "
-        "ancestor walk), the STREAM store, and the plain write — beside an invariant control "
-        "leg that the change cannot move, so an A/B against another build reports the change "
-        "and not the machine.",
-        "ns per operation, per leg"),
-    instrument_t(
         "bench_qos_census.cpp", "counted", (),
-        "Counts, per vertex shape, whether an extension block is allocated at all and whether "
-        "the storage policy it holds is byte-identical to the default — including the leaf that "
-        "materialises a block only because it INHERITS an ancestor's override (RFC-0022 §3.C), "
-        "which is the whole of what an override costs in RAM. Classifies by comparing the "
-        "address returned by `settings()` against `kDefaultSettings`, so it needs no accessor "
-        "of its own.",
+        "Counts, per vertex shape, whether an extension block is allocated at all — the "
+        "pay-for-what-you-use split RFC-0022 §3.B widened by deleting the registration "
+        "parameter that could force one. Classifies through `vertex_t::has_extension_block`, "
+        "the census observable that replaced comparing `settings()`'s returned address "
+        "against a shared defaults constant.",
         "vertices per bucket"),
     instrument_t(
         "bench_tcp_peer_scaling.cpp", "net", (),
