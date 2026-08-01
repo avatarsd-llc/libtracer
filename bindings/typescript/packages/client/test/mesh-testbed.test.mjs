@@ -307,11 +307,11 @@ test('mesh testbed: form a cyclic multi-node mesh in band, then route across it'
     const listing = await cli.bus.readField(['net', 'ws-server', 'mesh'], ':children[]');
     const peers = listingNames(listing);
     assert.equal(peers.length, 2, `the bus hears exactly its 2 dialers (got ${JSON.stringify(peers)})`);
-    // Peer names are the far side's <ip>:<port>; the source port is ephemeral, so assert
-    // the shape and the source addresses, never a literal.
-    for (const p of peers) assert.match(p, /^\d+\.\d+\.\d+\.\d+:\d+$/);
-    const ips = peers.map((p) => p.slice(0, p.lastIndexOf(':'))).sort();
-    assert.deepEqual(ips, [PEERS.a.host, PEERS.b.host].sort(), 'the peers are exactly a and b');
+    // Peer names are the routable p<slot> fallback (#426, ADR-0073 §2) — a LEGAL path
+    // segment, which the old <ip>:<port> spelling never was. Slot order is arrival-
+    // dependent, so assert the shape and distinctness, never a literal.
+    for (const p of peers) assert.match(p, /^p\d+$/);
+    assert.equal(new Set(peers).size, 2, 'the two dialers carry two distinct slot names');
 
     // NO vertex exists for a peer — the listing is synthesized on every read, so the module
     // still holds exactly its two CONNECTIONS however many peers are audible.
