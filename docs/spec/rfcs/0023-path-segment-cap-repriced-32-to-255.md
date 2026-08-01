@@ -17,7 +17,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Tracking issue** | [#767](https://github.com/avatarsd-llc/libtracer/issues/767) |
 | **Target spec version** | v1 itself. The immutability clause has never triggered: `docs/spec/v1.md:1` reads "(DRAFT)", `:3` reads "The wire format is not yet stable", and every Changelog entry reads `_unreleased_`. Same route RFC-0006, RFC-0018 and RFC-0019 took. |
 
-> **Numbering note.** 0012 was used and withdrawn; 0015 never existed. Neither gap is reusable —
+> **Numbering note.** 0012 was closed unmerged, 0014 was a phantom mislabel that was never a file, and 0015 was withdrawn (PR #446). None of the gaps is reusable —
 > see [RFC-0016](0016-composed-branch-read.md) §ghost history and RFC-0018's numbering note. 0023
 > is the next unused number.
 
@@ -31,8 +31,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 > groundwork is inherited, not re-litigated: the unit-pin erratum (already landed —
 > `docs/reference/03-addressing.md:30-34`, `docs/reference/05-protocol-tlvs.md:275-279`), the
 > audit that `kMaxSegments` sizes nothing in `core/` (its §6.2, re-verified below), the
-> conformance-corpus census (its §6.1), and the bindings audit (its §6.5, re-verified — the
-> TypeScript picture has since changed, §7.3).
+> conformance-corpus census (its §6.1), and the bindings audit (its §6.5, re-verified in §5.6 — RFC-0019's TypeScript
+> finding still holds: the literal 32 is at `bindings/typescript/packages/client/src/tlv.ts:125`).
 
 ---
 
@@ -123,8 +123,9 @@ records the addressing bounds as the named, ratified exception (§9).
   *width* lift is [#523](https://github.com/avatarsd-llc/libtracer/issues/523)'s own train, second
   per the 2026-07-30 sequencing ruling. §4.5 verifies this RFC does not move its buffers.
 - **Not decided here:** RFC-0018's body-grammar change. §4.2 prices both encodings; the packed
-  ceiling (512) and crossover are RFC-0018's to own, as its reconciliation note already does for
-  RFC-0019 (RFC-0018:207 updates from "≤ 32" to "≤ 255" in the same train, §9).
+  ceiling (512) and crossover are RFC-0018's to own. RFC-0019's own reconciliation list
+  (RFC-0019:371) already names `0018-packed-path-segments.md:207` as the line to edit; this RFC
+  inherits that item — RFC-0018:207 updates from "≤ 32" to "≤ 255" in the same train, §9.
 
 ## 4. The pricing argument — the number falls out, it is not asserted
 
@@ -179,7 +180,7 @@ per hop). Not a routed measurement (§10).
 
 | mount run | segs/hop | B/hop today | hops @ cap 32 | hops @ cap 255 (byte-gov.) | hops @ 255, RFC-0018 packed |
 | --- | --- | --- | --- | --- | --- |
-| `/net/ws-client/board-01` | 3 | 32 | 10 | **32** (byte) | 48 (byte) |
+| `/net/ws-client/board-01` | 3 | 32 | 10 | **32** (byte) | 44 (byte) |
 | `/net/can/c0` | 3 | 20 | 10 | **51** (byte) | **85 (count!)** |
 | `/net/ws-server/s/alice` | 4 | 34 | 8 | **30** (byte) | 46 (byte) |
 | 5-segment mount (post-#523) | 5 | ~40 | 6 | **~25** (byte) | ~36 (byte) |
@@ -331,12 +332,11 @@ enforce; resolver enforces child-type; count/length bound where constructed or a
   `bindings/rust/tests/conformance_vectors.rs:257` inverts into a must-accept, and a 256-segment
   must-reject takes its place. `MAX_SEGMENTS` stays exported (`src/lib.rs:56`) — value change is
   a semver-visible constant change, noted in `bindings/rust/CHANGELOG.md`.
-- **TypeScript** — the client validates only the per-segment 64-byte rule
-  (`bindings/typescript/packages/client/src/tlv.ts:25,102`); it has **no segment-count check and
-  no 1024-byte check at all** (RFC-0019 §6.5 reported a literal 32 that has since disappeared —
-  the regression it warned about is the present state). Adding **both** encode-time checks (255
-  and 1024) is part of this train, not a follow-up, and lands in
-  `bindings/typescript/*/CHANGELOG.md`.
+- **TypeScript** — the client validates the per-segment 64-byte rule
+  (`bindings/typescript/packages/client/src/tlv.ts:25,102`) and carries the literal 32-segment
+  check RFC-0019 §6.5 reported, still in place at `tlv.ts:125`; it has **no 1024-byte check at
+  all**. This train reprices the existing 32 → 255 and adds the missing 1024-byte encode-time
+  check, and lands in `bindings/typescript/*/CHANGELOG.md`.
 - `core/CHANGELOG.md` notes the constant change (public header).
 
 ### 5.7 Conformance vectors
