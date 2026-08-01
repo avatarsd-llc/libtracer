@@ -130,24 +130,31 @@ void transport_vertex_t::register_transport_type(std::string kind, transport_fac
     transport_types_.insert_or_assign(std::move(kind), std::move(factory));
 }
 
-void transport_vertex_t::register_module(std::string module, std::string kind, conn_role_t role) {
+result_t<void> transport_vertex_t::register_module(std::string module, std::string kind,
+                                                   conn_role_t role) {
+    // Registration is a minting boundary (ADR-0073 §1): the ONE shared segment-validity
+    // predicate gates the name here, exactly as path_t::parse gates the local string tier.
+    if (!graph::valid_segment(module)) return std::unexpected(status_t::INVALID_PATH);
     const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
     for (module_decl_t& d : modules_) {
         if (d.kind == kind && d.role == role) {
             d.module = std::move(module);
-            return;
+            return {};
         }
     }
     modules_.push_back({std::move(module), std::move(kind), role});
+    return {};
 }
 
-std::string transport_vertex_t::module_for(std::string_view kind, conn_role_t role) const {
+result_t<std::string> transport_vertex_t::module_for(std::string_view kind,
+                                                     conn_role_t role) const {
     for (const module_decl_t& d : modules_) {
         if (d.kind == kind && d.role == role) return d.module;
     }
-    // Undeclared: the role-split default, so an externally registered transport works
-    // unchanged. A transport whose shape this gets wrong declares itself explicitly.
-    return std::string(kind) + (role == conn_role_t::DIAL ? "-client" : "-server");
+    // Declared-only (ADR-0073 §4): no derived "<kind>-client"/"<kind>-server" fallback —
+    // an undeclared (kind, role) is an unsupported catalog entry, the same convention as
+    // an unknown SPEC `type`. The application mints every module segment.
+    return std::unexpected(status_t::SCHEMA_NOT_FOUND);
 }
 
 void transport_vertex_t::provide_link(std::string module, std::string name, transport_t& link) {
@@ -183,7 +190,16 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
             break;
         }
     }
-    if (module.empty()) module = module_for(settings.kind, settings.role);
+    if (module.empty()) {
+        // Neither a staged link nor a construction kind — nothing can carry the bytes
+        // (checked before module resolution: a kind-less SPEC has no module to look up).
+        if (settings.kind.empty()) return std::unexpected(status_t::NOT_FOUND);
+        auto declared = module_for(settings.kind, settings.role);
+        // Declared-only (ADR-0073 §4): a kind the application never mapped to a module
+        // fails creation explicitly instead of mounting under a library-derived name.
+        if (!declared) return std::unexpected(declared.error());
+        module = std::move(*declared);
+    }
 
     // The routing key IS the mount path (ADR-0061): `net/<module>/<name>`. Keeping the root
     // segment in the key means the registry's precomputed run is exactly the prefix a hop

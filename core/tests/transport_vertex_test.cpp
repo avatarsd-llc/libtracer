@@ -17,6 +17,11 @@
  * machinery lives only under `/net` and is never on the local hot path.
  */
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -34,6 +39,7 @@
 
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "libtracer/transport_udp.hpp"
 #include "libtracer/transport_ws.hpp"
 
 namespace {
@@ -110,6 +116,24 @@ view_t conn_spec(std::string_view type, std::string_view name, conn_role_t role,
     std::vector<std::byte> out;
     tr::wire::emit_tlv(out, type_t::SPEC, opt_t{.pl = true}, body);
     return owned(out);
+}
+
+/**
+ * @brief This test application's module declarations (ADR-0073 §4: declared-only).
+ *
+ * The library auto-registers NO module names — linking a built-in transport registers
+ * nothing. Every module segment is minted HERE, by the application (this test), under
+ * the built-ins' suggested names.
+ */
+void declare_builtin_modules(transport_vertex_t& net) {
+    (void)net.register_module(std::string(tr::net::kUdpClientSuggestedModule), "udp",
+                              conn_role_t::DIAL);
+    (void)net.register_module(std::string(tr::net::kUdpServerSuggestedModule), "udp",
+                              conn_role_t::LISTEN);
+    (void)net.register_module(std::string(tr::net::kWsClientSuggestedModule), "ws",
+                              conn_role_t::DIAL);
+    (void)net.register_module(std::string(tr::net::kWsServerSuggestedModule), "ws",
+                              conn_role_t::LISTEN);
 }
 
 void test_create_connection_vertex() {
@@ -204,6 +228,7 @@ void test_constructed_link_reports_role_state() {
     graph_t node;
     fwd_router_t router(node);
     transport_vertex_t net(node, router);
+    declare_builtin_modules(net);  // ADR-0073 §4: the application mints the module names
 
     // A udp LISTENER binds at creation => it reports LISTENING (0x04), not UP.
     const auto wl = node.write(path_t("/net:children[]"),
@@ -351,6 +376,8 @@ void test_config_constructed_udp() {
     fwd_router_t router_b(node_b);
     transport_vertex_t net_a(node_a, router_a);
     transport_vertex_t net_b(node_b, router_b);
+    declare_builtin_modules(net_a);  // ADR-0073 §4: the application mints the module names
+    declare_builtin_modules(net_b);
 
     // A's reply sink is set BEFORE the sockets exist: a config-constructed transport's
     // recv thread is live the moment the SPEC write returns, so router sinks follow
@@ -445,14 +472,31 @@ void test_creation_errors() {
     graph_t node;
     fwd_router_t router(node);
     transport_vertex_t net(node, router);
+    declare_builtin_modules(net);  // ADR-0073 §4: the application mints the module names
 
-    // Unknown transport kind => SCHEMA_NOT_FOUND (unsupported catalog entry), no vertex.
+    // Undeclared MODULE => SCHEMA_NOT_FOUND at the module_for gate (ADR-0073 §4), no
+    // vertex. "pigeon" has no register_module entry, so this exercises the declared-only
+    // gate — the factory lookup is never reached.
     const auto w1 =
         node.write(path_t("/net:children[]"),
                    conn_spec("client", "x", conn_role_t::DIAL, 47122, "pigeon", "127.0.0.1"));
     check(!w1.has_value() && w1.error() == status_t::SCHEMA_NOT_FOUND,
-          "unknown kind => SCHEMA_NOT_FOUND");
+          "undeclared module => SCHEMA_NOT_FOUND");
     check(!node.find(path_t::parse("/net/x")->key()).has_value(), "no /net/x vertex was created");
+
+    // The DISCRIMINATING twin: a DECLARED module whose kind has NO registered factory —
+    // the creation now passes module_for and must fail at the factory-lookup gate with
+    // the same status. Without this case the factory-missing branch is exercised by no
+    // test (the pre-ADR-0073 "pigeon" case used to cover it).
+    check(net.register_module("pigeon-x", "pigeon", conn_role_t::DIAL).has_value(),
+          "a module can be declared for a kind with no factory (declaration is naming)");
+    const auto w1b =
+        node.write(path_t("/net:children[]"),
+                   conn_spec("client", "x2", conn_role_t::DIAL, 47122, "pigeon", "127.0.0.1"));
+    check(!w1b.has_value() && w1b.error() == status_t::SCHEMA_NOT_FOUND,
+          "declared module, missing factory => SCHEMA_NOT_FOUND at the factory gate");
+    check(!node.find(path_t::parse("/net/pigeon-x/x2")->key()).has_value(),
+          "no vertex was created for the factory-less kind");
 
     // A udp DIAL without addr (and a LISTEN without port) => TYPE_MISMATCH, no vertex.
     const auto w2 = node.write(path_t("/net:children[]"),
@@ -479,6 +523,7 @@ void test_link_of_accessor() {
     graph_t node;
     fwd_router_t router(node);
     transport_vertex_t net(node, router);
+    declare_builtin_modules(net);  // ADR-0073 §4: the application mints the module names
 
     // A ws LISTENER built purely from config — the owned server socket is otherwise
     // unreachable by the app (no accessor existed before #374).
@@ -615,6 +660,29 @@ std::set<std::string> enumerate_peers(graph_t& g, const char* path) {
     return member_names(*dec);
 }
 
+/**
+ * @brief An OS-granted free TCP port (bind 0, read it back, release).
+ *
+ * The SPEC config contract forbids `port == 0` for LISTEN (`dial_or_listen`,
+ * TYPE_MISMATCH), so an in-band-created listener cannot ask for an ephemeral port —
+ * and a fixed literal was an EADDRINUSE flake across parallel CI matrix legs. The
+ * tiny close-to-bind race is acceptable in a test.
+ */
+[[nodiscard]] std::uint16_t free_port() {
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return 0;
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t len = sizeof(a);
+    std::uint16_t port = 0;
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 0 &&
+        ::getsockname(fd, reinterpret_cast<sockaddr*>(&a), &len) == 0)
+        port = ntohs(a.sin_port);
+    ::close(fd);
+    return port;
+}
+
 /** @brief Poll until `pred` holds — the peer table is fed by the server's accept thread. */
 template <typename Pred>
 bool wait_until(Pred pred, std::chrono::milliseconds budget) {
@@ -640,10 +708,12 @@ void test_ws_peer_named_config() {
     graph_t node;
     fwd_router_t router(node);
     transport_vertex_t net(node, router);
+    declare_builtin_modules(net);  // ADR-0073 §4: the application mints the module names
 
     // ----- the CONTROL: no peer_named => a plain point-to-point link, no listing. -----
-    const auto plain = node.write(path_t("/net:children[]"),
-                                  conn_spec("listener", "plain", conn_role_t::LISTEN, 47140, "ws"));
+    const auto plain =
+        node.write(path_t("/net:children[]"),
+                   conn_spec("listener", "plain", conn_role_t::LISTEN, free_port(), "ws"));
     check(plain.has_value(), "SPEC{listener, kind=ws} with no peer_named constructs the server");
     auto* const plain_srv =
         dynamic_cast<tr::net::transport_ws_server*>(net.link_of("net/ws-server/plain"));
@@ -651,8 +721,9 @@ void test_ws_peer_named_config() {
           "without the key the SPEC-created server has a NULL bus (no ADR-0044 facet)");
 
     // ----- the SUBJECT: peer_named=1 => the bus facet, hence the synthesized listing. -----
-    const auto w = node.write(path_t("/net:children[]"),
-                              ws_listener_spec("bus", 47141, /*peer_named=*/true, /*max_peers=*/8));
+    const auto w =
+        node.write(path_t("/net:children[]"),
+                   ws_listener_spec("bus", free_port(), /*peer_named=*/true, /*max_peers=*/8));
     check(w.has_value(), "SPEC{listener, kind=ws, peer_named=1} constructs the owned server");
     auto* const srv = dynamic_cast<tr::net::transport_ws_server*>(net.link_of("net/ws-server/bus"));
     check(srv != nullptr && srv->ok(), "the owned transport is a live transport_ws_server");
@@ -665,8 +736,9 @@ void test_ws_peer_named_config() {
 
     // Two real ws clients dial the SPEC-created listener; each completes an RFC 6455
     // handshake, so each becomes an audible peer of the bus.
-    tr::net::transport_ws_client c1("127.0.0.1", 47141);
-    tr::net::transport_ws_client c2("127.0.0.1", 47141);
+    const std::uint16_t bus_port = srv != nullptr ? srv->local_port() : 0;
+    tr::net::transport_ws_client c1("127.0.0.1", bus_port);
+    tr::net::transport_ws_client c2("127.0.0.1", bus_port);
     check(c1.ok() && c2.ok(), "both ws clients handshook against the in-band-created listener");
 
     const bool listed = wait_until(
@@ -695,6 +767,123 @@ void test_ws_peer_named_config() {
         "/net/ws-server:children[] lists only the two connections — no vertex per peer");
 }
 
+/**
+ * @brief ADR-0073 §4 / #621: modules are declared-only — an unregistered kind answers
+ *        SCHEMA_NOT_FOUND instead of silently mounting under a library-derived name.
+ *
+ * Ablation-verified: before the fix this creation SUCCEEDED and mounted the connection
+ * under the derived `/net/udp-client/...`, so both checks below failed.
+ */
+void test_unregistered_kind_is_schema_not_found() {
+    std::printf("#621: an unregistered kind fails creation (no derived module name):\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    // Deliberately NO register_module: `udp` has a transport FACTORY (linked built-in),
+    // but this application never declared a module for it.
+    const auto w = node.write(path_t("/net:children[]"), conn_spec("client", "x", conn_role_t::DIAL,
+                                                                   47150, "udp", "127.0.0.1"));
+    check(!w.has_value() && w.error() == status_t::SCHEMA_NOT_FOUND,
+          "kind with a factory but no declared module => SCHEMA_NOT_FOUND");
+    check(!node.find(path_t::parse("/net/udp-client/x")->key()).has_value(),
+          "nothing mounted under the old derived /net/udp-client name");
+}
+
+/** @brief ADR-0073 §1/§4: register_module is a minting boundary — the shared segment
+ *         predicate rejects a reserved-character module name with INVALID_PATH. */
+void test_register_module_rejects_reserved_chars() {
+    std::printf("#621: register_module gates the name with the shared segment predicate:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    for (const char* bad : {"a/b", "a:b", "a.b", "a*b", "a?b", ""}) {
+        const auto r = net.register_module(bad, "udp", conn_role_t::DIAL);
+        check(!r.has_value() && r.error() == status_t::INVALID_PATH,
+              "a reserved-character / empty module name answers INVALID_PATH");
+    }
+    // The failed registrations minted nothing: the kind still has no module.
+    check(!net.module_for("udp", conn_role_t::DIAL).has_value(),
+          "a rejected registration declares nothing (module_for stays SCHEMA_NOT_FOUND)");
+    // And a legal name goes through the same boundary.
+    check(net.register_module("uplink", "udp", conn_role_t::DIAL).has_value(),
+          "a legal segment registers");
+    const auto m = net.module_for("udp", conn_role_t::DIAL);
+    check(m.has_value() && *m == "uplink", "module_for answers the app-minted name");
+}
+
+/**
+ * @brief ADR-0073 §4 / #621: the application owns its whole path shape — a transport
+ *        registered under an app-chosen root AND module name (`/io/w`, `/io/l`) creates
+ *        and carries traffic end-to-end. This was impossible while the module half of
+ *        the path was library-derived.
+ */
+void test_app_chosen_root_and_module() {
+    std::printf("#621: app-chosen custom root + module name, end-to-end over UDP:\n");
+    graph_t node_a;
+    graph_t node_b;
+    fwd_router_t router_a(node_a);
+    fwd_router_t router_b(node_b);
+    transport_vertex_t net_a(node_a, router_a, "/io");
+    transport_vertex_t net_b(node_b, router_b, "/io");
+    // The application's naming decisions: dial links mount under /io/w, listeners under
+    // /io/l — nothing resembling the built-ins' suggested "<kind>-client" shape.
+    (void)net_a.register_module("w", "udp", conn_role_t::DIAL);
+    (void)net_b.register_module("l", "udp", conn_role_t::LISTEN);
+
+    std::promise<std::vector<std::byte>> got;
+    auto fut = got.get_future();
+    router_a.on_reply(
+        [](void* ctx, const tr::view::rope_t& reply) {
+            try {
+                const tr::view::view_t mat = reply.materialize();
+                const auto b = mat.bytes();
+                static_cast<std::promise<std::vector<std::byte>>*>(ctx)->set_value(
+                    std::vector<std::byte>(b.begin(), b.end()));
+            } catch (...) {
+            }
+        },
+        &got);
+
+    // B: a stored value and a listener created through the app-chosen names.
+    (void)node_b.register_vertex(path_t("/temp"), role_t::STORED_VALUE);
+    std::vector<std::byte> tv;
+    const std::byte tb{0x5C};
+    tr::wire::emit_tlv(tv, type_t::VALUE, opt_t{}, std::span<const std::byte>(&tb, 1));
+    (void)node_b.write(path_t("/temp"), owned(tv));
+    const auto wb = node_b.write(path_t("/io:children[]"),
+                                 conn_spec("listener", "a", conn_role_t::LISTEN, 47151, "udp"));
+    check(wb.has_value(), "B: SPEC{listener, kind=udp} creates under the app-chosen /io/l");
+    check(node_b.find(path_t::parse("/io/l/a")->key()).has_value(),
+          "B: the connection vertex is /io/l/a — the app's shape, not the library's");
+    check(router_b.registry().by_name("io/l/a") != nullptr, "B: the socket is routed under io/l/a");
+
+    const auto wa =
+        node_a.write(path_t("/io:children[]"),
+                     conn_spec("client", "b", conn_role_t::DIAL, 47151, "udp", "127.0.0.1"));
+    check(wa.has_value(), "A: SPEC{client, kind=udp} creates under the app-chosen /io/w");
+    check(node_a.find(path_t::parse("/io/w/b")->key()).has_value(),
+          "A: the connection vertex is /io/w/b");
+    const auto* s = net_a.settings_of("io/w/b");
+    check(s != nullptr && s->kind == "udp" && s->port == 47151,
+          "A: settings_of resolves by the app-chosen qualified key");
+
+    // End-to-end: a READ routed through /io/w/b reaches B and the reply returns.
+    router_a.on_frame("self", fwd_read({"io", "w", "b", "temp"}, {"reply-ep"}));
+    const bool replied = fut.wait_for(3s) == std::future_status::ready;
+    check(replied, "the READ crossed the /io/w link and the REPLY returned");
+    if (replied) {
+        const std::vector<std::byte> reply_bytes = fut.get();
+        const auto dec = tr::wire::decode(reply_bytes);
+        bool has_value = false;
+        if (dec && dec->type == type_t::FWD)
+            for (const auto& c : dec->children)
+                if (c.type == type_t::VALUE && c.payload.size() == 1 &&
+                    c.payload[0] == std::byte{0x5C})
+                    has_value = true;
+        check(has_value, "the REPLY carries B's stored /temp value");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -712,6 +901,9 @@ int main() {
     test_link_name_collision_rejected();
     test_link_name_collision_placeholder_parent();
     test_ws_peer_named_config();
+    test_unregistered_kind_is_schema_not_found();
+    test_register_module_rejects_reserved_chars();
+    test_app_chosen_root_and_module();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");

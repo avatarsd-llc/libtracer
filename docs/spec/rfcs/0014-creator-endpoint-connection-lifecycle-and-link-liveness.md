@@ -76,6 +76,19 @@ This unblocks the transport-link half of
 
 ### 1. A per-module creator endpoint, designated by the transport module
 
+> **Erratum (2026-08-01),
+> [ADR-0073](../../adr/0073-naming-authority-the-application-mints-one-predicate-gates.md) §4 /
+> [#621](https://github.com/avatarsd-llc/libtracer/issues/621):** this section (and the lifecycle
+> summary above) says modules are "mounted flat under `/net`" and lists `ws-client`, `ws-server`, …
+> as if the root and the module names were library rules. They are not, and never were normative
+> here: **`/net` is the recommended root convention** (a constructor default, overridable per
+> node — the normative spec never mandates it), and **every module name is application-declared**
+> through `register_module` — the library derives and auto-registers none; the listed spellings are
+> the built-ins' *suggested* names. The divergence was introduced by the implementation's derived
+> `"<kind>-client"`/`"<kind>-server"` fallback and its builtin self-registration, both removed by
+> ADR-0073 §4. Wording only: the endpoint shape, gating, and byte-level clauses of this RFC are
+> unchanged, and none of them promised a derived name or a fixed root.
+
 A creatable *(transport, role)* pair is a **self-contained module** mounted flat under `/net` —
 `ws-client`, `ws-server`, `can`, … (a transport with a single shape, like `can`, is one module; a
 transport with both a dial and a listen shape, like `ws`, is two). Each module exposes a

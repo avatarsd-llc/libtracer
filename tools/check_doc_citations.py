@@ -43,7 +43,16 @@ ANCHORS = [
     ("core/src/transport_vertex.cpp:64", 'cfg.name("kind")'),
     ("core/src/transport_vertex.cpp:99", "register_child_type"),
     ("core/src/transport_vertex.cpp:128", "register_transport_type"),
-    ("core/src/transport_vertex.cpp:150", '"-client" : "-server"'),
+    ("core/src/transport_vertex.cpp:133", "transport_vertex_t::register_module"),
+    ("core/src/transport_vertex.cpp:157", "SCHEMA_NOT_FOUND", "transport_vertex_t::module_for"),
+    ("core/src/transport_vertex.cpp:160", "transport_vertex_t::provide_link"),
+    ("core/src/transport_vertex.cpp:204", "routing key IS the mount path"),
+    ("core/src/transport_vertex.cpp:211", "qualified += name"),
+    ("core/src/transport_vertex.cpp:230", "grouping vertex, created lazily"),
+    ("core/src/transport_vertex.cpp:238", "register_vertex_key(mod_key"),
+    ("core/src/transport_vertex.cpp:318", "if (constructed)"),
+    ("core/src/transport_vertex.cpp:320", "link_state_t::LISTENING : link_state_t::UP"),
+    ("core/include/libtracer/transport_vertex.hpp:262", "result_t<void> register_module"),
     ("core/include/libtracer/transport_vertex.hpp:96", "enum class link_state_t"),
     ("core/src/graph.cpp:1458", "field.steps.size() != 1", 'step0.name == "subscribers"'),
     ("core/src/graph.cpp:1525", "field.steps.size() != 1 || !plain_step(step0)"),
@@ -126,7 +135,11 @@ def all_docs() -> list:
     """Every tracked markdown file. `_build` is generated Sphinx output; the
     `.claude/worktrees/fw-pin-*` trees are pinned history. Neither is a source."""
     skip = ("_build", "node_modules", ".claude", ".git")
-    return [p for p in REPO.rglob("*.md") if not any(s in p.parts for s in skip)]
+    # Match skip components against the path RELATIVE to the repo root — an absolute
+    # match made the tool skip EVERY doc when run from a `.claude/worktrees/*` checkout,
+    # turning the whole check into a vacuous pass there.
+    return [p for p in REPO.rglob("*.md")
+            if not any(s in p.relative_to(REPO).parts for s in skip)]
 
 
 def main() -> int:

@@ -27,6 +27,26 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **BREAKING: the derived `"<kind>-client"` / `"<kind>-server"` module name is gone (#621,
+  ADR-0073 §4).** `transport_vertex_t::module_for` no longer invents a module for an undeclared
+  *(kind, role)* pair — it returns `result_t<std::string>` and answers `SCHEMA_NOT_FOUND`
+  (previously `std::string`, always synthesizing), and creation with an unregistered kind now
+  fails with `SCHEMA_NOT_FOUND` (the unknown-SPEC-`type` convention) instead of silently
+  mounting under a path segment core picked. `register_module` now returns `result_t<void>` and
+  gates the name with the shared ADR-0073 §1 segment predicate (`tr::graph::valid_segment`) —
+  a reserved-character, empty, or oversized module name answers `INVALID_PATH`. The consumer
+  fix is one explicit `register_module` call per module.
+
+- **BREAKING: linking a built-in transport no longer registers its module names (#621,
+  ADR-0073 §4).** `register_udp_transport` / `register_tcp_transport` / `register_ws_transport`
+  (and therefore the default `transport_vertex_t` ctor) register only the transport *factory* —
+  never a module name. The application declares each module under a name IT chooses via
+  `register_module`; the built-ins now export *suggested*-name constants
+  (`kUdpClientSuggestedModule`, `kUdpServerSuggestedModule`, `kTcpClientSuggestedModule`,
+  `kTcpServerSuggestedModule`, `kWsClientSuggestedModule`, `kWsServerSuggestedModule` in their
+  transport headers) an application may pass. `/net` remains only the constructor-default
+  root — a documented recommendation, not a library rule.
+
 - **A bus link's connection NAME is no longer a routable next-hop (#741, ADR-0073 §3,
   RFC-0020).** An inbound FWD whose `dst` routed THROUGH a multi-peer link's own
   `net/<module>/<name>` mount with a residual naming no current peer fell through to the bus

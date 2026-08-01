@@ -510,6 +510,12 @@ void test_config_constructed_tcp() {
     tr::net::fwd_router_t router_b(node_b);
     tr::net::transport_vertex_t net_a(node_a, router_a);
     tr::net::transport_vertex_t net_b(node_b, router_b);
+    // ADR-0073 §4 (declared-only): the application mints the module names — the library
+    // registers none. This test-app adopts the built-ins' suggested names.
+    (void)net_a.register_module(std::string(tr::net::kTcpClientSuggestedModule), "tcp",
+                                tr::net::conn_role_t::DIAL);
+    (void)net_b.register_module(std::string(tr::net::kTcpServerSuggestedModule), "tcp",
+                                tr::net::conn_role_t::LISTEN);
 
     // A's reply sink is set BEFORE the sockets exist (configure before frames flow).
     std::promise<std::vector<std::byte>> got;

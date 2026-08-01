@@ -24,7 +24,7 @@ example asserts they never merge.
   an in-band `/net:children[]` write adds exactly one addressable vertex at
   `/net/<module>/<name>` — here `/net/can/link0`, the module taken from the
   `provide_link` staging key (`transport_vertex_t::provide_link`,
-  `core/src/transport_vertex.cpp:153`). The transport's real bytes live *outside*
+  `core/src/transport_vertex.cpp:160`). The transport's real bytes live *outside*
   the graph, in the FWD router's demux; no per-peer vertex or memory is added
   (ADR-0044). Attaching a bus does not "grow the rope."
 
