@@ -37,9 +37,9 @@ SCOPE_LINES = 80
 ANCHORS = [
     ("core/include/libtracer/tlv.hpp:59", "struct opt_t"),
     ("core/include/libtracer/tlv.hpp:28", "enum class type_t"),
-    ("core/src/graph.cpp:1788", "graph_t::set_identity"),
-    ("core/src/graph.cpp:1814", "graph_t::read_identity"),
-    ("core/src/graph.cpp:2172", 'field.steps[0].name == "identity"'),
+    ("core/src/graph.cpp:1793", "graph_t::set_identity"),
+    ("core/src/graph.cpp:1819", "graph_t::read_identity"),
+    ("core/src/graph.cpp:2177", 'field.steps[0].name == "identity"'),
     ("core/src/transport_vertex.cpp:64", 'cfg.name("kind")'),
     ("core/src/transport_vertex.cpp:99", "register_child_type"),
     ("core/src/transport_vertex.cpp:128", "register_transport_type"),
@@ -54,12 +54,12 @@ ANCHORS = [
     ("core/src/transport_vertex.cpp:320", "link_state_t::LISTENING : link_state_t::UP"),
     ("core/include/libtracer/transport_vertex.hpp:262", "result_t<void> register_module"),
     ("core/include/libtracer/transport_vertex.hpp:96", "enum class link_state_t"),
-    ("core/src/graph.cpp:1493", "field.steps.size() != 1", 'step0.name == "subscribers"'),
-    ("core/src/graph.cpp:1560", "field.steps.size() != 1 || !plain_step(step0)"),
-    ("core/src/graph.cpp:1597", "field.steps.size() != 1", 'step0.name == "children"'),
-    ("core/src/graph.cpp:1518", "step0.wildcard"),
-    ("core/src/graph.cpp:2138", '"children" && !field.steps[0].wildcard'),
-    ("core/src/graph.cpp:2216", "!field.steps[0].wildcard", 'field.steps[0].name == "subscribers"'),
+    ("core/src/graph.cpp:1498", "field.steps.size() != 1", 'step0.name == "subscribers"'),
+    ("core/src/graph.cpp:1565", "field.steps.size() != 1 || !plain_step(step0)"),
+    ("core/src/graph.cpp:1602", "field.steps.size() != 1", 'step0.name == "children"'),
+    ("core/src/graph.cpp:1523", "step0.wildcard"),
+    ("core/src/graph.cpp:2143", '"children" && !field.steps[0].wildcard'),
+    ("core/src/graph.cpp:2221", "!field.steps[0].wildcard", 'field.steps[0].name == "subscribers"'),
     ("core/src/op_resolve_walk.hpp:237", "enum class index_mode_t"),
     ("core/src/op_resolve_walk.hpp:594", 'field.steps[0].name != "subscribers"'),
     ("core/include/libtracer/mem_heap.hpp:149", "try_assign"),
@@ -71,29 +71,29 @@ ANCHORS = [
     ("core/include/libtracer/backend.hpp:101", "class mem_backend_t"),
     ("core/include/libtracer/backend.hpp:145", "before_io"),
     ("core/include/libtracer/grammar.hpp:210", "receiver-resource depth bound"),
-    ("core/src/graph.cpp:1048", "!arena"),
+    ("core/src/graph.cpp:1053", "!arena"),
     ("core/include/libtracer/segment.hpp:78", "struct segment_t"),
     # --- the design + module pages (#728). Every one of these had drifted. ---
-    ("core/src/graph.cpp:747", "has_registered_child()"),
-    ("core/src/graph.cpp:837", "void graph_t::fan_out"),
-    ("core/src/graph.cpp:969", "graph_t::write_impl"),
-    ("core/src/graph.cpp:1031", "value.materialize(*value_backend_)", "graph_t::write_branch"),
-    ("core/src/graph.cpp:1032", "head.empty() && value.total_length()", "graph_t::write_branch"),
-    ("core/src/graph.cpp:1044", "std::array<std::byte, 4096> stack;"),
-    ("core/src/graph.cpp:1045", "bump_source_t src(stack"),
-    ("core/src/graph.cpp:1047", "decode_into(head.bytes(), src)"),
-    ("core/src/graph.cpp:1063", "std::vector<std::byte> root_key;"),
-    ("core/src/graph.cpp:1064", "try_build_key(v, root_key)"),
-    ("core/src/graph.cpp:1066", "try_assign(parse_key, root_key)"),
-    ("core/src/graph.cpp:1268", "value.materialize(*value_backend_)", "field_write read it back"),
-    ("core/src/graph.cpp:1472", "result_t<void> graph_t::field_write"),
-    ("core/src/graph.cpp:1599", "acl_right_t::CREATE", 'step0.name == "children"'),
+    ("core/src/graph.cpp:752", "has_registered_child()"),
+    ("core/src/graph.cpp:842", "void graph_t::fan_out"),
+    ("core/src/graph.cpp:974", "graph_t::write_impl"),
+    ("core/src/graph.cpp:1036", "value.materialize(*value_backend_)", "graph_t::write_branch"),
+    ("core/src/graph.cpp:1037", "head.empty() && value.total_length()", "graph_t::write_branch"),
+    ("core/src/graph.cpp:1049", "std::array<std::byte, 4096> stack;"),
+    ("core/src/graph.cpp:1050", "bump_source_t src(stack"),
+    ("core/src/graph.cpp:1052", "decode_into(head.bytes(), src)"),
+    ("core/src/graph.cpp:1068", "std::vector<std::byte> root_key;"),
+    ("core/src/graph.cpp:1069", "try_build_key(v, root_key)"),
+    ("core/src/graph.cpp:1071", "try_assign(parse_key, root_key)"),
+    ("core/src/graph.cpp:1273", "value.materialize(*value_backend_)", "field_write read it back"),
+    ("core/src/graph.cpp:1477", "result_t<void> graph_t::field_write"),
+    ("core/src/graph.cpp:1604", "acl_right_t::CREATE", 'step0.name == "children"'),
     ("core/src/fwd_router.cpp:1159", "fwd_router_t::deliver_remote"),
     ("core/src/fwd_router.cpp:1180", "value.materialize()"),
     ("core/src/fwd_router.cpp:1181", "flatten OOM"),
     ("core/src/fwd_router.cpp:1185", "try_encode_compact", "fwd_router_t::deliver_remote"),
     ("core/src/fwd_router.cpp:1217", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
-    ("core/include/libtracer/vertex.hpp:2304", "vertex_t* parent_"),
+    ("core/include/libtracer/vertex.hpp:2325", "vertex_t* parent_"),
 ]
 
 
@@ -104,7 +104,7 @@ def cited_locations(context: str) -> set:
     `file.cpp:12-20` (which registers EVERY line in it, not just the first — a doc
     citing `996-997` is citing both), a comma list `file.hpp:145,153`, and the
     UNBACKTICKED form that appears inside annotated code-excerpt blocks. A bare
-    `` `:99` `` inherits the most recently named file, which is how CONTEXT.md
+    `` `:100` `` inherits the most recently named file, which is how CONTEXT.md
     writes sibling citations.
     """
     tok = re.compile(r"`?(core/[a-z_/]+\.(?:hpp|cpp)):([\d,\-]+)`?|`:([\d,\-]+)`")

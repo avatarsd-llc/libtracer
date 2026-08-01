@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "libtracer/config.hpp"
+#include "libtracer/hazard_domain.hpp"
 #include "libtracer/lkv_slot.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/rope.hpp"
@@ -412,6 +413,19 @@ struct value_handlers_t {
     std::function<result_t<void>(const rope_t&)>
         on_write;                                  /**< @brief Receives the written value. */
     std::function<result_t<view_t>()> on_children; /**< @brief Synthesized `:children[]` listing. */
+    /**
+     * @brief The block's own retire record (ADR-0072 erratum 1) — three words that make
+     *        retiring this seam ALLOCATION-FREE, and therefore non-blocking.
+     *
+     * `graph_t::retire` runs under the map lock, and the readers that announce this block
+     * are outside that lock precisely so their user callbacks may re-enter the graph; a
+     * retire that had to allocate could fail, and any fallback that waits for those readers
+     * waits for a thread that may be waiting for the map lock. Carrying the record inside
+     * the block removes the failure mode instead of handling it. Written by the domain only
+     * after retirement has detached this block from @ref vertex_ext_t::handlers — a reader
+     * still inside the callbacks above touches no part of it.
+     */
+    mem::retire_link_t hz_link;
 };
 
 /**
@@ -1173,7 +1187,8 @@ class vertex_t {
      * single-link trivial case, so a scalar write costs exactly what the `view_t`
      * slot cost (ADR-0053 §6). The LKV publish happens BEFORE the lock; only the
      * ring trim + seq bump + notify run under it. Not for Handler-role writes —
-     * the graph runs `handlers().on_write` and calls @ref note_write instead.
+     * the graph protects @ref handlers_slot through its reclamation domain, runs that
+     * block's `on_write`, and calls @ref note_write instead.
      * @param value The value to publish (moved into the LKV slot).
      * @param mr    The ADR-0039 injected resource the LKV control block + rope are
      *              allocated from (#361 §5) — the graph passes its own; `nullptr`
@@ -1624,7 +1639,12 @@ class vertex_t {
             // block back to the caller to RETIRE through the graph's reclamation domain
             // (never free it under a possible concurrent reader). The remaining ext
             // fields are mutated under the stripe lock.
-            detached = e->handlers.exchange(nullptr, std::memory_order_acq_rel);
+            // SEQ_CST, not acq_rel: this displacement is one half of the reclamation
+            // domain's Dekker pair, and the OTHER half — a reader that could get no
+            // announcement word and so stalled reclamation instead (hazard_domain.hpp) —
+            // proves its safety through the single total order. A control-plane store; the
+            // stronger ordering costs the read path nothing.
+            detached = e->handlers.exchange(nullptr, std::memory_order_seq_cst);
             const std::lock_guard lock(vertex_stripe_of(this).m);
             e->history.reset();
             e->acl.clear();
@@ -2211,10 +2231,11 @@ class vertex_t {
             // retired node's out. So the prior is provably null and a plain release store
             // suffices; the store races only the lock-free reader, which the release
             // ordering covers.
-            e.handlers.store(
-                new value_handlers_t{std::move(handlers.on_read), std::move(handlers.on_write),
-                                     std::move(handlers.on_children)},
-                std::memory_order_release);
+            e.handlers.store(new value_handlers_t{std::move(handlers.on_read),
+                                                  std::move(handlers.on_write),
+                                                  std::move(handlers.on_children),
+                                                  {}},
+                             std::memory_order_release);
         }
         if (handlers.on_app_field_write) {
             if (e.app == nullptr) e.app = std::make_unique<app_field_group_t>();

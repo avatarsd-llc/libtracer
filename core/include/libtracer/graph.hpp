@@ -755,16 +755,23 @@ class graph_t {
     [[nodiscard]] std::uint64_t ancestor_walks() const noexcept;
 
     /**
-     * @brief How many operations opened a value-seam announce window — instrumentation.
+     * @brief How many operations opened a value-seam announce window, or `nullopt` in a
+     *        build that does not maintain the counter — instrumentation.
      *
      * The ADR-0072 §4 gate observable, in the mold of @ref ancestor_walks — the four
      * lock-free seam readers (read / store-value / read-children / read-children-folded)
      * announce the seam pointer to the reclamation domain ONLY behind the existing
      * has-extension check, so this stays 0 across placeholder / plain-leaf operations —
      * which is what lets a test assert "the fan-0 write path paid nothing" structurally
-     * rather than by timing. Relaxed monotonic counter.
+     * rather than by timing.
+     *
+     * UNLIKE @ref ancestor_walks it is **compiled out by default**
+     * (@ref tr::graph::kSeamAnnounceCounter, ON only for the repo's own builds): a relaxed
+     * RMW on a shared word is roughly a tenth of a handler read, and a latency-first build
+     * does not pay for an instrument. `nullopt` says "this build did not count", which is
+     * the honest answer — a zero would read as "the gate held".
      */
-    [[nodiscard]] std::uint64_t seam_announces() const noexcept;
+    [[nodiscard]] std::optional<std::uint64_t> seam_announces() const noexcept;
 
     /**
      * @brief The ADR-0072 reclamation domain this graph owns — exposed, like
@@ -1061,8 +1068,16 @@ class graph_t {
     // Announce-pair instrumentation — see seam_announces(). The RFC-0005
     // near-free-when-idle observable applied to ADR-0072 §4's gate: bumped ONLY on the
     // gated announce path, so tests assert structurally that a placeholder / no-ext
-    // operation executed no announce.
+    // operation executed no announce. Maintained only when kSeamAnnounceCounter is on.
     mutable std::atomic<std::uint64_t> seam_announces_{0};
+
+    /**
+     * @brief Count one opened announce window — nothing at all in a build whose
+     *        @ref tr::graph::kSeamAnnounceCounter is off, which is every shipped build.
+     */
+    void note_seam_announce() const noexcept {
+        if constexpr (kSeamAnnounceCounter) seam_announces_.fetch_add(1, std::memory_order_relaxed);
+    }
 };
 
 }  // namespace tr::graph

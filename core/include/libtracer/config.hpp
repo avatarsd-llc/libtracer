@@ -129,6 +129,21 @@ struct default_config_t {
     static constexpr std::size_t kHazardReaderSlots = 64;
 
     /**
+     * @brief Maintain the value-seam announce counter (`graph_t::seam_announces`) — a
+     *        TEST observable, off by default because it is not free.
+     *
+     * The counter is what lets a test assert STRUCTURALLY, rather than by timing, that a
+     * placeholder / fan-0 operation opened no reclamation-announce window (ADR-0072 §4's
+     * gate). But it is a shared relaxed RMW on the seam read/write path — a `lock xadd`
+     * per operation on x86 — and measured at roughly a tenth of the whole handler read.
+     * A latency-first build does not pay for an instrument, so the repo's own test builds
+     * turn it on (the CMake default follows `PROJECT_IS_TOP_LEVEL`) and every shipped
+     * build leaves it off, where `seam_announces()` answers `nullopt` rather than a
+     * plausible-looking zero.
+     */
+    static constexpr bool kSeamAnnounceCounter = false;
+
+    /**
      * @brief The RAM-diet ceiling on `sizeof(vertex_t)`, 64-bit targets (#361 §8).
      *
      * Measured 112 B post-#380 §1; 144 post-packing, 168 post-§3, 160 post-§2, 248 post-§1,
@@ -202,6 +217,8 @@ inline constexpr std::size_t kVertexLockStripes = config_t::kVertexLockStripes;
 inline constexpr std::size_t kCacheLineBytes = config_t::kCacheLineBytes;
 /** @brief @ref default_config_t::kHazardReaderSlots for this build. */
 inline constexpr std::size_t kHazardReaderSlots = config_t::kHazardReaderSlots;
+/** @brief @ref default_config_t::kSeamAnnounceCounter for this build. */
+inline constexpr bool kSeamAnnounceCounter = config_t::kSeamAnnounceCounter;
 /** @brief @ref default_config_t::acl_policy_t for this build. */
 using acl_policy_t = config_t::acl_policy_t;
 /** @brief @ref default_config_t::lkv_slot_t for this build. */

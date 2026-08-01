@@ -27,6 +27,7 @@
  */
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -202,7 +203,13 @@ void test_concurrent_read_vs_retire_churn() {
     const long live = probe.use_count() - 1;
     check(live <= 2 * static_cast<long>(hazard_domain_t::kRetireBatch) + 1,
           "after the storm, live blocks are bounded by the domain (not by churn count)");
-    check(true, "read-vs-retire churn through the domain: no crash / UAF / race");
+    // The race half of this case is carried by the sanitizers, not by an assertion: under
+    // TSan/ASan a torn announce window aborts the process here. Printed as a note, because
+    // a `check(true, ...)` would print PASS for having executed, which is not evidence.
+    std::printf(
+        "  [note] %ld reads x %ld retire/revive cycles completed clean under the "
+        "sanitizer legs\n",
+        reads.load(), churns.load());
 }
 
 // ---------------------------------------------------------------------------
@@ -216,14 +223,69 @@ void test_no_announce_without_ext() {
     check(g.write(leaf, val_u8(0x01)).has_value(), "plain-leaf write succeeds");
     check(g.read(path_t("/plain/leaf")).has_value(), "plain-leaf read succeeds");
     check(g.read(path_t("/plain:children")).has_value(), ":children enumerates (no seam)");
-    check(g.seam_announces() == 0,
+    // `nullopt` = this build compiled the counter out (kSeamAnnounceCounter); the repo's
+    // own builds turn it on, so a missing counter here is a build-config failure, not a
+    // pass — say so rather than silently skipping the gate.
+    check(g.seam_announces().value_or(1) == 0,
           "no-ext writes/reads/:children opened ZERO announce windows (the gate held)");
 
     // And the counter is live — a handler-bearing vertex's ops do announce.
     auto probe = std::make_shared<int>(0);
     (void)g.register_vertex(path_t("/h"), role_t::HANDLER, probed_handlers(probe));
     (void)g.read(path_t("/h"));
-    check(g.seam_announces() > 0, "a handler read DID announce (the instrument is live)");
+    check(g.seam_announces().value_or(0) > 0,
+          "a handler read DID announce (the instrument is live)");
+}
+
+// ---------------------------------------------------------------------------
+// (4) The blocker: retire runs under the map lock, and an announced reader's callback may
+//     be waiting FOR that lock. retire must therefore never wait for a reader.
+//
+//     PRE-FIX this test HANGS FOREVER (it is a mutual wait, not a soft failure): `retire`
+//     allocated its record from the injected backend, this graph's backend can allocate
+//     nothing, so it fell to `scan()` + `wait_unannounced(block)` and spun holding
+//     map_mutex_ — while the announcing reader sat inside `find`, blocked on the very same
+//     lock. Records are intrusive now, so there is no allocation, no failure and no wait.
+void test_retire_never_waits_for_an_announced_reader() {
+    std::printf("#576 blocker: retire under the map lock cannot wait for a seam reader:\n");
+    // A backend that answers backpressure to everything — the state a peer can drive a
+    // bounded node into (ADR-0060 §2), and the one that used to arm the blocking branch.
+    struct starved_backend_t : tr::mem::mem_backend_t {
+        starved_backend_t() noexcept : mem_backend_t("starved") {}
+        /** @brief Nothing was ever handed out, so nothing can come back. */
+        void destroy(tr::view::segment_t*) noexcept override {}
+    } starved;
+    graph_t g{std::pmr::get_default_resource(), &starved};
+
+    (void)g.register_vertex(path_t("/other"), role_t::STORED_VALUE);
+    std::atomic<bool> entered{false};
+    std::atomic<bool> reentered{false};
+    tr::graph::handlers_t h;
+    h.on_read = [&]() -> tr::graph::result_t<tr::view::rope_t> {
+        entered.store(true, std::memory_order_release);
+        // Let the retirer take the map lock BEFORE this callback asks for it. Without the
+        // pause the two can pass each other — the callback finishes its re-entrant call
+        // before retire even starts — and the case degenerates into a plain retire, which
+        // the pre-fix code passes. ANNOUNCED-then-blocked-on-the-map-lock is the whole
+        // interleaving (verified: the pre-fix library hangs here, this one returns).
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        // Re-enter the graph from inside the user callback — the documented freedom the
+        // readers announce OUTSIDE the map lock for. This blocks until the retire below
+        // releases the lock, which is the whole point: if retire waits for us, neither
+        // side ever moves.
+        (void)g.find(path_t("/other").key());
+        reentered.store(true, std::memory_order_release);
+        return tr::view::rope_t{val_u8(0x5A)};
+    };
+    const vertex_handle_t slow = g.register_vertex(path_t("/slow"), role_t::HANDLER, std::move(h));
+
+    std::thread reader([&g] { (void)g.read(path_t("/slow")); });
+    while (!entered.load(std::memory_order_acquire)) std::this_thread::yield();
+
+    check(g.retire(slow).has_value(), "retire returned while a reader was announced (no hang)");
+    reader.join();
+    check(reentered.load(std::memory_order_acquire),
+          "the announced reader's callback re-entered the graph and completed");
 }
 
 }  // namespace
@@ -232,6 +294,7 @@ int main() {
     test_churn_is_bounded();
     test_slow_reader_vs_retire();
     test_no_announce_without_ext();
+    test_retire_never_waits_for_an_announced_reader();
     test_concurrent_read_vs_retire_churn();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,

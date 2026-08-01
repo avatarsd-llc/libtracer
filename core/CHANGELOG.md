@@ -24,7 +24,29 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   previously grew monotonically, one block per retire of a handler-bearing vertex), and
   the new destructor runs the final sweep — nothing retired outlives the graph.
   Observability: `graph_t::seam_domain()` (census / accounting) and
-  `graph_t::seam_announces()` (the announce-gate counter, `ancestor_walks()` mold).
+  `graph_t::seam_announces()` (the announce-gate counter — see the BREAKING note below).
+
+  Per ADR-0072 erratum 1 the domain's shape is not what the ADR first specified:
+  **`retire` allocates nothing and never blocks.** The retire record is a
+  `tr::mem::retire_link_t` the tenant embeds in the block it retires
+  (`retire(link, block, reclaim)`), so there is no allocation, no exhaustion, and no
+  wait-for-readers fallback — a retirer holding the map lock can never wait for a reader
+  whose user callback wants that lock. Readers announce into a per-thread participant
+  (claimed once, released at thread exit) rather than a per-operation cell, and a guard
+  that can get no announcement word — more reader threads than
+  `kHazardReaderSlots`, or guards nested deeper than a participant's words — increments a
+  **stall counter** that pauses reclamation instead of taking a lock, so guards nest to
+  any depth and a user callback may always re-enter the graph. Where the platform can
+  serialize other CPUs on demand (Linux `membarrier`), the announcement is a plain store
+  and the reclaimer carries the ordering; elsewhere both sides use the classical `seq_cst`
+  protocol.
+
+- **`LIBTRACER_SEAM_ANNOUNCE_COUNTER` build option / `tr::graph::kSeamAnnounceCounter`
+  (#576, ADR-0072 erratum 1).** Maintains `graph_t::seam_announces()`. Defaults to the
+  repo's own builds (`PROJECT_IS_TOP_LEVEL`) and OFF for consumers: it is a shared relaxed
+  RMW on the seam read/write path, measured at roughly a tenth of a handler read, and this
+  project ranks latency first. Rendered into the generated `config.hpp` like every other
+  knob (ADR-0068), so every TU of a build agrees.
 
 - **`fwd_router_t::subscribe_toward(producer, target)` (#739).** Binds a local producer's
   subscription toward ONE ordinary mount-path target (`/net/<module>/<name>/<consumer...>`,
@@ -44,6 +66,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   the vertex has no extension block — the placeholder/fan-0 gate), and a dereference goes
   through `hazard_domain_t::guard_t::protect` on `graph_t::seam_domain()`, which pins the
   block for the length of the callback.
+
+- **BREAKING: `graph_t::seam_announces()` returns `std::optional<std::uint64_t>` (#576,
+  ADR-0072 erratum 1).** `nullopt` when the build did not maintain the counter (see
+  `kSeamAnnounceCounter` above) — never a plausible-looking `0`, which would read as "the
+  announce gate held".
+
+- **BREAKING: `hazard_domain_t::retire` takes the tenant's retire record (#576, ADR-0072
+  erratum 1).** `retire(retire_link_t&, void* block, reclaim_fn_t)` replaces
+  `retire(void*, deleter_fn_t)`; a tenant embeds the three-word `tr::mem::retire_link_t` in
+  the block it will retire. This is what makes retirement allocation-free and therefore
+  non-blocking, and it strengthens the bound: a node cannot retire more blocks than it
+  allocated. `value_handlers_t` grows an `hz_link` member for it (HANDLER-role vertices
+  only — a plain leaf or app-field vertex still allocates no seam block at all).
 
 - **BREAKING: the derived `"<kind>-client"` / `"<kind>-server"` module name is gone (#621,
   ADR-0073 §4).** `transport_vertex_t::module_for` no longer invents a module for an undeclared

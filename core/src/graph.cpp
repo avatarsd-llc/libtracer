@@ -401,8 +401,12 @@ void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& k
         // block came from `new` (vertex_t::adopt_identity), so its deleter is `delete`
         // and the backend argument is unused.
         if (value_handlers_t* seam = x.revert_to_placeholder()) {
+            // The record rides INSIDE the block (`hz_link`), so this allocates nothing and
+            // cannot fail — which is what makes it safe to call with map_mutex_ held: no
+            // fallback here may ever wait for a reader, because the announcing readers run
+            // their user callbacks outside this lock and are free to re-enter the graph.
             seam_domain_.retire(
-                seam,
+                seam->hz_link, seam,
                 +[](void* p, mem::mem_backend_t&) { delete static_cast<value_handlers_t*>(p); });
         }
         x.mark_unregistered();
@@ -546,7 +550,8 @@ std::uint64_t graph_t::ancestor_walks() const noexcept {
     return ancestor_walks_.load(std::memory_order_relaxed);
 }
 
-std::uint64_t graph_t::seam_announces() const noexcept {
+std::optional<std::uint64_t> graph_t::seam_announces() const noexcept {
+    if constexpr (!kSeamAnnounceCounter) return std::nullopt;
     return seam_announces_.load(std::memory_order_relaxed);
 }
 
@@ -726,7 +731,7 @@ result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller)
         // the guard clears, AFTER the user callback returns. Gated on the has-extension
         // check (handlers_slot() null ⇒ no ext ⇒ no announce machinery at all).
         if (const std::atomic<value_handlers_t*>* slot = v->handlers_slot(); slot != nullptr) {
-            seam_announces_.fetch_add(1, std::memory_order_relaxed);
+            note_seam_announce();
             mem::hazard_domain_t::guard_t guard{seam_domain_};
             const value_handlers_t* h = guard.protect(*slot);
             // The handler seam is rope-valued (ADR-0053 section 6), so a handler read
@@ -910,7 +915,7 @@ result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t
         // on_write returns. Gated on the has-extension check; a placeholder / plain-leaf
         // write (no ext) never reaches the announce machinery.
         if (const std::atomic<value_handlers_t*>* slot = v->handlers_slot(); slot != nullptr) {
-            seam_announces_.fetch_add(1, std::memory_order_relaxed);
+            note_seam_announce();
             mem::hazard_domain_t::guard_t guard{seam_domain_};
             const value_handlers_t* h = guard.protect(*slot);
             if (h == nullptr || !h->on_write) return std::unexpected(status_t::NOT_FOUND);
@@ -1900,7 +1905,7 @@ result_t<view_t> graph_t::read_children(vertex_t* v) const {
     // concurrent retire may swap out, and the guard clears only after on_children
     // returned. Gated on the has-extension check (no ext ⇒ no announce).
     if (const std::atomic<value_handlers_t*>* slot = v->handlers_slot(); slot != nullptr) {
-        seam_announces_.fetch_add(1, std::memory_order_relaxed);
+        note_seam_announce();
         mem::hazard_domain_t::guard_t guard{seam_domain_};
         if (const value_handlers_t* h = guard.protect(*slot); h != nullptr && h->on_children)
             return h->on_children();
@@ -1942,7 +1947,7 @@ result_t<rope_t> graph_t::read_children_folded(vertex_handle_t vh) const {
     // byte-identical to the read_children path.
     // Announce-protected seam window (ADR-0072 §4), same shape as read_children.
     if (const std::atomic<value_handlers_t*>* slot = v->handlers_slot(); slot != nullptr) {
-        seam_announces_.fetch_add(1, std::memory_order_relaxed);
+        note_seam_announce();
         mem::hazard_domain_t::guard_t guard{seam_domain_};
         if (const value_handlers_t* h = guard.protect(*slot); h != nullptr && h->on_children) {
             const result_t<view_t> sv = h->on_children();

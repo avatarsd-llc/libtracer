@@ -51,6 +51,7 @@ set(LIBTRACER_SRCS
     "${LIBTRACER_ROOT}/core/src/tlv_view.cpp"
     "${LIBTRACER_ROOT}/core/src/path.cpp"
     "${LIBTRACER_ROOT}/core/src/graph.cpp"
+    "${LIBTRACER_ROOT}/core/src/hazard_domain.cpp"
     # net plane (ADR-0038/0040): FWD routing + transport/connection vertices
     "${LIBTRACER_ROOT}/core/src/op_resolve.cpp"
     "${LIBTRACER_ROOT}/core/src/op_resolve_view.cpp"

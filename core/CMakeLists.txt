@@ -83,6 +83,7 @@ add_library(libtracer STATIC
     src/tlv_view.cpp
     src/path.cpp
     src/graph.cpp
+    src/hazard_domain.cpp
     src/loopback.cpp
 )
 
@@ -220,6 +221,17 @@ set(LIBTRACER_LKV_SLOT sp_atomic_slot_t CACHE STRING
 # Costs (N+1)*128 bytes of .bss, and zero unless LIBTRACER_LKV_SLOT=hazard_slot_t.
 set(LIBTRACER_HAZARD_READER_SLOTS 64 CACHE STRING
     "Hazard-pointer domain size (threads that may concurrently touch an LKV slot)")
+# The value-seam announce counter (ADR-0072 §4's gate observable). ON for the repo's own
+# builds — its tests assert the gate structurally — and OFF for everyone else, because it
+# is a shared relaxed RMW on the seam read/write path and this project ranks latency first.
+option(LIBTRACER_SEAM_ANNOUNCE_COUNTER
+       "Maintain graph_t::seam_announces() (a test observable; costs an RMW per seam op)"
+       ${PROJECT_IS_TOP_LEVEL})
+if(LIBTRACER_SEAM_ANNOUNCE_COUNTER)
+    set(LIBTRACER_SEAM_ANNOUNCE_COUNTER_CXX true)
+else()
+    set(LIBTRACER_SEAM_ANNOUNCE_COUNTER_CXX false)
+endif()
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/include/libtracer/config.hpp.in
     ${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config.hpp
@@ -235,11 +247,13 @@ set(_lt_saved_policy "${LIBTRACER_ACL_POLICY}")
 set(_lt_saved_slot "${LIBTRACER_LKV_SLOT}")
 set(_lt_saved_hp "${LIBTRACER_HAZARD_READER_SLOTS}")
 set(_lt_saved_line "${LIBTRACER_CACHE_LINE_BYTES}")
+set(_lt_saved_sac "${LIBTRACER_SEAM_ANNOUNCE_COUNTER_CXX}")
 set(LIBTRACER_VERTEX_LOCK_STRIPES 16)
 set(LIBTRACER_ACL_POLICY allow_only_policy_t)
 set(LIBTRACER_LKV_SLOT sp_atomic_slot_t)
 set(LIBTRACER_HAZARD_READER_SLOTS 64)
 set(LIBTRACER_CACHE_LINE_BYTES 64)
+set(LIBTRACER_SEAM_ANNOUNCE_COUNTER_CXX false)
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/include/libtracer/config.hpp.in
     ${CMAKE_CURRENT_BINARY_DIR}/generated/drift-check/config.hpp
@@ -249,6 +263,7 @@ set(LIBTRACER_ACL_POLICY "${_lt_saved_policy}")
 set(LIBTRACER_LKV_SLOT "${_lt_saved_slot}")
 set(LIBTRACER_HAZARD_READER_SLOTS "${_lt_saved_hp}")
 set(LIBTRACER_CACHE_LINE_BYTES "${_lt_saved_line}")
+set(LIBTRACER_SEAM_ANNOUNCE_COUNTER_CXX "${_lt_saved_sac}")
 file(READ ${CMAKE_CURRENT_SOURCE_DIR}/include/libtracer/config.hpp _lt_cfg_default)
 file(READ ${CMAKE_CURRENT_BINARY_DIR}/generated/drift-check/config.hpp _lt_cfg_rendered)
 if(NOT _lt_cfg_default STREQUAL _lt_cfg_rendered)

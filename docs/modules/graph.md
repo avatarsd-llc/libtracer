@@ -177,7 +177,7 @@ for (...) g.write(v, p.field(), reliable_tlv);           // hot loop — zero st
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
 (`core/include/libtracer/graph.hpp:343,395` by handle, `:679,685` by path;
-`value_ref_t` at `core/include/libtracer/vertex.hpp:83`). A `value_ref_t` is an **owning
+`value_ref_t` at `core/include/libtracer/vertex.hpp:84`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds it as a
 `std::shared_ptr<const rope_t>`, so handing that reference back costs a refcount clone of
 one control block instead of one `segment_ptr_t` clone per link.

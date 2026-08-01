@@ -94,7 +94,7 @@ Verified from source, not assumed. Nothing on the wire path counts segments:
   No cap test.
 - `core/src/op_resolve_walk.hpp:547-556` (`path_lookup_key`) rejects a non-`NAME` child and counts
   nothing.
-- `core/src/graph.cpp:467-492` (`ensure_vertex_ptr`) calls `key_view_t::split_levels`, which checks
+- `core/src/graph.cpp:471-496` (`ensure_vertex_ptr`) calls `key_view_t::split_levels`, which checks
   only `NAME` framing and exactness (`core/include/libtracer/key_view.hpp:122-136`), then
   `mkdir -p`s every missing level with no count or byte check.
 
@@ -112,7 +112,7 @@ amendment:
 > one that survives `kMaxSegments` being lifted.
 
 PR #685 corrected the three code comments that claimed "graph depth is `kMaxSegments`-bounded
-structurally" (`core/include/libtracer/graph.hpp:470-476`, `core/src/graph.cpp:1921`).
+structurally" (`core/include/libtracer/graph.hpp:470-476`, `core/src/graph.cpp:1926`).
 
 ### 2.4 Doctrine
 
@@ -259,7 +259,7 @@ One comparison, no restructuring.
   `kMaxPathBytes`, so the ~1 KiB reserve ceiling on a 16 KB node is preserved exactly. (A design that
   dissolved the byte cap would have had to re-derive it; see §9.1.)
 - Comment-only sites needing the corrected wording: `core/include/libtracer/graph.hpp:470-476`,
-  `core/src/graph.cpp:1921`, `docs/modules/path.md:15` and `:69-72`.
+  `core/src/graph.cpp:1926`, `docs/modules/path.md:15` and `:69-72`.
 
 ## 5. The arithmetic — measured, and the maintainer's redundancy hypothesis is refuted
 
@@ -346,12 +346,12 @@ removes is the last *local-only* speed bump. It is nonetheless a hard **prerequi
 [#690](https://github.com/avatarsd-llc/libtracer/issues/690), and this RFC MUST NOT land before it.
 
 The fix shape is in the same file: the iterative heap-backed stack machine at
-`core/src/graph.cpp:1935-1945` (`std::vector<work_t>` + `detail::try_push_back` →
+`core/src/graph.cpp:1940-1945` (`std::vector<work_t>` + `detail::try_push_back` →
 `status_t::BACKPRESSURE`). Two of the four return `void`, so an error channel changes their
 signatures — that is the open design question in #690, not something this RFC decides.
 
-Note that `vertex_t` carries an immutable `parent_` link (`core/include/libtracer/vertex.hpp:2304`,
-accessor `:976`), so an O(1)-memory parent-link traversal is also available and would need no error
+Note that `vertex_t` carries an immutable `parent_` link (`core/include/libtracer/vertex.hpp:2325`,
+accessor `:990`), so an O(1)-memory parent-link traversal is also available and would need no error
 channel at all. #690 should weigh both.
 
 No C++ test asserts any of the four caps: `core/tests/path_test.cpp` is 82 lines with zero cap
@@ -359,17 +359,17 @@ assertions. Deleting the check breaks no C++ test — itself a finding.
 
 ### 6.3 Documents: 5 normative clauses in 3 files, plus counted ripple
 
-**Normative (must land atomically, §4.4):** `docs/spec/v1.md:58`, `:95`;
-`docs/reference/03-addressing.md:30`, `:31`; `docs/reference/05-protocol-tlvs.md:275`, `:276`, `:352`.
+**Normative (must land atomically, §4.4):** `docs/spec/v1.md:58`, `:96`;
+`docs/reference/03-addressing.md:30`, `:31`; `docs/reference/05-protocol-tlvs.md:275`, `:277`, `:353`.
 
 **Descriptive ripple (not normative — `reference/13` is absent from v1.md §3's incorporation list,
 which contains only `reference/01`, `reference/05`, and `reference/03` §path syntax):**
 `docs/reference/13-network-formation.md:285-288` (§8), `docs/reference/01-data-format.md:259`
-(§6.4), `docs/modules/path.md:15`, `:69-72`, `tests/conformance/README.md:14`,
+(§6.4), `docs/modules/path.md:15`, `:70-73`, `tests/conformance/README.md:14`,
 `docs/design/config/00-configuration-space.md:257-268` (§9.2).
 
 **RFCs to reconcile:** `docs/spec/rfcs/0018-packed-path-segments.md:207` (§7.2 — a direct
-contradiction). RFC-0016's erratum at `:229-254` needs no edit: it was written to survive this
+contradiction). RFC-0016's erratum at `:230-255` needs no edit: it was written to survive this
 change.
 
 **Changelogs** (per CLAUDE.md): `core/CHANGELOG.md`, `bindings/rust/CHANGELOG.md`,

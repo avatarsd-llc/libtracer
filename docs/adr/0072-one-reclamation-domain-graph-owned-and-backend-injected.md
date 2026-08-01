@@ -1,6 +1,6 @@
 # One reclamation domain: graph-owned, backend-injected, type-erased
 
-Status: **accepted; not yet implemented** (tracking: [#684](https://github.com/avatarsd-llc/libtracer/issues/684), [#576](https://github.com/avatarsd-llc/libtracer/issues/576), [#635](https://github.com/avatarsd-llc/libtracer/issues/635)). This is the reuse [ADR-0069](0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md) §4 anticipated: *"the hazard machinery landed here is expected to be reusable there, and that is a reason to land this first."* It landed; this ADR rules on the reuse.
+Status: **accepted; §§1–3 implemented for [#576](https://github.com/avatarsd-llc/libtracer/issues/576), amended by Erratum 1 below** (tracking: [#684](https://github.com/avatarsd-llc/libtracer/issues/684), [#576](https://github.com/avatarsd-llc/libtracer/issues/576), [#635](https://github.com/avatarsd-llc/libtracer/issues/635)). This is the reuse [ADR-0069](0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md) §4 anticipated: *"the hazard machinery landed here is expected to be reusable there, and that is a reason to land this first."* It landed; this ADR rules on the reuse.
 
 ## Context
 
@@ -62,3 +62,33 @@ Two bounds, per the §Resource-bound rule (no synthetic limits):
 - `graph_t` grows a destructor and a domain member; embedder surface is unchanged.
 - The MCU objection to `detail_hp` (global-heap allocation) is retired by construction: every domain allocation draws from the graph's injected backend.
 - The generalization touches `lkv_slot.hpp` only to *extract* the reusable protocol; `hazard_slot_t`'s behavior and its CI matrix legs must be byte-for-byte unaffected until the migration slice, which gets its own measurement.
+
+## Erratum 1 (2026-08-01, [#576](https://github.com/avatarsd-llc/libtracer/issues/576) implementation)
+
+Building the first tenant refuted three specifics of §3 and §4. The §1/§2 rulings — one mechanism, one instance-owned domain per `graph_t`, `lkv_slot.hpp` untouched — stand unchanged.
+
+### E1.1 — Retire records are INTRUSIVE, not backend-allocated; the blocking exhaustion policy is deleted
+
+§3 specified `retire(void*, deleter)` with records drawn from the injected backend and, on exhaustion, *"a blocking scan and then free inline — correct, slow, bounded"*. **That policy is a peer-reachable deadlock**, not a slow path:
+
+`graph_t::retire_subtree` runs under `std::unique_lock(map_mutex_)`. The four `handlers()` readers announce *outside* that lock precisely so their user callbacks may re-enter the graph (RFC-0010 §A.3 states that freedom for the apply seam, and every synthesized-listing handler uses it). A retirer that blocks until an announcing reader clears is therefore waiting for a thread that may be waiting for the map lock the retirer holds. Records draw from the same injected backend a peer can pressure, so the two conditions line up under exactly the connection churn #576 exists for.
+
+The remedy is not a better fallback but the removal of the failure mode: **the retire record is a `tr::mem::retire_link_t` the tenant embeds in the block it will retire** (`value_handlers_t::hz_link` for this tenant). `retire(link, block, reclaim)` allocates nothing, cannot fail, and never waits; `scan()` re-parks an announced block rather than waiting for it. The §3 bound *"retirement pressure is bounded by a real resource the target sizes"* is replaced by a strictly stronger one: **a node cannot retire more blocks than it allocated in the first place.** The backend reference survives — it is still what a reclaimer returns backend-allocated blocks to (the §3 deleter contract is unchanged).
+
+### E1.2 — Announcement is PER-THREAD, in a process-global table; the overflow spin lock becomes a stall counter
+
+§2's "instance, not process-global" ruling was about the retired list and the teardown point, and it holds for both. It also, incidentally, put the *announcement cells* on the domain, and the first implementation claimed one **per operation** with a `seq_cst` CAS. Measured, that CAS plus the gate counter was most of a +36% handler-read regression.
+
+A thread now claims one participant (a cache-line-isolated group of announcement words) **once**, and releases it at thread exit. The participant table is process-global, which is sound because **announcements are matched by address**: two live blocks cannot share one, so a foreign domain's announcement can never match a parked block. Per-instance RAM drops (one table, not one per graph); the per-instance bound §2 wanted is a property of the retired list, which stays per instance.
+
+The `detail_hp` overflow policy — a shared cell under a **non-recursive spin lock** — is replaced by a per-domain **stall counter**: a guard that can get no announcement word (more reader threads than participants, or nesting deeper than a participant's words) increments it, and a scan frees nothing while it is non-zero. It is a counter, not a lock: it nests to any depth, it never waits, and it cannot self-deadlock — which matters because the library's own call sites hold a guard across a user callback that may re-enter the graph and announce again. Nesting is therefore SAFE at any depth; past `kAnnouncePerThread` it costs reclamation throughput on that thread and nothing else.
+
+### E1.3 — §4's fold is NOT the remedy; the remedy is an asymmetric barrier
+
+§4 recorded *"one announcement scope per operation covering both the LKV slot and the seam"* as the fallback if the announce pair moved the number. **That fold cannot pay on the legs that moved.** `graph_t::read` forks on role: `role() == HANDLER` reads the seam and returns; every other role reads the LKV slot. The two announcements are on mutually exclusive branches of the same `if`, so there is no operation that performs both and nothing to fold. Measured lever by lever (`bench/run_seam_ab.sh`), the cost was the ordering itself, not the count: a hazard reader needs StoreLoad between "I announce p" and "is p still published?", which on x86-TSO is an `mfence`-class instruction on every protected read.
+
+The remedy is to move that ordering to the side that is cold. Where the OS can serialize every other CPU on demand (Linux `membarrier` `PRIVATE_EXPEDITED`), the reader announces with a **plain store** and the reclaimer pays a barrier once per scan; where it cannot — every other platform, an old kernel, a denied syscall, or a ThreadSanitizer build whose happens-before model cannot represent an IPI — both sides fall back to the classical `seq_cst` protocol and nothing about correctness changes. This is the one place the design depends on a platform capability, and it degrades to correct-and-slower rather than to incorrect.
+
+### E1.4 — The gate counter is a build option, not a shipped member
+
+`seam_announces()` is the §4 gate's structural observable, and a relaxed RMW on a shared word measured at roughly a tenth of a handler read. It is now `std::optional`, maintained only when `kSeamAnnounceCounter` is on (the repo's own builds), and `nullopt` — never a plausible-looking `0` — everywhere else.

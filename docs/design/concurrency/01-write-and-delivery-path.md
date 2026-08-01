@@ -17,7 +17,7 @@ lock each stage takes, where the buffers come from, and what the delivery legs c
 
 ## 1. Write path
 
-`write_impl` (`core/src/graph.cpp:969`) is the one body behind every write overload. It takes
+`write_impl` (`core/src/graph.cpp:974`) is the one body behind every write overload. It takes
 **no map lock**. The stages, in order:
 
 | stage | what it does |
@@ -45,7 +45,7 @@ reclones nothing (`graph.cpp:928-930`).
 
 Delivery runs outside the vertex lock, because a callback or a re-dispatch may re-enter the
 graph. The edge list therefore has to be copied out first. `fan_out` (`graph.cpp:794`) does that
-in one call to `snapshot_edges` (`core/include/libtracer/vertex.hpp:1482`), which takes the
+in one call to `snapshot_edges` (`core/include/libtracer/vertex.hpp:1549`), which takes the
 vertex stripe mutex, walks `subs_`, and fills one of two buffers.
 
 It reaches that call only when something subscribes here. `fan_out` opens on
@@ -66,7 +66,7 @@ lock-free `own_subs()` count:
 `inline_buf` is an `edge_snapshot_t`, a raw byte array placement-constructed into, so a small
 fan-out neither allocates nor pays the zeroing a default-constructed `edge_view_t` array would
 (`vertex.hpp:674-712`). Its width is `kInlineFanout` — the no-heap small-fan-out snapshot width,
-`edge_snapshot_t::kCapacity`, 8 (`vertex.hpp:910`, `:677`). A warm wide publish reuses the
+`edge_snapshot_t::kCapacity`, 8 (`vertex.hpp:910`, `:691`). A warm wide publish reuses the
 thread-local vector's capacity and so allocates nothing either.
 
 `own_subs()` is read without the lock, so the width it reports can be stale.
@@ -103,7 +103,7 @@ inline estimate small, because the in-process callback leg is the hot case. The 
 independent and any subset may fire for one edge: a callback pointer, a target key, and a
 non-empty link name.
 
-`bubble_up` (`graph.cpp:866`, entered only when `listeners_above() > 0`, `:1062`) walks parent pointers, which
+`bubble_up` (`core/src/graph.cpp:941`, entered only when `listeners_above() > 0`, `:1127`) walks parent pointers, which
 are immutable once linked, and so takes **no lock at all**; a placeholder ancestor holds no edges
 and its `fan_out` is a no-op. An idle write — nobody subscribed above — pays one relaxed load.
 

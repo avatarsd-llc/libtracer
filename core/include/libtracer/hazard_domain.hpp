@@ -1,45 +1,63 @@
 /**
  * @file
- * @brief The graph-owned, backend-injected hazard-pointer reclamation domain (ADR-0072).
+ * @brief The graph-owned, non-blocking hazard-pointer reclamation domain (ADR-0072 + its
+ *        erratum 1: intrusive records, per-thread announcement, asymmetric barriers).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * One answer to the replaced-block question — *what happens to a heap block a
- * control-plane writer replaces while a lock-free reader still holds a raw reference
- * into it* — generalized from the announce/scan protocol `lkv_slot.hpp`'s `detail_hp`
- * namespace proved (ADR-0069 §5), with the two properties that blocked reusing it
- * directly repaired (ADR-0072 §2/§3):
+ * control-plane writer replaces while a lock-free reader still holds a raw reference into
+ * it* — generalized from the announce/scan protocol `lkv_slot.hpp`'s `detail_hp` namespace
+ * proved (ADR-0069 §5). `detail_hp` itself is deliberately untouched: its migration is a
+ * later, separately measured slice (ADR-0072 §2).
  *
- *   - **Instance, not process-global.** A `hazard_domain_t` is an ordinary member
- *     (`graph_t` owns one), so it can take an injected resource and be torn down — the
- *     final sweep runs in its destructor, which is half of what #576 needed.
- *   - **Type-erased, backend-allocated retire records.** The retire API is
- *     `retire(void*, void (*)(void*, mem_backend_t&))`; announcement cells stay `void*`.
- *     Records draw from the injected `mem_backend_t`, so retirement pressure is
- *     bounded by a real resource the target sizes (no synthetic limits), and the MCU
- *     objection to `detail_hp` (global-heap allocation) is retired by construction.
+ * ## The three properties that make it usable on a bounded, latency-first node
  *
- * The first tenant is `graph_t`'s retired value seam (#576); the published edge array
- * (#635) rides the same plumbing next; the LKV slot's private static domain migrates
- * LAST, in its own measured slice — `detail_hp` is deliberately untouched here.
+ *   1. **`retire` allocates nothing and never waits.** The retire record is INTRUSIVE: the
+ *      tenant embeds a `retire_link_t` in the block it will one day retire, so parking a
+ *      block is a Treiber push of storage that already exists. There is no allocation, so
+ *      there is no exhaustion path, so there is no "block until the readers drain" fallback
+ *      — the shape that deadlocked against `graph_t::map_mutex_` (a retirer holds the map
+ *      lock; the announcing readers are outside it *precisely so their user callbacks may
+ *      re-enter the graph*, so waiting for one is waiting for a thread that is waiting for
+ *      you). This is ADR-0072 §3's erratum: the bound is not "records draw from an injected
+ *      resource" but the strictly stronger "records ARE the blocks" — a node cannot retire
+ *      more blocks than it allocated.
+ *   2. **The reader announces into a PER-THREAD word, not a per-operation cell.** A cell
+ *      claimed per operation costs a `seq_cst` CAS on shared storage every single read; a
+ *      thread claims its participant once (and releases it at thread exit) and thereafter
+ *      pays a store to a line it owns. Announcement storage is process-global rather than
+ *      per-domain, which is safe *because announcements are compared by ADDRESS*: two live
+ *      blocks in two domains cannot share one, so a foreign announcement can never match a
+ *      parked block. ADR-0072 §2's three reasons to own the domain per instance — an
+ *      injected resource, a teardown point, isolated bounds — are all about the RETIRED
+ *      LIST, which stays per-instance.
+ *   3. **The announcement store is LIGHT where the platform can flush a remote store
+ *      buffer.** Hazard protection fundamentally needs StoreLoad ordering between "I
+ *      announce p" and "is p still published?" — on x86 that is an `mfence`-class
+ *      instruction, and it was the whole of the measured regression this design replaces.
+ *      When the OS can serialize every other CPU on demand (Linux `membarrier`
+ *      `PRIVATE_EXPEDITED`), the reader drops to a plain store and the *reclaimer* pays the
+ *      barrier — cold, once per scan. Where it cannot (or under ThreadSanitizer, whose
+ *      model cannot see an IPI), the reader falls back to `seq_cst` and the protocol is
+ *      exactly the classical one. See `hazard_light_announce_available`.
  *
  * ## Protocol summary
  *
- * A reader takes a `hazard_domain_t::guard_t` (claiming one cache-line-isolated
- * announcement cell for the length of the operation), announces the pointer it is about
- * to dereference via `protect` (announce, then **re-read** the source — the ADR-0069 §5
- * loop), and clears on guard destruction — after the user callback returns, so a slow
- * callback merely delays that one block's reclamation. A writer that displaced a block
- * hands it to `hazard_domain_t::retire`; parked records are freed by a scan (a cold,
- * threshold-batched control-plane event) once no cell announces them.
+ * A reader takes a `hazard_domain_t::guard_t`, announces the pointer it is about to
+ * dereference via `protect` (announce, then **re-read** the source — the ADR-0069 §5 loop),
+ * and clears on guard destruction — after the user callback returns, so a slow callback
+ * merely delays that one block's reclamation. A writer that displaced a block hands it to
+ * `hazard_domain_t::retire`; parked blocks are freed by a scan (a cold, threshold-batched
+ * control-plane event) once no participant announces them.
  *
- * **Exhaustion never leaks and never aborts** (ADR-0072 §3): a writer that cannot
- * allocate a retire record runs a scan (to shed parked blocks), then blocks until no
- * reader announces ITS block, and frees it inline — correct, slow, bounded. A reader
- * that finds every cell claimed serializes with other overflow readers on the one shared
- * overflow cell (the `detail_hp` policy): a misconfigured cell count costs throughput on
- * the overflow threads and nothing else.
+ * **Nothing on either side blocks.** A reader that can get no announcement word — more
+ * concurrent reader threads than `tr::graph::kHazardReaderSlots`, or a user callback that
+ * re-entered the graph deeper than a participant has words — increments the domain's
+ * *stall* counter instead, which makes scans free nothing for the life of that guard. It is
+ * a counter, not a lock: it nests to any depth, it cannot self-deadlock, and it costs
+ * reclamation throughput on the overflowing thread and nothing else.
  */
 #pragma once
 
@@ -47,56 +65,193 @@
 #include <cstddef>
 #include <cstdint>
 #include <new>
-#include <thread>
 
 #include "libtracer/backend.hpp"
 #include "libtracer/config.hpp"
-#include "libtracer/segment.hpp"
 
 namespace tr::mem {
+
+/**
+ * @brief A parked block's reclaimer: frees @p block, returning it to the resource it came
+ *        from. The second argument is the domain's injected backend, for blocks that were
+ *        allocated from it; a block from elsewhere (e.g. the global heap) ignores it. Must
+ *        not throw and must not re-enter the domain.
+ */
+using reclaim_fn_t = void (*)(void* block, mem_backend_t& backend);
+
+/**
+ * @brief The intrusive retire record a tenant embeds in (or beside) the block it retires.
+ *
+ * Three words the tenant already owns, which is what makes `retire` allocation-free and
+ * therefore non-blocking (see the file header, property 1). The domain writes these fields
+ * only while the block is parked — i.e. after the writer detached it from its publication
+ * slot — and a lock-free reader inside the block touches only the tenant's own members, so
+ * the two never touch the same subobject.
+ *
+ * A block may be parked once at a time; retiring a block whose link is still parked is a
+ * tenant bug (it would splice the retired list into itself). Since retiring requires having
+ * just unpublished the block, this is structurally hard to do.
+ */
+struct retire_link_t {
+    void* block = nullptr;          /**< @brief The parked block (set by `retire`). */
+    reclaim_fn_t reclaim = nullptr; /**< @brief Frees `block` on reclaim. */
+    retire_link_t* next = nullptr;  /**< @brief Retired-list link. */
+};
+
+/**
+ * @brief Whether this process can force every other CPU to a serializing point on demand
+ *        (Linux `membarrier` `PRIVATE_EXPEDITED`), so readers may announce with a PLAIN
+ *        store and the reclaimer carries the ordering.
+ *
+ * Detected and registered once, on first call. `false` ⇒ the reader announces `seq_cst`
+ * (the classical hazard-pointer protocol) — always correct, just slower. Forced `false`
+ * under ThreadSanitizer: TSan's happens-before model cannot represent a barrier delivered
+ * by an inter-processor interrupt, so the light protocol would be reported as a race even
+ * though the hardware honours it.
+ */
+[[nodiscard]] bool hazard_light_announce_available() noexcept;
+
+/**
+ * @brief The reclaimer-side barrier: after it returns, every announcement any other thread
+ *        issued before it is visible here. `membarrier` where available (see
+ *        @ref hazard_light_announce_available), a `seq_cst` fence otherwise.
+ */
+void hazard_heavy_barrier() noexcept;
+
+/**
+ * @brief The process-global announcement table the reader protocol writes into.
+ *
+ * Global rather than per-domain because announcements are matched by ADDRESS: a block
+ * parked in one domain can never equal a live block announced against another, so a shared
+ * table costs a scan a few more words to read and buys every reader a per-thread claim
+ * (see the file header, property 2). Nothing here is ever allocated or freed — it is a
+ * fixed `.bss` table sized by @ref tr::graph::kHazardReaderSlots, the same knob the
+ * per-domain cells used, so the static-RAM census does not move (it drops, for a process
+ * with more than one graph).
+ */
+namespace detail_hz {
+
+/** @brief How many threads may hold announcements at once — one participant each. */
+inline constexpr std::size_t kParticipants = graph::kHazardReaderSlots;
+
+/**
+ * @brief Announcement words per participant, i.e. how deep a thread may nest guards
+ *        before it falls back to the stall counter.
+ *
+ * Two, because the library's own reachable nesting is exactly two deep: a seam read
+ * announces, and its user callback may re-enter the graph and announce a second seam. A
+ * third level is legal and costs a stall, not a deadlock — which is why this is a tuning
+ * number and not a correctness one (the no-synthetic-limits rule: exceeding it degrades,
+ * it never fails).
+ */
+inline constexpr std::size_t kAnnouncePerThread = 2;
+
+/** @brief Padding width: the cache-line knob, floored at the payload's own alignment so a
+ *         single-core build (knob 0) stays well-formed. */
+inline constexpr std::size_t kAnnAlign = graph::kCacheLineBytes > alignof(std::atomic<void*>)
+                                             ? graph::kCacheLineBytes
+                                             : alignof(std::atomic<void*>);
+
+/** @brief One thread's announcement storage, cache-line isolated so a scan cannot false-
+ *         share with a reader mid-announce. */
+struct alignas(kAnnAlign) participant_t {
+    std::atomic<bool> claimed{false};             /**< @brief Owned by some live thread. */
+    std::atomic<void*> ann[kAnnouncePerThread]{}; /**< @brief Announced blocks; null = free. */
+};
+
+/** @brief The table itself, and how far into it any thread has ever claimed. */
+inline participant_t g_participants[kParticipants]{};
+/** @brief One past the highest participant index any thread has ever claimed — a scan
+ *         reads only that far, so a node with two threads never walks the whole table. */
+inline std::atomic<std::size_t> g_claimed_high_water{0};
+
+/** @brief This thread's participant, how many of its words are in use, and whether it may
+ *         announce with a plain store. All three are constant-initialized PODs on purpose:
+ *         a `thread_local` with dynamic initialization compiles to a guarded (sometimes
+ *         out-of-line) access, and these are read on the seam hot path. They live in
+ *         thread-local storage rather than on the domain because the DOMAIN's line is
+ *         written by every retire — a reader loading a flag from it would take a coherence
+ *         miss on every control-plane event, which is the shape of cost this whole design
+ *         exists to remove. */
+inline thread_local participant_t* t_participant = nullptr;
+/** @brief How many of this thread's announcement words are in use (guards nest LIFO). */
+inline thread_local std::size_t t_depth = 0;
+/** @brief Whether this thread may announce with a plain store — see @ref t_participant. */
+inline thread_local bool t_light = false;
+
+/** @brief Releases this thread's participant back to the table at thread exit — the only
+ *         thing here with a destructor, and it is touched ONLY on the cold claim path so
+ *         the hot path never pays for its initialization guard. Without it a process that
+ *         churns threads would consume the table and degrade every later reader to the
+ *         stall path. */
+struct releaser_t {
+    bool armed = false; /**< @brief Written by the claim path purely to force TLS init. */
+    ~releaser_t() {
+        if (t_participant != nullptr) {
+            t_participant->claimed.store(false, std::memory_order_release);
+            t_participant = nullptr;
+        }
+    }
+};
+/** @brief The thread-exit hook itself — see @ref releaser_t. */
+inline thread_local releaser_t t_releaser{};
+
+/** @brief Claim this thread's participant (once per thread), or `nullptr` when the table
+ *         is full — in which case the caller stalls reclamation instead of blocking. */
+[[nodiscard]] inline participant_t* my_participant() noexcept {
+    if (t_participant != nullptr) return t_participant;
+    t_releaser.armed = true;  // force the thread-exit release to be registered
+    t_light = hazard_light_announce_available();
+    for (std::size_t i = 0; i < kParticipants; ++i) {
+        bool expected = false;
+        if (g_participants[i].claimed.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+            t_participant = &g_participants[i];
+            std::size_t hw = g_claimed_high_water.load(std::memory_order_relaxed);
+            while (hw < i + 1 && !g_claimed_high_water.compare_exchange_weak(
+                                     hw, i + 1, std::memory_order_acq_rel,
+                                     std::memory_order_relaxed)) { /* retry with the new hw */
+            }
+            return t_participant;
+        }
+    }
+    return nullptr;
+}
+
+}  // namespace detail_hz
 
 /**
  * @brief An instance-owned, type-erased hazard-pointer reclamation domain (ADR-0072).
  *
  * Owned by a composition root (`graph_t` today), borrowed by reference by its tenants.
  * Reader side: @ref guard_t. Writer side: @ref retire. Teardown: the destructor runs the
- * final sweep — every parked block's deleter fires, so nothing a tenant retired can
- * outlive the domain. The domain allocates ONLY retire records, and only from the
- * injected backend; announcement cells are embedded in the object itself.
+ * final sweep — every parked block's reclaimer fires, so nothing a tenant retired can
+ * outlive the domain.
  *
- * Thread-safety: `retire` and every guard operation may run concurrently from any
- * thread. Destruction requires quiescence — no guard live, no `retire` in flight — the
- * same precondition every C++ object's destructor has.
+ * Thread-safety: `retire` and every guard operation may run concurrently from any thread,
+ * and NEITHER EVER BLOCKS — no lock, no spin on another thread's progress. Destruction
+ * requires quiescence — no guard live, no `retire` in flight — the same precondition every
+ * C++ object's destructor has.
  */
 class hazard_domain_t {
    public:
+    /** @brief @ref reclaim_fn_t, under the name the tenants' call sites use. */
+    using deleter_fn_t = reclaim_fn_t;
+
     /**
-     * @brief A parked block's reclaimer: frees @p block, returning it to the resource it
-     *        came from. The second argument is the domain's injected backend, for blocks
-     *        that were allocated from it; a block from elsewhere (e.g. the global heap)
-     *        ignores it. Must not throw and must not re-enter the domain.
+     * @brief How many blocks may park before a retire triggers a scan.
+     *
+     * A threshold, not a bound: it is the smallest batch that can hope to free anything,
+     * since at most `kParticipants` blocks can be announced domain-wide at any instant.
      */
-    using deleter_fn_t = void (*)(void* block, mem_backend_t& backend);
-
-    /** @brief The claimable announcement cells; the config knob `detail_hp` sizes by too. */
-    static constexpr std::size_t kCells = graph::kHazardReaderSlots;
-
-    /** @brief The shared index readers fall back to when every claimable cell is taken. */
-    static constexpr std::size_t kOverflowCell = kCells;
+    static constexpr std::size_t kRetireBatch = detail_hz::kParticipants + 1;
 
     /**
-     * @brief How many records may park before a retire triggers a scan — the tightest
-     *        batch that can hope to free anything, since at most `kCells + 1` blocks can
-     *        be announced domain-wide at any instant (the `detail_hp` derivation).
-     */
-    static constexpr std::size_t kRetireBatch = kCells + 1;
-
-    /**
-     * @brief Construct a domain drawing its retire records from @p backend.
+     * @brief Construct a domain whose reclaimers return blocks to @p backend.
      *
      * @p backend must outlive the domain and must be thread-safe if tenants retire from
      * more than one thread (the same contract ADR-0060 §2 states for the graph's value
-     * backend, which is what `graph_t` injects here).
+     * backend, which is what `graph_t` injects here). The domain itself never allocates.
      */
     explicit hazard_domain_t(mem_backend_t& backend) noexcept : backend_(backend) {}
 
@@ -104,59 +259,54 @@ class hazard_domain_t {
     hazard_domain_t& operator=(const hazard_domain_t&) = delete;
 
     /**
-     * @brief The final sweep (ADR-0072 §2): free every parked block through its deleter.
+     * @brief The final sweep (ADR-0072 §2): free every parked block through its reclaimer.
      *
      * Precondition: quiescence — no live guard, no concurrent `retire`. `graph_t`'s
-     * destructor satisfies it the way every member destructor does: a caller destroying
-     * the graph under a live reader was already undefined.
+     * destructor satisfies it the way every member destructor does: a caller destroying the
+     * graph under a live reader was already undefined.
      */
     ~hazard_domain_t() {
-        record_t* r = retired_.exchange(nullptr, std::memory_order_acq_rel);
+        retire_link_t* r = retired_.exchange(nullptr, std::memory_order_acq_rel);
         while (r != nullptr) {
-            record_t* next = r->next;
-            r->deleter(r->block, backend_);
-            free_record(r);
+            retire_link_t* next = r->next;
+            r->reclaim(r->block, backend_);
             r = next;
         }
         retired_n_.store(0, std::memory_order_relaxed);
     }
 
     /**
-     * @brief Hand a displaced @p block to the domain: parked until no reader announces
-     *        it, then freed via @p deleter. Never leaks, never aborts (ADR-0072 §3).
+     * @brief Hand a displaced @p block to the domain: parked until no reader announces it,
+     *        then freed via @p reclaim.
      *
-     * The common case allocates one record from the injected backend and returns; a
-     * threshold-crossing retire additionally runs a scan (cold, O(cells + parked)). On
-     * record exhaustion the calling thread scans, then **blocks** until no cell
-     * announces @p block, and frees it inline — so a caller holding a lock a reader's
-     * announced callback could re-enter must size the record backend for its churn.
+     * **Never allocates, never blocks, never leaks, never aborts.** @p link is storage the
+     * tenant owns (embedded in @p block, in the common case), which is what removes the
+     * exhaustion path the ADR originally specified a blocking fallback for — see the file
+     * header, property 1. The common case is one Treiber push; a threshold-crossing retire
+     * additionally runs a scan (cold, O(participants + parked)), which frees the parked
+     * blocks nobody announces and re-parks the rest. It never waits for a reader.
      *
+     * Safe to call while holding a lock a reader's user callback might take: the whole
+     * point of the design.
+     *
+     * @param link    The tenant-owned record for @p block; must not be parked already.
      * @param block   The displaced block; `nullptr` is a no-op.
-     * @param deleter Frees @p block (see @ref deleter_fn_t). Must be non-null.
+     * @param reclaim Frees @p block (see @ref reclaim_fn_t). Must be non-null.
      */
-    void retire(void* block, deleter_fn_t deleter) noexcept {
+    void retire(retire_link_t& link, void* block, deleter_fn_t reclaim) noexcept {
         if (block == nullptr) return;
-        record_t* rec = alloc_record();
-        if (rec == nullptr) {
-            // Exhaustion policy (ADR-0072 §3): shed what a scan can, then free inline
-            // once provably unannounced — correct, slow, bounded; never leak or abort.
-            scan();
-            wait_unannounced(block);
-            deleter(block, backend_);
-            return;
-        }
-        rec->block = block;
-        rec->deleter = deleter;
-        // Count BEFORE pushing: a concurrent scan may pop the list between the two, and
-        // its decrement must never underflow the counter (the count may transiently
-        // exceed the list length; it can never fall below it).
+        link.block = block;
+        link.reclaim = reclaim;
+        // Count BEFORE pushing: a concurrent scan may pop the list between the two, and its
+        // decrement must never underflow the counter (the count may transiently exceed the
+        // list length; it can never fall below it).
         const std::size_t n = retired_n_.fetch_add(1, std::memory_order_acq_rel) + 1;
-        push_retired(rec);
+        push_retired(&link);
         if (n >= kRetireBatch) scan();
     }
 
     /**
-     * @brief Records currently parked (approximate under concurrency) — accounting for
+     * @brief Blocks currently parked (approximate under concurrency) — accounting for
      *        tests and a memory census, never a synchronization primitive.
      */
     [[nodiscard]] std::size_t retired_count() const noexcept {
@@ -164,169 +314,122 @@ class hazard_domain_t {
     }
 
     /**
-     * @brief A reader's claim on one announcement cell for the length of one operation.
+     * @brief Run a scan now (a cold control-plane courtesy — `retire` batches its own).
+     */
+    void collect() noexcept { scan(); }
+
+    /**
+     * @brief A reader's protection over one block for the length of one operation.
      *
-     * Construction is FREE — the claim and the announcement are one CAS inside
-     * @ref protect (claiming `nullptr` → the pointer being announced), so a guard whose
-     * source turns out empty touches no shared state at all. Destruction clears the
-     * announcement and releases the cell in one store — place the guard so it destructs
-     * AFTER the user callback returns. When every cell is taken, `protect` serializes
-     * with other overflow readers on the shared overflow cell under a spin lock; never
-     * nest two guards of one domain on one thread (the lock is not recursive) — tenants
-     * that announce once per operation cannot hit this.
+     * Construction is FREE: the guard takes an announcement word only when @ref protect
+     * finds something to announce, so a guard whose source turns out empty touches no
+     * shared state at all. Destruction clears the announcement in one store — place the
+     * guard so it destructs AFTER the user callback returns.
+     *
+     * Guards NEST to any depth. Past @ref detail_hz::kAnnouncePerThread levels on one
+     * thread (or when every participant is claimed) a guard falls back to the domain's
+     * stall counter, which pauses reclamation rather than waiting for anything — so an
+     * inner guard can never deadlock against an outer one, and a user callback that
+     * re-enters the graph is always safe.
      */
     class guard_t {
        public:
-        /** @brief Bind to @p d. Claims nothing until @ref protect announces. */
+        /** @brief Bind to @p d. Announces nothing until @ref protect is called. */
         explicit guard_t(hazard_domain_t& d) noexcept : d_(d) {}
 
         guard_t(const guard_t&) = delete;
         guard_t& operator=(const guard_t&) = delete;
 
-        /** @brief Clear the announcement and release the cell (and the overflow lock). */
+        /** @brief Clear the announcement (or release the stall), in one store. */
         ~guard_t() {
-            if (idx_ == kNoCell) return;
-            d_.cells_[idx_].pinned.store(nullptr, std::memory_order_release);
-            if (overflow_) {
-                d_.overflow_lock_.clear(std::memory_order_release);
-                d_.overflow_lock_.notify_one();
+            if (ann_ != nullptr) {
+                // Release, so the reader's reads of the block cannot sink past the clear —
+                // that is exactly the window in which a scan would free it.
+                ann_->store(nullptr, std::memory_order_release);
+                --detail_hz::t_depth;
+            } else if (stalled_) {
+                d_.stall_.fetch_sub(1, std::memory_order_release);
             }
         }
 
         /**
-         * @brief Announce the pointer @p src currently publishes and return it pinned —
-         *        the ADR-0069 §5 announce-then-re-read loop, so "not announced" means
-         *        "cannot become announced" against a concurrent displace + scan.
+         * @brief Announce the pointer @p src currently publishes and return it protected —
+         *        the announce-then-re-read loop, so "not announced" means "cannot become
+         *        announced" against a concurrent displace + scan.
          *
-         * The cell claim IS the first announcement (one `seq_cst` CAS of `nullptr` → the
-         * pointer), and the re-read is `seq_cst`, so both sit in one total order with
-         * the writer's displacing exchange and the scanner's fence (the same argument
-         * `hazard_slot_t::load` records). The returned pointer stays valid until this
-         * guard clears — i.e. through the caller's user callback — even if a writer
-         * displaces and retires it meanwhile.
+         * The returned pointer stays valid until this guard clears — i.e. through the
+         * caller's user callback — even if a writer displaces and retires it meanwhile.
          *
-         * @return The pinned pointer, or `nullptr` when @p src publishes none — in which
-         *         case, if nothing was yet claimed, the guard holds no cell and its
-         *         destructor is free.
+         * @return The protected pointer, or `nullptr` when @p src publishes none.
          */
         template <typename T>
         [[nodiscard]] T* protect(const std::atomic<T*>& src) noexcept {
             T* p = src.load(std::memory_order_acquire);
-            if (p == nullptr && idx_ == kNoCell) return nullptr;  // nothing to pin, no claim
-            if (idx_ == kNoCell) claim(p);
-            std::atomic<void*>& cell = d_.cells_[idx_].pinned;
+            if (p == nullptr && ann_ == nullptr && !stalled_) return nullptr;
+            if (ann_ == nullptr && !stalled_) take_slot();
+            if (stalled_) {
+                // Reclamation is paused domain-wide for this guard's life, so whatever the
+                // source publishes cannot be freed under us. The seq_cst load is the other
+                // half of scan()'s stall check: it puts this read after the stall increment
+                // in the single total order, so a scan that saw stall == 0 provably ran
+                // before this load and therefore before the displacement it might race.
+                return src.load(std::memory_order_seq_cst);
+            }
             for (;;) {
-                T* again = src.load(std::memory_order_seq_cst);
+                T* again = announce_and_reread(p, src);
                 if (again == p) return p;
-                // Source emptied mid-loop: return null but leave the STALE announcement
-                // in place (it merely defers that one block until the guard clears).
-                // Storing nullptr here would RELEASE the cell while this guard still
-                // owns it — a later claimant's announcement would then be destroyed by
-                // our destructor's clear, un-pinning a block a reader is inside.
-                if (again == nullptr) return nullptr;
+                if (again == nullptr) {
+                    ann_->store(nullptr, std::memory_order_release);
+                    return nullptr;
+                }
                 p = again;
-                cell.store(p, std::memory_order_seq_cst);  // re-announce, then re-read
             }
         }
 
        private:
-        /** @brief "This guard holds no cell (yet)." */
-        static constexpr std::size_t kNoCell = static_cast<std::size_t>(-1);
-
-        /**
-         * @brief Claim a cell with @p p as its first announcement: one CAS from a
-         *        thread-local probe hint in the common case, the shared overflow cell
-         *        under its spin lock when every claimable cell is taken (which costs
-         *        throughput on the overflow threads and nothing else — ADR-0069 §3).
-         */
-        void claim(void* p) noexcept {
-            std::size_t& hint = probe_hint();
-            for (std::size_t k = 0; k < kCells; ++k) {
-                const std::size_t i = (hint + k) % kCells;
-                void* expected = nullptr;
-                if (d_.cells_[i].pinned.compare_exchange_strong(
-                        expected, p, std::memory_order_seq_cst, std::memory_order_relaxed)) {
-                    idx_ = i;
-                    hint = i;
-                    return;
-                }
+        /** @brief Take this thread's next announcement word, or fall back to the stall
+         *         counter when there is none (table full, or nested too deep). */
+        void take_slot() noexcept {
+            detail_hz::participant_t* self = detail_hz::my_participant();
+            if (self != nullptr && detail_hz::t_depth < detail_hz::kAnnouncePerThread) {
+                ann_ = &self->ann[detail_hz::t_depth++];
+                return;
             }
-            while (d_.overflow_lock_.test_and_set(std::memory_order_acquire)) {
-                d_.overflow_lock_.wait(true, std::memory_order_relaxed);
-            }
-            overflow_ = true;
-            idx_ = kOverflowCell;
-            d_.cells_[idx_].pinned.store(p, std::memory_order_seq_cst);
+            d_.stall_.fetch_add(1, std::memory_order_seq_cst);
+            stalled_ = true;
         }
 
-        hazard_domain_t& d_;        /**< @brief The domain whose cell this guard holds. */
-        std::size_t idx_ = kNoCell; /**< @brief The claimed cell index, or `kNoCell`. */
-        bool overflow_ = false;     /**< @brief Whether `idx_` is the shared overflow cell. */
+        /**
+         * @brief Publish @p p in this guard's word, then re-read @p src, with the ordering
+         *        the domain's barrier mode requires.
+         *
+         * LIGHT mode: a plain store plus a compiler barrier. The StoreLoad the protocol
+         * needs is supplied from the other side — the reclaimer's @ref hazard_heavy_barrier
+         * serializes every CPU between its displacement and its read of the announcements,
+         * so a reader either announced before that point (the reclaimer sees it) or issues
+         * its re-read after it (and sees the displacement). HEAVY mode: the classical
+         * `seq_cst` store, which is the fence itself.
+         */
+        template <typename T>
+        [[nodiscard]] T* announce_and_reread(T* p, const std::atomic<T*>& src) noexcept {
+            if (detail_hz::t_light) {
+                ann_->store(p, std::memory_order_relaxed);
+                std::atomic_signal_fence(std::memory_order_seq_cst);
+                return src.load(std::memory_order_acquire);
+            }
+            ann_->store(p, std::memory_order_seq_cst);
+            return src.load(std::memory_order_seq_cst);
+        }
+
+        hazard_domain_t& d_;                /**< @brief The domain being read. */
+        std::atomic<void*>* ann_ = nullptr; /**< @brief This guard's announcement word. */
+        bool stalled_ = false;              /**< @brief Holding the domain's stall instead. */
     };
 
    private:
-    /**
-     * @brief One type-erased retire record (ADR-0072 §3): the parked block, its
-     *        reclaimer, the intrusive list link, and the segment the record itself
-     *        lives in (so freeing the record returns it to the injected backend).
-     */
-    struct record_t {
-        void* block = nullptr;           /**< @brief The displaced, parked block. */
-        deleter_fn_t deleter = nullptr;  /**< @brief Frees `block` on reclaim. */
-        record_t* next = nullptr;        /**< @brief Retired-list link. */
-        view::segment_t* self = nullptr; /**< @brief The backend segment holding this record. */
-    };
-
-    /**
-     * @brief The cell padding width: the cache-line knob floored at the payload's own
-     *        alignment so every value of the knob stays well-formed (the `detail_hp`
-     *        derivation). A single-core build sets the knob to 0 and the table collapses
-     *        to its payloads.
-     */
-    static constexpr std::size_t kCellAlign = graph::kCacheLineBytes > alignof(std::atomic<void*>)
-                                                  ? graph::kCacheLineBytes
-                                                  : alignof(std::atomic<void*>);
-
-    /** @brief One announcement cell, cache-line isolated so a scan does not false-share. */
-    struct alignas(kCellAlign) cell_t {
-        /** @brief The block a reader is dereferencing; `nullptr` = free. One word carries
-         *         both the claim and the announcement (the guard claims by CAS-ing the
-         *         announced pointer straight in). */
-        std::atomic<void*> pinned{nullptr};
-    };
-
-    /** @brief This thread's claim-probe start — a reuse hint, never a correctness input. */
-    [[nodiscard]] static std::size_t& probe_hint() noexcept {
-        static thread_local std::size_t hint = 0;
-        return hint;
-    }
-
-    /** @brief A record from the injected backend, or `nullptr` on exhaustion (nothrow). */
-    [[nodiscard]] record_t* alloc_record() noexcept {
-        view::segment_t* seg = backend_.alloc(sizeof(record_t));
-        if (seg == nullptr) return nullptr;
-        void* p = seg->bytes.data();
-        if (seg->bytes.size() < sizeof(record_t) ||
-            reinterpret_cast<std::uintptr_t>(p) % alignof(record_t) != 0) {
-            // A backend whose blocks cannot hold a record is exhaustion, not an abort.
-            view::segment_ptr_t::adopt(seg).reset();
-            return nullptr;
-        }
-        record_t* rec = ::new (p) record_t{};
-        rec->self = seg;
-        return rec;
-    }
-
-    /** @brief Return a record's storage to the backend it came from. */
-    static void free_record(record_t* rec) noexcept {
-        view::segment_t* seg = rec->self;
-        rec->~record_t();
-        view::segment_ptr_t::adopt(seg).reset();  // refcount 1 → 0 → backend destroy
-    }
-
     /** @brief Lock-free push onto the retired list (Treiber). */
-    void push_retired(record_t* rec) noexcept {
-        record_t* old = retired_.load(std::memory_order_relaxed);
+    void push_retired(retire_link_t* rec) noexcept {
+        retire_link_t* old = retired_.load(std::memory_order_relaxed);
         do {
             rec->next = old;
         } while (!retired_.compare_exchange_weak(old, rec, std::memory_order_acq_rel,
@@ -334,66 +437,68 @@ class hazard_domain_t {
     }
 
     /**
-     * @brief Free every parked block no cell announces; re-park the rest.
+     * @brief Free every parked block no participant announces; re-park the rest.
      *
-     * The `seq_cst` fence is the load-bearing half of the hazard protocol (the
-     * `detail_hp::scan` argument): it orders the retirer's displacement before its reads
-     * of the cells, against a reader's `seq_cst` announce followed by its re-read of the
-     * source — one of the two must see the other. Concurrent scans are safe: each owns
-     * exactly the batch it popped.
+     * @ref hazard_heavy_barrier is the load-bearing half of the protocol: it orders the
+     * retirer's displacement before its reads of the announcements, against a reader's
+     * announcement followed by its re-read of the source — one of the two must see the
+     * other. Concurrent scans are safe: each owns exactly the batch it popped. Nothing here
+     * waits for a reader — an announced block is simply re-parked for a later scan.
      */
     void scan() noexcept {
-        record_t* batch = retired_.exchange(nullptr, std::memory_order_acq_rel);
+        retire_link_t* batch = retired_.exchange(nullptr, std::memory_order_acq_rel);
         if (batch == nullptr) return;
 
-        std::atomic_thread_fence(std::memory_order_seq_cst);
-        void* pinned[kCells + 1];
-        std::size_t np = 0;
-        for (const cell_t& c : cells_) {
-            void* p = c.pinned.load(std::memory_order_seq_cst);
-            if (p != nullptr) pinned[np++] = p;
-        }
+        hazard_heavy_barrier();
+
+        // A stalled reader announces no address, so nothing can be proven unannounced:
+        // re-park the whole batch. Bounded work, no waiting; it self-clears when the
+        // stalling guard does.
+        const bool stalled = stall_.load(std::memory_order_seq_cst) != 0;
+        const std::size_t hw = detail_hz::g_claimed_high_water.load(std::memory_order_acquire);
 
         std::size_t popped = 0;
         std::size_t kept = 0;
-        for (record_t* cur = batch; cur != nullptr;) {
-            record_t* next = cur->next;
+        for (retire_link_t* cur = batch; cur != nullptr;) {
+            retire_link_t* next = cur->next;  // the reclaimer frees the link with the block
             ++popped;
-            bool held = false;
-            for (std::size_t i = 0; i < np && !held; ++i) held = pinned[i] == cur->block;
-            if (held) {
+            if (stalled || announced(cur->block, hw)) {
                 push_retired(cur);  // still announced — park it for a later scan
                 ++kept;
             } else {
-                cur->deleter(cur->block, backend_);
-                free_record(cur);
+                cur->reclaim(cur->block, backend_);
             }
             cur = next;
         }
         retired_n_.fetch_sub(popped - kept, std::memory_order_acq_rel);
     }
 
-    /** @brief Block until no cell announces @p block — the inline-free half of exhaustion. */
-    void wait_unannounced(const void* block) const noexcept {
-        for (;;) {
-            std::atomic_thread_fence(std::memory_order_seq_cst);
-            bool held = false;
-            for (const cell_t& c : cells_) {
-                if (c.pinned.load(std::memory_order_seq_cst) == block) {
-                    held = true;
-                    break;
-                }
+    /**
+     * @brief Is @p block announced by any participant right now?
+     *
+     * Read directly out of the table rather than into a snapshot buffer: the snapshot
+     * would be a `kParticipants * kAnnouncePerThread` pointer array on the stack of a
+     * function a bounded target calls under its map lock, and the loop it saves is cold.
+     * Re-reading per block is sound for the same reason one read is: past
+     * @ref hazard_heavy_barrier no reader can NEWLY announce an already-displaced block —
+     * it would re-read the source and find it gone — so "unannounced now" is permanent
+     * for that block.
+     */
+    [[nodiscard]] static bool announced(const void* block, std::size_t hw) noexcept {
+        for (std::size_t i = 0; i < hw; ++i) {
+            for (const std::atomic<void*>& a : detail_hz::g_participants[i].ann) {
+                if (a.load(std::memory_order_seq_cst) == block) return true;
             }
-            if (!held) return;
-            std::this_thread::yield();  // the announcer is mid-callback; let it finish
         }
+        return false;
     }
 
-    mem_backend_t& backend_;           /**< @brief The injected record resource (ADR-0072 §3). */
-    cell_t cells_[kCells + 1]{};       /**< @brief Announcements: claimable cells + overflow. */
-    std::atomic_flag overflow_lock_{}; /**< @brief Serializes users of @ref kOverflowCell. */
-    std::atomic<record_t*> retired_{nullptr}; /**< @brief Parked records awaiting a scan. */
-    std::atomic<std::size_t> retired_n_{0};   /**< @brief Approximate length of `retired_`. */
+    mem_backend_t& backend_; /**< @brief Passed to every reclaimer (ADR-0072 §3). */
+    std::atomic<retire_link_t*> retired_{nullptr}; /**< @brief Parked blocks awaiting a scan. */
+    std::atomic<std::size_t> retired_n_{0};        /**< @brief Approximate length of `retired_`. */
+    /** @brief Guards that could get no announcement word; while non-zero a scan frees
+     *         nothing. A counter, never a lock — it nests and it cannot deadlock. */
+    std::atomic<std::size_t> stall_{0};
 };
 
 }  // namespace tr::mem

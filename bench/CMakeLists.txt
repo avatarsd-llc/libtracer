@@ -219,3 +219,17 @@ target_compile_options(bench_iov_spill_cost PRIVATE -Wall -Wextra)
 add_executable(bench_failable_census bench_failable_census.cpp)
 target_link_libraries(bench_failable_census PRIVATE libtracer)
 target_compile_options(bench_failable_census PRIVATE -Wall -Wextra)
+
+# The ADR-0072 §4 gate harness (#576): per-operation latency of a HANDLER-role vertex's
+# value-seam read and write — the two legs the reclamation domain's announce sits on. Built
+# from ONE source at two revisions and interleaved by run_seam_ab.sh, so the arms differ
+# only in the library they linked. Diagnostic, not a perf gate.
+add_executable(bench_seam_guard bench_seam_guard.cpp)
+target_link_libraries(bench_seam_guard PRIVATE libtracer)
+target_compile_options(bench_seam_guard PRIVATE -Wall -Wextra)
+
+# The #576 RED-state probe: live retired seam blocks after N register/retire cycles. Built
+# from ONE source at any revision — the pre-fix arm reports one block per retire, forever.
+add_executable(probe_seam_churn probe_seam_churn.cpp)
+target_link_libraries(probe_seam_churn PRIVATE libtracer)
+target_compile_options(probe_seam_churn PRIVATE -Wall -Wextra)
