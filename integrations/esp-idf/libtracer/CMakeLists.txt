@@ -196,6 +196,9 @@ endif()
 set(LIBTRACER_ACL_POLICY allow_only_policy_t)  # the MCU profile — no full-ACL Kconfig yet
 set(LIBTRACER_LKV_SLOT sp_atomic_slot_t)  # write-dominated single core: keep the refcount slot
 set(LIBTRACER_HAZARD_READER_SLOTS 64)  # unused here: the refcount slot never builds the domain
+# The ADR-0072 §4 gate counter: an instrument, and a shared RMW on the seam read/write
+# path. A node never wants it (the repo's own test builds are the only ones that do).
+set(LIBTRACER_SEAM_ANNOUNCE_COUNTER_CXX false)
 # False-sharing padding: DERIVED, not a Kconfig option. A unicore chip (C2/C3/C6/H2, or a
 # dual-core built with CONFIG_FREERTOS_UNICORE) has no second core to false-share with, so
 # the padding is pure static RAM loss — measured 896 B of .bss for 16 stripes on rv32 -Os.
