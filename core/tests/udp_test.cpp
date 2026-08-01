@@ -277,12 +277,28 @@ void test_view_pool_exhaustion() {
 }
 
 /**
- * @brief ADR-0042 end to end: two nodes over real UDP with owning view delivery and a
- *        store_ref_min_bytes opt-in — the WRITE lands ZERO-copy (the graph's stored segment IS the
- *        RX frame segment, proven by pointer identity through graph read).
+ * @brief ADR-0042 end to end: two nodes over real UDP with owning view delivery and an RFC-0022
+ *        §3.D ratio that clears the pin predicate — the WRITE lands ZERO-copy (the graph's stored
+ *        segment IS the RX frame segment, proven by pointer identity through graph read).
+ *
+ * @section udp_pin_ratio What K has to be here, and why that is the finding
+ *
+ * `udp_transport_t` receives every datagram into a `kMaxDatagram` (65,536 B) segment and
+ * delivers `subview(0, n)` of it, so `segment_bytes` at the decision site is 65,536 whatever
+ * the datagram's length. §3.D's predicate is `payload * K >= segment`, so this 68-byte payload
+ * TLV needs **K >= 964** before it pins at all — and a 1 KB payload needs K >= 64.
+ *
+ * That is not an artefact of the test: it is the honest price of what pinning holds. The
+ * predicate is doing exactly its job — declining to hold 64 KB for 68 bytes of value — and the
+ * consequence is that §3.D on the reference UDP transport with a heap backend is a no-op at any
+ * K a human would write down. The RAM lever that changes it is the RX backend's
+ * `max_segment_size` (`test_view_pool_exhaustion`'s pool shape), not K.
+ *
+ * K is set to 1024 here so the pinned path stays covered; RFC-0022 §6's bench measures what a
+ * defensible default is.
  */
 void test_two_nodes_zero_copy_store() {
-    std::printf("Two nodes over UDP — view delivery + store_ref_min_bytes zero-copy WRITE:\n");
+    std::printf("Two nodes over UDP — view delivery + RFC-0022 §3.D ratio zero-copy WRITE:\n");
     recording_backend_t rec;
     graph_t node_a, node_b;
     tr::net::fwd_router_t router_a(node_a);
@@ -290,11 +306,12 @@ void test_two_nodes_zero_copy_store() {
     tr::net::udp_transport_t ta(47112, "127.0.0.1", 47113);
     tr::net::udp_transport_t tb(47113, "127.0.0.1", 47112, &rec);
 
-    // B's target vertex opts in to the referenced store (threshold 8 bytes) — an
-    // OWNER-side declaration since RFC-0022 §3.B, never a remote write.
+    // B's target vertex carries the §3.D ratio K as its OWNER-side declaration (RFC-0022
+    // §3.B, never a remote write). 68 * 1024 >= 65,536 => pin; K = 8 (the old absolute
+    // threshold's value) would copy, because 68 * 8 is 544 against a 64 KB segment.
     tr::graph::vertex_handle_t v =
         node_b.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE);
-    node_b.set_store_ref_min_bytes(v, 8);
+    node_b.set_store_ref_min_bytes(v, 1024);
     router_a.add_child("b", ta);
     router_b.add_child("a", tb);  // tb delivers views => the owning receiver is installed
 
@@ -303,7 +320,7 @@ void test_two_nodes_zero_copy_store() {
     auto on_blob = [&written](const tr::view::rope_t&) { written.set_value(); };
     (void)node_b.subscribe(path_t("/sensor/blob"), on_blob);
 
-    // A 64-byte payload => a 68-byte trailer-less VALUE TLV, well over the threshold.
+    // A 64-byte payload => a 68-byte trailer-less VALUE TLV; 68 * K clears the 64 KB segment.
     std::vector<std::byte> pb(64);
     for (std::size_t i = 0; i < pb.size(); ++i) pb[i] = static_cast<std::byte>(i);
     std::vector<std::byte> payload;

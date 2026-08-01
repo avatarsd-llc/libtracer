@@ -9,6 +9,22 @@ versioning/publish strategy.
 
 ### Changed
 
+- **The PATH segment cap is 255, not 32, and an encode-time 1024-byte check now exists**
+  (`@avatarsd-llc/libtracer-client`, `src/tlv.ts`;
+  [RFC-0023](../../docs/spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md), accepted; #767).
+  Two changes to `pathTlv` / `encodePath` (and every builder over them — `encodeSubscriber`,
+  `./fwd.ts`):
+  - `segments.length > 32` becomes `> 255` — a **widening**; a 33–255-segment path that used to
+    throw `RangeError` now encodes.
+  - **New reject:** the client validated the per-segment 64-byte rule but had **no total-length
+    check at all**, so it could emit a PATH whose `length` exceeded the normative 1024-byte
+    budget — bytes a conforming peer must refuse. `pathTlv` now throws `RangeError` when the
+    encoded body (`4 + len` per NAME, i.e. exactly the PATH TLV's own `length` field) exceeds
+    1024. Under this encoding that bound binds **before** the segment count, at 204 segments.
+
+  `WalkOptions.maxDepth` documentation updated: a route is bounded by the byte budget in
+  practice (≈ 30–50 hops at 3-segment mount runs), not by the segment count.
+
 - **BREAKING — `walkTopology` composes routes from mount paths, not bare connection names**
   ([RFC-0014](../../docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
   §1, [ADR-0061](../../docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md)).

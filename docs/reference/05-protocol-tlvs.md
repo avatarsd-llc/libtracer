@@ -302,7 +302,9 @@ PATH (PL=1) {
   "sum of NAME bytes + segment separators", a unit that excludes the per-segment 4-byte
   `NAME` header and so admits paths `path_t::parse` rejects — see
   [§path syntax](03-addressing.md) for the full note.)
-- Segment count ≤ 32.
+- Segment count ≤ 255 ([RFC-0023](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md)).
+  Under this body encoding the byte cap above binds first (each NAME costs `4 + len`, so
+  1024 bytes admit at most 204 segments); the count is the encoding-independent ceiling.
 
 ### Enforcement of the PATH constraints
 
@@ -378,7 +380,7 @@ The encoder's invariants:
 - **No inner trailers.** Children inside a PATH carry no TS and no CRC; the outer (when in transit) covers everything.
 - **Reserved characters** (`/ : . [ ] * ?`) MUST NOT appear inside any segment_bytes.
 
-A path that resolves to more than 32 segments, has a single segment longer than 64 bytes, or whose **encoded `PATH` body** exceeds the addressing-level cap MUST fail to encode.
+A path that resolves to more than 255 segments ([RFC-0023](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md)), has a single segment longer than 64 bytes, or whose **encoded `PATH` body** exceeds the addressing-level cap MUST fail to encode.
 
 #### Byte literal — `/sensor/temp`
 

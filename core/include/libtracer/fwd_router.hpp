@@ -91,19 +91,43 @@ class fwd_router_t {
      *              Appended with a default, so every existing call site is unchanged;
      *              a bounded node points this at the same slab as @p mr. Must outlive
      *              the router.
-     * @param flat  The byte backend every FLATTEN the router performs draws its owned
+     * @param flat  The byte backend the router's OWN FOUR rope flattens draw their owned
      *              `segment` from (#730) — the ingress control-frame sub-rope flattens
      *              (`ADVERTISE` route, `COMPACT` payload), the cold bus-name rejection
-     *              flatten, and the per-delivery `COMPACT` egress flatten. Split from
+     *              flatten, and the per-delivery `COMPACT` egress flatten. Those four and
+     *              no others: the TERMINUS resolver's rope-tier flattens, one call below
+     *              the router's `resolve_terminus_rope` in `op_resolve_view.cpp`
+     *              (`view_node::ensure_cache`, `view_node::own_wire`), never see this
+     *              backend and still draw from the global heap — measured, and tracked as
+     *              #766. Do not read this parameter as "every allocation the router path
+     *              makes"; that reading is what #730 was filed about.
+     *              Split from
      *              @p rx because these are BYTE buffers with cache hooks and an owning
      *              refcount (a @ref mem::mem_backend_t), not the arena's raw blocks —
      *              the same split `graph_t` makes between its `ctl` and its
      *              `value_backend` (ADR-0060). Until #730 all four took
      *              @ref mem::heap_backend by default, so a bounded node's memory bound
      *              did NOT cover them; now a node that points this at its own slab
-     *              bounds them, and every flatten failure is answered by value (the
-     *              frame is dropped, never stored empty). A bounded node points this at
-     *              the same slab as @p mr / @p rx. Must outlive the router.
+     *              bounds those four, and every flatten failure is answered by value (the
+     *              frame is dropped, never stored empty).
+     *
+     *              An injected @p flat MUST be thread-safe, with the same force `graph_t`
+     *              requires of its `value_backend` (ADR-0060 §2) — and for the same two
+     *              reasons, both of which hold here. Three of the four sites run on a
+     *              transport child's RECEIVE thread and several children receive
+     *              concurrently; the fourth runs on the WRITER thread inside the
+     *              remote-delivery fan-out. And the `segment` this backend hands out
+     *              self-routes its reclaim on whichever thread drops the last reference,
+     *              which is not in general the thread that allocated it. The default
+     *              `heap_backend()` already is thread-safe. A bare @ref mem::pool_t is
+     *              NOT — its free list is a plain `std::size_t` head and count with no
+     *              lock and no atomic, so two receive threads can be handed the same slot
+     *              — and must be composed with the target's arch-selected
+     *              synchronisation before it is injected here: @ref mem::sync_pool_t is
+     *              the in-tree composition (the multi-core-host spinlock variant); the
+     *              single-core interrupt-disable variant ADR-0060 §2 names is not built.
+     *              A bounded node points this at the same slab as @p mr / @p rx only
+     *              through such a composition. Must outlive the router.
      * @param max_label_bindings_per_link
      *              Ceiling on one link's ingress table and, separately, its egress table
      *              (#603). `0` ⇒ unbounded, the default and the prior behavior. Without it

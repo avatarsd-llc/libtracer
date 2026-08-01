@@ -298,10 +298,17 @@ privileged router node, so the network **folds arbitrarily** — elided-CAN leaf
 full-TLV QUIC backbone → another fold — with the forwarder stateless and uniform across
 framing modes. The bounds to design within:
 
-- **Depth is capped by the route.** A `FWD` frame's `dst` names every hop and is
-  consumed monotonically, so a delivery travels exactly as far as its explicit source
-  route — segment count ≤ the PATH segment cap of 32 ([03 — Addressing](03-addressing.md);
-  `kMaxSegments`, `core/include/libtracer/path.hpp:34`).
+- **Depth is capped by the route, and the route by its bytes.** A `FWD` frame's `dst` names
+  every hop and is consumed monotonically, so a delivery travels exactly as far as its explicit
+  source route — segment count ≤ 255 ([03 — Addressing](03-addressing.md);
+  [RFC-0023](../spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md); `kMaxSegments`,
+  `core/include/libtracer/path.hpp:34`). For realistically named mounts the **1024-byte PATH
+  budget binds first**, not the segment count: a 3-segment mount run (ADR-0061) costs its NAME
+  headers plus its bytes — 20 B/hop for `/net/can/c0`, 32 B/hop for
+  `/net/ws-client/board-01` — so the diameter is ≈ **30–50 hops** at 3-segment mount runs, and
+  ≈ 25 at a 5-segment one. (Arithmetic over the encoding rule at
+  [05 — Protocol TLVs](05-protocol-tlvs.md) §`0x06`, not a routed measurement —
+  RFC-0023 §4.3, §10.)
 - **Loops cannot form.** Because `dst` is consumed by at least one segment per hop (a whole
   `net/<module>/<name>[/<peer>]` mount run, RFC-0014 S2a), a physical cycle
   is harmless per-op rather than rejected. There is no revisit check — loop-freedom is

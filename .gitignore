@@ -92,3 +92,8 @@ docs/test-report.md
 integrations/esp-idf/libtracer/core/
 integrations/esp-idf/libtracer/dist/
 bench/vendor
+
+# ESP-IDF writes these into the example dir on set-target / reconfigure.
+integrations/esp-idf/examples/*/sdkconfig
+integrations/esp-idf/examples/*/sdkconfig.old
+integrations/esp-idf/examples/*/dependencies.lock

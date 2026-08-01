@@ -21,8 +21,16 @@ use crate::{type_code, Opt, Timestamp, Tlv, Trailer};
  * `core` `kMaxSegmentBytes`).
  */
 pub const MAX_SEGMENT_BYTES: usize = 64;
-/** @brief Maximum number of segments in a path (`core` `kMaxSegments`). */
-pub const MAX_SEGMENTS: usize = 32;
+/**
+ * @brief Maximum number of segments in a path (`core` `kMaxSegments`).
+ *
+ * Repriced 32 → 255 by RFC-0023: chosen so every per-segment quantity stays `u8`-representable,
+ * not inherited from a parser guard. Under the current NAME-TLV body encoding each segment costs
+ * `4 + len`, so [`MAX_PATH_BYTES`] admits at most 204 segments and the **byte** cap binds first —
+ * this constant is the encoding-independent ceiling, and becomes binding only under RFC-0018's
+ * packed body.
+ */
+pub const MAX_SEGMENTS: usize = 255;
 /**
  * @brief Maximum total encoded NAME-child bytes in a PATH payload (`core`
  * `kMaxPathBytes`). Mirrors `core/src/path.cpp`, which caps the accumulated

@@ -25,8 +25,15 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 namespace tr::graph {
+
+/**
+ * @brief The reserved @ref default_config_t::kPinPayloadRatio sentinel: never pin, always take
+ *        the ADR-0041 §2 one-copy store (RFC-0022 §3.D).
+ */
+inline constexpr std::uint32_t kPinNever = 0;
 
 struct allow_only_policy_t;  // security_acl.hpp — the ALLOW-only MCU profile (ADR-0020 subset)
 struct full_acl_policy_t;    // security_acl.hpp — ordered first-match-per-bit with DENY
@@ -158,6 +165,30 @@ struct default_config_t {
     static constexpr std::size_t kMaxVertexBytes32 = 80;
 
     /**
+     * @brief The RFC-0022 §3.D pin/copy amplification ratio — pin the written value as a subview
+     *        of the inbound frame iff `payload_bytes * K >= segment_bytes` (and the payload is
+     *        trailer-less).
+     *
+     * `K` is not a synthetic limit: both branches are correct and `K` selects which correct
+     * branch is cheaper. Pinning holds the whole owning RX **segment** for the value's lifetime,
+     * so `K` bounds the waste at `(K-1)x` the payload where an absolute byte threshold bounded
+     * it not at all.
+     *
+     * `segment_bytes` is the ALLOCATED size of the segment the pin would keep alive, not the
+     * length of the delivered frame view. Those differ by a lot on a real transport:
+     * `udp_transport_t` receives every datagram into a `kMaxDatagram`-sized segment and delivers
+     * a `subview(0, n)` of it, so a 1 KB datagram pins 64 KB. Measuring the view length instead
+     * would price a cost nobody pays and ignore the one everybody does.
+     *
+     * @ref kPinNever (0) is the reserved sentinel: never pin. It is the value shipped here, and
+     * it reproduces today's default behaviour exactly (`store_ref_min_bytes` defaults to 0 and
+     * the old predicate required `> 0`). RFC-0022 §8 Q3 leaves the landing default to §6's
+     * measurement rather than to argument, and this branch is that measurement's vehicle — it
+     * does not flip the default.
+     */
+    static constexpr std::uint32_t kPinPayloadRatio = 0;
+
+    /**
      * @brief The target's selected ACL policy (ADR-0047 §1 build-time module set).
      *
      * Default: the ALLOW-only MCU profile. The CMake option `LIBTRACER_ACL_FULL=ON` rebinds
@@ -202,6 +233,8 @@ inline constexpr std::size_t kVertexLockStripes = config_t::kVertexLockStripes;
 inline constexpr std::size_t kCacheLineBytes = config_t::kCacheLineBytes;
 /** @brief @ref default_config_t::kHazardReaderSlots for this build. */
 inline constexpr std::size_t kHazardReaderSlots = config_t::kHazardReaderSlots;
+/** @brief @ref default_config_t::kPinPayloadRatio for this build. */
+inline constexpr std::uint32_t kPinPayloadRatio = config_t::kPinPayloadRatio;
 /** @brief @ref default_config_t::acl_policy_t for this build. */
 using acl_policy_t = config_t::acl_policy_t;
 /** @brief @ref default_config_t::lkv_slot_t for this build. */

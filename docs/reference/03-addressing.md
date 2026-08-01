@@ -32,7 +32,7 @@ There is **no wildcard grammar**. Subscriptions do not need one: every subscript
   therefore costs its 4-byte `NAME` header plus its UTF-8 bytes, not its bytes alone.
   (Erratum 2026-07-31: this line and [§`0x06` PATH](05-protocol-tlvs.md) each stated the cap
   in a *different* byte set from the one `path_t::parse` enforces — see the note below.)
-- Maximum **segment depth**: 32 (an addressing limit on PATH construction; the TLV parser itself has no depth cap — nesting is receiver-resource-bounded per [RFC-0006](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md)).
+- Maximum **segment depth**: 255 ([RFC-0023](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md) — chosen from the wire's own widths, superseding the inherited 32; the total-path byte cap above binds tighter whenever mean encoded segment cost exceeds 4 bytes, which under the current NAME-TLV encoding is always, giving an effective ceiling of 204). (An addressing limit on PATH construction; the TLV parser itself has no depth cap — nesting is receiver-resource-bounded per [RFC-0006](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md).)
 - Maximum **field-chain depth**: 8 (e.g., `:settings.transport_tcp.tls.cipher.suite` is at the limit).
 - Maximum **index value**: 65535 (fits in u16).
 

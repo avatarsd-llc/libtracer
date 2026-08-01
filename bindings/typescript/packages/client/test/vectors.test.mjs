@@ -153,6 +153,19 @@ test('invalid path segments are rejected before any bytes are emitted', () => {
   assert.throws(() => encodePath(['x'.repeat(65)]), /1\.\.64/);
 });
 
+test('the segment cap is 255 and the 1024-byte body cap binds first (RFC-0023)', () => {
+  // 33 segments: rejected by the inherited cap of 32, legal now. 33 * (4 + 1) = 165 bytes.
+  assert.equal(encodePath(Array(33).fill('a')).length, 4 + 33 * 5);
+  // 204 segments = 1020 bytes: the byte-derived ceiling under this body encoding.
+  assert.equal(encodePath(Array(204).fill('a')).length, 4 + 1020);
+  // 205 = 1025 bytes: the BYTE cap fires, not the count. This client had NO byte check at
+  // all before RFC-0023 §5.6 — it would have emitted a non-conforming PATH.
+  assert.throws(() => encodePath(Array(205).fill('a')), /at most 1024 bytes/);
+  // 256 segments: over the count cap too. The count clause becomes the binding one only
+  // under RFC-0018's packed body.
+  assert.throws(() => encodePath(Array(256).fill('a')), /at most 255 segments/);
+});
+
 /* ----------------------------------------------------- RFC-0004 FWD / FIELD --- */
 
 const hex = (b) => Buffer.from(b).toString('hex');

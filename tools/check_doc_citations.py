@@ -47,11 +47,17 @@ ANCHORS = [
     ("core/src/transport_vertex.cpp:157", "SCHEMA_NOT_FOUND", "transport_vertex_t::module_for"),
     # fwd-router.md's "Signature source" line — bare :NNN shorthands that had ALL rotted
     # silently (they cited the pre-#739 header). Anchored so they cannot rot again.
-    ("core/include/libtracer/fwd_router.hpp:115", "explicit fwd_router_t"),
-    ("core/include/libtracer/fwd_router.hpp:168", "void add_child"),
-    ("core/include/libtracer/fwd_router.hpp:218", "subscribe_toward"),
-    ("core/include/libtracer/fwd_router.hpp:228", "using reply_fn_t"),
-    ("core/include/libtracer/fwd_router.hpp:239", "using stale_label_fn_t"),
+    # zero-copy-and-flatten.md's rope-tier citations and ADR-0072's stale-comment pointer —
+    # all four had rotted on main and were re-asserted by a mechanical +24 shift (#768 verify).
+    ("core/include/libtracer/fwd_router.hpp:516", "Terminus over a MULTI-LINK rope"),
+    ("core/include/libtracer/fwd_router.hpp:522", "64 KB / 2 links"),
+    ("core/include/libtracer/fwd_router.hpp:534", "The forward hop, read entirely by OFFSET"),
+    ("core/include/libtracer/fwd_router.hpp:426", "Slot addresses are NOT stable"),
+    ("core/include/libtracer/fwd_router.hpp:139", "explicit fwd_router_t"),
+    ("core/include/libtracer/fwd_router.hpp:192", "void add_child"),
+    ("core/include/libtracer/fwd_router.hpp:242", "subscribe_toward"),
+    ("core/include/libtracer/fwd_router.hpp:252", "using reply_fn_t"),
+    ("core/include/libtracer/fwd_router.hpp:263", "using stale_label_fn_t"),
     ("core/include/libtracer/child_registry.hpp:169", "void add(std::string name"),
     ("core/include/libtracer/child_registry.hpp:243", "resolve_peer"),
     ("core/include/libtracer/child_registry.hpp:258", "bool erase"),
@@ -74,8 +80,8 @@ ANCHORS = [
     ("core/src/graph.cpp:1524", "step0.wildcard"),
     ("core/src/graph.cpp:2083", '"children" && !field.steps[0].wildcard'),
     ("core/src/graph.cpp:2183", "!field.steps[0].wildcard", 'field.steps[0].name == "subscribers"'),
-    ("core/src/op_resolve_walk.hpp:237", "enum class index_mode_t"),
-    ("core/src/op_resolve_walk.hpp:594", 'field.steps[0].name != "subscribers"'),
+    ("core/src/op_resolve_walk.hpp:255", "enum class index_mode_t"),
+    ("core/src/op_resolve_walk.hpp:644", 'field.steps[0].name != "subscribers"'),
     ("core/include/libtracer/mem_heap.hpp:149", "try_assign"),
     ("core/include/libtracer/view.hpp:26", "namespace tr::view"),
     ("core/include/libtracer/frame.hpp:23", "namespace tr::wire"),
@@ -102,16 +108,16 @@ ANCHORS = [
     ("core/src/graph.cpp:1245", "value.materialize(*value_backend_)", "field_write read it back"),
     ("core/src/graph.cpp:1478", "result_t<void> graph_t::field_write"),
     ("core/src/graph.cpp:1605", "acl_right_t::CREATE", 'step0.name == "children"'),
-    ("core/src/fwd_router.cpp:1179", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:1203", "value.materialize(*flat_)"),
-    ("core/src/fwd_router.cpp:1204", "flatten OOM"),
-    ("core/src/fwd_router.cpp:1208", "try_encode_compact", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:1240", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1185", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1213", "value.materialize(*flat_)"),
+    ("core/src/fwd_router.cpp:1214", "flatten OOM"),
+    ("core/src/fwd_router.cpp:1218", "try_encode_compact", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1250", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
     # #730 — the two INGRESS flatten guards. Anchored because the whole point of the
     # seam is that these are testable; a citation to them silently rotting would be the
     # first step back to "the guard nobody can prove still works".
-    ("core/src/fwd_router.cpp:898", "route_flat.empty()"),
-    ("core/src/fwd_router.cpp:918", "payload_flat.empty()"),
+    ("core/src/fwd_router.cpp:904", "route_flat.empty()"),
+    ("core/src/fwd_router.cpp:924", "payload_flat.empty()"),
     ("core/include/libtracer/vertex.hpp:2386", "vertex_t* parent_"),
 ]
 

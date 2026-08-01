@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# Defaults for the libtracer P0 in-process smoke app.
+#
+# C++ exceptions and RTTI are intentionally left at the ESP-IDF default (OFF):
+# the libtracer reference core is exception-free and RTTI-free in its data path
+# (it returns std::expected, never throws; uses no typeid/dynamic_cast), so the
+# P0 profile links clean under -fno-exceptions -fno-rtti. Do not enable them on
+# the core's account.
+
+# Give app_main a little extra stack — the in-process graph touches std::
+# containers (unordered_map / vector) during register/write.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# CI compile-coverage for the esp_http_server-backed WS link. This example does
+# not USE httpd_ws_link_t (it is an in-process/loopback smoke app), but enabling
+# WS support makes the component CMakeLists compile httpd_ws_link.cpp here — the
+# ONLY CI build that exercises the WS-on path (full_node keeps it off so its
+# footprint sentinel is not charged for a TU it does not bind). Without this,
+# httpd_ws_link.cpp compiles nowhere in CI and a break in it (or in the
+# esp_http_server requirement wiring) is only caught by a downstream firmware
+# build. inprocess_mirror has no footprint gate, so the extra TU costs nothing here.
+CONFIG_HTTPD_WS_SUPPORT=y
+
+# RFC-0022 §6 measures the SHIPPED profile. The ESP-IDF default is -Og, which inflates the
+# absolute store leg by roughly an order of magnitude and — worse for this bench — does not
+# price the copy branch's memcpy the way the deployed image does. -Os is what the reference
+# node ships (ADR-0039 erratum) and what the rv32 census in this PR compiles with, so the
+# runtime numbers and the static numbers describe one binary shape.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y

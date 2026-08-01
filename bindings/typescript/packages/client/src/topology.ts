@@ -156,8 +156,9 @@ export interface WalkOptions {
    * @brief Hop limit. Default 8.
    *
    * WITHOUT {@link WalkOptions.identify} this is the ONLY thing that stops the walk on
-   * a cyclic topology — keep it modest. A route may not exceed the protocol's 32-segment
-   * PATH cap in any case, and every hop costs a round trip across the whole route.
+   * a cyclic topology — keep it modest. A route may not exceed the protocol's 255-segment
+   * PATH cap (RFC-0023), and in practice the 1024-byte PATH budget binds first — ≈ 30–50 hops
+   * at 3-segment mount runs — while every hop costs a round trip across the whole route.
    */
   readonly maxDepth?: number;
   /** @brief The transport-vertex parent segment. Default `"net"`. */

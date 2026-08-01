@@ -40,6 +40,7 @@
  *   - the ADVERTISE case: the label stays UNBOUND, observable as the `HANDLE_NACK` a
  *     later COMPACT on it draws (RFC-0004 §E.1 self-heal);
  *   - the delivery case: NOTHING goes on the wire — no ADVERTISE, no COMPACT;
+ *   - the bus-name rejection case: no reply is answered, and nothing is broadcast;
  *   - and each ends with the backend un-armed and the same flow succeeding, so a guard
  *     that over-rejects (or a seam that wedged the router) fails the control.
  */
@@ -53,7 +54,9 @@
 #include <initializer_list>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
@@ -119,6 +122,37 @@ class arming_backend_t final : public tr::mem::mem_backend_t {
     bool armed_ = false;
     int refusals_ = 0;
     int served_ = 0;
+};
+
+/** @brief A point-to-point endpoint that counts what it was handed (a bus peer's slot). */
+struct p2p_link_t : transport_t {
+    std::size_t received = 0; /**< @brief Frames this endpoint was handed. */
+    void send(std::span<const std::byte>) override { ++received; }
+};
+
+/**
+ * @brief A multi-peer (bus) transport with a fixed name→endpoint peer table.
+ *
+ * Modelled on `mount_routing_test.cpp`'s `bus_link_impl_t`, and here for one reason: a
+ * `dst` naming this link's own mount with a residual that matches NO peer is the
+ * ADR-0073 §3 / RFC-0020 rejection — the only path that reaches the cold bus-name
+ * rejection flatten. `broadcasts` counts frames pushed at the bus endpoint itself, which
+ * a real adapter fans out to every open peer; any count here is the forbidden shape.
+ */
+struct bus_link_impl_t : transport_t, tr::net::bus_link_t {
+    std::vector<std::pair<std::string, p2p_link_t*>> peers; /**< @brief name → endpoint. */
+    std::size_t broadcasts = 0; /**< @brief Frames sent at the bus endpoint itself. */
+    void send(std::span<const std::byte>) override { ++broadcasts; }
+    tr::net::bus_link_t* bus() override { return this; }
+    transport_t* peer_link(std::string_view name) override {
+        for (auto& [n, l] : peers) {
+            if (n == name) return l;
+        }
+        return nullptr;
+    }
+    void enumerate_peers(const tr::net::bus_link_t::peer_visitor_t& visit) const override {
+        for (const auto& [n, l] : peers) visit(n);
+    }
 };
 
 /** @brief A link that records what the router sends back, and can push ropes upward. */
@@ -388,6 +422,81 @@ void test_delivery_flatten_oom_sends_nothing() {
     }
 }
 
+// --- the fourth site: the COLD bus-name rejection flatten ----------------------------
+
+/**
+ * @brief A refused bus-name-rejection flatten drops the frame, and never broadcasts it.
+ *
+ * The fourth `materialize()` site (`fwd_router.cpp:577`) was added by RFC-0020 / #741 and
+ * pointed at `flat_` by #730 — and until this case NOTHING exercised it. The #730 verify
+ * pass reverted BOTH halves of the site (the seam and the empty-check) and the whole suite
+ * still reported `100% tests passed, 0 tests failed out of 72`. So a refactor could have
+ * restored the global-heap draw with the suite green, which is precisely the state the
+ * seam exists to make impossible.
+ *
+ * What this case pins is the SEAM. The `if (flat.empty()) return;` beside it is a redundant
+ * early-out — `reject_bus_name_hop` opens with a `wire::decode` that an empty span fails —
+ * and the code says so. With the site back on the DEFAULT heap the flatten SUCCEEDS under
+ * this injection, the rejection reply goes out, and the `sent.empty()` assertion below
+ * fails; the instrument check fails first and reports the case as vacuous rather than
+ * green.
+ *
+ * The path: a `dst` naming a multi-peer mount with a residual segment that resolves no
+ * current peer. It is COLD (an error answer) but peer-drivable, and it arrives here as a
+ * MULTI-LINK rope, which is the only shape that flattens at all.
+ */
+void test_bus_name_reject_flatten_oom_drops_the_frame() {
+    std::printf("a refused bus-name-rejection flatten drops the frame and answers nothing:\n");
+    graph_t g;
+    arming_backend_t fb;
+    fwd_router_t router(g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &fb);
+    bus_link_impl_t bus;
+    p2p_link_t alice;
+    bus.peers.emplace_back("alice", &alice);
+    rec_link_t in(/*ropes=*/true);
+    router.add_child("net/ws-server/srv", bus);
+    router.add_child("net/ws-client/in", in);
+
+    // `srv` is the bus link's own NAME and `sensor` names no peer on it — the ADR-0073 §3
+    // rejection. `src` is intact, so a well-formed frame is ANSWERED rather than dropped,
+    // which is what makes the drop below attributable to the flatten.
+    const std::vector<std::byte> misroute =
+        b_fwd(fwd_op_t::WRITE, b_path({"net", "ws-server", "srv", "sensor", "temp"}),
+              b_path({"origin"}), {}, b_value_u32(0x0C0FFEE0u));
+
+    fb.arm();
+    in.inject(as_rope(misroute, 4));
+    check(fb.refusals() > 0,
+          "instrument: the injected backend was ASKED and refused the rejection flatten");
+    check(in.sent.empty(), "no reply went out — the refused flatten drops the frame by value");
+    check(bus.broadcasts == 0, "and nothing was fanned out over the bus endpoint");
+    check(alice.received == 0, "nor pushed at a peer endpoint");
+
+    // The positive control: the SAME frame is answered once memory returns, which proves
+    // the drop above was the exhaustion and not a misbuilt frame that never reached the
+    // rejection arm at all.
+    fb.disarm();
+    in.inject(as_rope(misroute, 4));
+    check(in.sent.size() == 1, "the same frame draws exactly one directed reply with memory");
+    check(bus.broadcasts == 0, "still never broadcast (ADR-0073 S3)");
+    if (in.sent.size() == 1) {
+        const auto dec = tr::wire::decode(in.sent[0]);
+        check(dec && dec->type == type_t::FWD, "the answer is an FWD");
+        bool is_reply = false;
+        if (dec) {
+            for (const auto& c : dec->children) {
+                if (c.type == type_t::VALUE && c.payload.size() == 1 &&
+                    static_cast<fwd_op_t>(std::to_integer<std::uint8_t>(c.payload[0])) ==
+                        fwd_op_t::REPLY) {
+                    is_reply = true;
+                    break;
+                }
+            }
+        }
+        check(is_reply, "and it is the REPLY the rejection assembles");
+    }
+}
+
 // --- the default: an un-injected router behaves exactly as before --------------------
 
 /** @brief The defaulted parameter keeps the global-heap behaviour byte for byte. */
@@ -416,6 +525,8 @@ int main() {
     test_advertise_flatten_oom_binds_nothing();
     std::printf("\n");
     test_delivery_flatten_oom_sends_nothing();
+    std::printf("\n");
+    test_bus_name_reject_flatten_oom_drops_the_frame();
     std::printf("\n");
     test_default_backend_unchanged();
 
