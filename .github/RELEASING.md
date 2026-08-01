@@ -87,7 +87,10 @@ git tag over `VERSION`).
    DRAFT with the "pin to a commit" note.
 3. **CHANGELOG.** [`core/CHANGELOG.md`](../core/CHANGELOG.md)'s `[Unreleased]`
    section is complete (every public-API change has a note, per
-   [CONTRIBUTING](CONTRIBUTING.md)).
+   [CONTRIBUTING](CONTRIBUTING.md)). If any entry is marked **BREAKING**, check
+   before cutting that the release is the one the maintainer intends to carry it:
+   consumers pin a range, so a break lands on them at the next bump. State every
+   break in the release summary, not only in the CHANGELOG body.
 4. **CI is green on `main`** — all workflows, including `core-ci` (build + ctest +
    sanitizers + the `install-consume` packaging guard), `conformance` (3-core
    cross-match + diff-fuzz), `esp-idf`, `quic`, and `docs`.
@@ -132,8 +135,13 @@ git tag over `VERSION`).
 
 ## Notes
 
-- **This repo's standing rule:** the pending `0.3.0` release is **held** until the
-  maintainer explicitly says to cut it. The version markers already read `0.3.0`
-  (in-development); that is reconciliation, **not** a release — no tag exists yet.
+- **This repo's standing rule:** a release is cut only when the maintainer
+  explicitly says so. Reconciling the version markers (`tools/sync-version.py`) is
+  **not** a release — only the signed `vX.Y.Z` tag is.
+- **Released so far:** `v0.3.0` (2026-07-08), `v0.4.0` (2026-07-09), `v0.5.0`
+  (2026-07-21), `v0.6.0` (2026-07-23). `VERSION` currently reads the shipped
+  `0.6.0`, so the next cut bumps it. Do not take this list as authoritative —
+  `git tag -l 'v*'` and `gh release list` are; it is here so a reader knows the
+  process has run before and is not being exercised for the first time.
 - Spec/governance context: [GOVERNANCE.md](GOVERNANCE.md) (RFC process, BDFL
   model, spec immutability), [CONTRIBUTING.md](CONTRIBUTING.md) (DCO signing).
