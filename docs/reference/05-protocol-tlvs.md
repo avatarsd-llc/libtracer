@@ -223,14 +223,14 @@ When a SUBSCRIBER is written into `<vertex>:subscribers[N]` over a transport (an
 
 A subscriber that sets **`durability_request`** (bit 5 of its `delivery_policy`, below) additionally receives a **latch**: the subscribe itself emits one immediate delivery of the producer's last-known value, so a late joiner paints the current state without waiting for the next write. A subscriber that does not ask (the default) receives only writes that happen after its subscribe — and the two may sit on the same producer at the same time, which is the point of [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.A: this was a producer-side `:settings.durability` flag that replayed to every subscriber, including the ones that never asked. The latch reuses the same delivery path (full-route or `COMPACT`) and carries no new wire bytes of its own, so it is observable only as delivery *timing*; the vectors pin the REQUEST (`subscriber/policy-durability`, `subscriber/policy-absent`).
 
-The producer fan-out, end to end — the subscribe binds a remote subscriber, the transient-local latch fires immediately, and later writes stream out (auto-promoted to lean `COMPACT` when the subscriber opted in):
+The producer fan-out, end to end — the subscribe binds a remote subscriber, its `durability_request` fires the latch immediately, and later writes stream out (auto-promoted to lean `COMPACT` when the subscriber opted in):
 
 ```{mermaid}
 sequenceDiagram
     autonumber
     participant Cons as Consumer
     participant Prod as Producer node
-    participant V as Vertex (transient-local)
+    participant V as Vertex (producer)
     Cons->>Prod: FWD{WRITE, dst=/V, :subscribers[], src=/cons,<br/>SUBSCRIBER{ delivery_compact=1 }}
     Prod->>V: subscribe_wire — the ADR-0049 admission door<br/>(retain return_route=/cons + inbound link)
     Note over Prod,V: durability_request ⇒ latch the current LKV

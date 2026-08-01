@@ -317,7 +317,7 @@ a lock precisely because nothing writes them once traffic starts.
 | `set_identity(kind, key)` / `clear_identity()` | installs the node-scoped record `read <vertex>:identity` serves, byte-identical from every vertex | absent — `:identity` answers `SCHEMA_NOT_FOUND` |
 | `set_remote_delivery_sink(sink)` | where the producer fan-out hands each **remote** subscriber's delivery | **null — remote subscriber slots are stored but never deliver** |
 | `set_subject_resolver(resolver)` | maps a caller context to a subject token, enabling ACL evaluation | **none — enforcement is entirely off; every operation is allowed** |
-| `subscribe_wire(v, source, route, link)` | the inbound `:subscribers[]` append: one parse, the SUBSCRIBE gate, the slot append, the transient-local latch | — (called by the FWD resolver, not a default) |
+| `subscribe_wire(v, source, route, link)` | the inbound `:subscribers[]` append: one parse, the SUBSCRIBE gate, the slot append, the durability latch the subscriber requested | — (called by the FWD resolver, not a default) |
 
 The two defaults in bold are load-bearing and are the two failure modes a node wired by
 hand hits first. A graph with no remote-delivery sink accepts remote subscribes and

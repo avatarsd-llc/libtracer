@@ -381,10 +381,12 @@ void test_storage_policy_inheritance() {
  * @brief The write path still reads `store_ref_min_bytes` off ONE inline load, and the store
  *        path `history_keep_last` — asserted behaviourally, since the cost claim is the bench's.
  *
- * What is checkable here is that the value a hot read sees is the vertex's own copy, not
- * something resolved by walking: mutate an ancestor's ext AFTER the child exists and the
- * child's own load is what changes (the push wrote it), never a walk that would have found it
- * regardless of whether the push ran.
+ * What is checkable here is that the inherited value is the one the STORE PATH actually
+ * reads — not merely the one `:settings` reports back. The child states no policy of its
+ * own, so if the copy had not been taken it would carry the default depth of 1 and the ring
+ * would keep one entry; it keeps three. The COST of that read is the bench's question
+ * (`bench/bench_storage_policy.cpp`), which sweeps depth because that is the only shape
+ * that separates a load from a walk.
  */
 void test_hot_reads_see_the_local_copy() {
     std::printf("§3.C — the hot readers see a LOCAL copy, not an ancestor walk:\n");
