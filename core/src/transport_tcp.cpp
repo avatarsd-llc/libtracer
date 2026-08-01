@@ -283,9 +283,18 @@ void tcp_transport_t::run_listen() {
 struct transport_tcp_server::session_t {
     std::atomic<int> fd{-1};       /**< @brief The peer socket; -1 ⇒ free slot. */
     std::atomic<bool> open{false}; /**< @brief True while the connection is live. */
-    std::string name;              /**< @brief The peer's name, `<ip>:<port>`. */
-    length_prefix_framer framer;   /**< @brief Per-stream u32-LE frame reassembly. */
-    peer_endpoint_t endpoint;      /**< @brief The directed facade `peer_link` returns. */
+    /** @brief The peer's routable NAME, `p<slot>` — a pure function of the slot index
+     *         (ADR-0073 §2, #426): stamped at accept, moved out by teardown (the eviction
+     *         seam), so a reused slot gets the SAME name back. A legal path segment,
+     *         unlike the old `<ip>:<port>`. Identifies a SESSION, not a device — a
+     *         reconnecting peer may land in a different slot; device-stable identity is
+     *         a named link. */
+    std::string name;
+    /** @brief The remote `<ip>:<port>` — DIAGNOSTIC only, never a name and never in the
+     *         graph (#584 owns any future per-peer facet). Refreshed per accept. */
+    std::string endpoint_str;
+    length_prefix_framer framer; /**< @brief Per-stream u32-LE frame reassembly. */
+    peer_endpoint_t endpoint;    /**< @brief The directed facade `peer_link` returns. */
 };
 
 transport_tcp_server::transport_tcp_server(std::uint16_t bind_port, mem::mem_backend_t* backend,
@@ -409,9 +418,11 @@ void transport_tcp_server::accept_peer() {
     session_t* slot = nullptr;
     {
         const std::lock_guard lock(peers_m_);
-        for (const std::unique_ptr<session_t>& s : slots_)
-            if (s->fd.load(std::memory_order_relaxed) < 0) {
-                slot = s.get();
+        std::size_t idx = 0;
+        for (std::size_t i = 0; i < slots_.size(); ++i)
+            if (slots_[i]->fd.load(std::memory_order_relaxed) < 0) {
+                slot = slots_[i].get();
+                idx = i;
                 break;
             }
         if (slot == nullptr) {
@@ -423,10 +434,15 @@ void transport_tcp_server::accept_peer() {
             slot = slots_.back().get();
             slot->endpoint.owner_ = this;
             slot->endpoint.slot_ = slot;
+            idx = slots_.size() - 1;
         }
+        // The routable NAME is the slot index — `p<slot>`, legal by construction and a
+        // pure function of the slot's position (ADR-0073 §2), so a reused slot gets the
+        // SAME name back (teardown_slot moved the old string out for the eviction seam).
+        slot->name = 'p' + std::to_string(idx);
         char ip[INET_ADDRSTRLEN] = {};
         ::inet_ntop(AF_INET, &remote.sin_addr, ip, sizeof(ip));
-        slot->name = std::string(ip) + ':' + std::to_string(ntohs(remote.sin_port));
+        slot->endpoint_str = std::string(ip) + ':' + std::to_string(ntohs(remote.sin_port));
     }
     set_nodelay(fd);
     slot->framer.reset();

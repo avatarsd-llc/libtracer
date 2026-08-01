@@ -186,7 +186,7 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
  * (or @p max_peers, the RFC-0006 injected bound) — with the WS protocol layer
  * replaced by the shared u32-LE length-prefix stream framing (one chunk-fed
  * length_prefix_framer per slot).  There is NO handshake phase: a peer is open
- * (named `<ip>:<port>`) from the moment its connection is accepted.  The
+ * (named `p<slot>`, ADR-0073 §2 / #426) from the moment its connection is accepted.  The
  * board↔board listener shape: leaner than WS packaging (no HTTP upgrade, no
  * frame masking) with the same per-peer return-route identity when
  * @p peer_named.
@@ -269,7 +269,7 @@ class transport_tcp_server : public transport_t, public bus_link_t, private stre
      *         the whole link down on any session's close). */
     [[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }
 
-    /** @brief Visit the currently-OPEN peers' names, `<ip>:<port>`. */
+    /** @brief Visit the currently-OPEN peers' names, `p<slot>` (#426). */
     void enumerate_peers(const peer_visitor_t& visit) const override;
 
     /**

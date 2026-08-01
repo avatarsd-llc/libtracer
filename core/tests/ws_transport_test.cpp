@@ -41,6 +41,7 @@
 #include <thread>
 #include <vector>
 
+#include "libtracer/path.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/transport_ws.hpp"
 #include "libtracer/ws.hpp"
@@ -568,6 +569,44 @@ void test_multi_peer_bus() {
     }
     check(live == 1, "departed peer left enumeration (slot recycled)");
     check(server.bus()->peer_link(name_a) != nullptr, "surviving peer still resolves");
+
+    // --- #426 / ADR-0073 §2: peer names are the routable `p<slot>` fallback ---
+    // The old `<ip>:<port>` name contained two reserved characters, so a peer was
+    // enumerable but unaddressable, and the delivery tag TAINTED the accumulated
+    // return route. Every name must now pass THE segment predicate (fails before
+    // the rename), and be exactly the slot spelling.
+    {
+        bool all_legal = true;
+        std::vector<std::string> names;
+        server.bus()->enumerate_peers([&](std::string_view p) {
+            names.emplace_back(p);
+            if (!tr::graph::valid_segment(p)) all_legal = false;
+        });
+        check(all_legal, "every enumerated peer name is a legal path segment (#426)");
+        check(!names.empty() && names[0].size() >= 2 && names[0][0] == 'p',
+              "the fallback name is the p<slot> spelling");
+        check(name_a == "p0" || name_a == "p1",
+              "the DELIVERY TAG is the p<slot> name (the return route is addressable)");
+    }
+
+    // --- slot recycling: a new session lands in the freed slot and REUSES its name ---
+    std::optional<tr::net::transport_ws_client> c;
+    c.emplace("127.0.0.1", port);
+    frame_sink_t c_sink;
+    c->set_receiver(c_sink);
+    check(c->ok(), "third client connected after the departure");
+    const std::array<std::byte, 2> pc{std::byte{0x01}, std::byte{0xC1}};
+    c->send(pc);
+    check(srv_sink.wait_count(3, 2s), "server got the third client's frame");
+    {
+        const std::lock_guard lock(srv_sink.m);
+        const auto& [peer, bytes] = srv_sink.frames.back();
+        const bool p_form = peer.size() >= 2 && peer[0] == 'p' &&
+                            peer.find_first_not_of("0123456789", 1) == std::string::npos;
+        check(bytes == std::vector<std::byte>(pc.begin(), pc.end()) && p_form,
+              "the new session delivers under a p<slot> name");
+        check(peer != name_a, "…and it is not the surviving peer's name (directedness held)");
+    }
 }
 
 /** @brief #362 — the max_peers deployment cap: a peer beyond it is refused cleanly,

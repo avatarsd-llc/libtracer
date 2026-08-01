@@ -47,7 +47,7 @@ namespace tr::net {
  * Binds and listens on a TCP port (localhost is fine for tests); one poll-based
  * thread accepts clients and serves every open connection concurrently. Each
  * inbound BINARY message is delivered tagged with its peer's name
- * (`<ip>:<port>` of the far side) when a peer-named sink is installed (the
+ * (the routable `p<slot>` fallback, ADR-0073 §2 / #426) when a peer-named sink is installed (the
  * router's bus wiring), or to the flat @ref transport_t receiver otherwise —
  * so a single-client deployment behaves exactly as the point-to-point server
  * always did. The dial-out counterpart is transport_ws_client below.
@@ -140,7 +140,7 @@ class transport_ws_server : public transport_t, public bus_link_t, private strea
      *       flat server multiple concurrent peers. */
     [[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }
 
-    /** @brief Visit the currently-OPEN (handshaken) peers' names, `<ip>:<port>`. */
+    /** @brief Visit the currently-OPEN (handshaken) peers' names, `p<slot>` (#426). */
     void enumerate_peers(const peer_visitor_t& visit) const override;
 
     /**
