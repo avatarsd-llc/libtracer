@@ -248,7 +248,7 @@ class transport_vertex_t {
      * modules (`ws-client`, `ws-server`), while a bus like `can` is ONE for both roles — "a
      * bus has no dial/listen asymmetry" (`transport_can.hpp`).
      *
-     * Built-in transports ship *suggested* module names (e.g. `kWsClientModule` in
+     * Built-in transports ship *suggested* module names (e.g. `kWsClientSuggestedModule` in
      * `transport_ws.hpp`) the application may pass here — but the call is always
      * application code. Registration is a minting boundary, so the shared segment-validity
      * predicate (ADR-0073 §1) gates @p module: a name carrying a reserved character, empty,
@@ -268,6 +268,12 @@ class transport_vertex_t {
      * Declared-only (ADR-0073 §4): a *(kind, role)* pair the application never declared via
      * @ref register_module answers `SCHEMA_NOT_FOUND` — the unsupported-catalog-entry
      * convention an unknown SPEC `type` uses — instead of a library-derived name.
+     *
+     * **Setup-time contract.** This read takes no lock: it is safe concurrently with
+     * frame flow and with creation (whose caller holds the control mutex), but NOT
+     * concurrently with @ref register_module itself. Declare every module at wiring
+     * time, before other threads touch this object — the same read-only-once-frames-flow
+     * contract the transport-factory catalog documents.
      */
     [[nodiscard]] graph::result_t<std::string> module_for(std::string_view kind,
                                                           conn_role_t role) const;

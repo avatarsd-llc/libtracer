@@ -17,6 +17,11 @@
  * machinery lives only under `/net` and is never on the local hot path.
  */
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -469,13 +474,29 @@ void test_creation_errors() {
     transport_vertex_t net(node, router);
     declare_builtin_modules(net);  // ADR-0073 §4: the application mints the module names
 
-    // Unknown transport kind => SCHEMA_NOT_FOUND (unsupported catalog entry), no vertex.
+    // Undeclared MODULE => SCHEMA_NOT_FOUND at the module_for gate (ADR-0073 §4), no
+    // vertex. "pigeon" has no register_module entry, so this exercises the declared-only
+    // gate — the factory lookup is never reached.
     const auto w1 =
         node.write(path_t("/net:children[]"),
                    conn_spec("client", "x", conn_role_t::DIAL, 47122, "pigeon", "127.0.0.1"));
     check(!w1.has_value() && w1.error() == status_t::SCHEMA_NOT_FOUND,
-          "unknown kind => SCHEMA_NOT_FOUND");
+          "undeclared module => SCHEMA_NOT_FOUND");
     check(!node.find(path_t::parse("/net/x")->key()).has_value(), "no /net/x vertex was created");
+
+    // The DISCRIMINATING twin: a DECLARED module whose kind has NO registered factory —
+    // the creation now passes module_for and must fail at the factory-lookup gate with
+    // the same status. Without this case the factory-missing branch is exercised by no
+    // test (the pre-ADR-0073 "pigeon" case used to cover it).
+    check(net.register_module("pigeon-x", "pigeon", conn_role_t::DIAL).has_value(),
+          "a module can be declared for a kind with no factory (declaration is naming)");
+    const auto w1b =
+        node.write(path_t("/net:children[]"),
+                   conn_spec("client", "x2", conn_role_t::DIAL, 47122, "pigeon", "127.0.0.1"));
+    check(!w1b.has_value() && w1b.error() == status_t::SCHEMA_NOT_FOUND,
+          "declared module, missing factory => SCHEMA_NOT_FOUND at the factory gate");
+    check(!node.find(path_t::parse("/net/pigeon-x/x2")->key()).has_value(),
+          "no vertex was created for the factory-less kind");
 
     // A udp DIAL without addr (and a LISTEN without port) => TYPE_MISMATCH, no vertex.
     const auto w2 = node.write(path_t("/net:children[]"),
@@ -639,6 +660,29 @@ std::set<std::string> enumerate_peers(graph_t& g, const char* path) {
     return member_names(*dec);
 }
 
+/**
+ * @brief An OS-granted free TCP port (bind 0, read it back, release).
+ *
+ * The SPEC config contract forbids `port == 0` for LISTEN (`dial_or_listen`,
+ * TYPE_MISMATCH), so an in-band-created listener cannot ask for an ephemeral port —
+ * and a fixed literal was an EADDRINUSE flake across parallel CI matrix legs. The
+ * tiny close-to-bind race is acceptable in a test.
+ */
+[[nodiscard]] std::uint16_t free_port() {
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return 0;
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t len = sizeof(a);
+    std::uint16_t port = 0;
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 0 &&
+        ::getsockname(fd, reinterpret_cast<sockaddr*>(&a), &len) == 0)
+        port = ntohs(a.sin_port);
+    ::close(fd);
+    return port;
+}
+
 /** @brief Poll until `pred` holds — the peer table is fed by the server's accept thread. */
 template <typename Pred>
 bool wait_until(Pred pred, std::chrono::milliseconds budget) {
@@ -667,8 +711,9 @@ void test_ws_peer_named_config() {
     declare_builtin_modules(net);  // ADR-0073 §4: the application mints the module names
 
     // ----- the CONTROL: no peer_named => a plain point-to-point link, no listing. -----
-    const auto plain = node.write(path_t("/net:children[]"),
-                                  conn_spec("listener", "plain", conn_role_t::LISTEN, 47140, "ws"));
+    const auto plain =
+        node.write(path_t("/net:children[]"),
+                   conn_spec("listener", "plain", conn_role_t::LISTEN, free_port(), "ws"));
     check(plain.has_value(), "SPEC{listener, kind=ws} with no peer_named constructs the server");
     auto* const plain_srv =
         dynamic_cast<tr::net::transport_ws_server*>(net.link_of("net/ws-server/plain"));
@@ -676,8 +721,9 @@ void test_ws_peer_named_config() {
           "without the key the SPEC-created server has a NULL bus (no ADR-0044 facet)");
 
     // ----- the SUBJECT: peer_named=1 => the bus facet, hence the synthesized listing. -----
-    const auto w = node.write(path_t("/net:children[]"),
-                              ws_listener_spec("bus", 47141, /*peer_named=*/true, /*max_peers=*/8));
+    const auto w =
+        node.write(path_t("/net:children[]"),
+                   ws_listener_spec("bus", free_port(), /*peer_named=*/true, /*max_peers=*/8));
     check(w.has_value(), "SPEC{listener, kind=ws, peer_named=1} constructs the owned server");
     auto* const srv = dynamic_cast<tr::net::transport_ws_server*>(net.link_of("net/ws-server/bus"));
     check(srv != nullptr && srv->ok(), "the owned transport is a live transport_ws_server");
@@ -690,8 +736,9 @@ void test_ws_peer_named_config() {
 
     // Two real ws clients dial the SPEC-created listener; each completes an RFC 6455
     // handshake, so each becomes an audible peer of the bus.
-    tr::net::transport_ws_client c1("127.0.0.1", 47141);
-    tr::net::transport_ws_client c2("127.0.0.1", 47141);
+    const std::uint16_t bus_port = srv != nullptr ? srv->local_port() : 0;
+    tr::net::transport_ws_client c1("127.0.0.1", bus_port);
+    tr::net::transport_ws_client c2("127.0.0.1", bus_port);
     check(c1.ok() && c2.ok(), "both ws clients handshook against the in-band-created listener");
 
     const bool listed = wait_until(
