@@ -79,11 +79,11 @@ ANCHORS = [
     ("core/src/graph.cpp:1233", "value.materialize(*value_backend_)", "field_write read it back"),
     ("core/src/graph.cpp:1437", "result_t<void> graph_t::field_write"),
     ("core/src/graph.cpp:1564", "acl_right_t::CREATE", 'step0.name == "children"'),
-    ("core/src/fwd_router.cpp:1051", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:1072", "value.materialize()"),
-    ("core/src/fwd_router.cpp:1073", "flatten OOM"),
-    ("core/src/fwd_router.cpp:1077", "try_encode_compact", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:1109", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1159", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1180", "value.materialize()"),
+    ("core/src/fwd_router.cpp:1181", "flatten OOM"),
+    ("core/src/fwd_router.cpp:1185", "try_encode_compact", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1217", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
     ("core/include/libtracer/vertex.hpp:2299", "vertex_t* parent_"),
 ]
 

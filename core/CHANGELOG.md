@@ -27,6 +27,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **A bus link's connection NAME is no longer a routable next-hop (#741, ADR-0073 §3,
+  RFC-0020).** An inbound FWD whose `dst` routed THROUGH a multi-peer link's own
+  `net/<module>/<name>` mount with a residual naming no current peer fell through to the bus
+  transport's `send()` — a broadcast to every open peer, drawing N replies for one directed
+  request and scrambling FIFO reply correlation (the #409 failure). The forward path now
+  REJECTS that hop: a single directed `FWD{REPLY, kind=ERROR}` with
+  `STATUS{ERROR{tr::path::invalid (0x0021)}}` back along the accumulated `src` (drop by value
+  for a malformed frame or a REPLY, matching the terminus resolver's split), and `on_advertise`
+  binds nothing for such a route (the peer's COMPACTs draw the ordinary HANDLE_NACK).
+  Wire-visible behavior change; a `dst` naming the mount exactly (the connection vertex) and
+  peer-directed hops (`/net/<module>/<name>/<peer>/...`) are unchanged. Fan-out remains the
+  subscription plane's.
+
 - **Bus-accepted peers are named `p<slot>` (#426, ADR-0073 §2).** The ws and tcp multi-peer
   listeners named an accepted session `<ip>:<port>` — two reserved characters, so a peer was
   enumerable in the synthesized `:children[]` but addressable by no conforming client, and the
