@@ -470,11 +470,18 @@ export class LibtracerClient {
    *
    * @param producerPath the producer vertex path (string or segments)
    * @param handler      invoked with each inbound VALUE delivery
+   * @param opts         the SUBSCRIBER's optional children — notably RFC-0022 §3.A's
+   *                     `deliveryPolicy`, whose bit 5 asks the producer to deliver its
+   *                     latched last value on join (omitted ⇒ today's behaviour)
    * @returns a function that locally detaches `handler`
    * @throws {FwdError} when the subscribe-write is rejected
    */
-  async subscribe(producerPath: string | string[], handler: ValueHandler): Promise<Unsubscribe> {
-    const subscriber = encodeSubscriber(this.replyEndpoint);
+  async subscribe(
+    producerPath: string | string[],
+    handler: ValueHandler,
+    opts: SubscriberOptions = {},
+  ): Promise<Unsubscribe> {
+    const subscriber = encodeSubscriber(this.replyEndpoint, opts);
     // Register the handler BEFORE awaiting the ack: a producer may stream its
     // first delivery before its subscribe REPLY is seen on the wire, and we must
     // not drop it. On a rejected subscribe we detach again.

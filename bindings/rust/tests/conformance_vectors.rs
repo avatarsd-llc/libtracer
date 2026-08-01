@@ -351,11 +351,11 @@ fn field_indexed() {
 #[test]
 fn field_nested() {
     let bin = assert_vector_consistent("field/field-nested");
-    assert_eq!(encode(&encode_field(":settings.deadline_ns").unwrap()), bin);
+    assert_eq!(encode(&encode_field(":settings.history_keep_last").unwrap()), bin);
     let levels = parse_field_tlv(&decode(&bin).unwrap()).unwrap();
     assert_eq!(levels.len(), 2);
     assert_eq!(levels[0].name, "settings");
-    assert_eq!(levels[1].name, "deadline_ns");
+    assert_eq!(levels[1].name, "history_keep_last");
     assert_eq!(levels[0].mode, FieldMode::Scalar);
     assert_eq!(levels[1].mode, FieldMode::Scalar);
 }

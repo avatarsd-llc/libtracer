@@ -464,9 +464,10 @@ void test_container_reads() {
     const std::optional<decoded_t> bare_settings =
         decode_read(g.read(path_t("/dev/bare:settings")));
     check(bare_settings.has_value() && bare_settings->tlv.type == type_t::SETTINGS &&
-              bare_settings->tlv.children.size() == 14 &&
-              name_at(bare_settings->tlv, 0, "reliability"),
-          ":settings on a table-less vertex: the 7 protocol knobs, no app member");
+              bare_settings->tlv.children.size() == 4 &&
+              name_at(bare_settings->tlv, 0, "history_keep_last") &&
+              name_at(bare_settings->tlv, 2, "store_ref_min_bytes"),
+          ":settings on a table-less vertex: the 2 storage knobs, no app member");
 
     std::vector<app_field_t> table;
     table.push_back(
@@ -485,9 +486,9 @@ void test_container_reads() {
           "a declared-but-unset field reads NOT_FOUND (distinct from SCHEMA_NOT_FOUND)");
 
     const std::optional<decoded_t> full = decode_read(g.read(path_t("/dev/c:settings")));
-    check(full.has_value() && full->tlv.children.size() == 16 && name_at(full->tlv, 14, "app") &&
-              full->tlv.children[15].type == type_t::SETTINGS &&
-              full->tlv.children[15].children.size() == 2,
+    check(full.has_value() && full->tlv.children.size() == 6 && name_at(full->tlv, 4, "app") &&
+              full->tlv.children[5].type == type_t::SETTINGS &&
+              full->tlv.children[5].children.size() == 2,
           ":settings: protocol knobs + nested app record in ONE traversal");
 }
 

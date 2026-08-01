@@ -163,7 +163,7 @@ export interface FieldLevel {
  *
  * `":subscribers[]"` → `[{ name: "subscribers", mode: "ELEMENT" }]`;
  * `":subscribers[3]"` → `[{ name: "subscribers", index: 3, mode: "ELEMENT" }]`;
- * `":settings.deadline_ns"` → `[{ name: "settings" }, { name: "deadline_ns" }]`.
+ * `":settings.history_keep_last"` → `[{ name: "settings" }, { name: "history_keep_last" }]`.
  *
  * @param field the selector string (with or without the leading `:`)
  * @returns the parsed levels

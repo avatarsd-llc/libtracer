@@ -76,10 +76,10 @@ struct scratch_pool_t {
 int main() {
     std::printf("graph_t value_backend_ seam (ADR-0060):\n");
 
-    // The field-write value: an 8-byte deadline_ns knob (5000 LE), as graph_test.
-    const std::array<std::byte, 8> le{std::byte{0x88}, std::byte{0x13}};  // 5000
+    // The field-write value: a 4-byte history_keep_last knob (5000 LE), as graph_test.
+    const std::array<std::byte, 4> le{std::byte{0x88}, std::byte{0x13}};  // 5000
     const std::vector<std::byte> tlv = value_tlv_bytes(le);
-    const auto fp = path_t::parse("/s/temp:settings.deadline_ns");
+    const auto fp = path_t::parse("/s/temp:settings.history_keep_last");
     check(fp.has_value() && !fp->field().steps.empty(), "field path parses");
 
     // ROUTING + BEHAVIOUR: a pool with room accepts the multi-link field write and
@@ -90,7 +90,8 @@ int main() {
         auto v = g.register_vertex(path_t("/s/temp"), role_t::STORED_VALUE);
         const auto w = g.write(v, fp->field(), multilink(tlv));
         check(w.has_value(), "multi-link field write through a pool-backed graph succeeds");
-        check(g.settings(v).deadline_ns == 5000, "value read back byte-exact (deadline_ns=5000)");
+        check(g.settings(v).history_keep_last == 5000,
+              "value read back byte-exact (history_keep_last=5000)");
         // A plain single-link value write never materializes — the seam is untouched
         // and the ordinary store path is unaffected.
         const std::array<std::byte, 3> pv_bytes{std::byte{0xAA}, std::byte{0xBB}, std::byte{0xCC}};
@@ -109,13 +110,13 @@ int main() {
         const auto w = g.write(v, fp->field(), multilink(tlv));
         check(!w.has_value() && w.error() == status_t::BACKPRESSURE,
               "an undersized pool BACKPRESSUREs the write (no heap fallback, no TYPE_MISMATCH)");
-        check(g.settings(v).deadline_ns != 5000, "the rejected write landed nothing");
+        check(g.settings(v).history_keep_last != 5000, "the rejected write landed nothing");
     }
     {
         graph_t heap;  // default heap backend
         auto v = heap.register_vertex(path_t("/s/temp"), role_t::STORED_VALUE);
         const auto w = heap.write(v, fp->field(), multilink(tlv));
-        check(w.has_value() && heap.settings(v).deadline_ns == 5000,
+        check(w.has_value() && heap.settings(v).history_keep_last == 5000,
               "the identical write on the default-heap graph accepts (contrast: seam is live)");
     }
 

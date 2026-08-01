@@ -16,8 +16,8 @@
  *       inbound datagram lands in a pool slot, exhaustion is backpressure) and
  *       a `monotonic_buffer_resource` region for the router/label containers
  *       (wrapped in a `synchronized_pool_resource` so recv threads share it);
- *     - a sensor vertex `/sensor/temp` (transient-local, so a fresh subscriber
- *       latches the current value);
+ *     - a sensor vertex `/sensor/temp` (a subscriber that requests durability
+ *       latches the current value — RFC-0022 §3.A);
  *     - `transport_vertex_t` with the built-in udp/tcp/ws transport catalog;
  *       the UDP listener connection is created IN-BAND via a
  *       `write /net:children[] SPEC{listener, kind=udp, port}` — config-created,
@@ -267,11 +267,10 @@ struct device_node_t {
         if (!net.register_module(std::string(tr::net::kUdpServerSuggestedModule), "udp",
                                  conn_role_t::LISTEN))
             return false;
-        // The sensor vertex: transient-local (durability=1) so a fresh remote
-        // subscriber LATCHES the current value — one immediate delivery.
-        tr::graph::settings_t s;
-        s.durability = 1;
-        sensor = graph.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE, {}, s);
+        // The sensor vertex: a plain producer. Since RFC-0022 §3.A a fresh remote
+        // subscriber LATCHES the current value by ASKING for it (the SUBSCRIBER's
+        // `delivery_policy` bit 5), so the producer carries no durability flag.
+        sensor = graph.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
         if (!write_sensor(21)) return false;
 
         // The UDP listener, created IN-BAND from config — the production path.

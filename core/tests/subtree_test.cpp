@@ -315,7 +315,7 @@ void test_write_creates() {
           "intermediate levels are created too (mkdir-p)");
 
     // A :field write to a nonexistent vertex does NOT create.
-    const auto f = g.write(path_t("/nope:settings.priority"), make_value({1, 0, 1, 0, 1}));
+    const auto f = g.write(path_t("/nope:settings.history_keep_last"), make_value({1, 0, 1, 0, 1}));
     check(!f.has_value() && f.error() == status_t::NOT_FOUND,
           "field write to a nonexistent vertex stays NOT_FOUND");
     check(!g.find(path_t::parse("/nope")->key()).has_value(), "field write created nothing");

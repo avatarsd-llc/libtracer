@@ -35,11 +35,16 @@ namespace {
 
 using namespace std::chrono_literals;
 using tr::graph::delivery_mode_t;
+using tr::graph::delivery_policy_t;
 using tr::graph::graph_t;
 using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::settings_t;
 using tr::graph::status_t;
+
+/** @brief A subscription that REQUESTS the transient-local latch (RFC-0022 §3.A bit 5) —
+ *         what used to be the producer's `settings.durability == 1`. */
+constexpr delivery_policy_t kDurableSub{delivery_policy_t::kDurabilityRequest};
 
 int g_failures = 0;
 
@@ -81,10 +86,10 @@ void test_path_parse() {
     check(path_t::parse("/").has_value() && path_t::parse("/")->segment_count() == 0,
           "root '/' is zero segments");
 
-    const auto f = path_t::parse("/sensor/temp:settings.deadline_ns");
+    const auto f = path_t::parse("/sensor/temp:settings.history_keep_last");
     check(f && f->field().steps.size() == 2 && f->field().steps[0].name == "settings" &&
-              f->field().steps[1].name == "deadline_ns",
-          "field tail :settings.deadline_ns parses to two steps");
+              f->field().steps[1].name == "history_keep_last",
+          "field tail :settings.history_keep_last parses to two steps");
     const auto app = path_t::parse("/s:subscribers[]");
     check(app && app->field().steps.size() == 1 && app->field().steps[0].append,
           "subscribers[] parses as an append step");
@@ -292,10 +297,11 @@ void test_field_write_settings() {
     std::printf("field-write :settings.<field>:\n");
     graph_t g;
     tr::graph::vertex_handle_t v = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
-    const auto payload = std::array<std::byte, 8>{std::byte{0x88}, std::byte{0x13}};  // 5000 LE
-    auto w = g.write(path_t("/sensor/temp:settings.deadline_ns"), value_tlv(payload));
+    const auto payload = std::array<std::byte, 4>{std::byte{0x88}, std::byte{0x13}};  // 5000 LE
+    auto w = g.write(path_t("/sensor/temp:settings.history_keep_last"), value_tlv(payload));
     check(w.has_value(), "field-write returns OK");
-    check(g.settings(v).deadline_ns == 5000, "deadline_ns updated to 5000 via field-write");
+    check(g.settings(v).history_keep_last == 5000,
+          "history_keep_last updated to 5000 via field-write");
     check(!g.write(path_t("/sensor/temp:settings.bogus"), value_tlv(payload)).has_value(),
           "unknown settings field => SchemaNotFound");
 }
@@ -306,12 +312,12 @@ void test_field_write_handle() {
     auto v = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     // Parse the field path ONCE; reuse the vertex_t* handle + field_path_t thereafter
     // (no per-call string parse, no map lookup).
-    const auto fp = path_t::parse("/sensor/temp:settings.deadline_ns");
-    const std::array<std::byte, 8> le{std::byte{0x10}, std::byte{0x27}};  // 10000 LE
+    const auto fp = path_t::parse("/sensor/temp:settings.history_keep_last");
+    const std::array<std::byte, 4> le{std::byte{0x10}, std::byte{0x27}};  // 10000 LE
     check(g.write(v, fp->field(), value_tlv(le)).has_value(),
           "write(vertex_t*, field_path_t, view_t) returns OK");
-    check(g.settings(v).deadline_ns == 10000,
-          "deadline_ns updated via the handle (no string parse, no map lookup)");
+    check(g.settings(v).history_keep_last == 10000,
+          "history_keep_last updated via the handle (no string parse, no map lookup)");
     check(g.write(v, tr::graph::field_path_t{}, make_value({0x55})).has_value(),
           "an empty field_path_t is an ordinary value write");
 }
@@ -510,32 +516,32 @@ void test_admission_door_uniformity() {
               "both doors store the byte-identical SUBSCRIBER view");
     }
 
-    // Behavior alignment (ADR-0049): the transient-local (durability==1) latch now fires
-    // for LOCAL doors too — a callback subscriber and a target subscriber each receive
-    // the LKV immediately at subscribe, exactly as a remote one does (was remote-only).
+    // Behavior alignment (ADR-0049) as amended by RFC-0022 §3.A: the durability latch is
+    // the SUBSCRIBER's request, and it fires for LOCAL doors too — a callback subscriber
+    // and a target subscriber that ask for it each receive the LKV immediately at
+    // subscribe, exactly as a remote one does (was remote-only, and was a vertex flag).
     {
         graph_t g;
-        settings_t s;
-        s.durability = 1;  // transient-local
-        tr::graph::vertex_handle_t src =
-            g.register_vertex(path_t("/tl"), role_t::STORED_VALUE, {}, s);
+        tr::graph::vertex_handle_t src = g.register_vertex(path_t("/tl"), role_t::STORED_VALUE);
         (void)g.write(src, make_value({0x5A}));  // seed the LKV BEFORE subscribing
 
         auto seen = std::make_shared<int>(-1);
         auto on_latch = [seen](const tr::view::rope_t& v) {
             *seen = std::to_integer<int>(v.only().bytes()[0]);
         };
-        (void)g.subscribe(path_t("/tl"), on_latch);
-        check(*seen == 0x5A, "callback door: the LKV latches at subscribe");
+        (void)g.subscribe(path_t("/tl"), on_latch, kDurableSub);
+        check(*seen == 0x5A, "callback door: a durability_request latches the LKV at subscribe");
 
         tr::graph::vertex_handle_t tgt = g.register_vertex(path_t("/tgt"), role_t::STORED_VALUE);
-        (void)g.subscribe(path_t("/tl"), path_t("/tgt"));
+        (void)g.subscribe(path_t("/tl"), path_t("/tgt"), kDurableSub);
         const auto latched = g.read(tgt);
         check(latched.has_value() && std::to_integer<int>((*latched)->only().bytes()[0]) == 0x5A,
-              "target door: the LKV latches at subscribe (delivered as a write)");
+              "target door: a durability_request latches the LKV at subscribe (as a write)");
     }
 
-    // A volatile (durability==0, the default) vertex still does NOT latch.
+    // The ablation, and the RFC-0022 behaviour change: on the SAME producer, a subscriber
+    // that requested nothing gets NO latch. Before RFC-0022 one vertex flag decided this
+    // for every subscriber; there was no way to express "not for me".
     {
         graph_t g;
         tr::graph::vertex_handle_t src = g.register_vertex(path_t("/vol"), role_t::STORED_VALUE);
@@ -543,7 +549,12 @@ void test_admission_door_uniformity() {
         auto fired = std::make_shared<int>(0);
         auto on_vol = [fired](const tr::view::rope_t&) { ++*fired; };
         (void)g.subscribe(path_t("/vol"), on_vol);
-        check(*fired == 0, "no latch on a volatile vertex");
+        check(*fired == 0, "default subscription: no latch");
+        auto latched = std::make_shared<int>(0);
+        auto on_dur = [latched](const tr::view::rope_t&) { ++*latched; };
+        (void)g.subscribe(path_t("/vol"), on_dur, kDurableSub);
+        check(*latched == 1 && *fired == 0,
+              "... and a durability_request on the SAME vertex does latch (per-subscription)");
     }
 }
 
@@ -577,8 +588,8 @@ void test_subscribe_never_misses_a_racing_write() {
     constexpr int kOffsets = 64;  // interleaving positions the writer's arrival is swept over
 
     graph_t g;
-    settings_t s;
-    s.durability = 1;  // transient-local — the latch leg is armed
+    // The latch leg is armed by the SUBSCRIBER's request now (RFC-0022 §3.A), so the
+    // producers are plain vertices and every subscribe below asks for durability.
     std::vector<tr::graph::vertex_handle_t> verts;
     std::vector<path_t> paths;
     verts.reserve(kRounds);
@@ -588,7 +599,7 @@ void test_subscribe_never_misses_a_racing_write() {
         // would test nothing after the first subscribe.
         const std::string name = "/race/v" + std::to_string(i);
         paths.emplace_back(name);
-        verts.push_back(g.register_vertex(paths.back(), role_t::STORED_VALUE, {}, s));
+        verts.push_back(g.register_vertex(paths.back(), role_t::STORED_VALUE));
         (void)g.write(verts.back(), make_value({0x01}));  // the OLD value the latch may hold
     }
 
@@ -616,7 +627,7 @@ void test_subscribe_never_misses_a_racing_write() {
     for (int i = 0; i < kRounds; ++i) {
         seen.store(0, std::memory_order_relaxed);
         gate.store(i, std::memory_order_release);
-        (void)g.subscribe(paths[i], on_value);
+        (void)g.subscribe(paths[i], on_value, kDurableSub);
         while (done.load(std::memory_order_acquire) != i) { /* both legs have run */
         }
         if ((seen.load(std::memory_order_relaxed) & (1U << 2)) == 0) ++missed;

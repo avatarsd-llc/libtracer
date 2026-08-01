@@ -32,6 +32,7 @@ namespace {
 
 using namespace std::chrono_literals;
 using tr::graph::ace_t;
+using tr::graph::delivery_policy_t;
 using tr::graph::edge_latch_t;
 using tr::graph::edge_snapshot_t;
 using tr::graph::edge_view_t;
@@ -125,44 +126,51 @@ void test_await_wake_and_timeout() {
 }
 
 void test_edges_snapshot_clear_latch() {
-    std::printf("edges — add/snapshot/clear + the transient-local latch:\n");
-    settings_t st;
-    st.durability = 1;  // transient-local: add_edge latches once an LKV exists
-    vertex_t v{role_t::STORED_VALUE, key_of({0x04}), st, {}};
+    std::printf("edges — add/snapshot/clear + the per-subscription durability latch:\n");
+    // RFC-0022 §3.A: the latch predicate is the SUBSCRIBER's request, not a vertex flag.
+    vertex_t v{role_t::STORED_VALUE, key_of({0x04}), settings_t{}, {}};
 
     int hits = 0;
     // subscriber_t is move-only (#380 §3 cold-half unique_ptr): mint a fresh edge per add.
-    const auto mk_edge = [&hits] {
+    const auto mk_edge = [&hits](std::uint16_t policy_bits = 0) {
         subscriber_t s;
         s.callback = [](void* ctx, const rope_t&) { ++*static_cast<int*>(ctx); };
         s.callback_ctx = &hits;
+        s.policy.bits = policy_bits;
         return s;
     };
     edge_latch_t latch;
-    check(v.add_edge(mk_edge(), &latch) == 0, "the first edge lands in slot 0");
+    check(v.add_edge(mk_edge(delivery_policy_t::kDurabilityRequest), &latch) == 0,
+          "the first edge lands in slot 0");
     check(latch.value == nullptr, "no LKV yet => no latch");
 
     v.store(make_value(0x11));
     edge_latch_t latch2;
-    check(v.add_edge(mk_edge(), &latch2) == 1, "the second edge lands in slot 1");
+    check(v.add_edge(mk_edge(delivery_policy_t::kDurabilityRequest), &latch2) == 1,
+          "the second edge lands in slot 1");
     check(latch2.value != nullptr && first_byte(*latch2.value) == 0x11,
-          "transient-local + LKV => the latch snapshots the value");
+          "durability_request + LKV => the latch snapshots the value");
     check(latch2.edge.callback != nullptr && latch2.edge.callback_ctx == &hits,
           "the latch carries the admitted edge's {fn, ctx} dispatch view");
 
+    // The ablation: same vertex, same LKV, a subscriber that did NOT request durability.
+    edge_latch_t latch3;
+    check(v.add_edge(mk_edge(), &latch3) == 2, "the third edge lands in slot 2");
+    check(latch3.value == nullptr, "no durability_request => NO latch, on the same LKV");
+
     edge_snapshot_t buf;
     std::vector<edge_view_t> heap;
-    check(v.snapshot_edges(buf, heap) == 2 && heap.empty(),
-          "2 active edges snapshot into the inline buffer (no heap)");
+    check(v.snapshot_edges(buf, heap) == 3 && heap.empty(),
+          "3 active edges snapshot into the inline buffer (no heap)");
     buf[0].callback(buf[0].callback_ctx, *v.read_stored());
     check(hits == 1, "a snapshotted edge dispatches through its {fn, ctx} pair");
 
     check(v.clear_edge(0), "clearing an active slot reports true");
     check(!v.clear_edge(0), "re-clearing the same slot reports false");
     check(!v.clear_edge(99), "clearing an out-of-range slot reports false");
-    check(v.snapshot_edges(buf, heap) == 1, "a cleared edge vanishes from the snapshot");
+    check(v.snapshot_edges(buf, heap) == 2, "a cleared edge vanishes from the snapshot");
 
-    for (int i = 0; i < 12; ++i) (void)v.add_edge(mk_edge());
+    for (int i = 0; i < 11; ++i) (void)v.add_edge(mk_edge());
     const std::size_t n = v.snapshot_edges(buf, heap);
     check(n == 13 && heap.size() == 13, "a >kInlineFanout subscriber list overflows to the heap");
 }

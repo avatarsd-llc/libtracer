@@ -91,10 +91,10 @@ int main() {
     for (std::size_t fanout : {std::size_t{1}, std::size_t{8}, std::size_t{64}})
         run_fanout(fanout, kWrites, ok);
 
-    // Field-write a QoS setting, then discover the vertex shape via :schema.
+    // Field-write a storage knob, then discover the vertex shape via :schema.
     tr::graph::graph_t g;
     (void)g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
-    (void)g.write(path_t("/sensor/temp:settings.deadline_ns"), value_u32(5000));
+    (void)g.write(path_t("/sensor/temp:settings.history_keep_last"), value_u32(8));
     auto schema = g.read(path_t("/sensor/temp:schema"));
     std::size_t schema_children = 0;
     if (schema)

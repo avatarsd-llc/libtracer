@@ -126,7 +126,7 @@ test('encodeFwd matches the fwd-write-subscriber-field vector byte-for-byte (sub
 
 test('encodeField matches the field-indexed / field-nested / field-append vectors', () => {
   assert.ok(sameBytes(encodeField(':subscribers[3]'), vector('field/field-indexed')), 'field-indexed');
-  assert.ok(sameBytes(encodeField(':settings.deadline_ns'), vector('field/field-nested')), 'field-nested');
+  assert.ok(sameBytes(encodeField(':settings.history_keep_last'), vector('field/field-nested')), 'field-nested');
   assert.ok(sameBytes(encodeField(':subscribers[]'), vector('field/field-append')), 'field-append');
 });
 

@@ -476,7 +476,7 @@ void test_flat_knob_name_before_acl() {
           "trusted local caller installs the :acl");
 
     const std::array<std::byte, 8> le{std::byte{0x88}, std::byte{0x13}};  // 5000 LE
-    const auto knob = path_t::parse("/x:settings.deadline_ns");
+    const auto knob = path_t::parse("/x:settings.history_keep_last");
     const auto unknown = path_t::parse("/x:settings.bogus");
 
     // The property under test: an unknown NAME is caller-independent.
@@ -495,21 +495,22 @@ void test_flat_knob_name_before_acl() {
           "known knob + denied caller: PERMISSION_DENIED (the write stays gated)");
     check(g.write(v, knob->field(), make_value(value_tlv(le)), "peer-a").has_value(),
           "known knob + granted caller: the write lands");
-    check(g.settings(v).deadline_ns == 5000, "... and it actually took effect");
+    check(g.settings(v).history_keep_last == 5000, "... and it actually took effect");
 
-    // A knob NAME is exactly two plain steps. `settings.reliability.bogus` and
-    // `settings.reliability[2]` name NO knob — the read surface already rejects both
-    // (it checks `plain_step` on every step), and before the name-first hoist the write
-    // surface silently ACCEPTED them as writes to `reliability`, ignoring the tail.
-    check(fails_with(g.write(v, path_t::parse("/x:settings.reliability.bogus")->field(),
+    // A knob NAME is exactly two plain steps. `settings.store_ref_min_bytes.bogus` and
+    // `settings.store_ref_min_bytes[2]` name NO knob — the read surface already rejects
+    // both (it checks `plain_step` on every step), and before the name-first hoist the
+    // write surface silently ACCEPTED them as writes to the knob, ignoring the tail.
+    check(fails_with(g.write(v, path_t::parse("/x:settings.store_ref_min_bytes.bogus")->field(),
                              make_value(value_tlv(le)), "peer-a"),
                      status_t::SCHEMA_NOT_FOUND),
           "a trailing step names no knob: SCHEMA_NOT_FOUND (the tail is not ignored)");
-    check(fails_with(g.write(v, path_t::parse("/x:settings.reliability[2]")->field(),
+    check(fails_with(g.write(v, path_t::parse("/x:settings.store_ref_min_bytes[2]")->field(),
                              make_value(value_tlv(le)), "peer-a"),
                      status_t::SCHEMA_NOT_FOUND),
           "a selector step names no knob: SCHEMA_NOT_FOUND (no knob has an indexed surface)");
-    check(g.settings(v).reliability == 0, "... and neither malformed write reached `reliability`");
+    check(g.settings(v).store_ref_min_bytes == 0,
+          "... and neither malformed write reached `store_ref_min_bytes`");
 }
 
 /**

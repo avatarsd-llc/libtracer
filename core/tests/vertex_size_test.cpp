@@ -87,19 +87,18 @@ void default_leaf_shares_default_settings() {
             "&g.settings(h) == &tr::graph::kDefaultSettings");
 }
 
-/** @brief Non-default QoS at registration must yield a private settings copy (the cold
- *         block), not mutate the shared defaults. */
+/** @brief A non-default storage policy at registration must yield a private settings copy
+ *         (the cold block), not mutate the shared defaults. */
 void non_default_settings_get_private_copy() {
     graph_t g;
     settings_t s;
-    s.durability = 1;
-    const auto h =
-        g.register_vertex(path_t("/diet/durable"), role_t::STORED_VALUE, handlers_t{}, s);
+    s.store_ref_min_bytes = 64;
+    const auto h = g.register_vertex(path_t("/diet/pinned"), role_t::STORED_VALUE, handlers_t{}, s);
     require(&g.settings(h) != &tr::graph::kDefaultSettings,
             "&g.settings(h) != &tr::graph::kDefaultSettings");
-    require(g.settings(h).durability == 1, "g.settings(h).durability == 1");
-    require(tr::graph::kDefaultSettings.durability == 0,
-            "tr::graph::kDefaultSettings.durability == 0");
+    require(g.settings(h).store_ref_min_bytes == 64, "g.settings(h).store_ref_min_bytes == 64");
+    require(tr::graph::kDefaultSettings.store_ref_min_bytes == 0,
+            "tr::graph::kDefaultSettings.store_ref_min_bytes == 0");
 }
 
 /** @brief A `:settings` field write on a default leaf must transparently allocate the cold
@@ -109,10 +108,11 @@ void late_settings_write_allocates_lazily() {
     const auto h = g.register_vertex(path_t("/diet/late"), role_t::STORED_VALUE);
     require(&g.settings(h) == &tr::graph::kDefaultSettings,
             "&g.settings(h) == &tr::graph::kDefaultSettings");
-    const auto payload = std::array<std::byte, 1>{std::byte{7}};
-    const auto w = g.write(path_t("/diet/late:settings.priority"), value_tlv(payload));
+    const auto payload =
+        std::array<std::byte, 4>{std::byte{7}, std::byte{0}, std::byte{0}, std::byte{0}};
+    const auto w = g.write(path_t("/diet/late:settings.history_keep_last"), value_tlv(payload));
     require(w.has_value(), "w.has_value()");
-    require(g.settings(h).priority == 7, "g.settings(h).priority == 7");
+    require(g.settings(h).history_keep_last == 7, "g.settings(h).history_keep_last == 7");
     require(&g.settings(h) != &tr::graph::kDefaultSettings,
             "&g.settings(h) != &tr::graph::kDefaultSettings");
 }
