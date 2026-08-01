@@ -14,6 +14,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`fwd_router_t::subscribe_toward(producer, target)` (#739).** Binds a local producer's
+  subscription toward ONE ordinary mount-path target (`/net/<module>/<name>/<consumer...>`,
+  arbitrarily nested), resolved through the SAME ADR-0061 strip-K cached descent the forward
+  path uses — no caller-side `(link, return-route)` hand-split, no single-hop assumption, no
+  `net/<module>/<name>` string knowledge in the application. Bind-time resolution,
+  link-lifetime durability (teardown evicts the binding; re-binding is the application's job —
+  re-establishment is #716). A target whose first hop is a bus PEER answers `INVALID_PATH`
+  (no directed registry entry to store yet — the #741 work's territory).
+
 ### Changed
 
 - **Bus-accepted peers are named `p<slot>` (#426, ADR-0073 §2).** The ws and tcp multi-peer

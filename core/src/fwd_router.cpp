@@ -997,6 +997,57 @@ bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
     return graph_.write(*v, *payload_view).has_value();
 }
 
+graph::result_t<void> fwd_router_t::subscribe_toward(const graph::path_t& producer,
+                                                     const graph::path_t& target) {
+    const std::optional<graph::vertex_handle_t> v = graph_.find(producer.key());
+    if (!v) return std::unexpected(graph::status_t::NOT_FOUND);
+
+    // Walk the target key's NAME records into the segment spans the shared descent takes —
+    // the SAME resolve_mount_segs the forward path peeks a frame's dst into, so a bound
+    // route and a routed frame cannot disagree about where a mount ends (ADR-0061).
+    const std::span<const std::byte> key = target.key();
+    std::array<std::string_view, kMountPeekMax> seg{};
+    std::array<std::size_t, kMountPeekMax + 1> rec_off{};  // byte offset of each record
+    std::size_t n = 0;
+    std::size_t at = 0;
+    while (at + 4 <= key.size() && n < kMountPeekMax) {
+        const std::size_t len = detail::load_le<std::uint16_t>(key.subspan(at + 2, 2));
+        if (at + 4 + len > key.size()) break;
+        rec_off[n] = at;
+        seg[n] = detail::as_string_view(key.subspan(at + 4, len));
+        ++n;
+        at += 4 + len;
+    }
+    rec_off[n] = at;
+
+    const mount_hit_t hit =
+        resolve_mount_segs(registry_, std::span<const std::string_view>(seg.data(), n));
+    // No mount, an exact-mount target (nothing below it to deliver to), or a bus PEER
+    // first hop (no directed registry entry to store — see the header doc) all fail the
+    // same way the string parser fails an unroutable spelling.
+    if (hit.link == nullptr || !hit.peer.empty() || rec_off[hit.strip_k] >= key.size())
+        return std::unexpected(graph::status_t::INVALID_PATH);
+
+    // The return route is the residual below the mount, as ONE owned PATH TLV — the
+    // single copy every delivery then clones by refcount (ADR-0041 §2). The residual
+    // NAME records are reused verbatim: the key suffix IS the route payload.
+    const std::span<const std::byte> residual = key.subspan(rec_off[hit.strip_k]);
+    std::vector<std::byte> route_tlv;
+    wire::emit_tlv(route_tlv, wire::type_t::PATH, wire::opt_t{.pl = true}, residual);
+    const auto route_view = view::over_bytes(route_tlv);
+    if (!route_view) return std::unexpected(graph::status_t::BACKPRESSURE);
+
+    // A minimal SUBSCRIBER composite — the same admission door as the wire append
+    // (subscribe_wire parses it once; no compact opt-in, deliveries ride the
+    // full-route FWD{WRITE} form).
+    std::vector<std::byte> sub_tlv;
+    wire::emit_tlv(sub_tlv, wire::type_t::SUBSCRIBER, wire::opt_t{.pl = true}, {});
+    const auto sub_view = view::over_bytes(sub_tlv);
+    if (!sub_view) return std::unexpected(graph::status_t::BACKPRESSURE);
+
+    return graph_.subscribe_wire(*v, *sub_view, *route_view, std::string(hit.link_name));
+}
+
 void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const view::rope_t& value) {
     transport_t* const link = registry_.by_name(sub.link);
     if (link == nullptr) return;  // link torn down between subscribe and this write

@@ -228,6 +228,13 @@ target_link_libraries(route_handle_test PRIVATE libtracer)
 libtracer_test_warnings(route_handle_test)
 add_test(NAME route_handle COMMAND route_handle_test)
 
+# #739 — subscribe_toward: a local producer bound toward a mount-path target through
+# the shared strip-K descent (no caller-side link/route hand-split).
+add_executable(subscribe_toward_test subscribe_toward_test.cpp)
+target_link_libraries(subscribe_toward_test PRIVATE libtracer)
+libtracer_test_warnings(subscribe_toward_test)
+add_test(NAME subscribe_toward COMMAND subscribe_toward_test)
+
 # #684 — the rebind-vs-forward race on the published mount run (a TSan vehicle that is
 # also a functional misroute detector on every build).
 add_executable(registry_rebind_race_test registry_rebind_race_test.cpp)
