@@ -14,22 +14,9 @@ namespace tr::graph {
 using wire::opt_t;
 using wire::type_t;
 namespace {
-
-/**
- * @brief reference/03 §Reserved characters: a NAME segment MUST NOT contain `/ : . [ ] *`
- *        or the reserved-for-future `?`, rejected with INVALID_PATH.
- *
- * `/` and `:` are
- * separators (stripped before this runs) and are kept in the set defensively.
- * `[` / `]` are deliberately NOT rejected here: they delimit an address index
- * suffix (`/camera/frame[7]`, reference/03 §Index forms / ADR-0008), and address-
- * segment index parsing is not yet implemented — rejecting brackets would break
- * that documented form. So this enforces the unambiguous subset (`. * ?`) now;
- * bracket handling lands with address-index parsing.
- */
-[[nodiscard]] bool has_reserved_char(std::string_view seg) noexcept {
-    return seg.find_first_of("/:.*?") != std::string_view::npos;
-}
+// The reserved-character / size / non-empty checks live in path.hpp's `valid_segment` —
+// THE shared segment predicate (ADR-0073 §1), also enforced at the wire creation
+// boundary (#688) so the two tiers cannot drift.
 
 /** @brief Parse one field step: "name", "name[3]", or "name[]". */
 [[nodiscard]] result_t<field_step_t> parse_step(std::string_view step) {
@@ -104,9 +91,9 @@ result_t<path_t> path_t::parse(std::string_view text) {
             const std::size_t slash = addr.find('/', pos);
             const std::size_t end = (slash == std::string_view::npos) ? addr.size() : slash;
             const std::string_view seg = addr.substr(pos, end - pos);
-            if (seg.empty()) return std::unexpected(status_t::INVALID_PATH);  // "//"
-            if (has_reserved_char(seg)) return std::unexpected(status_t::INVALID_PATH);
-            if (seg.size() > kMaxSegmentBytes) return std::unexpected(status_t::INVALID_PATH);
+            // empty ("//"), reserved character, or over-long — one predicate, shared
+            // with the wire creation boundary (ADR-0073 §1).
+            if (!valid_segment(seg)) return std::unexpected(status_t::INVALID_PATH);
             if (++p.segments_ > kMaxSegments) return std::unexpected(status_t::INVALID_PATH);
             wire::emit_name(p.payload_, seg);
             if (p.payload_.size() > kMaxPathBytes) return std::unexpected(status_t::INVALID_PATH);

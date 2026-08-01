@@ -36,6 +36,28 @@ inline constexpr std::size_t kMaxSegments = 32;
 inline constexpr std::size_t kMaxFieldDepth = 8;
 
 /**
+ * @brief True iff @p seg is valid as ONE NAME segment of the addressing grammar.
+ *
+ * THE segment predicate (ADR-0073 §1): every boundary where a name enters the graph —
+ * the local string parser, a wire `SPEC` creation carrying a child name, a module
+ * registration — calls this ONE function, so the tiers cannot drift (#688; the drift,
+ * not any single missing check, is the recurring defect — cf. #681). A name that fails
+ * here answers `INVALID_PATH` wherever it is rejected.
+ *
+ * Checks: non-empty, at most @ref kMaxSegmentBytes, and none of the reserved characters
+ * of reference/03 — `/` and `:` are separators, `.` separates field levels, `*` is the
+ * wildcard selector, `?` is reserved for the future. `[` / `]` are deliberately NOT
+ * rejected: they delimit an address index suffix (`/camera/frame[7]`, reference/03
+ * §Index forms / ADR-0008), and address-segment index parsing is not yet implemented —
+ * rejecting brackets would break that documented form. This enforces the unambiguous
+ * subset now; bracket handling lands with address-index parsing.
+ */
+[[nodiscard]] inline bool valid_segment(std::string_view seg) noexcept {
+    return !seg.empty() && seg.size() <= kMaxSegmentBytes &&
+           seg.find_first_of("/:.*?") == std::string_view::npos;
+}
+
+/**
  * @brief One step of a field path: a NAME and an optional `[index]` / `[]` append /
  *        `[*]` wildcard selector.
  *
