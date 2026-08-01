@@ -673,17 +673,19 @@ void test_ws_peer_named_config() {
         [&] { return enumerate_peers(node, "/net/ws-server/bus:children[]").size() == 2; }, 2s);
     check(listed, "/net/bus:children[] synthesizes exactly the 2 live peers (ADR-0044 Brick C)");
 
-    // The peer names are the far side's <ip>:<port> — the source port is ephemeral, so
-    // assert the shape, never a literal.
+    // The peer names are the routable `p<slot>` fallback (#426, ADR-0073 §2) — the slot
+    // assignment is arrival-order-dependent, so assert the shape, never a literal.
     const auto peers = enumerate_peers(node, "/net/ws-server/bus:children[]");
     const bool shaped = std::all_of(peers.begin(), peers.end(), [](const std::string& p) {
-        return p.starts_with("127.0.0.1:") && p.size() > std::string_view("127.0.0.1:").size();
+        return p.size() >= 2 && p[0] == 'p' &&
+               p.find_first_not_of("0123456789", 1) == std::string::npos &&
+               tr::graph::valid_segment(p);
     });
-    check(shaped, "each synthesized peer name is the far side's <ip>:<port>");
+    check(shaped, "each synthesized peer name is the routable p<slot> segment");
 
     // NO vertex is created for a peer — the listing is synthesized on every read, so the
     // /net subtree still holds exactly the two CONNECTIONS (ADR-0044: peers are never
-    // registered; a peer name is not even a legal path segment).
+    // registered — though a peer name IS a legal next-hop segment since #426).
     // RFC-0014 §1: /net enumerates MODULES; the connections themselves sit one level down
     // under theirs. Either way no peer gains a vertex, which is what this asserts.
     check(enumerate_peers(node, "/net:children[]") == std::set<std::string>{"ws-server"},

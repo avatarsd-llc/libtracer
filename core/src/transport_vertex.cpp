@@ -250,14 +250,14 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
     // A BUS link (ADR-0044) serves its currently-audible peers as this vertex's
     // synthesized `:children[]` — a POINT of POINT{NAME <peer>} members built on
     // every read from the transport's live-traffic table. NO vertex is ever
-    // created for a peer. Whether a listed name is also a routable next-hop segment
-    // (the registry's peer fallback) is PER TRANSPORT, not universal: it holds where
-    // peer names are legal path segments, as CAN's are, and fails where they are not
-    // — a ws peer is named `<ip>:<port>`, and `.` and `:` are both reserved in the
-    // segment grammar, so no conforming client can express that hop. Enumerable is
-    // not addressable. Routing a `dst` through a bus link's own connection name is
-    // worse than unsupported: `transport_ws_server::send` BROADCASTS, so one request
-    // draws one reply per peer. See reference/14 §Forwarding. Kind-neutral in the one
+    // created for a peer. Every listed name is also a routable next-hop segment
+    // (the registry's peer fallback): CAN's names always were legal segments, and
+    // the ws/tcp bus servers now name accepted sessions `p<slot>` (#426, ADR-0073
+    // §2) instead of the unaddressable `<ip>:<port>`, so the ADR-0044 promise holds
+    // per the enumerable⇒addressable invariant (ADR-0073 §1). Routing a `dst`
+    // through a bus link's own connection NAME remains the sharp edge:
+    // `transport_ws_server::send` BROADCASTS, so one request draws one reply per
+    // peer — rejecting that hop is #741. See reference/14 §Forwarding. Kind-neutral in the one
     // sense that matters here: any transport whose
     // bus() is non-null gets this wiring; point-to-point links keep the plain
     // vertex. The captured facet lives exactly as long as the link (the class's

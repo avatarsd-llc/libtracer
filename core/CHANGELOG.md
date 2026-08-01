@@ -16,6 +16,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **Bus-accepted peers are named `p<slot>` (#426, ADR-0073 §2).** The ws and tcp multi-peer
+  listeners named an accepted session `<ip>:<port>` — two reserved characters, so a peer was
+  enumerable in the synthesized `:children[]` but addressable by no conforming client, and the
+  delivery tag tainted every accumulated return route. The routable NAME is now the slot index
+  (`p0`, `p1`, …) — a pure function of the slot, stable across recycling; the `<ip>:<port>`
+  string is transport-diagnostic only and no longer appears anywhere in the graph. Observable
+  name change; `enumerate_peers` / `peer_link` / the peer-named delivery tag all carry the new
+  spelling. A bus peer name identifies a session, not a device.
+
 - **A rebind of a live connection name no longer touches the published mount run (#684, ADR-0072
   §4).** `child_registry_t::add`'s rebind branch move-assigned `mount_tlv` while the forward
   path may read it as a span on a transport receive thread — a use-after-free whose symptom is

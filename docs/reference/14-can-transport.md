@@ -385,9 +385,10 @@ bus). A read of the connection vertex's `:children[]` (e.g.
 currently audible, wired through the vertex's `on_children` handler by
 `transport_vertex_t` for any link whose `bus()` is non-null.
 
-**Forwarding.** Each listed name doubles as a routable next-hop segment *on this
-transport* (whether that generalises to every bus kind is
-[#426](https://github.com/avatarsd-llc/libtracer/issues/426), still open): once a
+**Forwarding.** Each listed name doubles as a routable next-hop segment — on this
+transport and, since [#426](https://github.com/avatarsd-llc/libtracer/issues/426)
+renamed the ws/tcp bus sessions to `p<slot>`, on every bus kind (the
+enumerable⇒addressable invariant, ADR-0073 §1): once a
 `FWD`'s leading `dst` segments have matched this connection's **mount run**
 `net/<module>/<name>`, the router resolves the segment that follows it as a peer
 **within that endpoint's own table** (`child_registry_t::resolve_peer` →
