@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/error.hpp"
 #include "libtracer/fwd_frame_view.hpp"
 #include "libtracer/grammar.hpp"
 #include "libtracer/mem_heap.hpp"
@@ -99,6 +100,13 @@ struct mount_hit_t {
      *         `by_name` round-trips, so it is the key the label tables must store: the forward
      *         path never needs it, the control plane (ADVERTISE/COMPACT swaps) always does. */
     std::string_view link_name;
+    /** @brief The next hop is a bus link's own NAME with a residual below it — REJECTED
+     *         (ADR-0073 §3 / RFC-0020). A `dst` is a directed route to ONE terminus; the
+     *         only routable segments below a multi-peer mount are its peer names, so a
+     *         residual that resolves no peer must never fall through to the bus
+     *         transport's `send()` (which broadcasts) nor to the local terminus (where a
+     *         WRITE would mkdir-p a shadow vertex under the connection). */
+    bool rejected = false;
 };
 
 /**
@@ -108,7 +116,10 @@ struct mount_hit_t {
  * more specific mount always wins, and a node still carrying flat single-segment children
  * (the pre-RFC-0014 shape, and what the benches register) resolves through the same code.
  * When the matched child is multi-peer and another segment follows, that segment is resolved
- * in THAT endpoint's own peer table (never across buses) and the hop eats one more segment.
+ * in THAT endpoint's own peer table (never across buses) and the hop eats one more segment;
+ * a residual segment that resolves NO current peer marks the hit `rejected` (ADR-0073 §3 /
+ * RFC-0020 — the bus link's own NAME is not a routable next-hop, and the fall-through to
+ * the bus transport's broadcasting `send()` is exactly what the ruling forbids).
  *
  * Segment-based rather than cursor-based so the two planes share ONE descent: the forward
  * path feeds it segments peeked out of the frame, and the control plane (@ref
@@ -137,10 +148,20 @@ struct mount_hit_t {
         // a local vertex and terminates). A bus PEER is the exception: it has no vertex, so
         // naming a peer exactly still forwards, with an empty residual.
         if (n == k) return {};
-        if (c->multi_peer.load(std::memory_order_relaxed) && !seg[k].empty()) {
-            if (transport_t* const p = child_registry_t::resolve_peer(*c, seg[k])) {
-                return mount_hit_t{p, seg[k], k + 1, seg[k]};
+        if (c->multi_peer.load(std::memory_order_relaxed)) {
+            if (!seg[k].empty()) {
+                if (transport_t* const p = child_registry_t::resolve_peer(*c, seg[k])) {
+                    return mount_hit_t{p, seg[k], k + 1, seg[k]};
+                }
             }
+            // ADR-0073 §3 (RFC-0020): the bus link's own NAME is not a routable next-hop.
+            // Falling through to `c->link` here egressed over the bus transport's `send()`,
+            // which fans out to EVERY open peer — one directed request drew N replies and
+            // scrambled FIFO reply correlation (#409). Only the link's peer names route;
+            // fan-out belongs to the subscription plane.
+            mount_hit_t rej;
+            rej.rejected = true;
+            return rej;
         }
         return mount_hit_t{c->link.load(std::memory_order_acquire), {}, k, c->name};
     }
@@ -239,6 +260,74 @@ void emit_compact(transport_t& down, std::uint16_t label, std::span<const std::b
     if (!head.ok()) return;  // cannot happen at N=12; drop rather than emit a truncated frame
     const std::array<std::span<const std::byte>, 2> iov{head.span(), payload};
     down.send(std::span<const std::span<const std::byte>>(iov));
+}
+
+/**
+ * @brief Answer a bus-NAME-hop rejection (ADR-0073 §3 / RFC-0020) with an ADDRESSED
+ *        `FWD{REPLY, kind=ERROR, STATUS{ERROR{tr::path::invalid}}}` over the inbound link.
+ *
+ * The rejection shape follows the terminus resolver's own split (`op_resolve_walk.hpp` /
+ * `fwd_terminus_reject_test.cpp`): a frame malformed at the level that carries `src` drops
+ * BY VALUE (nowhere to reply to); a well-formed frame ANSWERS, so the peer learns its route
+ * was refused instead of seeing a silent timeout. This frame is well-formed — its dst simply
+ * names a hop the ruling forbids — so it answers. A `REPLY` is never answered with a reply
+ * (the resolver's own rule), and this is a COLD path, so the owning `wire::decode` is
+ * within the ADR-0039 allocation budget exactly as the control-frame decodes above are.
+ *
+ * The reply mirrors the resolver's assembled-error grammar byte for byte:
+ * `FWD{ VALUE op=REPLY, PATH dst=req.src, PATH src=req.dst, VALUE kind=ERROR,
+ * STATUS{ ERROR{ VALUE u16 LE code } } }` (RFC-0004 §D with the RFC-0002 §C registered-code
+ * identity, `tr::path::invalid` = 0x0021).
+ */
+void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbound_name,
+                         std::span<const std::byte> frame) {
+    const auto dec = wire::decode(frame);
+    if (!dec) return;  // malformed ⇒ drop by value
+    const tlv_t* op = nullptr;
+    const tlv_t* dst = nullptr;
+    const tlv_t* src = nullptr;
+    for (const tlv_t& c : dec->children) {
+        if (c.type == type_t::PATH) {
+            (dst == nullptr ? dst : src) = &c;
+        } else if (c.type == type_t::VALUE && op == nullptr) {
+            op = &c;
+        }
+        if (src != nullptr) break;
+    }
+    // No op / dst / src ⇒ nowhere trustworthy to reply to ⇒ drop by value.
+    if (op == nullptr || op->payload.size() != 1 || dst == nullptr || src == nullptr) return;
+    // Never answer a REPLY with a reply (the resolver rejects a REPLY by value too): an
+    // unroutable reply hop erroring BACK would ping-pong between two confused nodes.
+    if (static_cast<fwd_op_t>(u8(op->payload[0])) == fwd_op_t::REPLY) return;
+
+    const std::uint16_t code = std::to_underlying(wire::err_t::PATH_INVALID);
+    const std::array<std::byte, 2> le{static_cast<std::byte>(code & 0xFFu),
+                                      static_cast<std::byte>(code >> 8)};
+    std::vector<std::byte> err_body;
+    wire::emit_tlv(err_body, type_t::VALUE, opt_t{}, std::span<const std::byte>(le));
+    std::vector<std::byte> status_body;
+    wire::emit_tlv(status_body, type_t::ERROR, opt_t{.pl = true}, err_body);
+
+    std::vector<std::byte> body;
+    const std::byte opb{static_cast<std::uint8_t>(fwd_op_t::REPLY)};
+    wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&opb, 1));
+    // Reply routes swapped, as the resolver assembles them: reply dst = request src (the
+    // accumulated return route), reply src = request dst (the refused spelling — what the
+    // peer asked for, echoed so it can correlate).
+    const std::vector<std::byte> rdst = wire::encode(*src);
+    const std::vector<std::byte> rsrc = wire::encode(*dst);
+    body.insert(body.end(), rdst.begin(), rdst.end());
+    body.insert(body.end(), rsrc.begin(), rsrc.end());
+    const std::byte kind{static_cast<std::uint8_t>(graph::reply_kind_t::ERROR)};
+    wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&kind, 1));
+    wire::emit_tlv(body, type_t::STATUS, opt_t{.pl = true}, status_body);
+    std::vector<std::byte> out;
+    wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
+    // `by_name` includes the bus-peer fallback, so a frame that arrived FROM a peer (whose
+    // inbound_name is the peer's own name) answers back over that peer's directed endpoint —
+    // the same lookup resolve_terminus uses for its replies.
+    if (transport_t* const up = registry.by_name(inbound_name))
+        up->send(std::span<const std::byte>(out));
 }
 
 }  // namespace
@@ -479,6 +568,14 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
                                   &pre);
                 return;
             }
+            if (hit.rejected) {
+                // Bus NAME + residual: never broadcast, never terminus. The rejection reply
+                // needs a contiguous decode; this is a COLD error path, so the one flatten
+                // is the ADR-0052 legitimate kind (exactly the control-plane precedent).
+                const view_t flat = frame.subrope(0, frame.total_length()).materialize();
+                reject_bus_name_hop(registry_, inbound_name, flat.bytes());
+                return;
+            }
             // No child (or over-long segment) ⇒ this node is the terminus for the frame.
             // A request FWD is resolved straight off the rope (ADR-0053 3c-iii — NO
             // flatten, verify-at-access §4).
@@ -524,6 +621,10 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
             if (hit.link != nullptr) {
                 route_fwd_forward(inbound_name, inbound_ctx, from_peer, hit.strip_k, cur, *hit.link,
                                   &pre);
+                return;
+            }
+            if (hit.rejected) {  // bus NAME + residual: never broadcast, never terminus
+                reject_bus_name_hop(registry_, inbound_name, frame);
                 return;
             }
             // The dst names no mount ⇒ this node is the terminus.
@@ -824,6 +925,13 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
     }
     const mount_hit_t hit =
         resolve_mount_segs(registry_, std::span<const std::string_view>(seg.data(), n));
+
+    // A route through a bus link's own NAME is not routable (ADR-0073 §3 / RFC-0020): bind
+    // NOTHING — neither a downstream swap (the old fall-through re-advertised over the bus,
+    // i.e. broadcast) nor a terminus binding (which would absorb every COMPACT locally).
+    // The peer's COMPACTs then draw the same HANDLE_NACK a stale label draws, and the flow
+    // stays on the full-route FWD form — where the forward path answers the rejection.
+    if (hit.rejected) return;
 
     if (hit.link != nullptr) {
         // Forwarding hop: strip the K segments this node consumed, allocate OUR own

@@ -151,8 +151,8 @@ flowchart TB
   consumer that did not need contiguity. `m` must stay alive while its span is read.
 - **The default delivery leg copies nothing.** A full-route `FWD{WRITE}` fan-out scatter-gathers a
   fresh stack head, the stored return-route bytes, an empty `src`, and one span per link of the
-  stored value (`core/src/fwd_router.cpp:1109-1064`). The `COMPACT` leg is the one that flattens,
-  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:1072`) — single-link, that
+  stored value (`core/src/fwd_router.cpp:1217-1172`). The `COMPACT` leg is the one that flattens,
+  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:1180`) — single-link, that
   flatten is a zero-copy adopt.
 - **Delivery is nothrow and drops rather than aborts.** Every per-delivery allocation on the writer
   thread is failable: a failed flatten, frame build or `iovec` reserve **drops that one delivery**

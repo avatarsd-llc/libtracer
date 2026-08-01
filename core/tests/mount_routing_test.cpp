@@ -61,7 +61,11 @@ struct p2p_link_t : tr::net::transport_t {
 /** @brief A multi-peer transport whose peer table is a fixed name→endpoint list. */
 struct bus_link_impl_t : tr::net::transport_t, tr::net::bus_link_t {
     std::vector<std::pair<std::string, p2p_link_t*>> peers;
-    void send(std::span<const std::byte>) override {}
+    /** @brief Frames sent on the BUS endpoint itself — a real adapter fans these out to
+     *         EVERY open peer, so any count here is a broadcast (ADR-0073 §3). */
+    std::size_t broadcasts = 0;
+    void send(std::span<const std::byte>) override { ++broadcasts; }
+    void send(std::span<const std::span<const std::byte>>) override { ++broadcasts; }
     tr::net::bus_link_t* bus() override { return this; }
     tr::net::transport_t* peer_link(std::string_view name) override {
         for (auto& [n, l] : peers) {
@@ -415,6 +419,106 @@ void test_grown_src_round_trips() {
           "the reply resolves through the scoped descent and reaches the peer endpoint");
 }
 
+// --- the bus NAME is not a routable next-hop (ADR-0073 §3 / RFC-0020, #741) ---
+
+/** @brief The reply's (op, kind, registered error code) triple, or {-1,-1,-1} if unreadable. */
+std::array<int, 3> reply_shape(std::span<const std::byte> frame) {
+    std::array<int, 3> out{-1, -1, -1};
+    const auto dec = tr::wire::decode(frame);
+    if (!dec || dec->type != type_t::FWD) return out;
+    int value_seen = 0;
+    for (const auto& child : dec->children) {
+        if (child.type == type_t::VALUE && child.payload.size() == 1) {
+            out[static_cast<std::size_t>(value_seen == 0 ? 0 : 1)] =
+                std::to_integer<int>(child.payload[0]);
+            ++value_seen;
+        } else if (child.type == type_t::STATUS && !child.children.empty()) {
+            const auto& err = child.children[0];
+            if (err.type == type_t::ERROR && !err.children.empty() &&
+                err.children[0].payload.size() == 2) {
+                out[2] = std::to_integer<int>(err.children[0].payload[0]) |
+                         (std::to_integer<int>(err.children[0].payload[1]) << 8);
+            }
+        }
+    }
+    return out;
+}
+
+/**
+ * @brief An FWD routed THROUGH a bus link's own NAME is rejected, never broadcast (#741).
+ *
+ * ADR-0073 §3 / RFC-0020, amending RFC-0004 §B for multi-peer links: a `dst` is a directed
+ * route to ONE terminus, so the only routable segments below a multi-peer mount are its
+ * peer names. Before the fix this frame fell through to the bus transport's `send()` —
+ * which fans out to every open peer, drawing N replies for one request and scrambling FIFO
+ * reply correlation (the #409 topology-walk failure). The rejection is ANSWERED — a single
+ * directed `kind=ERROR` reply with `tr::path::invalid` (0x0021) — because `src` is intact,
+ * matching the terminus resolver's own drop-by-value vs answered split.
+ */
+void test_bus_name_hop_is_rejected() {
+    std::printf("bus NAME + residual is rejected, never broadcast (ADR-0073 S3)\n");
+    bus_link_impl_t bus;
+    p2p_link_t alice;
+    p2p_link_t bob;
+    bus.peers.emplace_back("alice", &alice);
+    bus.peers.emplace_back("bob", &bob);
+    recording_link_t in;
+
+    tr::graph::graph_t graph;
+    tr::net::fwd_router_t router{graph};
+    router.add_child("net/ws-server/srv", bus);
+    router.add_child("net/ws-client/in", in);
+
+    // The broadcast shape: the bus NAME with a residual below it that names NO peer.
+    router.on_frame("net/ws-client/in",
+                    make_fwd({"net", "ws-server", "srv", "sensor", "temp"}, {"origin"}));
+    check(bus.broadcasts == 0, "the frame never egresses the bus endpoint (no fan-out)");
+    check(alice.received == 0 && bob.received == 0, "no peer endpoint sees it either");
+    check(in.sent.size() == 1, "the inbound link is ANSWERED - one directed reply, no timeout");
+    if (in.sent.size() == 1) {
+        const auto shape = reply_shape(in.sent[0]);
+        check(shape[0] == static_cast<int>(tr::graph::fwd_op_t::REPLY), "the answer is a REPLY");
+        check(shape[1] == 1, "kind=ERROR");
+        check(shape[2] == 0x0021, "the registered code is tr::path::invalid (0x0021)");
+        const auto paths = paths_of(in.sent[0]);
+        check(paths.size() == 2 && paths[0] == std::vector<std::string>{"origin"},
+              "the reply rides the request's accumulated src back");
+    }
+
+    // Positive control 1: a PEER-directed hop through the same mount still forwards.
+    router.on_frame("net/ws-client/in",
+                    make_fwd({"net", "ws-server", "srv", "alice", "sensor"}, {"origin"}));
+    check(alice.received == 1, "a peer-directed hop still reaches the peer endpoint");
+    check(bus.broadcasts == 0, "and still nothing egresses the bus endpoint itself");
+
+    // Positive control 2: a dst naming the mount EXACTLY addresses the connection vertex
+    // itself — it terminates HERE and is answered, exactly as before.
+    const std::size_t answered = in.sent.size();
+    router.on_frame("net/ws-client/in", make_fwd({"net", "ws-server", "srv"}, {"origin"}));
+    check(in.sent.size() == answered + 1, "exact-mount addressing still terminates and answers");
+    check(bus.broadcasts == 0, "without touching the bus endpoint");
+}
+
+/** @brief The same rejection answers a PEER-originated misroute back to THAT peer only. */
+void test_bus_name_hop_reject_from_peer() {
+    std::printf("bus NAME rejection from a peer routes back to the sender\n");
+    bus_link_impl_t bus;
+    p2p_link_t alice;
+    p2p_link_t bob;
+    bus.peers.emplace_back("alice", &alice);
+    bus.peers.emplace_back("bob", &bob);
+
+    tr::graph::graph_t graph;
+    tr::net::fwd_router_t router{graph};
+    router.add_child("net/ws-server/srv", bus);
+
+    // alice addresses her OWN bus's NAME with a residual naming no peer.
+    bus.deliver("alice", make_fwd({"net", "ws-server", "srv", "zzz"}, {"origin"}));
+    check(bus.broadcasts == 0, "nothing fans out over the bus");
+    check(alice.received == 1, "the sender alone is answered, over her directed endpoint");
+    check(bob.received == 0, "the other peer never hears about it");
+}
+
 /** @brief A route naming the mount EXACTLY still terminates here (ADR-0038 §3a). */
 void test_advertise_exact_mount_terminates() {
     std::printf("ADVERTISE naming the mount exactly\n");
@@ -444,6 +548,8 @@ int main() {
     test_advertise_descends_the_mount();
     test_bus_peer_src_carries_the_mount();
     test_grown_src_round_trips();
+    test_bus_name_hop_is_rejected();
+    test_bus_name_hop_reject_from_peer();
     test_advertise_exact_mount_terminates();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,

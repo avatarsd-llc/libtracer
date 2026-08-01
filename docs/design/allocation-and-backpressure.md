@@ -119,8 +119,8 @@ defines for "exceeds this receiver's decode resources".
 | Branch-write root key render (`try_build_key`) | `core/src/graph.cpp:1028-1029` | `false` → `BACKPRESSURE` |
 | Branch-write parse-key copy (`detail::try_assign`) | `core/src/graph.cpp:1031` | `false` → `BACKPRESSURE` |
 | Branch-write decode arena | `core/src/graph.cpp:1011-1013` | decode error → `TYPE_MISMATCH` |
-| Per-delivery COMPACT flatten | `core/src/fwd_router.cpp:1072-1073` | the delivery is **dropped** |
-| Per-delivery frame build | `core/src/fwd_router.cpp:1077` | the delivery is **dropped** |
+| Per-delivery COMPACT flatten | `core/src/fwd_router.cpp:1180-1181` | the delivery is **dropped** |
+| Per-delivery frame build | `core/src/fwd_router.cpp:1185` | the delivery is **dropped** |
 
 The key render and its parse copy are nothrow so that OOM soft-fails the branch write as
 `BACKPRESSURE`, the injected-resource status — **never an abort on the writer thread**
@@ -130,7 +130,7 @@ The remote-delivery leg answers differently on purpose. A stored write that reac
 succeeded; the fan-out to one subscriber is a separate obligation, and a subscriber missing
 one value under heap exhaustion is valid delivery behaviour where failing the write is not. Every
 per-delivery allocation on that writer-thread leg is nothrow, and a failed flatten or frame build
-drops that one delivery (`core/src/fwd_router.cpp:1072-1027`). Dropping *invisibly* is the part that
+drops that one delivery (`core/src/fwd_router.cpp:1180-1135`). Dropping *invisibly* is the part that
 needs an answer, which is why `graph_t::delivery_drops()` exists
 (`core/include/libtracer/graph.hpp:768`): three relaxed monotonic counters — `no_target`, `denied`,
 `out_of_memory` (`graph.hpp:751-758`) — incremented only on a drop, so the delivering path is

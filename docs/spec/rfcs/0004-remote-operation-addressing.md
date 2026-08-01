@@ -292,3 +292,17 @@ moving; it is being described accurately for the first time.
 **Scope.** The *other* `INVALID_PATH` clauses in this RFC are real, different, and untouched —
 §C's rejection of `[*]` outside a subscriber-path context (`:131`) and its `fwd-wildcard-reject`
 vector (`:205`) are implemented, in `core/src/op_resolve_walk.hpp`.
+
+---
+
+## Amendment (2026-08-01): §B multi-peer next-hop resolution — a bus link's NAME is not a routable next-hop
+
+[RFC-0020](0020-bus-name-not-a-routable-next-hop.md) (recording
+[ADR-0073](../../adr/0073-naming-authority-the-application-mints-one-predicate-gates.md) §3,
+tracked in [#741](https://github.com/avatarsd-llc/libtracer/issues/741)) amends §B's
+forward-resolution step for **multi-peer (bus) links**: an inbound `FWD` whose next hop resolves
+to a bus link's **own connection NAME with a residual `dst` below it that names no current peer**
+MUST be **rejected** (`kind=ERROR`, `STATUS{ ERROR{ tr::path::invalid (0x0021) } }` along the
+accumulated `src`), never emitted over the bus's shared fan-out endpoint. Only the link's peer
+names route below its mount; a `dst` naming the mount exactly still addresses the connection
+vertex locally. Normative text, rationale, and the two rejected alternatives live in RFC-0020.
