@@ -96,7 +96,7 @@ class op_resolver_t {
      * A non-null @p frame_view marks the frame as OWNING (delivered as a
      * refcounted `view_t` over the same bytes the arena borrows — the ADR-0042
      * receiver seam). Then a WRITE whose payload TLV (`node.wire`) is at least the
-     * target vertex's `settings.store_ref_min_bytes` (> 0) and whose opt byte
+     * target vertex's owner-declared `store_ref_min_bytes` (> 0) and whose opt byte
      * carries no trailer bits is stored as a SUBVIEW of the frame — a refcount
      * bump that pins the whole frame, zero copy. Smaller, trailered, or
      * span-delivered payloads keep the ADR-0041 one-copy trailer-sliced store,

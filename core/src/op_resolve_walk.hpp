@@ -706,7 +706,7 @@ template <class N>
             // opted in, an ADR-0042 §3 pinned subrope of the frame (refcount, zero copy;
             // multi-link on the rope tier). An empty rope is an allocation failure.
             const rope_t value =
-                own_or_ref_tlv(payload_node, frame_view, graph.settings(v).store_ref_min_bytes);
+                own_or_ref_tlv(payload_node, frame_view, graph.store_ref_min_bytes(v));
             if (value.total_length() == 0)
                 return assemble_error(reply_dst_wire, reply_src_wire, status_t::BACKPRESSURE);
 

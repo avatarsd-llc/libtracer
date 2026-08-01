@@ -44,14 +44,25 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   Only `durability_request` is consumed today; `reliability` and `priority` are stored and read
   back, awaiting the transport work that honours them.
 
-- **Storage policy inherits by copy at registration (RFC-0022 §3.C).** A vertex registered without
-  its own `settings_t` copies its nearest ancestor's, taken during the registration descent (an
-  intermediate placeholder level carries it down). A later `:settings.<knob>` write is an override:
-  it is pushed to every descendant still carrying the old value and prunes at one that has its own
-  — *the override grows the subtree that opted in, and nothing else*. Resolution is **never** an
-  ancestor walk: `store_ref_min_bytes` is read per write and `history_keep_last` per store, so both
-  stay a single inline load. A vertex whose whole ancestry is at the defaults still allocates **no**
-  extension block.
+- **`graph_t::set_history_depth(vertex_handle_t, std::uint32_t)` — the STREAM ring depth, declared
+  owner-side (RFC-0022 §3.C).** Shaped like `set_delivery_mode` / `set_app_fields`: a declaration
+  the owner makes host-side after registration, with **no wire surface at all** — no peer can read
+  it and none can write it. The depth is what the *application* wants retained, which no peer and
+  no injected resource can supply, so it is not protocol QoS and does not belong on a remote write
+  surface. Costs a STREAM vertex zero extra bytes (a STREAM identity already allocates the cold
+  block). Default 1, as before.
+
+- **`graph_t::set_store_ref_min_bytes(vertex_handle_t, std::uint32_t)` and
+  `graph_t::store_ref_min_bytes(vertex_handle_t)`.** The ADR-0042 §3 store-by-reference threshold,
+  rehomed the same way and for the same reason — it is a deployment copy/pin trade, not a
+  quality-of-service property. Semantics are **unchanged**: an absolute byte threshold, `0` (the
+  default) disables referencing, read on every view-delivered write as one inline load. RFC-0022
+  §3.D replaces that predicate with an amplification ratio whose constant §6 gates on a
+  dual-target measurement; that measurement has not been run, so the predicate is untouched here.
+
+- **`vertex_t::has_extension_block()`.** The RAM-census observable that replaced comparing
+  `settings()`'s returned address against `kDefaultSettings` — both of which RFC-0022 deleted.
+  Used by `bench_qos_census` and the vertex-size gate; not a data-plane predicate.
 
 - **`fwd_router_t::subscribe_toward(producer, target)` (#739).** Binds a local producer's
   subscription toward ONE ordinary mount-path target (`/net/<module>/<name>/<consumer...>`,
@@ -89,29 +100,49 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   what the seam bought: an injected backend that refuses on command, and an ablation proving each
   guard fails without it.
 
-- **BREAKING (RFC-0022): four `settings_t` fields are REMOVED — `reliability`, `priority`,
-  `deadline_ns`, `queue_max_bytes` — and `durability` moved to the subscription.** `settings_t`
-  is now the two STORAGE magnitudes, `history_keep_last` and `store_ref_min_bytes`, and shrinks
-  from **24 B to 8 B** (still stored only when non-default). Code that set any removed field no
-  longer compiles; that is deliberate — a silent behaviour change would be worse, since none of
-  the four ever functioned. `durability` has a direct replacement with different semantics: set
-  `delivery_policy_t::kDurabilityRequest` on the SUBSCRIPTION.
+- **BREAKING (RFC-0022 §3.B): `tr::graph::settings_t` and `kDefaultSettings` are DELETED, and
+  `register_vertex` / `try_register_vertex` / `register_vertex_key` lose their fourth parameter.**
+  The type is removed, not shrunk. Four of its seven knobs (`reliability`, `priority`,
+  `deadline_ns`, `queue_max_bytes`) were inert — writable, readable, consumed by no code;
+  `durability` describes a *delivery relationship* and moved to the subscription
+  (`delivery_policy_t::kDurabilityRequest`); the two survivors are construction parameters, not
+  QoS, and became owner-side declarations (above). Nothing is inherited (§3.F): there is no
+  ancestor walk, no cached ancestor reference, and no propagation question when a parent's
+  configuration changes after its children exist.
 
-- **BREAKING (RFC-0022): `:settings` writes to the removed knobs answer `SCHEMA_NOT_FOUND`.**
-  `:settings.reliability`, `.priority`, `.deadline_ns`, `.queue_max_bytes` and `.durability` name
-  no knob — the honest answer, and the one an unsupported field already gives. **There is no
-  deprecation window:** the protocol is DRAFT and none of them ever drove behaviour (they were
-  accepted, stored, reported, and consumed by nothing — [#756](https://github.com/avatarsd-llc/libtracer/issues/756)).
-  The knob grammar is now exactly `history_keep_last` and `store_ref_min_bytes`.
+  `graph_t::settings(vertex_handle_t)` and `vertex_t::settings()` are removed with it. Code that
+  passed a `settings_t` no longer compiles; that is deliberate — a silent behaviour change would
+  be worse, since four of the fields never functioned and the other three moved.
 
-- **BREAKING (RFC-0022): the `:schema` and bare-`:settings` reads changed shape.** Both now
-  enumerate exactly the two storage knobs, in that order (`history_keep_last` u32,
-  `store_ref_min_bytes` u32). `:schema` previously advertised `deadline_ns` (u64), which nothing
-  consumed, and omitted `store_ref_min_bytes`, which the write path reads on every write — so the
-  reported set was not even a subset of the working set. That dissolves
-  [#706](https://github.com/avatarsd-llc/libtracer/issues/706) rather than fixing it. The
-  `tlv-types/point-schema-app` and `field/field-nested` conformance vectors were regenerated;
-  six new vectors were added under `subscriber/` and `settings/`.
+  **A vertex-RAM win falls out of it.** `adopt_identity`'s extension-block gate loses its
+  `settings == kDefaultSettings` term, so **strictly more vertices stay extension-less than
+  before**: registration can no longer force the cold block, and neither can an ancestor. Where an
+  override used to materialise a whole `vertex_ext_t` (120 B on x86-64) on every descendant of its
+  subtree, a declaration now reaches exactly the vertex it names.
+
+- **BREAKING (RFC-0022 §4): the whole `:settings.<knob>` write surface is REMOVED.** All seven
+  historical names — `reliability`, `priority`, `durability`, `deadline_ns`, `queue_max_bytes`,
+  `history_keep_last`, `store_ref_min_bytes` — answer `SCHEMA_NOT_FOUND`, the honest answer and
+  the one an unsupported field already gives. The answer is **caller-independent**: an unknown
+  core-namespace NAME resolves to nothing before any ACL gate, so a denied caller sees
+  `tr::schema::not_found` and never `tr::access::denied`. **There is no deprecation window:** the
+  protocol is DRAFT, and of the seven only three ever drove behaviour — none of them as remotely
+  writable QoS ([#756](https://github.com/avatarsd-llc/libtracer/issues/756)). `settings.app.*`
+  writes (RFC-0010 §A) are untouched.
+
+- **BREAKING (RFC-0022 §4): the `:schema` and bare-`:settings` reads keep their SHAPE and lose
+  their KNOBS.** The bare `:settings` read becomes `SETTINGS{ [NAME "app" SETTINGS{…}] }` — the
+  reserved `app` subkey and RFC-0010 §A.4's single-traversal renderer contract both survive, and a
+  vertex with no declared app fields reads an **empty** `SETTINGS{}`, which is honest rather than
+  absent. `:schema`'s synthesized protocol part becomes `SETTINGS{}` — an empty enumeration, and
+  therefore for the first time a **complete** one. `:schema` previously advertised `deadline_ns`
+  (u64), which nothing consumed, and omitted `store_ref_min_bytes`, which the write path reads on
+  every write, so the reported set was not even a subset of the working set: that dissolves
+  [#706](https://github.com/avatarsd-llc/libtracer/issues/706) rather than fixing it.
+  `:settings.app` and `:settings.app.<name…>` are unchanged. The `tlv-types/point-schema-app` and
+  `field/field-nested` conformance vectors were regenerated (the latter now spells the two-level
+  field with the surviving `app` subkey); six new vectors were added under `subscriber/`,
+  `settings/` and `stream/`.
 
 - **BREAKING (RFC-0022): the transient-local durability latch is now the SUBSCRIBER's request.**
   It fires when *that* subscription set `durability_request`, not when the producer carries a

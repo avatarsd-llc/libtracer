@@ -68,39 +68,13 @@ void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
     return !s.indexed && !s.append && !s.wildcard;
 }
 
-/**
- * @brief The implemented flat protocol STORAGE knobs — the writable core-namespace names of
- *        the vertex SETTINGS container (docs/reference/05 §`0x0B`, RFC-0022 §3.B).
- *
- * Exactly the two magnitudes the vertex owns as a value holder. RFC-0022 removed the rest:
- * `reliability`, `priority` and `durability` describe one producer→subscriber relationship
- * and moved to the subscription's packed policy (`delivery_policy_t`); `deadline_ns` and
- * `queue_max_bytes` were inert *and* had no coherent per-vertex meaning, so they were
- * deleted outright. All five now answer `SCHEMA_NOT_FOUND` — the honest answer an
- * unsupported field already gives, and the one a write that nothing would honour deserves.
- */
-enum class qos_knob_t : std::uint8_t {
-    HISTORY_KEEP_LAST,
-    STORE_REF_MIN_BYTES,
-};
-
-/**
- * @brief Resolve a `settings.<knob>` field path to its knob, or nullopt when it names none.
- *
- * The core-namespace name lookup of the §`0x0B` validation rule, factored out so it can run
- * BEFORE the ACL gate (an unknown name is caller-independent). A knob is addressed by exactly
- * two plain steps: `settings` then the name. A trailing step
- * (`settings.history_keep_last.bogus`) or any `[...]` selector names no knob — no knob has a
- * nested or indexed surface — which is the shape the read surface already requires.
- */
-[[nodiscard]] std::optional<qos_knob_t> qos_knob(const field_path_t& field) noexcept {
-    if (field.steps.size() != 2 || !plain_step(field.steps[0]) || !plain_step(field.steps[1]))
-        return std::nullopt;
-    const std::string& f = field.steps[1].name;
-    if (f == "history_keep_last") return qos_knob_t::HISTORY_KEEP_LAST;
-    if (f == "store_ref_min_bytes") return qos_knob_t::STORE_REF_MIN_BYTES;
-    return std::nullopt;
-}
+// The flat protocol-knob name table is GONE (RFC-0022 §3.B): `settings_t` is deleted, so
+// the vertex `:settings` core namespace has no writable member left. All seven historical
+// names — `reliability`, `priority`, `durability`, `deadline_ns`, `queue_max_bytes`,
+// `history_keep_last`, `store_ref_min_bytes` — answer `SCHEMA_NOT_FOUND`, which is the
+// honest answer an unsupported field already gives. The two survivors did not move to
+// another name; they stopped being remotely writable at all and became owner-side
+// declarations (`graph_t::set_history_depth`, `graph_t::set_store_ref_min_bytes`).
 
 /** @brief Emit the RFC-0010 §A.4 app-container members into @p out: each declared,
  *         non-`wo` field HOLDING a value, in table order — `NAME <name>` then the stored
@@ -291,8 +265,7 @@ graph_t::graph_t(std::pmr::memory_resource* mr, mem::mem_backend_t* value_backen
                  mem::block_source_t* ctl)
     : mr_(mr),
       value_backend_(value_backend),
-      root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, settings_t{},
-                                       handlers_t{})),
+      root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, handlers_t{})),
       ctl_(ctl) {
     // The one built-in creation-catalog type (#82, ADR-0017): `stored_value` makes a
     // plain last-writer-wins vertex at the composed child key. Its optional SPEC
@@ -311,9 +284,8 @@ void graph_t::register_child_type(std::string type, child_factory_t factory) {
     child_types_.insert_or_assign(std::move(type), std::move(factory));
 }
 
-vertex_handle_t graph_t::register_vertex(const path_t& path, role_t role, handlers_t handlers,
-                                         settings_t settings) {
-    result_t<vertex_handle_t> h = try_register_vertex(path, role, std::move(handlers), settings);
+vertex_handle_t graph_t::register_vertex(const path_t& path, role_t role, handlers_t handlers) {
+    result_t<vertex_handle_t> h = try_register_vertex(path, role, std::move(handlers));
     // PATH_IN_USE on a compile-site literal is a source bug, not a runtime outcome — fail loud
     // (ADR-0056, mirroring path_t(std::string_view)) rather than hand back a result the caller
     // would only `*`-deref unchecked. A genuine runtime path uses try_register_vertex.
@@ -322,35 +294,33 @@ vertex_handle_t graph_t::register_vertex(const path_t& path, role_t role, handle
 }
 
 result_t<vertex_handle_t> graph_t::try_register_vertex(const path_t& path, role_t role,
-                                                       handlers_t handlers, settings_t settings) {
+                                                       handlers_t handlers) {
     return register_vertex_key(std::vector<std::byte>(path.key().begin(), path.key().end()), role,
-                               std::move(handlers), settings);
+                               std::move(handlers));
 }
 
 result_t<vertex_handle_t> graph_t::register_vertex_key(std::vector<std::byte> key, role_t role,
-                                                       handlers_t handlers, settings_t settings) {
+                                                       handlers_t handlers) {
     const std::unique_lock lock(map_mutex_);
     // Descend the Composite tree (ADR-0057), creating unregistered PLACEHOLDER nodes for
     // missing intermediate levels — invisible to find/read_children until a registration
     // fills them in place (matching the flat map, where intermediates did not exist).
+    // NOTHING is inherited (RFC-0022 §3.F). The descent carries no policy down with it:
+    // with `settings_t` deleted there is no per-vertex policy left to inherit, so there is
+    // no ancestor walk, no cached ancestor reference, and no question about what happens to
+    // descendants when a parent's configuration changes after they exist. The two owner-side
+    // magnitudes are declared per vertex, by the owner, or they are at their defaults.
     vertex_t* node = root_.get();
     std::size_t i = 0;
-    // RFC-0022 §3.C: storage policy inherits by COPY, taken during this descent. `inherited`
-    // is the policy of the deepest node walked so far — the new vertex's nearest ancestor —
-    // so an intermediate PLACEHOLDER carries the value down too (otherwise a grandchild
-    // registered under a fresh intermediate would silently drop back to the defaults). The
-    // copy is what keeps the two hot readers a single inline load: `store_ref_min_bytes` is
-    // read per write and `history_keep_last` per store, and neither may walk ancestors.
-    settings_t inherited = root_->settings();
     while (i < key.size()) {
         const std::size_t e = segment_end(key, i);
         const std::span<const std::byte> record{key.data() + i, e - i};
         vertex_t* child = node->child_by_record(record);
         if (child == nullptr) {
-            // A default-policy ancestry passes `settings_t{}` here, so `adopt_identity`'s
-            // early return still fires and the placeholder allocates NO extension block.
-            auto fresh = std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{record},
-                                                    inherited, handlers_t{});
+            // A placeholder is a plain STORED_VALUE with no handlers, so `adopt_identity`'s
+            // early return fires and it allocates NO extension block.
+            auto fresh =
+                std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{record}, handlers_t{});
             // Subtree-subscription init (RFC-0005): a vertex born under a subscribed
             // ancestor starts with the ancestor-listener count already summed — O(1) from
             // the parent's maintained counters (under the same unique lock the
@@ -361,17 +331,10 @@ result_t<vertex_handle_t> graph_t::register_vertex_key(std::vector<std::byte> ke
             child = node->add_child(std::move(fresh));
         }
         node = child;
-        inherited = node->settings();
         i = e;
     }
     if (node->registered()) return std::unexpected(status_t::PATH_IN_USE);
-    // A registration that states NO policy of its own (the defaulted `settings_t{}`
-    // argument, which is every call site that does not care) INHERITS; one that states a
-    // policy OVERRIDES, and becomes the value its own subtree inherits. There is no third
-    // spelling: "explicitly the defaults" is not distinguishable from "unstated" in a
-    // defaulted value parameter, and inventing an optional to distinguish them would price
-    // a wire-invisible distinction into every call site.
-    node->fill(role, settings == kDefaultSettings ? inherited : settings, std::move(handlers));
+    node->fill(role, std::move(handlers));
     return vertex_handle_t{node};
 }
 
@@ -671,8 +634,16 @@ bool graph_t::has_first_level_child(std::span<const std::byte> record) const {
     return root_->child_by_record(record) != nullptr;
 }
 
-const settings_t& graph_t::settings(vertex_handle_t v) const noexcept {
-    return v.get()->settings();
+std::uint32_t graph_t::store_ref_min_bytes(vertex_handle_t v) const noexcept {
+    return v.get()->store_ref_min_bytes();
+}
+
+void graph_t::set_history_depth(vertex_handle_t v, std::uint32_t keep) {
+    v.get()->set_history_depth(keep);
+}
+
+void graph_t::set_store_ref_min_bytes(vertex_handle_t v, std::uint32_t bytes) {
+    v.get()->set_store_ref_min_bytes(bytes);
 }
 
 void graph_t::set_subject_resolver(subject_resolver_t resolver) {
@@ -733,25 +704,6 @@ void graph_t::mark_subtree_acl_dirty(vertex_t* v) {
     // Iterative (#690). Reached from the `:acl` write, so its depth is peer-chosen.
     v->mark_acl_cache_dirty();
     v->for_each_descendant([](vertex_t& c) { c.mark_acl_cache_dirty(); });
-}
-
-void graph_t::push_storage_policy(vertex_t* v, const settings_t& before, const settings_t& after) {
-    // Pre-order, PRUNING, and iterative (#690) — reached from a `:settings` write, so its
-    // depth is peer-chosen and neither a stack frame per level nor a heap-allocated
-    // work stack is affordable here.
-    //
-    // The predicate is "still carrying `before`", which is precisely "inheriting": a
-    // descendant got its copy from this vertex at registration (§3.C) and has not
-    // overridden it since. One that carries anything else IS an override, so it owns its
-    // subtree's policy and the walk prunes there — its descendants inherit from IT.
-    v->for_each_descendant_pruned([&before, &after](vertex_t& c) {
-        if (!(c.settings() == before)) return false;  // an override — its subtree is its own
-        c.update_settings([&after](settings_t& st) {
-            st = after;
-            return 0;  // update_settings passes the return value through; nothing wants it
-        });
-        return true;
-    });
 }
 
 result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller) const {
@@ -1696,54 +1648,11 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
         return {};
     }
 
-    if (step0.name == "settings" && field.steps.size() >= 2) {
-        // The flat protocol-knob surface. The NAME resolves FIRST: an unknown core-namespace
-        // name is `tr::schema::not_found` (docs/reference/05 §`0x0B` validation) — a rule
-        // stated with no caller qualifier, so a denied caller may not convert it into
-        // PERMISSION_DENIED. That order is what the `settings.app.` branch above already
-        // does (undeclared is ENOTTY before the ACL right) and what the terminal branch
-        // below does by having no gate at all; the three now agree. The accepted cost is
-        // narrow and deliberate: an unauthorized caller can enumerate flat knob NAMES by
-        // probing, exactly as it already can for app fields — knob names are a fixed,
-        // published constant of the protocol, not a per-node secret.
-        const std::optional<qos_knob_t> knob = qos_knob(field);
-        if (!knob) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-        if (!acl_allows(v, caller, acl_right_t::WRITE))  // QoS knobs are control writes
-            return std::unexpected(status_t::PERMISSION_DENIED);
-        const auto tlv = wire::decode(value);
-        if (!tlv || tlv->type != type_t::VALUE) return std::unexpected(status_t::TYPE_MISMATCH);
-        const std::uint64_t n = detail::load_le(tlv->payload);
-        settings_t before{};
-        settings_t after{};
-        const result_t<void> stored = v->update_settings([&](settings_t& st) -> result_t<void> {
-            before = st;
-            switch (*knob) {
-                case qos_knob_t::HISTORY_KEEP_LAST:
-                    st.history_keep_last = static_cast<std::uint32_t>(n);
-                    break;
-                case qos_knob_t::STORE_REF_MIN_BYTES:
-                    st.store_ref_min_bytes = static_cast<std::uint32_t>(n);
-                    break;
-            }
-            after = st;
-            return {};
-        });
-        if (!stored) return stored;
-        if (!(after == before)) {
-            // RFC-0022 §3.C: storage policy inherits by COPY, so an OVERRIDE must hand its
-            // new value down to the descendants still carrying the old one — otherwise
-            // "a child inherits its parent's storage policy" would hold only for children
-            // registered after the write. Same shape, same lock discipline and the same
-            // wiring-frequency argument as the `:acl` subtree invalidation above: a shared
-            // map lock (the walk excludes only vertex creation), on a control plane that
-            // runs at configuration time, never per write. The hot readers
-            // (`store_ref_min_bytes` per write, `history_keep_last` per store) stay ONE
-            // inline load because this pushes the value instead of making them pull it.
-            const std::shared_lock lock(map_mutex_);
-            push_storage_policy(v, before, after);
-        }
-        return {};
-    }
+    // Everything else under `settings` — every `:settings.<knob>` name the protocol ever
+    // minted, and every shape that resolves to none — falls through to the terminal
+    // SCHEMA_NOT_FOUND below. RFC-0022 §3.B withdrew the flat core-namespace write surface
+    // whole: there is no `settings_t` to write into, so the answer is caller-INDEPENDENT
+    // (never PERMISSION_DENIED) and there is no gate here to get the order wrong.
 
     return std::unexpected(status_t::SCHEMA_NOT_FOUND);
 }
@@ -1794,19 +1703,17 @@ result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value)
 }
 
 result_t<view_t> graph_t::read_schema(vertex_t* v) const {
-    const settings_t s = v->settings_snapshot();
-    // POINT { NAME <vertex name>, SETTINGS { NAME "history_keep_last"   VALUE u32,
-    //                                        NAME "store_ref_min_bytes" VALUE u32 } }
+    // POINT { NAME <vertex name>, SETTINGS { } }
     //
-    // EXACTLY the implemented storage knobs, which after RFC-0022 §3.B is the whole of the
-    // vertex's `:settings` core namespace — so the synthesized part is now both complete and
-    // true (the condition #706 was filed about, dissolved rather than fixed: the schema used
-    // to advertise `deadline_ns`, which nothing consumed, and omit the one live threshold).
-    std::vector<std::byte> settings_children;
-    wire::emit_name(settings_children, "history_keep_last");
-    emit_value(settings_children, s.history_keep_last, 4);
-    wire::emit_name(settings_children, "store_ref_min_bytes");
-    emit_value(settings_children, s.store_ref_min_bytes, 4);
+    // The synthesized protocol part enumerates the implemented `settings.*` knobs, and after
+    // RFC-0022 §3.B there are NONE: `settings_t` is deleted, so the vertex's `:settings` core
+    // namespace is empty — and therefore, for the first time, COMPLETE. That is the condition
+    // #706 was filed about (the schema advertised `deadline_ns`, which nothing consumed, and
+    // omitted the one live threshold), dissolved by removing the inputs rather than by
+    // extending the view. The empty SETTINGS is emitted rather than omitted so the record
+    // keeps its shape: a renderer walks `POINT{ NAME, SETTINGS, [NAME "app" SETTINGS] }`
+    // whatever the vertex declares.
+    const std::vector<std::byte> settings_children;
 
     std::vector<std::byte> point_body;
     wire::emit_name(point_body, key_view_t{v->name().bytes()}.last_segment());
@@ -1888,19 +1795,14 @@ result_t<view_t> graph_t::read_identity() const {
 }
 
 result_t<view_t> graph_t::read_settings(vertex_t* v) const {
-    // The full settings container (RFC-0010 §A.4): the implemented protocol STORAGE knobs —
-    // in the docs/reference/05 §0x0B payload-layout order, each `NAME <knob> VALUE <int>`
-    // — plus the nested `app` record iff a descriptor table is installed. One traversal
-    // serves a generic settings renderer protocol knobs and app config in one record,
-    // distinguished by the reserved subkey. The read enumerates exactly what the WRITE
-    // gate accepts (RFC-0022 §3.B), so a client can never read back a knob it cannot set,
-    // nor set one it cannot read.
-    const settings_t s = v->settings_snapshot();
+    // The settings container KEEPS ITS SHAPE and LOSES ITS KNOBS (RFC-0010 §A.4 as amended
+    // by RFC-0022 §4): `SETTINGS{ [NAME "app" SETTINGS{…}] }`. The reserved `app` subkey and
+    // the single-traversal renderer contract survive; the core knob namespace is empty
+    // because `settings_t` is deleted, so the read still enumerates exactly what the WRITE
+    // gate accepts — which is now nothing, honestly, rather than seven names of which four
+    // were never honoured. A vertex with no declared app fields reads an EMPTY `SETTINGS{}`,
+    // which is honest rather than absent.
     std::vector<std::byte> children;
-    wire::emit_name(children, "history_keep_last");
-    emit_value(children, s.history_keep_last, 4);
-    wire::emit_name(children, "store_ref_min_bytes");
-    emit_value(children, s.store_ref_min_bytes, 4);
     const std::vector<app_field_t> table = v->app_fields_snapshot();
     if (!table.empty()) {
         std::vector<std::byte> app_children;
@@ -2224,11 +2126,12 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
             plain_step(field.steps[0]))
             return read_schema(v);
         if (field.steps[0].name == "settings" && plain_step(field.steps[0])) {
-            // The RFC-0010 §A.4 read surfaces. Bare ":settings" — the full container
-            // (protocol knobs + the nested app record); ":settings.app" — the app
-            // container alone; ":settings.app.<name…>" — one declared field's stored
-            // TLV verbatim. Per-knob protocol reads (":settings.deadline_ns") remain
-            // unimplemented and fall through to SCHEMA_NOT_FOUND, as before.
+            // The RFC-0010 §A.4 read surfaces. Bare ":settings" — the container
+            // (RFC-0022 §4: the nested app record, and nothing else); ":settings.app" —
+            // the app container alone; ":settings.app.<name…>" — one declared field's
+            // stored TLV verbatim. A per-knob protocol read (":settings.deadline_ns")
+            // names nothing and falls through to SCHEMA_NOT_FOUND, exactly as its write
+            // now does.
             if (field.steps.size() == 1) return read_settings(v);
             if (field.steps[1].name == "app" && plain_step(field.steps[1])) {
                 if (field.steps.size() == 2) return read_settings_app(v);

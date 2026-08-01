@@ -50,7 +50,8 @@ using view::view_t;
  *         into `vertex_t`'s flag byte group (#361 diet — 3 values need no int). */
 enum class role_t : std::uint8_t {
     STORED_VALUE, /**< @brief Role 1: last-writer-wins; holds the last-written value. */
-    STREAM,       /**< @brief Role 2: bounded history ring sized by `settings.history_keep_last`. */
+    STREAM,       /**< @brief Role 2: bounded history ring, depth declared owner-side by
+                       `graph_t::set_history_depth` (RFC-0022 §3.C). */
     HANDLER,      /**< @brief Roles 3-7: user `on_read` / `on_write` supplies the behavior. */
 };
 
@@ -112,51 +113,6 @@ class value_ref_t {
 };
 
 /**
- * @brief A vertex's STORAGE policy — what it costs this vertex to hold a value
- *        (RFC-0022 §3.B; docs/reference/02 §core writable fields).
- *
- * **Storage only.** RFC-0022 moved delivery policy — reliability, priority, durability — to
- * the subscription that asks for it (@ref delivery_policy_t), because a single per-vertex
- * value has no coherent meaning across a heterogeneous fan-out, and deleted the two knobs
- * (`deadline_ns`, `queue_max_bytes`) that were inert *and* had no per-vertex meaning to
- * implement. What remains is exactly the two magnitudes a vertex decides **as a value
- * holder**, before any subscriber exists.
- *
- * Both are magnitudes, and neither is packed into a bit field anywhere: a bit-width on a
- * magnitude is a synthetic limit, which this project forbids (bounds come from injected
- * resources or per-target config, never a magic constant).
- *
- * Reordering is safe here and must stay safe: the wire form emits **named** children
- * (`SETTINGS{ NAME "history_keep_last", VALUE u32 }` — reference/05), so it is independent
- * of declaration order, and every construction site value-initializes (`settings_t{}`). Do
- * not introduce positional aggregate initialization — it would silently bind values to the
- * wrong fields the next time this order changes.
- */
-struct settings_t {
-    std::uint32_t history_keep_last = 1; /**< @brief Stream ring depth (>=1); re-read on
-                                              every store (@ref vertex_t::store). */
-    /**
-     * @brief Store-by-reference threshold (ADR-0042 §3): a view-delivered WRITE whose
-     *        payload TLV is >= this many bytes (and carries no trailer bits) is stored as a
-     *        SUBVIEW of the inbound frame (refcount pin, zero copy) instead of the one-copy
-     *        trailer-sliced store. 0 (the default) DISABLES referencing — pinning
-     *        amplification is a per-vertex deployment call. Read on every write
-     *        (`op_resolve.hpp`), so it stays one inline load: RFC-0022 §3.C makes the
-     *        inherited value a COPY taken at registration, never an ancestor walk.
-     */
-    std::uint32_t store_ref_min_bytes = 0;
-
-    /** @brief Memberwise equality — lets registration detect all-defaults settings (which
-     *         need no @ref vertex_ext_t allocation, ADR-0021 pay-for-what-you-use) and lets
-     *         an override tell an INHERITING descendant from one with its own policy. */
-    bool operator==(const settings_t&) const = default;
-};
-
-/** @brief The all-defaults @ref settings_t a vertex without a @ref vertex_ext_t reports —
- *         one shared constant, never a per-vertex copy. */
-inline constexpr settings_t kDefaultSettings{};
-
-/**
  * @brief One subscription's DELIVERY policy — a packed 16-bit field carried in the
  *        `SUBSCRIBER` TLV's `SETTINGS` child (RFC-0022 §3.A).
  *
@@ -176,7 +132,7 @@ inline constexpr settings_t kDefaultSettings{};
  * Absent from the wire ⇒ all-zero ⇒ today's default behaviour, byte-identically. Only
  * @ref durability_request is consumed today (the transient-local latch at
  * `graph_t::admit_subscriber`); @ref reliability and @ref priority are stored and read back,
- * awaiting the transport work that honours them — the honest shape RFC-0022 §3.D chose over
+ * awaiting the transport work that honours them — the honest shape RFC-0022 §3.E chose over
  * moving dead per-vertex fields.
  *
  * **Flags only, never a magnitude.** A deadline or a queue bound added later is a magnitude
@@ -877,8 +833,8 @@ inline std::condition_variable& vertex_stripe_cv(std::size_t idx) {
  *
  * ADR-0021 rule 2 ("the machinery is pay-for-what-you-use") applied to RAM: the common
  * MCU leaf keeps `vertex_t::ext_` null and pays nothing here. Allocated at most once —
- * at registration when the identity needs it (STREAM role, user handlers, non-default
- * settings), or later under the vertex mutex on the first `:acl` / `:settings` write —
+ * at registration when the identity needs it (STREAM role or user handlers), or later
+ * under the vertex mutex on the first `:acl` write or owner-side storage declaration —
  * and never freed before the vertex (the insert-only ADR-0057 lifetime), so a published
  * pointer stays valid for every reader.
  */
@@ -901,7 +857,8 @@ struct vertex_ext_t {
     /** @brief STREAM ring (docs/reference/11 role 2), LAZILY allocated on the first
      *         append (#388): an empty libstdc++ `std::deque` allocates its ~512 B map
      *         node at CONSTRUCTION, which every ext-bearing vertex (handlers, app
-     *         fields, `:acl`, non-default settings) paid even though only the STREAM
+     *         fields, `:acl`, an owner-declared storage magnitude) paid even though only the
+     *         STREAM
      *         role ever appends. Null ⇒ empty ring. Guarded by the vertex mutex. */
     std::unique_ptr<std::deque<std::shared_ptr<const rope_t>>> history;
     /** @brief Raw `:acl` TLV bytes, served back verbatim (#81-A, ADR-0018/0020); guarded by
@@ -927,9 +884,37 @@ struct vertex_ext_t {
      *         (physically impossible), and it packs into the padding after @ref
      *         acl_cache_dirty so the merge cache costs no extra per-vertex bytes. */
     std::atomic<std::uint32_t> acl_gen{0};
-    settings_t settings{}; /**< @brief Storage policy (RFC-0022 §3.B); single-field mutation under
-                                the vertex
-                                mutex (`vertex_t::update_settings`). */
+    /**
+     * @brief STREAM ring depth — how many entries @ref history retains (RFC-0022 §3.C).
+     *
+     * OWNER-SIDE state, not protocol QoS: it encodes what the APPLICATION wants retained,
+     * which no peer and no injected resource can supply. Declared host-side through
+     * `graph_t::set_history_depth`, exactly like the delivery mode; it has **no wire
+     * surface at all** — neither readable nor writable remotely. Guarded by the vertex
+     * mutex, which already guards the ring it bounds, and re-read on every append
+     * (@ref vertex_t::store) under that same hold. Costs a STREAM vertex zero extra bytes:
+     * a STREAM identity always allocates this block anyway.
+     */
+    std::uint32_t history_keep_last = 1;
+    /**
+     * @brief Store-by-reference threshold (ADR-0042 §3): a view-delivered WRITE whose
+     *        payload TLV is >= this many bytes (and carries no trailer bits) is stored as a
+     *        SUBVIEW of the inbound frame (refcount pin, zero copy) instead of the one-copy
+     *        trailer-sliced store. 0 (the default) DISABLES referencing.
+     *
+     * Owner-side like @ref history_keep_last, and for the same reason: it is a deployment
+     * copy/pin trade, not a quality-of-service property, so it lost its remote write
+     * surface with the rest of the RFC-0022 §3.B removal. Declared through
+     * `graph_t::set_store_ref_min_bytes`. Read on every view-delivered write
+     * (`op_resolve_walk.hpp`) with no lock, so it stays ONE inline load off this block.
+     *
+     * @note RFC-0022 §3.D replaces this absolute byte threshold with the amplification
+     *       ratio `payload * K >= segment`, whose `K` is a per-target `config_t` constant
+     *       — deliberately NOT implemented here, because §6 gates that change on a
+     *       dual-target measurement that has not been run. Until it is, the predicate and
+     *       its `0 = off` default are exactly what shipped before this RFC.
+     */
+    std::uint32_t store_ref_min_bytes = 0;
     /** @brief The RFC-0010 APP-FIELD group (ADR-0058 Step 2) — the descriptor table plus
      *         its `on_app_field_write` apply seam, LAZILY allocated: a vertex with no app
      *         fields and no apply seam keeps this null. Guarded by the vertex mutex,
@@ -973,11 +958,11 @@ class vertex_t {
     static constexpr std::size_t kInlineFanout = edge_snapshot_t::kCapacity;
 
     /** @brief Construct a vertex with its role, own canonical NAME record (ADR-0057 — one
-     *         segment, not the full key), storage policy, and handlers. The cold extension
-     *         block is allocated only if this identity needs one (#361 §1). */
-    vertex_t(role_t role, path_key_t name, settings_t settings, handlers_t handlers)
+     *         segment, not the full key), and handlers. The cold extension block is
+     *         allocated only if this identity needs one (#361 §1). */
+    vertex_t(role_t role, path_key_t name, handlers_t handlers)
         : name_(std::move(name)), role_(role) {
-        adopt_identity(role, settings, std::move(handlers));
+        adopt_identity(role, std::move(handlers));
     }
 
     vertex_t(const vertex_t&) = delete;
@@ -992,14 +977,30 @@ class vertex_t {
      *         empty at the root. The full key is a parent-walk concatenation
      *         (`graph_t`'s `build_key`). */
     [[nodiscard]] const path_key_t& name() const noexcept { return name_; }
-    /** @brief This vertex's STORAGE policy (`kDefaultSettings` when no extension block — a
-     *         default-policy vertex stores no copy of it). ONE inline load, by RFC-0022
-     *         §3.C's construction: the inherited value is COPIED at registration, so
-     *         neither the per-write `store_ref_min_bytes` read nor the per-store
-     *         `history_keep_last` read ever walks an ancestor. */
-    [[nodiscard]] const settings_t& settings() const noexcept {
+    /**
+     * @brief Whether the lazily-allocated cold extension block EXISTS on this vertex (#361 §1).
+     *
+     * A RAM-census observable, not a data-plane predicate: it is the one fact about the
+     * pay-for-what-you-use split that no functional surface reveals, and `bench_qos_census`
+     * plus the RFC-0022 host tests are its only callers. It used to be spelled by comparing
+     * `settings()`'s returned ADDRESS against the shared `kDefaultSettings` constant; RFC-0022
+     * deleted both, so the question needs a name of its own rather than an idiom.
+     */
+    [[nodiscard]] bool has_extension_block() const noexcept {
+        return ext_.load(std::memory_order_acquire) != nullptr;
+    }
+
+    /**
+     * @brief This vertex's store-by-reference threshold (0 ⇒ referencing off, the default).
+     *
+     * ONE inline load and nothing more: it is read on EVERY view-delivered write
+     * (`op_resolve_walk.hpp`), so it may never become an ancestor walk. Nothing is
+     * inherited (RFC-0022 §3.F) — a vertex that was never given a threshold answers 0,
+     * whatever its ancestors hold.
+     */
+    [[nodiscard]] std::uint32_t store_ref_min_bytes() const noexcept {
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        return e != nullptr ? e->settings : kDefaultSettings;
+        return e != nullptr ? e->store_ref_min_bytes : 0;
     }
     /** @brief This vertex's user handlers (Handler role behavior + the `on_children` seam);
      *         an all-empty shared constant when no extension block. */
@@ -1059,15 +1060,15 @@ class vertex_t {
     }
 
     /**
-     * @brief Fill this node with a registration's identity: set the role, storage policy, and
-     *        handlers, and mark it @ref registered.
+     * @brief Fill this node with a registration's identity: set the role and handlers, and
+     *        mark it @ref registered.
      *
      * Called under the graph's UNIQUE map lock — either on a freshly constructed node or on
      * a placeholder being registered in place (the allocation never moves, ADR-0057).
      */
-    void fill(role_t role, settings_t settings, handlers_t handlers) {
+    void fill(role_t role, handlers_t handlers) {
         role_ = role;
-        adopt_identity(role, settings, std::move(handlers));
+        adopt_identity(role, std::move(handlers));
         registered_ = true;
         // Maintain the parent's lock-free fork bit (#652). Setting is unconditional and
         // idempotent; the root has no parent, and nothing asks about the root's parent.
@@ -1224,53 +1225,6 @@ class vertex_t {
         }
     }
 
-    /**
-     * @brief Run @p f over every DESCENDANT, pre-order and **iteratively**, PRUNING the
-     *        subtree of any vertex for which @p f returns false.
-     *
-     * The pruning twin of @ref for_each_descendant, and it exists because the RFC-0022 §3.C
-     * storage-policy push must stop at a descendant that carries its OWN policy: that
-     * vertex is the root of an opted-out subtree, and everything below it inherits from
-     * IT, not from the vertex being written.
-     *
-     * @p f returns **true to descend** into the visited vertex's children, false to skip
-     * them (the vertex itself is always visited first). Descends with the same
-     * no-auxiliary-storage discipline as @ref for_each_descendant — parent link + a
-     * binary search among siblings on the ascent — so a peer-chosen graph depth costs
-     * neither stack frames nor an allocation that could fail (#690, #477).
-     *
-     * @note Same contract as @ref for_each_child — called under the graph's map lock, and
-     *       @p f MUST NOT mutate the tree's SHAPE (mutating vertex STATE is fine, which is
-     *       exactly what the policy push does).
-     */
-    template <typename F>
-    void for_each_descendant_pruned(F&& f) {
-        vertex_t* cur = first_child();
-        if (cur == nullptr) return;
-        for (;;) {
-            const bool descend = f(*cur);
-            if (descend) {
-                if (vertex_t* const down = cur->first_child(); down != nullptr) {
-                    cur = down;
-                    continue;
-                }
-            }
-            // Nothing below (or pruned): climb until some ancestor has a next sibling. The
-            // sibling test comes FIRST even when the parent IS `this` — see
-            // @ref for_each_descendant for the bug that rule was written against.
-            for (;;) {
-                vertex_t* const up = cur->parent_;
-                if (up == nullptr) return;
-                if (vertex_t* const sib = up->next_sibling_of(*cur); sib != nullptr) {
-                    cur = sib;
-                    break;
-                }
-                if (up == this) return;  // no sibling left at the top level — subtree exhausted
-                cur = up;
-            }
-        }
-    }
-
     // -- storage & readiness ----------------------------------------------------------
 
     /**
@@ -1353,8 +1307,7 @@ class vertex_t {
                     if (!e->history)  // first append allocates the ring (#388 lazy deque)
                         e->history = std::make_unique<std::deque<std::shared_ptr<const rope_t>>>();
                     e->history->push_back(sp);  // refcount bump — the caller keeps `sp`
-                    const std::size_t keep =
-                        e->settings.history_keep_last ? e->settings.history_keep_last : 1;
+                    const std::size_t keep = e->history_keep_last != 0 ? e->history_keep_last : 1;
                     while (e->history->size() > keep) e->history->pop_front();
                 }
             }
@@ -1741,7 +1694,8 @@ class vertex_t {
             e->eff_aces.clear();
             e->acl_gen.fetch_add(1, std::memory_order_release);
             e->acl_cache_dirty.store(true, std::memory_order_release);
-            e->settings = kDefaultSettings;
+            e->history_keep_last = 1;
+            e->store_ref_min_bytes = 0;
             e->app.reset();
             e->last_flushed_seq = 0;
         }
@@ -2020,27 +1974,41 @@ class vertex_t {
         return out;
     }
 
-    // -- settings & propagation policy --------------------------------------------------
+    // -- owner-side storage declarations & propagation policy ----------------------------
 
-    /** @brief A consistent copy of the storage policy (taken under the vertex lock;
-     *         `kDefaultSettings` when no extension block). */
-    [[nodiscard]] settings_t settings_snapshot() {
+    /**
+     * @brief Set the STREAM ring depth (RFC-0022 §3.C) — owner-side, never over the wire.
+     *
+     * Allocates the extension block if this vertex has none (a STREAM vertex always has
+     * one already). Taken under the vertex mutex, which is the same lock the ring append
+     * re-reads it under, so a depth change and a concurrent store cannot interleave
+     * halfway.
+     * @param keep Entries to retain; 0 is normalised to 1 by the ring trim.
+     */
+    void set_history_depth(std::uint32_t keep) {
+        vertex_ext_t& e = ensure_ext();
         const std::lock_guard lock(vertex_stripe_of(this).m);
+        e.history_keep_last = keep;
+    }
+
+    /** @brief The STREAM ring depth this vertex retains (1 when never declared). */
+    [[nodiscard]] std::uint32_t history_depth() const noexcept {
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        return e != nullptr ? e->settings : kDefaultSettings;
+        return e != nullptr ? e->history_keep_last : 1;
     }
 
     /**
-     * @brief Mutate the storage policy under the vertex lock: @p f receives `settings_t&`;
-     *        its return value is passed through (the `:settings.<field>` write surface —
-     *        concurrent single-field writes both land, no read-modify-write clobber).
-     *        Allocates the extension block on a default-policy vertex's first write.
+     * @brief Set the store-by-reference threshold (ADR-0042 §3) — owner-side, never over
+     *        the wire. 0 disables referencing.
+     *
+     * Published under the vertex mutex; the write-path reader (@ref store_ref_min_bytes)
+     * takes no lock, because a threshold changing under a concurrent write only decides
+     * WHICH correct store shape that write takes.
      */
-    template <typename F>
-    auto update_settings(F&& f) -> decltype(f(std::declval<settings_t&>())) {
+    void set_store_ref_min_bytes(std::uint32_t bytes) {
         vertex_ext_t& e = ensure_ext();
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        return f(e.settings);
+        e.store_ref_min_bytes = bytes;
     }
 
     /** @brief How this vertex participates in an ANCESTOR's propagate sweep (RFC-0008 §C). */
@@ -2283,7 +2251,7 @@ class vertex_t {
      * (graph map lock) and the field-write verbs (vertex mutex) resolve by
      * compare-exchange — the loser frees its candidate and adopts the winner's block.
      * The pointer is never cleared once published (ADR-0057 insert-only lifetime), so
-     * lock-free readers (@ref settings / @ref handlers) stay valid forever.
+     * lock-free readers (@ref store_ref_min_bytes / @ref handlers) stay valid forever.
      */
     vertex_ext_t& ensure_ext() {
         vertex_ext_t* e = ext_.load(std::memory_order_acquire);
@@ -2298,18 +2266,22 @@ class vertex_t {
 
     /**
      * @brief Install a registration's identity (constructor + @ref fill): allocate the
-     *        extension block iff this identity needs one — STREAM role (history ring),
-     *        any user handler, or a non-default storage policy — and store the cold members there.
-     *        A plain default leaf allocates nothing (#361 §1).
+     *        extension block iff this identity needs one — STREAM role (history ring) or
+     *        any user handler — and store the cold members there. A plain leaf allocates
+     *        nothing (#361 §1).
+     *
+     * RFC-0022 §3.B dropped the third condition, "a non-default storage policy", along with
+     * the parameter that carried it, so STRICTLY MORE vertices stay extension-less than
+     * before: registration can no longer force the cold block onto a vertex, and the two
+     * owner-side magnitudes materialise it only if an owner actually declares one.
      */
-    void adopt_identity(role_t role, const settings_t& settings, handlers_t handlers) {
+    void adopt_identity(role_t role, handlers_t handlers) {
         const bool has_handlers = handlers.on_read || handlers.on_write || handlers.on_children ||
                                   handlers.on_app_field_write;
-        if (role != role_t::STREAM && !has_handlers && settings == kDefaultSettings &&
+        if (role != role_t::STREAM && !has_handlers &&
             ext_.load(std::memory_order_acquire) == nullptr)
             return;
         vertex_ext_t& e = ensure_ext();
-        e.settings = settings;
         // Split the public input into its two lazy groups (ADR-0058 Step 2): the value
         // seam only when one of its three is set; the app-field group's apply seam only
         // when given. Registration is single-threaded for this vertex, so no lock here.
@@ -2351,7 +2323,8 @@ class vertex_t {
     lkv_slot_t lkv_{};
     std::vector<subscriber_t> subs_;  // fan-out edges; guarded by m_
     // The lazily-allocated cold half (#361 §1): handlers, STREAM ring, the ACL state +
-    // ADR-0050 effective-merge cache, non-default settings, and the stream drain cursor.
+    // ADR-0050 effective-merge cache, the owner-side storage magnitudes, and the stream
+    // drain cursor.
     // Null for the common default leaf. Published once by ensure_ext (CAS), never
     // cleared; freed by the destructor.
     std::atomic<vertex_ext_t*> ext_{nullptr};
