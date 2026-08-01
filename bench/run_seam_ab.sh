@@ -53,6 +53,7 @@ for arm in "${ARMS[@]}"; do
     # Pin the harness itself to the WORKING TREE's copy: the arms must differ in the
     # library under test, never in the thing measuring it.
     cp "$REPO_ROOT/bench/bench_seam_guard.cpp" "$src/bench/bench_seam_guard.cpp"
+    cp "$REPO_ROOT/bench/probe_seam_churn.cpp" "$src/bench/probe_seam_churn.cpp"
     cp "$REPO_ROOT/bench/CMakeLists.txt" "$src/bench/CMakeLists.txt"
     cp "$REPO_ROOT/bench/bench_common.hpp" "$src/bench/bench_common.hpp"
     echo "== building arm $name ($rev)" >&2
