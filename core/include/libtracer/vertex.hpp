@@ -112,48 +112,102 @@ class value_ref_t {
 };
 
 /**
- * @brief The mandatory core QoS fields of a vertex (docs/reference/02 §core writable fields).
+ * @brief A vertex's STORAGE policy — what it costs this vertex to hold a value
+ *        (RFC-0022 §3.B; docs/reference/02 §core writable fields).
  *
- * **Members are ordered widest-first, and that ordering is load-bearing.** Every field is a
- * fixed-width scalar, so this struct is the same size on a 32-bit MCU as on a 64-bit host —
- * it never shrinks with the pointer, which makes it the largest non-ACL member of
- * @ref vertex_ext_t on device (32 of 112 B on rv32 before this ordering). Declaration order
- * `u64, u32 x3, u8 x3` packs the 23 bytes of members into **24**; interleaving the `u8`s
- * between the wider fields costs 8 bytes of pure padding on every ext-bearing vertex, on
- * every target.
+ * **Storage only.** RFC-0022 moved delivery policy — reliability, priority, durability — to
+ * the subscription that asks for it (@ref delivery_policy_t), because a single per-vertex
+ * value has no coherent meaning across a heterogeneous fan-out, and deleted the two knobs
+ * (`deadline_ns`, `queue_max_bytes`) that were inert *and* had no per-vertex meaning to
+ * implement. What remains is exactly the two magnitudes a vertex decides **as a value
+ * holder**, before any subscriber exists.
+ *
+ * Both are magnitudes, and neither is packed into a bit field anywhere: a bit-width on a
+ * magnitude is a synthetic limit, which this project forbids (bounds come from injected
+ * resources or per-target config, never a magic constant).
  *
  * Reordering is safe here and must stay safe: the wire form emits **named** children
- * (`SETTINGS{ NAME "reliability", VALUE u8 }` — reference/05), so it is independent of
- * declaration order, and every construction site value-initializes (`settings_t{}`). Do not
- * introduce positional aggregate initialization — it would silently bind values to the wrong
- * fields the next time this order changes.
+ * (`SETTINGS{ NAME "history_keep_last", VALUE u32 }` — reference/05), so it is independent
+ * of declaration order, and every construction site value-initializes (`settings_t{}`). Do
+ * not introduce positional aggregate initialization — it would silently bind values to the
+ * wrong fields the next time this order changes.
  */
 struct settings_t {
-    std::uint64_t deadline_ns = 0;       /**< @brief 0=off; max ns between writes before a
-                                              liveness fault. */
-    std::uint32_t history_keep_last = 1; /**< @brief Stream ring depth (>=1). */
-    std::uint32_t queue_max_bytes = 0; /**< @brief 0=unbounded; per-subscriber back-pressure cap. */
+    std::uint32_t history_keep_last = 1; /**< @brief Stream ring depth (>=1); re-read on
+                                              every store (@ref vertex_t::store). */
     /**
      * @brief Store-by-reference threshold (ADR-0042 §3): a view-delivered WRITE whose
      *        payload TLV is >= this many bytes (and carries no trailer bits) is stored as a
      *        SUBVIEW of the inbound frame (refcount pin, zero copy) instead of the one-copy
      *        trailer-sliced store. 0 (the default) DISABLES referencing — pinning
-     *        amplification is a per-vertex deployment call.
+     *        amplification is a per-vertex deployment call. Read on every write
+     *        (`op_resolve.hpp`), so it stays one inline load: RFC-0022 §3.C makes the
+     *        inherited value a COPY taken at registration, never an ancestor walk.
      */
     std::uint32_t store_ref_min_bytes = 0;
-    std::uint8_t reliability = 0; /**< @brief 0=best-effort, 1=reliable. */
-    std::uint8_t durability = 0;  /**< @brief 0=volatile, 1=transient-local. */
-    std::uint8_t priority = 0;    /**< @brief 0=low .. 255=critical (transport hint, not a
-                                       wire bit). */
 
     /** @brief Memberwise equality — lets registration detect all-defaults settings (which
-     *         need no @ref vertex_ext_t allocation, ADR-0021 pay-for-what-you-use). */
+     *         need no @ref vertex_ext_t allocation, ADR-0021 pay-for-what-you-use) and lets
+     *         an override tell an INHERITING descendant from one with its own policy. */
     bool operator==(const settings_t&) const = default;
 };
 
 /** @brief The all-defaults @ref settings_t a vertex without a @ref vertex_ext_t reports —
  *         one shared constant, never a per-vertex copy. */
 inline constexpr settings_t kDefaultSettings{};
+
+/**
+ * @brief One subscription's DELIVERY policy — a packed 16-bit field carried in the
+ *        `SUBSCRIBER` TLV's `SETTINGS` child (RFC-0022 §3.A).
+ *
+ * Delivery policy describes **one producer→subscriber relationship**, not the producer: a
+ * vertex that fans out to a CAN peer and a WebSocket peer at once has no single
+ * `reliability` or `priority` to hold, which is why these lived on the vertex for a year
+ * without anything ever consuming them. DDS puts the same three on the reader/writer pair
+ * for the same reason.
+ *
+ * | bits | field | values |
+ * | ---: | --- | --- |
+ * | 0–1 | reliability | 0 = best-effort, 1 = reliable; 2–3 reserved |
+ * | 2–4 | priority | 0–7, 0 = default |
+ * | 5 | durability_request | 1 = deliver the latched last value on join |
+ * | 6–15 | reserved | MUST be written 0, MUST be ignored on read |
+ *
+ * Absent from the wire ⇒ all-zero ⇒ today's default behaviour, byte-identically. Only
+ * @ref durability_request is consumed today (the transient-local latch at
+ * `graph_t::admit_subscriber`); @ref reliability and @ref priority are stored and read back,
+ * awaiting the transport work that honours them — the honest shape RFC-0022 §3.D chose over
+ * moving dead per-vertex fields.
+ *
+ * **Flags only, never a magnitude.** A deadline or a queue bound added later is a magnitude
+ * and belongs in the subscription's cold half as a full-width field, never in these bits.
+ */
+struct delivery_policy_t {
+    std::uint16_t bits = 0; /**< @brief The packed field, as it arrived off the wire. */
+
+    static constexpr std::uint16_t kReliabilityMask = 0x0003;   /**< @brief Bits 0–1. */
+    static constexpr std::uint16_t kPriorityMask = 0x001C;      /**< @brief Bits 2–4. */
+    static constexpr int kPriorityShift = 2;                    /**< @brief Bits 2–4 offset. */
+    static constexpr std::uint16_t kDurabilityRequest = 0x0020; /**< @brief Bit 5. */
+
+    /** @brief 0 = best-effort, 1 = reliable (2–3 reserved; stored, never interpreted). */
+    [[nodiscard]] constexpr std::uint8_t reliability() const noexcept {
+        return static_cast<std::uint8_t>(bits & kReliabilityMask);
+    }
+    /** @brief 0–7, 0 = default. */
+    [[nodiscard]] constexpr std::uint8_t priority() const noexcept {
+        return static_cast<std::uint8_t>((bits & kPriorityMask) >> kPriorityShift);
+    }
+    /** @brief True iff THIS subscriber asked for the latched last value on join. */
+    [[nodiscard]] constexpr bool durability_request() const noexcept {
+        return (bits & kDurabilityRequest) != 0;
+    }
+
+    /** @brief Memberwise equality on the raw bits (reserved bits included — they are
+     *         carried verbatim, so two policies differing only there are not the same
+     *         bytes). */
+    bool operator==(const delivery_policy_t&) const = default;
+};
 
 /**
  * @brief Owner-declared REMOTE writability of one application property field (RFC-0010
@@ -610,6 +664,12 @@ struct subscriber_t {
      *         allocated by @ref ensure_remote when a route/link/caller/compact-flag is
      *         stored (pay-for-what-you-use, ADR-0021). */
     std::unique_ptr<subscriber_remote_t> remote;
+    /** @brief This subscription's DELIVERY policy (RFC-0022 §3.A) — the packed 16 bits its
+     *         `SUBSCRIBER.SETTINGS{ NAME "delivery_policy" }` carried, or all-zero when it
+     *         carried none. HOT, not in the cold `remote` half: `durability_request` is read
+     *         under the same lock hold that appends the slot, and it rides free in the
+     *         padding beside @ref active. */
+    delivery_policy_t policy{};
     /** @brief Active flag; an active edge receives every propagated value (delivery is
      *         value-agnostic — WHICH vertices a sweep propagates is the vertex's
      *         `delivery_mode_t`, never a per-subscriber byte comparison). */
@@ -653,7 +713,8 @@ struct edge_view_t {
  * @brief A transient-local durability latch (RFC-0004 §D / Q4): the LKV plus the freshly
  *        admitted edge's dispatch view, both snapshotted atomically with the append.
  *
- * @ref value stays null when no latch fired (volatile producer, or no LKV yet).
+ * @ref value stays null when no latch fired (the subscriber requested no durability —
+ * RFC-0022 §3.A — or the producer holds no LKV yet).
  */
 struct edge_latch_t {
     std::shared_ptr<const rope_t> value; /**< @brief The latched LKV; null ⇒ no latch. */
@@ -812,7 +873,7 @@ inline std::condition_variable& vertex_stripe_cv(std::size_t idx) {
 
 /**
  * @brief The lazily-allocated COLD half of a vertex (issue #361 §1): every member a plain
- *        STORED_VALUE leaf with default QoS, no handlers, and no `:acl` never touches.
+ *        STORED_VALUE leaf with default storage policy, no handlers, and no `:acl` never touches.
  *
  * ADR-0021 rule 2 ("the machinery is pay-for-what-you-use") applied to RAM: the common
  * MCU leaf keeps `vertex_t::ext_` null and pays nothing here. Allocated at most once —
@@ -866,7 +927,8 @@ struct vertex_ext_t {
      *         (physically impossible), and it packs into the padding after @ref
      *         acl_cache_dirty so the merge cache costs no extra per-vertex bytes. */
     std::atomic<std::uint32_t> acl_gen{0};
-    settings_t settings{}; /**< @brief QoS settings; single-field mutation under the vertex
+    settings_t settings{}; /**< @brief Storage policy (RFC-0022 §3.B); single-field mutation under
+                                the vertex
                                 mutex (`vertex_t::update_settings`). */
     /** @brief The RFC-0010 APP-FIELD group (ADR-0058 Step 2) — the descriptor table plus
      *         its `on_app_field_write` apply seam, LAZILY allocated: a vertex with no app
@@ -911,7 +973,7 @@ class vertex_t {
     static constexpr std::size_t kInlineFanout = edge_snapshot_t::kCapacity;
 
     /** @brief Construct a vertex with its role, own canonical NAME record (ADR-0057 — one
-     *         segment, not the full key), QoS settings, and handlers. The cold extension
+     *         segment, not the full key), storage policy, and handlers. The cold extension
      *         block is allocated only if this identity needs one (#361 §1). */
     vertex_t(role_t role, path_key_t name, settings_t settings, handlers_t handlers)
         : name_(std::move(name)), role_(role) {
@@ -930,8 +992,11 @@ class vertex_t {
      *         empty at the root. The full key is a parent-walk concatenation
      *         (`graph_t`'s `build_key`). */
     [[nodiscard]] const path_key_t& name() const noexcept { return name_; }
-    /** @brief This vertex's QoS settings (`kDefaultSettings` when no extension block —
-     *         a default-QoS vertex stores no copy of them). */
+    /** @brief This vertex's STORAGE policy (`kDefaultSettings` when no extension block — a
+     *         default-policy vertex stores no copy of it). ONE inline load, by RFC-0022
+     *         §3.C's construction: the inherited value is COPIED at registration, so
+     *         neither the per-write `store_ref_min_bytes` read nor the per-store
+     *         `history_keep_last` read ever walks an ancestor. */
     [[nodiscard]] const settings_t& settings() const noexcept {
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         return e != nullptr ? e->settings : kDefaultSettings;
@@ -994,7 +1059,7 @@ class vertex_t {
     }
 
     /**
-     * @brief Fill this node with a registration's identity: set the role, QoS settings, and
+     * @brief Fill this node with a registration's identity: set the role, storage policy, and
      *        handlers, and mark it @ref registered.
      *
      * Called under the graph's UNIQUE map lock — either on a freshly constructed node or on
@@ -1146,6 +1211,53 @@ class vertex_t {
             // never visited — but the sibling test must come FIRST even when the parent IS
             // `this`, or the walk returns at the end of the leftmost spine and never reaches
             // this vertex's second child. (It did exactly that; `edge_eviction` caught it.)
+            for (;;) {
+                vertex_t* const up = cur->parent_;
+                if (up == nullptr) return;
+                if (vertex_t* const sib = up->next_sibling_of(*cur); sib != nullptr) {
+                    cur = sib;
+                    break;
+                }
+                if (up == this) return;  // no sibling left at the top level — subtree exhausted
+                cur = up;
+            }
+        }
+    }
+
+    /**
+     * @brief Run @p f over every DESCENDANT, pre-order and **iteratively**, PRUNING the
+     *        subtree of any vertex for which @p f returns false.
+     *
+     * The pruning twin of @ref for_each_descendant, and it exists because the RFC-0022 §3.C
+     * storage-policy push must stop at a descendant that carries its OWN policy: that
+     * vertex is the root of an opted-out subtree, and everything below it inherits from
+     * IT, not from the vertex being written.
+     *
+     * @p f returns **true to descend** into the visited vertex's children, false to skip
+     * them (the vertex itself is always visited first). Descends with the same
+     * no-auxiliary-storage discipline as @ref for_each_descendant — parent link + a
+     * binary search among siblings on the ascent — so a peer-chosen graph depth costs
+     * neither stack frames nor an allocation that could fail (#690, #477).
+     *
+     * @note Same contract as @ref for_each_child — called under the graph's map lock, and
+     *       @p f MUST NOT mutate the tree's SHAPE (mutating vertex STATE is fine, which is
+     *       exactly what the policy push does).
+     */
+    template <typename F>
+    void for_each_descendant_pruned(F&& f) {
+        vertex_t* cur = first_child();
+        if (cur == nullptr) return;
+        for (;;) {
+            const bool descend = f(*cur);
+            if (descend) {
+                if (vertex_t* const down = cur->first_child(); down != nullptr) {
+                    cur = down;
+                    continue;
+                }
+            }
+            // Nothing below (or pruned): climb until some ancestor has a next sibling. The
+            // sibling test comes FIRST even when the parent IS `this` — see
+            // @ref for_each_descendant for the bug that rule was written against.
             for (;;) {
                 vertex_t* const up = cur->parent_;
                 if (up == nullptr) return;
@@ -1367,11 +1479,15 @@ class vertex_t {
      * @brief Append a subscription edge; atomically snapshot the transient-local
      *        durability latch when @p latch is non-null.
      *
-     * Under ONE lock hold: the slot is appended, and — iff this vertex is
-     * transient-local (`settings.durability == 1`) and already holds an LKV — the
-     * value plus the new edge's dispatch view are snapshotted into @p latch, so a
-     * concurrent `clear_edge` can never slip between append and latch. The caller
-     * dispatches the latch OUTSIDE the lock (RFC-0004 §D / ADR-0049).
+     * Under ONE lock hold: the slot is appended, and — iff THIS subscriber requested
+     * durability (`policy.durability_request()`, RFC-0022 §3.A) and the vertex already
+     * holds an LKV — the value plus the new edge's dispatch view are snapshotted into
+     * @p latch, so a concurrent `clear_edge` can never slip between append and latch. The
+     * caller dispatches the latch OUTSIDE the lock (RFC-0004 §D / ADR-0049).
+     *
+     * The predicate is the SUBSCRIBER's, not the vertex's: before RFC-0022 one
+     * `settings.durability` flag latched for every subscriber of a vertex, including the
+     * ones that never asked.
      *
      * An INACTIVE slot is REUSED before the list grows (RFC-0009 §D.2: "a cleared
      * slot MAY be reused by a later append") — the reclamation half of eviction:
@@ -1394,8 +1510,7 @@ class vertex_t {
             subs_.push_back(std::move(s));
         else
             subs_[idx] = std::move(s);  // reuse frees the cleared slot's leftovers
-        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        if (latch != nullptr && e != nullptr && e->settings.durability == 1) {
+        if (latch != nullptr && subs_[idx].policy.durability_request()) {
             if (std::shared_ptr<const rope_t> lkv = lkv_.load()) {
                 latch->value = std::move(lkv);
                 latch->edge = edge_view_of(subs_[idx]);
@@ -1459,8 +1574,8 @@ class vertex_t {
      *
      * @param idx   The `:subscribers[N]` slot number.
      * @param s     The replacing edge.
-     * @param latch Optional durability latch; snapshotted iff the vertex is
-     *              transient-local (`settings.durability == 1`) and holds an LKV.
+     * @param latch Optional durability latch; snapshotted iff the REPLACING subscriber
+     *              requested durability (RFC-0022 §3.A) and the vertex holds an LKV.
      * @return Which case applied — see @ref edge_replace_t.
      */
     edge_replace_t replace_edge(std::size_t idx, subscriber_t s, edge_latch_t* latch = nullptr) {
@@ -1468,8 +1583,7 @@ class vertex_t {
         if (idx >= subs_.size()) return edge_replace_t::OUT_OF_RANGE;
         const bool was_active = subs_[idx].active;
         subs_[idx] = std::move(s);  // reclaims the displaced edge's pins in place
-        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        if (latch != nullptr && e != nullptr && e->settings.durability == 1) {
+        if (latch != nullptr && subs_[idx].policy.durability_request()) {
             if (std::shared_ptr<const rope_t> lkv = lkv_.load()) {
                 latch->value = std::move(lkv);
                 latch->edge = edge_view_of(subs_[idx]);
@@ -1584,7 +1698,7 @@ class vertex_t {
      *        behind**, so a later revive of this address inherits nothing of the retired
      *        owner: the value seam (swap-and-park, never freed — a lock-free reader may
      *        still hold the old pointer), the stored value and history, the `:acl` (own
-     *        ACEs + the cached merge), the app-field table, the QoS settings, the role,
+     *        ACEs + the cached merge), the app-field table, the storage policy, the role,
      *        and the delivery mode. **Survives** by design: `write_seq_` (monotonic per
      *        address; a reset would regress the readiness cursors), `listeners_above_`
      *        (counts ANCESTOR subscribers, which retiring THIS vertex never touched — the
@@ -1908,7 +2022,7 @@ class vertex_t {
 
     // -- settings & propagation policy --------------------------------------------------
 
-    /** @brief A consistent copy of the QoS settings (taken under the vertex lock;
+    /** @brief A consistent copy of the storage policy (taken under the vertex lock;
      *         `kDefaultSettings` when no extension block). */
     [[nodiscard]] settings_t settings_snapshot() {
         const std::lock_guard lock(vertex_stripe_of(this).m);
@@ -1917,10 +2031,10 @@ class vertex_t {
     }
 
     /**
-     * @brief Mutate the QoS settings under the vertex lock: @p f receives `settings_t&`;
+     * @brief Mutate the storage policy under the vertex lock: @p f receives `settings_t&`;
      *        its return value is passed through (the `:settings.<field>` write surface —
      *        concurrent single-field writes both land, no read-modify-write clobber).
-     *        Allocates the extension block on a default-QoS vertex's first write.
+     *        Allocates the extension block on a default-policy vertex's first write.
      */
     template <typename F>
     auto update_settings(F&& f) -> decltype(f(std::declval<settings_t&>())) {
@@ -2185,7 +2299,7 @@ class vertex_t {
     /**
      * @brief Install a registration's identity (constructor + @ref fill): allocate the
      *        extension block iff this identity needs one — STREAM role (history ring),
-     *        any user handler, or non-default QoS — and store the cold members there.
+     *        any user handler, or a non-default storage policy — and store the cold members there.
      *        A plain default leaf allocates nothing (#361 §1).
      */
     void adopt_identity(role_t role, const settings_t& settings, handlers_t handlers) {
@@ -2261,7 +2375,7 @@ class vertex_t {
     role_t role_;  // behavioral role (byte-wide enum)
     // How this vertex participates in an ANCESTOR's propagate sweep (RFC-0008 §C).
     // Set at wiring time via graph_t::set_delivery_mode (the "configure before frames
-    // flow" contract, like the QoS settings); read on the assign path. Default IF_NEWER.
+    // flow" contract, like the storage policy); read on the assign path. Default IF_NEWER.
     delivery_mode_t delivery_mode_ = delivery_mode_t::IF_NEWER;
     // Two lock-free predicates, packed into ONE byte so the flag group stays exactly four
     // bytes wide and `sizeof(vertex_t)` stays at the 112 the #361 diet measured — the size

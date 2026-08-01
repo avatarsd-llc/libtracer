@@ -543,8 +543,15 @@ class graph_t {
      * field-write admission door as a wire subscribe — one parse, one SUBSCRIBE gate, one
      * durability latch, and the edge's stored SUBSCRIBER view reads back byte-identically
      * from `:subscribers[]`.
+     *
+     * @param policy This subscription's DELIVERY policy (RFC-0022 §3.A) — the same packed
+     *               16 bits a wire subscriber sends in its `SETTINGS` child, and encoded
+     *               into exactly that child here so the two doors stay byte-identical.
+     *               Defaulted to all-zero: best-effort, default priority, no durability
+     *               request — today's behaviour for every caller that says nothing.
      */
-    [[nodiscard]] result_t<void> subscribe(const path_t& src, const path_t& target);
+    [[nodiscard]] result_t<void> subscribe(const path_t& src, const path_t& target,
+                                           delivery_policy_t policy = {});
     /**
      * @brief Subscribe @p src to an in-process `{fn, ctx}` callback (sugar; fires inline
      *        on each delivery to src with the rope value).
@@ -560,24 +567,30 @@ class graph_t {
      * @param ctx Caller-owned context; must outlive every possible delivery (edges are
      *            never destroyed while the graph lives — an unsubscribe only deactivates
      *            the slot, but an in-flight delivery may still be running).
+     * @param policy This subscription's DELIVERY policy (RFC-0022 §3.A); defaulted to
+     *               all-zero, i.e. today's behaviour. A callback edge carries no TLV, so
+     *               the policy is set on the slot directly rather than parsed out of one.
      * @return A @ref subscription_t handle for @ref unsubscribe; error on an unknown @p src
      *         or a denied SUBSCRIBE gate.
      */
     [[nodiscard]] result_t<subscription_t> subscribe(const path_t& src, subscriber_fn_t fn,
-                                                     void* ctx);
+                                                     void* ctx, delivery_policy_t policy = {});
 
     /**
      * @brief Subscribe @p src to a caller-owned callable (sugar over the `{fn, ctx}` form).
      *
      * Zero-erasure sugar mirroring `transport_t::set_receiver`: @p callback is bound by
      * address (lvalues only — a temporary would dangle) and MUST outlive every delivery.
+     * @param policy This subscription's DELIVERY policy (RFC-0022 §3.A); all-zero default.
      * @return A @ref subscription_t handle for @ref unsubscribe (as the `{fn, ctx}` form).
      */
     template <typename F>
         requires std::invocable<F&, const view::rope_t&>
-    [[nodiscard]] result_t<subscription_t> subscribe(const path_t& src, F& callback) {
+    [[nodiscard]] result_t<subscription_t> subscribe(const path_t& src, F& callback,
+                                                     delivery_policy_t policy = {}) {
         return subscribe(
-            src, [](void* c, const view::rope_t& v) { (*static_cast<F*>(c))(v); }, &callback);
+            src, [](void* c, const view::rope_t& v) { (*static_cast<F*>(c))(v); }, &callback,
+            policy);
     }
 
     /**
@@ -924,6 +937,15 @@ class graph_t {
     // (shared suffices; the walk only excludes concurrent vertex creation, and a
     // vertex created after the mark starts dirty anyway).
     static void mark_subtree_acl_dirty(vertex_t* v);
+    // RFC-0022 §3.C storage-policy inheritance, push half: after `v`'s `:settings` write
+    // changed its policy from `before` to `after`, copy `after` into every descendant that
+    // was still carrying `before` — the ones INHERITING it. A descendant holding anything
+    // else has its own policy, so it and its whole subtree are skipped: an override grows
+    // the subtree that opted in, and nothing else. Iterative (an explicit stack, like
+    // `retire_subtree` after #690), because the walk PRUNES and `for_each_descendant`
+    // cannot. Call with map_mutex_ held (shared suffices — the walk reads the child links
+    // and only excludes concurrent vertex creation; each write takes its own vertex lock).
+    static void push_storage_policy(vertex_t* v, const settings_t& before, const settings_t& after);
     // ":children[]" append: instantiate a child from a SPEC via the type catalog (#82,
     // ADR-0017). Composes the child key (parent key + the SPEC `name` NAME), dispatches
     // on the SPEC `type`. Unknown type => SCHEMA_NOT_FOUND; duplicate name => PATH_IN_USE.

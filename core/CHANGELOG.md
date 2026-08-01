@@ -33,6 +33,26 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   is not merged (three rounds, three blocking defects, +19/+29 % on the read path), and #635
   keeps the open reclamation question.
 
+- **`tr::graph::delivery_policy_t` — the per-subscription delivery policy (RFC-0022 §3.A).** A
+  packed `u16`: bits 0–1 `reliability`, 2–4 `priority`, 5 `durability_request`, 6–15 reserved
+  (written 0, **ignored** on read — never rejected, and carried verbatim so they read back
+  unchanged). It rides the `SUBSCRIBER` TLV's **already-existing `SETTINGS` child** under the key
+  `delivery_policy` — the same child `delivery_compact` uses — so no new wire structure exists.
+  Absent ⇒ all-zero ⇒ today's behaviour, byte-identically. Both `subscribe` sugars take it as a
+  defaulted trailing argument (`subscribe(src, target, policy)`, `subscribe(src, fn, ctx, policy)`,
+  `subscribe(src, callable, policy)`), so every existing call site compiles and behaves unchanged.
+  Only `durability_request` is consumed today; `reliability` and `priority` are stored and read
+  back, awaiting the transport work that honours them.
+
+- **Storage policy inherits by copy at registration (RFC-0022 §3.C).** A vertex registered without
+  its own `settings_t` copies its nearest ancestor's, taken during the registration descent (an
+  intermediate placeholder level carries it down). A later `:settings.<knob>` write is an override:
+  it is pushed to every descendant still carrying the old value and prunes at one that has its own
+  — *the override grows the subtree that opted in, and nothing else*. Resolution is **never** an
+  ancestor walk: `store_ref_min_bytes` is read per write and `history_keep_last` per store, so both
+  stay a single inline load. A vertex whose whole ancestry is at the defaults still allocates **no**
+  extension block.
+
 - **`fwd_router_t::subscribe_toward(producer, target)` (#739).** Binds a local producer's
   subscription toward ONE ordinary mount-path target (`/net/<module>/<name>/<consumer...>`,
   arbitrarily nested), resolved through the SAME ADR-0061 strip-K cached descent the forward
@@ -68,6 +88,44 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   heap there was no way to make a flatten fail, and `core/tests/fwd_flatten_backend_test.cpp` is
   what the seam bought: an injected backend that refuses on command, and an ablation proving each
   guard fails without it.
+
+- **BREAKING (RFC-0022): four `settings_t` fields are REMOVED — `reliability`, `priority`,
+  `deadline_ns`, `queue_max_bytes` — and `durability` moved to the subscription.** `settings_t`
+  is now the two STORAGE magnitudes, `history_keep_last` and `store_ref_min_bytes`, and shrinks
+  from **24 B to 8 B** (still stored only when non-default). Code that set any removed field no
+  longer compiles; that is deliberate — a silent behaviour change would be worse, since none of
+  the four ever functioned. `durability` has a direct replacement with different semantics: set
+  `delivery_policy_t::kDurabilityRequest` on the SUBSCRIPTION.
+
+- **BREAKING (RFC-0022): `:settings` writes to the removed knobs answer `SCHEMA_NOT_FOUND`.**
+  `:settings.reliability`, `.priority`, `.deadline_ns`, `.queue_max_bytes` and `.durability` name
+  no knob — the honest answer, and the one an unsupported field already gives. **There is no
+  deprecation window:** the protocol is DRAFT and none of them ever drove behaviour (they were
+  accepted, stored, reported, and consumed by nothing — [#756](https://github.com/avatarsd-llc/libtracer/issues/756)).
+  The knob grammar is now exactly `history_keep_last` and `store_ref_min_bytes`.
+
+- **BREAKING (RFC-0022): the `:schema` and bare-`:settings` reads changed shape.** Both now
+  enumerate exactly the two storage knobs, in that order (`history_keep_last` u32,
+  `store_ref_min_bytes` u32). `:schema` previously advertised `deadline_ns` (u64), which nothing
+  consumed, and omitted `store_ref_min_bytes`, which the write path reads on every write — so the
+  reported set was not even a subset of the working set. That dissolves
+  [#706](https://github.com/avatarsd-llc/libtracer/issues/706) rather than fixing it. The
+  `tlv-types/point-schema-app` and `field/field-nested` conformance vectors were regenerated;
+  six new vectors were added under `subscriber/` and `settings/`.
+
+- **BREAKING (RFC-0022): the transient-local durability latch is now the SUBSCRIBER's request.**
+  It fires when *that* subscription set `durability_request`, not when the producer carries a
+  flag. This changes which subscribers are latched: a producer's `durability = 1` used to replay
+  its last value to **every** subscriber of that vertex, including ones that never asked, and
+  there was no way to decline. A producer that relied on the flag must now let its consumers ask
+  (they are the ones who know whether they want the replay). ADR-0049's one-door decision is
+  unaffected — the latch still fires at the single admission step, for every door.
+
+- **TypeScript client: `encodeSubscriber` / `LibtracerClient.subscribe` take an optional
+  `deliveryPolicy`** (`SubscriberOptions.deliveryPolicy`, with the `DELIVERY_DURABILITY_REQUEST`
+  constant exported). Omitted or `0` emits no `SETTINGS` child at all, so existing callers produce
+  byte-identical frames.
+
 
 - **BREAKING: the derived `"<kind>-client"` / `"<kind>-server"` module name is gone (#621,
   ADR-0073 §4).** `transport_vertex_t::module_for` no longer invents a module for an undeclared
