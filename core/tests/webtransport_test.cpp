@@ -470,6 +470,11 @@ void test_config_constructed_webtransport() {
     // has no `webtransport` builtin.
     net_a.register_transport_type("webtransport", tr::net::webtransport_transport_factory());
     net_b.register_transport_type("webtransport", tr::net::webtransport_transport_factory());
+    // ADR-0073 §4 (declared-only): the module names are minted HERE, by the application —
+    // an external kind no longer inherits a library-derived "<kind>-client" name.
+    (void)net_a.register_module("webtransport-client", "webtransport", tr::net::conn_role_t::DIAL);
+    (void)net_b.register_module("webtransport-server", "webtransport",
+                                tr::net::conn_role_t::LISTEN);
 
     // B: a webtransport LISTENER on a fixed localhost port, its dev cert/key
     // handed in as the kind-PRIVATE `cert`/`key` config keys.

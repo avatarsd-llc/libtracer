@@ -96,9 +96,12 @@ ports, binding is separate.
 
 [RFC-0014 — Creator endpoint: connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
 (accepted) specifies one creator endpoint **per (transport, role) module** rather than
-one global catalog. A creatable pair is a self-contained module mounted flat under
-`/net` — `ws-client`, `ws-server`, `quic-client`, `can`, … — and each module exposes a
-creator-endpoint child named `conn`:
+one global catalog. A creatable pair is a self-contained module mounted flat under the
+net root — conventionally `/net`, which is a *recommendation* (the constructor default,
+overridable per node), never a library rule — with names like `ws-client`, `ws-server`,
+`quic-client`, `can`, …, each **declared by the application** through `register_module`
+(modules are declared-only, ADR-0073 §4; the spellings here are the built-ins'
+*suggested* names). Each module exposes a creator-endpoint child named `conn`:
 
 ```
 /net/<module>/conn                          ; the creator endpoint (a / vertex, not a : field)

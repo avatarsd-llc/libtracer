@@ -23,9 +23,10 @@ void register_udp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     // dialing client route back. `keepalive` is ignored (UDP is connectionless).
     // `rx_backend` is the ADR-0042 §2 receive-segment seam, so a config-constructed
     // socket participates in owning view delivery with the host's memory policy.
-    // udp has both a dial and a listen shape, so it is TWO modules (RFC-0014 §1).
-    vertex.register_module("udp-client", "udp", conn_role_t::DIAL);
-    vertex.register_module("udp-server", "udp", conn_role_t::LISTEN);
+    // udp has both a dial and a listen shape, so it is TWO modules (RFC-0014 §1) — but the
+    // library registers NEITHER (ADR-0073 §4): the application declares each module under a
+    // name IT chooses via register_module (kUdpClientSuggestedModule /
+    // kUdpServerSuggestedModule in transport_udp.hpp are the suggested defaults).
     vertex.register_transport_type(
         "udp", [rx_backend](const conn_settings_t& s, const wire::tlv_t* /*raw_config*/) {
             return dial_or_listen(

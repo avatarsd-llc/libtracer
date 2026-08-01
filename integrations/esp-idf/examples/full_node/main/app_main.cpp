@@ -261,6 +261,12 @@ struct device_node_t {
     std::optional<tr::graph::vertex_handle_t> sensor;
 
     bool bring_up() {
+        // ADR-0073 §4 (declared-only): the APPLICATION mints the module its udp
+        // listener mounts under — the library registers no module names. This
+        // node adopts the built-in's suggested name.
+        if (!net.register_module(std::string(tr::net::kUdpServerSuggestedModule), "udp",
+                                 conn_role_t::LISTEN))
+            return false;
         // The sensor vertex: transient-local (durability=1) so a fresh remote
         // subscriber LATCHES the current value — one immediate delivery.
         tr::graph::settings_t s;
@@ -292,6 +298,10 @@ int run_host_probe(device_node_t& dev) {
     graph_t graph;
     fwd_router_t router(graph);
     transport_vertex_t net(graph, router);
+    // ADR-0073 §4 (declared-only): this host-peer application mints the module its
+    // udp dial link mounts under (the built-in's suggested name).
+    (void)net.register_module(std::string(tr::net::kUdpClientSuggestedModule), "udp",
+                              conn_role_t::DIAL);
 
     // Fan-out deliveries land here: the device's return route for our subscribe
     // is `src` as the device saw it ({host, self, probe}); the device forwards

@@ -70,6 +70,7 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_vertex.hpp"
+#include "libtracer/transport_ws.hpp"
 
 namespace {
 
@@ -265,6 +266,13 @@ int main(int argc, char** argv) {
     graph_t graph;
     tr::net::fwd_router_t router(graph);
     tr::net::transport_vertex_t net(graph, router);
+    // ADR-0073 §4 (declared-only): the application mints the module names — the library
+    // registers none. This node adopts the built-ins' suggested ws names, covering both
+    // its own listeners and any client link an in-band SPEC dials out.
+    (void)net.register_module(std::string(tr::net::kWsClientSuggestedModule), "ws",
+                              conn_role_t::DIAL);
+    (void)net.register_module(std::string(tr::net::kWsServerSuggestedModule), "ws",
+                              conn_role_t::LISTEN);
 
     // ----- the node's IDENTITY (#406 / RFC-0011), before anything is served ---------
     // With this installed, `read <any-vertex>:identity` answers the same 60-byte record

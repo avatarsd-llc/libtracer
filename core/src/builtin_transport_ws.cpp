@@ -40,9 +40,10 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* /*rx_
     //    left ADR-0044's peer-listing story creatable only by direct construction (#408).
     //  - `max_peers` (VALUE u32; default 0 = unbounded, host-bounded per RFC-0006) is the
     //    concurrent-peer admission cap.
-    // ws has both a dial and a listen shape, so it is TWO modules (RFC-0014 §1).
-    vertex.register_module("ws-client", "ws", conn_role_t::DIAL);
-    vertex.register_module("ws-server", "ws", conn_role_t::LISTEN);
+    // ws has both a dial and a listen shape, so it is TWO modules (RFC-0014 §1) — but the
+    // library registers NEITHER (ADR-0073 §4): the application declares each module under a
+    // name IT chooses via register_module (kWsClientSuggestedModule / kWsServerSuggestedModule
+    // in transport_ws.hpp are the suggested defaults).
     vertex.register_transport_type(
         "ws", [](const conn_settings_t& s, const wire::tlv_t* raw_config) {
             const config_reader_t cfg(raw_config);

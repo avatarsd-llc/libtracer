@@ -239,24 +239,38 @@ class transport_vertex_t {
     /**
      * @brief Declare the MODULE that connections of @p kind and @p role mount under.
      *
-     * A creatable *(transport, role)* pair is a self-contained module flat under `/net`
-     * (RFC-0014 §1), so a connection vertex lives at `/net/<module>/<name>` and its routing
-     * key is that same path (ADR-0061). Modules are **declared, not derived**, because the
-     * mapping is not uniform: a transport with both a dial and a listen shape is TWO modules
-     * (`ws-client`, `ws-server`), while a bus like `can` is ONE for both roles — "a bus has
-     * no dial/listen asymmetry" (`transport_can.hpp`).
+     * A creatable *(transport, role)* pair is a self-contained module under the net root
+     * (RFC-0014 §1), so a connection vertex lives at `<net_root>/<module>/<name>` and its
+     * routing key is that same path (ADR-0061). Modules are **declared-only, by the
+     * application** (ADR-0073 §4): the library never derives or auto-registers a module
+     * name, so every module segment in the graph traces to an application decision. The
+     * mapping is not uniform either: a transport with both a dial and a listen shape is TWO
+     * modules (`ws-client`, `ws-server`), while a bus like `can` is ONE for both roles — "a
+     * bus has no dial/listen asymmetry" (`transport_can.hpp`).
      *
-     * A `kind` with no declaration falls back to `"<kind>-client"` / `"<kind>-server"`, so an
-     * externally registered transport (quic) keeps working without changes; declare
-     * explicitly whenever that default is wrong.
-     * @param module The module segment (e.g. `"ws-client"`, `"can"`).
+     * Built-in transports ship *suggested* module names (e.g. `kWsClientModule` in
+     * `transport_ws.hpp`) the application may pass here — but the call is always
+     * application code. Registration is a minting boundary, so the shared segment-validity
+     * predicate (ADR-0073 §1) gates @p module: a name carrying a reserved character, empty,
+     * or over the segment byte cap answers `INVALID_PATH` and registers nothing.
+     * @param module The module segment (e.g. `"ws-client"`, `"can"`); must satisfy
+     *               `tr::graph::valid_segment`.
      * @param kind   The config `kind` this module constructs (e.g. `"ws"`).
      * @param role   The role this module fixes positionally.
+     * @return `INVALID_PATH` if @p module is not a valid path segment.
      */
-    void register_module(std::string module, std::string kind, conn_role_t role);
+    [[nodiscard]] graph::result_t<void> register_module(std::string module, std::string kind,
+                                                        conn_role_t role);
 
-    /** @brief The module a connection of @p kind and @p role mounts under (RFC-0014 §1). */
-    [[nodiscard]] std::string module_for(std::string_view kind, conn_role_t role) const;
+    /**
+     * @brief The module a connection of @p kind and @p role mounts under (RFC-0014 §1).
+     *
+     * Declared-only (ADR-0073 §4): a *(kind, role)* pair the application never declared via
+     * @ref register_module answers `SCHEMA_NOT_FOUND` — the unsupported-catalog-entry
+     * convention an unknown SPEC `type` uses — instead of a library-derived name.
+     */
+    [[nodiscard]] graph::result_t<std::string> module_for(std::string_view kind,
+                                                          conn_role_t role) const;
 
     /**
      * @brief Supply a pre-built transport a subsequent SPEC of connection @p name binds.
@@ -379,8 +393,8 @@ class transport_vertex_t {
     std::map<std::string, transport_t*, std::less<>> pending_links_;
     std::map<std::string, conn_t, std::less<>> conns_;
     std::map<std::string, transport_factory_t, std::less<>> transport_types_;
-    // Declared modules, keyed by "<kind>\x00<role>" — see register_module / module_for.
-    // Declared modules. A flat vector, not a map: this is written at setup and read once per
+    // Declared modules — see register_module / module_for (declared-only, ADR-0073 §4).
+    // A flat vector, not a map: this is written at setup and read once per
     // connection creation, so an rbtree buys nothing a linear scan over a handful of entries
     // does not — and it costs a whole extra container instantiation in flash. Nothing here is
     // on the forward path.

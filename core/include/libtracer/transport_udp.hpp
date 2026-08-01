@@ -17,12 +17,27 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <string_view>
 
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/posix_endpoint.hpp"
 #include "libtracer/transport.hpp"
 
 namespace tr::net {
+
+/**
+ * @brief Suggested module name for a DIAL `udp` connection (ADR-0073 §4).
+ *
+ * A *suggestion*, never a registration: the library auto-registers no module names — the
+ * application passes this (or any name it prefers) to
+ * `transport_vertex_t::register_module("udp-client", "udp", conn_role_t::DIAL)`.
+ */
+inline constexpr std::string_view kUdpClientSuggestedModule = "udp-client";
+
+/** @brief Suggested module name for a LISTEN `udp` connection (see
+ *         `kUdpClientSuggestedModule`; the application registers it, or any name it
+ *         prefers). */
+inline constexpr std::string_view kUdpServerSuggestedModule = "udp-server";
 
 /**
  * @brief A single-peer UDP datagram @ref transport_t (one datagram = one frame).

@@ -643,6 +643,10 @@ void test_config_constructed_quic() {
     // no `quic` builtin; a host that talks QUIC registers the factory at setup.
     net_a.register_transport_type("quic", tr::net::quic_transport_factory());
     net_b.register_transport_type("quic", tr::net::quic_transport_factory());
+    // ADR-0073 §4 (declared-only): the module names are minted HERE, by the application —
+    // an external kind no longer inherits a library-derived "<kind>-client" name.
+    (void)net_a.register_module("quic-client", "quic", tr::net::conn_role_t::DIAL);
+    (void)net_b.register_module("quic-server", "quic", tr::net::conn_role_t::LISTEN);
 
     std::promise<std::vector<std::byte>> got;
     auto fut = got.get_future();

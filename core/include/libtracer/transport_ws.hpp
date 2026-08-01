@@ -41,6 +41,20 @@
 namespace tr::net {
 
 /**
+ * @brief Suggested module name for a DIAL `ws` connection (ADR-0073 §4).
+ *
+ * A *suggestion*, never a registration: the library auto-registers no module names — the
+ * application passes this (or any name it prefers) to
+ * `transport_vertex_t::register_module("ws-client", "ws", conn_role_t::DIAL)`.
+ */
+inline constexpr std::string_view kWsClientSuggestedModule = "ws-client";
+
+/** @brief Suggested module name for a LISTEN `ws` connection (see
+ *         `kWsClientSuggestedModule`; the application registers it, or any name it
+ *         prefers). */
+inline constexpr std::string_view kWsServerSuggestedModule = "ws-server";
+
+/**
  * @brief A WebSocket (RFC 6455) server transport_t — accepts many inbound peers
  *        and exposes them through the @ref bus_link_t facet (ADR-0044).
  *

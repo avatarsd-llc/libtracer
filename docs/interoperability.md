@@ -51,8 +51,11 @@ implementation differ.
 | **What RFC-0014 specifies** | a per-module creator endpoint `/net/<module>/conn` — `SPEC{ name, config }` creates, `NAME{ name }` retires, with the transport and the role both positional in `<module>` | each module's own `conn:schema` |
 
 The created connection vertex is mounted and routed at **`/net/<module>/<name>`**,
-`<module>` defaulting to `<kind>-client` / `<kind>-server`
-(`core/src/transport_vertex.cpp:150,174,191-195`). The per-module creator endpoint is
+`<module>` **declared by the application** through `register_module` — modules are
+declared-only (ADR-0073 §4): the library derives and auto-registers no module names, and an
+undeclared `kind` fails creation with `SCHEMA_NOT_FOUND`
+(`core/src/transport_vertex.cpp:133,149-157,193-211`). `/net` itself is the recommended root
+convention (a constructor default, overridable per node). The per-module creator endpoint is
 the accepted direction and is **not implemented**: an integration written against
 this implementation writes the global `:children[]` catalog
 ([RFC-0014 — Creator endpoint: connection lifecycle and link
