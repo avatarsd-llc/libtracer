@@ -1,17 +1,19 @@
 /**
  * @file
- * @brief Which vertices carry an extension block, and how many of those hold QoS that is
- *        byte-identical to the default — the census #617 turns on.
+ * @brief Which vertices carry an extension block, and how many of those hold a storage
+ *        policy byte-identical to the default — the census RFC-0022 §3.C turns on.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * `vertex_ext_t` stores a full inline `settings_t` (24 B, and it does not shrink on rv32 —
- * every member is a fixed-width scalar). #617 proposes replacing it with a `const settings_t*`.
- * That is a WIN for a vertex whose QoS is default, which then points at the existing
- * `kDefaultSettings` constant and stores 4 B instead of 24; it is a small LOSS for a vertex
- * with custom QoS, which pays a pointer PLUS a 24 B allocation where it used to pay 24 B
- * inline. So the whole proposal reduces to one ratio, and nothing had measured it.
+ * This file was written to price #617 (intern the QoS profile) against a 24 B `settings_t`.
+ * RFC-0022 SUPERSEDED that proposal by deleting most of the struct: `settings_t` is now the
+ * two storage magnitudes, 8 B, and the four delivery knobs an intern table would have shared
+ * no longer exist. What survives is the question the census actually answers, which RFC-0022
+ * made sharper rather than moot: **which vertex shapes are forced to carry an extension block
+ * by something that says nothing about their storage policy** — because §3.C's
+ * copy-at-registration inheritance materialises an ext block on every descendant of an
+ * overriding vertex, so an override's RAM cost is exactly the ext blocks it creates.
  *
  * @section how How the census is taken without touching vertex_t
  *
@@ -19,11 +21,11 @@
  * extension block, and `ext->settings` when it does. So the two facts separate by comparing an
  * address against a value:
  *
- *   - `&v.settings() == &kDefaultSettings`  ⇒ NO ext. Already optimal; #617 cannot improve it.
- *   - address differs, value equals default  ⇒ ext-bearing, DEFAULT QoS. **The waste.** 24 B
- *     that are byte-identical to a constant.
- *   - address differs, value differs         ⇒ ext-bearing, CUSTOM QoS. Costs 4 B more under
- *     the proposal.
+ *   - `&v.settings() == &kDefaultSettings`  ⇒ NO ext. The pay-nothing shape.
+ *   - address differs, value equals default  ⇒ ext-bearing, DEFAULT policy. 8 B that are
+ *     byte-identical to a constant, carried for a reason unrelated to storage.
+ *   - address differs, value differs         ⇒ ext-bearing, CUSTOM policy. The ext is
+ *     carrying something.
  *
  * No accessor was added for this. A census that required widening the surface it measures
  * would be a worse instrument.
@@ -32,16 +34,15 @@
  *
  * `adopt_identity` skips the allocation only when ALL of: non-STREAM role, no handlers,
  * `settings == kDefaultSettings`, and no existing ext. So an ext is forced by being a STREAM,
- * by carrying a handler, or by holding an ACL — **independently of QoS**. Those are exactly the
- * shapes that can be ext-bearing while their QoS is untouched, and the shapes swept below.
+ * by carrying a handler, by holding an ACL, or — since RFC-0022 §3.C — by INHERITING a
+ * non-default storage policy from an ancestor. Those are the shapes swept below.
  *
  * @section reading Reading it
  *
- * The verdict is a ratio, not a latency. It says which of #617's two steps is worth doing:
- * point-at-the-default alone (no intern table, no lifetime protocol, no copy-on-write), or the
- * full intern machinery that also shares distinct profiles. It does NOT say whether the extra
- * indirection on the settings read is affordable — `settings()` is read on the write hot path,
- * and that is `bench_libtracer`'s question, not this file's.
+ * The output is a ratio, not a latency, and it prices RAM: `sizeof(vertex_ext_t)` per vertex
+ * in the ext-bearing buckets. It says nothing about the settings READ — that is one inline
+ * load by construction (§3.C is copy-at-registration precisely so it stays one), and
+ * `bench_libtracer`'s write/store arms are what measure it.
  */
 
 #include <bit>
@@ -60,11 +61,11 @@ using tr::graph::role_t;
 using tr::graph::settings_t;
 using tr::graph::vertex_handle_t;
 
-/** @brief The three buckets a vertex can fall into, and what #617 does to each. */
+/** @brief The three buckets a vertex can fall into. */
 struct census_t {
-    int no_ext = 0;      /**< @brief No extension block — already 0 B of settings. */
-    int ext_default = 0; /**< @brief Ext-bearing, default QoS — 24 B of a constant. */
-    int ext_custom = 0;  /**< @brief Ext-bearing, custom QoS — the case that costs more. */
+    int no_ext = 0;      /**< @brief No extension block — 0 B of settings, and no block. */
+    int ext_default = 0; /**< @brief Ext-bearing, default policy — 8 B of a constant. */
+    int ext_custom = 0;  /**< @brief Ext-bearing, custom policy — the ext carries something. */
 };
 
 /**
@@ -91,8 +92,9 @@ constexpr int kPer = 64;
 
 int main() {
     std::printf(
-        "QoS census (#617) — an ext-bearing vertex with DEFAULT QoS stores 24 B that are\n"
-        "byte-identical to a constant. Which shapes are those, and how many?\n\n");
+        "Storage-policy census (RFC-0022 §3.C) — an ext-bearing vertex with the DEFAULT\n"
+        "policy stores 8 B that are byte-identical to a constant, inside a block it was\n"
+        "forced to allocate for another reason. Which shapes are those, and how many?\n\n");
     std::printf("%-22s %-9s %-13s %-12s %s\n", "shape", "no ext", "ext+default", "ext+custom",
                 "what forces the ext");
 
@@ -113,7 +115,7 @@ int main() {
         total.ext_custom += c.ext_custom;
     }
 
-    // Handler vertex, QoS untouched: an ext is forced by the handler alone.
+    // Handler vertex, policy untouched: an ext is forced by the handler alone.
     {
         graph_t g;
         census_t c;
@@ -123,8 +125,8 @@ int main() {
             h.on_read = [] { return tr::view::view_t{}; };
             classify(g.register_vertex(path_t(p), role_t::HANDLER, std::move(h)), c);
         }
-        std::printf("%-22s %-9d %-13d %-12d %s\n", "handler, default QoS", c.no_ext, c.ext_default,
-                    c.ext_custom, "the handler");
+        std::printf("%-22s %-9d %-13d %-12d %s\n", "handler, default policy", c.no_ext,
+                    c.ext_default, c.ext_custom, "the handler");
         total.no_ext += c.no_ext;
         total.ext_default += c.ext_default;
         total.ext_custom += c.ext_custom;
@@ -142,13 +144,13 @@ int main() {
             classify(g.register_vertex(path_t(p), role_t::STREAM, {}, s), c);
         }
         std::printf("%-22s %-9d %-13d %-12d %s\n", "STREAM, keep_last=8", c.no_ext, c.ext_default,
-                    c.ext_custom, "STREAM role AND non-default QoS");
+                    c.ext_custom, "STREAM role AND a non-default policy");
         total.no_ext += c.no_ext;
         total.ext_default += c.ext_default;
         total.ext_custom += c.ext_custom;
     }
 
-    // STREAM at default depth: the role forces the ext, the QoS is untouched.
+    // STREAM at default depth: the role forces the ext, the policy is untouched.
     {
         graph_t g;
         census_t c;
@@ -156,59 +158,73 @@ int main() {
             const std::string p = "/streamd/v" + std::to_string(i);
             classify(g.register_vertex(path_t(p), role_t::STREAM), c);
         }
-        std::printf("%-22s %-9d %-13d %-12d %s\n", "STREAM, default QoS", c.no_ext, c.ext_default,
-                    c.ext_custom, "the STREAM role alone");
+        std::printf("%-22s %-9d %-13d %-12d %s\n", "STREAM, default policy", c.no_ext,
+                    c.ext_default, c.ext_custom, "the STREAM role alone");
         total.no_ext += c.no_ext;
         total.ext_default += c.ext_default;
         total.ext_custom += c.ext_custom;
     }
 
-    // Explicit QoS on an ordinary leaf: ext forced BY the settings, so it can never be default.
+    // An explicit policy on an ordinary leaf: the ext is forced BY the settings, so this
+    // shape can never land in the default bucket.
     {
         graph_t g;
         census_t c;
         settings_t s;
-        s.deadline_ns = 1000000;
+        s.store_ref_min_bytes = 256;
         for (int i = 0; i < kPer; ++i) {
-            const std::string p = "/qos/v" + std::to_string(i);
+            const std::string p = "/policy/v" + std::to_string(i);
             classify(g.register_vertex(path_t(p), role_t::STORED_VALUE, {}, s), c);
         }
-        std::printf("%-22s %-9d %-13d %-12d %s\n", "explicit deadline", c.no_ext, c.ext_default,
+        std::printf("%-22s %-9d %-13d %-12d %s\n", "explicit threshold", c.no_ext, c.ext_default,
                     c.ext_custom, "the settings themselves");
         total.no_ext += c.no_ext;
         total.ext_default += c.ext_default;
         total.ext_custom += c.ext_custom;
     }
 
+    // RFC-0022 §3.C: a leaf under an OVERRIDING ancestor. Nothing about this vertex asks
+    // for an ext — it is a plain default leaf — but it inherits a non-default policy BY
+    // VALUE at registration, so it materialises one. This is the RAM an override buys, and
+    // it is the whole of what an override costs.
+    {
+        graph_t g;
+        census_t c;
+        settings_t s;
+        s.store_ref_min_bytes = 256;
+        (void)g.register_vertex(path_t("/inh"), role_t::STORED_VALUE, {}, s);
+        for (int i = 0; i < kPer; ++i) {
+            const std::string p = "/inh/v" + std::to_string(i);
+            classify(g.register_vertex(path_t(p), role_t::STORED_VALUE), c);
+        }
+        std::printf("%-22s %-9d %-13d %-12d %s\n", "leaf under override", c.no_ext, c.ext_default,
+                    c.ext_custom, "the INHERITED policy (§3.C)");
+        total.no_ext += c.no_ext;
+        total.ext_default += c.ext_default;
+        total.ext_custom += c.ext_custom;
+    }
+
     const int ext = total.ext_default + total.ext_custom;
-    std::printf("\nTOTAL  no-ext %d | ext-bearing %d  (default QoS %d, custom %d)\n", total.no_ext,
-                ext, total.ext_default, total.ext_custom);
+    std::printf("\nTOTAL  no-ext %d | ext-bearing %d  (default policy %d, custom %d)\n",
+                total.no_ext, ext, total.ext_default, total.ext_custom);
 
     if (ext == 0) {
         std::printf("VERDICT no ext-bearing vertices in this sweep — the census says nothing.\n");
         return 0;
     }
-    // The ratio above is an artifact of the shapes THIS FILE constructs, so it is not the
-    // verdict. What is mix-INDEPENDENT is the break-even. Under #617 step 1 on rv32 a
-    // default-QoS vertex goes 24 B -> 4 B (saves 20) and a custom-QoS one goes 24 B -> 4 B plus
-    // a 24 B allocation (costs 4). So 20*d > 4*(ext - d), i.e. it pays whenever more than ONE
-    // IN SIX ext-bearing vertices holds default QoS. That threshold is a property of the
-    // sizes, not of any deployment.
+    std::printf("        sizeof(vertex_ext_t) = %zu B, of which settings_t is %zu B.\n",
+                sizeof(tr::graph::vertex_ext_t), sizeof(settings_t));
     std::printf(
-        "VERDICT step 1 (point at kDefaultSettings — no intern table, no lifetime\n"
-        "        protocol, no copy-on-write) pays whenever more than 1 in 6 (16.7%%) of\n"
-        "        ext-bearing vertices hold DEFAULT QoS. 20 B saved each against 4 B\n"
-        "        lost each on rv32. Mix-independent.\n\n");
-    std::printf(
-        "        STRUCTURAL — this part does not depend on the mix:\n"
-        "          recoverable : a handler vertex, and a STREAM at default depth. Both\n"
-        "                        are forced to carry an ext by something that says\n"
-        "                        NOTHING about QoS, then store 24 B of a constant.\n"
-        "          never       : a vertex whose ext was forced BY its settings cannot\n"
-        "                        be in the default bucket by construction, so it is\n"
-        "                        always the 4 B loss.\n"
-        "        Whether a real node clears 1-in-6 is that node's shape mix — but the\n"
-        "        first bucket holds every handler and every default-depth STREAM.\n");
+        "\nSTRUCTURAL — this part does not depend on the shape mix this file happens to\n"
+        "construct:\n"
+        "  carried for free : a handler vertex, and a STREAM at default depth. Both are\n"
+        "                     forced to carry an ext by something that says NOTHING about\n"
+        "                     storage, so their 8 B of policy costs no allocation of its own.\n"
+        "  paid for         : a leaf whose ext exists only because it holds — or INHERITS,\n"
+        "                     RFC-0022 §3.C — a non-default policy. That vertex pays a whole\n"
+        "                     vertex_ext_t. An override's RAM cost is one such block per\n"
+        "                     inheriting descendant, which is why §3.C grows only the subtree\n"
+        "                     that opted in.\n");
     (void)ext;
     return 0;
 }

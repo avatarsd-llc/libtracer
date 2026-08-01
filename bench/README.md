@@ -22,6 +22,7 @@ for a local `preview.html` of the same charts.
 | `bench_fanout_clone_storm` | **many-core refcount contention**: T threads clone+release one shared segment — the per-subscriber fan-out primitive under wide fan-out (ADR-0032 128-core row). |
 | `bench_await_wakeup_storm` | **many-core await fan-in**: one writer storms writes while W threads `await` one vertex — condvar/notify_all + vertex-lock scaling (ADR-0032 128-core row). |
 | `bench_route_handle_contention` | **per-link-lock contention**: T producers doing steady-state `ensure_egress` reuse-reads on one hot link (its header carries the finding that `shared_mutex` does not help). |
+| `bench_storage_policy` | **the RFC-0022 §3.C latency gate**: the two storage knobs (`store_ref_min_bytes` per write, `history_keep_last` per store) must stay ONE inline load. Sweeps DEPTH (1 vs 8) because that is the only shape that separates a load from an ancestor walk, and carries an **invariant control leg** so an A/B against another build can tell the change from the machine. Driven by `ab_storage_policy.py`. |
 | `bench_rx_source_topology` | **RX failable-source topology**: T receive threads forwarding rope frames through a shared heap, one shared pool, or one pool per child — the measurement behind [ADR-0067](../docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md) §3. |
 
 ### `bench_forward_heap` — the 16KB-RAM zero-heap forward gate (ADR-0038)

@@ -171,6 +171,14 @@ add_executable(bench_qos_census bench_qos_census.cpp)
 target_link_libraries(bench_qos_census PRIVATE libtracer)
 target_compile_options(bench_qos_census PRIVATE -Wall -Wextra)
 
+# The RFC-0022 §3.C latency gate: the two storage knobs must stay ONE inline load, which is
+# falsifiable only by sweeping DEPTH (a walk is O(depth), a load is not). Carries its own
+# invariant control leg (#464) so an A/B against another build can tell the change from the
+# machine.
+add_executable(bench_storage_policy bench_storage_policy.cpp)
+target_link_libraries(bench_storage_policy PRIVATE libtracer)
+target_compile_options(bench_storage_policy PRIVATE -Wall -Wextra)
+
 add_executable(bench_tcp_peer_scaling bench_tcp_peer_scaling.cpp)
 target_link_libraries(bench_tcp_peer_scaling PRIVATE libtracer)
 target_compile_options(bench_tcp_peer_scaling PRIVATE -Wall -Wextra)
