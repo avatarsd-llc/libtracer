@@ -169,6 +169,39 @@ class fwd_router_t {
      */
     bool remove_child(std::string_view name);
 
+    /**
+     * @brief Bind a local producer's subscription toward a MOUNT-PATH target — the
+     *        locally-initiated dual of the wire `:subscribers[]` append (#739).
+     *
+     * @p target is one ordinary path that routes through a transport mount (e.g.
+     * `/net/ws-client/b/display/val`, arbitrarily nested `/net/A/net/B/x`). It is
+     * resolved through the SAME strip-K cached descent the forward path uses
+     * (ADR-0061), so the caller never hand-splits `(link, return route)` — the split
+     * that bakes in a single-hop assumption and the `net/<module>/<name>` string
+     * shape. The residual below the matched mount becomes the delivery route the
+     * first hop forwards, exactly as an inbound `FWD` would carry it.
+     *
+     * **Bind-time resolution, link-lifetime durability.** The `(link, route)` split is
+     * computed ONCE, here. If the link later tears down, the binding is evicted with it
+     * (@ref link_down) and re-binding is the application's job — this helper does not
+     * track topology churn (re-establishment is #716's question, not this API's).
+     *
+     * A target whose first hop lands on a bus PEER (`/net/ws-server/mesh/p0/...`) is
+     * rejected with `INVALID_PATH`: the per-delivery sink resolves the stored link by
+     * its registry NAME, and a peer has no directed registry entry to store — binding
+     * it would produce a subscription that silently broadcasts. Directed bus-peer
+     * delivery arrives with the #741 work.
+     *
+     * @param producer The local producer vertex's path.
+     * @param target   The mount-path target, spelled from THIS node's root.
+     * @return `NOT_FOUND` if @p producer names no vertex; `INVALID_PATH` if @p target
+     *         does not route through a mount (or lands on a bus peer);
+     *         `BACKPRESSURE` on allocation failure; otherwise the
+     *         @ref graph::graph_t::subscribe_wire admission result.
+     */
+    [[nodiscard]] graph::result_t<void> subscribe_toward(const graph::path_t& producer,
+                                                         const graph::path_t& target);
+
     // -- observability / terminus sinks (fn-ptr + context, ADR-0047/ADR-0068 §3) -------
     // Not std::function: these fire on the per-frame RX path, where the erasure
     // machinery (code size, heap capability, exception paths) is the largest avoidable
