@@ -26,9 +26,11 @@
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/config.hpp"
 #include "libtracer/error.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/op_resolve.hpp"
+#include "libtracer/pin_instrument.hpp"
 #include "libtracer/tlv_emit.hpp"
 
 /**
@@ -149,6 +151,22 @@ struct arena_node {
         const std::span<const std::byte> w = node().wire;
         const std::size_t off = static_cast<std::size_t>(w.data() - frame_view->bytes().data());
         return rope_t(frame_view->subview(off, w.size()));
+    }
+
+    /**
+     * @brief The bytes a pin would KEEP ALIVE (RFC-0022 §3.D's `segment_bytes`): the owning
+     *        segment's ALLOCATED size, not the delivered frame view's length.
+     *
+     * A subview shares the segment's refcount, so the segment is freed only when the last
+     * subview dies — the held quantity is `owner->bytes.size()`, whatever window the transport
+     * narrowed the frame to. `udp_transport_t` makes the gap concrete: it receives into a
+     * `kMaxDatagram` (64 KB) segment and delivers `subview(0, n)`, so a 200-byte datagram's
+     * payload pins 64 KB. 0 when there is no owning segment (a borrowed, span-delivered frame),
+     * which the predicate reads as "cannot pin" without ever consulting the ratio.
+     */
+    [[nodiscard]] std::size_t segment_bytes(const view_t* frame_view) const noexcept {
+        if (frame_view == nullptr || !frame_view->owner) return 0;
+        return frame_view->owner->bytes.size();
     }
 
     /** @brief Forward-only child cursor — the shared shape of `tlv_view_t::children_t`. */
@@ -347,22 +365,54 @@ template <class N>
 }
 
 /**
- * @brief The ADR-0042 §3 stored-value decision, generalized to the rope tier (ADR-0053 ⑤): PIN the
- *        payload as a subrope of the owning delivery (refcount, zero copy) when the vertex opted in
- *        (`store_ref_min_bytes` > 0), the payload is big enough, its opt byte is trailer-less, AND
- *        the reader can pin (`pin_wire`) — the span tier pins a subview of the contiguous owning
- *        `frame_view`, the rope tier a subrope of its own scatter-gather segments.
+ * @brief The RFC-0022 §3.D stored-value decision: PIN the payload as a subrope of the owning
+ *        delivery (refcount, zero copy) iff `payload_bytes * K >= segment_bytes`, the payload is
+ *        trailer-less, AND the reader can pin (`pin_wire`) — the span tier pins a subview of the
+ *        contiguous owning `frame_view`, the rope tier a subrope of its own scatter-gather
+ *        segments. Otherwise the ADR-0041 §2 one-copy `own_tlv`.
  *
- * Otherwise the ADR-0041 §2 one-copy `own_tlv`. The
- * eligibility test lives HERE, one locus for both readers; each reader only produces
- * its pinned rope. Returns a rope so a multi-link pinned payload keeps its segments.
+ * @param k The amplification ratio (`config_t::kPinPayloadRatio`, or a per-vertex override while
+ *          RFC-0022 §6's measurement runs). @ref tr::graph::kPinNever disables pinning outright
+ *          and short-circuits before the segment size is even asked for.
+ *
+ * @section pin_ratio_why Why a ratio and not an absolute threshold
+ *
+ * The two branches are asymmetric in RAM, not in correctness: a copy holds the payload, a pin
+ * holds the whole owning **segment** for the value's lifetime. An absolute byte threshold
+ * (`store_ref_min_bytes`) prices the payload and never looks at what is held, so a 4 KB payload
+ * in a 4 KB frame and the same 4 KB payload in a 256 KB frame — opposite trades — satisfy it
+ * identically, and the waste is bounded not at all. The ratio bounds it at `(K-1)x` the payload
+ * using two quantities already in hand three lines from the branch.
+ *
+ * @section pin_ratio_segment What `segment_bytes` is
+ *
+ * `N::segment_bytes` answers the ALLOCATED size of the segment(s) a pin would keep alive, not
+ * the length of the delivered frame view. On a real transport those differ by orders of
+ * magnitude: `udp_transport_t` receives every datagram into a `kMaxDatagram`-sized segment and
+ * delivers a `subview(0, n)` of it, so pinning a 1 KB datagram's payload holds 64 KB. Pricing
+ * the view length instead would measure a cost nobody pays.
+ *
+ * The eligibility test lives HERE, one locus for both readers; each reader only produces its
+ * pinned rope and answers for its own segment shape. Returns a rope so a multi-link pinned
+ * payload keeps its segments.
  */
 template <class N>
-[[nodiscard]] rope_t own_or_ref_tlv(const N& node, const view_t* frame_view,
-                                    std::uint32_t ref_min_bytes) {
-    if (ref_min_bytes > 0 && node.wire_size() >= ref_min_bytes && trailer_less(node)) {
-        if (std::optional<rope_t> pinned = node.pin_wire(frame_view)) return std::move(*pinned);
+[[nodiscard]] rope_t own_or_ref_tlv(const N& node, const view_t* frame_view, std::uint32_t k) {
+    if (k != tr::graph::kPinNever && trailer_less(node)) {
+        // 64-bit product: `payload * k` overflows 32 bits at k = pin-always on any real payload,
+        // and an overflowed product decides the branch backwards.
+        const std::uint64_t payload = node.wire_size();
+        const std::uint64_t segment = node.segment_bytes(frame_view);
+        if (segment != 0 && payload * std::uint64_t{k} >= segment) {
+            if (std::optional<rope_t> pinned = node.pin_wire(frame_view)) {
+                LIBTRACER_TICK_PIN();
+                return std::move(*pinned);
+            }
+            LIBTRACER_TICK_PIN_REFUSED();
+            return rope_t(own_tlv(node));
+        }
     }
+    LIBTRACER_TICK_COPY();
     return rope_t(own_tlv(node));
 }
 
@@ -702,11 +752,21 @@ template <class N>
 
             // The stored written value: ADR-0041 §2 one ownership copy, trailer-sliced by
             // construction (§4 — an arriving CRC/TS trailer is NOT stored; stored TLVs are
-            // trailer-less at rest, ADR-0035) — or, on an owning delivery with the vertex
-            // opted in, an ADR-0042 §3 pinned subrope of the frame (refcount, zero copy;
-            // multi-link on the rope tier). An empty rope is an allocation failure.
-            const rope_t value =
-                own_or_ref_tlv(payload_node, frame_view, graph.settings(v).store_ref_min_bytes);
+            // trailer-less at rest, ADR-0035) — or, when RFC-0022 §3.D's amplification ratio
+            // says the payload dominates the segment it would pin, an ADR-0042 §3 pinned
+            // subrope of the frame (refcount, zero copy; multi-link on the rope tier). An
+            // empty rope is an allocation failure.
+            //
+            // K comes from the vertex's u32 when set and from `config_t::kPinPayloadRatio`
+            // otherwise. The per-vertex override exists ONLY so RFC-0022 §6's arms rotate
+            // inside ONE process: measuring them as separate binaries is what produced the
+            // 2.8x swing on identical code that the standing interleave rule was written
+            // against. §3.D's landing form is the config constant alone, and the sentinel is
+            // both defaults — so this branch changes no observable behaviour by itself.
+            const std::uint32_t pin_k = graph.settings(v).store_ref_min_bytes != 0
+                                            ? graph.settings(v).store_ref_min_bytes
+                                            : tr::graph::kPinPayloadRatio;
+            const rope_t value = own_or_ref_tlv(payload_node, frame_view, pin_k);
             if (value.total_length() == 0)
                 return assemble_error(reply_dst_wire, reply_src_wire, status_t::BACKPRESSURE);
 

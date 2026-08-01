@@ -69,7 +69,7 @@ slab; the composition guidance is in
 **"One slab, whole stack" is a direction, not a state the tree is in.** Two gaps stop a node that
 has injected every seam above from actually holding the whole stack in its slab, and both are open:
 
-- the **terminus resolver's** rope-tier flattens (`core/src/op_resolve_view.cpp:80`, `:142`) never
+- the **terminus resolver's** rope-tier flattens (`core/src/op_resolve_view.cpp:80`, `:166`) never
   see `flat` and draw from the global heap on every fragmented terminus request — **#766**,
   measured: with `flat` armed to refuse everything, a 4-link `FWD{READ}` consulted it **zero** times
   and still made 20 global-heap `new` calls;

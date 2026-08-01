@@ -84,7 +84,7 @@ identifiers for the rest of this page.
 | ③ | Field write — the twin of ② (`core/src/graph.cpp:1259`) | no — refcount bump | yes | Fallback | Same as ② |
 | ④ | 4096-byte decode arena (`core/src/graph.cpp:1035-1036`) | yes — paid on every branch write | yes | Structure scratch, not a payload copy | **No** — see §3; the rope cursor is a byte source, not a structure store |
 | ⑤ | `own_wire` mutation ownership — `sub.flatten()` (`core/src/op_resolve_view.cpp:80`) | no — `over_bytes(sub.only())`, no copy | yes — flattens the multi-link subrope | Structural for *mutated* values | No — this step *is* the ownership copy; it still owns |
-| ⑥ | Per-node parse contiguity — `ensure_cache` → `wire().materialize()` (`core/src/op_resolve_view.cpp:140-142`) | no — a single-link node adopts | only per **straddling** node | Fallback, span-node-shaped | Yes — rope-native node accessors remove it |
+| ⑥ | Per-node parse contiguity — `ensure_cache` → `wire().materialize()` (`core/src/op_resolve_view.cpp:164-166`) | no — a single-link node adopts | only per **straddling** node | Fallback, span-node-shaped | Yes — rope-native node accessors remove it |
 | ⑦ | `deliver_rope` span fallback (`core/include/libtracer/receiver_slot.hpp:138`) | no | yes — only when no rope sink is installed | Fallback — the cost of a span-only sink | Yes — installing the rope sink removes it; see §4.1 |
 | ⑧ | WS RX reassembly — `asm_buf_t` (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:102`), regrow-and-memcpy at `:126-127` | no — unfragmented delivers borrowed (`:403-404`) | yes — O(n²) across fragments | Fallback | Enables ⑦'s removal; the copy itself is a pool-recv question, not a cursor one |
 | ⑨ | WS TX gather — `new[]` + memcpy in `queue_send` (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:476`, gather at `:487-494`) | yes — per frame per peer | yes | Structural within the `esp_http_server` seam | **No** — TX-side; the cursor is irrelevant |
@@ -253,7 +253,7 @@ demand. The escape hatch is the consumer's, not the router's.
    a rope-aware node type instead of `decode_into` + `materialize`. Removes ②③.
 2. **Streaming branch decode** (§3.2 move 2) — removes ④'s on-stack arena.
 3. **Rope-native node accessors for the walk** — `ensure_cache`
-   (`core/src/op_resolve_view.cpp:140-142`) flattens each *accessed* node whose own subrope
+   (`core/src/op_resolve_view.cpp:164-166`) flattens each *accessed* node whose own subrope
    straddles a link. Converting `wire()` / `body()` from `std::span` to rope-native readers (fields
    via `load_le` / `for_each_span`) plus a scatter-gather reply head removes ⑥.
 

@@ -80,8 +80,8 @@ ANCHORS = [
     ("core/src/graph.cpp:1509", "step0.wildcard"),
     ("core/src/graph.cpp:2117", '"children" && !field.steps[0].wildcard'),
     ("core/src/graph.cpp:2195", "!field.steps[0].wildcard", 'field.steps[0].name == "subscribers"'),
-    ("core/src/op_resolve_walk.hpp:237", "enum class index_mode_t"),
-    ("core/src/op_resolve_walk.hpp:594", 'field.steps[0].name != "subscribers"'),
+    ("core/src/op_resolve_walk.hpp:255", "enum class index_mode_t"),
+    ("core/src/op_resolve_walk.hpp:644", 'field.steps[0].name != "subscribers"'),
     ("core/include/libtracer/mem_heap.hpp:149", "try_assign"),
     ("core/include/libtracer/view.hpp:26", "namespace tr::view"),
     ("core/include/libtracer/frame.hpp:23", "namespace tr::wire"),
@@ -126,7 +126,7 @@ ANCHORS = [
     # #766 — the terminus resolver's rope-tier flattens, which `flat` does NOT cover. Pinned
     # so the corrected scope sentences cannot drift off the sites that make them true.
     ("core/src/op_resolve_view.cpp:80", "return sub.flatten()"),
-    ("core/src/op_resolve_view.cpp:142", "cache_ = v_->wire().materialize()"),
+    ("core/src/op_resolve_view.cpp:166", "cache_ = v_->wire().materialize()"),
     # The in-tree pool/synchronisation composition the thread-safety contract names.
     ("core/include/libtracer/mem_pool.hpp:118", "class sync_pool_t"),
     ("core/include/libtracer/vertex.hpp:2299", "vertex_t* parent_"),

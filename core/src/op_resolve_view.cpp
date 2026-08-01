@@ -101,6 +101,30 @@ class view_node {
     }
 
     /**
+     * @brief The bytes a pin would KEEP ALIVE (RFC-0022 §3.D's `segment_bytes`): the sum of the
+     *        ALLOCATED sizes of the segments the pinned subrope's links belong to.
+     *
+     * The rope tier is the multi-link case, so the held quantity is a sum, not one segment: a
+     * payload straddling three RX segments pins all three in full, and pricing only the first
+     * would under-report the RAM the ratio exists to bound. Distinct owners are counted once —
+     * two links into the same segment hold it once, and double-counting would make the
+     * predicate decline a pin that costs nothing extra.
+     */
+    [[nodiscard]] std::size_t segment_bytes(const view_t*) const {
+        const rope_t sub = v_->wire().subrope(0, wire_size());
+        std::size_t total = 0;
+        const std::span<const view_t> links = sub.links();
+        for (std::size_t i = 0; i < links.size(); ++i) {
+            if (!links[i].owner) continue;
+            bool seen = false;
+            for (std::size_t j = 0; j < i && !seen; ++j)
+                seen = links[j].owner.get() == links[i].owner.get();
+            if (!seen) total += links[i].owner->bytes.size();
+        }
+        return total;
+    }
+
+    /**
      * @brief Forward-only child cursor — the shared shape of `arena_node::children_cursor` and
      *        `tlv_view_t::children_t`.
      *
