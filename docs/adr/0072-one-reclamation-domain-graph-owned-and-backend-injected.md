@@ -1,6 +1,37 @@
 # One reclamation domain: graph-owned, backend-injected, type-erased
 
-Status: **accepted; not yet implemented** (tracking: [#684](https://github.com/avatarsd-llc/libtracer/issues/684), [#576](https://github.com/avatarsd-llc/libtracer/issues/576), [#635](https://github.com/avatarsd-llc/libtracer/issues/635)). This is the reuse [ADR-0069](0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md) §4 anticipated: *"the hazard machinery landed here is expected to be reusable there, and that is a reason to land this first."* It landed; this ADR rules on the reuse.
+Status: **SUPERSEDED (2026-08-01) by the [#576](https://github.com/avatarsd-llc/libtracer/issues/576) direction-3 maintainer ruling — an explicit public collector.** §4's `#684` half (immutability by construction) **shipped and stands**; the domain itself is not built and will not be built for #576. [#635](https://github.com/avatarsd-llc/libtracer/issues/635) **keeps the open reclamation question** — see §Supersession, which is normative over everything below it. The ADR is kept as the record of a design that was tried, measured, and rejected on numbers. This was the reuse [ADR-0069](0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md) §4 anticipated: *"the hazard machinery landed here is expected to be reusable there, and that is a reason to land this first."* It landed; that reuse is what was refuted.
+
+## Supersession (2026-08-01) — why the domain died, and what replaced it for #576
+
+### Why
+
+Three implementation rounds were attempted on [PR #750](https://github.com/avatarsd-llc/libtracer/pull/750) (which stays DRAFT, superseded by this ruling, never merged). Each produced a **blocking defect a reproducer caught** — not a review objection, a failing test:
+
+1. **Round 1 — mutual wait.** The retiring writer waited on a scan while a thread inside the scan's path waited on the writer.
+2. **Round 2 — the free ran under `map_mutex_`.** A retired seam owns user callbacks; freeing it inside the graph's widest lock puts arbitrary embedder destructor code there, and any such destructor that touches the graph deadlocks on the way out.
+3. **Round 3 — the free ran on the caller's thread under `ctl_m_`.** The same defect, one lock over: `retire()` itself did the freeing, so the free's location was fixed by the library at a point the embedder could not move.
+
+And the **cost was irreducible**: the announce/clear pair the readers need is a `seq_cst` fence on the value-seam read path, measured at **+19 % / +29 %**. Per the standing rule that a latency regression on the read or write path is a **REJECT** with no trade offered, that alone ends the design; the three defects say the complexity did not buy anything either.
+
+The lesson the rounds taught, taken literally: **the free's location is an API contract that propagates up every caller.** So it stops being hidden and gets published.
+
+### What replaced it (for #576 only)
+
+`graph_t::collect()` — a public, explicit collector. It swaps `retired_seams_` into a local under `map_mutex_` and lets the local destruct **after** the lock is released, on the caller's thread, at a moment the embedder chose. Plus `graph_t::parked_seam_count()`, so an embedder that never calls `collect()` has an **observable** condition rather than a silent leak.
+
+No hazard cells, no `membarrier`, no announce/scan, no deferred-reclamation machinery, and **zero cost on the read or write path** — nothing was added to either. Each round's specific defect is *structurally* absent: round 1's mutual wait needs a wait (there is none); round 2's free-under-`map_mutex_` is excluded by the swap; round 3's free-on-the-caller's-thread-under-a-library-chosen-lock cannot arise because `retire()` no longer frees at all.
+
+**Accepted cost, ruled deliberately:** an embedder that never calls `collect()` still leaks. That is a documented, greppable API obligation instead of a hidden defect.
+
+### The constraint this ruling attaches: direction 3 does NOT generalize to #635
+
+`collect()`'s contract is *"call it from a point where no lock-free reader holds one."* Whether that is satisfiable is a property of the **tenant**, not of the collector:
+
+- **Value seams (#576) — satisfiable.** Connection teardown is rare and embedder-controlled. A seam reader's hold is short and confined to one graph operation, so an embedder can name a quiescent point (between operations on a single-threaded node; after the receive threads are joined or paused on a threaded one).
+- **Subscriber edge arrays (#635) — NOT satisfiable.** A `fan_out` reader holds an edge array **across dispatch**, and dispatch re-enters the graph and does I/O. On a many-core host there is no moment an embedder can name in which no thread is mid-`fan_out`. Publishing the free's location does not help when the caller cannot answer the question the contract asks.
+
+So **#635 keeps the open reclamation question.** It must not cite this ADR as its answer, and it must not cite `collect()` as a pattern to copy: nothing here is precedent for a tenant whose readers hold a block across an unbounded, re-entrant, I/O-doing scope.
 
 ## Context
 

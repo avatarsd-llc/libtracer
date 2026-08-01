@@ -78,6 +78,8 @@ class graph_t {
                                                   handlers_t = {}, settings_t = {});
     result_t<void> retire(vertex_handle_t);                       // logical absence, subtree-wide
     std::uint32_t  retire_generation(vertex_handle_t) const noexcept;
+    void           collect();                    // free the parked value seams — CALLER-timed
+    std::size_t    parked_seam_count() const;    // how many await a collect()
     std::optional<vertex_handle_t> find(std::span<const std::byte> key) const;
 
     // value plane
@@ -126,7 +128,7 @@ Subscription edges are never destroyed while the graph lives. `unsubscribe` only
 **deactivates** the slot; an in-flight delivery has already snapshotted the edge and
 completes. The caller-owned `ctx` (or, for the templated overload, the callable itself)
 must therefore stay alive past any delivery that may still be running, not merely past
-the `unsubscribe` call (`core/include/libtracer/graph.hpp:503-506`).
+the `unsubscribe` call (`core/include/libtracer/graph.hpp:552-555`).
 ```
 
 ```{admonition} No strings on the hot path
@@ -176,7 +178,7 @@ for (...) g.write(v, p.field(), reliable_tlv);           // hot loop — zero st
 ## What a read hands back
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
-(`core/include/libtracer/graph.hpp:343,395` by handle, `:679,685` by path;
+(`core/include/libtracer/graph.hpp:392,444` by handle, `:728,734` by path;
 `value_ref_t` at `core/include/libtracer/vertex.hpp:83`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds it as a
 `std::shared_ptr<const rope_t>`, so handing that reference back costs a refcount clone of
@@ -406,6 +408,7 @@ followed by the owner's own announce write.
 | `read` returns a reference | keeping a `value_ref_t` in long-lived state pins that allocation; under an injected pool, a handful of parked references is a pool that never drains |
 | `only()` is the single-link accessor | calling it on a multi-link rope is not the general path; `materialize()` is. A value that arrived as a subview of a frame, or that was written as a rope, has more than one link |
 | A retired handle stays dereferenceable | `retire` empties the vertex in place and never frees it, so a stale handle silently addresses a re-virginized slot. A holder that caches a resolution records `retire_generation` beside it and re-reads before use — and must not cache an authorization decision that way, since a generation match says the vertex is the same one, never that the caller may still act on it |
+| `retire` parks a value seam; only `collect()` frees it | the seam is read lock-free, so `retire` cannot free it — it parks it on the graph. Nothing frees the park until the embedder calls `collect()` at a point it knows no reader holds a seam. Connection teardown retires the `/net/<name>` identity vertex, so a node with peer churn that never collects grows the park forever; `parked_seam_count()` is how that shows up before it matters ([#576](https://github.com/avatarsd-llc/libtracer/issues/576)) |
 | No subject resolver means no enforcement | writing `:acl` bytes on vertices and never installing a resolver yields a node that looks protected and is fully open |
 | No remote-delivery sink means no remote delivery | remote subscribes are accepted and stored; the `delivery_drops()` counters stay at zero because nothing was dropped — nothing was attempted |
 

@@ -386,7 +386,9 @@ void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& k
         if (k > 0) bump_subtree_listeners(&x, -static_cast<std::int32_t>(k));
         keys.push_back(build_key(&x));
         // Park the detached value seam (if any): a lock-free reader may still hold the old
-        // pointer, so it is reclaimed only at teardown, never freed here. Under map_mutex_.
+        // pointer, so it is never freed here. The park's other end is the public collect(),
+        // which the embedder calls at a moment it knows no reader holds a seam (#576); the
+        // graph's own teardown is the backstop. Under map_mutex_.
         if (value_handlers_t* seam = x.revert_to_placeholder()) retired_seams_.emplace_back(seam);
         x.mark_unregistered();
     };
@@ -426,6 +428,30 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
         }
     }
     return {};
+}
+
+/**
+ * @brief Free the parked value seams — the embedder-called other end of retirement's park
+ *        (#576). The whole point is WHERE the free happens, so read the two scopes below.
+ */
+void graph_t::collect() {
+    std::vector<std::unique_ptr<value_handlers_t>> dead;
+    {
+        // Under the map lock: nothing but the swap. The lock is what serialises us against
+        // retire_subtree's append, and it is all it is here for — a free under it would put
+        // arbitrary user-callback destructor code inside the graph's widest lock, which is
+        // the mutual-wait every earlier design round died on.
+        const std::unique_lock lock(map_mutex_);
+        dead.swap(retired_seams_);
+    }
+    // `dead` destructs HERE — outside every graph lock, on the caller's thread, at a moment
+    // the embedder chose. So a seam callback's destructor may re-enter the graph, and a slow
+    // one blocks no reader or writer. Do not hoist this into the scope above.
+}
+
+std::size_t graph_t::parked_seam_count() const {
+    const std::shared_lock lock(map_mutex_);
+    return retired_seams_.size();
 }
 
 /**
