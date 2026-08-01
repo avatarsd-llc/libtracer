@@ -149,7 +149,7 @@ The per-module creator endpoint is **not implemented** in the reference implemen
 neither `/net/<module>/conn`, nor the reserved-and-hidden `conn` name, nor per-module
 `:schema`-as-catalog, nor `NAME`-write removal. What is implemented is the addressing
 half — a created connection mounts and routes at `/net/<module>/<name>`, with the module
-defaulting to `<kind>-client` / `<kind>-server` — reached through the `:children[]`
+name declared by the application (never library-derived — ADR-0073 §4) — reached through the `:children[]`
 creation spelling that RFC-0014 supersedes. RFC-0014's byte-level clauses (the
 `SPEC`/`NAME`/`config` layout, the catalog reply bytes, the liveness encoding, the gate
 order, the error identities) are proposed pending code plus conformance vectors; its

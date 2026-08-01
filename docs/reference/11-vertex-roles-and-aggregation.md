@@ -260,7 +260,7 @@ Two links to the same peer are two connection vertices ([ADR-0027](https://githu
                                             — the same sensor
 ```
 
-A routed address carries **two** segments before the remote path: the *module* the connection belongs to and the connection's own *name* ([ADR-0061](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md)). A module is one (transport, role) shape; a transport that does not declare a module name of its own falls back to `<kind>-client` for a dialling link and `<kind>-server` for a listening one. See §in-band creation and the type catalog below.
+A routed address carries **two** segments before the remote path: the *module* the connection belongs to and the connection's own *name* ([ADR-0061](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md)). A module is one (transport, role) shape, and its name is **minted by the application** via `register_module` — the library derives nothing, and an undeclared pair answers `SCHEMA_NOT_FOUND` ([ADR-0073](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0073-naming-authority-the-application-mints-one-predicate-gates.md) §4). Built-ins ship suggested names (`ws-client`, `ws-server`, `tcp-client`, …) an application may adopt or replace. See §in-band creation and the type catalog below.
 
 A consumer that wants redundancy subscribes to **both** routes and receives both deliveries — that is the point: an `await` timeout on one route detects the dead link, so failover is a visible signal, not a hidden merge. There is no duplicate detection anywhere in the net plane, and none is needed — every arrival travels a route the consumer deliberately named. See [reference/13](13-network-formation.md).
 
@@ -288,8 +288,11 @@ target = "/local/snapshot_recorder"      # in-process subscriber for backups
 
 [[connection]]
 # Each connection is a vertex mounted and routed at /net/<module>/<name>
-# (ADR-0027, ADR-0061); the module follows from (kind, role), so the dialling
-# TCP link below mounts at /net/tcp-client/tcp0.
+# (ADR-0027, ADR-0061). The module segment is NOT derived from (kind, role) —
+# the application declares it with register_module (ADR-0073 4), and an
+# undeclared pair answers SCHEMA_NOT_FOUND. `tcp-client` below is the name the
+# built-in tcp transport SUGGESTS (kTcpClientSuggestedModule) and this node
+# registered, so the dialling TCP link mounts at /net/tcp-client/tcp0.
 name = "tcp0"
 transport = "transport_tcp"
 
@@ -331,7 +334,8 @@ A second host (a screen) displays the canvas without participating in the model.
 
 ```toml
 [[connection]]
-name = "canvas-host"           # mounts at /net/tcp-client/canvas-host
+name = "canvas-host"           # mounts at /net/<module>/canvas-host — `tcp-client`
+                               # here because this node registered that module name
 transport = "transport_tcp"
 ```
 
@@ -383,7 +387,7 @@ What this makes visible is the device's **type catalog** — the types it can in
 
 The net plane carries the same shape for connections:
 
-- **The surface an implementation meets.** A connection is created by a `SPEC` write to the `/net:children[]` catalog carrying a `kind` field that selects the transport; the two catalog child types are the dial shape and the listen shape. The created connection vertex is mounted — and routed — at **`/net/<module>/<name>`**, where `<module>` is the module name the transport declares for that (kind, role) pair, defaulting to `<kind>-client` for a dialling link and `<kind>-server` for a listening one ([ADR-0061](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md)).
+- **The surface an implementation meets.** A connection is created by a `SPEC` write to the `/net:children[]` catalog carrying a `kind` field that selects the transport; the two catalog child types are the dial shape and the listen shape. The created connection vertex is mounted — and routed — at **`/net/<module>/<name>`**, where `<module>` is the module name the **application** declared for that (kind, role) pair via `register_module` — never a library-derived name, and an undeclared pair is refused with `SCHEMA_NOT_FOUND` ([ADR-0061](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md), [ADR-0073](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0073-naming-authority-the-application-mints-one-predicate-gates.md) §4).
 - **The accepted direction.** [RFC-0014](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) replaces the single global catalog with a **per-module creator endpoint** at `/net/<module>/conn`: `SPEC{name, config}` creates `/net/<module>/<name>` (gated `CREATE`), `NAME{<name>}` retires it (gated `WRITE`), and a read of `conn:schema` *is* that module's catalog. The role becomes positional — it is the module — rather than a config field. **That endpoint is not implemented**; the global `/net:children[]` catalog with a `kind` selector is what a peer meets. The mount-and-route rule at `/net/<module>/<name>` is realised.
 
 ---
