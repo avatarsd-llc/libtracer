@@ -124,8 +124,8 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 }  // namespace tr::net
 ```
 
-Signature source: `core/include/libtracer/fwd_router.hpp:101` (constructor), `:152`
-(`add_child`), `:202` (`subscribe_toward`), `:212-223` (the sink function-pointer types);
+Signature source: `core/include/libtracer/fwd_router.hpp:115` (constructor), `:168`
+(`add_child`), `:218` (`subscribe_toward`), `:228-239` (the sink function-pointer types);
 `core/include/libtracer/child_registry.hpp:169` (`add`), `:243` (`resolve_peer`), `:258`
 (`erase`), `:281` (`entry_by_name`), `:302` (`by_name`), `:343`/`:353` (`size`/`live_size`).
 
@@ -154,16 +154,17 @@ flowchart TB
   address size grows with hop count, which is what `ADVERTISE`/`COMPACT` route handles exist to
   amortise on a steady flow.
 - **A reply is delivered as a rope, never flattened by the router**
-  (`core/include/libtracer/fwd_router.hpp:186-190`). A sink that wants contiguous bytes holds
+  (`core/include/libtracer/fwd_router.hpp:249-253`). A sink that wants contiguous bytes holds
   `const view_t m = reply.materialize()` and reads `m.bytes()`; a **single-link reply — the common
   case — is returned zero-copy, no allocation and no copy**, and only a multi-link reply pays one
   flatten, on demand. The escape hatch sits at the consumer, so the router never pays for a
   consumer that did not need contiguity. `m` must stay alive while its span is read.
 - **The default delivery leg copies nothing.** A full-route `FWD{WRITE}` fan-out scatter-gathers a
   fresh stack head, the stored return-route bytes, an empty `src`, and one span per link of the
-  stored value (`core/src/fwd_router.cpp:1217-1172`). The `COMPACT` leg is the one that flattens,
-  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:1180`) — single-link, that
-  flatten is a zero-copy adopt.
+  stored value (`core/src/fwd_router.cpp:1240`). The `COMPACT` leg is the one that flattens,
+  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:1203`) — single-link, that
+  flatten is a zero-copy adopt, and multi-link it draws from the router's injected `flat` backend
+  (#730), not the global heap.
 - **Delivery is nothrow and drops rather than aborts.** Every per-delivery allocation on the writer
   thread is failable: a failed flatten, frame build or `iovec` reserve **drops that one delivery**
   — a subscriber misses a value under exhaustion, which is valid delivery behaviour — instead of

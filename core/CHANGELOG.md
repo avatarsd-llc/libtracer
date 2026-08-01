@@ -44,6 +44,31 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **BREAKING: `fwd_router_t` takes a fourth injection — the `flat` byte backend every rope
+  flatten it performs draws from (#730).** The constructor is now
+  `fwd_router_t(graph, mr = get_default_resource(), rx = &heap_source(), flat = &heap_backend(),
+  max_label_bindings_per_link = 0)`; `flat` is inserted BEFORE `max_label_bindings_per_link`, so a
+  call site that passed that ceiling positionally must move it one place right (a type error, not a
+  silent misbind). Every other call site is unchanged, and the default reproduces the previous
+  global-heap behaviour byte for byte. The router's four `materialize()` sites — the ingress
+  `ADVERTISE` route and `COMPACT` payload sub-rope flattens, the cold bus-name rejection flatten,
+  and the per-delivery egress `COMPACT` flatten — all took `rope_t::materialize`'s DEFAULT
+  heap backend, so a bounded node's memory bound did not cover any of them however much it
+  injected.
+
+  **The bound was the smaller half.** Two of those sites did not check their result, and an empty
+  flatten is not a visibly failed one: `view::over_bytes` maps an empty span to an ENGAGED-empty
+  optional by design, and `graph_t::write` stores it and reports success. So a heap exhaustion
+  during the ingress `COMPACT` flatten REPLACED the subscriber's last-known value with nothing,
+  fired the delivery callback, and reported success — silent corruption, indistinguishable
+  downstream from a legitimate empty write. Both unguarded sites now answer a refused flatten by
+  value: the `COMPACT` drops the delivery (the vertex keeps its last-known value) and the
+  `ADVERTISE` binds no label (the peer's subsequent `COMPACT`s draw the ordinary `HANDLE_NACK`
+  self-heal). The guard could not have shipped without the seam — with every site on the global
+  heap there was no way to make a flatten fail, and `core/tests/fwd_flatten_backend_test.cpp` is
+  what the seam bought: an injected backend that refuses on command, and an ablation proving each
+  guard fails without it.
+
 - **BREAKING: the derived `"<kind>-client"` / `"<kind>-server"` module name is gone (#621,
   ADR-0073 §4).** `transport_vertex_t::module_for` no longer invents a module for an undeclared
   *(kind, role)* pair — it returns `result_t<std::string>` and answers `SCHEMA_NOT_FOUND`

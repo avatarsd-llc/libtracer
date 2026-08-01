@@ -137,24 +137,25 @@ target](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0007-
 
 ## 5. Remote delivery legs
 
-`fwd_router_t::deliver_remote` (`core/src/fwd_router.cpp:1159`) is the sink the remote leg calls.
+`fwd_router_t::deliver_remote` (`core/src/fwd_router.cpp:1179`) is the sink the remote leg calls.
 It has two legs, and only one of them copies payload bytes.
 
 **The default full-route leg copies nothing.** It emits
 `FWD{ op=WRITE, dst=<stored return route>, src=<empty PATH>, payload=<VALUE> }` as a
 scatter-gather send: a fresh stack header, the stored route, an empty `src`, and one span per
-rope link (`fwd_router.cpp:1159-1118`). The header is a `stack_writer<16>` — the FWD header of at
+rope link (`fwd_router.cpp:1179`). The header is a `stack_writer<16>` — the FWD header of at
 most 6 bytes plus the 5-byte op TLV — and both constant TLVs are `constexpr` arrays with no
-runtime construction (`fwd_router.cpp:988-995`). The route bytes were copied once at subscribe
+runtime construction (`fwd_router.cpp:1224-1227`). The route bytes were copied once at subscribe
 time, so a delivery re-uses them by reference; a multi-link value crosses as its own segments,
 with no flatten. The iov vector is nothrow-reserved and an exhausted reserve drops that delivery
-rather than emitting a truncated frame (`fwd_router.cpp:1002-1005`).
+rather than emitting a truncated frame (`fwd_router.cpp:1240-1241`).
 
-**The COMPACT leg is the one that flattens.** `const view_t flat = value.materialize();`
-(`fwd_router.cpp:970`) precedes the compact encode, because a COMPACT wraps a contiguous
+**The COMPACT leg is the one that flattens.** `const view_t flat = value.materialize(*flat_);`
+(`fwd_router.cpp:1203`) precedes the compact encode, because a COMPACT wraps a contiguous
 payload. Single-link — the common case — that materialize is a zero-copy adopt; a multi-link
-value pays one flatten per delivery. A failed flatten drops the delivery
-(`fwd_router.cpp:971`). Auto-promotion advertises the label once per flow and then streams
+value pays one flatten per delivery, out of the router's INJECTED byte backend rather than the
+global heap (#730). A failed flatten drops the delivery (`fwd_router.cpp:1204`).
+Auto-promotion advertises the label once per flow and then streams
 compact frames; a dropped fresh ADVERTISE self-heals through the peer's `HANDLE_NACK`
 ([RFC-0004 — Remote operation
 addressing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md)
@@ -245,7 +246,7 @@ read side of the same table is in [`00-scaling-and-serialization.md`](00-scaling
 `bench/bench_forward_demux`, 8 alternating rounds across two builds. The scan's marginal cost
 over a fixed-position hop falls **35 ns to ~0 at 8 links, 86 to 2 at 16, and 333 to 17 at 64
 links (95% removed)**, with the fixed-position hop itself unchanged within ±2 ns
-(`core/CHANGELOG.md:62-69`). The digest is a filter and never a decision — `live()` and the full
+(`core/CHANGELOG.md:87-94`). The digest is a filter and never a decision — `live()` and the full
 compare still gate every answer — and the two digest functions are pinned against each other
 directly by `test_digest_paths_agree`
 (`core/tests/registry_teardown_test.cpp:289`), because a disagreement would throw nothing and
