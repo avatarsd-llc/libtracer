@@ -409,24 +409,35 @@ struct handlers_t {
  * Set once at registration (`vertex_t::adopt_identity`), read lock-free thereafter.
  */
 struct value_handlers_t {
-    std::function<result_t<rope_t>()> on_read; /**< @brief Supplies the vertex value on read. */
-    std::function<result_t<void>(const rope_t&)>
-        on_write;                                  /**< @brief Receives the written value. */
-    std::function<result_t<view_t>()> on_children; /**< @brief Synthesized `:children[]` listing. */
     /**
-     * @brief The block's own retire record (ADR-0072 erratum 1) — three words that make
+     * @brief The block's own retire record (ADR-0072 erratum 1) — ONE word that makes
      *        retiring this seam ALLOCATION-FREE, and therefore non-blocking.
      *
      * `graph_t::retire` runs under the map lock, and the readers that announce this block
      * are outside that lock precisely so their user callbacks may re-enter the graph; a
      * retire that had to allocate could fail, and any fallback that waits for those readers
      * waits for a thread that may be waiting for the map lock. Carrying the record inside
-     * the block removes the failure mode instead of handling it. Written by the domain only
-     * after retirement has detached this block from @ref vertex_ext_t::handlers — a reader
-     * still inside the callbacks above touches no part of it.
+     * the block removes the failure mode instead of handling it.
+     *
+     * **FIRST, deliberately**: the domain identifies a parked block BY its link's address,
+     * which is what keeps the record to one word — and one word is what keeps this block
+     * inside its allocator size class (the three-word form cost 16 B on every
+     * handler-bearing vertex; the perf gate's `mem:reg_escape` row caught it). Asserted
+     * below, because a reorder here would be a use-after-free, not a style change.
+     *
+     * Written by the domain only after retirement detached this block from
+     * @ref vertex_ext_t::handlers — a reader still inside the callbacks below touches no
+     * part of it.
      */
     mem::retire_link_t hz_link;
+    std::function<result_t<rope_t>()> on_read; /**< @brief Supplies the vertex value on read. */
+    std::function<result_t<void>(const rope_t&)>
+        on_write;                                  /**< @brief Receives the written value. */
+    std::function<result_t<view_t>()> on_children; /**< @brief Synthesized `:children[]` listing. */
 };
+
+static_assert(offsetof(value_handlers_t, hz_link) == 0,
+              "value_handlers_t::hz_link must be the block's first member (ADR-0072 erratum 1)");
 
 /**
  * @brief One right bit of an ACE `access_mask` (docs/reference/05 §0x0A, ADR-0020).
@@ -2231,10 +2242,10 @@ class vertex_t {
             // retired node's out. So the prior is provably null and a plain release store
             // suffices; the store races only the lock-free reader, which the release
             // ordering covers.
-            e.handlers.store(new value_handlers_t{std::move(handlers.on_read),
+            e.handlers.store(new value_handlers_t{{},
+                                                  std::move(handlers.on_read),
                                                   std::move(handlers.on_write),
-                                                  std::move(handlers.on_children),
-                                                  {}},
+                                                  std::move(handlers.on_children)},
                              std::memory_order_release);
         }
         if (handlers.on_app_field_write) {

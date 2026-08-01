@@ -60,7 +60,7 @@ hold and recurses under it. The doc comment at `:421` states the same contract f
 `evict_link_edges` snapshot helper — it documents a required hold, it is not an acquisition.
 
 The leaf/branch fork reads a per-vertex bit (`vertex_t::has_registered_child`,
-`core/include/libtracer/vertex.hpp:1072`), called from `core/src/graph.cpp:752`, and takes no
+`core/include/libtracer/vertex.hpp:1083`), called from `core/src/graph.cpp:753`, and takes no
 lock. The symbol exists on the vertex rather than on the graph, so a reader grepping for it finds
 a flag test rather than a lock acquisition.
 
@@ -74,9 +74,9 @@ kind, not only in degree.
 The stripe count is an ordinary config constant shared through one header
 ([ADR-0068 — build configuration is plain C++](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0068-build-configuration-is-plain-cpp-config-header.md);
 default 16, the sharing rationale at `vertex.hpp:717`). The stripe is selected by
-`vertex_stripe_of` (`:804`) from the vertex address, hashed `(h >> 6) % kVertexLockStripes`
-(`:800`). The stripes guard the fan-out edge list, the STREAM ring, the write-sequence bump and
-the ACL state. `snapshot_edges` (`:1487`) takes one on **every delivery**; so do `add_edge`,
+`vertex_stripe_of` (`:805`) from the vertex address, hashed `(h >> 6) % kVertexLockStripes`
+(`:801`). The stripes guard the fan-out edge list, the STREAM ring, the write-sequence bump and
+the ACL state. `snapshot_edges` (`:1488`) takes one on **every delivery**; so do `add_edge`,
 `clear_edge` and `set_acl`. It is reached only when the written vertex has an edge of its own:
 `fan_out` returns on a zero `own_subs_ordered()` first, so an unobserved write — and every
 placeholder ancestor a bubble walks past — touches no stripe at all
@@ -90,7 +90,7 @@ stripe-lock cost looks in this section:
 | platform | table | cost |
 | --- | --- | --- |
 | host libstdc++ / libc++ | `inline constinit std::array<vertex_stripe_t, kVertexLockStripes> vertex_stripes` (`vertex.hpp:777`) | none — constant-initialized |
-| a target without a constexpr `std::mutex` | guarded function-local `static` (`:790`) | one predicted branch per control-plane verb |
+| a target without a constexpr `std::mutex` | guarded function-local `static` (`:791`) | one predicted branch per control-plane verb |
 
 Two vertices that hash to the same stripe contend even though they share nothing else — which is
 what the `stripe1` bench topology exists to measure.

@@ -1,22 +1,22 @@
 arm                            read ns      write ns      plain ns      d read     d write
-main                             27.79         45.52         13.39       +0.00       +0.00
-branch                           36.47         52.61         12.29       +8.68       +7.09
-nocounter                        32.37         48.73         12.31       +4.57       +3.21
-nolight                          32.57         50.17         13.23       +4.78       +4.65
-final                            28.39         47.12         13.13       +0.60       +1.60
+main                             28.31         47.08         13.68       +0.00       +0.00
+branch                           37.35         53.81         12.55       +9.04       +6.73
+nocounter                        31.17         50.62         12.37       +2.86       +3.55
+nolight                          33.70         51.76         13.36       +5.39       +4.68
+final                            29.56         48.61         13.51       +1.26       +1.53
 
-spread main                 read   n=15  min=26.78 med=27.79 max=30.75
-spread main                 write  n=15  min=44.12 med=45.52 max=46.57
-spread main                 plain  n=15  min=12.33 med=13.39 max=13.76
-spread branch               read   n=15  min=35.94 med=36.47 max=40.72
-spread branch               write  n=15  min=52.40 med=52.61 max=53.66
-spread branch               plain  n=15  min=12.12 med=12.29 max=12.57
-spread nocounter            read   n=15  min=29.44 med=32.37 max=33.28
-spread nocounter            write  n=15  min=48.55 med=48.73 max=49.39
-spread nocounter            plain  n=15  min=12.18 med=12.31 max=15.61
-spread nolight              read   n=15  min=32.32 med=32.57 max=33.49
-spread nolight              write  n=15  min=49.58 med=50.17 max=52.60
-spread nolight              plain  n=15  min=12.91 med=13.23 max=13.63
-spread final                read   n=15  min=27.56 med=28.39 max=29.52
-spread final                write  n=15  min=46.04 med=47.12 max=47.96
-spread final                plain  n=15  min=12.75 med=13.13 max=13.39
+spread main                 read   n=15  min=26.36 med=28.31 max=29.55
+spread main                 write  n=15  min=45.51 med=47.08 max=50.65
+spread main                 plain  n=15  min=11.52 med=13.68 max=14.07
+spread branch               read   n=15  min=34.79 med=37.35 max=38.02
+spread branch               write  n=15  min=52.60 med=53.81 max=61.81
+spread branch               plain  n=15  min=11.44 med=12.55 max=12.91
+spread nocounter            read   n=15  min=29.88 med=31.17 max=36.58
+spread nocounter            write  n=15  min=49.47 med=50.62 max=51.29
+spread nocounter            plain  n=15  min=11.38 med=12.37 max=12.68
+spread nolight              read   n=15  min=33.16 med=33.70 max=34.67
+spread nolight              write  n=15  min=51.17 med=51.76 max=54.20
+spread nolight              plain  n=15  min=11.49 med=13.36 max=14.18
+spread final                read   n=15  min=28.67 med=29.56 max=30.62
+spread final                write  n=15  min=47.52 med=48.61 max=52.25
+spread final                plain  n=15  min=13.21 med=13.51 max=14.65

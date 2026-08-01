@@ -1,0 +1,1 @@
+RESULT zeroheap reg_escape allocs=4 frees=1 bytes=352 n=256 mr_served=0 ok=1 (report-only — GLOBAL-heap blocks per RUNTIME registration that bypass the injected memory_resource; ADR-0039 / RFC-0014, #551)

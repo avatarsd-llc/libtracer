@@ -80,22 +80,33 @@ namespace tr::mem {
 using reclaim_fn_t = void (*)(void* block, mem_backend_t& backend);
 
 /**
- * @brief The intrusive retire record a tenant embeds in (or beside) the block it retires.
+ * @brief The intrusive retire record a tenant embeds — **as its first member** — in the
+ *        block it retires.
  *
- * Three words the tenant already owns, which is what makes `retire` allocation-free and
- * therefore non-blocking (see the file header, property 1). The domain writes these fields
- * only while the block is parked — i.e. after the writer detached it from its publication
- * slot — and a lock-free reader inside the block touches only the tenant's own members, so
- * the two never touch the same subobject.
+ * **ONE word**, and the size is load-bearing rather than incidental. Carrying the record
+ * inside the block is what makes `retire` allocation-free and therefore non-blocking (see
+ * the file header, property 1) — but the block is a per-vertex allocation on a node with a
+ * RAM budget, and the three-word form this replaced pushed the 96-byte seam block into the
+ * next allocator size class, costing 16 B on every handler-bearing vertex (measured, as
+ * the perf gate's `mem:reg_escape` row). One word costs nothing at all, because:
+ *
+ *   - the **block address is the link's own address**, which is why the link must be the
+ *     FIRST member of the block (assert `offsetof(block, link) == 0` at the tenant), and
+ *   - the **reclaimer belongs to the domain**, fixed at construction, rather than to each
+ *     record — one domain per kind of block. Domains are a few words each; the expensive
+ *     part, the announcement table, is shared process-wide, so the second one is nearly
+ *     free.
+ *
+ * The domain writes `next` only while the block is parked — i.e. after the writer detached
+ * it from its publication slot — and a lock-free reader inside the block touches only the
+ * tenant's own members, so the two never touch the same subobject.
  *
  * A block may be parked once at a time; retiring a block whose link is still parked is a
  * tenant bug (it would splice the retired list into itself). Since retiring requires having
  * just unpublished the block, this is structurally hard to do.
  */
 struct retire_link_t {
-    void* block = nullptr;          /**< @brief The parked block (set by `retire`). */
-    reclaim_fn_t reclaim = nullptr; /**< @brief Frees `block` on reclaim. */
-    retire_link_t* next = nullptr;  /**< @brief Retired-list link. */
+    retire_link_t* next = nullptr; /**< @brief Retired-list link; the block IS `this`. */
 };
 
 /**
@@ -252,8 +263,14 @@ class hazard_domain_t {
      * @p backend must outlive the domain and must be thread-safe if tenants retire from
      * more than one thread (the same contract ADR-0060 §2 states for the graph's value
      * backend, which is what `graph_t` injects here). The domain itself never allocates.
+     *
+     * @p reclaim frees a block of THIS domain's one block kind. The type erasure ADR-0072
+     * §3 wanted lives here, on a construction parameter, instead of on every retire record
+     * — which is what lets @ref retire_link_t be a single word. A composition root with two
+     * kinds of reclaimable block owns two domains.
      */
-    explicit hazard_domain_t(mem_backend_t& backend) noexcept : backend_(backend) {}
+    explicit hazard_domain_t(mem_backend_t& backend, reclaim_fn_t reclaim) noexcept
+        : backend_(backend), reclaim_(reclaim) {}
 
     hazard_domain_t(const hazard_domain_t&) = delete;
     hazard_domain_t& operator=(const hazard_domain_t&) = delete;
@@ -269,7 +286,7 @@ class hazard_domain_t {
         retire_link_t* r = retired_.exchange(nullptr, std::memory_order_acq_rel);
         while (r != nullptr) {
             retire_link_t* next = r->next;
-            r->reclaim(r->block, backend_);
+            reclaim_(r, backend_);
             r = next;
         }
         retired_n_.store(0, std::memory_order_relaxed);
@@ -289,14 +306,9 @@ class hazard_domain_t {
      * Safe to call while holding a lock a reader's user callback might take: the whole
      * point of the design.
      *
-     * @param link    The tenant-owned record for @p block; must not be parked already.
-     * @param block   The displaced block; `nullptr` is a no-op.
-     * @param reclaim Frees @p block (see @ref reclaim_fn_t). Must be non-null.
+     * @param link The displaced block's own first member; must not already be parked.
      */
-    void retire(retire_link_t& link, void* block, deleter_fn_t reclaim) noexcept {
-        if (block == nullptr) return;
-        link.block = block;
-        link.reclaim = reclaim;
+    void retire(retire_link_t& link) noexcept {
         // Count BEFORE pushing: a concurrent scan may pop the list between the two, and its
         // decrement must never underflow the counter (the count may transiently exceed the
         // list length; it can never fall below it).
@@ -462,11 +474,11 @@ class hazard_domain_t {
         for (retire_link_t* cur = batch; cur != nullptr;) {
             retire_link_t* next = cur->next;  // the reclaimer frees the link with the block
             ++popped;
-            if (stalled || announced(cur->block, hw)) {
+            if (stalled || announced(cur, hw)) {
                 push_retired(cur);  // still announced — park it for a later scan
                 ++kept;
             } else {
-                cur->reclaim(cur->block, backend_);
+                reclaim_(cur, backend_);
             }
             cur = next;
         }
@@ -493,7 +505,8 @@ class hazard_domain_t {
         return false;
     }
 
-    mem_backend_t& backend_; /**< @brief Passed to every reclaimer (ADR-0072 §3). */
+    mem_backend_t& backend_;     /**< @brief Passed to the reclaimer (ADR-0072 §3). */
+    const reclaim_fn_t reclaim_; /**< @brief Frees this domain's one kind of block. */
     std::atomic<retire_link_t*> retired_{nullptr}; /**< @brief Parked blocks awaiting a scan. */
     std::atomic<std::size_t> retired_n_{0};        /**< @brief Approximate length of `retired_`. */
     /** @brief Guards that could get no announcement word; while non-zero a scan frees

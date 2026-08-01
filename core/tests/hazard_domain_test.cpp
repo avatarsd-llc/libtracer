@@ -22,6 +22,7 @@
 #include "libtracer/hazard_domain.hpp"
 
 #include <atomic>
+#include <cstddef>
 #include <cstdio>
 #include <string_view>
 #include <thread>
@@ -44,16 +45,19 @@ void check(bool ok, std::string_view what) {
 /** @brief Live count of @ref block_t — the instrument every case below reads. */
 std::atomic<int> g_live{0};
 
-/** @brief A tenant block carrying its own retire record, the way `value_handlers_t` does. */
+/** @brief A tenant block carrying its own retire record FIRST, the way `value_handlers_t`
+ *         must: the domain identifies a parked block by its link's address. */
 struct block_t {
-    int payload = 0;
     retire_link_t link;
+    int payload = 0;
     block_t() noexcept { g_live.fetch_add(1, std::memory_order_relaxed); }
     ~block_t() { g_live.fetch_sub(1, std::memory_order_relaxed); }
 };
+static_assert(offsetof(block_t, link) == 0, "the link IS the block address");
 
-/** @brief The tenant's reclaimer: this block came from the global heap, so the backend
- *         argument goes unused (the ADR-0072 §3 contract). */
+/** @brief This domain's ONE reclaimer (ADR-0072 erratum 1 — type erasure moved from the
+ *         record to the domain's constructor). The block came from the global heap, so the
+ *         backend argument goes unused. */
 void reclaim_block(void* p, tr::mem::mem_backend_t&) noexcept { delete static_cast<block_t*>(p); }
 
 /** @brief A backend that can allocate NOTHING — every `alloc` answers backpressure.
@@ -69,7 +73,7 @@ struct starved_backend_t : tr::mem::mem_backend_t {
 /** @brief Displace whatever @p slot publishes and retire it; returns the retired block. */
 block_t* displace_and_retire(hazard_domain_t& d, std::atomic<block_t*>& slot) {
     block_t* old = slot.exchange(nullptr, std::memory_order_seq_cst);
-    if (old != nullptr) d.retire(old->link, old, &reclaim_block);
+    if (old != nullptr) d.retire(old->link);
     return old;
 }
 
@@ -79,7 +83,7 @@ void test_retire_frees_and_destructor_sweeps() {
     std::printf("hazard_domain_t: unannounced blocks are freed; ~domain sweeps the rest:\n");
     const int before = g_live.load();
     {
-        hazard_domain_t d{tr::mem::heap_backend()};
+        hazard_domain_t d{tr::mem::heap_backend(), &reclaim_block};
         std::atomic<block_t*> slot{nullptr};
         int peak = 0;
         for (std::size_t i = 0; i < 6 * hazard_domain_t::kRetireBatch; ++i) {
@@ -103,7 +107,7 @@ void test_starved_backend_still_reclaims() {
     const int before = g_live.load();
     starved_backend_t starved;
     {
-        hazard_domain_t d{starved};
+        hazard_domain_t d{starved, &reclaim_block};
         std::atomic<block_t*> slot{nullptr};
         for (std::size_t i = 0; i < 3 * hazard_domain_t::kRetireBatch; ++i) {
             slot.store(new block_t{}, std::memory_order_release);
@@ -120,7 +124,7 @@ void test_starved_backend_still_reclaims() {
 void test_announced_block_survives_scans() {
     std::printf("hazard_domain_t: an announced block outlives concurrent retire + scans:\n");
     const int before = g_live.load();
-    hazard_domain_t d{tr::mem::heap_backend()};
+    hazard_domain_t d{tr::mem::heap_backend(), &reclaim_block};
     std::atomic<block_t*> slot{new block_t{}};
     std::atomic<bool> announced{false};
     std::atomic<bool> release{false};
@@ -163,7 +167,7 @@ void test_announced_block_survives_scans() {
 void test_nested_guards_do_not_deadlock() {
     std::printf("erratum 1: guards nest past kAnnouncePerThread — stall, never wait:\n");
     const int before = g_live.load();
-    hazard_domain_t d{tr::mem::heap_backend()};
+    hazard_domain_t d{tr::mem::heap_backend(), &reclaim_block};
     std::atomic<block_t*> a{new block_t{}};
     std::atomic<block_t*> b{new block_t{}};
     std::atomic<block_t*> c{new block_t{}};
@@ -197,7 +201,7 @@ void test_nested_guards_do_not_deadlock() {
 void test_more_readers_than_participants() {
     std::printf("erratum 1: kParticipants + 1 concurrent readers — the last one stalls:\n");
     const int before = g_live.load();
-    hazard_domain_t d{tr::mem::heap_backend()};
+    hazard_domain_t d{tr::mem::heap_backend(), &reclaim_block};
     constexpr std::size_t kReaders = tr::mem::detail_hz::kParticipants + 1;
 
     std::vector<std::atomic<block_t*>> slots(kReaders);

@@ -27,9 +27,9 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `graph_t::seam_announces()` (the announce-gate counter — see the BREAKING note below).
 
   Per ADR-0072 erratum 1 the domain's shape is not what the ADR first specified:
-  **`retire` allocates nothing and never blocks.** The retire record is a
-  `tr::mem::retire_link_t` the tenant embeds in the block it retires
-  (`retire(link, block, reclaim)`), so there is no allocation, no exhaustion, and no
+  **`retire` allocates nothing and never blocks.** The retire record is a one-word
+  `tr::mem::retire_link_t` the tenant embeds as the FIRST member of the block it retires
+  (`retire(link)`), so there is no allocation, no exhaustion, and no
   wait-for-readers fallback — a retirer holding the map lock can never wait for a reader
   whose user callback wants that lock. Readers announce into a per-thread participant
   (claimed once, released at thread exit) rather than a per-operation cell, and a guard
@@ -72,13 +72,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `kSeamAnnounceCounter` above) — never a plausible-looking `0`, which would read as "the
   announce gate held".
 
-- **BREAKING: `hazard_domain_t::retire` takes the tenant's retire record (#576, ADR-0072
-  erratum 1).** `retire(retire_link_t&, void* block, reclaim_fn_t)` replaces
-  `retire(void*, deleter_fn_t)`; a tenant embeds the three-word `tr::mem::retire_link_t` in
-  the block it will retire. This is what makes retirement allocation-free and therefore
-  non-blocking, and it strengthens the bound: a node cannot retire more blocks than it
-  allocated. `value_handlers_t` grows an `hz_link` member for it (HANDLER-role vertices
-  only — a plain leaf or app-field vertex still allocates no seam block at all).
+- **BREAKING: `hazard_domain_t::retire` takes the tenant's retire record, and the domain
+  takes its reclaimer at construction (#576, ADR-0072 erratum 1).** `retire(retire_link_t&)`
+  replaces `retire(void*, deleter_fn_t)`, and `hazard_domain_t(backend, reclaim_fn_t)`
+  replaces `hazard_domain_t(backend)` — one domain per kind of reclaimable block. A tenant
+  embeds the ONE-word `tr::mem::retire_link_t` as the **first member** of the block it will
+  retire (the domain identifies a parked block by that link's address). This is what makes
+  retirement allocation-free and therefore non-blocking, and it strengthens the bound: a
+  node cannot retire more blocks than it allocated. `value_handlers_t` grows an `hz_link`
+  first member for it — HANDLER-role vertices only, and **at zero measured cost**: one word
+  keeps the block inside its allocator size class (the perf gate's `mem:reg_escape` row is
+  unchanged at 352 B/vertex; a three-word record cost 16 B).
 
 - **BREAKING: the derived `"<kind>-client"` / `"<kind>-server"` module name is gone (#621,
   ADR-0073 §4).** `transport_vertex_t::module_for` no longer invents a module for an undeclared

@@ -295,7 +295,13 @@ graph_t::graph_t(std::pmr::memory_resource* mr, mem::mem_backend_t* value_backen
       root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, settings_t{},
                                        handlers_t{})),
       ctl_(ctl),
-      seam_domain_(*value_backend) {
+      // The domain's ONE block kind is the value seam, so its reclaimer is a construction
+      // parameter rather than a field of every retire record (ADR-0072 erratum 1) — which
+      // is what keeps that record to a single word. The block came from `new`
+      // (vertex_t::adopt_identity), so the backend argument goes unused.
+      seam_domain_(
+          *value_backend,
+          +[](void* p, mem::mem_backend_t&) { delete static_cast<value_handlers_t*>(p); }) {
     // The one built-in creation-catalog type (#82, ADR-0017): `stored_value` makes a
     // plain last-writer-wins vertex at the composed child key. Its optional SPEC
     // `config` SETTINGS is ignored for now (a stored-value has no instantiation params
@@ -397,18 +403,13 @@ void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& k
         // Hand the detached value seam (if any) to the reclamation domain (ADR-0072 §4):
         // a lock-free reader may still hold — and have ANNOUNCED — the old pointer, so it
         // is never freed here; a domain scan frees it once no announcement covers it,
-        // which is what bounds live seam blocks under peer-driven churn (#576). The
-        // block came from `new` (vertex_t::adopt_identity), so its deleter is `delete`
-        // and the backend argument is unused.
-        if (value_handlers_t* seam = x.revert_to_placeholder()) {
-            // The record rides INSIDE the block (`hz_link`), so this allocates nothing and
-            // cannot fail — which is what makes it safe to call with map_mutex_ held: no
-            // fallback here may ever wait for a reader, because the announcing readers run
-            // their user callbacks outside this lock and are free to re-enter the graph.
-            seam_domain_.retire(
-                seam->hz_link, seam,
-                +[](void* p, mem::mem_backend_t&) { delete static_cast<value_handlers_t*>(p); });
-        }
+        // which is what bounds live seam blocks under peer-driven churn (#576).
+        //
+        // The record rides INSIDE the block (`hz_link`, its first member), so this
+        // allocates nothing and cannot fail — which is what makes it safe to call with
+        // map_mutex_ held: nothing here may ever wait for a reader, because the announcing
+        // readers run their user callbacks outside this lock and may re-enter the graph.
+        if (value_handlers_t* seam = x.revert_to_placeholder()) seam_domain_.retire(seam->hz_link);
         x.mark_unregistered();
     };
     retire_one(*v);
