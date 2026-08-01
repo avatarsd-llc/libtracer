@@ -226,20 +226,18 @@ test('topology: a BUS link is reported with its peers, never descended', { skip 
   assert.ok(bus, 'the peer_named listener is reported as a bus link');
   assert.equal(bus.at, BUS);
   assert.equal(bus.peers.length, 2, 'it hears exactly its two dialers');
-  for (const p of bus.peers) assert.match(p, /^\d+\.\d+\.\d+\.\d+:\d+$/);
+  for (const p of bus.peers) assert.match(p, /^p\d+$/);
 
-  // The finding this pins: a ws bus names peers <ip>:<port>, and both "." and ":" are
-  // reserved in a path segment (reference/03) — so ADR-0044's "each listed name doubles
-  // as a routable next-hop segment" is TRUE for a CAN bus (n5/n7) and FALSE here. The
-  // peers are enumerable but not addressable, from any conforming client.
-  assert.equal(bus.routable, false, 'ws peer names are not legal path segments');
-  assert.ok(
-    g.warnings.some((w) => w.includes('mesh') && w.includes('not legal path segments')),
-    'the walk says WHY it stopped, rather than silently truncating',
-  );
+  // #426 closed the finding this test used to pin: a ws bus now names peers p<slot>,
+  // a legal path segment, so ADR-0044's "each listed name doubles as a routable
+  // next-hop segment" holds for EVERY bus kind (the enumerable⇒addressable invariant,
+  // ADR-0073 §1). The walk's routable flag — computed from RESERVED_SEGMENT_CHARS —
+  // flips to true on its own.
+  assert.equal(bus.routable, true, 'ws peer names are legal path segments (#426)');
 
-  // And it must not have been walked as a node — routing through a bus link's NAME
-  // broadcasts to every peer, drawing N replies for one request.
+  // The walk still must not descend the bus link AS the link's own NAME — routing
+  // through a bus link's NAME broadcasts to every peer, drawing N replies for one
+  // request (rejecting that hop on the node side is #741).
   assert.equal(g.edges.some((e) => e.name === 'mesh'), false, 'no edge descends the bus link');
   t.diagnostic(`bus link bus/mesh: peers=${JSON.stringify(bus.peers)} routable=${bus.routable}`);
 });
