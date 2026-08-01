@@ -575,9 +575,12 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
                 // Through the injected byte backend (#730), so a bounded node's memory bound
                 // covers this flatten too.
                 const view_t flat = frame.subrope(0, frame.total_length()).materialize(*flat_);
-                // Flatten OOM ⇒ drop the frame, which is what the peer would see anyway: an
-                // empty span decodes to nothing and `reject_bus_name_hop` returns without
-                // replying. Explicit so the reason is the OOM and not the codec's leniency.
+                // Flatten OOM ⇒ drop the frame. A REDUNDANT EARLY-OUT, like the ADVERTISE
+                // arm's: `reject_bus_name_hop` opens with a `wire::decode`, an empty span
+                // does not decode, and it returns without replying — so deleting this line
+                // changes no observable behaviour. Kept so the reason is the OOM and not
+                // the codec's leniency. The SEAM on the line above is the testable part,
+                // and `fwd_flatten_backend_test` pins it.
                 if (flat.empty()) return;
                 reject_bus_name_hop(registry_, inbound_name, flat.bytes());
                 return;
@@ -892,9 +895,12 @@ void fwd_router_t::on_control_rope(std::string_view inbound_name, view::rope_t f
             // so a bounded node's bound must cover it.
             const view_t route_flat =
                 frame.subrope(head->child1_off, head->child1_total).materialize(*flat_);
-            // Flatten OOM ⇒ bind NOTHING. Redundant with the decode below (an empty span
-            // does not decode), and deliberately so: the binding must fail because the
-            // flatten failed, not because the codec happens to reject what OOM produced.
+            // Flatten OOM ⇒ bind NOTHING. This is a REDUNDANT EARLY-OUT, not a guard: the
+            // `wire::decode` on the next line is what actually answers an OOM'd flatten (an
+            // empty span does not decode), and deleting this line changes no observable
+            // behaviour — verified by ablation, twice. It is kept only so the REASON the
+            // binding failed is the flatten and not the codec's leniency. Nothing may cite
+            // it as a proven guard; the seam on the line above is what the test pins.
             if (route_flat.empty() && head->child1_total != 0) return;
             const auto route = wire::decode(route_flat.bytes());
             if (!route) return;
@@ -1198,8 +1204,12 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
         const auto [label, fresh] = handles_.ensure_egress(sub.link, route);
         if (label != 0) {
             // Through the injected byte backend (#730): this egress flatten is the writer
-            // thread's, but it is the same store the ingress ones draw from, so ONE
-            // injection bounds every flatten the router performs.
+            // thread's, but it is the same store the ingress ones draw from, so one
+            // injection bounds the router's OWN FOUR flattens. Not every flatten on the
+            // path: the terminus resolver's rope-tier ones (`op_resolve_view.cpp`) never
+            // see `flat_` and still draw from the global heap (#766). `flat_` is therefore
+            // reached from BOTH this writer thread and the receive threads, which is why
+            // an injected backend must be thread-safe (ADR-0060 §2).
             const view_t flat = value.materialize(*flat_);
             if (flat.empty() && value.total_length() != 0) return;  // flatten OOM — drop
             std::vector<std::byte> frame;

@@ -69,6 +69,36 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   what the seam bought: an injected backend that refuses on command, and an ablation proving each
   guard fails without it.
 
+  **Contract corrections, filed against the merged change by an adversarial verify pass.** The code
+  is unchanged; four claims written around it were wrong and are now narrowed.
+
+  - **`flat` MUST be thread-safe** — the same obligation `graph_t`'s `value_backend` carries
+    (ADR-0060 §2), and it was missing from `@param flat`, which said only "must outlive the router".
+    Three of the four sites run on a transport child's receive thread (several children receive
+    concurrently) and the fourth on the writer thread, and a `segment` self-routes its reclaim on
+    whichever thread drops the last reference. A bare `mem::pool_t` is **not** thread-safe — plain
+    `std::size_t` free-list head and count, no lock, no atomic — and the ESP32 recipe in
+    `docs/interop/esp32-production-node.md` shipped exactly that. It now injects `heap_backend()`
+    for both byte-buffer seams and says why: `sync_pool_t` is the only synchronised pool in the
+    tree and it is a spinlock, wrong for a single-core target, and the interrupt-disable variant
+    ADR-0060 §2 names is unbuilt.
+  - **`flat` bounds the router's OWN four flattens, not "every flatten the router performs"** — the
+    terminus resolver's rope-tier flattens (`core/src/op_resolve_view.cpp:80`, `:142`) never see it
+    and still draw from the global heap. Measured: with `flat` armed to refuse everything, a 4-link
+    `FWD{READ}` consulted it zero times and made 20 global-heap `new` calls. Tracked as **#766**;
+    the header, the source comment, `docs/design/allocation-and-backpressure.md` and the ESP32
+    recipe now say four sites and cite it.
+  - **The bus-name rejection flatten is now exercised.** It was listed as covered by
+    `fwd_flatten_backend_test.cpp` and was not — reverting both halves of the site left the suite at
+    72/72. It has its own case, which asserts `refusals() > 0` first, and reverting the site's seam
+    fails it.
+  - **The `ADVERTISE` `empty()` early-out is no longer claimed as a proven guard.** It is redundant
+    with the `wire::decode` on the next line and its removal is unobservable — honestly reported at
+    the time, then pinned as a citation anchor and cited as the line producing the drop. The anchors
+    now pin the three flatten SEAMS (which the test does prove) plus the one guard that is
+    independently observable, and both redundant early-outs say plainly in code that they are
+    redundant early-outs.
+
 - **BREAKING: the derived `"<kind>-client"` / `"<kind>-server"` module name is gone (#621,
   ADR-0073 §4).** `transport_vertex_t::module_for` no longer invents a module for an undeclared
   *(kind, role)* pair — it returns `result_t<std::string>` and answers `SCHEMA_NOT_FOUND`

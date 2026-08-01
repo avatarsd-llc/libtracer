@@ -47,11 +47,17 @@ ANCHORS = [
     ("core/src/transport_vertex.cpp:157", "SCHEMA_NOT_FOUND", "transport_vertex_t::module_for"),
     # fwd-router.md's "Signature source" line — bare :NNN shorthands that had ALL rotted
     # silently (they cited the pre-#739 header). Anchored so they cannot rot again.
-    ("core/include/libtracer/fwd_router.hpp:115", "explicit fwd_router_t"),
-    ("core/include/libtracer/fwd_router.hpp:168", "void add_child"),
-    ("core/include/libtracer/fwd_router.hpp:218", "subscribe_toward"),
-    ("core/include/libtracer/fwd_router.hpp:228", "using reply_fn_t"),
-    ("core/include/libtracer/fwd_router.hpp:239", "using stale_label_fn_t"),
+    # zero-copy-and-flatten.md's rope-tier citations and ADR-0072's stale-comment pointer —
+    # all four had rotted on main and were re-asserted by a mechanical +24 shift (#768 verify).
+    ("core/include/libtracer/fwd_router.hpp:516", "Terminus over a MULTI-LINK rope"),
+    ("core/include/libtracer/fwd_router.hpp:522", "64 KB / 2 links"),
+    ("core/include/libtracer/fwd_router.hpp:534", "The forward hop, read entirely by OFFSET"),
+    ("core/include/libtracer/fwd_router.hpp:426", "Slot addresses are NOT stable"),
+    ("core/include/libtracer/fwd_router.hpp:139", "explicit fwd_router_t"),
+    ("core/include/libtracer/fwd_router.hpp:192", "void add_child"),
+    ("core/include/libtracer/fwd_router.hpp:242", "subscribe_toward"),
+    ("core/include/libtracer/fwd_router.hpp:252", "using reply_fn_t"),
+    ("core/include/libtracer/fwd_router.hpp:263", "using stale_label_fn_t"),
     ("core/include/libtracer/child_registry.hpp:169", "void add(std::string name"),
     ("core/include/libtracer/child_registry.hpp:243", "resolve_peer"),
     ("core/include/libtracer/child_registry.hpp:258", "bool erase"),
@@ -102,16 +108,27 @@ ANCHORS = [
     ("core/src/graph.cpp:1259", "value.materialize(*value_backend_)", "field_write read it back"),
     ("core/src/graph.cpp:1463", "result_t<void> graph_t::field_write"),
     ("core/src/graph.cpp:1590", "acl_right_t::CREATE", 'step0.name == "children"'),
-    ("core/src/fwd_router.cpp:1179", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:1203", "value.materialize(*flat_)"),
-    ("core/src/fwd_router.cpp:1204", "flatten OOM"),
-    ("core/src/fwd_router.cpp:1208", "try_encode_compact", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:1240", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
-    # #730 — the two INGRESS flatten guards. Anchored because the whole point of the
-    # seam is that these are testable; a citation to them silently rotting would be the
-    # first step back to "the guard nobody can prove still works".
-    ("core/src/fwd_router.cpp:898", "route_flat.empty()"),
-    ("core/src/fwd_router.cpp:918", "payload_flat.empty()"),
+    ("core/src/fwd_router.cpp:1185", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1213", "value.materialize(*flat_)"),
+    ("core/src/fwd_router.cpp:1214", "flatten OOM"),
+    ("core/src/fwd_router.cpp:1218", "try_encode_compact", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:1250", "std::vector<std::span<const std::byte>> iov;", "fwd_router_t::deliver_remote"),
+    # #730 — the THREE ingress flatten SITES, plus the one guard that is independently
+    # observable. Anchored because the whole point of the seam is that these are testable;
+    # a citation to them silently rotting would be the first step back to "the guard nobody
+    # can prove still works". The `ADVERTISE` and bus-name `empty()` early-outs are NOT
+    # anchored: both are redundant with the `wire::decode` that follows them and their
+    # removal is not observable, so pinning them would claim a dead line is a guard.
+    ("core/src/fwd_router.cpp:577", "materialize(*flat_)", "hit.rejected"),
+    ("core/src/fwd_router.cpp:897", "materialize(*flat_)", "case type_t::ADVERTISE"),
+    ("core/src/fwd_router.cpp:917", "materialize(*flat_)", "case type_t::COMPACT"),
+    ("core/src/fwd_router.cpp:924", "payload_flat.empty()"),
+    # #766 — the terminus resolver's rope-tier flattens, which `flat` does NOT cover. Pinned
+    # so the corrected scope sentences cannot drift off the sites that make them true.
+    ("core/src/op_resolve_view.cpp:80", "return sub.flatten()"),
+    ("core/src/op_resolve_view.cpp:142", "cache_ = v_->wire().materialize()"),
+    # The in-tree pool/synchronisation composition the thread-safety contract names.
+    ("core/include/libtracer/mem_pool.hpp:118", "class sync_pool_t"),
     ("core/include/libtracer/vertex.hpp:2299", "vertex_t* parent_"),
 ]
 

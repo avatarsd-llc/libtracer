@@ -28,9 +28,13 @@ The one-slab recipe
 /** @brief One static slab feeds BOTH memory seams — nothing grows at runtime. */
 static std::byte g_slab[24 * 1024];
 
-// Front region: pool_t — RX segments for owning transport delivery.
-// Every inbound datagram lands in a pool slot; exhaustion = backpressure.
-tr::mem::pool_t rx_pool{front_region(g_slab), /*slot_payload=*/1536};
+// Front region: RESERVED for the RX segment pool — but the receive seam is a
+// mem_backend_t too, and it carries the same thread-safety obligation as the
+// other two: every endpoint allocates on its own receive thread and a delivered
+// segment reclaims on whichever thread drops the last reference. Until the
+// arch-selected synchronised pool exists (#770), the receive seam ALSO stays on
+// heap_backend() — see the warning below.
+// ... transport_vertex_t net{graph, router, "/net", &tr::mem::heap_backend()};
 
 // Back region: monotonic + synchronized arena — the pmr seam (label tables,
 // LKV control blocks).
@@ -43,22 +47,64 @@ std::pmr::synchronized_pool_resource shared{&arena};
 // throwing (ADR-0065). Injecting only `shared` above leaves those allocations
 // on the global heap — where they at least RECYCLE, which matters below.
 //
-// ... graph_t graph{&shared, &rx_pool, /*ctl=*/&blocks};
-// ... fwd_router_t router{graph, &shared, /*rx=*/&blocks, /*flat=*/&rx_pool};
+// The two BYTE-BUFFER seams — graph_t's `value_backend` and fwd_router_t's `flat`
+// — stay on heap_backend() here, and the warning below says why: a BARE pool_t is
+// not thread-safe, and both seams are reached from several threads.
+//
+// ... graph_t graph{&shared, /*value_backend=*/&tr::mem::heap_backend(),
+// ...               /*ctl=*/&blocks};
+// ... fwd_router_t router{graph, &shared, /*rx=*/&blocks,
+// ...                     /*flat=*/&tr::mem::heap_backend()};
 ```
 
 Those are the three injection points of `graph_t`'s constructor — the pmr resource,
 the value backend and the failable control source
 (`core/include/libtracer/graph.hpp:187-189`) — and the matching three of
 `fwd_router_t`: the pmr resource, the failable `rx` source and the `flat` byte backend
-its rope flattens draw from (`core/include/libtracer/fwd_router.hpp:116-118`). Leave
-`flat` defaulted and every flatten the router performs — the ingress `ADVERTISE`/`COMPACT`
-sub-rope flattens and the per-delivery egress one — still comes off the global heap,
-outside the node's bound (#730). The full set of
+its rope flattens draw from (`core/include/libtracer/fwd_router.hpp:140-142`). The full set of
 build-time and injected bounds is catalogued in
 [the configuration space](../design/config/00-configuration-space.md); the failure
 semantics of the third seam are in
 [failable allocation and backpressure](../design/allocation-and-backpressure.md).
+
+:::{warning}
+**Do not point `value_backend` or `flat` at a bare `tr::mem::pool_t`.** Both are
+`mem_backend_t` seams, and an injected `mem_backend_t` MUST be thread-safe
+([ADR-0060 — LKV copy store](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0060-lkv-copy-store-injected-value-backend.md)
+§2): a `segment` self-routes its reclaim on whichever thread drops the last reference,
+which is not in general the thread that allocated it. `flat` adds a second reason —
+three of the router's four flatten sites run on a transport child's **receive** thread
+(several children receive concurrently) and the fourth runs on the **writer** thread
+inside the remote-delivery fan-out. `pool_t`'s free list is a plain `std::size_t` head
+and count with no lock and no atomic, so two threads can be handed the same slot and a
+stored value aliases onto an outbound frame.
+
+`sync_pool_t` (`core/include/libtracer/mem_pool.hpp:118`) is the in-tree composition of
+a pool with synchronisation — but it is a **spinlock**, the multi-core-host variant, and
+it is wrong for a single-core MCU, where a lower-priority task holding the lock cannot
+run while a higher-priority task spins. The variant this target needs is the
+interrupt-disable critical-section pool ADR-0060 §2 names, selected as an
+[ADR-0047 — build-time closed module sets](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)
+§2 module-set trait — and **it is not built**
+([zero-copy and flatten](../design/zero-copy-and-flatten.md) §5 records the same gap for
+the receive backend). The transport **receive** seam sits on the same unsynchronised
+primitive and is NOT a safe residual use: `transport_vertex_t`'s `rx_backend` is handed
+unchanged to every endpoint, each endpoint allocates on its own receive thread, and a
+delivered segment reclaims on whichever thread drops the last reference — a bare
+`pool_t` there is the identical race (#770; the `full_node` example still wires one and
+is tracked by that issue). Until the critical-section pool exists all **three** seams —
+`value_backend`, `flat` and the receive backend — stay on `heap_backend()`, which is
+thread-safe. That is the honest state of "one slab, whole stack" on a single-core
+target, not a licence to inject the pool anyway.
+:::
+
+Keeping `flat` on the heap means the router's four flattens — the ingress
+`ADVERTISE` / `COMPACT` sub-rope flattens, the cold bus-name rejection flatten and the
+per-delivery egress one — sit outside the node's slab bound (#730). Two further caveats,
+so the bound is not read wider than it is: those four are the only flattens `flat` covers
+— the **terminus resolver's** rope-tier flattens (`core/src/op_resolve_view.cpp:80`,
+`:142`) never see it and draw from the global heap on every fragmented terminus request
+(#766) — and `flat` bounds the flattened *bytes*, not the frame builds beside them.
 
 :::{warning}
 Do **not** reach for `tr::mem::bump_source_t` as `blocks`. It is scope-lifetime only:
