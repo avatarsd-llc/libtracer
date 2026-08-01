@@ -21,12 +21,19 @@
 name: publish-npm
 
 on:
-  # npm publishing is DELIBERATELY DECOUPLED from the core release tag. The
-  # TypeScript packages version independently of the C++ core (a `v0.3.0` core
-  # tag does not imply a TS release — the packages are at their own 0.x versions,
-  # and republishing an already-published version would fail). So this workflow
-  # is manual-only: bump the TS package versions intentionally, then dispatch it
-  # (dry-run first). It no longer fires on a `v*` tag or a published Release.
+  # MANUAL RE-PUBLISH PATH ONLY — it is not how a release reaches npm.
+  #
+  # The release path is `release.yml`, which publishes npm alongside crates.io,
+  # PlatformIO and ESP on a `v*` tag, stamping every manifest from the tag. The
+  # TypeScript packages do NOT version independently: `tools/sync-version.py` is
+  # a single-source-of-truth stamper and the root `VERSION` file drives all of
+  # them, so one `vX.Y.Z` tag means X.Y.Z everywhere.
+  #
+  # This workflow exists for the cases that path cannot serve — re-publishing
+  # after a registry-side failure, or validating a publish with dry-run. It is
+  # dispatch-only for that reason, not because npm is decoupled from the tag.
+  # Republishing an already-published version still fails, which is why the
+  # dry-run input exists.
   workflow_dispatch:
     inputs:
       dry-run:
