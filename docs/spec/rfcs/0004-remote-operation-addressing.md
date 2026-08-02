@@ -23,13 +23,17 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 > two spellings from an accepted record would decide [#584](https://github.com/avatarsd-llc/libtracer/issues/584) — which asks
 > whether they should exist — by silently editing the decision it is meant to inform.
 
-> **Amended by [RFC-0017](0017-element-addressing-value-plane-index.md) (2026-07-28):** §C's `FIELD`
+> **Amendment proposed by [RFC-0017](0017-element-addressing-value-plane-index.md) (2026-07-28) — still `draft`, not in force:** §C's `FIELD`
 > grammar admits **K = 0** — a selector carrying only `index` / `index_mode` and no leading `NAME`
 > addresses the **vertex's own value**, so `[n]` reaches the value plane and not only a `:field`.
 > Levels are `NAME`-delimited, so a `FIELD` whose first child is not a `NAME` is unambiguously a
 > value-plane selector. §D gains the element operations and the rule that a **delivery mirrors the
 > shape of the write** that caused it. `PATH` is untouched — the "children MUST be `NAME`"
 > invariant restated in §C still stands, and an element index never appears in `dst` or `src`.
+> The amendment takes effect only when RFC-0017 is accepted: as this RFC stands, §C's grammar is
+> the one [reference/03](../../reference/03-addressing.md) §index forms describes, where an index
+> is a property of a **field** step. ([ADR-0066](../../adr/0066-element-write-is-a-single-attempt-cas.md)
+> settles the concurrency half of the proposal in advance; it does not accept the RFC.)
 
 > **Partially superseded by [RFC-0008](0008-vertex-operations-assign-propagate.md) (2026-07-06, amended 2026-07-06b):** the value-based `delivery_mode` QoS hint (`EVERY`/`THROTTLED`/`ON_CHANGE`) and the `min_interval_ns` throttle referenced in §E are removed from `SUBSCRIBER.qos_settings` — the runtime no longer filters delivery by comparing values. `delivery_mode` survives redefined as a value-agnostic **per-vertex** policy (`UNCONDITIONAL`/`IF_NEWER`/`EXPLICIT`), not a per-subscriber value filter. `delivery_compact` (label compaction) is orthogonal and unaffected.
 
@@ -134,6 +138,12 @@ where each level =
 
 ### D. Operation semantics + replies
 
+> **Amended by [RFC-0021](0021-wire-subscriber-target-frame-of-reference.md) (accepted 2026-08-01):**
+> a wire `SUBSCRIBER`'s optional `PATH` child — undefined by this section — is the delivery route
+> **in the producer's own frame**, and `SUBSCRIBE` is sufficient authority to install it. RFC-0021's
+> implementation is deferred past v0.7.0, so the reference implementation still discards that child;
+> the normative text is RFC-0021's.
+
 | `op` | Payload | One-shot `REPLY` (`op=REPLY`, routed back via `src`) |
 | ---- | ---- | ---- |
 | `READ=0` | none | `kind=RESULT` + the value TLV, or `kind=ERROR` + `STATUS=ERROR(NOT_FOUND)` |
@@ -153,6 +163,15 @@ A `READ` of an **array `:field`** (e.g. `:subscribers[]`) returns its members wr
 **A delivery *is* a `FWD WRITE` (load-bearing).** When a producer fans out to a *remote* subscriber, that delivery **is** a `FWD{ op=WRITE, payload=VALUE }` routed to the subscriber's data vertex via the stored return-route. So a **subscription delivery and a one-shot command are the identical wire frame** — the only difference is whether a standing `SUBSCRIBER` produced it or a client issued it once; the target cannot (and per ADR-0026 claim 2 must not) tell them apart. Likewise **keepalive / digest / liveness / async-write-ack are ordinary `VALUE`/`STATUS` writes on the standing channel**, not reply-kinds.
 
 ### E. Delivery / fanout is unchanged
+
+> **Amended by [RFC-0021](0021-wire-subscriber-target-frame-of-reference.md) and
+> [RFC-0022](0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) (both accepted 2026-08-01):**
+> RFC-0021 rules that a `SUBSCRIBER` carrying a `PATH` target binds the edge to the mount link the
+> route names rather than to the session the subscribe-write arrived on, so a subscription outlives
+> the orchestrator that installed it. RFC-0022 (as replaced by its Amendment 1) moves **delivery
+> policy to the subscription** — two packed bytes in the `SUBSCRIBER`'s `SETTINGS` child — and
+> **deletes `settings_t`**, so the per-vertex `:settings.<knob>` write surface this section and §D
+> refer to no longer exists.
 
 Producer-holds fan-out ([ADR-0026](../../adr/0026-consumer-initiated-subscription-client-write.md)) is **unified** with this RFC, not changed by it: the `src` route a consumer's `subscribe`-`FWD` **accumulated on the way in** (§B) is exactly what the producer stores as the `SUBSCRIBER`'s `target`. Each later delivery is a `FWD{ op=WRITE, payload=VALUE }` source-routed back along that stored route — i.e. a delivery *is* the same primitive as a one-shot write (§D). For a delivery that crosses a **cyclic / multi-path** region of the mesh (where the same data could arrive two ways), the delivery `FWD` is wrapped in **`ROUTER` (`0x0D`)** for `(origin, ts)` dedup + `MAX_HOPS` ([ADR-0014](../../adr/0014-router-cycle-termination-hop-count.md)), carrying the [RFC-0003](0003-bridged-wildcard-delivery-path.md) concrete-path child. Strict source-routed deliveries (a single accumulated route) need no `ROUTER`; `ROUTER` earns its keep only where the topology folds.
 

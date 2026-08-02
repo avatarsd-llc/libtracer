@@ -1,6 +1,6 @@
 # The LKV publish takes no lock when nobody is awaiting, and the slot itself becomes lock-free
 
-Status: **§1 accepted and implemented; §2 proposed.** Extends [ADR-0060](0060-lkv-copy-store-injected-value-backend.md) (the LKV copy-store and its injected `value_backend_`) on the *synchronisation* axis rather than the allocation one. Preserves [ADR-0021](0021-pay-for-what-you-use-machinery.md)'s pay-for-what-you-use rule and the `#361 §2` stripe design that replaced per-vertex blocking primitives. Does not touch [ADR-0038](0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md) §3 — the FWD demux was already lock-free and stays so. Grounded in cycle-level measurement of the in-process write path; see [#555](https://github.com/avatarsd-llc/libtracer/issues/555).
+Status: **§1 accepted and implemented; §2 proposed.** Extends [ADR-0060](0060-lkv-copy-store-injected-value-backend.md) (the LKV copy-store and its injected `value_backend_`) on the *synchronisation* axis rather than the allocation one. Preserves [ADR-0021](0021-colon-field-plane-is-the-vertex-ioctl.md)'s pay-for-what-you-use rule and the `#361 §2` stripe design that replaced per-vertex blocking primitives. Does not touch [ADR-0038](0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md) §3 — the FWD demux was already lock-free and stays so. Grounded in cycle-level measurement of the in-process write path; see [#555](https://github.com/avatarsd-llc/libtracer/issues/555).
 
 ## Context
 

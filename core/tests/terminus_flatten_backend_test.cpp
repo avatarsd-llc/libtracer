@@ -65,6 +65,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
@@ -200,7 +201,10 @@ class arming_backend_t final : public tr::mem::mem_backend_t {
         }
         if (budget_ > 0) --budget_;
         tr::view::segment_t* const seg = up_.alloc(size, hint);
-        if (seg != nullptr) ++served_;
+        if (seg != nullptr) {
+            ++served_;
+            sizes_.push_back(size);
+        }
         return seg;
     }
     void destroy(tr::view::segment_t* seg) noexcept override { up_.destroy(seg); }
@@ -219,9 +223,25 @@ class arming_backend_t final : public tr::mem::mem_backend_t {
     [[nodiscard]] int refusals() const noexcept { return refusals_; }
     /** @brief How many were SERVED — the "the seam is consulted at all" check. */
     [[nodiscard]] int served() const noexcept { return served_; }
+    /**
+     * @brief Was an allocation of EXACTLY @p n bytes served (#793)?
+     *
+     * `served() > 0` says the seam was consulted; it does not say WHICH site consulted it,
+     * and on a fragmented frame the whole-frame flatten alone satisfies it. The
+     * single-link ownership copy asks for exactly the payload TLV's byte length and nothing
+     * else on this path does, so an exact-size match is the site-specific instrument — the
+     * one that goes to zero when `own_wire`'s single-link branch is put back on
+     * `view::over_bytes`'s global heap.
+     */
+    [[nodiscard]] bool served_size(std::size_t n) const noexcept {
+        return std::find(sizes_.begin(), sizes_.end(), n) != sizes_.end();
+    }
+    /** @brief Every size the seam was asked for, in order — the sweep's and #793's log. */
+    [[nodiscard]] const std::vector<std::size_t>& sizes() const noexcept { return sizes_; }
     void reset_counts() noexcept {
         refusals_ = 0;
         served_ = 0;
+        sizes_.clear();
     }
 
    private:
@@ -229,6 +249,7 @@ class arming_backend_t final : public tr::mem::mem_backend_t {
     int budget_ = -1;  // <0 ⇒ unlimited
     int refusals_ = 0;
     int served_ = 0;
+    std::vector<std::size_t> sizes_{};
 };
 
 /** @brief A link that records what the router sends back, and can push ropes upward. */
@@ -266,6 +287,17 @@ std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
 std::vector<std::byte> b_value_u32(std::uint32_t v) {
     std::array<std::byte, 4> raw{};
     tr::detail::store_le(std::span<std::byte>(raw), v, 4);
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, raw);
+    return out;
+}
+
+/**
+ * @brief An opaque `VALUE` TLV of @p n payload bytes, every one @p fill — a payload whose
+ *        WIRE length is distinctive, so the seam log can be read for that exact size (#793).
+ */
+std::vector<std::byte> b_value_filled(std::size_t n, std::uint8_t fill) {
+    const std::vector<std::byte> raw(n, std::byte{fill});
     std::vector<std::byte> out;
     tr::wire::emit_tlv(out, type_t::VALUE, opt_t{}, raw);
     return out;
@@ -309,6 +341,28 @@ tr::view::rope_t as_rope(std::span<const std::byte> bytes, std::size_t links) {
         const std::size_t n = std::min(step, bytes.size() - off);
         tr::view::segment_ptr_t seg = tr::view::heap_alloc(n);
         std::memcpy(seg->bytes.data(), bytes.data() + off, n);
+        r.append(tr::view::view_t::over(std::move(seg)));
+    }
+    return r;
+}
+
+/**
+ * @brief A TWO-link rope over @p bytes split at @p at — the shape that reaches
+ *        `own_wire`'s SINGLE-link branch (#793).
+ *
+ * @ref as_rope's even slicing lands TLV boundaries wherever the arithmetic falls, so which
+ * branch of `own_wire` a given node takes is incidental. Splitting exactly at the payload
+ * TLV's offset makes the frame MULTI-link (so the resolve runs on the rope tier at all)
+ * while the payload TLV lies WHOLLY inside the second link — `link_count() == 1` on its
+ * subrope, the ownership COPY rather than the ownership flatten. That is the branch #766
+ * left on the global heap.
+ */
+tr::view::rope_t as_split_rope(std::span<const std::byte> bytes, std::size_t at) {
+    tr::view::rope_t r;
+    for (const std::span<const std::byte> part : {bytes.first(at), bytes.subspan(at)}) {
+        if (part.empty()) continue;
+        tr::view::segment_ptr_t seg = tr::view::heap_alloc(part.size());
+        std::memcpy(seg->bytes.data(), part.data(), part.size());
         r.append(tr::view::view_t::over(std::move(seg)));
     }
     return r;
@@ -367,6 +421,20 @@ std::optional<std::uint32_t> stored_u32(const graph_t& g, vertex_handle_t v) {
     const auto tlv = tr::wire::decode((*ref)->only());
     if (!tlv || tlv->payload.size() != 4) return std::nullopt;
     return tr::detail::load_le<std::uint32_t>(tlv->payload);
+}
+
+/**
+ * @brief The stored VALUE's payload as (length, first byte), or `nullopt` when the vertex
+ *        holds nothing usable — the #793 WRITE cases' positive observable.
+ */
+std::optional<std::pair<std::size_t, std::uint8_t>> stored_filled(const graph_t& g,
+                                                                  vertex_handle_t v) {
+    const auto ref = g.read(v);
+    if (!ref || !*ref || (*ref)->total_length() == 0) return std::nullopt;
+    const tr::view::view_t flat = (*ref)->materialize();
+    const auto tlv = tr::wire::decode(flat.bytes());
+    if (!tlv || tlv->payload.empty()) return std::nullopt;
+    return std::pair{tlv->payload.size(), std::to_integer<std::uint8_t>(tlv->payload[0])};
 }
 
 /** @brief The fixture every case shares: `/sensor/temp` behind a rope-delivering link. */
@@ -594,6 +662,226 @@ void test_terminus_refusal_sweep() {
     check(drops + addressed > 0, "instrument: the sweep actually hit refusals");
 }
 
+// --- #793: the SINGLE-link ownership copy is the seam's too --------------------------
+
+/** @brief The #793 payload: 61 data bytes ⇒ a 65-byte VALUE TLV, a size nothing else asks for. */
+constexpr std::size_t kOwnPayloadBytes = 61;
+constexpr std::size_t kOwnTlvBytes = kOwnPayloadBytes + 4;  // VALUE header is 4 bytes
+constexpr std::uint8_t kOwnFill = 0xA7;
+constexpr std::uint8_t kPriorFill = 0x11;
+
+/** @brief The #793 fixture: a WRITE frame split so its payload TLV lies in ONE link. */
+struct split_write_t {
+    std::vector<std::byte> frame;
+    std::size_t split = 0; /**< @brief Byte offset of the payload TLV — the link boundary. */
+};
+split_write_t split_write() {
+    const std::vector<std::byte> payload = b_value_filled(kOwnPayloadBytes, kOwnFill);
+    split_write_t w;
+    w.frame = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"origin"}), payload);
+    w.split = w.frame.size() - payload.size();
+    return w;
+}
+
+/**
+ * @brief A fragmented terminus WRITE whose payload TLV is CONTIGUOUS draws its ADR-0041 §2
+ *        ownership copy from the injected seam — the last rope-tier site on the global heap
+ *        after #766.
+ *
+ * @section instrument Why an exact SIZE and not just `served()`
+ *
+ * `served() > 0` was already true here before #793: the frame spans two links, so the root
+ * FWD's `ensure_cache` flattens through the seam and the count is non-zero no matter what
+ * `own_wire` does. The claim under test is narrower — that the OWNERSHIP COPY, the
+ * `link_count() == 1` branch, stopped going to `view::over_bytes`'s global heap. It asks for
+ * exactly `kOwnTlvBytes` and nothing else on this path asks for that size, so
+ * `served_size(kOwnTlvBytes)` is the site-specific instrument. Put the branch back on the
+ * global heap and this check — and only this one — reddens.
+ *
+ * The RAM half is the same two-arm comparison the #766 case runs: the same request with the
+ * seam on a static slab must cost strictly fewer GLOBAL allocations than with it on the heap.
+ */
+void test_single_link_ownership_copy_draws_from_the_seam() {
+    std::printf("a contiguous WRITE payload's ownership COPY draws from the injected seam:\n");
+    const split_write_t w = split_write();
+
+    static std::array<std::byte, 64 * 1024> slab{};
+    tr::mem::pool_t pool(slab, 2048);
+    arming_backend_t seam(pool);
+    std::size_t pool_allocs = 0;
+    {
+        node_t n;
+        fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+        router.add_child("in", n.in);
+        tr::view::rope_t rope = as_split_rope(w.frame, w.split);  // built OUTSIDE the window
+        g_allocs = 0;
+        g_bytes = 0;
+        g_arm = true;
+        n.in.inject(std::move(rope));
+        g_arm = false;
+        pool_allocs = g_allocs;
+        check(seam.served_size(kOwnTlvBytes),
+              "instrument: the seam served the exact payload-TLV size — the SINGLE-link "
+              "ownership copy, not just the frame flatten");
+        const auto stored = stored_filled(n.g, n.temp);
+        check(stored.has_value() && stored->first == kOwnPayloadBytes && stored->second == kOwnFill,
+              "and the write landed intact (the copy is a copy, not a short span)");
+    }
+
+    std::size_t heap_allocs = 0;
+    {
+        node_t n;
+        fwd_router_t router(n.g);  // defaults: flat = heap_backend()
+        router.add_child("in", n.in);
+        tr::view::rope_t rope = as_split_rope(w.frame, w.split);
+        g_allocs = 0;
+        g_bytes = 0;
+        g_arm = true;
+        n.in.inject(std::move(rope));
+        g_arm = false;
+        heap_allocs = g_allocs;
+        check(stored_filled(n.g, n.temp).has_value(),
+              "the un-injected default lands the same write");
+    }
+    std::printf("    global new: %zu calls with the seam on a slab, %zu on the heap (%d served)\n",
+                pool_allocs, heap_allocs, seam.served());
+    check(pool_allocs + static_cast<std::size_t>(seam.served()) <= heap_allocs,
+          "and every draw the seam served is a global allocation that did NOT happen");
+}
+
+/**
+ * @brief A REFUSED single-link ownership copy is answered by value: the vertex keeps its
+ *        previous value and the answer is a drop or an addressed BACKPRESSURE.
+ *
+ * The refusal channel #789 built is what carries this — `own_wire` answers an empty view,
+ * `own_or_ref_tlv`'s `total_length() == 0` guard turns it into `assemble_error(BACKPRESSURE)`,
+ * and the refusal is recorded sticky so a LATER span read on the same walk is not believed
+ * either. What #793 adds is that the refusal can HAPPEN at all on this branch: before it,
+ * an injected seam armed to refuse everything watched this write land from the global heap.
+ */
+void test_single_link_ownership_copy_refusal_is_answered() {
+    std::printf("a refused SINGLE-link ownership copy is answered by value:\n");
+    const split_write_t w = split_write();
+    node_t n;
+    (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_filled(4, kPriorFill))));
+    arming_backend_t seam;
+    fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+    router.add_child("in", n.in);
+
+    // Serve everything up to (but not including) the ownership copy, then refuse: the
+    // refusal lands ON the #793 site rather than on the frame flatten ahead of it.
+    seam.disarm();
+    {
+        node_t probe;
+        arming_backend_t probe_seam;
+        fwd_router_t probe_router(probe.g, std::pmr::get_default_resource(),
+                                  &tr::mem::heap_source(), &probe_seam);
+        probe_router.add_child("in", probe.in);
+        probe.in.inject(as_split_rope(w.frame, w.split));
+        int before = 0;
+        for (const std::size_t s : probe_seam.sizes()) {
+            if (s == kOwnTlvBytes) break;
+            ++before;
+        }
+        check(probe_seam.served_size(kOwnTlvBytes),
+              "instrument: the un-refused write DOES draw the ownership copy from the seam");
+        seam.refuse_after(before);
+    }
+
+    n.in.inject(as_split_rope(w.frame, w.split));
+    check(seam.refusals() > 0, "instrument: the injected backend was ASKED and refused");
+    check(!seam.served_size(kOwnTlvBytes),
+          "and the ownership copy is the draw that was refused (never served)");
+    const auto stored = stored_filled(n.g, n.temp);
+    check(stored.has_value() && stored->second == kPriorFill,
+          "the vertex still holds its PREVIOUS value — a refused copy is not stored");
+    if (!n.in.sent.empty()) {
+        const reply_facts_t f = read_reply(n.in.sent[0]);
+        check(f.is_fwd_reply && f.kind_error && f.code == backpressure_code() && f.route_bytes > 0,
+              "and the answer is an addressed BACKPRESSURE with an intact route, never a RESULT");
+    } else {
+        check(true, "the answer is a drop — by value, never an abort");
+    }
+
+    // The positive control: the identical write lands once memory returns.
+    seam.disarm();
+    n.in.sent.clear();
+    n.in.inject(as_split_rope(w.frame, w.split));
+    const auto after = stored_filled(n.g, n.temp);
+    check(after.has_value() && after->first == kOwnPayloadBytes && after->second == kOwnFill,
+          "and the same write lands once memory returns");
+}
+
+/**
+ * @brief The #793 refusal SWEEP: move the exhaustion point across every draw the contiguous
+ *        WRITE makes and require each outcome to be sound.
+ *
+ * Sound here has a stronger form than the READ sweep's, because a WRITE MUTATES: on top of
+ * "a drop or an addressed BACKPRESSURE, never a `kind=RESULT`", the vertex must never end up
+ * holding a value derived from a refused draw. A short span stored as the LKV is the failure
+ * this whole seam programme exists to remove (#730's ingress-COMPACT finding, one layer out),
+ * so the sweep asserts the vertex holds either its previous value or the intended one — never
+ * a third thing.
+ */
+void test_single_link_ownership_copy_sweep() {
+    std::printf("moving the refusal across every draw of a contiguous WRITE stays sound:\n");
+    const split_write_t w = split_write();
+
+    int total = 0;
+    {
+        node_t n;
+        arming_backend_t seam;
+        fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+        router.add_child("in", n.in);
+        n.in.inject(as_split_rope(w.frame, w.split));
+        total = seam.served();
+    }
+    check(total > 0, "instrument: the un-refused write DOES draw through the seam");
+
+    int drops = 0;
+    int addressed = 0;
+    bool sound = true;
+    for (int k = 0; k < total; ++k) {
+        node_t n;
+        arming_backend_t seam;
+        fwd_router_t router(n.g, std::pmr::get_default_resource(), &tr::mem::heap_source(), &seam);
+        router.add_child("in", n.in);
+        (void)n.g.write(n.temp,
+                        tr::view::rope_t(*tr::view::over_bytes(b_value_filled(4, kPriorFill))));
+        seam.refuse_after(k);
+        n.in.inject(as_split_rope(w.frame, w.split));
+        if (seam.refusals() == 0) continue;
+
+        const auto stored = stored_filled(n.g, n.temp);
+        const bool value_ok = stored.has_value() &&
+                              (stored->second == kPriorFill ||
+                               (stored->second == kOwnFill && stored->first == kOwnPayloadBytes));
+        if (!value_ok) {
+            sound = false;
+            std::printf("    refusal after %d served: the vertex holds a THIRD value\n", k);
+        }
+        if (n.in.sent.empty()) {
+            ++drops;
+            continue;
+        }
+        const reply_facts_t f = read_reply(n.in.sent[0]);
+        const bool ok =
+            f.is_fwd_reply && f.kind_error && f.code == backpressure_code() && f.route_bytes > 0;
+        if (ok) {
+            ++addressed;
+        } else {
+            sound = false;
+            std::printf("    refusal after %d served: unsound answer (reply=%d error=%d code=%u)\n",
+                        k, static_cast<int>(f.is_fwd_reply), static_cast<int>(f.kind_error),
+                        static_cast<unsigned>(f.code));
+        }
+    }
+    std::printf("    %d refusal points: %d dropped, %d answered addressed BACKPRESSURE\n", total,
+                drops, addressed);
+    check(sound, "every refusal point answers soundly and stores nothing derived from it");
+    check(drops + addressed > 0, "instrument: the sweep actually hit refusals");
+}
+
 // --- the default path: byte-identical, no regression -------------------------------
 
 /**
@@ -635,6 +923,12 @@ int main() {
     test_terminus_write_refusal_stores_nothing();
     std::printf("\n");
     test_terminus_refusal_sweep();
+    std::printf("\n");
+    test_single_link_ownership_copy_draws_from_the_seam();
+    std::printf("\n");
+    test_single_link_ownership_copy_refusal_is_answered();
+    std::printf("\n");
+    test_single_link_ownership_copy_sweep();
     std::printf("\n");
     test_default_backend_unchanged();
 

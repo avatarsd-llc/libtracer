@@ -68,11 +68,15 @@ class op_resolver_t {
      * @brief Bind the resolver to the local @p graph it resolves `dst` against.
      *
      * @param graph The node's local graph.
-     * @param flat  The byte backend the ROPE-tier terminus rope flattens draw their owned
-     *              `segment` from (#766) — the per-node contiguous-span materialize
+     * @param flat  The byte backend the ROPE-tier terminus draws its owned `segment`s from
+     *              (#766, #793) — the per-node contiguous-span materialize
      *              (`view_node::ensure_cache`, reached by every `wire()`/`body()` read of a
-     *              multi-link TLV) and the ADR-0053 ⑤ ownership flatten
-     *              (`view_node::own_wire`). These are the flattens that sit one call BELOW
+     *              multi-link TLV) and BOTH branches of the ownership copy
+     *              (`view_node::own_wire`: the ADR-0053 ⑤ flatten of a straddling payload and
+     *              the ADR-0041 §2 copy of a contiguous one — the latter reached the global
+     *              heap through `view::over_bytes` until #793, so which allocator a write used
+     *              depended on where the PEER's fragmentation happened to fall). These sit one
+     *              call BELOW
      *              `fwd_router_t::resolve_terminus_rope`, and until #766 they took
      *              @ref mem::heap_backend unconditionally: a bounded node that pointed every
      *              other injection at its own slab still drew from the global heap the moment

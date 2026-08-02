@@ -111,10 +111,14 @@ Keeping `flat` on the heap means every rope flatten on the forward **and** termi
 sits outside the node's slab bound — the ingress `ADVERTISE` / `COMPACT` sub-rope
 flattens, the cold bus-name rejection flatten and the per-delivery egress one, plus
 the terminus resolver's rope-tier flattens one call below `resolve_terminus_rope`
-(`view_node::ensure_cache`, `view_node::own_wire`), which the router reaches by handing
-`flat` to its `op_resolver_t`. One caveat remains, so the bound is not read wider
-than it is: `flat` bounds the flattened *bytes*, not the frame builds beside them, and not
-the terminus arena — that is `blocks`.
+(`view_node::ensure_cache`, `view_node::own_wire` — both of its branches, so a
+peer cannot escape the bound by sending a payload that happens to land contiguously), which
+the router reaches by handing `flat` to its `op_resolver_t`. Two caveats remain, so
+the bound is not read wider than it is: `flat` bounds the flattened and copied *bytes*, not
+the frame builds beside them, and not the terminus arena — that is `blocks`. And the
+terminus **reply head segment** is bounded by neither: it draws from the global heap on both
+tiers, answers exhaustion as an addressed `BACKPRESSURE` rather than an abort, and is the
+one peer-drivable terminus allocation this recipe does not yet put inside the slab.
 
 :::{warning}
 Do **not** reach for `tr::mem::bump_source_t` as `blocks`. It is scope-lifetime only:

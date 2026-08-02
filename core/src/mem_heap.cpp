@@ -20,6 +20,18 @@ mem_backend_t& heap_backend() noexcept {
 
 namespace tr::view {
 
+/**
+ * @brief The one locus of "adopt a fresh owned segment from a backend" (#793) — @ref
+ *        heap_alloc is this over @ref mem::heap_backend.
+ */
+segment_ptr_t segment_alloc(mem::mem_backend_t& backend, std::size_t size) {
+    return segment_ptr_t::adopt(backend.alloc(size, mem::alloc_hint_t::NONE));
+}
+
+// NOT written as `segment_alloc(mem::heap_backend(), size)`: this is the arm every
+// pre-#793 call site takes, and the whole latency claim for #793 is that those call
+// sites are BYTE-identical. Delegating would put one extra call frame on it. One
+// duplicated line is the price of an object-file `cmp` being the proof.
 segment_ptr_t heap_alloc(std::size_t size) {
     return segment_ptr_t::adopt(mem::heap_backend().alloc(size, mem::alloc_hint_t::NONE));
 }

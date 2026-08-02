@@ -29,27 +29,23 @@ There is **no wildcard grammar**. Subscriptions do not need one: every subscript
 - Maximum **single-name** length: 64 bytes (UTF-8 encoded).
 - Maximum **total path** length: 1024 bytes, measured as the **encoded `PATH` body** — the
   concatenated `NAME` TLVs, i.e. exactly the `PATH` TLV's `length` field. Each segment
-  therefore costs its 4-byte `NAME` header plus its UTF-8 bytes, not its bytes alone.
-  (Erratum 2026-07-31: this line and [§`0x06` PATH](05-protocol-tlvs.md) each stated the cap
-  in a *different* byte set from the one `path_t::parse` enforces — see the note below.)
+  therefore costs its 4-byte `NAME` header plus its UTF-8 bytes, not its bytes alone
+  (see the note on the cap's unit below).
 - Maximum **segment depth**: 255 ([RFC-0023](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md) — chosen from the wire's own widths, superseding the inherited 32; the total-path byte cap above binds tighter whenever mean encoded segment cost exceeds 4 bytes, which under the current NAME-TLV encoding is always, giving an effective ceiling of 204). (An addressing limit on PATH construction; the TLV parser itself has no depth cap — nesting is receiver-resource-bounded per [RFC-0006](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md).)
 - Maximum **field-chain depth**: 8 (e.g., `:settings.transport_tcp.tls.cipher.suite` is at the limit).
 - Maximum **index value**: 65535 (fits in u16).
 
 A path that violates any limit MUST be rejected with `ERROR{tr::path::invalid}`.
 
-> **Erratum (2026-07-31) — the total-path cap was stated in three incompatible units.**
-> This section said "total path length", readable as the string form `/a/b/c`;
-> [§`0x06` PATH](05-protocol-tlvs.md) said "sum of NAME bytes + segment separators", which
-> **excludes** the per-segment TLV header; and `core/src/path.cpp` enforces it against the
-> accumulated `emit_name` output, which **includes** a 4-byte header per segment. For 32 segments
-> of 29 bytes those give 960, 959 and 1056 — so a path both documents called conforming is
-> **rejected by every shipped implementation**. The encoded-body reading is what C++ and Rust both
-> implement, so the text is corrected to it and no behaviour changes. It does mean a path that was
-> nominally conforming under a literal reading of the old wording is not conforming under the new
-> one; nothing in the wild emits such a path, because nothing in the wild implemented the old
-> reading. See [RFC-0019](../spec/rfcs/0019-path-depth-bounded-by-bytes.md) §4.3, which depends on
-> this unit being unambiguous.
+> **The cap's unit is the encoded `PATH` body — and the unit is load-bearing.**
+> It is neither the string form `/a/b/c` nor the sum of NAME bytes plus segment separators:
+> `path_t::parse` counts the accumulated `emit_name` output, which **includes** a 4-byte
+> `NAME` header per segment, so the number the cap bounds is exactly the `PATH` TLV's
+> `length` field. For 32 segments of 29 bytes the three readings give 960, 959 and 1056 —
+> far enough apart that a path one reading calls conforming another rejects. The
+> encoded-body reading is the one C++ and Rust both implement. See
+> [RFC-0019](../spec/rfcs/0019-path-depth-bounded-by-bytes.md) §4.3, which depends on this
+> unit being unambiguous.
 
 ### Examples
 
@@ -59,7 +55,8 @@ A path that violates any limit MUST be rejected with `ERROR{tr::path::invalid}`.
 /sensor/temp:subscribers[]             — append-or-list view of subscribers
 /sensor/temp:settings.app.setpoint     — a nested control field (owner-declared)
 /sensor/temp:settings.transport_tcp.send_buf_kb  — module-namespaced field
-/net/can0/wheel-encoder/left           — a remote vertex, routed through a transport-vertex
+/net/can/can0/wheel-encoder/left       — a remote vertex, routed through a transport-vertex
+                                         (the mount is two segments: module, then connection NAME)
 /camera/frame[7]                       — an indexed child endpoint (one vertex per index)
 /camera/frame[]                        — the append / list spelling (see §index forms)
 /i2c-bus/0x68/accel                    — peripheral on I²C bus 0x68
@@ -144,7 +141,7 @@ If stage 1 fails: `ERROR{tr::path::not_found}`. If stage 2 fails: `ERROR{tr::sch
 
 ### Atomicity of multi-field writes
 
-A single `write(path, tlv)` is atomic: a concurrent reader sees either the full prior state or the full new state at that path, not a partial mixture. To update multiple fields atomically, write a single SETTINGS TLV (`0x0B`) containing all the fields to a parent path; the router applies the SETTINGS as one operation.
+A single `write(path, tlv)` is atomic: a concurrent reader sees either the full prior state or the full new state at that path, not a partial mixture. There is **no atomic multi-field settings write**: settings writes are per-field, and a bare `:settings` write resolves nothing (`SCHEMA_NOT_FOUND`) — see [05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x0B`. Reads are the atomic direction: `read /x:settings` serves the whole container in one traversal. An application that needs several knobs to take effect together packs them into one `settings.app.*` leaf and writes that leaf.
 
 ```cpp
 // See the graph module: ../modules/graph.md
@@ -292,24 +289,24 @@ A path resolves within the host's own graph. No route prefix. Applies to:
 
 ### Routed scope (path-as-route)
 
-A remote vertex is reached by walking *through* a transport-vertex ([ADR-0027](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0027-transport-and-connections-are-vertices.md) / [CONTEXT.md §Path-as-route](../../CONTEXT.md)): the path `/net/<conn>/<remote path>` — e.g. `/net/can0/sensor/wheel/left` — is the local address of the remote vertex, and **the path is the route**. The prefix is the transport-vertex's own path, not a configured string; the send-side suffix and the receive-side prefix are the same address.
+A remote vertex is reached by walking *through* a transport-vertex ([ADR-0027](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0027-transport-and-connections-are-vertices.md) / [CONTEXT.md §Path-as-route](../../CONTEXT.md)): the path `/net/<module>/<name>/<remote path>` — e.g. `/net/can/can0/sensor/wheel/left` — is the local address of the remote vertex. The connection mount is **two** segments, a module segment grouping one transport kind and role plus the connection's own name ([13-network-formation.md](13-network-formation.md)); a one-segment `/net/<name>` addresses a module vertex that does not exist and fails to resolve, and **the path is the route**. The prefix is the transport-vertex's own path, not a configured string; the send-side suffix and the receive-side prefix are the same address.
 
-The operation travels as an `FWD` frame carrying its own route: each forwarder hop strips its leading `dst` segment and prepends the inbound-link NAME to `src`, so `dst` is always the remaining forward route and `src` the accumulated return route. Explicit source routes cannot loop **by construction** — `dst` shrinks monotonically per hop, so a delivery travels exactly as far as its explicit route and no further; a cycle in the physical topology is harmless per-op (the route is finite, so the walk is finite). There is no visited-set or revisit check — loop-freedom is protection-by-construction, not protection-by-rejection. Nothing is republished at a fixed prefix; a consumer addresses the routed path directly, and deliveries return along the accumulated route. See [reference/13](13-network-formation.md).
+The operation travels as an `FWD` frame carrying its own route: each forwarder hop strips the whole leading mount run — `net/<module>/<name>[/<peer>]` (RFC-0014 S2a) — from `dst` and prepends the inbound link's own mount run to `src`, so `dst` is always the remaining forward route and `src` the accumulated return route. Explicit source routes cannot loop **by construction** — `dst` shrinks monotonically per hop, so a delivery travels exactly as far as its explicit route and no further; a cycle in the physical topology is harmless per-op (the route is finite, so the walk is finite). There is no visited-set or revisit check — loop-freedom is protection-by-construction, not protection-by-rejection. Nothing is republished at a fixed prefix; a consumer addresses the routed path directly, and deliveries return along the accumulated route. See [reference/13](13-network-formation.md).
 
-Two links to the same peer are two different routed addresses (e.g. `/net/ws0/...` and `/net/can0/...`) — deliberate redundancy the consumer subscribes to explicitly, not auto-multipath.
+Two links to the same peer are two different routed addresses (e.g. `/net/ws/ws0/...` and `/net/can/can0/...`) — deliberate redundancy the consumer subscribes to explicitly, not auto-multipath.
 
 ### Global scope
 
 The "global" scope is the union of all hosts' local + routed graphs. There is no single authority that owns it; it is a logical view assembled by composing routes through transport-vertices.
 
-A common convention (not normative): a peer's data is addressed through the connection that reaches it — `/net/<conn>/...` — and multi-hop reach composes one link segment per hop. This keeps the global graph navigable without name collisions.
+A common convention (not normative): a peer's data is addressed through the connection that reaches it — `/net/<module>/<name>/...` — and multi-hop reach composes one link mount per hop. This keeps the global graph navigable without name collisions.
 
 ### Collision rules
 
 When two registrations would claim the same local path:
 
 - **First-binder wins**: the first registrant to bind a vertex name owns it. Subsequent attempts return `ERROR{tr::path::in_use}` (a yet-to-be-assigned error code in the `0x0C..0x7F` reserved range).
-- Configuration avoids collisions by giving each link a distinct connection NAME (`/net/can0`, `/net/ws0`).
+- Configuration avoids collisions by giving each link a distinct connection NAME within its module (`/net/can/can0`, `/net/ws/ws0`).
 - For routed addresses, uniqueness comes from the connection-NAME namespace of each node along the route. Conflicting peer identities on the network are a discovery-layer problem, not an addressing problem.
 
 ---

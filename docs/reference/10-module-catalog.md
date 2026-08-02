@@ -95,10 +95,10 @@ The view + rope + cast machinery itself is one `required` module; integrations w
 | ---- | ---- | ---- |
 | `graph_runtime` | required | Vertex map, edge and subscription registry, dispatch loop |
 | `path_handle` | required | Build-time and init-time PATH TLV encoder; read-only-segment literal helpers; init-time path registration. The hot-path surface takes handles only ([03-addressing.md](03-addressing.md) §static path handles, [../spec/v1.md](../spec/v1.md) §3.1) |
-| `path_resolver` | required | Path EBNF parsing, wildcard match, field-chain resolution. Slow path only — the string-form entry point is used at init or for ergonomics. P0 builds MAY omit it |
+| `path_resolver` | required | Path EBNF parsing and field-chain resolution — v1 has no wildcard grammar, and a path containing `*` or `?` anywhere is rejected with `ERROR{tr::path::invalid}` ([03-addressing.md](03-addressing.md)). Slow path only — the string-form entry point is used at init or for ergonomics. P0 builds MAY omit it |
 | `dispatcher` | required | Fan-out to subscribers, per-subscriber QoS and ACL gating. The vertex map is keyed on canonical PATH TLV bytes ([02-graph-model.md](02-graph-model.md) §dispatch keyed on canonical PATH TLV bytes) |
-| `fwd_router` | required | The stateless source-routed forwarder ([ADR-0035 — implementing RFC-0004 remote-operation addressing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0035-implementing-rfc-0004-remote-operation-addressing.md)): an offset-dispatch forward hop that shrinks `dst` and grows `src` with no heap allocation, an arena-decoded terminus for frames whose leading `dst` segment is local, and route-handle compaction (ADVERTISE / COMPACT / NACK) |
-| `subscriber_mux` | required | Per-subscriber state slots, rate limit, deadline and liveness watchdog |
+| `fwd_router` | required | The stateless source-routed forwarder ([ADR-0035 — implementing RFC-0004 remote-operation addressing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0035-implementing-rfc-0004-remote-operation-addressing.md)): an offset-dispatch forward hop that shrinks `dst` and grows `src` with no heap allocation, an arena-decoded terminus for frames whose leading `dst` mount run is local, and route-handle compaction (ADVERTISE / COMPACT / NACK) |
+| `subscriber_mux` | required | Per-subscriber state slots and the per-subscription delivery policy carried on the SUBSCRIBER record. There is no rate throttle — the `min_interval_ns` / `keepalive_ns` knobs are gone for good ([02-graph-model.md](02-graph-model.md) §delivery modes) — no deadline engine and no liveness watchdog ([04-communication-flows.md](04-communication-flows.md)) |
 | `schema_registry` | required | Per-vertex `:schema` storage and lookup |
 
 These are required down to profile P0, the in-process build. "Required" does not mean "monolithic": they are distinct modules with declared contracts between them, and any one may be swapped for an alternative implementation as long as the protocol behaviour is preserved.
@@ -251,7 +251,7 @@ When a TLV arrives at the dispatcher, the registry tells the graph runtime what 
 - `VALUE` at a vertex path → store, then fan out to subscribers.
 - `PATH` → resolve and read.
 - `SUBSCRIBER` appended to `:subscribers[]` → register a fan-out target. An **indexed** write, `:subscribers[N]`, is resolved by what it carries: an empty `STATUS` sentinel clears slot `N`, a `SUBSCRIBER` replaces slot `N`'s edge through the same gate as an append, anything else answers `TYPE_MISMATCH` and leaves the slot untouched ([02-graph-model.md](02-graph-model.md) §writing `:subscribers[N]`).
-- `FWD` arriving over a transport → the forwarder's responsibility: forward onward, or terminus-resolve when the leading `dst` segment is local. `0x0D ROUTER` is a reserved code — it decodes generically, and no mechanism consumes it.
+- `FWD` arriving over a transport → the forwarder's responsibility: forward onward, or terminus-resolve when the leading `dst` segments are local. `0x0D ROUTER` is a reserved code — it decodes generically, and no mechanism consumes it.
 - Unknown user-range types with `opt.PL=1` → store as opaque structured data; subscribers see what they can handle.
 
 ### Transport ↔ L4 — the transport contract

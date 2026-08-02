@@ -10,7 +10,8 @@ feasible). The ID is **structured** — `[protocol-version prefix | node | endpo
 — and because **lower numeric ID = higher bus arbitration priority**, assigning
 the ID *also* assigns real-time priority. A payload larger than one frame (8 bytes
 classic, up to 64 CAN-FD) reassembles via libtracer's own **address-shift slicing /
-advertise+id-match** keyed by `(origin_peer_id, ts) + index → rope`, **not** ISO-TP.
+advertise+id-match** keyed by `(origin, ts) + index → rope`, **not** ISO-TP
+(`origin` is receiver-derived — on this transport, the peer identity in the frame id).
 The `identity↔path` map lives **inside `transport_can`**, is **dynamic**, and
 **self-establishes decentrally** from in-band **advertise** frames on (re)connect —
 there is no gateway or orchestrator role ([ADR-0030 — CAN transport: a dynamic in-transport map, a structured 29-bit ID, advertise+id-match reassembly](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md),
@@ -156,9 +157,14 @@ zero-copy subviews); applying the DLC padding is the SocketCAN binding's job.
 
 `can_reassembly_t` reassembles a payload that spanned several CAN frames. Each
 frame is a **slice**; slices are grouped by the in-flight identity
-**`(origin_peer_id, ts)`** — the same collision-free identity used for cycle-dedup
-and for slice grouping everywhere else ([03-addressing](03-addressing.md),
+**`(origin, ts)`** — the same slice-group key used everywhere else
+([03-addressing](03-addressing.md) §the slice-group key,
 [CONTEXT.md](../../CONTEXT.md) *Address-shift slicing*) — and ordered by `index`.
+`origin` is a **receiver-side** identity, not a wire field: v1 defines no
+delivery-borne producer id, so on this header-elided transport the binding derives
+it from how the slice arrived — the link-local peer identity read off the frame id
+(`can_reassembly_t` keys it as `(node, base-endpoint)`). There is no dedup or
+revisit state anywhere in the stack; the key groups slices, nothing else.
 `assemble()` chains the slices, in index order, into a `rope_t` — zero copies.
 
 This deliberately reuses libtracer's **one reassembly model** rather than bolting
@@ -339,23 +345,18 @@ re-driven when the manifest lands.
 
 ### Peer enumeration and transparent per-peer forwarding
 
-> **Erratum (2026-07-31) — this section taught two forms that no longer route.**
-> Both predate RFC-0014 S2a and [ADR-0061](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md), and neither is a cosmetic
-> difference:
+> **Two forms do not route, and both are easy to write by mistake**
+> (RFC-0014 S2a, [ADR-0061](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md)):
 >
-> 1. **A bare peer `dst` (`/n5/a/b`).** A peer segment is only reachable *through* its
+> 1. **A bare peer `dst` (`/n5/a/b`).** A peer segment is reachable only *through* its
 >    connection's mount run — `resolve_mount_segs` matches `net/<module>/<name>` first and
 >    resolves the peer as the segment *after* it. A bare `/n5/…` matches no mount, so it falls
->    through to the terminus and is not forwarded at all. The sequence diagram below carried this
->    form while the very next line already used the correct `dst=/net/can/can0`.
-> 2. **"asks each bus child to resolve it as a peer."** That global cross-bus scan is exactly what
->    `child_registry_t::resolve_peer` replaced, and the in-code rationale says why: it resolves
->    "against the multi-peer child it was addressed *through*, so two servers' same-named peers
->    stay distinct and **a peer is never reachable through the wrong module**." Believing the old
->    wording means believing a misroute is correct behaviour.
->
-> Tracked under [#605](https://github.com/avatarsd-llc/libtracer/issues/605); the rest of that
-> sweep is still open.
+>    through to the terminus and is not forwarded at all. The routable form is
+>    `dst=/net/can/can0/n5/a/b`.
+> 2. **A global cross-bus peer scan.** Resolution is not "ask each bus child whether this is
+>    its peer". `child_registry_t::resolve_peer` resolves against the multi-peer child the
+>    frame was addressed *through*, so two servers' same-named peers stay distinct and **a
+>    peer is never reachable through the wrong module**.
 
 
 A CAN bus reaches many peers over one wire, so `transport_can` also implements
@@ -386,8 +387,7 @@ currently audible, wired through the vertex's `on_children` handler by
 `transport_vertex_t` for any link whose `bus()` is non-null.
 
 **Forwarding.** Each listed name doubles as a routable next-hop segment — on this
-transport and, since [#426](https://github.com/avatarsd-llc/libtracer/issues/426)
-renamed the ws/tcp bus sessions to `p<slot>`, on every bus kind (the
+transport and on every bus kind — ws/tcp bus sessions are named `p<slot>` (the
 enumerable⇒addressable invariant, ADR-0073 §1): once a
 `FWD`'s leading `dst` segments have matched this connection's **mount run**
 `net/<module>/<name>`, the router resolves the segment that follows it as a peer
@@ -445,7 +445,7 @@ reply completion at the `op_resolver_t` terminus, which resolves synchronously.
 | Rule | Failure mode it prevents |
 | --- | --- |
 | The 29-bit ID carries no bus field. | An implementation that packs a controller index into the ID collides with a deployment that repartitioned the lower 25 bits, and loses the property that one arbitration band belongs to one node. Two buses are two path segments, not two ID layouts. |
-| A slice group is `(origin_peer_id, ts) + index`. | Grouping by `ts` alone merges the slices of two publishers that emit at the same timestamp into one corrupt rope. |
+| A slice group is `(origin, ts) + index`, and `origin` is receiver-derived, never read off the wire. | Grouping by `ts` alone merges the slices of two publishers that emit at the same timestamp into one corrupt rope. |
 | Trailing-slice loss is only detectable with a declared count. | An implementation that infers `N` from the highest index observed reports a 100-slice group as complete when index 99 was dropped. The advertise manifest's `slice_count` is what makes the group total. |
 | A CAN-FD frame is trimmed back to the advertised total length. | Delivering the padded frame hands the receiver DLC pad bytes as payload, so a frame that round-trips on a classic bus fails on an FD one. |
 | The advertise rides classic ≤8-byte windows even on an FD bus. | Padding a manifest slice inserts pad bytes into the control byte stream, and the far side's `decode_advertise` desynchronizes for every subsequent manifest, not just the padded one. |

@@ -628,7 +628,7 @@ For very large N — 4096 slices, say — where individual registration would bu
 
 ### Cost of each addressing mode
 
-For a representative Cortex-M4 build with one transport, no GUI and a 32 KB flash budget. Per-write costs are the same ballpark figures as [04-communication-flows.md](04-communication-flows.md) §performance envelope, quoted at 100 MHz.
+For a representative Cortex-M4 build with one transport, no GUI and a 32 KB flash budget. Per-write costs are the same ballpark figures as [04-communication-flows.md](04-communication-flows.md) §cost envelope, quoted at 100 MHz.
 
 | Variant | Flash overhead | RAM overhead | Per-write cost | ISR-safe |
 | ---- | ---- | ---- | ---- | ---- |
