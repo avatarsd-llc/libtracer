@@ -1,0 +1,12 @@
+{
+  "name": "bound-vs-canonical-allow",
+  "category": "acl",
+  "hex": "0F402100010001000014000800020000000000000006400C00020008007265706C792D6570",
+  "total_bytes": 37,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=READ, dst=PATH_REF{ index=2, generation=0 }, src=/reply-ep } — the BOUND spelling of fwd/fwd-read's operation. Against a graph where slot 2 is /sensor/temp at generation 0, this and its canonical twin serve the same value to an allowed caller.",
+    "note": "RFC-0024 §6.3, the mandated pair's allow half. 37 bytes against the canonical twin's 47. The canonical twin is fwd/fwd-read's frame verbatim."
+  }
+}

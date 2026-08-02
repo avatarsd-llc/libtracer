@@ -68,6 +68,8 @@ add_test(NAME path COMMAND path_test)
 add_executable(bound_path_test bound_path_test.cpp)
 target_link_libraries(bound_path_test PRIVATE libtracer)
 libtracer_test_warnings(bound_path_test)
+target_compile_definitions(bound_path_test PRIVATE
+    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME bound_path COMMAND bound_path_test)
 
 add_executable(path_ref_test path_ref_test.cpp)

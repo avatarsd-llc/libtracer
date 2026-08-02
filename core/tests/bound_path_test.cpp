@@ -19,11 +19,15 @@
  * - and the bound and canonical spellings of one operation produce byte-identical replies.
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <initializer_list>
+#include <iterator>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -152,7 +156,13 @@ reply_facts_t reply_facts(const tr::view::rope_t& reply) {
     out.child_count = dec->children.size();
     out.kind =
         static_cast<reply_kind_t>(tr::detail::load_le<std::uint8_t>(dec->children[3].payload));
-    for (const tlv_t& c : dec->children) {
+    // The mint is a trailing child, PAST `kind` (index 3). Scanning the whole child list
+    // would count the reply's own `src` — which is the request's `dst` echoed back, and is
+    // itself a PATH_REF whenever the request was bound. That false positive is exactly the
+    // shape a denied bound READ has, so a test asserting "no mint on a denial" would pass
+    // while measuring the echo.
+    for (std::size_t i = 4; i < dec->children.size(); ++i) {
+        const tlv_t& c = dec->children[i];
         if (c.type != type_t::PATH_REF) continue;
         if (tr::wire::path_ref_element_count(c.payload.size()) != 1) continue;
         out.has_mint = true;
@@ -192,6 +202,24 @@ constexpr std::uint32_t bit(acl_right_t r) { return static_cast<std::uint32_t>(r
 constexpr std::uint8_t kMint = tr::graph::kFwdOpFlagMintRequest;
 constexpr std::uint8_t kRead = static_cast<std::uint8_t>(fwd_op_t::READ);
 constexpr std::uint8_t kWrite = static_cast<std::uint8_t>(fwd_op_t::WRITE);
+
+/** @brief The raw bytes of a conformance vector's `input.bin`. */
+std::vector<std::byte> vector_bytes(std::string_view case_dir) {
+    const std::filesystem::path p =
+        std::filesystem::path{LIBTRACER_VECTORS_DIR} / case_dir / "input.bin";
+    std::ifstream f(p, std::ios::binary);
+    const std::vector<char> raw((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
+    std::vector<std::byte> out(raw.size());
+    for (std::size_t i = 0; i < raw.size(); ++i)
+        out[i] = static_cast<std::byte>(static_cast<unsigned char>(raw[i]));
+    return out;
+}
+
+/** @brief Byte equality over two spans. */
+bool same(std::span<const std::byte> a, std::span<const std::byte> b) {
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin());
+}
 
 // ---------------------------------------------------------------------------
 
@@ -519,6 +547,81 @@ void test_path_binding_slot() {
     check(!p.bind({}) && !p.binding().bound, "and neither does an empty one");
 }
 
+/**
+ * @brief The four RFC-0024 behavioural vectors, as BYTES, against the reference impl.
+ *
+ * A vector gates the codec and only the codec (HARNESS.md §"What a vector gates"), so every
+ * behavioural claim a `description.md` makes has to be made somewhere it can be false. This
+ * is that place for the mint exchange and the §6.3 pair: each vector's bytes are fed to — or
+ * compared against — the resolver, so a vector that drifts from the code fails here rather
+ * than sitting on disk describing a protocol nobody implements.
+ *
+ * The graph is the one the vectors were taken from: `/sensor/temp` in an empty node, which
+ * allocates the `/sensor` placeholder at slot 1 and the leaf at slot 2 under the structural
+ * root at slot 0 — hence `index = 2`, `generation = 0`.
+ */
+void test_conformance_vectors() {
+    std::printf("the RFC-0024 vectors, byte-exact against the resolver:\n");
+    graph_t g;
+    op_resolver_t resolver(g);
+    const vertex_handle_t v = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+    (void)g.write(v, make_value(b_value({0xD2, 0x04, 0x00, 0x00})));
+    check(g.vertex_slot(v) == 2u && g.retire_generation(v) == 0u,
+          "the vectors' index=2 generation=0 is what this graph really hands out");
+
+    // fwd/fwd-mint-request differs from fwd/fwd-read in exactly one byte.
+    const std::vector<std::byte> mint_req = vector_bytes("fwd/fwd-mint-request");
+    const std::vector<std::byte> plain_req = vector_bytes("fwd/fwd-read");
+    std::size_t differing = 0;
+    for (std::size_t i = 0; i < mint_req.size() && i < plain_req.size(); ++i)
+        if (mint_req[i] != plain_req[i]) ++differing;
+    check(mint_req.size() == plain_req.size() && differing == 1,
+          "fwd-mint-request is fwd-read with ONE byte changed — the request costs zero bytes");
+
+    // ...and the reply to it is fwd/fwd-mint-reply, byte for byte.
+    const auto minted = resolve_bytes(resolver, mint_req);
+    check(minted.has_value() && same(reply_bytes(*minted), vector_bytes("fwd/fwd-mint-reply")),
+          "fwd-mint-reply is byte-exact what the resolver emits for fwd-mint-request");
+
+    // The §6.3 pair, allow half: the bound spelling serves what the canonical one serves.
+    const auto bound = resolve_bytes(resolver, vector_bytes("acl/bound-vs-canonical-allow"));
+    const auto canonical = resolve_bytes(resolver, plain_req);
+    check(bound.has_value() && canonical.has_value(), "both spellings of the pair answer");
+    const std::vector<std::byte> bb = reply_bytes(*bound);
+    const std::vector<std::byte> cb = reply_bytes(*canonical);
+    const std::vector<std::byte> val = b_value({0xD2, 0x04, 0x00, 0x00});
+    const auto tail = [&](const std::vector<std::byte>& f) {
+        return std::vector<std::byte>(f.end() - static_cast<long>(val.size()), f.end());
+    };
+    check(tail(bb) == val && tail(cb) == val,
+          "allow half: the two spellings serve byte-identical RESULT bytes");
+
+    // The §6.3 pair, deny half: the same request, denied, IS the vector's frame.
+    graph_t gd;
+    gd.set_subject_resolver(caller_is_subject);
+    op_resolver_t rd(gd);
+    const vertex_handle_t vd = gd.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+    (void)vd;
+    (void)gd.write(path_t("/sensor/temp:acl"),
+                   make_value(allow_acl("link-ok", bit(acl_right_t::READ))));
+    const auto denied = resolve_bytes(rd, vector_bytes("acl/bound-vs-canonical-allow"), "link-bad");
+    check(denied.has_value() &&
+              same(reply_bytes(*denied), vector_bytes("acl/bound-vs-canonical-deny")),
+          "deny half: bound-vs-canonical-deny is byte-exact what the denied bound READ emits");
+
+    // ...and the canonical spelling's denial agrees on the OUTCOME, which is the claim.
+    const auto denied_canonical = resolve_bytes(rd, plain_req, "link-bad");
+    const std::vector<std::byte> dv = reply_bytes(*denied);
+    const std::vector<std::byte> dc = reply_bytes(*denied_canonical);
+    constexpr std::size_t kOutcome = 19;  // kind VALUE (5) + STATUS{ERROR{VALUE u16}} (14)
+    check(denied_canonical.has_value() && dv.size() > kOutcome && dc.size() > kOutcome &&
+              std::equal(dv.end() - kOutcome, dv.end(), dc.end() - kOutcome),
+          "deny half: the two spellings' outcome tails are byte-identical");
+    check(dv.size() != dc.size(),
+          "and they differ ONLY in the reply src, which echoes the request dst");
+    check(!reply_facts(*denied).has_mint, "a denied reply carries no minted binding");
+}
+
 }  // namespace
 
 int main() {
@@ -533,6 +636,7 @@ int main() {
     test_revocation_is_immediate();
     test_unmasked_op_byte_still_routes();
     test_path_binding_slot();
+    test_conformance_vectors();
     std::printf("%s\n", g_failures == 0 ? "ALL PASS" : "FAILURES");
     return g_failures == 0 ? 0 : 1;
 }

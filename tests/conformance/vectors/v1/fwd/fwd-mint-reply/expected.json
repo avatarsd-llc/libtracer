@@ -1,0 +1,12 @@
+{
+  "name": "fwd-mint-reply",
+  "category": "fwd",
+  "hex": "0F404400010001000306400C00020008007265706C792D6570064012000200060073656E736F720200040074656D70010001000001000400D2040000140008000200000000000000",
+  "total_bytes": 72,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=REPLY, dst=/reply-ep, src=/sensor/temp, kind=RESULT, VALUE u32=1234, PATH_REF{ index=2, generation=0 } } — the answer to fwd/fwd-mint-request: the ordinary reply plus the minted binding as its LAST child.",
+    "note": "RFC-0024 §7.5. 4 + 8 bytes on the reply and none on the request. LAST, so a positional reader of an ordinary reply (op / dst / src / kind / payload) is untouched and only an origin that asked reads past."
+  }
+}
