@@ -60,6 +60,14 @@ target_link_libraries(path_test PRIVATE libtracer)
 libtracer_test_warnings(path_test)
 add_test(NAME path COMMAND path_test)
 
+# PATH_REF (0x14) codec — the bound-path envelope, element layout, count bound and
+# the structural rejects (RFC-0024 §4), plus the published vectors pinned against
+# the builder.
+add_executable(path_ref_test path_ref_test.cpp)
+target_link_libraries(path_ref_test PRIVATE libtracer)
+libtracer_test_warnings(path_ref_test)
+add_test(NAME path_ref COMMAND path_ref_test)
+
 # Frame codec — nesting depth cap / iterative-parse contract (reference/01).
 add_executable(frame_test frame_test.cpp)
 target_link_libraries(frame_test PRIVATE libtracer)
