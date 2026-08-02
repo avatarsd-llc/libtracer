@@ -1,0 +1,37 @@
+{
+  "name": "ref-2host",
+  "category": "path-ref",
+  "hex": "1400100007000000030000002A00000001000000",
+  "total_bytes": 20,
+  "decoded": {
+    "type": "0x14 PATH_REF",
+    "opt": {
+      "raw": "0x00",
+      "PL": 0,
+      "TS": 0,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 16,
+    "element_count": 2,
+    "elements": [
+      {
+        "index": 7,
+        "generation": 3
+      },
+      {
+        "index": 42,
+        "generation": 1
+      }
+    ],
+    "trailer": {
+      "ts": null,
+      "crc": null
+    },
+    "meaning": "A direct-link bound path: element 0 is the origin's own reference to its first-hop connection vertex, element 1 the terminus host's reference to the target vertex."
+  }
+}

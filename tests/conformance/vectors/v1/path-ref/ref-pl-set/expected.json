@@ -1,0 +1,9 @@
+{
+  "name": "ref-pl-set",
+  "category": "path-ref",
+  "hex": "1440100007000000030000002A00000001000000",
+  "total_bytes": 20,
+  "reject": "FRAME_INVALID",
+  "decoded": null,
+  "meaning": "opt.PL=1 asserts the body is concatenated child TLVs, and a PATH_REF body is a fixed-stride record array. RFC-0024 \u00a74.2 makes PL=0 a MUST; a set PL is tr::frame::invalid. A successful decode of this frame is a conformance FAILURE."
+}

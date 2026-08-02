@@ -26,7 +26,8 @@ VECTORS = HERE / "vectors" / "v1"
 
 # The v1 core type-code registry (docs/reference/05-protocol-tlvs.md). 0x05 is
 # retired (LIST, ADR-0003) and intentionally absent. 0x0F FWD / 0x10 FIELD are
-# the remote-operation frames (RFC-0004 / ADR-0035, the v1 fast-track range).
+# the remote-operation frames (RFC-0004 / ADR-0035, the v1 fast-track range), and
+# 0x14 PATH_REF is the bound-path address form (RFC-0024 §4).
 TYPE_NAMES = {
     0x01: "VALUE",
     0x02: "NAME",
@@ -43,6 +44,7 @@ TYPE_NAMES = {
     0x0E: "SPEC",
     0x0F: "FWD",
     0x10: "FIELD",
+    0x14: "PATH_REF",
 }
 
 # opt bit -> (mask, name). Bits 7 and 0 are reserved-must-be-zero (not coverage
