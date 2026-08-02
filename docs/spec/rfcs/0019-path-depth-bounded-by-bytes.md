@@ -302,6 +302,14 @@ bytes unchanged; `/net/board/can0/ow/sensor`); longest `NAME` 9 bytes;
 largest `PATH` body 40 bytes. Nothing is within an order of magnitude of any cap, and neither of the
 corpus's two `reject.bin` cases tests a cap (both are reserved-bit cases).
 
+> **Census re-run 2026-08-02 (#419) — the numbers above are the RFC-time snapshot.** The corpus is
+> now 51 directories, 18 carrying ≥1 `PATH`. Excluding this RFC's own `path/path-deep-204`, the
+> deepest `PATH` is **8 segments / 62-byte body** (`fwd/fwd-routed-two-mount`'s `dst`), with
+> `fwd/fwd-src-accumulated`'s rewritten `src` next at **7 / 62**; longest `NAME` is still 9 bytes
+> (`fwd/fwd-bus-name-reject`). Both are S2a mount-run addresses — three segments per hop is where
+> corpus depth now comes from. The conclusion is unchanged: still two orders of magnitude below the
+> 1024-byte cap.
+
 A removed maximum cannot invalidate bytes that never reached it. This matters because `v1.md:141-142`
 makes *changing* an existing vector's bytes a spec change in its own right while *adding* one
 explicitly is not. Sharp contrast with RFC-0018, which must rewrite all twelve because it changes

@@ -706,18 +706,25 @@ fn fwd_routed_two_mount() {
 
 #[test]
 fn fwd_src_accumulated() {
+    // Mid-route, two hops in: `src` has grown by TWO full `net/<module>/<name>` mount
+    // runs (six segments), never two bare NAMEs. `dst` still carries the next mount plus
+    // the residual. Bytes changed 2026-08-02 by maintainer ruling on #419 — the previous
+    // frame was pre-S2a and did not compose under mount routing.
     let bin = assert_vector_consistent("fwd/fwd-src-accumulated");
     let req = FwdRequest::new(
         fwd_op::READ,
-        &["can0", "ow", "sensor"],
-        &["via_board", "via_net", "reply-ep"],
+        &["net", "uplink", "d", "sensor", "temp"],
+        &["net", "downlink", "a", "net", "downlink", "cli", "reply-ep"],
     );
     assert_eq!(encode(&encode_fwd(&req).unwrap()), bin);
     let f = decode_fwd(&bin).unwrap();
-    assert_eq!(libtracer::fwd::fwd_dst_path(&f).unwrap(), "/can0/ow/sensor");
+    assert_eq!(
+        libtracer::fwd::fwd_dst_path(&f).unwrap(),
+        "/net/uplink/d/sensor/temp"
+    );
     assert_eq!(
         libtracer::fwd::fwd_src_path(&f).unwrap(),
-        "/via_board/via_net/reply-ep"
+        "/net/downlink/a/net/downlink/cli/reply-ep"
     );
 }
 

@@ -75,6 +75,25 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `transport_vertex_t` `:children[]` SPEC door, asserting `strip_k = 3` at each hop and the
   terminus delivery. Corpus: 50 → 51 vectors, all three cores green.
 
+- **Conformance vector `fwd/fwd-src-accumulated`'s BYTES are rewritten (#419) — the first and
+  only time any vector's bytes have changed.** The corpus is normative-by-incorporation
+  (ADR-0007) and `v1.md` §conformance is explicit that *adding* a vector is free while
+  *changing existing bytes* is a spec change, so this landed only under a second, explicit
+  maintainer ruling (2026-08-02) on the still-`DRAFT` protocol — recorded here because any
+  implementation pinned to the old bytes will now fail the harness. Old:
+  `FWD{ op=READ, dst=/can0/ow/sensor, src=/via_board/via_net/reply-ep }`, 77 B, `0f4049…`.
+  New: `FWD{ op=READ, dst=/net/uplink/d/sensor/temp,
+  src=/net/downlink/a/net/downlink/cli/reply-ep }`, 119 B, `0f4073…`. The old frame was
+  **pre-S2a and did not compose**: under the shipped mount routing a forwarder consumes and
+  prepends a whole three-segment `net/<module>/<name>` run, so a `src` grown by two hops is six
+  segments, never the two bare names `via_board`/`via_net` — neither of which is a mount key at
+  all. The name is kept: the vector still shows exactly what it always claimed, `src`
+  accumulating mid-route. Now bound behaviourally by `core/tests/fwd_two_mount_test.cpp`'s hop-2
+  probe, which asserts that same `src` byte-exactly out of the production router. Corpus stays
+  at 51 vectors; cpp/ts/rust green. **Known residue, deliberately untouched (no ruling):**
+  `fwd/fwd-reply-result` and `fwd/fwd-reply-error` still carry the pre-S2a accumulated route
+  `dst=/via_board/via_net/reply-ep`.
+
 - **`op_resolver_t`'s `flat` now bounds the SPAN (arena) tier too (#801).**
   `core/include/libtracer/op_resolve.hpp`, `core/include/libtracer/fwd_router.hpp` — **no
   signature changes**; what changed is which allocation the already-public `flat` parameter
