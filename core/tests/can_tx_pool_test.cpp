@@ -105,6 +105,12 @@ void test_cross_thread_ownership() {
     // The "tx-done ISR": pops a queued frame and returns its slot to the pool.
     std::thread isr([&] {
         while (true) {
+            // Snapshot `done` BEFORE the pop attempt, never after: reading it
+            // after an observed-empty queue loses the producer's final frame
+            // when the push lands in between the two reads (the #782 flake).
+            // Read first, an empty queue seen afterwards is authoritative —
+            // `done`'s release store happens-after every push.
+            const bool producer_finished = done.load(std::memory_order_acquire);
             slot_t* s = nullptr;
             {
                 const std::lock_guard lock(m);
@@ -114,7 +120,7 @@ void test_cross_thread_ownership() {
                 }
             }
             if (s == nullptr) {
-                if (done.load(std::memory_order_acquire)) break;
+                if (producer_finished) break;
                 std::this_thread::yield();
                 continue;
             }
@@ -166,6 +172,10 @@ burst_result_t run_burst(bool backpressure, std::size_t capacity, std::uint32_t 
 
     std::thread consumer([&] {
         while (true) {
+            // Same shutdown handshake as the ISR above: `done` is read before
+            // the pop attempt so the producer's final frame cannot be stranded
+            // in `in_driver` by an early break (#782).
+            const bool producer_finished = done.load(std::memory_order_acquire);
             slot_t* s = nullptr;
             {
                 const std::lock_guard lock(m);
@@ -175,7 +185,7 @@ burst_result_t run_burst(bool backpressure, std::size_t capacity, std::uint32_t 
                 }
             }
             if (s == nullptr) {
-                if (done.load(std::memory_order_acquire)) break;
+                if (producer_finished) break;
                 std::this_thread::yield();
                 continue;
             }
