@@ -132,7 +132,7 @@ jobs:
   # nobody currently runs is compiled by nothing — and rots silently against the very
   # API changes it was written to measure. bench_pin_ratio, bench_pin_net and the
   # pin_bench example all stopped compiling the moment RFC-0022 §3.B deleted
-  # `settings_t`, and the tree stayed green for three PRs. This job is the guard: it
+  # `settings_t`, and the tree stayed green for six PRs. This job is the guard: it
   # is a COMPILE gate, so it costs one build and cannot be confounded by a runner's
   # load. Ablate it by reverting any bench to a deleted API — the job goes red.
   bench-compile:
