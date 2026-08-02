@@ -1,0 +1,12 @@
+{
+  "name": "fwd-routed-two-mount",
+  "category": "fwd",
+  "hex": "0F405700010001000006403E00020003006E65740200060075706C696E6B0200010062020003006E65740200060075706C696E6B02000100630200060073656E736F720200040074656D7006400C00020008007265706C792D6570",
+  "total_bytes": 91,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=READ, dst=/net/uplink/b/net/uplink/c/sensor/temp, src=/reply-ep } — a dst crossing TWO mounts: hop 1 strips net/uplink/b, hop 2 strips net/uplink/c, the terminus resolves /sensor/temp",
+    "note": "RFC-0004 §B/§C canonical bytes; structured TLV, opt.PL=1, no trailers (at-rest form)"
+  }
+}

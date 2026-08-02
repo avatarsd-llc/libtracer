@@ -60,6 +60,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **Conformance vector `fwd/fwd-routed-multihop` is renamed `fwd/fwd-routed-mount-residual`;
+  a genuine two-mount vector `fwd/fwd-routed-two-mount` is added (#419).** No public C++ API
+  moves, but the conformance corpus is normative-by-incorporation (ADR-0007), so the rename is
+  recorded here. **The renamed vector's bytes are byte-for-byte unchanged** — the maintainer
+  ruling (2026-08-02) is that they were always correct under strip-K mount routing
+  (RFC-0014 §S2a / ADR-0061): `dst=/net/board/can0/ow/sensor` parses as ONE hop — the mount key
+  `net/board/can0` consumed as a whole run, residual `ow/sensor`. Only the name and the
+  `description.md` prose were stale artifacts of the pre-S2a two-hop reading. The new
+  `fwd-routed-two-mount` carries `dst=/net/uplink/b/net/uplink/c/sensor/temp` — a `dst` crossing
+  TWO mounts — and is bound behaviourally by the new `core/tests/fwd_two_mount_test.cpp`
+  (`ctest -R fwd_two_mount`), the first FWD test in the tree with more than one forwarder: three
+  in-process `fwd_router_t` nodes chained by loopback link pairs, wired through the production
+  `transport_vertex_t` `:children[]` SPEC door, asserting `strip_k = 3` at each hop and the
+  terminus delivery. Corpus: 50 → 51 vectors, all three cores green.
+
 - **`op_resolver_t`'s `flat` now bounds the SPAN (arena) tier too (#801).**
   `core/include/libtracer/op_resolve.hpp`, `core/include/libtracer/fwd_router.hpp` — **no
   signature changes**; what changed is which allocation the already-public `flat` parameter

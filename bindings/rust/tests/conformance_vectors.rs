@@ -668,8 +668,8 @@ fn fwd_reply_error() {
 }
 
 #[test]
-fn fwd_routed_multihop() {
-    let bin = assert_vector_consistent("fwd/fwd-routed-multihop");
+fn fwd_routed_mount_residual() {
+    let bin = assert_vector_consistent("fwd/fwd-routed-mount-residual");
     let req = FwdRequest::new(
         fwd_op::READ,
         &["net", "board", "can0", "ow", "sensor"],
@@ -681,6 +681,27 @@ fn fwd_routed_multihop() {
         libtracer::fwd::fwd_dst_path(&f).unwrap(),
         "/net/board/can0/ow/sensor"
     );
+}
+
+/**
+ * @brief The two-mount route (#419): a `dst` crossing TWO `net/<module>/<name>` mounts
+ * before its residual `/sensor/temp` resolves at the terminus.
+ */
+#[test]
+fn fwd_routed_two_mount() {
+    let bin = assert_vector_consistent("fwd/fwd-routed-two-mount");
+    let req = FwdRequest::new(
+        fwd_op::READ,
+        &["net", "uplink", "b", "net", "uplink", "c", "sensor", "temp"],
+        &["reply-ep"],
+    );
+    assert_eq!(encode(&encode_fwd(&req).unwrap()), bin);
+    let f = decode_fwd(&bin).unwrap();
+    assert_eq!(
+        libtracer::fwd::fwd_dst_path(&f).unwrap(),
+        "/net/uplink/b/net/uplink/c/sensor/temp"
+    );
+    assert_eq!(libtracer::fwd::fwd_src_path(&f).unwrap(), "/reply-ep");
 }
 
 #[test]

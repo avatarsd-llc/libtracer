@@ -217,7 +217,8 @@ Add to `tests/conformance/vectors/v1/`, so the 3-core machine (C++/TS/Rust) vali
 - `fwd-write-value` — `FWD{ op=WRITE, dst=/sensor/temp, src=…, VALUE u32 }`.
 - `fwd-await-timeout` — `FWD{ op=AWAIT, dst=/sensor/temp, src=…, await_timeout=1e9 }`.
 - `fwd-write-subscriber-field` — `FWD{ op=WRITE, dst=/sensor/temp, FIELD :subscribers[], src=…, SUBSCRIBER{...} }`.
-- `fwd-routed-multihop` — `FWD{ op=READ, dst=/net/<peer>/can[0]/ow/x, src=/reply-ep }` (un-stripped `dst`).
+- `fwd-routed-mount-residual` (authored as `fwd-routed-multihop`; renamed by #419) — `FWD{ op=READ, dst=/net/board/can0/ow/sensor, src=/reply-ep }`: one strip-K mount (`net/board/can0`) plus the residual it forwards.
+- `fwd-routed-two-mount` — `FWD{ op=READ, dst=/net/uplink/b/net/uplink/c/sensor/temp, src=/reply-ep }`: a `dst` crossing **two** mounts, three nodes deep (#419).
 - `fwd-src-accumulated` — the same op **after two hops**: `dst` shrunk by two segments, `src` grown by two (the prepend invariant).
 - `fwd-reply-result` / `fwd-reply-error` — `FWD{ op=REPLY, kind=RESULT, dst=<accumulated route>, VALUE }` and `kind=ERROR, STATUS=ERROR(...)`.
 - `field-indexed`, `field-nested`, `field-append` — the three `FIELD` index-modes.

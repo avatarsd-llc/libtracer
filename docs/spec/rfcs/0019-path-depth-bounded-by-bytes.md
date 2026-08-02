@@ -297,7 +297,8 @@ Two consequences that must be said plainly rather than smuggled in:
 Independent TLV walk of every `input.bin` / `reject.bin` under `tests/conformance/vectors/v1/`:
 **41 vector directories, 12 carrying ≥1 `PATH`** — reproducing RFC-0018 §6's independently-derived
 "12 of 41" exactly, which cross-validates the instrument. The **deepest `PATH` in the entire corpus
-is 5 segments** (`fwd/fwd-routed-multihop`, `/net/board/can0/ow/sensor`); longest `NAME` 9 bytes;
+is 5 segments** (`fwd/fwd-routed-multihop` — renamed `fwd/fwd-routed-mount-residual` by #419,
+bytes unchanged; `/net/board/can0/ow/sensor`); longest `NAME` 9 bytes;
 largest `PATH` body 40 bytes. Nothing is within an order of magnitude of any cap, and neither of the
 corpus's two `reject.bin` cases tests a cap (both are reserved-bit cases).
 
