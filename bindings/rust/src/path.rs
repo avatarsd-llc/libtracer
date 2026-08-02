@@ -10,8 +10,9 @@
  * [`MAX_PATH_BYTES`] total encoded NAME payload. Vector-pinned: `path-sensor-temp`.
  *
  * The two accumulative bounds (segment count, total encoded body) sit at the
- * construction/admission tier — [`split_path`] on the way in from a string, and
- * [`admit_path_tlv`] on the way in from decoded bytes — never at decode
+ * construction/admission tier — [`split_path`] (count) and `tlv_builders::path`
+ * (bytes) on the way in from a string, and [`admit_path_tlv`] (both) on the way
+ * in from decoded bytes — never at decode
  * ([`tlv_to_path`]), per `docs/reference/05-protocol-tlvs.md` §"Enforcement of the PATH
  * constraints" and RFC-0023 §5.6.
  */
