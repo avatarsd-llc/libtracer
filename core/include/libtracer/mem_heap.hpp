@@ -222,11 +222,25 @@ class heap_backend_t final : public mem_backend_t {
 namespace tr::view {
 
 /**
+ * @brief Allocate a fresh, owned segment of @p size bytes from @p backend, wrapped in an
+ *        adopting `segment_ptr_t` — the backend-taking form @ref heap_alloc is one call of
+ *        (#793).
+ *
+ * An L1 helper (it produces an owning handle), so it lives in `tr::view`, not `tr::mem`
+ * (docs/adr/0016 §2). It exists so an ownership COPY on a peer-driven path can draw from the
+ * node's injected byte seam instead of the global heap — the rope-tier `own_wire`'s
+ * single-link branch was the last such copy that could not (#793); the multi-link branch
+ * beside it already flattened through the injection (#766).
+ * @retval {} An empty handle on allocation failure (the backend refused).
+ */
+[[nodiscard]] segment_ptr_t segment_alloc(mem::mem_backend_t& backend, std::size_t size);
+
+/**
  * @brief Allocate a fresh, owned heap segment of @p size bytes, wrapped in an
  *        adopting `segment_ptr_t`.
  *
  * An L1 helper (it produces an owning handle), so it lives in `tr::view`, not
- * `tr::mem` (docs/adr/0016 §2).
+ * `tr::mem` (docs/adr/0016 §2). Exactly @ref segment_alloc over @ref mem::heap_backend.
  * @retval {} An empty handle on allocation failure.
  */
 [[nodiscard]] segment_ptr_t heap_alloc(std::size_t size);
@@ -243,7 +257,7 @@ namespace tr::view {
  * The return type disambiguates the two outcomes an unowned `view_t` used to
  * conflate (docs/reference/08 §L1 contracts): `std::nullopt` is an allocation
  * failure the caller maps to BACKPRESSURE; an **engaged, empty** view is a
- * legitimately-empty @p bytes span (`heap_alloc(0)` is not called).
+ * legitimately-empty @p bytes span (no allocation is attempted).
  *
  * @retval std::nullopt Allocation failure / backpressure.
  * @retval {engaged}    An owned copy of @p bytes (empty-and-unowned iff @p bytes
@@ -253,6 +267,40 @@ namespace tr::view {
     if (bytes.empty()) return view_t{};  // engaged-empty: a legitimately-empty input
     segment_ptr_t seg = heap_alloc(bytes.size());
     if (!seg) return std::nullopt;  // allocation failure => BACKPRESSURE
+    std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
+    return view_t::over(std::move(seg));
+}
+
+/**
+ * @brief The seam-taking @ref over_bytes (#793): own a copy of @p bytes in a `segment` drawn
+ *        from @p backend rather than from the global heap.
+ *
+ * Same contract, same two outcomes; the only difference is where the bytes come from. It
+ * exists for the ADR-0041 §2 ownership copies on a PEER-DRIVEN path — the rope-tier
+ * `view_node::own_wire`'s single-link branch was the last one still copying through the
+ * global heap after #766 seamed the multi-link branch beside it, so one function drew from
+ * two different allocators depending on how the peer fragmented the frame.
+ *
+ * @par Why an overload and not a defaulted parameter
+ * A defaulted `mem_backend_t& = mem::heap_backend()` reads better and was the first shape
+ * tried. It moves the `heap_backend()` call out of `heap_alloc` and into **every** existing
+ * call site, and the library's object files stop compiling to the same bytes (measured:
+ * 8 of them changed, +0.1 % text). The dynamic call count is unchanged and the difference is
+ * almost certainly unmeasurable — but "almost certainly" is not the standard here, and the
+ * separate overload makes the pre-#793 arm provably untouched: every object file that does
+ * not opt in `cmp`s equal.
+ *
+ * @param bytes   The bytes to own a copy of.
+ * @param backend The injected byte seam. A refusal answers `std::nullopt` — the same
+ *                by-value BACKPRESSURE channel an OOM already used, never an abort.
+ * @retval std::nullopt The backend refused (or @p bytes could not be owned).
+ * @retval {engaged}    An owned copy of @p bytes.
+ */
+[[nodiscard]] inline std::optional<view_t> over_bytes(std::span<const std::byte> bytes,
+                                                      mem::mem_backend_t& backend) noexcept {
+    if (bytes.empty()) return view_t{};  // engaged-empty: a legitimately-empty input
+    segment_ptr_t seg = segment_alloc(backend, bytes.size());
+    if (!seg) return std::nullopt;  // refusal => BACKPRESSURE
     std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
     return view_t::over(std::move(seg));
 }

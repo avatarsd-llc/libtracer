@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-"""Decision-rule tests for the interleaved perf gate (`perf_gate.paired_verdict`).
+"""Decision-rule tests for the perf gate (`paired_verdict` and the memory ratchet).
 
 These are the gate's OWN unit tests, and they exist because #763 was a defect in the
 gate rather than in anything it measured: the shapes below are the recorded sample sets
@@ -10,12 +10,19 @@ must keep catching (#385's +33% fan-out step, and the measured -20% synthetic fo
 ablation used to demonstrate this fix). A change to the rules that loses either
 direction fails here, in a second, instead of on a release train.
 
+The memory-ratchet cases cover the other defect class the gate has now shown: not a
+wrong verdict but an ABSENT one — a probe that could not run, printed nothing, and
+passed (#792).
+
     python3 bench/test_perf_gate.py            # or: python3 -m unittest discover -s bench
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import pathlib
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -150,6 +157,147 @@ class ThresholdBoundary(unittest.TestCase):
         """Below three pairs 'a majority' is meaningless, so every pair must breach."""
         self.assertFalse(tput([63, 101], [100, 100])["fail"])
         self.assertTrue(tput([63, 62], [100, 100])["fail"])
+
+
+class MemoryRatchetIsNeverSilent(unittest.TestCase):
+    """@brief #792: an absent `bench_forward_heap` must never read as a passing gate.
+
+    `mem_probe` returns `{}` for a missing binary and `mem_gate` iterates the CANDIDATE
+    dict, so before this fix a candidate that was never built produced no output and no
+    fail — the gate vanished. These pin the three supply shapes.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self._probes: dict[pathlib.Path, dict] = {}
+        real_probe = pg.mem_probe
+        # The ratchet's decision is about SUPPLY, not about running a compiled binary:
+        # stub the probe so these tests need no build, and restore it after.
+        # `{}` for an unknown path is the real `mem_probe`'s contract for a binary that
+        # is absent — the exact input that used to make the gate disappear.
+        pg.mem_probe = lambda p: self._probes.get(p, {})  # noqa: E731
+        self.addCleanup(setattr, pg, "mem_probe", real_probe)
+
+    def binary(self, name: str, points: dict) -> pathlib.Path:
+        """@brief A present bench_forward_heap whose probe yields `points`."""
+        p = self.dir / name
+        p.write_text("#!/bin/sh\n")
+        self._probes[p] = points
+        return p
+
+    def run_ratchet(self, cand, base) -> tuple[list[str], str]:
+        """@brief (fails, stdout) for one paired-mode ratchet decision."""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            fails = pg.mem_ratchet(cand, base)
+        return fails, buf.getvalue()
+
+    def test_symmetric_absence_prints_skip_and_passes(self):
+        """Neither arm built: nothing to compare, but the gate must say so out loud."""
+        missing = self.dir / "bench_forward_heap"
+        for cand, base in ((missing, None), (missing, self.dir / "base_fwd"), (None, None)):
+            with self.subTest(cand=cand, base=base):
+                fails, out = self.run_ratchet(cand, base)
+                self.assertEqual(fails, [])          # a genuine skip does not fail the gate
+                self.assertIn("SKIP", out)           # ... and is never silent
+                self.assertIn("memory ratchet", out)
+
+    def test_asymmetric_absence_fails_and_names_the_missing_binary(self):
+        """Baseline supplied, candidate missing — the shape #792 was reported for."""
+        base = self.binary("base_fwd", {"mem:vertex": {"bytes": 100, "allocs": 3}})
+        cand = self.dir / "bench_forward_heap"  # never built
+        fails, out = self.run_ratchet(cand, base)
+        self.assertEqual(len(fails), 1)
+        self.assertIn("wiring error", fails[0])
+        self.assertIn(str(cand), fails[0])       # the missing binary is named
+        self.assertIn("MISSING", fails[0])
+        self.assertNotIn("SKIP", out)            # a wiring error is not a skip
+
+    def test_asymmetric_absence_mirror_case_also_fails(self):
+        """Candidate built, baseline arm never supplied: same wiring error, same fail."""
+        cand = self.binary("bench_forward_heap", {"mem:vertex": {"bytes": 100, "allocs": 3}})
+        for base in (None, self.dir / "base_fwd"):
+            with self.subTest(base=base):
+                fails, out = self.run_ratchet(cand, base)
+                self.assertEqual(len(fails), 1)
+                self.assertIn("wiring error", fails[0])
+                self.assertIn("baseline", fails[0])
+                self.assertNotIn("SKIP", out)
+
+    def test_both_present_runs_the_ratchet(self):
+        """The existing behaviour is what the fix must not cost: probe both, compare."""
+        base = self.binary("base_fwd", {"mem:vertex": {"bytes": 100, "allocs": 3}})
+        cand = self.binary("bench_forward_heap", {"mem:vertex": {"bytes": 100, "allocs": 3}})
+        fails, out = self.run_ratchet(cand, base)
+        self.assertEqual(fails, [])
+        self.assertIn("mem:vertex", out)         # the point is printed, not skipped
+        self.assertIn("base 100B", out)
+
+    def test_both_present_still_catches_a_regression(self):
+        """Detection is not what was traded away: a real pullback fails through it."""
+        base = self.binary("base_fwd", {"mem:vertex": {"bytes": 100, "allocs": 3}})
+        cand = self.binary("bench_forward_heap", {"mem:vertex": {"bytes": 130, "allocs": 4}})
+        fails, _ = self.run_ratchet(cand, base)
+        self.assertEqual(len(fails), 2)          # bytes pullback + allocation pullback
+        self.assertTrue(any("memory pullback" in f for f in fails))
+        self.assertTrue(any("allocation pullback" in f for f in fails))
+
+
+class LegacyMemoryRatchetIsNeverSilent(unittest.TestCase):
+    """@brief The legacy (recorded-baseline) arm carried the identical hole: no `mem:`
+    keys in the run simply meant `mem_gate` printed nothing."""
+
+    def ratchet(self, cur, base, fwd=pathlib.Path("/nonexistent/bench_forward_heap")):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            fails = pg.mem_ratchet_legacy(cur, base, fwd)
+        return fails, buf.getvalue()
+
+    def test_no_points_anywhere_prints_skip_and_passes(self):
+        fails, out = self.ratchet({"inproc": {}}, None)
+        self.assertEqual(fails, [])
+        self.assertIn("SKIP", out)
+
+    def test_baseline_has_points_but_run_produced_none_fails(self):
+        """Asymmetric: the recorded baseline gates memory, this run silently would not."""
+        fails, out = self.ratchet({"inproc": {}}, {"mem:vertex": {"bytes": 100, "allocs": 3}})
+        self.assertEqual(len(fails), 1)
+        self.assertIn("wiring error", fails[0])
+        self.assertIn("bench_forward_heap", fails[0])
+        self.assertNotIn("SKIP", out)
+
+    def test_points_present_ratchets_as_before(self):
+        cur = {"mem:vertex": {"bytes": 130, "allocs": 3}}
+        base = {"mem:vertex": {"bytes": 100, "allocs": 3}}
+        fails, out = self.ratchet(cur, base)
+        self.assertEqual(len(fails), 1)
+        self.assertIn("memory pullback", fails[0])
+        self.assertIn("mem:vertex", out)
+
+
+class MemPointsAreDocumented(unittest.TestCase):
+    """@brief docs/methodology.md states the memory-probe COUNT in prose and is not
+    generated, so it can only rot silently (#792 found it stale at three). This pins the
+    doc to the list — an editor who changes MEM_POINTS fails here until the doc follows."""
+
+    DOC = pathlib.Path(__file__).resolve().parents[1] / "docs" / "methodology.md"
+
+    def test_methodology_names_every_mem_point(self):
+        if not self.DOC.exists():          # bench/ checked out alone
+            self.skipTest(f"{self.DOC} not present")
+        text = self.DOC.read_text()
+        words = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven"}
+        n = len(pg.MEM_POINTS)
+        # `assertTrue` rather than `assertIn`: the doc is 300 lines and a failing
+        # `assertIn` dumps the whole of it over the real message.
+        self.assertTrue(f"**{words[n]} memory probes**" in text,
+                        f"{self.DOC} does not say '{words[n]} memory probes' — "
+                        f"MEM_POINTS now has {n} entries and the doc has rotted (#792)")
+        for point in pg.MEM_POINTS:
+            self.assertTrue(f"`{point}`" in text,
+                            f"{point} is gated but not named in {self.DOC}")
 
 
 if __name__ == "__main__":

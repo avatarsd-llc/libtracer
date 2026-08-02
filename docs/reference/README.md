@@ -109,7 +109,7 @@ The wire format does not version per frame. v1 is committed once; future incompa
 - **Not a feature comparison against Zenoh, DDS or MQTT.** See the [project README](https://github.com/avatarsd-llc/libtracer/blob/main/README.md).
 - **Not a security architecture.** The wire format is security-agnostic; security wraps it at the transport layer, per [10-module-catalog.md](10-module-catalog.md).
 - **Not a roadmap.** The issue tracker holds that.
-- **Not a performance specification.** [15-concurrency-and-scaling.md](15-concurrency-and-scaling.md) is the one section that quotes measurements. It does so as *evidence for a claim about hardware*, with the host named — never as a number an implementation must hit. Anything specific to the reference implementation's own locks and costs is deliberately outside this suite, in [`../design/concurrency/`](../design/concurrency/README.md), so that every section here stays writable from the spec alone.
+- **Not a performance specification.** A few sections quote measurements — [15-concurrency-and-scaling.md](15-concurrency-and-scaling.md) most heavily, and [09-memory-substrate.md](09-memory-substrate.md) and [00-overview.md](00-overview.md) where a figure is what makes a structural claim checkable. Every such number appears as *evidence for a claim about hardware*, with the host named — never as a number an implementation must hit. Anything specific to the reference implementation's own locks and costs is deliberately outside this suite, in [`../design/concurrency/`](../design/concurrency/README.md), so that every section here stays writable from the spec alone.
 
 ```{toctree}
 :caption: Overview & cross-cutting

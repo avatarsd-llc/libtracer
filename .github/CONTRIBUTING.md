@@ -57,7 +57,9 @@ Either way, add a row to the registry so users can find it.
 
 ## Spec changes
 
-See [GOVERNANCE.md](GOVERNANCE.md) for the RFC process. tl;dr: open an `rfc`-tagged issue, then a PR under `docs/spec/rfcs/`, wait 14 days, address feedback from registered implementers.
+See [GOVERNANCE.md](GOVERNANCE.md) for the RFC process — it is the authority; this is only a pointer.
+
+tl;dr: pick the instrument first. A correction to a normative document that contradicts **already-shipped, already-agreed** behaviour is an **erratum** — an ordinary PR, no comment window, and it may not change the wire surface. A change to the normative surface itself is an **amendment** — open an `rfc`-tagged issue, then a PR under `docs/spec/rfcs/`, and address feedback from registered implementers. The amendment comment window is **at least 14 days when it runs**, but it is **waived by default** while the project is solo-maintained and is invoked explicitly when outside input is wanted; do not defer a correction for a window that is not running. See [Errata, amendments, and the comment window](GOVERNANCE.md#errata-amendments-and-the-comment-window).
 
 ## Code of conduct
 

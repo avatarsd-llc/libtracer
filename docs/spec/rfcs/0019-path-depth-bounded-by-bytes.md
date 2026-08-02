@@ -167,7 +167,7 @@ failure mode ADR-0038's erratum already had to undo.
   syntax — canonical PATH constraints (NAME limit 64 bytes, PATH `length`
   ≤ 1024 bytes, reserved characters, UTF-8). There is **no limit on segment
   count**: a path is as deep as its byte budget allows
-  ([RFC-0019](rfcs/0019-path-depth-is-bounded-by-bytes.md)).
+  ([RFC-0019](rfcs/0019-path-depth-bounded-by-bytes.md)).
 ```
 
 ### 4.2 `docs/spec/v1.md` line 95 — the load-bearing encode-time MUST (§3.1.2)
@@ -181,7 +181,7 @@ failure mode ADR-0038's erratum already had to undo.
 **After:**
 
 ```
-- Path constraints from [docs/reference/03-addressing.md](../reference/03-addressing.md) §path syntax MUST be checked at encode time, and they are exactly two: every NAME child's payload MUST be 1..64 bytes, and the PATH TLV's `length` field — its encoded payload size, whatever the body grammar — MUST be ≤ 1024. A pre-encoded PATH TLV that violates either limit is non-conforming. **There is no limit on the number of segments.** An encoder MUST NOT reject a PATH for its segment count alone: path depth is bounded by that byte budget and by nothing else ([RFC-0019](rfcs/0019-path-depth-is-bounded-by-bytes.md)). *(Consequence, informative: with today's 4-byte NAME headers a 1024-byte PATH admits at most 204 single-byte segments; the ceiling is derived from the encoding, not declared.)*
+- Path constraints from [docs/reference/03-addressing.md](../reference/03-addressing.md) §path syntax MUST be checked at encode time, and they are exactly two: every NAME child's payload MUST be 1..64 bytes, and the PATH TLV's `length` field — its encoded payload size, whatever the body grammar — MUST be ≤ 1024. A pre-encoded PATH TLV that violates either limit is non-conforming. **There is no limit on the number of segments.** An encoder MUST NOT reject a PATH for its segment count alone: path depth is bounded by that byte budget and by nothing else ([RFC-0019](rfcs/0019-path-depth-bounded-by-bytes.md)). *(Consequence, informative: with today's 4-byte NAME headers a 1024-byte PATH admits at most 204 single-byte segments; the ceiling is derived from the encoding, not declared.)*
 ```
 
 ### 4.3 Pinning the unit — an erratum-shaped sub-change, folded in
@@ -445,7 +445,7 @@ That is a direct contradiction of this RFC. RFC-0018 is a merged **draft**, so t
 edit rather than leaving the two documents disagreeing:
 
 > - Total path length ≤ 1024 bytes, measured as the `PATH` `length` field. **No segment count
->   limit** ([RFC-0019](0019-path-depth-is-bounded-by-bytes.md), which lands first per the
+>   limit** ([RFC-0019](0019-path-depth-bounded-by-bytes.md), which lands first per the
 >   2026-07-30 sequencing ruling). Note that this RFC's packing moves the byte-derived segment
 >   ceiling from 204 to 512 — a consequence of the encoding change, which this RFC therefore owns
 >   in its Compatibility section.
@@ -469,7 +469,7 @@ rewrite of that bullet:
 >   consumed monotonically — `dst` strictly shrinks by at least one segment per hop, so a delivery
 >   terminates in at most `len(dst)` hops with no counter, no state and no cap
 >   ([ADR-0038 §erratum](../adr/0038-…)). `len(dst)` is bounded by the `PATH` `length` field and by
->   the link's frame budget, not by a segment constant ([RFC-0019](../spec/rfcs/0019-path-depth-is-bounded-by-bytes.md)).
+>   the link's frame budget, not by a segment constant ([RFC-0019](../spec/rfcs/0019-path-depth-bounded-by-bytes.md)).
 
 Its sibling bullet at `:289` (loop-freedom) stands on `dst`-monotonicity alone and is unaffected.
 

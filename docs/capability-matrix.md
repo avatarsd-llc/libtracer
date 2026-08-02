@@ -5,8 +5,10 @@ test evidence** by [`tools/gen_capability_matrix.py`](https://github.com/avatars
 not hand-authored. Every ✅ is backed by an artifact CI runs (a shared
 conformance-vector category, a C++ `ctest`, a Rust `cargo test`, a TS `npm test`,
 a live-interop job, or an ESP build); the module row below is auto-derived by
-scanning the source tree, so a catalog entry with no translation unit shows as
-*planned*, not *done*. A CI check fails if this page drifts from that evidence.
+scanning the source tree, so a catalog entry with no source at all — neither a
+`core/src` translation unit nor a `core/include` header — shows as *planned*, not
+*done*. A header-only module counts as implemented, with an empty
+translation-unit cell. A CI check fails if this page drifts from that evidence.
 
 *The **C++ core is the golden reference**; the TypeScript and Rust cores are
 from-scratch native reimplementations kept in lock-step by the same vectors
@@ -56,7 +58,7 @@ from-scratch native reimplementations kept in lock-step by the same vectors
         <tr><td class="capm-name">ROS 2 (rmw_tracer)</td><td>binding</td><td class="capm-name" style="font-weight:400">drop-in RMW over the C++ graph</td><td data-s="warn"><span class="capm-badge">⚠️</span><span class="capm-note">18-line stub</span></td><td data-s="warn"><span class="capm-badge">⚠️</span><span class="capm-note">early stub</span></td></tr>
       </tbody></table></div>
   <h3 style="margin:1rem 0 .5rem">C++ modules (auto-derived from the source tree)</h3>
-  <p style="font-size:.85rem;color:var(--color-foreground-secondary);margin:.25rem 0 .5rem">Status detected from <code>core/src</code> + <code>core/tests</code> — a module the catalog lists but has no translation unit shows as <b>planned</b>.</p>
+  <p style="font-size:.85rem;color:var(--color-foreground-secondary);margin:.25rem 0 .5rem">Status detected from <code>core/src</code> + <code>core/tests</code> — a module the catalog lists but has no source at all (no TU and no header) shows as <b>planned</b>; a header-only module counts as implemented, with an empty translation-unit cell.</p>
   <div class="capm-wrap"><table class="capm-table"><thead><tr><th>Module</th><th>Translation unit</th><th>Status</th></tr></thead><tbody>
         <tr><td class="capm-name">transport_tcp</td><td class="capm-name" style="font-weight:400"><code>core/src/transport_tcp.cpp</code></td><td data-s="ok"><span class="capm-badge">✅</span><span class="capm-note">implemented · tested</span></td></tr>
         <tr><td class="capm-name">transport_udp</td><td class="capm-name" style="font-weight:400"><code>core/src/transport_udp.cpp</code></td><td data-s="ok"><span class="capm-badge">✅</span><span class="capm-note">implemented · tested</span></td></tr>
@@ -93,6 +95,9 @@ from-scratch native reimplementations kept in lock-step by the same vectors
   or if this page is stale. The tests' pass/fail is proven by the existing CI
   jobs (`conformance`, `core-ci`, `ts`, `ws-interop`, `wt-interop`, `esp-idf`).
 - The **module** table is auto-derived by scanning the tree, so it cannot
-  overclaim: `transport_i2c`/`spi`/`unix` show as *planned* until their TU lands.
+  overclaim: a listed module shows as *planned* until its source lands. The
+  future-tier `transport_i2c` / `transport_spi` carry no design commitment and are
+  deliberately absent from this table; they are listed in the module catalog's
+  `future` tier.
 - Full module catalog: [reference/10-module-catalog.md](reference/10-module-catalog.md).
   Third-party implementations: [docs/implementations.md](https://github.com/avatarsd-llc/libtracer/blob/main/docs/implementations.md).

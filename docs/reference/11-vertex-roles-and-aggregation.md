@@ -58,14 +58,14 @@ The simplest vertex. A single TLV is held; writes replace it; reads return it; s
 
 - **Behavior**: `read` → most recent `write`. `subscribe` → every future `write`.
 - **State size**: one TLV (typically a few bytes to a few KiB).
-- **Used for**: configuration values, sensor readings, the shared-variable pattern of [06-user-data-packing.md](06-user-data-packing.md) §"Synchronize the value of a variable" pattern.
+- **Used for**: configuration values, sensor readings, the shared-variable pattern of [06-user-data-packing.md](06-user-data-packing.md) §shared-variable pattern.
 
 ### 2. Stream (append-only, no replacement)
 
 Writes do not replace prior values; they append to a stream. Reads return the most recent value (or a window); subscribers receive the sequence.
 
 - **Behavior**: `read` → most recent OR a windowed list (`read("/x[..]")`). `write` → append, no displacement. `subscribe` → every append.
-- **State size**: bounded by the vertex's configured history window (a `:settings` knob; the protocol fixes no depth).
+- **State size**: bounded by the vertex's configured history window. The depth is set owner-side by the host call `graph_t::set_history_depth(v, keep)` and has **no wire surface** — it is not a `:settings` knob ([02-graph-model.md](02-graph-model.md) §storage is declared owner-side, and nothing is inherited); the protocol fixes no depth.
 - **Used for**: log streams, sensor streams where each sample matters, address-shift slicing (each `[N]` slot is itself a stored value but the *parent* path acts as a stream).
 
 ### 3. Sink with internal model (mirror / state-machine)
@@ -106,7 +106,7 @@ The path fronts multiple physical sources or sinks. A read aggregates; a write f
 
 A view onto live memory whose value changes asynchronously to libtracer. Reads snapshot the current bytes; writes (if accepted) poke the memory.
 
-- **Behavior**: `read` → snapshot now (per the resolved memory-binding contract — [08-views-and-ownership.md](08-views-and-ownership.md) §MMIO register-as-view and [ADR-0012](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0012-modular-memory-binding-transparent-router.md): snapshot is the recommended-safe default, a live binding is supported). `write` → poke. `subscribe` → polled at the vertex's configured poll interval (a `:settings` knob).
+- **Behavior**: `read` → snapshot now (per the resolved memory-binding contract — [08-views-and-ownership.md](08-views-and-ownership.md) §MMIO register-as-view and [ADR-0012](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0012-modular-memory-binding-transparent-router.md): snapshot is the recommended-safe default, a live binding is supported). `write` → poke. `subscribe` → polled at the interval the owning module was configured with host-side; there is no `:settings` knob for it — the core vertex SETTINGS namespace is empty ([05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x0B`).
 - **State size**: zero (the bytes live in MMIO).
 - **Used for**: GPIO registers, peripheral status, anything memory-mapped.
 
@@ -219,7 +219,7 @@ write("/peer:subscribers[]",
       SUBSCRIBER{ target = "/log/global" })
 ```
 
-Every subscription is a subtree subscription ([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md)), so the edge at `/peer` observes every write to any `/peer/{id}/log` — and anything else under `/peer`. The consumer filters if the subtree carries more than logs; selecting only sibling-pattern paths like `/peer/*/log` would need the unratified per-segment wildcard grammar ([03-addressing.md](03-addressing.md) §future direction: per-segment wildcards). `/log/global` becomes the place where every host's log lands *as if* they wrote there directly.
+Every subscription is a subtree subscription ([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md)), so the edge at `/peer` observes every write to any `/peer/{id}/log` — and anything else under `/peer`. The consumer filters if the subtree carries more than logs; selecting only sibling-pattern paths like `/peer/*/log` would need the unratified per-segment wildcard grammar ([03-addressing.md](03-addressing.md) §per-segment wildcards (unratified)). `/log/global` becomes the place where every host's log lands *as if* they wrote there directly.
 
 This is **not** a special primitive — it falls out of subtree subscription plus the SUBSCRIBER target field. The aggregate-role vertex is just any vertex a subtree subscription pulls into.
 
@@ -416,7 +416,7 @@ The net plane carries the same shape for connections:
 | Concept | Specified in | Role here |
 | ---- | ---- | ---- |
 | Vertex backing is unspecified (RAM, MMIO, file, function-on-read) | [02-graph-model.md](02-graph-model.md) §the graph imposes no shape | The taxonomy that develops it |
-| Shared-variable pattern via a subscribe requesting durability (`durability_request`, RFC-0022 §3.A) | [06-user-data-packing.md](06-user-data-packing.md) §"Synchronize the value of a variable" pattern | Role 1 (stored value) |
+| Shared-variable pattern via a subscribe requesting durability (`durability_request`, RFC-0022 §3.A) | [06-user-data-packing.md](06-user-data-packing.md) §shared-variable pattern | Role 1 (stored value) |
 | Route proxy as a vertex that forwards | [07-host-embedding.md](07-host-embedding.md) §per-host view | Role 5 (proxy) |
 | Subtree subscription mechanics | [03-addressing.md](03-addressing.md) §subtree subscriptions | Builds aggregate-role vertices |
 | Address-shift slicing for large payloads | [03-addressing.md](03-addressing.md) §address-shift slicing | Composes with role 2 and the Mode-A canvas |

@@ -17,9 +17,11 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Tracking issue** | [#767](https://github.com/avatarsd-llc/libtracer/issues/767) |
 | **Target spec version** | v1 itself. The immutability clause has never triggered: `docs/spec/v1.md:1` reads "(DRAFT)", `:3` reads "The wire format is not yet stable", and every Changelog entry reads `_unreleased_`. Same route RFC-0006, RFC-0018 and RFC-0019 took. |
 
-> **Numbering note.** 0012 was closed unmerged, 0014 was a phantom mislabel that was never a file, and 0015 was withdrawn (PR #446). None of the gaps is reusable —
-> see [RFC-0016](0016-composed-branch-read.md) §ghost history and RFC-0018's numbering note. 0023
-> is the next unused number.
+> **Numbering note.** 0012 was closed unmerged and 0015 was withdrawn (PR #446); neither gap is
+> reusable — see [RFC-0016](0016-composed-branch-read.md) §ghost history and RFC-0018's numbering
+> note. 0014 was a phantom mislabel when RFC-0016 wrote that note, but it was **subsequently issued
+> as a real document** ([RFC-0014](0014-creator-endpoint-connection-lifecycle-and-link-liveness.md),
+> accepted 2026-07-24), so it is not a gap at all. 0023 is the next unused number.
 
 > **Relationship to [RFC-0019](0019-path-depth-bounded-by-bytes.md).** RFC-0019 (draft,
 > 2026-07-31) proposed deleting the segment cap outright, leaving the byte budget as the only

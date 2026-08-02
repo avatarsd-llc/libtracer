@@ -179,9 +179,15 @@ flowchart TB
   same pointer to its `op_resolver_t` (#766), which threads it through the rope-tier node reader,
   so one injection covers both paths. A refused terminus flatten is answered by value: an addressed
   `kind=ERROR STATUS{BACKPRESSURE}` reply, or — when the refusal hit the reply's own route bytes,
-  leaving no trustworthy address — a drop. Never a reply built on a short span. What `flat` still
-  does **not** cover is everything that is not a rope flatten: the terminus arena (that is `rx`)
-  and the reply head segment.
+  leaving no trustworthy address — a drop. Never a reply built on a short span. Since #793 it also
+  covers the rope tier's **single-link** ownership copy, which used to reach the global heap
+  through `view::over_bytes` — so `own_wire`'s two branches no longer allocate from two different
+  allocators depending on where the peer's fragmentation fell. What `flat` still does **not**
+  cover: the terminus arena (that is `rx`'s nothrow `block_source_t`, bounded by a different seam,
+  not unbounded) and the reply head segment (genuinely unbounded on both tiers; it answers
+  exhaustion by value, and folding it into `flat` would silently re-scope an injection callers have
+  already sized — see
+  [failable allocation and backpressure](../design/allocation-and-backpressure.md)).
 - **Delivery is nothrow and drops rather than aborts.** Every per-delivery allocation on the writer
   thread is failable: a failed flatten, frame build or `iovec` reserve **drops that one delivery**
   — a subscriber misses a value under exhaustion, which is valid delivery behaviour — instead of

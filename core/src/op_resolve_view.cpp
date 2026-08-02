@@ -24,6 +24,9 @@
  * (ADR-0041 §3) without span-aliasing a borrowed frame.
  */
 
+#include <optional>
+#include <utility>
+
 #include "libtracer/op_resolve.hpp"
 #include "libtracer/tlv_view.hpp"
 #include "op_resolve_walk.hpp"
@@ -106,6 +109,13 @@ class view_node {
      * segment (the required ADR-0041 §2 ownership copy). The shared `own_tlv`
      * clears the trailer bits on the owned opt byte; both branches yield an
      * exclusively-owned segment safe to patch.
+     *
+     * BOTH branches draw from the injected seam. Until #793 only the multi-link one did
+     * (#766) and the single-link one copied through `view::over_bytes`'s global heap — so
+     * one function allocated from two different allocators depending on how the PEER
+     * happened to fragment the frame, and the fragmentation that took the *cheaper* branch
+     * was the one that escaped the node's memory bound. A whole terminus WRITE whose payload
+     * TLV lands inside one RX segment is exactly that case, and it is the common one.
      */
     [[nodiscard]] view_t own_wire() const {
         const rope_t sub = v_->wire().subrope(0, wire_size());  // trailer excluded
@@ -120,7 +130,18 @@ class view_node {
             if (flat.empty()) note_refusal();
             return flat;
         }
-        return view::over_bytes(sub.only().bytes()).value_or(view_t{});
+        // Single link: the ADR-0041 §2 ownership COPY, through the same seam (#793). A wire
+        // TLV is never zero bytes, so `over_bytes` cannot answer its engaged-empty
+        // "legitimately-empty input" here — `nullopt` is exactly a refusal, and it maps to
+        // the empty view the walk's empty-value guards already read as BACKPRESSURE. It is
+        // recorded for the same reason the flatten branch records its own: a LATER span read
+        // on this walk must not be believed either.
+        std::optional<view_t> owned = view::over_bytes(sub.only().bytes(), backend());
+        if (!owned) {
+            note_refusal();
+            return view_t{};
+        }
+        return std::move(*owned);
     }
 
     /**

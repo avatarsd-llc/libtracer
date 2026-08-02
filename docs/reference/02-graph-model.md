@@ -15,7 +15,7 @@
 
 - **Schema**: a structured TLV (typically a `POINT` or a `SETTINGS`-shaped record) returned at `<vertex>:schema`, enumerating the writable fields the vertex exposes. Two parts with defined precedence ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §B.2): a **synthesized protocol part**, authoritative for protocol machinery — and, when the owner installed a field descriptor table, an **owner part** (`NAME "app" SETTINGS{…}`) served verbatim, authoritative for `settings.app.*`. Read-only.
 
-> **What the synthesized part emits** ([#586](https://github.com/avatarsd-llc/libtracer/issues/586), [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md)). This paragraph used to say the synthesized part enumerates "`:subscribers[]`, `:settings.*`, `:liveness.*`, `:acl`". It enumerates **none of those as such**. `graph_t::read_schema` emits exactly:
+> **What the synthesized part emits** ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md)). The synthesized part enumerates neither `:subscribers[]` nor `:settings.*`, `:liveness.*` or `:acl`. `graph_t::read_schema` emits exactly:
 >
 > ```
 > POINT{ NAME <vertex name>
@@ -24,11 +24,11 @@
 > }
 > ```
 >
-> The knob enumeration is **empty**, and therefore for the first time **complete**. It was neither before RFC-0022: it advertised `deadline_ns`, which nothing consumed, and omitted `store_ref_min_bytes`, which the write path read on every write — the reported set was not even a subset of the working set. RFC-0022 §3.B deleted `settings_t` outright, which dissolved [#706](https://github.com/avatarsd-llc/libtracer/issues/706) rather than fixing it. The empty `SETTINGS` is **emitted, not omitted**, so the record keeps its shape whatever the vertex declares. The `:liveness.*` and `:description` rows below remain fictional and are still marked as such.
+> The core knob enumeration is **empty**, and therefore **complete**: RFC-0022 §3.B deletes `settings_t` outright, so the vertex's `:settings` core namespace holds nothing to enumerate and the synthesized part can neither over- nor under-report it. The empty `SETTINGS` is **emitted, not omitted**, so the record keeps its shape whatever the vertex declares. The `:liveness.*` and `:description` rows below are fictional and are marked as such.
 
 
 
-- **Forwarder** (router): the stateless component that routes `FWD` frames between a node's local graph and its named transport links — each hop strips the leading `dst` segment and grows `src` with the way back. To a downstream subscriber a forwarded delivery is indistinguishable from a local write.
+- **Forwarder** (router): the stateless component that routes `FWD` frames between a node's local graph and its named transport links — each hop strips the whole leading `dst` mount run and grows `src` with the way back. To a downstream subscriber a forwarded delivery is indistinguishable from a local write.
 
 - **Buffer segment**: a refcounted region of real memory backing one or more views. The unit of ownership.
 
@@ -296,7 +296,7 @@ Implementations on multi-threaded hosts MUST use atomic refcounts with these mem
 | Read for inspection (debug, metrics) | `acquire` | Pairs with each decrement; gives consistent snapshot |
 | Weak-to-strong upgrade (CAS loop) | `acq_rel` on success, `acquire` on failure | Same logic as inc + sync with last decrementer |
 
-Rationale is expanded in [01-data-format.md](01-data-format.md) §refcount memory ordering. The reference implementation uses C++ `std::atomic`; implementations in C (`<stdatomic.h>`), Rust (`Arc<T>` / `AtomicUsize`), or any other language MUST implement equivalent semantics.
+Rationale is expanded in [08-views-and-ownership.md](08-views-and-ownership.md) §refcount semantics. The reference implementation uses C++ `std::atomic`; implementations in C (`<stdatomic.h>`), Rust (`Arc<T>` / `AtomicUsize`), or any other language MUST implement equivalent semantics.
 
 ### Single-threaded mode
 
@@ -370,7 +370,7 @@ A subscriber that wants the application-domain timestamp reads it from a sibling
 
 Three ratified write/delivery semantics ([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md)) make the vertex tree observable and writable **at any granularity** with the same three-call API:
 
-- **Every subscription is a subtree subscription (vertical bubbling).** A `SUBSCRIBER` edge on vertex V observes writes to V **and to every descendant** (a leaf subscription is the trivial case). A write at W delivers — once per subscriber — to the subscribers of W and of each ancestor of W, carrying the **written TLV as-is** (the frame at the producer's granularity; no re-encoding, no tagging envelope; provenance beyond that travels in the data). Local delivery is the usual view clone; remote delivery rides the existing return-route `FWD{WRITE}` path unchanged. The write path stays **near-free when nobody listens**: per-vertex listener counters (maintained at subscribe/unsubscribe and summed from ancestors at vertex creation) mean an idle write takes **no vertex lock at all** and never walks ancestors — the whole delivery decision is two atomic loads. (Until 2026-07-31 the lock half of that was untrue: `fan_out` reached the edge snapshot, and its stripe mutex, unconditionally — see [#635](https://github.com/avatarsd-llc/libtracer/issues/635).)
+- **Every subscription is a subtree subscription (vertical bubbling).** A `SUBSCRIBER` edge on vertex V observes writes to V **and to every descendant** (a leaf subscription is the trivial case). A write at W delivers — once per subscriber — to the subscribers of W and of each ancestor of W, carrying the **written TLV as-is** (the frame at the producer's granularity; no re-encoding, no tagging envelope; provenance beyond that travels in the data). Local delivery is the usual view clone; remote delivery rides the existing return-route `FWD{WRITE}` path unchanged. The write path stays **near-free when nobody listens**: per-vertex listener counters (maintained at subscribe/unsubscribe and summed from ancestors at vertex creation) mean an idle write takes **no vertex lock at all** and never walks ancestors — the whole delivery decision is two atomic loads.
 - **A branch write decomposes.** A write whose payload is a `POINT` tree ([05 §`0x07`](05-protocol-tlvs.md)) rooted at the target vertex lands each value-carrying node at the corresponding descendant vertex as a **refcount subview of the written frame** (zero copy), creating missing vertices on the way; each covered subscription point is notified once with its slice. Values are the truth at the vertices where they land; a branch is a view. The branch is **not a transaction** — admission (shape + ACL) is all-or-nothing, application is per-leaf; cross-leaf snapshot coherence is the coherent-sampling `(origin, ts)` group ([ADR-0019](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0019-per-producer-monotonic-origin-timestamp.md)), never a write-side lock.
 - **A data write creates its target** (`mkdir -p`) when the vertex does not exist, gated by the existing `CREATE` access bit on the nearest existing ancestor's effective ACL. `:field` writes, `read`, and `await` keep `tr::path::not_found`.
 
@@ -554,7 +554,7 @@ The `app` key is **reserved inside the vertex `SETTINGS` namespace** ([05 §`0x0
 
 **Change notification — the announce-write convention** ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §C). A field write — protocol or app, local or remote — does **not** wake `await`, does **not** advance the vertex's write sequence, and does **not** propagate along subscription edges: the property plane is silent by design. A property change consumers should notice is followed by an ordinary **announce write at the vertex** — the owner assigns and propagates once the change is actually applied (for a remote app-field write, in its apply handler; the graph never announces on the writer's behalf). Subscribers receive one ordinary delivery and re-read the property tree if they care which knob moved. Consumers MUST NOT poll fields for change detection and MUST NOT expect per-field wakeups.
 
-**This is enforced, not merely stated** ([#585](https://github.com/avatarsd-llc/libtracer/issues/585)). An `await` carrying a `:field` selector answers `ERROR{tr::schema::not_found}` — the same ENOTTY a `read` or `write` of an unserved facet returns. It applies to **every** selector, including `:subscribers` and `:acl`, which read and write normally: the field is real, the await surface is not. Previously the selector was decoded, validated, and then discarded, so `await <v>:<anything>` was byte-identical to `await <v>` — a consumer asking for a per-field wakeup silently got a whole-vertex one, or `tr::flow::timeout`, which it cannot distinguish from a quiet link.
+**This is enforced, not merely stated** ([#585](https://github.com/avatarsd-llc/libtracer/issues/585)). An `await` carrying a `:field` selector answers `ERROR{tr::schema::not_found}` — the same ENOTTY a `read` or `write` of an unserved facet returns. It applies to **every** selector, including `:subscribers` and `:acl`, which read and write normally: the field is real, the await surface is not. Rejecting is what keeps a consumer that asks for a per-field wakeup from silently receiving a whole-vertex one — or a `tr::flow::timeout` it cannot distinguish from a quiet link.
 
 ### Stale and invalid values
 
@@ -582,7 +582,7 @@ Appearance is observable; **disappearance is not** — see §Retirement notifica
 
 A vertex enters the graph two ways: **explicit registration** (an init-time or catalog-driven create) or **write-creates** — a data write to an unregistered path materializes its target, and any missing ancestors along the way (`mkdir -p`-style), so *appearance is the first write* (§Observing structural change above).
 
-Leaving is **retirement, not erasure** ([RFC-0009](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0009-vertex-removal-and-subscriber-eviction.md)). Retiring a vertex **re-virginizes** the subtree in place: each vertex unwinds its subscriber contribution to its descendants, reverts to an unregistered placeholder, and its retired path then reads `not_found` (`0x0020`) — identical to never-existed, with **no distinct `retired` status** — no such code is allocated, and `0x0023` remains free. The vertex *object* is **not** freed — outstanding handles stay valid (an insert-only vertex lifetime, [ADR-0057](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0057-graph-composite-vertex-tree.md)) — and the detached value-seam block is **parked**: the seam is read lock-free, so the retiring thread cannot free a block a reader may still hold. The park's other end is explicit and the **embedder's**: `graph_t::collect()` frees everything parked, on the caller's thread and outside every graph lock, at a point the caller knows no reader holds a seam; `graph_t::parked_seam_count()` makes an uncollected park observable ([#576](https://github.com/avatarsd-llc/libtracer/issues/576)). Connection teardown retires a `/net/<name>` identity vertex, so a node with peer churn that never collects grows the park forever — graph teardown is the backstop, not the policy. The root cannot be retired, and retiring an already-retired or unregistered path is a no-op. There is **no wire operation** that reaches retirement directly: a peer removes by writing a request the device executes ([ADR-0059](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md) creator-endpoint), keeping removal owner-mediated.
+Leaving is **retirement, not erasure** ([RFC-0009](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0009-vertex-removal-and-subscriber-eviction.md)). Retiring a vertex **re-virginizes** the subtree in place: each vertex unwinds its subscriber contribution to its descendants, reverts to an unregistered placeholder, and its retired path then reads `not_found` (`0x0020`) — identical to never-existed, with **no distinct `retired` status** — no such code is allocated, and `0x0023` remains free. The vertex *object* is **not** freed — outstanding handles stay valid (an insert-only vertex lifetime, [ADR-0057](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0057-graph-composite-vertex-tree.md)) — and the detached value-seam block is **parked**: the seam is read lock-free, so the retiring thread cannot free a block a reader may still hold. The park's other end is explicit and the **embedder's**: `graph_t::collect()` frees everything parked, on the caller's thread and outside every graph lock, at a point the caller knows no reader holds a seam; `graph_t::parked_seam_count()` makes an uncollected park observable ([#576](https://github.com/avatarsd-llc/libtracer/issues/576)). Connection teardown retires a `/net/<module>/<name>` identity vertex, so a node with peer churn that never collects grows the park forever — graph teardown is the backstop, not the policy. The root cannot be retired, and retiring an already-retired or unregistered path is a no-op. There is **no wire operation** that reaches retirement directly: a peer removes by writing a request the device executes ([ADR-0059](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md) creator-endpoint), keeping removal owner-mediated.
 
 A retired path may be **revived** by a later write-creates. The revived vertex inherits **nothing** of the retired owner — in particular it takes its *live ancestor's* ACL policy, never the retired one's, so a stale grant cannot outlive the retirement.
 
@@ -664,13 +664,13 @@ Both roles use the **same TLV substrate** — same wire format, same in-memory v
 
 ### The shedding rule (mandatory)
 
-At each **forward hop** (the first `dst` segment names a transport link):
+At each **forward hop** (the leading `dst` mount run names a transport link):
 
-1. **Strip the leading `dst` segment** — the route shrinks toward the target.
+1. **Strip the leading `dst` mount run** — `net/<module>/<name>[/<peer>]` (RFC-0014 S2a), not one segment; the route shrinks toward the target.
 2. **Prepend the node's NAME for the inbound link to `src`** — the return route grows.
 3. Re-emit the rest of the frame **untouched** over the named link (fresh trailer per the egress transport). The hop keeps no per-request state.
 
-At the **terminus** (the first `dst` segment names a local vertex):
+At the **terminus** (the leading `dst` segments name a local vertex):
 
 1. Decode the frame and apply the op to the local vertex.
 2. **Shed the `FWD` envelope** — the graph stores only the bare payload TLV, trailer-less at rest. No routing metadata lands in graph data.
@@ -680,7 +680,7 @@ Forwarding is **loop-free by construction**: `dst` is consumed monotonically per
 
 ### Consequences
 
-- **Graph reads are clean.** A subscriber reading `/net/can0/wheel/left` gets the bare data TLV — same shape regardless of whether the value originated locally or arrived over CAN. No envelope pollution; no need for application code to skip routing metadata.
+- **Graph reads are clean.** A subscriber reading `/net/can/can0/wheel/left` gets the bare data TLV — same shape regardless of whether the value originated locally or arrived over CAN. No envelope pollution; no need for application code to skip routing metadata.
 - **Recorder is simple.** Recording a vertex's value writes the bare data TLV. Replay does NOT replay the original envelope (which would alias the original sender's route); replay is a fresh write from the recorder's identity.
 - **Same substrate, two clean roles.** The protocol does not have separate "wire format" and "graph format" — it has one format with one optional wrapping that distinguishes the two roles.
 
@@ -697,7 +697,7 @@ sequenceDiagram
     STM->>LB: FWD{ WRITE, dst=/esp/wheel/left, src=/stm, VALUE }
     Note over LB: strip "esp" from dst<br/>prepend inbound-link NAME to src
     LB->>ESP: FWD{ WRITE, dst=/wheel/left, src=/can0/stm, VALUE }
-    Note over ESP: first dst segment is local ⇒ terminus<br/>shed the envelope, store bare VALUE
+    Note over ESP: leading dst segments are local ⇒ terminus<br/>shed the envelope, store bare VALUE
     ESP->>V: write (trailer-less at rest)
     ESP-->>LB: FWD{ REPLY, dst=/can0/stm }
     LB-->>STM: FWD{ REPLY, dst=/stm }
