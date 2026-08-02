@@ -28,13 +28,15 @@ The one-slab recipe
 /** @brief One static slab feeds BOTH memory seams — nothing grows at runtime. */
 static std::byte g_slab[24 * 1024];
 
-// Front region: RESERVED for the RX segment pool — but the receive seam is a
-// mem_backend_t too, and it carries the same thread-safety obligation as the
-// other two: every endpoint allocates on its own receive thread and a delivered
-// segment reclaims on whichever thread drops the last reference. Until the
-// arch-selected synchronised pool exists (#770), the receive seam ALSO stays on
-// heap_backend() — see the warning below.
-// ... transport_vertex_t net{graph, router, "/net", &tr::mem::heap_backend()};
+// Front region: the RX segment pool. The receive seam is a mem_backend_t like
+// the other two and carries the same thread-safety obligation — every endpoint
+// allocates on its own receive thread, and a delivered segment reclaims on
+// whichever thread drops the last reference — so it takes a SYNCHRONISED pool,
+// never a bare pool_t. On this single-core target that is the interrupt-disable
+// policy (#770); a spinlock would let a high-priority task spin on a lock its
+// lower-priority holder cannot release.
+tr::esp::critical_pool_t rx_pool{std::span<std::byte>(g_slab, kRxRegion), 1536};
+// ... transport_vertex_t net{graph, router, "/net", &rx_pool};
 
 // Back region: monotonic + synchronized arena — the pmr seam (label tables,
 // LKV control blocks).
@@ -48,8 +50,9 @@ std::pmr::synchronized_pool_resource shared{&arena};
 // on the global heap — where they at least RECYCLE, which matters below.
 //
 // The two BYTE-BUFFER seams — graph_t's `value_backend` and fwd_router_t's `flat`
-// — stay on heap_backend() here, and the warning below says why: a BARE pool_t is
-// not thread-safe, and both seams are reached from several threads.
+// — stay on heap_backend() here; the warning below says why a BARE pool_t is never
+// the alternative (both are reached from several threads). They may take a
+// critical_pool_t of their own, sized from what this node actually stores.
 //
 // ... graph_t graph{&shared, /*value_backend=*/&tr::mem::heap_backend(),
 // ...               /*ctl=*/&blocks};
@@ -79,23 +82,29 @@ inside the remote-delivery fan-out. `pool_t`'s free list is a plain `std::size_t
 and count with no lock and no atomic, so two threads can be handed the same slot and a
 stored value aliases onto an outbound frame.
 
-`sync_pool_t` (`core/include/libtracer/mem_pool.hpp:118`) is the in-tree composition of
-a pool with synchronisation — but it is a **spinlock**, the multi-core-host variant, and
-it is wrong for a single-core MCU, where a lower-priority task holding the lock cannot
-run while a higher-priority task spins. The variant this target needs is the
-interrupt-disable critical-section pool ADR-0060 §2 names, selected as an
+The synchronised pool this target needs **is built** (#770):
+`synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:170`) keeps `pool_t`'s
+bounded slab and makes the critical section a compile-time policy, chosen as an
 [ADR-0047 — build-time closed module sets](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)
-§2 module-set trait — and **it is not built**
-([zero-copy and flatten](../design/zero-copy-and-flatten.md) §5 records the same gap for
-the receive backend). The transport **receive** seam sits on the same unsynchronised
-primitive and is NOT a safe residual use: `transport_vertex_t`'s `rx_backend` is handed
-unchanged to every endpoint, each endpoint allocates on its own receive thread, and a
-delivered segment reclaims on whichever thread drops the last reference — a bare
-`pool_t` there is the identical race (#770; the `full_node` example still wires one and
-is tracked by that issue). Until the critical-section pool exists all **three** seams —
-`value_backend`, `flat` and the receive backend — stay on `heap_backend()`, which is
-thread-safe. That is the honest state of "one slab, whole stack" on a single-core
-target, not a licence to inject the pool anyway.
+§2 module-set trait, because the target knows its concurrency model at build time
+([ADR-0068](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0068-build-configuration-is-plain-cpp-config-header.md)).
+`tr::mem::sync_pool_t` is the **spinlock** pairing — the multi-core host one, wrong here,
+where a lower-priority task holding the lock cannot run while a higher-priority task
+spins. **`tr::esp::critical_pool_t`** (`libtracer_esp/critical_pool.hpp`, shipped by the
+ESP-IDF component because it needs FreeRTOS headers) is the interrupt-disable pairing
+ADR-0060 §2 names, and it is what a C6 injects — at the receive seam above, and at
+`value_backend` / `flat` if you want those bytes in the slab too. It is opt-in
+construction: no seam defaults to a pool, and `heap_backend()` (thread-safe) remains the
+default at all three.
+
+What is still **not** safe is the bare primitive: `transport_vertex_t`'s `rx_backend` is
+handed unchanged to every endpoint, each endpoint allocates on its own receive thread, and
+a delivered segment reclaims on whichever thread drops the last reference — a bare
+`pool_t` there is the identical race the two byte seams have. The bundled `full_node`
+example wires the synchronised pool through a per-target platform TU
+(`main/platform.hpp`'s `rx_backend()`: `critical_pool_t` on a chip, `sync_pool_t` on the
+`linux` host target), which is the same recipe in the form an example that builds for two
+targets can take.
 :::
 
 Keeping `flat` on the heap means the router's four flattens — the ingress

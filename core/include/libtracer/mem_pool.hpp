@@ -16,6 +16,7 @@
 #pragma once
 
 #include <atomic>
+#include <concepts>
 #include <cstddef>
 #include <span>
 
@@ -94,19 +95,69 @@ class pool_t final : public mem_backend_t {
 };
 
 /**
- * @brief A thread-safe `pool_t` for the graph's `value_backend_` on a MULTI-CORE host
- *        (ADR-0060 §2), guarding the O(1) free-list with a spinlock.
+ * @brief The compile-time synchronisation seam of `synchronized_pool_t` (ADR-0047 §2
+ *        module-set trait, ADR-0068 compile-time doctrine).
  *
- * `value_backend_` MUST be thread-safe: a `segment` self-routes its reclaim on whatever
- * thread drops the last ref — typically a *reader/subscriber* thread, concurrent with a
- * writer's `alloc` (ADR-0060 §2). A single thread-safe pool (never per-stripe sharding,
- * which removes no race and adds partition imbalance) is the answer. The sync mechanism
- * is an ADR-0047 §2 module-set trait chosen by the target: this is the **spinlock**
- * variant for the multi-core host (`is_isr_safe == false`) — negligible contention on an
- * O(1) section, and it avoids the ~2 µs OS-mutex round-trip that would dominate the
- * ~120 ns free-list op. The single-core interrupt-disable critical-section variant and the
- * many-core lock-free index+tag CAS upgrade (the free list is already index-based) are the
- * recorded ADR-0060 §2 follow-ups.
+ * A policy owns ONE critical-section mechanism: `lock()` / `unlock()` around the pool's
+ * O(1) free-list ops, plus the two facts the seam publishes upward — whether the section
+ * is ISR-safe and what the resulting backend is called. The target knows its concurrency
+ * model at BUILD time (a single-core priority-preemptive MCU never becomes a multi-core
+ * host), so the choice is a template argument, not a runtime knob: no branch, no vtable,
+ * no per-alloc indirection on a ~120 ns operation.
+ */
+template <class P>
+concept pool_sync_policy = requires(P& p) {
+    { p.lock() } noexcept;
+    { p.unlock() } noexcept;
+    { P::is_isr_safe } -> std::convertible_to<bool>;
+    { P::name } -> std::convertible_to<const char*>;
+};
+
+/**
+ * @brief The MULTI-CORE HOST policy: an `std::atomic_flag` spinlock.
+ *
+ * Negligible contention on an O(1) section, and it avoids the ~2 µs OS-mutex round-trip
+ * that would dominate the ~120 ns free-list op. NOT ISR-safe, and wrong for a single-core
+ * priority-preemptive target, where a lower-priority holder cannot run while a
+ * higher-priority task spins (ADR-0060 §2) — such a target supplies the interrupt-disable
+ * critical-section policy instead (`tr::esp::portmux_sync_t` for ESP-IDF).
+ */
+struct spin_sync_t {
+    static constexpr bool is_isr_safe = false;           /**< @brief Spin => not ISR-safe. */
+    static constexpr const char* name = "mem_sync_pool"; /**< @brief Backend name. */
+    /** @brief Acquire the flag, spinning (the guarded section is O(1)). */
+    void lock() noexcept {
+        while (lk_.test_and_set(std::memory_order_acquire)) { /* spin: O(1) section */
+        }
+    }
+    /** @brief Release the flag. */
+    void unlock() noexcept { lk_.clear(std::memory_order_release); }
+
+   private:
+    std::atomic_flag lk_{};
+};
+
+/**
+ * @brief A thread-safe `pool_t` whose SYNCHRONISATION IS A COMPILE-TIME POLICY
+ *        (ADR-0060 §2), guarding the O(1) free-list with @p Sync.
+ *
+ * Any `mem_backend_t` injected at a shared seam MUST be thread-safe: a `segment`
+ * self-routes its reclaim on whatever thread drops the last ref — typically a
+ * *reader/subscriber* or transport *receive* thread, concurrent with a writer's `alloc`
+ * (ADR-0060 §2; the same obligation holds for `graph_t`'s `value_backend`, the router's
+ * `flat`, and `transport_vertex_t`'s `rx_backend`). A single thread-safe pool (never
+ * per-stripe sharding, which removes no race and adds partition imbalance) is the answer.
+ *
+ * The mechanism is the target's to pick, because only the target knows its concurrency
+ * model: @ref spin_sync_t on a multi-core host, an interrupt-disable critical section on a
+ * single-core priority-preemptive MCU (`tr::esp::portmux_sync_t`, shipped by the ESP-IDF
+ * component — it needs FreeRTOS headers, so it lives outside `core/`). The many-core
+ * lock-free index+tag CAS upgrade (the free list is already index-based) stays the
+ * recorded ADR-0060 §2 follow-up.
+ *
+ * This is **opt-in construction only** — no seam defaults to it. `heap_backend()` remains
+ * the default everywhere; a target that wants its receive/value bytes inside its own slab
+ * constructs one of these and injects it.
  *
  * Composition over `pool_t`: a freshly-`alloc`'d segment is re-pointed to `this` with a
  * `UNKNOWN` tag, so `destroy_dispatch` routes reclaim through the virtual (locked)
@@ -115,53 +166,60 @@ class pool_t final : public mem_backend_t {
  * re-point is invisible to the inner pool. The re-point touches only the just-allocated
  * segment, which no other thread can observe until the caller publishes it.
  */
-class sync_pool_t final : public mem_backend_t {
+template <pool_sync_policy Sync>
+class synchronized_pool_t final : public mem_backend_t {
    public:
     /** @brief Carve @p slab into @p slot_payload-byte slots (see @ref pool_t), thread-safe. */
-    sync_pool_t(std::span<std::byte> slab, std::size_t slot_payload,
-                std::size_t align = alignof(std::max_align_t)) noexcept
-        : mem_backend_t("mem_sync_pool"), inner_(slab, slot_payload, align) {}
+    synchronized_pool_t(std::span<std::byte> slab, std::size_t slot_payload,
+                        std::size_t align = alignof(std::max_align_t)) noexcept
+        : mem_backend_t(Sync::name), inner_(slab, slot_payload, align) {}
 
+    /** @brief @ref pool_t::alloc inside @p Sync's critical section; reclaim re-routed here. */
     view::segment_t* alloc(std::size_t size, alloc_hint_t hint = alloc_hint_t::NONE) override {
-        lock();
+        sync_.lock();
         view::segment_t* seg = inner_.alloc(size, hint);
         if (seg != nullptr) {
             seg->backend = this;               // reclaim routes back through this (locked)
             seg->btag = backend_tag::UNKNOWN;  // -> destroy_dispatch virtual fallback
         }
-        unlock();
+        sync_.unlock();
         return seg;
     }
+    /** @brief @ref pool_t::destroy inside @p Sync's critical section. */
     void destroy(view::segment_t* seg) noexcept override {
-        lock();
+        sync_.lock();
         inner_.destroy(seg);
-        unlock();
+        sync_.unlock();
     }
     [[nodiscard]] std::size_t alignment() const noexcept override { return inner_.alignment(); }
     [[nodiscard]] std::size_t max_segment_size() const noexcept override {
         return inner_.max_segment_size();
     }
     /** @brief UNKNOWN so `destroy_dispatch` takes the virtual (locked) `destroy`, not the
-     *         devirtualized POOL fast path that would bypass the spinlock. */
+     *         devirtualized POOL fast path that would bypass the critical section. */
     [[nodiscard]] backend_tag tag() const noexcept override { return backend_tag::UNKNOWN; }
 
-    // Module-set traits (ADR-0047 §2). Spinlock => NOT ISR-safe (the single-core
-    // crit-section variant is the ISR-safe one); plain-RAM slab => no cache ops.
+    // Module-set traits (ADR-0047 §2). ISR-safety is the POLICY's fact, forwarded here;
+    // plain-RAM slab => no cache ops.
     static constexpr bool needs_cache_ops = false; /**< @brief Plain RAM slab. */
-    static constexpr bool is_isr_safe = false;     /**< @brief Spinlock (multi-core host). */
-    static constexpr bool owns_bytes = true;       /**< @brief Backend-managed, durably storable. */
+    static constexpr bool is_isr_safe =
+        Sync::is_isr_safe;                   /**< @brief Whatever the sync policy guarantees. */
+    static constexpr bool owns_bytes = true; /**< @brief Backend-managed, durably storable. */
 
     /** @brief Total slots (delegated to the inner @ref pool_t). */
     [[nodiscard]] std::size_t capacity() const noexcept { return inner_.capacity(); }
 
    private:
     pool_t inner_;
-    std::atomic_flag lk_{};
-    void lock() noexcept {
-        while (lk_.test_and_set(std::memory_order_acquire)) { /* spin: O(1) section */
-        }
-    }
-    void unlock() noexcept { lk_.clear(std::memory_order_release); }
+    Sync sync_{};
 };
+
+/**
+ * @brief The multi-core-host spelling of `synchronized_pool_t` — a spinlock-guarded pool.
+ *
+ * The name predates the policy seam and is kept as the host default (ADR-0060 §2's
+ * spinlock variant); a single-core MCU wants the critical-section policy instead.
+ */
+using sync_pool_t = synchronized_pool_t<spin_sync_t>;
 
 }  // namespace tr::mem

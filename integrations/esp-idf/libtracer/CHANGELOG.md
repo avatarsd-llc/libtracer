@@ -10,6 +10,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`tr::esp::critical_pool_t` — a thread-safe, slab-bounded `mem_backend_t` for a
+  single-core ESP32 (#770).** `include/libtracer_esp/critical_pool.hpp`. `portmux_sync_t`
+  implements core's `tr::mem::pool_sync_policy` with `portENTER_CRITICAL_SAFE` /
+  `portEXIT_CRITICAL_SAFE`, and `critical_pool_t` is `tr::mem::synchronized_pool_t` specialised
+  on it — the interrupt-disable variant
+  [ADR-0060](../../../docs/adr/0060-lkv-copy-store-injected-value-backend.md) §2 names for a
+  priority-preemptive target, where core's spinlock `sync_pool_t` would let a high-priority task
+  spin on a lock its lower-priority holder cannot release. `is_isr_safe` is `true` (the section
+  disables interrupts, and the `_SAFE` macros pick the ISR-context primitive). Inject it wherever
+  a shared byte seam must live in the application's own slab — `transport_vertex_t`'s
+  `rx_backend`, `graph_t`'s `value_backend`, `fwd_router_t`'s `flat`; a bare `tr::mem::pool_t` is
+  unsynchronised and wrong at all three. **Opt-in construction — nothing defaults to it**, and an
+  app that never names it links nothing (the compile-gate TU `critical_pool.cpp` instantiates the
+  specialisation on chip targets so the adapter is type-checked by every build; `--gc-sections`
+  drops it). The bundled `full_node` example wires it behind its per-target platform seam.
+
 ### Changed
 
 - **`CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` now rides the generated `libtracer/config.hpp`**

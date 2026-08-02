@@ -343,6 +343,22 @@ target_link_libraries(mem_sync_pool_test PRIVATE libtracer)
 libtracer_test_warnings(mem_sync_pool_test)
 add_test(NAME mem_sync_pool COMMAND mem_sync_pool_test)
 
+# #770 — the synchronisation POLICY seam of mem::synchronized_pool_t: the injected
+# critical section is taken on every alloc/destroy, no slot is handed to two live
+# segments, and the free list survives the storm. Sanitizer-independent (it counts and
+# compares), so it fires in the ordinary ctest run as well as under the tsan job.
+#
+# THE ABLATION, run by hand (deliberately not an add_test — "the race manifests" is a
+# probabilistic pass condition, and a flaky green is worse than none):
+#   g++ -std=c++23 -O2 -pthread -DLIBTRACER_ABLATE_POOL_SYNC \
+#       -I core/include core/tests/mem_sync_policy_test.cpp core/src/*.cpp -o /tmp/ablate
+# The build with the policy's critical section removed reports double hand-outs and a
+# mangled free list; the unablated build reports OK.
+add_executable(mem_sync_policy_test mem_sync_policy_test.cpp)
+target_link_libraries(mem_sync_policy_test PRIVATE libtracer)
+libtracer_test_warnings(mem_sync_policy_test)
+add_test(NAME mem_sync_policy COMMAND mem_sync_policy_test)
+
 add_executable(graph_test graph_test.cpp)
 target_link_libraries(graph_test PRIVATE libtracer)
 libtracer_test_warnings(graph_test)

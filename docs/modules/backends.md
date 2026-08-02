@@ -32,10 +32,15 @@ A fourth, `mem_cuda`, is compiled only when `LIBTRACER_WITH_CUDA` is set
 `mem_pool` is the bounded "custom allocator": it carves a **caller-owned** slab
 into fixed slots with the free list threaded *through the slab* (no auxiliary
 heap), and returns `nullptr` when full — the BACKPRESSURE signal. `pool_t` is not
-synchronized; `sync_pool_t` (`core/include/libtracer/mem_pool.hpp`) composes over it
-and guards the free list with a spinlock, which is what a multi-core host's
-`value_backend_` needs — a segment self-routes its reclaim on whatever thread drops
-the last reference, concurrent with a writer's `alloc`.
+synchronized; `synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:170`)
+composes over it and guards the free list with a **compile-time synchronisation policy**,
+which is what any shared seam needs — a segment self-routes its reclaim on whatever thread
+drops the last reference, concurrent with a writer's `alloc`. Two policies ship: the
+spinlock `spin_sync_t` for a multi-core host (`sync_pool_t` is the alias for that pairing)
+and the interrupt-disable `tr::esp::portmux_sync_t` for a single-core, priority-preemptive
+MCU (`integrations/esp-idf/libtracer/include/libtracer_esp/critical_pool.hpp`, aliased
+`tr::esp::critical_pool_t` — it needs FreeRTOS headers, so it ships with the ESP-IDF
+component rather than in `core/`). The target picks; nothing defaults to either.
 
 Each concrete backend also carries three compile-time traits the module set reads
 without a virtual call — `needs_cache_ops`, `is_isr_safe`, `owns_bytes`

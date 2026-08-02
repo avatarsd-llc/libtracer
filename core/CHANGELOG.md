@@ -14,6 +14,29 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`mem::synchronized_pool_t<Sync>` — the pool's critical section is now a compile-time
+  policy (#770, [ADR-0060](../docs/adr/0060-lkv-copy-store-injected-value-backend.md) §2
+  erratum 2).** `core/include/libtracer/mem_pool.hpp`. New: the class template
+  `synchronized_pool_t<Sync>`, the constraint `concept mem::pool_sync_policy` (a policy supplies
+  `lock()`/`unlock()`, `is_isr_safe`, `name`) and the shipped host policy `mem::spin_sync_t`.
+  The pool forwards its policy's `is_isr_safe` as its own ADR-0047 §2 module-set trait.
+  **`mem::sync_pool_t` is unchanged in behavior and spelling** — it is now the alias
+  `synchronized_pool_t<spin_sync_t>`, so every existing use compiles and runs as before. The
+  point of the seam is the *other* pairing: a single-core, priority-preemptive MCU cannot use a
+  spinlock (a high-priority task spins while the lower-priority holder cannot run), and gets the
+  interrupt-disable policy `tr::esp::portmux_sync_t` / `tr::esp::critical_pool_t` from the
+  ESP-IDF component instead (it needs FreeRTOS headers). Compile-time per
+  [ADR-0068](../docs/adr/0068-build-configuration-is-plain-cpp-config-header.md): the target
+  knows its concurrency model at build time, so there is no branch or vtable on a ~120 ns op.
+  **Nothing defaults to it** — `heap_backend()` remains the default at `value_backend`, `flat`
+  and `transport_vertex_t`'s `rx_backend`; injecting a pool is opt-in construction, and a *bare*
+  `mem::pool_t` is still wrong at all three (unsynchronised free list). Covered by
+  `core/tests/mem_sync_policy_test.cpp` (policy engaged on every alloc/destroy, no double
+  hand-out under contention, free list intact) — sanitizer-independent, and RED when the
+  critical section is ablated.
+
 ### Changed
 
 - **The owner-declared pin knob is renamed to what its value became (#774).**
