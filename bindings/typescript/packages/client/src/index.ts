@@ -36,6 +36,7 @@ export type {
   TopologyNode,
   TopologyEdge,
   TopologyBusPeers,
+  TopologyGap,
   WalkOptions,
 } from './topology.js';
 

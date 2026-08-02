@@ -12,6 +12,8 @@
  *     the walk cannot terminate on its own and `maxDepth` is the only bound. This test
  *     asserts that degradation EXACTLY, rather than hiding it: the walk is bounded,
  *     `truncated` is true, `authoritative` is false, and node count grows with depth.
+ *     Note `complete` is a DIFFERENT question (#676) — this walk drops no read, so it
+ *     is complete while being non-authoritative.
  *     That is the executable argument for #406.
  *   - **with identity** — nodes collapse, the cycle closes, and the walk terminates on
  *     its own. `identify()` reads the REAL RFC-0011 `:identity` facet (#406): each node
@@ -158,6 +160,11 @@ test('topology: WITH identity the cycle closes, nodes collapse, and the walk sel
 
   assert.equal(g.authoritative, true, 'every node identified => the graph is a real map');
   assert.equal(g.truncated, false, 'identity closed the ring, so the walk ended on its own');
+  // #676 — the second honesty flag, on a REAL network: a healthy mesh drops nothing, so
+  // `complete` holds and `gaps` is empty. (The failure paths are unit-tested against a
+  // stub in topology-completeness.test.mjs — a healthy testbed cannot exercise them.)
+  assert.equal(g.complete, true, 'every intended read landed');
+  assert.deepEqual(g.gaps, [], 'nothing was dropped, so nothing is itemized');
 
   // Exactly the four devices the compose stack runs — no matter how many routes reach them.
   const ids = g.nodes.map((n) => n.id).sort();
