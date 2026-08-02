@@ -46,10 +46,13 @@ on:
 #
 # MEASURED provenance, kept as historical reference (PR #193 first run,
 # 2026-07-03, espressif/idf:release-v6.0, -Os): libtracer.a flash 78,825 B
-# (esp32c3) / 82,861 B (esp32c6); static RAM 16 B on both — the library holds no
-# internal buffers (ADR-0041 §5), a property now tracked and reviewed rather
-# than enforced by a tight ceiling. The reported numbers cover the libtracer
-# component archive (libtracer.a) only, not the whole app image.
+# (esp32c3) / 82,861 B (esp32c6); static RAM 16 B on both. Both figures have
+# moved since — CURRENT numbers live in the footprint-<target> artifact and the
+# step summary, never in this comment. The library holds no internal buffers
+# (ADR-0041 §5): its static RAM is function-local bookkeeping only, a property
+# tracked and reviewed rather than enforced by a tight ceiling. The reported
+# numbers cover the libtracer component archive (libtracer.a) only, not the
+# whole app image.
 
 jobs:
   # Fast fail-first guard: every core/src/*.cpp is either in the component's
