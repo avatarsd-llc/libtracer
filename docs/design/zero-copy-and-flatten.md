@@ -24,7 +24,7 @@ byte source is the wrong shape:
 |---|---|---|
 | Ingress ownership | `rope_t::flatten` (`core/src/rope.cpp:22`), `read_exact` into the accepted segment (`core/src/transport_tcp.cpp:241`) | A transient recv buffer cannot be borrowed by a rope that outlives the receive call |
 | Mutation ownership | `own_wire` (`core/src/op_resolve_view.cpp:136`) | A mutated multi-link value must own a contiguous, patchable, trailer-cleared segment |
-| WS TX gather | `queue_send` (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:476`, gather at `:487-494`) | `httpd_ws_send_frame_async` takes one contiguous buffer and `httpd_queue_work` runs later, after the rope links are gone |
+| WS TX gather | `httpd_ws_link_t::queue_send` (`integrations/esp-idf/libtracer/httpd_ws_link.cpp`; destination is a pre-allocated tx work slot, heap fallback) | `httpd_ws_send_frame_async` takes one contiguous buffer and `httpd_queue_work` runs later, after the rope links are gone |
 
 A fourth copy is bounded rather than structural: reply-route synthesis (`tlv_sliced`,
 `core/src/op_resolve_walk.hpp:504`) emits rewritten route wires — tens of bytes, never
@@ -86,8 +86,8 @@ identifiers for the rest of this page.
 | ⑤ | `own_wire` mutation ownership — `sub.flatten(backend())` (`core/src/op_resolve_view.cpp:136`) | no — a single link is still COPIED, through the same backend (`core/src/op_resolve_view.cpp:146`, #793) | yes — flattens the multi-link subrope | Structural for *mutated* values | No — this step *is* the ownership copy; it still owns |
 | ⑥ | Per-node parse contiguity — `ensure_cache` → `wire().materialize(backend())` (`core/src/op_resolve_view.cpp:248-254`) | no — a single-link node adopts | only per **straddling** node | Fallback, span-node-shaped | Yes — rope-native node accessors remove it |
 | ⑦ | `deliver_rope` span fallback (`core/include/libtracer/receiver_slot.hpp:138`) | no | yes — only when no rope sink is installed | Fallback — the cost of a span-only sink | Yes — installing the rope sink removes it; see §4.1 |
-| ⑧ | WS RX reassembly — `asm_buf_t` (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:102`), regrow-and-memcpy at `:126-127` | no — unfragmented delivers borrowed (`:403-404`) | yes — O(n²) across fragments | Fallback | Enables ⑦'s removal; the copy itself is a pool-recv question, not a cursor one |
-| ⑨ | WS TX gather — `new[]` + memcpy in `queue_send` (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:476`, gather at `:487-494`) | yes — per frame per peer | yes | Structural within the `esp_http_server` seam | **No** — TX-side; the cursor is irrelevant |
+| ⑧ | WS RX reassembly — `asm_buf_t` regrow-and-memcpy (`integrations/esp-idf/libtracer/httpd_ws_link.cpp`) | no — unfragmented delivers borrowed (scratch-backed, no per-frame alloc for fitting frames) | yes — O(n²) across fragments | Fallback | Enables ⑦'s removal; the copy itself is a pool-recv question, not a cursor one |
+| ⑨ | WS TX gather — memcpy into a pooled tx work slot in `queue_send` (`integrations/esp-idf/libtracer/httpd_ws_link.cpp`; `new (nothrow)` only on the oversize/pool-exhausted fallback) | copy per frame per peer; alloc only on fallback | yes | Structural within the `esp_http_server` seam | **No** — TX-side; the cursor is irrelevant |
 | ⑩ | COMPACT remote delivery — `deliver_remote` (`core/src/fwd_router.cpp:1413`, materialize at `:1442`, from the router's injected backend) | no — adopt | yes — auto-promotion leg only | Fallback, narrow | Yes — a scatter-gather compact encoder |
 | ⑪ | Control-child strip — `on_control_rope` (`core/src/fwd_router.cpp:1060`, sub-rope materialize at `:1087` and `:1107`, from the router's injected backend) | no | only a multi-link ADVERTISE / COMPACT sub-rope | Fallback, and fused rather than eliminated — the next consumer re-encodes anyway | Yes, with a near-zero saving |
 | ⑫ | Reply-route synthesis — `tlv_sliced` (`core/src/op_resolve_walk.hpp:504`, called at `:557-558`) | yes | yes | Bounded frame synthesis: the route wires are rewritten | No — these are emitted bytes, not a copy of payload |
@@ -291,9 +291,10 @@ There is no latency-versus-RAM trade-off for the decode walk. The one genuine co
 The ingress ownership copy (①) is structural as a copy, but it is not always an *extra* copy.
 
 **Why it must own.** `vertex_t::store` refcounts rather than copies, so durability rests on stored
-segments being long-lived. The receive buffer is transient: the ESP-IDF WS link allocates the
-frame's bytes per receive with `new (std::nothrow) std::byte[frame.len]`
-(`integrations/esp-idf/libtracer/httpd_ws_link.cpp:332`), and that allocation dies when the receive
+segments being long-lived. The receive buffer is transient: the ESP-IDF WS link reads a fitting
+frame into a once-per-link reusable scratch, falling back to an exact-size
+`new (std::nothrow) std::byte[frame.len]` only for oversized frames
+(`httpd_ws_link_t::on_data_frame`), and either buffer is reused or dies when the receive
 call returns, while the rope outlives it — pinned in a last-known-value slot, fanned out
 asynchronously, awaited. A borrowed view of that buffer would dangle. Ingress must therefore land
 bytes in an owned segment.
@@ -311,10 +312,11 @@ only stack scratch left on this path is `drain()`'s 4096-byte backpressure disca
 **Where the pull-path shape is not followed**, the residual costs are pool-recv questions, not
 flatten questions:
 
-- **The ESP-IDF WS link delivers borrowed** (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:467-469`),
-  forcing a downstream ownership copy at store. Landing the payload in a bounded rx pool, adopting
-  it and delivering owning — the TCP/UDP shape — removes the per-frame `new[]` (`:332`) and, by
-  feeding the rope tier an owned segment, lets the branch and field decode collapse to refcount
+- **The ESP-IDF WS link delivers borrowed** (`httpd_ws_link_t::deliver`),
+  forcing a downstream ownership copy at store. The per-frame `new[]` itself is gone for fitting
+  frames (they read into the once-per-link scratch); the residual is the shape: landing the
+  payload in a bounded rx pool, adopting it and delivering owning — the TCP/UDP shape — would, by
+  feeding the rope tier an owned segment, let the branch and field decode collapse to refcount
   bumps once the sink is rope-native.
 - **WS reassembly (⑧)** regrows exact-size per fragment
   (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:120-130`), which is O(n²) in total bytes
@@ -371,10 +373,11 @@ the gate.
   §2). This step is the ownership copy, not its removal.
 - **⑨ the WS TX gather** — `httpd_ws_send_frame_async` takes one contiguous `{payload, len}` and
   `httpd_queue_work` is asynchronous, so the rope links are gone before the send runs; the reply
-  must be flattened into one owned buffer. `queue_send`
-  (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:476`) gathers once straight into the tx work
-  buffer (`:487-494`), and the directed reply path hands it the reply rope's iovec with no
-  intermediate flatten temporary (`:604-615`). One irreducible gather-copy remains. It is the price
+  must be flattened into one owned buffer. `httpd_ws_link_t::queue_send` gathers once, straight
+  into a pre-allocated tx work slot claimed lock-free (nothrow heap only as the
+  oversize/pool-exhausted fallback), and the directed reply path hands it the reply rope's iovec
+  with no intermediate flatten temporary. One irreducible gather-copy remains — now
+  allocation-free in steady state. It is the price
   of threadlessness — riding the existing HTTP-server task, adding no FreeRTOS task — and is
   removable only by leaving the seam. The rope cursor is irrelevant to it: the sink is a send API,
   not a decoder.

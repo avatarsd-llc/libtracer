@@ -43,14 +43,24 @@
  *     interleave — the payload is heap-copied into the work item and freed after
  *     the send. send() may be called from any task (subscription pushes on the
  *     io/event threads, a reply on the httpd task itself); all funnel through the
- *     same queue. TX failure is never silent: a failed socket send closes the
- *     session (a peer that missed a frame is broken-by-contract — closing lets it
- *     reconnect into clean state), and repeated enqueue drops (queue full / OOM)
- *     close it after kMaxConsecutiveTxDrops in a row.
+ *     same queue. TX failure is never silent: repeated enqueue drops (queue full /
+ *     work-slot OOM) close the session after kMaxConsecutiveTxDrops in a row, and
+ *     a failed oversized async send drops that one frame while keeping the socket
+ *     (see tx_work).
  *
- * NO fixed-size static buffers: peer slots and the per-frame payload copies are
- * heap; the slot vector is grown on demand and RECYCLED in place (never shrunk),
- * so the endpoint `peer_link` hands out stays pointer-valid for the link's life.
+ * Steady-state allocation — the RX scratch and the TX work-slot pool are allocated
+ * ONCE at construction, so typical graph traffic (control TLVs, value pushes,
+ * directed replies) touches the heap in NEITHER direction:
+ *   - RX: a frame that fits the once-allocated scratch is read into it and
+ *     delivered borrowed — no per-frame allocation. Larger frames (up to the
+ *     kMaxFrameBytes abuse cap) fall back to an exact-size nothrow buffer.
+ *   - TX: a send claims a pool slot lock-free (CAS) and gathers straight into its
+ *     inline payload. A frame past the inline capacity keeps the pooled shell and
+ *     takes a nothrow heap payload; a momentarily exhausted pool falls back to a
+ *     fully heap work item. Every fallback is `new (std::nothrow)` with
+ *     drop-on-OOM backpressure — never an abort.
+ * Peer slots remain heap, grown on demand and RECYCLED in place (never shrunk), so
+ * the endpoint `peer_link` hands out stays pointer-valid for the link's life.
  */
 #pragma once
 
@@ -134,13 +144,14 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     void send(std::span<const std::byte> frame) override;
 
     /**
-     * @brief Broadcast a scattered frame: gather @p iov once, straight into the
-     *        nothrow-allocated tx work buffer, one BINARY message per open peer.
+     * @brief Broadcast a scattered frame: gather @p iov once, straight into a
+     *        pre-allocated tx work slot (nothrow heap fallback), one BINARY message
+     *        per open peer.
      *
      * Overrides the base gather-into-a-temporary default: the reply rope's iovec is
-     * copied exactly ONCE (into the queued work item), so a large reply is never
-     * double-buffered (gather temp + tx copy) on the heap — the transient that
-     * exhausted the chip heap under concurrent SPA asset GETs. On allocation
+     * copied exactly ONCE (into the queued work slot/item), so a large reply is
+     * never double-buffered (gather temp + tx copy) on the heap — the transient
+     * that exhausted the chip heap under concurrent SPA asset GETs. On allocation
      * failure the frame is dropped (backpressure), never an abort.
      */
     void send(std::span<const std::span<const std::byte>> iov) override;
@@ -168,6 +179,8 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
 
    private:
     struct session_t;  // one peer slot's connection state (defined in the .cpp)
+    struct tx_work_t;  // one queued outbound frame (defined in the .cpp)
+    struct tx_slot_t;  // one pre-allocated TX work slot (defined in the .cpp)
 
     /**
      * @brief The directed per-peer sending endpoint @ref peer_link hands out:
@@ -198,9 +211,20 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     esp_err_t on_data_frame(httpd_req_t* req);  // recv one WS frame, (reassemble,) deliver
     void reclaim_slot(session_t* slot);
     void deliver(std::string_view peer, std::span<const std::byte> frame);
-    // ONE nothrow gather-copy + httpd_queue_work; drops the frame on OOM (never aborts)
+    // ONE gather-copy (into a pool slot, else a nothrow heap item) + httpd_queue_work;
+    // drops the frame on OOM (never aborts)
     void queue_send(int fd, std::span<const std::span<const std::byte>> iov);
     void queue_send(int fd, std::span<const std::byte> frame);  // one-span sugar over the gather
+
+    /** @brief Allocate the once-per-link RX scratch + TX slot pool (nothrow; on failure
+     *         the link still works — every frame takes the per-frame heap fallback). */
+    void alloc_buffers();
+    /** @brief Claim a free TX work slot lock-free (a CAS scan); nullptr when the pool
+     *         is exhausted or absent — the caller falls back to a heap work item. */
+    [[nodiscard]] tx_slot_t* claim_tx_slot();
+    /** @brief Return a drained/failed work item: recycle its pool slot (dropping any
+     *         overflow heap payload) or delete the heap-fallback shell. */
+    static void release_tx_work(tx_work_t* work);
 
     /**
      * @brief Per-session TX-enqueue accounting (takes @ref peers_m_ — callers must
@@ -225,6 +249,12 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *         httpd task's accept/close. The reassembly buffer is httpd-task-only. */
     mutable std::mutex peers_m_;
     std::vector<std::unique_ptr<session_t>> slots_;  // grown on demand; recycled in place
+    /** @brief Once-allocated RX scratch (httpd-task-only, so lock-free by construction):
+     *         a frame that fits reads here instead of a per-frame allocation. */
+    std::unique_ptr<std::byte[]> rx_scratch_;
+    /** @brief Once-allocated TX work-slot pool: claimed lock-free by sending tasks,
+     *         released by the httpd task as each send drains. */
+    std::unique_ptr<tx_slot_t[]> tx_pool_;
 };
 
 }  // namespace tr::net

@@ -299,7 +299,18 @@ The nothrow-end-to-end shape splits them: size the total, allocate the payload b
 `new (std::nothrow)` — moving the buffer in. If the shell allocation fails the initializer never
 runs, so the buffer is not moved from and frees itself on return; there is no leak on either arm,
 and an allocation failure becomes the same drop the link's send contract defines
-(`integrations/esp-idf/libtracer/httpd_ws_link.cpp:476-499`).
+(`httpd_ws_link_t::queue_send`, `integrations/esp-idf/libtracer/httpd_ws_link.cpp`).
+
+The copy is structural; the *allocation* is not. `httpd_ws_link_t` fronts the gather with a
+once-per-link pool of TX work slots claimed lock-free (a CAS scan — senders run on any task, the
+httpd task releases the slot as the send drains): a steady-state frame gathers straight into the
+slot's inline payload and allocates nothing. The nothrow-end-to-end heap shape above remains as the
+fallback — a frame past the inline capacity keeps the pooled shell and takes a nothrow heap
+payload; a momentarily exhausted pool takes the full heap work item — with the identical
+drop-on-OOM contract on every arm. The RX mirror is a once-per-link scratch buffer: a frame that
+fits reads into it and is delivered borrowed (the httpd task is the only RX thread and delivery is
+synchronous, so one scratch needs no lock); only an oversized frame takes the exact-size nothrow
+allocation.
 
 ## Pitfalls
 
