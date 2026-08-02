@@ -42,7 +42,9 @@ Exit 0 = PERF: PASS, 1 = PERF: FAIL (p50 up >15%, mean up >12%, deliveries/s dow
 >12%, or per-vertex live bytes up >2%, vs the same-runner baseline, or — with no
 baseline — past the absolute floors). The memory points come from bench_forward_heap
 (counting allocator, deterministic) and are NOT timed, so they need no interleaving:
-they are probed once per binary and ratchet exactly.
+they are probed once per binary and ratchet exactly. Supplying that binary for one arm
+and not the other is a wiring error and FAILS; supplying it for neither prints an
+explicit SKIP and passes — never silence (#792).
 
 Latency percentiles beyond p50/mean (p99, and the p999 the transport benches now emit)
 are PUBLISHED but not gated; the measurement behind that decision is recorded beside
@@ -258,6 +260,12 @@ def tput_contradicted(cur: dict, base: dict) -> bool:
 # memory_resource never sees (ADR-0039's seam, which RFC-0014 turned into a wire-driven
 # path — #551). Its target is ZERO, every slice of that work lowers it, and the exact
 # ratchet is what stops it drifting back up between slices.
+#
+# EDITORS: this list is the answer to "how many memory probes does the gate check?",
+# and `docs/methodology.md` (§the per-PR hard gate) states that count and names every
+# entry in prose. That doc is HAND-WRITTEN, not generated, so it cannot track this list
+# on its own — it already went stale once at three points (#792). Adding to or removing
+# from MEM_POINTS means editing docs/methodology.md in the same commit.
 MEM_POINTS = ["vertex", "vertex_value", "vertex_app5", "vertex_app5_static", "reg_escape"]
 MEM_REGRESS = 1.02   # fail if live bytes/vertex > baseline * 1.02 ...
 MEM_TICK_B = 1       # ... AND grew by more than one byte (ignore a lone bucket flip)
@@ -554,6 +562,76 @@ def mem_gate(cur: dict, base: dict | None) -> list[str]:
     return fails
 
 
+def _mem_arm(label: str, p: pathlib.Path | None, flag: str) -> str:
+    """@brief One arm's supply state, worded for a human reading CI output."""
+    if p is None:
+        return f"{label}: not supplied ({flag})"
+    return f"{label}: {'present' if p.exists() else 'MISSING'} at {p}"
+
+
+def mem_ratchet(bench_fwd: pathlib.Path | None, base_fwd: pathlib.Path | None) -> list[str]:
+    """@brief Decide whether the paired per-vertex memory ratchet runs, skips, or fails.
+
+    `mem_probe` returns `{}` for an absent binary and `mem_gate` iterates the candidate
+    dict, so an absent CANDIDATE used to print nothing and pass — a skipped gate that is
+    indistinguishable from a gate that passed, which is exactly the blind spot this file
+    warns about two lines below (#792, same class as #464). The rule now:
+
+      * both arms present  -> probe both and ratchet (unchanged behaviour);
+      * NEITHER arm present -> print an explicit SKIP and pass. There is nothing to
+        compare and no claim is being hidden, but it is said out loud;
+      * exactly ONE arm present -> FAIL. An asymmetric supply is a wiring error: one side
+        of a same-runner comparison was built and handed over and the other was not, so
+        whatever the present arm measures cannot be ratcheted against anything. Failing
+        here is what keeps a dropped `--baseline-bench-fwd` (or an unbuilt
+        `bench_forward_heap` target) from reading as a clean gate.
+    """
+    cand_ok = bench_fwd is not None and bench_fwd.exists()
+    base_ok = base_fwd is not None and base_fwd.exists()
+    cand = _mem_arm("candidate", bench_fwd, "--bench-fwd")
+    base = _mem_arm("baseline", base_fwd, "--baseline-bench-fwd")
+    if cand_ok and base_ok:
+        return mem_gate(mem_probe(bench_fwd), mem_probe(base_fwd))
+    if not cand_ok and not base_ok:
+        # Say so. A skipped gate that prints nothing is indistinguishable from a
+        # gate that passed, which is how a guard becomes a blind spot.
+        print(f"  SKIP: the per-vertex memory ratchet is NOT run — neither arm supplied a "
+              f"bench_forward_heap ({cand}; {base}). Build the `bench_forward_heap` target "
+              f"on both arms and pass --baseline-bench-fwd to gate memory.")
+        return []
+    missing, present = (cand, base) if base_ok else (base, cand)
+    return [f"memory ratchet wiring error: bench_forward_heap was supplied for one arm but "
+            f"not the other, so the per-vertex memory points cannot be ratcheted — "
+            f"{present}, but {missing}. This is not a skip: an asymmetric supply hides the "
+            f"gate rather than running it (#792)."]
+
+
+def mem_ratchet_legacy(cur: dict, base: dict | None, bench_fwd: pathlib.Path | None) -> list[str]:
+    """@brief The same decision for the legacy (recorded-baseline) arm, which had the
+    identical hole: `cur` simply carries no `mem:` keys when the candidate binary is
+    absent, so `mem_gate` printed nothing and passed.
+
+    Here the "baseline side was supplied" question is answered by the recorded JSON: if
+    it carries `mem:` points and this run produced none, the ratchet that guarded those
+    points has silently disappeared — a wiring error, not a skip. With neither side
+    carrying them there is nothing to compare, which is announced and passes. Note the
+    asymmetry also poisons `--update-baseline`, which would drop the recorded `mem:`
+    points on the floor.
+    """
+    if any(k.startswith("mem:") for k in cur):
+        return mem_gate(cur, base)
+    where = _mem_arm("candidate", bench_fwd, "--bench-fwd")
+    if base and any(k.startswith("mem:") for k in base):
+        return [f"memory ratchet wiring error: the recorded baseline carries memory points "
+                f"but this run produced none — {where}. This is not a skip: it would drop "
+                f"the per-vertex memory gate (and, under --update-baseline, the recorded "
+                f"points themselves) without saying so (#792)."]
+    print(f"  SKIP: the per-vertex memory ratchet is NOT run — no memory probe rows were "
+          f"produced ({where}) and the recorded baseline carries none. Build the "
+          f"`bench_forward_heap` target to gate memory.")
+    return []
+
+
 def _opt(args: list[str], name: str, default: pathlib.Path | None) -> pathlib.Path | None:
     """@brief Resolve an optional path-valued flag."""
     return pathlib.Path(args[args.index(name) + 1]).resolve() if name in args else default
@@ -576,12 +654,7 @@ def main() -> int:
               f"mean +{(MEAN_REGRESS - 1) * 100:.0f}% / "
               f"deliv -{(1 - TPUT_REGRESS) * 100:.0f}%):")
         fails = gate_paired(bench, base_bench, pairs)
-        if base_fwd is not None:
-            fails += mem_gate(mem_probe(bench_fwd), mem_probe(base_fwd))
-        else:
-            # Say so. A skipped gate that prints nothing is indistinguishable from a
-            # gate that passed, which is how a guard becomes a blind spot.
-            print("  (no --baseline-bench-fwd: the per-vertex memory ratchet is NOT run)")
+        fails += mem_ratchet(bench_fwd, base_fwd)
         fails += lkv_ratio_gate(bench)  # ADR-0060 same-run ratio (no baseline needed)
         print("PERF: PASS" if not fails else "PERF: FAIL")
         for x in fails:
@@ -599,7 +672,7 @@ def main() -> int:
     print(f"Per-loop perf gate (libtracer in-process, LEGACY best of {runs} run(s), "
           f"fail: p50 +{(LAT_REGRESS - 1) * 100:.0f}% / mean +{(MEAN_REGRESS - 1) * 100:.0f}% / "
           f"deliv -{(1 - TPUT_REGRESS) * 100:.0f}%{mem_hdr}):")
-    fails += mem_gate(cur, base)
+    fails += mem_ratchet_legacy(cur, base, bench_fwd)
     for k, v in cur.items():
         if k.startswith("mem:"):
             continue  # handled by mem_gate above
