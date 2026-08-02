@@ -5,8 +5,8 @@
 
 Runs the libtracer in-process benchmark and validates the canonical latency /
 throughput points so a regression is caught the moment it lands — not at release.
-Compares against a recorded baseline (bench/perf_baseline.json, host-specific,
-gitignored); on the first run it records the baseline.
+Compares against a baseline BINARY built on the same runner (paired mode, below), or
+— only where no such binary exists — against a recorded bench/perf_baseline.json.
 
 PAIRED mode (`--baseline-bench`, what CI runs) is the primary shape. The two
 binaries are executed INTERLEAVED — A B / B A / A B / B A — and compared as a
@@ -82,7 +82,10 @@ POINTS = [
 # No-baseline absolute-floor backstop, per point: a fan-1024 write's p50 is the
 # WHOLE 1024-subscriber fan-out (~13 µs), so the 1 µs 1:1 floor cannot apply.
 FLOOR_P50_OVERRIDE = {"inproc/64/1024/1": 100_000}
-# Same-runner + best-of-N makes tight thresholds safe. The remaining noise is
+# The thresholds are the SAME in both modes and unchanged by #763 — what changed is
+# the decision taken around them. Same-runner measurement is what makes them tight
+# enough to be useful; in paired mode the effect/separation/reproducibility rules are
+# what make them safe, and in legacy mode it is still best-of-N. The remaining noise is
 # timer quantization (~10 ns ticks on a ~100–300 ns p50): 15% ≥ 1.5 ticks at the
 # fastest gated point, so a threshold trip is a real pullback, not clock grain.
 LAT_REGRESS = 1.15   # fail if p50 > baseline * 1.15  (latency pullback)
@@ -231,11 +234,12 @@ def tput_contradicted(cur: dict, base: dict) -> bool:
 # --- memory footprint gate (bench_forward_heap counting-allocator probes) --------
 # The live usable-size bytes a default leaf vertex holds at rest, plus the increment
 # an LKV write / a 5-field app table adds. These are EXACT — the counting allocator
-# is deterministic, not timed — so unlike latency they need no best-of-N and ratchet
-# tightly: a few bytes per vertex is real on the constrained target's ~16 KB budget.
-# Same-runner correctness comes from --bench-fwd (record the baseline binary's bytes),
-# mirroring --bench for the latency binary; keys are `mem:`-namespaced so they never
-# collide with the latency points.
+# is deterministic, not timed — so unlike latency they need neither best-of-N nor
+# interleaving, and they ratchet tightly: a few bytes per vertex is real on the
+# constrained target's ~16 KB budget. Same-runner correctness comes from probing BOTH
+# binaries in the same pass — `--baseline-bench-fwd` (paired mode) or `--bench-fwd`
+# with `--update-baseline` (legacy); keys are `mem:`-namespaced so they never collide
+# with the latency points.
 #
 # Two independent quantities ride on the same probe rows and BOTH ratchet (#571):
 #

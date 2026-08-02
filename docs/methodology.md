@@ -312,7 +312,9 @@ optional TLS module. An absent transport must never be readable as a tie.
   *same binary* against itself and taking the worst ratio between repeats gives the
   floor any threshold on that leg would have to clear before it stopped firing on its
   own noise. On the **in-process gated points** (18 runs, replayed through the gate's
-  own estimator, worst of 15 disjoint pairs):
+  then-current best-of-3 estimator, worst of 15 disjoint pairs — the numbers below are
+  a property of the *machine*, not of the estimator, so the interleaved gate inherits
+  them unchanged):
 
   | leg | worst same-binary ratio | threshold it would need | gated today |
   | --- | ---: | ---: | --- |
