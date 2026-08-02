@@ -10,10 +10,19 @@ to the reader: an arm beats the control only when the per-round paired delta `ar
 carries the same sign in EVERY round.  One flip prints `indistinguishable`, and no amount of
 median separation upgrades that.  See `verdict` for why the test is paired and not an
 unpaired range overlap.
+
+THE CONTROL ARM IS `B-sentinel` (`kControlArm`), the K = 0 arm of the SAME binary.  It was once
+`A-control`, a build of the bench source against untouched origin/main; RFC-0022 §3.B deleted
+`settings_t`, so that build no longer exists and cannot be recreated.  Rows whose arm is the
+control print `control` in the verdict column instead of a delta against themselves.
 """
 import sys
 import statistics
 from collections import defaultdict
+
+
+#: The arm every other arm's paired delta is taken against.  See the module docstring.
+kControlArm = "B-sentinel"
 
 
 def rng(xs):
@@ -84,14 +93,14 @@ def main(argv):
 
     if grid:
         rounds = max(len(v) for v in grid.values())
-        arms = sorted({a for a, _, _ in grid}, key=lambda a: (a != "A-control", a))
+        arms = sorted({a for a, _, _ in grid}, key=lambda a: (a != kControlArm, a))
         print(f"\n## Store leg — p50 ns, min/median/max across {rounds} interleaved rounds\n")
         print("| payload B | segment B | arm | K | p50 min/med/max ns | pins | copies "
-              "| paired delta vs A min/med/max ns | verdict |")
+              f"| paired delta vs {kControlArm} min/med/max ns | verdict |")
         print("| ---: | ---: | --- | ---: | --- | ---: | ---: | --- | --- |")
         cells = sorted({(p, s) for _, p, s in grid})
         for p, s in cells:
-            ctl = grid.get(("A-control", p, s))
+            ctl = grid.get((kControlArm, p, s))
             for a in arms:
                 v = grid.get((a, p, s))
                 if not v:
@@ -99,11 +108,11 @@ def main(argv):
                 lo, med, hi = rng(v)
                 pins, copies = reach[(a, p, s)]
                 seg = "fit" if s == 0 else str(s)
-                if a == "A-control" or not ctl:
+                if a == kControlArm or not ctl:
                     print(f"| {p} | {seg} | {a} | {ks[a]} | {lo}/{med}/{hi} | {pins} "
                           f"| {copies} | -- | control |")
                     continue
-                d, ratio, deltas = verdict(byround[(a, p, s)], byround[("A-control", p, s)])
+                d, ratio, deltas = verdict(byround[(a, p, s)], byround[(kControlArm, p, s)])
                 verd = "indistinguishable" if d == "indistinguishable" else f"{d} {ratio:.2f}x"
                 dl, dm, dh = rng(deltas)
                 print(f"| {p} | {seg} | {a} | {ks[a]} | {lo}/{med}/{hi} | {pins} | {copies} "

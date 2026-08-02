@@ -299,8 +299,9 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "Times the WRITE store leg over a (payload x segment) grid with the copy branch and the "
         "pinned-subview branch rotating as interleaved arms inside one process, and reports each "
         "cell's pin/copy split two independent ways so no timing is read off an arm that never "
-        "reached the branch. Pairs with `bench_pin_net.cpp`; the control arm is this same source "
-        "built against untouched main.",
+        "reached the branch. Pairs with `bench_pin_net.cpp`; the control is the SENTINEL arm "
+        "(`kPinNever`, the one-copy branch) of this same binary, not a separate build — "
+        "RFC-0022 §3.B deleted the pre-RFC knob, so no such build exists.",
         "ns per store · pins and copies per cell"),
     instrument_t(
         "bench_mount_resolve.cpp", "framed", (),
