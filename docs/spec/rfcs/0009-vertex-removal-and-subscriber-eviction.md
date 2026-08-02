@@ -520,7 +520,7 @@ and dereferenceable (§B.1). Operations through them behave per §C.
 
 | Path | Change |
 | ---- | ---- |
-| `docs/reference/02-graph-model.md` | `:422` — replace the open question with §C (answer: *snapshot-diff only; a retired path is `not_found`*); note the `DELETE` orphan at `:422`; **`:411` — strike the STATUS-in-place-of-a-VALUE claim, which nothing implements (§C.4)** |
+| `docs/reference/02-graph-model.md` | `:424` — replace the open question with §C (answer: *snapshot-diff only; a retired path is `not_found`*); note the `DELETE` orphan at `:424`; **`:413` — strike the STATUS-in-place-of-a-VALUE claim, which nothing implements (§C.4)** |
 | `docs/reference/05-protocol-tlvs.md` | STATUS §Where-it-appears: the eviction sentinel per §D.1; `DELETE` bit reserved-unused per §A.2 |
 | `docs/reference/07-host-embedding.md` | connection teardown per §E.2 |
 | `docs/spec/rfcs/0005-subtree-subscriptions.md` | §E: mark the deferred child-removal point resolved here |

@@ -30,7 +30,7 @@ A fourth copy is bounded rather than structural: reply-route synthesis (`tlv_sli
 `core/src/op_resolve_walk.hpp:456`) emits rewritten route wires — tens of bytes, never
 payload-scaled.
 
-The 4096-byte decode arena (`core/src/graph.cpp:1021`) is **structure storage, not a payload copy**:
+The 4096-byte decode arena (`core/src/graph.cpp:1023`) is **structure storage, not a payload copy**:
 it backs the `arena_tlv_t` node array and the grammar walk stacks, whose existence is independent
 of where the field bytes come from. The rope cursor is a byte source, so it does not remove the
 arena; only a streaming decode does, and that **relocates** the bytes from stack to pool rather
@@ -80,9 +80,9 @@ identifiers for the rest of this page.
 | # | Site | Single-link? | Multi-link? | Kind | Removed by the rope cursor? |
 |---|------|:--:|:--:|---------|---------|
 | ① | Ingress ownership — `flatten` (`core/src/rope.cpp:22`), pull-path `read_exact` into the accepted segment (`core/src/transport_tcp.cpp:241`) | yes (it *is* the recv) | yes | Structural | No — orthogonal; it is the ingress floor |
-| ② | Branch write — `value.materialize(*value_backend_)` (`core/src/graph.cpp:1008`) | no — refcount bump | yes (one flatten to feed the span cursor) | Fallback | Multi-link leg: yes, via a rope-native branch decode |
-| ③ | Field write — the twin of ② (`core/src/graph.cpp:1245`) | no — refcount bump | yes | Fallback | Same as ② |
-| ④ | 4096-byte decode arena (`core/src/graph.cpp:1021-1022`) | yes — paid on every branch write | yes | Structure scratch, not a payload copy | **No** — see §3; the rope cursor is a byte source, not a structure store |
+| ② | Branch write — `value.materialize(*value_backend_)` (`core/src/graph.cpp:1010`) | no — refcount bump | yes (one flatten to feed the span cursor) | Fallback | Multi-link leg: yes, via a rope-native branch decode |
+| ③ | Field write — the twin of ② (`core/src/graph.cpp:1247`) | no — refcount bump | yes | Fallback | Same as ② |
+| ④ | 4096-byte decode arena (`core/src/graph.cpp:1023-1024`) | yes — paid on every branch write | yes | Structure scratch, not a payload copy | **No** — see §3; the rope cursor is a byte source, not a structure store |
 | ⑤ | `own_wire` mutation ownership — `sub.flatten(backend())` (`core/src/op_resolve_view.cpp:129`) | no — a single link is still COPIED, through the same backend (`core/src/op_resolve_view.cpp:139`, #793) | yes — flattens the multi-link subrope | Structural for *mutated* values | No — this step *is* the ownership copy; it still owns |
 | ⑥ | Per-node parse contiguity — `ensure_cache` → `wire().materialize(backend())` (`core/src/op_resolve_view.cpp:231-237`) | no — a single-link node adopts | only per **straddling** node | Fallback, span-node-shaped | Yes — rope-native node accessors remove it |
 | ⑦ | `deliver_rope` span fallback (`core/include/libtracer/receiver_slot.hpp:138`) | no | yes — only when no rope sink is installed | Fallback — the cost of a span-only sink | Yes — installing the rope sink removes it; see §4.1 |
@@ -105,14 +105,14 @@ migration is therefore insurance against fragmented-transport load, not a single
 ### 3.1 Two costs at one site
 
 ```
-core/src/graph.cpp:1008   const view_t head = value.materialize(*value_backend_);   // A: the flatten
-core/src/graph.cpp:1009   if (head.empty() && value.total_length() != 0) return std::unexpected(status_t::BACKPRESSURE);
-core/src/graph.cpp:1021   std::array<std::byte, 4096> stack;                        // B: the arena
-core/src/graph.cpp:1022   mem::bump_source_t src(stack, *ctl_);
-core/src/graph.cpp:1024   wire::decode_into(head.bytes(), src);
+core/src/graph.cpp:1010   const view_t head = value.materialize(*value_backend_);   // A: the flatten
+core/src/graph.cpp:1011   if (head.empty() && value.total_length() != 0) return std::unexpected(status_t::BACKPRESSURE);
+core/src/graph.cpp:1023   std::array<std::byte, 4096> stack;                        // B: the arena
+core/src/graph.cpp:1024   mem::bump_source_t src(stack, *ctl_);
+core/src/graph.cpp:1026   wire::decode_into(head.bytes(), src);
 ```
 
-**Cost A, the flatten (`:1008`)** is zero-copy for a single-link rope — `materialize` returns
+**Cost A, the flatten (`:1010`)** is zero-copy for a single-link rope — `materialize` returns
 `links()[0]`, a refcount bump (`core/include/libtracer/rope.hpp:148`) — and memcpys only a
 multi-link rope, drawing from the injected `value_backend_`. An exhausted pool yields an empty
 head, which `graph.cpp:1009` surfaces as `BACKPRESSURE` rather than letting the decoder read it back as a
@@ -185,7 +185,7 @@ path. A 4 KB stack-high-water reclaim is the real saving even though total RAM i
 
 ### 3.4 Arena exhaustion
 
-The overflow leg does not draw from a throwing upstream. `core/src/graph.cpp:1021-1022` reads
+The overflow leg does not draw from a throwing upstream. `core/src/graph.cpp:1023-1024` reads
 
 ```
 std::array<std::byte, 4096> stack;

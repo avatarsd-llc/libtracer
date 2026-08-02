@@ -6,13 +6,13 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * `retire()` detaches a HANDLER-role vertex's value seam and parks it, because the seam is
- * read lock-free and the retiring thread cannot free a block a reader may still hold. Until
- * #576 the park had ONE append site and ZERO release sites, so every connection teardown
- * (`transport_vertex_t::remove_connection` retires the `/net/<name>` identity vertex) leaked
- * ~96 B of `std::function` permanently. Two properties are asserted here:
+ * `retire()` detaches a vertex's value seam and parks it, because the seam is read lock-free
+ * and the retiring thread cannot free a block a reader may still hold. Until #576 the park
+ * had ONE append site and ZERO release sites, so a BUS node's connection teardown
+ * (`transport_vertex_t::remove_connection` retires the `/net/<module>/<name>` identity
+ * vertex) leaked ~96 B of `std::function` permanently. Four properties are asserted here:
  *
- *   (a) the park is BOUNDED and OBSERVABLE — N retired handler-bearing vertices show as N
+ *   (a) the park is BOUNDED and OBSERVABLE — N retired seam-bearing vertices show as N
  *       parked seams, and `collect()` takes that to 0;
  *   (b) the free happens OUTSIDE every graph lock — the load-bearing one. Three earlier
  *       design rounds each died exactly here: a free performed while the graph's map lock is
@@ -20,8 +20,20 @@
  *       a seam callback that owns anything graph-shaped deadlocks on the way out. The probe
  *       installs a seam whose DESTRUCTOR re-enters the graph (`find()`), and a watchdog
  *       turns the resulting hang into a FAIL line rather than a stuck CI job.
+ *   (c) the population is keyed on handler PRESENCE, never on `role_t`: `adopt_identity`
+ *       allocates the seam iff `on_read || on_write || on_children`. `STORED_VALUE` +
+ *       `{on_read}` parks 1; `HANDLER` + an empty `handlers_t` parks 0 — the exact inverse
+ *       of a role-keyed reading. `STORED_VALUE` + `{on_children}` is the PRODUCTION shape
+ *       (the `/net/<module>/<name>` identity vertex of a bus link);
+ *   (d) `transport_vertex_t::remove_connection` end to end, over both link shapes: a
+ *       bus-capable link (the `peer_named = true` / CAN shape, `bus() != nullptr`) parks one
+ *       seam per teardown and `collect()` drains it, while the point-to-point control
+ *       (`bus() == nullptr` — every dial link, UDP, loopback, a default-wired server) parks
+ *       ZERO. Both halves matter: a default-transport embedder needs no quiescent point, and
+ *       a bus node is the one that leaks without one.
  */
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -34,6 +46,7 @@
 #include <utility>
 #include <vector>
 
+#include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 
 namespace {
@@ -44,6 +57,9 @@ using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::status_t;
 using tr::graph::vertex_handle_t;
+using tr::net::bus_link_t;
+using tr::net::fwd_router_t;
+using tr::net::transport_vertex_t;
 
 int g_failures = 0;
 
@@ -101,6 +117,23 @@ vertex_handle_t make_handler_vertex(graph_t& g, const std::string& path) {
     handlers_t h;
     h.on_read = [] { return inert_read(); };
     return g.register_vertex(path_t(path), role_t::HANDLER, std::move(h));
+}
+
+/**
+ * @brief Register @p path in the PRODUCTION shape: `role_t::STORED_VALUE` bearing an
+ *        `on_children` seam.
+ *
+ * This is exactly what `transport_vertex_t::add_connection` builds for a bus link's
+ * `/net/<module>/<name>` identity vertex — a synthesized `:children[]` listing on a
+ * STORED_VALUE vertex (ADR-0044). It is the shape a role-keyed reading of the park
+ * excludes, and the only one #576 exists for.
+ */
+vertex_handle_t make_stored_value_children_vertex(graph_t& g, const std::string& path) {
+    handlers_t h;
+    h.on_children = []() -> tr::graph::result_t<tr::view::view_t> {
+        return std::unexpected(status_t::NOT_FOUND);
+    };
+    return g.register_vertex(path_t(path), role_t::STORED_VALUE, std::move(h));
 }
 
 // ---------------------------------------------------------------------------
@@ -203,9 +236,164 @@ void test_free_runs_outside_graph_locks() {
           "and it re-entered the graph from inside that free (find() resolved /probe)");
     check(g.parked_seam_count() == 0, "the park is empty afterwards");
 
-    // Nothing re-entrant may be left parked: the graph's own teardown frees the remainder
-    // AFTER the vertex tree and the map lock are gone (the contract collect()'s @note states).
+    // Nothing re-entrant may be left parked. The graph's own teardown is a growth backstop
+    // only: retired_seams_ is declared before map_mutex_ and root_, so it destructs LAST —
+    // after the vertex tree and the map lock are already gone — and a seam destructor that
+    // re-enters the graph then re-enters a half-destroyed object. Hence the @note's "safe
+    // HERE and only here": such an owner must be collected explicitly.
     check(g.parked_seam_count() == 0, "no re-entrant seam is left for teardown to free");
+}
+
+// ---------------------------------------------------------------------------
+// (c) The park is keyed on handler PRESENCE, not on role_t. The published contract used to
+// say "HANDLER-role vertex", which is the exact inverse of what adopt_identity does — and
+// excluded the one production site the collector exists for.
+void test_park_is_keyed_on_handler_presence_not_role() {
+    std::printf("#576(c): the park is keyed on handler PRESENCE, never on role_t:\n");
+    graph_t g;
+    (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
+
+    // STORED_VALUE + {on_read}: the role says "not a handler", the seam exists anyway.
+    handlers_t sv_read;
+    sv_read.on_read = [] { return inert_read(); };
+    const vertex_handle_t sv =
+        g.register_vertex(path_t("/dev/sv_read"), role_t::STORED_VALUE, std::move(sv_read));
+    check(g.retire(sv).has_value(), "retire a STORED_VALUE vertex carrying {on_read}");
+    check(g.parked_seam_count() == 1, "STORED_VALUE + {on_read} PARKS ONE (role is not consulted)");
+    g.collect();
+
+    // HANDLER + an empty handlers_t: the role says "handler", no seam was ever allocated.
+    const vertex_handle_t bare =
+        g.register_vertex(path_t("/dev/bare_handler"), role_t::HANDLER, handlers_t{});
+    check(g.retire(bare).has_value(), "retire a HANDLER-role vertex with an EMPTY handlers_t");
+    check(g.parked_seam_count() == 0, "HANDLER + {} parks NOTHING (the inverse of the old text)");
+
+    // The production shape: STORED_VALUE + {on_children} — the /net/<module>/<name> identity
+    // vertex of a bus link. A role-keyed quiescent point excludes exactly this.
+    const vertex_handle_t prod = make_stored_value_children_vertex(g, "/dev/identity");
+    check(g.retire(prod).has_value(), "retire a STORED_VALUE vertex carrying {on_children}");
+    check(g.parked_seam_count() == 1,
+          "STORED_VALUE + {on_children} PARKS ONE — the production identity-vertex shape");
+    g.collect();
+    check(g.parked_seam_count() == 0, "collect() drains the production shape too");
+
+    // And the third seam, for completeness: presence of ANY of the three allocates.
+    handlers_t sv_write;
+    sv_write.on_write = [](const tr::view::rope_t&) -> tr::graph::result_t<void> { return {}; };
+    const vertex_handle_t w =
+        g.register_vertex(path_t("/dev/sv_write"), role_t::STORED_VALUE, std::move(sv_write));
+    check(g.retire(w).has_value(), "retire a STORED_VALUE vertex carrying {on_write}");
+    check(g.parked_seam_count() == 1, "STORED_VALUE + {on_write} parks one as well");
+    g.collect();
+}
+
+// ---------------------------------------------------------------------------
+// (d) transport_vertex_t::remove_connection END TO END, over both link shapes.
+//
+// A transport that records nothing and opens nothing — the point-to-point control. Its
+// bus() keeps transport_t's default nullptr, which is every dial link, UDP, loopback and a
+// default-wired tcp/ws server.
+class p2p_link_t : public tr::net::transport_t {
+   public:
+    void send(std::span<const std::byte> frame) override { (void)frame; }
+};
+
+/**
+ * @brief A bus-capable link: `bus()` returns its own facet, exactly as `transport_can`
+ *        does unconditionally and as tcp/ws do when wired `peer_named = true`.
+ *
+ * That single property is what makes `add_connection` install an `on_children` on the
+ * identity vertex — and therefore what makes the teardown park a seam.
+ */
+class bus_capable_link_t : public tr::net::transport_t, public bus_link_t {
+   public:
+    void send(std::span<const std::byte> frame) override { (void)frame; }
+    [[nodiscard]] bus_link_t* bus() override { return this; }
+
+    void enumerate_peers(const peer_visitor_t& visit) const override { visit("p0"); }
+    [[nodiscard]] tr::net::transport_t* peer_link(std::string_view peer) override {
+        return peer == "p0" ? this : nullptr;
+    }
+};
+
+/** @brief SPEC{ type, name } with no config — the provide_link-staged connection form. */
+tr::view::view_t conn_spec(std::string_view type, std::string_view name) {
+    std::vector<std::byte> body;
+    tr::wire::emit_name(body, "type");
+    tr::wire::emit_name(body, type);
+    tr::wire::emit_name(body, "name");
+    tr::wire::emit_name(body, name);
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, tr::wire::type_t::SPEC, tr::wire::opt_t{.pl = true},
+                       std::span<const std::byte>(body));
+    tr::view::segment_ptr_t seg = tr::view::heap_alloc(out.size());
+    if (!out.empty()) std::memcpy(seg->bytes.data(), out.data(), out.size());
+    return tr::view::view_t::over(std::move(seg));
+}
+
+/** @brief The module staged connections mount under here. */
+constexpr std::string_view kModule = "ws-client";
+
+/** @brief The qualified key of connection @p name (RFC-0014 §1 / ADR-0061, #605). */
+std::string mount_of(std::string_view name) {
+    return "net/" + std::string(kModule) + "/" + std::string(name);
+}
+
+/** @brief Create connection @p name over the staged @p link via the `:children[]` SPEC. */
+bool create_conn(graph_t& g, transport_vertex_t& net, tr::net::transport_t& link,
+                 std::string_view name) {
+    net.provide_link(std::string(kModule), std::string(name), link);
+    const auto p = path_t::parse("/net:children[]");
+    if (!p) return false;
+    return g.write(*p, conn_spec("client", name)).has_value();
+}
+
+void test_remove_connection_parks_only_over_a_bus_link() {
+    std::printf("#576(d): remove_connection parks over a BUS link and NOT point-to-point:\n");
+
+    // --- the control: a point-to-point link. bus() == nullptr, so add_connection installs
+    // no on_children, so the identity vertex bears no seam, so teardown parks nothing.
+    {
+        graph_t g;
+        fwd_router_t router(g);
+        transport_vertex_t net(g, router);
+        p2p_link_t link;
+        check(create_conn(g, net, link, "p2p"), "created /net/ws-client/p2p over a p2p link");
+        check(g.parked_seam_count() == 0, "creating it parks nothing");
+        check(net.remove_connection(mount_of("p2p")).has_value(), "remove_connection succeeds");
+        check(g.parked_seam_count() == 0,
+              "a POINT-TO-POINT teardown parks ZERO — no quiescent point is owed");
+        const auto after = g.read(*path_t::parse("/net/ws-client/p2p"));
+        check(!after && after.error() == status_t::NOT_FOUND, "and the identity vertex is retired");
+    }
+
+    // --- the leaking case: a bus-capable link (the CAN / peer_named=true shape).
+    {
+        graph_t g;
+        fwd_router_t router(g);
+        transport_vertex_t net(g, router);
+        bus_capable_link_t link;
+        check(create_conn(g, net, link, "bus"), "created /net/ws-client/bus over a BUS link");
+        check(g.parked_seam_count() == 0, "creating it parks nothing");
+        check(net.remove_connection(mount_of("bus")).has_value(), "remove_connection succeeds");
+        check(g.parked_seam_count() == 1,
+              "a BUS-link teardown parks ONE seam — the ~96 B that leaked before #576");
+        g.collect();
+        check(g.parked_seam_count() == 0, "collect() drains it");
+
+        // Churn: the leak was unbounded growth, so prove the cycle is now bounded.
+        std::size_t high_water = 0;
+        bool every_cycle_ok = true;
+        for (int i = 0; i < 16; ++i) {
+            every_cycle_ok = every_cycle_ok && create_conn(g, net, link, "bus") &&
+                             net.remove_connection(mount_of("bus")).has_value();
+            high_water = std::max(high_water, g.parked_seam_count());
+            g.collect();
+        }
+        check(every_cycle_ok, "16 further bus connect/teardown cycles each completed");
+        check(high_water == 1, "and never exceed 1 parked seam with collect() in the loop");
+        check(g.parked_seam_count() == 0, "and end at 0");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -218,9 +406,10 @@ void test_churn_is_bounded_by_collect() {
     std::size_t high_water = 0;
     bool every_retire_ok = true;
     for (int i = 0; i < 64; ++i) {
-        // The transport_vertex_t::remove_connection shape: register the identity vertex of a
-        // connection, then retire it on teardown.
-        const vertex_handle_t conn = make_handler_vertex(g, "/net/peer");
+        // The graph-level churn shape (the end-to-end transport drive lives in (d)): register
+        // an identity vertex in the production shape — STORED_VALUE bearing an on_children,
+        // as a bus link's /net/<module>/<name> is — then retire it on teardown.
+        const vertex_handle_t conn = make_stored_value_children_vertex(g, "/net/peer");
         every_retire_ok = every_retire_ok && g.retire(conn).has_value();
         const std::size_t parked = g.parked_seam_count();
         if (parked > high_water) high_water = parked;
@@ -236,6 +425,8 @@ void test_churn_is_bounded_by_collect() {
 int main() {
     test_parked_count_and_collect();
     test_free_runs_outside_graph_locks();
+    test_park_is_keyed_on_handler_presence_not_role();
+    test_remove_connection_parks_only_over_a_bus_link();
     test_churn_is_bounded_by_collect();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
