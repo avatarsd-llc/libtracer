@@ -1,6 +1,20 @@
 # ROUTER cycle termination is guaranteed by `hop_count`; the dedup recent-set is a bounded best-effort optimization
 
-Status: accepted
+Status: accepted — **superseded by [ADR-0040](0040-net-plane-is-explicit-source-routed-only.md) / [ADR-0051](0051-delivery-terminates-at-target-no-dispatch-limits.md)**
+
+> **Erratum (2026-08-02) — this decision's mechanism no longer exists; read [ADR-0040](0040-net-plane-is-explicit-source-routed-only.md) instead.**
+> ADR-0040 retired `bridge_t` and the ROUTER-flood mechanism outright: the net plane is
+> explicit source-routed `FWD`, a forwarding node strips its own segment and passes the rest,
+> and the result is loop-free by construction. `fwd_router_t` therefore has **no visited-set and
+> no hop counter** (ADR-0040 erratum), and [ADR-0051](0051-delivery-terminates-at-target-no-dispatch-limits.md)
+> removes the in-process dispatch cap on the same grounds. On the wire,
+> [reference/05](../reference/05-protocol-tlvs.md) §`0x0D` — normative by incorporation via
+> [spec/v1.md](../spec/v1.md) §3 — makes `0x0D` ROUTER *"a reserved, decodable codepoint with no
+> implemented mechanism"* and says senders **MUST NOT** emit it. Every `hop_count` / `MAX_HOPS`
+> clause below (including the conformance MUST and the reference-impl status note) is dead: no
+> such field is carried, honoured, or emitted anywhere. The text is left as written rather than
+> edited, because the record of why the recent-set was demoted is what makes ADR-0040's later
+> "no dedup state at all" step legible.
 
 A bridge has two independent loop defenses ([05-protocol-tlvs.md](../reference/05-protocol-tlvs.md) §`0x0D` ROUTER, [07-host-embedding.md](../reference/07-host-embedding.md) §cycle handling): a **recent-set** of seen `(origin_peer_id, origin_timestamp)` pairs (already-seen TLVs dropped silently), and a **`hop_count`** incremented by each bridge with a hard `MAX_HOPS` cap (recommended 32) beyond which a bridge MUST drop the TLV and emit a local error.
 

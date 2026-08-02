@@ -60,6 +60,8 @@ Move the two independently-sheddable feature groups behind their own lazy pointe
 - **`settings` stays inline** because `settings()` is a lock-free `const settings_t&` reader; keeping it inline avoids a second pointer-hop on that path, and `settings_t` is small and common. `history` is already lazy (#389); `last_flushed_seq` is 8 B.
 
   > **Erratum (2026-08-01), [RFC-0022](../spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.B:** `settings_t` no longer exists. The two magnitudes it held are now plain `std::uint32_t` members of the extension block (`history_keep_last`, `store_ref_min_bytes`), and the inline-vs-lazy ruling above carries over to them verbatim — the threshold is still read lock-free on every view-delivered write, so it stays one inline load off this block. Nothing else in this decision changes.
+  >
+  > **Erratum 2 (2026-08-02), [RFC-0022](../spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.D + Amendment 2:** `store_ref_min_bytes` above is the pre-rename spelling. The shipped member is `pin_payload_ratio` (`vertex.hpp`), and the owner-side declaration is `graph_t::set_pin_payload_ratio(v, k)` — see [ADR-0042](0042-refcounted-receiver-seam-view-delivery.md) erratum 2. Only the name and the predicate changed; the inline-vs-lazy ruling still holds for the renamed member.
 
 So Step 2 as shipped is the two *unconditionally-dead-for-a-leaf* groups (value handlers, app-field), which is where the entire measured #388 win lives.
 
