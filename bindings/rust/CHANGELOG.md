@@ -17,11 +17,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   itself is unchanged and still maps to `tr::path::invalid`. Under the current NAME-TLV body
   encoding the `MAX_PATH_BYTES` (1024) check binds first at 204 segments, so `path_to_tlv` answers
   `BuildError::PathTooLong` — not `TooManySegments` — for a 205-segment path.
-  **Known misplacement, repriced not relocated:** the count check in `tlv_to_path`
-  (`src/path.rs`) sits at the **decode** tier, which `docs/reference/05-protocol-tlvs.md`
-  §"Enforcement of the PATH constraints" places at construction/admission instead. Repricing it
-  removes the live regression on accumulated `src` return routes; moving it to the resolver tier
-  is a named follow-up (RFC-0023 §5.6).
+  ~~**Known misplacement, repriced not relocated:**~~ relocated below (#773).
+
+- **SEMVER-VISIBLE — the accumulative PATH bounds left the decode tier (RFC-0023 §5.6; #773).**
+  `path::tlv_to_path` no longer answers `BuildError::TooManySegments` or
+  `BuildError::PathTooLong`: `docs/reference/05-protocol-tlvs.md` §"Enforcement of the PATH
+  constraints" places the segment-count and total-length limits where an address is
+  **constructed or admitted**, and states that "the codec does not enforce these constraints,
+  and is not expected to". A caller that relied on `tlv_to_path` (or `fwd::fwd_dst_path` /
+  `fwd::fwd_src_path` / `structured::subscriber_target_path`, which route through it) to reject
+  an over-limit PATH must call the new `path::admit_path_tlv` instead. This closes RFC-0019
+  §10(b): an accumulated `src` return route is legal at any byte-reachable depth, and decoding
+  one no longer fails. The per-segment rules (1..64 bytes, no reserved character, NAME child
+  type, UTF-8) stay in `tlv_to_path` — they are not accumulative, and they are what makes the
+  rendered string re-splittable.
+
+### Added
+
+- **`path::admit_path_tlv(&Tlv) -> Result<(), BuildError>` (#773)** — the construction/admission
+  gate for a *decoded* PATH: the encode-time MUST of `tlv_builders::path`
+  (`children ≤ MAX_SEGMENTS` ∧ each child a valid NAME ∧ encoded body ≤ `MAX_PATH_BYTES`)
+  evaluated over an already-parsed tree. Call it where a foreign PATH becomes an address a
+  resolver will spell; do **not** call it on a `src` return route being forwarded on. The 255
+  bound is unchanged and exact — the same inputs it accepted and rejected at the decode tier it
+  accepts and rejects here.
 
 ## [0.6.0] — 2026-07-23
 
