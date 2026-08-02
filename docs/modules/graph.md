@@ -293,7 +293,7 @@ remote-delivery sink, which is a `tr::net` concern. See
 `status_t` (`core/include/libtracer/status.hpp:24-33`) is the error side of every
 `result_t`. When the operation arrived over the wire, the FWD resolver maps it to the
 registered `tr::` error code the `kind=ERROR` reply carries (`error_code(status_t)`,
-`core/src/op_resolve_walk.hpp:108-127` — a private header under `src/`, not part of the
+`core/src/op_resolve_walk.hpp:76-95` — a private header under `src/`, not part of the
 public API).
 
 | `status_t` | Wire error | What produces it |

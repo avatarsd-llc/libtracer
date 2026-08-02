@@ -73,9 +73,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   stored value's provenance depended on the link it arrived over. A refusal answers
   `std::nullopt` → the empty view the walk's existing empty-value guards already read as
   `BACKPRESSURE`; `arena_node::spans_intact()` deliberately stays a constant `true`, because an
-  arena span is borrowed from the frame and a refused allocation cannot shorten one. **Default
-  unchanged** (the global heap), and 26 of the library's 27 object files `cmp` byte-identical to
-  `origin/main` — only `op_resolve.cpp.o`, the TU that opted in, differs. Covered by
+  arena span is borrowed from the frame and a refused allocation cannot shorten one. The backend
+  travels as a `resolve_node` argument rather than as a node member, so `arena_node` — copied by
+  value throughout the walk — stays two words wide. **Default unchanged** (the global heap), and
+  25 of the library's 27 object files `cmp` byte-identical to `origin/main` — only
+  `op_resolve.cpp.o` and `op_resolve_view.cpp.o`, the two TUs that instantiate the walk, differ.
+  Covered by
   `core/tests/terminus_flatten_backend_test.cpp`: an exact-size seam instrument, a
   slab-containment *provenance* assertion on the stored value, a READ control that must draw
   nothing, a refusing-backend case and a mutation-aware sweep. Reverting the site reddens 6 of

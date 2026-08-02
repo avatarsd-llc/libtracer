@@ -87,7 +87,7 @@ Reproduced today on `main` (in tree, three runs × three reps): `chain-path` p50
 
 The two arms do not differ only in how the destination is named. `chain-path` injects
 `FWD{op=WRITE}`, and a `WRITE` terminus **always** assembles a `RESULT` reply
-(`core/src/op_resolve_walk.hpp:817-822`) which then routes four hops home. `chain-label` injects
+(`core/src/op_resolve_walk.hpp:797-802`) which then routes four hops home. `chain-label` injects
 `COMPACT`, and the `COMPACT` terminus **never** replies (`core/src/fwd_router.cpp:864-898`).
 Instrumented (`scratchpad/probe_chain.cpp`, reverse counters added to `wire_link_t`):
 
@@ -178,7 +178,7 @@ collapse:
 
 - `is_canonical_name` (`core/src/tlv_arena.cpp:20-22`) tests exactly `h.opt == opt_t{}`;
 - the `canonical_path` flag (`core/src/tlv_arena.cpp:101`, contract at `tlv_arena.hpp:56-63`);
-- `path_lookup_key`'s re-emit fallback (`core/src/op_resolve_walk.hpp:622-634`), whose fast path
+- `path_lookup_key`'s re-emit fallback (`core/src/op_resolve_walk.hpp:602-614`), whose fast path
   already returns `path.body()` when canonical — under this RFC that becomes **unconditional**,
   and the span-alias into the graph's vertex-map key is guaranteed rather than tested.
 
