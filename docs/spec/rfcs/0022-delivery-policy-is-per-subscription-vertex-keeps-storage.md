@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0022 |
 | **Title** | Delivery policy is per-subscription; `settings_t` dissolves |
-| **Status** | **accepted** — maintainer ruling 2026-08-01; comment window waived by sole maintainer per [GOVERNANCE](../../../.github/GOVERNANCE.md) §Errata, amendments, and the comment window. **Amendment 1** (2026-08-01, below) replaced §3.B–§3.D before any implementation landed. To be implemented and tested **before v0.7.0**. |
+| **Status** | **accepted** — maintainer ruling 2026-08-01; comment window waived by sole maintainer per [GOVERNANCE](../../../.github/GOVERNANCE.md) §Errata, amendments, and the comment window. **Amendment 1** (2026-08-01, below) replaced §3.B–§3.D before any implementation landed; **Amendment 2** (2026-08-02, below — accepted) answers §6's measurement demand, fixes `kPinPayloadRatio`'s shipped default at the sentinel, and renames the owner-side knob. To be implemented and tested **before v0.7.0**. |
 | **Amends** | [RFC-0004](0004-remote-operation-addressing.md) §E (delivery/fanout), [RFC-0010](0010-owner-app-fields-and-schema.md) §B.2 (the synthesized `:schema` protocol part), §A.4 (the `:settings` read container) |
 | **Supersedes** | [#617](https://github.com/avatarsd-llc/libtracer/issues/617) (intern the QoS profile) — the struct it proposed to intern ceases to exist |
 | **Dissolves** | [#706](https://github.com/avatarsd-llc/libtracer/issues/706) (`:schema` under-reports knobs) — there is nothing left to under-report |

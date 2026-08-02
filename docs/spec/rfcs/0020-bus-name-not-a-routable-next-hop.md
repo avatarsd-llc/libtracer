@@ -17,9 +17,13 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Tracking issue** | [#741](https://github.com/avatarsd-llc/libtracer/issues/741) (`rfc`-labelled) |
 | **Target spec version** | v1 itself — still `DRAFT` (`docs/spec/v1.md:1`), the immutability clause has never triggered. Same route RFC-0006 / RFC-0018 / RFC-0019 took. |
 
-> **Numbering note.** 0012 was used and withdrawn; 0015 never existed. Neither gap is reusable —
-> see [RFC-0016](0016-composed-branch-read.md) §ghost history and RFC-0018's numbering note. 0020
-> is the next unused number after [RFC-0019](0019-path-depth-bounded-by-bytes.md).
+> **Numbering note.** 0012 was used and closed unmerged (the dtype/direction draft of PR #416);
+> 0015 was used and withdrawn (PR #446). Neither gap is reusable — see
+> [RFC-0016](0016-composed-branch-read.md) §ghost history and RFC-0018's numbering note. (0016's
+> note also skips 0014 as a phantom mislabel; that number was **subsequently issued as a real
+> document**, [RFC-0014](0014-creator-endpoint-connection-lifecycle-and-link-liveness.md), per
+> [RFC-0017](0017-element-addressing-value-plane-index.md)'s note.) 0020 is the next unused number
+> after [RFC-0019](0019-path-depth-bounded-by-bytes.md).
 
 ---
 

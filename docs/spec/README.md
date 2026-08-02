@@ -1,6 +1,6 @@
 # libtracer protocol specification
 
-This directory contains the **normative** specification of the libtracer wire protocol. Anything outside this directory (architecture notes, design rationale, implementation guides) is informative.
+This directory contains the **normative** specification of the libtracer wire protocol. Anything outside this directory (architecture notes, design rationale, implementation guides) is informative, **except the documents [v1.md](v1.md) §3 incorporates normatively by reference** — `docs/reference/01-data-format.md`, `docs/reference/05-protocol-tlvs.md`, and `docs/reference/03-addressing.md` §path syntax. Those files live under `docs/reference/`, but their MUST/SHOULD/MAY clauses are clauses of the specification; their *informative*-marked notes are not.
 
 ## Structure
 

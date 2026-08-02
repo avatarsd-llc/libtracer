@@ -1,6 +1,6 @@
 # 67. A bounded seam recycles through segregated exact-size classes, and scales by giving each owner its own source rather than by locking a shared one
 
-Status: accepted (maintainer-ratified 2026-07-28). Closes the gap [ADR-0065](0065-failable-allocation-gets-its-own-seam-block-source.md) left in its own *Outstanding* list and that [#597](https://github.com/avatarsd-llc/libtracer/issues/597) tracks. Upholds [ADR-0047](0047-build-time-closed-module-sets-compile-time-seams.md) §1 (the compile-time/runtime appropriateness rule) and [RFC-0006](../spec/rfcs/0006-resource-bounded-nesting-depth.md) (bounds are injected resources, never magic constants). Acts on [ADR-0060](0060-arena-route-pooled-value-backend.md) erratum 1, whose measurement makes the second half of this decision non-optional.
+Status: accepted (maintainer-ratified 2026-07-28). Closes the gap [ADR-0065](0065-failable-allocation-gets-its-own-seam-block-source.md) left in its own *Outstanding* list and that [#597](https://github.com/avatarsd-llc/libtracer/issues/597) tracks. Upholds [ADR-0047](0047-build-time-closed-module-sets-compile-time-seams.md) §1 (the compile-time/runtime appropriateness rule) and [RFC-0006](../spec/rfcs/0006-resource-bounded-nesting-depth.md) (bounds are injected resources, never magic constants). Acts on [ADR-0060](0060-lkv-copy-store-injected-value-backend.md) erratum 1, whose measurement makes the second half of this decision non-optional.
 
 ## Context
 
