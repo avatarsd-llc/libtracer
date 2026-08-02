@@ -613,19 +613,13 @@ class fwd_router_t {
 
     graph::graph_t& graph_;
     graph::op_resolver_t resolver_;
-    std::pmr::memory_resource* mr_;  // route_handle label-table resource (ADR-0039 §1)
-    mem::block_source_t* rx_;        // DEFAULT terminus-arena source, NOTHROW (#588);
-                                     // a child may carry its own (ADR-0067 §3)
-    mem::mem_backend_t* flat_;       // every rope flatten the router performs (#730);
-                                     // a null result is answered by value, never stored
-    child_registry_t registry_;      // the one NAME→link demux table (Brick 3a, ADR-0037)
-    route_handle_t handles_;         // per-link label tables (compact flows only)
-    // EXPERIMENT (#504 bench arm — DELETE with the verdict): the reply-leg memo prototype.
-    // One slot, invalidated by the registry's mount generation, so a fan-out's second and later
-    // deliveries to the same link skip `by_name`. Inert unless `g_reply_leg_memo` is set.
-    std::string_view memo_name_{};
-    transport_t* memo_link_ = nullptr;
-    std::uint32_t memo_gen_ = 0;
+    std::pmr::memory_resource* mr_;        // route_handle label-table resource (ADR-0039 §1)
+    mem::block_source_t* rx_;              // DEFAULT terminus-arena source, NOTHROW (#588);
+                                           // a child may carry its own (ADR-0067 §3)
+    mem::mem_backend_t* flat_;             // every rope flatten the router performs (#730);
+                                           // a null result is answered by value, never stored
+    child_registry_t registry_;            // the one NAME→link demux table (Brick 3a, ADR-0037)
+    route_handle_t handles_;               // per-link label tables (compact flows only)
     std::deque<child_rx_ctx_t> child_rx_;  // stable receiver contexts, one per child
     /**
      * @brief Serializes CONTROL-PLANE mutation of the registry and `child_rx_` (ADR-0063 §3).

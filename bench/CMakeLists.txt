@@ -192,9 +192,6 @@ target_compile_options(bench_tail_validate PRIVATE -Wall -Wextra)
 add_executable(bench_reply_leg bench_reply_leg.cpp)
 target_link_libraries(bench_reply_leg PRIVATE libtracer)
 target_compile_options(bench_reply_leg PRIVATE -Wall -Wextra)
-# EXPERIMENT (#504 — DELETE with the verdict): arms the prototype reply-leg memo so the bench
-# can interleave it against the shipped path inside one binary.
-target_compile_definitions(bench_reply_leg PRIVATE LIBTRACER_BENCH_REPLY_LEG_MEMO=1)
 
 add_executable(bench_mount_resolve bench_mount_resolve.cpp)
 target_link_libraries(bench_mount_resolve PRIVATE libtracer)

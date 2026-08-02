@@ -64,18 +64,6 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 
-#ifdef LIBTRACER_BENCH_REPLY_LEG_MEMO
-/**
- * @brief EXPERIMENT (#504 — DELETE with the verdict): the core-side reply-leg memo toggle.
- *
- * Set per arm so the memo and no-memo legs interleave inside ONE process on ONE machine; a
- * two-binary comparison would fold the machine's drift into the result.
- */
-namespace tr::net {
-extern bool g_reply_leg_memo;
-}  // namespace tr::net
-#endif
-
 namespace {
 
 using tr::graph::graph_t;
@@ -111,11 +99,6 @@ constexpr double kDefaultBudgetSeconds = 1.0;
 }
 
 using bench::calibrate_batch;
-
-#ifdef LIBTRACER_BENCH_REPLY_LEG_MEMO
-/** @brief EXPERIMENT (#504 — DELETE with the verdict): which arm the next point runs. */
-bool g_memo_arm = false;
-#endif
 
 /** @brief A link that swallows what it is handed and counts it — no I/O, no allocation. */
 struct sink_link_t : tr::net::transport_t {
@@ -176,20 +159,6 @@ enum class pos_t {
 };
 
 [[nodiscard]] const char* pos_name(pos_t p) {
-#ifdef LIBTRACER_BENCH_REPLY_LEG_MEMO
-    if (g_memo_arm) {
-        switch (p) {  // EXPERIMENT (#504 — DELETE with the verdict)
-            case pos_t::FIRST:
-                return "reply-first-memo";
-            case pos_t::LAST:
-                return "reply-last-memo";
-            case pos_t::PEER:
-                return "reply-peer-memo";
-            case pos_t::SPREAD:
-                return "reply-spread-memo";
-        }
-    }
-#endif
     switch (p) {
         case pos_t::FIRST:
             return "reply-first";
@@ -227,9 +196,6 @@ struct spread_t {
  * @param pos    Where the subscribers' link sits in that registry.
  */
 void run_point(std::size_t fanout, std::size_t width, pos_t pos) {
-#ifdef LIBTRACER_BENCH_REPLY_LEG_MEMO
-    tr::net::g_reply_leg_memo = g_memo_arm;  // EXPERIMENT (#504 — DELETE with the verdict)
-#endif
     graph_t g;
     fwd_router_t router(g);
 
@@ -367,13 +333,6 @@ void run_point(std::size_t fanout, std::size_t width, pos_t pos) {
 
 }  // namespace
 
-/** @brief EXPERIMENT (#504 — DELETE with the verdict): select the memo arm; a no-op without it. */
-void memo_arm([[maybe_unused]] bool on) {
-#ifdef LIBTRACER_BENCH_REPLY_LEG_MEMO
-    g_memo_arm = on;
-#endif
-}
-
 int main() {
     std::printf("# bench_reply_leg — the producer fan-out's per-delivery link resolution\n");
     // BREAK THE LINE first: the same write with no remote subscribers. Both counters must read
@@ -388,35 +347,21 @@ int main() {
             // that drifts during the sweep drifts through both arms, not into one of them.
             run_point(fanout, width, pos_t::FIRST);
             run_point(fanout, width, pos_t::LAST);
-            memo_arm(true);
-            run_point(fanout, width, pos_t::LAST);
-            memo_arm(false);
             run_point(fanout, width, pos_t::FIRST);
             run_point(fanout, width, pos_t::LAST);
-            memo_arm(true);
-            run_point(fanout, width, pos_t::LAST);
-            memo_arm(false);
         }
     }
-    // The 1-slot memo's worst case: the same fan-out rotated over kSpreadLinks destinations, so
-    // consecutive deliveries never repeat a link. Timed against the shared-link LAST arm above.
+    // A resolve-once scheme's WORST case: the same fan-out rotated over kSpreadLinks
+    // destinations, so consecutive deliveries never repeat a link and nothing a single-slot memo
+    // holds can be reused. Read against the shared-link LAST arm at the same (fan, width).
     for (const std::size_t fanout : {8U, 64U}) {
+        run_point(fanout, 32, pos_t::LAST);
         run_point(fanout, 32, pos_t::SPREAD);
-        memo_arm(true);
+        run_point(fanout, 32, pos_t::LAST);
         run_point(fanout, 32, pos_t::SPREAD);
-        memo_arm(false);
-        run_point(fanout, 32, pos_t::SPREAD);
-        memo_arm(true);
-        run_point(fanout, 32, pos_t::SPREAD);
-        memo_arm(false);
     }
     // The counted mode: one width, the full fan-out sweep, so the resolution count is asserted
     // against every fan-out this bench claims a per-delivery scan for.
-    for (const std::size_t fanout : {1U, 8U, 64U}) {
-        run_point(fanout, 32, pos_t::PEER);
-        memo_arm(true);
-        run_point(fanout, 32, pos_t::PEER);
-        memo_arm(false);
-    }
+    for (const std::size_t fanout : {1U, 8U, 64U}) run_point(fanout, 32, pos_t::PEER);
     return 0;
 }
