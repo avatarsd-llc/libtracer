@@ -754,7 +754,18 @@ the code's capability rather than the machine lottery.
 The store carries roughly three times as many series as this page charts — every recorded
 point, including the ones no family groups. **[Open the raw per-series trend
 browser ↗](https://libtracer.avatarsd.com/dev/bench/)** — one chart per series, zoomable,
-with per-point commit links. It is the archive; the families above are the reading."""
+with per-point commit links. It is the archive; the families above are the reading.
+
+A second, parallel store records the same transcript set from a **fixed self-hosted
+machine** (`perf-local` workflow), pinned to one logical CPU — **[the bench-local trend
+browser ↗](https://libtracer.avatarsd.com/dev/bench-local/)**. The two stores answer
+different questions and are never mixed: GitHub-hosted runners vary ~2× in absolute speed
+run to run, so the hosted store reads as a portability envelope (best-across-three-runners
+per point), while the bench-local store is the **absolute-trend instrument** — same silicon
+every point, host characteristics recorded on every point (each point's tooltip carries the
+host descriptor; `host.txt` next to the store holds the full `lscpu` capture). A two-point
+regression verdict is only ever read from the bench-local store or from a same-host
+interleaved A/B, never from the hosted one."""
 
 
 def _load_history() -> dict | None:

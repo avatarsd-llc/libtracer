@@ -1,0 +1,201 @@
+# Fixed-host bench series (bench-local) — the absolute-trend instrument.
+#
+# perf.yml's history rides GitHub-hosted runners, which vary ~2x in absolute speed
+# run to run (hardware lottery); its store answers portability, and only its
+# SAME-RUNNER interleaved gates carry regression verdicts. What no hosted store can
+# give is a readable absolute trend — a two-point read of it manufactures
+# regressions that do not exist (it did, twice, on one day: byte-identical .text
+# "regressed" 60%+ across docs-only merges).
+#
+# This workflow runs the SAME transcript set on ONE fixed self-hosted machine
+# (runner label `bench-local`), pinned to one fixed logical CPU, and records to its
+# own store on gh-pages (`dev/bench-local/` — never mixed into `dev/bench/`; mixing
+# machines in one series is precisely the defect this exists to remove). The host's
+# characteristics are stamped onto EVERY recorded point (`extra` field — visible in
+# the chart tooltip) and captured in full next to the store (`host.txt`).
+#
+# SECURITY (public repo + self-hosted runner): fork code must never execute on the
+# bench machine. Triggers are push-to-main ONLY — no pull_request — plus the
+# repository guard on the job. Keep it that way.
+#
+# NOISE: the bench host also serves other repos' CI, so single points can catch a
+# noisy neighbour. The series is read by medians over points, the alert threshold
+# is a soft signal, and the hard verdicts stay with perf.yml's interleaved gates.
+name: perf-local
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'core/**'
+      - 'bench/**'
+      - '**/CMakeLists.txt'
+      - '**/*.cmake'
+      - '.github/workflows/perf-local.yml'
+
+# One measurement at a time; never cancel a measurement mid-run (a half-measured
+# point is worse than a late one — the next push queues behind it).
+concurrency:
+  group: perf-local
+  cancel-in-progress: false
+
+jobs:
+  bench-local:
+    if: github.repository == 'avatarsd-llc/libtracer'
+    runs-on: [self-hosted, bench-local]
+    permissions:
+      contents: write # benchmark-action pushes the history to the gh-pages branch
+    env:
+      BENCH_CPU: "2" # the one pinned logical CPU — every measured process runs here
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Capture host characteristics (stamped onto every recorded point)
+        id: host
+        run: |
+          model=$(grep -m1 "model name" /proc/cpuinfo | cut -d: -f2- | xargs)
+          gov=$(cat /sys/devices/system/cpu/cpu${BENCH_CPU}/cpufreq/scaling_governor 2>/dev/null || echo "not-exposed")
+          desc="$(hostname) · pinned cpu${BENCH_CPU} · ${model} · $(nproc) cpus · governor ${gov} · $(uname -r)"
+          echo "desc=${desc}" >> "$GITHUB_OUTPUT"
+          { echo "${desc}"; echo; lscpu; } > bench/host.txt
+          { echo "### bench-local host"; echo '```'; echo "${desc}"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build the benchmark set (Release)
+        run: |
+          cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build bench/build --target bench_libtracer bench_forward_heap \
+            bench_forward_demux bench_compact_delivery -j "$(nproc)"
+
+      # Deterministic (allocation counts, not time) — a free consistency check per
+      # point, and its transcript feeds the memory series (mirrors perf.yml).
+      - name: Zero-heap forward gate (ADR-0038 §16KB-RAM)
+        run: |
+          set -o pipefail
+          ZEROHEAP_MAX=0 taskset -c "$BENCH_CPU" ./bench/build/bench_forward_heap \
+            | tee bench/bench_forward_heap_raw.txt
+
+      - name: Run the bench transcripts, pinned
+        env:
+          LIBTRACER_BENCH_SECONDS: "1"
+        run: |
+          if [ -x /usr/bin/time ]; then
+            /usr/bin/time -v taskset -c "$BENCH_CPU" ./bench/build/bench_libtracer \
+              >bench/bench_libtracer_raw.txt 2>bench/bench_libtracer_time.txt
+          else
+            taskset -c "$BENCH_CPU" ./bench/build/bench_libtracer >bench/bench_libtracer_raw.txt
+            : >bench/bench_libtracer_time.txt
+          fi
+          taskset -c "$BENCH_CPU" ./bench/build/bench_forward_demux >bench/bench_forward_demux_raw.txt || true
+          taskset -c "$BENCH_CPU" ./bench/build/bench_compact_delivery >bench/bench_compact_delivery_raw.txt || true
+          # An empty transcript is a silent non-recording — say so (mirrors perf.yml,
+          # where `|| true` once swallowed a missing binary into a green job).
+          for f in bench/bench_forward_demux_raw.txt bench/bench_compact_delivery_raw.txt; do
+            [ -s "$f" ] || echo "::warning::$f is empty — its series will not be recorded"
+          done
+
+      # Zenoh control series, pinned to the same CPU: a pinned control that moves is
+      # the HOST changing (thermal, neighbour), not the code — on a fixed machine the
+      # control is what turns "the series moved" into a diagnosis. Optional: a failed
+      # vendor fetch must never cost the commit its history point.
+      - name: Run the Zenoh comparison bench (control series, optional)
+        run: |
+          if bash bench/fetch_zenoh.sh; then
+            cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
+            if cmake --build bench/build --target bench_zenoh -j "$(nproc)"; then
+              taskset -c "$BENCH_CPU" ./bench/build/bench_zenoh >bench/bench_zenoh_raw.txt || true
+            fi
+          fi
+          [ -s bench/bench_zenoh_raw.txt ] || \
+            echo "::warning::no Zenoh transcript — the control series will not be recorded this commit"
+
+      - name: Emit history metrics + stamp the host onto every point
+        run: |
+          args=""
+          for f in bench/bench_libtracer_raw.txt bench/bench_forward_demux_raw.txt \
+                   bench/bench_compact_delivery_raw.txt bench/bench_zenoh_raw.txt; do
+            [ -s "$f" ] && args="$args --raw $f"
+          done
+          python3 bench/perf_emit_benchmark.py $args \
+            --zeroheap-raw bench/bench_forward_heap_raw.txt \
+            --time-v bench/bench_libtracer_time.txt \
+            --out-smaller bench/benchmark_output.json \
+            --out-bigger bench/benchmark_throughput.json
+          # benchmark-action renders each point's `extra` in the chart tooltip — this
+          # is where "which host produced this number" lives, per bench, per point.
+          python3 - "$HOST_DESC" <<'EOF'
+          import json, sys
+          desc = sys.argv[1]
+          for p in ("bench/benchmark_output.json", "bench/benchmark_throughput.json"):
+              items = json.load(open(p))
+              for it in items:
+                  it["extra"] = desc
+              json.dump(items, open(p, "w"), indent=1)
+          EOF
+        env:
+          HOST_DESC: ${{ steps.host.outputs.desc }}
+
+      - name: Upload this point's transcripts + host capture
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-local-${{ github.sha }}
+          path: |
+            bench/host.txt
+            bench/bench_libtracer_raw.txt
+            bench/bench_libtracer_time.txt
+            bench/bench_forward_heap_raw.txt
+            bench/bench_forward_demux_raw.txt
+            bench/bench_compact_delivery_raw.txt
+            bench/bench_zenoh_raw.txt
+          retention-days: 90
+
+      - name: Track latency + memory history (fixed host)
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: libtracer bench-local latency (ns, smaller is better, fixed pinned host)
+          tool: customSmallerIsBetter
+          output-file-path: bench/benchmark_output.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/bench-local
+          # Tighter than the hosted store's 125%: the machine is fixed, so creep at
+          # 115% is signal, not lottery. Still a soft alert — the hard verdicts stay
+          # with perf.yml's same-runner interleaved gates.
+          alert-threshold: '115%'
+          comment-on-alert: true
+          fail-on-alert: false
+          alert-comment-cc-users: '@avatarsd'
+
+      - name: Track throughput history (fixed host)
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: libtracer bench-local throughput (deliveries/s, bigger is better, fixed pinned host)
+          tool: customBiggerIsBetter
+          output-file-path: bench/benchmark_throughput.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/bench-local
+          alert-threshold: '115%'
+          comment-on-alert: true
+          fail-on-alert: false
+          alert-comment-cc-users: '@avatarsd'
+
+      - name: Publish host.txt next to the store
+        run: |
+          git fetch --no-tags --depth=1 origin gh-pages
+          git worktree add ../ghp FETCH_HEAD
+          mkdir -p ../ghp/dev/bench-local
+          cp bench/host.txt ../ghp/dev/bench-local/host.txt
+          cd ../ghp
+          if ! git diff --quiet -- dev/bench-local/host.txt 2>/dev/null || [ -n "$(git status --porcelain dev/bench-local/host.txt)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add dev/bench-local/host.txt
+            git commit -m "bench-local: refresh host.txt"
+            # Best-effort: the histories above are already recorded; a race with a
+            # concurrent gh-pages push must not turn this point's job red.
+            git push origin HEAD:gh-pages || echo "::warning::host.txt push raced a concurrent gh-pages write"
+          fi
+          cd - && git worktree remove ../ghp
