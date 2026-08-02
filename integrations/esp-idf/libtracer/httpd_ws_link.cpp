@@ -16,10 +16,12 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
+#include <chrono>
 #include <cstring>
 #include <memory>
 #include <new>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -72,6 +74,34 @@ constexpr std::size_t kInternalSockSlack = 3;
  * detector, not a tunable, so it is a named constant and NOT a config knob.
  */
 constexpr std::uint8_t kMaxConsecutiveTxDrops = 3;
+
+/**
+ * @brief Reusable RX scratch capacity, bytes — a frame at or under this reads into
+ *        a once-allocated buffer instead of taking a per-frame heap allocation.
+ *
+ * The httpd task is the only RX thread and delivery is synchronous (borrowed,
+ * serviced in-call), so ONE scratch per link suffices and needs no lock. Graph
+ * control TLVs — writes, subscribes, value pushes — sit well under this; a larger
+ * frame (up to kMaxFrameBytes) falls back to the exact-size nothrow heap path,
+ * trading one allocation for not pinning 32 KB of RAM permanently.
+ */
+constexpr std::size_t kRxScratchBytes = 2048;
+
+/** @brief TX work slots pre-allocated per link, claimed lock-free by sending tasks
+ *         (see @ref httpd_ws_link_t::tx_slot_t). Sized past the steady-state
+ *         in-flight depth (a reply + a couple of subscription pushes); a burst past
+ *         it falls back to the heap work item, never blocks. */
+constexpr std::size_t kTxPoolSlots = 4;
+
+/**
+ * @brief Inline payload capacity of one TX work slot, bytes.
+ *
+ * Sized past the common outbound frames (value pushes, directed replies, census)
+ * so a steady-state send gathers straight into the slot with NO allocation; a
+ * larger frame (e.g. a composed-root snapshot reply) keeps the pooled shell but
+ * takes a nothrow heap payload. Roughly one Ethernet MTU.
+ */
+constexpr std::size_t kTxInlineBytes = 1600;
 
 /** @brief `<ip>:<port>` of the far side of @p fd — the peer name (bus tag / census),
  *         byte-compatible with transport_ws_server's naming. Falls back to `fd<n>`. */
@@ -157,22 +187,40 @@ struct httpd_ws_link_t::session_t {
     peer_endpoint_t endpoint;         /**< @brief The directed facade `peer_link` returns. */
 };
 
-namespace {
-
-/** @brief One queued outbound frame: the payload is gather-copied ONCE, nothrow, so
- *         it outlives the send() caller's spans until the httpd task drains the work
- *         item. A `unique_ptr` buffer, never a `std::vector` — the vector's THROWING
- *         allocator inside the braced initializer defeated the `new (std::nothrow)`
- *         guard on the shell: under `-fno-exceptions` a reply-sized copy hitting heap
- *         exhaustion aborted the node (the browser-session crash). */
-struct tx_work_t {
-    httpd_handle_t handle;                /**< @brief Owning httpd instance. */
-    int fd;                               /**< @brief Destination peer socket. */
-    std::unique_ptr<std::byte[]> payload; /**< @brief The gathered frame bytes. */
-    std::size_t len;                      /**< @brief Frame length, bytes. */
+/**
+ * @brief One queued outbound frame: the payload is gather-copied ONCE, nothrow, so
+ *        it outlives the send() caller's spans until the httpd task drains the work
+ *        item.
+ *
+ * Two storage shapes behind one struct (see @ref queue_send for the selection):
+ * pooled — the work item IS a @ref tx_slot_t member and `payload` points at the
+ * slot's inline buffer (or at `owned` when the frame outgrows it); heap — the
+ * shell itself is `new (std::nothrow)` and `owned` holds the payload. Never a
+ * `std::vector` for the copy — the vector's THROWING allocator inside a braced
+ * initializer defeated the `new (std::nothrow)` guard on the shell: under
+ * `-fno-exceptions` a reply-sized copy hitting heap exhaustion aborted the node
+ * (the browser-session crash).
+ */
+struct httpd_ws_link_t::tx_work_t {
+    httpd_handle_t handle = nullptr; /**< @brief Owning httpd instance. */
+    int fd = -1;                     /**< @brief Destination peer socket. */
+    std::byte* payload = nullptr;    /**< @brief Gathered frame bytes (slot-inline or `owned`). */
+    std::size_t len = 0;             /**< @brief Frame length, bytes. */
+    tx_slot_t* slot = nullptr;       /**< @brief Owning pool slot; nullptr => heap shell. */
+    std::unique_ptr<std::byte[]> owned; /**< @brief Heap payload (fallback shapes only). */
 };
 
-}  // namespace
+/**
+ * @brief One pre-allocated TX work slot: claimed lock-free (a CAS on @ref busy) by
+ *        any sending task in @ref claim_tx_slot, released by the httpd task once
+ *        its send drains (@ref release_tx_work) — so a steady-state send allocates
+ *        nothing. The pool (kTxPoolSlots of these) is allocated once per link.
+ */
+struct httpd_ws_link_t::tx_slot_t {
+    std::atomic<bool> busy{false};        /**< @brief Claimed flag (acquire/release). */
+    tx_work_t work;                       /**< @brief The slot's embedded work item. */
+    std::byte inline_buf[kTxInlineBytes]; /**< @brief Inline payload storage. */
+};
 
 httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers, bool peer_named)
     : port_(bind_port), max_peers_(max_peers), peer_named_(peer_named) {
@@ -208,7 +256,9 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers,
     if (httpd_register_uri_handler(handle_, &uri) != ESP_OK) {
         httpd_stop(handle_);
         handle_ = nullptr;
+        return;
     }
+    alloc_buffers();
 }
 
 httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_pattern,
@@ -233,6 +283,34 @@ httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_patter
     uri.handle_ws_control_frames = false;  // httpd answers PING/PONG and tracks CLOSE
     if (httpd_register_uri_handler(external, &uri) != ESP_OK) {
         handle_ = nullptr;  // ok() stays false; do NOT httpd_stop — we do not own the server
+        return;
+    }
+    alloc_buffers();
+}
+
+void httpd_ws_link_t::alloc_buffers() {
+    // Both are once-per-link, nothrow, and OPTIONAL: if either allocation fails the
+    // link still works — every frame just takes the per-frame heap fallback path.
+    rx_scratch_.reset(new (std::nothrow) std::byte[kRxScratchBytes]);
+    tx_pool_.reset(new (std::nothrow) tx_slot_t[kTxPoolSlots]);
+}
+
+httpd_ws_link_t::tx_slot_t* httpd_ws_link_t::claim_tx_slot() {
+    if (tx_pool_ == nullptr) return nullptr;
+    for (std::size_t i = 0; i < kTxPoolSlots; ++i) {
+        bool expected = false;
+        if (tx_pool_[i].busy.compare_exchange_strong(expected, true, std::memory_order_acquire))
+            return &tx_pool_[i];
+    }
+    return nullptr;  // every slot in flight this instant — caller heap-falls-back
+}
+
+void httpd_ws_link_t::release_tx_work(tx_work_t* work) {
+    if (work->slot != nullptr) {
+        work->owned.reset();  // drop an overflow heap payload before the slot recycles
+        work->slot->busy.store(false, std::memory_order_release);
+    } else {
+        delete work;
     }
 }
 
@@ -251,6 +329,20 @@ httpd_ws_link_t::~httpd_ws_link_t() {
             httpd_stop(handle_);
         else
             httpd_unregister_uri_handler(handle_, uri_.c_str(), HTTP_GET);
+    }
+    // Adopted mode: the caller's server keeps running after our URI is unregistered,
+    // so a queued tx_work may still execute on its task while it references a pool
+    // slot — wait (bounded) for the in-flight slots to drain before tx_pool_ dies.
+    // Owning mode needs no wait: httpd_stop has halted the task, so nothing can touch
+    // the pool afterwards (an undrained work item is simply never run).
+    if (!owns_httpd_ && tx_pool_ != nullptr) {
+        for (int turn = 0; turn < 200; ++turn) {  // <= ~1 s
+            bool busy = false;
+            for (std::size_t i = 0; i < kTxPoolSlots; ++i)
+                if (tx_pool_[i].busy.load(std::memory_order_acquire)) busy = true;
+            if (!busy) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
     }
     handle_ = nullptr;
 }
@@ -322,23 +414,33 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
 
     // Pass 2: ALWAYS drain the payload — even a frame type we ignore must be consumed,
     // or its bytes stay in the stream and the next recv reads them as a frame header
-    // (TCP-stream misalignment). Only then decide what to do with it. The buffer is
-    // nothrow (frame.len is peer-controlled up to kMaxFrameBytes; a throwing
+    // (TCP-stream misalignment). Only then decide what to do with it. Fast path: a
+    // frame that fits reads into the once-allocated rx scratch — no per-frame heap.
+    // The scratch is safe to reuse per frame because this handler is the only RX
+    // path (httpd task) and delivery below is synchronous; reassembly copies out of
+    // `body` before returning. An oversized frame falls back to an exact-size nothrow
+    // buffer (frame.len is peer-controlled up to kMaxFrameBytes; a throwing
     // std::vector would abort the node on heap exhaustion under -fno-exceptions);
     // on OOM the payload cannot be drained, so fail the handler — httpd closes just
     // this session (backpressure), never the whole node.
-    std::unique_ptr<std::byte[]> payload;
+    std::unique_ptr<std::byte[]> heap_payload;
+    std::byte* payload = nullptr;
     if (frame.len != 0) {
-        payload.reset(new (std::nothrow) std::byte[frame.len]);
-        if (payload == nullptr) {
-            ESP_LOGW(kTag, "rx alloc failed (len=%u) - closing session", (unsigned)frame.len);
-            return ESP_FAIL;
+        if (rx_scratch_ != nullptr && frame.len <= kRxScratchBytes) {
+            payload = rx_scratch_.get();
+        } else {
+            heap_payload.reset(new (std::nothrow) std::byte[frame.len]);
+            if (heap_payload == nullptr) {
+                ESP_LOGW(kTag, "rx alloc failed (len=%u) - closing session", (unsigned)frame.len);
+                return ESP_FAIL;
+            }
+            payload = heap_payload.get();
         }
-        frame.payload = reinterpret_cast<std::uint8_t*>(payload.get());
+        frame.payload = reinterpret_cast<std::uint8_t*>(payload);
         err = httpd_ws_recv_frame(req, &frame, frame.len);
         if (err != ESP_OK) return err;
     }
-    const std::span<const std::byte> body(payload.get(), frame.len);
+    const std::span<const std::byte> body(payload, frame.len);
     // Only data frames carry a TLV (control frames are httpd's — handle_ws_control_frames
     // is off); a stray TEXT/PONG is now drained and ignored.
     if (frame.type != HTTPD_WS_TYPE_BINARY && frame.type != HTTPD_WS_TYPE_CONTINUE) return ESP_OK;
@@ -476,31 +578,54 @@ void httpd_ws_link_t::deliver(std::string_view peer, std::span<const std::byte> 
 void httpd_ws_link_t::queue_send(int fd, std::span<const std::span<const std::byte>> iov) {
     if (handle_ == nullptr || fd < 0) return;
     // Gather-copy the payload ONCE: httpd_queue_work is asynchronous, so the caller's
-    // spans are gone by the time the httpd task runs tx_work. Heap, never a fixed
-    // static buffer — and nothrow END TO END: the previous std::vector copy inside
-    // the braced initializer allocated with the THROWING allocator, so the
-    // `new (std::nothrow)` guard only covered the work-item shell and a reply-sized
-    // copy hitting heap exhaustion aborted the node under -fno-exceptions. An
-    // allocation failure is now exactly the drop contract below: note_tx_result
+    // spans are gone by the time the httpd task runs tx_work. Fast path: claim a
+    // pre-allocated pool slot (lock-free CAS) and gather straight into its inline
+    // buffer — no allocation at all. Fallbacks, in order: a pooled shell with a
+    // nothrow heap payload (frame > kTxInlineBytes), then a fully heap work item
+    // (pool exhausted/absent). Nothrow END TO END on every arm — never a std::vector
+    // for the copy: its THROWING allocator once defeated the `new (std::nothrow)`
+    // guard on the shell, aborting the node under -fno-exceptions on a reply-sized
+    // copy. An allocation failure is exactly the drop contract below: note_tx_result
     // counts it and the streak closes the session.
     std::size_t total = 0;
     for (const auto& part : iov) total += part.size();
-    std::unique_ptr<std::byte[]> buf(new (std::nothrow) std::byte[total]);
     tx_work_t* work = nullptr;
-    if (buf != nullptr) {
-        std::byte* p = buf.get();
+    std::byte* dst = nullptr;
+    if (tx_slot_t* const slot = claim_tx_slot(); slot != nullptr) {
+        work = &slot->work;
+        work->handle = handle_;
+        work->fd = fd;
+        work->len = total;
+        work->slot = slot;
+        if (total <= kTxInlineBytes) {
+            dst = slot->inline_buf;
+        } else {
+            work->owned.reset(new (std::nothrow) std::byte[total]);
+            dst = work->owned.get();
+            if (dst == nullptr) {  // overflow-payload OOM: recycle the slot, drop below
+                release_tx_work(work);
+                work = nullptr;
+            }
+        }
+        if (work != nullptr) work->payload = dst;
+    } else {
+        std::unique_ptr<std::byte[]> buf(new (std::nothrow) std::byte[total]);
+        if (buf != nullptr) {
+            dst = buf.get();
+            // If the shell allocation fails the initializer never runs, so `buf` is not
+            // moved-from and frees itself on return — no leak either way.
+            work = new (std::nothrow) tx_work_t{handle_, fd, dst, total, nullptr, std::move(buf)};
+        }
+    }
+    bool queued = false;
+    if (work != nullptr) {  // work == nullptr => OOM: drop this frame (backpressure)
+        std::byte* p = dst;
         for (const auto& part : iov) {
             if (!part.empty()) std::memcpy(p, part.data(), part.size());
             p += part.size();
         }
-        // If the shell allocation fails the initializer never runs, so `buf` is not
-        // moved-from and frees itself on return — no leak either way.
-        work = new (std::nothrow) tx_work_t{handle_, fd, std::move(buf), total};
-    }
-    bool queued = false;
-    if (work != nullptr) {  // work == nullptr => OOM: drop this frame (backpressure)
         queued = httpd_queue_work(handle_, &httpd_ws_link_t::tx_work, work) == ESP_OK;
-        if (!queued) delete work;  // could not enqueue — no leak
+        if (!queued) release_tx_work(work);  // could not enqueue — recycle/free, no leak
     }
     // Either drop kind is counted; kMaxConsecutiveTxDrops in a row closes the session.
     note_tx_result(fd, queued, total);
@@ -551,7 +676,7 @@ void httpd_ws_link_t::tx_work(void* arg) {
         f.final = true;
         f.fragmented = false;
         f.type = HTTPD_WS_TYPE_BINARY;
-        f.payload = reinterpret_cast<std::uint8_t*>(work->payload.get());
+        f.payload = reinterpret_cast<std::uint8_t*>(work->payload);
         f.len = work->len;
         const esp_err_t err = httpd_ws_send_frame_async(work->handle, work->fd, &f);
         if (err != ESP_OK) {
@@ -571,7 +696,7 @@ void httpd_ws_link_t::tx_work(void* arg) {
                      esp_err_to_name(err), work->fd, (unsigned)work->len);
         }
     }
-    delete work;
+    release_tx_work(work);  // recycle the pool slot, or free the heap-fallback shell
 }
 
 void httpd_ws_link_t::send(std::span<const std::byte> frame) {
