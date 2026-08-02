@@ -27,7 +27,7 @@ unsupported field already gives:
 | `reliability`, `priority`, `durability` | they describe one producer→subscriber **relationship**, and moved to the subscription's packed `delivery_policy_t` (§3.A) |
 | `deadline_ns`, `queue_max_bytes` | inert *and* without a coherent per-vertex meaning — deleted, not moved (§3.E) |
 | `history_keep_last` | an application **retention intent**: owner-side vertex state now (`graph_t::set_history_depth`, §3.C) |
-| `store_ref_min_bytes` | a deployment **copy/pin trade**: owner-side too, and §3.D replaces the predicate itself once §6's dual-target measurement lands |
+| `store_ref_min_bytes` | a deployment **copy/pin trade**: owner-side too, and §3.D's ratio predicate has replaced it (landed with §6's measurement, PR #771/#758; sentinel default per Amendment 2) |
 
 There is no deprecation window: the protocol is DRAFT, and of the seven only three ever
 functioned — none of them as remotely-writable QoS.

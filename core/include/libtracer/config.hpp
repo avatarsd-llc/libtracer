@@ -181,10 +181,10 @@ struct default_config_t {
      * would price a cost nobody pays and ignore the one everybody does.
      *
      * @ref kPinNever (0) is the reserved sentinel: never pin. It is the value shipped here, and
-     * it reproduces today's default behaviour exactly (`store_ref_min_bytes` defaults to 0 and
-     * the old predicate required `> 0`). RFC-0022 §8 Q3 leaves the landing default to §6's
-     * measurement rather than to argument, and this branch is that measurement's vehicle — it
-     * does not flip the default.
+     * it reproduces the pre-RFC default behaviour exactly (the old absolute threshold defaulted
+     * to 0 and its predicate required `> 0`). RFC-0022 §8 Q3 was answered by §6's measurement
+     * (Amendment 2, PR #771): the sentinel is the landing default on BOTH targets — the
+     * on-by-default flip does not land.
      */
     static constexpr std::uint32_t kPinPayloadRatio = 0;
 

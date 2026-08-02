@@ -466,8 +466,8 @@ class graph_t {
      * @note This is a per-vertex OVERRIDE of `config_t::kPinPayloadRatio`, which Amendment 2
      *       fixes at the sentinel on both targets. It exists so §6-style measurement arms
      *       rotate inside one process — measuring them as separate binaries is what produced
-     *       a 2.8x swing on identical code. Setting it changes no observable behaviour until
-     *       a deployment opts a vertex in.
+     *       a 2.8x swing on identical code. Setting it IS the opt-in for that vertex; the
+     *       override's existence changes nothing shipped, since both defaults are the sentinel.
      */
     void set_pin_payload_ratio(vertex_handle_t v, std::uint32_t k);
     /**
