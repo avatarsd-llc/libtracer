@@ -92,7 +92,7 @@ Verified from source, not assumed. Nothing on the wire path counts segments:
 
 - `core/src/frame.cpp:166-179` (`wire::path_key`) sums child lengths only to reserve, then emits.
   No cap test.
-- `core/src/op_resolve_walk.hpp:604-613` (`path_lookup_key`) rejects a non-`NAME` child and counts
+- `core/src/op_resolve_walk.hpp:648-657` (`path_lookup_key`) rejects a non-`NAME` child and counts
   nothing.
 - `core/src/graph.cpp:458-483` (`ensure_vertex_ptr`) calls `key_view_t::split_levels`, which checks
   only `NAME` framing and exactness (`core/include/libtracer/key_view.hpp:122-136`), then

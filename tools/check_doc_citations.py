@@ -49,15 +49,15 @@ ANCHORS = [
     # silently (they cited the pre-#739 header). Anchored so they cannot rot again.
     # zero-copy-and-flatten.md's rope-tier citations and ADR-0072's stale-comment pointer —
     # all four had rotted on main and were re-asserted by a mechanical +24 shift (#768 verify).
-    ("core/include/libtracer/fwd_router.hpp:529", "Terminus over a MULTI-LINK rope"),
-    ("core/include/libtracer/fwd_router.hpp:535", "64 KB / 2 links"),
-    ("core/include/libtracer/fwd_router.hpp:547", "The forward hop, read entirely by OFFSET"),
-    ("core/include/libtracer/fwd_router.hpp:439", "Slot addresses are NOT stable"),
-    ("core/include/libtracer/fwd_router.hpp:146", "explicit fwd_router_t"),
-    ("core/include/libtracer/fwd_router.hpp:205", "bool add_child"),
-    ("core/include/libtracer/fwd_router.hpp:255", "subscribe_toward"),
-    ("core/include/libtracer/fwd_router.hpp:265", "using reply_fn_t"),
-    ("core/include/libtracer/fwd_router.hpp:276", "using stale_label_fn_t"),
+    ("core/include/libtracer/fwd_router.hpp:534", "Terminus over a MULTI-LINK rope"),
+    ("core/include/libtracer/fwd_router.hpp:540", "64 KB / 2 links"),
+    ("core/include/libtracer/fwd_router.hpp:552", "The forward hop, read entirely by OFFSET"),
+    ("core/include/libtracer/fwd_router.hpp:444", "Slot addresses are NOT stable"),
+    ("core/include/libtracer/fwd_router.hpp:151", "explicit fwd_router_t"),
+    ("core/include/libtracer/fwd_router.hpp:210", "bool add_child"),
+    ("core/include/libtracer/fwd_router.hpp:260", "subscribe_toward"),
+    ("core/include/libtracer/fwd_router.hpp:270", "using reply_fn_t"),
+    ("core/include/libtracer/fwd_router.hpp:281", "using stale_label_fn_t"),
     ("core/include/libtracer/child_registry.hpp:209", "bool add(std::string name"),
     ("core/include/libtracer/child_registry.hpp:458", "resolve_peer"),
     ("core/include/libtracer/child_registry.hpp:473", "bool erase"),
@@ -80,8 +80,8 @@ ANCHORS = [
     ("core/src/graph.cpp:1526", "step0.wildcard"),
     ("core/src/graph.cpp:2085", '"children" && !field.steps[0].wildcard'),
     ("core/src/graph.cpp:2185", "!field.steps[0].wildcard", 'field.steps[0].name == "subscribers"'),
-    ("core/src/op_resolve_walk.hpp:268", "enum class index_mode_t"),
-    ("core/src/op_resolve_walk.hpp:676", 'field.steps[0].name != "subscribers"'),
+    ("core/src/op_resolve_walk.hpp:311", "enum class index_mode_t"),
+    ("core/src/op_resolve_walk.hpp:720", 'field.steps[0].name != "subscribers"'),
     ("core/include/libtracer/mem_heap.hpp:149", "try_assign"),
     ("core/include/libtracer/view.hpp:26", "namespace tr::view"),
     ("core/include/libtracer/frame.hpp:23", "namespace tr::wire"),
@@ -124,11 +124,13 @@ ANCHORS = [
     # seam docs name as NOT covered by `flat`. These were cited by four doc pages and anchored
     # by none, so #793's own edits to `op_resolve_view.cpp` shifted every one of them without
     # the gate noticing — the exact rot class this file exists for.
-    ("core/src/op_resolve_view.cpp:129", "sub.flatten(backend())"),
-    ("core/src/op_resolve_view.cpp:139", "over_bytes(sub.only().bytes(), backend())"),
-    ("core/src/op_resolve_view.cpp:237", "wire().materialize(backend())"),
-    ("core/src/op_resolve_walk.hpp:500", "view::heap_alloc(head_len)"),
-    ("core/src/op_resolve_walk.hpp:577", "rope_t or_backpressure"),
+    ("core/src/op_resolve_view.cpp:136", "sub.flatten(flat)"),
+    # #801 — the SPAN tier's ownership copy, cited by allocation-and-backpressure.md.
+    ("core/src/op_resolve_walk.hpp:186", "view_t own_wire(mem::mem_backend_t& flat)"),
+    ("core/src/op_resolve_view.cpp:146", "over_bytes(sub.only().bytes(), flat)"),
+    ("core/src/op_resolve_view.cpp:254", "wire().materialize(backend())"),
+    ("core/src/op_resolve_walk.hpp:544", "view::heap_alloc(head_len)"),
+    ("core/src/op_resolve_walk.hpp:621", "rope_t or_backpressure"),
     ("core/src/fwd_router.cpp:1012", "decode_into(frame, rx_for(inbound_ctx))"),
     ("core/include/libtracer/vertex.hpp:2394", "vertex_t* parent_"),
 ]

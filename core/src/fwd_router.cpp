@@ -1037,7 +1037,7 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
     // No frame_view is threaded, and the rope tier does not need one: unlike the arena's
     // pin_wire — which requires a contiguous frame view and is gated on it —
     // view_node::pin_wire IGNORES the argument and subropes the payload directly
-    // (`op_resolve_view.cpp:106-128`), so the ADR-0042 §3 referenced store works here with
+    // (`op_resolve_view.cpp:113-135`), so the ADR-0042 §3 referenced store works here with
     // ZERO copy, retaining only the payload's links rather than the whole frame. (This
     // comment previously read as though the pin were unavailable on the rope path; it is
     // the reverse, and that misreading nearly justified deleting the tier.) Reply routes
