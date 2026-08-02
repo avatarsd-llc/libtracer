@@ -304,7 +304,7 @@ pub struct PathRefElement {
 
 /**
  * @brief Build a PATH_REF TLV (`type=0x14`, `PL=0`, `LL=0`) — the bound-path form
- * (RFC-0024 §4). Vector-pinned: `path-ref/ref-1host`, `ref-2host`, `ref-3host`.
+ * (RFC-0024 §4). Vector-pinned: `path-ref/ref-empty`, `ref-1host`, `ref-2host`, `ref-3host`.
  *
  * The body is a bare array of fixed 8-byte elements in route order: no per-element framing
  * (element *i* is `body[8i .. 8i+8)`, computed rather than parsed) and no count field (the

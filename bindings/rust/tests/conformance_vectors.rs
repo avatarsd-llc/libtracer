@@ -571,6 +571,37 @@ fn path_ref_pl_set() {
     assert_eq!(cleared, assert_vector_consistent("path-ref/ref-2host"));
 }
 
+/**
+ * @brief `opt.LL = 1` on a PATH_REF is `tr::frame::invalid` — the u32 length is unreachable.
+ *
+ * `ref-1host`'s single element under the 6-byte header. 255 elements is 2040 bytes, three
+ * orders inside a u16, so a wide length can only ever be two wasted bytes; §4.2 forbids the
+ * bit so that one route has one byte spelling. Its own vector because the clause is
+ * independent of the `PL` one — a core that drops it still satisfies the other three rules.
+ */
+#[test]
+fn path_ref_ll_set() {
+    let bin = assert_vector_rejected("path-ref/ref-ll-set");
+    assert_eq!(hex(&bin), "1408080000000700000003000000");
+}
+
+/**
+ * @brief An empty body (`H = 0`) round-trips: §4.3's element bound is an upper one.
+ *
+ * `0 % 8 == 0` and `0 <= 2040`, and no clause demands a first element — so the codec carries
+ * the frame and a route naming no vertex is the router's to refuse (§5). The low end of the
+ * range whose high end `ref-255-elements` / `ref-256-elements` straddle.
+ */
+#[test]
+fn path_ref_empty() {
+    let bin = assert_vector_consistent("path-ref/ref-empty");
+    assert_eq!(hex(&bin), "14000000");
+    assert_eq!(encode(&path_ref(&[]).unwrap()), bin);
+    let t = decode(&bin).unwrap();
+    assert!(t.payload.is_empty());
+    assert_eq!(path_ref_element(&t.payload, 0), None);
+}
+
 /* -------------------------------------------------- Unit 3 — ERROR + STATUS --- */
 
 #[test]

@@ -220,6 +220,17 @@ int main() {
         pl_set[1] = std::byte{0x40};
         check(hex(pl_set) == "1440100007000000030000002a00000001000000" && rejected_invalid(pl_set),
               "path-ref/ref-pl-set's reject.bin decodes to FRAME_INVALID");
+        // ref-ll-set is not emittable — emit_path_ref never sets LL — so its bytes are spelled
+        // out: the 6-byte header a set LL forces, then ref-1host's single element.
+        const std::vector<std::byte> ll_set = {
+            std::byte{0x14}, std::byte{0x08}, std::byte{0x08}, std::byte{0x00}, std::byte{0x00},
+            std::byte{0x00}, std::byte{0x07}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+            std::byte{0x03}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+        check(hex(ll_set) == "1408080000000700000003000000" && rejected_invalid(ll_set),
+              "path-ref/ref-ll-set's reject.bin decodes to FRAME_INVALID");
+        // The low end of the accepted range: H = 0 is the envelope alone, and it round-trips.
+        check(hex(emit(std::span<const path_ref_element_t>{})) == "14000000",
+              "emit_path_ref reproduces path-ref/ref-empty's input.bin (4 B, H = 0)");
     }
 
     std::printf(g_failures == 0 ? "\nPATH_REF: PASS\n" : "\nPATH_REF: FAIL (%d)\n", g_failures);

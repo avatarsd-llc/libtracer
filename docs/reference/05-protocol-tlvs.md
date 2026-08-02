@@ -1014,7 +1014,7 @@ The encoder's invariants:
    2A 00 00 00 01 00 00 00      ← element 1: index=42, generation=1
 ```
 
-**20 bytes total** — the `4 + 8H` a bound path costs at `H = 2`. Conformance vectors: `path-ref/ref-1host`, `ref-2host`, `ref-3host`, `ref-255-elements`, and the negative `ref-len-not-multiple-of-8`, `ref-256-elements`, `ref-pl-set`.
+**20 bytes total** — the `4 + 8H` a bound path costs at `H = 2`. Conformance vectors: `path-ref/ref-empty` (`H = 0`, the envelope alone), `ref-1host`, `ref-2host`, `ref-3host`, `ref-255-elements`, and the negative `ref-len-not-multiple-of-8`, `ref-256-elements`, `ref-pl-set`, `ref-ll-set`. The four structural rules above each get their own reject case, since a core that drops one of them still satisfies the other three.
 
 An element is **node-scoped**: it means nothing anywhere but on the host that minted it, so no receiver can validate another host's element and no codec can validate any of them. A `PATH_REF` is an **address, never a capability** — an operation arriving on one is authorized by the same per-operation `acl_allows` check at the target vertex that the canonical form performs.
 

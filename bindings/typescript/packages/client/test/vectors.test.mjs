@@ -343,4 +343,25 @@ test('the structurally-invalid PATH_REF vectors are FRAME_INVALID, never a parti
   const cleared = Uint8Array.from(plSet);
   cleared[1] = 0x00;
   assert.ok(sameBytes(cleared, vector('path-ref/ref-2host')), 'one bit apart from ref-2host');
+
+  // opt.LL = 1: ref-1host's element under the 6-byte header and the u32 length. The u32
+  // width is unreachable below a 2040-byte cap, so §4.2 forbids the bit rather than
+  // ignoring it — one route, one byte spelling. Its own case because the LL clause is
+  // independent of the PL one: dropping either leaves the other three rules satisfied.
+  const llSet = rejectVector('path-ref/ref-ll-set');
+  assert.equal(hex(llSet), '1408080000000700000003000000');
+  assert.throws(() => decode(llSet), (e) => e.code === ERROR.FRAME_INVALID);
+});
+
+test('an empty PATH_REF body is well-formed — the §4.3 bound is an upper one', () => {
+  // H = 0: the envelope alone. 0 % 8 == 0 and 0 <= 2040, and there is no "at least one
+  // element" clause; a route naming no vertex is the router's to refuse (§5), not the
+  // codec's. This is the low end of the range ref-255/ref-256-elements bound above.
+  const empty = vector('path-ref/ref-empty');
+  assert.equal(hex(empty), '14000000');
+  const tlv = decode(empty);
+  assert.equal(tlv.type, TYPE.PATH_REF);
+  assert.equal(tlv.payload.length, 0);
+  assert.equal(tlv.children.length, 0);
+  assert.ok(sameBytes(encodePathRef([]), empty), 'ref-empty');
 });
