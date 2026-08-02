@@ -175,7 +175,15 @@ reports a failed allocation as a successful write of nothing.
 :members:
 ```
 
-```{doxygenfunction} tr::view::over_bytes
+```{doxygenfunction} tr::view::over_bytes(std::span<const std::byte>)
+:project: libtracer
+```
+
+```{doxygenfunction} tr::view::over_bytes(std::span<const std::byte>, mem::mem_backend_t&)
+:project: libtracer
+```
+
+```{doxygenfunction} tr::view::segment_alloc
 :project: libtracer
 ```
 

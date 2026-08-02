@@ -44,7 +44,7 @@ A path that violates any limit MUST be rejected with `ERROR{tr::path::invalid}`.
 > `length` field. For 32 segments of 29 bytes the three readings give 960, 959 and 1056 —
 > far enough apart that a path one reading calls conforming another rejects. The
 > encoded-body reading is the one C++ and Rust both implement. See
-> [RFC-0019](../spec/rfcs/0019-path-depth-bounded-by-bytes.md) §4.3, which depends on this
+> [RFC-0019](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0019-path-depth-bounded-by-bytes.md) §4.3, which depends on this
 > unit being unambiguous.
 
 ### Examples
