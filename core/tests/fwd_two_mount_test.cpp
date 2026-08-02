@@ -290,7 +290,19 @@ int main() {
     const std::vector<std::byte> origin = b_fwd(
         fwd_op_t::READ, b_path({"net", "uplink", "b", "net", "uplink", "c", "sensor", "temp"}),
         b_path({"reply-ep"}));
-    check(origin.size() == 91, "the origin frame is the 91-byte fwd-routed-two-mount vector");
+    // The vector's input.bin, pinned here so a divergence between b_fwd's construction and the
+    // published bytes fails this test rather than only the Rust encode pin.
+    static constexpr std::string_view kVectorHex =
+        "0f405700010001000006403e00020003006e65740200060075706c696e6b0200010062020003006e6574"
+        "0200060075706c696e6b02000100630200060073656e736f720200040074656d7006400c000200080072"
+        "65706c792d6570";
+    std::vector<std::byte> expected_bytes;
+    for (size_t i = 0; i + 1 < kVectorHex.size(); i += 2) {
+        expected_bytes.push_back(
+            static_cast<std::byte>(std::stoi(std::string(kVectorHex.substr(i, 2)), nullptr, 16)));
+    }
+    check(origin == expected_bytes,
+          "the origin frame is byte-identical to fwd/fwd-routed-two-mount's input.bin (91 B)");
     ch_cli.a().send(origin);
 
     // ===== hop 1, at A: strip_k = 3 =====================================================

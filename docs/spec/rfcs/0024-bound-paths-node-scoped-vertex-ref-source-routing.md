@@ -727,13 +727,13 @@ Wireshark dissector (`tools/wireshark/libtracer.lua`) follow. Public-header chan
   delivery-compaction tier. §2.1 is the comparison; the vocabulary rule is normative.
 - **[RFC-0021](0021-wire-subscriber-target-frame-of-reference.md)** — accepted, implementation
   deferred; **this RFC is the home its deferred producer-frame resolution needs** (§7.4).
-- **[#419](https://github.com/avatarsd-llc/libtracer/issues/419)** — the open adjudication is
-  whether `fwd/fwd-routed-multihop` encodes one three-segment mount or two successive hops; the
-  ruling notes "reading the bytes cannot settle it, because both models produce the same `dst`
-  string." **A `PATH_REF` makes hop structure explicit on the wire** — H elements is H hosts, with
-  no reading required — so a bound-form companion vector is unambiguous by construction. This does
-  **not** settle #419 (the canonical vector's meaning is still the maintainer's call) and this RFC
-  does not block on it.
+- **[#419](https://github.com/avatarsd-llc/libtracer/issues/419)** — **settled (ruling (a))**:
+  the vector encodes one three-segment mount plus residual and is now named
+  `fwd/fwd-routed-mount-residual`, with a genuine two-hop companion at
+  `fwd/fwd-routed-two-mount`. The adjudication had turned on the fact that reading the bytes
+  cannot distinguish the two models, because both produce the same `dst` string. **A `PATH_REF`
+  makes hop structure explicit on the wire** — H elements is H hosts, with no reading required —
+  so the bound form never reproduces that ambiguity class.
 - **[RFC-0019](0019-path-depth-bounded-by-bytes.md) / [RFC-0023](0023-path-segment-cap-repriced-32-to-255.md)
   byte bounds** — `PATH_REF` is bounded by **hop count**, not segment count, and derives its own
   bound in §4.3 (normative ≤ 255 elements / 2040 B; reachable ≤ 69 today, ≤ 171 packed).
