@@ -32,7 +32,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     `assert` that compiled out under `NDEBUG` and therefore left every release build with no
     bound at all. What it refuses is only what no address could ever name: an empty name, a
     name with an empty segment, or one wider than `graph::kMaxSegments` — the path-depth
-    budget being the ONLY real bound on mount width.
+    budget being the ONLY real bound on mount width. `false` ALSO covers the registry refusing
+    to grow: `child_registry_t::add` now reports its soft allocation failure instead of
+    swallowing it, and `add_child` refuses BEFORE it wires the link's receiver — so a node
+    that cannot allocate a registry chunk gets no child rather than a GHOST one, audible on
+    its transport and resolvable by no `dst` (`core/tests/mount_add_oom_test.cpp`).
+  - `child_registry_t::add` returns **`bool`** instead of `void` — `false` ⇔ no slot could be
+    appended and NOTHING was registered. Also not `[[nodiscard]]`, so control-plane call sites
+    that ignore it are unchanged.
   - `tr::net::kMountPeekMax` — **removed.**
   - `tr::net::peek_fwd_dst_segs` — **removed**, replaced by `tr::net::peek_fwd_dst` (opens the
     `dst` window, materializes nothing) plus `tr::net::dst_seg_walk_t` (reads leading segments
@@ -64,8 +71,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   every per-segment quantity (count, slot index, table dimension) stays `u8`-representable.
   **Nothing in `core/` is dimensioned by the constant** — `segments_` is already a `std::size_t`,
   the parse-time reserve is keyed to `kMaxPathBytes`, and the one cap-sized scratch
-  (`core/src/fwd_router.cpp`) is keyed to `kMaxSegmentBytes × kMountPeekMax` — so the static-RAM
-  delta is **zero by construction** (RFC-0023 §4.4, re-verified on this tree). Under the current
+  (`core/src/fwd_router.cpp`) is keyed to `kMaxSegmentBytes` and a fixed slot count — so the
+  static-RAM delta is **zero by construction** (RFC-0023 §4.4, re-verified on this tree).
+  (RFC-0023 as accepted named that scratch `kMaxSegmentBytes × kMountPeekMax`, which was its
+  shape at the time; the #523 lift in this same release deletes `kMountPeekMax` and shrinks the
+  scratch to `kMaxSegmentBytes × 2` — two stitch slots, a transient and a retained. The RFC's
+  own text is left as accepted; the conclusion it reaches — nothing is dimensioned by
+  `kMaxSegments` — is only more true afterwards.) Under the current
   NAME-TLV body encoding each segment costs `4 + len`, so the **1024-byte `kMaxPathBytes` cap
   binds first at 204 segments** and the count clause cannot fire; it becomes binding only under
   RFC-0018's packed body. The observable widening today is therefore 32 → 204.

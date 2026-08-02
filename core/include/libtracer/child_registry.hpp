@@ -107,20 +107,6 @@ class child_registry_t {
      * shape captured once at @ref add time, so the forward path never probes `bus()`.
      */
     struct child_t {
-        std::string name; /**< @brief Qualified mount name, `"<module>/<name>"`. */
-        /** @brief The link; nullptr marks a TOMBSTONE (#494). ATOMIC because teardown nulls
-         *         it in place while a lock-free forward read may be dereferencing the slot
-         *         (ADR-0063): the reader sees the old pointer or `nullptr`, never a tear. */
-        std::atomic<transport_t*> link{nullptr};
-        /** @brief Shape, captured at @ref add time. ATOMIC for the same reason `link` is, and
-         *         it was missed the first time: @ref add REBINDS an existing slot on the
-         *         tombstone-reuse path that RFC-0014 create/remove churn takes constantly, and
-         *         that rebind writes this field while a lock-free forward read is testing it
-         *         (`fwd_router.cpp`'s mount descent). A plain write against a plain read is a
-         *         data race however benign the codegen looks on a given target (ADR-0063
-         *         erratum 3). Relaxed suffices: the value is an independent bool, published
-         *         BEFORE the `link` release-store that makes the slot resolvable at all. */
-        std::atomic<bool> multi_peer{false};
         /**
          * @brief How many `/`-separated segments @ref name has — the slot's OWN mount width.
          *
@@ -133,12 +119,31 @@ class child_registry_t {
          * Written once, on the append path, before the slot is published — the same contract
          * @ref name_digest has, and for the same reason: it is a pure function of @ref name.
          *
-         * Declared HERE, in `multi_peer`'s tail padding, rather than beside `name_digest`:
-         * appended at the end it grew `child_t` from 80 to 88 bytes, and 64 slots of that is
-         * eight extra cache lines the scan walks per frame. Slotted into the hole the struct
-         * already had, the width lift costs the table nothing at all.
+         * **Declared FIRST, beside @ref name_digest.** These two are the ONLY fields the scan's
+         * hot loop reads, once per slot; everything else is touched for the single slot that
+         * wins. Appended at the END of the struct they grew `child_t` from 80 to 88 bytes, and
+         * 64 slots of that is eight extra cache lines the scan walks per frame. Tucked into
+         * `multi_peer`'s tail padding instead (offset 44, digest at 48) the size came back, but
+         * the PAIR then straddled a 64-byte boundary on one slot in every four. Here it is 16
+         * bytes at offsets 0/8, so the size is 80 AND every slot's hot read is one line.
+         *
+         * Honest about what that last move bought: it was made to remove the straddle and the
+         * A/B moved by ~1 ns at `W = 3`, `N = 64` — inside the run-to-run range, so it is a
+         * shape argument, not a measured win. It is kept because the straddle-free layout is
+         * the one that does not depend on the compiler having placed the fields luckily; the
+         * regression this PR actually had to close was code generation, not slot layout (see
+         * `resolve_mount_deep` in `fwd_router.cpp`).
          */
         std::uint32_t seg_count = 0;
+        /** @brief Shape, captured at @ref add time. ATOMIC for the same reason `link` is, and
+         *         it was missed the first time: @ref add REBINDS an existing slot on the
+         *         tombstone-reuse path that RFC-0014 create/remove churn takes constantly, and
+         *         that rebind writes this field while a lock-free forward read is testing it
+         *         (`fwd_router.cpp`'s mount descent). A plain write against a plain read is a
+         *         data race however benign the codegen looks on a given target (ADR-0063
+         *         erratum 3). Relaxed suffices: the value is an independent bool, published
+         *         BEFORE the `link` release-store that makes the slot resolvable at all. */
+        std::atomic<bool> multi_peer{false};
         /**
          * @brief A cheap digest of @ref name, computed once at @ref add time.
          *
@@ -154,6 +159,11 @@ class child_registry_t {
          * overwhelming majority of candidates cost one compare.
          */
         std::uint64_t name_digest = 0;
+        std::string name; /**< @brief Qualified mount name, `"<module>/<name>"`. */
+        /** @brief The link; nullptr marks a TOMBSTONE (#494). ATOMIC because teardown nulls
+         *         it in place while a lock-free forward read may be dereferencing the slot
+         *         (ADR-0063): the reader sees the old pointer or `nullptr`, never a tear. */
+        std::atomic<transport_t*> link{nullptr};
         /** @brief True while this slot still resolves — i.e. it is not a tombstone. */
         [[nodiscard]] bool live() const noexcept {
             return link.load(std::memory_order_acquire) != nullptr;
@@ -186,8 +196,17 @@ class child_registry_t {
      * its transport believing teardown had succeeded while @ref by_name kept resolving the
      * freed link through the shadow. Rebinding makes the name→slot mapping one-to-one, which
      * is what every other operation here already assumes.
+     *
+     * @retval false The table could not grow — `append` got no chunk from the allocator, so
+     *         NOTHING was registered. It used to return `void` and swallow exactly this,
+     *         leaving the caller (`fwd_router_t::add_child`) to report success and wire a
+     *         receiver onto a link the registry does not hold: a GHOST child, audible on its
+     *         transport, resolvable by no `dst`, and removable by no `remove_child` — the same
+     *         "healthy-looking child that every forward misses" shape #523 was filed about.
+     *         Not `[[nodiscard]]`: the control-plane tests that ignore it are unchanged, and
+     *         the ONE caller that must not is `add_child`.
      */
-    void add(std::string name, transport_t& link) {
+    bool add(std::string name, transport_t& link) {
         const bool multi_peer = link.bus() != nullptr;
         child_t* hit = nullptr;
         for_each([&](const child_t& c) {
@@ -209,11 +228,11 @@ class child_registry_t {
             // A tombstone coming back to life changes what a `dst` prefix resolves to, so it
             // moves the mount shape exactly as a fresh append does (#765).
             bump_generation();
-            return;
+            return true;
         }
         std::vector<std::byte> mount = encode_mount_name(name);
         child_t* const slot = append();
-        if (slot == nullptr) return;  // allocation failure — soft-fail, nothing registered
+        if (slot == nullptr) return false;  // no chunk — NOTHING is registered; see the docs
         slot->name = std::move(name);
         slot->name_digest = digest_name(slot->name);
         slot->seg_count = static_cast<std::uint32_t>(segment_count(slot->name));
@@ -222,6 +241,7 @@ class child_registry_t {
         slot->link.store(&link, std::memory_order_release);
         publish(slot);
         bump_generation();
+        return true;
     }
 
     /**

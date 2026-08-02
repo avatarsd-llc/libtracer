@@ -120,6 +120,19 @@ struct fwd_pre_t {
     std::size_t dst_body_off = 0; /**< @brief First byte of the dst PATH body. */
     std::size_t dst_end = 0;      /**< @brief End of the dst PATH body. */
     std::size_t after_dst = 0;    /**< @brief First byte after the dst PATH TLV. */
+    /**
+     * @brief The FIRST `dst` segment's `[body_off, body_len)` — the gate's own read, kept.
+     *
+     * @ref peek_fwd_dst must parse this header anyway: "the leading child is a NAME" is the
+     * gate that decides a `dst` is an address at all. It used to throw the parsed offsets
+     * away, and the descent immediately re-read the identical four bytes — one duplicated
+     * `parse_header` on EVERY forward hop, which is a per-frame cost the pre-lift peek did
+     * not pay (its one walk both gated and collected). Carrying the two integers forward
+     * removes the duplicate without moving the gate: the same header, read once, decides the
+     * same thing. Meaningless when @ref valid is false.
+     */
+    std::size_t seg0_off = 0;
+    std::size_t seg0_len = 0; /**< @brief Length of the first `dst` segment's body. */
     /** @brief Where the surviving `dst` starts after this hop consumes its leading segments —
      *         i.e. the end of segment `strip_k - 1`, or @ref dst_body_off when nothing is
      *         stripped. Filled by the caller after the mount descent; leaving it 0 with
@@ -150,9 +163,14 @@ struct fwd_pre_t {
  * @retval false  Not a structured FWD with an op VALUE, a non-empty `dst` PATH, and a
  *                leading NAME segment — the caller falls through to the terminus/control
  *                arms exactly as it did on the old `n == 0`.
+ *
+ * @note `flatten` — see @ref rebuild_fwd_forward for the measurement. The four
+ *       @ref read_fwd_header calls below are this function's whole body, and each returns a
+ *       ~56-byte `std::optional<fwd_hdr_t>` that an out-of-line call must return through
+ *       memory.
  */
 template <class Cursor>
-[[nodiscard]] bool peek_fwd_dst(const Cursor& cur, fwd_pre_t& pre) {
+[[gnu::flatten]] [[nodiscard]] bool peek_fwd_dst(const Cursor& cur, fwd_pre_t& pre) {
     pre = fwd_pre_t{};
     const auto fwd_h = read_fwd_header(cur, 0);
     if (!fwd_h || fwd_h->type != wire::type_t::FWD || !fwd_h->opt.pl) return false;
@@ -177,6 +195,9 @@ template <class Cursor>
     pre.dst_body_off = dst_h->body_off;
     pre.dst_end = dst_h->body_off + dst_h->body_len;
     pre.after_dst = dst_pos + dst_h->total;
+    // The gate's own read, handed over rather than discarded — see the member doc.
+    pre.seg0_off = seg_h->body_off;
+    pre.seg0_len = seg_h->body_len;
     pre.strip_at = dst_h->body_off;  // caller overwrites once strip_k is known
     return true;
 }
@@ -667,13 +688,24 @@ struct fwd_rebuild_t {
  *         terminus path.
  * @note   A returned rebuild may still have `!ok()` (an oversized op TLV
  *         overflowed a head) — the caller must check and drop, never overrun.
+ *
+ * @note **`flatten`, and it is measured.** @ref read_fwd_header returns
+ *       `std::optional<fwd_hdr_t>` — six words — so an OUT-OF-LINE call returns it through
+ *       memory and the caller re-loads every field. Inlined it is registers. Which way the
+ *       compiler goes is a budget decision it makes per caller, and it flipped the wrong way
+ *       for the three header readers on the forward hop once the descent's cold arm was moved
+ *       out of line and `on_frame_impl` shrank: a `perf` profile of a `W = 3` hop put **58%**
+ *       of it inside an out-of-line `read_fwd_header`, against 4% on the pre-lift build where
+ *       the same calls were inlined. `flatten` on the three functions that read headers in a
+ *       loop (here, @ref peek_fwd_dst, and the router's `resolve_mount_at`) is worth 6-8 ns
+ *       per hop across every `W` measured. It is deliberately NOT `always_inline` on
+ *       @ref read_fwd_header itself: that inlines it into the cold control-frame and terminus
+ *       paths too and measured **+16 to +24%** — strictly worse than doing nothing.
  */
 template <class Cursor>
-[[nodiscard]] std::optional<fwd_rebuild_t> rebuild_fwd_forward(const Cursor& cur,
-                                                               std::span<const std::byte> mount_tlv,
-                                                               std::string_view extra_seg,
-                                                               std::size_t strip_k,
-                                                               const fwd_pre_t* pre = nullptr) {
+[[gnu::flatten]] [[nodiscard]] std::optional<fwd_rebuild_t> rebuild_fwd_forward(
+    const Cursor& cur, std::span<const std::byte> mount_tlv, std::string_view extra_seg,
+    std::size_t strip_k, const fwd_pre_t* pre = nullptr) {
     // The frame's leading headers were already parsed by the `dst` peek that routed this hop.
     // When the caller hands them over, re-reading them is pure duplicated work — profiling put
     // ~88% of a 1-link forward hop in header parsing, most of it exactly this. There is still

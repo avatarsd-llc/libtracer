@@ -246,79 +246,129 @@ template <class SegAt, class Retain>
 }
 
 /**
- * @brief The forward path's entry to @ref resolve_mount_by — walks `dst` lazily, then descends.
+ * @brief The UNBOUNDED-width arm of the descent: walk `dst` lazily, one segment at a time.
  *
- * The walker and the two stitch slots are the WHOLE per-frame state: nothing is sized by the
- * mount width, so the router's stack frame is the same for a 1-segment mount and a 33-segment
- * one. (The measured alternative — a W-sized peek array — cost 592 B of rv32 stack at W=4 and
- * 2912 B at W=33, paid per rope frame. That is the design this replaces, not a variant of it.)
+ * Reached only when the address does not fit the shallow arm's locals — a `dst` deeper than
+ * @ref kSegViewSlots, or one whose segments straddle rope links and so cannot be named by a
+ * view into the frame. Every answer is identical to the shallow arm's; this is the arm that
+ * makes the width unbounded, which is why the shallow one is an OPTIMISATION and never a cap.
+ *
+ * `noinline` ON PURPOSE, and it is the fix for the measured regression this design shipped
+ * with. Inlined, the walker, its lambdas and `resolve_mount_by`'s second instantiation all
+ * landed in `on_frame_impl` — 3476 → 8080 bytes of code and +144 B of stack frame — and the
+ * SHALLOW path, which touches none of it, paid for the register pressure: +14 ns per frame at
+ * W = 1 rising to +25 ns at W = 3, on shapes whose per-slot work is identical. Out of line,
+ * the hot function is the pre-lift one again and this arm costs a call it was always going to
+ * be worth.
+ *
+ * The walker and the two stitch slots are the WHOLE per-frame state here: nothing is sized by
+ * the mount width, so the router's stack frame is the same for a 1-segment mount and a
+ * 33-segment one. (The measured alternative — a W-sized peek array — cost 592 B of rv32 stack
+ * at W=4 and 2912 B at W=33, paid per rope frame. That is the design this replaces.)
  */
 template <class Cursor>
-[[nodiscard]] mount_hit_t resolve_mount_at(const child_registry_t& registry, const Cursor& cur,
-                                           seg_reader_t<Cursor>& rd, fwd_pre_t& pre) {
-    if (!pre.valid) return {};
+[[gnu::noinline]] [[nodiscard]] mount_hit_t resolve_mount_deep(const child_registry_t& registry,
+                                                               const Cursor& cur,
+                                                               seg_reader_t<Cursor>& rd,
+                                                               fwd_pre_t& pre) {
     dst_seg_walk_t<Cursor> walk(cur, pre);
     walk.prefill();
-    // Materialize the INLINE RUN up front, in one tight loop, into plain locals — the exact
-    // shape of the fixed peek this replaced, minus the fixed BOUND. The descent reads each
-    // leading segment several times (the digest fold, the confirm compare, the residual test),
-    // and reaching back through the walker and the reader on every one of those measured
-    // ~30 ns on the `W = 3` shape that already worked. Off a local array it is a bounds
-    // compare and a load.
-    //
-    // `kSegViewSlots` is a CACHE length, not a width bound: a `dst` deeper than it is walked
-    // on demand below, with identical answers. That is the whole difference from
-    // `kMountPeekMax`, which decided which mounts could resolve at all.
-    std::array<std::string_view, kSegViewSlots> seg;
-    std::size_t inline_n = 0;
-    bool all_in_place = true;
-    while (inline_n < kSegViewSlots) {
-        const auto s = walk.at(inline_n);  // served from the prefilled cache
-        if (!s) break;
-        // Empty here means "not addressable as a view into the frame" — unroutable, OR
-        // straddling a rope link. Either way the slow arm below re-reads it and answers
-        // correctly; nothing is decided by the difference.
-        seg[inline_n] = rd.in_place(s->first, s->second);
-        if (seg[inline_n].empty()) all_in_place = false;
-        ++inline_n;
-    }
-    // FAST ARM: the whole address sits in the locals above. Then the descent is handed a plain
-    // span and is byte-for-byte the shape the pre-lift one had — no walker, no callable, no
-    // `std::optional` on any per-segment step. This is the arm every RFC-0014 mount takes, and
-    // measuring it was the point: a lazy walk is the right shape for an UNBOUNDED width and
-    // the wrong one for the three-segment address that is 99% of the traffic.
-    const bool ends_in_run = inline_n < kSegViewSlots || !walk.at(inline_n).has_value();
-    mount_hit_t hit;
-    if (all_in_place && ends_in_run) {
-        hit = resolve_mount_segs(registry, std::span<const std::string_view>(seg.data(), inline_n));
-    } else {
-        // SLOW ARM: a `dst` deeper than the cached run, or one whose segments straddle rope
-        // links. Same descent, reading segments on demand — the arm that makes the width
-        // unbounded, and the reason the fast arm is an optimisation rather than a bound.
-        const auto read_seg = [&](std::size_t i) -> std::optional<std::string_view> {
-            if (i < inline_n && !seg[i].empty()) return seg[i];
-            const auto s = walk.at(i);
-            if (!s) return std::nullopt;
-            return rd.transient(s->first, s->second);
-        };
-        hit = resolve_mount_by(registry, read_seg, [&](std::size_t i) {
-            // The resolved PEER name is referenced right through the egress `gather`, so it
-            // is read into the slot that outlives every later read. An in-place view already
-            // outlives the hop, so it is handed over as-is.
-            if (i < inline_n && !seg[i].empty()) return seg[i];
-            const auto s = walk.at(i);
-            return s ? rd.retained(s->first, s->second) : std::string_view{};
-        });
-    }
+    // Every segment is read into the TRANSIENT stitch slot and compared immediately: the
+    // descent never holds two segment views at once (`matches_prefix` folds each into its
+    // memcmp before asking for the next), which is exactly what lets one buffer serve a `dst`
+    // of any depth instead of one buffer per segment.
+    const auto read_seg = [&](std::size_t i) -> std::optional<std::string_view> {
+        const auto s = walk.at(i);
+        if (!s) return std::nullopt;
+        return rd.transient(s->first, s->second);
+    };
+    mount_hit_t hit = resolve_mount_by(registry, read_seg, [&](std::size_t i) {
+        // The resolved PEER name is referenced right through the egress `gather`, so it is
+        // read into the slot that outlives every later read.
+        const auto s = walk.at(i);
+        return s ? rd.retained(s->first, s->second) : std::string_view{};
+    });
     // The walk just visited these segments; record where the consumed run ENDS so the rebuild
-    // does not walk them again. Only meaningful once the descent has chosen `strip_k`, which
-    // is why it is filled here rather than in the peek.
+    // does not walk them again. Only meaningful once the descent has chosen `strip_k`.
     if (hit.link != nullptr && hit.strip_k > 0) {
         if (const std::optional<std::size_t> e = walk.end_of(hit.strip_k - 1)) {
             pre.strip_at = *e;
         } else {
             pre.valid = false;
         }
+    } else {
+        pre.valid = false;  // nothing to hand over — the rebuild parses for itself
+    }
+    return hit;
+}
+
+/**
+ * @brief The forward path's entry to the descent — a SHALLOW arm in locals, a deep arm out of
+ *        line.
+ *
+ * Reads the leading `dst` segments into plain locals in ONE tight loop — the exact shape of
+ * the fixed peek this replaced, minus the fixed BOUND — and hands the descent a plain span. No
+ * walker, no callable, no `std::optional` on any per-segment step. That is what the pre-lift
+ * forward hop compiled to, and it is what 99% of the traffic (a 2- or 3-segment RFC-0014
+ * mount) must keep costing.
+ *
+ * `kSegViewSlots` is a CACHE length, NOT a width bound, and the difference is observable: an
+ * address longer than it, or one a rope splits, takes @ref resolve_mount_deep and resolves
+ * identically — no mount is unreachable at any value, including the structural floor of two.
+ * `kMountPeekMax` decided which mounts could resolve at all; this decides only which of two
+ * code paths, with one answer between them, a frame takes.
+ *
+ * Segment 0 is not parsed here: @ref peek_fwd_dst already read that header to gate the frame
+ * and now hands the offsets over (@ref fwd_pre_t::seg0_off), so a forward hop parses each
+ * header exactly once (ADR-0038 inv. #1).
+ *
+ * `flatten` for the reason `rebuild_fwd_forward` carries it — the loop below is header reads,
+ * and `read_fwd_header` returns six words that an out-of-line call hands back through memory.
+ * It does NOT reach @ref resolve_mount_deep: `flatten` respects `noinline`, which is what lets
+ * the two attributes state the two halves of the same decision.
+ */
+template <class Cursor>
+[[gnu::flatten]] [[nodiscard]] mount_hit_t resolve_mount_at(const child_registry_t& registry,
+                                                            const Cursor& cur,
+                                                            seg_reader_t<Cursor>& rd,
+                                                            fwd_pre_t& pre) {
+    if (!pre.valid) return {};
+    std::array<std::string_view, kSegViewSlots> seg;
+    std::array<std::size_t, kSegViewSlots> seg_end;
+    // Segment 0 came free with the peek's gate — the same header, read once.
+    seg[0] = rd.in_place(pre.seg0_off, pre.seg0_len);
+    seg_end[0] = pre.seg0_off + pre.seg0_len;  // a NAME body is its TLV's tail
+    bool all_in_place = !seg[0].empty();
+    std::size_t n = 1;
+    std::size_t pos = seg_end[0];
+    bool ends_in_run = true;
+    while (n < kSegViewSlots) {
+        if (pos >= pre.dst_end) break;  // the address ended inside the run
+        const auto h = read_fwd_header(cur, pos);
+        // A non-NAME child is where an ADDRESS stops (a FIELD selector, say) — the run ends
+        // here exactly as the walker's `at` would report it.
+        if (!h || h->type != wire::type_t::NAME) break;
+        // Empty means "not addressable as a view into the frame" — unroutable, OR straddling a
+        // rope link. Either way the deep arm re-reads it and answers correctly.
+        seg[n] = rd.in_place(h->body_off, h->body_len);
+        if (seg[n].empty()) all_in_place = false;
+        seg_end[n] = h->body_off + h->body_len;
+        pos += h->total;
+        ++n;
+    }
+    // Filled the run with bytes still to come: the address MAY continue past the locals, so it
+    // is the deep arm's. (It may also stop at a non-NAME child one header later — testing that
+    // would cost a header parse on every frame to save a cold call on almost none.)
+    if (n == kSegViewSlots && pos < pre.dst_end) ends_in_run = false;
+    if (!all_in_place || !ends_in_run) return resolve_mount_deep(registry, cur, rd, pre);
+
+    const mount_hit_t hit =
+        resolve_mount_segs(registry, std::span<const std::string_view>(seg.data(), n));
+    // Record where the consumed run ENDS so the rebuild does not walk these segments again.
+    // Only meaningful once the descent has chosen `strip_k`, which is why it is filled here
+    // rather than in the peek.
+    if (hit.link != nullptr && hit.strip_k > 0 && hit.strip_k <= n) {
+        pre.strip_at = seg_end[hit.strip_k - 1];
     } else {
         pre.valid = false;  // nothing to hand over — the rebuild parses for itself
     }
@@ -496,7 +546,11 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
     // child first ensures the entry is visible before any inbound frame can resolve it
     // (the set_receiver mutex provides the release/acquire fence). No lock is taken on the
     // read hot path.
-    registry_.add(name, link);
+    // A registry that could not grow registers NOTHING, and this is the only place that can
+    // tell the caller so. Refusing HERE — before `set_receiver` — is what keeps the failure
+    // total: nothing is wired, so there is no ghost child audible on its transport but
+    // resolvable by no `dst` and removable by no `remove_child`.
+    if (!registry_.add(name, link)) return false;
     // Capability-matched receiver (ADR-0042 §1 / ADR-0044): a BUS link delivers
     // frames tagged with the SENDING peer's name, which becomes the hop's inbound
     // NAME — so the `src` grown on a forward (and the link a terminus reply goes

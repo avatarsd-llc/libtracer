@@ -31,8 +31,11 @@
  *   - delete the walker's backwards-restart → `narrow_after_wide` fails;
  *   - delete the `!next` exact-mount check → `exact_mount_terminates` fails;
  *   - delete `routable_mount_name` → `unaddressable_names_refused` fails;
- *   - delete the `mount_gen` stamp or its comparison → `shape_change_is_seen` fails;
  *   - delete the `mount_gen` stamp or its comparison → `shape_change_is_seen` fails.
+ *
+ * The suite prints **63** assertions across those cases; the OOM half of `add_child`'s new
+ * `bool` lives in `mount_add_oom_test.cpp`, which needs its own binary to replace the global
+ * nothrow `operator new`.
  *
  * One thing deliberately NOT claimed: `matches_prefix`'s trailing `pos == key.size()` and its
  * `/` check are NOT ablation-provable, and this was checked rather than assumed — ablating

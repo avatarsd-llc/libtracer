@@ -116,7 +116,7 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
     struct child_t { std::string name; std::atomic<transport_t*> link; /* tombstone = null */
                      std::atomic<bool> multi_peer; std::uint64_t name_digest;
                      std::vector<std::byte> mount_tlv; bool live() const noexcept; };
-    void add(std::string name, transport_t& link);        // rebinds an existing name
+    bool add(std::string name, transport_t& link);        // rebinds; false = no slot
     bool erase(std::string_view name);                    // tombstones in place
     // ONE pass, each slot matched against the prefix of its OWN seg_count (#523) — so a
     // mount of any width resolves and there is no per-width retry. Longest match wins.
@@ -131,8 +131,8 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 
 Signature source: `core/include/libtracer/fwd_router.hpp:139` (constructor), `:198`
 (`add_child`), `:248` (`subscribe_toward`), `:258-269` (the sink function-pointer types);
-`core/include/libtracer/child_registry.hpp:190` (`add`), `:438` (`resolve_peer`), `:453`
-(`erase`), `:479` (`entry_by_name`), `:500` (`by_name`), `:541`/`:551` (`size`/`live_size`).
+`core/include/libtracer/child_registry.hpp:209` (`add`), `:458` (`resolve_peer`), `:473`
+(`erase`), `:499` (`entry_by_name`), `:520` (`by_name`), `:561`/`:571` (`size`/`live_size`).
 
 ## Routing one inbound frame
 
@@ -166,8 +166,8 @@ flowchart TB
   consumer that did not need contiguity. `m` must stay alive while its span is read.
 - **The default delivery leg copies nothing.** A full-route `FWD{WRITE}` fan-out scatter-gathers a
   fresh stack head, the stored return-route bytes, an empty `src`, and one span per link of the
-  stored value (`core/src/fwd_router.cpp:1418`). The `COMPACT` leg is the one that flattens,
-  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:1381`) — single-link, that
+  stored value (`core/src/fwd_router.cpp:1478`). The `COMPACT` leg is the one that flattens,
+  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:1441`) — single-link, that
   flatten is a zero-copy adopt, and multi-link it draws from the router's injected `flat` backend
   (#730), not the global heap.
 - **Delivery is nothrow and drops rather than aborts.** Every per-delivery allocation on the writer
