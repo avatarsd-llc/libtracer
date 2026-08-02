@@ -10,6 +10,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-08-02
+
 ### Added
 
 - **`tr::esp::critical_pool_t` — a thread-safe, slab-bounded `mem_backend_t` for a
@@ -27,32 +29,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   app that never names it links nothing (the compile-gate TU `critical_pool.cpp` instantiates the
   specialisation on chip targets so the adapter is type-checked by every build; `--gc-sections`
   drops it). The bundled `full_node` example wires it behind its per-target platform seam.
-
-### Changed
-
-- **`CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` now rides the generated `libtracer/config.hpp`**
-  ([ADR-0068](../../../docs/adr/0068-build-configuration-is-plain-cpp-config-header.md))
-  instead of a PUBLIC compile definition: the component `configure_file`s the header from the
-  Kconfig value and lists it before `core/include`, so every dependent TU reads the same
-  constexpr `tr::graph::kVertexLockStripes` — the ODR hazard the PUBLIC `-D` existed to manage
-  is gone by construction. menuconfig behavior is unchanged.
-
-- **`httpd_ws_link_t` steady-state RX/TX no longer allocates per frame (#814).** Two
-  once-per-link buffers replace the per-frame heap on the hot paths, bringing the server
-  link toward `esp_ws_client_link_t`'s allocation discipline. **RX:** a frame that fits the
-  2 KB reusable scratch (all graph control TLVs) is read into it and delivered borrowed —
-  the exact-size `new (std::nothrow)` remains only as the fallback for larger frames (up to
-  the 32 KB abuse cap), trading one allocation for not pinning 32 KB permanently. **TX:** a
-  send claims one of 4 pre-allocated work slots **lock-free** (a CAS scan; senders on any
-  task, released by the httpd task as the send drains) and gathers the frame straight into
-  the slot's ~1.5 KB inline payload — no allocation. A frame past the inline capacity keeps
-  the pooled shell and takes a nothrow heap payload; a momentarily exhausted pool falls back
-  to the previous fully-heap work item. Every fallback stays nothrow with the same
-  drop-on-OOM backpressure (`note_tx_result` streak accounting unchanged) — never an abort.
-  No API change; ~8.5 KB of heap moves from per-frame churn to one construction-time
-  allocation per link.
-
-### Added
 
 - **`esp_ws_client_link_t` — an ESP-IDF `esp_transport_ws`-backed WebSocket *client*
   `transport_t` (dial-out).** The embedded-native counterpart to core's portable
@@ -89,6 +65,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `esp_driver_gpio`, `esp_http_server`, `lwip`) stay **unconditional** — a Kconfig-gated
   REQUIRES never propagates in IDF's early requirement-expansion pass — and are free when
   their TU is absent (`--gc-sections` drops the link dep).
+
+### Changed
+
+- **`CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` now rides the generated `libtracer/config.hpp`**
+  ([ADR-0068](../../../docs/adr/0068-build-configuration-is-plain-cpp-config-header.md))
+  instead of a PUBLIC compile definition: the component `configure_file`s the header from the
+  Kconfig value and lists it before `core/include`, so every dependent TU reads the same
+  constexpr `tr::graph::kVertexLockStripes` — the ODR hazard the PUBLIC `-D` existed to manage
+  is gone by construction. menuconfig behavior is unchanged.
+
+- **`httpd_ws_link_t` steady-state RX/TX no longer allocates per frame (#814).** Two
+  once-per-link buffers replace the per-frame heap on the hot paths, bringing the server
+  link toward `esp_ws_client_link_t`'s allocation discipline. **RX:** a frame that fits the
+  2 KB reusable scratch (all graph control TLVs) is read into it and delivered borrowed —
+  the exact-size `new (std::nothrow)` remains only as the fallback for larger frames (up to
+  the 32 KB abuse cap), trading one allocation for not pinning 32 KB permanently. **TX:** a
+  send claims one of 4 pre-allocated work slots **lock-free** (a CAS scan; senders on any
+  task, released by the httpd task as the send drains) and gathers the frame straight into
+  the slot's ~1.5 KB inline payload — no allocation. A frame past the inline capacity keeps
+  the pooled shell and takes a nothrow heap payload; a momentarily exhausted pool falls back
+  to the previous fully-heap work item. Every fallback stays nothrow with the same
+  drop-on-OOM backpressure (`note_tx_result` streak accounting unchanged) — never an abort.
+  No API change; ~8.5 KB of heap moves from per-frame churn to one construction-time
+  allocation per link.
 
 ## [0.6.0] — 2026-07-23
 

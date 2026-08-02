@@ -5,7 +5,9 @@ package follows [Semantic Versioning](https://semver.org/); see
 [ADR-0033](../../docs/adr/0033-npm-subpackage-monorepo.md) for the
 versioning/publish strategy.
 
-## Unreleased
+## [Unreleased]
+
+## 0.7.0 — 2026-08-02
 
 ### Changed
 
