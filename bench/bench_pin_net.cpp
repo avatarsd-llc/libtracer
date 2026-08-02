@@ -33,8 +33,21 @@
  *
  * The subscriber reports `pins` / `copies` by segment-pointer identity between the stored
  * value and the RX segments the backend handed out — an outcome, available with or without
- * `LIBTRACER_PIN_INSTRUMENT`, so this same source is the untouched-main control arm. An arm
- * that intends to pin and reports zero pins invalidates its own row.
+ * `LIBTRACER_PIN_INSTRUMENT`. An arm that intends to pin and reports zero pins invalidates its
+ * own row.
+ *
+ * @section pin_net_control What the control arm is
+ *
+ * **Arm B, the SENTINEL arm — this same binary run at `K = tr::graph::kPinNever`**, not a
+ * separate pre-RFC build. This source used to double as a build against untouched
+ * `origin/main`; RFC-0022 §3.B deleted `settings_t`, so there is no longer a main for it to
+ * compile against and that arm is gone permanently. The sentinel arm controls for the thing
+ * that is still controllable — the ADR-0041 §2 one-copy store branch, reached on the same
+ * binary, the same pool and the same transport as every pinning arm — which is what the paired
+ * per-round delta in `collate_pin.py` is taken against.
+ *
+ * K reaches the store site through `graph_t::set_pin_payload_ratio`, the owner-declared
+ * per-vertex override RFC-0022 §3.D keeps for exactly this: rotating arms inside one process.
  *
  * Usage:
  *   bench_pin_net sub <port> <K> <payload_bytes> <slot_bytes> <slots> <ms> [vertices] [label]
@@ -128,8 +141,8 @@ std::vector<std::byte> fwd_write_frame(std::size_t payload_bytes, std::size_t id
  * @brief A pool backend that also REMEMBERS which segments it handed out.
  *
  * The membership set is what turns "the stored value's segment" into a pin/copy verdict
- * without needing the decision site's counters — the instrument that survives being compiled
- * on untouched `origin/main`.
+ * without needing the decision site's counters — an OUTCOME instrument, so a build with
+ * `LIBTRACER_PIN_INSTRUMENT` off still reports a reachability figure per row.
  */
 class recording_pool_t final : public tr::mem::mem_backend_t {
    public:
@@ -213,11 +226,11 @@ int run_sub(int argc, char** argv) {
     // segment_bytes`, so the vertex count IS the RAM axis: at `vertices > slots` a pinned
     // steady state cannot fit in the pool and the transport must start refusing datagrams,
     // which is the backpressure onset the acceptance criterion asks for.
-    tr::graph::settings_t s;
-    s.store_ref_min_bytes = k;  // the arm's K (on origin/main: the old absolute threshold)
-    for (std::size_t i = 0; i < vertices; ++i)
-        (void)node.register_vertex(path_t("/sensor/blob" + std::to_string(i)), role_t::STORED_VALUE,
-                                   {}, s);
+    for (std::size_t i = 0; i < vertices; ++i) {
+        const tr::graph::vertex_handle_t v =
+            node.register_vertex(path_t("/sensor/blob" + std::to_string(i)), role_t::STORED_VALUE);
+        node.set_pin_payload_ratio(v, k);  // the arm's K, owner-declared (RFC-0022 §3.D)
+    }
     router.add_child("a", t);
 
     std::atomic<std::uint64_t> delivered{0};

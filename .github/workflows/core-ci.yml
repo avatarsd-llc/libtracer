@@ -8,9 +8,9 @@ name: core-ci
 on:
   push:
     branches: [main]
-    paths: ["core/**", "tests/packaging/**", ".github/workflows/core-ci.yml"]
+    paths: ["core/**", "bench/**", "tests/packaging/**", ".github/workflows/core-ci.yml"]
   pull_request:
-    paths: ["core/**", "tests/packaging/**", ".github/workflows/core-ci.yml"]
+    paths: ["core/**", "bench/**", "tests/packaging/**", ".github/workflows/core-ci.yml"]
   workflow_dispatch:
 
 jobs:
@@ -126,6 +126,23 @@ jobs:
             -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/prefix"
           cmake --build "${RUNNER_TEMP}/consumer" -j
           "${RUNNER_TEMP}/consumer/app"
+
+  # Compile EVERY bench target, run none of them (#781). The measuring workflows
+  # (perf.yml, docs.yml) each name the handful of targets they execute, so a bench
+  # nobody currently runs is compiled by nothing — and rots silently against the very
+  # API changes it was written to measure. bench_pin_ratio, bench_pin_net and the
+  # pin_bench example all stopped compiling the moment RFC-0022 §3.B deleted
+  # `settings_t`, and the tree stayed green for three PRs. This job is the guard: it
+  # is a COMPILE gate, so it costs one build and cannot be confounded by a runner's
+  # load. Ablate it by reverting any bench to a deleted API — the job goes red.
+  bench-compile:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure + build every bench target (compile only, nothing is run)
+        run: |
+          cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build bench/build -j
 
   format:
     runs-on: ubuntu-24.04
