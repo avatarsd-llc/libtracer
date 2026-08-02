@@ -154,7 +154,7 @@ It has two legs, and only one of them copies payload bytes.
 scatter-gather send: a fresh stack header, the stored route, an empty `src`, and one span per
 rope link (`fwd_router.cpp:1478-1485`). The header is a `stack_writer<16>` — the FWD header of at
 most 6 bytes plus the 5-byte op TLV — and both constant TLVs are `constexpr` arrays with no
-runtime construction (`fwd_router.cpp:1463-1470`). The route bytes were copied once at subscribe
+runtime construction (`fwd_router.cpp:1463-1467`). The route bytes were copied once at subscribe
 time, so a delivery re-uses them by reference; a multi-link value crosses as its own segments,
 with no flatten. The iov vector is nothrow-reserved and an exhausted reserve drops that delivery
 rather than emitting a truncated frame (`fwd_router.cpp:1479-1480`).
