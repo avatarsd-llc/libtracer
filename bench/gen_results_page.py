@@ -309,6 +309,14 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "built against untouched main.",
         "ns per store · pins and copies per cell"),
     instrument_t(
+        "bench_mount_resolve.cpp", "framed", (),
+        "Drives one whole forward hop — peek, mount descent, head rebuild, egress — through a "
+        "registry of N mounts of width W segments, addressed to the last-registered mount, and "
+        "counts the frames that actually reached the intended egress link so no cell's timing is "
+        "read off a hop that fell to the terminus instead. Written to compile unchanged against "
+        "the pre-lift tree, so the two binaries interleave as A/B arms on one machine.",
+        "ns per hop, p50 · hits vs iters per cell"),
+    instrument_t(
         "bench_pin_net.cpp", "net", (),
         "Drives FWD{WRITE} across two processes over real UDP into a receiver whose RX backend is "
         "a bounded pool, counting deliveries in the receiver's own graph and sampling the pool's "
