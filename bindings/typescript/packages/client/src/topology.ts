@@ -55,9 +55,22 @@
  * peer address, a value — would be exactly the identity-matching ADR-0044 forbids the
  * core from doing, moved into the client and dressed up. When the answer is unknown,
  * this says so.
+ *
+ * ## Two independent honesty flags (#676)
+ *
+ * {@link TopologyGraph.authoritative} answers *"are these nodes devices?"* and keys on
+ * identity resolution alone. It says **nothing** about whether the walk read everything
+ * it meant to: a node whose `/net` read is refused becomes a leaf and its whole subtree
+ * is silently absent, while identity resolution — and therefore `authoritative` — is
+ * untouched. Completeness is a **separate property** and gets its own flag,
+ * {@link TopologyGraph.complete}, cleared by every site that drops data and itemized in
+ * {@link TopologyGraph.gaps}. A caller wanting a trustworthy picture checks
+ * `authoritative && complete && !truncated`.
  */
 
 import type { LibtracerClient } from './client.js';
+import { FwdError } from './client.js';
+import { FWD_ERROR } from './fwd.js';
 import type { Tlv } from '@avatarsd-llc/libtracer';
 import { TYPE } from '@avatarsd-llc/libtracer';
 
@@ -128,6 +141,49 @@ export interface TopologyBusPeers {
   readonly routable: boolean;
 }
 
+/**
+ * @brief One read the walk intended to make and did not get — the structured form of
+ * an incompleteness (#676).
+ *
+ * Every entry corresponds to data that is **absent from the graph**, and every entry
+ * clears {@link TopologyGraph.complete}. A `net` gap is the expensive one: the node
+ * became a leaf, so its entire subtree is missing, not just one link.
+ *
+ * A legitimate absence is NOT a gap. `NOT_FOUND` on a node's `/net` means the node
+ * genuinely has no transport vertices — a real leaf — and costs neither a warning nor
+ * completeness.
+ */
+export interface TopologyGap {
+  /** @brief The {@link TopologyNode.id} whose read failed. */
+  readonly at: string;
+  /** @brief The route to that node, from the walk's vantage. */
+  readonly route: string[];
+  /**
+   * @brief Which read was lost, and therefore what is missing.
+   *
+   * - `"net"` — the node's module listing: **its whole subtree** is absent.
+   * - `"module"` — one module's connection listing: that module's links are absent.
+   * - `"peers"` — one link's peer listing: the link was assumed point-to-point, so a
+   *   bus may be under-reported (or wrongly descended).
+   */
+  readonly site: 'net' | 'module' | 'peers';
+  /** @brief The module NAME for a `module`/`peers` gap; `null` for a `net` gap. */
+  readonly module: string | null;
+  /** @brief The connection NAME for a `peers` gap; `null` otherwise. */
+  readonly name: string | null;
+  /**
+   * @brief The registered wire ERROR code ({@link FWD_ERROR}) when the peer answered
+   * with one, else `null` — a `null` means no reply at all (a local timeout, a closed
+   * transport), which is the transport-class failure {@link TopologyGraph.pruned}
+   * prunes on.
+   */
+  readonly code: number | null;
+  /** @brief The symbolic name of {@link TopologyGap.code}, or `null`. */
+  readonly codeName: string | null;
+  /** @brief The underlying failure, stringified — the same text the warning carries. */
+  readonly message: string;
+}
+
 /** @brief The assembled projection. */
 export interface TopologyGraph {
   readonly nodes: TopologyNode[];
@@ -144,8 +200,35 @@ export interface TopologyGraph {
    * When false the graph is a **shape, not a map**: one device may appear as several
    * nodes, and a cycle appears as an unbounded chain truncated by `maxDepth`. Do not
    * present a non-authoritative graph as the network's topology.
+   *
+   * This flag is about **identity only**. It is `true` on a graph that is missing whole
+   * subtrees — for that question read {@link TopologyGraph.complete} (#676).
    */
   readonly authoritative: boolean;
+  /**
+   * @brief True only if EVERY read the walk intended succeeded, so nothing is missing.
+   *
+   * When false the walk dropped data it meant to have: see {@link TopologyGraph.gaps}
+   * for what, where and why. The severe case is a failed `/net` read — that node became
+   * a leaf and **its entire subtree is absent from `nodes` and `edges`**, with no other
+   * signal that it ever existed.
+   *
+   * Orthogonal to {@link TopologyGraph.authoritative} (identity) and to
+   * {@link TopologyGraph.truncated} (the `maxDepth` bound, which is a deliberate stop,
+   * not a failed read). All three must hold to trust the graph as the network.
+   */
+  readonly complete: boolean;
+  /** @brief Every dropped read, itemized — empty exactly when `complete` (see {@link TopologyGap}). */
+  readonly gaps: TopologyGap[];
+  /**
+   * @brief Routes abandoned after a transport-class failure — the node did not answer.
+   *
+   * A node that is gone costs one `requestTimeoutMs` per read. Once a read to it fails
+   * with no reply (a local timeout, a closed transport) or with `TRANSPORT_DOWN`, the
+   * walk stops reading that node's remaining modules rather than re-paying the timeout
+   * for each one.
+   */
+  readonly pruned: string[][];
   /** @brief Non-fatal problems (an unreadable node, a failed identity read). */
   readonly warnings: string[];
 }
@@ -208,12 +291,19 @@ function listingNames(tlv: Tlv): string[] {
  * than one deep tendril. Each node costs one `readField` for its connections plus one
  * {@link WalkOptions.identify} call, both routed across the full path to it.
  *
- * An unreadable node (a dead link, a denied read) becomes a warning and a leaf — the
- * walk continues, because one unreachable branch is not a reason to lose the rest.
+ * An unreadable node (a dead link, a denied read) becomes a leaf — the walk continues,
+ * because one unreachable branch is not a reason to lose the rest. What it drops is
+ * **recorded**: the loss clears {@link TopologyGraph.complete} and appends a
+ * {@link TopologyGap} naming the route, the module and the wire ERROR code, so a caller
+ * never has to regex `warnings` to learn the graph is missing a subtree (#676).
  *
  * @param client attached to the vantage node
  * @param opts   identity resolution and bounds
- * @returns the projection — check {@link TopologyGraph.authoritative} before trusting it
+ * @returns the projection. Before trusting it check **both** honesty flags —
+ *   {@link TopologyGraph.authoritative} (are these nodes devices?) and
+ *   {@link TopologyGraph.complete} (did every intended read succeed?) — plus
+ *   {@link TopologyGraph.truncated}. `authoritative` alone does not detect a missing
+ *   subtree.
  */
 export async function walkTopology(
   client: LibtracerClient,
@@ -225,9 +315,50 @@ export async function walkTopology(
   const byId = new Map<string, { id: string; routes: string[][]; identity: string | null }>();
   const edges: TopologyEdge[] = [];
   const busLinks: TopologyBusPeers[] = [];
+  const gaps: TopologyGap[] = [];
+  const pruned: string[][] = [];
   const warnings: string[] = [];
   let truncated = false;
   let anyUnidentified = false;
+
+  /**
+   * A `NOT_FOUND` is an ANSWER, not a loss: the vertex genuinely is not there. That is a
+   * legitimate leaf (a node with no `/net`, a link with no `:children[]`) and must cost
+   * neither a warning nor completeness — the conflation the blanket catch used to make.
+   */
+  const isNotFound = (err: unknown): boolean =>
+    err instanceof FwdError && err.code === FWD_ERROR.NOT_FOUND;
+
+  /**
+   * Transport-class: the node did not answer at all (a local request timeout, a closed
+   * transport — neither is a `FwdError`) or the network below us said the link is down.
+   * Any other `FwdError` came FROM the node, so the node is alive and worth continuing.
+   */
+  const isTransportClass = (err: unknown): boolean =>
+    !(err instanceof FwdError) || err.code === FWD_ERROR.TRANSPORT_DOWN;
+
+  /** Record a dropped read: clears `complete`, itemizes the loss, and warns as before. */
+  const noteGap = (
+    site: TopologyGap['site'],
+    route: string[],
+    at: string,
+    module: string | null,
+    name: string | null,
+    err: unknown,
+    warning: string,
+  ): void => {
+    gaps.push({
+      at,
+      route,
+      site,
+      module,
+      name,
+      code: err instanceof FwdError ? err.code : null,
+      codeName: err instanceof FwdError ? err.codeName : null,
+      message: String(err),
+    });
+    warnings.push(warning);
+  };
 
   /**
    * A connection's `:children[]` discriminates the two link shapes (ADR-0044): a BUS
@@ -235,10 +366,29 @@ export async function walkTopology(
    * facet and the generic member listing of a childless vertex is empty. Empty ⇒ safe
    * to route through by name; non-empty ⇒ a bus, and routing by name would broadcast.
    */
-  const peersOf = async (route: string[], module: string, name: string): Promise<string[]> => {
+  const peersOf = async (
+    route: string[],
+    at: string,
+    module: string,
+    name: string,
+  ): Promise<string[]> => {
     try {
       return listingNames(await client.readField([...route, netRoot, module, name], ':children[]'));
-    } catch {
+    } catch (err) {
+      // NOT_FOUND is the childless answer — genuinely point-to-point, nothing lost. Any
+      // other failure means we do NOT know the link's shape and are about to assume the
+      // riskier half of the guess, so the graph is not complete.
+      if (!isNotFound(err)) {
+        noteGap(
+          'peers',
+          route,
+          at,
+          module,
+          name,
+          err,
+          `could not read peers of link "${module}/${name}" at ${routeKey(route)} — assumed point-to-point, a bus here would be under-reported: ${String(err)}`,
+        );
+      }
       return []; // unreadable ⇒ treat as point-to-point; the descend below will warn if it fails
     }
   };
@@ -285,9 +435,22 @@ export async function walkTopology(
       try {
         modules = listingNames(await client.readField([...route, netRoot], ':children[]'));
       } catch (err) {
-        // A node with no /net has no connections — indistinguishable here from one that
-        // refused the read. Either way it is a leaf, and either way the walk goes on.
-        warnings.push(`could not read connections at ${routeKey(route)}: ${String(err)}`);
+        // A node with no /net has no connections. That is DISTINGUISHABLE from a refused
+        // read: NOT_FOUND is the node answering "there is nothing there" — a legitimate
+        // leaf, no warning, no loss. Anything else means the node HAS a subtree we could
+        // not see, and the whole of it is now missing from the graph (#676).
+        if (!isNotFound(err)) {
+          noteGap(
+            'net',
+            route,
+            id,
+            null,
+            null,
+            err,
+            `could not read connections at ${routeKey(route)} — it becomes a leaf and its subtree is absent: ${String(err)}`,
+          );
+          if (isTransportClass(err)) pruned.push(route);
+        }
         continue;
       }
 
@@ -299,9 +462,24 @@ export async function walkTopology(
           );
           for (const name of names) links.push({ module, name });
         } catch (err) {
-          warnings.push(
+          noteGap(
+            'module',
+            route,
+            id,
+            module,
+            null,
+            err,
             `could not read connections of module "${module}" at ${routeKey(route)}: ${String(err)}`,
           );
+          // A node that has stopped answering costs requestTimeoutMs PER module if we
+          // keep asking. Stop asking: the rest of this node is unreachable too.
+          if (isTransportClass(err)) {
+            pruned.push(route);
+            warnings.push(
+              `stopped reading ${routeKey(route)} after a transport-class failure — its remaining modules are not attempted`,
+            );
+            break;
+          }
         }
       }
 
@@ -311,7 +489,7 @@ export async function walkTopology(
         // A bus link is a dead end: routing through its NAME broadcasts to every peer,
         // drawing N replies for one request. Record its peers and stop. (See
         // TopologyBusPeers for why the directed per-peer hop is not expressible either.)
-        const peers = await peersOf(route, module, name);
+        const peers = await peersOf(route, id, module, name);
         if (peers.length > 0) {
           const routable = peers.every((p) => !RESERVED_SEGMENT_CHARS.test(p));
           busLinks.push({ at: id, name, peers, routable });
@@ -354,6 +532,11 @@ export async function walkTopology(
     root,
     truncated,
     authoritative: !anyUnidentified,
+    // The split (#676): completeness is whether every intended read landed, and NOTHING
+    // else decides it. One gap is one piece of the network the caller does not have.
+    complete: gaps.length === 0,
+    gaps,
+    pruned,
     warnings,
   };
 }

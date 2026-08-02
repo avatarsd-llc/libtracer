@@ -51,6 +51,45 @@ versioning/publish strategy.
   prefixed form throughout, and the bare-NAME demux was the divergence — not the other way
   round.
 
+### Fixed
+
+- **`walkTopology` could report `authoritative: true` on a graph missing whole subtrees;
+  `TopologyGraph` gains `complete` / `gaps` / `pruned`** (`@avatarsd-llc/libtracer-client`,
+  `src/topology.ts`; #676).
+
+  **If you check `authoritative` to decide whether to trust a topology, that check does not
+  do what the docs said.** `authoritative` answers one question only — *did every node
+  report an identity, so are these nodes really devices?* It says nothing about whether the
+  walk read everything it meant to. Three sites dropped data without touching it, and the
+  worst is silent: when a node's `/net` read failed, that node became a **leaf** and its
+  **entire subtree disappeared** from `nodes` and `edges` — with `authoritative: true` and
+  only an unstructured string in `warnings` to say so. Detecting the loss meant regexing
+  warning text.
+
+  Completeness is now its own property:
+
+  - **`complete: boolean`** — true only if every intended read succeeded. Cleared by all
+    three drop sites: the node's `/net` module listing (subtree lost), one module's
+    `:children[]` (that module's links lost), and a link's peer listing (the link's shape
+    was guessed, so a bus may be under-reported).
+  - **`gaps: TopologyGap[]`** — each loss itemized: `site` (`"net"` / `"module"` /
+    `"peers"`), the `route` and node `at` it happened on, the `module` / `name`, and the
+    registered wire ERROR `code` + `codeName` when the peer answered with one. Empty
+    exactly when `complete`. No string parsing.
+  - **`pruned: string[][]`** — routes abandoned after a transport-class failure. A node
+    that has stopped answering used to cost one `requestTimeoutMs` (default 10 s) **per
+    module**; the walk now stops asking after the first such failure.
+
+  **Migration:** replace `if (graph.authoritative)` with
+  `if (graph.authoritative && graph.complete && !graph.truncated)`. The three flags are
+  independent — identity, dropped reads, and the `maxDepth` bound are different failures.
+  A structural type that spells out `TopologyGraph` will need the three new fields.
+
+  Also: **`NOT_FOUND` is now treated as an answer, not a failure.** A node that genuinely
+  has no `/net` is a legitimate leaf — it costs no warning and no completeness, where the
+  old blanket `catch` could not tell it apart from a refused read. Expect *fewer* warnings
+  from a healthy walk over leaf-bearing networks.
+
 ## 0.6.0 — 2026-07-23
 
 ## 0.5.0 — 2026-07-21
