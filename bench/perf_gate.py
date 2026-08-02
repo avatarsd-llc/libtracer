@@ -8,40 +8,45 @@ throughput points so a regression is caught the moment it lands — not at relea
 Compares against a recorded baseline (bench/perf_baseline.json, host-specific,
 gitignored); on the first run it records the baseline.
 
-Noise handling (what makes STRICT thresholds viable):
-  * the bench is run --runs times (default 3) and each point takes the BEST run
-    (min p50, max deliveries/s) — co-tenancy spikes on a shared runner hit one
-    run, not all, so best-of-N converges on the machine's real capability;
-  * within a run, repeated RESULT rows are medianed (single-iteration jitter);
-  * comparisons are only ever same-runner (see below), so absolute machine
-    speed cancels and the thresholds can be tight without false-failing.
+PAIRED mode (`--baseline-bench`, what CI runs) is the primary shape. The two
+binaries are executed INTERLEAVED — A B / B A / A B / B A — and compared as a
+population, never as two sequential blocks. See `paired_samples` and
+`paired_verdict` for the rules; the short version is that a fail needs the
+effect to be large (median), separated (the two arms' ranges are disjoint) and
+reproducible (a strict majority of the interleaved pairs breach the threshold
+on their own). Any sign flip inside the ranges reads as indistinguishable and
+can never fail the gate.
 
-The --bench override drives the same-runner comparisons (CI):
-  * PR gate: build main's bench and the PR's bench on the SAME runner, record
-    main's numbers (`--bench <main_bin> --update-baseline`), gate the PR's.
-  * main-push ratchet: build HEAD^'s bench and HEAD's bench on the SAME runner
-    and gate HEAD against its parent — a merge that pulls latency up or
-    throughput down past the thresholds turns main red immediately.
+Within a run, repeated RESULT rows are medianed (single-iteration jitter), and
+comparisons are only ever same-runner, so absolute machine speed cancels and the
+thresholds can be tight without false-failing.
 
-  ./perf_gate.py                     # run + validate (records baseline on first run)
-  ./perf_gate.py --update-baseline   # accept current numbers as the new baseline
-  ./perf_gate.py --bench PATH        # time PATH instead of the default build output
-  ./perf_gate.py --bench-fwd PATH    # gate PATH's per-vertex memory bytes (baseline binary)
-  ./perf_gate.py --runs N            # best-of-N bench executions (default 3)
+LEGACY mode (a recorded `bench/perf_baseline.json`, host-specific, gitignored) is
+kept for the no-baseline-binary case (a root commit, or a local `./perf_gate.py`
+against yesterday's numbers). It runs the bench --runs times and takes the BEST run
+per point. It is NOT what gates a PR any more: best-of-N rejects one bad SAMPLE, and
+the failure that actually bit this project three times is a bad WINDOW — a
+time-correlated depression of the runner that outlasts every run of whichever arm
+happens to hold the machine at the time (#763, #464).
+
+  ./perf_gate.py --baseline-bench PATH   # PAIRED: interleave PATH (base) vs the candidate
+  ./perf_gate.py --pairs N               # interleaved A/B pairs (default 4)
+  ./perf_gate.py                         # legacy: run + validate (records baseline on first run)
+  ./perf_gate.py --update-baseline       # legacy: accept current numbers as the new baseline
+  ./perf_gate.py --bench PATH            # time PATH as the CANDIDATE instead of the build output
+  ./perf_gate.py --bench-fwd PATH        # probe PATH for the candidate's per-vertex memory
+  ./perf_gate.py --baseline-bench-fwd P  # the baseline binary's per-vertex memory (paired)
+  ./perf_gate.py --runs N                # legacy: best-of-N bench executions (default 3)
 
 Exit 0 = PERF: PASS, 1 = PERF: FAIL (p50 up >15%, mean up >12%, deliveries/s down
 >12%, or per-vertex live bytes up >2%, vs the same-runner baseline, or — with no
 baseline — past the absolute floors). The memory points come from bench_forward_heap
-(counting allocator, deterministic); pass --bench-fwd to record the baseline binary's
-bytes same-runner, mirroring --bench for latency.
+(counting allocator, deterministic) and are NOT timed, so they need no interleaving:
+they are probed once per binary and ratchet exactly.
 
-One failure is downgraded to a `~` warning rather than a fail: a THROUGHPUT-only
-pullback whose own p50 and mean both came back flat-or-better. Two instruments over one
-operation cannot honestly disagree, so that combination is a machine-state signature,
-not a code one — see `TPUT_NEEDS_SECOND_OPINION`. Latency percentiles beyond p50/mean
-(p99, and the p999 the transport benches now emit) are PUBLISHED but not gated; the
-measurement behind that decision is recorded beside the thresholds below.
-Stdlib only; no zenoh needed.
+Latency percentiles beyond p50/mean (p99, and the p999 the transport benches now emit)
+are PUBLISHED but not gated; the measurement behind that decision is recorded beside
+the thresholds below. Stdlib only; no zenoh needed.
 """
 from __future__ import annotations
 
@@ -101,15 +106,29 @@ LAT_TICK_NS = 25     # sub-100ns baselines: one ~10ns clock tick already exceeds
                      # >100% regression to fire. Making the tick guard per-point is the
                      # real fix and is not attempted here.
                      #
-                     # What IS done about it: `TPUT_NEEDS_SECOND_OPINION` below. The
-                     # inert legs are not re-enabled — a silenced GATE is still a live
-                     # MEASUREMENT, and the check reads their values rather than their
-                     # verdicts.
+                     # What IS done about it, in order of load-bearing-ness:
+                     #   1. PAIRED mode's REPRODUCIBILITY rule (`paired_verdict`). A
+                     #      throughput-only fail must reproduce across a strict majority
+                     #      of interleaved A/B pairs with disjoint ranges. That does not
+                     #      care whether the latency legs are inert, which is why it, and
+                     #      not the second opinion below, is the fix for #763's defect 1:
+                     #      a cross-check that a one-grain p50 step can satisfy is not a
+                     #      cross-check.
+                     #   2. `TPUT_NEEDS_SECOND_OPINION` below — LEGACY mode only now. The
+                     #      inert legs are not re-enabled; the check reads their values
+                     #      rather than their verdicts.
 FLOOR_P50_NS = 1000  # absolute backstop if no baseline (canonical is ~100 ns)
 FLOOR_DELIV = 1_000_000
 DEFAULT_RUNS = 3
 
 # --- a throughput pullback on its own needs a second opinion (#464, PR #708) ------
+# LEGACY MODE ONLY. Paired mode never consults this: its own reproducibility +
+# range-disjointness rules already refuse a one-window throughput excursion, and #763
+# established that this check cannot carry the load on a sub-tick point — LAT_TICK_NS
+# quantizes `fold-b4`'s p50 to a ~10 ns grain, so a SINGLE grain of downward step in a
+# 3 ns operation satisfies "flat-or-better" or breaks it at random, and the corroboration
+# it produces carries no information. It is retained below because in legacy mode it is
+# strictly better than nothing; it is not the answer to #763.
 # Every gated point is measured by TWO instruments over the SAME operation: a per-op
 # clock (p50, mean) and a bulk timer (deliveries/s). A change in what the operation
 # costs moves both. When only the bulk timer moves and BOTH latency legs came back
@@ -324,6 +343,164 @@ def best_of(bench: pathlib.Path, runs: int) -> dict[str, dict]:
     return cur
 
 
+# --- PAIRED (interleaved) comparison — the fix for #763 --------------------------
+# Defect: baseline and candidate were measured as two SEQUENTIAL BLOCKS on one runner
+# (record main's three runs, then time the PR's three runs). Any drift in the machine
+# between the blocks lands entirely on one side of the comparison, and best-of-N does
+# not help: it rejects a bad SAMPLE, not a bad WINDOW. Measured on #708 and again on
+# #758 — nine same-binary A/B pairs where the low sample landed on run 3 for BOTH
+# binaries, a machine depression of 0.64x median that CI reported as a 0.67x "candidate
+# regression" against an untouched baseline arm that itself swung 2.8x across runners.
+#
+# Fix: run the two binaries INTERLEAVED, alternating which one starts each pair, so a
+# drift window is shared by both arms instead of being donated to one. Then decide on
+# the resulting population rather than on one order statistic. Three conditions must
+# ALL hold to fail, and each answers a different question the old gate could not ask:
+#
+#   effect         — median(cand) vs median(base) breaches the threshold  (is it big?)
+#   separation     — the two arms' [min..max] ranges are DISJOINT         (is it real?)
+#   reproducibility— a strict majority of the interleaved pairs breach    (does it recur?)
+#
+# The separation rule is the "never fail on a sign flip inside the ranges" clause: if the
+# candidate's best sample is no worse than the baseline's worst, the two populations are
+# not distinguishable by this instrument and the honest verdict is PASS, whatever the
+# medians say. It is also what supplies the run-drift readout #763 asked for: each arm's
+# own [min..max] spread IS the control leg. No extra bench point is needed — the baseline
+# arm is by construction invariant under the change being gated, so its spread across the
+# interleaved pairs is exactly the "did this run drift?" number.
+#
+# Cost. The old shape was 3 baseline + 3 candidate = 6 bench executions per gate. The new
+# one is PAIRS x 2 = 8 at the default, i.e. ~1.33x wall-clock — inside the ~2x budget.
+PAIRS_DEFAULT = 4
+
+
+def paired_samples(cand: pathlib.Path, base: pathlib.Path,
+                   pairs: int) -> dict[str, dict[str, list[dict]]]:
+    """@brief Run candidate and baseline interleaved, alternating which one starts.
+
+    Emits A B / B A / A B / … so neither arm systematically owns the early (cold, or
+    boost-ramping) part of the job and neither systematically owns a late drift window.
+    Returns {"cand"|"base": {point_key: [per-pair metric dict, …]}} with index `i` of
+    both arms drawn from the SAME pair, so the lists can be compared element-wise.
+    """
+    out: dict[str, dict[str, list[dict]]] = {"cand": {}, "base": {}}
+    for i in range(max(1, pairs)):
+        order = [("base", base), ("cand", cand)]
+        if i % 2:
+            order.reverse()
+        for arm, binary in order:
+            rows = run_bench_once(binary)
+            for (m, s, f, e) in POINTS:
+                v = metric(rows, m, s, f, e)
+                if v:
+                    out[arm].setdefault(f"{m}/{s}/{f}/{e}", []).append(v)
+    return out
+
+
+def _tick_ok(cur: int, ref: int) -> bool:
+    """@brief The sub-100ns clock-grain guard, unchanged from the legacy latency legs."""
+    return ref >= 100 or cur - ref > LAT_TICK_NS
+
+
+def paired_verdict(cand: list[float], base: list[float], factor: float,
+                   lower_is_worse: bool, tick_guard: bool = False) -> dict:
+    """@brief Decide one metric of one point from its interleaved A/B pairs.
+
+    `factor` is the existing relative threshold (1.15 for p50, 0.88 for deliv/s);
+    `lower_is_worse` selects the throughput sense. Returns the three conditions plus the
+    numbers a reader needs to audit the call, and fails only when all three hold. With
+    fewer than three pairs "a strict majority" degrades to "every pair", because two
+    samples cannot vote.
+    """
+    n = min(len(cand), len(base))
+    cs, bs = cand[:n], base[:n]
+
+    def breach(c: float, b: float) -> bool:
+        if lower_is_worse:
+            return c < b * factor
+        return c > b * factor and (not tick_guard or _tick_ok(int(c), int(b)))
+
+    cm, bm = statistics.median(cs), statistics.median(bs)
+    pairs_breached = sum(1 for c, b in zip(cs, bs) if breach(c, b))
+    # Disjoint = the candidate's BEST sample is still worse than the baseline's WORST.
+    disjoint = (max(cs) < min(bs)) if lower_is_worse else (min(cs) > max(bs))
+    majority = pairs_breached * 2 > n if n >= 3 else pairs_breached == n
+    return {"n": n, "cand_med": cm, "base_med": bm,
+            "cand_range": (min(cs), max(cs)), "base_range": (min(bs), max(bs)),
+            "effect": breach(cm, bm), "disjoint": disjoint,
+            "pairs_breached": pairs_breached, "majority": majority,
+            "fail": breach(cm, bm) and disjoint and majority}
+
+
+def _spread(rng: tuple[float, float]) -> float:
+    """@brief Worst-to-best ratio of an arm's own samples — its drift readout."""
+    lo, hi = rng
+    return (hi / lo) if lo else float("inf")
+
+
+def paired_report(v: dict, label: str, unit: str, fmt: str) -> str:
+    """@brief One human-auditable line per metric: medians, both ranges, and the verdict
+    path (which of effect / separation / reproducibility held)."""
+    cr, br = v["cand_range"], v["base_range"]
+    ratio = (v["cand_med"] / v["base_med"]) if v["base_med"] else float("nan")
+    line = (f"      {label:<9} base {v['base_med']:>{fmt}}{unit} "
+            f"[{br[0]:>{fmt}}..{br[1]:>{fmt}}, spread {_spread(br):.2f}x]  "
+            f"cand {v['cand_med']:>{fmt}}{unit} "
+            f"[{cr[0]:>{fmt}}..{cr[1]:>{fmt}}, spread {_spread(cr):.2f}x]  x{ratio:.2f}")
+    if v["effect"]:
+        line += (f"  | effect YES, pairs {v['pairs_breached']}/{v['n']}, "
+                 f"ranges {'DISJOINT' if v['disjoint'] else 'OVERLAP'}")
+        if not v["fail"]:
+            line += " -> INDISTINGUISHABLE, not failed"
+    return line
+
+
+def gate_paired(cand: pathlib.Path, base: pathlib.Path, pairs: int) -> list[str]:
+    """@brief The interleaved per-PR gate. Prints the full population and returns fails."""
+    samples = paired_samples(cand, base, pairs)
+    fails: list[str] = []
+    print(f"Interleaved A/B perf gate ({pairs} pairs, alternating start; fail needs "
+          f"effect + disjoint ranges + a majority of pairs):")
+    if pairs < 3:
+        # Below three pairs "reproduces across a majority" degrades to "happened twice",
+        # which is the property #763 showed a runner can manufacture. Usable for a quick
+        # local look; not a verdict, and CI never runs it this way.
+        print(f"  WARNING: {pairs} pair(s) — the reproducibility rule cannot discriminate "
+              f"below 3. Treat a FAIL here as a prompt to re-run at the default.")
+    worst_drift = 0.0
+    for (m, s, f, e) in POINTS:
+        k = f"{m}/{s}/{f}/{e}"
+        cs, bs = samples["cand"].get(k), samples["base"].get(k)
+        if not cs or not bs:
+            print(f"  {k:<22} (absent from one arm — not gated)")
+            continue
+        print(f"  {k}")
+        legs = [
+            ("p50_ns", "p50", "ns", "9,.0f", LAT_REGRESS, False, True),
+            ("mean_ns", "mean", "ns", "9,.0f", MEAN_REGRESS, False, True),
+            ("deliv_s", "deliv/s", "", "15,.0f", TPUT_REGRESS, True, False),
+        ]
+        for key, label, unit, fmt, factor, lower_worse, tick in legs:
+            c = [float(x[key]) for x in cs]
+            b = [float(x[key]) for x in bs]
+            if lower_worse and (min(c) <= 0 or min(b) <= 0):
+                continue  # latency-only row (#553): deliv_s = 0 means "not measured here"
+            v = paired_verdict(c, b, factor, lower_worse, tick)
+            worst_drift = max(worst_drift, _spread(v["base_range"]))
+            print(paired_report(v, label, unit, fmt))
+            if v["fail"]:
+                fails.append(
+                    f"{k} {label} pullback: {v['cand_med']:,.0f}{unit} vs base "
+                    f"{v['base_med']:,.0f}{unit} "
+                    f"({(v['cand_med'] / v['base_med'] - 1) * 100:+.0f}%), reproduced in "
+                    f"{v['pairs_breached']}/{v['n']} interleaved pairs with disjoint ranges")
+    # The baseline arm cannot be moved by the candidate's code, so its worst spread is
+    # this run's drift figure. It does not gate — it tells a reader whether the run was
+    # worth believing at all, which is what a 2.8x baseline swing needed and never got.
+    print(f"  run drift (worst baseline-arm spread across pairs): {worst_drift:.2f}x")
+    return fails
+
+
 def mem_probe(bench_fwd: pathlib.Path) -> dict[str, dict]:
     """Live usable-size bytes AND heap-block count per vertex from the counting-allocator
     probes — one run (deterministic). Returns {"mem:<what>": {"bytes": N, "allocs": M}};
@@ -340,50 +517,88 @@ def mem_probe(bench_fwd: pathlib.Path) -> dict[str, dict]:
     return got
 
 
+def mem_gate(cur: dict, base: dict | None) -> list[str]:
+    """@brief The exact per-vertex memory ratchet — bytes with a tolerance, heap-block
+    count with none. Deterministic (a counting allocator, not a clock), so it is probed
+    once per binary and never interleaved."""
+    fails: list[str] = []
+    for k, v in cur.items():
+        if not k.startswith("mem:") or "bytes" not in v:
+            continue
+        line = f"  {k:<22} live={v['bytes']:>6} B/vertex  blocks={v['allocs']:>2}"
+        b = base.get(k) if base else None
+        if b and "bytes" in b:
+            if v["bytes"] > b["bytes"] * MEM_REGRESS and v["bytes"] - b["bytes"] > MEM_TICK_B:
+                fails.append(f"{k} memory pullback: {v['bytes']}B vs base {b['bytes']}B "
+                             f"(+{(v['bytes'] / b['bytes'] - 1) * 100:.1f}%)")
+            line += f"   (base {b['bytes']}B"
+            # Block COUNT ratchets exactly — no tolerance, no tick guard. It is a
+            # count of operator-new calls, identical on every host, so any increase
+            # is the code allocating more per vertex. Guarded on presence so a
+            # baseline recorded before this key existed degrades to bytes-only
+            # gating rather than crashing (the checked-in perf_baseline.json
+            # fallback deliberately carries no `allocs`: it was captured on a
+            # different toolchain, and an exact ratchet is only honest against a
+            # same-runner baseline binary, which is what CI supplies).
+            if "allocs" in b:
+                if v["allocs"] > b["allocs"]:
+                    fails.append(f"{k} allocation pullback: {v['allocs']} heap blocks per "
+                                 f"vertex vs base {b['allocs']} (+{v['allocs'] - b['allocs']})")
+                line += f", {b['allocs']} blocks"
+            line += ")"
+        print(line)
+    return fails
+
+
+def _opt(args: list[str], name: str, default: pathlib.Path | None) -> pathlib.Path | None:
+    """@brief Resolve an optional path-valued flag."""
+    return pathlib.Path(args[args.index(name) + 1]).resolve() if name in args else default
+
+
 def main() -> int:
     args = sys.argv[1:]
-    bench = BENCH
-    if "--bench" in args:
-        bench = pathlib.Path(args[args.index("--bench") + 1]).resolve()
+    bench = _opt(args, "--bench", BENCH)
+    bench_fwd = _opt(args, "--bench-fwd", BENCH_FWD)
+    base_bench = _opt(args, "--baseline-bench", None)
+    base_fwd = _opt(args, "--baseline-bench-fwd", None)
+
+    # PAIRED mode — the per-PR gate. Both binaries in hand, so nothing is recorded to
+    # or read from perf_baseline.json: the comparison is made against samples drawn in
+    # the same interleaved rotation, which is the whole point of #763's fix.
+    if base_bench is not None:
+        pairs = int(args[args.index("--pairs") + 1]) if "--pairs" in args else PAIRS_DEFAULT
+        print(f"Per-loop perf gate (libtracer in-process, INTERLEAVED baseline/candidate, "
+              f"fail: p50 +{(LAT_REGRESS - 1) * 100:.0f}% / "
+              f"mean +{(MEAN_REGRESS - 1) * 100:.0f}% / "
+              f"deliv -{(1 - TPUT_REGRESS) * 100:.0f}%):")
+        fails = gate_paired(bench, base_bench, pairs)
+        if base_fwd is not None:
+            fails += mem_gate(mem_probe(bench_fwd), mem_probe(base_fwd))
+        else:
+            # Say so. A skipped gate that prints nothing is indistinguishable from a
+            # gate that passed, which is how a guard becomes a blind spot.
+            print("  (no --baseline-bench-fwd: the per-vertex memory ratchet is NOT run)")
+        fails += lkv_ratio_gate(bench)  # ADR-0060 same-run ratio (no baseline needed)
+        print("PERF: PASS" if not fails else "PERF: FAIL")
+        for x in fails:
+            print("  ! " + x)
+        return 0 if not fails else 1
+
     runs = int(args[args.index("--runs") + 1]) if "--runs" in args else DEFAULT_RUNS
     cur = best_of(bench, runs)
-    bench_fwd = BENCH_FWD
-    if "--bench-fwd" in args:
-        bench_fwd = pathlib.Path(args[args.index("--bench-fwd") + 1]).resolve()
     cur.update(mem_probe(bench_fwd))  # fold the mem:* points into the same baseline dict
     base = json.loads(BASELINE.read_text()) if BASELINE.exists() else None
     fails = []
     warns: list[str] = []  # measured, reported, does not fail the gate
     mem_hdr = (f" / mem +{(MEM_REGRESS - 1) * 100:.0f}% / blocks +0"
                if any(k.startswith("mem:") for k in cur) else "")
-    print(f"Per-loop perf gate (libtracer in-process, best of {runs} run(s), "
+    print(f"Per-loop perf gate (libtracer in-process, LEGACY best of {runs} run(s), "
           f"fail: p50 +{(LAT_REGRESS - 1) * 100:.0f}% / mean +{(MEAN_REGRESS - 1) * 100:.0f}% / "
           f"deliv -{(1 - TPUT_REGRESS) * 100:.0f}%{mem_hdr}):")
+    fails += mem_gate(cur, base)
     for k, v in cur.items():
-        if "bytes" in v:  # memory footprint point (mem:*) — exact, deterministic
-            line = f"  {k:<22} live={v['bytes']:>6} B/vertex  blocks={v['allocs']:>2}"
-            b = base.get(k) if base else None
-            if b and "bytes" in b:
-                if v["bytes"] > b["bytes"] * MEM_REGRESS and v["bytes"] - b["bytes"] > MEM_TICK_B:
-                    fails.append(f"{k} memory pullback: {v['bytes']}B vs base {b['bytes']}B "
-                                 f"(+{(v['bytes'] / b['bytes'] - 1) * 100:.1f}%)")
-                line += f"   (base {b['bytes']}B"
-                # Block COUNT ratchets exactly — no tolerance, no tick guard. It is a
-                # count of operator-new calls, identical on every host, so any increase
-                # is the code allocating more per vertex. Guarded on presence so a
-                # baseline recorded before this key existed degrades to bytes-only
-                # gating rather than crashing (the checked-in perf_baseline.json
-                # fallback deliberately carries no `allocs`: it was captured on a
-                # different toolchain, and an exact ratchet is only honest against a
-                # same-runner baseline binary, which is what CI's --bench-fwd supplies).
-                if "allocs" in b:
-                    if v["allocs"] > b["allocs"]:
-                        fails.append(f"{k} allocation pullback: {v['allocs']} heap blocks per "
-                                     f"vertex vs base {b['allocs']} (+{v['allocs'] - b['allocs']})")
-                    line += f", {b['allocs']} blocks"
-                line += ")"
-            print(line)
-            continue
+        if k.startswith("mem:"):
+            continue  # handled by mem_gate above
         line = (f"  {k:<22} p50={v['p50_ns']:>7}ns mean={v['mean_ns']:>7}ns "
                 f"deliv/s={v['deliv_s']:>14,.0f}")
         if base and k in base:

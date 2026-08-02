@@ -193,7 +193,7 @@ thresholds, one hard invariant:
 
 | mechanism | when | comparison | threshold | effect |
 | --- | --- | --- | --- | --- |
-| **per-PR hard gate** ([`perf_gate.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/perf_gate.py)) | every PR | PR build vs `main` build, **one runner** | p50 **+15%** · mean **+12%** · deliveries/s **−12%** · per-vertex bytes **+2%** | fails the PR |
+| **per-PR hard gate** ([`perf_gate.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/perf_gate.py)) | every PR | PR build vs `main` build, **one runner, interleaved A/B** | p50 **+15%** · mean **+12%** · deliveries/s **−12%** · per-vertex bytes **+2%** — *and* disjoint ranges *and* a majority of pairs | fails the PR |
 | **push ratchet** | every `main` push | HEAD vs its parent, **three independently-drawn runners** | same as above | turns `main` red |
 | **forward-hop zero-alloc gate** | every CI run | absolute | `> 0` allocations on the forward hop | fails the build |
 | **soft trend alert** | per `main` commit | vs previous point, **cross-runner** | series drifts past **125%** | a comment, *not* a verdict |
@@ -201,15 +201,33 @@ thresholds, one hard invariant:
 Details that make these trustworthy:
 
 - The per-PR gate watches **six canonical points** (a representative slice of the
-  fan-out / payload / topic sweeps plus a fold-width point), each taken as the
-  **best of three runs** (min p50 / max deliveries) so single-iteration jitter
-  cannot manufacture a failure. Because the baseline is *the same PR's `main`
-  rebuilt on the same runner in the same pass*, the comparison is machine-neutral.
-  The same gate additionally checks **three memory probes** — per-vertex live bytes,
+  fan-out / payload / topic sweeps plus a fold-width point). The two binaries are run
+  **interleaved** — `A B / B A / A B / B A`, four pairs, alternating which one starts —
+  so a slow window in the machine is shared by both arms rather than donated to
+  whichever one holds it. Because the baseline is *the same PR's `main` rebuilt on the
+  same runner in the same pass*, the comparison is machine-neutral.
+- A point fails only when **all three** of these hold, and the gate prints every one of
+  them: the **medians** breach the threshold (the effect is big enough), the two arms'
+  **[min..max] ranges are disjoint** (a sign flip inside the ranges reads as
+  indistinguishable and can never fail), and a **strict majority of the interleaved
+  pairs** breach on their own (the effect reproduces). This replaced a best-of-3
+  estimator, which rejects a bad *sample* but not a bad *window* — the failure that
+  produced three false `fold-b4` failures on unrelated PRs
+  ([#763](https://github.com/avatarsd-llc/libtracer/issues/763),
+  [#464](https://github.com/avatarsd-llc/libtracer/issues/464)).
+- Each arm's own spread across the pairs is printed, and the **baseline arm's worst
+  spread is reported as the run's drift figure** — the baseline binary cannot be moved
+  by the change under test, so its spread is the invariant control leg. It does not
+  gate; it tells a reader whether the run was worth believing.
+- The same gate additionally checks **three memory probes** — per-vertex live bytes,
   the increment one LKV write adds, and a leaf carrying a five-field app-field table.
   These come from the counting allocator (`bench_forward_heap`), so they are exact
-  rather than sampled: they need no best-of-N and ratchet tightly at **+2%**, with
-  the baseline binary's bytes recorded same-runner via `--bench-fwd`.
+  rather than sampled: they need no repetition at all and ratchet tightly at **+2%**,
+  with the baseline binary's bytes probed same-runner via `--baseline-bench-fwd`.
+- The gate's decision rules have their **own unit tests**
+  ([`bench/test_perf_gate.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/test_perf_gate.py)),
+  run in the same CI job before anything is timed, pinning both directions: the recorded
+  false-failure sample sets must pass, and the recorded real regressions must still fail.
 - The **push ratchet** re-runs that gate on **three separate runner draws** and
   requires the regression to reproduce — one noisy machine cannot fail `main`, and a
   regression that slips through the PR gate still gets caught the moment it lands.
@@ -219,10 +237,12 @@ Details that make these trustworthy:
 - The **soft alert** compares *across* runners, so it is only a prompt to look at
   the trend, never a merge-blocker.
 
-The baseline the per-PR gate compares against (`bench/perf_baseline.json`) is
-**host-specific and regenerated on every CI run** — it is never committed as a
-fixed number, precisely so the gate can never encode one machine's speed as another
-machine's target.
+The per-PR gate never compares against a *recorded* number at all: both binaries are
+in hand on the runner, so every sample on both sides is drawn in the same interleaved
+rotation, minutes apart at most. (`bench/perf_baseline.json` still exists for the
+local / root-commit path, where there is no baseline binary to interleave with. It is
+**host-specific and never committed as a fixed number**, precisely so the gate can
+never encode one machine's speed as another machine's target.)
 
 ---
 
@@ -292,7 +312,7 @@ optional TLS module. An absent transport must never be readable as a tie.
   *same binary* against itself and taking the worst ratio between repeats gives the
   floor any threshold on that leg would have to clear before it stopped firing on its
   own noise. On the **in-process gated points** (18 runs, replayed through the gate's
-  own best-of-3 estimator, worst of 15 disjoint pairs):
+  own estimator, worst of 15 disjoint pairs):
 
   | leg | worst same-binary ratio | threshold it would need | gated today |
   | --- | ---: | ---: | --- |
