@@ -73,7 +73,7 @@ flowchart LR
   stitch buffer is two segments' worth, `std::array<std::byte, kMaxSegmentBytes * 2>`
   (`core/src/fwd_router.cpp`), and no longer scales with how wide a mount is (#523).
 - **Ordinary names cost no heap block.** `path_key_t` holds records up to 16 bytes inline
-  (`path_key_t::kInlineBytes`, `core/include/libtracer/path.hpp:150`) — a NAME record is a
+  (`path_key_t::kInlineBytes`, `core/include/libtracer/path.hpp:172`) — a NAME record is a
   4-byte TLV header plus the segment text, so a name of up to 12 characters never
   allocates; longer records spill to a single owned block.
 
