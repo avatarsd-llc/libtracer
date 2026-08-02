@@ -175,7 +175,7 @@ export interface TopologyGap {
    * @brief The registered wire ERROR code ({@link FWD_ERROR}) when the peer answered
    * with one, else `null` — a `null` means no reply at all (a local timeout, a closed
    * transport). A `null` code is always transport-class; a non-`null` one can be too
-   * (`TRANSPORT_DOWN`) — {@link TopologyGap.pruned} names the deciding predicate.
+   * (`TRANSPORT_DOWN`) — {@link TopologyGraph.pruned} names the deciding predicate.
    */
   readonly code: number | null;
   /** @brief The symbolic name of {@link TopologyGap.code}, or `null`. */
