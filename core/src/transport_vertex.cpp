@@ -342,8 +342,13 @@ result_t<void> transport_vertex_t::remove_connection(std::string_view name) {
     // reuses. Retiring an already-retired or unregistered vertex is a no-op, so a
     // half-built connection tears down cleanly too.
     //
-    // #576: this is the peer-driven append site of the value-seam park — the identity
-    // vertex bears a value seam, so every teardown parks one. We do NOT collect here: we
+    // #576: this is the peer-driven append site of the value-seam park — but only for a BUS
+    // link. The identity vertex bears a value seam iff it was given one above, and that
+    // happens only when `link->bus() != nullptr` (CAN; a tcp/ws server wired
+    // `peer_named = true`). Tearing down a point-to-point connection — every dial link, UDP,
+    // loopback, a default-wired server — parks NOTHING, so a default deployment never needs
+    // a collect() point. A bus node parks one ~96 B value_handlers_t per teardown, which is
+    // the case #576 exists for. We do NOT collect here even then: we
     // are under ctl_m_ and on whatever thread the teardown arrived on, which is precisely
     // the free location graph_t::collect() exists to take out of the library's hands. The
     // embedder calls collect() where it knows no reader holds a seam.

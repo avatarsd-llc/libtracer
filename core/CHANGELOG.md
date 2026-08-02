@@ -183,17 +183,26 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 ### Added
 
 - **`graph_t::collect()` and `graph_t::parked_seam_count()` (#576, ADR-0072 §Supersession).**
-  `retire()` detaches a HANDLER-role vertex's value seam and parks it — the seam is read
-  lock-free, so the retiring thread cannot free a block a reader may still hold. Until now the
-  park had one append site and **zero** release sites, and `transport_vertex_t::remove_connection`
-  retires the `/net/<name>` identity vertex, so **every connection teardown leaked ~96 B of
-  `std::function`** permanently: peer-driven growth, not operator action. `collect()` is the
-  park's other end — it swaps the park into a local under the map lock and lets the local
+  `retire()` detaches a vertex's value seam and parks it — the seam is read lock-free, so the
+  retiring thread cannot free a block a reader may still hold. The park is keyed on **handler
+  presence, not role**: `adopt_identity` allocates the seam iff `on_read`, `on_write` or
+  `on_children` was installed, so a `role_t::STORED_VALUE` vertex with an `on_children` parks
+  one and a `role_t::HANDLER` with an empty `handlers_t` parks none. Until now the park had one
+  append site and **zero** release sites, and `transport_vertex_t::remove_connection` retires the
+  `/net/<module>/<name>` identity vertex — which is `role_t::STORED_VALUE` and bears a seam only
+  when its link exposes a bus facet (`link->bus() != nullptr`: CAN, or a tcp/ws server wired
+  `peer_named = true`). So **a bus node leaked ~96 B of `std::function` per connection teardown**,
+  permanently — peer-driven growth, not operator action — while a point-to-point deployment
+  (dial links, UDP, loopback, a default-wired server) parks nothing and needs no collect point at
+  all. `collect()` is the park's other end — it swaps the park into a local under the map lock and lets the local
   destruct **after** the lock is released, so the free runs on the **caller's thread, outside
   every graph lock** (a seam callback's destructor may re-enter the graph). `parked_seam_count()`
   makes an uncollected park observable rather than silent. **Caller obligation:** `collect()`
   MUST be called from a point where no lock-free reader holds a value seam — the library cannot
-  know that moment, so it is published rather than hidden. An embedder that never calls it keeps
+  know that moment, so it is published rather than hidden. That includes a reader that entered
+  while the vertex was still LIVE: `read` / `write` / `:children[]` load the seam pointer once
+  and hold it across the user callback, so a concurrent retire hands the park a block a live
+  call is still using. An embedder that never calls it keeps
   today's behaviour. Nothing was added to the read or write path; no existing call site changes.
   This supersedes the ADR-0072 reclamation domain for this site — PR #750's hazard-domain design
   is not merged (three rounds, three blocking defects, +19/+29 % on the read path), and #635

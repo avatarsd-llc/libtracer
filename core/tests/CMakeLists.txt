@@ -199,7 +199,9 @@ add_test(NAME retire COMMAND retire_test)
 # #576 — graph_t::collect() / parked_seam_count(): the explicit end of retirement's
 # value-seam park. The load-bearing case is that the free runs OUTSIDE every graph lock
 # (a seam destructor that re-enters the graph must not deadlock), so this test carries a
-# watchdog and reports rather than hanging.
+# watchdog and reports rather than hanging. It also pins the two contract properties an
+# embedder acts on: the park is keyed on handler PRESENCE (not role_t), and only a BUS
+# link's connection teardown parks anything (point-to-point parks zero).
 add_executable(collect_test collect_test.cpp)
 target_link_libraries(collect_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(collect_test)
