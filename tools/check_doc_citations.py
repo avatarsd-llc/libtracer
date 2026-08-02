@@ -120,6 +120,16 @@ ANCHORS = [
     ("core/src/fwd_router.cpp:1114", "payload_flat.empty()"),
     ("core/src/fwd_router.cpp:1107", "frame.subrope(head->child1_off, head->child1_total).materialize", "case type_t::COMPACT"),
     ("core/src/fwd_router.cpp:767", "frame.subrope(0, frame.total_length()).materialize"),
+    # #766/#793 — the terminus resolver's three rope-tier draws, and the two allocations the
+    # seam docs name as NOT covered by `flat`. These were cited by four doc pages and anchored
+    # by none, so #793's own edits to `op_resolve_view.cpp` shifted every one of them without
+    # the gate noticing — the exact rot class this file exists for.
+    ("core/src/op_resolve_view.cpp:129", "sub.flatten(backend())"),
+    ("core/src/op_resolve_view.cpp:139", "over_bytes(sub.only().bytes(), backend())"),
+    ("core/src/op_resolve_view.cpp:237", "wire().materialize(backend())"),
+    ("core/src/op_resolve_walk.hpp:500", "view::heap_alloc(head_len)"),
+    ("core/src/op_resolve_walk.hpp:577", "rope_t or_backpressure"),
+    ("core/src/fwd_router.cpp:1012", "decode_into(frame, rx_for(inbound_ctx))"),
     ("core/include/libtracer/vertex.hpp:2387", "vertex_t* parent_"),
 ]
 
