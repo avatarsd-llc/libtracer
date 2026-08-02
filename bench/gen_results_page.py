@@ -284,6 +284,13 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "after teardown.",
         "live bytes per link · live bytes per connection"),
     instrument_t(
+        "bench_ram_census_tcp.cpp", "counted", (),
+        "Prices a 100-vertex node — mixed int, array and stream values, 4–64 B each — stage by "
+        "stage on the live heap balance: empty graph, vertices registered, values written, TCP "
+        "listener up, a second-process peer connected, and the steady state after a mixed op "
+        "storm, with a null arm and residual check bracketing every run.",
+        "live bytes · blocks, per stage · bytes per vertex"),
+    instrument_t(
         "bench_failable_census.cpp", "counted", (),
         "Counts the blocks each peer-driven control-plane operation draws from the injected "
         "resource against those that escape to the global heap, and A/Bs the two growable-array "
