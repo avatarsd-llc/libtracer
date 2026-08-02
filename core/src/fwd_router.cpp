@@ -1410,8 +1410,30 @@ graph::result_t<void> fwd_router_t::subscribe_toward(const graph::path_t& produc
     return graph_.subscribe_wire(*v, *sub_view, *route_view, std::string(hit.link_name));
 }
 
+/**
+ * @brief EXPERIMENT (#504 bench arm — DELETE with the verdict): arms the reply-leg memo.
+ *
+ * A process-wide toggle so `bench_reply_leg` can interleave the memo and no-memo arms inside one
+ * binary on one machine, rather than comparing two builds.
+ */
+bool g_reply_leg_memo = false;
+
 void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const view::rope_t& value) {
-    transport_t* const link = registry_.by_name(sub.link);
+    transport_t* link = nullptr;
+    if (g_reply_leg_memo) {
+        // EXPERIMENT (#504) — the candidate: one memo slot, generation-stamped.
+        const std::uint32_t gen = registry_.mount_generation();
+        if (memo_link_ != nullptr && memo_gen_ == gen && memo_name_ == sub.link) {
+            link = memo_link_;
+        } else {
+            link = registry_.by_name(sub.link);
+            memo_name_ = sub.link;
+            memo_link_ = link;
+            memo_gen_ = gen;
+        }
+    } else {
+        link = registry_.by_name(sub.link);
+    }
     if (link == nullptr) return;  // link torn down between subscribe and this write
     const std::span<const std::byte> route = sub.return_route.bytes();  // the stored PATH TLV
 

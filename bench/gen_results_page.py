@@ -304,6 +304,14 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "RFC-0022 §3.B deleted the pre-RFC knob, so no such build exists.",
         "ns per store · pins and copies per cell"),
     instrument_t(
+        "bench_reply_leg.cpp", "framed", (),
+        "Drives the PRODUCER fan-out leg: one write to a vertex with N remote subscribers, which "
+        "runs `deliver_remote` N times and opens each with a registry scan for the subscriber's "
+        "link. Swept over fan-out, registry width and scan position (the link registered first "
+        "against last), with the deliveries counted at the destination link and the resolutions "
+        "counted exactly by addressing the subscribers through the bus-peer tier.",
+        "ns per write, median with range \u00b7 deliveries and resolutions per write"),
+    instrument_t(
         "bench_mount_resolve.cpp", "framed", (),
         "Drives one whole forward hop — peek, mount descent, head rebuild, egress — through a "
         "registry of N mounts of width W segments, addressed to the last-registered mount, and "
