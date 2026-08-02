@@ -33,6 +33,7 @@ import {
   decodeFwd,
   replyErrorCode,
   FWD_OP,
+  FWD_OP_FLAG_MINT_REQUEST,
   FWD_KIND,
   FWD_ERROR,
 } from '../dist/index.js';
@@ -364,4 +365,86 @@ test('an empty PATH_REF body is well-formed — the §4.3 bound is an upper one'
   assert.equal(tlv.payload.length, 0);
   assert.equal(tlv.children.length, 0);
   assert.ok(sameBytes(encodePathRef([]), empty), 'ref-empty');
+});
+
+/* --------------------------------- RFC-0024 §5-§7 — the bound-path routing car --- */
+
+test('fwd-mint-request is fwd-read with ONE bit changed — a mint ask costs no bytes', () => {
+  const mint = vector('fwd/fwd-mint-request');
+  const plain = vector('fwd/fwd-read');
+  assert.equal(mint.length, plain.length, 'a mint request adds no bytes');
+  const differing = [...mint].map((b, i) => (b === plain[i] ? -1 : i)).filter((i) => i >= 0);
+  assert.equal(differing.length, 1, 'exactly one byte differs');
+  assert.equal(plain[differing[0]], 0x00, "fwd-read's op byte is READ");
+  assert.equal(mint[differing[0]], FWD_OP_FLAG_MINT_REQUEST, 'and the mint ask is bit 7 of it');
+
+  // The masking rule (RFC-0024 §9.3): a forwarder switches on `op & 0x3F`, so this frame is
+  // a READ everywhere but at the mint. A core reading the raw byte sees opcode 0x80.
+  const mf = decodeFwd(mint);
+  const pf = decodeFwd(plain);
+  assert.equal(mf.op, FWD_OP.READ);
+  assert.equal(mf.op, pf.op);
+  assert.equal(mf.mintRequest, true);
+  assert.equal(pf.mintRequest, false);
+  // The mint REQUEST is canonically addressed: the canonical path IS the mint key.
+  assert.equal(mf.dstBound, false);
+});
+
+test('fwd-mint-reply carries the minted binding as its LAST child', () => {
+  const bin = vector('fwd/fwd-mint-reply');
+  const tlv = decode(bin);
+  assert.equal(tlv.type, TYPE.FWD);
+  // op / dst / src / kind / payload / PATH_REF — appended, nothing displaced. Position is
+  // the pin that matters: anywhere but last and every positional reader of a reply shifts.
+  assert.equal(tlv.children.length, 6);
+  assert.equal(tlv.children[3].payload[0], 0x00, 'kind = RESULT');
+  const mintTlv = tlv.children[5];
+  assert.equal(mintTlv.type, TYPE.PATH_REF);
+  assert.equal(mintTlv.opt.pl, false);
+  assert.equal(mintTlv.children.length, 0);
+  // A terminus answers exactly one element — its own reference to the target vertex.
+  assert.equal(mintTlv.payload.length / PATH_REF_ELEMENT_BYTES, 1);
+  assert.ok(sameBytes(mintTlv.payload, pathRefBody([[2, 0]])), 'index=2 generation=0');
+  // 4 + 8 bytes on the reply, and none anywhere else.
+  assert.equal(hex(bin.subarray(bin.length - 12)), '140008000200000000000000');
+});
+
+test('acl/bound-vs-canonical-allow is the bound spelling, and it is the shorter one', () => {
+  const bound = vector('acl/bound-vs-canonical-allow');
+  const canonical = vector('fwd/fwd-read');
+  assert.equal(
+    hex(bound),
+    '0f402100010001000014000800020000000000000006400c00020008007265706c792d6570',
+  );
+  // The byte count IS the case for the form, so it is pinned against the twin.
+  assert.ok(bound.length < canonical.length, `${bound.length} < ${canonical.length}`);
+
+  const pf = decodeFwd(bound);
+  assert.equal(pf.op, FWD_OP.READ);
+  assert.equal(pf.dstBound, true);
+  assert.equal(pf.dst.type, TYPE.PATH_REF);
+  assert.ok(sameBytes(pf.dst.payload, pathRefBody([[2, 0]])));
+  // …and the canonical twin's dst is a PATH of NAME children: the two forms, side by side.
+  const cf = decodeFwd(canonical);
+  assert.equal(cf.dstBound, false);
+  assert.equal(cf.dst.type, TYPE.PATH);
+});
+
+test('acl/bound-vs-canonical-deny denies, carries no mint, and agrees on the outcome', () => {
+  const bin = vector('acl/bound-vs-canonical-deny');
+  const pf = decodeFwd(bin);
+  assert.equal(pf.op, FWD_OP.REPLY);
+  // `src` echoes the request's dst — the bound form here, and the ONE thing that cannot
+  // agree between two spellings of one address.
+  assert.equal(pf.src.type, TYPE.PATH_REF);
+  assert.equal(pf.kind, FWD_KIND.ERROR);
+  assert.equal(replyErrorCode(pf), FWD_ERROR.PERMISSION_DENIED);
+
+  // Nothing past the STATUS: a denial never hands back a handle to what it refused (§6.1).
+  const tlv = decode(bin);
+  assert.equal(tlv.children.length, 5);
+  assert.ok(!tlv.children.some((c) => c.type === TYPE.PATH_REF && c !== tlv.children[2]));
+
+  // The outcome tail is what the canonical spelling produces byte for byte — §6.3's claim.
+  assert.equal(hex(bin.subarray(bin.length - 19)), '010001000109400a0008400600010002005000');
 });

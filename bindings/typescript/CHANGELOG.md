@@ -9,6 +9,15 @@ versioning/publish strategy.
 
 ### Added
 
+- **`ParsedFwd` learns the RFC-0024 §5-§7 routing surface.** Two new fields — `mintRequest`
+  (the `op` byte's bit 7) and `dstBound` (`dst` is a `PATH_REF`, not a `PATH`) — plus the
+  exported `FWD_OPCODE_MASK` (`0x3f`) and `FWD_OP_FLAG_MINT_REQUEST` (`0x80`).
+  **Behaviour change, and both halves matter for interop:** `parseFwdTlv` now masks the `op`
+  byte before comparing it, so a mint-flagged operation parses as its plain opcode instead of
+  falling through every arm; and it accepts a `PATH_REF` in the `dst` and `src` positions,
+  which previously threw. An element is node-scoped, so this binding carries one and never
+  interprets it.
+
 - **`TYPE.PATH_REF` (`0x14`) and its structural decode rule**
   (`@avatarsd-llc/libtracer`, `src/codec.mjs`;
   [RFC-0024](../../docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §4).

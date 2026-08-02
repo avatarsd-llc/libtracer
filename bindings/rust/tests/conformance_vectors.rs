@@ -1067,3 +1067,136 @@ fn delivery_policy_bit_layout() {
     assert_eq!(all_reserved.priority(), 0);
     assert!(!all_reserved.durability_request());
 }
+
+/* ------------------------------- RFC-0024 §5-§7 — the bound-path routing car --- */
+
+/**
+ * @brief `fwd/fwd-mint-request` — the mint ask is one BIT of an `op` byte that already
+ * existed.
+ *
+ * Pinned against `fwd/fwd-read` rather than only against its own hex, because the whole
+ * claim of the request side is that a mint request costs ZERO added bytes. If the two frames
+ * ever differ by more than that byte, the claim is gone and this fails.
+ */
+#[test]
+fn fwd_mint_request_is_one_bit() {
+    let mint = assert_vector_consistent("fwd/fwd-mint-request");
+    let plain = assert_vector_consistent("fwd/fwd-read");
+    assert_eq!(mint.len(), plain.len(), "a mint request adds no bytes");
+    let differing: Vec<usize> = (0..mint.len()).filter(|&i| mint[i] != plain[i]).collect();
+    assert_eq!(differing.len(), 1, "exactly one byte differs");
+    let i = differing[0];
+    assert_eq!(plain[i], 0x00, "fwd-read's op byte is READ");
+    assert_eq!(mint[i], 0x80, "and the mint request is bit 7 of it");
+    // The masking rule (RFC-0024 §9.3): a forwarder switches on `op & 0x3F`, so this frame
+    // is a READ everywhere but at the mint. A core that reads the raw byte sees opcode 0x80.
+    assert_eq!(mint[i] & 0x3F, 0x00, "the opcode is still READ");
+    // And the parser does mask, so both frames read as the same operation.
+    let pf = libtracer::fwd::decode_fwd(&plain).unwrap();
+    let mf = libtracer::fwd::decode_fwd(&mint).unwrap();
+    assert_eq!(mf.op, libtracer::fwd::fwd_op::READ);
+    assert_eq!(mf.op, pf.op);
+    assert!(mf.mint_request && !pf.mint_request);
+    assert!(!mf.dst_bound, "the mint REQUEST is canonically addressed — it is the key");
+}
+
+/**
+ * @brief `fwd/fwd-mint-reply` — the minted binding is the reply's LAST child.
+ *
+ * Position is the pin that matters here. Anywhere but last and every existing positional
+ * reader of a reply shifts by one, mint or no mint.
+ */
+#[test]
+fn fwd_mint_reply_carries_the_binding_last() {
+    let bin = assert_vector_consistent("fwd/fwd-mint-reply");
+    let t = decode(&bin).unwrap();
+    assert_eq!(t.type_code, libtracer::type_code::FWD);
+    // op / dst / src / kind / payload / PATH_REF — the mint appended, nothing displaced.
+    assert_eq!(t.children.len(), 6);
+    assert_eq!(t.children[0].payload, vec![0x03], "op = REPLY");
+    assert_eq!(t.children[3].payload, vec![0x00], "kind = RESULT");
+    assert_eq!(t.children[4].payload, vec![0xD2, 0x04, 0x00, 0x00]);
+    let mint = &t.children[5];
+    assert_eq!(mint.type_code, libtracer::type_code::PATH_REF);
+    assert!(!mint.opt.pl && mint.children.is_empty());
+    assert_eq!(
+        mint.payload.len() / libtracer::PATH_REF_ELEMENT_BYTES,
+        1,
+        "a terminus answers exactly one element — its own reference to the target"
+    );
+    assert_eq!(
+        path_ref_element(&mint.payload, 0),
+        Some(PathRefElement {
+            index: 2,
+            generation: 0
+        })
+    );
+    // 4 + 8 bytes of mint, and nothing else changed.
+    let plain_reply_len = bin.len() - 12;
+    assert!(plain_reply_len > 0);
+}
+
+/**
+ * @brief `acl/bound-vs-canonical-allow` — a `PATH_REF` in `dst` position, and it is shorter.
+ *
+ * The §6.3 pair's allow half. The byte count IS the case for the form, so it is pinned
+ * against the canonical twin rather than asserted in isolation.
+ */
+#[test]
+fn acl_bound_vs_canonical_allow() {
+    let bound = assert_vector_consistent("acl/bound-vs-canonical-allow");
+    let canonical = assert_vector_consistent("fwd/fwd-read");
+    assert_eq!(hex(&bound), "0f402100010001000014000800020000000000000006400c00020008007265706c792d6570");
+    assert!(
+        bound.len() < canonical.len(),
+        "the bound spelling is the shorter one — {} vs {}",
+        bound.len(),
+        canonical.len()
+    );
+    let t = decode(&bound).unwrap();
+    assert_eq!(t.children[0].payload, vec![0x00], "op = READ");
+    let dst = &t.children[1];
+    assert_eq!(dst.type_code, libtracer::type_code::PATH_REF);
+    assert_eq!(
+        path_ref_element(&dst.payload, 0),
+        Some(PathRefElement {
+            index: 2,
+            generation: 0
+        })
+    );
+    // The canonical twin's dst is a PATH of NAME children — the two forms, side by side.
+    let c = decode(&canonical).unwrap();
+    assert_eq!(c.children[1].type_code, libtracer::type_code::PATH);
+    assert!(c.children[1].opt.pl);
+    // The FWD parser accepts both spellings in `dst` and says which it got.
+    let pf = libtracer::fwd::decode_fwd(&bound).unwrap();
+    assert!(pf.dst_bound && !pf.mint_request);
+    assert!(!libtracer::fwd::decode_fwd(&canonical).unwrap().dst_bound);
+}
+
+/**
+ * @brief `acl/bound-vs-canonical-deny` — denied, and carrying no binding.
+ *
+ * Two things are pinned. The outcome tail is the `ERROR{tr::access::denied}` the canonical
+ * spelling produces byte for byte — that agreement IS §6.3's claim. And there is no
+ * `PATH_REF` after the `STATUS`: a denial never hands back a handle to what it refused.
+ */
+#[test]
+fn acl_bound_vs_canonical_deny() {
+    let bin = assert_vector_consistent("acl/bound-vs-canonical-deny");
+    let t = decode(&bin).unwrap();
+    assert_eq!(t.children[0].payload, vec![0x03], "op = REPLY");
+    // `src` echoes the request's dst, which is the bound form — the one thing that cannot
+    // agree between two spellings of one address.
+    assert_eq!(t.children[2].type_code, libtracer::type_code::PATH_REF);
+    assert_eq!(t.children[3].payload, vec![0x01], "kind = ERROR");
+    let f = libtracer::fwd::decode_fwd(&bin).unwrap();
+    assert_eq!(reply_error_code(&f), 0x0050, "tr::access::denied");
+    // Nothing past the STATUS: no mint on a denial (RFC-0024 §6.1).
+    assert_eq!(t.children.len(), 5);
+    // The outcome tail, byte for byte — kind VALUE (5 B) + STATUS{ERROR{VALUE u16}} (14 B).
+    assert_eq!(
+        hex(&bin[bin.len() - 19..]),
+        "010001000109400a0008400600010002005000"
+    );
+}

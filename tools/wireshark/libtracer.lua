@@ -158,6 +158,11 @@ M.STRUCTURED = {
 }
 
 M.FWD_OP = { [0] = "READ", [1] = "WRITE", [2] = "AWAIT", [3] = "REPLY" }
+-- The `op` byte's flag bits (RFC-0024 §7.5): the opcode is `op & 0x3F`, bit 7 is the
+-- bound-path mint request. A dissector that switches on the raw byte renders every
+-- mint-flagged operation as an unknown opcode.
+M.FWD_OPCODE_MASK = 0x3F
+M.FWD_OP_FLAG_MINT_REQUEST = 0x80
 M.FWD_KIND = { [0] = "RESULT", [1] = "ERROR" }
 -- FIELD index_mode, the optional trailing u8 VALUE of a selector level
 -- (RFC-0004 §C; core/src/op_resolve_walk.hpp:315 `index_mode_t`). Any other
@@ -390,8 +395,16 @@ function M._semantics(b, node)
         paths[#paths + 1] = c.path_str
       end
     end
-    fwd.op = values[1]
+    -- The opcode is `op & 0x3F`; bits 7-6 are FLAGS (RFC-0024 §7.5). Reading the raw byte
+    -- rendered a mint-flagged READ as "op?128" -- the exact mis-read the masking rule the
+    -- RFC makes normative for forwarders exists to stop, in the tool people read wire
+    -- captures with.
+    local op_byte = values[1]
+    fwd.op = op_byte and (op_byte % 64) or nil
     fwd.op_name = fwd.op and (M.FWD_OP[fwd.op] or ("op?" .. fwd.op)) or nil
+    -- Bit 7: the bound-path mint request. Surfaced, because a frame that asks for a binding
+    -- and one that does not differ by nothing else on the wire.
+    fwd.mint_request = op_byte and (op_byte >= 128) or nil
     fwd.dst = paths[1]
     fwd.src = paths[2]
     if fwd.op == 3 and values[2] then -- REPLY carries a kind after src

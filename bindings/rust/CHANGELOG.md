@@ -10,6 +10,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`fwd::ParsedFwd` learns the RFC-0024 §5-§7 routing surface.** Two new fields —
+  `mint_request` (the `op` byte's bit 7) and `dst_bound` (`dst` is a `PATH_REF`, not a `PATH`)
+  — plus `fwd_op::OPCODE_MASK` (`0x3F`) and `fwd_op::FLAG_MINT_REQUEST` (`0x80`).
+  **Behaviour change, and both halves matter for interop:** `parse_fwd_tlv` now masks the `op`
+  byte before comparing it, so a mint-flagged operation parses as its plain opcode instead of
+  falling through every arm; and it accepts a `PATH_REF` in the `dst` and `src` positions,
+  which it previously rejected as `TypeMismatch`. An element is node-scoped, so this binding
+  carries one and never interprets it.
+
 - **`type_code::PATH_REF` (`0x14`) and the bound-path element codec
   ([RFC-0024](../../docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §4).**
   New public items: `PathRefElement { index: u32, generation: u32 }`,

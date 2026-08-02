@@ -286,11 +286,11 @@ export function encodeFwd(req: FwdRequest): Uint8Array {
 export interface ParsedFwd {
   /** @brief The operation (a {@link FWD_OP} value). */
   readonly op: number;
-  /** @brief The `dst` PATH child. */
+  /** @brief The `dst` route child — a `PATH`, or a `PATH_REF` when {@link dstBound}. */
   readonly dst: Tlv;
   /** @brief The optional FIELD selector child (or `null`). */
   readonly field: Tlv | null;
-  /** @brief The `src` PATH child. */
+  /** @brief The `src` route child — a `PATH`, or a `PATH_REF` on a reply to a bound op. */
   readonly src: Tlv;
   /** @brief The reply {@link FWD_KIND} (REPLY frames only, else `null`). */
   readonly kind: number | null;
@@ -298,7 +298,29 @@ export interface ParsedFwd {
   readonly payload: Tlv | null;
   /** @brief The AWAIT `await_timeout` ns (else `null`). */
   readonly awaitTimeoutNs: bigint | null;
+  /** @brief `op` bit 7 was set — the origin asked for a bound-path mint (RFC-0024 §7.5). */
+  readonly mintRequest: boolean;
+  /** @brief `dst` is a `PATH_REF` (`0x14`), not a canonical `PATH` (RFC-0024 §4). */
+  readonly dstBound: boolean;
 }
+
+/**
+ * @brief The opcode field of the `op` byte — bits 5-0 (RFC-0024 §7.5).
+ *
+ * Bits 7-6 are FLAGS. A forwarder MUST mask before switching (RFC-0024 §9.3): an
+ * unrecognised flag then degrades to the plain opcode instead of an unknown-opcode reject,
+ * which is what makes a flag additive at all.
+ */
+export const FWD_OPCODE_MASK = 0x3f;
+
+/**
+ * @brief `op` bit 7 — the bound-path MINT REQUEST (RFC-0024 §7.5).
+ *
+ * Set by an origin asking each host on the route to answer with its own vertex ref. It costs
+ * ZERO request bytes: there is no free TLV `opt` bit, and a dedicated presence child would
+ * spend a 4-byte header to express one. The request is a hint, never an obligation.
+ */
+export const FWD_OP_FLAG_MINT_REQUEST = 0x80;
 
 const u8 = (t: Tlv): number => (t.payload.length > 0 ? t.payload[0] : 0);
 
@@ -308,12 +330,23 @@ export function parseFwdTlv(fwd: Tlv): ParsedFwd {
   const ch = fwd.children;
   let i = 0;
   if (ch[i]?.type !== TYPE.VALUE) throw new RangeError('FWD: missing op VALUE child');
-  const op = u8(ch[i++]);
-  if (ch[i]?.type !== TYPE.PATH) throw new RangeError('FWD: missing dst PATH child');
+  // The opcode is `op & 0x3F`; bits 7-6 are flags (RFC-0024 §7.5, normative in §9.3).
+  // Switching on the raw byte would make a mint-flagged READ an unknown opcode here.
+  const opByte = u8(ch[i++]);
+  const op = opByte & FWD_OPCODE_MASK;
+  const mintRequest = (opByte & FWD_OP_FLAG_MINT_REQUEST) !== 0;
+  // Two address forms (RFC-0024 §4): a canonical PATH, or a bound PATH_REF whose body shape
+  // the grammar has already checked. What an element MEANS is node-scoped, so a binding core
+  // carries one and never interprets it.
+  const dstBound = ch[i]?.type === TYPE.PATH_REF;
+  if (!dstBound && ch[i]?.type !== TYPE.PATH) throw new RangeError('FWD: missing dst PATH child');
   const dst = ch[i++];
   let field: Tlv | null = null;
   if (ch[i]?.type === TYPE.FIELD) field = ch[i++];
-  if (ch[i]?.type !== TYPE.PATH) throw new RangeError('FWD: missing src PATH child');
+  // `src` takes either form too: a reply to a bound operation echoes the request's `dst`.
+  if (ch[i]?.type !== TYPE.PATH && ch[i]?.type !== TYPE.PATH_REF) {
+    throw new RangeError('FWD: missing src PATH child');
+  }
   const src = ch[i++];
 
   let kind: number | null = null;
@@ -330,7 +363,7 @@ export function parseFwdTlv(fwd: Tlv): ParsedFwd {
       i++;
     }
   }
-  return { op, dst, field, src, kind, payload, awaitTimeoutNs };
+  return { op, dst, field, src, kind, payload, awaitTimeoutNs, mintRequest, dstBound };
 }
 
 /**
