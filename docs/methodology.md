@@ -210,11 +210,10 @@ Details that make these trustworthy:
   them: the **medians** breach the threshold (the effect is big enough), the two arms'
   **[min..max] ranges are disjoint** (a sign flip inside the ranges reads as
   indistinguishable and can never fail), and a **strict majority of the interleaved
-  pairs** breach on their own (the effect reproduces). This replaced a best-of-3
-  estimator, which rejects a bad *sample* but not a bad *window* — the failure that
-  produced three false `fold-b4` failures on unrelated PRs
-  ([#763](https://github.com/avatarsd-llc/libtracer/issues/763),
-  [#464](https://github.com/avatarsd-llc/libtracer/issues/464)).
+  pairs** breach on their own (the effect reproduces). All three are needed because a
+  best-of-3 estimator rejects a bad *sample* but not a bad *window*: a runner that goes
+  slow for the whole of one arm's block produces a clean, reproducible, entirely false
+  breach, and the majority-of-interleaved-pairs rule is what a window cannot fake.
 - Each arm's own spread across the pairs is printed, and the **baseline arm's worst
   spread is reported as the run's drift figure** — the baseline binary cannot be moved
   by the change under test, so its spread is the invariant control leg. It does not
