@@ -3,7 +3,7 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * transport_ws server (#54, multi-peer per #362) — the connection layer on top
- * of the RFC 6455 PROTOCOL layer (ws.hpp). A board accepts MANY concurrent
+ * of the RFC 6455 PROTOCOL layer (`%ws.hpp`). A board accepts MANY concurrent
  * inbound WebSocket connections (the headline browser↔board link — an SPA plus
  * a peer node, or several tabs): bind+listen on a TCP port, then ONE poll-based
  * thread multiplexes the listen socket and every peer socket (no per-peer
@@ -120,7 +120,7 @@ class transport_ws_server : public transport_t, public bus_link_t, private strea
      * @brief Zero-copy scatter-gather broadcast: emit the gathered @p iov spans as
      *        ONE server→client BINARY message to EVERY open peer, no flatten copy.
      *
-     * Overrides the base flatten-then-encode default (transport.hpp): server frames
+     * Overrides the base flatten-then-encode default (`%transport.hpp`): server frames
      * are UNMASKED (RFC 6455 §5.1), so the frame header rides as the first iovec
      * entry and the payload spans follow it straight to the wire via one gathered
      * scatter-gather write per peer — no allocation, no copy. Each peer writes from

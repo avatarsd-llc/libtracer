@@ -16,7 +16,7 @@ bump, no copy). The last-known-value path takes **no per-vertex mutex**.
 `graph_t` owns the vertex map (keyed on canonical [path](path.md) bytes). Each vertex
 has a **role**: *stored-value* (last-writer-wins), *stream* (a bounded ring whose depth the
 owner declares host-side with `set_history_depth`, and which no peer can read or write —
-[RFC-0022](../spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.C), or *handler* (`on_read` / `on_write` — covering
+[RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.C), or *handler* (`on_read` / `on_write` — covering
 computed, proxy, sink, live-MMIO patterns). The last-known-value slot is an
 `atomic<shared_ptr<const rope_t>>` swap, so `read` / `write` of the value take **no
 per-vertex mutex**; that mutex guards the subscriber list, the history ring and the
@@ -450,4 +450,130 @@ followed by the owner's own announce write.
 :project: libtracer
 ```
 
-See: [path](path.md), [views](views.md), [interface-map](interface-map.md).
+### Registration and subscription
+
+```{doxygenclass} tr::graph::vertex_handle_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::graph::subscription_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::graph::subscriber_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::graph::subscriber_remote_t
+:project: libtracer
+:members:
+```
+
+```{doxygentypedef} tr::graph::subscriber_fn_t
+:project: libtracer
+```
+
+```{doxygenstruct} tr::graph::remote_delivery_t
+:project: libtracer
+:members:
+```
+
+### Handlers and delivery policy
+
+```{doxygenstruct} tr::graph::handlers_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::graph::value_handlers_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::graph::delivery_policy_t
+:project: libtracer
+:members:
+```
+
+```{doxygenenum} tr::graph::delivery_mode_t
+:project: libtracer
+```
+
+```{doxygenclass} tr::graph::value_ref_t
+:project: libtracer
+:members:
+```
+
+### Edges
+
+```{doxygenstruct} tr::graph::edge_view_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::graph::edge_snapshot_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::graph::edge_latch_t
+:project: libtracer
+:members:
+```
+
+### Owner app fields
+
+```{doxygenenum} tr::graph::app_access_t
+:project: libtracer
+```
+
+```{doxygenstruct} tr::graph::app_field_t
+:project: libtracer
+:members:
+```
+
+```{doxygentypedef} tr::graph::app_field_static_t
+:project: libtracer
+```
+
+```{doxygenstruct} tr::graph::app_field_slot_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::graph::app_field_group_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::graph::app_field_table_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::graph::borrowed_fields_t
+:project: libtracer
+:members:
+```
+
+### Lock striping
+
+```{doxygenstruct} tr::graph::vertex_stripe_t
+:project: libtracer
+:members:
+```
+
+```{doxygenfunction} tr::graph::vertex_stripe_index
+:project: libtracer
+```
+
+```{doxygenfunction} tr::graph::vertex_stripe_at
+:project: libtracer
+```
+
+See: [path](path.md), [views](views.md), [status & errors](status.md),
+[security & ACL](security-acl.md), [config](config.md),
+[interface-map](interface-map.md).

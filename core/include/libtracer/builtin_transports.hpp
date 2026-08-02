@@ -14,8 +14,10 @@
  * NO preprocessor macro selects a module: selection is which TUs get compiled (the
  * project's no-feature-macro doctrine, cf. socketcan_link.cpp vs. its stub).
  *
- * This is NOT a public API: it is not part of the tracer.hpp umbrella and is not
- * scanned by core/Doxyfile.
+ * Integration glue, not part of the modelling surface: it is deliberately absent from
+ * the `%tracer.hpp` umbrella, so a translation unit that wants the built-in catalog
+ * includes it by name. It IS scanned by core/Doxyfile and rendered on the transport
+ * page — `register_builtin_transports` is the call an integrator makes.
  */
 #pragma once
 

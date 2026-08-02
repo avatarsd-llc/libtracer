@@ -34,7 +34,7 @@ namespace tr::net {
  * A protected base (inherited privately by the concrete transports) owning the
  * `stop_` flag and the receive thread, plus the socket-timeout/poll idioms that
  * make a blocking loop shutdown-responsive: every blocking wait is bounded to
- * 100 ms (SO_RCVTIMEO or ::poll), after which the loop re-checks @ref stop_.
+ * 100 ms (SO_RCVTIMEO or `poll(2)`), after which the loop re-checks `stop_`.
  *
  * **Teardown invariant (derived destructors):** call @ref stop_and_join
  * FIRST, before releasing ANY resource the thread body touches (sockets,
@@ -91,7 +91,7 @@ class posix_endpoint_t {
     /**
      * @brief Request shutdown and join the receive thread (idempotent).
      *
-     * Sets @ref stop_ and joins the thread if one is running. MUST be the
+     * Sets `stop_` and joins the thread if one is running. MUST be the
      * FIRST act of every derived destructor — only after it returns may the
      * destructor release the resources the thread body touches.
      */
@@ -102,21 +102,21 @@ class posix_endpoint_t {
      *
      * The idiom that keeps a blocking `recv`/`recvfrom` loop shutdown-
      * responsive: each blocked read wakes within 100 ms so the loop can
-     * re-check @ref stop_ and resume (or exit) — one home for the constant.
+     * re-check `stop_` and resume (or exit) — one home for the constant.
      *
      * @param fd The socket to arm.
      */
     static void set_rcv_timeout(int fd);
 
     /**
-     * @brief One bounded readability wait: `::poll(POLLIN, 100 ms)` on @p fd.
+     * @brief One bounded readability wait: `poll(2)` for POLLIN with a 100 ms timeout on @p fd.
      *
      * The poll-flavored twin of @ref set_rcv_timeout for loops that wait
-     * before reading. Returns the raw `::poll` result — `> 0` readable,
-     * `0` timeout (re-check @ref stop_ and continue), `< 0` error.
+     * before reading. Returns the raw `poll(2)` result — `> 0` readable,
+     * `0` timeout (re-check `stop_` and continue), `< 0` error.
      *
      * @param fd The socket to wait on.
-     * @return The `::poll` return value.
+     * @return The `poll(2)` return value.
      */
     static int poll_readable(int fd);
 
@@ -141,17 +141,17 @@ class posix_endpoint_t {
 
    private:
     /**
-     * @brief pthread entry trampoline — runs @ref body_ then returns.
+     * @brief pthread entry trampoline — runs `body_` then returns.
      *
      * @param self The owning @ref posix_endpoint_t (the `pthread_create` arg).
      * @return Always nullptr (the thread's exit value is unused).
      */
     static void* thread_entry(void* self);
 
-    std::function<void()> body_; /**< @brief The owned thread body @ref thread_entry runs. */
+    std::function<void()> body_; /**< @brief The owned thread body `thread_entry` runs. */
     pthread_t thread_{};         /**< @brief The receive thread (joined by stop_and_join;
-                                            valid only while @ref started_). */
-    bool started_ = false;       /**< @brief Whether @ref thread_ holds a joinable thread
+                                            valid only while `started_`). */
+    bool started_ = false;       /**< @brief Whether `thread_` holds a joinable thread
                                             (a failed/never-attempted spawn stays false). */
 };
 
@@ -170,7 +170,7 @@ class posix_endpoint_t {
  * @ref conn_fd_ INSIDE the lock, pairing with the teardown below.
  *
  * **Teardown-under-write-lock invariant:** a recv thread that closes the peer
- * fd MUST reset @ref conn_fd_ to -1 under @ref write_m_ BEFORE `::close()`
+ * fd MUST reset @ref conn_fd_ to -1 under @ref write_m_ BEFORE `close(2)`
  * (@ref teardown_peer) — so a sender never writes to (or reads) a
  * closed/reused fd.
  *
@@ -203,7 +203,7 @@ class stream_endpoint_t : protected posix_endpoint_t {
     /**
      * @brief Write @p bytes to @p fd completely, resuming partial writes.
      *
-     * A stream write may stop anywhere; loops `::send` (MSG_NOSIGNAL — a
+     * A stream write may stop anywhere; loops `send(2)` (MSG_NOSIGNAL — a
      * vanished peer must not SIGPIPE the process) until done. Peer-gone /
      * error drops the rest silently (link-down is #66 lifecycle). The caller
      * holds @ref write_m_ per the write-serialization invariant.
@@ -218,7 +218,7 @@ class stream_endpoint_t : protected posix_endpoint_t {
      *        resuming partial writes — the zero-copy scatter-gather twin of
      *        @ref write_all.
      *
-     * `::sendmsg` (MSG_NOSIGNAL — a vanished peer must not SIGPIPE the process)
+     * `sendmsg(2)` (MSG_NOSIGNAL — a vanished peer must not SIGPIPE the process)
      * emits every iovec in one syscall; a stream write may stop anywhere, so the
      * loop advances past fully-written entries and trims a partially-written one
      * and resends. @p vec is CONSUMED (its entries' `iov_base`/`iov_len` are
@@ -248,7 +248,7 @@ class stream_endpoint_t : protected posix_endpoint_t {
      * @brief Tear the peer connection down (recv-thread side).
      *
      * The teardown-under-write-lock invariant as code: resets @ref conn_fd_
-     * to -1 under @ref write_m_, THEN `::close(fd)` — a concurrent `send()`
+     * to -1 under @ref write_m_, THEN `close(2)` on the fd — a concurrent `send()`
      * either finished against the still-open fd or reads -1 and no-ops.
      *
      * @param fd The peer fd the recv loop was serving.
@@ -258,7 +258,7 @@ class stream_endpoint_t : protected posix_endpoint_t {
     /**
      * @brief The one-peer accept loop (tcp LISTEN / ws server shape).
      *
-     * Until @ref stop_: one poll-100ms-recheck accept pass (@ref poll_accept);
+     * Until `stop_`: one poll-100ms-recheck accept pass (@ref poll_accept);
      * on a new connection run @p on_accept (per-peer setup — socket options,
      * handshake; return false to reject: the fd is closed and the loop
      * re-accepts), publish the fd to @ref conn_fd_, run @p serve_peer, then
@@ -267,7 +267,7 @@ class stream_endpoint_t : protected posix_endpoint_t {
      * @param listen_fd  The bound+listening socket.
      * @param on_accept  Per-peer setup; false rejects the connection.
      * @param serve_peer The per-connection recv loop; returns on peer
-     *                   departure or @ref stop_.
+     *                   departure or `stop_`.
      */
     void run_accept_loop(int listen_fd, const std::function<bool(int)>& on_accept,
                          const std::function<void(int)>& serve_peer);

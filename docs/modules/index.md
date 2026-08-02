@@ -1,10 +1,20 @@
-# Modules
+# C++ API reference
 
-A module-by-module guide to the **reference C++ implementation** (`core/`). Each
-page gives a one-paragraph summary, an extended description, the public interface
-(real C++ signatures), and where the module sits. For the cross-cutting view see
-the **[interface map](interface-map.md)**; for the bytes on the wire see the
-**[bit-level walkthrough](wire-format-bits.md)**.
+The per-layer API reference for the **reference C++ implementation** (`core/`).
+Each page pairs a usage narrative — what the module is for, how it is used, and
+what goes wrong — with the declarations rendered from the headers themselves.
+For the cross-cutting view see the **[interface map](interface-map.md)**; for the
+bytes on the wire see the **[bit-level walkthrough](wire-format-bits.md)**.
+
+Pages are ordered by dependency, which is also the layer order: the cross-cutting
+taxonomy and configuration first, then L0 up to the transport plane. Namespaces
+mirror that model — `tr::mem` is L0, `tr::view` is L1, `tr::wire` is the L2/L3
+codec, `tr::graph` is L4, and `tr::net` is the transport plane. Dependencies point
+*up* the layers only.
+
+This reference describes the C++ implementation. What an implementation in any
+language must do is [the specification](../spec/index.md); the
+implementation-independent model is [the reference suite](../reference/README.md).
 
 A libtracer node is **a set of modules linked together** — there is no monolithic
 "core". The implemented modules form a clean six-layer stack:
@@ -58,7 +68,12 @@ Each module has its own page in the sidebar, grouped by layer:
 - **L2/L3 wire codec** — [frame-codec](frame-codec.md) (TLV decode/encode + CRC)
 - **L4 graph** — [path](path.md) (addressing), [graph](graph.md) (vertices, read/write/await,
   dispatch), [fwd-router](fwd-router.md) (FWD source-routing and the `/net` plane)
-- **L4 transport** — [transport](transport.md) (loopback · UDP · TCP · WS · CAN; QUIC / WebTransport opt-in)
+- **L4 transport** — [transport](transport.md) (loopback · UDP · TCP · WS; QUIC / WebTransport opt-in),
+  [can](can.md) (the header-elided CAN stack: ID codec, advertise, splitter, reassembly, binding)
+- **Cross-cutting** — [status & errors](status.md) (`status_t` / `result_t<T>` / `err_t`),
+  [config](config.md) (the named-traits type and the policies it selects),
+  [security & ACL](security-acl.md) (typed entries and the policy seam),
+  [instrumentation](instrumentation.md) (the optional reachability counters)
 
 ## The dispatcher module boundary
 
@@ -73,6 +88,15 @@ a conforming node must supply, listed alongside the frame codec, the view machin
 the forwarder ([../reference/10-module-catalog.md](../reference/10-module-catalog.md)).
 A second implementation is free to make it its own compilation unit. This implementation
 folds it into the graph runtime; the module boundary is a contract, not a file layout.
+
+## Where to see the calls in use
+
+Every page here describes a seam; the [worked examples](../examples/index.md) are
+the same seams driven end to end in compile-tested programs — in-process pub/sub
+and dispatch cost for [graph](graph.md), the codec round-trip for
+[frame-codec](frame-codec.md), rope scatter-gather for [views](views.md), and a
+two-node forward for [fwd-router](fwd-router.md) and [transport](transport.md).
+Read a module page for the contract and an example for the shape of the call.
 
 ## Generated API reference blocks
 
@@ -89,6 +113,9 @@ sees it and cannot drift from `core/`. When the two disagree, the generated bloc
 :maxdepth: 1
 
 Interface map <interface-map>
+status & errors — result taxonomy <status>
+config — the build's traits type <config>
+instrumentation — reachability counters <instrumentation>
 ```
 
 ```{toctree}
@@ -124,6 +151,8 @@ Wire format, bit by bit <wire-format-bits>
 
 path — addressing <path>
 graph — vertices & dispatch <graph>
+security & ACL — access control <security-acl>
 fwd-router — FWD routing and the /net plane <fwd-router>
 transport — the wire <transport>
+can — the header-elided CAN stack <can>
 ```

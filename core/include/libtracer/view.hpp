@@ -6,7 +6,7 @@
  * borrows its segment via segment_ptr_t, so copying a view is a clone (refcount
  * bump) and the bytes stay alive as long as any view references them. The
  * load-bearing claim of L1 (docs/reference/08 §what L1 is): "a TLV is a cast
- * from a view" — the cast itself (the decode(view_t) overload) lives at L2 (frame.hpp /
+ * from a view" — the cast itself (the decode(view_t) overload) lives at L2 (`%frame.hpp` /
  * tr::wire), since it produces a tlv_t; L1 must not depend upward on L2.
  */
 #pragma once
@@ -29,7 +29,7 @@ namespace tr::view {
  * @brief A single contiguous window into one @ref segment_t.
  *
  * Copyable; copy == clone (bumps the segment refcount). The common case is one
- * link; ropes (rope.hpp) chain several.
+ * link; ropes (`%rope.hpp`) chain several.
  * @note Invariant: `offset + length <= owner->bytes.size()`.
  */
 struct view_t {

@@ -808,7 +808,7 @@ class graph_t {
      *        @ref tr::graph::kPinNever (0) ⇒ this vertex never pins.
      *
      * The read accessor the opaque handle does not expose directly: the WRITE resolver
-     * (`op_resolve_walk.hpp`) queries it here instead of dereferencing the vertex. One
+     * (`%op_resolve_walk.hpp`) queries it here instead of dereferencing the vertex. One
      * inline load, and nothing is inherited (RFC-0022 §3.F) — a vertex whose owner never
      * called @ref set_pin_payload_ratio answers 0 whatever its ancestors hold.
      */

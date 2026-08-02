@@ -1,10 +1,17 @@
-/*
+/**
+ * @file
+ * @brief Umbrella header for the libtracer protocol-v1 reference implementation — the L0
+ *        substrate, L1 views, the L2/L3 wire codec, the L4 graph runtime and its forwarding
+ *        plane, and the UDP/TCP/loopback transports.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Umbrella header for the libtracer protocol-v1 reference implementation.
- * M1 (this milestone) ships the L2/L3 wire codec; the L0/L1 substrate and the
- * L4 in-process graph runtime follow (see core/README.md).
+ * Including this header pulls in every layer. A translation unit that needs one layer includes
+ * that layer's header directly. The opt-in pieces are deliberately absent and are included by
+ * name: the WebSocket, CAN, QUIC and WebTransport transports, the CUDA backend, the lazy
+ * decode tier, and the ACL policy seam — each carries dependencies a minimal node should not
+ * pay for.
  */
 #pragma once
 

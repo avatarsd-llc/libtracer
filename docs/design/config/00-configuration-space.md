@@ -1,7 +1,7 @@
 # The configuration space
 
 > **Scope:** the build configuration of the C++23 reference implementation under
-> [`../../../core/`](../../../core/) — which knobs exist, what each costs on a given target, and
+> [`core/`](https://github.com/avatarsd-llc/libtracer/tree/main/core/) — which knobs exist, what each costs on a given target, and
 > which constants are not knobs. **Not the standard:** the [spec](../../spec/v1.md) constrains
 > bytes on the wire, not build systems, and a second implementer needs none of this. Every
 > number here is a measurement with its target and flags named. Standard-level companions:

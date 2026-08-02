@@ -130,6 +130,83 @@ The bounded reference backend:
 :members:
 ```
 
+### The heap backend and the space tags
+
+```{doxygenclass} tr::mem::heap_backend_t
+:project: libtracer
+:members:
+```
+
+```{doxygenfunction} tr::mem::heap_backend
+:project: libtracer
+```
+
+```{doxygenenum} tr::mem::mem_space_t
+:project: libtracer
+```
+
+```{doxygenenum} tr::mem::backend_tag
+:project: libtracer
+```
+
+```{doxygenfunction} tr::mem::destroy_dispatch
+:project: libtracer
+```
+
+```{doxygenfunction} tr::mem::transfer
+:project: libtracer
+```
+
+### Shared pools and their synchronization policy
+
+A pool shared by more than one thread needs a synchronization policy, and the
+policy is a compile-time parameter rather than a runtime flag so a single-threaded
+target pays nothing for it. `spin_sync_t` is the multi-core host policy;
+`sync_none_t` is the unsynchronized one; a bare-metal target supplies an
+interrupt-disable critical section of its own. `sync_pool_t` is the spelling for
+the common host case.
+
+The `pool_source_t` seam has its own policy question, and one deliberate
+non-answer: `sync_mutex_t` lives in a separate header because the L0 seam is
+compiled into a freestanding footprint sentinel where `<mutex>` does not exist,
+and because a mutex is the right instrument only for a source shared at *wiring*
+frequency. It is not a way to make a per-frame source thread-safe — see
+[failable allocation and backpressure](../design/allocation-and-backpressure.md)
+for what a shared free list costs under contention.
+
+```{doxygenconcept} tr::mem::pool_sync_policy
+:project: libtracer
+```
+
+```{doxygenstruct} tr::mem::spin_sync_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::mem::synchronized_pool_t
+:project: libtracer
+:members:
+```
+
+```{doxygentypedef} tr::mem::sync_pool_t
+:project: libtracer
+```
+
+```{doxygenclass} tr::mem::sync_mutex_t
+:project: libtracer
+:members:
+```
+
+### Device memory
+
+```{doxygenfunction} tr::mem::cuda_backend
+:project: libtracer
+```
+
+```{doxygenfunction} tr::mem::cuda_transfer
+:project: libtracer
+```
+
 ## The seam
 
 ```{mermaid}

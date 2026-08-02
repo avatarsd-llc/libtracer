@@ -59,6 +59,29 @@ with it (`core/tests/CMakeLists.txt:489-490`).
 :members:
 ```
 
+The handle-producing conveniences live in `tr::view` rather than with the
+backends, because what they produce is an L1 handle:
+
+```{doxygenfunction} tr::view::heap_alloc
+:project: libtracer
+```
+
+```{doxygenfunction} tr::view::borrow
+:project: libtracer
+```
+
+```{doxygenfunction} tr::view::borrow_const
+:project: libtracer
+```
+
+```{doxygenfunction} tr::view::borrow_device
+:project: libtracer
+```
+
+```{doxygenfunction} tr::view::cuda_alloc
+:project: libtracer
+```
+
 ## Refcount lifecycle (fan-out)
 
 ```{mermaid}

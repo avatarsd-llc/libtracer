@@ -250,10 +250,10 @@ class transport_vertex_t {
      * name, so every module segment in the graph traces to an application decision. The
      * mapping is not uniform either: a transport with both a dial and a listen shape is TWO
      * modules (`ws-client`, `ws-server`), while a bus like `can` is ONE for both roles — "a
-     * bus has no dial/listen asymmetry" (`transport_can.hpp`).
+     * bus has no dial/listen asymmetry" (`%transport_can.hpp`).
      *
      * Built-in transports ship *suggested* module names (e.g. `kWsClientSuggestedModule` in
-     * `transport_ws.hpp`) the application may pass here — but the call is always
+     * `%transport_ws.hpp`) the application may pass here — but the call is always
      * application code. Registration is a minting boundary, so the shared segment-validity
      * predicate (ADR-0073 §1) gates @p module: a name carrying a reserved character, empty,
      * or over the segment byte cap answers `INVALID_PATH` and registers nothing.

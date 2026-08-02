@@ -300,7 +300,7 @@ framing modes. The bounds to design within:
 - **Depth is capped by the route, and the route by its bytes.** A `FWD` frame's `dst` names
   every hop and is consumed monotonically, so a delivery travels exactly as far as its explicit
   source route — segment count ≤ 255 ([03 — Addressing](03-addressing.md);
-  [RFC-0023](../spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md); `kMaxSegments`,
+  [RFC-0023](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md); `kMaxSegments`,
   `core/include/libtracer/path.hpp:34`). For realistically named mounts the **1024-byte PATH
   budget binds first**, not the segment count: a 3-segment mount run (ADR-0061) costs its NAME
   headers plus its bytes — 20 B/hop for `/net/can/c0`, 32 B/hop for

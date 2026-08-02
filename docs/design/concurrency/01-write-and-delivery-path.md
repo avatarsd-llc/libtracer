@@ -1,7 +1,7 @@
 # Write and delivery path
 
 **Scope:** the dispatch structure of the C++23 reference implementation under
-[`../../../core/`](../../../core/) and what it costs on one host. Not the standard, and not
+[`core/`](https://github.com/avatarsd-llc/libtracer/tree/main/core/) and what it costs on one host. Not the standard, and not
 normative — the obligations any implementation must meet are in
 [`../../reference/15-concurrency-and-scaling.md`](../../reference/15-concurrency-and-scaling.md).
 The read half of the runtime is [`00-scaling-and-serialization.md`](00-scaling-and-serialization.md);

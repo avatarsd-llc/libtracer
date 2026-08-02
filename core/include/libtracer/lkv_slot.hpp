@@ -188,10 +188,10 @@ static_assert(alignof(cell_t) == kDomainAlign,
 /** @brief One participant's private node lists — touched only by its owner, so never atomic. */
 struct alignas(kDomainAlign) lists_t {
     node_t* retired = nullptr;  /**< @brief Displaced nodes awaiting a scan. */
-    std::size_t retired_n = 0;  /**< @brief Length of @ref retired. */
-    std::size_t scan_at = 0;    /**< @brief Scan once @ref retired_n reaches this. */
+    std::size_t retired_n = 0;  /**< @brief Length of `retired`. */
+    std::size_t scan_at = 0;    /**< @brief Scan once `retired_n` reaches this. */
     node_t* freelist = nullptr; /**< @brief Scanned-clean nodes, reused by the next publish. */
-    std::size_t freelist_n = 0; /**< @brief Length of @ref freelist. */
+    std::size_t freelist_n = 0; /**< @brief Length of `freelist`. */
 };
 
 /** @brief "This thread has not claimed an index." */
@@ -232,13 +232,13 @@ struct final_sweep_t {
  * variable and is never destroyed, so a `thread_local` participant unwinding at process
  * exit can always reach it — the ordering hazard that a `std::vector` or a `std::mutex`
  * in here would create. Cost: `(kHazardReaderSlots + 1) * 128` bytes, and **zero** for a
- * target that does not bind this slot, since nothing then references @ref registry.
+ * target that does not bind this slot, since nothing then references `registry()`.
  */
 struct registry_t {
     std::array<cell_t, kHazardReaderSlots + 1> cells{};  /**< @brief Announcements. */
     std::array<lists_t, kHazardReaderSlots + 1> lists{}; /**< @brief Parked + recycled nodes. */
     std::atomic<node_t*> orphans{nullptr}; /**< @brief Left by exited threads; adopted by scans. */
-    std::atomic_flag overflow_lock{};      /**< @brief Serializes users of @ref kOverflowIndex. */
+    std::atomic_flag overflow_lock{};      /**< @brief Serializes users of `kOverflowIndex`. */
 };
 
 /** @brief The one domain. Emitted only in a build that actually binds @ref hazard_slot_t. */
@@ -252,18 +252,18 @@ struct registry_t {
 /** @brief This thread's claim on a domain index, released when the thread ends. */
 class participant_t {
    public:
-    /** @brief Bind to the domain up front; see @ref self for why the timing matters. */
+    /** @brief Bind to the domain up front; see `self()` for why the timing matters. */
     explicit participant_t(registry_t& reg) : reg_(reg) {}
     participant_t(const participant_t&) = delete;
     participant_t& operator=(const participant_t&) = delete;
     ~participant_t();
 
-    /** @brief The claimed index, or @ref kNoIndex before @ref claim succeeds. */
+    /** @brief The claimed index, or `kNoIndex` before `claim()` succeeds. */
     [[nodiscard]] std::size_t index() const { return idx_; }
 
     /**
      * @brief Claim an index once per thread.
-     * @return The claimed index, or @ref kNoIndex when every index is taken.
+     * @return The claimed index, or `kNoIndex` when every index is taken.
      */
     std::size_t claim();
 
@@ -294,7 +294,7 @@ void scan(registry_t& r, lists_t& l);
  * @brief Resolves the calling thread to a domain index for the length of one operation.
  *
  * The common case is a `thread_local` read and a branch. Only a thread that found every
- * index taken pays anything more: it borrows @ref kOverflowIndex under the domain spin lock
+ * index taken pays anything more: it borrows `kOverflowIndex` under the domain spin lock
  * and gives it back here. Never nest two of these on one thread — the lock is not recursive.
  */
 class ticket_t {
@@ -386,7 +386,7 @@ inline void scan(registry_t& r, lists_t& l) {
 }
 
 /**
- * @brief Give @ref kOverflowIndex back, draining it first.
+ * @brief Give `kOverflowIndex` back, draining it first.
  *
  * The shared index is the one list with no owning thread: the threads that use it never
  * claimed anything, so no `participant_t` destructor ever comes back for what they parked.
@@ -538,7 +538,7 @@ inline final_sweep_t::~final_sweep_t() {
  * readers (7.4 M/s) — see the table in this file's header, and ADR-0069 §6 for why the
  * model bench's 20.8× did not survive contact with the whole read path.
  *
- * Why the default is still @ref sp_atomic_slot_t: the gain is entirely a concurrency gain —
+ * Why the default is still `sp_atomic_slot_t`: the gain is entirely a concurrency gain —
  * at one thread the two slots are indistinguishable within run-to-run spread, so a
  * single-core node buys nothing and still pays `(kHazardReaderSlots + 1) * 128` bytes of
  * registry, a deferred-reclamation lifetime rule (see `retire_and_flush`), and

@@ -116,7 +116,7 @@ class can_link_t {
      * pointer and formats the buffer later, possibly from a tx-done ISR —
      * e.g. ESP-IDF's `esp_driver_twai` behind the component's `twai_link_t`)
      * must copy the frame into storage the LINK owns until the driver signals
-     * completion (#383; `can_tx_pool.hpp` is that storage). A synchronous
+     * completion (#383; `%can_tx_pool.hpp` is that storage). A synchronous
      * link (`socketcan_link_t`: the kernel copies inside the write(2) call)
      * may use @p frame directly.
      */

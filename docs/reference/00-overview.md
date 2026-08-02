@@ -45,7 +45,7 @@ Higher profiles are strict supersets. A conformance test suite exercises P0 mand
 
 ## The six load-bearing claims
 
-Any conforming implementation must honor these. They are what distinguishes libtracer from existing protocols (see [../../README.md](../../README.md) for the comparison).
+Any conforming implementation must honor these. They are what distinguishes libtracer from existing protocols (see the [repository README](https://github.com/avatarsd-llc/libtracer/blob/main/README.md) for the comparison).
 
 1. **A TLV in memory IS a graph node IS the wire bytes.** No separate serialization layer. The in-memory representation is a tree of refcounted **views** over real backing memory. Mix/split/concat at the graph level rearranges views without touching bytes. Serialization is a walk of the view tree. ([02-graph-model.md](02-graph-model.md), [06-user-data-packing.md](06-user-data-packing.md))
 
@@ -233,7 +233,7 @@ For a forwarder implementer: 02, 03, 04, 07 are mandatory; 06 is illustrative of
 
 ## Out-of-scope for this reference suite
 
-- The API/ABI of any specific implementation (header signatures, struct layouts beyond the packed wire header). See the implementation's own headers — for the reference C++23 core, those land in [../../core/](../../core/).
+- The API/ABI of any specific implementation (header signatures, struct layouts beyond the packed wire header). See the implementation's own headers — for the reference C++23 core, those land in [../../core/](https://github.com/avatarsd-llc/libtracer/tree/main/core/).
 - The module ABI (`transport_vtable_t`, etc.). See [10-module-catalog.md](10-module-catalog.md) §module ABI.
 - The configuration file format (TOML for forwarding/discovery). The catalog deliberately declines to fix it — see [10-module-catalog.md](10-module-catalog.md) §boundaries of the catalog.
 - Build options and CMake toggles (defined with the `core/` rebuild).

@@ -8,7 +8,7 @@
  * reconstructed host-side from the 29-bit CAN ID scheme (can.hpp / ADR-0022), so
  * the existing CAN frames are byte-unchanged on the bus (zero added overhead).
  *
- * Mirrors the existing L1 view/rope primitives (view.hpp, rope.hpp): the split
+ * Mirrors the existing L1 view/rope primitives (`%view.hpp`, `%rope.hpp`): the split
  * is zero-copy — each CAN-frame window is a subview() over the source segment,
  * never a memcpy — and reassembly chains those windows back into a rope_t.
  */

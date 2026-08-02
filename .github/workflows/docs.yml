@@ -18,6 +18,7 @@ on:
       - "tests/conformance/**"
       - "core/include/**" # public headers feed the Doxygen source refs
       - "core/Doxyfile"
+      - "tools/**" # the citation gate, the release-subtree assembler, the version manifest
       - ".github/workflows/docs.yml"
   pull_request:
     paths:
@@ -27,6 +28,7 @@ on:
       - "tests/conformance/**"
       - "core/include/**"
       - "core/Doxyfile"
+      - "tools/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -149,7 +151,7 @@ jobs:
             const body = `${marker}\n### 📊 libtracer vs Zenoh — absolute (this run)\n\n`
               + `Measured on this CI runner in the same pass. libtracer built from source at \`-O3\`; Zenoh is the upstream zenoh-c 1.9.0 prebuilt release. Absolute values, no ratios — `
               + `shared-runner variance is real, read trends not the third digit. Interactive charts land on the `
-              + `[Performance page](https://avatarsd-llc.github.io/libtracer/docs/performance.html) after merge.\n\n`
+              + `[Performance page](https://libtracer.avatarsd.com/docs/performance.html) after merge.\n\n`
               + table;
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
@@ -159,8 +161,13 @@ jobs:
             else await github.rest.issues.createComment({ owner, repo, issue_number, body });
       - name: Generate live test report (ctest across every suite)
         run: python3 bench/gen_test_report.py
+      # -n -W --keep-going: nitpicky, warnings are errors, and report them all rather
+      # than stopping at the first. This is the link-integrity gate — a broken
+      # cross-reference, a dead toctree entry or an @ref that no page publishes fails
+      # the PR check instead of shipping as unlinked plain text. docs/conf.py records
+      # the two Breathe-generated reference classes that are deliberately not nitpicked.
       - name: Build (sphinx-build, config in docs/, source = repo root)
-        run: sphinx-build -b html -c docs . docs/_build/html
+        run: sphinx-build -n -W --keep-going -b html -c docs . docs/_build/html
       # Rebuild each released version's docs from its vX.Y.Z tag into a subtree of
       # the site (deploy-pages replaces the WHOLE site every push, so released
       # subtrees must be re-assembled on every deploy, not once at release time).

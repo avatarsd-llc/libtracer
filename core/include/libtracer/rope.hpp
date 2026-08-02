@@ -239,7 +239,7 @@ class rope_t {
      *
      * The single bridge-boundary copy — taken only when a flat-buffer consumer
      * demands it. The flattened view can then be cast with `decode(view_t)`
-     * (frame.hpp, `tr::wire`).
+     * (`%frame.hpp`, `tr::wire`).
      * @retval {} An empty view if the backend cannot allocate, **or if the rope
      *            is not @ref all_host** (a DEVICE link cannot be CPU-memcpy'd —
      *            docs/adr/0024; lower such a payload via its device transport).

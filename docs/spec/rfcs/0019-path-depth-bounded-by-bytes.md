@@ -700,7 +700,7 @@ would make an already-large amendment unreviewable:
 
 1. The immutability trigger is spelled three different ways in three governing documents — `v1.md:148`
    "immutable once **finalized**", `GOVERNANCE.md:45` "immutable once **released**",
-   `docs/spec/README.md` "Once a version is **published**". None has fired, so this RFC's target-version
+   `docs/spec/index.md` "Once a version is **published**". None has fired, so this RFC's target-version
    conclusion is robust under every reading.
 2. `v1.md` incorporates `reference/03` at **two different widths**: §3 scopes to "§path syntax" (one
    H2, lines 8–103) while §3.1.3 line 102 says "Validates per the rules of [reference/03]" with no

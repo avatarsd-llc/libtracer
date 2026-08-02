@@ -1,7 +1,7 @@
 # Build configuration — reference-implementation design notes
 
 > **Scope:** the build configuration of the C++23 reference implementation. Not normative.
-> **Target:** the sources under [`../../../core/`](../../../core/).
+> **Target:** the sources under [`core/`](https://github.com/avatarsd-llc/libtracer/tree/main/core/).
 > **Companions:** [`../../reference/10-module-catalog.md`](../../reference/10-module-catalog.md)
 > says what each module is *responsible for*, at standard level;
 > [`../../reference/12-deployment-profiles.md`](../../reference/12-deployment-profiles.md) says

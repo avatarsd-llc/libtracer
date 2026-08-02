@@ -194,14 +194,6 @@ The model above, made executable:
   embedded profile: memory slabs, transport composition, task-stack discipline,
   backpressure behavior, and validation practice for an ESP32-C6 target.
 
-```{toctree}
-:hidden:
-:maxdepth: 1
-
-Custom interoperable device <interop/custom-device>
-Production ESP32 node <interop/esp32-production-node>
-```
-
 ---
 
 > **See also**: [reference/00-overview.md](reference/00-overview.md) (the six-layer

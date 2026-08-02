@@ -4,7 +4,7 @@
  *
  * The rope-source cursor + rope validator (ADR-0048 §1): the link-walking twin of
  * grammar::span_cursor. It satisfies the same structural cursor concept the one
- * grammar core (grammar.hpp) reads through, so the identical header/trailer rules
+ * grammar core (`%grammar.hpp`) reads through, so the identical header/trailer rules
  * validate a frame delivered as a scatter-gather rope (CAN reassembly, WS
  * fragments) WITHOUT first flattening it — a header or trailer that straddles a
  * link boundary is stitched a byte at a time (they are small and bounded), and a

@@ -123,18 +123,11 @@ Concurrency & scaling <15-concurrency-and-scaling>
 ```
 
 ```{toctree}
-:caption: L0 — memory substrate
+:caption: Substrate — L0 memory, L1 views
 :hidden:
 :maxdepth: 1
 
 Memory substrate <09-memory-substrate>
-```
-
-```{toctree}
-:caption: L1 — views & ownership
-:hidden:
-:maxdepth: 1
-
 Views & ownership <08-views-and-ownership>
 ```
 
@@ -148,7 +141,7 @@ Protocol-defined TLVs <05-protocol-tlvs>
 ```
 
 ```{toctree}
-:caption: L4 — graph, addressing, host & transport
+:caption: L4 — graph semantics
 :hidden:
 :maxdepth: 1
 
@@ -156,8 +149,15 @@ Graph model <02-graph-model>
 Addressing <03-addressing>
 Communication flows <04-communication-flows>
 User data packing <06-user-data-packing>
-Host embedding <07-host-embedding>
 Vertex roles & aggregation <11-vertex-roles-and-aggregation>
+```
+
+```{toctree}
+:caption: Embedding, formation & transports
+:hidden:
+:maxdepth: 1
+
+Host embedding <07-host-embedding>
 Network formation <13-network-formation>
 CAN transport <14-can-transport>
 ```

@@ -53,6 +53,31 @@ if shutil.which("doxygen"):
 else:
     print("conf.py: doxygen not found — skipping C++ API source refs (Breathe)")
 
+# The Evidence pages (docs/performance.md, docs/test-report.md) are GENERATED —
+# bench/gen_results_page.py and bench/gen_test_report.py write them from the live
+# harnesses before sphinx-build runs in CI, and .gitignore keeps them out of the
+# tree. A fresh clone therefore has no such files, and the root toctree entries
+# that point at them would be dead on every local or non-CI build. Drop a minimal
+# placeholder for whichever one is absent: CI never sees this branch (the
+# generators run first and their output is what deploys), and a contributor
+# previewing the site locally gets a structurally identical tree with an honest
+# "generated in CI" note instead of a broken toctree.
+for _gen, _title in (
+    ("performance.md", "Performance & conformance"),
+    ("test-report.md", "Test report"),
+):
+    _path = os.path.join(_repo_root, "docs", _gen)
+    if not os.path.exists(_path):
+        with open(_path, "w", encoding="utf-8") as _fh:
+            _fh.write(
+                f"# {_title}\n\n"
+                "```{note}\n"
+                "This page is generated from the live harnesses by the documentation\n"
+                "workflow. This local build ran without them, so the page is a\n"
+                "placeholder — see the published site for the measured figures.\n"
+                "```\n"
+            )
+
 breathe_projects = {"libtracer": "_doxygen/xml"}
 breathe_default_project = "libtracer"
 breathe_default_members = ()  # docs opt in per-directive with :members:
@@ -71,11 +96,14 @@ include_patterns = [
     "index.md",
     "docs/getting-started.md",
     "docs/capability-matrix.md",
+    "docs/implementations.md",
     "docs/interoperability.md",
     "docs/interop/**",
     # docs/methodology.md is NOT listed: bench/gen_results_page.py splices its
     # prose into docs/performance.md, so listing it here would publish every
-    # paragraph twice under two different URLs.
+    # paragraph twice under two different URLs. The splice is heading-keyed — the
+    # generator looks methodology.md's section headings up by name — so renaming a
+    # heading there silently drops a section from the published page.
     "docs/performance.md",
     "docs/test-report.md",
     "docs/reference/**",
@@ -86,7 +114,7 @@ include_patterns = [
     "docs/modules/**",
     "docs/examples/**",
     "docs/spec/v1.md",
-    "docs/spec/README.md",
+    "docs/spec/index.md",
     "CONTEXT.md",
 ]
 exclude_patterns = [
@@ -110,9 +138,22 @@ myst_enable_extensions = ["colon_fence", "deflist", "tasklist"]
 myst_fence_as_directive = ["mermaid"]
 myst_heading_anchors = 3
 
-# Cross-links into the code tree (../../core/, etc.) are not documents; don't fail
-# the build over them. Run with -W later once links are polished.
-suppress_warnings = ["myst.xref_missing"]
+# No warning category is suppressed. myst.xref_missing used to be, to tolerate a
+# handful of deliberate links into the unpublished trees (ADRs, RFCs, code) — but
+# suppressing the category hid every genuinely broken cross-reference behind them,
+# including several inside the normative spec. Those deliberate links are now
+# absolute github.com URLs (which MyST leaves alone), so the category is a real
+# signal again and the docs job runs with -n -W --keep-going.
+#
+# Nitpicky mode (-n) is on in CI. One class of nitpick is not actionable: Breathe
+# renders each C++ declaration with a cross-reference for every type token in it,
+# and Sphinx's C++ domain can only resolve the tokens that some directive on the
+# site actually declared. A signature mentioning std::span, a `detail::` helper or
+# a type documented on another page therefore emits `cpp:identifier reference
+# target not found` no matter how complete the page set is. Ignore that one target
+# type; every other nitpick (undefined labels from @ref, missing documents, dead
+# toctree entries) still fails the build.
+nitpick_ignore_regex = [("cpp:identifier", r".*")]
 
 html_theme = "furo"
 html_title = "libtracer"
@@ -142,3 +183,37 @@ html_css_files = ["custom.css", "version-switcher.css"]
 # then it shows the current version as a chip. Base-path agnostic (resolves via
 # Sphinx's URL_ROOT), so it works on github.io and on a custom domain alike.
 html_js_files = ["version-switcher.js"]
+
+
+# --- Doxygen references no Sphinx directive can ever define -----------------------
+# Doxygen emits a <derivedcompoundref> for EVERY subclass of a documented base,
+# including subclasses whose namespace EXCLUDE_SYMBOLS drops (core/Doxyfile removes
+# `*::detail`). Breathe renders that list as "Subclassed by …" with a reference each,
+# so a base like tr::mem::mem_backend_t points at labels that, by policy, no directive
+# can ever define. That is not a broken cross-reference — it is the exclusion policy
+# showing through — so render those targets as plain literal text instead of warning.
+# Scoped to Doxygen ids inside a `detail` namespace: every other undefined label
+# (a rotted @ref, an entity no page embeds) still fails the nitpicky build.
+import re as _re
+
+from docutils import nodes as _nodes
+
+# A Doxygen id that names a FILE compound (`mem__pool_8hpp`, `rope_8hpp_source`) is
+# the second structurally-undefinable class: Breathe prints an `#include` line for
+# some entity kinds, and Doxygen auto-links a bare header name in prose, but no
+# {doxygen*} directive publishes a file, so no page can ever define that label.
+_UNDEFINABLE = _re.compile(r"_1_1detail(_1_1|__)|^[a-z_0-9]+_8hpp(_source)?$")
+
+
+def _undefinable_doxygen_ref(app, env, node, contnode):
+    """Render a Doxygen label no directive can define as literal text, not a warning."""
+    if node.get("refdomain") == "std" and node.get("reftype") == "ref":
+        target = node.get("reftarget", "")
+        if _UNDEFINABLE.search(target):
+            return _nodes.literal("", contnode.astext())
+    return None
+
+
+def setup(app):
+    app.connect("missing-reference", _undefinable_doxygen_ref)
+    return {"parallel_read_safe": True, "parallel_write_safe": True}
