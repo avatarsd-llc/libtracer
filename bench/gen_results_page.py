@@ -262,12 +262,6 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "actually carries so the address collapse is asserted rather than assumed.",
         "ns p50 per hop · wire bytes per hop"),
     instrument_t(
-        "bench_mount_descent.cpp", "framed", (),
-        "Times the mount descent's width loop — key widths `k = W..1`, each pass walking the "
-        "whole child table — against a single-pass alternative, swept over registry size and "
-        "widest registered mount.",
-        "ns p50 · slot visits per descent"),
-    instrument_t(
         "bench_transport_iov.cpp", "counted", (),
         "Assembles the real transports' `::iovec` table at rising span counts to find the width "
         "at which it stops fitting inline and allocates.",
