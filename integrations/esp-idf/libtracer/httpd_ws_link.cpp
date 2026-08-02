@@ -296,7 +296,11 @@ void httpd_ws_link_t::alloc_buffers() {
 }
 
 httpd_ws_link_t::tx_slot_t* httpd_ws_link_t::claim_tx_slot() {
-    if (tx_pool_ == nullptr) return nullptr;
+    // Teardown gate: once the dtor is draining, new sends must stop claiming slots or
+    // the drain never converges (unregistering the URI stops RX only — subscription
+    // pushers keep sending until the router detaches the transport). The heap fallback
+    // they get instead never touches the pool, so it is safe to run past the dtor.
+    if (tx_pool_ == nullptr || stopping_.load(std::memory_order_relaxed)) return nullptr;
     for (std::size_t i = 0; i < kTxPoolSlots; ++i) {
         bool expected = false;
         if (tx_pool_[i].busy.compare_exchange_strong(expected, true, std::memory_order_acquire))
@@ -336,12 +340,27 @@ httpd_ws_link_t::~httpd_ws_link_t() {
     // Owning mode needs no wait: httpd_stop has halted the task, so nothing can touch
     // the pool afterwards (an undrained work item is simply never run).
     if (!owns_httpd_ && tx_pool_ != nullptr) {
-        for (int turn = 0; turn < 200; ++turn) {  // <= ~1 s
-            bool busy = false;
+        bool busy = true;
+        for (int turn = 0; turn < 200 && busy; ++turn) {  // <= ~1 s
+            busy = false;
             for (std::size_t i = 0; i < kTxPoolSlots; ++i)
                 if (tx_pool_[i].busy.load(std::memory_order_acquire)) busy = true;
-            if (!busy) break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            if (busy) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        if (busy) {
+            // The drain bound expired with a send still in flight. That is not a
+            // corner case to power through: httpd_ws_send_frame_async can sit in
+            // SO_SNDTIMEO for several seconds on one large frame, and a dtor running
+            // on the adopting server's OWN task can never see its queued work drain
+            // at all (the work runs on the task that is sleeping here). The in-flight
+            // tx_work still reads the slot's payload and release-stores its busy flag,
+            // so freeing the pool now is a use-after-free — leak it instead: a
+            // bounded, teardown-only loss (kTxPoolSlots inline slots) that the
+            // drained path never pays. tx_work touches only the work item and the
+            // caller's still-running server handle, never this link, so the leaked
+            // pool is the one allocation that must outlive us.
+            ESP_LOGW(kTag, "tx pool leaked at teardown: a queued send outlived the drain bound");
+            (void)tx_pool_.release();
         }
     }
     handle_ = nullptr;
