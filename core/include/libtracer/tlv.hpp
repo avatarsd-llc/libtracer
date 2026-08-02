@@ -23,7 +23,9 @@ namespace tr::wire {
  * established, `delivery_compact`-flagged flow into a per-link label. They are NOT part of
  * the FWD frame and NOT cross-core conformance TLVs — a peer that ignores them simply keeps
  * the full-route delivery path — but are self-describing (opt.PL=1) so the codec parses them
- * generically.
+ * generically. 0x14 PATH_REF is the bound-path address form (RFC-0024 §4): the one type whose
+ * body is NOT self-describing — a fixed-stride 8-byte record array (opt.PL=0), whose shape the
+ * grammar therefore checks by type (path_ref.hpp).
  */
 enum class type_t : std::uint8_t {
     VALUE = 0x01,       /**< @brief Opaque scalar value. */
@@ -47,6 +49,8 @@ enum class type_t : std::uint8_t {
     COMPACT = 0x12,
     /** @brief Route-handle: VALUE label(u16) — stale/unknown label seen; prompts re-advertise. */
     HANDLE_NACK = 0x13,
+    /** @brief Bound path: a bare array of 8-byte node-scoped vertex refs (RFC-0024 §4). */
+    PATH_REF = 0x14,
 };
 
 /**

@@ -27,7 +27,7 @@ back. That makes a route **loop-free by construction** and needs **no per-hop de
 is no flooding, and no `(origin, ts)` suppression table. Two parallel links to the same peer are
 therefore *two different explicit addresses* — deliberate redundancy chosen by the addresser, not
 auto-multipath discovered by the router. `0x0D ROUTER` is a reserved, decodable wire code
-(`type_t::ROUTER`, `core/include/libtracer/tlv.hpp:40`) with no implemented mechanism behind it;
+(`type_t::ROUTER`, `core/include/libtracer/tlv.hpp:42`) with no implemented mechanism behind it;
 source routing needs none.
 
 Three dispositions, decided by resolving the **first `dst` segment** against the registry:

@@ -29,6 +29,7 @@
 #include "libtracer/crc.hpp"
 #include "libtracer/error.hpp"
 #include "libtracer/mem_source.hpp"
+#include "libtracer/path_ref.hpp"
 #include "libtracer/tlv.hpp"
 
 /**
@@ -121,7 +122,8 @@ struct header_t {
  * @brief Parse + validate ONE TLV header and its trailer at offset 0 of @p cur.
  *
  * Applies the whole grammar — minimum size, `type == 0x00` reject, reserved-bit
- * reject, `LL` length width, trailer sizing, and the two-span CRC (payload ++
+ * reject, `LL` length width, the `PATH_REF` fixed-stride body shape (RFC-0024
+ * §4.2/§4.3), trailer sizing, and the two-span CRC (payload ++
  * timestamp, fed without concatenation) — but does **not** recurse into a
  * structured payload's children; the sink's iterative walk does that. On success
  * the trailer has already been CRC-verified; the caller only re-reads the stored
@@ -151,6 +153,14 @@ template <class Cursor>
     if (avail < header) return std::unexpected(err_t::FRAME_TRUNCATED);
 
     const std::uint64_t length = cur.load_le(2, opt.ll ? 4u : 2u);
+    // The one per-type structural rule in the grammar (RFC-0024 §4.2/§4.3): a PATH_REF body is
+    // a fixed-stride 8-byte record array, so its shape is not derivable from the header alone
+    // the way every other type's is. PL/LL forbidden, length a whole number of elements, count
+    // at or under the §4.3 bound. Shape only — what an element MEANS is L4's (path_ref.hpp).
+    if (static_cast<type_t>(type_b) == type_t::PATH_REF &&
+        !path_ref_body_valid(opt.pl, opt.ll, static_cast<std::size_t>(length))) {
+        return std::unexpected(err_t::FRAME_INVALID);
+    }
     const std::size_t ts_size = opt.ts ? (opt.tf ? 4u : 8u) : 0u;
     const std::size_t crc_size = opt.cr ? (opt.cw ? 2u : 4u) : 0u;
     const std::size_t total = static_cast<std::size_t>(header + length + ts_size + crc_size);

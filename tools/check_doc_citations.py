@@ -60,8 +60,8 @@ NON_SOURCE_DIRS = ("_build", "build", "node_modules", ".claude", ".git", "target
 SCOPE_LINES = 80
 
 ANCHORS = [
-    ("core/include/libtracer/tlv.hpp:59", "struct opt_t"),
-    ("core/include/libtracer/tlv.hpp:28", "enum class type_t"),
+    ("core/include/libtracer/tlv.hpp:63", "struct opt_t"),
+    ("core/include/libtracer/tlv.hpp:30", "enum class type_t"),
     ("core/src/graph.cpp:1760", "graph_t::set_identity"),
     ("core/src/graph.cpp:1786", "graph_t::read_identity"),
     ("core/src/graph.cpp:2119", 'field.steps[0].name == "identity"'),
@@ -115,7 +115,7 @@ ANCHORS = [
     ("core/include/libtracer/backend.hpp:40", "enum class io_dir_t"),
     ("core/include/libtracer/backend.hpp:101", "class mem_backend_t"),
     ("core/include/libtracer/backend.hpp:145", "before_io"),
-    ("core/include/libtracer/grammar.hpp:210", "receiver-resource depth bound"),
+    ("core/include/libtracer/grammar.hpp:220", "receiver-resource depth bound"),
     ("core/src/graph.cpp:1027", "!arena"),
     ("core/include/libtracer/segment.hpp:78", "struct segment_t"),
     # --- the design + module pages (#728). Every one of these had drifted. ---
@@ -238,7 +238,7 @@ ANCHORS = [
     ('core/include/libtracer/fwd_router.hpp:622',
      '[[nodiscard]] mem::block_source_t& rx_for(const child_rx_ctx_t* ctx) const noexcept {'),
     # core/include/libtracer/grammar.hpp
-    ('core/include/libtracer/grammar.hpp:308',
+    ('core/include/libtracer/grammar.hpp:318',
      '* call stack, docs/reference/01 §Iterative parsing requirement): the walk keeps'),
     # core/include/libtracer/graph.hpp
     ('core/include/libtracer/graph.hpp:78',
@@ -377,7 +377,7 @@ ANCHORS = [
     # core/include/libtracer/status.hpp
     ('core/include/libtracer/status.hpp:24', 'enum class status_t {'),
     # core/include/libtracer/tlv.hpp
-    ('core/include/libtracer/tlv.hpp:40', 'ROUTER = 0x0D,      /**< @brief Router-wrapped frame. */'),
+    ('core/include/libtracer/tlv.hpp:42', 'ROUTER = 0x0D,      /**< @brief Router-wrapped frame. */'),
     # core/include/libtracer/tlv_arena.hpp
     ('core/include/libtracer/tlv_arena.hpp:8',
      "* span points into the caller's input buffer — the arena holds structure"),
