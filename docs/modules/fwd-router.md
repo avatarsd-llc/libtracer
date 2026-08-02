@@ -182,7 +182,11 @@ flowchart TB
   leaving no trustworthy address — a drop. Never a reply built on a short span. Since #793 it also
   covers the rope tier's **single-link** ownership copy, which used to reach the global heap
   through `view::over_bytes` — so `own_wire`'s two branches no longer allocate from two different
-  allocators depending on where the peer's fragmentation fell. What `flat` still does **not**
+  allocators depending on where the peer's fragmentation fell. Since #801 it covers the **span
+  (arena) tier's** `own_wire` as well — that tier's only allocating site, and the one a
+  span-delivering child (a synchronous CAN/UART link) takes on every ordinary WRITE — so which
+  allocator a stored value's bytes come from no longer depends on which transport delivered the
+  frame. What `flat` still does **not**
   cover: the terminus arena (that is `rx`'s nothrow `block_source_t`, bounded by a different seam,
   not unbounded) and the reply head segment (genuinely unbounded on both tiers; it answers
   exhaustion by value, and folding it into `flat` would silently re-scope an injection callers have

@@ -213,7 +213,10 @@ including two sweeps that move the refusal point across every draw one request m
 each outcome to be a drop or an addressed `BACKPRESSURE`, never a `kind=RESULT` built on a short
 span and never a vertex left holding a third value.
 
-The last of the three is #793's. It is worth stating separately from the flatten above it because
+The fourth row is #801's — the same ADR-0041 §2 copy on the span tier, whose refusal is answered
+through the empty view alone and never through `spans_intact()`; see the seam table above.
+
+The third is #793's. It is worth stating separately from the flatten above it because
 the two are **branches of one function** that used to allocate from two different allocators:
 `own_wire` flattens a multi-link subrope through the injection and copied a single-link one
 through `view::over_bytes`'s global heap. Which branch a peer takes is decided by where its
