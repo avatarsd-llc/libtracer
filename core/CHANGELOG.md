@@ -39,6 +39,37 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`op_resolver_t` takes the flatten backend, so the TERMINUS rope flattens are bounded too
+  (#766).** `core/include/libtracer/op_resolve.hpp`.
+  `explicit op_resolver_t(graph_t&)` gains a second, defaulted parameter:
+  **`explicit op_resolver_t(graph_t& graph, mem::mem_backend_t* flat = &mem::heap_backend())`**.
+  Every existing call site compiles unchanged and the default is the global heap, so the span
+  (arena) tier and an un-injected node are byte-identical to before. `fwd_router_t` now passes its
+  own `flat` down, which closes the #730 gap this issue was split out for: the resolver's rope-tier
+  flattens — `view_node::ensure_cache` (the per-node contiguous span every `wire()`/`body()` read
+  of a multi-link TLV materializes) and `view_node::own_wire` (the ADR-0053 ⑤ ownership flatten) —
+  took `rope_t::materialize`'s default backend, so a bounded node that had injected `mr`, `rx`,
+  `flat`, `ctl`, `value_backend` and the transport-receive backend at one slab **still allocated on
+  the global heap** the moment a peer sent a fragmented terminus request. Peer-drivable, and on
+  `-fno-exceptions` the `abort()` the seam programme exists to remove. The honest sentence is now
+  **all rope flattens on the forward AND terminus paths draw from the injected seam**; `flat` still
+  does not cover what is not a rope flatten (the arena is `rx`'s, the reply head segment is
+  neither's).
+
+  A refused terminus flatten is answered **by value**, never by reading a short span: the shared
+  resolve walk carries a sticky per-call `spans_intact()` on its node-reader concept (a constant
+  `true` on the span tier, so the checks fold away on the MCU terminus) and answers an addressed
+  `kind=ERROR STATUS{BACKPRESSURE}` reply — or, when the refusal hit the reply's OWN route bytes
+  and no trustworthy address remains, a `BACKPRESSURE` status the router drops. Never a `RESULT`
+  reply built on an empty span, never a truncated route, never a stored value. Covered by
+  `core/tests/terminus_flatten_backend_test.cpp`: the seam is proved consulted (`served() > 0` —
+  zero before this change), the RAM claim is measured with a counting global `operator new`
+  (18 vs 24 calls for the same 4-link `FWD{READ}` with `flat` on a static-slab pool vs the heap),
+  and a sweep moves the refusal point across every flatten one request makes and requires each
+  outcome to be a drop or an addressed `BACKPRESSURE`. Ablated both ways: re-pointing the two sites
+  at the default heap reddens 8 checks, and deleting the walk's guards reddens the sweep with a
+  `kind=RESULT` answer built on a short span.
+
 - **The owner-declared pin knob is renamed to what its value became (#774).**
   `core/include/libtracer/graph.hpp`, `vertex.hpp`.
   `graph_t::set_store_ref_min_bytes(vertex_handle_t, std::uint32_t)` /
@@ -227,12 +258,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     for both byte-buffer seams and says why: `sync_pool_t` is the only synchronised pool in the
     tree and it is a spinlock, wrong for a single-core target, and the interrupt-disable variant
     ADR-0060 §2 names is unbuilt.
-  - **`flat` bounds the router's OWN four flattens, not "every flatten the router performs"** — the
-    terminus resolver's rope-tier flattens (`core/src/op_resolve_view.cpp:80`, `:142`) never see it
-    and still draw from the global heap. Measured: with `flat` armed to refuse everything, a 4-link
-    `FWD{READ}` consulted it zero times and made 20 global-heap `new` calls. Tracked as **#766**;
-    the header, the source comment, `docs/design/allocation-and-backpressure.md` and the ESP32
-    recipe now say four sites and cite it.
+  - **`flat` bounded the router's OWN four flattens, not "every flatten the router performs"** — the
+    terminus resolver's rope-tier flattens never saw it and still drew from the global heap.
+    Measured: with `flat` armed to refuse everything, a 4-link `FWD{READ}` consulted it zero times
+    and made 20 global-heap `new` calls. Tracked as **#766** and **since closed** (see the
+    `op_resolver_t` entry under Changed, above): the router hands `flat` to its resolver, and the
+    header, the source comment, `docs/design/allocation-and-backpressure.md`, the fwd-router module
+    page and the ESP32 recipe now say all rope flattens on the forward and terminus paths.
   - **The bus-name rejection flatten is now exercised.** It was listed as covered by
     `fwd_flatten_backend_test.cpp` and was not — reverting both halves of the site left the suite at
     72/72. It has its own case, which asserts `refusals() > 0` first, and reverting the site's seam

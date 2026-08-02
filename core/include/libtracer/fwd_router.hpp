@@ -91,25 +91,32 @@ class fwd_router_t {
      *              Appended with a default, so every existing call site is unchanged;
      *              a bounded node points this at the same slab as @p mr. Must outlive
      *              the router.
-     * @param flat  The byte backend the router's OWN FOUR rope flattens draw their owned
-     *              `segment` from (#730) — the ingress control-frame sub-rope flattens
-     *              (`ADVERTISE` route, `COMPACT` payload), the cold bus-name rejection
-     *              flatten, and the per-delivery `COMPACT` egress flatten. Those four and
-     *              no others: the TERMINUS resolver's rope-tier flattens, one call below
-     *              the router's `resolve_terminus_rope` in `op_resolve_view.cpp`
-     *              (`view_node::ensure_cache`, `view_node::own_wire`), never see this
-     *              backend and still draw from the global heap — measured, and tracked as
-     *              #766. Do not read this parameter as "every allocation the router path
-     *              makes"; that reading is what #730 was filed about.
+     * @param flat  The byte backend EVERY rope flatten on the router's forward AND terminus
+     *              paths draws its owned `segment` from — the router's own four (#730): the
+     *              ingress control-frame sub-rope flattens (`ADVERTISE` route, `COMPACT`
+     *              payload), the cold bus-name rejection flatten, and the per-delivery
+     *              `COMPACT` egress flatten; PLUS the terminus resolver's rope-tier flattens
+     *              one call below `resolve_terminus_rope` (#766) — `view_node::ensure_cache`
+     *              (the per-node contiguous span every `wire()`/`body()` read of a multi-link
+     *              TLV materializes) and `view_node::own_wire` (the ADR-0053 ⑤ ownership
+     *              flatten) — which the router reaches by passing this pointer straight to
+     *              its @ref graph::op_resolver_t. Until #766 the terminus half drew from the
+     *              global heap, so a fragmented request from a peer escaped the bound; the
+     *              honest sentence now is that all rope flattens on the forward and terminus
+     *              paths draw from the injected seam. Still NOT every allocation the router
+     *              path makes: the reply head segment and the arena are their own injections
+     *              (@p rx and `view::heap_alloc`), which is the reading #730 was filed about.
      *              Split from
      *              @p rx because these are BYTE buffers with cache hooks and an owning
      *              refcount (a @ref mem::mem_backend_t), not the arena's raw blocks —
      *              the same split `graph_t` makes between its `ctl` and its
-     *              `value_backend` (ADR-0060). Until #730 all four took
+     *              `value_backend` (ADR-0060). Until #730 all of them took
      *              @ref mem::heap_backend by default, so a bounded node's memory bound
      *              did NOT cover them; now a node that points this at its own slab
-     *              bounds those four, and every flatten failure is answered by value (the
-     *              frame is dropped, never stored empty).
+     *              bounds them all, and every flatten failure is answered by value — the
+     *              forward-path frame is dropped (never stored empty), and a refused
+     *              terminus flatten answers an addressed `kind=ERROR STATUS{BACKPRESSURE}`
+     *              reply (or, when the refusal hit the reply's own route bytes, a drop).
      *
      *              An injected @p flat MUST be thread-safe, with the same force `graph_t`
      *              requires of its `value_backend` (ADR-0060 §2) — and for the same two
@@ -142,7 +149,7 @@ class fwd_router_t {
                           mem::mem_backend_t* flat = &mem::heap_backend(),
                           std::size_t max_label_bindings_per_link = 0)
         : graph_(graph),
-          resolver_(graph),
+          resolver_(graph, flat),  // the terminus tier draws from the SAME seam (#766)
           mr_(mr),
           rx_(rx),
           flat_(flat),

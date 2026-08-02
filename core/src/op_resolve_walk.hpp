@@ -105,7 +105,9 @@ static_assert(struct_opt(std::byte{0x00}) == std::byte{0x00});
  * A node exposes its header facts, its
  * trailer-excluded whole-TLV `wire` bytes and its `body` bytes, and FORWARD
  * child iteration (`children().next()`) — never random sibling access, so the
- * same walk serves a forward-only rope view. `arena_node` is the span-tier
+ * same walk serves a forward-only rope view. A reader that has to BUILD its contiguous
+ * spans (the rope tier flattens) also answers `spans_intact()`, so a reader that could not
+ * build one is answered by value instead of read short (#766). `arena_node` is the span-tier
  * instantiation (byte-identical, still the MCU terminus + conformance oracle);
  * the `tlv_view_t` reader instantiation follows (3c).
  */
@@ -120,6 +122,17 @@ struct arena_node {
     [[nodiscard]] std::span<const std::byte> wire() const noexcept { return node().wire; }
     [[nodiscard]] std::span<const std::byte> body() const noexcept { return node().body; }
     [[nodiscard]] bool canonical_path() const noexcept { return node().canonical_path; }
+
+    /**
+     * @brief Have this walk's contiguous spans all been produced successfully (#766)? Always
+     *        true on the span tier — an arena span is BORROWED from the frame, so producing
+     *        it cannot fail and nothing here can refuse.
+     *
+     * The rope tier answers `false` once its injected flatten backend refused, because a
+     * refused flatten yields an EMPTY span where the frame had bytes. Constant here, so the
+     * walk's two checks fold away entirely on the MCU terminus.
+     */
+    [[nodiscard]] static bool spans_intact() noexcept { return true; }
 
     /**
      * @brief The trailer-excluded whole TLV as a fresh OWNED segment (the ADR-0041 §2 ownership
@@ -632,6 +645,24 @@ template <class N>
     // node model (ADR-0053 §7 node-reader seam). parse_fwd guarantees both PATH nodes.
     const std::span<const std::byte> reply_dst_wire = req.src.wire();
     const std::span<const std::byte> reply_src_wire = req.dst.wire();
+    // #766, guard 1 of 2 — the reply's OWN route bytes. On the rope tier these two spans are
+    // materialized (a multi-link PATH pays one flatten from the injected backend), so a
+    // refusal here leaves no trustworthy address to answer TO: an assemble_error built on a
+    // short `src` would put a truncated route on the wire. Answer on the ERROR side instead —
+    // by value, which the router turns into a drop. This is also the only guard that can fire
+    // before `parse_fwd`'s op byte is acted on, so it comes first.
+    if (!req.src.spans_intact()) return std::unexpected(status_t::BACKPRESSURE);
+
+    // The pre-dispatch error reply (#766): every "the frame says something illegal" verdict
+    // below is derived from a SPAN read, and on the rope tier a refused flatten hands the
+    // reader an empty span — which reads as a malformed selector or an unaddressable key.
+    // Reporting that as INVALID_PATH would blame the peer's frame for this node's memory
+    // state, so a refusal re-labels the verdict BACKPRESSURE (the reply route bytes are known
+    // good — guard 1 — so it is addressable either way).
+    const auto reply_error = [&](status_t s) {
+        return assemble_error(reply_dst_wire, reply_src_wire,
+                              req.dst.spans_intact() ? s : status_t::BACKPRESSURE);
+    };
 
     // Decode the optional :field selector and the wildcard deferral: a [*] level
     // on a non-subscriber-path target is rejected with INVALID_PATH.
@@ -640,10 +671,10 @@ template <class N>
     if (has_field) {
         bool wildcard = false;
         result_t<field_path_t> f = selector_to_field(*req.selector, wildcard);
-        if (!f) return assemble_error(reply_dst_wire, reply_src_wire, status_t::INVALID_PATH);
+        if (!f) return reply_error(status_t::INVALID_PATH);
         field = std::move(*f);
         if (wildcard && (field.steps.empty() || field.steps[0].name != "subscribers"))
-            return assemble_error(reply_dst_wire, reply_src_wire, status_t::INVALID_PATH);
+            return reply_error(status_t::INVALID_PATH);
     }
 
     // dst resolution is the router's PATH-keyed dispatch — span-aliased for a
@@ -655,8 +686,17 @@ template <class N>
     // BEFORE the write-creates branch below — a WRITE must not mkdir-p a path the spec
     // says cannot be spelled that way (#436).
     const result_t<std::span<const std::byte>> dst_key_r = path_lookup_key(req.dst, key_fallback);
-    if (!dst_key_r) return assemble_error(reply_dst_wire, reply_src_wire, dst_key_r.error());
+    if (!dst_key_r) return reply_error(dst_key_r.error());
     const std::span<const std::byte> dst_key = *dst_key_r;
+    // #766, guard 2 of 2 — everything the walk READ before it touches the graph: the op
+    // discriminant, the `:field` selector's names and indices, and the dst lookup key are all
+    // span reads, and on the rope tier a refused flatten answers them EMPTY. An empty key
+    // finds the wrong vertex (or none); an empty selector name addresses the wrong field. So
+    // check once, here, after every pre-dispatch read and before the first graph call — the
+    // reply route bytes are known good by guard 1, so this refusal is ADDRESSABLE and answers
+    // as the same kind=ERROR BACKPRESSURE an OOM'd reply assembly does (the client falls back
+    // on the same link rather than presuming the node dead).
+    if (!req.dst.spans_intact()) return reply_error(status_t::BACKPRESSURE);
     std::optional<vertex_handle_t> found = graph.find(dst_key);
     if (!found) {
         // Write-creates (RFC-0005): a remote DATA write (no :field selector) to a

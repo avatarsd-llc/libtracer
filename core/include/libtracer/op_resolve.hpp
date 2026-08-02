@@ -30,6 +30,7 @@
 #include <string_view>
 
 #include "libtracer/graph.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/tlv_arena.hpp"
@@ -63,8 +64,38 @@ inline constexpr std::chrono::nanoseconds kDefaultAwaitTimeout = std::chrono::se
  */
 class op_resolver_t {
    public:
-    /** @brief Bind the resolver to the local @p graph it resolves `dst` against. */
-    explicit op_resolver_t(graph_t& graph) noexcept : graph_(graph) {}
+    /**
+     * @brief Bind the resolver to the local @p graph it resolves `dst` against.
+     *
+     * @param graph The node's local graph.
+     * @param flat  The byte backend the ROPE-tier terminus rope flattens draw their owned
+     *              `segment` from (#766) — the per-node contiguous-span materialize
+     *              (`view_node::ensure_cache`, reached by every `wire()`/`body()` read of a
+     *              multi-link TLV) and the ADR-0053 ⑤ ownership flatten
+     *              (`view_node::own_wire`). These are the flattens that sit one call BELOW
+     *              `fwd_router_t::resolve_terminus_rope`, and until #766 they took
+     *              @ref mem::heap_backend unconditionally: a bounded node that pointed every
+     *              other injection at its own slab still drew from the global heap the moment
+     *              a peer sent a FRAGMENTED terminus request — peer-drivable, and an
+     *              `abort()` under `-fno-exceptions`. `fwd_router_t` passes its own `flat`
+     *              here, so one injection now covers the router's four sites AND the terminus.
+     *              The default is the global heap, so the span (arena) tier and every existing
+     *              call site are byte-identical to before.
+     *
+     *              A refused flatten is answered BY VALUE, never by reading a short span: the
+     *              resolve walk carries a per-call "spans intact" flag (`spans_intact()` on the
+     *              node-reader concept) and turns a refusal into an addressed `kind=ERROR`
+     *              `STATUS{BACKPRESSURE}` reply — or, when the refusal hit the reply's OWN
+     *              route bytes and no trustworthy address is left, into a `BACKPRESSURE`
+     *              status on the error side, which the router drops. Never a truncated reply.
+     *
+     *              An injected @p flat MUST be thread-safe on the same terms `fwd_router_t`
+     *              documents for its own: the terminus resolves on a transport child's receive
+     *              thread and several children receive concurrently. Must outlive the
+     *              resolver.
+     */
+    explicit op_resolver_t(graph_t& graph, mem::mem_backend_t* flat = &mem::heap_backend()) noexcept
+        : graph_(graph), flat_(flat) {}
 
     /**
      * @brief Resolve an arena-decoded request FWD and build the zero-copy `FWD{REPLY}` rope.
@@ -143,6 +174,7 @@ class op_resolver_t {
 
    private:
     graph_t& graph_;
+    mem::mem_backend_t* flat_ = &mem::heap_backend();  // rope-tier terminus flattens (#766)
 };
 
 }  // namespace tr::graph
