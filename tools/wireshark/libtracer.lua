@@ -276,6 +276,19 @@ function M.parse(b, off, depth, maxdepth)
   node.header_len = H
   node.length = (node.opt.LL == 1) and u32le(b, off + 2) or u16le(b, off + 2)
 
+  -- PATH_REF (0x14) is the one type whose body shape is not derivable from the header:
+  -- a bare array of fixed 8-byte elements, PL and LL both forbidden, at most 255
+  -- elements (RFC-0024 §4.2/§4.3). Anything else is tr::frame::invalid.
+  if t == 0x14 then
+    if node.opt.PL == 1 or node.opt.LL == 1 then
+      node.invalid = "PATH_REF with opt.PL/opt.LL set (tr::frame::invalid)"
+    elseif node.length % 8 ~= 0 then
+      node.invalid = "PATH_REF length not a multiple of 8 (tr::frame::invalid)"
+    elseif node.length > 255 * 8 then
+      node.invalid = "PATH_REF over 255 elements (tr::frame::invalid)"
+    end
+  end
+
   -- Trailer widths from opt.
   local ts_len = 0
   if node.opt.TS == 1 then ts_len = (node.opt.TF == 1) and 4 or 8 end
