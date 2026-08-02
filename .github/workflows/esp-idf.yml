@@ -32,18 +32,24 @@ on:
       - ".github/workflows/esp-idf.yml"
   workflow_dispatch:
 
-# ── Footprint sentinel thresholds (full-node job) ────────────────────────────
-# MEASURED provenance (PR #193 first run, 2026-07-03, espressif/idf:release-v6.0,
-# -Os): libtracer.a flash 78,825 B (esp32c3) / 82,861 B (esp32c6); static RAM
-# 16 B on both. Flash limit = measured + ~15 % headroom. The static-RAM limit is
-# deliberately tight (4 KiB against a measured 16 B): the library holds NO
-# internal buffers (ADR-0041 §5) — any static buffer sneaking in trips the gate.
-# Thresholds gate the libtracer component archive (libtracer.a) only, not the
-# whole app image. To re-baseline after intentional growth: read the measured
-# numbers from the full-node job step summary / footprint-<target> artifact.
-env:
-  LIBTRACER_MAX_STATIC_RAM_BYTES: 4096 # measured 2026-07-03: 16 B — the tight ceiling ENFORCES the no-internal-buffers ruling (ADR-0041 §5)
-  LIBTRACER_SENTINEL_MODE: fail # thresholds are measured (see above); a breach is a real regression
+# ── Footprint contract (full-node job): TRACKED, never GATED ─────────────────
+# The libtracer component's flash and static-RAM contribution is MEASURED and
+# PUBLISHED on every run — a markdown table in the job step summary plus the
+# machine-readable footprint-<target> artifact — and it is never a merge gate.
+# No ceiling is set here, by maintainer ruling: the library must stay free to
+# serve the thinnest possible client, and what actually has to fit is the
+# PRODUCT image on its own target, which CI cannot know. A ceiling here would
+# police a number nobody deploys and would red a main for a feature landing.
+# Regressions are caught by READING the tracked numbers run to run, not by a
+# threshold. (tools/esp_size_gate.py still fails the job if it cannot parse the
+# esp-idf-size output — a broken reporter must not look like a green report.)
+#
+# MEASURED provenance, kept as historical reference (PR #193 first run,
+# 2026-07-03, espressif/idf:release-v6.0, -Os): libtracer.a flash 78,825 B
+# (esp32c3) / 82,861 B (esp32c6); static RAM 16 B on both — the library holds no
+# internal buffers (ADR-0041 §5), a property now tracked and reviewed rather
+# than enforced by a tight ceiling. The reported numbers cover the libtracer
+# component archive (libtracer.a) only, not the whole app image.
 
 jobs:
   # Fast fail-first guard: every core/src/*.cpp is either in the component's
@@ -127,11 +133,12 @@ jobs:
           idf.py set-target ${{ matrix.target }}
           idf.py build
 
-      # Footprint report + sentinel (docs/reference/00-overview.md "build-size
-      # sentinel"; numbers referenced by integrations/esp-idf/README.md). Prints
-      # the per-component breakdown to the log, publishes a markdown table to
-      # the step summary, uploads a JSON artifact, and gates the libtracer
-      # component's flash / static-RAM contribution (thresholds: workflow env).
+      # Footprint report (docs/reference/00-overview.md §"build-size profiles";
+      # numbers described by integrations/esp-idf/README.md §Memory budget).
+      # Prints the per-component breakdown to the log, publishes a markdown
+      # table to the step summary and uploads a JSON artifact. It reports the
+      # libtracer component's flash / static-RAM contribution; it sets no
+      # ceiling on either (see the footprint contract at the top of this file).
       - name: Report footprint (idf.py size / size-components)
         shell: bash
         working-directory: integrations/esp-idf/examples/full_node
@@ -154,7 +161,7 @@ jobs:
           python -m esp_idf_size --format json2 "$MAP" > size_summary.json ||
             python -m esp_idf_size --format json "$MAP" > size_summary.json
 
-      - name: Footprint sentinel (step summary + component-size gate)
+      - name: Footprint report (step summary + component-size table)
         shell: bash
         working-directory: integrations/esp-idf/examples/full_node
         run: |
@@ -162,8 +169,6 @@ jobs:
             --components-json size_components.json \
             --summary-json size_summary.json \
             --target "${{ matrix.target }}" \
-            --max-static-ram-bytes "${LIBTRACER_MAX_STATIC_RAM_BYTES}" \
-            --mode "${LIBTRACER_SENTINEL_MODE}" \
             --out-json "footprint-${{ matrix.target }}.json"
 
       - name: Upload footprint artifact

@@ -104,11 +104,14 @@ the build, not by the modules: it compiles when *any* of them is on.
 The minimum-feature module set — `frame`, `tlv_arena`, `backend_set`, `mem_pool`, `mem_source`,
 `rope`, `path` — targets **≤ 16 KiB of stripped flash** on
 `arm-none-eabi-g++ -std=c++23 -Os -fno-exceptions -fno-rtti -mcpu=cortex-m0` with
-`--specs=nano.specs` (`tools/cortexm0_footprint.py:56,86-90,104-106`). Two committed sentinels
-measure against it: `tools/cortexm0_footprint.py`, driven by `.github/workflows/footprint-cortexm0.yml`
-over the `core/tests/footprint/sentinel_node.cpp` fixture, and `tools/esp_size_gate.py`, which
-gates the component's flash and static-RAM contribution to the esp32c3/c6 **full-node** image
-(all socket transports plus CAN — far more than the required modules).
+`--specs=nano.specs` (`tools/cortexm0_footprint.py:56,86-90,104-106`). One committed sentinel
+measures against it: `tools/cortexm0_footprint.py`, driven by `.github/workflows/footprint-cortexm0.yml`
+over the `core/tests/footprint/sentinel_node.cpp` fixture. A second tool, `tools/esp_size_gate.py`,
+*reports* the component's flash and static-RAM contribution to the esp32c3/c6 **full-node** image
+(all socket transports plus CAN — far more than the required modules) without setting a ceiling on
+either: that image is one deployment's composition, not a budget the library owes, and a ceiling
+there would constrain how thin a client this library can serve. Its numbers are published to the
+job step summary and a `footprint-<target>` artifact, and reviewed run to run.
 
 The Cortex-M0 sentinel runs in warn mode because the measured node is **20,937 B, about 4.5 KiB
 over the 16 KiB budget** (re-measured 2026-07-27; `.github/workflows/footprint-cortexm0.yml:13-20`).

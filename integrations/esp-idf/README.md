@@ -84,7 +84,7 @@ Footprint numbers are **measured and published on every run of the `full-node` C
 
 What is measured: the `full_node` build (`espressif/idf:release-v6.0`, built `-Os` — the example sets `CONFIG_COMPILER_OPTIMIZATION_SIZE`, overriding IDF's default `-Og`, so the footprint reflects a size-optimized deployment) — graph + fwd_router + transport_vertex + udp/tcp/ws/can transports + TWAI link, plus the example app and IDF's Wi-Fi/lwIP stack.
 
-The same CI step is a **footprint sentinel**: it gates the libtracer component's flash and static-RAM contribution against thresholds set at the top of [`esp-idf.yml`](../../.github/workflows/esp-idf.yml) (via [`tools/esp_size_gate.py`](../../tools/esp_size_gate.py)). Thresholds are **measured and enforcing** (the `-Os` component flash sits comfortably under the 96 KiB ceiling — read each run's footprint step for the current value; the `-Og` first baseline on 2026-07-03 was ≈ 77–81 KiB). Static RAM is **16 bytes** — the library holds no internal buffers, so the 4 KiB static-RAM ceiling structurally guards that ruling.
+The footprint is **tracked, never gated**: [`tools/esp_size_gate.py`](../../tools/esp_size_gate.py) reports the libtracer component's flash and static-RAM contribution and sets no ceiling on either (it fails the job only if it cannot parse the size output). That is deliberate — a ceiling in this repo would police a number nobody deploys, and the library must stay free to serve the thinnest possible client; what has to fit is *your* image on *your* target, so arm a ceiling in your own build if you have one (pass `--max-flash-bytes` / `--max-static-ram-bytes`). Regressions are caught by reading the published numbers run to run. For orientation, the `-Og` first baseline on 2026-07-03 measured ≈ 77–81 KiB of component flash and **16 bytes** of static RAM — the library holds no internal buffers, a property now tracked and reviewed rather than enforced by a tight ceiling.
 
 Steady-state heap is what you configure: the full_node example runs its RX segments and router tables out of a **24 KiB static slab** (12 KiB pool → 7 × 1536 B datagram slots + 12 KiB pmr arena); each live socket transport additionally owns one recv thread (stack below).
 
@@ -120,7 +120,7 @@ The value is delivered as the ordinary constexpr `tr::graph::kVertexLockStripes`
 **Built in CI** ([`.github/workflows/esp-idf.yml`](../../.github/workflows/esp-idf.yml)):
 
 - `inprocess_mirror` (P0 profile) — builds for **esp32c6** + **esp32c3**.
-- `full_node` (full-node profile, #183) — builds for **esp32c6** + **esp32c3**, including the TWAI link; the footprint steps publish the component-size table to the job step summary, upload the `footprint-<target>` JSON artifact, and run the size sentinel (see [Memory budget](#memory-budget-measured-per-ci-run)).
+- `full_node` (full-node profile, #183) — builds for **esp32c6** + **esp32c3**, including the TWAI link; the footprint steps publish the component-size table to the job step summary, and upload the `footprint-<target>` JSON artifact — tracked, not gated (see [Memory budget](#memory-budget-measured-per-ci-run)).
 - `full_node` — builds **and runs** for the **`linux`** target: device node + host peer over real datagrams, read/subscribe/latch/fan-out/await end to end (the runtime proof CI can give without silicon).
 - `host_smoke` — builds and runs for the **`linux`** target (the host_test path).
 

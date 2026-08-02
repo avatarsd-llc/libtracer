@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-"""Footprint sentinel for the ESP-IDF full-node build (esp-idf.yml, full-node job).
+"""Footprint reporter for the ESP-IDF full-node build (esp-idf.yml, full-node job).
 
 Reads the per-archive and whole-image size JSON emitted by esp-idf-size for the
 `full_node` example, extracts the libtracer component's contribution (flash =
 text+rodata, static RAM = data+bss+iram), writes a markdown table to the GitHub
-Actions step summary, dumps a machine-readable JSON artifact, and gates the
-component's numbers against flash / static-RAM thresholds.
+Actions step summary and dumps a machine-readable JSON artifact.
+
+The footprint is TRACKED, not GATED. No ceiling is set in CI by maintainer
+ruling: the library must stay free to serve the thinnest possible client, and
+what has to fit is the product image on its own target — a number CI cannot
+know. Regressions are caught by reading the tracked numbers, not by a
+threshold. `--max-flash-bytes` / `--max-static-ram-bytes` are therefore both
+optional and both default to "tracked, no ceiling"; a downstream consumer with
+a real budget can pass one to turn this into a gate for its own build.
 
 Accepts BOTH esp-idf-size output generations, so the workflow can fall back:
   * NG (esp-idf-size >= 2.0, IDF v6.0):  `--format json2 [--archives]`
   * legacy (IDF v5.x):                   `--format json [--archives]`
 
-Gate modes:
-  * warn — over-threshold prints a `::warning::` annotation, exit 0 (never a
-    red main from a guessed threshold).
-  * fail — over-threshold prints `::error::` and exits 1. Flip to this mode
-    only once the thresholds are tightened from real CI numbers.
+A parse failure ALWAYS prints `::error::` and exits 1 — a silently broken
+reporter must not masquerade as a green report.
 
-Any parse failure is a warning + exit 0 in warn mode; in fail mode a parse
-failure exits 1 (a silently broken parser must not masquerade as a green gate).
-
-Exit 0 = within thresholds (or warn mode), 1 = over threshold / broken input
-in fail mode. Stdlib only.
+Exit 0 = report published (and within any ceiling that was passed), 1 = broken
+input, or over a ceiling the caller opted into. Stdlib only.
 """
 from __future__ import annotations
 
@@ -129,14 +130,13 @@ def main() -> int:
     ap.add_argument("--summary-json", required=True, help="esp-idf-size summary JSON")
     ap.add_argument("--component-pattern", default=r"libtracer", help="archive-name regex")
     ap.add_argument("--target", default="unknown", help="chip target label (esp32c6, ...)")
-    # Flash is TRACKED, not gated (maintainer ruling 2026-07-25). A flash ceiling on
-    # libtracer polices the wrong thing: what has to fit is the PRODUCT image on its own
-    # target, and every raise here was a feature landing, not a regression. Lower flash is an
-    # improvement to report alongside latency and throughput — not a merge gate. Pass the flag
-    # to re-arm a ceiling for a target that genuinely has one.
-    ap.add_argument("--max-flash-bytes", type=int, default=None)
-    ap.add_argument("--max-static-ram-bytes", type=int, required=True)
-    ap.add_argument("--mode", choices=("warn", "fail"), default="warn")
+    # Both ceilings are OFF by default: the footprint is tracked, not gated (maintainer
+    # ruling). A ceiling on libtracer polices the wrong thing — what has to fit is the
+    # PRODUCT image on its own target, and an esp32 must stay able to build the thinnest
+    # client this library can serve. Every past raise was a feature landing, not a
+    # regression. Pass a flag to arm a ceiling for a build that genuinely has one.
+    ap.add_argument("--max-flash-bytes", type=int, default=None, help="opt-in ceiling")
+    ap.add_argument("--max-static-ram-bytes", type=int, default=None, help="opt-in ceiling")
     ap.add_argument("--out-json", default=None, help="write the numbers as a JSON artifact")
     args = ap.parse_args()
 
@@ -147,16 +147,13 @@ def main() -> int:
         flash, ram, breakdown = component_sizes(arch_info)
         total, used = app_totals(summary)
     except Exception as exc:  # noqa: BLE001 — tooling breakage must be visible, not a crash
-        msg = f"footprint sentinel could not parse esp-idf-size output: {exc}"
-        if args.mode == "fail":
-            print(f"::error::{msg}")
-            return 1
-        print(f"::warning::{msg} (warn mode: not failing the job)")
-        return 0
+        print(f"::error::footprint reporter could not parse esp-idf-size output: {exc}")
+        return 1
 
     flash_ok = args.max_flash_bytes is None or flash <= args.max_flash_bytes
-    ram_ok = ram <= args.max_static_ram_bytes
-    verdict = "PASS" if (flash_ok and ram_ok) else ("WARN" if args.mode == "warn" else "FAIL")
+    ram_ok = args.max_static_ram_bytes is None or ram <= args.max_static_ram_bytes
+    gated = args.max_flash_bytes is not None or args.max_static_ram_bytes is not None
+    verdict = ("PASS" if (flash_ok and ram_ok) else "FAIL") if gated else "REPORTED"
 
     lines = [
         f"## libtracer footprint — `full_node` @ {args.target}",
@@ -166,13 +163,13 @@ def main() -> int:
         "| Scope | Flash (text+rodata) | Static RAM (data+bss+iram) |",
         "| --- | --- | --- |",
         f"| **libtracer component** | {_fmt(flash)} | {_fmt(ram)} |",
-        f"| threshold (sentinel, mode={args.mode}) | "
-        f"{'tracked, no ceiling' if args.max_flash_bytes is None else _fmt(args.max_flash_bytes)} "
-        f"| {_fmt(args.max_static_ram_bytes)} |",
+        f"| ceiling | "
+        f"{'tracked, no ceiling' if args.max_flash_bytes is None else _fmt(args.max_flash_bytes)} | "
+        f"{'tracked, no ceiling' if args.max_static_ram_bytes is None else _fmt(args.max_static_ram_bytes)} |",
         f"| whole app image (app + IDF) | {_fmt(total)} (total image) | "
         f"{_fmt(sum(v for k, v in used.items() if 'flash' not in k.lower()))} |",
         "",
-        f"**Sentinel: {verdict}**"
+        f"**Footprint: {verdict}**"
         + ("" if flash_ok else f" — component flash {_fmt(flash)} > {_fmt(args.max_flash_bytes)}")
         + ("" if ram_ok else f" — component static RAM {_fmt(ram)} > {_fmt(args.max_static_ram_bytes)}"),
         "",
@@ -201,10 +198,10 @@ def main() -> int:
             "component_breakdown": breakdown,
             "app_total_image_bytes": total,
             "app_used_by_memory_type": used,
+            # null ⇒ tracked, not gated — the shipped CI configuration for both.
             "thresholds": {
-                "max_flash_bytes": args.max_flash_bytes,  # null ⇒ tracked, not gated
+                "max_flash_bytes": args.max_flash_bytes,
                 "max_static_ram_bytes": args.max_static_ram_bytes,
-                "mode": args.mode,
             },
             "verdict": verdict,
         }
@@ -212,17 +209,15 @@ def main() -> int:
 
     if flash_ok and ram_ok:
         return 0
-    over = (
-        f"libtracer footprint over threshold on {args.target}: "
+    # Only reachable when the caller opted into a ceiling with an explicit flag.
+    print(
+        f"::error::libtracer footprint over the ceiling passed for {args.target}: "
         f"flash {_fmt(flash)} "
         f"({'tracked' if args.max_flash_bytes is None else 'max ' + _fmt(args.max_flash_bytes)}), "
-        f"static RAM {_fmt(ram)} (max {_fmt(args.max_static_ram_bytes)})"
+        f"static RAM {_fmt(ram)} "
+        f"({'tracked' if args.max_static_ram_bytes is None else 'max ' + _fmt(args.max_static_ram_bytes)})"
     )
-    if args.mode == "fail":
-        print(f"::error::{over}")
-        return 1
-    print(f"::warning::{over} (warn mode: not failing the job — tighten or investigate)")
-    return 0
+    return 1
 
 
 if __name__ == "__main__":
