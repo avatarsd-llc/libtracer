@@ -24,7 +24,7 @@ use libtracer::structured::{self, Ace, DeliveryPolicy};
 use libtracer::{
     decode, decode_fwd, encode, encode_field, encode_fwd, error_code, parse_error, parse_field_tlv,
     reply_error_code, status_ok, status_with_errors, subscriber, value, value_opts, value_u32,
-    BuildError, ErrCode, FwdRequest, ValueOptions,
+    BuildError, ErrCode, FwdRequest, Opt, Tlv, ValueOptions,
 };
 
 /* ----------------------------------------------------------------- helpers --- */
@@ -281,6 +281,114 @@ fn path_rejects_reserved_and_overlong() {
         libtracer::path::split_path("/a//b").unwrap_err(),
         BuildError::SegmentLength
     );
+}
+
+/**
+ * @brief Build a PATH TLV with `n` one-byte NAME segments WITHOUT going through
+ * `tlv_builders::path` — i.e. bypassing the construction-tier admission gate, the way
+ * bytes arriving off the wire do. `n` above 204 is not expressible through the builders.
+ */
+fn raw_path_tlv(n: usize) -> Tlv {
+    Tlv {
+        type_code: libtracer::type_code::PATH,
+        opt: Opt::structured(),
+        payload: Vec::new(),
+        children: (0..n).map(|_| libtracer::name("a").unwrap()).collect(),
+        trailer: None,
+    }
+}
+
+/**
+ * @brief RFC-0019 §10(b) regression, the one the RFC-0023 §5.6 relocation exists to fix:
+ * an accumulated `src` return route deeper than the admission bounds must DECODE, because
+ * the codec tier does not enforce them (`reference/05` §"Enforcement of the PATH
+ * constraints"). 256 one-byte segments overshoot BOTH accumulative bounds at once — the
+ * count (256 > 255) and the body budget (256 × 5 = 1280 > 1024) — and the bytes are
+ * still well-formed TLV that must round-trip byte-identically.
+ */
+#[test]
+fn path_decode_admits_over_limit_accumulated_src_route() {
+    let deep = raw_path_tlv(256);
+    let bin = encode(&deep);
+    let decoded = decode(&bin).unwrap();
+    assert_eq!(encode(&decoded), bin, "over-limit PATH must round-trip");
+    assert_eq!(decoded.children.len(), 256);
+
+    let rendered = libtracer::path::tlv_to_path(&decoded)
+        .expect("decode tier must not enforce the accumulative PATH bounds");
+    assert_eq!(rendered, format!("/{}", vec!["a"; 256].join("/")));
+
+    // …and through the FWD accessor the route actually arrives on. Built by hand because
+    // `encode_fwd` runs the construction-tier gate, which legitimately rejects this depth.
+    let fwd = Tlv {
+        type_code: libtracer::type_code::FWD,
+        opt: Opt::structured(),
+        payload: Vec::new(),
+        children: vec![
+            libtracer::value_u8(fwd_op::READ),
+            libtracer::tlv_builders::path(&["sensor", "temp"]).unwrap(),
+            deep,
+        ],
+        trailer: None,
+    };
+    let parsed = libtracer::decode_fwd(&encode(&fwd)).unwrap();
+    assert_eq!(
+        libtracer::fwd::fwd_src_path(&parsed).unwrap(),
+        rendered,
+        "an accumulated src route is legal at any byte-reachable depth"
+    );
+    assert_eq!(
+        libtracer::fwd::fwd_dst_path(&parsed).unwrap(),
+        "/sensor/temp"
+    );
+}
+
+/**
+ * @brief The relocated bound, at its new tier: `admit_path_tlv` is where the count and
+ * byte limits live (RFC-0023 §5.6). It must fail exactly the cases the decode-tier check
+ * used to fail — 256 segments reject, 33 accept — and keep the 255 bound exact.
+ */
+#[test]
+fn path_admission_enforces_segment_count() {
+    // 33 segments: legal since RFC-0023 repriced 32 → 255.
+    assert!(libtracer::path::admit_path_tlv(&raw_path_tlv(33)).is_ok());
+    // 204 segments = 1020 bytes: the deepest this body encoding can express.
+    assert!(libtracer::path::admit_path_tlv(&raw_path_tlv(204)).is_ok());
+    // 205 = 1025 bytes: the byte budget binds first under this encoding.
+    assert_eq!(
+        libtracer::path::admit_path_tlv(&raw_path_tlv(205)).unwrap_err(),
+        BuildError::PathTooLong
+    );
+    // 256 segments: the count clause itself — checked BEFORE the byte accumulation, so it
+    // is this error and not PathTooLong that surfaces. Deleting the count check in
+    // `admit_path_tlv` reddens exactly this assertion.
+    assert_eq!(
+        libtracer::path::admit_path_tlv(&raw_path_tlv(256)).unwrap_err(),
+        BuildError::TooManySegments
+    );
+    // The admission gate is also the child-type and segment-syntax gate.
+    assert_eq!(
+        libtracer::path::admit_path_tlv(&value_u32(7)).unwrap_err(),
+        BuildError::TypeMismatch
+    );
+    // The graph root (zero children) is admissible.
+    assert!(libtracer::path::admit_path_tlv(&raw_path_tlv(0)).is_ok());
+}
+
+/**
+ * @brief The encode-time MUST is unmoved: `tlv_builders::path` rejects an over-count
+ * segment list on its own, independently of `split_path`'s string-tier check. Deleting
+ * the count check at `tlv_builders.rs` reddens this.
+ */
+#[test]
+fn path_builder_enforces_segment_count() {
+    let many = vec!["a"; 256];
+    assert_eq!(
+        libtracer::tlv_builders::path(&many).unwrap_err(),
+        BuildError::TooManySegments
+    );
+    let thirty_three = vec!["a"; 33];
+    assert!(libtracer::tlv_builders::path(&thirty_three).is_ok());
 }
 
 /* -------------------------------------------------- Unit 3 — ERROR + STATUS --- */
