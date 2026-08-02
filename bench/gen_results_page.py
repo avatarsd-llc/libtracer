@@ -705,7 +705,13 @@ are not comparable to each other: different denominator, by construction.
 - Families with a numeric parameter carry four switchable views — trend, sweep, heatmap and
   an isometric 3D surface — drawn only over the commits where **every** series of the family
   has a value, so a series that started late cannot fake a trend.
-- Hover any point for its exact value, the commit and its subject line.
+- A `source` selector heads each chart block: **GitHub-hosted** (the default — best of three
+  runners per point, a portability envelope) or **bench-local** (one pinned self-hosted CPU,
+  the absolute-trend instrument). One store at a time, page-wide, never overlaid — the two
+  answer different questions ({ch("raw")}). A family the selected store has not recorded
+  says so instead of drawing an empty axis.
+- Hover any point for its exact value, the commit and its subject line — plus the host
+  descriptor when the store records one, which the bench-local store does on every point.
 
 ### Two latency series per in-process mode
 
@@ -742,7 +748,9 @@ def raw_data() -> str:
     return f"""\
 {head("raw")}
 
-The charts above are one view of a persisted store. Every push to `main` runs the full bench
+The charts above are one view of the two persisted stores this section describes — the
+selector at the head of each chart block says which one you are reading. Every push to
+`main` runs the full bench
 on **three independently-drawn runners**, archives all raw transcripts as a per-commit CI
 artifact (`bench-results-<sha>`, on the `perf` workflow run), and records every
 `(mode, size, fanout, endpoints)` point — latency, throughput and memory footprint as
@@ -758,7 +766,11 @@ with per-point commit links. It is the archive; the families above are the readi
 
 A second, parallel store records the same transcript set from a **fixed self-hosted
 machine** (`perf-local` workflow), pinned to one logical CPU — **[the bench-local trend
-browser ↗](https://libtracer.avatarsd.com/dev/bench-local/)**. The two stores answer
+browser ↗](https://libtracer.avatarsd.com/dev/bench-local/)**. Every family chart above
+draws **one store at a time**, chosen by the `source` selector at the head of each chart
+block (**GitHub-hosted** by default); switching redraws every chart on the page from the
+other store and the choice is remembered. A family the selected store has not recorded
+says so rather than drawing an empty axis. The two stores answer
 different questions and are never mixed: GitHub-hosted runners vary ~2× in absolute speed
 run to run, so the hosted store reads as a portability envelope (best-across-three-runners
 per point), while the bench-local store is the **absolute-trend instrument** — same silicon
@@ -768,24 +780,29 @@ regression verdict is only ever read from the bench-local store or from a same-h
 interleaved A/B, never from the hosted one."""
 
 
-def _load_history() -> dict | None:
-    """@brief Load the benchmark-action store (gh-pages `dev/bench/data.js`) as JSON.
+def _load_history(store: str = "dev/bench/data.js") -> dict | None:
+    """@brief Load a benchmark-action store (a gh-pages `data.js`) as JSON.
 
-    Source order: a local `dev/bench/data.js` (present when a caller pre-mirrored the
+    Source order: a local copy of `store` (present when a caller pre-mirrored the
     branch), else a best-effort shallow fetch of `origin/gh-pages` + `git show`.
     Returns None (a note, not a crash) when the store is unreachable — e.g. a fork
     without the branch or an offline build.
+
+    Parameterized by path because the page now charts TWO stores: `dev/bench/data.js`
+    (the GitHub-hosted series) and `dev/bench-local/data.js` (the fixed pinned host).
+    They live on the same branch in the same format and differ only in which machine
+    produced them, so a second loader would be a copy free to drift.
     """
     import json
     raw = None
-    local = REPO / "dev" / "bench" / "data.js"
+    local = REPO / pathlib.Path(store)
     if local.exists():
         raw = local.read_text()
     else:
         subprocess.run(["git", "fetch", "--depth=1", "origin", "gh-pages"],
                        capture_output=True, cwd=REPO)
         for ref in ("FETCH_HEAD", "origin/gh-pages"):
-            p = subprocess.run(["git", "show", f"{ref}:dev/bench/data.js"],
+            p = subprocess.run(["git", "show", f"{ref}:{store}"],
                                capture_output=True, text=True, cwd=REPO)
             if p.returncode == 0 and p.stdout:
                 raw = p.stdout
@@ -800,7 +817,7 @@ def _load_history() -> dict | None:
         return None
 
 
-def history_sections(data: dict | None) -> tuple[dict[str, str], str]:
+def history_sections(data: dict | None, local: dict | None = None) -> tuple[dict[str, str], str]:
     """@brief The family trend charts, split into the page's chapters.
 
     Every chart on this page is the same kind of object: one series-family, all
@@ -814,11 +831,17 @@ def history_sections(data: dict | None) -> tuple[dict[str, str], str]:
     store was read fine and simply carries no family with two or more series yet.
     Reporting all three as "unreachable" publishes a false cause, and does it on
     a page that may be showing live charts from that same store two chapters up.
+
+    `local` is the bench-local store (`dev/bench-local/data.js`). It is passed through
+    to the renderer, which embeds BOTH payloads in every block behind the page's source
+    selector. It is optional and its absence is not an error: the bench-local runner is
+    ours, a fork has no such series, and the page must still build there — the selector
+    just renders its second option disabled.
     """
-    if not data:
+    if not data and not local:
         return {}, ("the per-commit history store was not reachable in this build")
     try:
-        blocks = render_history.html_blocks(data)
+        blocks = render_history.html_blocks(data, local)
     except Exception as e:  # a malformed store must never break the docs build
         return {}, f"the history store could not be rendered in this build — {e}"
     return blocks, "the history store carries no chartable family for this chapter yet"
@@ -1039,7 +1062,8 @@ def main() -> int:
     summary, passed = cross_core_block()
     M = _methodology()
     history = _load_history()
-    charts = history_sections(history)
+    history_local = _load_history("dev/bench-local/data.js")
+    charts = history_sections(history, history_local)
     assets = render_history.assets_block()
     page = f"""\
 # Performance & Conformance

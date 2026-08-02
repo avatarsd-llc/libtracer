@@ -50,6 +50,25 @@ body[data-theme="dark"] .ph-hist, :root[data-theme="dark"] .ph-hist {
   --ph-c8: #93a9bc; --ph-c9: #e08a4a; --ph-c10: #7aa6d9; --ph-c11: #9aa7b5;
 }
 
+/* Source selector: WHICH STORE the charts below are drawn from — the GitHub-hosted
+   series (portability envelope) or the bench-local series (one pinned host, absolute
+   trend). A third control alongside .ph-mets (which NUMBER) and .ph-tabs (which VIEW),
+   and deliberately the outermost of the three: it sits above the note rather than on a
+   card, because it governs every card in the block at once. Segmented rather than a
+   <select> so both answers are readable without opening anything. */
+.ph-hist .ph-srcsel { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; margin: 0 0 8px; }
+.ph-hist .ph-srclab { font-family: var(--ph-mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--ph-muted); margin-right: 4px; }
+.ph-hist .ph-srcbtn { font-family: var(--ph-mono); font-size: 11px; padding: 3px 10px; border-radius: 6px; border: 1px solid var(--ph-line); background: transparent; color: var(--ph-muted); cursor: pointer; }
+.ph-hist .ph-srcbtn:hover:not([disabled]) { color: var(--ph-ink); border-color: var(--ph-hair); }
+.ph-hist .ph-srcbtn.on { background: var(--ph-sweep); border-color: var(--ph-sweep); color: #fff; }
+/* Disabled = the store was unreachable when the page was generated (a fork with no
+   gh-pages). Kept visible and titled, not hidden: a control that vanishes reads as
+   "this page has one store", which is false. */
+.ph-hist .ph-srcbtn[disabled] { opacity: .42; cursor: not-allowed; text-decoration: line-through; }
+
+/* The honest empty state for a chapter the selected store carries no family for. */
+.ph-hist .ph-empty { font-size: 12.5px; color: var(--ph-muted); font-style: italic; border: 1px dashed var(--ph-line); border-radius: 10px; padding: 14px 15px; margin: 0; }
+
 .ph-hist .ph-note { font-size: 13px; color: var(--ph-muted); line-height: 1.55; margin: 4px 0 14px; }
 .ph-hist .ph-note b { color: var(--ph-ink); }
 
@@ -130,5 +149,7 @@ body[data-theme="dark"] .ph-hist, :root[data-theme="dark"] .ph-hist {
 .ph-hist .ph-tip .sha { font-weight: 700; margin-bottom: 2px; }
 .ph-hist .ph-tip .sha .rel { color: var(--ph-rel); }
 .ph-hist .ph-tip .msg { color: var(--ph-muted); font-size: 10.5px; margin-bottom: 4px; }
+/* Per-point host descriptor (bench-local store only — the hosted store records none). */
+.ph-hist .ph-tip .host { color: var(--ph-muted); font-family: var(--ph-mono); font-size: 9.5px; line-height: 1.35; margin-bottom: 5px; padding-bottom: 4px; border-bottom: 1px solid var(--ph-line); }
 .ph-hist .ph-tip .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
 .ph-hist .ph-tip div b { font-variant-numeric: tabular-nums; font-family: var(--ph-mono); }
