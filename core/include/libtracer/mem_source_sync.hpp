@@ -12,7 +12,7 @@
  * @file
  * @brief A `std::mutex`-backed synchronization policy for @ref tr::mem::pool_source_t.
  *
- * Deliberately a separate header. `mem_source.hpp` is compiled into the freestanding
+ * Deliberately a separate header. `%mem_source.hpp` is compiled into the freestanding
  * footprint sentinel, where `<mutex>` is not available; putting the only threading
  * facility this seam offers behind its own include keeps that build honest instead of
  * making every consumer of the L0 seam pay for a hosted dependency.

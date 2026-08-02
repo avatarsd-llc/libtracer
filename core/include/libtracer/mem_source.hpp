@@ -242,7 +242,7 @@ class bump_source_t final : public block_source_t {
  *
  * A policy is anything with `lock()`/`unlock()`; a target supplies its own where it needs
  * one (an interrupt-disable critical section on single-core FreeRTOS,
- * `tr::mem::sync_mutex_t` from `mem_source_sync.hpp` on a host). This header stays
+ * `tr::mem::sync_mutex_t` from `%mem_source_sync.hpp` on a host). This header stays
  * freestanding-clean, so it pulls in no threading facility of its own.
  */
 struct sync_none_t {

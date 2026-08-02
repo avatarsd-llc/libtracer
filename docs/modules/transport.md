@@ -228,11 +228,38 @@ flowchart LR
   routing plane to evict the departed link's subscriber edges, so it must be fired
   with no internal transport locks held; a connectionless kind simply never fires it.
 
+## Shared scaffolding
+
+Three pieces are shared by every transport rather than reimplemented in each, and
+they are the reason a new binding is small.
+
+- **`receiver_slot_t`** is the one home of the delivery-tier mechanism: the
+  guarded storage for a receiver pair, the per-frame snapshot, and the
+  owning-rope-versus-borrowed-span tier select. Its callbacks are plain
+  `{function pointer, context}` pairs, so taking a snapshot on the receive path
+  is a trivial copy under an uncontended lock rather than a heap allocation. Its
+  `Tag...` pack is how a bus link prepends the sending peer's name to both sinks.
+- **`posix_endpoint_t`** is the receive-thread scaffold every POSIX socket
+  transport shares: the stop flag, the thread lifecycle, and the bounded
+  poll-and-recheck idioms that let a blocking socket loop notice a clean
+  shutdown. `stream_endpoint_t` adds what only the *stream* transports need — the
+  peer-fd atomic, the write mutex, and the teardown-under-write-lock ordering
+  that keeps a concurrent send from writing to a reused descriptor. UDP keeps its
+  datagram shape and uses only the base.
+- **`register_builtin_transports`** is how a node's transport catalog gets
+  populated. Each `register_*_transport` lives in its own translation unit,
+  compiled only when that transport is enabled, so a build that drops a transport
+  leaves neither a compiled factory nor a dangling call to it. No preprocessor
+  macro selects a transport: selection is which translation units get compiled.
+
 ## API reference
+
+### The seams
 
 ```{doxygenclass} tr::net::transport_t
 :project: libtracer
 :members:
+:protected-members:
 ```
 
 ```{doxygenclass} tr::net::bus_link_t
@@ -240,6 +267,149 @@ flowchart LR
 :members:
 ```
 
-See: [fwd-router](fwd-router.md), [interface map](interface-map.md),
+```{doxygenclass} tr::net::receiver_slot_t
+:project: libtracer
+:members:
+```
+
+```{doxygenenum} tr::net::link_state_t
+:project: libtracer
+```
+
+```{doxygentypedef} tr::net::peer_id_t
+:project: libtracer
+```
+
+### The POSIX scaffold
+
+```{doxygenclass} tr::net::posix_endpoint_t
+:project: libtracer
+:members:
+:protected-members:
+```
+
+```{doxygenclass} tr::net::stream_endpoint_t
+:project: libtracer
+:members:
+:protected-members:
+```
+
+### Datagram and stream transports
+
+```{doxygenclass} tr::net::udp_transport_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::net::tcp_transport_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::net::transport_tcp_server
+:project: libtracer
+:members:
+```
+
+### WebSocket
+
+```{doxygenclass} tr::net::transport_ws_client
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::net::transport_ws_server
+:project: libtracer
+:members:
+```
+
+The WebSocket wire layer itself — opcodes, frame decode, the accept-key
+computation — is pure and lives in `tr::net::ws`:
+
+```{doxygenenum} tr::net::ws::opcode_t
+:project: libtracer
+```
+
+```{doxygenstruct} tr::net::ws::frame_t
+:project: libtracer
+:members:
+```
+
+```{doxygenfunction} tr::net::ws::decode_frame
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::ws::encode_frame
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::ws::accept_key
+:project: libtracer
+```
+
+### QUIC and WebTransport (the optional module)
+
+```{doxygenclass} tr::net::quic_transport_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::net::quic_dial_tls_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::net::webtransport_transport_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::net::webtransport_dial_tls_t
+:project: libtracer
+:members:
+```
+
+```{doxygenfunction} tr::net::quic_transport_factory
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::webtransport_transport_factory
+:project: libtracer
+```
+
+### In-process loopback (development and test)
+
+```{doxygenclass} tr::net::loopback_channel_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::net::loopback_endpoint_t
+:project: libtracer
+:members:
+```
+
+### Catalog registration
+
+```{doxygenfunction} tr::net::register_builtin_transports
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::register_udp_transport
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::register_tcp_transport
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::register_ws_transport
+:project: libtracer
+```
+
+CAN is a stack of its own — the ID codec, the advertise stream, the splitter and
+the reassembler as well as the binding — and has [its own page](can.md).
+
+See: [can](can.md), [fwd-router](fwd-router.md), [interface map](interface-map.md),
 [reference §communication flows](../reference/04-communication-flows.md),
 [bench suite](https://github.com/avatarsd-llc/libtracer/blob/main/bench/README.md).

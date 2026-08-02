@@ -2,7 +2,7 @@
 
 > **Scope:** this implementation's own serializers and their measured cost on one many-core
 > host. Not normative. **Target:** the C++23 reference implementation under
-> [`../../../core/`](../../../core/), on a many-core host. **Companion:**
+> [`core/`](https://github.com/avatarsd-llc/libtracer/tree/main/core/), on a many-core host. **Companion:**
 > [`../../reference/15-concurrency-and-scaling.md`](../../reference/15-concurrency-and-scaling.md)
 > is the standard-level half — the obligations any implementation must meet and the four
 > hardware regimes. Everything here is specific to this codebase and one host, and none of it
@@ -15,7 +15,7 @@ remain on the hot paths.
 | File | Topic |
 | --- | --- |
 | [`00-scaling-and-serialization.md`](00-scaling-and-serialization.md) | The serializer inventory with file anchors; the two independent limits on the read path; the measured effect of removing the per-read map lock and of binding the hazard-pointer slot; the cost budget; the remaining serializers; the diagnostic recipe; and how measurement goes wrong here. |
-| [`01-write-and-delivery-path.md`](01-write-and-delivery-path.md) | The write and delivery half: the snapshot-under-lock split, the vertex lock stripes taken on every delivery, fan-out and scatter-gather delivery cost, and the forward-demux mount scan. Its forward-hop and mount-scan figures come from [`bench/bench_forward_demux.cpp`](../../../bench/bench_forward_demux.cpp), the instrument that settled the acceptance condition of [ADR-0061, per-module mount routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md). |
+| [`01-write-and-delivery-path.md`](01-write-and-delivery-path.md) | The write and delivery half: the snapshot-under-lock split, the vertex lock stripes taken on every delivery, fan-out and scatter-gather delivery cost, and the forward-demux mount scan. Its forward-hop and mount-scan figures come from [`bench/bench_forward_demux.cpp`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/bench_forward_demux.cpp), the instrument that settled the acceptance condition of [ADR-0061, per-module mount routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md). |
 
 ## The three instruments behind the figures here
 
@@ -26,8 +26,8 @@ named in its row above.
 
 | instrument | what it measures | committed? |
 | --- | --- | --- |
-| [`bench/bench_contention`](../../../bench/bench_contention.cpp) | the **machine** — what one shared cache line costs, libtracer absent | yes |
-| [`bench/bench_lkv_slot`](../../../bench/bench_lkv_slot.cpp) | model slot policies (`slot` mode) and the real `graph_t::read`/`write` shapes (`graph` mode) | yes |
+| [`bench/bench_contention`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/bench_contention.cpp) | the **machine** — what one shared cache line costs, libtracer absent | yes |
+| [`bench/bench_lkv_slot`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/bench_lkv_slot.cpp) | model slot policies (`slot` mode) and the real `graph_t::read`/`write` shapes (`graph` mode) | yes |
 | the `has_registered_child` ablation | the ceiling a lock removal could reach | not committed; it short-circuits the fork check (`vertex_t::has_registered_child`, `core/include/libtracer/vertex.hpp:1056`, called from `core/src/graph.cpp:733`), which breaks the composed branch read |
 
 A `slot`-mode arm models a slot policy in isolation and is not the cost of any code path. The

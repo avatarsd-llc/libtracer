@@ -28,7 +28,7 @@ This is what separates libtracer from middleware that decodes wire bytes into in
 ## The view struct
 
 The view is deliberately POD-simple — one owning handle plus two sizes (reference
-implementation: `tr::view::view_t`, [core/include/libtracer/view.hpp](../../core/include/libtracer/view.hpp)):
+implementation: `tr::view::view_t`, [core/include/libtracer/view.hpp](https://github.com/avatarsd-llc/libtracer/blob/main/core/include/libtracer/view.hpp)):
 
 ```cpp
 namespace tr::view {
@@ -50,7 +50,7 @@ a plain `view_t` allocates nothing. How the rope stores its chain is an
 implementation choice, and short chains need not allocate at all — the reference
 implementation holds the first two links in inline storage and spills the whole
 chain to a heap vector on the third append
-([core/include/libtracer/rope.hpp](../../core/include/libtracer/rope.hpp)).
+([core/include/libtracer/rope.hpp](https://github.com/avatarsd-llc/libtracer/blob/main/core/include/libtracer/rope.hpp)).
 
 Invariants:
 
@@ -110,7 +110,7 @@ When a segment's refcount drops to zero, the owning handle invokes `backend->des
 
 ## View and rope operations
 
-The clone/release pair of a manual-refcount design is expressed as ordinary C++ value semantics; everything else is a small set of member operations ([core/include/libtracer/rope.hpp](../../core/include/libtracer/rope.hpp)):
+The clone/release pair of a manual-refcount design is expressed as ordinary C++ value semantics; everything else is a small set of member operations ([core/include/libtracer/rope.hpp](https://github.com/avatarsd-llc/libtracer/blob/main/core/include/libtracer/rope.hpp)):
 
 ### Clone — copy the view
 
@@ -224,7 +224,7 @@ Given a view whose bytes hold an L2 TLV, the cast decodes and **validates** it. 
 std::expected<tlv_t, tr::wire::err_t> tlv = tr::wire::decode(v);
 ```
 
-The cast is a `decode` overload over the view — `decode(v)` is exactly `decode(v.bytes())` (`decode`, [core/include/libtracer/frame.hpp](../../core/include/libtracer/frame.hpp)): it **validates** the framing (minimum size, reserved-bit and type-`0x00` rejects, the `LL` length width, trailer sizing, CRC verification, and the receiver's decode-resource bound on nesting depth) and, on success, materializes an owning `tlv_t` tree. The decoded payload spans (and every child's) **borrow** `v`'s bytes, so the view — and thus its refcounted segment (§refcount semantics) — must outlive the returned `tlv_t`. On malformed input it yields the `err_t` the grammar rejected with (`FRAME_TRUNCATED` / `FRAME_INVALID` / `FRAME_CRC_FAIL` / `TLV_NESTING_TOO_DEEP`).
+The cast is a `decode` overload over the view — `decode(v)` is exactly `decode(v.bytes())` (`decode`, [core/include/libtracer/frame.hpp](https://github.com/avatarsd-llc/libtracer/blob/main/core/include/libtracer/frame.hpp)): it **validates** the framing (minimum size, reserved-bit and type-`0x00` rejects, the `LL` length width, trailer sizing, CRC verification, and the receiver's decode-resource bound on nesting depth) and, on success, materializes an owning `tlv_t` tree. The decoded payload spans (and every child's) **borrow** `v`'s bytes, so the view — and thus its refcounted segment (§refcount semantics) — must outlive the returned `tlv_t`. On malformed input it yields the `err_t` the grammar rejected with (`FRAME_TRUNCATED` / `FRAME_INVALID` / `FRAME_CRC_FAIL` / `TLV_NESTING_TOO_DEEP`).
 
 Nesting depth has no constant: `TLV_NESTING_TOO_DEEP` means "exceeds *this* receiver's decode resources", and a receiver's open-node budget is the bound (RFC-0006). An implementation that hardcodes a depth number will reject frames a conforming peer may legitimately send.
 
@@ -232,7 +232,7 @@ There is **no non-validating cast**. The receive path always validates, so a laz
 
 ### Rope-aware decode
 
-A flat (single-link) view decodes by reading its bytes directly. A multi-link rope does not have to be flattened first: the same header/trailer grammar reads through a link-walking cursor instead of a contiguous span (`rope_cursor`, [core/include/libtracer/rope_decode.hpp](../../core/include/libtracer/rope_decode.hpp); [ADR-0048 — one wire grammar, chunk cursor, rope-aware decode](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0048-one-wire-grammar-chunk-cursor-rope-aware-decode.md) §1). A header or trailer that straddles a link boundary is stitched a byte at a time into a small bounded stack scratch — headers and trailers are small and bounded — and a payload the CRC must cover is fed to the CRC link by link. Payload spans stay zero-copy: a payload inside one link is a subview, a payload across links is a sub-rope.
+A flat (single-link) view decodes by reading its bytes directly. A multi-link rope does not have to be flattened first: the same header/trailer grammar reads through a link-walking cursor instead of a contiguous span (`rope_cursor`, [core/include/libtracer/rope_decode.hpp](https://github.com/avatarsd-llc/libtracer/blob/main/core/include/libtracer/rope_decode.hpp); [ADR-0048 — one wire grammar, chunk cursor, rope-aware decode](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0048-one-wire-grammar-chunk-cursor-rope-aware-decode.md) §1). A header or trailer that straddles a link boundary is stitched a byte at a time into a small bounded stack scratch — headers and trailers are small and bounded — and a payload the CRC must cover is fed to the CRC link by link. Payload spans stay zero-copy: a payload inside one link is a subview, a payload across links is a sub-rope.
 
 Two rope entry points exist, matching the two validation timings:
 

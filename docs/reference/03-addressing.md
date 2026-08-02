@@ -48,7 +48,7 @@ A path that violates any limit MUST be rejected with `ERROR{tr::path::invalid}`.
 > implement, so the text is corrected to it and no behaviour changes. It does mean a path that was
 > nominally conforming under a literal reading of the old wording is not conforming under the new
 > one; nothing in the wild emits such a path, because nothing in the wild implemented the old
-> reading. See [RFC-0019](../spec/rfcs/0019-path-depth-bounded-by-bytes.md) §4.3, which depends on
+> reading. See [RFC-0019](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0019-path-depth-bounded-by-bytes.md) §4.3, which depends on
 > this unit being unambiguous.
 
 ### Examples

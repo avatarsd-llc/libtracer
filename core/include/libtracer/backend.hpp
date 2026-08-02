@@ -5,7 +5,7 @@
  * The L0 memory-backend seam: the small, user-implementable interface every
  * substrate implements (heap, borrowed/live, fixed pool — and, later, DMA,
  * lwIP pbuf, SHM). libtracer never allocates on its own; it receives memory
- * from a backend, refcounts it (segment.hpp), and casts the bytes to TLVs.
+ * from a backend, refcounts it (`%segment.hpp`), and casts the bytes to TLVs.
  * Each backend owns and declares its own per-architecture concurrency/coherency
  * contract — the protocol mandates none. See docs/reference/09-memory-substrate.md,
  * docs/adr/0012 (modular memory binding; transparent byte router) and
@@ -80,9 +80,9 @@ enum class mem_space_t : std::uint8_t {
  */
 enum class backend_tag : std::uint8_t {
     UNKNOWN = 0,     /**< @brief No fast-path tag → virtual `destroy` fallback. */
-    HEAP,            /**< @brief `mem_heap` (mem_heap.hpp). */
-    POOL,            /**< @brief `mem_pool` (mem_pool.hpp). */
-    BORROWED,        /**< @brief `mem_borrowed` (mem_borrowed.hpp). */
+    HEAP,            /**< @brief `mem_heap` (`%mem_heap.hpp`). */
+    POOL,            /**< @brief `mem_pool` (`%mem_pool.hpp`). */
+    BORROWED,        /**< @brief `mem_borrowed` (`%mem_borrowed.hpp`). */
     BORROWED_DEVICE, /**< @brief `mem_borrowed` device-space variant. */
     CUDA,            /**< @brief `mem_cuda` (device; dispatched via the virtual fallback). */
 };
@@ -163,7 +163,7 @@ class mem_backend_t {
      * @brief The address space this backend's segments live in (default `HOST`).
      *
      * A `DEVICE` backend (e.g. `mem_cuda`) must override this; segments inherit
-     * it (segment.hpp), and the codec uses it to skip CPU access to device links.
+     * it (`%segment.hpp`), and the codec uses it to skip CPU access to device links.
      */
     [[nodiscard]] virtual mem_space_t space() const noexcept { return mem_space_t::HOST; }
 

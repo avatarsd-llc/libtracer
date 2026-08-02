@@ -16,6 +16,9 @@ verbatim from that file, so it cannot drift from what actually compiles.
 | [Composition axes](tree-of-ropes.md) | L1 + L4 + transport | why a node is a tree of ropes and not a rope of ropes; rope over two backends; mount = identity, not memory |
 
 The toctree below is the order of record; this table adds the layer and the summary.
+Each example's layer column names the module that owns the types it uses — the
+[C++ API reference](../modules/index.md) is where those declarations are rendered
+from the headers.
 
 Several examples print a `RESULT …` line with **latency and throughput** numbers. Those are
 informational (measured on whatever build ran — CI builds the examples in debug), so CI never

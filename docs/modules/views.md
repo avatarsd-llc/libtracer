@@ -175,5 +175,15 @@ reports a failed allocation as a successful write of nothing.
 :members:
 ```
 
+```{doxygenfunction} tr::view::over_bytes
+:project: libtracer
+```
+
+The CAN splitter is the other L1 view producer; it lives with the rest of the CAN
+stack on [can](can.md). The lazy, rope-backed *decode* view — what a rope-delivered
+frame becomes on the read side — is L2 and lives on
+[frame-codec](frame-codec.md).
+
 See: [segment](segment.md), [frame-codec](frame-codec.md), [graph](graph.md),
+[can](can.md),
 [reference 08 — views and ownership](../reference/08-views-and-ownership.md).

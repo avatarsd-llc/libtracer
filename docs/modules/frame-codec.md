@@ -309,6 +309,131 @@ under `core/include/libtracer/`.
 :project: libtracer
 ```
 
+```{doxygenclass} tr::wire::tlv_arena_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::wire::crc_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::wire::timestamp_t
+:project: libtracer
+:members:
+```
+
+```{doxygenfunction} tr::wire::check_frame
+:project: libtracer
+```
+
+```{doxygenfunction} tr::wire::validate_rope
+:project: libtracer
+```
+
+### The lazy tier — `tlv_view_t`
+
+A rope-delivered frame does not have to become an owning tree to be read. A
+`tlv_view_t` is one TLV whose bytes stay in the rope: it holds the parsed header
+facts plus a refcounted subrope, and **nothing that is not accessed is ever
+decoded**. Children are materialized one header at a time by stepping
+`children_t`; a payload handed onward stays the subrope it already is; and
+`materialize()` into a `tlv_t` is the single, explicit copy point.
+
+Validation is lazy in the same sense. Anchoring a view checks the root header and
+the exact total, with the CRC walk deferred; child headers are grammar-checked as
+they are stepped over; and integrity — the per-TLV CRC trailer — is checked by
+whichever consumer accesses a TLV, through `verify()`. An endpoint whose members
+form one transaction verifies all of them before mutating any state, so a
+partially-applied frame is not a reachable outcome.
+
+```{doxygenclass} tr::wire::tlv_view_t
+:project: libtracer
+:members:
+```
+
+### Keys — `key_view_t`
+
+A vertex-map key is the concatenated NAME-TLV encodings of its path, so every
+ancestor / descendant / child relation is a byte operation and no string form is
+ever materialized. `key_view_t` is the navigation over those bytes and the single
+home of that walking.
+
+Why a byte prefix means "ancestor": two *valid* keys can share a byte prefix only
+where it lands on a NAME-segment boundary, because a differing length header
+would break the byte match one record earlier. A strict byte-prefix of a valid
+key is therefore exactly a strict ancestor of it.
+
+```{doxygenclass} tr::wire::key_view_t
+:project: libtracer
+:members:
+```
+
+### The grammar core
+
+The header/trailer rules — the type-`0x00` reject, the reserved-bit reject, the
+`LL` length width, trailer sizing, the two-span CRC — are parsed and validated in
+**one** place, read through a small chunk cursor so the same rules serve every
+byte source. Both materializing decoders funnel through it. The cursor is the
+byte-*source* seam: `span_cursor` is the contiguous case and `rope_cursor` walks
+links, stitching a straddled header into a bounded scratch.
+
+```{doxygenstruct} tr::wire::grammar::header_t
+:project: libtracer
+:members:
+```
+
+```{doxygenenum} tr::wire::grammar::crc_check_t
+:project: libtracer
+```
+
+```{doxygenfunction} tr::wire::grammar::parse_header
+:project: libtracer
+```
+
+```{doxygenfunction} tr::wire::grammar::walk
+:project: libtracer
+```
+
+```{doxygenstruct} tr::wire::grammar::span_cursor
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::wire::grammar::rope_cursor
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::wire::grammar::walk_frame_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::wire::grammar::walk_stack_t
+:project: libtracer
+:members:
+```
+
+### Stream framing
+
+Splitting a byte stream back into frames is the transport's job, and it is one
+state machine rather than one per transport. `length_prefix_framer` reassembles
+u32-LE length-prefixed frames from arbitrary chunks: each complete frame lands in
+**one exactly-sized refcounted segment** drawn from the caller's backend, so
+there is no library-owned buffer and exactly one copy off the wire. An allocation
+failure is backpressure — the frame is drained so framing sync survives, and
+counted — while an oversize prefix is malformed, because a desynchronized stream
+cannot be re-framed and the caller must tear the connection down. The state
+machine names no transport type, which is why it is tested directly with no live
+connection.
+
+```{doxygenclass} tr::net::length_prefix_framer
+:project: libtracer
+:members:
+```
+
 See the [reference data-format](../reference/01-data-format.md) for the normative
 rules and [wire-format-bits](wire-format-bits.md) for worked byte dumps.
 

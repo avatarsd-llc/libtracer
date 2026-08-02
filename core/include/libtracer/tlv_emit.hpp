@@ -6,7 +6,7 @@
  * body — without building a `tlv_t` model object. The structural byte-builders
  * (PATH canonical keys, ROUTER envelopes, :schema POINT descriptors) all share
  * this instead of each hand-rolling the header. For decoding, and for emitting a
- * full `tlv_t` value (payload/children/trailers), use frame.hpp's encode/decode.
+ * full `tlv_t` value (payload/children/trailers), use `%frame.hpp`'s encode/decode.
  *
  * Lives in `tr::wire` (L2/L3): it produces wire bytes from wire types (`type_t`,
  * `opt_t`), so it is a codec concern, not a layer-free `tr::detail` primitive —

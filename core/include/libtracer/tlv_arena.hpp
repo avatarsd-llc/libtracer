@@ -7,7 +7,7 @@
  * arena nodes drawn from an injected nothrow tr::mem::block_source_t. Every byte
  * span points into the caller's input buffer — the arena holds structure
  * only, never bytes. It is the resolve-scoped view the FWD terminus reads;
- * the owning tlv_t model (frame.hpp decode/encode) is unchanged alongside.
+ * the owning tlv_t model (`%frame.hpp` decode/encode) is unchanged alongside.
  *
  * The borrowed-span contract (ADR-0041 §2): a span into the inbound frame may
  * be read, copied once to its owner, or sub-viewed off a refcounted owner —

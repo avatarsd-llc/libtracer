@@ -96,4 +96,59 @@ Generated from `core/include/libtracer/path.hpp` by Doxygen.
 :members:
 ```
 
-See: [graph](graph.md), [wire-format-bits](wire-format-bits.md).
+### The owned key
+
+A path is looked up by an owned copy of its canonical bytes rather than by a
+string. `path_key_t` is that copy, with a small-buffer optimization sized so that
+a NAME record — a 4-byte TLV header plus the segment text — fits inline for names
+up to twelve characters, which is the overwhelming norm; longer records spill to
+one heap block. It is immutable after construction, matching its use: a vertex's
+name never changes. `path_key_hash_t` and `path_key_eq_t` are the hash-map
+bindings over it, and `target_key_t` is the delivery-target key `try_make_target_key`
+builds.
+
+```{doxygenclass} tr::graph::path_key_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::graph::path_key_hash_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::graph::path_key_eq_t
+:project: libtracer
+:members:
+```
+
+```{doxygentypedef} tr::graph::target_key_t
+:project: libtracer
+```
+
+```{doxygenfunction} tr::graph::try_make_target_key
+:project: libtracer
+```
+
+```{doxygenfunction} tr::graph::valid_segment
+:project: libtracer
+```
+
+```{doxygenvariable} tr::graph::kMaxPathBytes
+:project: libtracer
+```
+
+```{doxygenvariable} tr::graph::kMaxSegments
+:project: libtracer
+```
+
+```{doxygenvariable} tr::graph::kMaxSegmentBytes
+:project: libtracer
+```
+
+```{doxygenvariable} tr::graph::kMaxFieldDepth
+:project: libtracer
+```
+
+See: [graph](graph.md), [wire-format-bits](wire-format-bits.md),
+[reference §addressing](../reference/03-addressing.md).

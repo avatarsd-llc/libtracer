@@ -66,7 +66,7 @@ struct span_cursor {
     [[nodiscard]] std::uint8_t byte_at(std::size_t off) const noexcept {
         return std::to_integer<std::uint8_t>(buf[off]);
     }
-    /** @brief Load @p n little-endian bytes at @p off as a u64 (byteorder.hpp). */
+    /** @brief Load @p n little-endian bytes at @p off as a u64 (`%byteorder.hpp`). */
     [[nodiscard]] std::uint64_t load_le(std::size_t off, std::size_t n) const noexcept {
         return tr::detail::load_le(buf.subspan(off, n));
     }

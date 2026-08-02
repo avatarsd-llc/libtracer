@@ -5,10 +5,15 @@
 # Breathe (docs/conf.py) renders it into the Sphinx site as source references.
 # Run from the repo root: `doxygen core/Doxyfile`.
 #
-# Scope is the *documented* public surface: the L0/L1 memory substrate headers,
-# which carry the @brief discipline of core/STYLE.md. WARN_AS_ERROR makes an
-# undocumented public symbol a hard failure — the CI gate (docs.yml). Add headers
-# to INPUT as they gain Doxygen coverage.
+# Scope is the *documented* public surface — every header under
+# core/include/libtracer/ that carries the @brief discipline of core/STYLE.md.
+# WARN_AS_ERROR makes an undocumented public symbol a hard failure — the CI gate
+# (docs.yml). Add headers to INPUT as they gain Doxygen coverage.
+#
+# One header is deliberately absent: byteorder.hpp is entirely `tr::detail`, and
+# EXCLUDE_SYMBOLS drops that namespace, so listing it would add an empty file
+# entry and nothing else. Its entities still carry @brief comments (core/STYLE.md
+# applies to internals too); they are simply not part of the rendered surface.
 
 PROJECT_NAME           = libtracer
 PROJECT_BRIEF          = "Decentralized graph-of-endpoints protocol — reference implementation"
@@ -66,7 +71,13 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/route_handle.hpp \
                          core/include/libtracer/ws.hpp \
                          core/include/libtracer/crc.hpp \
-                         core/include/libtracer/loopback.hpp
+                         core/include/libtracer/loopback.hpp \
+                         core/include/libtracer/builtin_transports.hpp \
+                         core/include/libtracer/lkv_slot.hpp \
+                         core/include/libtracer/mem_source_sync.hpp \
+                         core/include/libtracer/pin_instrument.hpp \
+                         core/include/libtracer/posix_endpoint.hpp \
+                         core/include/libtracer/receiver_slot.hpp
 RECURSIVE              = NO
 
 # Document only what is explicitly commented; internal `detail` helpers are not

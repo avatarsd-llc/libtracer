@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC-0014 implementation plan — creator endpoint & link liveness
 
-Execution plan for [RFC-0014](../spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
+Execution plan for [RFC-0014](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
 (accepted 2026-07-24). Descriptive/planning doc — the RFC is the normative source; where they
 disagree, the RFC wins.
 
@@ -28,7 +28,7 @@ Verified against `main` during the RFC's adversarial pass:
 `retire()` (RFC-0009) is reused unchanged. The whole liveness engine, the per-module endpoint,
 the per-module catalog `:schema`, and the enumeration-hide seam are **greenfield**.
 
-## Design spike 0 — RESOLVED → [ADR-0061](../adr/0061-per-transport-mount-routing-strip-k-l5-demux.md)
+## Design spike 0 — RESOLVED → [ADR-0061](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md)
 
 Spike 0 (reconcile the per-module `/net/<module>/<name>` nesting with the flat FWD child-link
 registry) is **resolved**; ADR-0061 (proposed) is the full mechanism and rationale. In brief:

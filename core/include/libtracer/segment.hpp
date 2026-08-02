@@ -73,7 +73,7 @@ class ref_count_t {
  *
  * @note `bytes` is writable at the type level, but whether writes are *legal*
  *       is the backend's contract — a const/ROM borrow must not be written
- *       through (see mem_borrowed.hpp).
+ *       through (see `%mem_borrowed.hpp`).
  */
 struct segment_t {
     detail::ref_count_t refcount; /**< @brief Intrusive refcount (spec orderings). */

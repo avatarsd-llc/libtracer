@@ -60,7 +60,7 @@ enum class role_t : std::uint8_t {
  *        @ref graph_t::await hand back.
  *
  * The value a vertex publishes is already refcounted: the LKV slot holds it as a
- * `std::shared_ptr<const rope_t>`, and the policy contract in `lkv_slot.hpp` fixes that shape
+ * `std::shared_ptr<const rope_t>`, and the policy contract in `%lkv_slot.hpp` fixes that shape
  * because `load()` must return an OWNING handle. A read therefore has a choice — hand the
  * caller that reference, or copy the rope out of it. Copying is not free: a rope copy clones
  * one `segment_ptr_t` per link, and each clone is a contended refcount RMW on a line every
@@ -454,7 +454,7 @@ enum class ace_type_t : std::uint8_t {
 /**
  * @brief One parsed ACE of a vertex's `:acl` (ADR-0020 / #81).
  *
- * Evaluation is the pure per-target policy of ADR-0050 (`security_acl.hpp`): the
+ * Evaluation is the pure per-target policy of ADR-0050 (`%security_acl.hpp`): the
  * default ALLOW-only MCU profile rejects a DENY ACE (or any flag bit beyond
  * `kAceInherit`) at write time with TYPE_MISMATCH, so stored ACEs never carry
  * semantics the selected evaluator would silently weaken; the full `security_acl`
@@ -908,7 +908,7 @@ struct vertex_ext_t {
      * deployment copy/pin trade, not a quality-of-service property, so it lost its remote
      * write surface with the rest of the RFC-0022 §3.B removal. Declared through
      * `graph_t::set_pin_payload_ratio`. Read on every view-delivered write
-     * (`op_resolve_walk.hpp`) with no lock, so it stays ONE inline load off this block.
+     * (`%op_resolve_walk.hpp`) with no lock, so it stays ONE inline load off this block.
      *
      * @note This overrides the per-target `config_t::kPinPayloadRatio`, which Amendment 2
      *       fixes at the sentinel on both targets; the override exists so §6-style arms
@@ -995,7 +995,7 @@ class vertex_t {
      * @brief This vertex's declared pin amplification ratio `K` (0 ⇒ never pin, the default).
      *
      * ONE inline load and nothing more: it is read on EVERY view-delivered write
-     * (`op_resolve_walk.hpp`), so it may never become an ancestor walk. Nothing is
+     * (`%op_resolve_walk.hpp`), so it may never become an ancestor walk. Nothing is
      * inherited (RFC-0022 §3.F) — a vertex that was never given a ratio answers 0,
      * whatever its ancestors hold.
      */
@@ -2104,7 +2104,7 @@ class vertex_t {
      *        `-fno-exceptions` (#477, the engine-task storm crash class).
      *
      * Host profile (exceptions on): catch — zero cost on the hot success path, no probe
-     * race. MCU profile: the mem_heap.hpp probe-then-commit discipline; the probe covers
+     * race. MCU profile: the `%mem_heap.hpp` probe-then-commit discipline; the probe covers
      * the rope payload + a control-header bound and targets the global heap — exact for
      * the default resource (every production graph today); an ADR-0039 injected @p mr
      * keeps its own contract, the probe being a best-effort proxy for it.
@@ -2316,9 +2316,9 @@ class vertex_t {
     // The stored value is a rope (ADR-0053 §6): a contiguous scalar is a single-link
     // rope (small-buffer inline, no extra alloc), a chunked stream keeps its links.
     /** @brief The last-known value, held through the slot policy this target bound
-     *         (`tr::graph::lkv_slot_t` in `config.hpp`; ADR-0069 §1). The default binding is
+     *         (`tr::graph::lkv_slot_t` in `%config.hpp`; ADR-0069 §1). The default binding is
      *         `sp_atomic_slot_t` — today's `std::atomic<std::shared_ptr<const rope_t>>`,
-     *         which is lock-free by CONTRACT and spin-locked in practice. `lkv_slot.hpp`
+     *         which is lock-free by CONTRACT and spin-locked in practice. `%lkv_slot.hpp`
      *         documents that caveat and the contract any replacement must satisfy. Do not
      *         read "lock-free" here as "no serializing operation". */
     lkv_slot_t lkv_{};

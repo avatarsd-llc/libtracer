@@ -7,7 +7,7 @@
  * offsets, the forward-vs-terminus peeks (first `dst` segment, op discriminant),
  * the control-frame head peek, the fixed-capacity stack byte-writer, and the
  * shrunk-dst / grown-src head rebuild. Everything is templated over the grammar
- * `Cursor` concept (grammar.hpp), so the identical logic serves a contiguous
+ * `Cursor` concept (`%grammar.hpp`), so the identical logic serves a contiguous
  * `span_cursor` and a link-walking `rope_cursor` — offsets, never spans, so every
  * result is source-agnostic and the caller re-slices from its own cursor.
  *

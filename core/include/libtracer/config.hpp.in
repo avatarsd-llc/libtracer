@@ -13,7 +13,7 @@
  *     build tree with the target's knob values and prepends that directory to the PUBLIC
  *     include path, so the generated file SHADOWS this one for every TU of the build
  *     (one file per build ⇒ no per-TU `-D` mismatch, no ODR hazard).
- *   - the checked-in `config.hpp` — the default rendering, kept byte-identical by a
+ *   - the checked-in `%config.hpp` — the default rendering, kept byte-identical by a
  *     configure-time drift gate (`FATAL_ERROR` on mismatch), so a raw `-Icore/include`
  *     consumer (the Cortex-M0 footprint gate, vendored source drops) builds with stock
  *     settings and no build-system participation.
@@ -143,7 +143,7 @@ struct default_config_t {
      * member (handlers, history, the ACL trio) fails the build.
      *
      * It lives HERE, in the configuration, because it is a per-target budget — and it is
-     * enforced in `vertex.hpp` beside the type it constrains, so **every** build on **every**
+     * enforced in `%vertex.hpp` beside the type it constrains, so **every** build on **every**
      * target evaluates it under **its own** binding. It used to sit in a test, which meant it
      * gated exactly one configuration and never the 32-bit one at all (no CI leg compiled that
      * test cross-target, while the ESP-IDF legs compiled `vertex_t` itself on every PR).
@@ -209,7 +209,7 @@ struct default_config_t {
      * readers, and a reclamation scheme that does not serialize recovers roughly 4x of that at
      * twenty-four readers (ADR-0069 §6 — the real path, not the model bench's 20.8x). CMake:
      * `-DLIBTRACER_LKV_SLOT=<type>`. The named type must satisfy the policy contract in
-     * `lkv_slot.hpp` — in particular `load()` returns an OWNING handle.
+     * `%lkv_slot.hpp` — in particular `load()` returns an OWNING handle.
      */
     using lkv_slot_t = @LIBTRACER_LKV_SLOT@;
 };

@@ -308,6 +308,38 @@ out of the raw config `SETTINGS` TLV handed to it alongside these settings.
   produces a `HANDLE_NACK` back to the producer, which re-advertises. An implementation that treats
   an unknown label as a protocol error breaks the self-heal.
 
+## The rest of the plane
+
+The router is the orchestrator, but most of the plane's surface is in the pieces
+it delegates to — and each of those was extracted precisely so its rules could be
+tested against hand-built frames with no live transport.
+
+- **`op_resolver_t`** is the terminus half. When a `dst` names a vertex on *this*
+  node, it applies the operation (READ / WRITE / AWAIT, plus any `:field`
+  selector) against the graph and builds the reply as a rope: one exactly-sized
+  head segment prepended to refcount-clones of the vertex's stored payload, never
+  a serialize into a fresh buffer. It is local-only by construction — a `dst`
+  that does not resolve locally is answered `NOT_FOUND`, and hop-by-hop
+  forwarding stays the router's job.
+- **`route_handle_t`** is the per-node label store behind delivery compaction.
+  Read literally, "a delivery is a FWD WRITE" makes every streamed sample
+  re-carry its full return route; a per-link label aliases that route instead,
+  and each hop *swaps* the label the way a CAN ID is re-resolved against each
+  bus. Binding is advertise-driven and re-advertise on reconnect is the
+  self-heal. A flow that is not flagged for compaction allocates nothing here,
+  which is what preserves the stateless-forwarder property for everything else.
+- **The frame view** (`fwd_hdr_t`, `fwd_pre_t`, `dst_seg_walk_t`,
+  `control_head_t`, `fwd_rebuild_t`, `stack_writer`) is the offset-dispatch
+  cluster the forward hop reads a frame by: one header read as absolute offsets,
+  the forward-versus-terminus peeks, the control-frame head peek, a fixed-capacity
+  stack byte writer, and the shrunk-`dst` / grown-`src` head rebuild. Everything
+  is templated over a cursor concept and yields **offsets, never spans**, so the
+  same logic serves a contiguous frame and a link-walking rope and the caller
+  re-slices from its own cursor.
+- **The grammar** (`tr::wire::grammar`) is the shared TLV header/trailer core
+  underneath all of that; it is documented with the codec on
+  [frame-codec](frame-codec.md).
+
 ## API reference
 
 ```{doxygenclass} tr::net::fwd_router_t
@@ -316,6 +348,139 @@ out of the raw config `SETTINGS` TLV handed to it alongside these settings.
 ```
 
 ```{doxygenclass} tr::net::child_registry_t
+:project: libtracer
+:members:
+```
+
+### Terminus resolution
+
+```{doxygenclass} tr::graph::op_resolver_t
+:project: libtracer
+:members:
+```
+
+```{doxygenenum} tr::graph::fwd_op_t
+:project: libtracer
+```
+
+```{doxygenenum} tr::graph::reply_kind_t
+:project: libtracer
+```
+
+### Delivery compaction
+
+```{doxygenclass} tr::net::route_handle_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::net::resolved_binding_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::net::handle_binding_t
+:project: libtracer
+:members:
+```
+
+### The FWD frame view
+
+```{doxygenstruct} tr::net::fwd_hdr_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::net::fwd_pre_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::net::dst_seg_walk_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::net::control_head_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::net::fwd_rebuild_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::net::stack_writer
+:project: libtracer
+:members:
+```
+
+```{doxygenfunction} tr::net::read_fwd_header
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::peek_fwd_dst
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::peek_fwd_first_dst_seg
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::peek_fwd_op
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::peek_control
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::rebuild_fwd_forward(const Cursor&, std::span<const std::byte>, std::string_view, std::size_t, const fwd_pre_t*)
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::rebuild_fwd_forward(const Cursor&, std::string_view)
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::encode_mount_tlv
+:project: libtracer
+```
+
+```{doxygenvariable} tr::net::kDstSegCacheSlots
+:project: libtracer
+```
+
+```{doxygenvariable} tr::net::kFwdHead1Cap
+:project: libtracer
+```
+
+```{doxygenvariable} tr::net::kFwdSrcHdrCap
+:project: libtracer
+```
+
+```{doxygenvariable} tr::net::kFwdMaxIov
+:project: libtracer
+```
+
+### The /net connection surface
+
+```{doxygenclass} tr::net::transport_vertex_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::net::conn_settings_t
+:project: libtracer
+:members:
+```
+
+```{doxygenenum} tr::net::conn_role_t
+:project: libtracer
+```
+
+```{doxygenstruct} tr::net::slim_net_t
 :project: libtracer
 :members:
 ```

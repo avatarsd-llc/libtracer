@@ -76,7 +76,7 @@ self-description.
 :::
 
 :::{grid-item-card} Implement the protocol
-:link: docs/spec/v1
+:link: docs/spec/index
 :link-type: doc
 
 The normative v1 wire protocol: byte-level TLV framing an interoperable
@@ -93,7 +93,14 @@ other document disagree, the spec wins.
 
 Getting started <docs/getting-started>
 Examples <docs/examples/index>
-C++ modules <docs/modules/index>
+```
+
+```{toctree}
+:caption: Specification
+:hidden:
+:maxdepth: 2
+
+The specification <docs/spec/index>
 ```
 
 ```{toctree}
@@ -103,17 +110,26 @@ C++ modules <docs/modules/index>
 
 Reference (descriptive) <docs/reference/README>
 Design notes <docs/design/README>
-Capability matrix <docs/capability-matrix>
-Interoperability <docs/interoperability>
 ```
 
 ```{toctree}
-:caption: Specification
+:caption: C++ API reference
 :hidden:
-:maxdepth: 1
+:maxdepth: 2
 
-Protocol v1 — the wire format <docs/spec/v1>
-About the specification <docs/spec/README>
+C++ API reference <docs/modules/index>
+```
+
+```{toctree}
+:caption: Interoperate
+:hidden:
+:maxdepth: 2
+
+Interoperability <docs/interoperability>
+Build a custom device <docs/interop/custom-device>
+A production ESP32 node <docs/interop/esp32-production-node>
+Capability matrix <docs/capability-matrix>
+Implementation registry <docs/implementations>
 ```
 
 ```{toctree}
