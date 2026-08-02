@@ -884,6 +884,68 @@ void test_app_chosen_root_and_module() {
     }
 }
 
+/**
+ * @brief #688 open trace — a peer-created child DOES reach `fwd_router_t::add_child`, and
+ *        THE segment predicate runs strictly before it.
+ *
+ * The trace the ruling left open, executed against the PRODUCTION wiring rather than a
+ * hand-built harness (the RFC-0014 lesson: two silent misroutes shipped because no test
+ * drove the real path). The reachable chain is
+ * `graph_t::write(/net:children[]) -> graph_t::create_child -> child_types_["client"] ->
+ * transport_vertex_t::make_connection -> fwd_router_t::add_child`, so a peer-supplied
+ * `SPEC` name becomes the last segment of a routable MOUNT name — which is exactly why
+ * the predicate must gate it, and why gating it anywhere later would be too late.
+ *
+ * The positive control proves the chain is real (a legal name lands in the router's
+ * registry); each reserved-character case proves the door shuts first — `INVALID_PATH`
+ * from `create_child`, before the catalog lookup, before key composition, before the
+ * factory, hence before `add_child`. Ablation-verified: delete the `valid_segment` call
+ * in `graph_t::create_child` and every negative case below registers a mount named
+ * `net/udp-client/a:b` (etc.) that no conforming `dst` can address.
+ *
+ * `routable_mount_name` (fwd_router.cpp, #523) is a SIBLING of the predicate, not a
+ * second copy of it: it bounds a whole multi-segment mount PATH, where `/` is legal and
+ * `kMaxSegments` is the bound; `valid_segment` bounds ONE segment, where `/` is not. It
+ * accepts every name below, so it is not, and must not be mistaken for, this gate.
+ */
+void test_wire_name_reaches_add_child() {
+    std::printf("#688 trace: create_child -> make_connection -> add_child, predicate first:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    declare_builtin_modules(net);  // ADR-0073 §4: the application mints the module names
+
+    // ----- POSITIVE CONTROL: the chain is real. A legal peer name becomes a mount. -----
+    const auto ok = node.write(
+        path_t("/net:children[]"),
+        conn_spec("client", "ok-name", conn_role_t::DIAL, free_port(), "udp", "127.0.0.1"));
+    check(ok.has_value(), "a legal peer-supplied name creates the connection");
+    check(router.registry().by_name("net/udp-client/ok-name") != nullptr,
+          "and it REACHED fwd_router_t::add_child — the peer's name is now a mount segment");
+    const std::size_t mounts_after_control = router.registry().size();
+    check(mounts_after_control == 1, "exactly one mount is registered so far");
+
+    // ----- SUBJECT: one reserved character per case, same production door. -----
+    for (const std::string_view bad : {"a/b", "a:b", "a.b", "a*b", "a?b"}) {
+        const auto w = node.write(
+            path_t("/net:children[]"),
+            conn_spec("client", bad, conn_role_t::DIAL, free_port(), "udp", "127.0.0.1"));
+        char label[96];
+        std::snprintf(label, sizeof label, "name \"%.*s\" => INVALID_PATH before add_child",
+                      static_cast<int>(bad.size()), bad.data());
+        check(!w.has_value() && w.error() == status_t::INVALID_PATH, label);
+
+        std::string qualified("net/udp-client/");
+        qualified += bad;
+        check(router.registry().by_name(qualified) == nullptr,
+              "no unaddressable mount entered the router registry");
+    }
+    check(router.registry().size() == mounts_after_control,
+          "the registry gained NOTHING from the five rejected creates");
+    // No socket was constructed either: the gate is upstream of the transport factory.
+    check(net.link_of("net/udp-client/a:b") == nullptr, "no link was constructed for a bad name");
+}
+
 }  // namespace
 
 int main() {
@@ -903,6 +965,7 @@ int main() {
     test_ws_peer_named_config();
     test_unregistered_kind_is_schema_not_found();
     test_register_module_rejects_reserved_chars();
+    test_wire_name_reaches_add_child();
     test_app_chosen_root_and_module();
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
