@@ -129,8 +129,8 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 }  // namespace tr::net
 ```
 
-Signature source: `core/include/libtracer/fwd_router.hpp:139` (constructor), `:198`
-(`add_child`), `:248` (`subscribe_toward`), `:258-269` (the sink function-pointer types);
+Signature source: `core/include/libtracer/fwd_router.hpp:146` (constructor), `:205`
+(`add_child`), `:255` (`subscribe_toward`), `:265-276` (the sink function-pointer types);
 `core/include/libtracer/child_registry.hpp:209` (`add`), `:458` (`resolve_peer`), `:473`
 (`erase`), `:499` (`entry_by_name`), `:520` (`by_name`), `:561`/`:571` (`size`/`live_size`).
 
@@ -159,17 +159,29 @@ flowchart TB
   address size grows with hop count, which is what `ADVERTISE`/`COMPACT` route handles exist to
   amortise on a steady flow.
 - **A reply is delivered as a rope, never flattened by the router**
-  (`core/include/libtracer/fwd_router.hpp:273-277`). A sink that wants contiguous bytes holds
+  (`core/include/libtracer/fwd_router.hpp:280-284`). A sink that wants contiguous bytes holds
   `const view_t m = reply.materialize()` and reads `m.bytes()`; a **single-link reply — the common
   case — is returned zero-copy, no allocation and no copy**, and only a multi-link reply pays one
   flatten, on demand. The escape hatch sits at the consumer, so the router never pays for a
   consumer that did not need contiguity. `m` must stay alive while its span is read.
 - **The default delivery leg copies nothing.** A full-route `FWD{WRITE}` fan-out scatter-gathers a
   fresh stack head, the stored return-route bytes, an empty `src`, and one span per link of the
-  stored value (`core/src/fwd_router.cpp:1478`). The `COMPACT` leg is the one that flattens,
-  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:1441`) — single-link, that
+  stored value (`core/src/fwd_router.cpp:1479`). The `COMPACT` leg is the one that flattens,
+  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:1442`) — single-link, that
   flatten is a zero-copy adopt, and multi-link it draws from the router's injected `flat` backend
   (#730), not the global heap.
+- **All rope flattens on the forward AND terminus paths draw from the injected seam.** `flat`
+  started (#730) as the router's own four sites — the two ingress control-frame sub-rope flattens,
+  the cold bus-name rejection flatten, and the per-delivery `COMPACT` egress one. The terminus half
+  was not covered: the resolver's rope-tier flattens, one call below `resolve_terminus_rope`, took
+  `rope_t::materialize`'s default global-heap backend, so a **fragmented** request from a peer
+  allocated outside a bounded node's slab no matter what it had injected. The router now passes the
+  same pointer to its `op_resolver_t` (#766), which threads it through the rope-tier node reader,
+  so one injection covers both paths. A refused terminus flatten is answered by value: an addressed
+  `kind=ERROR STATUS{BACKPRESSURE}` reply, or — when the refusal hit the reply's own route bytes,
+  leaving no trustworthy address — a drop. Never a reply built on a short span. What `flat` still
+  does **not** cover is everything that is not a rope flatten: the terminus arena (that is `rx`)
+  and the reply head segment.
 - **Delivery is nothrow and drops rather than aborts.** Every per-delivery allocation on the writer
   thread is failable: a failed flatten, frame build or `iovec` reserve **drops that one delivery**
   — a subscriber misses a value under exhaustion, which is valid delivery behaviour — instead of

@@ -47,15 +47,15 @@ every other member at the byte offset it had before the seam existed, which keep
 bench measuring the same layout (`graph.hpp:1032-1036`).
 
 `fwd_router_t` carries the same failable seam separately as its `rx` parameter
-(`core/include/libtracer/fwd_router.hpp:141`), because the terminus arena decode belongs to the
+(`core/include/libtracer/fwd_router.hpp:148`), because the terminus arena decode belongs to the
 router's receive thread rather than to the graph. It carries a **fourth** injection beside it, and
-for a different contract: `flat` (`fwd_router.hpp:142`), the `mem_backend_t` the router's **own
-four** rope flattens draw their owned `segment` from — the byte-buffer seam, with cache hooks and a
-refcount, which the block source is not. The split is `graph_t`'s `ctl_` / `value_backend_` split
-one layer out. Like `value_backend_`, an injected `flat` **MUST be thread-safe** (ADR-0060 §2):
-three of those four sites run on a transport child's receive thread and the fourth on the writer
-thread, and the `segment` it hands out self-routes its reclaim on whichever thread drops the last
-reference. A bare `pool_t` is not thread-safe and must not be injected here;
+for a different contract: `flat` (`fwd_router.hpp:142`), the `mem_backend_t` **every rope flatten on
+the forward and terminus paths** draws its owned `segment` from — the byte-buffer seam, with cache
+hooks and a refcount, which the block source is not. The split is `graph_t`'s `ctl_` /
+`value_backend_` split one layer out. Like `value_backend_`, an injected `flat` **MUST be
+thread-safe** (ADR-0060 §2): all of those sites but one run on a transport child's receive thread
+and the remaining one on the writer thread, and the `segment` it hands out self-routes its reclaim
+on whichever thread drops the last reference. A bare `pool_t` is not thread-safe and must not be injected here;
 `synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:170`) is the in-tree
 composition, and its critical section is a compile-time policy: `sync_pool_t` for the multi-core
 spinlock, `tr::esp::critical_pool_t` for the single-core interrupt-disable variant.
@@ -67,27 +67,33 @@ plus the router's `rx` **and its `flat`** and the transport-receive backend at t
 slab; the composition guidance is in
 [`../reference/09-memory-substrate.md`](../reference/09-memory-substrate.md).
 
-**"One slab, whole stack" is a direction, not a state the tree is in.** Two gaps stop a node that
-has injected every seam above from actually holding the whole stack in its slab, and both are open:
+**"One slab, whole stack" is a direction, not a state the tree is in.** One gap still stops a node
+that has injected every seam above from actually holding the whole stack in its slab:
 
-- the **terminus resolver's** rope-tier flattens (`core/src/op_resolve_view.cpp:80`, `:166`) never
-  see `flat` and draw from the global heap on every fragmented terminus request — **#766**,
-  measured: with `flat` armed to refuse everything, a 4-link `FWD{READ}` consulted it **zero** times
-  and still made 20 global-heap `new` calls;
 - the byte-buffer seams need a thread-safe backend, and the only synchronised pool built is a
   spinlock — wrong for a single-core target ([zero-copy and flatten](zero-copy-and-flatten.md) §5),
   so a constrained node keeps `value_backend` and `flat` on `heap_backend()` today.
 
-**The bound covers the arena, and — since #730 — the router's own four flattens beside it.** Read
-the arena claim below as a claim about the arena only: until #730 the router's four `materialize()`
-call sites all took `rope_t::materialize`'s DEFAULT global-heap backend, so a node that had injected
-every seam above still flattened outside its own bound. Worse, two of those sites were unguarded,
-and an empty flatten is not a visibly-failed one: `view::over_bytes` maps an empty span to an
-ENGAGED-empty optional by design and `graph_t::write` stores it and reports success, so an ingress
-`COMPACT` flatten that OOM'd REPLACED the subscriber's last-known value with nothing. Both halves
-are closed for those four — the sites draw from `flat`, and each answers a refusal by value (the
-rows in [Status legs](#status-legs) below). Read *that* literally too: four named sites, not "the
-router's allocations".
+The **terminus** gap that stood beside it is closed: until #766 the resolver's rope-tier flattens
+(`view_node::ensure_cache`, `view_node::own_wire` in `core/src/op_resolve_view.cpp`) never saw
+`flat` and drew from the global heap on every fragmented terminus request — measured: with `flat`
+armed to refuse everything, a 4-link `FWD{READ}` consulted it **zero** times and still made 20
+global-heap `new` calls. The router now hands `flat` to its `op_resolver_t`, which threads it
+through the rope-tier node reader, and `core/tests/terminus_flatten_backend_test.cpp` pins both
+halves: the same request costs strictly fewer global allocations with `flat` on a slab, and a
+refusal is answered rather than read short.
+
+**The bound covers the arena, and — since #730 and #766 — every rope flatten on the forward and
+terminus paths beside it.** Read the arena claim below as a claim about the arena only: until #730
+the router's four `materialize()` call sites all took `rope_t::materialize`'s DEFAULT global-heap
+backend, so a node that had injected every seam above still flattened outside its own bound. Worse,
+two of those sites were unguarded, and an empty flatten is not a visibly-failed one:
+`view::over_bytes` maps an empty span to an ENGAGED-empty optional by design and `graph_t::write`
+stores it and reports success, so an ingress `COMPACT` flatten that OOM'd REPLACED the subscriber's
+last-known value with nothing. Both halves are closed at every one of those sites — they draw from
+`flat`, and each answers a refusal by value (the rows in [Status legs](#status-legs) below). Read
+*that* literally too: the named sites in that table, not "the router's allocations" — the terminus
+arena is `rx`'s, and the reply head segment is neither's.
 
 ## The block source
 
@@ -155,11 +161,18 @@ defines for "exceeds this receiver's decode resources".
 | Branch-write root key render (`try_build_key`) | `core/src/graph.cpp:1040-1041` | `false` → `BACKPRESSURE` |
 | Branch-write parse-key copy (`detail::try_assign`) | `core/src/graph.cpp:1043` | `false` → `BACKPRESSURE` |
 | Branch-write decode arena | `core/src/graph.cpp:1021-1024` | decode error → `TYPE_MISMATCH` |
-| Per-delivery COMPACT flatten (egress) | `core/src/fwd_router.cpp:1441-1442` | the delivery is **dropped** |
-| Per-delivery frame build | `core/src/fwd_router.cpp:1446` | the delivery is **dropped** |
+| Per-delivery COMPACT flatten (egress) | `core/src/fwd_router.cpp:1442-1443` | the delivery is **dropped** |
+| Per-delivery frame build | `core/src/fwd_router.cpp:1447` | the delivery is **dropped** |
 | Ingress `ADVERTISE` route flatten | flatten `core/src/fwd_router.cpp:897`, answered at `:905` | the empty flatten **fails the `wire::decode`** ⇒ the frame is **dropped**; the label stays **unbound** (the peer's COMPACTs draw a `HANDLE_NACK`) |
 | Ingress `COMPACT` payload flatten | flatten `core/src/fwd_router.cpp:1107`, answered at `:1114` | the delivery is **dropped**; the subscriber keeps its last-known value |
 | Bus-name rejection reply flatten (cold) | flatten `core/src/fwd_router.cpp:577`, answered by the `wire::decode` opening `reject_bus_name_hop` | the frame is **dropped** by value — no reply |
+| Terminus per-node span materialize (rope tier) | flatten `core/src/op_resolve_view.cpp:216`, answered at `core/src/op_resolve_walk.hpp:654` / `core/src/op_resolve_walk.hpp:699` | a refusal on the reply's own route bytes ⇒ `BACKPRESSURE` on the error side ⇒ the frame is **dropped**; anywhere else before dispatch ⇒ an **addressed** `kind=ERROR STATUS{BACKPRESSURE}` reply |
+| Terminus ownership flatten (rope tier, ADR-0053 ⑤) | flatten `core/src/op_resolve_view.cpp:119`, answered by the empty-value guards in `resolve_node` (`core/src/op_resolve_walk.hpp:813-814`) | the write is **not stored** — the vertex keeps its previous value — and the reply is `BACKPRESSURE` |
+
+The two terminus rows are the resolver's, reached through the same `flat` the router injects (#766),
+and both are exercised by `core/tests/terminus_flatten_backend_test.cpp` — including a sweep that
+moves the refusal point across every flatten one request makes and requires each outcome to be a
+drop or an addressed `BACKPRESSURE`, never a `kind=RESULT` built on a short span.
 
 All three router-ingress rows draw from the router's injected `flat` backend, and all three are
 exercised by `core/tests/fwd_flatten_backend_test.cpp`, which injects a backend that refuses on
@@ -168,7 +181,7 @@ verify pass reverted both halves of that site and the suite still reported 72/72
 its own case now, and reverting the site's seam fails it (1 of 72).
 
 **Two of those three rows are answered by a decode, not by a guard.** The `empty()` early-outs
-beside the `ADVERTISE` (`:1094`) and bus-name (`:767`) flattens are redundant with the `wire::decode`
+beside the `ADVERTISE` (`core/src/fwd_router.cpp:1094`) and bus-name (`core/src/fwd_router.cpp:767`) flattens are redundant with the `wire::decode`
 that follows each — deleting either changes nothing observable, verified by ablation — and the code
 says so at both sites. They are kept so the *reason* the operation failed is the OOM rather than the
 codec's leniency, and nothing here cites them as proven guards. What the test pins at those two
@@ -189,7 +202,7 @@ The remote-delivery leg answers differently on purpose. A stored write that reac
 succeeded; the fan-out to one subscriber is a separate obligation, and a subscriber missing
 one value under heap exhaustion is valid delivery behaviour where failing the write is not. Every
 per-delivery allocation on that writer-thread leg is nothrow, and a failed flatten or frame build
-drops that one delivery (`core/src/fwd_router.cpp:1441-1442`). Dropping *invisibly* is the part that
+drops that one delivery (`core/src/fwd_router.cpp:1442-1443`). Dropping *invisibly* is the part that
 needs an answer, which is why `graph_t::delivery_drops()` exists
 (`core/include/libtracer/graph.hpp:848`): three relaxed monotonic counters — `no_target`, `denied`,
 `out_of_memory` (`graph.hpp:781-788`) — incremented only on a drop, so the delivering path is

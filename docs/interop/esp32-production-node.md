@@ -64,7 +64,7 @@ Those are the three injection points of `graph_t`'s constructor — the pmr reso
 the value backend and the failable control source
 (`core/include/libtracer/graph.hpp:187-189`) — and the matching three of
 `fwd_router_t`: the pmr resource, the failable `rx` source and the `flat` byte backend
-its rope flattens draw from (`core/include/libtracer/fwd_router.hpp:140-142`). The full set of
+its rope flattens draw from (`core/include/libtracer/fwd_router.hpp:147-149`). The full set of
 build-time and injected bounds is catalogued in
 [the configuration space](../design/config/00-configuration-space.md); the failure
 semantics of the third seam are in
@@ -107,13 +107,14 @@ example wires the synchronised pool through a per-target platform TU
 targets can take.
 :::
 
-Keeping `flat` on the heap means the router's four flattens — the ingress
-`ADVERTISE` / `COMPACT` sub-rope flattens, the cold bus-name rejection flatten and the
-per-delivery egress one — sit outside the node's slab bound (#730). Two further caveats,
-so the bound is not read wider than it is: those four are the only flattens `flat` covers
-— the **terminus resolver's** rope-tier flattens (`core/src/op_resolve_view.cpp:80`,
-`:142`) never see it and draw from the global heap on every fragmented terminus request
-(#766) — and `flat` bounds the flattened *bytes*, not the frame builds beside them.
+Keeping `flat` on the heap means every rope flatten on the forward **and** terminus paths
+sits outside the node's slab bound — the ingress `ADVERTISE` / `COMPACT` sub-rope
+flattens, the cold bus-name rejection flatten and the per-delivery egress one (#730), plus
+the terminus resolver's rope-tier flattens one call below `resolve_terminus_rope`
+(`view_node::ensure_cache`, `view_node::own_wire`), which the router reaches by handing
+`flat` to its `op_resolver_t` (#766). One caveat remains, so the bound is not read wider
+than it is: `flat` bounds the flattened *bytes*, not the frame builds beside them, and not
+the terminus arena — that is `blocks`.
 
 :::{warning}
 Do **not** reach for `tr::mem::bump_source_t` as `blocks`. It is scope-lifetime only:

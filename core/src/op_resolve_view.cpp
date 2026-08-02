@@ -32,17 +32,35 @@ namespace tr::graph {
 namespace {
 
 /**
+ * @brief The per-resolve flatten seam (#766): the injected byte backend every rope-tier
+ *        flatten of ONE resolve draws from, plus the sticky "a flatten was refused" flag
+ *        that makes the refusal answerable by value.
+ *
+ * One instance lives on `op_resolver_t::resolve`'s stack and every `view_node` of that walk
+ * points at it — nodes are copied by value (`parsed_fwd_t` holds them so), and each node
+ * caches its own materialize, so the failure signal cannot live in a node: a refusal seen
+ * while reading the `dst` PATH's third NAME must still be visible at the walk's decision
+ * point. The flag is sticky by construction — nothing clears it inside a resolve.
+ */
+struct flatten_seam_t {
+    mem::mem_backend_t* backend = nullptr; /**< @brief Injected byte backend; null ⇒ heap. */
+    bool refused = false;                  /**< @brief A flatten was refused during this walk. */
+};
+
+/**
  * @brief The owning rope-tier node-reader (ADR-0053 §7): one lazy `tlv_view_t` adapted to the node-
  *        reader concept the templated `resolve_node` walks.
  *
  * Default- and
  * copy-constructible (parsed_fwd_t holds nodes by value); a copy bumps segment
- * refcounts, never bytes.
+ * refcounts, never bytes. A copy shares the walk's @ref flatten_seam_t — the backend
+ * injection and the refusal flag are per-RESOLVE, not per-node.
  */
 class view_node {
    public:
     view_node() = default;
-    explicit view_node(wire::tlv_view_t v) noexcept : v_(std::move(v)) {}
+    explicit view_node(wire::tlv_view_t v, flatten_seam_t* seam = nullptr) noexcept
+        : v_(std::move(v)), seam_(seam) {}
 
     [[nodiscard]] type_t type() const noexcept { return v_->type(); }
     [[nodiscard]] opt_t opt() const noexcept { return v_->opt(); }
@@ -55,14 +73,28 @@ class view_node {
      *        builder and the ownership copy).
      */
     [[nodiscard]] std::span<const std::byte> wire() const {
-        ensure_cache();
+        if (!ensure_cache()) return {};
         return cache_.bytes().first(header_size() + v_->body_size());
     }
     /** @brief The body (payload / children) region. */
     [[nodiscard]] std::span<const std::byte> body() const {
-        ensure_cache();
+        if (!ensure_cache()) return {};
         return cache_.bytes().subspan(header_size(), v_->body_size());
     }
+
+    /**
+     * @brief Has every contiguous span this walk produced been materialized successfully
+     *        (#766)?
+     *
+     * `false` once ANY node of this resolve had its flatten refused by the injected backend:
+     * that node's `wire()`/`body()` answered an EMPTY span rather than reading a short one,
+     * so every value the walk derived from it downstream (the op discriminant, a lookup key,
+     * a field name) is unsound. The walk checks this at its two decision points and answers
+     * `BACKPRESSURE` — it never sends a reply built on a refused flatten. The span tier's
+     * `arena_node` borrows and never allocates, so it answers a constant `true` and the
+     * checks fold away.
+     */
+    [[nodiscard]] bool spans_intact() const noexcept { return seam_ == nullptr || !seam_->refused; }
 
     /**
      * @brief The trailer-excluded whole TLV as a fresh OWNED segment (ADR-0053 ⑤): a multi-link
@@ -77,7 +109,17 @@ class view_node {
      */
     [[nodiscard]] view_t own_wire() const {
         const rope_t sub = v_->wire().subrope(0, wire_size());  // trailer excluded
-        if (sub.link_count() > 1) return sub.flatten();         // one flatten, adopt (no 2nd copy)
+        if (sub.link_count() > 1) {                             // one flatten, adopt (no 2nd copy)
+            // Through the injected seam (#766): the ADR-0053 ⑤ ownership flatten of a
+            // fragmented WRITE payload is peer-provoked and must stay inside the node's
+            // memory bound. An empty result is already the walk's BACKPRESSURE signal
+            // (`own_tlv` → the empty-value guards in `resolve_node`), so the refusal needs
+            // no second channel here — but it is recorded so a LATER span read on the same
+            // walk cannot be believed either.
+            view_t flat = sub.flatten(backend());
+            if (flat.empty()) note_refusal();
+            return flat;
+        }
         return view::over_bytes(sub.only().bytes()).value_or(view_t{});
     }
 
@@ -134,17 +176,21 @@ class view_node {
      */
     class children_cursor {
        public:
-        explicit children_cursor(wire::tlv_view_t::children_t ch) noexcept : ch_(std::move(ch)) {}
+        explicit children_cursor(wire::tlv_view_t::children_t ch, flatten_seam_t* seam) noexcept
+            : ch_(std::move(ch)), seam_(seam) {}
         [[nodiscard]] std::optional<view_node> next() {
             std::expected<std::optional<wire::tlv_view_t>, wire::err_t> n = ch_.next();
             if (!n || !n->has_value()) return std::nullopt;
-            return view_node{std::move(**n)};
+            return view_node{std::move(**n), seam_};
         }
 
        private:
         wire::tlv_view_t::children_t ch_;
+        flatten_seam_t* seam_;
     };
-    [[nodiscard]] children_cursor children() const { return children_cursor{v_->children()}; }
+    [[nodiscard]] children_cursor children() const {
+        return children_cursor{v_->children(), seam_};
+    }
 
    private:
     /**
@@ -161,13 +207,34 @@ class view_node {
      * Cached so each node flattens at
      * most once; shared across copies via the segment refcount.
      */
-    void ensure_cache() const {
-        if (cached_) return;
-        cache_ = v_->wire().materialize();
-        cached_ = true;
+    [[nodiscard]] bool ensure_cache() const {
+        if (!cached_) {
+            // Through the injected seam (#766): a multi-link materialize is the flatten a
+            // FRAGMENTED terminus request provokes, so it is bounded by the same backend the
+            // router's own four sites draw from. Single-link is a refcount adopt and never
+            // reaches the backend at all.
+            cache_ = v_->wire().materialize(backend());
+            cached_ = true;
+            // A wire TLV is never zero bytes, so an empty cache is exactly a refused
+            // flatten. Record it: the spans this node would hand out are SHORT, and a short
+            // span read as an op byte / a lookup key / a name silently changes the answer.
+            if (cache_.empty()) note_refusal();
+        }
+        return cache_.length >= header_size() + v_->body_size();
+    }
+
+    /** @brief The walk's injected byte backend, or the global heap when none was injected. */
+    [[nodiscard]] mem::mem_backend_t& backend() const noexcept {
+        return (seam_ != nullptr && seam_->backend != nullptr) ? *seam_->backend
+                                                               : mem::heap_backend();
+    }
+    /** @brief Mark this resolve's spans untrustworthy (sticky; see @ref spans_intact). */
+    void note_refusal() const noexcept {
+        if (seam_ != nullptr) seam_->refused = true;
     }
 
     std::optional<wire::tlv_view_t> v_{};
+    flatten_seam_t* seam_ = nullptr;
     mutable view_t cache_{};
     mutable bool cached_ = false;
 };
@@ -179,7 +246,13 @@ result_t<rope_t> op_resolver_t::resolve(const wire::tlv_view_t& fwd, std::string
     // The owning rope-tier instantiation: the lazy view root read through the
     // node-reader concept. Same walk as the arena tier — nothing here names a
     // decode representation (ADR-0053 §7).
-    return resolve_node(graph_, view_node{fwd}, inbound_link, frame_view);
+    //
+    // The seam is per-CALL and lives on this stack frame (#766): every node of the walk
+    // points at it, so the injected backend reaches the flattens one call below the router
+    // AND a refusal anywhere in the walk is visible at the walk's decision points. Its
+    // lifetime covers the nodes', which never outlive `resolve_node`.
+    flatten_seam_t seam{.backend = flat_, .refused = false};
+    return resolve_node(graph_, view_node{fwd, &seam}, inbound_link, frame_view);
 }
 
 }  // namespace tr::graph

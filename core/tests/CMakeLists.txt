@@ -470,6 +470,14 @@ target_link_libraries(fwd_flatten_backend_test PRIVATE libtracer)
 libtracer_test_warnings(fwd_flatten_backend_test)
 add_test(NAME fwd_flatten_backend COMMAND fwd_flatten_backend_test)
 
+# #766 — the TERMINUS half of that seam: the rope-tier flattens one call below
+# resolve_terminus_rope draw from the same injection, and a refusal is answered by
+# value (drop, or an addressed BACKPRESSURE) instead of read as a short span.
+add_executable(terminus_flatten_backend_test terminus_flatten_backend_test.cpp)
+target_link_libraries(terminus_flatten_backend_test PRIVATE libtracer)
+libtracer_test_warnings(terminus_flatten_backend_test)
+add_test(NAME terminus_flatten_backend COMMAND terminus_flatten_backend_test)
+
 add_executable(fwd_rope_forward_test fwd_rope_forward_test.cpp)
 target_link_libraries(fwd_rope_forward_test PRIVATE libtracer)
 libtracer_test_warnings(fwd_rope_forward_test)

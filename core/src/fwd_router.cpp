@@ -1433,11 +1433,12 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
         if (label != 0) {
             // Through the injected byte backend (#730): this egress flatten is the writer
             // thread's, but it is the same store the ingress ones draw from, so one
-            // injection bounds the router's OWN FOUR flattens. Not every flatten on the
-            // path: the terminus resolver's rope-tier ones (`op_resolve_view.cpp`) never
-            // see `flat_` and still draw from the global heap (#766). `flat_` is therefore
-            // reached from BOTH this writer thread and the receive threads, which is why
-            // an injected backend must be thread-safe (ADR-0060 §2).
+            // injection bounds the router's own four flattens — and, since #766 hands the
+            // same pointer to `resolver_`, the terminus resolver's rope-tier ones
+            // (`op_resolve_view.cpp`) too: all rope flattens on the forward AND terminus
+            // paths draw from the injected seam. `flat_` is therefore reached from BOTH
+            // this writer thread and the receive threads, which is why an injected backend
+            // must be thread-safe (ADR-0060 §2).
             const view_t flat = value.materialize(*flat_);
             if (flat.empty() && value.total_length() != 0) return;  // flatten OOM — drop
             std::vector<std::byte> frame;
