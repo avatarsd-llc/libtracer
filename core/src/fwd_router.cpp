@@ -449,6 +449,11 @@ void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbo
     const tlv_t* op = nullptr;
     const tlv_t* dst = nullptr;
     const tlv_t* src = nullptr;
+    // `type_t::PATH` only, and that is not an oversight: a BOUND frame's dst is a `PATH_REF`,
+    // so its one PATH child is the `src` — it lands in `dst`, `src` stays null, and the
+    // `src == nullptr` line below drops the frame by value. That is the conformant answer
+    // (RFC-0024 §5.3: a bound frame this node cannot route is dropped, never repaired), and
+    // it is also unreachable today, since only the canonical mount descent rejects a hop.
     for (const tlv_t& c : dec->children) {
         if (c.type == type_t::PATH) {
             (dst == nullptr ? dst : src) = &c;
@@ -461,7 +466,13 @@ void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbo
     if (op == nullptr || op->payload.size() != 1 || dst == nullptr || src == nullptr) return;
     // Never answer a REPLY with a reply (the resolver rejects a REPLY by value too): an
     // unroutable reply hop erroring BACK would ping-pong between two confused nodes.
-    if (static_cast<fwd_op_t>(u8(op->payload[0])) == fwd_op_t::REPLY) return;
+    //
+    // MASKED, like every other op-byte read (RFC-0024 §9.3 — "a forwarder MUST mask rather
+    // than switch on the raw byte"). Unmasked, a REPLY carrying any flag bit is not
+    // recognised as a REPLY at all and this guard waves it through, so the node answers a
+    // reply with an addressed error reply — the exact frame the line above forbids.
+    if (static_cast<fwd_op_t>(u8(op->payload[0]) & graph::kFwdOpcodeMask) == fwd_op_t::REPLY)
+        return;
 
     const std::uint16_t code = std::to_underlying(wire::err_t::PATH_INVALID);
     const std::array<std::byte, 2> le{static_cast<std::byte>(code & 0xFFu),
@@ -785,6 +796,26 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
             // A REPLY that reaches its originator here is handed to the sink rope-native
             // (ADR-0055): NO flatten — the sink materializes on demand. Absent sink ⇒
             // dropped (as the flatten path would, into a no-op decode).
+            if (reply_cb_ != nullptr) reply_cb_(reply_ctx_, frame);
+            return;
+        }
+        // A structured FWD whose `dst` is NOT a canonical PATH of NAMEs. `peek_fwd_dst` is
+        // the mount descent's gate, not a frame classifier: it says "this frame has an
+        // address this node can descend", and a BOUND dst (`PATH_REF`, RFC-0024 §5) has no
+        // NAME to descend on. Such a frame names no mount here, so this node is its
+        // terminus — exactly the conclusion the span arm below reaches by letting
+        // `resolve_mount` come back empty.
+        //
+        // Falling through to `on_control_rope` instead is how a bound operation VANISHED on
+        // any transport that scatter-delivers (ADR-0053 ④b): `peek_control` rejects a FWD,
+        // so the frame was dropped before the resolver ever validated element 0 — not the
+        // §5.3 validation drop, just a disappearance, and a silent one. The router's own
+        // invariant forbids it: fragmenting a frame must not change whether it is applied.
+        if (const std::optional<fwd_op_t> op = peek_fwd_op(cur)) {
+            if (*op != fwd_op_t::REPLY) {
+                resolve_terminus_rope(inbound_name, std::move(frame));
+                return;
+            }
             if (reply_cb_ != nullptr) reply_cb_(reply_ctx_, frame);
             return;
         }

@@ -73,6 +73,13 @@ std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
     tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
     return out;
 }
+/** @brief A one-element `PATH_REF` dst — the BOUND spelling of an address (RFC-0024 §4). */
+std::vector<std::byte> b_path_ref_one(std::uint32_t index, std::uint32_t generation) {
+    const tr::wire::path_ref_element_t e{.index = index, .generation = generation};
+    std::vector<std::byte> out;
+    (void)tr::wire::emit_path_ref(out, std::span<const tr::wire::path_ref_element_t>(&e, 1));
+    return out;
+}
 std::vector<std::byte> b_value_u32(std::uint32_t v) {
     std::vector<std::byte> p(4);
     tr::detail::store_le<std::uint32_t>(p, v);
@@ -385,6 +392,74 @@ int main() {
         const std::array<std::size_t, 2> cuts{6, 11};
         const auto got = forward_as_rope(frame, cuts);
         check(got == oracle, "a 3-link split across segment + header routes byte-identically");
+    }
+
+    // A BOUND dst over a multi-link rope (RFC-0024 §5): the frame that made the
+    // fragmentation invariant observable.
+    //
+    // The rope arm's routing gate is `peek_fwd_dst`, which answers "does this frame carry an
+    // address this node can DESCEND" — it requires a canonical PATH whose first child is a
+    // NAME. A bound dst is a `PATH_REF`, so the gate says no, and before the fix the frame
+    // fell through to the control arm, where `peek_control` refuses a FWD: the operation
+    // vanished with no reply and no drop anyone could name. It was NOT the §5.3 validation
+    // drop — the element was never even validated — and it happened to every bound operation
+    // on every transport that scatter-delivers (ADR-0053 ④b), while the canonical spelling
+    // of the same operation, split the same way, answered normally.
+    //
+    // The check is the router's own invariant, stated as an equality over splits: FRAGMENTING
+    // A FRAME MUST NOT CHANGE WHETHER IT IS APPLIED. So the same bound frame is injected
+    // contiguously and at EVERY interior split, and every one of them must answer the reply
+    // the 1-link case answers — with the canonical spelling swept alongside as the control
+    // that says the harness, not the fix, is what the bound arm is being measured against.
+    {
+        std::printf("A BOUND (PATH_REF) dst over a multi-link rope (RFC-0024 §5):\n");
+        const auto reply_count = [](const std::vector<std::byte>& f,
+                                    std::span<const std::size_t> cuts) {
+            graph_t g;
+            const auto temp = path_t::parse("/sensor/temp");
+            tr::graph::vertex_handle_t v = g.register_vertex(*temp, role_t::STORED_VALUE);
+            (void)g.write(v, make_value(b_value_u32(0x04D2u)));
+            fwd_router_t router(g);
+            fake_rope_link_t in;
+            router.add_child("in", in);
+            in.inject(rope_split(f, cuts));
+            return in.sent().size();
+        };
+        // The binding is minted from a graph shaped exactly like the one above, so the slot
+        // it names is the slot the probe graph hands out.
+        graph_t shape;
+        const auto temp = path_t::parse("/sensor/temp");
+        tr::graph::vertex_handle_t sv = shape.register_vertex(*temp, role_t::STORED_VALUE);
+        const std::optional<tr::graph::vertex_slot_t> slot = shape.vertex_slot(sv);
+        check(slot.has_value(), "the target vertex is bindable (the mint side answers)");
+        const std::vector<std::byte> bound = b_fwd(
+            fwd_op_t::READ, b_path_ref_one(slot->index, slot->generation), b_path({"reply-ep"}));
+        const std::vector<std::byte> canon =
+            b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), b_path({"reply-ep"}));
+
+        check(reply_count(bound, std::span<const std::size_t>{}) == 1,
+              "contiguous: a bound READ answers exactly one reply (the ablation)");
+        int bound_silent = 0;
+        int canon_silent = 0;
+        int swept = 0;
+        for (std::size_t cut = 1; cut < bound.size(); ++cut) {
+            const std::array<std::size_t, 1> cuts{cut};
+            ++swept;
+            if (reply_count(bound, cuts) != 1) ++bound_silent;
+        }
+        for (std::size_t cut = 1; cut < canon.size(); ++cut) {
+            const std::array<std::size_t, 1> cuts{cut};
+            if (reply_count(canon, cuts) != 1) ++canon_silent;
+        }
+        check(swept > 0, "swept every interior split boundary of the bound frame");
+        check(canon_silent == 0, "control: the canonical spelling answers at every split");
+        check(bound_silent == 0, "a bound READ answers at EVERY split, exactly as contiguous");
+
+        // A 3-link split whose cuts straddle the PATH_REF header and land mid-ELEMENT — the
+        // shape a reassembling transport actually produces, and the one a header-stitching
+        // bug would survive the 2-link sweep to break.
+        const std::array<std::size_t, 2> mid{6, 12};
+        check(reply_count(bound, mid) == 1, "a 3-link split through the element array answers");
     }
 
     // Terminus over a multi-link rope: dst names NO child (local /sensor), so the

@@ -16,6 +16,7 @@
 #include <chrono>
 #include <concepts>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -115,6 +116,24 @@ struct remote_delivery_t {
 struct subscription_t {
     vertex_t* vertex = nullptr; /**< @brief Opaque: the producer vertex the edge lives on. */
     std::size_t slot = 0;       /**< @brief Opaque: the `:subscribers[]` slot index. */
+};
+
+/**
+ * @brief One node-scoped vertex reference — a slot index AND the generation stamping it
+ *        (RFC-0024 §4.4 / §6.4).
+ *
+ * The pair is the unit a mint hands out, never two separately-read numbers: an index without
+ * the generation that was current when it was read is not a reference to a vertex, it is a
+ * reference to whatever the slot holds later. Retirement moves the generation and takes the
+ * graph's map lock uniquely, so reading both under one hold is what makes the pair name a
+ * single tenancy of the slot.
+ */
+struct vertex_slot_t {
+    std::uint32_t index = 0;      /**< @brief Position in the node-scoped vertex index. */
+    std::uint32_t generation = 0; /**< @brief The slot's retirement generation at that moment. */
+
+    /** @brief Value equality — both fields, since either alone is not a reference. */
+    [[nodiscard]] friend constexpr bool operator==(vertex_slot_t, vertex_slot_t) = default;
 };
 
 /**
@@ -290,16 +309,22 @@ class graph_t {
     [[nodiscard]] std::size_t vertex_slot_count() const noexcept;
 
     /**
-     * @brief This node's own index for @p vh — the MINT side of a bound-path element
+     * @brief This node's own reference to @p vh — the MINT side of a bound-path element
      *        (RFC-0024 §6.4, §7).
      *
-     * @retval std::nullopt @p vh's generation has SATURATED (@ref kGenerationSaturated), so
+     * Returns the index **and** the generation that stamps it, because the two are one fact:
+     * read separately they can straddle a `retire`, and the pair would then name the
+     * successor tenant's vertex while the caller believes it bound the one its operation
+     * reached. Both fields are read under a single `map_mutex_` hold, which retirement takes
+     * uniquely, so the pair is always a consistent snapshot.
+     *
+     * @retval std::nullopt @p vh's generation has SATURATED (`kGenerationSaturated`), so
      *         the vertex is permanently unbindable and the caller stays on the canonical
      *         form (RFC-0024 §4.4 rule 3) — or, defensively, @p vh is not in this graph's
      *         index at all.
      *
      * @warning This is a **control-plane** call and is priced as one: it finds @p vh by
-     *          scanning the slot vector, because the reverse direction is deliberately not
+     *          scanning the slot index, because the reverse direction is deliberately not
      *          memoized. A per-vertex index field costs 4 bytes on rv32, where
      *          `sizeof(vertex_t)` sits at its ceiling with zero headroom
      *          (`config_t::kMaxVertexBytes32`), and a pointer→index side map costs strictly
@@ -307,19 +332,29 @@ class graph_t {
      *          binding, on a reply already being assembled; the hot path — @ref
      *          deref_vertex_slot — pays a bounds check and one compare and never comes here.
      */
-    [[nodiscard]] std::optional<std::uint32_t> vertex_slot(vertex_handle_t vh) const noexcept;
+    [[nodiscard]] std::optional<vertex_slot_t> vertex_slot(vertex_handle_t vh) const noexcept;
 
     /**
      * @brief Dereference a bound-path element — the §5.1 check, and the whole of it.
      *
-     * Bounds-checks @p index against @ref vertex_slot_count and compares @p generation
-     * against the slot's @ref retire_generation. The vertex map is pinned, pointer-stable
-     * and insert-only, so an in-range index always names a live allocation and the deref
-     * itself cannot fault; a generation only ever moves forward, so a stale element can only
-     * ever compare lower and never becomes valid again by waiting.
+     * Bounds-checks @p index against @ref vertex_slot_count, refuses a SATURATED
+     * @p generation outright, and compares the rest against the slot's
+     * @ref retire_generation. The vertex map is pinned, pointer-stable and insert-only, so
+     * an in-range index always names a live allocation and the deref itself cannot fault.
      *
-     * @retval std::nullopt Out of range, or the generation does not match. The caller MUST
-     *         then drop — never forward, never apply, never repair (RFC-0024 §5.3).
+     * A generation only ever moves forward, so a stale element can only ever compare lower
+     * and never becomes valid again by waiting — **except at the ceiling**, where the
+     * counter stops. There, and only there, "moves forward" stops being a guard: a
+     * `kGenerationSaturated` element would match the slot for the rest of the node's life,
+     * across every subsequent retire and revive, so staleness detection would be dead for
+     * that slot and the #603 misroute class the saturation rule exists to close would be
+     * open again. The mint refuses to issue such an element; this refuses to honour one,
+     * which is what makes "permanently unbindable" (RFC-0024 §4.4 rule 3) a property of the
+     * vertex rather than of one code path's good manners.
+     *
+     * @retval std::nullopt Out of range, saturated, or the generation does not match. The
+     *         caller MUST then drop — never forward, never apply, never repair
+     *         (RFC-0024 §5.3).
      *
      * @warning A match authorizes **nothing**. It says the vertex is the same one, never
      *          that the caller may still act on it: every bound-form operation re-evaluates
@@ -1138,7 +1173,16 @@ class graph_t {
     // host — the figure RFC-0024 §4.4's RAM floor already charges. Appending per allocation
     // rather than per REGISTRATION is what keeps it a bijection: a retired vertex is revived
     // by a second fill() of the same object, which must not mint a second slot.
-    std::vector<vertex_t*> vertex_slots_;
+    //
+    // CHUNKED, not a `std::vector`, and the difference is the whole charged cost. A vector
+    // grows geometrically, so between two doublings it holds up to TWICE the pointers it
+    // needs: measured on the 512-vertex heap probe (bench_forward_heap `zeroheap vertex`) a
+    // vector cost 15 B/vertex live where the RFC charges 8 — the slack, not the slot, was
+    // most of it. A deque appends into fixed-size blocks, so live bytes track the vertex
+    // count instead of the last doubling: the same probe reads 8 B/vertex, exactly the
+    // pointer §6.4 prices and not a byte of unpriced headroom. Indexing stays O(1) and
+    // elements never move, which is all the deref needs.
+    std::deque<vertex_t*> vertex_slots_;
 
     mutable std::shared_mutex map_mutex_;
     // The Composite vertex tree's root (ADR-0057): an unregistered structural node whose

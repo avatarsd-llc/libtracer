@@ -59,7 +59,7 @@ This unblocks the transport-link half of
   **not** supply). Un-stubbing tracks **#82** (the code's cited issue) and **#407**.
 - **The current creation path is the superseded spelling.** `transport_vertex_t` registers ONE
   global `client`/`listener` catalog through `register_child_type` as a `:children[]` target on
-  `/net` (`graph.cpp:1538`), and the `quic` module extends the *same* catalog via
+  `/net` (`graph.cpp:1558`), and the `quic` module extends the *same* catalog via
   `register_transport_type` with a `kind` selector (open/closed). RFC-0014 keeps that module
   ownership but **replaces the single-global-catalog mechanism** with a per-*(transport, role)*
   module endpoint (§1); the per-module structure, the positional role, and `conn:schema`-as-catalog
@@ -69,7 +69,7 @@ This unblocks the transport-link half of
 
 > **Implementation status.** Except where noted, this describes **new mechanism**. Today connections
 > register flat at `/net/<name>` (not `/net/<module>/<name>`), the catalog is a single global
-> `:children[]` target, `:schema` is whole-vertex-only (`graph.cpp:1859`, `size()==1`), `set_link_state`
+> `:children[]` target, `:schema` is whole-vertex-only (`graph.cpp:1879`, `size()==1`), `set_link_state`
 > is a manual binary up/down bool, and no refcount / dormancy / self-heal exists. Per the clause-kind
 > rule (see Discussion) the byte-level clauses here are **proposed pending** code + conformance
 > vectors.
@@ -238,7 +238,7 @@ link **ignores refcount** — its listen socket stays bound and accepting until 
 The control reuses **already-enforced** access-mask bits ([05 §ACL](../../reference/05-protocol-tlvs.md)):
 
 - **`SPEC` (create) gates on `CREATE` (0x08).** `CREATE` already gates `:children[]` creation and
-  write-creates (`graph.cpp:1355`, `:440`, `:910`). This RFC **relocates** that gate onto the
+  write-creates (`graph.cpp:1375`, `:460`, `:930`). This RFC **relocates** that gate onto the
   creator endpoint's own ACL, so the create right is delegable **without any right on the parent
   transport**. (ADR-0059 §Decision 6's "allocated-but-ungated trap" described the *rejected*
   WRITE-for-create alternative; choosing `CREATE` here means the trap never arises.)

@@ -62,29 +62,63 @@ inline void emit_name(std::vector<std::byte>& out, std::span<const std::byte> na
 }
 
 /**
- * @brief Append a `PATH_REF` TLV over @p elements — the bound-path form (RFC-0024 §4).
+ * @brief Bytes a `PATH_REF` over @p n elements occupies — the 4-byte envelope plus the array.
+ *
+ * The whole size function, so a caller can size a STACK buffer for the shape it is about to
+ * emit rather than discovering the size from a container that grew to hold it.
+ */
+[[nodiscard]] constexpr std::size_t path_ref_wire_bytes(std::size_t n) noexcept {
+    return 4u + n * kPathRefElementBytes;
+}
+
+/**
+ * @brief Write a `PATH_REF` TLV over @p elements into @p out — the ALLOCATION-FREE form.
  *
  * Emits the 4-byte envelope (`0x14`, `opt = 0x00` — `PL = 0` and `LL = 0` are both MUSTs of
  * §4.2) followed by the bare 8-byte element array, in route order, with no per-element
  * framing and no count field: the count IS `length / 8`.
  *
+ * This is the form the reply path uses. A `PATH_REF`'s size is a pure function of its element
+ * count, so the buffer can be a caller's stack array and the emit cannot fail for want of
+ * memory — which matters because the mint rides a reply that has ALREADY succeeded: under
+ * `-fno-exceptions` a growing container would abort the node on a fragmented heap instead of
+ * degrading to the plain reply the design promises (#748's precedent, same function).
+ *
+ * @return False — writing nothing — when @p elements exceeds @ref kMaxPathRefElements (the
+ *         §4.3 bound; such a caller has no bound spelling and falls back to the canonical
+ *         `PATH`), or when @p out is smaller than `path_ref_wire_bytes`.
+ */
+[[nodiscard]] inline bool emit_path_ref_into(std::span<std::byte> out,
+                                             std::span<const path_ref_element_t> elements) {
+    if (elements.size() > kMaxPathRefElements) return false;
+    const std::size_t body_len = elements.size() * kPathRefElementBytes;
+    if (out.size() < path_ref_wire_bytes(elements.size())) return false;
+    out[0] = static_cast<std::byte>(std::to_underlying(type_t::PATH_REF));
+    out[1] = static_cast<std::byte>(opt_t{}.encode());
+    out[2] = static_cast<std::byte>(body_len & 0xFFu);
+    out[3] = static_cast<std::byte>((body_len >> 8) & 0xFFu);
+    for (std::size_t i = 0; i < elements.size(); ++i) {
+        path_ref_store_element(out.subspan(4u + i * kPathRefElementBytes, kPathRefElementBytes),
+                               elements[i]);
+    }
+    return true;
+}
+
+/**
+ * @brief Append a `PATH_REF` TLV over @p elements to a growing buffer — the container form.
+ *
+ * Same bytes as `emit_path_ref_into`, which it delegates to, so the two spellings cannot
+ * drift. For the reply path use the span form: it does not allocate.
+ *
  * @return False — emitting nothing — when @p elements exceeds @ref kMaxPathRefElements, the
- *         §4.3 bound. A caller with more hosts than that has no bound spelling and falls back
- *         to the canonical `PATH`, which is the mint key and the fallback by construction.
+ *         §4.3 bound.
  */
 [[nodiscard]] inline bool emit_path_ref(std::vector<std::byte>& out,
                                         std::span<const path_ref_element_t> elements) {
     if (elements.size() > kMaxPathRefElements) return false;
-    const std::size_t body_len = elements.size() * kPathRefElementBytes;
-    emit_header(out, type_t::PATH_REF, opt_t{}, body_len);
     const std::size_t base = out.size();
-    out.resize(base + body_len);
-    for (std::size_t i = 0; i < elements.size(); ++i) {
-        path_ref_store_element(std::span<std::byte>(out).subspan(base + i * kPathRefElementBytes,
-                                                                 kPathRefElementBytes),
-                               elements[i]);
-    }
-    return true;
+    out.resize(base + path_ref_wire_bytes(elements.size()));
+    return emit_path_ref_into(std::span<std::byte>(out).subspan(base), elements);
 }
 
 /** @brief Append a NAME TLV over a text segment (no temporary buffer). */

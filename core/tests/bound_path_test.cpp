@@ -50,6 +50,7 @@ using tr::graph::reply_kind_t;
 using tr::graph::role_t;
 using tr::graph::subject_token_t;
 using tr::graph::vertex_handle_t;
+using tr::graph::vertex_slot_t;
 using tr::wire::opt_t;
 using tr::wire::path_ref_element_t;
 using tr::wire::tlv_t;
@@ -234,9 +235,11 @@ void test_slot_index_is_a_bijection() {
     check(g.vertex_slot_count() == at_start + 2,
           "registering /sensor/temp appends a slot for the placeholder AND the leaf");
 
-    const std::optional<std::uint32_t> slot_a = g.vertex_slot(a);
+    const std::optional<vertex_slot_t> slot_a = g.vertex_slot(a);
     check(slot_a.has_value(), "a registered vertex has a slot");
-    check(g.deref_vertex_slot(*slot_a, g.retire_generation(a)) == a,
+    check(slot_a->generation == g.retire_generation(a),
+          "the mint reads the index and the generation TOGETHER — one lock hold, one tenancy");
+    check(g.deref_vertex_slot(slot_a->index, slot_a->generation) == a,
           "the slot dereferences back to the same vertex (index+generation is the whole check)");
 
     // Filling a placeholder in place must NOT hand the same object a second slot: the index
@@ -245,8 +248,8 @@ void test_slot_index_is_a_bijection() {
     const vertex_handle_t parent = g.register_vertex(path_t("/sensor"), role_t::STORED_VALUE);
     check(g.vertex_slot_count() == before_fill,
           "registering an existing placeholder appends NO slot — the object already had one");
-    const std::optional<std::uint32_t> slot_p = g.vertex_slot(parent);
-    check(slot_p.has_value() && *slot_p != *slot_a && *slot_p < *slot_a,
+    const std::optional<vertex_slot_t> slot_p = g.vertex_slot(parent);
+    check(slot_p.has_value() && slot_p->index != slot_a->index && slot_p->index < slot_a->index,
           "the placeholder kept its own, earlier slot");
 
     // The index is append-only, which is the property that makes a handed-out slot permanent.
@@ -269,6 +272,40 @@ void test_generation_saturates() {
     const std::uint32_t before = g.retire_generation(v);
     (void)g.retire(v);
     check(g.retire_generation(v) == before + 1, "a retire bumps the generation (the wiring)");
+
+    // Saturation is enforced on BOTH sides, and the deref side is the load-bearing one: a mint
+    // that declines only keeps this node from ISSUING a saturated element, and an element is a
+    // peer-supplied number. If the deref honoured one, a saturated slot would validate the
+    // same element forever — through every retire and revive, staleness detection dead for
+    // that slot, which is the #603 misroute class rule 3 exists to close.
+    //
+    // The ceiling itself is 2^32 retirements away, so — exactly as above — the clause is
+    // exercised on the total function the deref calls, whose static_asserts fail if the
+    // predicate is ever written as a plain `==`.
+    check(tr::graph::bound_generation_matches(3, 3), "a live element matches its slot");
+    check(!tr::graph::bound_generation_matches(4, 3), "a stale element does not");
+    check(!tr::graph::bound_generation_matches(tr::graph::kGenerationSaturated,
+                                               tr::graph::kGenerationSaturated),
+          "at the ceiling the slot and the element AGREE and the answer is still no");
+
+    // And the wire behaviour that rides on it: a saturated element is refused at the deref
+    // whatever slot it names — in range, out of range, root or leaf.
+    op_resolver_t resolver(g);
+    const vertex_handle_t bindable = g.register_vertex(path_t("/y"), role_t::STORED_VALUE);
+    (void)g.write(bindable, make_value(b_value({0x07})));
+    const vertex_slot_t live = *g.vertex_slot(bindable);
+    check(resolve_bytes(resolver, b_fwd_raw_op(kRead, b_path_ref_one(live.index, live.generation),
+                                               b_path({"back"})))
+              .has_value(),
+          "the same slot, on its live generation, IS delivered (the ablation)");
+    check(!resolve_bytes(
+               resolver,
+               b_fwd_raw_op(kRead, b_path_ref_one(live.index, tr::graph::kGenerationSaturated),
+                            b_path({"back"})))
+               .has_value(),
+          "a SATURATED element on that same slot DROPS");
+    check(g.vertex_slot(bindable).has_value(),
+          "and the vertex is still bindable — the refusal is the element's, not the slot's");
 }
 
 void test_bound_read_matches_canonical() {
@@ -278,14 +315,14 @@ void test_bound_read_matches_canonical() {
     const vertex_handle_t v = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     (void)g.write(v, make_value(b_value({0xD2, 0x04, 0x00, 0x00})));
 
-    const std::optional<std::uint32_t> slot = g.vertex_slot(v);
+    const std::optional<vertex_slot_t> slot = g.vertex_slot(v);
     check(slot.has_value(), "the target vertex is bindable");
 
     const auto canonical =
         resolve_bytes(resolver, b_fwd_raw_op(kRead, b_path({"sensor", "temp"}), b_path({"back"})));
     const auto bound = resolve_bytes(
         resolver,
-        b_fwd_raw_op(kRead, b_path_ref_one(*slot, g.retire_generation(v)), b_path({"back"})));
+        b_fwd_raw_op(kRead, b_path_ref_one(slot->index, slot->generation), b_path({"back"})));
     check(canonical.has_value() && bound.has_value(), "both spellings answer a reply");
 
     const reply_facts_t cf = reply_facts(*canonical);
@@ -324,8 +361,9 @@ void test_mint_round_trip() {
     check(minted.has_value() && mf.kind == reply_kind_t::RESULT,
           "a mint-flagged READ is still a READ — the opcode is `op & 0x3F` (§9.3)");
     check(mf.has_mint, "the reply carries the minted PATH_REF");
-    check(mf.mint.index == *g.vertex_slot(v) && mf.mint.generation == g.retire_generation(v),
-          "the minted element is this node's own index + generation for the target");
+    check(
+        g.vertex_slot(v) == vertex_slot_t{.index = mf.mint.index, .generation = mf.mint.generation},
+        "the minted element is this node's own index + generation for the target");
     check(reply_bytes(*minted).size() == reply_bytes(*plain).size() + 12,
           "the mint costs exactly 4 + 8 bytes on the reply and zero on the request");
 
@@ -351,7 +389,7 @@ void test_generation_mismatch_drops() {
     op_resolver_t resolver(g);
     const vertex_handle_t v = g.register_vertex(path_t("/tenant/a"), role_t::STORED_VALUE);
     (void)g.write(v, make_value(b_value({0x11})));
-    const std::uint32_t slot = *g.vertex_slot(v);
+    const std::uint32_t slot = g.vertex_slot(v)->index;
     const std::uint32_t gen = g.retire_generation(v);
 
     // The SAME frame lands while the binding is sound — the ablation that makes every drop
@@ -366,7 +404,7 @@ void test_generation_mismatch_drops() {
     (void)g.retire(v);
     const vertex_handle_t revived = g.register_vertex(path_t("/tenant/a"), role_t::STORED_VALUE);
     (void)g.write(revived, make_value(b_value({0x22})));
-    check(g.vertex_slot(revived) == slot,
+    check(g.vertex_slot(revived)->index == slot,
           "the revived address reuses the SAME slot — the index alone cannot tell them apart");
     check(g.retire_generation(revived) != gen, "the generation moved, which is what can");
 
@@ -390,7 +428,7 @@ void test_out_of_range_index_drops() {
     const vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
     (void)g.write(v, make_value(b_value({0x01})));
 
-    const std::uint32_t in_range = *g.vertex_slot(v);
+    const std::uint32_t in_range = g.vertex_slot(v)->index;
     const auto ok = resolve_bytes(
         resolver,
         b_fwd_raw_op(kRead, b_path_ref_one(in_range, g.retire_generation(v)), b_path({"back"})));
@@ -418,7 +456,8 @@ void test_residual_length_drops() {
     op_resolver_t resolver(g);
     const vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
     (void)g.write(v, make_value(b_value({0x01})));
-    const path_ref_element_t good{.index = *g.vertex_slot(v), .generation = g.retire_generation(v)};
+    const path_ref_element_t good{.index = g.vertex_slot(v)->index,
+                                  .generation = g.retire_generation(v)};
 
     const auto one = resolve_bytes(
         resolver, b_fwd_raw_op(kRead, b_path_ref(std::span<const path_ref_element_t>(&good, 1)),
@@ -566,7 +605,7 @@ void test_conformance_vectors() {
     op_resolver_t resolver(g);
     const vertex_handle_t v = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     (void)g.write(v, make_value(b_value({0xD2, 0x04, 0x00, 0x00})));
-    check(g.vertex_slot(v) == 2u && g.retire_generation(v) == 0u,
+    check(g.vertex_slot(v) == vertex_slot_t{.index = 2u, .generation = 0u},
           "the vectors' index=2 generation=0 is what this graph really hands out");
 
     // fwd/fwd-mint-request differs from fwd/fwd-read in exactly one byte.

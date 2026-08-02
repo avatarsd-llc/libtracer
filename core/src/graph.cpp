@@ -397,15 +397,23 @@ std::size_t graph_t::vertex_slot_count() const noexcept {
     return vertex_slots_.size();
 }
 
-std::optional<std::uint32_t> graph_t::vertex_slot(vertex_handle_t vh) const noexcept {
+std::optional<vertex_slot_t> graph_t::vertex_slot(vertex_handle_t vh) const noexcept {
     const vertex_t* const v = vh.get();
     if (v == nullptr) return std::nullopt;
+    // ONE hold covers both fields. Retirement takes this lock uniquely, so the generation
+    // read here cannot straddle a retire that the index read did not see; splitting them
+    // into two acquisitions is how a mint ends up stamped with the SUCCESSOR tenant's
+    // generation — a well-formed element naming a vertex the operation never reached.
+    const std::shared_lock lock(map_mutex_);
     // Saturated ⇒ permanently unbindable (RFC-0024 §4.4 rule 3). Refused BEFORE the scan,
     // so the one caller that can be told "no" is told cheaply and falls back to canonical.
-    if (v->retire_gen() == kGenerationSaturated) return std::nullopt;
-    const std::shared_lock lock(map_mutex_);
+    // Read INSIDE the hold for the reason above: at the ceiling the difference between the
+    // two orderings is an immortal element, not a stale one.
+    const std::uint32_t gen = v->retire_gen();
+    if (gen == kGenerationSaturated) return std::nullopt;
     for (std::size_t i = 0; i < vertex_slots_.size(); ++i) {
-        if (vertex_slots_[i] == v) return static_cast<std::uint32_t>(i);
+        if (vertex_slots_[i] == v)
+            return vertex_slot_t{.index = static_cast<std::uint32_t>(i), .generation = gen};
     }
     return std::nullopt;  // not this graph's vertex — defensive, unreachable via the API.
 }
@@ -417,11 +425,23 @@ std::optional<vertex_handle_t> graph_t::deref_vertex_slot(std::uint32_t index,
     // could fault, and it cannot get past here.
     if (index >= vertex_slots_.size()) return std::nullopt;
     vertex_t* const v = vertex_slots_[index];
+    // A SATURATED element is refused whatever the slot says (RFC-0024 §4.4 rule 3), and it
+    // is refused HERE and not only at the mint. Everywhere below the ceiling "generations
+    // only ever move forward" is the whole guard: a stale element compares lower and can
+    // never become valid again. At the ceiling the counter stops, so that argument stops
+    // too — a saturated element would keep matching its slot through every subsequent
+    // retire and revive, delivering tenant A's operations into tenants B, C, D … forever
+    // with no drop ever. That is #603's misroute with the guard in place of the address,
+    // which is precisely what rule 3 exists to close, so "permanently unbindable" has to be
+    // enforced on the side that HONOURS an element, not only on the side that issues one.
+    //
+    // Both halves live in `bound_generation_matches`, a total function, so the ceiling clause
+    // is exercised by static_assert rather than by a test that would need 2^32 retirements.
+    //
     // Generation compare (§5.1 step 2). A mismatch means the vertex was retired (and
     // possibly re-created for a DIFFERENT owner) since the mint, so the answer is discarded
-    // rather than delivered into whatever now occupies the address. Generations only ever
-    // move forward, so a stale element can only compare lower and never becomes valid again.
-    if (v->retire_gen() != generation) return std::nullopt;
+    // rather than delivered into whatever now occupies the address.
+    if (!bound_generation_matches(v->retire_gen(), generation)) return std::nullopt;
     // A retired-but-not-yet-revived vertex is a PLACEHOLDER: invisible to find/read, so the
     // bound form must not be the one spelling that reaches it. This is the map-lock state
     // the shared hold above is really for — it also covers the never-registered

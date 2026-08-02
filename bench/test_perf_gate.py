@@ -24,6 +24,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
@@ -275,6 +276,61 @@ class LegacyMemoryRatchetIsNeverSilent(unittest.TestCase):
         self.assertEqual(len(fails), 1)
         self.assertIn("memory pullback", fails[0])
         self.assertIn("mem:vertex", out)
+
+
+class MemChargedSteps(unittest.TestCase):
+    """@brief An RFC-priced per-vertex step passes; one byte more does not.
+
+    The charge is the one thing that lets a strict ratchet say yes to a cost a ratified
+    clause already bought. It has to be exactly as narrow as it claims, so these pin both
+    edges — a charge that absorbed more than its bytes would be a tolerance wearing a
+    citation, and the whole point of declaring it is that it cannot become one."""
+
+    def gate(self, cur_bytes, base_bytes, charged):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), \
+                unittest.mock.patch.object(pg, "MEM_CHARGED", charged):
+            fails = pg.mem_gate({"mem:vertex": {"bytes": cur_bytes, "allocs": 3}},
+                                {"mem:vertex": {"bytes": base_bytes, "allocs": 3}})
+        return fails, buf.getvalue()
+
+    CHARGE = {"mem:vertex": (8, "RFC-0024 §6.4 vertex-index slot")}
+
+    def test_exactly_the_charged_step_passes(self):
+        fails, out = self.gate(144, 136, self.CHARGE)
+        self.assertEqual(fails, [])
+        self.assertIn("charged 8/8B", out)
+        self.assertIn("RFC-0024", out)
+        self.assertIn("144", out)  # the PRINTED figure is the real one, not the excused one
+
+    def test_one_byte_over_the_charge_still_fails(self):
+        fails, _ = self.gate(153, 136, self.CHARGE)
+        self.assertEqual(len(fails), 1)
+        self.assertIn("memory pullback", fails[0])
+        self.assertIn("the other 9B is not", fails[0])
+
+    def test_without_the_charge_the_same_step_fails(self):
+        """The ablation: the charge, not the threshold, is what admits 136 -> 144."""
+        fails, _ = self.gate(144, 136, {})
+        self.assertEqual(len(fails), 1)
+        self.assertIn("memory pullback", fails[0])
+
+    def test_a_landed_charge_says_so(self):
+        """Once the step is on main the delta is zero and the entry is dead weight."""
+        fails, out = self.gate(144, 144, self.CHARGE)
+        self.assertEqual(fails, [])
+        self.assertIn("UNSPENT", out)
+        self.assertIn("delete the entry", out)
+
+    def test_every_charge_names_a_point_the_gate_probes(self):
+        for key in pg.MEM_CHARGED:
+            self.assertIn(key.removeprefix("mem:"), pg.MEM_POINTS,
+                          f"{key} is charged but never probed — a charge against nothing")
+
+    def test_every_charge_cites_a_clause(self):
+        for key, (nbytes, why) in pg.MEM_CHARGED.items():
+            self.assertGreater(nbytes, 0, f"{key}: a zero-byte charge is not a charge")
+            self.assertIn("RFC-", why, f"{key}: a charge must name the clause that prices it")
 
 
 class MemPointsAreDocumented(unittest.TestCase):

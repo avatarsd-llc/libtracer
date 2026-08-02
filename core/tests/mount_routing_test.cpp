@@ -104,6 +104,21 @@ void emit_path(std::vector<std::byte>& out, std::initializer_list<std::string_vi
     tr::wire::emit_tlv(out, type_t::PATH, opt_t{.pl = true}, body);
 }
 
+std::vector<std::byte> make_fwd_op(std::uint8_t op_byte,
+                                   std::initializer_list<std::string_view> dst,
+                                   std::initializer_list<std::string_view> src) {
+    std::vector<std::byte> body;
+    const std::byte op{op_byte};
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
+    emit_path(body, dst);
+    emit_path(body, src);
+    const std::byte payload[2] = {std::byte{0x01}, std::byte{0x02}};
+    tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(payload, 2));
+    std::vector<std::byte> frame;
+    tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
+    return frame;
+}
+
 std::vector<std::byte> make_fwd(std::initializer_list<std::string_view> dst,
                                 std::initializer_list<std::string_view> src) {
     std::vector<std::byte> body;
@@ -521,6 +536,51 @@ void test_bus_name_hop_is_rejected() {
     check(bus.broadcasts == 0, "without touching the bus endpoint");
 }
 
+/**
+ * @brief The bus-NAME rejection reads the op byte MASKED — a flagged REPLY is still a REPLY.
+ *
+ * RFC-0024 §9.3: the `op` byte's top two bits are flags, and "a forwarder MUST mask rather
+ * than switch on the raw byte". The rejection's own rule is that a REPLY is never answered
+ * with a reply — an unroutable reply hop erroring BACK ping-pongs between two confused nodes.
+ * Read RAW, an `op = 0x83` (REPLY with a flag bit) is not recognised as a REPLY at all, so the
+ * guard waves it through and the node emits exactly the frame the guard exists to prevent.
+ */
+void test_bus_name_hop_masks_the_op_byte() {
+    std::printf(
+        "the bus-NAME rejection masks the op byte before testing for REPLY (RFC-0024 S9.3)\n");
+    bus_link_impl_t bus;
+    p2p_link_t alice;
+    bus.peers.emplace_back("alice", &alice);
+    recording_link_t in;
+
+    tr::graph::graph_t graph;
+    tr::net::fwd_router_t router{graph};
+    router.add_child("net/ws-server/srv", bus);
+    router.add_child("net/ws-client/in", in);
+
+    const std::initializer_list<std::string_view> dst{"net", "ws-server", "srv", "sensor", "temp"};
+    const std::initializer_list<std::string_view> src{"origin"};
+
+    // The ablation: a REQUEST on the identical route IS answered, so a silent count below is
+    // the op byte talking and not the route failing to reach the rejection at all.
+    router.on_frame("net/ws-client/in",
+                    make_fwd_op(static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE), dst, src));
+    check(in.sent.size() == 1, "a WRITE on this route is answered (the ablation)");
+
+    // The plain REPLY: dropped by value, the shipped behaviour.
+    router.on_frame("net/ws-client/in",
+                    make_fwd_op(static_cast<std::uint8_t>(tr::graph::fwd_op_t::REPLY), dst, src));
+    check(in.sent.size() == 1, "a plain REPLY (0x03) is dropped, never answered");
+
+    // The same REPLY with a flag bit set. Masked, it is the same frame; raw, it is an unknown
+    // opcode and the node answers a reply with a reply.
+    router.on_frame(
+        "net/ws-client/in",
+        make_fwd_op(static_cast<std::uint8_t>(tr::graph::fwd_op_t::REPLY) | 0x80u, dst, src));
+    check(in.sent.size() == 1, "a FLAGGED REPLY (0x83) is dropped too — the byte is masked");
+    check(bus.broadcasts == 0 && alice.received == 0, "and nothing egressed the bus either way");
+}
+
 /** @brief The same rejection answers a PEER-originated misroute back to THAT peer only. */
 void test_bus_name_hop_reject_from_peer() {
     std::printf("bus NAME rejection from a peer routes back to the sender\n");
@@ -644,6 +704,7 @@ int main() {
     test_bus_peer_src_carries_the_mount();
     test_grown_src_round_trips();
     test_bus_name_hop_is_rejected();
+    test_bus_name_hop_masks_the_op_byte();
     test_bus_name_hop_reject_from_peer();
     test_bus_name_hop_rejected_rope_arm();
     test_advertise_exact_mount_terminates();

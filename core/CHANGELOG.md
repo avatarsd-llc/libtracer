@@ -41,15 +41,32 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   §5-§7).** `graph_t` gains three methods for the node-scoped vertex index (§6.4):
   `vertex_slot_count()`, `vertex_slot(vertex_handle_t)` — the **mint** side, which declines
   for a vertex whose generation has saturated — and `deref_vertex_slot(index, generation)`,
-  which is the whole of the §5.1 check (bounds, generation compare) and authorizes nothing.
-  `vertex_slot` is a control-plane call and is priced as one: it scans, because a per-vertex
-  index field costs 4 bytes on rv32 where `sizeof(vertex_t)` sits at its ceiling with zero
-  headroom. Purely additive.
+  which is the whole of the §5.1 check (bounds, saturation refusal, generation compare) and
+  authorizes nothing. `vertex_slot` returns `graph::vertex_slot_t` (`{u32 index, u32
+  generation}`), both fields read under **one** lock hold: read as two calls they can straddle
+  a `retire`, and the pair would then name the successor tenant's vertex while the caller
+  believes it bound the one its operation reached. `vertex_slot` is a control-plane call and
+  is priced as one: it scans, because a per-vertex index field costs 4 bytes on rv32 where
+  `sizeof(vertex_t)` sits at its ceiling with zero headroom. Purely additive.
 - **`graph::kGenerationSaturated` and `graph::saturating_next_generation`.** The retirement
   generation now **saturates rather than wraps** (§4.4 rule 3, normative in §9.3). **Behaviour
   change:** a vertex retired 2^32 times stops advancing its generation and becomes permanently
   unbindable, instead of aliasing a generation a stale bound-path element still carries. No
   reachable deployment is near the ceiling; the rule closes the failure class by construction.
+- **`graph::bound_generation_matches(slot_gen, element_gen)`.** The deref's generation rule as
+  one total function, and the reason it is one: it refuses `kGenerationSaturated` **outright**
+  rather than comparing it. Below the ceiling "generations only move forward" is the whole
+  guard; at the ceiling the counter stops, so a saturated element would keep matching its slot
+  through every subsequent retire and revive, with staleness detection permanently dead for
+  that slot. Enforcing this only at the mint would leave the guard to the side that does not
+  choose the number — an element is peer-supplied. Exercised at the ceiling by `static_assert`,
+  which 2^32 retirements cannot be.
+- **`wire::emit_path_ref_into(span, elements)` and `wire::path_ref_wire_bytes(n)`.** The
+  allocation-free `PATH_REF` writer, and the size function that lets a caller stack-size its
+  buffer. `emit_path_ref(vector, …)` now delegates to it, so the two spellings cannot drift.
+  The reply path uses the span form: a `PATH_REF`'s size is a pure function of its element
+  count, and a growing container on a path that has already succeeded would abort the node
+  under `-fno-exceptions` on a fragmented heap instead of degrading to the plain reply.
 - **`graph::kFwdOpcodeMask` (`0x3F`) and `graph::kFwdOpFlagMintRequest` (`0x80`)** in
   `op_resolve.hpp`. The `FWD` `op` byte's opcode is now `op & 0x3F` and bits 7-6 are flags.
   **Behaviour change:** `net::peek_fwd_op` and the terminus resolver mask before switching, so
@@ -74,6 +91,24 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 Still not implemented, and named rather than implied: the **forwarder's** element-consuming
 hop (a bound `dst` terminates locally today) and the §5.3 NACK carrying the failing hop index,
 whose spelling RFC-0024 §9.2 leaves open. A drop is already the conformant answer without it.
+
+### Fixed
+
+- **A `PATH_REF`-addressed `FWD` delivered as a MULTI-LINK rope is no longer silently
+  dropped.** `fwd_router_t`'s rope arm gated its routing on `peek_fwd_dst`, which asks "does
+  this frame carry an address this node can *descend*" and therefore requires a canonical
+  `PATH` whose first child is a `NAME`. A bound `dst` has neither, so the frame fell through
+  to the control arm, where `peek_control` refuses a `FWD` — the operation vanished with no
+  reply and no drop anyone could name, on every transport that scatter-delivers (ADR-0053
+  ④b), while the same operation spelled canonically and split the same way answered normally.
+  It was **not** the §5.3 validation drop: the element was never validated. A structured
+  `FWD` the descent cannot gate on now reaches the terminus arm, which is the conclusion the
+  contiguous path always came to — restoring the router's own invariant that fragmenting a
+  frame must not change whether it is applied.
+- **The bus-NAME hop rejection masks the `op` byte** (RFC-0024 §9.3). It compared the **raw**
+  byte against `REPLY`, so a `REPLY` carrying a flag bit (`0x83`) was not recognised as one
+  and the node answered it with an addressed error reply — the reply-to-a-reply the guard
+  exists to prevent.
 
 ## [0.7.0] — 2026-08-02
 

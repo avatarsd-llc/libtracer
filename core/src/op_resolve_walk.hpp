@@ -744,18 +744,25 @@ template <class N>
     // `vertex_slot` declining is not an error either: a saturated generation makes a vertex
     // permanently unbindable (§4.4 rule 3), and the answer to that is the ordinary reply plus
     // an origin that stays on the canonical form, which always works.
-    std::array<std::byte, 4 + wire::kPathRefElementBytes> mint_buf{};
+    //
+    // The element is written STRAIGHT into the stack buffer. It has a fixed 12-byte shape, so
+    // there is nothing for a container to size — and a growing one here would abort the node
+    // under `-fno-exceptions` on a fragmented heap (#748's precedent, this very function),
+    // which is the opposite of the degrade this path promises: a mint that cannot happen is
+    // answered with the plain reply, never with a panic.
+    //
+    // `vertex_slot` returns the index and the generation TOGETHER, from one lock hold. Read
+    // as two calls they can straddle a retire, and the reply would then carry a well-formed
+    // element naming the vertex's SUCCESSOR — the origin believing it bound the vertex its
+    // operation actually reached.
+    std::array<std::byte, wire::path_ref_wire_bytes(1)> mint_buf{};
     std::span<const std::byte> mint;
     if (req.mint_request) {
-        if (const std::optional<std::uint32_t> slot = graph.vertex_slot(v)) {
-            const wire::path_ref_element_t e{.index = *slot,
-                                             .generation = graph.retire_generation(v)};
-            std::vector<std::byte> enc;
-            if (wire::emit_path_ref(enc, std::span<const wire::path_ref_element_t>(&e, 1)) &&
-                enc.size() == mint_buf.size()) {
-                std::memcpy(mint_buf.data(), enc.data(), enc.size());
+        if (const std::optional<vertex_slot_t> slot = graph.vertex_slot(v)) {
+            const wire::path_ref_element_t e{.index = slot->index, .generation = slot->generation};
+            if (wire::emit_path_ref_into(mint_buf,
+                                         std::span<const wire::path_ref_element_t>(&e, 1)))
                 mint = std::span<const std::byte>(mint_buf);
-            }
         }
     }
 

@@ -212,8 +212,8 @@ Verified against `core/` at `549ec0d`, inheriting and re-running RFC-0019 §6.2'
 - **The C stack no longer sees depth.** RFC-0019 §6.2 found four wire-reachable recursive subtree
   walks (up to 208 B/level — 32 → 255 would have been +46 KB of worst-case stack). All four are
   now O(1)-memory iterative ascents via `vertex_t::for_each_descendant`
-  (`core/include/libtracer/vertex.hpp:1143`; sites `core/src/graph.cpp:398`, `:473`, `:569`,
-  `:722`; [#690](https://github.com/avatarsd-llc/libtracer/issues/690), fixed by #692) — no
+  (`core/include/libtracer/vertex.hpp:1175`; sites `core/src/graph.cpp:398`, `:493`, `:589`,
+  `:742`; [#690](https://github.com/avatarsd-llc/libtracer/issues/690), fixed by #692) — no
   auxiliary storage, nothing to fail. The prerequisite RFC-0019 flagged is already satisfied.
 - **Decode state is resource-keyed, not count-keyed**: terminus decode draws per-open-level nodes
   from the injected block source (RFC-0006; `core/include/libtracer/grammar.hpp:209-218`,

@@ -36,7 +36,7 @@ subscribing *is* writing a `SUBSCRIBER` TLV into `:subscribers[]`. On each write
 dispatcher clones the value to every subscriber's target vertex and in-process callback.
 A delivery **terminates at its target** — store and notify, never a re-dispatch to the
 target's own `:subscribers[]` — so a dispatch-level cycle cannot form and there is no
-depth cap to tune (`core/include/libtracer/graph.hpp:78-83`;
+depth cap to tune (`core/include/libtracer/graph.hpp:79-84`;
 [ADR-0051 — delivery terminates at target, no dispatch limits](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0051-delivery-terminates-at-target-no-dispatch-limits.md),
 [RFC-0007 — delivery terminates at target](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0007-delivery-terminates-at-target.md)).
 Propagation past a target is exclusively the target's own logic — a controller
@@ -83,7 +83,7 @@ class graph_t {
 
     // the node-scoped vertex index — bound-path addressing (RFC-0024 §6.4)
     std::size_t vertex_slot_count() const noexcept;
-    std::optional<std::uint32_t>    vertex_slot(vertex_handle_t) const noexcept;   // mint side
+    std::optional<vertex_slot_t>    vertex_slot(vertex_handle_t) const noexcept;   // mint side
     std::optional<vertex_handle_t>  deref_vertex_slot(std::uint32_t index,
                                                       std::uint32_t generation) const noexcept;
 
@@ -140,7 +140,7 @@ Subscription edges are never destroyed while the graph lives. `unsubscribe` only
 **deactivates** the slot; an in-flight delivery has already snapshotted the edge and
 completes. The caller-owned `ctx` (or, for the templated overload, the callable itself)
 must therefore stay alive past any delivery that may still be running, not merely past
-the `unsubscribe` call (`core/include/libtracer/graph.hpp:669-672`).
+the `unsubscribe` call (`core/include/libtracer/graph.hpp:704-707`).
 ```
 
 ```{admonition} No strings on the hot path
@@ -190,8 +190,8 @@ for (...) g.write(v, p.field(), setpoint_tlv);           // hot loop — zero st
 ## What a read hands back
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
-(`core/include/libtracer/graph.hpp:477,531` by handle, `:845,821` by path;
-`value_ref_t` at `core/include/libtracer/vertex.hpp:114`). A `value_ref_t` is an **owning
+(`core/include/libtracer/graph.hpp:512,566` by handle, `:880,856` by path;
+`value_ref_t` at `core/include/libtracer/vertex.hpp:146`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds it as a
 `std::shared_ptr<const rope_t>`, so handing that reference back costs a refcount clone of
 one control block instead of one `segment_ptr_t` clone per link.
@@ -464,7 +464,12 @@ index means something: the vertex tree is a Composite of non-moving `unique_ptr`
 allocations with no dense index of its own, and an element that named a tree position
 would have to be a path again.
 
-It costs **4 bytes per vertex on rv32**, 8 on a host. It is not a route table — its size
+It costs **4 bytes per vertex on rv32**, 8 on a host — the pointer and nothing else. The
+index is stored **chunked** rather than as one growing array for exactly that reason: a
+geometrically-growing array holds up to twice the pointers it needs between doublings, which
+measured 15 B per vertex on the 512-vertex heap probe against the 8 B the cost model
+charges. Fixed blocks make live bytes track the vertex count instead of the last doubling,
+and indexing stays O(1) with elements that never move. It is not a route table — its size
 tracks the graph, not the traffic — and it introduces no new lifetime rule, because
 registration was already insert-only. A slot is appended per **allocation**, not per
 registration, which is what keeps the mapping a bijection: retirement revives a vertex by
@@ -475,7 +480,18 @@ indices depending on which side of the revive a mint fell.
 generation compare, both under one shared map hold. It authorizes nothing; the operation
 that follows re-evaluates the ACL at the vertex it returns.
 
-`vertex_slot` is the mint side, and it **scans**. That is deliberate rather than pending: a
+The generation compare is `bound_generation_matches`, and it refuses a **saturated**
+element outright rather than comparing it. Below the ceiling, "generations only move
+forward" is the whole guard — a stale element compares lower and can never come back. At
+the ceiling the counter stops, so a saturated element would keep matching its slot through
+every subsequent retire and revive, with staleness detection permanently dead for that
+slot. "Permanently unbindable" therefore has to be enforced on the side that *honours* an
+element, not only on the side that issues one.
+
+`vertex_slot` is the mint side. It returns the index **and** the generation together, from
+one lock hold, because either alone is not a reference: read as two calls they can straddle
+a retire, and the pair would then name the successor tenant's vertex while the caller
+believes it bound the one its operation reached. And it **scans**. That is deliberate rather than pending: a
 per-vertex index field costs 4 bytes on rv32, where `sizeof(vertex_t)` sits at
 `config_t::kMaxVertexBytes32` with zero headroom, and a pointer→index side map costs
 strictly more than the 4 B/vertex the slot vector does. A mint happens once per binding, on
