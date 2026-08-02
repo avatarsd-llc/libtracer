@@ -35,6 +35,13 @@ Applying §1 honestly: `fwd_router_t::add_child` and the capability queries (`de
 
 ADR-0016 §3 cited a "≤ 16 KB stripped Cortex-M0 sentinel" that does not exist in CI (only the esp32 full-node gate of `.github/workflows/esp-idf.yml` does). That sentinel now lands as part of this work — an `arm-none-eabi-g++ -std=c++23 -Os -fno-exceptions -fno-rtti` required-modules build with a hard size gate — and both sentinels are the standing referee: template/metaprogramming techniques are admissible exactly as far as the gates stay green. Note the referee cuts both ways: it catches vtable/erasure bloat *and* template-instantiation bloat.
 
+> **Erratum (2026-08-02):** the ESP-IDF footprint sentinel is now **report-only** — its
+> numbers are published (step summary + `footprint-<target>` artifact) but carry no ceiling,
+> by maintainer ruling: the library must stay free to serve the thinnest possible client, and
+> a ceiling here would police a number nobody deploys. The Cortex-M0 sentinel remains the one
+> hard size gate, and it alone is the referee this section describes; the ESP-IDF numbers
+> stay part of the review evidence.
+
 ## Considered options
 
 - **Keep ADR-0016 §3 (one vtable) everywhere.** Rejected: leaves per-segment-release indirect dispatch and `std::function` machinery on targets that could resolve them statically, and forecloses the single-backend MCU fold.

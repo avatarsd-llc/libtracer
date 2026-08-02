@@ -18,7 +18,8 @@ codebase serves ESP32-class MCUs and 128-core hosts, and this referee cuts both
 ways, catching vtable/erasure bloat AND template-instantiation bloat. When the
 module-set work (Waves 1-3) lands, the delta on this number is the evidence.
 
-Gate modes (mirroring tools/esp_size_gate.py):
+Gate modes (the ESP-IDF footprint in tools/esp_size_gate.py is reported only —
+it carries no ceiling; this Cortex-M0 budget is the one footprint gate):
   * warn — over budget prints `::warning::` and exits 0. The default *today*:
     the measured full send+receive P0 node is ~0.9 KiB over the 16 KiB bound
     (`std::pmr` drags ~2.7 KiB of soft-float via the ADR-0041 arena decoder's
