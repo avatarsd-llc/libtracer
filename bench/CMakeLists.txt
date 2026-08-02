@@ -212,6 +212,15 @@ add_executable(bench_conn_ram bench_conn_ram.cpp)
 target_link_libraries(bench_conn_ram PRIVATE libtracer)
 target_compile_options(bench_conn_ram PRIVATE -Wall -Wextra)
 
+# WHOLE-NODE RAM census: what a 100-vertex graph (values 4..64 B, mixed int / array /
+# STREAM shapes) costs in heap bytes, staged from an empty graph_t through the
+# SPEC-created TCP listener to steady state under a real remote peer PROCESS. Where
+# bench_conn_ram prices ONE CONNECTION, this prices the node around it. Diagnostic,
+# not a perf gate — it forks a peer and stands up a real loopback socket.
+add_executable(bench_ram_census_tcp bench_ram_census_tcp.cpp)
+target_link_libraries(bench_ram_census_tcp PRIVATE libtracer)
+target_compile_options(bench_ram_census_tcp PRIVATE -Wall -Wextra)
+
 # What the transport iovec spill COSTS and how often it is reached. bench_transport_iov found
 # WHERE the boundary sits (17 caller spans); this one measures the egress span count a real
 # rope forward hop produces, the latency of one spill (isolated and behind a real sendmsg),
