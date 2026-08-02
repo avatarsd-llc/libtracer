@@ -43,7 +43,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 Replace the normative "segment limit 32" with **"segment limit 255"** everywhere it is stated —
 `docs/spec/v1.md:58` and `:95`, `docs/reference/03-addressing.md:35`,
 `docs/reference/05-protocol-tlvs.md:280` and `:358` — and reprice
-`kMaxSegments` (`core/include/libtracer/path.hpp:34`) and the bindings' mirrors to match.
+`kMaxSegments` (`core/include/libtracer/path.hpp:35`) and the bindings' mirrors to match.
 
 The value is not asserted; it falls out of three prices computed in §4 from the spec's own
 encoding and the RAM record:
@@ -116,11 +116,11 @@ records the addressing bounds as the named, ratified exception (§9).
 
 ## 3. What this RFC does **not** do
 
-- **Not touched:** `kMaxPathBytes = 1024` (`core/include/libtracer/path.hpp:32`) — the byte cap
+- **Not touched:** `kMaxPathBytes = 1024` (`core/include/libtracer/path.hpp:33`) — the byte cap
   stays, in the unit the 2026-07-31 erratum pinned (the PATH TLV's `length` field). It remains
   the dominant bound for realistically named paths (§4.2).
-- **Not touched:** `kMaxSegmentBytes = 64` (`path.hpp:30`) — RFC-0018's `u8` field width.
-- **Not touched:** `kMaxFieldDepth = 8` (`path.hpp:36`) — a different axis.
+- **Not touched:** `kMaxSegmentBytes = 64` (`path.hpp:31`) — RFC-0018's `u8` field width.
+- **Not touched:** `kMaxFieldDepth = 8` (`path.hpp:37`) — a different axis.
 - **Not touched:** `kMountPeekMax` (`core/include/libtracer/fwd_frame_view.hpp:94`) — the mount
   *width* lift is [#523](https://github.com/avatarsd-llc/libtracer/issues/523)'s own train, second
   per the 2026-07-30 sequencing ruling. §4.5 verifies this RFC does not move its buffers.
@@ -212,8 +212,8 @@ Verified against `core/` at `549ec0d`, inheriting and re-running RFC-0019 §6.2'
 - **The C stack no longer sees depth.** RFC-0019 §6.2 found four wire-reachable recursive subtree
   walks (up to 208 B/level — 32 → 255 would have been +46 KB of worst-case stack). All four are
   now O(1)-memory iterative ascents via `vertex_t::for_each_descendant`
-  (`core/include/libtracer/vertex.hpp:1143`; sites `core/src/graph.cpp:398`, `:473`, `:569`,
-  `:722`; [#690](https://github.com/avatarsd-llc/libtracer/issues/690), fixed by #692) — no
+  (`core/include/libtracer/vertex.hpp:1175`; sites `core/src/graph.cpp:398`, `:493`, `:589`,
+  `:742`; [#690](https://github.com/avatarsd-llc/libtracer/issues/690), fixed by #692) — no
   auxiliary storage, nothing to fail. The prerequisite RFC-0019 flagged is already satisfied.
 - **Decode state is resource-keyed, not count-keyed**: terminus decode draws per-open-level nodes
   from the injected block source (RFC-0006; `core/include/libtracer/grammar.hpp:209-218`,
@@ -316,12 +316,12 @@ enforce; resolver enforces child-type; count/length bound where constructed or a
 > - **Depth is capped by the route, and the route by its bytes.** A `FWD` frame's `dst` names
 >   every hop and is consumed monotonically, so a delivery travels exactly as far as its explicit
 >   source route — segment count ≤ **255** ([RFC-0023](../spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md);
->   `kMaxSegments`, `core/include/libtracer/path.hpp:34`), and for realistically named mounts the
+>   `kMaxSegments`, `core/include/libtracer/path.hpp:35`), and for realistically named mounts the
 >   1024-byte PATH budget binds first (≈ 30–50 hops at 3-segment mount runs).
 
 ### 5.6 Code (reference implementation, after acceptance)
 
-- `core/include/libtracer/path.hpp:34` — `kMaxSegments = 255`, comment gains the RFC pointer and
+- `core/include/libtracer/path.hpp:35` — `kMaxSegments = 255`, comment gains the RFC pointer and
   the min(255, byte-derived) note. The check at `core/src/path.cpp:97` and everything around it is
   untouched; `segments_` already counts in a `std::size_t`.
 - **Rust** — `MAX_SEGMENTS = 255` (`bindings/rust/src/tlv_builders.rs:25`; checks at

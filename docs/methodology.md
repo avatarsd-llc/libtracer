@@ -233,6 +233,16 @@ Details that make these trustworthy:
   `--baseline-bench-fwd`. Supplying that binary for one arm and not the other **fails**
   the gate as a wiring error; supplying it for neither prints an explicit `SKIP` — a
   probe that cannot run never passes silently.
+- A per-vertex cost a **ratified clause already prices** is not a pullback, and the memory
+  ratchet has one narrow way to say so: a **charged step** (`perf_gate.py`'s
+  `MEM_CHARGED`), declared per probe, in bytes, naming the clause that charges it. A
+  charge absorbs *at most* its own bytes — a step of exactly that size passes, one byte
+  more fails and the failure names the unpriced remainder — and it is **printed on every
+  run**, spent or not, so an allowance can never be a gate that quietly moved. It also
+  expires by construction: the paired baseline is built from `main`, so once the step
+  lands there the delta is zero, the charge prints as `UNSPENT`, and the entry is deleted.
+  It is not a tolerance: it does not scale, does not accumulate, and is not a budget to
+  spend later.
 - The gate's decision rules have their **own unit tests**
   ([`bench/test_perf_gate.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/test_perf_gate.py)),
   run in the same CI job before anything is timed, pinning both directions: the recorded

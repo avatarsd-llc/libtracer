@@ -35,6 +35,25 @@ pub mod fwd_op {
     pub const AWAIT: u8 = 2;
     /** @brief A reply routed back along the accumulated `src`. */
     pub const REPLY: u8 = 3;
+
+    /**
+     * @brief The opcode field of the `op` byte — bits 5-0 (RFC-0024 §7.5).
+     *
+     * Bits 7-6 are FLAGS. A forwarder MUST mask before switching (RFC-0024 §9.3): an
+     * unrecognised flag then degrades to the plain opcode instead of an unknown-opcode
+     * reject, which is what makes a flag additive at all.
+     */
+    pub const OPCODE_MASK: u8 = 0x3F;
+
+    /**
+     * @brief `op` bit 7 — the bound-path MINT REQUEST (RFC-0024 §7.5).
+     *
+     * Set by an origin asking each host on the route to answer with its own vertex ref. It
+     * costs ZERO request bytes: there is no free TLV `opt` bit, and a dedicated presence
+     * child would spend a 4-byte header to express one. The request is a hint, never an
+     * obligation — a host that will not mint answers the ordinary reply.
+     */
+    pub const FLAG_MINT_REQUEST: u8 = 0x80;
 }
 
 /** @brief FWD{REPLY} `kind` discriminant (RFC-0004 §D — a VALUE u8 after `src`). */
@@ -171,11 +190,11 @@ pub fn encode_fwd_bytes(req: &FwdRequest) -> Result<Vec<u8>, BuildError> {
 pub struct ParsedFwd {
     /** @brief The operation (a [`fwd_op`] value). */
     pub op: u8,
-    /** @brief The `dst` PATH child. */
+    /** @brief The `dst` route child — a `PATH`, or a `PATH_REF` when [`Self::dst_bound`]. */
     pub dst: Tlv,
     /** @brief The optional FIELD selector child. */
     pub field: Option<Tlv>,
-    /** @brief The `src` PATH child. */
+    /** @brief The `src` route child — a `PATH`, or a `PATH_REF` on a reply to a bound op. */
     pub src: Tlv,
     /** @brief The reply [`fwd_kind`] (REPLY frames only). */
     pub kind: Option<u8>,
@@ -183,6 +202,10 @@ pub struct ParsedFwd {
     pub payload: Option<Tlv>,
     /** @brief The AWAIT `await_timeout` ns, if present. */
     pub await_timeout_ns: Option<u64>,
+    /** @brief `op` bit 7 was set — the origin asked for a bound-path mint (RFC-0024 §7.5). */
+    pub mint_request: bool,
+    /** @brief `dst` is a `PATH_REF` (`0x14`), not a canonical `PATH` (RFC-0024 §4). */
+    pub dst_bound: bool,
 }
 
 fn u8_of(t: &Tlv) -> u8 {
@@ -205,9 +228,17 @@ pub fn parse_fwd_tlv(fwd: &Tlv) -> Result<ParsedFwd, BuildError> {
     if ch.get(i).map(|c| c.type_code) != Some(type_code::VALUE) {
         return Err(BuildError::TypeMismatch);
     }
-    let op = u8_of(&ch[i]);
+    // The opcode is `op & 0x3F`; bits 7-6 are flags (RFC-0024 §7.5, normative in §9.3).
+    // Switching on the raw byte would make a mint-flagged READ an unknown opcode here.
+    let op_byte = u8_of(&ch[i]);
+    let op = op_byte & fwd_op::OPCODE_MASK;
+    let mint_request = op_byte & fwd_op::FLAG_MINT_REQUEST != 0;
     i += 1;
-    if ch.get(i).map(|c| c.type_code) != Some(type_code::PATH) {
+    // Two address forms (RFC-0024 §4): a canonical PATH, or a bound PATH_REF whose body
+    // shape the grammar has already checked. What an element MEANS is node-scoped, so a
+    // binding core carries one and never interprets it.
+    let dst_bound = ch.get(i).map(|c| c.type_code) == Some(type_code::PATH_REF);
+    if !dst_bound && ch.get(i).map(|c| c.type_code) != Some(type_code::PATH) {
         return Err(BuildError::TypeMismatch);
     }
     let dst = ch[i].clone();
@@ -217,7 +248,9 @@ pub fn parse_fwd_tlv(fwd: &Tlv) -> Result<ParsedFwd, BuildError> {
         field = Some(ch[i].clone());
         i += 1;
     }
-    if ch.get(i).map(|c| c.type_code) != Some(type_code::PATH) {
+    // `src` takes either form too: a reply to a bound operation echoes the request's `dst`.
+    let src_kind = ch.get(i).map(|c| c.type_code);
+    if src_kind != Some(type_code::PATH) && src_kind != Some(type_code::PATH_REF) {
         return Err(BuildError::TypeMismatch);
     }
     let src = ch[i].clone();
@@ -254,6 +287,8 @@ pub fn parse_fwd_tlv(fwd: &Tlv) -> Result<ParsedFwd, BuildError> {
         kind,
         payload,
         await_timeout_ns,
+        mint_request,
+        dst_bound,
     })
 }
 

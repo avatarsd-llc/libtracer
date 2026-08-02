@@ -41,6 +41,68 @@
 
 namespace tr::graph {
 
+/**
+ * @brief The terminal value of a vertex's retirement generation (RFC-0024 §4.4 rule 3).
+ *
+ * The generation SATURATES here rather than wrapping. Wrapping is the #603 failure class
+ * transposed onto the guard: a stale reference whose generation came back around compares
+ * equal again and the operation is delivered into whatever now occupies the vertex — a
+ * misroute, not a drop. At this value the counter stops moving, the vertex is permanently
+ * unbindable, and every bound-path mint for it declines and leaves the caller on the
+ * canonical form, which always works.
+ */
+inline constexpr std::uint32_t kGenerationSaturated = 0xFFFFFFFFu;
+
+/**
+ * @brief The generation after @p g — saturating at `kGenerationSaturated` (RFC-0024 §4.4).
+ *
+ * The whole of the no-wrap rule, as one total function, so the rule can be exercised at the
+ * ceiling: reaching it through the retire path takes 2^32 retirements of one vertex, which no
+ * test performs, and a guard nothing can reach is a guard nothing is checking.
+ */
+[[nodiscard]] constexpr std::uint32_t saturating_next_generation(std::uint32_t g) noexcept {
+    return g == kGenerationSaturated ? kGenerationSaturated : g + 1;
+}
+
+static_assert(saturating_next_generation(0) == 1);
+static_assert(saturating_next_generation(kGenerationSaturated - 1) == kGenerationSaturated);
+// The clause the whole element shape rests on: at the ceiling the counter STOPS. If this ever
+// read 0, a stale bound-path element would compare equal again and the operation would land on
+// the vertex's successor — #603's misroute, with the guard in place of the address.
+static_assert(saturating_next_generation(kGenerationSaturated) == kGenerationSaturated);
+
+/**
+ * @brief Does a bound-path element stamped @p element_gen still name the tenancy a slot whose
+ *        stamp is @p slot_gen is holding (RFC-0024 §5.1 step 2)?
+ *
+ * The whole of the deref's generation rule, as one total function, for the reason
+ * `saturating_next_generation` is one: the interesting case is the CEILING, and reaching
+ * it through the retire path takes 2^32 retirements of one vertex, which no test performs.
+ * A guard nothing can reach is a guard nothing is checking — and this one had that shape.
+ *
+ * Below the ceiling the rule is plain equality, and it is safe because generations only move
+ * forward: a stale element compares lower and can never become valid again by waiting. AT the
+ * ceiling the counter stops, so that argument stops with it. A saturated element would keep
+ * comparing equal to its slot for the rest of the node's life, through every subsequent
+ * retire and revive — tenant A's operations delivered into B, then C, then D, with staleness
+ * detection permanently dead for that slot. So saturation is refused OUTRIGHT, on the side
+ * that honours an element and not only on the side that issues one; that is what makes
+ * "permanently unbindable" (§4.4 rule 3) a property of the vertex.
+ */
+[[nodiscard]] constexpr bool bound_generation_matches(std::uint32_t slot_gen,
+                                                      std::uint32_t element_gen) noexcept {
+    return element_gen != kGenerationSaturated && element_gen == slot_gen;
+}
+
+static_assert(bound_generation_matches(0, 0));
+static_assert(!bound_generation_matches(1, 0), "a stale element compares lower and is refused");
+static_assert(!bound_generation_matches(0, 1), "a forged-ahead element is refused too");
+// THE clause the saturation rule rests on, and the one a plain `==` gets wrong: at the ceiling
+// the slot and the element agree and the answer is STILL no. Written as `==` this reads true,
+// and the element would validate forever across every retire — #603's misroute with the guard
+// in place of the address.
+static_assert(!bound_generation_matches(kGenerationSaturated, kGenerationSaturated));
+
 // L1 types this layer consumes (upward dependency on tr::view, docs/adr/0016 §2).
 using view::rope_t;
 using view::segment_ptr_t;
@@ -1682,7 +1744,22 @@ class vertex_t {
         // Bump BEFORE anything else is torn down (ADR-0062): a holder comparing generations
         // must see the invalidation no later than it could observe the reverted state, so a
         // cached resolution can never be used against a vertex already mid-revert.
-        retire_gen_.fetch_add(1, std::memory_order_release);
+        //
+        // SATURATING, never wrapping (RFC-0024 §4.4 rule 3, normative in §9.3). A wrapped
+        // generation is #603's misroute with the guard instead of the address: a stale
+        // bound-path element would compare EQUAL again and the operation would land on the
+        // vertex's successor. The CAS loop is the whole of the rule — at the ceiling the
+        // counter stops, the vertex becomes permanently unbindable, and every mint for it
+        // falls back to the canonical form (the same degrade the label allocator takes at
+        // exhaustion). Contended only against another retire of the SAME vertex, which the
+        // map lock already excludes, so the loop is uncontended in practice.
+        for (std::uint32_t g = retire_gen_.load(std::memory_order_relaxed);
+             g != kGenerationSaturated;) {
+            if (retire_gen_.compare_exchange_weak(g, saturating_next_generation(g),
+                                                  std::memory_order_release,
+                                                  std::memory_order_relaxed))
+                break;
+        }
         set_flag(flag_t::OWN_ACES, false);
         lkv_.clear(std::memory_order_release);  // a mid-read reader holds its own
                                                 // reference — safe under either policy.

@@ -64,7 +64,7 @@ RFC-0006's answer does not transfer, and why the honest replacement is not a *di
 > - **Depth is capped by the route.** A `FWD` frame's `dst` names every hop and is consumed
 >   monotonically, so a delivery travels exactly as far as its explicit source route — segment
 >   count ≤ the PATH segment cap of 32 ([03 — Addressing](../reference/03-addressing.md);
->   `kMaxSegments`, `core/include/libtracer/path.hpp:34`).
+>   `kMaxSegments`, `core/include/libtracer/path.hpp:35`).
 
 Per ADR-0061's erratum, `src`/`dst` grow by the **full** mount run per hop — `net` / `<module>` /
 `<name>`. Arithmetic over the encoding rule at `docs/reference/05-protocol-tlvs.md:348` (each
@@ -94,7 +94,7 @@ Verified from source, not assumed. Nothing on the wire path counts segments:
   No cap test.
 - `core/src/op_resolve_walk.hpp:660-669` (`path_lookup_key`) rejects a non-`NAME` child and counts
   nothing.
-- `core/src/graph.cpp:458-483` (`ensure_vertex_ptr`) calls `key_view_t::split_levels`, which checks
+- `core/src/graph.cpp:478-503` (`ensure_vertex_ptr`) calls `key_view_t::split_levels`, which checks
   only `NAME` framing and exactness (`core/include/libtracer/key_view.hpp:122-136`), then
   `mkdir -p`s every missing level with no count or byte check.
 
@@ -112,7 +112,7 @@ amendment:
 > one that survives `kMaxSegments` being lifted.
 
 PR #685 corrected the three code comments that claimed "graph depth is `kMaxSegments`-bounded
-structurally" (`core/include/libtracer/graph.hpp:580-586`, `core/src/graph.cpp:1851`).
+structurally" (`core/include/libtracer/graph.hpp:615-621`, `core/src/graph.cpp:1871`).
 
 ### 2.4 Doctrine
 
@@ -136,7 +136,7 @@ failure mode ADR-0038's erratum already had to undo.
 - **Not touched:** `kMaxSegmentBytes = 64` — RFC-0018 is settling it and turns it into a genuine
   `u8` wire field width. This RFC must not, and does not, answer RFC-0018 §12 open question 2
   ("does the segment-length bound belong in `config.hpp`?") in the affirmative; §9.2 explains why.
-- **Not touched:** `kMaxFieldDepth = 8` (`core/include/libtracer/path.hpp:36`) — a different axis.
+- **Not touched:** `kMaxFieldDepth = 8` (`core/include/libtracer/path.hpp:37`) — a different axis.
 - **Not touched:** `kMountPeekMax` — that is the width uncapping, deliberately second (§2.2).
 - **Not touched:** `tests/conformance/coverage_audit.py:66-67`, which still raises
   `ParseError("nesting > 32")` — a live residue of the *nesting* cap RFC-0006 removed, a different
@@ -247,7 +247,7 @@ RFC's error-surface delta is **zero** — contrast RFC-0006, which had to amend 
 
 One comparison, no restructuring.
 
-- Delete `core/include/libtracer/path.hpp:34` (`kMaxSegments`) and update the `parse` doc comment at
+- Delete `core/include/libtracer/path.hpp:35` (`kMaxSegments`) and update the `parse` doc comment at
   `:105`.
 - Delete `core/src/path.cpp:110`:
   `if (++p.segments_ > kMaxSegments) return std::unexpected(status_t::INVALID_PATH);`
@@ -258,8 +258,8 @@ One comparison, no restructuring.
 - The reserve guard at `path.cpp:99` (`want <= kMaxPathBytes`) is **untouched** — this RFC keeps
   `kMaxPathBytes`, so the ~1 KiB reserve ceiling on a 16 KB node is preserved exactly. (A design that
   dissolved the byte cap would have had to re-derive it; see §9.1.)
-- Comment-only sites needing the corrected wording: `core/include/libtracer/graph.hpp:580-586`,
-  `core/src/graph.cpp:1851`, `docs/modules/path.md:15` and `:69-72`.
+- Comment-only sites needing the corrected wording: `core/include/libtracer/graph.hpp:615-621`,
+  `core/src/graph.cpp:1871`, `docs/modules/path.md:15` and `:69-72`.
 
 ## 5. The arithmetic — measured, and the maintainer's redundancy hypothesis is refuted
 
@@ -357,12 +357,12 @@ removes is the last *local-only* speed bump. It is nonetheless a hard **prerequi
 [#690](https://github.com/avatarsd-llc/libtracer/issues/690), and this RFC MUST NOT land before it.
 
 The fix shape is in the same file: the iterative heap-backed stack machine at
-`core/src/graph.cpp:1865-1875` (`std::vector<work_t>` + `detail::try_push_back` →
+`core/src/graph.cpp:1885-1895` (`std::vector<work_t>` + `detail::try_push_back` →
 `status_t::BACKPRESSURE`). Two of the four return `void`, so an error channel changes their
 signatures — that is the open design question in #690, not something this RFC decides.
 
-Note that `vertex_t` carries an immutable `parent_` link (`core/include/libtracer/vertex.hpp:2394`,
-accessor `:983`), so an O(1)-memory parent-link traversal is also available and would need no error
+Note that `vertex_t` carries an immutable `parent_` link (`core/include/libtracer/vertex.hpp:2471`,
+accessor `:1015`), so an O(1)-memory parent-link traversal is also available and would need no error
 channel at all. #690 should weigh both.
 
 No C++ test asserts any of the four caps: `core/tests/path_test.cpp` is 82 lines with zero cap
@@ -526,7 +526,7 @@ This pre-answers RFC-0018 §12 open question 2 with **no**, and this RFC does no
 
 **Contradiction surfaced, not fixed here** (house rule): six lines later the same document says
 "Field depth is the worked example: resource-keyed rather than configurable" — but
-`core/include/libtracer/path.hpp:36` is a bare `inline constexpr kMaxFieldDepth = 8` with literal
+`core/include/libtracer/path.hpp:37` is a bare `inline constexpr kMaxFieldDepth = 8` with literal
 comparisons at `core/src/path.cpp:129` and `core/src/op_resolve_walk.hpp:380`. It almost certainly
 means TLV *nesting* depth (RFC-0006). Separate erratum; flagged because §9.2 leans on the first
 bullet.

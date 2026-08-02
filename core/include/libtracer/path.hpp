@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "libtracer/path_ref.hpp"
 #include "libtracer/status.hpp"
 
 namespace tr::graph {
@@ -93,11 +94,46 @@ struct field_path_t {
 };
 
 /**
+ * @brief A path's BOUND form: the stack of node-scoped vertex refs a mint answered with
+ *        (RFC-0024 §7.4) — the opaque slot a @ref path_t carries beside its canonical bytes.
+ *
+ * Shaped on `tr::net::resolved_binding_t`, which has been the "a resolution plus its own
+ * staleness signal" record since ADR-0062, and for the same two reasons: the answer is held
+ * *with* the stamp that invalidates it, and "no resolution yet" is expressed OUTSIDE the
+ * resolution (@ref bound) rather than as an invalid one. It is a separate type only because
+ * that one lives in the transport plane, and an address must not depend downward on it.
+ *
+ * The elements are **opaque here and everywhere but on the host that minted each one**: this
+ * type carries them, compares them and hands them to an encoder, and never interprets one.
+ * Nothing about a binding is authorization-shaped — a bound path holds no ACL state at all,
+ * which is why a revoked right takes effect on the very next operation over an already-minted
+ * binding (RFC-0024 §6.2).
+ *
+ * The canonical bytes stay in the @ref path_t alongside it and are never discarded: they are
+ * the key the binding was minted FROM and the fallback a failed binding drops back to, which
+ * is what makes "drop and re-mint" a complete recovery (RFC-0024 §1, §5.3).
+ */
+struct path_binding_t {
+    /** @brief True once a mint has completed; false is "never bound", not "invalid". */
+    bool bound = false;
+    /** @brief The route's vertex refs, origin-first — element *i* means something only on
+     *         host *i*. Empty exactly when @ref bound is false. */
+    std::vector<wire::path_ref_element_t> elements;
+    /** @brief Value equality over both fields. */
+    bool operator==(const path_binding_t&) const = default;
+};
+
+/**
  * @brief A parsed, canonical path: the PATH-TLV payload bytes (NAME children) plus the
  *        optional @ref field_path_t tail. The payload bytes are the vertex-map key.
  *
  * Dispatch keys on the parsed bytes (@ref key), never the string form — parse once,
  * hold the value, and every read/write compares bytes (docs/reference/02 §dispatch).
+ *
+ * A path also carries the optional bound form (@ref binding, RFC-0024 §7.4). It stays a
+ * **value type**: the binding is an opaque slot the graph and transport tiers fill and
+ * validate, never a handle into either of them, so copying a path copies its binding and
+ * neither copy can outlive anything.
  */
 class path_t {
    public:
@@ -142,10 +178,50 @@ class path_t {
     /** @brief The number of NAME segments in the path. */
     [[nodiscard]] std::size_t segment_count() const noexcept { return segments_; }
 
+    /** @brief This path's bound form, if a mint has completed (RFC-0024 §7.4). */
+    [[nodiscard]] const path_binding_t& binding() const noexcept { return binding_; }
+
+    /**
+     * @brief Record the bound form a mint answered with — @p elements in ROUTE order.
+     *
+     * Element 0 is the origin's own reference to its first-hop connection vertex; the last is
+     * the terminus host's reference to the target vertex. A mint answers only for the hosts
+     * that saw the operation, so the origin stacks its own element under what came back.
+     *
+     * Refuses (leaving the path unbound) past the normative element bound: a route with more
+     * hosts than a `PATH_REF` can spell has no bound spelling, and the canonical path this
+     * object still holds is the answer — refusing beats truncating, which would produce a
+     * *valid-looking* binding for a different route.
+     *
+     * @return true iff the binding was recorded.
+     */
+    bool bind(std::span<const wire::path_ref_element_t> elements) {
+        if (elements.empty() || elements.size() > wire::kMaxPathRefElements) return false;
+        binding_.elements.assign(elements.begin(), elements.end());
+        binding_.bound = true;
+        return true;
+    }
+
+    /**
+     * @brief Drop the bound form and fall back to the canonical one (RFC-0024 §5.3).
+     *
+     * What an origin does on a failed validation. There is nothing to tear down anywhere else
+     * — no hop holds state for a bound path — so forgetting the elements IS the teardown, and
+     * the next operation goes out canonically and may re-mint.
+     */
+    void clear_binding() noexcept {
+        binding_.elements.clear();
+        binding_.bound = false;
+    }
+
    private:
     std::vector<std::byte> payload_;  // canonical PATH-TLV payload (NAME children)
     field_path_t field_;
     std::size_t segments_ = 0;
+    // The RFC-0024 §7.4 opaque slot. Empty for every path that has never been bound, which is
+    // every path until an origin asks for a mint — so an unbound path costs one empty vector
+    // and no allocation, and nothing on the canonical hot path reads it.
+    path_binding_t binding_;
 };
 
 inline path_t::path_t(std::string_view text) {

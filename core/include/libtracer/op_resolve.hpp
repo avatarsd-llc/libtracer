@@ -46,6 +46,30 @@ enum class fwd_op_t : std::uint8_t {
     REPLY = 3, /**< @brief A reply routed back; not resolvable as a request here. */
 };
 
+/**
+ * @brief The opcode field of the `FWD` `op` byte — bits 5-0 (RFC-0024 §7.5).
+ *
+ * Bits 7-6 are FLAGS. A forwarder MUST mask before switching (RFC-0024 §9.3): an
+ * unrecognised flag then degrades to the plain opcode instead of an unknown-opcode reject,
+ * which is what makes a flag additive at all. Four of the 64 opcode values are in use.
+ */
+inline constexpr std::uint8_t kFwdOpcodeMask = 0x3F;
+
+/**
+ * @brief `op` bit 7 — the bound-path MINT REQUEST (RFC-0024 §7.5).
+ *
+ * Set by an origin asking each host on the route to answer with its own vertex ref, so the
+ * origin can address the same target in the bound form next time. It costs **zero request
+ * bytes**: there is no free TLV `opt` bit (all six defined bits are assigned and the two
+ * reserved ones make a frame invalid if set), and a dedicated presence child would spend a
+ * 4-byte TLV header to express one bit.
+ *
+ * The request is a HINT, never an obligation: a host that will not or cannot mint (its
+ * generation has saturated, it does not implement the amendment) answers the ordinary reply
+ * and the origin stays on the canonical form, which always works.
+ */
+inline constexpr std::uint8_t kFwdOpFlagMintRequest = 0x80;
+
 /** @brief The reply discriminant carried by a `FWD{REPLY}` (RFC-0004 §D). */
 enum class reply_kind_t : std::uint8_t {
     RESULT = 0, /**< @brief Success — payload is the result (or empty for a WRITE ack). */

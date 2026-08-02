@@ -261,7 +261,11 @@ struct arena_node {
 template <class N>
 struct parsed_fwd_t {
     fwd_op_t op{};
-    N dst{};                         /**< forward route (a PATH node) */
+    /** @brief `op` bit 7 was set — the origin asked for a bound-path mint (RFC-0024 §7.5). */
+    bool mint_request = false;
+    /** @brief `dst` is a `PATH_REF` (`0x14`), not a canonical `PATH` (RFC-0024 §4). */
+    bool dst_bound = false;
+    N dst{};                         /**< forward route (a PATH or PATH_REF node) */
     std::optional<N> selector{};     /**< optional :field (a FIELD node) */
     N src{};                         /**< accumulated return route (a PATH node) */
     std::optional<N> payload{};      /**< WRITE only (the value node) */
@@ -285,10 +289,24 @@ template <class N>
 
     const std::optional<N> op = ch.next();
     if (!op || op->type() != type_t::VALUE) return std::unexpected(status_t::INVALID_PATH);
-    p.op = static_cast<fwd_op_t>(detail::load_le<std::uint8_t>(op->body()));
+    // The opcode is `op & 0x3F`; bits 7-6 are FLAGS (RFC-0024 §7.5, normative in §9.3). The
+    // raw byte is split here, once, so nothing downstream ever sees a flag mixed into the
+    // discriminant — a mint-flagged READ is a READ everywhere but at the mint itself.
+    const auto op_byte = detail::load_le<std::uint8_t>(op->body());
+    p.op = static_cast<fwd_op_t>(op_byte & kFwdOpcodeMask);
+    p.mint_request = (op_byte & kFwdOpFlagMintRequest) != 0;
 
     std::optional<N> dst = ch.next();
-    if (!dst || dst->type() != type_t::PATH) return std::unexpected(status_t::INVALID_PATH);
+    // Two address forms, and the second changes nothing about the first (RFC-0024 §1): a
+    // canonical PATH of NAME children, or a PATH_REF whose body shape the grammar has already
+    // settled (path_ref.hpp — PL=0, LL=0, a whole number of 8-byte elements, at or under the
+    // count bound). What an element MEANS is settled at the deref, in resolve_node.
+    if (!dst) return std::unexpected(status_t::INVALID_PATH);
+    if (dst->type() == type_t::PATH_REF) {
+        p.dst_bound = true;
+    } else if (dst->type() != type_t::PATH) {
+        return std::unexpected(status_t::INVALID_PATH);
+    }
     p.dst = *dst;
 
     std::optional<N> next = ch.next();
@@ -531,10 +549,11 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
 [[nodiscard]] rope_t assemble(std::span<const std::byte> reply_dst_wire,
                               std::span<const std::byte> reply_src_wire, reply_kind_t kind,
                               std::span<const std::byte> inline_tail,
-                              std::span<const view_t> shared, std::size_t shared_len) {
+                              std::span<const view_t> shared, std::size_t shared_len,
+                              std::span<const std::byte> trailing = {}) {
     const std::size_t children_len = kU8ValueLen + reply_dst_wire.size() + reply_src_wire.size() +
                                      kU8ValueLen + inline_tail.size();
-    const std::size_t body_len = children_len + shared_len;
+    const std::size_t body_len = children_len + shared_len + trailing.size();
     const bool ll = body_len > 0xFFFFu;
     const std::size_t head_len = (ll ? 6u : 4u) + children_len;
 
@@ -544,7 +563,7 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
     // -fno-exceptions on a fragmented heap. On failure return an EMPTY rope; resolve_node's
     // or_backpressure wrapper turns an empty success reply into an addressed BACKPRESSURE
     // error (the client falls back on the same link rather than presuming it dead).
-    if (!rope.try_reserve(1 + shared.size())) return rope_t{};
+    if (!rope.try_reserve(1 + shared.size() + (trailing.empty() ? 0u : 1u))) return rope_t{};
     segment_ptr_t seg = view::heap_alloc(head_len);
     // A head-alloc failure invalidates the WHOLE reply: the shared payload views WITHOUT
     // the FWD header are a headerless, unroutable frame that the send site's
@@ -560,6 +579,26 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
     out.raw(inline_tail);
     rope.append(view_t::over(std::move(seg)));
     for (const view_t& v : shared) rope.append(v);  // refcount clone — no byte copy
+    // The minted `PATH_REF` goes LAST — after the payload, as the reply's final child
+    // (RFC-0024 §7.1). Last rather than beside `kind` so a positional reader of an ordinary
+    // reply is untouched: it reads op / dst / src / kind / payload and stops, and only an
+    // origin that ASKED for a mint reads past. Its own segment, because the head is sized
+    // exactly and the payload's links sit between — one small allocation on the mint path
+    // and none on any other.
+    if (!trailing.empty()) {
+        segment_ptr_t mint_seg = view::heap_alloc(trailing.size());
+        if (mint_seg) {
+            std::memcpy(mint_seg->bytes.data(), trailing.data(), trailing.size());
+            rope.append(view_t::over(std::move(mint_seg)));
+            return rope;
+        }
+        // A mint that cannot be allocated is not an error: the operation already succeeded and
+        // its reply is complete without it, so answer the plain reply and let the origin stay
+        // canonical — the same degrade a saturated generation takes. Rebuilt rather than
+        // returned short, because a header whose body_len counts bytes that are not there is
+        // unparseable, not merely unhelpful.
+        return assemble(reply_dst_wire, reply_src_wire, kind, inline_tail, shared, shared_len);
+    }
     return rope;
 }
 
@@ -597,7 +636,8 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
  */
 [[nodiscard]] rope_t assemble_result_rope(std::span<const std::byte> reply_dst_wire,
                                           std::span<const std::byte> reply_src_wire,
-                                          const rope_t& payload) {
+                                          const rope_t& payload,
+                                          std::span<const std::byte> trailing = {}) {
     // The links span feeds assemble directly — no heap copy of the link table. The
     // old std::vector staging copy was a per-reply transient that scaled with the
     // stored value's link count and ABORTED on heap exhaustion under -fno-exceptions
@@ -605,7 +645,7 @@ constexpr std::size_t kU8ValueLen = 5;  // 4-byte VALUE header + 1 payload byte
     // OOM abort on a composed-root read's ~288-link reply. `payload` outlives the
     // call, so borrowing its span is safe.
     return assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT, {}, payload.links(),
-                    payload.total_length());
+                    payload.total_length(), trailing);
 }
 
 /**
@@ -669,6 +709,207 @@ template <class N>
 }
 
 /**
+ * @brief Apply a parsed request FWD's op at an ALREADY-RESOLVED vertex and build the reply.
+ *
+ * The one body both address forms reach (RFC-0024 §6.3): a canonical `dst` resolves to a
+ * `vertex_handle_t` by key, a bound `dst` dereferences to one by element, and from here the
+ * two are the SAME code — the same `graph_t` call, with the same right, the same caller
+ * context, the same reply assembly. That is what makes the outcomes identical by
+ * construction rather than by two policies kept in sync, and it is where the per-operation
+ * ACL re-check RFC-0024 §6.2 requires actually happens: `graph_t::read` / `write` / `await`
+ * evaluate `acl_allows` at @p v themselves, so neither spelling can skip a gate the other
+ * takes and a generation match authorizes nothing.
+ *
+ * Also the one place a bound path is MINTED (RFC-0024 §7). The mint rides an operation that
+ * has already passed every gate on its way here, so a vref is never produced for a
+ * destination the caller could not have reached canonically — probing the bound form yields
+ * exactly what probing the canonical form yields (§6.1's anti-enumeration property).
+ */
+template <class N>
+[[nodiscard]] result_t<rope_t> apply_op(graph_t& graph, const parsed_fwd_t<N>& req,
+                                        vertex_handle_t v, std::string_view inbound_link,
+                                        const view_t* frame_view, mem::mem_backend_t& flat,
+                                        std::span<const std::byte> reply_dst_wire,
+                                        std::span<const std::byte> reply_src_wire,
+                                        const field_path_t& field, bool has_field) {
+    // The mint answer (RFC-0024 §7.5): this node's own reference to the target vertex, as a
+    // one-element `PATH_REF` the origin stacks under whatever it already holds for the hops
+    // in front of it. 4 + 8 bytes, on the reply only, and only when asked — the request side
+    // costs zero bytes, because the ask is a spare bit of an `op` byte that was already there.
+    //
+    // It rides SUCCESS alone. Every `assemble_error` below leaves it off, which is the
+    // anti-enumeration property in code: a denied operation answers denied and nothing else,
+    // never "denied, and here is a handle to the thing you may not have".
+    //
+    // `vertex_slot` declining is not an error either: a saturated generation makes a vertex
+    // permanently unbindable (§4.4 rule 3), and the answer to that is the ordinary reply plus
+    // an origin that stays on the canonical form, which always works.
+    //
+    // The element is written STRAIGHT into the stack buffer. It has a fixed 12-byte shape, so
+    // there is nothing for a container to size — and a growing one here would abort the node
+    // under `-fno-exceptions` on a fragmented heap (#748's precedent, this very function),
+    // which is the opposite of the degrade this path promises: a mint that cannot happen is
+    // answered with the plain reply, never with a panic.
+    //
+    // `vertex_slot` returns the index and the generation TOGETHER, from one lock hold. Read
+    // as two calls they can straddle a retire, and the reply would then carry a well-formed
+    // element naming the vertex's SUCCESSOR — the origin believing it bound the vertex its
+    // operation actually reached.
+    std::array<std::byte, wire::path_ref_wire_bytes(1)> mint_buf{};
+    std::span<const std::byte> mint;
+    if (req.mint_request) {
+        if (const std::optional<vertex_slot_t> slot = graph.vertex_slot(v)) {
+            const wire::path_ref_element_t e{.index = slot->index, .generation = slot->generation};
+            if (wire::emit_path_ref_into(mint_buf,
+                                         std::span<const wire::path_ref_element_t>(&e, 1)))
+                mint = std::span<const std::byte>(mint_buf);
+        }
+    }
+
+    switch (req.op) {
+        case fwd_op_t::READ: {
+            if (has_field && is_subscribers_array(field)) {
+                result_t<std::vector<view_t>> subs = graph.read_subscribers(v, inbound_link);
+                if (!subs) return assemble_error(reply_dst_wire, reply_src_wire, subs.error());
+                std::size_t sub_len = 0;
+                for (const view_t& s : *subs) sub_len += s.length;
+                // PL=1 wrapper (POINT) whose children are the slot SUBSCRIBER views,
+                // roped on zero-copy. POINT is the structured introspection-result
+                // container already used for :schema and vertex enumeration.
+                std::array<std::byte, 6> wrapper;
+                const bool wll = sub_len > 0xFFFFu;
+                emit_cursor_t wout{wrapper.data()};
+                wout.struct_header(type_t::POINT, wll, sub_len);
+                return or_backpressure(
+                    assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT,
+                             std::span<const std::byte>(wrapper.data(), wll ? 6u : 4u), *subs,
+                             sub_len, mint),
+                    reply_dst_wire, reply_src_wire);
+            }
+            // A `:field` read composes a value and is rope-valued; a plain value read hands
+            // back a REFERENCE to the published one. Both feed the same reply assembly, which
+            // only ever reads the rope, so bind whichever arrived without copying it.
+            result_t<value_ref_t> r = has_field ? [&] {
+                auto composed = graph.read(v, field, inbound_link);
+                return composed ? result_t<value_ref_t>{value_ref_t::composed(std::move(*composed))}
+                                : result_t<value_ref_t>{std::unexpected(composed.error())};
+            }()
+                                                : graph.read(v, inbound_link);
+            if (!r) return assemble_error(reply_dst_wire, reply_src_wire, r.error());
+            // The composed-root case: graph.read may SUCCEED (a folded ~hundreds-of-links
+            // snapshot) yet the reply's own link-table reserve fail on the fragmented heap.
+            // or_backpressure keeps that from becoming a silent drop (the dead-web-ui bug).
+            return or_backpressure(assemble_result_rope(reply_dst_wire, reply_src_wire, **r, mint),
+                                   reply_dst_wire, reply_src_wire);
+        }
+        case fwd_op_t::WRITE: {
+            if (!req.payload.has_value())
+                return assemble_error(reply_dst_wire, reply_src_wire, status_t::TYPE_MISMATCH);
+            const N& payload_node = *req.payload;
+
+            // A remote subscribe — a `:subscribers[]` APPEND that arrived over a
+            // transport (inbound_link set) carrying a SUBSCRIBER — binds a REMOTE
+            // subscriber instead of a local fan-out edge (#136); its stored views
+            // (source SUBSCRIBER + return route) are subscription-scoped and keep
+            // the ADR-0041 one-copy behavior unconditionally (ADR-0042 §3 applies
+            // to the value store only).
+            const bool remote_sub = !inbound_link.empty() && has_field &&
+                                    is_subscribe_append(field) &&
+                                    payload_node.type() == type_t::SUBSCRIBER;
+
+            // The remote-subscribe binding: its stored views (source SUBSCRIBER + the
+            // accumulated return route) are subscription-scoped and keep the ADR-0041 §2
+            // one-copy behavior unconditionally (ADR-0042 §3 pinning applies to the value
+            // store only). The slot retains `src` (copied once, trailer-sliced) + the
+            // inbound link so the producer fan-out delivers FWD{WRITE}/COMPACT home. A
+            // wire TLV is never empty, so an empty copy is exactly an allocation failure
+            // ⇒ BACKPRESSURE.
+            if (remote_sub) {
+                const view_t sub_value = own_tlv(payload_node, flat);
+                if (sub_value.empty())
+                    return assemble_error(reply_dst_wire, reply_src_wire, status_t::BACKPRESSURE);
+                // The ONE route copy of the subscription's life (ADR-0041 §2), into a
+                // refcounted segment — every later delivery clones the refcount.
+                const view_t return_route = own_tlv(req.src, flat);
+                if (return_route.empty())
+                    return assemble_error(reply_dst_wire, reply_src_wire, status_t::BACKPRESSURE);
+                // ADR-0049: the wire append enters the graph's single admission door
+                // (subscribe_wire → admit_subscriber) — the SUBSCRIBER TLV is parsed
+                // ONCE there (delivery_compact included), so no parallel parse here.
+                result_t<void> w =
+                    graph.subscribe_wire(v, sub_value, return_route, std::string(inbound_link));
+                if (!w) return assemble_error(reply_dst_wire, reply_src_wire, w.error());
+                return or_backpressure(
+                    assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT, {}, {}, 0, mint),
+                    reply_dst_wire, reply_src_wire);  // OK, empty payload
+            }
+
+            // The stored written value: ADR-0041 §2 one ownership copy, trailer-sliced by
+            // construction (§4 — an arriving CRC/TS trailer is NOT stored; stored TLVs are
+            // trailer-less at rest, ADR-0035) — or, when RFC-0022 §3.D's amplification ratio
+            // says the payload dominates the segment it would pin, an ADR-0042 §3 pinned
+            // subrope of the frame (refcount, zero copy; multi-link on the rope tier). An
+            // empty rope is an allocation failure.
+            //
+            // K comes from the vertex's owner-declared u32 when set and from
+            // `config_t::kPinPayloadRatio` otherwise. The per-vertex override exists ONLY so
+            // RFC-0022 §6's arms rotate inside ONE process: measuring them as separate
+            // binaries is what produced the 2.8x swing on identical code that the standing
+            // interleave rule was written against. §3.D's landing form is the config constant
+            // alone, and the sentinel is both defaults — so this branch changes no observable
+            // behaviour by itself. Whether the override survives at all is a live maintainer
+            // question (#774); the name now at least says what the value is.
+            const std::uint32_t pin_k = graph.pin_payload_ratio(v) != 0
+                                            ? graph.pin_payload_ratio(v)
+                                            : tr::graph::kPinPayloadRatio;
+            const rope_t value = own_or_ref_tlv(payload_node, frame_view, pin_k, flat);
+            if (value.total_length() == 0)
+                return assemble_error(reply_dst_wire, reply_src_wire, status_t::BACKPRESSURE);
+
+            result_t<void> w =
+                graph.write(v, has_field ? field : field_path_t{}, value, inbound_link);
+            if (!w) return assemble_error(reply_dst_wire, reply_src_wire, w.error());
+            return or_backpressure(
+                assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT, {}, {}, 0, mint),
+                reply_dst_wire, reply_src_wire);  // OK, empty payload
+        }
+        case fwd_op_t::AWAIT: {
+            // A FIELD selector has no await surface, and silently dropping it was a lie
+            // (#585). The selector is decoded and validated above and was then discarded,
+            // so `await <v>:<anything>` behaved exactly like `await <v>` — a peer asking
+            // to be woken on one facet was instead woken on the whole vertex, or told
+            // `tr::flow::timeout`, which is indistinguishable from a quiet link.
+            //
+            // RFC-0010 §C settles the direction rather than leaving it open: a field write
+            // "does NOT wake `await` on the vertex, does not advance the vertex's write
+            // sequence, and does not propagate ... `await` on a single field is
+            // deliberately unsupported." Nothing can ever fire such a wait, so answering
+            // it is the ENOTTY of an unsupported ioctl -- SCHEMA_NOT_FOUND, the same code
+            // READ and WRITE already return for a facet they do not serve (CONTEXT.md
+            // §Field-write). This holds for EVERY selector, including `:subscribers` and
+            // `:acl`, which read and write fine: the field exists, the await does not.
+            //
+            // `graph_t::await` takes no field parameter at all, so the local API never
+            // offered this -- only the wire path decoded a selector it could not honour.
+            if (has_field)
+                return assemble_error(reply_dst_wire, reply_src_wire, status_t::SCHEMA_NOT_FOUND);
+            const std::chrono::nanoseconds timeout =
+                req.has_await_timeout ? std::chrono::nanoseconds(req.await_timeout)
+                                      : kDefaultAwaitTimeout;
+            result_t<value_ref_t> r = graph.await(v, timeout, inbound_link);
+            if (!r)
+                return assemble_error(reply_dst_wire, reply_src_wire,
+                                      r.error());  // TIMEOUT => tr::flow::timeout
+            return or_backpressure(assemble_result_rope(reply_dst_wire, reply_src_wire, **r, mint),
+                                   reply_dst_wire, reply_src_wire);
+        }
+        case fwd_op_t::REPLY:
+            break;  // unreachable — handled above
+    }
+    return std::unexpected(status_t::INVALID_PATH);
+}
+
+/**
  * @brief The ONE templated resolve walk (ADR-0053 §7): apply an @p N-read request FWD against @p
  *        graph and build the FWD{REPLY} rope.
  *
@@ -725,6 +966,38 @@ template <class N>
             return reply_error(status_t::INVALID_PATH);
     }
 
+    // The BOUND form (RFC-0024 §5). A `PATH_REF` dst is not a key and is not resolved — it is
+    // DEREFERENCED. The grammar has already settled the body's shape; what is left is the
+    // §5.1 check (bounds, generation, then the op's own per-operation ACL at the dereferenced
+    // vertex) and the §5.3 rule that governs every way it can fail.
+    //
+    // **Failure is a DROP, never a mis-route.** Each `unexpected` below leaves the frame
+    // unforwarded and unapplied, which is what the router turns a by-value error into — no
+    // re-resolution, no nearest match, no retry against a different vertex. The origin still
+    // holds the canonical path the binding was minted from, and re-resolving canonically and
+    // re-minting is its recovery, not this node's. (§5.3's NACK carrying the failing hop
+    // index is deferred with the forwarder branch: §9.2's spelling question is still open,
+    // and a drop is already the conformant behaviour — the NACK only makes it faster.)
+    if (req.dst_bound) {
+        if (!req.dst.spans_intact()) return std::unexpected(status_t::BACKPRESSURE);
+        const std::span<const std::byte> elems = req.dst.body();
+        // Exactly one element reaches a terminus: each hop consumes element 0 and forwards the
+        // remainder (§4.1), so what is left here is the last element — this node's own
+        // reference to the target vertex. A longer residual means this node is a FORWARDER for
+        // a bound path, which this node does not do; an empty one is a route with no hops,
+        // which the codec deliberately admits and the router refuses (§9.4 `ref-empty`).
+        if (wire::path_ref_element_count(elems.size()) != 1)
+            return std::unexpected(status_t::INVALID_PATH);
+        const wire::path_ref_element_t e = wire::path_ref_element_at(elems, 0);
+        const std::optional<vertex_handle_t> bound = graph.deref_vertex_slot(e.index, e.generation);
+        if (!bound) return std::unexpected(status_t::NOT_FOUND);
+        // No write-creates on a bound dst, deliberately: `ensure_vertex` mkdir-p's an ADDRESS,
+        // and an element is not one. A vref names a vertex that existed when it was minted, so
+        // "it is not there any more" is exactly the stale case the deref just refused.
+        return apply_op(graph, req, *bound, inbound_link, frame_view, flat, reply_dst_wire,
+                        reply_src_wire, field, has_field);
+    }
+
     // dst resolution is the router's PATH-keyed dispatch — span-aliased for a
     // canonical PATH (ADR-0041 §3: the frame IS the key). Local-only: a dst
     // naming a transport child / unknown path is not local => ERROR(NOT_FOUND).
@@ -759,149 +1032,8 @@ template <class N>
             return assemble_error(reply_dst_wire, reply_src_wire, status_t::NOT_FOUND);
         }
     }
-    const vertex_handle_t v = *found;
-
-    switch (req.op) {
-        case fwd_op_t::READ: {
-            if (has_field && is_subscribers_array(field)) {
-                result_t<std::vector<view_t>> subs = graph.read_subscribers(v, inbound_link);
-                if (!subs) return assemble_error(reply_dst_wire, reply_src_wire, subs.error());
-                std::size_t sub_len = 0;
-                for (const view_t& s : *subs) sub_len += s.length;
-                // PL=1 wrapper (POINT) whose children are the slot SUBSCRIBER views,
-                // roped on zero-copy. POINT is the structured introspection-result
-                // container already used for :schema and vertex enumeration.
-                std::array<std::byte, 6> wrapper;
-                const bool wll = sub_len > 0xFFFFu;
-                emit_cursor_t wout{wrapper.data()};
-                wout.struct_header(type_t::POINT, wll, sub_len);
-                return or_backpressure(
-                    assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT,
-                             std::span<const std::byte>(wrapper.data(), wll ? 6u : 4u), *subs,
-                             sub_len),
-                    reply_dst_wire, reply_src_wire);
-            }
-            // A `:field` read composes a value and is rope-valued; a plain value read hands
-            // back a REFERENCE to the published one. Both feed the same reply assembly, which
-            // only ever reads the rope, so bind whichever arrived without copying it.
-            result_t<value_ref_t> r = has_field ? [&] {
-                auto composed = graph.read(v, field, inbound_link);
-                return composed ? result_t<value_ref_t>{value_ref_t::composed(std::move(*composed))}
-                                : result_t<value_ref_t>{std::unexpected(composed.error())};
-            }()
-                                                : graph.read(v, inbound_link);
-            if (!r) return assemble_error(reply_dst_wire, reply_src_wire, r.error());
-            // The composed-root case: graph.read may SUCCEED (a folded ~hundreds-of-links
-            // snapshot) yet the reply's own link-table reserve fail on the fragmented heap.
-            // or_backpressure keeps that from becoming a silent drop (the dead-web-ui bug).
-            return or_backpressure(assemble_result_rope(reply_dst_wire, reply_src_wire, **r),
-                                   reply_dst_wire, reply_src_wire);
-        }
-        case fwd_op_t::WRITE: {
-            if (!req.payload.has_value())
-                return assemble_error(reply_dst_wire, reply_src_wire, status_t::TYPE_MISMATCH);
-            const N& payload_node = *req.payload;
-
-            // A remote subscribe — a `:subscribers[]` APPEND that arrived over a
-            // transport (inbound_link set) carrying a SUBSCRIBER — binds a REMOTE
-            // subscriber instead of a local fan-out edge (#136); its stored views
-            // (source SUBSCRIBER + return route) are subscription-scoped and keep
-            // the ADR-0041 one-copy behavior unconditionally (ADR-0042 §3 applies
-            // to the value store only).
-            const bool remote_sub = !inbound_link.empty() && has_field &&
-                                    is_subscribe_append(field) &&
-                                    payload_node.type() == type_t::SUBSCRIBER;
-
-            // The remote-subscribe binding: its stored views (source SUBSCRIBER + the
-            // accumulated return route) are subscription-scoped and keep the ADR-0041 §2
-            // one-copy behavior unconditionally (ADR-0042 §3 pinning applies to the value
-            // store only). The slot retains `src` (copied once, trailer-sliced) + the
-            // inbound link so the producer fan-out delivers FWD{WRITE}/COMPACT home. A
-            // wire TLV is never empty, so an empty copy is exactly an allocation failure
-            // ⇒ BACKPRESSURE.
-            if (remote_sub) {
-                const view_t sub_value = own_tlv(payload_node, flat);
-                if (sub_value.empty())
-                    return assemble_error(reply_dst_wire, reply_src_wire, status_t::BACKPRESSURE);
-                // The ONE route copy of the subscription's life (ADR-0041 §2), into a
-                // refcounted segment — every later delivery clones the refcount.
-                const view_t return_route = own_tlv(req.src, flat);
-                if (return_route.empty())
-                    return assemble_error(reply_dst_wire, reply_src_wire, status_t::BACKPRESSURE);
-                // ADR-0049: the wire append enters the graph's single admission door
-                // (subscribe_wire → admit_subscriber) — the SUBSCRIBER TLV is parsed
-                // ONCE there (delivery_compact included), so no parallel parse here.
-                result_t<void> w =
-                    graph.subscribe_wire(v, sub_value, return_route, std::string(inbound_link));
-                if (!w) return assemble_error(reply_dst_wire, reply_src_wire, w.error());
-                return or_backpressure(
-                    assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT, {}, {}, 0),
-                    reply_dst_wire, reply_src_wire);  // OK, empty payload
-            }
-
-            // The stored written value: ADR-0041 §2 one ownership copy, trailer-sliced by
-            // construction (§4 — an arriving CRC/TS trailer is NOT stored; stored TLVs are
-            // trailer-less at rest, ADR-0035) — or, when RFC-0022 §3.D's amplification ratio
-            // says the payload dominates the segment it would pin, an ADR-0042 §3 pinned
-            // subrope of the frame (refcount, zero copy; multi-link on the rope tier). An
-            // empty rope is an allocation failure.
-            //
-            // K comes from the vertex's owner-declared u32 when set and from
-            // `config_t::kPinPayloadRatio` otherwise. The per-vertex override exists ONLY so
-            // RFC-0022 §6's arms rotate inside ONE process: measuring them as separate
-            // binaries is what produced the 2.8x swing on identical code that the standing
-            // interleave rule was written against. §3.D's landing form is the config constant
-            // alone, and the sentinel is both defaults — so this branch changes no observable
-            // behaviour by itself. Whether the override survives at all is a live maintainer
-            // question (#774); the name now at least says what the value is.
-            const std::uint32_t pin_k = graph.pin_payload_ratio(v) != 0
-                                            ? graph.pin_payload_ratio(v)
-                                            : tr::graph::kPinPayloadRatio;
-            const rope_t value = own_or_ref_tlv(payload_node, frame_view, pin_k, flat);
-            if (value.total_length() == 0)
-                return assemble_error(reply_dst_wire, reply_src_wire, status_t::BACKPRESSURE);
-
-            result_t<void> w =
-                graph.write(v, has_field ? field : field_path_t{}, value, inbound_link);
-            if (!w) return assemble_error(reply_dst_wire, reply_src_wire, w.error());
-            return or_backpressure(
-                assemble(reply_dst_wire, reply_src_wire, reply_kind_t::RESULT, {}, {}, 0),
-                reply_dst_wire, reply_src_wire);  // OK, empty payload
-        }
-        case fwd_op_t::AWAIT: {
-            // A FIELD selector has no await surface, and silently dropping it was a lie
-            // (#585). The selector is decoded and validated above and was then discarded,
-            // so `await <v>:<anything>` behaved exactly like `await <v>` — a peer asking
-            // to be woken on one facet was instead woken on the whole vertex, or told
-            // `tr::flow::timeout`, which is indistinguishable from a quiet link.
-            //
-            // RFC-0010 §C settles the direction rather than leaving it open: a field write
-            // "does NOT wake `await` on the vertex, does not advance the vertex's write
-            // sequence, and does not propagate ... `await` on a single field is
-            // deliberately unsupported." Nothing can ever fire such a wait, so answering
-            // it is the ENOTTY of an unsupported ioctl -- SCHEMA_NOT_FOUND, the same code
-            // READ and WRITE already return for a facet they do not serve (CONTEXT.md
-            // §Field-write). This holds for EVERY selector, including `:subscribers` and
-            // `:acl`, which read and write fine: the field exists, the await does not.
-            //
-            // `graph_t::await` takes no field parameter at all, so the local API never
-            // offered this -- only the wire path decoded a selector it could not honour.
-            if (has_field)
-                return assemble_error(reply_dst_wire, reply_src_wire, status_t::SCHEMA_NOT_FOUND);
-            const std::chrono::nanoseconds timeout =
-                req.has_await_timeout ? std::chrono::nanoseconds(req.await_timeout)
-                                      : kDefaultAwaitTimeout;
-            result_t<value_ref_t> r = graph.await(v, timeout, inbound_link);
-            if (!r)
-                return assemble_error(reply_dst_wire, reply_src_wire,
-                                      r.error());  // TIMEOUT => tr::flow::timeout
-            return or_backpressure(assemble_result_rope(reply_dst_wire, reply_src_wire, **r),
-                                   reply_dst_wire, reply_src_wire);
-        }
-        case fwd_op_t::REPLY:
-            break;  // unreachable — handled above
-    }
-    return std::unexpected(status_t::INVALID_PATH);
+    return apply_op(graph, req, *found, inbound_link, frame_view, flat, reply_dst_wire,
+                    reply_src_wire, field, has_field);
 }
 
 }  // namespace

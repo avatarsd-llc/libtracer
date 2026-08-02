@@ -411,7 +411,12 @@ template <class Cursor>
     if (!fwd_h || fwd_h->type != wire::type_t::FWD || !fwd_h->opt.pl) return std::nullopt;
     const auto op_h = read_fwd_header(cur, fwd_h->body_off);
     if (!op_h || op_h->type != wire::type_t::VALUE || op_h->body_len == 0) return std::nullopt;
-    return static_cast<graph::fwd_op_t>(cur.byte_at(op_h->body_off));
+    // MASKED, never switched on raw (RFC-0024 §9.3): bits 7-6 are flags, so an op byte
+    // carrying a bind request must peek as the plain opcode it also is. Switching on the raw
+    // byte here would make a mint-flagged READ an unknown opcode at every forwarder on the
+    // route — a clean error, but an error, and the whole point of spending an existing byte's
+    // spare bits is that a peer which ignores the flag still routes the operation.
+    return static_cast<graph::fwd_op_t>(cur.byte_at(op_h->body_off) & graph::kFwdOpcodeMask);
 }
 
 /**
@@ -749,8 +754,10 @@ template <class Cursor>
         dst_end = dst_h->body_off + dst_h->body_len;
         pos += dst_h->total;
     }
+    // Masked (RFC-0024 §9.3) — the flag bits say nothing about which op this is.
     const bool is_reply =
-        static_cast<graph::fwd_op_t>(cur.byte_at(op_body_off)) == graph::fwd_op_t::REPLY;
+        static_cast<graph::fwd_op_t>(cur.byte_at(op_body_off) & graph::kFwdOpcodeMask) ==
+        graph::fwd_op_t::REPLY;
 
     fwd_rebuild_t r;
     if (pos < body_end) {

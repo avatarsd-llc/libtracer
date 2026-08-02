@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0024 |
 | **Title** | Bound paths: node-scoped vertex-ref source routing |
-| **Status** | **accepted** (2026-08-03, maintainer-ratified, comment window waived). The whole document is ratified; it lands car by car. §4 (the `PATH_REF` wire form) is the **incorporated** part — `docs/spec/v1.md` §3 and `docs/reference/05-protocol-tlvs.md` §`0x14` cite it normatively as of the codec car ([#809](https://github.com/avatarsd-llc/libtracer/issues/809)). §5-§7 (validation, ACL re-check, minting and binding) are ratified but not yet incorporated: no normative text cites them until the routing car lands, so they are the design of record, not yet a peer obligation. |
+| **Status** | **accepted** (2026-08-03, maintainer-ratified, comment window waived). The whole document is ratified; it lands car by car. **§4-§7** are the **incorporated** part as of the routing car (2026-08-03): `docs/spec/v1.md` §3 and `docs/reference/05-protocol-tlvs.md` §`0x14` cite the wire form (§4) and the routing semantics (§5-§7) normatively, `docs/reference/03-addressing.md` carries the two-forms rule, and `docs/reference/13-network-formation.md` the bound diameter ([#809](https://github.com/avatarsd-llc/libtracer/issues/809)). Two clauses are ratified and NOT yet incorporated, because no implementation stands behind them: the **forwarder's** element-consuming hop (§4.1, §5.1 step 4 — a bound `dst` terminates locally today, and a residual longer than one element is dropped rather than guessed at) and the §5.3 **NACK** carrying the failing hop index, whose spelling §9.2 still leaves open. A drop is already the conformant behaviour without the NACK; the NACK only makes the origin's recovery faster. |
 | **Author(s)** | AvatarSD (maintainer) — written up from the 2026-08-02 grill, in which the design below was **ruled**, not proposed |
 | **Created** | 2026-08-02 |
 | **Comment window** | waived by default while solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke explicitly if outside input is wanted. Verified: `docs/implementations.md:13` still reads `_(none yet)_`, so the waiver's revert trigger has not fired. |
@@ -50,8 +50,8 @@ This RFC adds a **second, optional normative path form** and changes nothing abo
   **derived** in §4.4, in the discipline [RFC-0023](0023-path-segment-cap-repriced-32-to-255.md)
   set: *from the wire's own widths and the RAM record, not chosen.*
 - Validation is **existing machinery**: a bounds check into the pinned, pointer-stable,
-  insert-only vertex map (`core/include/libtracer/graph.hpp:56`) plus a compare against the
-  validate-on-use stamps that already exist (`core/include/libtracer/graph.hpp:275`,
+  insert-only vertex map (`core/include/libtracer/graph.hpp:57`) plus a compare against the
+  validate-on-use stamps that already exist (`core/include/libtracer/graph.hpp:294`,
   `core/include/libtracer/child_registry.hpp:266-268`). A failed validation **never mis-routes**:
   drop, NACK with the failing hop index, and the origin re-resolves canonically and re-mints.
 - Binding is minted **in-band, in the reply of an ordinary canonical op**, with **zero added
@@ -276,7 +276,7 @@ vertices can physically exist**, so the derivation is a RAM floor:
 - The smallest vertex costs `sizeof(vertex_t)`, gated at **80 B on rv32**
   (`core/include/libtracer/config.hpp:165`) and **120 B on a 64-bit host**
   (`core/include/libtracer/config.hpp:153`), enforced at compile time
-  (`core/include/libtracer/vertex.hpp:2452`, `:2455`).
+  (`core/include/libtracer/vertex.hpp:2529`, `:2532`).
   [ADR-0070](../../adr/0070-configuration-is-a-named-traits-type.md):40 records that rv32 sits at
   *exactly* 80 with zero headroom — so 80 is a floor, not a budget.
 - Add the index slot itself: one pointer, 4 B on rv32, 8 B on a host (§6.4).
@@ -303,7 +303,7 @@ The generation is the **anti-mis-route guard** — the only thing standing betwe
 and a delivery into whatever now occupies that slot. Its width is not a space decision.
 
 1. **It is the width of the stamp that already exists.** `graph_t::retire_generation` returns
-   `std::uint32_t` (`core/include/libtracer/graph.hpp:275`); `child_registry_t::mount_generation`
+   `std::uint32_t` (`core/include/libtracer/graph.hpp:294`); `child_registry_t::mount_generation`
    likewise (`core/include/libtracer/child_registry.hpp:285`). A narrower wire field would be a
    **truncating** conversion of a live counter — aliasing every 2^width retires by construction,
    with no code anywhere doing anything wrong.
@@ -346,7 +346,7 @@ Little-endian, both fields. This is not a choice: `docs/reference/01-data-format
   forge primitive handed to whoever can put bytes on a link. An index is checkable against a
   cardinality the receiver knows. The reference implementation already refuses this shape
   internally, for the weaker in-process case: `vertex_handle_t` "exposes no `operator*` or
-  raw-pointer accessor" (`core/include/libtracer/graph.hpp:54-55`); putting on the wire what is
+  raw-pointer accessor" (`core/include/libtracer/graph.hpp:55-56`); putting on the wire what is
   not exposed to a local caller is not arguable. It is also 8 B on a host where 4 suffices.
 - **A globally unique vertex id (UUID / node-key + local id).** Rejected as a *different design*:
   it would need a mint authority, a resolution table at every hop, and a global namespace — three
@@ -360,11 +360,11 @@ Little-endian, both fields. This is not a choice: `docs/reference/01-data-format
 On receipt of a `PATH_REF`-addressed op, a host reads element 0 and:
 
 1. **Bounds-check** `index` against its vertex-map cardinality. The map is *pinned,
-   pointer-stable, insert-only* — `core/include/libtracer/graph.hpp:56`, and ADR-0057's
-   never-freed rule (`graph.hpp:109`) — so an in-range index always names a live allocation and
+   pointer-stable, insert-only* — `core/include/libtracer/graph.hpp:57`, and ADR-0057's
+   never-freed rule (`graph.hpp:110`) — so an in-range index always names a live allocation and
    the deref itself cannot fault. Out of range ⇒ **reject** (§5.3).
 2. **Compare the generation** against `graph_t::retire_generation(vh)`
-   (`core/include/libtracer/graph.hpp:275`). Mismatch ⇒ **reject**. That doc comment already
+   (`core/include/libtracer/graph.hpp:294`). Mismatch ⇒ **reject**. That doc comment already
    states the contract this RFC leans on verbatim: a holder "records this alongside it and
    re-reads it before use: a mismatch means the path was retired (and possibly re-created for a
    DIFFERENT owner) since the resolution, so the cached answer must be discarded rather than
@@ -375,7 +375,7 @@ On receipt of a `PATH_REF`-addressed op, a host reads element 0 and:
 4. Egress (or, at the terminus, apply the op).
 
 Generations only ever move **forward** (`retire_generation` is bumped under retirement's own
-ordering, `graph.hpp:271`), so a stale element can only ever compare *lower*. It never becomes
+ordering, `graph.hpp:290`), so a stale element can only ever compare *lower*. It never becomes
 valid again by waiting.
 
 ### 5.2 The three stamps, and which one the wire carries
@@ -386,7 +386,7 @@ slot tombstone (a departed link)". All three remain in force under this RFC; the
 
 | stamp | catches | where it lives under a bound path |
 | --- | --- | --- |
-| `retire_generation` (`graph.hpp:275`) | a retired-and-revived vertex | **on the wire** — the element's second u32 |
+| `retire_generation` (`graph.hpp:294`) | a retired-and-revived vertex | **on the wire** — the element's second u32 |
 | slot tombstone | a departed link | **node-local** — the egress slot the deref'd connection vertex resolves to is checked as it is used today; zero wire bytes |
 | `mount_generation` (`child_registry.hpp:285`) | the *split point* moving — a `dst` prefix starting or stopping resolving to a different mount (#765) | **node-local, and structurally not applicable to the deref**: a bound element names a connection vertex *directly*. There is no cached prefix split to go stale because there is no prefix. The stamp still guards the **mint** (§6.2) and every canonical-form op, unchanged |
 
@@ -431,7 +431,7 @@ as requirements, because a route form that skipped a gate would be a capability,
 **Normative.** A host MUST NOT mint a vref for a vertex the requesting caller could not have
 reached canonically in the same operation. Since a mint rides an ordinary canonical op (§7), this
 is automatic: the op already ran `acl_allows` at every gate on its way through
-(`core/src/graph.cpp:655`), and a denial is `PERMISSION_DENIED` before any vref is produced.
+(`core/src/graph.cpp:675`), and a denial is `PERMISSION_DENIED` before any vref is produced.
 
 **The anti-enumeration property, stated:** because denial happens at resolve time, **no vref is
 ever minted for a destination an ancestor ACL hides**. Probing a bound-path mint therefore yields
@@ -442,24 +442,24 @@ handle to it*. A bound path cannot be used to discover a namespace its holder ca
 
 **Normative.** Every operation arriving on a bound path MUST evaluate `acl_allows` at the
 dereferenced vertex, for the operation's own right, exactly as the canonical form does. A
-generation match authorizes nothing (`graph.hpp:271-273`).
+generation match authorizes nothing (`graph.hpp:290-292`).
 
-The evaluation is the shipped one: `graph_t::acl_allows` (`core/src/graph.cpp:655`) walks to the
+The evaluation is the shipped one: `graph_t::acl_allows` (`core/src/graph.cpp:675`) walks to the
 nearest **bearing** ancestor lock-free and evaluates that vertex's **cached effective-ACE merge**
 through the `kAceInherit` projection —
 [ADR-0050](../../adr/0050-acl-pure-policy-cached-effective-ace-merge.md), one pre-merged list, no
-per-operation ancestor rebuild (`graph.cpp:673-682`).
+per-operation ancestor rebuild (`graph.cpp:693-702`).
 
 **Revocation is immediate; there is no snapshot to go stale.** An `:acl` write marks the subtree
-dirty (`graph_t::mark_subtree_acl_dirty`, `core/src/graph.cpp:705`) and the next check rebuilds.
+dirty (`graph_t::mark_subtree_acl_dirty`, `core/src/graph.cpp:725`) and the next check rebuilds.
 A bound path holds no ACL state of any kind, so a revoked right takes effect on the very next
-operation over an already-minted binding — the property `graph.hpp:271-273` demands and the reason
+operation over an already-minted binding — the property `graph.hpp:290-292` demands and the reason
 this RFC stores nothing authorization-shaped.
 
 ### 6.3 Equivalence by construction — and a vector pair anyway
 
 Path-form operations check `acl_allows(target)` and nothing else: `graph_t::read`
-(`core/src/graph.cpp:713`), `graph_t::write_impl` (`core/src/graph.cpp:949`). A bound-form
+(`core/src/graph.cpp:733`), `graph_t::write_impl` (`core/src/graph.cpp:969`). A bound-form
 operation dereferences to the same `vertex_t*` and calls the same function with the same right
 and the same caller context, so the outcomes are **identical by construction** — there is no
 second policy to keep in sync, which is the property that makes this section short.
@@ -475,16 +475,23 @@ two silent misroutes shipped because no test used the production wiring.
 
 This RFC adds **no wire registry and no per-hop route table**. It does require one node-local
 structure that does not exist today, and the RFC would be dishonest not to name it:
-`graph.hpp:56`'s "vertex map" is *described* as a map but *stored* as the ADR-0057 composite
-vertex tree (`core/include/libtracer/graph.hpp:1074-1085`) — a tree of non-moving `unique_ptr`
+`graph.hpp:57`'s "vertex map" is *described* as a map but *stored* as the ADR-0057 composite
+vertex tree (`core/include/libtracer/graph.hpp:1109-1120`) — a tree of non-moving `unique_ptr`
 allocations with no dense index. A **dense, append-only `vector<vertex_t*>`**, one slot appended
 per registration, is therefore required to give an index meaning.
 
 Its cost and its properties:
 
-- **4 B/vertex on rv32, 8 B on a host** — the figure already used in §4.4's floor.
+- **4 B/vertex on rv32, 8 B on a host** — the figure already used in §4.4's floor. **Erratum
+  (routing car):** "`vector<vertex_t*>`" above names the *shape* — dense, append-only, O(1) by
+  index — not the container. A geometrically-growing `std::vector` holds up to twice the
+  pointers it needs between doublings, and the reference core measured **15 B/vertex** that way
+  on the 512-vertex heap probe, nearly double the figure this clause prices. It stores the index
+  in fixed blocks (`std::deque`) instead, which measures **8 B/vertex** — the priced pointer and
+  no unpriced headroom — while keeping the index O(1) and its elements non-moving. The cost model
+  and the wire surface are unchanged; only the sentence naming a container was wrong.
 - It is **append-only**, which the registration path already is ("vertices are added, never
-  erased", `graph.hpp:1077`), so it introduces no new lifetime rule and no new invalidation event.
+  erased", `graph.hpp:1112`), so it introduces no new lifetime rule and no new invalidation event.
 - It is **node-local** and unobservable on the wire; a peer never learns another node's
   cardinality.
 - It is **not** a route table: its size tracks the graph, not the traffic, so it does not
@@ -659,9 +666,12 @@ Spec edits land **after acceptance, in a follow-up PR**; the RFC's own PR added 
 document and the two glossary entries (§11). Acceptance has since happened, and the edits land
 car by car — a spec bullet is incorporated in the same train as the code that honours it, so no
 normative text ever cites a clause with no implementation behind it. The codec car landed §9.1's
-`0x14` registry bullet and its `v1.md` §3 incorporation, and those two alone. The `FWD` bullet,
-the `03-addressing.md` two-forms text, the diameter row and the RFC-0004 §B amendment land with
-the routing car, which is what makes their clauses observable.
+`0x14` registry bullet and its `v1.md` §3 incorporation, and those two alone. The routing car
+landed the rest: the `FWD` bullet (the `op & 0x3F` masking rule and the bind-request flag, plus
+`dst`/`src` MAY be a `PATH_REF`), the `05` §routing-semantics text that `v1.md` §3 now
+incorporates for §5-§7, the `03-addressing.md` two-forms section and the
+`13-network-formation.md` diameter row — each in the same train as the code that honours it,
+which is what makes their clauses observable.
 
 ### 9.1 New normative text
 
@@ -748,7 +758,7 @@ Wireshark dissector (`tools/wireshark/libtracer.lua`) follow. Public-header chan
 - **[RFC-0019](0019-path-depth-bounded-by-bytes.md) / [RFC-0023](0023-path-segment-cap-repriced-32-to-255.md)
   byte bounds** — `PATH_REF` is bounded by **hop count**, not segment count, and derives its own
   bound in §4.3 (normative ≤ 255 elements / 2040 B; reachable ≤ 69 today, ≤ 171 packed).
-  `kMaxSegments` and `kMaxPathBytes` (`core/include/libtracer/path.hpp:34`, `:32`) are untouched
+  `kMaxSegments` and `kMaxPathBytes` (`core/include/libtracer/path.hpp:35`, `:33`) are untouched
   and continue to govern the canonical form alone.
 
 ## 11. `CONTEXT.md`

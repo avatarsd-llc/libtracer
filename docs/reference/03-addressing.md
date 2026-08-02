@@ -325,6 +325,25 @@ UTF-8 normalization: implementations MAY normalize path bytes to NFC at the pars
 
 ---
 
+## The two path forms
+
+An address has two normative spellings, and everything above this heading describes the first.
+
+| | **Canonical** `PATH` (`0x06`) | **Bound** `PATH_REF` (`0x14`) |
+| --- | --- | --- |
+| what it spells | names, from the caller's own root | resolutions — one element per **host** on the route |
+| who can read it | any peer, including one that has never spoken to you | only the host that minted each element |
+| what it costs | `4 + len` per segment, and a hop costs a whole mount run | `4 + 8H` |
+| when it works | always | until the vertex it names is retired |
+
+**Canonical is the mint key and the fallback.** A bound path is derived from a canonical one and never from anything else, which is what makes three things true at once: no address is reachable *only* in bound form; a failed bound path always has somewhere to fall back to; and a bound path can be re-minted from the address its holder still has. Canonical support is therefore mandatory and bound support is optional — to emit and to accept alike.
+
+Everything this document specifies — the segment grammar, the 64-byte name limit, the 255-segment and 1024-byte caps, canonicalization, the reserved characters — governs the **canonical** form alone. A `PATH_REF` carries no names, so none of it applies to one; its own bound is a host count, derived in [RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §4.3. The byte layout and the routing semantics are in [05-protocol-tlvs.md](05-protocol-tlvs.md) §`0x14`.
+
+A bound element is an **address, never a capability**: an operation arriving on one is authorized by the same per-operation access check at the target vertex that the canonical form performs, so a bound path can reach nothing its holder could not reach by name.
+
+---
+
 ## Static path handles (MCU-friendly addressing)
 
 > **Normative reference**: [../spec/v1.md](../spec/v1.md) §3.1.

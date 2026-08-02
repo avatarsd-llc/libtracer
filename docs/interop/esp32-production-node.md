@@ -62,7 +62,7 @@ std::pmr::synchronized_pool_resource shared{&arena};
 
 Those are the three injection points of `graph_t`'s constructor — the pmr resource,
 the value backend and the failable control source
-(`core/include/libtracer/graph.hpp:187-189`) — and the matching three of
+(`core/include/libtracer/graph.hpp:206-208`) — and the matching three of
 `fwd_router_t`: the pmr resource, the failable `rx` source and the `flat` byte backend
 its rope flattens draw from (`core/include/libtracer/fwd_router.hpp:152-154`). The full set of
 build-time and injected bounds is catalogued in
@@ -316,8 +316,8 @@ itself, described via `:schema` like any other data
 ```
 
 The backpressure counters come from `graph_t::delivery_drops()`
-(`core/include/libtracer/graph.hpp:903`), which snapshots three per-cause totals —
-`no_target`, `denied`, `out_of_memory` (`graph.hpp:886-893`). They are counted and
+(`core/include/libtracer/graph.hpp:994`), which snapshots three per-cause totals —
+`no_target`, `denied`, `out_of_memory` (`graph.hpp:977-984`). They are counted and
 never enforced: nothing in the library reads them, so the deployment decides what to
 alarm on. The three loads are individually relaxed rather than one atomic snapshot,
 so their useful reading is "is this growing", not an instant total.

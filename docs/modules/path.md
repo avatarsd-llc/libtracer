@@ -39,7 +39,7 @@ The two entry points differ in what failure means. `path_t::parse` is for a stri
 validity is itself a runtime condition, and returns `status_t::INVALID_PATH`
 (`core/src/path.cpp:107-112,129-130`). The `explicit` constructor is for a compile-site
 literal, where a malformed path is a source bug: it hard-aborts rather than yielding a
-`result_t` the caller would only `*`-deref unchecked (`path.hpp:129-132`). Neither uses
+`result_t` the caller would only `*`-deref unchecked (`path.hpp:165-168`). Neither uses
 exceptions, so both hold under `-fno-exceptions`.
 
 ## String → bytes, once
@@ -68,12 +68,12 @@ flowchart LR
   rather than surfacing as a miss deep in dispatch.
 - **The limits are a receiver's buffer budget.** ≤64 B per segment, ≤1024 B total,
   ≤255 segments (RFC-0023; the byte cap binds first under the current encoding, at 204)
-  and ≤8 field steps (`core/include/libtracer/path.hpp:30,32,34,36`) let a
+  and ≤8 field steps (`core/include/libtracer/path.hpp:31,33,35,37`) let a
   component size fixed scratch instead of allocating per frame — the mount-prefix walk's
   stitch buffer is two segments' worth, `std::array<std::byte, kMaxSegmentBytes * 2>`
   (`core/src/fwd_router.cpp`), and no longer scales with how wide a mount is (#523).
 - **Ordinary names cost no heap block.** `path_key_t` holds records up to 16 bytes inline
-  (`path_key_t::kInlineBytes`, `core/include/libtracer/path.hpp:172`) — a NAME record is a
+  (`path_key_t::kInlineBytes`, `core/include/libtracer/path.hpp:248`) — a NAME record is a
   4-byte TLV header plus the segment text, so a name of up to 12 characters never
   allocates; longer records spill to a single owned block.
 

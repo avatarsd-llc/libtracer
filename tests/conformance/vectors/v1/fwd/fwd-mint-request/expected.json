@@ -1,0 +1,12 @@
+{
+  "name": "fwd-mint-request",
+  "category": "fwd",
+  "hex": "0F402B000100010080064012000200060073656E736F720200040074656D7006400C00020008007265706C792D6570",
+  "total_bytes": 47,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=0x80 = READ | mint-request, dst=/sensor/temp, src=/reply-ep } — byte-for-byte fwd/fwd-read with ONE bit changed: the op byte's bit 7. A bound-path mint request costs zero added request bytes.",
+    "note": "RFC-0024 §7.5. The opcode is `op & 0x3F`; bits 7-6 are flags. A forwarder MUST mask before switching on the byte, or this frame reads as an unknown opcode at every hop."
+  }
+}

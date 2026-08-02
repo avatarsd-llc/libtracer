@@ -63,6 +63,15 @@ add_test(NAME path COMMAND path_test)
 # PATH_REF (0x14) codec — the bound-path envelope, element layout, count bound and
 # the structural rejects (RFC-0024 §4), plus the published vectors pinned against
 # the builder.
+# RFC-0024 car 2 — what a PATH_REF MEANS: the node-scoped slot index, the mint exchange,
+# and every way a bound path is refused rather than mis-routed.
+add_executable(bound_path_test bound_path_test.cpp)
+target_link_libraries(bound_path_test PRIVATE libtracer)
+libtracer_test_warnings(bound_path_test)
+target_compile_definitions(bound_path_test PRIVATE
+    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
+add_test(NAME bound_path COMMAND bound_path_test)
+
 add_executable(path_ref_test path_ref_test.cpp)
 target_link_libraries(path_ref_test PRIVATE libtracer)
 libtracer_test_warnings(path_ref_test)

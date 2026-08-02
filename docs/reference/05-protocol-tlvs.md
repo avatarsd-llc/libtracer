@@ -898,6 +898,8 @@ SPEC (0x0E, PL=1) {
 Allocated on a fast-track basis during v1. Assigned so far:
 
 - `0x0F` **FWD** and `0x10` **FIELD** — the remote-operation frames ([RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md) §B/§C, ADR-0035).
+  - A `FWD`'s `dst` (and `src`) **MAY** be a `PATH_REF` (§`0x14`) instead of a `PATH`; the two forms are interchangeable as addresses, and a peer that does not accept the bound one falls back per §`0x14` §routing semantics.
+  - The `op` byte's **opcode is `op & 0x3F`**; bits 7–6 are flags, of which **bit 7 is the bound-path mint request** (§`0x14` §routing semantics). A forwarder MUST mask rather than switch on the raw byte ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.5/§9.3).
 - `0x11`–`0x13` — the **route-handle transport-plane control frames** (below).
 - `0x14` **PATH_REF** — the **bound path**, the second normative address form ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §4, below).
 
@@ -977,7 +979,6 @@ A `COMPACT` whose `label` has no binding on its inbound link is **dropped** and 
 
 The **second normative address form** ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §4). The canonical `PATH` (`0x06`, NAME children) is untouched and stays the only form a cold peer can use; a `PATH_REF` spells the same route in **resolutions** rather than names — one element per **host**, each element that host's own reference to its next-hop connection vertex, the last element the terminus host's reference to the **target vertex itself**.
 
-Only the **wire form** is specified here. The routing semantics — how a bound path is minted, validated, and fallen back from — land with the forwarder that implements them.
 
 #### Payload layout
 
@@ -1017,6 +1018,37 @@ The encoder's invariants:
 **20 bytes total** — the `4 + 8H` a bound path costs at `H = 2`. Conformance vectors: `path-ref/ref-empty` (`H = 0`, the envelope alone), `ref-1host`, `ref-2host`, `ref-3host`, `ref-255-elements`, and the negative `ref-len-not-multiple-of-8`, `ref-256-elements`, `ref-pl-set`, `ref-ll-set`. The four structural rules above each get their own reject case, since a core that drops one of them still satisfies the other three.
 
 An element is **node-scoped**: it means nothing anywhere but on the host that minted it, so no receiver can validate another host's element and no codec can validate any of them. A `PATH_REF` is an **address, never a capability** — an operation arriving on one is authorized by the same per-operation `acl_allows` check at the target vertex that the canonical form performs.
+
+#### Routing semantics
+
+The wire form above is what a bound path *is*; this is what a host does with one ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §5–§7).
+
+**Validation — the check.** On receipt of a `PATH_REF`-addressed operation a host reads element 0 and, in order:
+
+1. **Bounds-checks** the `index` against its own vertex cardinality. An in-range index names a live allocation, because the vertex map is pinned, pointer-stable and insert-only; an out-of-range one is refused.
+2. **Compares** the `generation` against the vertex's current retirement generation. A mismatch means the vertex was retired — and possibly re-created for a **different owner** — since the mint, so the reference names an address rather than the thing that was there.
+3. **Authorizes**, per operation, at the dereferenced vertex (below). A generation match says the vertex is the same one; it never says the caller may still act on it.
+4. Forwards on the remainder, or — at the terminus, where exactly one element is left — applies the operation.
+
+Generations only ever move **forward**, so a stale element can only ever compare lower and never becomes valid again by waiting. A host **MUST NOT** wrap a generation: on saturation the counter stops, the vertex becomes permanently unbindable, and every mint for it declines. A wrapped generation would let a stale reference validate falsely and deliver the operation into the vertex's successor, which is a mis-route rather than a drop.
+
+Each hop **consumes element 0 and forwards the remainder**, the same monotone shrink the canonical `dst` performs — so a bound path is loop-free by construction, for the identical reason, and needs no visited set. The residual that reaches a terminus is therefore exactly one element.
+
+**A terminus-only host is conformant, and the forwarding hop is not yet incorporated.** Of step 4, only the terminus half — "at the terminus, where exactly one element is left, applies the operation" — is normative in this revision. The forwarding half, and the element-consuming shrink described in the paragraph above, are **ratified but not incorporated** ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) status): no implementation stands behind them, and this reference does not incorporate a clause nothing honours. They are stated here because they fix the shape a forwarder will take, not as a requirement on a host today. A host that implements only the terminus case answers a one-element `PATH_REF` and **drops** any longer residual — which is exactly the failure rule below, and exactly what the origin already recovers from by falling back to the canonical form it still holds. The reference core is such a host. Nothing about a route is lost by this: a route is only ever bound end to end by hosts that each chose to mint, so a host that does not forward simply never appears in a multi-element binding.
+
+**Failure is a drop, never a mis-route.** A host that cannot validate element 0 **MUST NOT** forward, **MUST NOT** apply the operation, and **MUST NOT** attempt any repair of its own — no re-resolution, no nearest match, no retry against a different vertex. It drops the frame. The origin's recovery is the one that already exists: fall back to the canonical form, which it still holds, and re-mint. This is why canonical support stays mandatory and why no address is ever reachable only in bound form — every bound path is minted from a canonical one.
+
+**Authorization.** Every operation arriving on a bound path **MUST** evaluate the same access check at the dereferenced vertex, for the operation's own right, exactly as the canonical form does. A bound path holds no authorization state of any kind, so a revoked right takes effect on the very next operation over an already-minted binding. Conformance carries a paired vector set — `acl/bound-vs-canonical-allow` and `acl/bound-vs-canonical-deny` — asserting that the two spellings of one operation agree, in the allowed case and the denied one alike.
+
+**Minting.** A binding is minted **in-band**, on an ordinary canonical operation, and costs **zero added request bytes**:
+
+- The `FWD` `op` byte carries **flags in bits 7–6**; the opcode is `op & 0x3F`. A forwarder **MUST** mask before switching on it, so an unrecognised flag degrades to the plain opcode instead of an unknown-opcode reject.
+- **Bit 7 is the mint request.** An origin sets it on an ordinary operation; each host that participates answers with its own vertex ref, and the terminus answers with its reference to the **target vertex itself**.
+- The answer rides the **reply**, as its **last** child: a `PATH_REF` of `4 + 8H` bytes per direction. Last, so a positional reader of an ordinary reply is untouched and only an origin that asked reads past it.
+- A mint is gated by the **full existing check**: a host **MUST NOT** mint a vref for a vertex the requesting caller could not have reached canonically in the same operation. Since a mint rides that operation, this is automatic — a denial happens before any vref is produced. So probing the bound form yields exactly what probing the canonical form yields, *exists + denied*, and never *exists + here is a handle to it*. A bound path cannot be used to discover a namespace its holder cannot already walk.
+- The request is a **hint, never an obligation**. A host that will not or cannot mint — a saturated generation, or simply no implementation — answers the ordinary reply, and the origin stays canonical.
+
+**Optionality.** `PATH_REF` is optional to *emit* and optional to *accept*. A peer that does not accept it answers such a frame per the forward-compatibility rules of [01-data-format.md](01-data-format.md) §handling unknown type codes, and the origin falls back to the canonical form.
 
 ---
 

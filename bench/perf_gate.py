@@ -271,6 +271,37 @@ MEM_REGRESS = 1.02   # fail if live bytes/vertex > baseline * 1.02 ...
 MEM_TICK_B = 1       # ... AND grew by more than one byte (ignore a lone bucket flip)
 _MEM_RE = re.compile(r"^RESULT zeroheap (\w+) allocs=(\d+) frees=\d+ bytes=(\d+)")
 
+# --- CHARGED steps: the one thing this ratchet must be able to say yes to --------
+# A per-vertex cost a ratified RFC PRICES is not a pullback; it is the step the RFC
+# bought, and a ratchet with no way to accept one can only be satisfied by lying to
+# it. So a charge is declared HERE, by point, in bytes, naming the clause that
+# charges it — and it is spent narrowly:
+#
+#   * it absorbs AT MOST that many bytes. A step of exactly the charged size passes;
+#     charged+1 fails, and the failure names the overshoot rather than the total, so
+#     an unpriced byte riding along with a priced one is still caught;
+#   * it is PRINTED on every run, charged or not, so a reader of CI output sees the
+#     allowance and its clause rather than a gate that quietly moved;
+#   * it EXPIRES on its own. The paired baseline is built from `main`, so the moment
+#     the step lands there the delta is zero and the charge stops applying to
+#     anything. An entry whose step has landed is dead weight, and the review that
+#     follows deletes it.
+#
+# What a charge is NOT: a tolerance. It does not scale, it does not accumulate, and
+# it is not a per-point budget to spend later — two charged steps to one point mean
+# two reviews, each pricing its own.
+MEM_CHARGED = {
+    # RFC-0024 §6.4: the node-scoped vertex index costs one pointer per vertex — 4 B on
+    # rv32, 8 B on a host — and §4.4's RAM floor is computed WITH it. Measured on this
+    # probe at exactly 8 B on all four points a vertex allocation touches; the index is a
+    # chunked deque rather than a vector precisely so the figure is the priced pointer and
+    # not a vector's geometric slack, which measured 15 B (see graph.hpp's storage note).
+    "mem:vertex": (8, "RFC-0024 §6.4 vertex-index slot (one pointer/vertex, 8 B on a host)"),
+    "mem:vertex_app5": (8, "RFC-0024 §6.4 vertex-index slot"),
+    "mem:vertex_app5_static": (8, "RFC-0024 §6.4 vertex-index slot"),
+    "mem:reg_escape": (8, "RFC-0024 §6.4 vertex-index slot"),
+}
+
 # --- ADR-0060 LKV copy-store gate (same-run pool-vs-heap ratio, NOT vs-baseline) --
 # The pooled value_backend vs the default heap on the write-path alloc/free op. A
 # same-run ratio cancels absolute machine speed, so it needs no baseline: it proves
@@ -539,10 +570,24 @@ def mem_gate(cur: dict, base: dict | None) -> list[str]:
             continue
         line = f"  {k:<22} live={v['bytes']:>6} B/vertex  blocks={v['allocs']:>2}"
         b = base.get(k) if base else None
+        charge, why = MEM_CHARGED.get(k, (0, ""))
         if b and "bytes" in b:
-            if v["bytes"] > b["bytes"] * MEM_REGRESS and v["bytes"] - b["bytes"] > MEM_TICK_B:
+            grew = v["bytes"] - b["bytes"]
+            # The charge is subtracted from the GROWTH, never from the measurement: the
+            # printed live figure stays the real one, and only the amount a ratified
+            # clause paid for is excused.
+            over = grew - charge
+            if v["bytes"] - charge > b["bytes"] * MEM_REGRESS and over > MEM_TICK_B:
                 fails.append(f"{k} memory pullback: {v['bytes']}B vs base {b['bytes']}B "
-                             f"(+{(v['bytes'] / b['bytes'] - 1) * 100:.1f}%)")
+                             f"(+{(v['bytes'] / b['bytes'] - 1) * 100:.1f}%)"
+                             + (f"; {charge}B of that is charged to {why}, "
+                                f"the other {over}B is not" if charge else ""))
+            if charge:
+                # Said out loud on every run, spent or not: an allowance nobody can see in
+                # the log is a moved gate.
+                state = f"charged {min(max(grew, 0), charge)}/{charge}B" if grew > 0 \
+                    else f"charge {charge}B UNSPENT (step already on main — delete the entry)"
+                print(f"  {'':<22} {state} — {why}")
             line += f"   (base {b['bytes']}B"
             # Block COUNT ratchets exactly — no tolerance, no tick guard. It is a
             # count of operator-new calls, identical on every host, so any increase

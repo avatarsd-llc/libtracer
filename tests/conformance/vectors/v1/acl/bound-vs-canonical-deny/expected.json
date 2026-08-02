@@ -1,0 +1,12 @@
+{
+  "name": "bound-vs-canonical-deny",
+  "category": "acl",
+  "hex": "0F403400010001000306400C00020008007265706C792D6570140008000200000000000000010001000109400A0008400600010002005000",
+  "total_bytes": 56,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=REPLY, dst=/reply-ep, src=PATH_REF{ index=2, generation=0 }, kind=ERROR, STATUS{ ERROR{ VALUE u16=0x0050 tr::access::denied } } } — what acl/bound-vs-canonical-allow's frame answers when the caller is NOT allowed.",
+    "note": "RFC-0024 §6.3, the mandated pair's deny half. The canonical spelling answers the identical outcome tail (kind=ERROR + STATUS{ERROR{0x0050}}, `010001000109400A0008400600010002005000`); the frames differ only in the reply's `src`, which echoes the request's `dst` and is therefore the one thing that cannot agree between two spellings of one address."
+  }
+}
