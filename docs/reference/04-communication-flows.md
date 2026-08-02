@@ -251,8 +251,8 @@ its `SUBSCRIBER` record (§Subscribe via field-write).
 A remote operation rides an **`FWD`** frame that carries its own route ([RFC-0004 — remote operation addressing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md), implemented per [ADR-0035](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0035-implementing-rfc-0004-remote-operation-addressing.md)): `dst` holds the remaining hops and shrinks by a whole `net/<module>/<name>[/<peer>]` mount run per hop (RFC-0014 S2a), not one NAME; `src` accumulates the same run as the way back. A remote endpoint is addressed by path-suffix through a transport vertex ([ADR-0027 — transport and connections are vertices](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0027-transport-and-connections-are-vertices.md)) — see [13-network-formation.md](13-network-formation.md) and [CONTEXT.md §Path-as-route](../../CONTEXT.md). Each node plays one of two roles per frame, decided by whether the **leading** `dst` segments
 match one of its mount runs (longest first) — not by the first segment alone:
 
-- **Forward hop** — the first `dst` segment names a transport-child vertex. The hop reads roughly three TLV headers **by offset**, with no decoded tree and **zero heap allocations** (CI-gated), strips that leading `dst` NAME, prepends the inbound-link NAME to `src`, and scatter-gather-sends the result: stack-built replacement heads plus untouched views over the original frame bytes.
-- **Terminus** — the first `dst` segment names a local, non-transport vertex. The frame is arena-decoded into a flat pre-order array of span nodes over the frame bytes, drawn from an injected **nothrow** block source (see [09 §where the wire decode draws from](09-memory-substrate.md)); the operation is applied to the local graph, and the `FWD{REPLY}` head is direct-emitted into one exactly-sized segment.
+- **Forward hop** — the leading `dst` segments match one of this node's transport mount runs. The hop reads roughly three TLV headers **by offset**, with no decoded tree and **zero heap allocations** (CI-gated), strips that whole leading mount run from `dst`, prepends the inbound link's own mount run to `src`, and scatter-gather-sends the result: stack-built replacement heads plus untouched views over the original frame bytes.
+- **Terminus** — the leading `dst` segments name a local, non-transport vertex. The frame is arena-decoded into a flat pre-order array of span nodes over the frame bytes, drawn from an injected **nothrow** block source (see [09 §where the wire decode draws from](09-memory-substrate.md)); the operation is applied to the local graph, and the `FWD{REPLY}` head is direct-emitted into one exactly-sized segment.
 
 Exhaustion of the terminus decode budget is a **reject**, never an allocation failure and never an abort: the decode answers `tr::tlv::nesting_too_deep`, RFC-0006's "exceeds this receiver's decode resources" ([ADR-0065 — failable allocation gets its own seam](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md)). Nesting depth has no protocol constant; it is whatever the receiver's injected decode resources permit ([RFC-0006 — resource-bounded nesting depth](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md)).
 
@@ -264,9 +264,9 @@ sequenceDiagram
     participant T as Terminus node
     C->>H: FWD{op, dst=/h/sensor/temp, src=[], payload}
     Note over H: offset dispatch — read ~3 headers by offset,<br/>no decoded tree, zero heap allocations
-    H->>H: first dst segment → transport child<br/>(child-registry demux)
-    H->>T: strip leading dst NAME · prepend inbound-link NAME to src<br/>scatter-gather send: stack heads + untouched frame views
-    Note over T: first dst segment names a local vertex → terminus
+    H->>H: leading dst mount run → transport child<br/>(child-registry demux)
+    H->>T: strip leading dst mount run · prepend inbound-link mount run to src<br/>scatter-gather send: stack heads + untouched frame views
+    Note over T: leading dst segments name a local vertex → terminus
     T->>T: arena-decode the frame into a flat<br/>pre-order array of span nodes
     T->>T: apply the operation — read/write/await —<br/>to the local vertex
     T->>H: FWD{REPLY, dst = accumulated src}<br/>direct-emitted into one exactly-sized segment

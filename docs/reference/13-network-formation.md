@@ -202,16 +202,15 @@ The orchestrator disconnects. The created controllers and transport connections
 remain in the devices — RAM, or NVS where the device persists them.
 
 :::{warning}
-**Subscriber edges do NOT yet survive a third-party orchestrator's departure**
-([#491](https://github.com/avatarsd-llc/libtracer/issues/491), verified 2026-08-01).
+**Subscriber edges do not survive a third-party orchestrator's departure.**
 A subscription written *over the wire* binds to the **arrival session**, not to the
 target the writer named: `graph_t::subscribe_wire` discards the SUBSCRIBER's PATH
 target (`core/src/graph.cpp:1400`) and delivery rides the accumulated `src` back to
 whoever wrote it — the orchestrator. Its departure then evicts the edge outright
 (`fwd_router_t::link_down` → `graph_t::evict_link_edges`). So the paragraph above
-holds today only for a subscription the **consumer itself** wrote. Closing it needs a
+holds only for a subscription the **consumer itself** wrote. Closing the gap needs a
 ruled wire behaviour for a mount-routed SUBSCRIBER target (RFC-0004 §D territory) —
-see §Boundaries, which flagged this gap before it was measured.
+see §Boundaries.
 :::
 **Two devices keep talking with no third party present**; the patch cable stays. A
 rebooted leaf re-establishes its links and subscriptions by re-issuing the same

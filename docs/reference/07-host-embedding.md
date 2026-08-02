@@ -123,7 +123,7 @@ A transport vertex holds **no** peer state and creates **no** vertices for peers
 
 ## Every host is a router
 
-There is **no architectural distinction** between a leaf and a router. Any host with two or more connection vertices forwards `FWD` frames between them: a frame whose leading `dst` segment names a connection is forwarded onward, one segment consumed per hop. The forward path is the same code on every host; a leaf is simply a host where `dst` empties.
+There is **no architectural distinction** between a leaf and a router. Any host with two or more connection vertices forwards `FWD` frames between them: a frame whose leading `dst` segments name a connection is forwarded onward, the whole mount run — `net/<module>/<name>[/<peer>]` — consumed per hop (RFC-0014 S2a). The forward path is the same code on every host; a leaf is simply a host where `dst` empties.
 
 A specialized **WAN router** is a host that runs multiple WAN-friendly transports, a discovery module to find peers, and no application vertices — its job is purely to forward. This is **convention**, not a separate node type. Such a host conforms at profile P2 ([00-overview.md](00-overview.md) §conformance profiles); the protocol does not single it out. A `router_wan` module in the [10-module-catalog.md](10-module-catalog.md) catalog would package the typical configuration for ergonomics without extending the protocol.
 
@@ -143,7 +143,7 @@ A specialized **WAN router** is a host that runs multiple WAN-friendly transport
   └ transport_uart on USB-CDC ↔ host PC running tracer-cli
 ```
 
-Local DAG = entire view. The host PC addresses the car's vertices through its one link (`/net/car/…`); the topology has no cycles. Conformance: P1 on the ESP32, P1 on the PC.
+Local DAG = entire view. The host PC addresses the car's vertices through its one link (`/net/uart/car/…`); the topology has no cycles. Conformance: P1 on the ESP32, P1 on the PC.
 
 ### Robot with CAN bus and Wi-Fi
 
@@ -158,7 +158,7 @@ Local DAG = entire view. The host PC addresses the car's vertices through its on
                                      /control/...              (own vertices)
 ```
 
-The Linux brain holds two connections: a CAN link and a Wi-Fi socket link. The ground station addresses the accelerometer as `/net/brain/net/can0/imu/accel` — the path **is** the route: over the `brain` link, then the brain's `can0` link, then the peer's `/imu/accel`. Each hop consumes one segment. Conformance: P1 on each STM32, P2 on the Linux brain, P2 on the laptop.
+The Linux brain holds two connections: a CAN link and a Wi-Fi socket link. The ground station addresses the accelerometer as `/net/tcp/brain/net/can/can0/imu/accel` — the path **is** the route: over the `brain` link, then the brain's `can0` link, then the peer's `/imu/accel`. Each hop consumes the whole mount run that names its link — `net/<module>/<name>[/<peer>]` — not one segment (RFC-0014 S2a). Conformance: P1 on each STM32, P2 on the Linux brain, P2 on the laptop.
 
 ### Fleet of robots with a central monitor (star)
 
@@ -173,10 +173,10 @@ The Linux brain holds two connections: a CAN link and a Wi-Fi socket link. The g
                     /net/robot-4/...
 
 Monitor subscribes:
-    write("/net/robot-1/**:subscribers[]", SUBSCRIBER{path="/local/recorder"})
+    write("/net/tcp/robot-1:subscribers[]", SUBSCRIBER{path="/local/recorder"})
 ```
 
-A wildcard subscription per link aggregates everything from every robot into the monitor's recorder; each producer streams deliveries back along the consumer's accumulated return route. Conformance: P1 on each robot, P2 on the monitor.
+A subtree subscription per link ([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md)) — subscribing to the connection vertex observes it and every descendant, so no pattern grammar is involved — aggregates everything from every robot into the monitor's recorder; each producer streams deliveries back along the consumer's accumulated return route. Conformance: P1 on each robot, P2 on the monitor.
 
 ### Forwarded delivery end to end
 
