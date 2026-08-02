@@ -250,6 +250,6 @@ target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_23)
 # component NAME stays `libtracer` (so `REQUIRES libtracer`, the idf_component.yml
 # registry entry, and the docs are all unchanged) and IDF links by CMake target,
 # not by archive file name, so nothing in the link graph is affected. The
-# esp-idf-size footprint gate matches the archive by the substring `libtracer`
+# esp-idf-size footprint report matches the archive by the substring `libtracer`
 # (tools/esp_size_gate.py --component-pattern), which still hits `libtracer.a`.
 set_target_properties(${COMPONENT_LIB} PROPERTIES OUTPUT_NAME tracer)
