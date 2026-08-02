@@ -81,8 +81,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   Covered by
   `core/tests/terminus_flatten_backend_test.cpp`: an exact-size seam instrument, a
   slab-containment *provenance* assertion on the stored value, a READ control that must draw
-  nothing, a refusing-backend case and a mutation-aware sweep. Reverting the site reddens 6 of
-  the 9 new checks and takes the seam count to zero.
+  nothing, a refusing-backend case and a mutation-aware sweep. Reverting the site reddens **8** of
+  the new checks and takes the seam count to zero.
 
 - **`op_resolver_t` takes the flatten backend, so the TERMINUS rope flattens are bounded too
   (#766).** `core/include/libtracer/op_resolve.hpp`.

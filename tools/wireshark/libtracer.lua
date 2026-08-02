@@ -159,9 +159,9 @@ M.STRUCTURED = {
 M.FWD_OP = { [0] = "READ", [1] = "WRITE", [2] = "AWAIT", [3] = "REPLY" }
 M.FWD_KIND = { [0] = "RESULT", [1] = "ERROR" }
 -- FIELD index_mode, the optional trailing u8 VALUE of a selector level
--- (RFC-0004 §C; core/src/op_resolve_walk.hpp:323 `index_mode_t`). Any other
+-- (RFC-0004 §C; core/src/op_resolve_walk.hpp:311 `index_mode_t`). Any other
 -- byte is malformed and is rejected with INVALID_PATH by the reference
--- resolver (op_resolve_walk.hpp:336-385), so the dissector flags it too.
+-- resolver (op_resolve_walk.hpp:368-373), so the dissector flags it too.
 M.INDEX_MODE = { [0] = "SCALAR", [1] = "ELEMENT", [2] = "WILDCARD" }
 
 -- tr::<concept>::<error> registry, keyed by the u16 registered code.
@@ -388,7 +388,7 @@ function M._semantics(b, node)
 
   elseif t == 0x10 then -- FIELD: one or more levels, each NAME + 0/1/2 VALUE
     -- Mirrors the reference resolver's `selector_to_field`
-    -- (core/src/op_resolve_walk.hpp:375-392) level for level: a NAME, then
+    -- (core/src/op_resolve_walk.hpp:322-380) level for level: a NAME, then
     -- 0 VALUEs => SCALAR, 1 VALUE => index_mode only ("[]" / "[*]"),
     -- 2 VALUEs => [index u32, index_mode u8] ("[N]"). Reading only the u32
     -- (as this branch once did) makes ":subscribers", ":subscribers[]" and
