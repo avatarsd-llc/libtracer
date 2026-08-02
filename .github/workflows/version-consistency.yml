@@ -65,10 +65,16 @@ jobs:
         run: python3 -m unittest discover -s tools/tests -v
       - name: Release-body dry run — every package contributes (no tag is created)
         run: |
-          # A version no CHANGELOG has yet, so every package falls back to its
-          # [Unreleased] section: exactly what the next real cut will emit.
+          # Probe with the tree's own VERSION: mid-cycle that section does not exist
+          # yet, so every package falls back to its [Unreleased] entries — exactly
+          # what the next real cut will emit. On the release PR itself (the one
+          # commit where consolidation has just moved [Unreleased] under the new
+          # version heading) the section DOES exist and the probe reads it — the
+          # old fixed 0.0.0-dry-run probe was guaranteed to fail precisely there,
+          # because it matched no section and the fallback found a just-emptied
+          # [Unreleased].
           # ANTHROPIC_API_KEY is deliberately absent here, so no model is called.
-          python3 tools/gen_release_notes.py --version 0.0.0-dry-run \
+          python3 tools/gen_release_notes.py --version "$(cat VERSION)" \
             > "${RUNNER_TEMP}/release-body.md"
           echo '----- release body (dry run) -----'
           cat "${RUNNER_TEMP}/release-body.md"
