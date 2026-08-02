@@ -8,30 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Changed
-
-- **SEMVER-VISIBLE — `MAX_SEGMENTS` repriced 32 → 255 (RFC-0023, accepted; #767).** The exported
-  constant (`libtracer::MAX_SEGMENTS`) changes value, so any consumer that mirrors it in an array
-  size or a message must be recompiled. `split_path` / `tlv_builders::path` / `tlv_to_path` accept
-  33–255 segments where they previously answered `BuildError::TooManySegments`; the error variant
-  itself is unchanged and still maps to `tr::path::invalid`. Under the current NAME-TLV body
-  encoding the `MAX_PATH_BYTES` (1024) check binds first at 204 segments, so `path_to_tlv` answers
-  `BuildError::PathTooLong` — not `TooManySegments` — for a 205-segment path.
-  ~~**Known misplacement, repriced not relocated:**~~ relocated below (#773).
-
-- **SEMVER-VISIBLE — the accumulative PATH bounds left the decode tier (RFC-0023 §5.6; #773,
-  landed in #778).**
-  `path::tlv_to_path` no longer answers `BuildError::TooManySegments` or
-  `BuildError::PathTooLong`: `docs/reference/05-protocol-tlvs.md` §"Enforcement of the PATH
-  constraints" places the segment-count and total-length limits where an address is
-  **constructed or admitted**, and states that "the codec does not enforce these constraints,
-  and is not expected to". A caller that relied on `tlv_to_path` (or `fwd::fwd_dst_path` /
-  `fwd::fwd_src_path` / `structured::subscriber_target_path`, which route through it) to reject
-  an over-limit PATH must call the new `path::admit_path_tlv` instead. This closes RFC-0019
-  §10(b): an accumulated `src` return route is legal at any byte-reachable depth, and decoding
-  one no longer fails. The per-segment rules (1..64 bytes, no reserved character, NAME child
-  type, UTF-8) stay in `tlv_to_path` — they are not accumulative, and they are what makes the
-  rendered string re-splittable.
+## [0.7.0] — 2026-08-02
 
 ### Added
 
@@ -60,16 +37,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   to a pre-RFC-0022 sender's. Pinned to the `subscriber/policy-{absent,durability,reserved-bits}`
   conformance vectors, with the two ablations that bite recorded in the commit that added them.
 
-### Fixed
-
-- **The three `subscriber/policy-*` conformance vectors were scored `ok` by a core that
-  implemented none of them (#758).** The polyglot harness contract is
-  `encode(decode(input.bin)) == input.bin`, which any well-formed TLV satisfies, so this
-  binding — which contained no delivery-policy code at all — passed the policy vectors on
-  structure alone. The behaviour is now claimed where it can be false: `DeliveryPolicy` above,
-  plus three vector-bound tests and a bit-layout pin in `tests/conformance_vectors.rs`.
-
 ### Changed
+
+- **SEMVER-VISIBLE — `MAX_SEGMENTS` repriced 32 → 255 (RFC-0023, accepted; #767).** The exported
+  constant (`libtracer::MAX_SEGMENTS`) changes value, so any consumer that mirrors it in an array
+  size or a message must be recompiled. `split_path` / `tlv_builders::path` / `tlv_to_path` accept
+  33–255 segments where they previously answered `BuildError::TooManySegments`; the error variant
+  itself is unchanged and still maps to `tr::path::invalid`. Under the current NAME-TLV body
+  encoding the `MAX_PATH_BYTES` (1024) check binds first at 204 segments, so `path_to_tlv` answers
+  `BuildError::PathTooLong` — not `TooManySegments` — for a 205-segment path.
+  ~~**Known misplacement, repriced not relocated:**~~ relocated below (#773).
+
+- **SEMVER-VISIBLE — the accumulative PATH bounds left the decode tier (RFC-0023 §5.6; #773,
+  landed in #778).**
+  `path::tlv_to_path` no longer answers `BuildError::TooManySegments` or
+  `BuildError::PathTooLong`: `docs/reference/05-protocol-tlvs.md` §"Enforcement of the PATH
+  constraints" places the segment-count and total-length limits where an address is
+  **constructed or admitted**, and states that "the codec does not enforce these constraints,
+  and is not expected to". A caller that relied on `tlv_to_path` (or `fwd::fwd_dst_path` /
+  `fwd::fwd_src_path` / `structured::subscriber_target_path`, which route through it) to reject
+  an over-limit PATH must call the new `path::admit_path_tlv` instead. This closes RFC-0019
+  §10(b): an accumulated `src` return route is legal at any byte-reachable depth, and decoding
+  one no longer fails. The per-segment rules (1..64 bytes, no reserved character, NAME child
+  type, UTF-8) stay in `tlv_to_path` — they are not accumulative, and they are what makes the
+  rendered string re-splittable.
 
 - **The `:field` selector examples no longer name a knob that was deleted
   ([RFC-0022](../../docs/spec/rfcs/0022-qos-restructure.md) §5 + amendment 1; #758).**
@@ -83,6 +74,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **`path`'s module header names the byte bound's real string-side enforcer.** A doc-only
   correction following the accumulative-bounds relocation above; no behaviour change.
+
+### Fixed
+
+- **The three `subscriber/policy-*` conformance vectors were scored `ok` by a core that
+  implemented none of them (#758).** The polyglot harness contract is
+  `encode(decode(input.bin)) == input.bin`, which any well-formed TLV satisfies, so this
+  binding — which contained no delivery-policy code at all — passed the policy vectors on
+  structure alone. The behaviour is now claimed where it can be false: `DeliveryPolicy` above,
+  plus three vector-bound tests and a bit-layout pin in `tests/conformance_vectors.rs`.
 
 ## [0.6.0] — 2026-07-23
 

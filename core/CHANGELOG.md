@@ -14,6 +14,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-08-02
+
 ### Added
 
 - **`view::over_bytes(bytes, mem::mem_backend_t&)` and `view::segment_alloc(backend, size)` —
@@ -57,6 +59,382 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `core/tests/mem_sync_policy_test.cpp` (policy engaged on every alloc/destroy, no double
   hand-out under contention, free list intact) — sanitizer-independent, and RED when the
   critical section is ablated.
+
+- **`graph_t::collect()` and `graph_t::parked_seam_count()` (#576, ADR-0072 §Supersession).**
+  `retire()` detaches a vertex's value seam and parks it — the seam is read lock-free, so the
+  retiring thread cannot free a block a reader may still hold. The park is keyed on **handler
+  presence, not role**: `adopt_identity` allocates the seam iff `on_read`, `on_write` or
+  `on_children` was installed, so a `role_t::STORED_VALUE` vertex with an `on_children` parks
+  one and a `role_t::HANDLER` with an empty `handlers_t` parks none. Until now the park had one
+  append site and **zero** release sites, and `transport_vertex_t::remove_connection` retires the
+  `/net/<module>/<name>` identity vertex — which is `role_t::STORED_VALUE` and bears a seam only
+  when its link exposes a bus facet (`link->bus() != nullptr`: CAN, or a tcp/ws server wired
+  `peer_named = true`). So **a bus node leaked ~96 B of `std::function` per connection teardown**,
+  permanently — peer-driven growth, not operator action — while a point-to-point deployment
+  (dial links, UDP, loopback, a default-wired server) parks nothing and needs no collect point at
+  all. `collect()` is the park's other end — it swaps the park into a local under the map lock and lets the local
+  destruct **after** the lock is released, so the free runs on the **caller's thread, outside
+  every graph lock** (a seam callback's destructor may re-enter the graph). `parked_seam_count()`
+  makes an uncollected park observable rather than silent. **Caller obligation:** `collect()`
+  MUST be called from a point where no lock-free reader holds a value seam — the library cannot
+  know that moment, so it is published rather than hidden. That includes a reader that entered
+  while the vertex was still LIVE: `read` / `write` / `:children[]` load the seam pointer once
+  and hold it across the user callback, so a concurrent retire hands the park a block a live
+  call is still using. An embedder that never calls it keeps
+  today's behaviour. Nothing was added to the read or write path; no existing call site changes.
+  This supersedes the ADR-0072 reclamation domain for this site — PR #750's hazard-domain design
+  is not merged (three rounds, three blocking defects, +19/+29 % on the read path), and #635
+  keeps the open reclamation question.
+
+- **`tr::graph::delivery_policy_t` — the per-subscription delivery policy (RFC-0022 §3.A).** A
+  packed `u16`: bits 0–1 `reliability`, 2–4 `priority`, 5 `durability_request`, 6–15 reserved
+  (written 0, **ignored** on read — never rejected, and carried verbatim so they read back
+  unchanged). It rides the `SUBSCRIBER` TLV's **already-existing `SETTINGS` child** under the key
+  `delivery_policy` — the same child `delivery_compact` uses — so no new wire structure exists.
+  Absent ⇒ all-zero ⇒ today's behaviour, byte-identically. Both `subscribe` sugars take it as a
+  defaulted trailing argument (`subscribe(src, target, policy)`, `subscribe(src, fn, ctx, policy)`,
+  `subscribe(src, callable, policy)`), so every existing call site compiles and behaves unchanged.
+  Only `durability_request` is consumed today; `reliability` and `priority` are stored and read
+  back, awaiting the transport work that honours them.
+
+- **`graph_t::set_history_depth(vertex_handle_t, std::uint32_t)` — the STREAM ring depth, declared
+  owner-side (RFC-0022 §3.C).** Shaped like `set_delivery_mode` / `set_app_fields`: a declaration
+  the owner makes host-side after registration, with **no wire surface at all** — no peer can read
+  it and none can write it. The depth is what the *application* wants retained, which no peer and
+  no injected resource can supply, so it is not protocol QoS and does not belong on a remote write
+  surface. Costs a STREAM vertex zero extra bytes (a STREAM identity already allocates the cold
+  block). Default 1, as before.
+
+- **`graph_t::set_store_ref_min_bytes(vertex_handle_t, std::uint32_t)` and
+  `graph_t::store_ref_min_bytes(vertex_handle_t)`.** The ADR-0042 §3 store-by-reference threshold,
+  rehomed the same way and for the same reason — it is a deployment copy/pin trade, not a
+  quality-of-service property. Semantics are **unchanged**: an absolute byte threshold, `0` (the
+  default) disables referencing, read on every view-delivered write as one inline load. RFC-0022
+  §3.D replaces that predicate with an amplification ratio whose constant §6 gates on a
+  dual-target measurement; that measurement has not been run, so the predicate is untouched here.
+
+- **`vertex_t::has_extension_block()`.** The RAM-census observable that replaced comparing
+  `settings()`'s returned address against `kDefaultSettings` — both of which RFC-0022 deleted.
+  Used by `bench_qos_census` and the vertex-size gate; not a data-plane predicate.
+
+- **`fwd_router_t::subscribe_toward(producer, target)` (#739).** Binds a local producer's
+  subscription toward ONE ordinary mount-path target (`/net/<module>/<name>/<consumer...>`,
+  arbitrarily nested), resolved through the SAME ADR-0061 strip-K cached descent the forward
+  path uses — no caller-side `(link, return-route)` hand-split, no single-hop assumption, no
+  `net/<module>/<name>` string knowledge in the application. Bind-time resolution,
+  link-lifetime durability (teardown evicts the binding; re-binding is the application's job —
+  re-establishment is #716). A target whose first hop is a bus PEER answers `INVALID_PATH`
+  (no directed registry entry to store yet — the #741 work's territory).
+
+- **`child_registry_t` slots carry a precomputed name digest** — the forward demux's mount scan
+  no longer touches a candidate's string or its atomic link unless the digest matches. Measured
+  on `bench/bench_forward_demux` (8 alternating rounds, two builds), the scan's marginal cost
+  over a fixed-position hop drops **35 ns to ~0 at 8 links, 86 to 2 at 16, and 333 to 17 at 64
+  (95% removed)**, with the fixed-position hop itself unchanged within +/-2 ns. The digest is a
+  filter, never a decision: `live()` and the full compare still gate every answer. New public:
+  `digest_name`, `digest_segments`, `fold_segment` — public only so a test can pin the first two
+  in agreement, which a lookup cannot do.
+
+
+- **`tr::graph::kCacheLineBytes` — false-sharing padding becomes a per-target knob.** New
+  constant in `libtracer/config.hpp` (CMake: `-DLIBTRACER_CACHE_LINE_BYTES`, default 64), and
+  **0 means "this target has no second core to false-share with"**. It governs every shared
+  table libtracer pads: the vertex lock stripes and the hazard domain's cells and retire
+  lists. Measured on rv32 (`-Os -fno-exceptions -fno-rtti`, GCC 15.2, real `core/src/graph.cpp`),
+  16 stripes cost **1,024 B of `.bss` at 64 and 128 B at 0** — a 896 B static-RAM saving on a
+  single-core node, with the hazard domain worth a further 6.5 KB when bound. The ESP-IDF
+  component *derives* the value from `CONFIG_FREERTOS_UNICORE` rather than adding a Kconfig
+  option: a unicore build has no second core by construction. Purely an optimization axis —
+  the wrong value costs control-plane throughput and changes nothing observable. The host
+  default is unchanged, byte for byte. New: `tr::graph::kStripeAlign`,
+  `tr::graph::detail_hp::kDomainAlign` (both derived, both `static_assert`ed to have actually
+  taken effect), and a `sizeof(vertex_stripe_t)` gate in `vertex_size_test`.
+
+- **`tr::graph::hazard_slot_t` — the host LKV slot, reclaimed with hazard pointers** (#604,
+  [ADR-0069](../docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md) §2/§5/§6).
+  A lock-free `std::atomic<node*>` over a 24-byte indirection node that owns the rope's
+  `shared_ptr`; a read pins the node, copies the handle out, and unpins, so `read_stored()`
+  keeps its owning signature and nothing in `graph.cpp` changed. Bind it per target with
+  `-DLIBTRACER_LKV_SLOT=hazard_slot_t`; the new `tr::graph::kHazardReaderSlots` knob
+  (`-DLIBTRACER_HAZARD_READER_SLOTS`, default 64) sizes the process-wide domain at
+  `(N + 1) * 128` bytes — **zero** unless the slot is bound, since the default binding never
+  references the registry. Measured against the default slot through `graph_t::read` on one
+  shared LKV: **4.2× aggregate and 4.4× p50 at 24 readers** (1.7 → 7.4 M ops/s), decisive from
+  8 readers up, and indistinguishable at one — the gain is a concurrency gain only. Three
+  differences from `sp_atomic_slot_t` that are not performance and are documented in the
+  header: reclamation is deferred (so an injected `pmr` resource must outlive the threads that
+  wrote through it, not just the graph); a publish can fail under memory exhaustion, which it
+  **reports** — `vertex_t::store` turns it into the same `nullptr` → `BACKPRESSURE` soft-fail an
+  LKV allocation failure already produces, and the node comes from the global heap rather than
+  from a graph's injected resource; and an undersized `kHazardReaderSlots` costs throughput
+  rather than correctness.
+
+- **`tr::graph::lkv_slot_t` — the LKV slot is now a per-target binding** (#604,
+  [ADR-0069](../docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md) §1). The
+  slot type `vertex_t` holds is selected in `config.hpp` through the same forward-declare-plus-alias
+  mechanism `acl_policy_t` already uses, set by the CMake cache variable `LIBTRACER_LKV_SLOT`
+  (default `sp_atomic_slot_t`, so a stock build and the ESP-IDF component are unchanged). No
+  templating is involved: `vertex_t` names the alias, and binding a different slot is a
+  target-configuration change rather than an edit to any header. Verified that the generated
+  header substitutes the requested type, that the configure-time drift gate is **not** fooled by a
+  non-default cache value, and that `graph.cpp.o` is byte-for-byte the size it was before the
+  alias was introduced — the indirection costs nothing.
+
+- **`libtracer/lkv_slot.hpp` — the LKV slot is a named policy** (#604,
+  [ADR-0069](../docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md) §1). The
+  new public header defines `tr::graph::sp_atomic_slot_t`, which is exactly the
+  `std::atomic<std::shared_ptr<const rope_t>>` `vertex_t` has always held, behind the three
+  operations the vertex actually performs — `[[nodiscard]] bool store(value_ptr_t, order)`,
+  `void clear(order)`, `value_ptr_t load() const`. `store` reports rather than returns void
+  because a slot that reclaims lazily must allocate to publish, and a policy that cannot say
+  "I did not take this" would force the one thing [#477](https://github.com/avatarsd-llc/libtracer/issues/477)
+  exists to prevent: a dropped write reported as a successful one. `sp_atomic_slot_t` allocates
+  nothing and always returns `true`. **No behaviour change and no new configuration**: this
+  slice only names the seam so a later one can bind a different reclamation strategy per target.
+  The header also states the contract a replacement must satisfy — chiefly that `load()` returns
+  an *owning* handle, because the composed branch read holds one per node across three passes.
+  Verified neutral: `graph.cpp.o`'s symbol table is unchanged (423 symbols, none added or
+  removed, so the policy inlines away), the `sizeof(vertex_t)` gate is unmoved, and
+  `bench_compact_delivery`'s forward and terminus hops sit within ±1.1% p50 over eight
+  alternating runs per side with no consistent sign.
+
+- **`graph_t::delivery_drops()` — a dropped delivery is now countable** (#629). A path-target
+  subscription edge (the form a wire `SUBSCRIBER` produces) delivers by re-dispatching into its
+  target, and three conditions make that impossible: the target PATH resolves to no live vertex,
+  the target's `:acl` denies the edge's stored caller (the #81 fan-in gate), or the nothrow
+  delivery clone cannot be allocated (#477). All three are specified to drop that ONE leg while
+  the write itself succeeds — correct, and previously **invisible**: a node whose target had been
+  retired dropped every delivery for the rest of its life with nothing anywhere to say so. Note
+  that an edge may name a target that does not exist and still be admitted, so this is reachable
+  without anything being retired.
+
+  Returns `delivery_drops_t{no_target, denied, out_of_memory}` — per cause, because "something
+  dropped" is not actionable. Counted, never enforced: nothing in the library reads them, so a
+  deployment decides whether to alarm. Relaxed monotonic and incremented only ON a drop, so the
+  delivering path is unchanged while nothing drops — the same near-free-when-idle shape as
+  `ancestor_walks()`. The three loads are not one coherent snapshot, deliberately: a lock on the
+  drop path to serve a diagnostic would cost more than it tells.
+
+- **`tr::mem::pool_source_t<Sync>` — a bounded, RECYCLING `block_source_t`** (#597,
+  [ADR-0067](../docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md)). Closes the
+  gap between `heap_source_t` (recycles, unbounded) and `bump_source_t` (bounded, never
+  recycles): a **long-lived** seam could not be bounded at all, so an 8 KiB bump source wired
+  as a router's `rx` decoded six frames and rejected the next 194. Segregated free lists keyed
+  on the exact `(bytes, align)` pair, with **no per-block header** — the seam's sized `release`
+  makes one unnecessary. Both bounds are injected per RFC-0006: the caller supplies the slab and
+  the `size_class_t` span, so neither the byte ceiling nor the class count is a constant in this
+  library. `classes_used()` / `overflowed()` report what to size the span against.
+
+  Shape chosen on a recorded trace of the seam (70,937 events): **12 distinct sizes, three
+  covering 99.8 %**, so exact classes cost zero internal fragmentation and need 26,176 B where
+  first-fit-with-coalescing needs 27,448 B and TLSF 28,440 B. Costs **322 B** of text on
+  `riscv32-esp-elf-g++ -Os -fno-exceptions -fno-rtti`, plus a 24 B vtable.
+
+  **Read ADR-0067 §3 before sharing one.** A `pool_source_t` is structurally the object
+  ADR-0060 erratum 1 measured collapsing to ~1/15 of its single-thread rate on a 12-core host
+  while the platform heap scaled. It is owned by one thread wherever it sits on a per-frame
+  path; sharing behind a lock is admissible only at wiring frequency.
+
+- **`tr::mem::sync_none_t`** (in `mem_source.hpp`) and **`tr::mem::sync_mutex_t`** (in the new
+  `mem_source_sync.hpp`) — the synchronization policies for the above. The default is empty and
+  compiles to nothing under `[[no_unique_address]]`; the hosted one is in its own header so
+  `mem_source.hpp` stays freestanding-clean for the footprint sentinel. A policy is anything
+  with `lock()`/`unlock()`, so a single-core target supplies its own interrupt-disable section.
+
+- **`fwd_router_t::add_child` takes an optional per-child failable source**:
+  `add_child(std::string name, transport_t& link, mem::block_source_t* rx = nullptr)`, stored on
+  the child's `child_rx_ctx_t`. **Source-compatible** — the parameter is appended with a default,
+  and a child that supplies none draws from the router's as before.
+
+  This is what makes a bounded source *usable* on the RX path at all. The router previously held
+  one `rx_` while its own class comment documented `on_frame` as firing on several transports'
+  receive threads concurrently with no per-request locking — so a shared pool there would have
+  put a contended lock on a deliberately lock-free path, at the 15x cost ADR-0060 erratum 1
+  measured. Each transport has its own receive thread, so a source parked on the child is
+  touched by exactly one. It also makes the bound **per-peer**: one noisy link can no longer
+  starve another link's decode.
+
+  Resolution is `rx_for(ctx)` — a branch on a pointer already in a register, with no lookup by
+  name on the frame path.
+
+- **`vertex_t::replace_edge(idx, subscriber_t, edge_latch_t*)` and `vertex_t::edge_replace_t`** —
+  the §D.1 replace primitive. Takes the durability latch under the same single lock hold as
+  `add_edge`, so a concurrent `clear_edge` cannot slip between the write and the snapshot, and
+  reclaims the displaced edge's segment pin in place. It never grows `subs_`: an out-of-range
+  index is refused rather than back-filled, because the index arrives off the wire.
+
+- **BREAKING (routing addresses): a bus PEER is addressed `<mount>/<peer>/<residual>`, not
+  `<peer>/<residual>` — RFC-0014 S2a (`9d038b9`).** Per-module mount routing made
+  routing-address equal vertex-path, and a multi-peer child now resolves the next segment in
+  **its own** peer table, eating one more segment. A dst that used to reach a CAN peer as
+  `n21/a/b` must now say `can0/n21/a/b` (or the full `net/can/can0/n21/a/b` for a connection
+  created through `/net`). Nothing rejects the old form — it simply stops resolving, so a peer
+  goes quietly unreachable and a READ times out rather than erroring.
+
+  This slice landed without a CHANGELOG entry, which is how it reached a downstream firmware as
+  a mystery timeout (`"READ over vcan never resolved"`) and cost a 188-commit bisect to
+  attribute. The commit message documented it thoroughly; the file an integrator actually reads
+  did not.
+
+- **BREAKING: `transport_vertex_t::provide_link` gains a leading `module` argument** — RFC-0014
+  S2a. A staged link bypasses the connection factory, so there is no `kind` to derive the mount
+  from and it must be named: `provide_link("can", "can0", tcan)`. Modules are **declared**, not
+  derived (`register_module(module, kind, role)`) — a transport with both a dial and a listen
+  shape is two modules (`ws-client` / `ws-server`), while a bus like CAN is one for both roles;
+  an undeclared kind falls back to `<kind>-client` / `<kind>-server`, so an externally
+  registered transport keeps working.
+
+- **`graph_t::set_app_fields_static` / `vertex_t::set_app_fields_static` take a
+  `tr::graph::borrowed_fields_t`** instead of a `std::span<const app_field_static_t>`
+  (ADR-0058 erratum 2). **Source-compatible with every array-shaped caller**: the new type
+  converts implicitly from `const app_field_static_t (&)[N]` and from `std::array`, which is
+  what a `static`/`constexpr` table already is. It deliberately does **not** convert from a
+  `std::vector` or a bare `std::span`.
+
+  This closes a silent break. The previous release tightened this install's lifetime contract
+  to cover the ARRAY, not just the bytes it points at — but a `std::span` binds implicitly to a
+  `std::vector`, so a caller that built its table into a function-local vector kept compiling
+  and began viewing freed memory. That reached a downstream firmware consumer and cost a
+  188-commit bisect to find, because there was no compiler diagnostic anywhere.
+
+  **If this stops compiling for you, you had the bug.** Give the table storage that outlives the
+  vertex. A genuinely runtime-sized table — a language binding mapping a foreign POD array into
+  slots, typically — opts out explicitly with `borrowed_fields_t::unchecked(span)`, which asserts
+  the lifetime by hand. Note the guard rejects the container/temporary mistake, not every one: a
+  block-scope array still binds, since static storage duration is not expressible as a constraint.
+
+- **`tr::mem::block_array_t<T>::data()`** (both const and non-const), returning the contiguous
+  block or `nullptr` when empty. For handing the array to a pointer/length API — the egress
+  `iov` table below is the first caller. Invalidated by any growth, like every other
+  contiguous container.
+
+- **`tr::mem::bump_source_t`, `null_source()`, and `block_array_t<T>`** — the companions the
+  migrated call sites need. `bump_source_t` is the nothrow twin of
+  `std::pmr::monotonic_buffer_resource` over a caller buffer, with an upstream so it stays
+  capability-preserving; `null_source()` is the upstream that makes the buffer a hard bound.
+  `block_array_t<T>` is a nothrow growable array of trivially-copyable `T` whose growth
+  returns `false`.
+
+  `block_array_t::push_slot()` claims one uninitialized slot to fill **in place**. That is
+  load-bearing, not sugar: `push_back(T{...})` on a 48-byte element materializes the
+  aggregate on the stack field-by-field and reads it back as wide loads, and the
+  store-forwarding stall cost **~45 % of a terminus decode while executing FEWER
+  instructions** (IPC 5.0 → 2.6). It was the entire regression this change first showed, and
+  five other hypotheses — modulo vs mask alignment, growth inlining, index vs pointer
+  cursor, the sink's latch stores, `is_canonical_name` inlining — were each measured and
+  refuted before the profile pointed here.
+
+
+- **A nothrow failable-block seam: `tr::mem::block_source_t` (#551, slice 1).** New header
+  `libtracer/mem_source.hpp` with `block_source_t` (`try_alloc` / `release`, both `noexcept`,
+  `nullptr` on exhaustion), the default `heap_source_t`, and `tr::mem::heap_source()`.
+  `graph_t` gained a THIRD, **appended** constructor parameter
+  (`mem::block_source_t* ctl = &mem::heap_source()`) and a `control_source()` accessor.
+  Appended, so every existing `graph_t{...}` call site — including the shipping
+  `graph_t graph{&mr};` — compiles unchanged.
+
+  Why a new type rather than reusing `std::pmr::memory_resource` with a documented
+  may-return-null contract: `memory_resource::allocate` is annotated `returns_nonnull`, so
+  the caller's null check is undefined behaviour and **is deleted at `-Os`/`-Oz`** —
+  measured on `riscv32-esp-elf-g++ 15.2.0`, where the soft-fail branch survives at
+  `-O0`/`-O1`/`-O2`/`-O3` and vanishes at the two size-optimized levels. `-Os` is what the
+  reference ESP-IDF node ships, and no job executes an allocation-failure path at it (the
+  one `-Os` binary CI runs, `full-node-host`, drives only the happy path).
+
+  **As of slice 1 no call site drew from the seam**; the #588 entry above then made the
+  branch-write decode its first consumer. The registration
+  allocations that motivated #551 migrate next.
+
+- **The LKV publish takes no lock when nobody is awaiting (ADR-0064 §1, #555).** A non-`STREAM`
+  write now bumps `write_seq_` with one `fetch_add(seq_cst)`, reads the stripe's `waiters`
+  count, and returns **without acquiring the stripe mutex** when it is zero. `#370` already
+  skipped the condvar *call* on this path; the mutex itself was what remained, and measured it
+  is not free — it sits immediately downstream of the `lkv_` atomic publish, so the two
+  serializing regions land back-to-back on the critical dependency chain (~38 of the write's
+  ~335 cycles). `inproc` measures **89.2 → 82.6 ns/op**, faster in 5 of 5 pinned interleaved
+  rounds. `current_seq()` becomes lock-free as a consequence. `STREAM` roles are unchanged —
+  their ring append is real state mutation and keeps the lock.
+
+  **`write_seq_` and `vertex_stripe_t::waiters` are now atomic and part of a documented
+  ordering contract**: the writer bumps the sequence *before* reading `waiters`, the waiter
+  publishes `++waiters` *before* reading the sequence, both `seq_cst`. Reversing either order,
+  or relaxing either access, silently reintroduces a lost-wakeup window. The argument is in
+  ADR-0064 §1 and beside the code.
+
+  Also corrects the "lock-free" language on `lkv_`: `std::atomic<std::shared_ptr<T>>` is
+  lock-free *by contract* and **spin-locked in libstdc++** (`is_lock_free()` returns 0), which
+  is ~77 of the remaining ~316 cycles and now the largest single term on the write path.
+  ADR-0064 §2 records what a genuinely lock-free slot would take and why none was chosen yet.
+
+- **Borrowed app-field installs now really cost zero declaration RAM (ADR-0058 erratum 1).**
+  `set_app_fields_static` promised the slots would view caller flash, but the runtime still
+  copied the caller's array into an owned `std::vector` — and `app_field_static_t` /
+  `app_field_slot_t` were field-for-field identical, so the copy converted between a type and
+  itself. Measured host-side, that vector was the **largest single resident block** on the
+  borrowed path: 200 B of the 456 B a 5-field table added. **`app_field_static_t` is now an
+  alias of `app_field_slot_t`**, and `app_field_table_t::slots` is a `std::span` the borrowed
+  install points straight at the caller's array. Per-vertex live bytes for a 5-field borrowed
+  table drop **592 → 392 B (11 → 10 allocations)**; the owning install is unchanged, and the
+  struct does not grow (the owning copy moves to `unique_ptr<slot[]>`, which with the span is
+  the size the vector was on host and rv32 alike). Gated by the `vertex_app5_static` row.
+
+  **⚠ Stronger caller contract.** The runtime now views the **array**, not merely the
+  `name`/`descriptor` bytes it points at — so a `set_app_fields_static` caller must keep the
+  array itself alive for the vertex's lifetime. Pass a `static`/`constexpr` array; a stack
+  array that previously worked by accident will now dangle. Wire-invariant (`:schema` serves
+  identical bytes), so no RFC.
+
+- **Control-plane serialization — `fwd_router_t` and `transport_vertex_t` each gain an internal
+  mutex (ADR-0063 §3).** `transport_vertex_t` had **no synchronization at all**, yet the graph
+  invokes its connection factory *outside* `map_mutex_`, on whichever transport's receive thread
+  delivered the CREATE. With two transports that is two threads, so concurrent `make_connection`
+  calls raced `conns_` / `pending_links_` (and the unlocked `settings_of` / `link_of` readers
+  raced the insert's rebalance), while `fwd_router_t::add_child` raced on the registry's
+  scan-then-append — two writers could be handed the **same empty slot**, silently losing a
+  child — and on the `child_rx_` deque spine. Now serialized. **The forward and delivery paths
+  take no lock and are unchanged** (ADR-0038 §3). Lock order, where more than one is held:
+  `transport_vertex_t` → `fwd_router_t` → `graph_t::map_mutex_` → the vertex stripe. Cost is
+  ~4 B static per lock plus a FreeRTOS mutex allocated on first lock — one-time, not per
+  connection. ADR-0063 originally specified an arch-selected sync *trait* for this; its
+  Erratum 1 records why that was withdrawn (it was never built, it cannot wrap a section that
+  blocks on sockets and `map_mutex_`, and a spinlock there risks unbounded priority inversion
+  on single-core FreeRTOS).
+
+- **`child_registry_t::child_t::multi_peer` is now `std::atomic<bool>`.** `add` **rebinds** an
+  existing slot on the tombstone-reuse path that create/remove churn takes constantly, and that
+  rebind wrote this field while the lock-free mount descent read it — a genuine reader-vs-writer
+  data race that the atomic `link` did not cover. Confirmed under TSan, independently of the
+  locks above: with the locks in place and this field left plain, the race still reports.
+
+- **Connection teardown — `child_registry_t::erase`, `fwd_router_t::remove_child`,
+  `transport_vertex_t::remove_connection` (#494).** The FWD child registry was add-only, so a
+  retired connection left a dangling `name → transport_t*` — latent while removal had no wire
+  path, a use-after-free once RFC-0014's remove-half drives create/remove churn. `erase`
+  **tombstones in place** (nulls the slot's link, keeps its NAME) rather than erasing from the
+  vector, so a concurrent lock-free reader's iteration stays valid; a later `add` of the same
+  NAME reuses the tombstone, so churn on a stable name set does not grow the table.
+  `remove_connection` sequences un-route → `retire()` the vertex → destroy the owned socket. The
+  eviction hook is **removal, not departure**: `link_down` alone remains correct for a link that
+  merely dropped, since a DIAL connection's vertex outlives its socket and self-heals.
+  `remove_connection` is owner-internal — the RFC-0014 `NAME`-write dispatch (S2b) is what will
+  expose it to the wire. `child_registry_t::size()` now counts slots including tombstones;
+  `live_size()` counts those that still resolve.
+
+- **Link-liveness enum — RFC-0014 S1 (`tr::net::link_state_t`, #492).** A connection
+  vertex's stored value is now the six-state liveness enum
+  (`DORMANT`/`DIALING`/`RECONNECTING`/`UP`/`LISTENING`/`BIND_FAILED`, RFC-0014 §4) rather
+  than a binary up/down byte. `conn_settings_t` gains `backoff_ms` and
+  `connect_timeout_ms` (config keys `backoff` / `connect_timeout`), parsed now but
+  consumed by the S5 liveness engine that lands later. The state remains manually driven
+  in S1: a config-constructed socket self-reports `UP` (DIAL) / `LISTENING` (LISTEN) at
+  creation; the engine becomes the sole writer of the DIAL transitions in S5. The 1-byte
+  wire encoding (table order, `DORMANT = 0x00` preserving the old "down") is the reference
+  encoding until the S7 conformance vectors make it normative (the RFC defers the byte
+  clauses to #492).
+
+- **`route_handle_t::link_count()` (#488).** A diagnostic accessor returning the number of
+  live per-link table shells in the compaction registry — the observable that `clear_link`
+  now returns to steady state (see Fixed).
 
 ### Changed
 
@@ -265,76 +643,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   binds first at 204 segments** and the count clause cannot fire; it becomes binding only under
   RFC-0018's packed body. The observable widening today is therefore 32 → 204.
   `kMaxSegmentBytes`, `kMaxPathBytes` and `kMaxFieldDepth` are unchanged.
-
-### Added
-
-- **`graph_t::collect()` and `graph_t::parked_seam_count()` (#576, ADR-0072 §Supersession).**
-  `retire()` detaches a vertex's value seam and parks it — the seam is read lock-free, so the
-  retiring thread cannot free a block a reader may still hold. The park is keyed on **handler
-  presence, not role**: `adopt_identity` allocates the seam iff `on_read`, `on_write` or
-  `on_children` was installed, so a `role_t::STORED_VALUE` vertex with an `on_children` parks
-  one and a `role_t::HANDLER` with an empty `handlers_t` parks none. Until now the park had one
-  append site and **zero** release sites, and `transport_vertex_t::remove_connection` retires the
-  `/net/<module>/<name>` identity vertex — which is `role_t::STORED_VALUE` and bears a seam only
-  when its link exposes a bus facet (`link->bus() != nullptr`: CAN, or a tcp/ws server wired
-  `peer_named = true`). So **a bus node leaked ~96 B of `std::function` per connection teardown**,
-  permanently — peer-driven growth, not operator action — while a point-to-point deployment
-  (dial links, UDP, loopback, a default-wired server) parks nothing and needs no collect point at
-  all. `collect()` is the park's other end — it swaps the park into a local under the map lock and lets the local
-  destruct **after** the lock is released, so the free runs on the **caller's thread, outside
-  every graph lock** (a seam callback's destructor may re-enter the graph). `parked_seam_count()`
-  makes an uncollected park observable rather than silent. **Caller obligation:** `collect()`
-  MUST be called from a point where no lock-free reader holds a value seam — the library cannot
-  know that moment, so it is published rather than hidden. That includes a reader that entered
-  while the vertex was still LIVE: `read` / `write` / `:children[]` load the seam pointer once
-  and hold it across the user callback, so a concurrent retire hands the park a block a live
-  call is still using. An embedder that never calls it keeps
-  today's behaviour. Nothing was added to the read or write path; no existing call site changes.
-  This supersedes the ADR-0072 reclamation domain for this site — PR #750's hazard-domain design
-  is not merged (three rounds, three blocking defects, +19/+29 % on the read path), and #635
-  keeps the open reclamation question.
-
-- **`tr::graph::delivery_policy_t` — the per-subscription delivery policy (RFC-0022 §3.A).** A
-  packed `u16`: bits 0–1 `reliability`, 2–4 `priority`, 5 `durability_request`, 6–15 reserved
-  (written 0, **ignored** on read — never rejected, and carried verbatim so they read back
-  unchanged). It rides the `SUBSCRIBER` TLV's **already-existing `SETTINGS` child** under the key
-  `delivery_policy` — the same child `delivery_compact` uses — so no new wire structure exists.
-  Absent ⇒ all-zero ⇒ today's behaviour, byte-identically. Both `subscribe` sugars take it as a
-  defaulted trailing argument (`subscribe(src, target, policy)`, `subscribe(src, fn, ctx, policy)`,
-  `subscribe(src, callable, policy)`), so every existing call site compiles and behaves unchanged.
-  Only `durability_request` is consumed today; `reliability` and `priority` are stored and read
-  back, awaiting the transport work that honours them.
-
-- **`graph_t::set_history_depth(vertex_handle_t, std::uint32_t)` — the STREAM ring depth, declared
-  owner-side (RFC-0022 §3.C).** Shaped like `set_delivery_mode` / `set_app_fields`: a declaration
-  the owner makes host-side after registration, with **no wire surface at all** — no peer can read
-  it and none can write it. The depth is what the *application* wants retained, which no peer and
-  no injected resource can supply, so it is not protocol QoS and does not belong on a remote write
-  surface. Costs a STREAM vertex zero extra bytes (a STREAM identity already allocates the cold
-  block). Default 1, as before.
-
-- **`graph_t::set_store_ref_min_bytes(vertex_handle_t, std::uint32_t)` and
-  `graph_t::store_ref_min_bytes(vertex_handle_t)`.** The ADR-0042 §3 store-by-reference threshold,
-  rehomed the same way and for the same reason — it is a deployment copy/pin trade, not a
-  quality-of-service property. Semantics are **unchanged**: an absolute byte threshold, `0` (the
-  default) disables referencing, read on every view-delivered write as one inline load. RFC-0022
-  §3.D replaces that predicate with an amplification ratio whose constant §6 gates on a
-  dual-target measurement; that measurement has not been run, so the predicate is untouched here.
-
-- **`vertex_t::has_extension_block()`.** The RAM-census observable that replaced comparing
-  `settings()`'s returned address against `kDefaultSettings` — both of which RFC-0022 deleted.
-  Used by `bench_qos_census` and the vertex-size gate; not a data-plane predicate.
-
-- **`fwd_router_t::subscribe_toward(producer, target)` (#739).** Binds a local producer's
-  subscription toward ONE ordinary mount-path target (`/net/<module>/<name>/<consumer...>`,
-  arbitrarily nested), resolved through the SAME ADR-0061 strip-K cached descent the forward
-  path uses — no caller-side `(link, return-route)` hand-split, no single-hop assumption, no
-  `net/<module>/<name>` string knowledge in the application. Bind-time resolution,
-  link-lifetime durability (teardown evicts the binding; re-binding is the application's job —
-  re-establishment is #716). A target whose first hop is a bus PEER answers `INVALID_PATH`
-  (no directed registry entry to store yet — the #741 work's territory).
-
-### Changed
 
 - **BREAKING: `fwd_router_t` takes a fourth injection — the `flat` byte backend every rope
   flatten it performs draws from (#730).** The constructor is now
@@ -553,6 +861,179 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `0` as "cannot compact" and never stamp it on a frame — `fwd_router_t::advertise` already
   documented `0` as its failure return, and now uses it for this case too.
 
+- **Configuration is one named type: `tr::graph::default_config_t`, bound by `using config_t`**
+  ([ADR-0070](../docs/adr/0070-configuration-is-a-named-traits-type.md)). Every compile-time knob
+  is a member; the loose names (`kVertexLockStripes`, `lkv_slot_t`, …) remain and are **derived**
+  from it, so no call site moved. An application declares its own by inheriting
+  `default_config_t` and overriding what differs. **Verified byte-identical codegen** against the
+  previous shape — same disassembly and same section sizes for `core/src/graph.cpp` on host
+  x86-64 `-O2` and rv32 `-Os`.
+
+  It is bound **once**, not threaded as a template parameter. ADR-0070 supersedes ADR-0068 §2's
+  `basic_graph_t<config_t>` plan on measurement: a parameter is latency-neutral by construction,
+  its one unique capability (two configs per binary) forks the process-global stripe and hazard
+  tables and so costs RAM, and an app-declared traits type cannot reach the library's
+  out-of-line TUs.
+
+- **The `sizeof(vertex_t)` RAM-diet gate moved from `vertex_size_test.cpp` into `vertex.hpp`**,
+  keyed on `config_t::kMaxVertexBytes{64,32}`. A `static_assert` in the header is evaluated by
+  every TU that includes it, so **every target and every configuration now checks its own
+  binding** — including the 32-bit arm, which was never checked before (no CI leg cross-compiled
+  that test, while the ESP-IDF legs compile `vertex_t` on every PR). Note that the 32-bit ceiling
+  has **zero headroom**: rv32 sits exactly on 80 B, so the next inlined 32-bit member is a build
+  failure by design.
+
+- **BREAKING: `graph_t::read` and `graph_t::await` return `result_t<value_ref_t>`** — a
+  REFERENCE to the vertex's published value — instead of `result_t<rope_t>`, a copy of it. The
+  value was already refcounted (`shared_ptr<const rope_t>` is the LKV slot's value type); the
+  read then copied the rope out of it, cloning one `segment_ptr_t` per link, and each clone is
+  a contended refcount RMW on the line every reader of that vertex shares. Measured on the real
+  path with both binaries built once and alternated over 6 rounds: **median 1.48x aggregate,
+  95/102 paired samples**, up to **3.07x** on distinct vertices at 8 readers, with p50 falling
+  90 -> 60 ns on the uncontended shapes. New type: `tr::graph::value_ref_t` (dereferences to the
+  rope; `value_ref_t::composed` wraps a freshly built one).
+
+  **Migration:** `r->only()` becomes `(*r)->only()`, and `*r` becomes `**r` where a `rope_t` is
+  wanted. The rule the surface now follows: **a read of a PUBLISHED value returns a reference to
+  it; a read that COMPOSES a new value returns the value** — so `read(handle, field)`,
+  `read_children_folded`, `read_children_materialized` and `read_subtree_folded` are unchanged
+  and still rope-valued. The composed BRANCH read measured **1.00x** (30 paired samples), so the
+  shape that cannot benefit does not pay for the change either.
+
+- **BREAKING: build configuration is plain C++ — the config macros are gone**
+  ([ADR-0068](../docs/adr/0068-build-configuration-is-plain-cpp-config-header.md)). The new
+  public header `libtracer/config.hpp` carries every per-target compile-time knob as ordinary
+  C++; a CMake build generates it from `config.hpp.in` (shadowing the checked-in default, with
+  a configure-time drift gate keeping the two identical). Consequences:
+  `LIBTRACER_VERTEX_LOCK_STRIPES` is now the constexpr `tr::graph::kVertexLockStripes`, set
+  via the CMake cache variable (or ESP-IDF menuconfig) — a bare `-D` compile definition **no
+  longer does anything**; `LIBTRACER_ACL_FULL` remains the CMake option name but no longer
+  exists as a preprocessor symbol (it rebinds the `acl_policy_t` alias in the generated
+  header). Pre-production, so no deprecation shims.
+
+- **BREAKING: `fwd_router_t`'s five observability/terminus sinks are fn-ptr + context**
+  (`on_reply` / `on_inbound` / `on_raw` / `on_compact_delivery` / `on_stale_label`), no longer
+  `std::function`. They fire on the per-frame RX path — the seam
+  [ADR-0047](../docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md) already
+  called "the largest avoidable embedded liability on the delivery path" when it rejected
+  `std::function` receivers — and now take `(fn, ctx)` in the same shape as
+  `graph_t::subscriber_fn_t`. Wiring-frequency `std::function`s elsewhere
+  (`posix_endpoint_t::start`, `peer_visitor_t`) are deliberately kept. Pre-production, no
+  deprecation shims ([ADR-0068](../docs/adr/0068-build-configuration-is-plain-cpp-config-header.md)
+  records the survey).
+
+- **`graph_t::read` no longer takes the graph map lock**
+  ([#652](https://github.com/avatarsd-llc/libtracer/issues/652)). The leaf/branch fork — "does
+  this vertex have a registered child?" — was computed by walking the child list under
+  `map_mutex_` shared, on **every** read. Being process-wide, that lock capped the whole
+  process at roughly 20 M reads/s no matter how many cores were reading or how disjoint the
+  vertices, and a blocking lock plateaus rather than collapsing, so a flat aggregate read like
+  "scales fine" until you notice flat across a 24× thread range means each thread is 24×
+  slower. The predicate is now a bit on the vertex, set when a child is filled and recomputed
+  when one is retired, both under the unique lock the graph already held. No API change.
+  Measured, twenty-four readers on distinct vertices: **19.7 → 163.5 M ops/s (8.28×)**, which
+  is 99% of what short-circuiting the call entirely achieves; 3.19× at eight readers.
+  Shared-vertex reads and every write shape land inside their run-to-run spread, as expected —
+  that lock was never what bound them. `sizeof(vertex_t)` is unchanged at 112 B: the bit
+  shares a byte with the existing `OWN_ACES` flag rather than taking a word of its own.
+
+- **`vertex_ext_t` no longer caches a second, projected ACE list.** `eff_aces_inherit` — a
+  materialized copy of `eff_aces`'s `kAceInherit`-flagged elements — is removed;
+  `effective_acl_t::allows` gained a `required_flags` parameter and filters the single cached
+  merge in place. `vertex_ext_t` drops **104 → 96 B on rv32**, and each ACL-bearing vertex loses a
+  heap block plus N x 32 B of `ace_t` copies rebuilt on every merge invalidation.
+
+  The evaluator could already do this: both ACL policies' `allows` take `required_flags` ("ACEs
+  lacking these flag bits are skipped"), so the projection duplicated a filter that existed.
+  Filtering in place is **order-identical** to projecting — skipping elements cannot reorder the
+  ones that remain — which matters because the full policy is first-match-per-bit in stored
+  order. (Partitioning the vector by the flag, considered first, is **not** sound: it would move
+  an own INHERIT-flagged ACE past ancestor ones.)
+
+  **Only affects you if you call `vertex_t::with_effective_aces` directly**: the `eval` callable
+  now takes one list, not `(merged, inherited)`. Select the inheritable subsequence by passing
+  `kAceInherit` as `effective_acl_t::allows`'s `required_flags`.
+
+- **`subscriber_t::target_key` and `edge_view_t::target_key` are now
+  `std::shared_ptr<const std::vector<std::byte>>`, not `std::vector<std::byte>`** — the key is
+  immutable and refcount-shared instead of deep-copied per delivery. A null pointer means "no
+  local re-dispatch target", replacing the old `.empty()` test.
+
+  **Why:** `snapshot_edges` copied the key into every `edge_view_t` so dispatch could run outside
+  the vertex lock, and that snapshot is a fresh stack object per publish — so every edge with a
+  local target allocated on the fan-out path. It cost **two** allocations, not one, because
+  `try_reserve` is probe-then-commit (probe allocates and frees, then the real reserve allocates).
+  Measured with a global operator-new counter: a delivery to a local target went from **2.00
+  allocations to 0.00**, with the store's own LKV allocation unchanged at 1.00 on both sides as a
+  control.
+
+  Sizes on rv32 (`riscv32-esp-elf -Os`): `subscriber_t` 40 → 36 B, `edge_view_t` 84 → 80 B — so
+  the 8-deep inline dispatch snapshot drops from 672 to 640 B of stack per publish.
+
+  **Only affects you if you construct `subscriber_t` directly** (the in-process
+  `graph_t::subscribe` sugar and every wire path are unchanged). Build the key with
+  `tr::graph::try_make_target_key(std::move(bytes))`, which soft-fails to null on OOM rather than
+  aborting under `-fno-exceptions`.
+
+- **`settings_t`'s member order changed (widest-first), shrinking it 32 → 24 B.** Layout only —
+  no field was added, removed, renamed or retyped, and the wire form is unaffected (it emits
+  **named** children, so it never depended on declaration order). `vertex_ext_t` drops
+  112 → 104 B on rv32 and 168 → 160 B on x86-64, so every ext-bearing vertex (ACL, handlers,
+  app fields, STREAM ring, or non-default QoS) gets 8 bytes back on every target.
+
+  `settings_t` is all fixed-width scalars, so it is the one runtime type that does **not** shrink
+  with the pointer — it was 32 B on a 32-bit MCU exactly as on a 64-bit host, making it the
+  largest non-ACL member of `vertex_ext_t` on device.
+
+  **Only affects you if you positionally aggregate-initialize it** (`settings_t{1, 0, 8, …}`),
+  which would now bind values to different fields. Use designated initializers
+  (`settings_t{.deadline_ns = …}`) or assign members; every construction site in this tree
+  value-initializes with `settings_t{}` and needed no change.
+
+- **BREAKING (wire behaviour): an indexed `:subscribers[N]` write is now payload-discriminating,
+  per RFC-0009 §D.1 — and `:subscribers[*]` on a write is rejected (#598, #579).** The
+  implementation cleared slot `N` payload-blind, so a `SUBSCRIBER`, a junk `VALUE` and the
+  empty-`STATUS` sentinel all produced the identical clear and the identical `RESULT`. Now:
+  an empty `STATUS` (`09 00 00 00`) clears; a `SUBSCRIBER` **replaces** slot `N`'s edge; anything
+  else is `TYPE_MISMATCH`; an index no slot answers to is `INVALID_PATH`.
+
+  Three consequences an integrator must read:
+
+  1. **A replace passes the `SUBSCRIBE` gate, not merely `WRITE`.** It enters the same admission
+     door as an append (ADR-0049), so a caller holding `WRITE` but not `SUBSCRIBE` can still
+     clear a slot but can no longer install one.
+  2. **Writes that used to succeed now fail.** A client clearing a slot with an arbitrary payload
+     was already non-conforming (§D.1 calls this a conformance *repair*), but it was succeeding;
+     it now gets `TYPE_MISMATCH`. Clear with the sentinel.
+  3. **`:subscribers[*]` was silent data loss.** The wildcard sets `indexed` and leaves `index`
+     at 0, so a wildcard write cleared **slot 0** and answered `RESULT`. It is now
+     `INVALID_PATH`; the `WRITE` grammar has no wildcard axis.
+
+- **BREAKING: `transport_vertex_t::set_link_state(std::string_view, bool)` →
+  `set_link_state(std::string_view, tr::net::link_state_t)` (#492).** The manual
+  link-state seam now takes the liveness enum instead of a bool. Migrate `set_link_state(n,
+  true)` → `set_link_state(n, tr::net::link_state_t::UP)` (or `LISTENING` for a listen
+  socket) and `set_link_state(n, false)` → `…::DORMANT`.
+
+- **Per-transport recv-thread stack sizing (#486).** Every socket transport constructor
+  (`udp_transport_t`, `tcp_transport_t` dial+listen, `transport_tcp_server`,
+  `transport_ws_server`, `transport_ws_client`) and `socketcan_link_t` gain a trailing
+  `recv_stack` parameter, and `twai_link_config_t` gains a `stack_size` field — all
+  defaulting to `0` (the platform default, i.e. the prior behavior). A non-zero value
+  right-sizes that one thread's stack instead of forcing an integrator to inflate the
+  **global** `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT` (which pays for every pthread in the
+  system) to cover the stack-heaviest recv loop. Socket transports apply it via
+  `pthread_attr_setstacksize` (honored by glibc and the ESP-IDF pthread layer alike); the
+  ESP TWAI link applies it via `esp_pthread_set_cfg`. Size to the measured high-water mark.
+
+- **The shared recv-thread scaffold (`posix_endpoint_t::start`) and `socketcan_link_t` now
+  spawn via `pthread_create`, not `std::thread`.** `std::thread`'s constructor *throws* on a
+  spawn failure, which under the MCU profile's `-fno-exceptions` becomes `std::abort` — a
+  thread-spawn OOM on a starved node would bring the whole process down. `pthread_create`
+  returns an error code; a failed spawn now leaves the endpoint simply not receiving (a soft
+  fail in keeping with the 0.6.0 OOM→`BACKPRESSURE` hardening), never an abort. At the
+  default stack size the observable behavior is otherwise unchanged.
+
 ### Fixed
 
 - **An `AWAIT` carrying a `:field` selector is rejected instead of silently awaiting the whole
@@ -628,356 +1109,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   Regression guard added in `fwd_rope_forward_test` — it corrupts a body byte under a valid
   trailer and splits the frame so the corruption and the trailer land in **different links**, the
   shape a contiguous arm cannot produce. Verified to fail before the change and pass after.
-
-### Changed
-
-- **Configuration is one named type: `tr::graph::default_config_t`, bound by `using config_t`**
-  ([ADR-0070](../docs/adr/0070-configuration-is-a-named-traits-type.md)). Every compile-time knob
-  is a member; the loose names (`kVertexLockStripes`, `lkv_slot_t`, …) remain and are **derived**
-  from it, so no call site moved. An application declares its own by inheriting
-  `default_config_t` and overriding what differs. **Verified byte-identical codegen** against the
-  previous shape — same disassembly and same section sizes for `core/src/graph.cpp` on host
-  x86-64 `-O2` and rv32 `-Os`.
-
-  It is bound **once**, not threaded as a template parameter. ADR-0070 supersedes ADR-0068 §2's
-  `basic_graph_t<config_t>` plan on measurement: a parameter is latency-neutral by construction,
-  its one unique capability (two configs per binary) forks the process-global stripe and hazard
-  tables and so costs RAM, and an app-declared traits type cannot reach the library's
-  out-of-line TUs.
-
-- **The `sizeof(vertex_t)` RAM-diet gate moved from `vertex_size_test.cpp` into `vertex.hpp`**,
-  keyed on `config_t::kMaxVertexBytes{64,32}`. A `static_assert` in the header is evaluated by
-  every TU that includes it, so **every target and every configuration now checks its own
-  binding** — including the 32-bit arm, which was never checked before (no CI leg cross-compiled
-  that test, while the ESP-IDF legs compile `vertex_t` on every PR). Note that the 32-bit ceiling
-  has **zero headroom**: rv32 sits exactly on 80 B, so the next inlined 32-bit member is a build
-  failure by design.
-
-### Changed
-
-- **BREAKING: `graph_t::read` and `graph_t::await` return `result_t<value_ref_t>`** — a
-  REFERENCE to the vertex's published value — instead of `result_t<rope_t>`, a copy of it. The
-  value was already refcounted (`shared_ptr<const rope_t>` is the LKV slot's value type); the
-  read then copied the rope out of it, cloning one `segment_ptr_t` per link, and each clone is
-  a contended refcount RMW on the line every reader of that vertex shares. Measured on the real
-  path with both binaries built once and alternated over 6 rounds: **median 1.48x aggregate,
-  95/102 paired samples**, up to **3.07x** on distinct vertices at 8 readers, with p50 falling
-  90 -> 60 ns on the uncontended shapes. New type: `tr::graph::value_ref_t` (dereferences to the
-  rope; `value_ref_t::composed` wraps a freshly built one).
-
-  **Migration:** `r->only()` becomes `(*r)->only()`, and `*r` becomes `**r` where a `rope_t` is
-  wanted. The rule the surface now follows: **a read of a PUBLISHED value returns a reference to
-  it; a read that COMPOSES a new value returns the value** — so `read(handle, field)`,
-  `read_children_folded`, `read_children_materialized` and `read_subtree_folded` are unchanged
-  and still rope-valued. The composed BRANCH read measured **1.00x** (30 paired samples), so the
-  shape that cannot benefit does not pay for the change either.
-
-### Added
-
-- **`child_registry_t` slots carry a precomputed name digest** — the forward demux's mount scan
-  no longer touches a candidate's string or its atomic link unless the digest matches. Measured
-  on `bench/bench_forward_demux` (8 alternating rounds, two builds), the scan's marginal cost
-  over a fixed-position hop drops **35 ns to ~0 at 8 links, 86 to 2 at 16, and 333 to 17 at 64
-  (95% removed)**, with the fixed-position hop itself unchanged within +/-2 ns. The digest is a
-  filter, never a decision: `live()` and the full compare still gate every answer. New public:
-  `digest_name`, `digest_segments`, `fold_segment` — public only so a test can pin the first two
-  in agreement, which a lookup cannot do.
-
-
-- **`tr::graph::kCacheLineBytes` — false-sharing padding becomes a per-target knob.** New
-  constant in `libtracer/config.hpp` (CMake: `-DLIBTRACER_CACHE_LINE_BYTES`, default 64), and
-  **0 means "this target has no second core to false-share with"**. It governs every shared
-  table libtracer pads: the vertex lock stripes and the hazard domain's cells and retire
-  lists. Measured on rv32 (`-Os -fno-exceptions -fno-rtti`, GCC 15.2, real `core/src/graph.cpp`),
-  16 stripes cost **1,024 B of `.bss` at 64 and 128 B at 0** — a 896 B static-RAM saving on a
-  single-core node, with the hazard domain worth a further 6.5 KB when bound. The ESP-IDF
-  component *derives* the value from `CONFIG_FREERTOS_UNICORE` rather than adding a Kconfig
-  option: a unicore build has no second core by construction. Purely an optimization axis —
-  the wrong value costs control-plane throughput and changes nothing observable. The host
-  default is unchanged, byte for byte. New: `tr::graph::kStripeAlign`,
-  `tr::graph::detail_hp::kDomainAlign` (both derived, both `static_assert`ed to have actually
-  taken effect), and a `sizeof(vertex_stripe_t)` gate in `vertex_size_test`.
-
-### Changed
-
-- **BREAKING: build configuration is plain C++ — the config macros are gone**
-  ([ADR-0068](../docs/adr/0068-build-configuration-is-plain-cpp-config-header.md)). The new
-  public header `libtracer/config.hpp` carries every per-target compile-time knob as ordinary
-  C++; a CMake build generates it from `config.hpp.in` (shadowing the checked-in default, with
-  a configure-time drift gate keeping the two identical). Consequences:
-  `LIBTRACER_VERTEX_LOCK_STRIPES` is now the constexpr `tr::graph::kVertexLockStripes`, set
-  via the CMake cache variable (or ESP-IDF menuconfig) — a bare `-D` compile definition **no
-  longer does anything**; `LIBTRACER_ACL_FULL` remains the CMake option name but no longer
-  exists as a preprocessor symbol (it rebinds the `acl_policy_t` alias in the generated
-  header). Pre-production, so no deprecation shims.
-
-- **BREAKING: `fwd_router_t`'s five observability/terminus sinks are fn-ptr + context**
-  (`on_reply` / `on_inbound` / `on_raw` / `on_compact_delivery` / `on_stale_label`), no longer
-  `std::function`. They fire on the per-frame RX path — the seam
-  [ADR-0047](../docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md) already
-  called "the largest avoidable embedded liability on the delivery path" when it rejected
-  `std::function` receivers — and now take `(fn, ctx)` in the same shape as
-  `graph_t::subscriber_fn_t`. Wiring-frequency `std::function`s elsewhere
-  (`posix_endpoint_t::start`, `peer_visitor_t`) are deliberately kept. Pre-production, no
-  deprecation shims ([ADR-0068](../docs/adr/0068-build-configuration-is-plain-cpp-config-header.md)
-  records the survey).
-
-### Changed
-
-- **`graph_t::read` no longer takes the graph map lock**
-  ([#652](https://github.com/avatarsd-llc/libtracer/issues/652)). The leaf/branch fork — "does
-  this vertex have a registered child?" — was computed by walking the child list under
-  `map_mutex_` shared, on **every** read. Being process-wide, that lock capped the whole
-  process at roughly 20 M reads/s no matter how many cores were reading or how disjoint the
-  vertices, and a blocking lock plateaus rather than collapsing, so a flat aggregate read like
-  "scales fine" until you notice flat across a 24× thread range means each thread is 24×
-  slower. The predicate is now a bit on the vertex, set when a child is filled and recomputed
-  when one is retired, both under the unique lock the graph already held. No API change.
-  Measured, twenty-four readers on distinct vertices: **19.7 → 163.5 M ops/s (8.28×)**, which
-  is 99% of what short-circuiting the call entirely achieves; 3.19× at eight readers.
-  Shared-vertex reads and every write shape land inside their run-to-run spread, as expected —
-  that lock was never what bound them. `sizeof(vertex_t)` is unchanged at 112 B: the bit
-  shares a byte with the existing `OWN_ACES` flag rather than taking a word of its own.
-
-### Added
-
-- **`tr::graph::hazard_slot_t` — the host LKV slot, reclaimed with hazard pointers** (#604,
-  [ADR-0069](../docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md) §2/§5/§6).
-  A lock-free `std::atomic<node*>` over a 24-byte indirection node that owns the rope's
-  `shared_ptr`; a read pins the node, copies the handle out, and unpins, so `read_stored()`
-  keeps its owning signature and nothing in `graph.cpp` changed. Bind it per target with
-  `-DLIBTRACER_LKV_SLOT=hazard_slot_t`; the new `tr::graph::kHazardReaderSlots` knob
-  (`-DLIBTRACER_HAZARD_READER_SLOTS`, default 64) sizes the process-wide domain at
-  `(N + 1) * 128` bytes — **zero** unless the slot is bound, since the default binding never
-  references the registry. Measured against the default slot through `graph_t::read` on one
-  shared LKV: **4.2× aggregate and 4.4× p50 at 24 readers** (1.7 → 7.4 M ops/s), decisive from
-  8 readers up, and indistinguishable at one — the gain is a concurrency gain only. Three
-  differences from `sp_atomic_slot_t` that are not performance and are documented in the
-  header: reclamation is deferred (so an injected `pmr` resource must outlive the threads that
-  wrote through it, not just the graph); a publish can fail under memory exhaustion, which it
-  **reports** — `vertex_t::store` turns it into the same `nullptr` → `BACKPRESSURE` soft-fail an
-  LKV allocation failure already produces, and the node comes from the global heap rather than
-  from a graph's injected resource; and an undersized `kHazardReaderSlots` costs throughput
-  rather than correctness.
-
-- **`tr::graph::lkv_slot_t` — the LKV slot is now a per-target binding** (#604,
-  [ADR-0069](../docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md) §1). The
-  slot type `vertex_t` holds is selected in `config.hpp` through the same forward-declare-plus-alias
-  mechanism `acl_policy_t` already uses, set by the CMake cache variable `LIBTRACER_LKV_SLOT`
-  (default `sp_atomic_slot_t`, so a stock build and the ESP-IDF component are unchanged). No
-  templating is involved: `vertex_t` names the alias, and binding a different slot is a
-  target-configuration change rather than an edit to any header. Verified that the generated
-  header substitutes the requested type, that the configure-time drift gate is **not** fooled by a
-  non-default cache value, and that `graph.cpp.o` is byte-for-byte the size it was before the
-  alias was introduced — the indirection costs nothing.
-
-- **`libtracer/lkv_slot.hpp` — the LKV slot is a named policy** (#604,
-  [ADR-0069](../docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md) §1). The
-  new public header defines `tr::graph::sp_atomic_slot_t`, which is exactly the
-  `std::atomic<std::shared_ptr<const rope_t>>` `vertex_t` has always held, behind the three
-  operations the vertex actually performs — `[[nodiscard]] bool store(value_ptr_t, order)`,
-  `void clear(order)`, `value_ptr_t load() const`. `store` reports rather than returns void
-  because a slot that reclaims lazily must allocate to publish, and a policy that cannot say
-  "I did not take this" would force the one thing [#477](https://github.com/avatarsd-llc/libtracer/issues/477)
-  exists to prevent: a dropped write reported as a successful one. `sp_atomic_slot_t` allocates
-  nothing and always returns `true`. **No behaviour change and no new configuration**: this
-  slice only names the seam so a later one can bind a different reclamation strategy per target.
-  The header also states the contract a replacement must satisfy — chiefly that `load()` returns
-  an *owning* handle, because the composed branch read holds one per node across three passes.
-  Verified neutral: `graph.cpp.o`'s symbol table is unchanged (423 symbols, none added or
-  removed, so the policy inlines away), the `sizeof(vertex_t)` gate is unmoved, and
-  `bench_compact_delivery`'s forward and terminus hops sit within ±1.1% p50 over eight
-  alternating runs per side with no consistent sign.
-
-- **`graph_t::delivery_drops()` — a dropped delivery is now countable** (#629). A path-target
-  subscription edge (the form a wire `SUBSCRIBER` produces) delivers by re-dispatching into its
-  target, and three conditions make that impossible: the target PATH resolves to no live vertex,
-  the target's `:acl` denies the edge's stored caller (the #81 fan-in gate), or the nothrow
-  delivery clone cannot be allocated (#477). All three are specified to drop that ONE leg while
-  the write itself succeeds — correct, and previously **invisible**: a node whose target had been
-  retired dropped every delivery for the rest of its life with nothing anywhere to say so. Note
-  that an edge may name a target that does not exist and still be admitted, so this is reachable
-  without anything being retired.
-
-  Returns `delivery_drops_t{no_target, denied, out_of_memory}` — per cause, because "something
-  dropped" is not actionable. Counted, never enforced: nothing in the library reads them, so a
-  deployment decides whether to alarm. Relaxed monotonic and incremented only ON a drop, so the
-  delivering path is unchanged while nothing drops — the same near-free-when-idle shape as
-  `ancestor_walks()`. The three loads are not one coherent snapshot, deliberately: a lock on the
-  drop path to serve a diagnostic would cost more than it tells.
-
-- **`tr::mem::pool_source_t<Sync>` — a bounded, RECYCLING `block_source_t`** (#597,
-  [ADR-0067](../docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md)). Closes the
-  gap between `heap_source_t` (recycles, unbounded) and `bump_source_t` (bounded, never
-  recycles): a **long-lived** seam could not be bounded at all, so an 8 KiB bump source wired
-  as a router's `rx` decoded six frames and rejected the next 194. Segregated free lists keyed
-  on the exact `(bytes, align)` pair, with **no per-block header** — the seam's sized `release`
-  makes one unnecessary. Both bounds are injected per RFC-0006: the caller supplies the slab and
-  the `size_class_t` span, so neither the byte ceiling nor the class count is a constant in this
-  library. `classes_used()` / `overflowed()` report what to size the span against.
-
-  Shape chosen on a recorded trace of the seam (70,937 events): **12 distinct sizes, three
-  covering 99.8 %**, so exact classes cost zero internal fragmentation and need 26,176 B where
-  first-fit-with-coalescing needs 27,448 B and TLSF 28,440 B. Costs **322 B** of text on
-  `riscv32-esp-elf-g++ -Os -fno-exceptions -fno-rtti`, plus a 24 B vtable.
-
-  **Read ADR-0067 §3 before sharing one.** A `pool_source_t` is structurally the object
-  ADR-0060 erratum 1 measured collapsing to ~1/15 of its single-thread rate on a 12-core host
-  while the platform heap scaled. It is owned by one thread wherever it sits on a per-frame
-  path; sharing behind a lock is admissible only at wiring frequency.
-
-- **`tr::mem::sync_none_t`** (in `mem_source.hpp`) and **`tr::mem::sync_mutex_t`** (in the new
-  `mem_source_sync.hpp`) — the synchronization policies for the above. The default is empty and
-  compiles to nothing under `[[no_unique_address]]`; the hosted one is in its own header so
-  `mem_source.hpp` stays freestanding-clean for the footprint sentinel. A policy is anything
-  with `lock()`/`unlock()`, so a single-core target supplies its own interrupt-disable section.
-
-- **`fwd_router_t::add_child` takes an optional per-child failable source**:
-  `add_child(std::string name, transport_t& link, mem::block_source_t* rx = nullptr)`, stored on
-  the child's `child_rx_ctx_t`. **Source-compatible** — the parameter is appended with a default,
-  and a child that supplies none draws from the router's as before.
-
-  This is what makes a bounded source *usable* on the RX path at all. The router previously held
-  one `rx_` while its own class comment documented `on_frame` as firing on several transports'
-  receive threads concurrently with no per-request locking — so a shared pool there would have
-  put a contended lock on a deliberately lock-free path, at the 15x cost ADR-0060 erratum 1
-  measured. Each transport has its own receive thread, so a source parked on the child is
-  touched by exactly one. It also makes the bound **per-peer**: one noisy link can no longer
-  starve another link's decode.
-
-  Resolution is `rx_for(ctx)` — a branch on a pointer already in a register, with no lookup by
-  name on the frame path.
-
-### Changed
-
-- **`vertex_ext_t` no longer caches a second, projected ACE list.** `eff_aces_inherit` — a
-  materialized copy of `eff_aces`'s `kAceInherit`-flagged elements — is removed;
-  `effective_acl_t::allows` gained a `required_flags` parameter and filters the single cached
-  merge in place. `vertex_ext_t` drops **104 → 96 B on rv32**, and each ACL-bearing vertex loses a
-  heap block plus N x 32 B of `ace_t` copies rebuilt on every merge invalidation.
-
-  The evaluator could already do this: both ACL policies' `allows` take `required_flags` ("ACEs
-  lacking these flag bits are skipped"), so the projection duplicated a filter that existed.
-  Filtering in place is **order-identical** to projecting — skipping elements cannot reorder the
-  ones that remain — which matters because the full policy is first-match-per-bit in stored
-  order. (Partitioning the vector by the flag, considered first, is **not** sound: it would move
-  an own INHERIT-flagged ACE past ancestor ones.)
-
-  **Only affects you if you call `vertex_t::with_effective_aces` directly**: the `eval` callable
-  now takes one list, not `(merged, inherited)`. Select the inheritable subsequence by passing
-  `kAceInherit` as `effective_acl_t::allows`'s `required_flags`.
-
-- **`subscriber_t::target_key` and `edge_view_t::target_key` are now
-  `std::shared_ptr<const std::vector<std::byte>>`, not `std::vector<std::byte>`** — the key is
-  immutable and refcount-shared instead of deep-copied per delivery. A null pointer means "no
-  local re-dispatch target", replacing the old `.empty()` test.
-
-  **Why:** `snapshot_edges` copied the key into every `edge_view_t` so dispatch could run outside
-  the vertex lock, and that snapshot is a fresh stack object per publish — so every edge with a
-  local target allocated on the fan-out path. It cost **two** allocations, not one, because
-  `try_reserve` is probe-then-commit (probe allocates and frees, then the real reserve allocates).
-  Measured with a global operator-new counter: a delivery to a local target went from **2.00
-  allocations to 0.00**, with the store's own LKV allocation unchanged at 1.00 on both sides as a
-  control.
-
-  Sizes on rv32 (`riscv32-esp-elf -Os`): `subscriber_t` 40 → 36 B, `edge_view_t` 84 → 80 B — so
-  the 8-deep inline dispatch snapshot drops from 672 to 640 B of stack per publish.
-
-  **Only affects you if you construct `subscriber_t` directly** (the in-process
-  `graph_t::subscribe` sugar and every wire path are unchanged). Build the key with
-  `tr::graph::try_make_target_key(std::move(bytes))`, which soft-fails to null on OOM rather than
-  aborting under `-fno-exceptions`.
-
-- **`settings_t`'s member order changed (widest-first), shrinking it 32 → 24 B.** Layout only —
-  no field was added, removed, renamed or retyped, and the wire form is unaffected (it emits
-  **named** children, so it never depended on declaration order). `vertex_ext_t` drops
-  112 → 104 B on rv32 and 168 → 160 B on x86-64, so every ext-bearing vertex (ACL, handlers,
-  app fields, STREAM ring, or non-default QoS) gets 8 bytes back on every target.
-
-  `settings_t` is all fixed-width scalars, so it is the one runtime type that does **not** shrink
-  with the pointer — it was 32 B on a 32-bit MCU exactly as on a 64-bit host, making it the
-  largest non-ACL member of `vertex_ext_t` on device.
-
-  **Only affects you if you positionally aggregate-initialize it** (`settings_t{1, 0, 8, …}`),
-  which would now bind values to different fields. Use designated initializers
-  (`settings_t{.deadline_ns = …}`) or assign members; every construction site in this tree
-  value-initializes with `settings_t{}` and needed no change.
-
-- **BREAKING (wire behaviour): an indexed `:subscribers[N]` write is now payload-discriminating,
-  per RFC-0009 §D.1 — and `:subscribers[*]` on a write is rejected (#598, #579).** The
-  implementation cleared slot `N` payload-blind, so a `SUBSCRIBER`, a junk `VALUE` and the
-  empty-`STATUS` sentinel all produced the identical clear and the identical `RESULT`. Now:
-  an empty `STATUS` (`09 00 00 00`) clears; a `SUBSCRIBER` **replaces** slot `N`'s edge; anything
-  else is `TYPE_MISMATCH`; an index no slot answers to is `INVALID_PATH`.
-
-  Three consequences an integrator must read:
-
-  1. **A replace passes the `SUBSCRIBE` gate, not merely `WRITE`.** It enters the same admission
-     door as an append (ADR-0049), so a caller holding `WRITE` but not `SUBSCRIBE` can still
-     clear a slot but can no longer install one.
-  2. **Writes that used to succeed now fail.** A client clearing a slot with an arbitrary payload
-     was already non-conforming (§D.1 calls this a conformance *repair*), but it was succeeding;
-     it now gets `TYPE_MISMATCH`. Clear with the sentinel.
-  3. **`:subscribers[*]` was silent data loss.** The wildcard sets `indexed` and leaves `index`
-     at 0, so a wildcard write cleared **slot 0** and answered `RESULT`. It is now
-     `INVALID_PATH`; the `WRITE` grammar has no wildcard axis.
-
-### Added
-
-- **`vertex_t::replace_edge(idx, subscriber_t, edge_latch_t*)` and `vertex_t::edge_replace_t`** —
-  the §D.1 replace primitive. Takes the durability latch under the same single lock hold as
-  `add_edge`, so a concurrent `clear_edge` cannot slip between the write and the snapshot, and
-  reclaims the displaced edge's segment pin in place. It never grows `subs_`: an out-of-range
-  index is refused rather than back-filled, because the index arrives off the wire.
-
-- **BREAKING (routing addresses): a bus PEER is addressed `<mount>/<peer>/<residual>`, not
-  `<peer>/<residual>` — RFC-0014 S2a (`9d038b9`).** Per-module mount routing made
-  routing-address equal vertex-path, and a multi-peer child now resolves the next segment in
-  **its own** peer table, eating one more segment. A dst that used to reach a CAN peer as
-  `n21/a/b` must now say `can0/n21/a/b` (or the full `net/can/can0/n21/a/b` for a connection
-  created through `/net`). Nothing rejects the old form — it simply stops resolving, so a peer
-  goes quietly unreachable and a READ times out rather than erroring.
-
-  This slice landed without a CHANGELOG entry, which is how it reached a downstream firmware as
-  a mystery timeout (`"READ over vcan never resolved"`) and cost a 188-commit bisect to
-  attribute. The commit message documented it thoroughly; the file an integrator actually reads
-  did not.
-
-- **BREAKING: `transport_vertex_t::provide_link` gains a leading `module` argument** — RFC-0014
-  S2a. A staged link bypasses the connection factory, so there is no `kind` to derive the mount
-  from and it must be named: `provide_link("can", "can0", tcan)`. Modules are **declared**, not
-  derived (`register_module(module, kind, role)`) — a transport with both a dial and a listen
-  shape is two modules (`ws-client` / `ws-server`), while a bus like CAN is one for both roles;
-  an undeclared kind falls back to `<kind>-client` / `<kind>-server`, so an externally
-  registered transport keeps working.
-
-- **`graph_t::set_app_fields_static` / `vertex_t::set_app_fields_static` take a
-  `tr::graph::borrowed_fields_t`** instead of a `std::span<const app_field_static_t>`
-  (ADR-0058 erratum 2). **Source-compatible with every array-shaped caller**: the new type
-  converts implicitly from `const app_field_static_t (&)[N]` and from `std::array`, which is
-  what a `static`/`constexpr` table already is. It deliberately does **not** convert from a
-  `std::vector` or a bare `std::span`.
-
-  This closes a silent break. The previous release tightened this install's lifetime contract
-  to cover the ARRAY, not just the bytes it points at — but a `std::span` binds implicitly to a
-  `std::vector`, so a caller that built its table into a function-local vector kept compiling
-  and began viewing freed memory. That reached a downstream firmware consumer and cost a
-  188-commit bisect to find, because there was no compiler diagnostic anywhere.
-
-  **If this stops compiling for you, you had the bug.** Give the table storage that outlives the
-  vertex. A genuinely runtime-sized table — a language binding mapping a foreign POD array into
-  slots, typically — opts out explicitly with `borrowed_fields_t::unchecked(span)`, which asserts
-  the lifetime by hand. Note the guard rejects the container/temporary mistake, not every one: a
-  block-scope array still binds, since static storage duration is not expressible as a constraint.
-
-### Added
-
-- **`tr::mem::block_array_t<T>::data()`** (both const and non-const), returning the contiguous
-  block or `nullptr` when empty. For handing the array to a pointer/length API — the egress
-  `iov` table below is the first caller. Invalidated by any growth, like every other
-  contiguous container.
-
-### Fixed
 
 - **The rope FORWARD hop can no longer abort (#596).** `fwd_router_t::route_fwd_forward`'s
   multi-link instantiation gathered its scatter-gather entries into a
@@ -1055,138 +1186,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   before (the guard deliberately does NOT use `plain_step`, since an append is
   `append == true` and a clear is `indexed == true`).
 
-### Added
-
-- **`tr::mem::bump_source_t`, `null_source()`, and `block_array_t<T>`** — the companions the
-  migrated call sites need. `bump_source_t` is the nothrow twin of
-  `std::pmr::monotonic_buffer_resource` over a caller buffer, with an upstream so it stays
-  capability-preserving; `null_source()` is the upstream that makes the buffer a hard bound.
-  `block_array_t<T>` is a nothrow growable array of trivially-copyable `T` whose growth
-  returns `false`.
-
-  `block_array_t::push_slot()` claims one uninitialized slot to fill **in place**. That is
-  load-bearing, not sugar: `push_back(T{...})` on a 48-byte element materializes the
-  aggregate on the stack field-by-field and reads it back as wide loads, and the
-  store-forwarding stall cost **~45 % of a terminus decode while executing FEWER
-  instructions** (IPC 5.0 → 2.6). It was the entire regression this change first showed, and
-  five other hypotheses — modulo vs mask alignment, growth inlining, index vs pointer
-  cursor, the sink's latch stores, `is_canonical_name` inlining — were each measured and
-  refuted before the profile pointed here.
-
-
-- **A nothrow failable-block seam: `tr::mem::block_source_t` (#551, slice 1).** New header
-  `libtracer/mem_source.hpp` with `block_source_t` (`try_alloc` / `release`, both `noexcept`,
-  `nullptr` on exhaustion), the default `heap_source_t`, and `tr::mem::heap_source()`.
-  `graph_t` gained a THIRD, **appended** constructor parameter
-  (`mem::block_source_t* ctl = &mem::heap_source()`) and a `control_source()` accessor.
-  Appended, so every existing `graph_t{...}` call site — including the shipping
-  `graph_t graph{&mr};` — compiles unchanged.
-
-  Why a new type rather than reusing `std::pmr::memory_resource` with a documented
-  may-return-null contract: `memory_resource::allocate` is annotated `returns_nonnull`, so
-  the caller's null check is undefined behaviour and **is deleted at `-Os`/`-Oz`** —
-  measured on `riscv32-esp-elf-g++ 15.2.0`, where the soft-fail branch survives at
-  `-O0`/`-O1`/`-O2`/`-O3` and vanishes at the two size-optimized levels. `-Os` is what the
-  reference ESP-IDF node ships, and no job executes an allocation-failure path at it (the
-  one `-Os` binary CI runs, `full-node-host`, drives only the happy path).
-
-  **As of slice 1 no call site drew from the seam**; the #588 entry above then made the
-  branch-write decode its first consumer. The registration
-  allocations that motivated #551 migrate next.
-
-- **The LKV publish takes no lock when nobody is awaiting (ADR-0064 §1, #555).** A non-`STREAM`
-  write now bumps `write_seq_` with one `fetch_add(seq_cst)`, reads the stripe's `waiters`
-  count, and returns **without acquiring the stripe mutex** when it is zero. `#370` already
-  skipped the condvar *call* on this path; the mutex itself was what remained, and measured it
-  is not free — it sits immediately downstream of the `lkv_` atomic publish, so the two
-  serializing regions land back-to-back on the critical dependency chain (~38 of the write's
-  ~335 cycles). `inproc` measures **89.2 → 82.6 ns/op**, faster in 5 of 5 pinned interleaved
-  rounds. `current_seq()` becomes lock-free as a consequence. `STREAM` roles are unchanged —
-  their ring append is real state mutation and keeps the lock.
-
-  **`write_seq_` and `vertex_stripe_t::waiters` are now atomic and part of a documented
-  ordering contract**: the writer bumps the sequence *before* reading `waiters`, the waiter
-  publishes `++waiters` *before* reading the sequence, both `seq_cst`. Reversing either order,
-  or relaxing either access, silently reintroduces a lost-wakeup window. The argument is in
-  ADR-0064 §1 and beside the code.
-
-  Also corrects the "lock-free" language on `lkv_`: `std::atomic<std::shared_ptr<T>>` is
-  lock-free *by contract* and **spin-locked in libstdc++** (`is_lock_free()` returns 0), which
-  is ~77 of the remaining ~316 cycles and now the largest single term on the write path.
-  ADR-0064 §2 records what a genuinely lock-free slot would take and why none was chosen yet.
-
-- **Borrowed app-field installs now really cost zero declaration RAM (ADR-0058 erratum 1).**
-  `set_app_fields_static` promised the slots would view caller flash, but the runtime still
-  copied the caller's array into an owned `std::vector` — and `app_field_static_t` /
-  `app_field_slot_t` were field-for-field identical, so the copy converted between a type and
-  itself. Measured host-side, that vector was the **largest single resident block** on the
-  borrowed path: 200 B of the 456 B a 5-field table added. **`app_field_static_t` is now an
-  alias of `app_field_slot_t`**, and `app_field_table_t::slots` is a `std::span` the borrowed
-  install points straight at the caller's array. Per-vertex live bytes for a 5-field borrowed
-  table drop **592 → 392 B (11 → 10 allocations)**; the owning install is unchanged, and the
-  struct does not grow (the owning copy moves to `unique_ptr<slot[]>`, which with the span is
-  the size the vector was on host and rv32 alike). Gated by the `vertex_app5_static` row.
-
-  **⚠ Stronger caller contract.** The runtime now views the **array**, not merely the
-  `name`/`descriptor` bytes it points at — so a `set_app_fields_static` caller must keep the
-  array itself alive for the vertex's lifetime. Pass a `static`/`constexpr` array; a stack
-  array that previously worked by accident will now dangle. Wire-invariant (`:schema` serves
-  identical bytes), so no RFC.
-
-- **Control-plane serialization — `fwd_router_t` and `transport_vertex_t` each gain an internal
-  mutex (ADR-0063 §3).** `transport_vertex_t` had **no synchronization at all**, yet the graph
-  invokes its connection factory *outside* `map_mutex_`, on whichever transport's receive thread
-  delivered the CREATE. With two transports that is two threads, so concurrent `make_connection`
-  calls raced `conns_` / `pending_links_` (and the unlocked `settings_of` / `link_of` readers
-  raced the insert's rebalance), while `fwd_router_t::add_child` raced on the registry's
-  scan-then-append — two writers could be handed the **same empty slot**, silently losing a
-  child — and on the `child_rx_` deque spine. Now serialized. **The forward and delivery paths
-  take no lock and are unchanged** (ADR-0038 §3). Lock order, where more than one is held:
-  `transport_vertex_t` → `fwd_router_t` → `graph_t::map_mutex_` → the vertex stripe. Cost is
-  ~4 B static per lock plus a FreeRTOS mutex allocated on first lock — one-time, not per
-  connection. ADR-0063 originally specified an arch-selected sync *trait* for this; its
-  Erratum 1 records why that was withdrawn (it was never built, it cannot wrap a section that
-  blocks on sockets and `map_mutex_`, and a spinlock there risks unbounded priority inversion
-  on single-core FreeRTOS).
-
-- **`child_registry_t::child_t::multi_peer` is now `std::atomic<bool>`.** `add` **rebinds** an
-  existing slot on the tombstone-reuse path that create/remove churn takes constantly, and that
-  rebind wrote this field while the lock-free mount descent read it — a genuine reader-vs-writer
-  data race that the atomic `link` did not cover. Confirmed under TSan, independently of the
-  locks above: with the locks in place and this field left plain, the race still reports.
-
-- **Connection teardown — `child_registry_t::erase`, `fwd_router_t::remove_child`,
-  `transport_vertex_t::remove_connection` (#494).** The FWD child registry was add-only, so a
-  retired connection left a dangling `name → transport_t*` — latent while removal had no wire
-  path, a use-after-free once RFC-0014's remove-half drives create/remove churn. `erase`
-  **tombstones in place** (nulls the slot's link, keeps its NAME) rather than erasing from the
-  vector, so a concurrent lock-free reader's iteration stays valid; a later `add` of the same
-  NAME reuses the tombstone, so churn on a stable name set does not grow the table.
-  `remove_connection` sequences un-route → `retire()` the vertex → destroy the owned socket. The
-  eviction hook is **removal, not departure**: `link_down` alone remains correct for a link that
-  merely dropped, since a DIAL connection's vertex outlives its socket and self-heals.
-  `remove_connection` is owner-internal — the RFC-0014 `NAME`-write dispatch (S2b) is what will
-  expose it to the wire. `child_registry_t::size()` now counts slots including tombstones;
-  `live_size()` counts those that still resolve.
-
-- **Link-liveness enum — RFC-0014 S1 (`tr::net::link_state_t`, #492).** A connection
-  vertex's stored value is now the six-state liveness enum
-  (`DORMANT`/`DIALING`/`RECONNECTING`/`UP`/`LISTENING`/`BIND_FAILED`, RFC-0014 §4) rather
-  than a binary up/down byte. `conn_settings_t` gains `backoff_ms` and
-  `connect_timeout_ms` (config keys `backoff` / `connect_timeout`), parsed now but
-  consumed by the S5 liveness engine that lands later. The state remains manually driven
-  in S1: a config-constructed socket self-reports `UP` (DIAL) / `LISTENING` (LISTEN) at
-  creation; the engine becomes the sole writer of the DIAL transitions in S5. The 1-byte
-  wire encoding (table order, `DORMANT = 0x00` preserving the old "down") is the reference
-  encoding until the S7 conformance vectors make it normative (the RFC defers the byte
-  clauses to #492).
-
-- **`route_handle_t::link_count()` (#488).** A diagnostic accessor returning the number of
-  live per-link table shells in the compaction registry — the observable that `clear_link`
-  now returns to steady state (see Fixed).
-
-### Fixed
-
 - **FWD FIELD selector: a malformed `index_mode` byte now rejects with `INVALID_PATH` (#437).**
   `selector_to_field` (`op_resolve_walk.hpp`) switched on the decoded `index_mode` (RFC-0004 §C:
   `SCALAR`/`ELEMENT`/`WILDCARD`) with no `default` case, so a wire byte outside `{0,1,2}` fell
@@ -1207,35 +1206,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `bind_ingress` is mid-write on) while bounding `links_` to live link names. The public label
   API is behavior-unchanged; a churn-of-distinct-names case plus a concurrent
   writer×`clear_link` case (TSan) were added.
-
-### Changed
-
-- **BREAKING: `transport_vertex_t::set_link_state(std::string_view, bool)` →
-  `set_link_state(std::string_view, tr::net::link_state_t)` (#492).** The manual
-  link-state seam now takes the liveness enum instead of a bool. Migrate `set_link_state(n,
-  true)` → `set_link_state(n, tr::net::link_state_t::UP)` (or `LISTENING` for a listen
-  socket) and `set_link_state(n, false)` → `…::DORMANT`.
-
-- **Per-transport recv-thread stack sizing (#486).** Every socket transport constructor
-  (`udp_transport_t`, `tcp_transport_t` dial+listen, `transport_tcp_server`,
-  `transport_ws_server`, `transport_ws_client`) and `socketcan_link_t` gain a trailing
-  `recv_stack` parameter, and `twai_link_config_t` gains a `stack_size` field — all
-  defaulting to `0` (the platform default, i.e. the prior behavior). A non-zero value
-  right-sizes that one thread's stack instead of forcing an integrator to inflate the
-  **global** `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT` (which pays for every pthread in the
-  system) to cover the stack-heaviest recv loop. Socket transports apply it via
-  `pthread_attr_setstacksize` (honored by glibc and the ESP-IDF pthread layer alike); the
-  ESP TWAI link applies it via `esp_pthread_set_cfg`. Size to the measured high-water mark.
-
-### Changed
-
-- **The shared recv-thread scaffold (`posix_endpoint_t::start`) and `socketcan_link_t` now
-  spawn via `pthread_create`, not `std::thread`.** `std::thread`'s constructor *throws* on a
-  spawn failure, which under the MCU profile's `-fno-exceptions` becomes `std::abort` — a
-  thread-spawn OOM on a starved node would bring the whole process down. `pthread_create`
-  returns an error code; a failed spawn now leaves the endpoint simply not receiving (a soft
-  fail in keeping with the 0.6.0 OOM→`BACKPRESSURE` hardening), never an abort. At the
-  default stack size the observable behavior is otherwise unchanged.
 
 ## [0.6.0] — 2026-07-23
 
