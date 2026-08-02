@@ -22,6 +22,7 @@ for a local `preview.html` of the same charts.
 | `bench_fanout_clone_storm` | **many-core refcount contention**: T threads clone+release one shared segment — the per-subscriber fan-out primitive under wide fan-out (ADR-0032 128-core row). |
 | `bench_await_wakeup_storm` | **many-core await fan-in**: one writer storms writes while W threads `await` one vertex — condvar/notify_all + vertex-lock scaling (ADR-0032 128-core row). |
 | `bench_route_handle_contention` | **per-link-lock contention**: T producers doing steady-state `ensure_egress` reuse-reads on one hot link (its header carries the finding that `shared_mutex` does not help). |
+| `bench_ram_census_tcp` | **whole-node RAM census**: the heap a 100-vertex graph (values 4..64 B, mixed int / array / STREAM) holds, staged from an empty `graph_t` through a `/net:children[]`-created TCP listener to steady state under a real remote peer **process**. |
 | `bench_rx_source_topology` | **RX failable-source topology**: T receive threads forwarding rope frames through a shared heap, one shared pool, or one pool per child — the measurement behind [ADR-0067](../docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md) §3. |
 
 ### `bench_forward_heap` — the 16KB-RAM zero-heap forward gate (ADR-0038)
@@ -101,6 +102,31 @@ cmake --build bench/build --target bench_fanout_clone_storm bench_await_wakeup_s
   ~39 k at W=128, i.e. 0.47 µs → ~26 µs per write); `deliv_per_s` is aggregate wakeups/s.
   Steady-state throughput is used over single-shot latency so no fragile "all W parked"
   barrier is needed — the bench is not flaky.
+
+### `bench_ram_census_tcp` — what a 100-vertex node costs over TCP
+
+```sh
+cmake --build bench/build --target bench_ram_census_tcp -j
+./bench/build/bench_ram_census_tcp                    # RESULT arm=<mix> metric=<stage>
+./bench/build/bench_ram_census_tcp --reps=9 --ops=5000 --arm=mixed
+```
+
+`bench_conn_ram` prices one **connection**; this prices the **node** around it. A counting
+`operator new` (all variants — sized, array, aligned, **nothrow**) reads the LIVE heap
+balance at five points: an empty `graph_t`, +100 vertices registered, +their values written
+once, +the `fwd_router_t` / `transport_vertex_t` / SPEC-created TCP listener, +a peer
+**process** connected over loopback, and +steady state after N mixed FWD read/write ops from
+that peer. The listener is created the way the wire creates one — `write /net:children[] +=
+SPEC{listener, kind=tcp, port}` — so no byte is counted on a hand-wired path.
+
+Three arms differing in exactly one variable (every value 4 B, the 4..64 B mix, every value
+64 B) give the value-size sensitivity. A NULL arm is printed with the rest and must read 0;
+the first repetition is discarded. The figures are near-deterministic — a spread wider than a
+few bytes means an unwaited thread or a broken instrument, not noise.
+
+Diagnostic, **not** a `perf.yml` gate, and deliberately **not** wired into the generated
+performance page. It does not count pthread stacks (`mmap`ed, invisible to any `operator new`
+counter) or static RAM — the footprint sentinel prices those.
 
 ### `bench_rx_source_topology` — where a bounded RX source may sit (ADR-0067 §3)
 
