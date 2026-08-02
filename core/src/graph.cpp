@@ -363,10 +363,12 @@ void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& k
         const std::uint32_t k = x.own_subs();
         if (k > 0) bump_subtree_listeners(&x, -static_cast<std::int32_t>(k));
         keys.push_back(build_key(&x));
-        // Park the detached value seam (if any): a lock-free reader may still hold the old
+        // Park the detached value seam (if any — the seam exists iff a handler was installed
+        // at registration, whatever the role): a lock-free reader may still hold the old
         // pointer, so it is never freed here. The park's other end is the public collect(),
         // which the embedder calls at a moment it knows no reader holds a seam (#576); the
-        // graph's own teardown is the backstop. Under map_mutex_.
+        // graph's own teardown is a growth backstop only — retired_seams_ destructs LAST, so
+        // a seam that re-enters the graph must be collected explicitly. Under map_mutex_.
         if (value_handlers_t* seam = x.revert_to_placeholder()) retired_seams_.emplace_back(seam);
         x.mark_unregistered();
     };

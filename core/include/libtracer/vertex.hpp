@@ -365,7 +365,7 @@ struct app_field_table_t {
  *        the RFC-0010 descriptor table plus its owner apply seam, together.
  *
  * `on_app_field_write` co-occurs with the field table (it is the table's apply seam), NOT
- * with the value seam of a HANDLER-role vertex — so it lives here, not in
+ * with the vertex's value seam — so it lives here, not in
  * @ref value_handlers_t. A vertex with no app fields and no apply seam keeps this group
  * null and pays neither the table nor the ~32 B `std::function`. Allocated on the first of
  * either `set_app_fields*` (the table) or an `on_app_field_write` at registration; guarded
@@ -407,13 +407,19 @@ struct handlers_t {
 };
 
 /**
- * @brief The internal, lazily-allocated STORAGE of a Handler-role vertex's VALUE seam
- *        (ADR-0058 Step 2) — the three seams `handlers_t` carries minus `on_app_field_write`.
+ * @brief The internal, lazily-allocated STORAGE of a vertex's VALUE seam (ADR-0058 Step 2)
+ *        — the three seams `handlers_t` carries minus `on_app_field_write`.
  *
- * Split off from the public @ref handlers_t input so a plain STORED_VALUE or app-field
- * vertex never allocates these ~96 B of `std::function`: the value seam is HANDLER-role
- * only (transports / connections / synthesized listings), so it lives behind a
- * `unique_ptr` in the extension block, null for every other role. `on_app_field_write`
+ * Split off from the public @ref handlers_t input so a vertex that installs none of the
+ * three never allocates these ~96 B of `std::function`: the block lives behind a lazily
+ * published pointer in the extension block, null unless at least one of `on_read`,
+ * `on_write`, `on_children` was given. Allocation is keyed on that PRESENCE, not on
+ * `role_t` — `adopt_identity` never consults the role — so a `STORED_VALUE` vertex
+ * given an `on_children` (the `/net/<module>/<name>` identity vertex of a bus link) does
+ * carry one, and a `HANDLER` vertex registered with an empty @ref handlers_t does not.
+ * Which of the three is ever CONSULTED is a separate, per-seam question: `on_read` /
+ * `on_write` run only on a HANDLER-role target, while `on_children` serves the
+ * synthesized listing whatever the role. `on_app_field_write`
  * co-occurs with app fields, not the value seam, so it moved to @ref app_field_group_t.
  * Set once at registration (`vertex_t::adopt_identity`), read lock-free thereafter.
  */
@@ -840,8 +846,9 @@ inline std::condition_variable& vertex_stripe_cv(std::size_t idx) {
  */
 struct vertex_ext_t {
     /** @brief The VALUE seam (on_read/on_write/on_children), LAZILY allocated (ADR-0058
-     *         Step 2): HANDLER-role only, so a plain leaf / app-field vertex keeps this
-     *         null and never pays the ~96 B.
+     *         Step 2) iff one of the three was installed at registration — handler
+     *         PRESENCE, not role — so a plain leaf / app-field vertex keeps this null
+     *         and never pays the ~96 B.
      *
      *         **Read lock-free** (@ref vertex_t::handlers loads it with no stripe lock,
      *         on the hot path). It is therefore an ATOMIC pointer, not a `unique_ptr`:
