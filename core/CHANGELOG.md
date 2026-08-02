@@ -36,8 +36,44 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   as an opaque unknown-type TLV with type `0x14` now reject. No frame any libtracer version has
   ever emitted is affected — `0x14` was unassigned.
 
-Routing on a bound path — minting, per-hop validation, the NACK and the canonical fallback —
-is not implemented; this is the codec only.
+- **Bound-path routing and minting at the terminus
+  ([RFC-0024](../docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md)
+  §5-§7).** `graph_t` gains three methods for the node-scoped vertex index (§6.4):
+  `vertex_slot_count()`, `vertex_slot(vertex_handle_t)` — the **mint** side, which declines
+  for a vertex whose generation has saturated — and `deref_vertex_slot(index, generation)`,
+  which is the whole of the §5.1 check (bounds, generation compare) and authorizes nothing.
+  `vertex_slot` is a control-plane call and is priced as one: it scans, because a per-vertex
+  index field costs 4 bytes on rv32 where `sizeof(vertex_t)` sits at its ceiling with zero
+  headroom. Purely additive.
+- **`graph::kGenerationSaturated` and `graph::saturating_next_generation`.** The retirement
+  generation now **saturates rather than wraps** (§4.4 rule 3, normative in §9.3). **Behaviour
+  change:** a vertex retired 2^32 times stops advancing its generation and becomes permanently
+  unbindable, instead of aliasing a generation a stale bound-path element still carries. No
+  reachable deployment is near the ceiling; the rule closes the failure class by construction.
+- **`graph::kFwdOpcodeMask` (`0x3F`) and `graph::kFwdOpFlagMintRequest` (`0x80`)** in
+  `op_resolve.hpp`. The `FWD` `op` byte's opcode is now `op & 0x3F` and bits 7-6 are flags.
+  **Behaviour change:** `net::peek_fwd_op` and the terminus resolver mask before switching, so
+  an `op` byte carrying an unrecognised flag routes as its plain opcode rather than rejecting
+  as an unknown one. Frames libtracer emitted before this change all have zero flag bits and
+  are unaffected.
+- **A `FWD` `dst` may be a `PATH_REF`.** The terminus dereferences the single remaining element
+  and applies the operation at that vertex, through the **same** `graph_t` call the canonical
+  spelling makes — so the per-operation ACL check happens at the dereferenced vertex by
+  construction, and the two spellings' outcomes agree without a second policy. Any validation
+  failure is a **drop**: no forward, no apply, no repair (§5.3). Forwarding a bound path is not
+  implemented — a residual longer than one element is dropped rather than guessed at.
+- **A mint answers in the reply.** An operation whose `op` byte sets bit 7 gets a one-element
+  `PATH_REF` appended as the reply's **last** child, on **success only**. A denied or failed
+  operation mints nothing, which is the anti-enumeration property of §6.1.
+- **`graph::path_binding_t` and `path_t::binding()` / `bind()` / `clear_binding()`.** The
+  §7.4 origin-side slot: `path_t` stays a value type and carries the bound form beside its
+  canonical bytes, which are never discarded — they are the key the binding was minted from
+  and the fallback a failed one drops back to. `bind()` refuses past the element cap rather
+  than truncating. Purely additive.
+
+Still not implemented, and named rather than implied: the **forwarder's** element-consuming
+hop (a bound `dst` terminates locally today) and the §5.3 NACK carrying the failing hop index,
+whose spelling RFC-0024 §9.2 leaves open. A drop is already the conformant answer without it.
 
 ## [0.7.0] — 2026-08-02
 
