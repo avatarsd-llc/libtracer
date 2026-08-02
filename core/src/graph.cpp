@@ -267,6 +267,11 @@ graph_t::graph_t(std::pmr::memory_resource* mr, mem::mem_backend_t* value_backen
       value_backend_(value_backend),
       root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, handlers_t{})),
       ctl_(ctl) {
+    // Slot 0 is the structural root (RFC-0024 §6.4): the index is seeded here so it stays
+    // allocation-ordered from the first vertex_t this graph owns. The root is not a
+    // registrable address, so no bound path ever names slot 0 — it is in the vector because
+    // leaving a hole there would make "slot i is the i-th vertex_t allocated" false.
+    vertex_slots_.push_back(root_.get());
     // The one built-in creation-catalog type (#82, ADR-0017): `stored_value` makes a
     // plain last-writer-wins vertex at the composed child key. Its optional SPEC
     // `config` SETTINGS is ignored for now (a stored-value has no instantiation params
@@ -329,6 +334,12 @@ result_t<vertex_handle_t> graph_t::register_vertex_key(std::vector<std::byte> ke
             // single relaxed load.
             fresh->init_listeners_above(node->listeners_above() + node->own_subs());
             child = node->add_child(std::move(fresh));
+            // One slot per vertex_t ALLOCATION (RFC-0024 §6.4), appended under the same
+            // unique map-lock hold that linked it in, so slot order is allocation order.
+            // Placeholders take a slot too: they are ordinary vertex_t objects that a later
+            // registration fills IN PLACE, so skipping them here would hand the same object
+            // two different slots depending on which side of its fill() the mint happened.
+            vertex_slots_.push_back(child);
         }
         node = child;
         i = e;
@@ -379,6 +390,46 @@ void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& k
 std::uint32_t graph_t::retire_generation(vertex_handle_t vh) const noexcept {
     const vertex_t* const v = vh.get();
     return v == nullptr ? 0u : v->retire_gen();
+}
+
+std::size_t graph_t::vertex_slot_count() const noexcept {
+    const std::shared_lock lock(map_mutex_);
+    return vertex_slots_.size();
+}
+
+std::optional<std::uint32_t> graph_t::vertex_slot(vertex_handle_t vh) const noexcept {
+    const vertex_t* const v = vh.get();
+    if (v == nullptr) return std::nullopt;
+    // Saturated ⇒ permanently unbindable (RFC-0024 §4.4 rule 3). Refused BEFORE the scan,
+    // so the one caller that can be told "no" is told cheaply and falls back to canonical.
+    if (v->retire_gen() == kGenerationSaturated) return std::nullopt;
+    const std::shared_lock lock(map_mutex_);
+    for (std::size_t i = 0; i < vertex_slots_.size(); ++i) {
+        if (vertex_slots_[i] == v) return static_cast<std::uint32_t>(i);
+    }
+    return std::nullopt;  // not this graph's vertex — defensive, unreachable via the API.
+}
+
+std::optional<vertex_handle_t> graph_t::deref_vertex_slot(std::uint32_t index,
+                                                          std::uint32_t generation) const noexcept {
+    const std::shared_lock lock(map_mutex_);
+    // Bounds check (RFC-0024 §5.1 step 1). Out of range is the only way the deref itself
+    // could fault, and it cannot get past here.
+    if (index >= vertex_slots_.size()) return std::nullopt;
+    vertex_t* const v = vertex_slots_[index];
+    // Generation compare (§5.1 step 2). A mismatch means the vertex was retired (and
+    // possibly re-created for a DIFFERENT owner) since the mint, so the answer is discarded
+    // rather than delivered into whatever now occupies the address. Generations only ever
+    // move forward, so a stale element can only compare lower and never becomes valid again.
+    if (v->retire_gen() != generation) return std::nullopt;
+    // A retired-but-not-yet-revived vertex is a PLACEHOLDER: invisible to find/read, so the
+    // bound form must not be the one spelling that reaches it. This is the map-lock state
+    // the shared hold above is really for — it also covers the never-registered
+    // intermediates, which hold slots (they are vertex_t allocations) but are no address.
+    if (!v->registered()) return std::nullopt;
+    // Authorization is NOT settled here (§6.2): the caller's op re-evaluates acl_allows at
+    // this vertex, for its own right, exactly as the canonical spelling does.
+    return vertex_handle_t{v};
 }
 
 result_t<void> graph_t::retire(vertex_handle_t vh) {

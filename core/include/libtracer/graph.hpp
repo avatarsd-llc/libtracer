@@ -275,6 +275,62 @@ class graph_t {
     [[nodiscard]] std::uint32_t retire_generation(vertex_handle_t vh) const noexcept;
 
     /**
+     * @brief Slots in the node-scoped vertex index — the cardinality a bound-path element's
+     *        index is bounds-checked against (RFC-0024 §6.4).
+     *
+     * One slot per `vertex_t` ever allocated in this graph, in allocation order, slot 0 being
+     * the structural root. The index is **append-only** because registration already is
+     * ("vertices are added, never erased"), so a slot handed out once names the same
+     * allocation for the graph's lifetime and there is no new invalidation event to observe.
+     *
+     * Node-local and unobservable on the wire: a peer learns another node's cardinality only
+     * by being handed an element that came from it, and an element is meaningless anywhere
+     * but on the host that minted it.
+     */
+    [[nodiscard]] std::size_t vertex_slot_count() const noexcept;
+
+    /**
+     * @brief This node's own index for @p vh — the MINT side of a bound-path element
+     *        (RFC-0024 §6.4, §7).
+     *
+     * @retval std::nullopt @p vh's generation has SATURATED (@ref kGenerationSaturated), so
+     *         the vertex is permanently unbindable and the caller stays on the canonical
+     *         form (RFC-0024 §4.4 rule 3) — or, defensively, @p vh is not in this graph's
+     *         index at all.
+     *
+     * @warning This is a **control-plane** call and is priced as one: it finds @p vh by
+     *          scanning the slot vector, because the reverse direction is deliberately not
+     *          memoized. A per-vertex index field costs 4 bytes on rv32, where
+     *          `sizeof(vertex_t)` sits at its ceiling with zero headroom
+     *          (`config_t::kMaxVertexBytes32`), and a pointer→index side map costs strictly
+     *          more than the 4 B/vertex RFC-0024 §6.4 priced. A mint happens once per
+     *          binding, on a reply already being assembled; the hot path — @ref
+     *          deref_vertex_slot — pays a bounds check and one compare and never comes here.
+     */
+    [[nodiscard]] std::optional<std::uint32_t> vertex_slot(vertex_handle_t vh) const noexcept;
+
+    /**
+     * @brief Dereference a bound-path element — the §5.1 check, and the whole of it.
+     *
+     * Bounds-checks @p index against @ref vertex_slot_count and compares @p generation
+     * against the slot's @ref retire_generation. The vertex map is pinned, pointer-stable
+     * and insert-only, so an in-range index always names a live allocation and the deref
+     * itself cannot fault; a generation only ever moves forward, so a stale element can only
+     * ever compare lower and never becomes valid again by waiting.
+     *
+     * @retval std::nullopt Out of range, or the generation does not match. The caller MUST
+     *         then drop — never forward, never apply, never repair (RFC-0024 §5.3).
+     *
+     * @warning A match authorizes **nothing**. It says the vertex is the same one, never
+     *          that the caller may still act on it: every bound-form operation re-evaluates
+     *          `acl_allows` at the dereferenced vertex for its own right, exactly as the
+     *          canonical form does (RFC-0024 §6.2). The graph's own data ops do that
+     *          themselves, which is why the two spellings are equivalent by construction.
+     */
+    [[nodiscard]] std::optional<vertex_handle_t> deref_vertex_slot(
+        std::uint32_t index, std::uint32_t generation) const noexcept;
+
+    /**
      * @brief Free every value seam @ref retire parked — the EXPLICIT collector (#576).
      *
      * @ref retire detaches a vertex's value seam and **parks** it: the seam is read
@@ -1069,6 +1125,20 @@ class graph_t {
     // identity vertex only gets an on_children when link->bus() != nullptr) — hence the
     // public parked_seam_count().
     std::vector<std::unique_ptr<value_handlers_t>> retired_seams_;
+
+    // The node-scoped vertex index (RFC-0024 §6.4) — the ONE new structure a bound path
+    // needs, named honestly. The "vertex map" is a Composite tree of non-moving unique_ptr
+    // allocations with no dense index, so an element's u32 index has no meaning until one
+    // exists. This is it: one slot appended per vertex_t ALLOCATION (slot 0 = root_,
+    // placeholders included), under the same unique map_mutex_ hold that links the node into
+    // the tree, so slot order is allocation order and the mapping is a bijection forever.
+    //
+    // It is NOT a route table: its size tracks the graph, not the traffic, so it does not
+    // reintroduce the per-flow state a bound path exists to avoid. 4 B/vertex on rv32, 8 on a
+    // host — the figure RFC-0024 §4.4's RAM floor already charges. Appending per allocation
+    // rather than per REGISTRATION is what keeps it a bijection: a retired vertex is revived
+    // by a second fill() of the same object, which must not mint a second slot.
+    std::vector<vertex_t*> vertex_slots_;
 
     mutable std::shared_mutex map_mutex_;
     // The Composite vertex tree's root (ADR-0057): an unregistered structural node whose
