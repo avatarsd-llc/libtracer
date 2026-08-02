@@ -22,7 +22,9 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   (`{u32 index, u32 generation}`), the constants `kPathRefElementBytes` (8),
   `kMaxPathRefElements` (255) and `kMaxPathRefBodyBytes` (2040), plus
   `path_ref_element_count`, `path_ref_element_at`, `path_ref_store_element` and the structural
-  predicate `path_ref_body_valid`. `tlv_emit.hpp` gains `emit_path_ref(out, elements)`, which
+  predicate `path_ref_body_valid`. `path_ref_element_at` / `path_ref_store_element` are
+  precondition-only and debug-assert their bound: a caller that cannot prove the index — anything
+  walking a foreign frame's elements — gates on `path_ref_element_count` first. `tlv_emit.hpp` gains `emit_path_ref(out, elements)`, which
   refuses (returns `false`, emitting nothing) past the 255-element bound rather than truncating.
   Purely additive — no existing declaration changes spelling or semantics.
 - **`grammar::parse_header` now enforces the `PATH_REF` body shape.** The one per-type rule in

@@ -15,6 +15,7 @@
  */
 #pragma once
 
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -105,11 +106,19 @@ struct path_ref_element_t {
 /**
  * @brief Read element @p i out of a `PATH_REF` body (little-endian, both fields).
  *
- * Precondition: `body.size() >= (i + 1) * 8` — i.e. @p i is below
- * @ref path_ref_element_count of a body @ref path_ref_body_valid accepted.
+ * @note Precondition: `(i + 1) * 8 <= body.size()` — i.e. @p i is below
+ *       @ref path_ref_element_count of a body @ref path_ref_body_valid accepted
+ *       (debug-asserted). The bound is the caller's to hold because it is free
+ *       there and not here: a decode path has already had the whole body shape
+ *       checked by the grammar, so re-deriving the count per element would price
+ *       a division into every hop of a forward. A caller that cannot prove @p i —
+ *       anything walking a *foreign* frame's elements — gates its loop on
+ *       @ref path_ref_element_count first; past the end this reads whatever
+ *       follows the body, it does not fail.
  */
 [[nodiscard]] constexpr path_ref_element_t path_ref_element_at(std::span<const std::byte> body,
                                                                std::size_t i) noexcept {
+    assert((i + 1) * kPathRefElementBytes <= body.size());
     const std::span<const std::byte> e =
         body.subspan(i * kPathRefElementBytes, kPathRefElementBytes);
     return path_ref_element_t{
@@ -121,10 +130,14 @@ struct path_ref_element_t {
 /**
  * @brief Write one element into the 8 bytes at @p out (little-endian, both fields).
  *
- * Precondition: `out.size() >= 8`. The inverse of @ref path_ref_element_at.
+ * @note Precondition: `out.size() >= 8` (debug-asserted). The inverse of
+ *       @ref path_ref_element_at, and the same contract: the emitter sizes the buffer
+ *       from the element count before the first store, so the check belongs there once
+ *       rather than here per element.
  */
 constexpr void path_ref_store_element(std::span<std::byte> out,
                                       const path_ref_element_t& e) noexcept {
+    assert(out.size() >= kPathRefElementBytes);
     detail::store_le<std::uint32_t>(out.subspan(0, 4), e.index);
     detail::store_le<std::uint32_t>(out.subspan(4, 4), e.generation);
 }
