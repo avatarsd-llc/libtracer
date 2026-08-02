@@ -80,6 +80,20 @@ jobs:
           idf.py set-target ${{ matrix.target }}
           idf.py build
 
+      # #781: pin_bench is RFC-0022 §6's MCU-half apparatus. Nothing built it, so it
+      # rotted against the very API change it measures — `settings_t`, deleted by
+      # §3.B, three PRs before anyone noticed. One target is enough: this is a
+      # COMPILE gate on an example that uses the store path, not a second portability
+      # check. Ablate it by reverting app_main.cpp to a deleted API — the step reds.
+      - name: Build pin_bench (RFC-0022 §6 MCU apparatus) for ${{ matrix.target }}
+        if: matrix.target == 'esp32c6'
+        shell: bash
+        working-directory: integrations/esp-idf/examples/pin_bench
+        run: |
+          . "${IDF_PATH}/export.sh"
+          idf.py set-target ${{ matrix.target }}
+          idf.py build
+
       - name: Show build artifacts
         if: always()
         shell: bash
