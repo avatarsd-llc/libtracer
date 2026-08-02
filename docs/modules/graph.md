@@ -81,6 +81,12 @@ class graph_t {
     std::size_t    parked_seam_count() const;    // how many await a collect()
     std::optional<vertex_handle_t> find(std::span<const std::byte> key) const;
 
+    // the node-scoped vertex index — bound-path addressing (RFC-0024 §6.4)
+    std::size_t vertex_slot_count() const noexcept;
+    std::optional<std::uint32_t>    vertex_slot(vertex_handle_t) const noexcept;   // mint side
+    std::optional<vertex_handle_t>  deref_vertex_slot(std::uint32_t index,
+                                                      std::uint32_t generation) const noexcept;
+
     // value plane
     result_t<value_ref_t> read (vertex_handle_t, std::string_view caller = {}) const;
     result_t<void>        write(vertex_handle_t, rope_t, std::string_view caller = {});
@@ -134,7 +140,7 @@ Subscription edges are never destroyed while the graph lives. `unsubscribe` only
 **deactivates** the slot; an in-flight delivery has already snapshotted the edge and
 completes. The caller-owned `ctx` (or, for the templated overload, the callable itself)
 must therefore stay alive past any delivery that may still be running, not merely past
-the `unsubscribe` call (`core/include/libtracer/graph.hpp:613-616`).
+the `unsubscribe` call (`core/include/libtracer/graph.hpp:669-672`).
 ```
 
 ```{admonition} No strings on the hot path
@@ -184,8 +190,8 @@ for (...) g.write(v, p.field(), setpoint_tlv);           // hot loop — zero st
 ## What a read hands back
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
-(`core/include/libtracer/graph.hpp:421,475` by handle, `:789,765` by path;
-`value_ref_t` at `core/include/libtracer/vertex.hpp:84`). A `value_ref_t` is an **owning
+(`core/include/libtracer/graph.hpp:477,531` by handle, `:845,821` by path;
+`value_ref_t` at `core/include/libtracer/vertex.hpp:114`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds it as a
 `std::shared_ptr<const rope_t>`, so handing that reference back costs a refcount clone of
 one control block instead of one `segment_ptr_t` clone per link.
@@ -449,6 +455,31 @@ followed by the owner's own announce write.
 ```{doxygenenum} tr::graph::role_t
 :project: libtracer
 ```
+
+### The node-scoped vertex index
+
+`graph_t` keeps one dense, append-only `vertex_t*` slot per vertex ever allocated, in
+allocation order, with the structural root at slot 0. It exists so a bound path's `u32`
+index means something: the vertex tree is a Composite of non-moving `unique_ptr`
+allocations with no dense index of its own, and an element that named a tree position
+would have to be a path again.
+
+It costs **4 bytes per vertex on rv32**, 8 on a host. It is not a route table — its size
+tracks the graph, not the traffic — and it introduces no new lifetime rule, because
+registration was already insert-only. A slot is appended per **allocation**, not per
+registration, which is what keeps the mapping a bijection: retirement revives a vertex by
+filling the same object again, and a per-registration slot would give that object two
+indices depending on which side of the revive a mint fell.
+
+`deref_vertex_slot` is the hot side and is the whole of the check — a bounds compare and a
+generation compare, both under one shared map hold. It authorizes nothing; the operation
+that follows re-evaluates the ACL at the vertex it returns.
+
+`vertex_slot` is the mint side, and it **scans**. That is deliberate rather than pending: a
+per-vertex index field costs 4 bytes on rv32, where `sizeof(vertex_t)` sits at
+`config_t::kMaxVertexBytes32` with zero headroom, and a pointer→index side map costs
+strictly more than the 4 B/vertex the slot vector does. A mint happens once per binding, on
+a reply already being assembled.
 
 ### Registration and subscription
 

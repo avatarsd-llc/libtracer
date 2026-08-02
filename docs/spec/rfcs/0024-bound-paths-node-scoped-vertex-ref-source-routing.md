@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0024 |
 | **Title** | Bound paths: node-scoped vertex-ref source routing |
-| **Status** | **accepted** (2026-08-03, maintainer-ratified, comment window waived). The whole document is ratified; it lands car by car. §4 (the `PATH_REF` wire form) is the **incorporated** part — `docs/spec/v1.md` §3 and `docs/reference/05-protocol-tlvs.md` §`0x14` cite it normatively as of the codec car ([#809](https://github.com/avatarsd-llc/libtracer/issues/809)). §5-§7 (validation, ACL re-check, minting and binding) are ratified but not yet incorporated: no normative text cites them until the routing car lands, so they are the design of record, not yet a peer obligation. |
+| **Status** | **accepted** (2026-08-03, maintainer-ratified, comment window waived). The whole document is ratified; it lands car by car. **§4-§7** are the **incorporated** part as of the routing car (2026-08-03): `docs/spec/v1.md` §3 and `docs/reference/05-protocol-tlvs.md` §`0x14` cite the wire form (§4) and the routing semantics (§5-§7) normatively, `docs/reference/03-addressing.md` carries the two-forms rule, and `docs/reference/13-network-formation.md` the bound diameter ([#809](https://github.com/avatarsd-llc/libtracer/issues/809)). Two clauses are ratified and NOT yet incorporated, because no implementation stands behind them: the **forwarder's** element-consuming hop (§4.1, §5.1 step 4 — a bound `dst` terminates locally today, and a residual longer than one element is dropped rather than guessed at) and the §5.3 **NACK** carrying the failing hop index, whose spelling §9.2 still leaves open. A drop is already the conformant behaviour without the NACK; the NACK only makes the origin's recovery faster. |
 | **Author(s)** | AvatarSD (maintainer) — written up from the 2026-08-02 grill, in which the design below was **ruled**, not proposed |
 | **Created** | 2026-08-02 |
 | **Comment window** | waived by default while solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke explicitly if outside input is wanted. Verified: `docs/implementations.md:13` still reads `_(none yet)_`, so the waiver's revert trigger has not fired. |
@@ -276,7 +276,7 @@ vertices can physically exist**, so the derivation is a RAM floor:
 - The smallest vertex costs `sizeof(vertex_t)`, gated at **80 B on rv32**
   (`core/include/libtracer/config.hpp:165`) and **120 B on a 64-bit host**
   (`core/include/libtracer/config.hpp:153`), enforced at compile time
-  (`core/include/libtracer/vertex.hpp:2452`, `:2455`).
+  (`core/include/libtracer/vertex.hpp:2497`, `:2500`).
   [ADR-0070](../../adr/0070-configuration-is-a-named-traits-type.md):40 records that rv32 sits at
   *exactly* 80 with zero headroom — so 80 is a floor, not a budget.
 - Add the index slot itself: one pointer, 4 B on rv32, 8 B on a host (§6.4).
@@ -659,9 +659,12 @@ Spec edits land **after acceptance, in a follow-up PR**; the RFC's own PR added 
 document and the two glossary entries (§11). Acceptance has since happened, and the edits land
 car by car — a spec bullet is incorporated in the same train as the code that honours it, so no
 normative text ever cites a clause with no implementation behind it. The codec car landed §9.1's
-`0x14` registry bullet and its `v1.md` §3 incorporation, and those two alone. The `FWD` bullet,
-the `03-addressing.md` two-forms text, the diameter row and the RFC-0004 §B amendment land with
-the routing car, which is what makes their clauses observable.
+`0x14` registry bullet and its `v1.md` §3 incorporation, and those two alone. The routing car
+landed the rest: the `FWD` bullet (the `op & 0x3F` masking rule and the bind-request flag, plus
+`dst`/`src` MAY be a `PATH_REF`), the `05` §routing-semantics text that `v1.md` §3 now
+incorporates for §5-§7, the `03-addressing.md` two-forms section and the
+`13-network-formation.md` diameter row — each in the same train as the code that honours it,
+which is what makes their clauses observable.
 
 ### 9.1 New normative text
 
@@ -748,7 +751,7 @@ Wireshark dissector (`tools/wireshark/libtracer.lua`) follow. Public-header chan
 - **[RFC-0019](0019-path-depth-bounded-by-bytes.md) / [RFC-0023](0023-path-segment-cap-repriced-32-to-255.md)
   byte bounds** — `PATH_REF` is bounded by **hop count**, not segment count, and derives its own
   bound in §4.3 (normative ≤ 255 elements / 2040 B; reachable ≤ 69 today, ≤ 171 packed).
-  `kMaxSegments` and `kMaxPathBytes` (`core/include/libtracer/path.hpp:34`, `:32`) are untouched
+  `kMaxSegments` and `kMaxPathBytes` (`core/include/libtracer/path.hpp:35`, `:33`) are untouched
   and continue to govern the canonical form alone.
 
 ## 11. `CONTEXT.md`

@@ -205,7 +205,7 @@ remain in the devices — RAM, or NVS where the device persists them.
 **Subscriber edges do not survive a third-party orchestrator's departure.**
 A subscription written *over the wire* binds to the **arrival session**, not to the
 target the writer named: `graph_t::subscribe_wire` discards the SUBSCRIBER's PATH
-target (`core/src/graph.cpp:1402`) and delivery rides the accumulated `src` back to
+target (`core/src/graph.cpp:1453`) and delivery rides the accumulated `src` back to
 whoever wrote it — the orchestrator. Its departure then evicts the edge outright
 (`fwd_router_t::link_down` → `graph_t::evict_link_edges`). So the paragraph above
 holds only for a subscription the **consumer itself** wrote. Closing the gap needs a
@@ -301,13 +301,21 @@ framing modes. The bounds to design within:
   every hop and is consumed monotonically, so a delivery travels exactly as far as its explicit
   source route — segment count ≤ 255 ([03 — Addressing](03-addressing.md);
   [RFC-0023](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md); `kMaxSegments`,
-  `core/include/libtracer/path.hpp:34`). For realistically named mounts the **1024-byte PATH
+  `core/include/libtracer/path.hpp:35`). For realistically named mounts the **1024-byte PATH
   budget binds first**, not the segment count: a 3-segment mount run (ADR-0061) costs its NAME
   headers plus its bytes — 20 B/hop for `/net/can/c0`, 32 B/hop for
   `/net/ws-client/board-01` — so the diameter is ≈ **30–50 hops** at 3-segment mount runs, and
   ≈ 25 at a 5-segment one. (Arithmetic over the encoding rule at
   [05 — Protocol TLVs](05-protocol-tlvs.md) §`0x06`, not a routed measurement —
   RFC-0023 §4.3, §10.)
+- **A bound route is capped by hosts, not by bytes.** The second address form
+  (`PATH_REF`, [05 — Protocol TLVs](05-protocol-tlvs.md) §`0x14`; [RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §4.3)
+  spells one fixed 8-byte element per **host** rather than a run of names per hop, so its
+  diameter is a host count: **≤ 255 normatively**, and ≤ 69 *reachable* today, since every
+  bound path is minted from a canonical one and inherits that form's 1024-byte budget (≤ 171
+  under packed segments). The canonical ceiling above is therefore the binding one in
+  practice, and the bound form's own cap sits above it deliberately — it is a property of the
+  element, not of whichever body grammar `PATH` happens to use.
 - **Loops cannot form.** Because `dst` is consumed by at least one segment per hop (a whole
   `net/<module>/<name>[/<peer>]` mount run, RFC-0014 S2a), a physical cycle
   is harmless per-op rather than rejected. There is no revisit check — loop-freedom is
