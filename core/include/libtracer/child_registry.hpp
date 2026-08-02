@@ -20,7 +20,9 @@
 #include <atomic>
 #include <cassert>
 #include <cstdint>
+#include <cstring>
 #include <new>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -46,7 +48,8 @@ namespace tr::net {
  * eviction, the departure notifiers) keeps working on an opaque string and needs no
  * signature change. The demux, which holds two raw segment spans and must not allocate
  * on the hot path (`bench_forward_heap`'s `allocs=0` gate), matches through
- * @ref by_segments, which compares the two parts in place and never builds a key.
+ * @ref longest_prefix, which compares each slot's key against the `dst` prefix in place
+ * and never builds a key.
  *
  * **Shape is per-CONNECTION, not per-module** — a refinement of ADR-0061, which assumed
  * a module declares it. It cannot: `ws-server`'s `peer_named` config decides whether the
@@ -104,11 +107,34 @@ class child_registry_t {
      * shape captured once at @ref add time, so the forward path never probes `bus()`.
      */
     struct child_t {
-        std::string name; /**< @brief Qualified mount name, `"<module>/<name>"`. */
-        /** @brief The link; nullptr marks a TOMBSTONE (#494). ATOMIC because teardown nulls
-         *         it in place while a lock-free forward read may be dereferencing the slot
-         *         (ADR-0063): the reader sees the old pointer or `nullptr`, never a tear. */
-        std::atomic<transport_t*> link{nullptr};
+        /**
+         * @brief How many `/`-separated segments @ref name has — the slot's OWN mount width.
+         *
+         * The field the INVERTED SINGLE-PASS descent turns on (#523). The descent used to try
+         * key widths `W..1` and re-scan the whole table at each one — O(W×N) slot visits, which
+         * is invisible only while a constant caps W at 3. Storing each slot's own width lets
+         * ONE pass match every slot against the prefix of exactly that width, so the descent is
+         * O(N) whatever the widths in the table are, and no width needs to be known in advance.
+         *
+         * Written once, on the append path, before the slot is published — the same contract
+         * @ref name_digest has, and for the same reason: it is a pure function of @ref name.
+         *
+         * **Declared FIRST, beside @ref name_digest.** These two are the ONLY fields the scan's
+         * hot loop reads, once per slot; everything else is touched for the single slot that
+         * wins. Appended at the END of the struct they grew `child_t` from 80 to 88 bytes, and
+         * 64 slots of that is eight extra cache lines the scan walks per frame. Tucked into
+         * `multi_peer`'s tail padding instead (offset 44, digest at 48) the size came back, but
+         * the PAIR then straddled a 64-byte boundary on one slot in every four. Here it is 16
+         * bytes at offsets 0/8, so the size is 80 AND every slot's hot read is one line.
+         *
+         * Honest about what that last move bought: it was made to remove the straddle and the
+         * A/B moved by ~1 ns at `W = 3`, `N = 64` — inside the run-to-run range, so it is a
+         * shape argument, not a measured win. It is kept because the straddle-free layout is
+         * the one that does not depend on the compiler having placed the fields luckily; the
+         * regression this PR actually had to close was code generation, not slot layout (see
+         * `resolve_mount_deep` in `fwd_router.cpp`).
+         */
+        std::uint32_t seg_count = 0;
         /** @brief Shape, captured at @ref add time. ATOMIC for the same reason `link` is, and
          *         it was missed the first time: @ref add REBINDS an existing slot on the
          *         tombstone-reuse path that RFC-0014 create/remove churn takes constantly, and
@@ -133,6 +159,11 @@ class child_registry_t {
          * overwhelming majority of candidates cost one compare.
          */
         std::uint64_t name_digest = 0;
+        std::string name; /**< @brief Qualified mount name, `"<module>/<name>"`. */
+        /** @brief The link; nullptr marks a TOMBSTONE (#494). ATOMIC because teardown nulls
+         *         it in place while a lock-free forward read may be dereferencing the slot
+         *         (ADR-0063): the reader sees the old pointer or `nullptr`, never a tear. */
+        std::atomic<transport_t*> link{nullptr};
         /** @brief True while this slot still resolves — i.e. it is not a tombstone. */
         [[nodiscard]] bool live() const noexcept {
             return link.load(std::memory_order_acquire) != nullptr;
@@ -165,8 +196,17 @@ class child_registry_t {
      * its transport believing teardown had succeeded while @ref by_name kept resolving the
      * freed link through the shadow. Rebinding makes the name→slot mapping one-to-one, which
      * is what every other operation here already assumes.
+     *
+     * @retval false The table could not grow — `append` got no chunk from the allocator, so
+     *         NOTHING was registered. It used to return `void` and swallow exactly this,
+     *         leaving the caller (`fwd_router_t::add_child`) to report success and wire a
+     *         receiver onto a link the registry does not hold: a GHOST child, audible on its
+     *         transport, resolvable by no `dst`, and removable by no `remove_child` — the same
+     *         "healthy-looking child that every forward misses" shape #523 was filed about.
+     *         Not `[[nodiscard]]`: the control-plane tests that ignore it are unchanged, and
+     *         the ONE caller that must not is `add_child`.
      */
-    void add(std::string name, transport_t& link) {
+    bool add(std::string name, transport_t& link) {
         const bool multi_peer = link.bus() != nullptr;
         child_t* hit = nullptr;
         for_each([&](const child_t& c) {
@@ -185,50 +225,225 @@ class child_registry_t {
             assert(hit->mount_tlv == encode_mount_name(name));
             hit->multi_peer.store(multi_peer, std::memory_order_relaxed);
             hit->link.store(&link, std::memory_order_release);
-            return;
+            // A tombstone coming back to life changes what a `dst` prefix resolves to, so it
+            // moves the mount shape exactly as a fresh append does (#765).
+            bump_generation();
+            return true;
         }
         std::vector<std::byte> mount = encode_mount_name(name);
         child_t* const slot = append();
-        if (slot == nullptr) return;  // allocation failure — soft-fail, nothing registered
+        if (slot == nullptr) return false;  // no chunk — NOTHING is registered; see the docs
         slot->name = std::move(name);
         slot->name_digest = digest_name(slot->name);
+        slot->seg_count = static_cast<std::uint32_t>(segment_count(slot->name));
         slot->multi_peer.store(multi_peer, std::memory_order_relaxed);
         slot->mount_tlv = std::move(mount);
         slot->link.store(&link, std::memory_order_release);
         publish(slot);
+        bump_generation();
+        return true;
     }
 
     /**
-     * @brief The live child whose qualified name equals @p segs joined by `/` (null if none).
+     * @brief Segments in a qualified mount name — `"a/b"` is 2, `""` is 0.
      *
-     * The forward demux's entry point. @p segs are raw segment spans read straight out of
-     * the inbound frame (`<module>`, `<name>`, and for a bus peer `<peer>`); they are
-     * compared against the stored key **in place**, so no key is ever built and the hot
-     * path stays allocation-free (`bench_forward_heap`'s `allocs=0` gate).
+     * Counts separators rather than splitting: a count is all any caller wants, and building a
+     * vector of pieces to learn one would be the wrong shape even on a control-plane path.
      */
-    [[nodiscard]] const child_t* by_segments(std::span<const std::string_view> segs) const {
-        // The joined length is a property of `segs`, not of any child — so it is computed
-        // ONCE here rather than per candidate. It was inside `matches`, which meant every
-        // slot in the table re-ran a loop over the segments just to derive the number it
-        // would compare its own size against. Hoisting it leaves the per-slot work at a
-        // single integer compare for the (overwhelming) majority that cannot match.
-        std::size_t need = segs.empty() ? 0 : segs.size() - 1;
-        for (const std::string_view s : segs) need += s.size();
-        // Both discriminators are derived from `segs` ONCE, so a candidate that cannot match
-        // costs a single integer compare against a field in its own cache line — no acquire
-        // load, no string access. The hash is tested FIRST for exactly that reason; `live()`
-        // and the full compare still gate the answer, so this is a filter, never a decision.
-        const std::uint64_t want = digest_segments(segs);
-        const child_t* hit = nullptr;
-        for_each([&](const child_t& c) {
-            if (c.name_digest == want && c.name.size() == need && c.live() &&
-                matches(c.name, segs)) {
-                hit = &c;
-                return true;
+    [[nodiscard]] static constexpr std::size_t segment_count(std::string_view name) noexcept {
+        if (name.empty()) return 0;
+        std::size_t n = 1;
+        for (const char c : name) {
+            if (c == '/') ++n;
+        }
+        return n;
+    }
+
+    /**
+     * @brief The MOUNT-SHAPE generation — bumped whenever a `dst` prefix could start or stop
+     *        resolving to a different mount (#765).
+     *
+     * The third validate-on-use stamp, beside `graph_t::retire_generation` (a revived vertex)
+     * and the slot tombstone (a departed link). Neither of those two can see the hazard this
+     * one exists for: bind a label through mount `net/ws/s`, then register `net/ws/s/rack`, and
+     * a full `FWD` resolves against the NEW, deeper mount while a `COMPACT` riding the old
+     * label still dereferences the binding made against the old split. Both targets are alive
+     * and both are the vertex/link they always were — what moved is the POINT at which the
+     * address divides into "local mount" and "remote residual".
+     *
+     * Until #523 the two planes agreed about a deeper mount only because NEITHER could reach it
+     * — the descent capped its width, so the deeper registration was unroutable to both. That
+     * is agreement by mutual failure, and lifting the width bound ends it.
+     *
+     * Coarse ON PURPOSE: it counts mount-table mutations, not the mounts a given label depends
+     * on. A mutation that could not have changed one label's split still restamps it, and that
+     * label takes the RFC-0004 §E.1 self-heal — drop, observe, `HANDLE_NACK`, re-advertise. A
+     * per-label dependency set would be a reverse index, which is the option ADR-0062 already
+     * rejected: it moves work onto the control plane's lock to serve the minority flow, and it
+     * is a SECOND invalidation mechanism beside one that works.
+     */
+    [[nodiscard]] std::uint32_t mount_generation() const noexcept {
+        return generation_.load(std::memory_order_acquire);
+    }
+
+    /**
+     * @brief Walks a `dst`'s leading segments once, forward, keeping the digest chain with it.
+     *
+     * The state the single-pass descent needs to test a slot of ANY width for one integer
+     * compare. @ref fold_segment is an ACCUMULATOR — `h_k = fold(h_{k-1}, seg_k)` — so the
+     * digests of every prefix form a chain, and @ref reach walks it forward on demand: a
+     * table whose slots share a width folds it exactly once and every slot after the first
+     * costs two integer compares, the same per-slot work the old exact-match scan paid.
+     *
+     * @tparam SegAt `std::optional<std::string_view>(std::size_t)` — segment `i` of the
+     *               `dst`, `std::nullopt` when the `dst` has no segment there. An EMPTY
+     *               string means "present but not routable" (over-long, or unreadable off a
+     *               rope), which is a different answer: it stops the chain without meaning
+     *               the address ended.
+     */
+    template <class SegAt>
+    class prefix_walk_t {
+       public:
+        /** @brief Walk the segments @p at yields, folding as it goes. */
+        explicit prefix_walk_t(SegAt& at) noexcept : at_(at) {}
+
+        /**
+         * @brief Advance the chain to cover the first @p want segments.
+         * @return false if the `dst` has no usable run that long — and then no LONGER run
+         *         is usable either, which `limit_` remembers so the rest of the pass
+         *         costs one compare per slot instead of one walk.
+         */
+        [[nodiscard]] bool reach(std::size_t want) {
+            if (want > limit_) return false;
+            if (want < k_) {  // a narrower slot after a wider one — restart the chain
+                k_ = 0;
+                h_ = kDigestSeed;
             }
+            while (k_ < want) {
+                const std::optional<std::string_view> s = at_(k_);
+                if (!s || s->empty()) {
+                    limit_ = k_;
+                    return false;
+                }
+                h_ = fold_segment(h_, *s);
+                ++k_;
+            }
+            return true;
+        }
+
+        /** @brief Digest of the first `reach`ed segments — comparable to `name_digest`. */
+        [[nodiscard]] std::uint64_t digest() const noexcept { return h_; }
+
+       private:
+        SegAt& at_;
+        std::size_t k_ = 0;
+        std::uint64_t h_ = kDigestSeed;
+        std::size_t limit_ = static_cast<std::size_t>(-1);
+    };
+
+    /**
+     * @brief The live child whose qualified name is the LONGEST prefix of the `dst` segments
+     *        @p at yields — the forward demux's entry point (#523).
+     *
+     * ONE pass over the table. Each slot is matched against the prefix of ITS OWN
+     * @ref child_t::seg_count, so a mount of any width resolves and the descent never retries
+     * a width: **O(N) slot visits, independent of how wide the widest mount is**. It replaces
+     * a `k = W..1` loop that re-scanned the whole table at every width — O(W×N), measured at
+     * 270 ns vs 25 ns for one scan at W=12, N=64 — and which, worse, could only ever match the
+     * widths a compile-time constant enumerated (`kMountPeekMax`, deleted with this).
+     *
+     * Segments are read through @p at and compared against the stored key **in place**, so no
+     * key is ever built and the hot path stays allocation-free (`bench_forward_heap`'s
+     * `allocs=0` gate). Nothing here is sized by a width: there is no per-width array, no
+     * peek window, and no constant to raise.
+     *
+     * LONGEST-MATCH-WINS is the contract, preserved exactly: the old loop started at the
+     * widest key and returned the first hit, so a more specific mount always beat a shorter
+     * one. Here the incumbent's width is the filter (`k <= best_k` cannot win), which is also
+     * what keeps the pass cheap when a wide mount matches early.
+     *
+     * @tparam SegAt See @ref prefix_walk_t.
+     * @return The matched slot, or nullptr when no registered mount prefixes the `dst`.
+     */
+    template <class SegAt>
+    [[nodiscard]] const child_t* longest_prefix(SegAt&& at) const {
+        // TWO PHASES, and the split is the whole performance story. Phase 1 is a scan whose
+        // body is two loads and two compares and NOTHING else — no call, no string access, no
+        // acquire load. Phase 2 confirms the single slot it picked.
+        //
+        // Written as one phase, with the confirm inline, the compiler stops inlining the scan
+        // body and the WHOLE pass slows down — not just the matching slot. Measured on the
+        // shipped `W = 3` shape: ~24 ns, i.e. ~20% of a forward hop, paid on a comparison that
+        // by construction can only matter for one slot in the table.
+        prefix_walk_t<SegAt> walk(at);
+        const child_t* best = nullptr;
+        std::size_t best_k = 0;
+        // The chain state for the width the PREVIOUS slot had, held as plain locals. Registry
+        // tables are overwhelmingly uniform in width — every RFC-0014 mount is
+        // `net/<module>/<name>` — so the chain is folded once and every slot after the first
+        // costs the two compares.
+        std::size_t at_k = 0;
+        std::uint64_t at_digest = 0;
+        for_each([&](const child_t& c) {
+            const std::size_t k = c.seg_count;
+            if (k != at_k) {
+                if (k == 0 || k <= best_k || !walk.reach(k)) return false;
+                at_k = k;
+                at_digest = walk.digest();
+            }
+            if (c.name_digest != at_digest) return false;
+            best = &c;
+            best_k = k;
+            return false;  // keep going: a WIDER slot later in the table still wins
+        });
+        // Phase 2. The digest is a FILTER over three facts per segment, so this compare is the
+        // DECISION, not a formality — and its closing total-length check is what rules that
+        // the key is a SEGMENT prefix of the address rather than merely a byte prefix.
+        if (best == nullptr) return nullptr;
+        if (best->live() && matches_prefix(best->name, best_k, at)) return best;
+        // The filter picked a slot that is not actually the answer: a digest collision, or a
+        // slot tombstoned between the scan and here. Both are rare enough to be worth nothing
+        // in the hot loop and both must still give the right answer, so the fallback repeats
+        // the pass with the confirm inline — the shape phase 1 exists to keep OUT of the hot
+        // loop, run only when the hot loop was wrong.
+        return longest_prefix_confirmed(at);
+    }
+
+    /**
+     * @brief @ref longest_prefix with the confirm INSIDE the pass — the cold fallback.
+     *
+     * Same contract, same answer, and it is the definition the fast path is an optimisation
+     * of. Reached only when the digest filter's pick fails to confirm.
+     */
+    template <class SegAt>
+    [[nodiscard]] const child_t* longest_prefix_confirmed(SegAt& at) const {
+        prefix_walk_t<SegAt> walk(at);
+        const child_t* best = nullptr;
+        std::size_t best_k = 0;
+        for_each([&](const child_t& c) {
+            const std::size_t k = c.seg_count;
+            if (k == 0 || k <= best_k || !walk.reach(k)) return false;
+            if (c.name_digest != walk.digest()) return false;
+            if (!c.live() || !matches_prefix(c.name, k, at)) return false;
+            best = &c;
+            best_k = k;
             return false;
         });
-        return hit;
+        return best;
+    }
+
+    /**
+     * @brief @ref longest_prefix over a ready-made segment list — the control plane's form.
+     *
+     * `on_advertise` holds decoded `NAME` children, not a frame cursor, and `subscribe_toward`
+     * holds a parsed `path_t`. Same descent, same answer: the two planes resolving a mount by
+     * different rules is precisely what #516 was.
+     */
+    [[nodiscard]] const child_t* longest_prefix(std::span<const std::string_view> segs) const {
+        return longest_prefix([segs](std::size_t i) -> std::optional<std::string_view> {
+            if (i >= segs.size()) return std::nullopt;
+            return segs[i];
+        });
     }
 
     /**
@@ -264,6 +479,9 @@ class child_registry_t {
             }
             return false;
         });
+        // A departed mount moves the split for every `dst` that used to descend through it,
+        // so it restamps the label plane exactly as a registration does (#765).
+        if (erased) bump_generation();
         return erased;
     }
 
@@ -296,7 +514,7 @@ class child_registry_t {
      * The identity lookup used off the mount-descent path (reply/advertise plumbing, which
      * addresses a link by its qualified name). Resolution order (ADR-0044): an exact child
      * NAME wins; otherwise each registered BUS child is asked to resolve @p name as a
-     * currently-audible peer. Prefer @ref by_segments on the forward path, and
+     * currently-audible peer. Prefer @ref longest_prefix on the forward path, and
      * @ref resolve_peer for scoped peer resolution.
      */
     [[nodiscard]] transport_t* by_name(std::string_view name) const {
@@ -448,25 +666,40 @@ class child_registry_t {
     }
 
     /**
-     * @brief True iff @p key equals @p segs joined by `/`, compared without allocating.
+     * @brief True iff @p key equals the first @p k segments @p at yields, joined by `/`.
      *
-     * Callers that scan a table pre-filter on the joined LENGTH (see @ref by_segments) —
-     * this still re-derives it, so the function is correct standalone, but on the scan path
-     * it only ever runs for a candidate whose size already matched.
+     * Compared in place — no key is built, so the descent allocates nothing. This is the
+     * CONFIRMATION, reached only for a candidate whose digest already matched — and it is a
+     * real decision, not a formality: the digest is a filter over three facts per segment, so
+     * the byte compare here and its closing `pos == key.size()` are what actually rule that
+     * this key is this address's prefix.
      */
-    [[nodiscard]] static bool matches(const std::string& key,
-                                      std::span<const std::string_view> segs) noexcept {
-        std::size_t need = segs.empty() ? 0 : segs.size() - 1;
-        for (const std::string_view s : segs) need += s.size();
-        if (key.size() != need) return false;
-        std::size_t at = 0;
-        for (std::size_t i = 0; i < segs.size(); ++i) {
-            if (i != 0 && key[at++] != '/') return false;
-            if (key.compare(at, segs[i].size(), segs[i]) != 0) return false;
-            at += segs[i].size();
+    template <class SegAt>
+    [[nodiscard]] static bool matches_prefix(const std::string& key, std::size_t k,
+                                             SegAt& at) noexcept {
+        std::size_t pos = 0;
+        for (std::size_t i = 0; i < k; ++i) {
+            if (i != 0) {
+                if (pos >= key.size() || key[pos] != '/') return false;
+                ++pos;
+            }
+            const std::optional<std::string_view> s = at(i);
+            if (!s) return false;
+            // A plain bounded memcmp, NOT `key.compare(pos, n, sv)`: that overload range-checks
+            // `pos` against a throwing precondition and then computes a min-length before it
+            // compares anything, and on the confirm — which runs once per frame over every
+            // segment of the matched mount — that measured several ns per segment against a
+            // descent whose whole budget is ~130 ns.
+            if (pos + s->size() > key.size()) return false;
+            if (!s->empty() && std::memcmp(key.data() + pos, s->data(), s->size()) != 0)
+                return false;
+            pos += s->size();
         }
-        return true;
+        return pos == key.size();
     }
+
+    /** @brief Publish a mount-shape change (#765). Control plane only. */
+    void bump_generation() noexcept { generation_.fetch_add(1, std::memory_order_release); }
 
     /**
      * @brief An append-only chunked list — the ADR-0063 container (#521).
@@ -543,6 +776,8 @@ class child_registry_t {
     }
 
     std::atomic<chunk_t*> head_{nullptr};
+    /** @brief The mount-shape generation (#765) — see @ref mount_generation. */
+    std::atomic<std::uint32_t> generation_{1};
 };
 
 }  // namespace tr::net

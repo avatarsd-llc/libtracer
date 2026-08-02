@@ -158,6 +158,19 @@ target_link_libraries(mount_routing_test PRIVATE libtracer)
 libtracer_test_warnings(mount_routing_test)
 add_test(NAME mount_routing COMMAND mount_routing_test)
 
+# `add_child` under a REFUSING allocator (#523): the registry chunk is the one soft-failing
+# allocation on the control path, and it is driven by replacing the global NOTHROW
+# `operator new` — a whole-program decision, hence its own binary.
+add_executable(mount_add_oom_test mount_add_oom_test.cpp)
+target_link_libraries(mount_add_oom_test PRIVATE libtracer)
+libtracer_test_warnings(mount_add_oom_test)
+add_test(NAME mount_add_oom COMMAND mount_add_oom_test)
+
+add_executable(mount_width_test mount_width_test.cpp)
+target_link_libraries(mount_width_test PRIVATE libtracer)
+libtracer_test_warnings(mount_width_test)
+add_test(NAME mount_width COMMAND mount_width_test)
+
 add_executable(compact_cache_test compact_cache_test.cpp)
 target_link_libraries(compact_cache_test PRIVATE libtracer)
 libtracer_test_warnings(compact_cache_test)

@@ -277,7 +277,7 @@ std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* m
  * DESTINATION. It cannot remove work that depends on the FRAME, because the frame is new on
  * every hop. So the fixed per-hop cost divides in two:
  *
- *  - `resolve` — `peek_fwd_dst_segs` walks the `dst` PATH by offset and hands back the mount
+ *  - `resolve` — `peek_fwd_dst` opens the `dst` window and the walk hands back the mount
  *    run. Its answer is the same for every frame to the same destination, so a token that
  *    names the resolved link makes it dead work. **This is the ceiling on caching**, and the
  *    registry scan (axis 2) sits on top of it.
@@ -301,7 +301,6 @@ std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* m
 
     // Accumulated so the optimizer cannot delete the call it is here to time.
     std::size_t sink = 0;
-    std::array<std::pair<std::size_t, std::size_t>, tr::net::kMountPeekMax> segs{};
     tr::net::fwd_pre_t pre{};
     // The mount TLV a real child carries precomputed (#508) — content is irrelevant to the
     // timing, only that the rebuild emits it as one span.
@@ -311,7 +310,7 @@ std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* m
     // Production peeks ONCE and hands the parse to the rebuild via `pre`, so the rebuild leg
     // is timed the same way — otherwise it would re-parse and double-count the very work
     // this axis is trying to attribute to the peek.
-    (void)tr::net::peek_fwd_dst_segs(cur, segs, pre);
+    (void)tr::net::peek_fwd_dst(cur, pre);
 
     const auto leg = [&] {
         if (rebuild_leg) {
@@ -321,7 +320,13 @@ std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* m
             sink += rb ? rb->head1.span().size() : 0;
         } else {
             tr::net::fwd_pre_t local{};
-            sink += tr::net::peek_fwd_dst_segs(cur, segs, local);
+            if (!tr::net::peek_fwd_dst(cur, local)) return;
+            // The peek no longer materializes the segments — it opens the window and the walk
+            // reads them (#523). Timing the peek alone would therefore no longer be timing the
+            // work this axis attributes to it, so the walk of the mount run rides with it.
+            tr::net::dst_seg_walk_t<tr::wire::grammar::span_cursor> w(cur, local);
+            w.prefill();
+            for (std::size_t i = 0; i < 3; ++i) sink += w.at(i).has_value();
         }
     };
 

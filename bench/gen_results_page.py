@@ -262,12 +262,6 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "actually carries so the address collapse is asserted rather than assumed.",
         "ns p50 per hop · wire bytes per hop"),
     instrument_t(
-        "bench_mount_descent.cpp", "framed", (),
-        "Times the mount descent's width loop — key widths `k = W..1`, each pass walking the "
-        "whole child table — against a single-pass alternative, swept over registry size and "
-        "widest registered mount.",
-        "ns p50 · slot visits per descent"),
-    instrument_t(
         "bench_transport_iov.cpp", "counted", (),
         "Assembles the real transports' `::iovec` table at rising span counts to find the width "
         "at which it stops fitting inline and allocates.",
@@ -308,6 +302,14 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "reached the branch. Pairs with `bench_pin_net.cpp`; the control arm is this same source "
         "built against untouched main.",
         "ns per store · pins and copies per cell"),
+    instrument_t(
+        "bench_mount_resolve.cpp", "framed", (),
+        "Drives one whole forward hop — peek, mount descent, head rebuild, egress — through a "
+        "registry of N mounts of width W segments, addressed to the last-registered mount, and "
+        "counts the frames that actually reached the intended egress link so no cell's timing is "
+        "read off a hop that fell to the terminus instead. Written to compile unchanged against "
+        "the pre-lift tree, so the two binaries interleave as A/B arms on one machine.",
+        "ns per hop, p50 · hits vs iters per cell"),
     instrument_t(
         "bench_pin_net.cpp", "net", (),
         "Drives FWD{WRITE} across two processes over real UDP into a receiver whose RX backend is "

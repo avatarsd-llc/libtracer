@@ -7,12 +7,13 @@
  *
  * Covers the three mechanisms strip-K routing is built from, ahead of the demux being
  * rewired onto them:
- *   - `child_registry_t::by_segments` — matches a qualified `"<module>/<name>"` key
- *     against raw segment spans WITHOUT building a key (the `allocs=0` forward gate),
- *     and keeps two modules' same-named connections distinct;
+ *   - `child_registry_t::longest_prefix` — matches every registered key against the `dst`
+ *     prefix in ONE pass, each slot against the prefix of its OWN width, WITHOUT building a
+ *     key (the `allocs=0` forward gate), and keeps two modules' same-named connections
+ *     distinct;
  *   - `child_registry_t::resolve_peer` — per-endpoint peer resolution (ADR-0061), so a
  *     peer is reachable only through the module it belongs to, never across buses;
- *   - `peek_fwd_dst_segs` + strip-K `rebuild_fwd_forward` — consuming K leading `dst`
+ *   - `peek_fwd_dst` + `dst_seg_walk_t` + strip-K `rebuild_fwd_forward` — consuming K leading `dst`
  *     segments and growing `src` by the FULL mount path, which is what keeps a reply
  *     resolvable once names are per-module-scoped (the ADR-0061 erratum).
  *
@@ -82,11 +83,19 @@ struct bus_link_impl_t : tr::net::transport_t, tr::net::bus_link_t {
     }
 };
 
-/** @brief `by_segments` over a segment list, spelled the way the demux will call it. */
+/**
+ * @brief The EXACT-width lookup the old `by_segments` gave, expressed through the single pass.
+ *
+ * `longest_prefix` answers "the widest registered mount that PREFIXES this address", which is
+ * the routing question. These cases ask the narrower one — "is there a slot spelled exactly
+ * this?" — so the prefix answer is confirmed to have consumed the whole list.
+ */
 const child_registry_t::child_t* find(const child_registry_t& reg,
                                       std::initializer_list<std::string_view> segs) {
     const std::vector<std::string_view> v(segs);
-    return reg.by_segments(std::span<const std::string_view>(v));
+    const child_registry_t::child_t* const c =
+        reg.longest_prefix(std::span<const std::string_view>(v));
+    return (c != nullptr && c->seg_count == v.size()) ? c : nullptr;
 }
 
 void emit_path(std::vector<std::byte>& out, std::initializer_list<std::string_view> segs) {
@@ -194,28 +203,41 @@ void test_scoped_peer_resolution() {
           "a point-to-point child resolves no peer at all");
 }
 
-/** @brief The peek reads the leading dst segments by offset, bounded. */
+/** @brief The peek opens the dst window; the walker reads segments lazily, to ANY depth. */
 void test_peek_segments() {
     std::printf("multi-segment dst peek\n");
     const std::vector<std::byte> frame =
         make_fwd({"net", "ws-client", "foo", "sensor", "temp"}, {"reply"});
     const tr::wire::grammar::span_cursor cur{std::span<const std::byte>(frame)};
-    std::array<std::pair<std::size_t, std::size_t>, tr::net::kMountPeekMax> segs{};
-    const std::size_t n = tr::net::peek_fwd_dst_segs(cur, segs);
-    check(n == tr::net::kMountPeekMax, "peeks up to the mount maximum, no further");
-    const auto at = [&](std::size_t i) {
-        return std::string(reinterpret_cast<const char*>(frame.data()) + segs[i].first,
-                           segs[i].second);
+    tr::net::fwd_pre_t pre;
+    check(tr::net::peek_fwd_dst(cur, pre), "a structured FWD opens its dst window");
+    tr::net::dst_seg_walk_t<tr::wire::grammar::span_cursor> walk(cur, pre);
+    const auto at = [&](std::size_t i) -> std::string {
+        const auto s = walk.at(i);
+        if (!s) return "<none>";
+        return std::string(reinterpret_cast<const char*>(frame.data()) + s->first, s->second);
     };
     check(at(0) == "net", "segment 0 is the /net root");
     check(at(1) == "ws-client", "segment 1 is the module");
     check(at(2) == "foo", "segment 2 is the connection name");
     check(at(3) == "sensor", "segment 3 is the first residual segment");
+    // The fifth segment is the one the old fixed-window peek could never see: it stopped at
+    // `kMountPeekMax = 4`. Reading it is the whole width lift in one assertion (#523).
+    check(at(4) == "temp", "segment 4 is reachable — there is no peek window any more");
+    check(at(5) == "<none>", "past the end is a clean miss, not a stale repeat");
+    // Backwards access restarts the walk rather than answering from a stale cursor — the
+    // narrower-slot-after-a-wider-one case the single pass takes constantly.
+    check(at(1) == "ws-client", "a backwards read restarts the walk and still answers");
+    check(walk.end_of(2) == pre.dst_body_off + 4 + 3 + 4 + 9 + 4 + 3,
+          "end_of(k-1) is where the consumed run stops");
 
     const std::vector<std::byte> shortf = make_fwd({"net", "can"}, {"reply"});
     const tr::wire::grammar::span_cursor scur{std::span<const std::byte>(shortf)};
-    std::array<std::pair<std::size_t, std::size_t>, tr::net::kMountPeekMax> ssegs{};
-    check(tr::net::peek_fwd_dst_segs(scur, ssegs) == 2, "a short dst yields only what it has");
+    tr::net::fwd_pre_t spre;
+    check(tr::net::peek_fwd_dst(scur, spre), "a short dst still opens");
+    tr::net::dst_seg_walk_t<tr::wire::grammar::span_cursor> swalk(scur, spre);
+    check(swalk.at(1).has_value() && !swalk.at(2).has_value(),
+          "a short dst yields only what it has");
 }
 
 /** @brief strip-K consumes the mount and grows src by the WHOLE mount (the erratum). */

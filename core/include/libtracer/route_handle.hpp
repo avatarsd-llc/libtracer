@@ -79,6 +79,10 @@ struct resolved_binding_t {
      *         must be expressed outside the handle, not as an invalid one. */
     std::optional<graph::vertex_handle_t> target;
     std::uint32_t target_gen = 0; /**< @brief Terminus: generation `target` was resolved at. */
+    /** @brief The MOUNT-SHAPE generation this binding was resolved against (#765) — see
+     *         @ref handle_binding_t::mount_gen. Carried into the allocation-free view so the
+     *         warm COMPACT path can validate it without taking the owning form. */
+    std::uint32_t mount_gen = 0;
 };
 
 /**
@@ -102,6 +106,28 @@ struct handle_binding_t {
     const void* down_slot = nullptr; /**< @brief Forward: cached `child_registry_t::child_t*`. */
     std::optional<graph::vertex_handle_t> target; /**< @brief Terminus: the cached vertex. */
     std::uint32_t target_gen = 0; /**< @brief Terminus: generation `target` was resolved at. */
+    /**
+     * @brief The mount-shape generation this binding's SPLIT was decided against (#765).
+     *
+     * The THIRD validate-on-use stamp, and it exists because the other two cannot see this
+     * hazard. `target_gen` catches a retired-and-revived vertex; the slot tombstone catches a
+     * departed link. Neither catches the split MOVING: bind a label through mount `net/ws/s`,
+     * then register `net/ws/s/rack`, and a full `FWD` resolves against the new, deeper mount
+     * while a `COMPACT` riding this label still dereferences the binding made against the old
+     * one. Both targets are alive and both are what they always were — what changed is the
+     * point at which the address divides into "local mount" and "remote residual", and the
+     * two planes now disagree about the same address with nothing reporting it.
+     *
+     * Until #523 the disagreement was unreachable, but only by accident: the descent capped
+     * its width, so a deeper mount was unroutable to BOTH planes. That is agreement by mutual
+     * failure, and it stopped holding the moment the width bound was lifted.
+     *
+     * Compared against @ref child_registry_t::mount_generation on use; a mismatch takes the
+     * SAME RFC-0004 §E.1 self-heal a stale label already takes — drop, fire the stale-label
+     * observer, `HANDLE_NACK` upstream to prompt a re-advertise. No new error code, and no
+     * second invalidation mechanism (the objection that killed ADR-0062's reverse index).
+     */
+    std::uint32_t mount_gen = 0;
 };
 
 /**
