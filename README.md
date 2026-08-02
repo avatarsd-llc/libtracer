@@ -87,9 +87,9 @@ A deliberate separation lets vendors build proprietary products on top without f
 ```text
 libtracer/
 ├── core/                Reference C/C++ implementation (Apache 2.0) — src, include, tests
+│   └── examples/        Runnable, CI-built example programs (CC0)
 ├── bindings/            Native cores — rust/ (crates.io), typescript/ (npm @avatarsd-llc/*)
 ├── integrations/        Platform packaging — esp-idf/ (working) · platformio/ · esphome/ · arduino/
-├── examples/            Runnable, CI-built examples
 ├── bench/               libtracer↔Zenoh benchmark harness (feeds the live perf page)
 ├── docs/                Spec (normative) · reference (descriptive) · ADRs (rationale)
 ├── tests/conformance/   Cross-implementation vectors + run-all.py driver
@@ -106,6 +106,6 @@ Every change lands via a pull request; commits are DCO‑signed (`git commit -s`
 | --- | --- |
 | Reference implementation (`core/`, `bindings/`, `integrations/`) | **Apache 2.0** ([LICENSE](LICENSE)) |
 | Protocol specification (`docs/spec/`) | **CC BY 4.0** |
-| Example code (`examples/`) | **CC0 1.0** |
+| Example code (`core/examples/`) | **CC0 1.0** ([examples/LICENSE](examples/LICENSE)) |
 
 Copyright **avatarsd LLC** for company‑authored work; outside contributions remain their authors', licensed per the scope above. The **"libtracer" name** is a trademark of avatarsd LLC ([TRADEMARKS.md](.github/TRADEMARKS.md)).

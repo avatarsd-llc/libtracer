@@ -82,7 +82,7 @@ inside the remote-delivery fan-out. `pool_t`'s free list is a plain `std::size_t
 and count with no lock and no atomic, so two threads can be handed the same slot and a
 stored value aliases onto an outbound frame.
 
-The synchronised pool this target needs **is built** (#770):
+The synchronised pool this target needs **is built**:
 `synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:170`) keeps `pool_t`'s
 bounded slab and makes the critical section a compile-time policy, chosen as an
 [ADR-0047 — build-time closed module sets](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)
@@ -109,10 +109,10 @@ targets can take.
 
 Keeping `flat` on the heap means every rope flatten on the forward **and** terminus paths
 sits outside the node's slab bound — the ingress `ADVERTISE` / `COMPACT` sub-rope
-flattens, the cold bus-name rejection flatten and the per-delivery egress one (#730), plus
+flattens, the cold bus-name rejection flatten and the per-delivery egress one, plus
 the terminus resolver's rope-tier flattens one call below `resolve_terminus_rope`
 (`view_node::ensure_cache`, `view_node::own_wire`), which the router reaches by handing
-`flat` to its `op_resolver_t` (#766). One caveat remains, so the bound is not read wider
+`flat` to its `op_resolver_t`. One caveat remains, so the bound is not read wider
 than it is: `flat` bounds the flattened *bytes*, not the frame builds beside them, and not
 the terminus arena — that is `blocks`.
 
@@ -181,8 +181,8 @@ Rules that follow:
   Audit any path that calls throwing `new`.
 - **Size the pool from the transport, not from hope.** `udp_transport_t` sizes RX
   segments to `min(64 KiB, backend->max_segment_size())`
-  (`core/src/transport_udp.cpp:134`; `kMaxDatagram = 65536` at
-  `core/include/libtracer/transport_udp.hpp:40`). Give the pool MTU-sized slots and
+  (`core/src/transport_udp.cpp:140`; `kMaxDatagram = 65536` at
+  `core/include/libtracer/transport_udp.hpp:55`). Give the pool MTU-sized slots and
   datagrams arrive without a 64 KiB scratch buffer on a small thread stack.
 
 ## 2. Role composition and the transport RAM lever
@@ -239,8 +239,8 @@ replaces, not by shaving the core.
   mutable buffer libtracer links: `N * sizeof(vertex_stripe_t)` bytes of `.bss`
   reserved at link time, plus the same for the condvar table. Sixteen stripes suit a
   multi-core host — that is the default (`kVertexLockStripes = 16`,
-  `core/include/libtracer/config.hpp:79`) — while a single-core chip reclaims RAM at
-  **4–8** (`config.hpp:70-71`). A stripe's platform mutex is lazy: on FreeRTOS it
+  `core/include/libtracer/config.hpp:86`) — while a single-core chip reclaims RAM at
+  **4–8** (`config.hpp:77`). A stripe's platform mutex is lazy: on FreeRTOS it
   costs ~90 B of heap on its first lock, so an untouched stripe costs its struct and
   no heap.
 - **Pin task priorities deliberately**: transport RX threads just below the
@@ -310,8 +310,8 @@ itself, described via `:schema` like any other data
 ```
 
 The backpressure counters come from `graph_t::delivery_drops()`
-(`core/include/libtracer/graph.hpp:848`), which snapshots three per-cause totals —
-`no_target`, `denied`, `out_of_memory` (`graph.hpp:781-788`). They are counted and
+(`core/include/libtracer/graph.hpp:872`), which snapshots three per-cause totals —
+`no_target`, `denied`, `out_of_memory` (`graph.hpp:855-862`). They are counted and
 never enforced: nothing in the library reads them, so the deployment decides what to
 alarm on. The three loads are individually relaxed rather than one atomic snapshot,
 so their useful reading is "is this growing", not an instant total.
