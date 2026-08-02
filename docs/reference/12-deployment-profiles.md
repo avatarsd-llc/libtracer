@@ -68,7 +68,7 @@ A ROS 2 node speaks libtracer transparently through the **`rmw_tracer`** RMW plu
 
 ```
 Rung 2/3  +  bindings/ros2/rmw_tracer  (RMW_IMPLEMENTATION=rmw_tracer)
-  ROS topic ↔ path · ROS QoS ↔ :settings · CDR msg = opaque VALUE
+  ROS topic ↔ path · ROS QoS ↔ SUBSCRIBER.delivery_policy · CDR msg = opaque VALUE
   loaned-message API → zero-copy take
   + discovery_mdns (topic/graph discovery) + executor_c (vertex compute)
 ```
