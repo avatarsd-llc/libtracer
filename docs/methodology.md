@@ -384,6 +384,59 @@ optional TLS module. An absent transport must never be readable as a tie.
   makes the *same* quantity more accurately measured, the name is kept and the
   instrument marker carries the discontinuity.
 
+**The A/B protocol — what a two-arm comparison may and may not vary.** An A/B of a code change runs two binaries and attributes the difference to the change.
+That attribution is only sound if **nothing else** differed. Two things that look
+harmless routinely do.
+
+**Build directory: harmless, and now measured.** A cross-worktree A/B — build
+`origin/main` in one worktree, the change in another, interleave — was suspected
+(#807, from PR #806) of measuring *code layout* rather than code: identical
+`origin/main` source built at two paths appeared to differ by **+1.7 % (65589 B
+frames) to +6.7 % (53 B frames)** on `bench_terminus_tier`'s `terminus-arena` leg
+over 12 interleaved rounds, with disjoint ranges. That cause is **refuted**. Building
+the same commit at two paths of different lengths produces, on this toolchain,
+**byte-identical output**: all 27 `libtracer` object files, `libtracer.a`, and the
+`bench_terminus_tier` executable `cmp` equal (one md5 for both arms). There is no
+layout to be sensitive to, so no layout lever is warranted, and none ships —
+`-falign-functions=64` over the whole bench + library build reads **−1.50 % to
++1.56 %** against stock across 10 interleaved rounds, sign varying by frame size,
+i.e. nothing. Re-run at two paths under this protocol the same leg reads **−0.64 % to
++0.87 %** (unpinned) and **−0.64 % to +0.73 %** (pinned), 12 interleaved rounds.
+
+**CPU placement: the real hazard, and it is large.** The reference host is
+**heterogeneous** — 4 Zen 5 cores at 5.16 GHz (`cpu0–7`) and 8 Zen 5c cores at
+3.29 GHz (`cpu8–23`). The *same binary* on the `terminus-arena` leg reads **+47.0 % to
++53.7 %** slower pinned to a compact core than to a classic one, 5 rounds each, ranges
+disjoint and tight within each arm (e.g. 53 B: 308–313 ns vs 474–481 ns). That is the
+signature a confounded A/B wears: tight, reproducible, and entirely about the machine.
+Even the *choice* of pinning moves the figure — at 53 B, 15 runs each: unpinned median
+228 ns, `taskset -c 2` 234 ns, `taskset -c 2,3` 238 ns (**+4.4 %** across pinning
+policies, from SMT sharing). A few percent between two arms needs no exotic
+explanation on such a host; it needs only that the two arms were placed differently.
+
+So the rules for any latency A/B, on this leg or any other:
+
+1. **Pin both arms identically**, to the same *single* logical CPU on the same core
+   class (`taskset -c 2`). Pinning one arm and not the other, or to different core
+   classes, is not a comparison.
+2. **Interleave** the arms round-robin within one session and report **medians *and*
+   ranges** of at least ~10 rounds per arm. A single round per arm cannot separate the
+   change from the machine.
+3. **Discard the first execution.** A cold process's first measured point on this leg
+   reads ~313 ns against a 228 ns steady state (**+37 %**) — it is idle-state wake-up,
+   not code.
+4. Prefer **same-directory A/B** (`git stash`, rebuild, re-run in one session) when it
+   is available; it varies strictly less than a two-worktree run.
+5. When the expected effect is **smaller than the leg's own noise floor**, do not
+   reach for a stopwatch at all — use **object-file `cmp`** against the baseline tree
+   (the method PR #799/#806 established). A change that leaves 25 of 27 objects
+   byte-identical has proved more about the unchanged paths than any bench can.
+
+The stack-offset hypothesis was also tested and is negative: sweeping the environment
+block from 0 to 4000 bytes (which shifts the initial stack pointer, and with it the
+bench's 64 KiB stack slab) moves the leg 2.8–4.4 %, non-monotonically — indistinguishable
+from run-to-run noise.
+
 ---
 
 ## Reproducing locally
@@ -412,7 +465,11 @@ bench/fetch_zenoh.sh && cmake --build bench/build -j
 
 Compare a change against its own baseline **on the same machine in the same
 session** (`git stash`, rebuild, re-run) — never against a number from a different
-host or a different day.
+host or a different day, and never with one arm pinned differently from the other.
+The full two-arm protocol, and the measurements behind each of its rules, is above
+under **The A/B protocol**, in *Reading the numbers*. The single-CPU `taskset -c 2` in the commands above is part of the measurement, not
+decoration: this host is heterogeneous and an unpinned arm can land on a core class
+50 % slower than its partner's.
 
 ---
 

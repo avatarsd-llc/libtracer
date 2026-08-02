@@ -173,12 +173,16 @@ struct arena_node {
      * choose, and it is the only one of the two shapes that cannot cost anything.
      *
      * That is a structural argument, deliberately not a measured one. `bench_terminus_tier`
-     * CANNOT resolve either shape: identical `origin/main` source compiled at two different
-     * build paths differs by +1.7 % to +6.7 % on this leg (12 interleaved rounds, ranges
-     * disjoint), which is larger than anything either shape does and has the same
-     * frame-size profile. Any cross-worktree A/B of this leg measures code layout. The
-     * evidence that the un-injected path is unchanged is the object-file `cmp`, not a
-     * stopwatch.
+     * cannot resolve either shape — one call taking one more register argument is below its
+     * noise floor — so the evidence that the un-injected path is unchanged is the object-file
+     * `cmp`, not a stopwatch.
+     *
+     * An earlier revision of this comment blamed that on BUILD LAYOUT ("identical source at
+     * two build paths differs by +1.7 % to +6.7 %"). That attribution is withdrawn (#807):
+     * the same commit built at two different paths produces byte-identical objects, archive
+     * and executable, so there is no layout to be sensitive to. What the confounded A/B was
+     * measuring was CPU placement on a heterogeneous host. The protocol that separates the two
+     * lives in `docs/methodology.md`, "The A/B protocol"; do not re-derive it here.
      *
      * The rope tier keeps its seam POINTER regardless: it needs the sticky `refused` flag,
      * and its `ensure_cache` is reached from `wire()`/`body()`, which take no arguments.
