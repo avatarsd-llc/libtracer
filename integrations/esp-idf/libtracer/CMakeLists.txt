@@ -139,6 +139,14 @@ if(CONFIG_LIBTRACER_TRANSPORT_CAN)
 endif()
 
 if(NOT IDF_TARGET STREQUAL "linux")
+    # Chip targets: the interrupt-disable critical-section pool policy (#770, ADR-0060 §2)
+    # — the single-core-MCU synchronisation variant of mem::synchronized_pool_t. The
+    # adapter is a header; this TU exists purely to instantiate it, so every chip build
+    # type-checks the policy against the portMUX macros. Not compiled on `linux` (no
+    # portMUX there); the host proves the SEAM instead (core/tests/mem_sync_policy_test).
+    # Nothing links against it by default — it is opt-in construction, so an application
+    # that never names critical_pool_t leaves the symbols for --gc-sections to drop.
+    list(APPEND LIBTRACER_SRCS "critical_pool.cpp")
     # Chip targets: the esp_http_server-backed WS transport link (httpd_ws_link_t) — the
     # embedded-native replacement for core's raw-socket transport_ws_server, a platform
     # link picked by which TU compiles (never an in-source #ifdef). transport_ws.cpp is in

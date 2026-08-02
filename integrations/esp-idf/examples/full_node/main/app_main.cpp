@@ -12,7 +12,8 @@
  *
  *   DEVICE node (what an origin-firmware board runs)
  *     - ONE static slab feeding both memory seams (ADR-0039 §one-slab):
- *       a `pool_t` region for RX segments (ADR-0042 owning delivery — every
+ *       a synchronised-`pool_t` region for RX segments (ADR-0042 owning
+ *       delivery — every
  *       inbound datagram lands in a pool slot, exhaustion is backpressure) and
  *       a `monotonic_buffer_resource` region for the router/label containers
  *       (wrapped in a `synchronized_pool_resource` so recv threads share it);
@@ -230,7 +231,7 @@ std::uint32_t reply_value_u32(const tr::wire::tlv_t& f) {
  * @brief ADR-0039 one-slab recipe, concretely: ONE static slab, partitioned
  *        once at bring-up.
  *
- * The front region becomes the RX segment pool (pool_t — fixed slots,
+ * The front region becomes the RX segment pool (a synchronised pool_t — fixed slots,
  * exhaustion = backpressure, ADR-0042); the back region backs the container
  * memory_resource the router draws its LABEL TABLES from.
  *
@@ -246,19 +247,27 @@ std::uint32_t reply_value_u32(const tr::wire::tlv_t& f) {
  * See docs/reference/09 §the second L0 seam and docs/interop/esp32-production-node.md.
  */
 constexpr std::size_t kSlabBytes = 24 * 1024;
-constexpr std::size_t kRxRegion = 12 * 1024; /**< @brief pool_t: RX datagram segments. */
+constexpr std::size_t kRxRegion = 12 * 1024; /**< @brief Synchronised pool: RX datagram segments. */
 constexpr std::size_t kRxSlotPayload = 1536; /**< @brief One UDP/MTU-sized datagram per slot. */
 alignas(std::max_align_t) std::byte g_slab[kSlabBytes];
 
 /** @brief The device node: the one-slab substrate, graph, router, and transport vertex. */
 struct device_node_t {
     /**
-     * @brief Segment seam: RX datagrams land in pool slots.
+     * @brief Segment seam: RX datagrams land in pool slots — a SYNCHRONISED pool.
      *
      * udp_transport_t sizes its RX segments to the pool's slot payload (min
      * with kMaxDatagram), so MCU-sized slots work as-is.
+     *
+     * It is NOT a bare `tr::mem::pool_t` (#770): this backend is handed to every
+     * endpoint, each allocates on its own receive thread, and a delivered segment
+     * reclaims on whichever thread drops the last reference — a plain free list is
+     * two-threads-one-slot there. Which critical section guards it is a per-target
+     * compile-time policy behind `rx_backend()` (platform.hpp): the interrupt-disable
+     * one on a chip, a spinlock on the host. Same slab, same bound (ADR-0060 §2).
      */
-    tr::mem::pool_t rx_pool{std::span<std::byte>(g_slab, kRxRegion), kRxSlotPayload};
+    tr::mem::mem_backend_t& rx_pool =
+        rx_backend(std::span<std::byte>(g_slab, kRxRegion), kRxSlotPayload);
     /**
      * @brief Container seam: a monotonic arena over the slab's back region.
      *
@@ -431,7 +440,7 @@ extern "C" void app_main(void) {
     std::printf(
         "device node up: /sensor/temp + udp listener /net/udp-server/host (port %u), one-slab "
         "recipe (pool %u slots x %u B + pmr arena)\n",
-        static_cast<unsigned>(kNodePort), static_cast<unsigned>(dev.rx_pool.capacity()),
+        static_cast<unsigned>(kNodePort), static_cast<unsigned>(rx_backend_slots()),
         static_cast<unsigned>(kRxSlotPayload));
 
     const int failures = run_host_probe(dev);

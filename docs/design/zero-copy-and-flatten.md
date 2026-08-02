@@ -330,17 +330,19 @@ link would fault, and `flatten` refuses that up front (`core/src/rope.cpp:15`).
 pbuf on a Linux host — and incompatible with `esp_http_server`'s WS framing. For a BSD-socket API,
 ① stays.
 
-**Every pool-recv change shares one precondition, and it is unbuilt.** A segment self-routes reclaim
-on whichever subscriber thread drops the last reference, concurrent with a writer's `alloc`, so the
-receive backend must be thread-safe. The only thread-safe pool built is `sync_pool_t`
-(`core/include/libtracer/mem_pool.hpp:118`), a spinlock — wrong for a single-core target, where a
-lower-priority slot-holder cannot run while a higher-priority task spins. The variant a single-core
-target needs is an interrupt-disable critical-section pool
+**Every pool-recv change shares one precondition, and it is now built (#770).** A segment
+self-routes reclaim on whichever subscriber thread drops the last reference, concurrent with a
+writer's `alloc`, so the receive backend must be thread-safe. `synchronized_pool_t<Sync>`
+(`core/include/libtracer/mem_pool.hpp:170`) is that backend, with the critical section as a
+compile-time policy
 ([ADR-0060, LKV copy store and injected value backend](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0060-lkv-copy-store-injected-value-backend.md)
-§2), selected per target as a module-set trait
+§2, selected per target as a module-set trait
 ([ADR-0047, build-time closed module sets](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)
-§2) — a host keeping `sync_pool_t` or the heap, a constrained target getting the critical-section
-pool. No such backend exists in `core/include/libtracer/`.
+§2): a host keeps the spinlock `sync_pool_t`, and a single-core priority-preemptive target — where
+a lower-priority slot-holder cannot run while a higher-priority task spins — takes the
+interrupt-disable `tr::esp::critical_pool_t` from the ESP-IDF component
+(`integrations/esp-idf/libtracer/include/libtracer_esp/critical_pool.hpp`; it needs FreeRTOS
+headers, so it is not in `core/`). It is opt-in construction: no seam defaults to a pool.
 
 ---
 

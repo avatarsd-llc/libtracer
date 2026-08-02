@@ -55,9 +55,10 @@ refcount, which the block source is not. The split is `graph_t`'s `ctl_` / `valu
 one layer out. Like `value_backend_`, an injected `flat` **MUST be thread-safe** (ADR-0060 §2):
 three of those four sites run on a transport child's receive thread and the fourth on the writer
 thread, and the `segment` it hands out self-routes its reclaim on whichever thread drops the last
-reference. A bare `pool_t` is not thread-safe and must not be injected here; `sync_pool_t`
-(`core/include/libtracer/mem_pool.hpp:118`) is the in-tree composition, and it is the multi-core
-spinlock variant only.
+reference. A bare `pool_t` is not thread-safe and must not be injected here;
+`synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:170`) is the in-tree
+composition, and its critical section is a compile-time policy: `sync_pool_t` for the multi-core
+spinlock, `tr::esp::critical_pool_t` for the single-core interrupt-disable variant.
 
 **A bounded node must inject all of them.** Injecting `mr_` and `value_backend_` alone leaves every
 peer-driven allocation on the global heap, where the failure mode on a `-fno-exceptions` target is

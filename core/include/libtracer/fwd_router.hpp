@@ -123,9 +123,9 @@ class fwd_router_t {
      *              NOT — its free list is a plain `std::size_t` head and count with no
      *              lock and no atomic, so two receive threads can be handed the same slot
      *              — and must be composed with the target's arch-selected
-     *              synchronisation before it is injected here: @ref mem::sync_pool_t is
-     *              the in-tree composition (the multi-core-host spinlock variant); the
-     *              single-core interrupt-disable variant ADR-0060 §2 names is not built.
+     *              synchronisation before injection: `mem::synchronized_pool_t` takes it
+     *              as a compile-time policy — @ref mem::sync_pool_t is the multi-core
+     *              spinlock, `tr::esp::critical_pool_t` the MCU interrupt-disable one.
      *              A bounded node points this at the same slab as @p mr / @p rx only
      *              through such a composition. Must outlive the router.
      * @param max_label_bindings_per_link

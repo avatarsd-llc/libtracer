@@ -67,6 +67,26 @@ Related: the same "the pool is a latency lever" reading is refuted single-thread
 No redesign is proposed here. The finding is recorded; the fix is an ADR-0060 decision with its own
 gate.
 
+## Erratum 2 — the arch-selected sync mechanism is built, as a compile-time policy (#770)
+
+Decision 2 described the mechanism spectrum in prose and left `sync_pool_t` — a hardcoded
+`std::atomic_flag` spinlock — as its only realization, which
+[ADR-0063](0063-connection-table-lock-free-reads-trait-serialized-writes.md) Erratum 1 correctly
+called out as "the trait does not exist to be reused". It exists now, for the **data-path pool**
+only: `mem::synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:170`) takes the
+critical section as a template parameter constrained by `mem::pool_sync_policy`, with
+`mem::spin_sync_t` (the multi-core host) in `core/` and `tr::esp::portmux_sync_t` (the single-core
+interrupt-disable section) in the ESP-IDF component, where the FreeRTOS headers are.
+`sync_pool_t` is retained as the alias for the host pairing, so nothing that used it changed.
+
+Two limits this does **not** lift. It is a *compile-time* choice per ADR-0068 — the target knows
+its concurrency model at build time — not a runtime-selectable trait, so it says nothing about
+call sites that need a *blocking* lock: ADR-0063 Erratum 1's ruling (the connection table's
+milliseconds-long control-plane section takes a mutex, not an interrupt-disable section) stands
+untouched, and this policy must only ever wrap the O(1) free-list op it was measured on. And it
+remains **opt-in construction**: no seam defaults to a pool, `heap_backend()` is still the default
+at `value_backend`, `flat` and the transport receive backend.
+
 ## Consequences
 
 - New surface: one defaulted `mem_backend_t*` constructor parameter on `graph_t`. Additive; no existing caller changes; behavior byte-identical until a host injects a pool.
