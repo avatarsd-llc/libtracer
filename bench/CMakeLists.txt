@@ -185,6 +185,14 @@ target_compile_options(bench_tail_validate PRIVATE -Wall -Wextra)
 # descent could win, measured at W>3 where the shipped cap makes it invisible.
 # The A/B the width lift is gated on (#523). Deliberately written to compile UNCHANGED
 # against the pre-lift tree, so the two binaries can be interleaved on one machine.
+# The PRODUCER fan-out's reply leg (#504): a write to a vertex with N remote subscribers runs
+# deliver_remote N times, and each opens with a by_name registry scan. Prices that scan per
+# delivery — swept over fan-out, registry width and scan position — with an exact resolution
+# count taken through the bus-peer tier.
+add_executable(bench_reply_leg bench_reply_leg.cpp)
+target_link_libraries(bench_reply_leg PRIVATE libtracer)
+target_compile_options(bench_reply_leg PRIVATE -Wall -Wextra)
+
 add_executable(bench_mount_resolve bench_mount_resolve.cpp)
 target_link_libraries(bench_mount_resolve PRIVATE libtracer)
 target_compile_options(bench_mount_resolve PRIVATE -Wall -Wextra)
