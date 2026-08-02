@@ -8,6 +8,12 @@
 # ranges), and the Rust crate. This job runs the stamper in --check mode and
 # fails if anything has drifted from `VERSION`, so a version bump can never land
 # half-applied. (The ROS 2 stub is unreleased and intentionally excluded.)
+#
+# It also runs the unit tests for the two other release-mechanics tools —
+# `tools/gen_release_notes.py` (the multi-package GitHub Release body) and
+# `tools/consolidate_changelog.py` (the at-tag-time `[Unreleased]` consolidation).
+# Both run exactly once per release, where a mistake is expensive and hard to undo,
+# so they are gated here rather than discovered during a cut (#607).
 name: version-consistency
 
 on:
@@ -21,6 +27,10 @@ on:
       - bindings/typescript/packages/**/package.json
       - bindings/rust/Cargo.toml
       - tools/sync-version.py
+      - tools/gen_release_notes.py
+      - tools/consolidate_changelog.py
+      - tools/tests/**
+      - "**/CHANGELOG.md"
       - .github/workflows/version-consistency.yml
   pull_request:
     paths:
@@ -31,6 +41,10 @@ on:
       - bindings/typescript/packages/**/package.json
       - bindings/rust/Cargo.toml
       - tools/sync-version.py
+      - tools/gen_release_notes.py
+      - tools/consolidate_changelog.py
+      - tools/tests/**
+      - "**/CHANGELOG.md"
       - .github/workflows/version-consistency.yml
   workflow_dispatch:
 
@@ -42,5 +56,23 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: Package manifests match the VERSION file
         run: python3 tools/sync-version.py --check
+      - name: Release-mechanics tool tests (release notes + changelog consolidation)
+        run: python3 -m unittest discover -s tools/tests -v
+      - name: Release-body dry run — every package contributes (no tag is created)
+        run: |
+          # A version no CHANGELOG has yet, so every package falls back to its
+          # [Unreleased] section: exactly what the next real cut will emit.
+          # ANTHROPIC_API_KEY is deliberately absent here, so no model is called.
+          python3 tools/gen_release_notes.py --version 0.0.0-dry-run \
+            > "${RUNNER_TEMP}/release-body.md"
+          echo '----- release body (dry run) -----'
+          cat "${RUNNER_TEMP}/release-body.md"
+          for pkg in core bindings/rust bindings/typescript integrations/esp-idf; do
+            grep -q "^#### ${pkg}" "${RUNNER_TEMP}/release-body.md" \
+              || { echo "::error::${pkg} contributes nothing to the release body"; exit 1; }
+          done

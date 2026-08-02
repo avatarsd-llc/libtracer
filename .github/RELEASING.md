@@ -85,9 +85,17 @@ git tag over `VERSION`).
    be resolved (accepted / rejected / superseded) — you cannot freeze a wire spec
    with pending normative changes. A `0.x` preview MAY skip this and ship the
    DRAFT with the "pin to a commit" note.
-3. **CHANGELOG.** [`core/CHANGELOG.md`](../core/CHANGELOG.md)'s `[Unreleased]`
+3. **CHANGELOG — all four of them.** Every package changelog's `[Unreleased]`
    section is complete (every public-API change has a note, per
-   [CONTRIBUTING](CONTRIBUTING.md)). If any entry is marked **BREAKING**, check
+   [CONTRIBUTING](CONTRIBUTING.md)): [`core/CHANGELOG.md`](../core/CHANGELOG.md),
+   [`bindings/rust/CHANGELOG.md`](../bindings/rust/CHANGELOG.md),
+   [`bindings/typescript/CHANGELOG.md`](../bindings/typescript/CHANGELOG.md) and
+   [`integrations/esp-idf/libtracer/CHANGELOG.md`](../integrations/esp-idf/libtracer/CHANGELOG.md).
+   One tag publishes all four in lockstep, and since #607 the release body
+   concatenates all four — a package whose entries are missing is a package whose
+   users learn nothing from the release. (The failure this fixes was real: #676's
+   TypeScript **BREAKING** entries were invisible to npm consumers because only
+   `core/CHANGELOG.md` was read.) If any entry is marked **BREAKING**, check
    before cutting that the release is the one the maintainer intends to carry it:
    consumers pin a range, so a break lands on them at the next bump. State every
    break in the release summary, not only in the CHANGELOG body.
@@ -97,9 +105,23 @@ git tag over `VERSION`).
 
 ## Steps
 
-1. **Changelog-cut PR (+ recommended version reconcile).** In one PR: move each
-   `CHANGELOG.md`'s `[Unreleased]` entries under a new `## [X.Y.Z] — YYYY-MM-DD`
-   heading. Recommended in the same PR (required only for the Arduino registry,
+1. **Changelog-cut PR (+ recommended version reconcile) — the LAST pre-tag
+   commit.** Consolidation is done *at tag time*, never speculatively: a
+   long-lived `[Unreleased]` accumulates one `### Category` heading per landing PR
+   (18 against 3 distinct names, at the time of writing), and merging them early
+   only creates conflicts for every PR still in flight. Do it mechanically:
+   ```sh
+   python3 tools/consolidate_changelog.py \
+     core/CHANGELOG.md bindings/rust/CHANGELOG.md \
+     bindings/typescript/CHANGELOG.md integrations/esp-idf/libtracer/CHANGELOG.md \
+     --release X.Y.Z --write
+   ```
+   That merges each file's repeated `### Category` subsections into one per
+   category in Keep-a-Changelog order (entry order preserved, text moved verbatim),
+   renames the section to `## [X.Y.Z] — YYYY-MM-DD`, and opens a fresh empty
+   `[Unreleased]`. `--check` is the read-only form; omit `--write` to preview on
+   stdout. Read the diff before committing — the tool moves text, it does not
+   judge it. Recommended in the same PR (required only for the Arduino registry,
    see "Source of truth" above): `python3 tools/sync-version.py X.Y.Z` and
    refresh the lockfiles (`npm install --package-lock-only`,
    `cargo update -p libtracer`). Merge it (signed, per DCO).
@@ -115,9 +137,13 @@ git tag over `VERSION`).
    automatically. Each
    publish is an **independent job**: a missing secret **skips** that registry
    with a warning (add tokens incrementally) rather than failing the release.
-   - **GitHub Release** — an AI-written summary (from the CHANGELOG + commits)
-     above the extracted `## [X.Y.Z]` CHANGELOG section. Needs `ANTHROPIC_API_KEY`;
-     without it, the CHANGELOG section alone is the body.
+   - **GitHub Release** — an AI-written summary (from the CHANGELOGs + commits)
+     above the extracted `## [X.Y.Z]` section of **every package changelog**, each
+     under its own heading (`tools/gen_release_notes.py`, one `--changelog` per
+     package). A package whose section is still called `[Unreleased]` at tag time
+     contributes that instead, so a binding that missed the consolidation PR is
+     still published. Needs `ANTHROPIC_API_KEY`; without it, the CHANGELOG sections
+     alone are the body.
    - **npm** — the four `@avatarsd-llc/*` packages at `X.Y.Z`. Needs `NPM_TOKEN`.
    - **crates.io** — `libtracer` at `X.Y.Z`. Needs `CARGO_REGISTRY_TOKEN`.
    - **PlatformIO** — `pio package publish`. Needs `PLATFORMIO_AUTH_TOKEN`.

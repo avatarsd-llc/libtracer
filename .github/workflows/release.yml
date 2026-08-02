@@ -6,7 +6,8 @@
 # every publish job stamps the checked-out tree to X.Y.Z with
 # `tools/sync-version.py X.Y.Z` before packaging, so the committed manifests
 # never need a pre-tag bump PR (drift from VERSION only produces a warning).
-# It creates the GitHub Release (AI-written summary + CHANGELOG) and publishes
+# It creates the GitHub Release (AI-written summary + every package's CHANGELOG
+# section, per #607) and publishes
 # every packaged artifact at X.Y.Z in lockstep: npm, crates.io, PlatformIO, ESP.
 #
 # Each publish is an INDEPENDENT job that no-ops with a warning when its secret is
@@ -115,9 +116,14 @@ jobs:
           git log --no-merges --pretty='- %s' ${range} 2>/dev/null | head -300 > "${RUNNER_TEMP}/commits.txt" || true
       - name: Build the release body (AI summary + CHANGELOG)
         run: |
+          # One tag publishes every package, so the body speaks for every package:
+          # core, the Rust crate, the npm packages and the ESP component (#607).
           python3 tools/gen_release_notes.py \
             --version "${{ needs.verify.outputs.version }}" \
             --changelog core/CHANGELOG.md \
+                        bindings/rust/CHANGELOG.md \
+                        bindings/typescript/CHANGELOG.md \
+                        integrations/esp-idf/libtracer/CHANGELOG.md \
             --commits-file "${RUNNER_TEMP}/commits.txt" > "${RUNNER_TEMP}/body.md"
           echo "----- release body -----"; cat "${RUNNER_TEMP}/body.md"
       - name: Create the GitHub Release
