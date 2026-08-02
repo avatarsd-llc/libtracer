@@ -31,8 +31,8 @@ A knob is a constant or an alias, so a wrong value is a compile error in the bui
 rather than a silent behavioural fork between translation units.
 
 The sizes and policies are members of **one named type**, `default_config_t`
-(`core/include/libtracer/config.hpp.in:66`), bound once by `using config_t = default_config_t;`
-(`:192`). An application declares its own by inheriting and overriding what differs (`:56-60`):
+(`core/include/libtracer/config.hpp.in:73`), bound once by `using config_t = default_config_t;`
+(`:223`). An application declares its own by inheriting and overriding what differs (`:61-67`):
 
 ```cpp
 struct my_node_config_t : tr::graph::default_config_t {
@@ -43,7 +43,7 @@ using config_t = my_node_config_t;
 
 Inheriting means a knob added later does not break the preset — it inherits the new default
 rather than failing to compile. The rest of the library names the derived spellings re-exported
-below the traits type (`:199-208`), each of which is exactly its traits member, so introducing
+below the traits type (`:225-241`), each of which is exactly its traits member, so introducing
 `config_t` moved no call site.
 
 It is **bound once, not threaded as a template parameter**, and
@@ -126,16 +126,32 @@ type-erasure bloat and template-instantiation bloat alike.
 
 | knob | kind | default | CMake | ESP-IDF |
 | --- | --- | --- | --- | --- |
-| `kVertexLockStripes` (`config.hpp.in:79`) | count | 16 | `-DLIBTRACER_VERTEX_LOCK_STRIPES` | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` |
-| `kCacheLineBytes` (`:102`) | padding width | 64 | `-DLIBTRACER_CACHE_LINE_BYTES` | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:193-197`) |
-| `kHazardReaderSlots` (`:129`) | count | 64 | `-DLIBTRACER_HAZARD_READER_SLOTS` | hardcoded to 64 (`CMakeLists.txt:188`) |
-| `kMaxVertexBytes64` / `kMaxVertexBytes32` (`:146` / `:158`) | RAM ceiling | 120 / 80 | the preset — deliberately not a CMake variable | the preset |
-| `acl_policy_t` (`:167`) | policy type | `allow_only_policy_t` | `-DLIBTRACER_ACL_FULL=ON` | hardcoded to `allow_only_policy_t` (`CMakeLists.txt:186`) — the full policy is not selectable |
-| `lkv_slot_t` (`:183`) | policy type | `sp_atomic_slot_t` | `-DLIBTRACER_LKV_SLOT=<type>` | hardcoded to `sp_atomic_slot_t` (`CMakeLists.txt:187`) — the hazard slot is not selectable |
+| `kVertexLockStripes` (`config.hpp.in:86`) | count | 16 | `-DLIBTRACER_VERTEX_LOCK_STRIPES` | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` |
+| `kCacheLineBytes` (`:109`) | padding width | 64 | `-DLIBTRACER_CACHE_LINE_BYTES` | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:193-197`) |
+| `kHazardReaderSlots` (`:136`) | count | 64 | `-DLIBTRACER_HAZARD_READER_SLOTS` | hardcoded to 64 (`CMakeLists.txt:188`) |
+| `kMaxVertexBytes64` / `kMaxVertexBytes32` (`:153` / `:165`) | RAM ceiling | 120 / 80 | the preset — deliberately not a CMake variable | the preset |
+| `kPinPayloadRatio` (`:189`) | ratio | 0 — the `kPinNever` sentinel | no variable — a preset member | not exposed |
+| `acl_policy_t` (`:198`) | policy type | `allow_only_policy_t` | `-DLIBTRACER_ACL_FULL=ON` | hardcoded to `allow_only_policy_t` (`CMakeLists.txt:186`) — the full policy is not selectable |
+| `lkv_slot_t` (`:214`) | policy type | `sp_atomic_slot_t` | `-DLIBTRACER_LKV_SLOT=<type>` | hardcoded to `sp_atomic_slot_t` (`CMakeLists.txt:187`) — the hazard slot is not selectable |
 
 Each is documented at its declaration with what it costs and when to move it; that header is
-the reference, not this table. What matters here is the shape: **five knobs, all named, all
-finite.** Two are counts, one is a width, two are type bindings.
+the reference, not this table. What matters here is the shape: **seven knobs, all named, all
+finite.** Two are counts, one is a padding width, one is a per-target RAM ceiling, one is a
+ratio, and two are type bindings.
+
+Two of the seven carry no build-system variable at all. `kMaxVertexBytes64` / `kMaxVertexBytes32`
+and `kPinPayloadRatio` are preset members: an application moves them by declaring its own traits
+type, not by passing `-D`. `kPinPayloadRatio` is the pin/copy amplification ratio `K` — a
+trailer-less written value is stored as a subview of the inbound frame, rather than copied out,
+exactly when `payload_bytes * K >= segment_bytes`. Both branches are correct, so `K` selects which
+correct branch is cheaper rather than imposing a limit: pinning holds the whole owning RX
+**segment** for the value's lifetime, and `K` bounds that waste at `(K-1)×` the payload where an
+absolute byte threshold bounded it not at all. `segment_bytes` is the segment's **allocated**
+size, not the delivered view's length, because a datagram transport receiving into a fixed-size
+segment and delivering a subview of it makes those differ by orders of magnitude. The shipped
+value is the reserved sentinel `kPinNever` (0) — never pin, on every target. It is also the one
+knob with a per-vertex override (`graph_t::set_pin_payload_ratio`), which exists for an owner that
+knows one vertex's traffic differs from the target's default.
 
 The ESP-IDF component exposes exactly five options — `LIBTRACER_TRANSPORT_{UDP,TCP,WS,CAN}` and
 `LIBTRACER_VERTEX_LOCK_STRIPES` — so an integrator reaching for the full ACL policy, the hazard
@@ -189,7 +205,7 @@ an integrator should be asked.
 
 `lkv_slot_t` is the one knob whose value is a **name the integrator supplies**, so it is the one
 knob with a contract attached. The declaration instructs that the named type must satisfy the
-policy contract in `lkv_slot.hpp` (`config.hpp.in:183`, and the instruction itself at `:181`) —
+policy contract in `lkv_slot.hpp` (`config.hpp.in:214`, and the instruction itself at `:211-212`) —
 a header that is absent from `core/Doxyfile`'s `INPUT` list, so the generated API site does not
 serve the page that instruction points at. The contract, stated here, is three operations over
 `value_ptr_t = std::shared_ptr<const view::rope_t>`:
@@ -201,7 +217,7 @@ serve the page that instruction points at. The contract, stated here, is three o
 | read | `value_ptr_t load() const` | Returns an **owning** handle. |
 
 Owning is not negotiable. The composed branch read `graph_t::read_subtree_folded`
-(`core/include/libtracer/graph.hpp:554`) stashes one LKV per node into a vector that outlives
+(`core/include/libtracer/graph.hpp:564`) stashes one LKV per node into a vector that outlives
 the map lock and spans three passes, so **N values are held simultaneously**. A reclamation
 scheme that can protect only one value per reader at a time — hazard pointers, as classically
 stated — therefore cannot hand back a pinned pointer; it must promote the pin to a counted
@@ -213,7 +229,7 @@ which is where they belong rather than repeated here.
 
 The default binding, `sp_atomic_slot_t`, is **lock-free by contract and spin-locked in
 practice**: `std::atomic<std::shared_ptr<T>>::is_lock_free()` returns 0 on libstdc++, so both
-load and store take its internal pointer-lock bit (`core/include/libtracer/lkv_slot.hpp:99-104`).
+load and store take its internal pointer-lock bit (`core/include/libtracer/lkv_slot.hpp:100-102`).
 Its reclamation is the refcount, so there is no scheme to implement and no registry to size —
 which is why a raw `-I` consumer and the stock ESP-IDF component build what they would have
 built without the policy seam
@@ -235,13 +251,13 @@ Four differences that surprise people, each a property of the target rather than
   `atomic::wait` back-end `.bss` beyond the registry itself.
 - **`sizeof(vertex_t)` is gated in the header, not in a test.** The ceilings are `config_t`
   members and the assertions sit in `vertex.hpp` beside the type they constrain
-  (`core/include/libtracer/vertex.hpp:2217,2251`), so every build on every target checks its
+  (`core/include/libtracer/vertex.hpp:2445,2448`), so every build on every target checks its
   own binding, for free. A test-resident gate covers only the configurations CI actually
   builds: one, in practice, and never the 32-bit arm, because no CI leg cross-compiles that
   test while the ESP-IDF legs compile `vertex_t` itself on every change. That distinction has
-  teeth here — **rv32 sits exactly on its 80 B ceiling with zero headroom** (`config.hpp.in:158`),
+  teeth here — **rv32 sits exactly on its 80 B ceiling with zero headroom** (`config.hpp.in:165`),
   so the next 32-bit member is a build failure by design. The stripe carries a companion
-  assertion of a different kind: `alignof(vertex_stripe_t) == kStripeAlign` (`vertex.hpp:717`),
+  assertion of a different kind: `alignof(vertex_stripe_t) == kStripeAlign` (`vertex.hpp:778`),
   which catches an `alignas` that asked for less than the payload's natural alignment and was
   therefore ignored — silently, by GCC, per `[dcl.align]/5`.
 - **A single-core target's constraint is RAM; a many-core host's is the read path.** The two
