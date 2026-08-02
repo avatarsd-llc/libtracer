@@ -19,7 +19,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `BuildError::PathTooLong` — not `TooManySegments` — for a 205-segment path.
   ~~**Known misplacement, repriced not relocated:**~~ relocated below (#773).
 
-- **SEMVER-VISIBLE — the accumulative PATH bounds left the decode tier (RFC-0023 §5.6; #773).**
+- **SEMVER-VISIBLE — the accumulative PATH bounds left the decode tier (RFC-0023 §5.6; #773,
+  landed in #778).**
   `path::tlv_to_path` no longer answers `BuildError::TooManySegments` or
   `BuildError::PathTooLong`: `docs/reference/05-protocol-tlvs.md` §"Enforcement of the PATH
   constraints" places the segment-count and total-length limits where an address is
@@ -41,6 +42,47 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   resolver will spell; do **not** call it on a `src` return route being forwarded on. The 255
   bound is unchanged and exact — the same inputs it accepted and rejected at the decode tier it
   accepts and rejects here.
+
+- **`structured::DeliveryPolicy`, `structured::subscriber_policy`,
+  `structured::subscriber_with_policy` and `structured::DELIVERY_POLICY_KEY`
+  ([RFC-0022](../../docs/spec/rfcs/0022-qos-restructure.md) §3.A; #758)** — read and write one
+  subscription's packed 16-bit delivery-policy word, the `SETTINGS{ NAME "delivery_policy"
+  VALUE u16 }` child of a SUBSCRIBER. Delivery policy describes a **producer→subscriber
+  relationship**, not the producer, so it travels on the subscribe-write rather than on the
+  vertex. The bit layout mirrors the C++ core's `delivery_policy_t` byte for byte — bits 0–1
+  reliability, 2–4 priority, bit 5 `durability_request` (`DeliveryPolicy::DURABILITY_REQUEST`),
+  6–15 reserved. Reserved bits are round-tripped **verbatim and never interpreted** (§3.A says
+  ignore, not reject), so a future sender's bits survive a hop through this binding.
+  `subscriber_policy` reads the word **by NAME**, never by position — a `SETTINGS` child naming
+  a different key (e.g. `delivery_compact`) is not the policy and yields the default.
+  `subscriber_with_policy` emits **no** `SETTINGS` child for an all-zero policy, so a caller
+  that does not ask for a policy produces bytes identical to `tlv_builders::subscriber`'s and
+  to a pre-RFC-0022 sender's. Pinned to the `subscriber/policy-{absent,durability,reserved-bits}`
+  conformance vectors, with the two ablations that bite recorded in the commit that added them.
+
+### Fixed
+
+- **The three `subscriber/policy-*` conformance vectors were scored `ok` by a core that
+  implemented none of them (#758).** The polyglot harness contract is
+  `encode(decode(input.bin)) == input.bin`, which any well-formed TLV satisfies, so this
+  binding — which contained no delivery-policy code at all — passed the policy vectors on
+  structure alone. The behaviour is now claimed where it can be false: `DeliveryPolicy` above,
+  plus three vector-bound tests and a bit-layout pin in `tests/conformance_vectors.rs`.
+
+### Changed
+
+- **The `:field` selector examples no longer name a knob that was deleted
+  ([RFC-0022](../../docs/spec/rfcs/0022-qos-restructure.md) §5 + amendment 1; #758).**
+  `field::FieldLevel`'s module docs illustrated the two-scalar-level shape with
+  `":settings.deadline_ns"`, then `":settings.history_keep_last"`; both names were removed from
+  the protocol's `settings` container, and the example is now `":settings.app"` — the only
+  two-level `settings` field that still resolves. **No API changed here**, and the FIELD grammar
+  is untouched: `parse_field` still parses any syntactically valid selector. What changed is on
+  the wire — a peer answers `tr::field::not_found` for the removed names, on read *and* on
+  write, independently of the caller.
+
+- **`path`'s module header names the byte bound's real string-side enforcer.** A doc-only
+  correction following the accumulative-bounds relocation above; no behaviour change.
 
 ## [0.6.0] — 2026-07-23
 
