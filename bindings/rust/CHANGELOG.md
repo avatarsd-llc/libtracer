@@ -8,6 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`type_code::PATH_REF` (`0x14`) and the bound-path element codec
+  ([RFC-0024](../../docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §4).**
+  New public items: `PathRefElement { index: u32, generation: u32 }`,
+  `path_ref(&[PathRefElement]) -> Result<Tlv, BuildError>`,
+  `path_ref_element(&[u8], usize) -> Option<PathRefElement>`, and the constants
+  `PATH_REF_ELEMENT_BYTES` (8) and `MAX_PATH_REF_ELEMENTS` (255). `path_ref` answers
+  `BuildError::TooManySegments` past the bound rather than truncating.
+- **`decode` enforces the `PATH_REF` body shape.** For type `0x14`, `opt.pl` and `opt.ll` must
+  be clear, the length must be a multiple of 8, and the element count must be ≤ 255; a
+  violation is `Error::FrameInvalid`. **Behaviour change:** bytes that previously decoded as an
+  opaque unknown-type TLV with type `0x14` now reject. `0x14` was unassigned, so no frame any
+  libtracer version has emitted is affected.
+
 ## [0.7.0] — 2026-08-02
 
 ### Added

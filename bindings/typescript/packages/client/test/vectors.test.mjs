@@ -14,7 +14,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { decode, TYPE } from '@avatarsd-llc/libtracer';
+import {
+  decode,
+  encode,
+  ERROR,
+  TYPE,
+  PATH_REF_ELEMENT_BYTES,
+  MAX_PATH_REF_ELEMENTS,
+} from '@avatarsd-llc/libtracer';
 import {
   LibtracerClient,
   encodeValue,
@@ -243,4 +250,97 @@ test('decodeFwd parses the fwd-reply-error vector and replyErrorCode reads NOT_F
   assert.deepEqual(pathSegs(parsed.dst), REPLY_DST);
   assert.deepEqual(pathSegs(parsed.src), REPLY_SRC);
   assert.equal(replyErrorCode(parsed), FWD_ERROR.NOT_FOUND);
+});
+
+/* ----------------------------------------------- RFC-0024 §4 PATH_REF (0x14) --- */
+
+/** @brief Read a NEGATIVE vector's `reject.bin` bytes (HARNESS.md §negative cases). */
+function rejectVector(rel) {
+  return new Uint8Array(readFileSync(join(VECTORS, ...rel.split('/'), 'reject.bin')));
+}
+
+/** @brief Build a PATH_REF body from `[index, generation]` pairs — 8 LE bytes each. */
+function pathRefBody(elements) {
+  const body = new Uint8Array(elements.length * PATH_REF_ELEMENT_BYTES);
+  const dv = new DataView(body.buffer);
+  elements.forEach(([index, generation], i) => {
+    dv.setUint32(i * PATH_REF_ELEMENT_BYTES, index, true);
+    dv.setUint32(i * PATH_REF_ELEMENT_BYTES + 4, generation, true);
+  });
+  return body;
+}
+
+/** @brief Encode a PATH_REF over `[index, generation]` pairs — opt = 0x00, PL and LL both clear. */
+function encodePathRef(elements) {
+  return encode({
+    type: TYPE.PATH_REF,
+    opt: { pl: false, ts: false, cr: false, ll: false, cw: false, tf: false },
+    payload: pathRefBody(elements),
+    children: [],
+    trailer: null,
+  });
+}
+
+test('a PATH_REF encodes to the ref-1host / ref-2host / ref-3host vectors byte-for-byte', () => {
+  // The hex literals ARE the pin: a codec change that no longer produces the published
+  // bytes fails here even if the vector files were regenerated alongside it.
+  assert.equal(hex(vector('path-ref/ref-1host')), '140008000700000003000000');
+  assert.equal(hex(vector('path-ref/ref-2host')), '1400100007000000030000002a00000001000000');
+  assert.equal(
+    hex(vector('path-ref/ref-3host')),
+    '140018000700000003000000130000000c0000002a00000001000000',
+  );
+  assert.ok(sameBytes(encodePathRef([[7, 3]]), vector('path-ref/ref-1host')), 'ref-1host');
+  assert.ok(sameBytes(encodePathRef([[7, 3], [42, 1]]), vector('path-ref/ref-2host')), 'ref-2host');
+  assert.ok(
+    sameBytes(encodePathRef([[7, 3], [19, 12], [42, 1]]), vector('path-ref/ref-3host')),
+    'ref-3host',
+  );
+});
+
+test('a decoded PATH_REF is an opaque record array — no children, count = length / 8', () => {
+  const tlv = decode(vector('path-ref/ref-3host'));
+  assert.equal(tlv.type, TYPE.PATH_REF);
+  // PL = 0 is a MUST (RFC-0024 §4.2): the body is fixed-stride records, not child TLVs.
+  assert.equal(tlv.opt.pl, false);
+  assert.equal(tlv.children.length, 0);
+  // There is no count field on the wire — the count IS length / 8 (§4.3).
+  assert.equal(tlv.payload.length / PATH_REF_ELEMENT_BYTES, 3);
+  const dv = new DataView(tlv.payload.buffer, tlv.payload.byteOffset, tlv.payload.byteLength);
+  assert.deepEqual(
+    [0, 1, 2].map((i) => [dv.getUint32(i * 8, true), dv.getUint32(i * 8 + 4, true)]),
+    [[7, 3], [19, 12], [42, 1]],
+  );
+});
+
+test('the ref-255-elements vector is the normative maximum: 255 elements, 2044 bytes', () => {
+  const bin = vector('path-ref/ref-255-elements');
+  assert.equal(bin.length, 4 + MAX_PATH_REF_ELEMENTS * PATH_REF_ELEMENT_BYTES);
+  // Head and tail rather than 4088 hex characters: an off-by-one in the bound moves these.
+  assert.equal(hex(bin.subarray(0, 12)), '1400f8070000000000000000');
+  assert.equal(hex(bin.subarray(bin.length - 8)), 'fe000000f2060000');
+  const elements = Array.from({ length: 255 }, (_, i) => [i, (i * 7) % 65536]);
+  assert.ok(sameBytes(encodePathRef(elements), bin));
+});
+
+test('the structurally-invalid PATH_REF vectors are FRAME_INVALID, never a partial parse', () => {
+  // A length that is not a whole number of elements has no reading at all: the count is not
+  // on the wire, so a body of 1.5 elements cannot be framed (§4.3).
+  const ragged = rejectVector('path-ref/ref-len-not-multiple-of-8');
+  assert.equal(hex(ragged), '14000c000700000003000000aabbccdd');
+  assert.throws(() => decode(ragged), (e) => e.code === ERROR.FRAME_INVALID);
+
+  // One element over the §4.3 bound.
+  const over = rejectVector('path-ref/ref-256-elements');
+  assert.equal(over.length, 4 + 256 * PATH_REF_ELEMENT_BYTES);
+  assert.throws(() => decode(over), (e) => e.code === ERROR.FRAME_INVALID);
+
+  // opt.PL = 1: ref-2host's body with one option bit set. A generic PL=1 walker would read
+  // the first element's index bytes as a TLV header and mis-frame the whole body (§4.2).
+  const plSet = rejectVector('path-ref/ref-pl-set');
+  assert.equal(hex(plSet), '1440100007000000030000002a00000001000000');
+  assert.throws(() => decode(plSet), (e) => e.code === ERROR.FRAME_INVALID);
+  const cleared = Uint8Array.from(plSet);
+  cleared[1] = 0x00;
+  assert.ok(sameBytes(cleared, vector('path-ref/ref-2host')), 'one bit apart from ref-2host');
 });

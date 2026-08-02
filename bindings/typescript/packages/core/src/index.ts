@@ -19,6 +19,8 @@ export const SPEC_VERSION = 1 as const;
  */
 export {
   TYPE,
+  PATH_REF_ELEMENT_BYTES,
+  MAX_PATH_REF_ELEMENTS,
   ERROR,
   CodecError,
   decode,
