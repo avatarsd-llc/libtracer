@@ -13,7 +13,7 @@
 | `0x20` – `0x7F` | Reserved for future core extensions |
 | `0x80` – `0xFF` | User-defined application payload types |
 
-Assigned in the first block: `0x01`–`0x04`, `0x06`–`0x0C`, `0x0E` (12 types). `0x05` is a **reserved code with no assigned meaning** in v1 (see §`0x05`); `0x0D` ROUTER is a **reserved, decodable codepoint with no implemented mechanism** (see §`0x0D`). `0x0E` is **SPEC** (vertex-creation spec, [ADR-0017](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0017-in-band-vertex-creation-controller-orchestration.md)). The `0x0F`–`0x1F` fast-track range holds the remote-operation and route-handle frames (`0x0F`–`0x13` assigned, §reserved range `0x0F` – `0x1F`); `0x20` – `0x7F` is the long-term registry.
+Assigned in the first block: `0x01`–`0x04`, `0x06`–`0x0C`, `0x0E` (12 types). `0x05` is a **reserved code with no assigned meaning** in v1 (see §`0x05`); `0x0D` ROUTER is a **reserved, decodable codepoint with no implemented mechanism** (see §`0x0D`). `0x0E` is **SPEC** (vertex-creation spec, [ADR-0017](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0017-in-band-vertex-creation-controller-orchestration.md)). The `0x0F`–`0x1F` fast-track range holds the remote-operation, route-handle and bound-path frames (`0x0F`–`0x14` assigned, §reserved range `0x0F` – `0x1F`); `0x20` – `0x7F` is the long-term registry.
 
 The names below are the canonical type-code names; an implementation's own enumeration matches them.
 
@@ -22,6 +22,8 @@ The names below are the canonical type-code names; an implementation's own enume
 Several core type codes are **structured** — they carry `opt.PL=1` and their payload is a concatenation of child TLVs. The structured types are: `0x04` SUBSCRIBER, `0x06` PATH, `0x07` POINT, `0x09` STATUS (when non-empty), `0x0A` ACL, `0x0B` SETTINGS, `0x0E` SPEC. Each entry below specifies its own children layout.
 
 There is no generic container type: every structured container declares its purpose via its type code. User-range type codes (`0x80–0xFF`) MAY also be structured (set `opt.PL=1`) for application-defined records.
+
+`0x14` PATH_REF is deliberately **not** structured despite being an address form: its payload is a fixed-stride record array, so `opt.PL` MUST be 0 (§`0x14`).
 
 ---
 
@@ -897,8 +899,9 @@ Allocated on a fast-track basis during v1. Assigned so far:
 
 - `0x0F` **FWD** and `0x10` **FIELD** — the remote-operation frames ([RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md) §B/§C, ADR-0035).
 - `0x11`–`0x13` — the **route-handle transport-plane control frames** (below).
+- `0x14` **PATH_REF** — the **bound path**, the second normative address form ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §4, below).
 
-Unassigned: `0x14`–`0x1F`. Candidate uses: `CAPABILITY` (opaque token, lighter than full ACL), `HEARTBEAT` (an explicit liveness ping; the intended alternative is writes to the `:liveness.last_seen_ns` field, [04-communication-flows.md](04-communication-flows.md) — ⚠️ which is itself unimplemented, so *neither* spelling exists today, [#586](https://github.com/avatarsd-llc/libtracer/issues/586)). Receivers MUST handle unknown codes in this range per the forward-compatibility rules of [01-data-format.md](01-data-format.md) §forward / backward compatibility.
+Unassigned: `0x15`–`0x1F`. Candidate uses: `CAPABILITY` (opaque token, lighter than full ACL), `HEARTBEAT` (an explicit liveness ping; the intended alternative is writes to the `:liveness.last_seen_ns` field, [04-communication-flows.md](04-communication-flows.md) — ⚠️ which is itself unimplemented, so *neither* spelling exists today, [#586](https://github.com/avatarsd-llc/libtracer/issues/586)). Receivers MUST handle unknown codes in this range per the forward-compatibility rules of [01-data-format.md](01-data-format.md) §forward / backward compatibility.
 
 A single-hop `FWD` request → reply round-trip (the consumer reaches a terminus node directly). The reply's `dst` is the request's `src`; a failure comes back as `kind=ERROR` carrying `STATUS{ ERROR }`:
 
@@ -969,6 +972,51 @@ HANDLE_NACK (0x13, PL=1) {         ; "I have no binding for this label" — prom
 ```
 
 A `COMPACT` whose `label` has no binding on its inbound link is **dropped** and a `HANDLE_NACK` is returned (never a crash); re-advertising on (re)connect — the same producer-holds reconnect trigger — **rebinds** the flow ([ADR-0030](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md) self-heal). A node holds label state **only** for the compact flows crossing it (bounded by the number of such subscriptions); one-shot / cold / non-compact traffic allocates none, which preserves the stateless-forwarder property. Per-hop multiplexing of a reply to a specific request remains the transport's concern (RFC-0004 §D), so no end-to-end handle exists.
+
+### Bound path — `0x14` PATH_REF
+
+The **second normative address form** ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §4). The canonical `PATH` (`0x06`, NAME children) is untouched and stays the only form a cold peer can use; a `PATH_REF` spells the same route in **resolutions** rather than names — one element per **host**, each element that host's own reference to its next-hop connection vertex, the last element the terminus host's reference to the **target vertex itself**.
+
+Only the **wire form** is specified here. The routing semantics — how a bound path is minted, validated, and fallen back from — land with the forwarder that implements them.
+
+#### Payload layout
+
+```
+PATH_REF (0x14, PL=0, LL=0) {
+  ; body: H bare 8-byte elements, in route order, no per-element framing
+  ; element i, little-endian:
+  ;   u32 index       — the minting host's vertex-map index
+  ;   u32 generation  — that vertex's retirement generation at mint time
+}
+```
+
+The encoder's invariants:
+
+- **Outer header** (4 bytes): `14 00 LL_lo LL_hi`. `opt` is `0x00` — see the two MUSTs below.
+- **`opt.PL` MUST be 0.** `PL=1` asserts the payload is concatenated child TLVs, and this payload is a fixed-stride record array. A generic `PL=1` walker reads the first four body bytes as a TLV header (`type` = the low byte of an index, `opt` = the next) and mis-frames the whole body, so a set `PL` is `tr::frame::invalid`, not a tolerated redundancy.
+- **`opt.LL` MUST be 0.** `LL=1` buys a u32 length for bodies above 65 535 bytes, and the element-count bound below puts the maximum body at 2040 bytes. There is no reachable `PATH_REF` for which `LL=1` is anything but two wasted bytes, so it is forbidden rather than merely unused. A set `LL` is `tr::frame::invalid`.
+- **`length` MUST be a multiple of 8.** There is **no element-count field**: the count *is* `length / 8`, so a length not divisible by 8 describes no body and is `tr::frame::invalid`.
+- **Element count MUST be ≤ 255**, i.e. `length` ≤ **2040**. Over that is `tr::frame::invalid`.
+- **Both element fields are little-endian** u32, per [01-data-format.md](01-data-format.md) §frame layout.
+- **No inner trailers**, and no per-element header: element *i* is `body[8i .. 8i+8)`, computed rather than parsed. `opt.TS` / `opt.CR` remain the enclosing frame's business, exactly as for `PATH`.
+
+`PATH_REF` carries no NAME children, so [03-addressing.md](03-addressing.md)'s segment, name-length and 1024-byte path caps do not apply to it and continue to govern the canonical form alone.
+
+#### The 255-element bound
+
+255 is the largest count for which every per-element quantity — the count itself, the largest index (254), a receiver's per-element table dimension — fits a `u8`, the same discipline [RFC-0023](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md) applies to the canonical segment cap. It sits *above* both reachable ceilings: a bound path is minted from a canonical route, a canonical body caps at 1024 bytes, and a hop costs at least one 3-segment mount run, so at most 69 hosts are reachable under today's NAME encoding and 171 under packed segments. The bound is therefore encoding-independent rather than an artifact of whichever body grammar `PATH` currently uses.
+
+#### Byte literal — a two-host bound path
+
+```
+14 00 10 00     ← outer: type=PATH_REF(0x14), opt=0x00 (PL=0, LL=0), length=16 (u16 LE)
+   07 00 00 00 03 00 00 00      ← element 0: index=7,  generation=3
+   2A 00 00 00 01 00 00 00      ← element 1: index=42, generation=1
+```
+
+**20 bytes total** — the `4 + 8H` a bound path costs at `H = 2`. Conformance vectors: `path-ref/ref-1host`, `ref-2host`, `ref-3host`, `ref-255-elements`, and the negative `ref-len-not-multiple-of-8`, `ref-256-elements`, `ref-pl-set`.
+
+An element is **node-scoped**: it means nothing anywhere but on the host that minted it, so no receiver can validate another host's element and no codec can validate any of them. A `PATH_REF` is an **address, never a capability** — an operation arriving on one is authorized by the same per-operation `acl_allows` check at the target vertex that the canonical form performs.
 
 ---
 
