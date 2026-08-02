@@ -60,7 +60,7 @@ hold and recurses under it. The doc comment at `:439` states the same contract f
 `evict_link_edges` snapshot helper — it documents a required hold, it is not an acquisition.
 
 The leaf/branch fork reads a per-vertex bit (`vertex_t::has_registered_child`,
-`core/include/libtracer/vertex.hpp:1129`), called from `core/src/graph.cpp:735`, and takes no
+`core/include/libtracer/vertex.hpp:1159`), called from `core/src/graph.cpp:786`, and takes no
 lock. The symbol exists on the vertex rather than on the graph, so a reader grepping for it finds
 a flag test rather than a lock acquisition.
 
@@ -73,10 +73,10 @@ kind, not only in degree.
 
 The stripe count is an ordinary config constant shared through one header
 ([ADR-0068 — build configuration is plain C++](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0068-build-configuration-is-plain-cpp-config-header.md);
-default 16, the sharing rationale at `vertex.hpp:740-744`). The stripe is selected by
-`vertex_stripe_of` (`:822`) from the vertex address, hashed `(h >> 6) % kVertexLockStripes`
-(`:818`). The stripes guard the fan-out edge list, the STREAM ring, the write-sequence bump and
-the ACL state. `snapshot_edges` (`:1606`) takes one on **every delivery**; so do `add_edge`,
+default 16, the sharing rationale at `vertex.hpp:770-774`). The stripe is selected by
+`vertex_stripe_of` (`:852`) from the vertex address, hashed `(h >> 6) % kVertexLockStripes`
+(`:848`). The stripes guard the fan-out edge list, the STREAM ring, the write-sequence bump and
+the ACL state. `snapshot_edges` (`:1636`) takes one on **every delivery**; so do `add_edge`,
 `clear_edge` and `set_acl`. It is reached only when the written vertex has an edge of its own:
 `fan_out` returns on a zero `own_subs_ordered()` first, so an unobserved write — and every
 placeholder ancestor a bubble walks past — touches no stripe at all
@@ -89,8 +89,8 @@ stripe-lock cost looks in this section:
 
 | platform | table | cost |
 | --- | --- | --- |
-| host libstdc++ / libc++ | `inline constinit std::array<vertex_stripe_t, kVertexLockStripes> vertex_stripes` (`vertex.hpp:800`) | none — constant-initialized |
-| a target without a constexpr `std::mutex` | guarded function-local `static` (`:808`) | one predicted branch per control-plane verb |
+| host libstdc++ / libc++ | `inline constinit std::array<vertex_stripe_t, kVertexLockStripes> vertex_stripes` (`vertex.hpp:830`) | none — constant-initialized |
+| a target without a constexpr `std::mutex` | guarded function-local `static` (`:838`) | one predicted branch per control-plane verb |
 
 Two vertices that hash to the same stripe contend even though they share nothing else — which is
 what the `stripe1` bench topology exists to measure.
@@ -148,7 +148,7 @@ Two limits, and the second hides the first:
    There the limit is the value's own reference count, and the `sp-load` calibration arm —
    1.4 M/s at T=24 — accounts for nearly all of the 1.74 M/s stock rate.
 
-The write path takes no map lock (`write_impl`, `graph.cpp:948`), which is the entire "writes
+The write path takes no map lock (`write_impl`, `graph.cpp:999`), which is the entire "writes
 scale 5×, reads do not" asymmetry.
 
 **A caution on the calibration arms.** `sp-load` measures 710 ns/op at T=24 against a whole real
@@ -299,7 +299,7 @@ re-measurement — never by further reasoning about a curve.
 
 | A plausible claim | What checking shows | The check that decides it |
 | --- | --- | --- |
-| The read-path residual is `snapshot_edges`' stripe lock | `snapshot_edges` (`vertex.hpp:1606`) is on the **delivery** path; `read` never calls it | reading the call graph |
+| The read-path residual is `snapshot_edges`' stripe lock | `snapshot_edges` (`vertex.hpp:1636`) is on the **delivery** path; `read` never calls it | reading the call graph |
 | "Nothing process-wide is serializing — not the map lock" | Every read acquired `map_mutex_` shared through the fork check — the one lock the claim named | the §3 ablation |
 | Distinct-vertex reads "retain 94%/91% of their T=1 rate", read as healthy | The arithmetic used the wrong shape's denominator — real figures 106%/96% — and retention of a T=1 *aggregate* is a serializer signature, not a health signature | recomputing it |
 | Only a config traits template can recover the stripe table's 896 B, "because the alignment is part of the type" | The *count* cannot reach the alignment; the **alignment itself is a config constant**. One `constexpr` and one token recover the identical 896 B, zero templates | building it both ways on rv32 |

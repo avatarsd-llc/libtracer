@@ -149,12 +149,12 @@ place that turns a byte span into an owned `view_t`. A hand-rolled
 loses the allocation-failure signal that `std::optional` carries.
 
 **`read` returns a reference, not a copy.** `graph_t::read` and `graph_t::await` return
-`result_t<value_ref_t>` (`core/include/libtracer/graph.hpp:421,508`), so `(*got)` is a
+`result_t<value_ref_t>` (`core/include/libtracer/graph.hpp:477,564`), so `(*got)` is a
 `value_ref_t` and `(*got)->…` reaches the referenced `rope_t`. The rule: *a read of a
 published value returns a reference to it; a read that composes a new value returns the
 value* — which is why `read_children_folded` and its siblings still return a `rope_t`.
 Under an injected `std::pmr::memory_resource` an outstanding `value_ref_t` **pins** the
-value it names (`core/include/libtracer/vertex.hpp:79-82`), so a long-lived reference
+value it names (`core/include/libtracer/vertex.hpp:109-112`), so a long-lived reference
 holds the graph's memory; take the bytes and drop it.
 
 ```{note}
@@ -188,8 +188,8 @@ auto r = g.await(temp, std::chrono::seconds{2});
 The callback form is sugar over the primitive
 `subscribe(const path_t&, subscriber_fn_t fn, void* ctx)` with
 `subscriber_fn_t = void (*)(void*, const rope_t&)`
-(`core/include/libtracer/vertex.hpp:510`). The sugar takes the callable as `F&`
-(`core/include/libtracer/graph.hpp:651-654`), so a temporary lambda written inline at
+(`core/include/libtracer/vertex.hpp:540`). The sugar takes the callable as `F&`
+(`core/include/libtracer/graph.hpp:707-710`), so a temporary lambda written inline at
 the call site does not compile — and would dangle if it did. **Lifetime obligation:**
 the bound callable is the `ctx`, and `ctx` must outlive every possible delivery;
 `unsubscribe` only deactivates the edge slot, and a delivery already in flight

@@ -218,7 +218,7 @@ types are invalid in PATH context"* — is replaced by the body grammar above. T
 **On the `u8` length bound.** The 64-byte per-segment limit is pre-existing
 (`docs/reference/03-addressing.md:29`, restated normatively at `docs/spec/v1.md:95`), so `u8` is
 derived from the spec rather than invented. **But this RFC hardens it**: today the limit is a
-one-line `inline constexpr kMaxSegmentBytes = 64` at `core/include/libtracer/path.hpp:30` and the
+one-line `inline constexpr kMaxSegmentBytes = 64` at `core/include/libtracer/path.hpp:31` and the
 TLV length field is `u16`, so a per-target build could raise it; after this change the encoding
 caps it at 255 forever. That is a real, irreversible narrowing and it is stated here rather than
 buried. **A LEB128/varint length is explicitly not the escape hatch** —
