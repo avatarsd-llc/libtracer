@@ -79,6 +79,40 @@ void* counted_alloc(std::size_t size) {
 #endif
     return p;
 }
+/**
+ * @brief The OVER-ALIGNED counted allocation — `aligned_alloc`, whose result `free` accepts.
+ *
+ * Forwarding an over-aligned request to plain `malloc` (what this file did until #801) hands
+ * back memory aligned only to `max_align_t`, so a `std::pmr` control block asking for 32-byte
+ * alignment is under-aligned — real UB, latent only because nothing on today's measured path
+ * asks for more. `aligned_alloc` requires the size to be a multiple of the alignment, so it is
+ * rounded up; the COUNTED byte figure stays the requested @p size, so `bytes=` is unmoved.
+ *
+ * Copied verbatim in shape from `core/tests/terminus_flatten_backend_test.cpp`, which is the
+ * repo's reference replacement set. The live-bytes figures DO move, and that is expected and
+ * measured, not a surprise: `malloc_usable_size` of an `aligned_alloc` block rounds up to the
+ * alignment, and libtracer's heap backend allocates every segment through
+ * `operator new(size, align_val_t{alignof(max_align_t)}, nothrow)` (mem_heap.hpp). #793
+ * measured the shift and deferred it rather than move a published number as a side effect;
+ * #801 is where it is moved deliberately. Allocation COUNTS and requested-byte totals are
+ * unchanged.
+ */
+void* counted_aligned_alloc(std::size_t size, std::size_t align) {
+    const bool armed = probe::g_armed.load(std::memory_order_relaxed);
+    if (armed) {
+        probe::g_allocs.fetch_add(1, std::memory_order_relaxed);
+        probe::g_bytes.fetch_add(size, std::memory_order_relaxed);
+    }
+    if (align < alignof(std::max_align_t)) align = alignof(std::max_align_t);
+    const std::size_t rounded = ((size == 0 ? 1 : size) + align - 1) / align * align;
+    void* p = std::aligned_alloc(align, rounded);
+#ifdef BENCH_HAS_USABLE_SIZE
+    if (armed && p != nullptr)
+        probe::g_live_bytes.fetch_add(static_cast<long long>(malloc_usable_size(p)),
+                                      std::memory_order_relaxed);
+#endif
+    return p;
+}
 void counted_free(void* p) {
     if (p == nullptr) return;
     if (probe::g_armed.load(std::memory_order_relaxed)) {
@@ -106,29 +140,25 @@ void* operator new(std::size_t size, const std::nothrow_t&) noexcept { return co
 void* operator new[](std::size_t size, const std::nothrow_t&) noexcept {
     return counted_alloc(size);
 }
-void* operator new(std::size_t size, std::align_val_t) { return operator new(size); }
-void* operator new[](std::size_t size, std::align_val_t) { return operator new(size); }
-void* operator new(std::size_t size, std::align_val_t, const std::nothrow_t&) noexcept {
-    return counted_alloc(size);
+void* operator new(std::size_t size, std::align_val_t align) {
+    void* p = counted_aligned_alloc(size, static_cast<std::size_t>(align));
+    if (!p) throw std::bad_alloc();
+    return p;
 }
-void* operator new[](std::size_t size, std::align_val_t, const std::nothrow_t&) noexcept {
-    return counted_alloc(size);
+void* operator new[](std::size_t size, std::align_val_t align) { return operator new(size, align); }
+void* operator new(std::size_t size, std::align_val_t align, const std::nothrow_t&) noexcept {
+    return counted_aligned_alloc(size, static_cast<std::size_t>(align));
+}
+void* operator new[](std::size_t size, std::align_val_t align, const std::nothrow_t&) noexcept {
+    return counted_aligned_alloc(size, static_cast<std::size_t>(align));
 }
 // Every DEALLOCATING form (#793) — the array, nothrow and sized+aligned twins were the hole.
 // A replacement set with a hole leaves that one form to the sanitizer's own operator, which
 // is then handed a pointer this file allocated: ASan reports `alloc-dealloc-mismatch` the
 // first time such a job runs this bench. The sized+aligned `operator delete` is the one
 // libstdc++'s `std::pmr::memory_resource::deallocate` walks into on every pmr control block.
-// Set completed from `core/tests/terminus_flatten_backend_test.cpp`.
-//
-// NOT copied from that file: its over-aligned `operator new` routes to `aligned_alloc`, while
-// the ones above keep routing to `malloc`. Switching them here is a real correctness fix (a
-// 32-byte-aligned pmr control block currently comes back aligned only to `max_align_t`) but
-// it moves a PUBLISHED figure — `malloc_usable_size` of an `aligned_alloc` block rounds up,
-// which shifts the gh-pages-tracked `vertex_value` live-bytes trend from 104 to 120 B.
-// Moving a tracked number is its own change with its own note, not a side effect of closing
-// an ASan hole. Tracked as follow-up; every figure this bench prints is byte-for-byte
-// unchanged by #793.
+// Set completed from `core/tests/terminus_flatten_backend_test.cpp` — including, since #801,
+// its over-aligned `operator new` (see counted_aligned_alloc above for what that moves).
 void operator delete(void* p) noexcept { counted_free(p); }
 void operator delete[](void* p) noexcept { counted_free(p); }
 void operator delete(void* p, std::size_t) noexcept { counted_free(p); }

@@ -35,22 +35,6 @@ namespace tr::graph {
 namespace {
 
 /**
- * @brief The per-resolve flatten seam (#766): the injected byte backend every rope-tier
- *        flatten of ONE resolve draws from, plus the sticky "a flatten was refused" flag
- *        that makes the refusal answerable by value.
- *
- * One instance lives on `op_resolver_t::resolve`'s stack and every `view_node` of that walk
- * points at it — nodes are copied by value (`parsed_fwd_t` holds them so), and each node
- * caches its own materialize, so the failure signal cannot live in a node: a refusal seen
- * while reading the `dst` PATH's third NAME must still be visible at the walk's decision
- * point. The flag is sticky by construction — nothing clears it inside a resolve.
- */
-struct flatten_seam_t {
-    mem::mem_backend_t* backend = nullptr; /**< @brief Injected byte backend; null ⇒ heap. */
-    bool refused = false;                  /**< @brief A flatten was refused during this walk. */
-};
-
-/**
  * @brief The owning rope-tier node-reader (ADR-0053 §7): one lazy `tlv_view_t` adapted to the node-
  *        reader concept the templated `resolve_node` walks.
  *
@@ -94,8 +78,9 @@ class view_node {
      * so every value the walk derived from it downstream (the op discriminant, a lookup key,
      * a field name) is unsound. The walk checks this at its two decision points and answers
      * `BACKPRESSURE` — it never sends a reply built on a refused flatten. The span tier's
-     * `arena_node` borrows and never allocates, so it answers a constant `true` and the
-     * checks fold away.
+     * `arena_node` answers a constant `true` and the checks fold away: it draws from the
+     * same seam for its ownership copy (#801), but its SPANS are borrowed from the frame and
+     * a refusal cannot shorten one, so there is nothing here for it to condemn.
      */
     [[nodiscard]] bool spans_intact() const noexcept { return seam_ == nullptr || !seam_->refused; }
 
@@ -245,10 +230,7 @@ class view_node {
     }
 
     /** @brief The walk's injected byte backend, or the global heap when none was injected. */
-    [[nodiscard]] mem::mem_backend_t& backend() const noexcept {
-        return (seam_ != nullptr && seam_->backend != nullptr) ? *seam_->backend
-                                                               : mem::heap_backend();
-    }
+    [[nodiscard]] mem::mem_backend_t& backend() const noexcept { return seam_backend(seam_); }
     /** @brief Mark this resolve's spans untrustworthy (sticky; see @ref spans_intact). */
     void note_refusal() const noexcept {
         if (seam_ != nullptr) seam_->refused = true;

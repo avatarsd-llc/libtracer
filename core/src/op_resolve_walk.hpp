@@ -51,6 +51,38 @@ using wire::type_t;
 namespace {
 
 /**
+ * @brief The per-resolve byte seam (#766, #793, #801): the injected backend every owned
+ *        `segment` of ONE resolve draws from, plus the sticky "a draw was refused" flag that
+ *        makes a refusal answerable by value.
+ *
+ * Shared by BOTH node readers, which is the point: one instance lives on the `resolve`
+ * overload's stack and every node of that walk points at it — nodes are copied by value
+ * (`parsed_fwd_t` holds them so) and each rope-tier node caches its own materialize, so the
+ * failure signal cannot live in a node: a refusal seen while reading the `dst` PATH's third
+ * NAME must still be visible at the walk's decision point. The flag is sticky by
+ * construction — nothing clears it inside a resolve.
+ *
+ * The two tiers use different halves of it. The rope tier draws AND records (a refused
+ * flatten leaves a SHORT span behind, so a later read of that node must not be believed).
+ * The span tier only ever draws: its spans are borrowed from the frame and stay whole
+ * whatever the backend answers, so `arena_node::spans_intact()` is a constant `true` and a
+ * refused ownership copy is answered through the by-value channel alone (#801).
+ */
+struct flatten_seam_t {
+    mem::mem_backend_t* backend = nullptr; /**< @brief Injected byte backend; null ⇒ heap. */
+    bool refused = false;                  /**< @brief A draw was refused during this walk. */
+};
+
+/**
+ * @brief The seam's backend, or the global heap when no seam (or no backend) was injected.
+ *
+ * One locus for both readers — a null seam is the un-injected default the pre-#766 code had.
+ */
+[[nodiscard]] inline mem::mem_backend_t& seam_backend(const flatten_seam_t* seam) noexcept {
+    return (seam != nullptr && seam->backend != nullptr) ? *seam->backend : mem::heap_backend();
+}
+
+/**
  * @brief The opt byte an ADR-0041 §4 trailer-sliced copy carries: the structural bits (PL, LL)
  *        survive; the trailer bits (TS, CR, CW, TF) are cleared so the copied TLV — whose bytes
  *        exclude the trailer by construction (`node.wire`) — stays self-consistent and trailer-less
@@ -114,6 +146,11 @@ static_assert(struct_opt(std::byte{0x00}) == std::byte{0x00});
 struct arena_node {
     const tlv_arena_t* a = nullptr;
     std::uint32_t i = 0;
+    /**
+     * @brief The walk's injected byte seam (#801) — where @ref own_wire's ownership copy
+     *        draws from. Null ⇒ the global heap, which is what an un-injected resolver has.
+     */
+    const flatten_seam_t* seam = nullptr;
 
     [[nodiscard]] const arena_tlv_t& node() const noexcept { return (*a)[i]; }
     [[nodiscard]] type_t type() const noexcept { return node().type; }
@@ -131,6 +168,14 @@ struct arena_node {
      * The rope tier answers `false` once its injected flatten backend refused, because a
      * refused flatten yields an EMPTY span where the frame had bytes. Constant here, so the
      * walk's two checks fold away entirely on the MCU terminus.
+     *
+     * It stays constant after #801 put @ref own_wire on the seam, and that is a statement
+     * about spans, not about allocation. A refused ownership copy on this tier consumes no
+     * span and shortens none: `wire()` still points into the frame and every value the walk
+     * derived from it stays sound. The refusal is carried by the empty view `own_wire`
+     * returns, through the by-value BACKPRESSURE channel `own_tlv`'s callers already read.
+     * Flipping this flag instead would be strictly worse — it would condemn a walk whose
+     * spans are provably intact.
      */
     [[nodiscard]] static bool spans_intact() noexcept { return true; }
 
@@ -141,8 +186,23 @@ struct arena_node {
      *
      * The lazy rope reader overrides this
      * to adopt a multi-link flatten instead of copying it twice (ADR-0053 ⑤).
+     *
+     * Through the INJECTED seam (#801). This is the arena tier's only allocating site, and
+     * until #801 it was the last ownership copy in either tier still drawing from
+     * `view::over_bytes`'s global heap — so a bounded node whose peer sent a CONTIGUOUS
+     * terminus WRITE (the span-delivered shape a synchronous CAN/UART child hands up, and
+     * the MCU terminus's ordinary case) allocated outside its own memory bound, peer-driven,
+     * and an `abort()` under `-fno-exceptions`. #793 closed the same site one tier over.
+     *
+     * A refusal answers `std::nullopt` ⇒ the empty view, which is exactly what `own_tlv`'s
+     * callers already read as BACKPRESSURE (`resolve_node`'s empty-value guards). A wire TLV
+     * is never zero bytes, so `over_bytes`' engaged-empty "legitimately-empty input" outcome
+     * is unreachable here and `nullopt` is unambiguously a refusal. Never an abort, never a
+     * short span: see @ref spans_intact for why no flag is set.
      */
-    [[nodiscard]] view_t own_wire() const { return view::over_bytes(wire()).value_or(view_t{}); }
+    [[nodiscard]] view_t own_wire() const {
+        return view::over_bytes(wire(), seam_backend(seam)).value_or(view_t{});
+    }
 
     /**
      * @brief The trailer-excluded whole-TLV byte length — read WITHOUT materializing (the ADR-0042
@@ -185,22 +245,26 @@ struct arena_node {
     /** @brief Forward-only child cursor — the shared shape of `tlv_view_t::children_t`. */
     class children_cursor {
        public:
-        children_cursor(const tlv_arena_t* a, std::uint32_t begin, std::uint32_t end) noexcept
-            : a_(a), j_(begin), end_(end) {}
+        children_cursor(const tlv_arena_t* a, std::uint32_t begin, std::uint32_t end,
+                        const flatten_seam_t* seam) noexcept
+            : a_(a), j_(begin), end_(end), seam_(seam) {}
         [[nodiscard]] std::optional<arena_node> next() noexcept {
             if (j_ >= end_) return std::nullopt;
             const std::uint32_t cur = j_;
             j_ = a_->next_sibling(j_);
-            return arena_node{a_, cur};
+            // The seam rides down with the child: the ownership copy the walk takes is of a
+            // CHILD node (the WRITE payload, the return route), never of the root (#801).
+            return arena_node{a_, cur, seam_};
         }
 
        private:
         const tlv_arena_t* a_;
         std::uint32_t j_;
         std::uint32_t end_;
+        const flatten_seam_t* seam_;
     };
     [[nodiscard]] children_cursor children() const noexcept {
-        return children_cursor{a, tlv_arena_t::first_child(i), node().end};
+        return children_cursor{a, tlv_arena_t::first_child(i), node().end, seam};
     }
 };
 

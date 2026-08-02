@@ -103,9 +103,14 @@ class fwd_router_t {
      *              its @ref graph::op_resolver_t. Until #766 the terminus half drew from the
      *              global heap, so a fragmented request from a peer escaped the bound; the
      *              honest sentence now is that all rope flattens on the forward and terminus
-     *              paths draw from the injected seam. Still NOT every allocation the router
-     *              path makes: the reply head segment and the arena are their own injections
-     *              (@p rx and `view::heap_alloc`), which is the reading #730 was filed about.
+     *              paths draw from the injected seam. Since #801 that sentence covers the
+     *              SPAN-tier terminus too: `arena_node::own_wire`, the ADR-0041 §2 ownership
+     *              copy a span-delivered request takes, is this backend's as well — so the
+     *              MCU terminus (a synchronous CAN/UART child delivers spans, not ropes) no
+     *              longer escapes the bound on its ordinary WRITE. Still NOT every
+     *              allocation the router path makes: the reply head segment and the arena
+     *              are their own injections (@p rx and `view::heap_alloc`), which is the
+     *              reading #730 was filed about.
      *              Split from
      *              @p rx because these are BYTE buffers with cache hooks and an owning
      *              refcount (a @ref mem::mem_backend_t), not the arena's raw blocks —
