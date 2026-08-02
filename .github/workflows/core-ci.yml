@@ -64,7 +64,7 @@ jobs:
         run: |
           cmake -S core -B core/build-gcc15 -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_C_COMPILER=gcc-15 -DCMAKE_CXX_COMPILER=g++-15
-          cmake --build core/build-gcc15 -j
+          cmake --build core/build-gcc15 -j "$(nproc)"
           ctest --test-dir core/build-gcc15 --output-on-failure
 
   # Both sanitizer legs run against both LKV slot bindings (ADR-0069 §1) as parallel
