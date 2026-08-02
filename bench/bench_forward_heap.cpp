@@ -107,18 +107,42 @@ void* operator new[](std::size_t size, const std::nothrow_t&) noexcept {
     return counted_alloc(size);
 }
 void* operator new(std::size_t size, std::align_val_t) { return operator new(size); }
+void* operator new[](std::size_t size, std::align_val_t) { return operator new(size); }
 void* operator new(std::size_t size, std::align_val_t, const std::nothrow_t&) noexcept {
     return counted_alloc(size);
 }
-void* operator new[](std::size_t size, std::align_val_t) { return operator new(size); }
+void* operator new[](std::size_t size, std::align_val_t, const std::nothrow_t&) noexcept {
+    return counted_alloc(size);
+}
+// Every DEALLOCATING form (#793) — the array, nothrow and sized+aligned twins were the hole.
+// A replacement set with a hole leaves that one form to the sanitizer's own operator, which
+// is then handed a pointer this file allocated: ASan reports `alloc-dealloc-mismatch` the
+// first time such a job runs this bench. The sized+aligned `operator delete` is the one
+// libstdc++'s `std::pmr::memory_resource::deallocate` walks into on every pmr control block.
+// Set completed from `core/tests/terminus_flatten_backend_test.cpp`.
+//
+// NOT copied from that file: its over-aligned `operator new` routes to `aligned_alloc`, while
+// the ones above keep routing to `malloc`. Switching them here is a real correctness fix (a
+// 32-byte-aligned pmr control block currently comes back aligned only to `max_align_t`) but
+// it moves a PUBLISHED figure — `malloc_usable_size` of an `aligned_alloc` block rounds up,
+// which shifts the gh-pages-tracked `vertex_value` live-bytes trend from 104 to 120 B.
+// Moving a tracked number is its own change with its own note, not a side effect of closing
+// an ASan hole. Tracked as follow-up; every figure this bench prints is byte-for-byte
+// unchanged by #793.
 void operator delete(void* p) noexcept { counted_free(p); }
 void operator delete[](void* p) noexcept { counted_free(p); }
 void operator delete(void* p, std::size_t) noexcept { counted_free(p); }
 void operator delete[](void* p, std::size_t) noexcept { counted_free(p); }
-void operator delete(void* p, std::align_val_t) noexcept { counted_free(p); }
-void operator delete(void* p, std::size_t, std::align_val_t) noexcept { counted_free(p); }
 void operator delete(void* p, const std::nothrow_t&) noexcept { counted_free(p); }
+void operator delete[](void* p, const std::nothrow_t&) noexcept { counted_free(p); }
+void operator delete(void* p, std::align_val_t) noexcept { counted_free(p); }
+void operator delete[](void* p, std::align_val_t) noexcept { counted_free(p); }
+void operator delete(void* p, std::size_t, std::align_val_t) noexcept { counted_free(p); }
+void operator delete[](void* p, std::size_t, std::align_val_t) noexcept { counted_free(p); }
 void operator delete(void* p, std::align_val_t, const std::nothrow_t&) noexcept { counted_free(p); }
+void operator delete[](void* p, std::align_val_t, const std::nothrow_t&) noexcept {
+    counted_free(p);
+}
 
 // --- the forward-hop fixture -------------------------------------------------
 

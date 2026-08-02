@@ -16,6 +16,27 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`view::over_bytes(bytes, mem::mem_backend_t&)` and `view::segment_alloc(backend, size)` —
+  an ownership copy can name the seam it draws from (#793).**
+  `core/include/libtracer/mem_heap.hpp`. Purely additive: the existing
+  `over_bytes(std::span<const std::byte>)` and `heap_alloc(std::size_t)` are unchanged in
+  spelling, semantics and generated code, so every call site outside this change is untouched
+  (verified by object-file `cmp` — see below). The new overload exists for the last rope-tier
+  heap site #766 left outside the router's injected `flat`: `view_node::own_wire`'s
+  **single-link** branch, the ADR-0041 §2 ownership copy of a contiguous payload, which
+  flattened through the injection when the peer's fragmentation split the payload and copied
+  through the **global heap** when it did not. A refused copy answers `std::nullopt` → the empty
+  view the resolve walk's existing empty-value guards already read as `BACKPRESSURE`, and the
+  refusal is recorded on the per-resolve sticky `spans_intact()` flag so a later span read on the
+  same walk is not believed either. Measured with a counting global `operator new`: a two-link
+  `FWD{WRITE}` whose payload TLV is contiguous consulted an injected `flat` **zero** times before
+  and once after, global-heap `new` 16 → 15. Covered by
+  `core/tests/terminus_flatten_backend_test.cpp` (exact-size seam instrument, refusing-backend
+  case, a mutation-aware refusal sweep); reverting the site reddens 7 checks and drops the seam
+  count to zero. A separate overload rather than a defaulted parameter deliberately: defaulting
+  `mem::mem_backend_t& = mem::heap_backend()` moves that call into every existing call site and
+  changed 8 library object files, and the pre-#793 arm has to be provably untouched.
+
 - **`mem::synchronized_pool_t<Sync>` — the pool's critical section is now a compile-time
   policy (#770, [ADR-0060](../docs/adr/0060-lkv-copy-store-injected-value-backend.md) §2
   erratum 2).** `core/include/libtracer/mem_pool.hpp`. New: the class template

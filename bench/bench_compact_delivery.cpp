@@ -78,6 +78,18 @@ bool g_arm = false;
 // `operator new(size)` made the payload-sized store copy INVISIBLE to this counter — the
 // published figures undercounted. bench_forward_heap has always overridden the full set;
 // this now matches it, so the two benches' allocation columns are comparable.
+//
+// And every DEALLOCATING form (#793), for a reason ASan reports as `alloc-dealloc-mismatch`:
+// a replacement set with a hole leaves that one form to the sanitizer's own operator, which
+// is then handed a pointer this file `malloc`ed. The sized+aligned `operator delete` is the
+// hole libstdc++'s `std::pmr::memory_resource::deallocate` walks into on every pmr control
+// block — inert today only because no sanitizer job runs this bench. Set completed from
+// `core/tests/terminus_flatten_backend_test.cpp`.
+//
+// NOT copied from that file: its over-aligned `operator new` routes to `aligned_alloc`, while
+// the ones below keep routing to `malloc` — held back for the reason spelled out at the same
+// place in `bench_forward_heap.cpp` (it moves a published live-bytes figure there, and the
+// two benches' allocation columns are only comparable while they share one shape).
 namespace {
 void* counted(std::size_t n) {
     if (g_arm) {
@@ -101,16 +113,25 @@ void* operator new[](std::size_t n) {
 void* operator new(std::size_t n, const std::nothrow_t&) noexcept { return counted(n); }
 void* operator new[](std::size_t n, const std::nothrow_t&) noexcept { return counted(n); }
 void* operator new(std::size_t n, std::align_val_t) { return operator new(n); }
+void* operator new[](std::size_t n, std::align_val_t) { return operator new(n); }
 void* operator new(std::size_t n, std::align_val_t, const std::nothrow_t&) noexcept {
     return counted(n);
 }
-void* operator new[](std::size_t n, std::align_val_t) { return operator new(n); }
+void* operator new[](std::size_t n, std::align_val_t, const std::nothrow_t&) noexcept {
+    return counted(n);
+}
 void operator delete(void* p) noexcept { std::free(p); }
-void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+void operator delete(void* p, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete[](void* p, const std::nothrow_t&) noexcept { std::free(p); }
 void operator delete(void* p, std::align_val_t) noexcept { std::free(p); }
 void operator delete[](void* p, std::align_val_t) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t, std::align_val_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t, std::align_val_t) noexcept { std::free(p); }
+void operator delete(void* p, std::align_val_t, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete[](void* p, std::align_val_t, const std::nothrow_t&) noexcept { std::free(p); }
 
 namespace {
 
