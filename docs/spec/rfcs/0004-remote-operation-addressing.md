@@ -217,9 +217,10 @@ Add to `tests/conformance/vectors/v1/`, so the 3-core machine (C++/TS/Rust) vali
 - `fwd-write-value` — `FWD{ op=WRITE, dst=/sensor/temp, src=…, VALUE u32 }`.
 - `fwd-await-timeout` — `FWD{ op=AWAIT, dst=/sensor/temp, src=…, await_timeout=1e9 }`.
 - `fwd-write-subscriber-field` — `FWD{ op=WRITE, dst=/sensor/temp, FIELD :subscribers[], src=…, SUBSCRIBER{...} }`.
-- `fwd-routed-multihop` — `FWD{ op=READ, dst=/net/<peer>/can[0]/ow/x, src=/reply-ep }` (un-stripped `dst`).
-- `fwd-src-accumulated` — the same op **after two hops**: `dst` shrunk by two segments, `src` grown by two (the prepend invariant).
-- `fwd-reply-result` / `fwd-reply-error` — `FWD{ op=REPLY, kind=RESULT, dst=<accumulated route>, VALUE }` and `kind=ERROR, STATUS=ERROR(...)`.
+- `fwd-routed-mount-residual` (authored as `fwd-routed-multihop`; renamed by #419) — `FWD{ op=READ, dst=/net/board/can0/ow/sensor, src=/reply-ep }`: one strip-K mount (`net/board/can0`) plus the residual it forwards.
+- `fwd-routed-two-mount` — `FWD{ op=READ, dst=/net/uplink/b/net/uplink/c/sensor/temp, src=/reply-ep }`: a `dst` crossing **two** mounts, three nodes deep (#419).
+- `fwd-src-accumulated` — the same op **mid-route, after two hops**: `FWD{ op=READ, dst=/net/uplink/d/sensor/temp, src=/net/downlink/a/net/downlink/cli/reply-ep }`. `dst` shrinks and `src` grows by whole `net/<module>/<name>` mount runs — two hops means six `src` segments, not two (the prepend invariant, in its S2a form). Bytes rewritten 2026-08-02 by maintainer ruling on #419; the frame as authored was pre-S2a and did not compose.
+- `fwd-reply-result` / `fwd-reply-error` — the reply as the **terminus** emits it, the request's routes swapped: `FWD{ op=REPLY, dst=/net/downlink/a/net/downlink/cli/reply-ep, src=/sensor/temp, kind=RESULT, VALUE }` and the same routes with `kind=ERROR, STATUS{ERROR{...}}`. The `dst` is the accumulated return route in its S2a form — whole `net/<module>/<name>` mount runs, so it routes home through the same strip-K descent a request does. Bytes rewritten 2026-08-02 by maintainer ruling (c) on #419; the frames as authored carried `dst=/via_board/via_net/reply-ep`, pre-S2a and non-composing.
 - `field-indexed`, `field-nested`, `field-append` — the three `FIELD` index-modes.
 - `fwd-wildcard-reject` — `[*]` outside subscriber-path ⇒ `INVALID_PATH`.
 

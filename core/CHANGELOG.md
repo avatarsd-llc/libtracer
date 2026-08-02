@@ -60,6 +60,66 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **Conformance vector `fwd/fwd-routed-multihop` is renamed `fwd/fwd-routed-mount-residual`;
+  a genuine two-mount vector `fwd/fwd-routed-two-mount` is added (#419).** No public C++ API
+  moves, but the conformance corpus is normative-by-incorporation (ADR-0007), so the rename is
+  recorded here. **The renamed vector's bytes are byte-for-byte unchanged** — the maintainer
+  ruling (2026-08-02) is that they were always correct under strip-K mount routing
+  (RFC-0014 §S2a / ADR-0061): `dst=/net/board/can0/ow/sensor` parses as ONE hop — the mount key
+  `net/board/can0` consumed as a whole run, residual `ow/sensor`. Only the name and the
+  `description.md` prose were stale artifacts of the pre-S2a two-hop reading. The new
+  `fwd-routed-two-mount` carries `dst=/net/uplink/b/net/uplink/c/sensor/temp` — a `dst` crossing
+  TWO mounts — and is bound behaviourally by the new `core/tests/fwd_two_mount_test.cpp`
+  (`ctest -R fwd_two_mount`), the first FWD test in the tree with more than one forwarder: three
+  in-process `fwd_router_t` nodes chained by loopback link pairs, wired through the production
+  `transport_vertex_t` `:children[]` SPEC door, asserting `strip_k = 3` at each hop and the
+  terminus delivery. Corpus: 50 → 51 vectors, all three cores green.
+
+- **Conformance vector `fwd/fwd-src-accumulated`'s BYTES are rewritten (#419) — the first time
+  any vector's bytes have changed.** The corpus is normative-by-incorporation
+  (ADR-0007) and `v1.md` §conformance is explicit that *adding* a vector is free while
+  *changing existing bytes* is a spec change, so this landed only under a second, explicit
+  maintainer ruling (2026-08-02) on the still-`DRAFT` protocol — recorded here because any
+  implementation pinned to the old bytes will now fail the harness. Old:
+  `FWD{ op=READ, dst=/can0/ow/sensor, src=/via_board/via_net/reply-ep }`, 77 B, `0f4049…`.
+  New: `FWD{ op=READ, dst=/net/uplink/d/sensor/temp,
+  src=/net/downlink/a/net/downlink/cli/reply-ep }`, 119 B, `0f4073…`. The old frame was
+  **pre-S2a and did not compose**: under the shipped mount routing a forwarder consumes and
+  prepends a whole three-segment `net/<module>/<name>` run, so a `src` grown by two hops is six
+  segments, never the two bare names `via_board`/`via_net` — neither of which is a mount key at
+  all. The name is kept: the vector still shows exactly what it always claimed, `src`
+  accumulating mid-route. Now bound behaviourally by `core/tests/fwd_two_mount_test.cpp`'s hop-2
+  probe, which asserts that same `src` byte-exactly out of the production router. Corpus stays
+  at 51 vectors; cpp/ts/rust green.
+
+- **Conformance vectors `fwd/fwd-reply-result` and `fwd/fwd-reply-error`'s BYTES are rewritten
+  (#419) — maintainer ruling (c), 2026-08-02, the same instrument and the same defect as the
+  entry above.** These two were the residue that ruling (b) left: they carried
+  `dst=/via_board/via_net/reply-ep`, the identical pre-S2a accumulated route, in the two vectors
+  that show a REPLY retracing one. Recorded here because any implementation pinned to the old
+  bytes will now fail the harness.
+  - `fwd/fwd-reply-result`: old `FWD{ op=REPLY, dst=/via_board/via_net/reply-ep, src=/sensor,
+    kind=RESULT, VALUE u32=1234 }`, 76 B, `0f4048…` → new
+    `FWD{ op=REPLY, dst=/net/downlink/a/net/downlink/cli/reply-ep, src=/sensor/temp,
+    kind=RESULT, VALUE u32=1234 }`, 110 B, `0f406a…`.
+  - `fwd/fwd-reply-error`: old same route with `kind=ERROR, STATUS{ERROR{VALUE u16=0x0020}}`,
+    82 B, `0f404e…` → new same corrected route, 116 B, `0f4070…`.
+
+  Both now depict **one explicit point**: the reply exactly as the terminus C of
+  `fwd/fwd-routed-two-mount`'s route emits it, before any forwarder has consumed a mount run —
+  RESULT and ERROR being the two sides of the same frame. That is adjudicated from the code, not
+  chosen: `op_resolve_walk.hpp`'s `assemble`/`assemble_error` splice the request's two routes
+  **swapped and verbatim** (`reply dst = req.src`, `reply src = req.dst`), so the reply `dst` is
+  necessarily the accumulated `src` `fwd/fwd-src-accumulated` carries, in whole
+  `net/<module>/<name>` mount runs — which is exactly what lets `route_fwd_forward` walk it home
+  by the same op-agnostic strip-K descent. `kind`, the VALUE payload and the RFC-0002 §C ERROR
+  identity are untouched: only the route was wrong. Bound behaviourally by
+  `core/tests/fwd_two_mount_test.cpp` (the hop-2 probe pins the request `src` these vectors'
+  `dst` mirrors; the terminus leg asserts the REPLY arrives with `dst` consumed to `/reply-ep`)
+  and `core/tests/op_resolve_test.cpp` (the swap and the `0x0020 tr::path::not_found` identity).
+  Corpus stays at 51 vectors; cpp/ts/rust green. **With rulings (b) and (c) both executed, no
+  route-bearing conformance vector carries the pre-S2a form any more.**
+
 - **`op_resolver_t`'s `flat` now bounds the SPAN (arena) tier too (#801).**
   `core/include/libtracer/op_resolve.hpp`, `core/include/libtracer/fwd_router.hpp` — **no
   signature changes**; what changed is which allocation the already-public `flat` parameter

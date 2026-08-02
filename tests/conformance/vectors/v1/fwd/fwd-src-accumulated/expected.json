@@ -1,12 +1,12 @@
 {
   "name": "fwd-src-accumulated",
   "category": "fwd",
-  "hex": "0F4049000100010000064018000200040063616E30020002006F770200060073656E736F7206402400020009007669615F626F617264020007007669615F6E6574020008007265706C792D6570",
-  "total_bytes": 77,
+  "hex": "0F407300010001000006402800020003006E65740200060075706C696E6B02000100640200060073656E736F720200040074656D7006403E00020003006E657402000800646F776E6C696E6B0200010061020003006E657402000800646F776E6C696E6B02000300636C69020008007265706C792D6570",
+  "total_bytes": 119,
   "decoded": {
     "type": "0x0F FWD",
     "structured": true,
-    "meaning": "FWD{ op=READ, dst=/can0/ow/sensor, src=/via_board/via_net/reply-ep } \u2014 the multihop op after two hops: dst shrunk by two, src grown by two (zero-copy prepend invariant, \u00a7B)",
-    "note": "RFC-0004 \u00a7B/\u00a7C canonical bytes; structured TLV, opt.PL=1, no trailers (at-rest form)"
+    "meaning": "FWD{ op=READ, dst=/net/uplink/d/sensor/temp, src=/net/downlink/a/net/downlink/cli/reply-ep } — the same op mid-route after TWO strip-K hops: src has grown by two FULL net/<module>/<name> mount runs, dst still carries one mount plus the residual /sensor/temp",
+    "note": "RFC-0004 §B/§C canonical bytes; structured TLV, opt.PL=1, no trailers (at-rest form). Bytes CHANGED 2026-08-02 by maintainer ruling — the previous bytes were pre-S2a and did not compose under mount routing (protocol DRAFT)."
   }
 }

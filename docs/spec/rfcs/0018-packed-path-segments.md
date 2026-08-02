@@ -272,9 +272,11 @@ rewritten. Per `tests/conformance/README.md:50` and ADR-0028 the C++ reference b
 bytes; adding a vector needs no manifest edit (`run-all.py` discovers by `rglob`), but *changing*
 existing bytes is a spec change — which is what this RFC is.
 
-**Sequencing hazard:** `fwd/fwd-routed-multihop`'s `expected.json` is contested in
-[#419](https://github.com/avatarsd-llc/libtracer/issues/419) ("needs a maintainer call"). That
-call must be made before, not during, this rewrite.
+**Sequencing hazard (settled):** `fwd/fwd-routed-multihop`'s `expected.json` was contested in
+[#419](https://github.com/avatarsd-llc/libtracer/issues/419) ("needs a maintainer call"). The call
+was made on 2026-08-02: the bytes were already correct under strip-K mount routing, and only the
+name and prose were stale, so the vector is now `fwd/fwd-routed-mount-residual` with its bytes
+untouched. Nothing blocks this rewrite.
 
 **C++ core.** 5 files under `core/src` + `core/include` reference `type_t::PATH`; 40 `emit_name`
 call sites. The named loci: `fwd_frame_view.hpp` (both `peek_fwd_dst_segs` overloads,
@@ -423,8 +425,9 @@ green and 5–6 are at least measured.
 
 ## 11. Prerequisites and sequencing
 
-1. **[#419](https://github.com/avatarsd-llc/libtracer/issues/419)** — the contested
-   `fwd-routed-multihop` `dst` form needs a maintainer call *before* twelve vectors are rewritten.
+1. **[#419](https://github.com/avatarsd-llc/libtracer/issues/419)** — SETTLED (2026-08-02): the
+   contested `dst` form was already correct; the vector is renamed `fwd-routed-mount-residual`,
+   bytes unchanged. No longer a prerequisite.
 2. **This RFC**, in slices: (S1) the encoding + C++ core + `key_view`; (S2) vectors + both
    bindings + dissector; (S3) the docs sweep and the `v1` §3.1.1/§3.1.2 amendment.
 3. **#603** is **not** a prerequisite of this RFC — that dependency belonged to the withdrawn

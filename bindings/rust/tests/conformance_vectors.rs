@@ -627,13 +627,18 @@ fn fwd_write_subscriber_field() {
     );
 }
 
+/**
+ * @brief The terminus's RESULT reply (#419 ruling (c)): its routes are the request's
+ * swapped, so `dst` is the accumulated return route `fwd/fwd-src-accumulated` carries as
+ * `src`, and `src` is the terminus residual `fwd/fwd-routed-two-mount` ends on.
+ */
 #[test]
 fn fwd_reply_result() {
     let bin = assert_vector_consistent("fwd/fwd-reply-result");
     let mut req = FwdRequest::new(
         fwd_op::REPLY,
-        &["via_board", "via_net", "reply-ep"],
-        &["sensor"],
+        &["net", "downlink", "a", "net", "downlink", "cli", "reply-ep"],
+        &["sensor", "temp"],
     );
     req.kind = Some(fwd_kind::RESULT);
     req.payload = Some(value_u32(1234));
@@ -641,16 +646,25 @@ fn fwd_reply_result() {
     let f = decode_fwd(&bin).unwrap();
     assert_eq!(f.op, fwd_op::REPLY);
     assert_eq!(f.kind, Some(fwd_kind::RESULT));
+    assert_eq!(
+        libtracer::fwd::fwd_dst_path(&f).unwrap(),
+        "/net/downlink/a/net/downlink/cli/reply-ep"
+    );
+    assert_eq!(libtracer::fwd::fwd_src_path(&f).unwrap(), "/sensor/temp");
     assert_eq!(f.payload.unwrap().payload_uint(), 1234);
 }
 
+/**
+ * @brief The same terminus and the same swapped routes as `fwd_reply_result`, on the error
+ * side: the reply `src` is the refused spelling (#419 ruling (c)).
+ */
 #[test]
 fn fwd_reply_error() {
     let bin = assert_vector_consistent("fwd/fwd-reply-error");
     let mut req = FwdRequest::new(
         fwd_op::REPLY,
-        &["via_board", "via_net", "reply-ep"],
-        &["sensor"],
+        &["net", "downlink", "a", "net", "downlink", "cli", "reply-ep"],
+        &["sensor", "temp"],
     );
     req.kind = Some(fwd_kind::ERROR);
     req.payload = Some(status_with_errors(&[error_code(
@@ -660,6 +674,11 @@ fn fwd_reply_error() {
     assert_eq!(encode(&encode_fwd(&req).unwrap()), bin);
     let f = decode_fwd(&bin).unwrap();
     assert_eq!(f.kind, Some(fwd_kind::ERROR));
+    assert_eq!(
+        libtracer::fwd::fwd_dst_path(&f).unwrap(),
+        "/net/downlink/a/net/downlink/cli/reply-ep"
+    );
+    assert_eq!(libtracer::fwd::fwd_src_path(&f).unwrap(), "/sensor/temp");
     assert_eq!(reply_error_code(&f), 0x0020);
     assert_eq!(
         ErrCode::from_code(reply_error_code(&f)),
@@ -668,8 +687,8 @@ fn fwd_reply_error() {
 }
 
 #[test]
-fn fwd_routed_multihop() {
-    let bin = assert_vector_consistent("fwd/fwd-routed-multihop");
+fn fwd_routed_mount_residual() {
+    let bin = assert_vector_consistent("fwd/fwd-routed-mount-residual");
     let req = FwdRequest::new(
         fwd_op::READ,
         &["net", "board", "can0", "ow", "sensor"],
@@ -683,20 +702,48 @@ fn fwd_routed_multihop() {
     );
 }
 
+/**
+ * @brief The two-mount route (#419): a `dst` crossing TWO `net/<module>/<name>` mounts
+ * before its residual `/sensor/temp` resolves at the terminus.
+ */
 #[test]
-fn fwd_src_accumulated() {
-    let bin = assert_vector_consistent("fwd/fwd-src-accumulated");
+fn fwd_routed_two_mount() {
+    let bin = assert_vector_consistent("fwd/fwd-routed-two-mount");
     let req = FwdRequest::new(
         fwd_op::READ,
-        &["can0", "ow", "sensor"],
-        &["via_board", "via_net", "reply-ep"],
+        &["net", "uplink", "b", "net", "uplink", "c", "sensor", "temp"],
+        &["reply-ep"],
     );
     assert_eq!(encode(&encode_fwd(&req).unwrap()), bin);
     let f = decode_fwd(&bin).unwrap();
-    assert_eq!(libtracer::fwd::fwd_dst_path(&f).unwrap(), "/can0/ow/sensor");
+    assert_eq!(
+        libtracer::fwd::fwd_dst_path(&f).unwrap(),
+        "/net/uplink/b/net/uplink/c/sensor/temp"
+    );
+    assert_eq!(libtracer::fwd::fwd_src_path(&f).unwrap(), "/reply-ep");
+}
+
+#[test]
+fn fwd_src_accumulated() {
+    // Mid-route, two hops in: `src` has grown by TWO full `net/<module>/<name>` mount
+    // runs (six segments), never two bare NAMEs. `dst` still carries the next mount plus
+    // the residual. Bytes changed 2026-08-02 by maintainer ruling on #419 — the previous
+    // frame was pre-S2a and did not compose under mount routing.
+    let bin = assert_vector_consistent("fwd/fwd-src-accumulated");
+    let req = FwdRequest::new(
+        fwd_op::READ,
+        &["net", "uplink", "d", "sensor", "temp"],
+        &["net", "downlink", "a", "net", "downlink", "cli", "reply-ep"],
+    );
+    assert_eq!(encode(&encode_fwd(&req).unwrap()), bin);
+    let f = decode_fwd(&bin).unwrap();
+    assert_eq!(
+        libtracer::fwd::fwd_dst_path(&f).unwrap(),
+        "/net/uplink/d/sensor/temp"
+    );
     assert_eq!(
         libtracer::fwd::fwd_src_path(&f).unwrap(),
-        "/via_board/via_net/reply-ep"
+        "/net/downlink/a/net/downlink/cli/reply-ep"
     );
 }
 

@@ -116,7 +116,8 @@ fn field_node(sel: &FieldSel) -> Result<Tlv, BuildError> {
  * Children are assembled in the normative order for the request's `op`.
  * Vector-pinned: `fwd-read`, `fwd-write-value`, `fwd-await-timeout`,
  * `fwd-write-subscriber-field`, `fwd-reply-result`, `fwd-reply-error`,
- * `fwd-routed-multihop`, `fwd-src-accumulated`, `fwd-wildcard-reject`.
+ * `fwd-routed-mount-residual`, `fwd-routed-two-mount`, `fwd-src-accumulated`,
+ * `fwd-wildcard-reject`.
  *
  * # Errors
  * Any error from building the `dst`/`src` PATHs, the FIELD selector, or an

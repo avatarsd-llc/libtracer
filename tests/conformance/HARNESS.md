@@ -51,6 +51,20 @@ consequences follow, and both are load-bearing:
 
 Behavioural conformance is gated by **each implementation's own host suite**, not here.
 
+### The execution model has ONE forwarder — a named limitation
+
+The harness drives no topology at all: it decodes and re-encodes `input.bin`. There is therefore
+no way to express a *routed* vector here, and the shortfall is not merely that a vector cannot
+route — it is that until #419 **every FWD test in the C++ tree also had exactly one forwarder**.
+That is how the multi-hop `dst` form could disagree three ways (reference docs, vectors,
+implementation) for two weeks without a single red light: no artifact in the repo ever consumed
+one address at two nodes.
+
+`fwd/fwd-routed-two-mount` is delivered as a **codec-tier** vector for that reason — its bytes are
+the origin frame of a real two-mount route, and the route itself is proven where it can fail, in
+`core/tests/fwd_two_mount_test.cpp`. Read the vector's `ok` as "the codec carries these bytes",
+never as "this core routes them".
+
 ### Behavioural vectors and their binding tests
 
 | Vector | Behaviour claimed | Bound by |
@@ -64,6 +78,10 @@ Behavioural conformance is gated by **each implementation's own host suite**, no
 | `stream/history-depth-host-only` | The STREAM ring depth is owner-side (`set_history_depth` trims the ring) and has **no** wire surface: read and write both answer these bytes. | C++ `qos_policy_test.cpp` — `test_history_depth_is_host_only`, `test_removed_knob_reply_bytes`. |
 | `field/field-nested` | `:settings.app` is the two-level field that survives §3.B; a second level that is not `app` resolves to nothing. | C++ `qos_policy_test.cpp` — `test_conformance_vectors` (the vector's own bytes fed to `op_resolver_t` as the selector, with the sibling spelling as the ablation). |
 | `tlv-types/point-schema-app` | `read_schema` emits `POINT{ NAME, SETTINGS, NAME "app", SETTINGS }` for a vertex with a declared app table. | C++ `qos_policy_test.cpp` — `test_conformance_vectors` (byte-exact). |
+| `fwd/fwd-routed-two-mount` | A `dst` crossing TWO `net/<module>/<name>` mounts is consumed by two different routers — `strip_k = 3` at each — and only the residual `/sensor/temp` resolves at the third node; `src` grows by each forwarder's FULL mount run. | C++ `core/tests/fwd_two_mount_test.cpp` — three in-process `fwd_router_t` nodes chained by loopback link pairs, wired through the production `transport_vertex_t` `:children[]` SPEC door. No binding gates it: neither the Rust nor the TypeScript core has a router, so both correctly score `ok` on the codec alone. |
+| `fwd/fwd-src-accumulated` | The reverse half of the same invariant, seen mid-route: after two hops `src` has grown by **two full** `net/<module>/<name>` mount runs (six segments, most recent first), never by two bare NAMEs, while `dst` still carries the next mount plus its residual. | C++ `core/tests/fwd_two_mount_test.cpp` — the hop-2 probe asserts `src == /net/downlink/a/net/downlink/cli/reply-ep` byte-exactly, the identical two-run shape this vector carries. Same binding caveat as the row above: no Rust/TS router. |
+| `fwd/fwd-reply-result` | The closing half of the round trip: the terminus emits its reply with the request's routes **swapped verbatim** — reply `dst` = the accumulated request `src` (so it is routable home by the same strip-K descent), reply `src` = the request `dst`. | C++ `core/tests/fwd_two_mount_test.cpp` — the hop-2 probe pins the request `src` this vector's `dst` mirrors byte-exactly, and the terminus leg asserts the REPLY reaches the originator with `dst` fully consumed to `/reply-ep`; `core/tests/op_resolve_test.cpp` drives the swap itself. Same binding caveat: no Rust/TS router. |
+| `fwd/fwd-reply-error` | The same terminus, the same swapped routes, on the error side — the reply `src` is the **refused spelling** (the request `dst` that did not resolve), and the payload is `STATUS{ ERROR{ VALUE u16 } }` per RFC-0002 §C. | C++ `core/tests/op_resolve_test.cpp` — a non-local `dst` answers `kind=ERROR` with `STATUS{ ERROR{ VALUE u16=0x0020 tr::path::not_found } }`, byte-exact on the code. Rust `bindings/rust/tests/conformance_vectors.rs` and TS `vectors.test.mjs` gate the reply codec and the error-code read, not the routing. |
 
 `tlv-types/settings-reliability` is **not** in this table on purpose: since RFC-0022 it pins
 a `SETTINGS` record *shape* and no longer names any protocol knob, so it is a pure codec

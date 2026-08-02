@@ -266,6 +266,15 @@ target_link_libraries(registry_rebind_race_test PRIVATE libtracer)
 libtracer_test_warnings(registry_rebind_race_test)
 add_test(NAME registry_rebind_race COMMAND registry_rebind_race_test)
 
+# #419 — the two-mount route: one dst crossing TWO net/<module>/<name> mounts, driven
+# through three in-process routers chained by loopback link pairs. The behavioural binding
+# for the fwd/fwd-routed-two-mount conformance vector (HARNESS.md: a vector gates the codec
+# only), and the first FWD test in the tree with more than one forwarder.
+add_executable(fwd_two_mount_test fwd_two_mount_test.cpp)
+target_link_libraries(fwd_two_mount_test PRIVATE libtracer)
+libtracer_test_warnings(fwd_two_mount_test)
+add_test(NAME fwd_two_mount COMMAND fwd_two_mount_test)
+
 # M1 — conformance harness (links the built library).
 add_executable(conformance_runner conformance_runner.cpp)
 target_link_libraries(conformance_runner PRIVATE libtracer)

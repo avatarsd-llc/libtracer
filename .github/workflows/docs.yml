@@ -106,7 +106,7 @@ jobs:
       - name: Build harnesses for the results page
         run: |
           cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
-          cmake --build core/build -j          # all test targets, for the live test report
+          cmake --build core/build -j "$(nproc)"   # all test targets, for the live test report
           bash bench/fetch_zenoh.sh || echo "zenoh fetch failed — comparison will be omitted"
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
           cmake --build bench/build --target bench_libtracer bench_codec bench_forward_heap bench_transports bench_forward_demux bench_compact_delivery -j
