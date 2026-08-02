@@ -55,7 +55,7 @@ Per [HARNESS.md](../../../../HARNESS.md), a vector gates the **codec** only — 
 
 ## Provenance — the bytes CHANGED on 2026-08-02
 
-This is the only conformance vector whose bytes have ever changed. It previously read
+This vector previously read
 `FWD{ op=READ, dst=/can0/ow/sensor, src=/via_board/via_net/reply-ep }` (77 bytes, `0f4049…`),
 described as "the multihop op after two hops: dst shrunk by two, src grown by two".
 
@@ -69,6 +69,12 @@ Changed under maintainer ruling (b) on [#419](https://github.com/avatarsd-llc/li
 2026-08-02, on the DRAFT protocol (`v1.md`: adding a vector is free, changing existing bytes is a
 spec change — this one was authorised explicitly). The vector keeps its name: it still shows
 exactly what it always claimed to show, `src` accumulating mid-route.
+
+Ruling (c), the same day, applied the identical fix to the two vectors carrying the reverse leg —
+[`fwd/fwd-reply-result`](../fwd-reply-result/description.md) and
+[`fwd/fwd-reply-error`](../fwd-reply-error/description.md), whose `dst` was the same pre-S2a
+`/via_board/via_net/reply-ep`. Those three vectors are the only ones whose bytes have ever
+changed, and after (c) no conformance vector carries the pre-S2a form.
 
 ```
 0f407300010001000006402800020003006e65740200060075706c696e6b02000100640200060073656e736f720200040074656d7006403e00020003006e657402000800646f776e6c696e6b0200010061020003006e657402000800646f776e6c696e6b02000300636c69020008007265706c792d6570
