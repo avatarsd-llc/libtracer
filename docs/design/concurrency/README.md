@@ -19,7 +19,7 @@ remain on the hot paths.
 
 ## The three instruments behind the figures here
 
-`bench/` holds sixteen bench sources. This table is not an inventory of them: it names the three
+`bench/` holds several dozen bench sources. This table is not an inventory of them: it names the three
 that produce the numbers in [`00-scaling-and-serialization.md`](00-scaling-and-serialization.md),
 because it matters which one a figure came from. The write and delivery path quotes a fourth,
 named in its row above.
@@ -28,10 +28,10 @@ named in its row above.
 | --- | --- | --- |
 | [`bench/bench_contention`](../../../bench/bench_contention.cpp) | the **machine** — what one shared cache line costs, libtracer absent | yes |
 | [`bench/bench_lkv_slot`](../../../bench/bench_lkv_slot.cpp) | model slot policies (`slot` mode) and the real `graph_t::read`/`write` shapes (`graph` mode) | yes |
-| the `has_registered_child` ablation | the ceiling a lock removal could reach | not committed; it short-circuits the fork check (`vertex_t::has_registered_child`, `core/include/libtracer/vertex.hpp:1056`, called from `core/src/graph.cpp:733`), which breaks the composed branch read |
+| the `has_registered_child` ablation | the ceiling a lock removal could reach | not committed; it short-circuits the fork check (`vertex_t::has_registered_child`, `core/include/libtracer/vertex.hpp:1122`, called from `core/src/graph.cpp:733`), which breaks the composed branch read |
 
 A `slot`-mode arm models a slot policy in isolation and is not the cost of any code path. The
-arms are named `model_*` in the source (`bench/bench_lkv_slot.cpp:188,337,451`) so that a model
+arms are named `model_*` in the source (`bench/bench_lkv_slot.cpp:192,341,455`) so that a model
 policy and a real library type cannot be confused. Never quote a `slot`-mode number as a forecast
 for a real path.
 

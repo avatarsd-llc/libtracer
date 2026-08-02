@@ -49,18 +49,18 @@ The list below is the complete set of acquisitions in `graph.cpp`.
 
 | taken | where | frequency |
 | --- | --- | --- |
-| **unique** | `register_vertex_key` (`:333`), `retire` (`:398`) | control plane |
-| shared | `find_ptr` (`:546`) — **so every `path_t` overload pays it once**; ≥3× and non-scaling (§6) | per op, path-addressed only |
-| shared | `field_write` (`:1494`) | per `:field` write |
-| shared | `read_children` (`:1817`), `read_children_folded` (`:1864`), `read_subtree_folded` (`:1933`) | per composed read — these walk, so they need it |
-| shared | `note_subscriber_added` / `_removed` (`:534`, `:540`), `evict_link_edges` (`:443`, `:448`), `has_first_level_child` (`:610`) | control plane |
+| **unique** | `register_vertex_key` (`:304`), `retire` (`:390`), `collect` (`:422`) | control plane |
+| shared | `find_ptr` (`:566`) — **so every `path_t` overload pays it once**; ≥3× and non-scaling (§6) | per op, path-addressed only |
+| shared | `field_write` (`:1583`) | per `:field` write |
+| shared | `read_children` (`:1863`), `read_children_folded` (`:1910`), `read_subtree_folded` (`:1982`) | per composed read — these walk, so they need it |
+| shared | `note_subscriber_added` / `_removed` (`:554`, `:560`), `evict_link_edges` (`:464`, `:469`), `has_first_level_child` (`:630`), `parked_seam_count` (`:431`) | control plane |
 
-`retire_subtree` (`:363`) takes nothing of its own: it is called from inside `retire`'s unique
-hold and recurses under it. The doc comment at `:421` states the same contract for the
+`retire_subtree` (`:341`) takes nothing of its own: it is called from inside `retire`'s unique
+hold and recurses under it. The doc comment at `:437` states the same contract for the
 `evict_link_edges` snapshot helper — it documents a required hold, it is not an acquisition.
 
 The leaf/branch fork reads a per-vertex bit (`vertex_t::has_registered_child`,
-`core/include/libtracer/vertex.hpp:1056`), called from `core/src/graph.cpp:733`, and takes no
+`core/include/libtracer/vertex.hpp:1122`), called from `core/src/graph.cpp:733`, and takes no
 lock. The symbol exists on the vertex rather than on the graph, so a reader grepping for it finds
 a flag test rather than a lock acquisition.
 
@@ -73,15 +73,15 @@ kind, not only in degree.
 
 The stripe count is an ordinary config constant shared through one header
 ([ADR-0068 — build configuration is plain C++](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0068-build-configuration-is-plain-cpp-config-header.md);
-default 16, the sharing rationale at `vertex.hpp:673`). The stripe is selected by
-`vertex_stripe_of` (`:825`) from the vertex address, hashed `(h >> 6) % kVertexLockStripes`
-(`:821`). The stripes guard the fan-out edge list, the STREAM ring, the write-sequence bump and
-the ACL state. `snapshot_edges` (`:1508`) takes one on **every delivery**; so do `add_edge`,
+default 16, the sharing rationale at `vertex.hpp:734-738`). The stripe is selected by
+`vertex_stripe_of` (`:816`) from the vertex address, hashed `(h >> 6) % kVertexLockStripes`
+(`:812`). The stripes guard the fan-out edge list, the STREAM ring, the write-sequence bump and
+the ACL state. `snapshot_edges` (`:1599`) takes one on **every delivery**; so do `add_edge`,
 `clear_edge` and `set_acl`. It is reached only when the written vertex has an edge of its own:
 `fan_out` returns on a zero `own_subs_ordered()` first, so an unobserved write — and every
 placeholder ancestor a bubble walks past — touches no stripe at all
-([#635](https://github.com/avatarsd-llc/libtracer/issues/635); before 2026-07-31 it did, which
-is why the same-stripe write arm scaled negatively).
+([#635](https://github.com/avatarsd-llc/libtracer/issues/635)). Without that gate the
+same-stripe write arm scales negatively, because every placeholder ancestor takes a stripe.
 
 The table has two realizations, chosen by whether the platform's `std::mutex` has a constexpr
 constructor. Duplicated here from the configuration notes because a reader reasoning about
@@ -89,15 +89,15 @@ stripe-lock cost looks in this section:
 
 | platform | table | cost |
 | --- | --- | --- |
-| host libstdc++ / libc++ | `inline constinit std::array<vertex_stripe_t, kVertexLockStripes> vertex_stripes` (`vertex.hpp:733`) | none — constant-initialized |
-| a target without a constexpr `std::mutex` | guarded function-local `static` (`:811`) | one predicted branch per control-plane verb |
+| host libstdc++ / libc++ | `inline constinit std::array<vertex_stripe_t, kVertexLockStripes> vertex_stripes` (`vertex.hpp:794`) | none — constant-initialized |
+| a target without a constexpr `std::mutex` | guarded function-local `static` (`:802`) | one predicted branch per control-plane verb |
 
 Two vertices that hash to the same stripe contend even though they share nothing else — which is
 what the `stripe1` bench topology exists to measure.
 
 ### 2.3 The LKV slot — per vertex, policy-selected
 
-`lkv_slot_t` is a compile-time policy (`core/include/libtracer/config.hpp:183`,
+`lkv_slot_t` is a compile-time policy (`core/include/libtracer/config.hpp.in:214`,
 [ADR-0069 — LKV slot is a compile-time policy](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md)).
 Two bindings ship:
 
@@ -113,8 +113,8 @@ The write-sequence read, the subtree-listener counters (`own_subs_`, `listeners_
 itself when no waiter is parked
 ([#555](https://github.com/avatarsd-llc/libtracer/pull/555)).
 
-Since [#635](https://github.com/avatarsd-llc/libtracer/issues/635) the **whole delivery decision
-for an unobserved write** is on this list: two counter loads and no lock. One of them,
+The **whole delivery decision for an unobserved write** is on this list too
+([#635](https://github.com/avatarsd-llc/libtracer/issues/635)): two counter loads and no lock. One of them,
 `own_subs_ordered()`, is read `seq_cst` rather than relaxed — it is the only read that decides
 whether to deliver at all, so it pairs against a subscribe taking ADR-0049's latch. Every other
 reader of the same counter stays relaxed, because deciding *how much* work to do can safely be
@@ -148,7 +148,7 @@ Two limits, and the second hides the first:
    There the limit is the value's own reference count, and the `sp-load` calibration arm —
    1.4 M/s at T=24 — accounts for nearly all of the 1.74 M/s stock rate.
 
-The write path takes no map lock (`write_impl`, `graph.cpp:850`), which is the entire "writes
+The write path takes no map lock (`write_impl`, `graph.cpp:946`), which is the entire "writes
 scale 5×, reads do not" asymmetry.
 
 **A caution on the calibration arms.** `sp-load` measures 710 ns/op at T=24 against a whole real
@@ -299,7 +299,7 @@ re-measurement — never by further reasoning about a curve.
 
 | A plausible claim | What checking shows | The check that decides it |
 | --- | --- | --- |
-| The read-path residual is `snapshot_edges`' stripe lock | `snapshot_edges` (`vertex.hpp:1436`) is on the **delivery** path; `read` never calls it | reading the call graph |
+| The read-path residual is `snapshot_edges`' stripe lock | `snapshot_edges` (`vertex.hpp:1599`) is on the **delivery** path; `read` never calls it | reading the call graph |
 | "Nothing process-wide is serializing — not the map lock" | Every read acquired `map_mutex_` shared through the fork check — the one lock the claim named | the §3 ablation |
 | Distinct-vertex reads "retain 94%/91% of their T=1 rate", read as healthy | The arithmetic used the wrong shape's denominator — real figures 106%/96% — and retention of a T=1 *aggregate* is a serializer signature, not a health signature | recomputing it |
 | Only a config traits template can recover the stripe table's 896 B, "because the alignment is part of the type" | The *count* cannot reach the alignment; the **alignment itself is a config constant**. One `constexpr` and one token recover the identical 896 B, zero templates | building it both ways on rv32 |
