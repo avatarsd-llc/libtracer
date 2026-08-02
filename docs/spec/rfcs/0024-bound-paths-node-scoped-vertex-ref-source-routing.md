@@ -394,7 +394,7 @@ That third row is the honest consequence of the design, not an exemption claimed
 hazard `mount_generation` exists for — "bind a label through mount `net/ws/s`, then register
 `net/ws/s/rack`, and a full `FWD` resolves against the NEW, deeper mount while a `COMPACT` riding
 the old label still dereferences the binding made against the old split"
-(`child_registry.hpp:270-274`) — requires a **cached split**. A vref caches a vertex, and a vertex
+(`child_registry.hpp:268-270`) — requires a **cached split**. A vref caches a vertex, and a vertex
 is not a split.
 
 ### 5.3 Failure is a drop, never a mis-route
@@ -759,13 +759,13 @@ Element shapes are in §4.5. Design-level rejections:
 
 - **Extend §E.1's label to client-originated binding** (#504's original shape). Rejected on state:
   it puts a table on **every hop**, which is the property §E.1 itself scopes to compact flows only
-  ("a constrained ws node forwarding 50 cold reads holds **zero** label state", RFC-0004:186), and
+  ("a constrained ws node forwarding 50 cold reads holds **zero** label state", RFC-0004:187), and
   it needs an advertise round before the first op. The bound path holds nothing at any hop and
   mints inside work already happening.
 - **A per-hop route cache keyed on canonical bytes.** Rejected: it is the ADR-0062 reverse-index
   shape twice refused — "it moves work onto the control plane's lock to serve the minority flow,
   and it is a SECOND invalidation mechanism beside one that works"
-  (`core/include/libtracer/child_registry.hpp:277-281`).
+  (`core/include/libtracer/child_registry.hpp:281-283`).
 - **A negotiated capability for bound-path support.** Rejected for minimalism: v1 has no
   capability negotiation and deliberately so (`CONTEXT.md` §Capability negotiation, ADR-0013). The
   fallback in §9.3 is a closed-form local decision needing no negotiation — try bound, take the
