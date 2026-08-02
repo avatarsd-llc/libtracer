@@ -88,12 +88,35 @@ void* counted(std::size_t n) {
     return std::malloc(n == 0 ? 1 : n);
 }
 
+/**
+ * @brief The over-aligned counted allocation — `aligned_alloc`, whose result `free` accepts.
+ *
+ * Forwarding an over-aligned request to plain `malloc` would hand back memory aligned only to
+ * `max_align_t`; a `std::pmr` control block asking for 16- or 32-byte alignment would then be
+ * under-aligned. The size is rounded up to a multiple of the alignment, which `aligned_alloc`
+ * requires.
+ */
+void* counted_aligned(std::size_t n, std::size_t align) {
+    if (g_arm) {
+        ++g_allocs;
+        g_bytes += n;
+    }
+    if (align < alignof(std::max_align_t)) align = alignof(std::max_align_t);
+    const std::size_t rounded = ((n == 0 ? 1 : n) + align - 1) / align * align;
+    return std::aligned_alloc(align, rounded);
+}
+
 }  // namespace
 
 // Every allocating form, not just the throwing one: libtracer's heap backend allocates
 // through `::operator new(bytes, std::nothrow)` (mem_heap.hpp), so overriding only
 // `operator new(size)` would make the flatten INVISIBLE to this counter — exactly the
 // undercount `bench_compact_delivery` was corrected for.
+//
+// And every DEALLOCATING form, for a reason ASan reports as `alloc-dealloc-mismatch`: a
+// replacement set with a hole leaves that one form to the sanitizer's own operator, which is
+// then handed a pointer this file `malloc`ed. The sized+aligned `operator delete` is the hole
+// libstdc++'s `std::pmr::memory_resource::deallocate` walks into on every pmr control block.
 void* operator new(std::size_t n) {
     void* const p = counted(n);
     if (p == nullptr) throw std::bad_alloc();
@@ -106,17 +129,30 @@ void* operator new[](std::size_t n) {
 }
 void* operator new(std::size_t n, const std::nothrow_t&) noexcept { return counted(n); }
 void* operator new[](std::size_t n, const std::nothrow_t&) noexcept { return counted(n); }
-void* operator new(std::size_t n, std::align_val_t) { return operator new(n); }
-void* operator new(std::size_t n, std::align_val_t, const std::nothrow_t&) noexcept {
-    return counted(n);
+void* operator new(std::size_t n, std::align_val_t a) {
+    void* const p = counted_aligned(n, static_cast<std::size_t>(a));
+    if (p == nullptr) throw std::bad_alloc();
+    return p;
 }
-void* operator new[](std::size_t n, std::align_val_t) { return operator new(n); }
+void* operator new[](std::size_t n, std::align_val_t a) { return operator new(n, a); }
+void* operator new(std::size_t n, std::align_val_t a, const std::nothrow_t&) noexcept {
+    return counted_aligned(n, static_cast<std::size_t>(a));
+}
+void* operator new[](std::size_t n, std::align_val_t a, const std::nothrow_t&) noexcept {
+    return counted_aligned(n, static_cast<std::size_t>(a));
+}
 void operator delete(void* p) noexcept { std::free(p); }
-void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+void operator delete(void* p, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete[](void* p, const std::nothrow_t&) noexcept { std::free(p); }
 void operator delete(void* p, std::align_val_t) noexcept { std::free(p); }
 void operator delete[](void* p, std::align_val_t) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t, std::align_val_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t, std::align_val_t) noexcept { std::free(p); }
+void operator delete(void* p, std::align_val_t, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete[](void* p, std::align_val_t, const std::nothrow_t&) noexcept { std::free(p); }
 
 namespace {
 
