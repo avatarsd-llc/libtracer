@@ -379,7 +379,8 @@ template <class N>
  *
  * The two branches are asymmetric in RAM, not in correctness: a copy holds the payload, a pin
  * holds the whole owning **segment** for the value's lifetime. An absolute byte threshold
- * (`store_ref_min_bytes`) prices the payload and never looks at what is held, so a 4 KB payload
+ * (`store_ref_min_bytes`, as this knob was named before RFC-0022 §3.D) prices the payload and
+ * never looks at what is held, so a 4 KB payload
  * in a 4 KB frame and the same 4 KB payload in a 256 KB frame — opposite trades — satisfy it
  * identically, and the waste is bounded not at all. The ratio bounds it at `(K-1)x` the payload
  * using two quantities already in hand three lines from the branch.
@@ -763,10 +764,10 @@ template <class N>
             // binaries is what produced the 2.8x swing on identical code that the standing
             // interleave rule was written against. §3.D's landing form is the config constant
             // alone, and the sentinel is both defaults — so this branch changes no observable
-            // behaviour by itself. (The declaration's NAME still says min-bytes; since the
-            // §6 bench its value is the RATIO — tracked for rename.)
-            const std::uint32_t pin_k = graph.store_ref_min_bytes(v) != 0
-                                            ? graph.store_ref_min_bytes(v)
+            // behaviour by itself. Whether the override survives at all is a live maintainer
+            // question (#774); the name now at least says what the value is.
+            const std::uint32_t pin_k = graph.pin_payload_ratio(v) != 0
+                                            ? graph.pin_payload_ratio(v)
                                             : tr::graph::kPinPayloadRatio;
             const rope_t value = own_or_ref_tlv(payload_node, frame_view, pin_k);
             if (value.total_length() == 0)

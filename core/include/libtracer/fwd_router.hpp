@@ -469,7 +469,7 @@ class fwd_router_t {
      * (offset-dispatch, zero heap) — and threads the owning view to the
      * terminus, where a big trailer-less WRITE payload may be stored as a
      * subview of it (refcount pin, zero copy) under the vertex's
-     * `store_ref_min_bytes` policy. A multi-link rope routes a FORWARD hop
+     * `pin_payload_ratio` declaration. A multi-link rope routes a FORWARD hop
      * directly over the rope cursor (ADR-0053 ④b): the dispatch offsets are read
      * through the link-walking @ref wire::grammar::rope_cursor and the egress
      * scatter-gathers the untouched links — no flatten. Only a terminus / reply /

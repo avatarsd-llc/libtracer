@@ -451,22 +451,25 @@ class graph_t {
      */
     void set_history_depth(vertex_handle_t v, std::uint32_t keep);
     /**
-     * @brief Declare @p v's store-by-reference threshold in bytes (ADR-0042 §3); 0 (the
-     *        default) disables referencing.
+     * @brief Declare @p v's RFC-0022 §3.D pin amplification ratio `K` (ADR-0042 §3);
+     *        @ref tr::graph::kPinNever (0, the default) disables pinning on this vertex.
      *
-     * A view-delivered WRITE whose payload TLV is at least this large, and carries no
-     * trailer bits, is stored as a refcounted SUBVIEW of the inbound frame — no allocation
-     * and no copy — instead of the one-copy trailer-sliced store. Pinning holds the WHOLE
-     * inbound segment for the value's lifetime, so it buys latency and pays in RAM; that
-     * trade is a deployment call, which is why this is an owner-side declaration and not,
-     * since RFC-0022 §3.B, a remotely writable knob. Nothing is inherited (§3.F).
+     * @p k is a RATIO, not a byte count. A view-delivered WRITE is stored as a refcounted
+     * SUBVIEW of the inbound frame — no allocation, no copy — iff
+     * `payload_bytes * k >= segment_bytes` and the payload is trailer-less; otherwise it
+     * takes the one-copy trailer-sliced store. Pinning holds the WHOLE inbound segment for
+     * the value's lifetime, so it buys latency and pays in RAM bounded at `(k-1)x` the
+     * payload; that trade is a deployment call, which is why this is an owner-side
+     * declaration and not, since RFC-0022 §3.B, a remotely writable knob. Nothing is
+     * inherited (§3.F).
      *
-     * @note RFC-0022 §3.D replaces this absolute threshold with the amplification ratio
-     *       `payload * K >= segment`. That change is gated by §6 on a dual-target
-     *       measurement which has not been run, so the predicate here is still the
-     *       absolute one, defaulting off exactly as it did before the RFC.
+     * @note This is a per-vertex OVERRIDE of `config_t::kPinPayloadRatio`, which Amendment 2
+     *       fixes at the sentinel on both targets. It exists so §6-style measurement arms
+     *       rotate inside one process — measuring them as separate binaries is what produced
+     *       a 2.8x swing on identical code. Setting it changes no observable behaviour until
+     *       a deployment opts a vertex in.
      */
-    void set_store_ref_min_bytes(vertex_handle_t v, std::uint32_t bytes);
+    void set_pin_payload_ratio(vertex_handle_t v, std::uint32_t k);
     /**
      * @brief Block until the vertex's value changes or @p timeout elapses; return the value.
      * @return The stored value as a rope, or a `status_t` (e.g. `TIMEOUT`).
@@ -801,14 +804,15 @@ class graph_t {
     [[nodiscard]] bool has_first_level_child(std::span<const std::byte> record) const;
 
     /**
-     * @brief @p v's store-by-reference threshold in bytes (ADR-0042 §3); 0 ⇒ referencing off.
+     * @brief @p v's declared RFC-0022 §3.D pin amplification ratio `K` (ADR-0042 §3);
+     *        @ref tr::graph::kPinNever (0) ⇒ this vertex never pins.
      *
      * The read accessor the opaque handle does not expose directly: the WRITE resolver
      * (`op_resolve_walk.hpp`) queries it here instead of dereferencing the vertex. One
      * inline load, and nothing is inherited (RFC-0022 §3.F) — a vertex whose owner never
-     * called @ref set_store_ref_min_bytes answers 0 whatever its ancestors hold.
+     * called @ref set_pin_payload_ratio answers 0 whatever its ancestors hold.
      */
-    [[nodiscard]] std::uint32_t store_ref_min_bytes(vertex_handle_t v) const noexcept;
+    [[nodiscard]] std::uint32_t pin_payload_ratio(vertex_handle_t v) const noexcept;
 
     /**
      * @brief Find-or-create the vertex at @p key (write-creates, RFC-0005).

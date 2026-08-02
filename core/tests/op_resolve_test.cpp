@@ -470,13 +470,13 @@ void test_non_canonical_dst() {
 }
 
 /**
- * @brief ADR-0042 §3 — the owner-declared `store_ref_min_bytes` referenced WRITE store: a view-
+ * @brief ADR-0042 §3 — the owner-declared `pin_payload_ratio` referenced WRITE store: a view-
  *        delivered frame's big trailer-less payload stores as a SUBVIEW of the frame (segment-
  *        pointer identity, zero copy, frame pinned); the default (0), a small payload, a trailered
  *        payload, and a span-delivered frame all keep the ADR-0041 one-copy trailer-sliced store.
  */
-void test_store_ref_threshold() {
-    std::printf("store_ref_min_bytes — referenced vs copied WRITE store (ADR-0042 §3):\n");
+void test_pin_payload_ratio_store() {
+    std::printf("pin_payload_ratio — referenced vs copied WRITE store (ADR-0042 §3):\n");
     graph_t g;
     op_resolver_t resolver(g);
     const auto path = path_t::parse("/sensor/blob");
@@ -499,7 +499,7 @@ void test_store_ref_threshold() {
         check(reply.has_value(), "WRITE with default threshold produced a reply");
         const auto rd = g.read(v);
         check(rd.has_value() && (*rd)->only().owner.get() != frame.owner.get(),
-              "default store_ref_min_bytes=0 => stored bytes are a COPY (segment differs)");
+              "default pin_payload_ratio=0 => stored bytes are a COPY (segment differs)");
         check(rd.has_value() && (*rd)->only().bytes().size() == big_tlv.size() &&
                   std::memcmp((*rd)->only().bytes().data(), big_tlv.data(), big_tlv.size()) == 0,
               "copied store holds the payload TLV bytes");
@@ -513,8 +513,8 @@ void test_store_ref_threshold() {
                    make_value(b_value({0x08, 0x00, 0x00, 0x00})))
                .has_value(),
           "the removed `:settings.store_ref_min_bytes` write surface refuses");
-    g.set_store_ref_min_bytes(v, 8);
-    check(g.store_ref_min_bytes(v) == 8, "the owner-side declaration takes the threshold (8)");
+    g.set_pin_payload_ratio(v, 8);
+    check(g.pin_payload_ratio(v) == 8, "the owner-side declaration takes the threshold (8)");
 
     // Big trailer-less payload >= threshold => the stored view IS the frame segment.
     {
@@ -585,7 +585,7 @@ void test_store_ref_concurrent() {
     op_resolver_t resolver(g);
     const auto path = path_t::parse("/sensor/blob");
     tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::STORED_VALUE);
-    g.set_store_ref_min_bytes(v, 8);
+    g.set_pin_payload_ratio(v, 8);
 
     std::vector<std::byte> big(64);
     for (std::size_t i = 0; i < big.size(); ++i) big[i] = static_cast<std::byte>(0xA0 + i);
@@ -742,7 +742,7 @@ int main() {
     test_await_field_selector_is_enotty();
     test_subscribers_field();
     test_write_trailer_sliced();
-    test_store_ref_threshold();
+    test_pin_payload_ratio_store();
     test_store_ref_concurrent();
     test_non_canonical_dst();
     test_wildcard_and_not_local();

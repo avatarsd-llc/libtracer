@@ -29,9 +29,11 @@
  *   7. `stream/history-depth-host-only`       — `set_history_depth` changes the retained ring
  *                                               depth, and no wire operation reaches it.
  *
- * §5.8 `store/pin-ratio` is deliberately ABSENT: §3.D's amplification predicate is gated by §6
- * on a dual-target measurement that has not been run, so `store_ref_min_bytes` keeps the
- * absolute threshold it shipped with — rehomed owner-side, but otherwise untouched.
+ * §5.8 `store/pin-ratio` is covered at the decision site (`op_resolve_test`, `udp_test`), not
+ * here: §3.D's amplification predicate landed with §6's bench, and Amendment 2 fixes the
+ * default at the sentinel on both targets. What this file pins about it is the DECLARATION —
+ * `pin_payload_ratio`, the owner-side per-vertex override of `config_t::kPinPayloadRatio`
+ * (renamed from `store_ref_min_bytes`, #774: the value has been the ratio K since the bench).
  */
 
 #include <array>
@@ -380,23 +382,23 @@ void test_nothing_is_inherited() {
     std::printf("§3.F — no inheritance, and no registration-forced extension block:\n");
     graph_t g;
     const vertex_handle_t parent = g.register_vertex(path_t("/i/root"), role_t::STORED_VALUE);
-    g.set_store_ref_min_bytes(parent, 256);
+    g.set_pin_payload_ratio(parent, 256);
     g.set_history_depth(parent, 4);
-    check(g.store_ref_min_bytes(parent) == 256, "the parent holds its own declared threshold");
+    check(g.pin_payload_ratio(parent) == 256, "the parent holds its own declared ratio");
 
     // A child registered UNDER it inherits nothing — the whole hole Amendment 1 closed.
     const vertex_handle_t child = g.register_vertex(path_t("/i/root/a"), role_t::STORED_VALUE);
-    check(g.store_ref_min_bytes(child) == 0, "a child inherits NOTHING (§3.F)");
+    check(g.pin_payload_ratio(child) == 0, "a child inherits NOTHING (§3.F)");
     check(!has_ext(child), "... and pays no extension block for the parent's declaration");
 
     // A child registered LATER, and one under a fresh intermediate placeholder, likewise.
-    g.set_store_ref_min_bytes(parent, 512);
+    g.set_pin_payload_ratio(parent, 512);
     const vertex_handle_t later = g.register_vertex(path_t("/i/root/b"), role_t::STORED_VALUE);
     const vertex_handle_t deep =
         g.register_vertex(path_t("/i/root/mid/deep"), role_t::STORED_VALUE);
-    check(g.store_ref_min_bytes(later) == 0 && g.store_ref_min_bytes(deep) == 0,
+    check(g.pin_payload_ratio(later) == 0 && g.pin_payload_ratio(deep) == 0,
           "a later child and a grandchild under a placeholder inherit nothing either");
-    check(g.store_ref_min_bytes(parent) == 512,
+    check(g.pin_payload_ratio(parent) == 512,
           "... while the parent's own later declaration still lands on the parent");
 
     // The RAM half of §3.B: registration cannot force the cold block any more, because the
@@ -407,8 +409,8 @@ void test_nothing_is_inherited() {
     check(has_ext(stream),
           "ablation: a STREAM identity still allocates one (has_ext is not stuck)");
     // A declaration is what materialises it — the owner pays only when the owner asks.
-    g.set_store_ref_min_bytes(plain, 8);
-    check(has_ext(plain) && g.store_ref_min_bytes(plain) == 8,
+    g.set_pin_payload_ratio(plain, 8);
+    check(has_ext(plain) && g.pin_payload_ratio(plain) == 8,
           "an owner-side declaration materialises the block, and takes effect");
 }
 

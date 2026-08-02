@@ -523,7 +523,7 @@ parameters** ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/doc
 | what | who supplies it | how |
 | ---- | ---- | ---- |
 | STREAM ring depth | the application — a retention *intent* no peer and no injected resource can supply | `graph_t::set_history_depth(v, keep)` |
-| store-by-reference threshold | the deployment — a copy/pin trade ([ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md) §3) | `graph_t::set_store_ref_min_bytes(v, bytes)` |
+| pin amplification ratio `K` | the deployment — a copy/pin trade ([ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md) §3, [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.D) | `graph_t::set_pin_payload_ratio(v, k)` |
 
 Both are owner-side wiring calls in the shape of `set_delivery_mode` and `set_app_fields` —
 declarations the owner makes host-side after registration — and **neither has any wire surface**:
@@ -533,7 +533,7 @@ owner-side configuration.
 **Nothing is inherited** (§3.F). A declaration reaches exactly the vertex it names: there is no
 ancestor walk, no cached ancestor reference, and no propagation question when a parent's
 configuration changes after its children exist. Both readers therefore stay a single inline load
-off the vertex's own extension block — `store_ref_min_bytes` is read on every view-delivered write
+off the vertex's own extension block — `pin_payload_ratio` is read on every view-delivered write
 and the ring depth on every STREAM store, so a walk on either path would be disqualifying under
 this project's latency-first ordering.
 
