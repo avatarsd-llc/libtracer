@@ -11,7 +11,8 @@ receive the value a different way:
 
 Delivery to (1) and (2) is a refcount-bump clone of the *same* [rope](../modules/views.md)
 value — no byte copy. The example finishes by reading the last-known-value back and
-field-writing a QoS setting, then discovering it via the `:schema` control read.
+declaring the STREAM ring depth owner-side (`set_history_depth`, which has no wire
+surface), then discovering the vertex shape via the `:schema` control read.
 
 ## What to notice
 
