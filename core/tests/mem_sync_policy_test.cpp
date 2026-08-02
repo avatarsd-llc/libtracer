@@ -24,8 +24,8 @@
  *
  * THE ABLATION (#770): building this TU with `-DLIBTRACER_ABLATE_POOL_SYNC` swaps the
  * policy's `lock`/`unlock` for no-ops — the critical section, and nothing else, removed.
- * Checks 2 and 3 then go RED without a sanitizer (measured: 3 threads × 20k iterations
- * reported thousands of double hand-outs and a mangled free list). See
+ * The run then goes RED without a sanitizer (measured: 3 threads × 20k iterations dies
+ * on the mangled free list — SIGSEGV/exit 139 — before checks 2 and 3 even print). See
  * `core/tests/CMakeLists.txt` for the exact command; the ablation build is deliberately
  * NOT an `add_test` because "the race manifests" is a probabilistic pass condition.
  */

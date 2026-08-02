@@ -350,10 +350,12 @@ add_test(NAME mem_sync_pool COMMAND mem_sync_pool_test)
 #
 # THE ABLATION, run by hand (deliberately not an add_test — "the race manifests" is a
 # probabilistic pass condition, and a flaky green is worse than none):
-#   g++ -std=c++23 -O2 -pthread -DLIBTRACER_ABLATE_POOL_SYNC \
-#       -I core/include core/tests/mem_sync_policy_test.cpp core/src/*.cpp -o /tmp/ablate
-# The build with the policy's critical section removed reports double hand-outs and a
-# mangled free list; the unablated build reports OK.
+#   g++ -std=c++23 -O2 -pthread -DLIBTRACER_ABLATE_POOL_SYNC -I core/include \
+#       core/tests/mem_sync_policy_test.cpp core/src/mem_pool.cpp core/src/mem_heap.cpp \
+#       core/src/backend_set.cpp core/src/mem_source.cpp -o ablate
+# (Only these TUs — core/src/*.cpp would drag in the msquic-dependent transports.)
+# The ablated build dies on the corruption (typically SIGSEGV in the mangled free list
+# before the counters even print); the unablated build reports OK.
 add_executable(mem_sync_policy_test mem_sync_policy_test.cpp)
 target_link_libraries(mem_sync_policy_test PRIVATE libtracer)
 libtracer_test_warnings(mem_sync_policy_test)
