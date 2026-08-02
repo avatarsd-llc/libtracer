@@ -7,9 +7,12 @@
 #     bench harness, CMake, or this workflow. A PR touching only bindings/typescript/**,
 #     docs/**, packaging, etc. does NOT run perf.
 #  2. PR gate (`gate-pr`) — main's bench_libtracer and the PR's bench_libtracer are BOTH
-#     built and timed on the SAME runner in one job; only a real relative regression
-#     (p50 +15% / mean +12% / throughput -12%, best-of-3 runs) fails. perf_gate.py
-#     keeps its absolute-floor backstop. No Actions cache feeds the gate.
+#     built on the SAME runner and then timed INTERLEAVED (A B / B A / …, 4 pairs) in one
+#     job, so a drift window in the machine is shared by the two arms instead of landing
+#     on whichever one happened to be running. A fail needs the regression to be large
+#     (median past p50 +15% / mean +12% / throughput -12%), separated (the arms' ranges do
+#     not overlap) AND reproduced across a majority of the pairs — #763. No Actions cache
+#     feeds the gate.
 #  3. Push ratchet (`ratchet`) — every main push re-runs the same gate on THREE
 #     independently-drawn runners (redundant testing): each replica builds HEAD and its
 #     PARENT commit and gates HEAD against the parent on its own hardware. A pullback
@@ -64,13 +67,16 @@ jobs:
           git worktree add --detach ../main-baseline origin/main
           cmake -S ../main-baseline/bench -B ../main-baseline/bench/build -DCMAKE_BUILD_TYPE=Release
           cmake --build ../main-baseline/bench/build --target bench_libtracer bench_forward_heap -j
-      - name: Performance gate (same-runner main baseline)
+      # The gate's OWN decision rules, unit-tested before anything is timed: #763 was a
+      # defect in the gate, not in what it measures, so the rules are regression-tested
+      # against the recorded false-failure and true-regression sample sets.
+      - name: Perf-gate decision-rule tests
+        run: python3 bench/test_perf_gate.py
+      - name: Performance gate (INTERLEAVED same-runner A/B vs main)
         run: |
-          echo "== record main (baseline) on this runner =="
-          python3 bench/perf_gate.py --bench ../main-baseline/bench/build/bench_libtracer \
-            --bench-fwd ../main-baseline/bench/build/bench_forward_heap --update-baseline
-          echo "== gate PR candidate against the same-runner baseline (latency + per-vertex memory) =="
-          python3 bench/perf_gate.py
+          python3 bench/perf_gate.py \
+            --baseline-bench ../main-baseline/bench/build/bench_libtracer \
+            --baseline-bench-fwd ../main-baseline/bench/build/bench_forward_heap
 
   # --- main push: REDUNDANT no-pullback ratchet (3 runners, HEAD vs parent) -------
   # Each replica is a complete same-runner experiment on independently-drawn hardware:
@@ -155,14 +161,13 @@ jobs:
           else
             echo "root commit — no parent to ratchet against"
           fi
-      - name: No-pullback ratchet (HEAD vs parent, this runner)
+      - name: No-pullback ratchet (HEAD vs parent, this runner, interleaved)
         run: |
           if [ -x ../parent-baseline/bench/build/bench_libtracer ]; then
-            echo "== record the parent (ratchet baseline) on this runner =="
-            python3 bench/perf_gate.py --bench ../parent-baseline/bench/build/bench_libtracer \
-              --bench-fwd ../parent-baseline/bench/build/bench_forward_heap --update-baseline
-            echo "== gate HEAD against its parent on the same runner (latency + per-vertex memory) =="
-            python3 bench/perf_gate.py
+            echo "== gate HEAD against its parent, interleaved on this runner =="
+            python3 bench/perf_gate.py \
+              --baseline-bench ../parent-baseline/bench/build/bench_libtracer \
+              --baseline-bench-fwd ../parent-baseline/bench/build/bench_forward_heap
           else
             echo "== no parent build — absolute floors only =="
             python3 bench/perf_gate.py --update-baseline

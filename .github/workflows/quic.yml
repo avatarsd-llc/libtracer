@@ -83,7 +83,7 @@ jobs:
           cmake -S ~/msquic-src -B ~/msquic-src/build -DCMAKE_BUILD_TYPE=Release \
             -DQUIC_BUILD_TOOLS=OFF -DQUIC_BUILD_TEST=OFF -DQUIC_BUILD_PERF=OFF \
             -DQUIC_ENABLE_LOGGING=OFF -DCMAKE_INSTALL_PREFIX="$HOME/msquic-install"
-          cmake --build ~/msquic-src/build -j
+          cmake --build ~/msquic-src/build -j "$(nproc)"
           cmake --install ~/msquic-src/build
 
       - name: Configure + build (LIBTRACER_WITH_QUIC=ON) + full ctest
@@ -91,7 +91,7 @@ jobs:
           cmake -S core -B core/build-quic-${{ matrix.name }} -DBUILD_TESTING=ON \
             -DLIBTRACER_WITH_QUIC=ON -DCMAKE_PREFIX_PATH="$HOME/msquic-install" \
             ${{ matrix.cmake_flags }}
-          cmake --build core/build-quic-${{ matrix.name }} -j
+          cmake --build core/build-quic-${{ matrix.name }} -j "$(nproc)"
           # ASLR can make ASan/TSan abort in this runner; pin it off (harmless
           # for the release leg). LD_LIBRARY_PATH covers the msquic shared lib.
           export LD_LIBRARY_PATH="$HOME/msquic-install/lib:${LD_LIBRARY_PATH:-}"
