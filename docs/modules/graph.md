@@ -51,7 +51,7 @@ enum class delivery_mode_t { IF_NEWER, UNCONDITIONAL, EXPLICIT };
 // There is NO per-vertex settings type. RFC-0022 §3.B deleted `settings_t` outright: four
 // of its seven knobs were inert, `durability` became the subscription's (below), and the two
 // survivors are construction parameters an OWNER declares — see set_history_depth /
-// set_store_ref_min_bytes. Nothing is inherited (§3.F).
+// set_pin_payload_ratio. Nothing is inherited (§3.F).
 
 struct delivery_policy_t {  // ONE subscription's delivery policy (RFC-0022 §3.A) — 2 B packed
     std::uint16_t bits;     // 0-1 reliability | 2-4 priority | 5 durability_request | 6-15 rsvd
@@ -93,8 +93,8 @@ class graph_t {
 
     // owner-side storage declarations (RFC-0022 §3.C) — host API only, NO wire surface
     void          set_history_depth     (vertex_handle_t, std::uint32_t keep);
-    void          set_store_ref_min_bytes(vertex_handle_t, std::uint32_t bytes);
-    std::uint32_t store_ref_min_bytes   (vertex_handle_t) const noexcept;
+    void          set_pin_payload_ratio (vertex_handle_t, std::uint32_t k);
+    std::uint32_t pin_payload_ratio     (vertex_handle_t) const noexcept;
 
     // composed reads — they build a value, so they return one
     result_t<rope_t> read_children_folded(vertex_handle_t) const;
@@ -246,7 +246,7 @@ vertex is the explicit target; the mode gates only what an **ancestor's** sweep 
 Its cost is O((pending + unconditional) in subtree).
 
 `set_delivery_mode(v, mode)` sets that per-vertex policy. It is a wiring-time host API call,
-in the same family as `set_history_depth`, `set_store_ref_min_bytes` and `set_app_fields` — an
+in the same family as `set_history_depth`, `set_pin_payload_ratio` and `set_app_fields` — an
 owner declaration with no wire surface.
 
 | `delivery_mode_t` | An ancestor's sweep includes this vertex |

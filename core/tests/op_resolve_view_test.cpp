@@ -297,18 +297,18 @@ int main() {
     }
 
     // ADR-0053 ⑤ / ADR-0042 §3 — the rope-tier referenced store: a view-delivered
-    // MULTI-LINK payload on a vertex that opted in (store_ref_min_bytes > 0) is PINNED
+    // MULTI-LINK payload on a vertex that opted in (pin_payload_ratio > 0) is PINNED
     // as a subrope of the delivery (its segments kept, ZERO copy), yet byte-identical
     // to the copy a default vertex makes. The arena tier proves the contiguous-frame
     // twin in op_resolve_test's store_ref_threshold; here the payload spans many links.
     {
-        std::printf("rope-tier pinned store (store_ref_min_bytes, multi-link payload):\n");
+        std::printf("rope-tier pinned store (pin_payload_ratio, multi-link payload):\n");
         graph_t g;
         tr::graph::vertex_handle_t v =
             g.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE);
         // Opt in through the OWNER-side declaration (RFC-0022 §3.B withdrew the wire knob),
         // matching the arena test.
-        g.set_store_ref_min_bytes(v, 8);
+        g.set_pin_payload_ratio(v, 8);
 
         std::vector<std::byte> big(32);
         for (std::size_t i = 0; i < big.size(); ++i) big[i] = static_cast<std::byte>(i);

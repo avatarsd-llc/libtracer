@@ -16,6 +16,28 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **The owner-declared pin knob is renamed to what its value became (#774).**
+  `core/include/libtracer/graph.hpp`, `vertex.hpp`.
+  `graph_t::set_store_ref_min_bytes(vertex_handle_t, std::uint32_t)` /
+  `graph_t::store_ref_min_bytes(vertex_handle_t)` become
+  **`graph_t::set_pin_payload_ratio(vertex_handle_t, std::uint32_t k)`** /
+  **`graph_t::pin_payload_ratio(vertex_handle_t)`**; the extension-block member
+  `vertex_ext_t::store_ref_min_bytes` becomes `pin_payload_ratio`. **The old names cease to
+  exist** — no alias, no deprecation shim, so a stale call site is a compile error rather than
+  a silent misconfiguration. The u32 layout, the storage class, the owner-side home, the
+  absence of any wire surface, the `0` default and the non-inheritance (RFC-0022 §3.F) are all
+  **unchanged**.
+
+  The rename is not cosmetic: since §6's bench landed (#758, PR #771) this u32 has held the
+  RFC-0022 §3.D amplification ratio `K` — the store pins iff `payload_bytes * K >=
+  segment_bytes` — while the name still said *minimum bytes*, the absolute-threshold predicate
+  the bench refuted. An owner writing `4096` expecting "pin only payloads ≥ 4 KB" was instead
+  asking for "pin any payload whose 4096x amplification clears the segment", which at large
+  segments is close to the opposite. Per RFC-0022 Amendment 2 the shipped default on both
+  targets remains the sentinel `tr::graph::kPinNever` (0), so nothing pins unless a deployment
+  declares a non-sentinel `K`; the per-vertex value overrides `config_t::kPinPayloadRatio` and
+  exists so §6-style measurement arms rotate inside one process.
+
 - **The mount WIDTH bound is lifted — one registry pass, any width (#523, #765).**
   `core/include/libtracer/child_registry.hpp`, `fwd_frame_view.hpp`, `fwd_router.hpp`,
   `route_handle.hpp`. A mount key of **any** number of segments now registers and resolves; the

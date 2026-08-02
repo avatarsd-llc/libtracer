@@ -897,24 +897,25 @@ struct vertex_ext_t {
      */
     std::uint32_t history_keep_last = 1;
     /**
-     * @brief Store-by-reference threshold (ADR-0042 §3): a view-delivered WRITE whose
-     *        payload TLV is >= this many bytes (and carries no trailer bits) is stored as a
+     * @brief RFC-0022 §3.D pin amplification RATIO `K` (ADR-0042 §3): a view-delivered,
+     *        trailer-less WRITE whose `payload_bytes * K >= segment_bytes` is stored as a
      *        SUBVIEW of the inbound frame (refcount pin, zero copy) instead of the one-copy
-     *        trailer-sliced store. 0 (the default) DISABLES referencing.
+     *        trailer-sliced store. 0 (@ref tr::graph::kPinNever, the default) NEVER pins.
      *
-     * Owner-side like @ref history_keep_last, and for the same reason: it is a deployment
-     * copy/pin trade, not a quality-of-service property, so it lost its remote write
-     * surface with the rest of the RFC-0022 §3.B removal. Declared through
-     * `graph_t::set_store_ref_min_bytes`. Read on every view-delivered write
+     * A ratio, NOT a byte count — the predicate prices what a pin would hold (the whole
+     * segment) against the payload it holds it for, which an absolute threshold could not
+     * see. Owner-side like @ref history_keep_last, and for the same reason: it is a
+     * deployment copy/pin trade, not a quality-of-service property, so it lost its remote
+     * write surface with the rest of the RFC-0022 §3.B removal. Declared through
+     * `graph_t::set_pin_payload_ratio`. Read on every view-delivered write
      * (`op_resolve_walk.hpp`) with no lock, so it stays ONE inline load off this block.
      *
-     * @note RFC-0022 §3.D replaces this absolute byte threshold with the amplification
-     *       ratio `payload * K >= segment`, whose `K` is a per-target `config_t` constant
-     *       — deliberately NOT implemented here, because §6 gates that change on a
-     *       dual-target measurement that has not been run. Until it is, the predicate and
-     *       its `0 = off` default are exactly what shipped before this RFC.
+     * @note This overrides the per-target `config_t::kPinPayloadRatio`, which Amendment 2
+     *       fixes at the sentinel on both targets; the override exists so §6-style arms
+     *       rotate inside one process. Left unset, behaviour is exactly what shipped
+     *       before this RFC.
      */
-    std::uint32_t store_ref_min_bytes = 0;
+    std::uint32_t pin_payload_ratio = 0;
     /** @brief The RFC-0010 APP-FIELD group (ADR-0058 Step 2) — the descriptor table plus
      *         its `on_app_field_write` apply seam, LAZILY allocated: a vertex with no app
      *         fields and no apply seam keeps this null. Guarded by the vertex mutex,
@@ -991,16 +992,16 @@ class vertex_t {
     }
 
     /**
-     * @brief This vertex's store-by-reference threshold (0 ⇒ referencing off, the default).
+     * @brief This vertex's declared pin amplification ratio `K` (0 ⇒ never pin, the default).
      *
      * ONE inline load and nothing more: it is read on EVERY view-delivered write
      * (`op_resolve_walk.hpp`), so it may never become an ancestor walk. Nothing is
-     * inherited (RFC-0022 §3.F) — a vertex that was never given a threshold answers 0,
+     * inherited (RFC-0022 §3.F) — a vertex that was never given a ratio answers 0,
      * whatever its ancestors hold.
      */
-    [[nodiscard]] std::uint32_t store_ref_min_bytes() const noexcept {
+    [[nodiscard]] std::uint32_t pin_payload_ratio() const noexcept {
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        return e != nullptr ? e->store_ref_min_bytes : 0;
+        return e != nullptr ? e->pin_payload_ratio : 0;
     }
     /** @brief This vertex's user handlers (Handler role behavior + the `on_children` seam);
      *         an all-empty shared constant when no extension block. */
@@ -1695,7 +1696,7 @@ class vertex_t {
             e->acl_gen.fetch_add(1, std::memory_order_release);
             e->acl_cache_dirty.store(true, std::memory_order_release);
             e->history_keep_last = 1;
-            e->store_ref_min_bytes = 0;
+            e->pin_payload_ratio = 0;
             e->app.reset();
             e->last_flushed_seq = 0;
         }
@@ -1998,17 +1999,17 @@ class vertex_t {
     }
 
     /**
-     * @brief Set the store-by-reference threshold (ADR-0042 §3) — owner-side, never over
-     *        the wire. 0 disables referencing.
+     * @brief Set the RFC-0022 §3.D pin amplification ratio `K` (ADR-0042 §3) — owner-side,
+     *        never over the wire. 0 (@ref tr::graph::kPinNever) never pins.
      *
-     * Published under the vertex mutex; the write-path reader (@ref store_ref_min_bytes)
-     * takes no lock, because a threshold changing under a concurrent write only decides
+     * Published under the vertex mutex; the write-path reader (@ref pin_payload_ratio)
+     * takes no lock, because a ratio changing under a concurrent write only decides
      * WHICH correct store shape that write takes.
      */
-    void set_store_ref_min_bytes(std::uint32_t bytes) {
+    void set_pin_payload_ratio(std::uint32_t k) {
         vertex_ext_t& e = ensure_ext();
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        e.store_ref_min_bytes = bytes;
+        e.pin_payload_ratio = k;
     }
 
     /** @brief How this vertex participates in an ANCESTOR's propagate sweep (RFC-0008 §C). */
@@ -2251,7 +2252,7 @@ class vertex_t {
      * (graph map lock) and the field-write verbs (vertex mutex) resolve by
      * compare-exchange — the loser frees its candidate and adopts the winner's block.
      * The pointer is never cleared once published (ADR-0057 insert-only lifetime), so
-     * lock-free readers (@ref store_ref_min_bytes / @ref handlers) stay valid forever.
+     * lock-free readers (@ref pin_payload_ratio / @ref handlers) stay valid forever.
      */
     vertex_ext_t& ensure_ext() {
         vertex_ext_t* e = ext_.load(std::memory_order_acquire);

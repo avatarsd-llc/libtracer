@@ -74,7 +74,7 @@ void emit_value(std::vector<std::byte>& out, std::uint64_t value, int width) {
 // `history_keep_last`, `store_ref_min_bytes` — answer `SCHEMA_NOT_FOUND`, which is the
 // honest answer an unsupported field already gives. The two survivors did not move to
 // another name; they stopped being remotely writable at all and became owner-side
-// declarations (`graph_t::set_history_depth`, `graph_t::set_store_ref_min_bytes`).
+// declarations (`graph_t::set_history_depth`, `graph_t::set_pin_payload_ratio`).
 
 /** @brief Emit the RFC-0010 §A.4 app-container members into @p out: each declared,
  *         non-`wo` field HOLDING a value, in table order — `NAME <name>` then the stored
@@ -634,16 +634,16 @@ bool graph_t::has_first_level_child(std::span<const std::byte> record) const {
     return root_->child_by_record(record) != nullptr;
 }
 
-std::uint32_t graph_t::store_ref_min_bytes(vertex_handle_t v) const noexcept {
-    return v.get()->store_ref_min_bytes();
+std::uint32_t graph_t::pin_payload_ratio(vertex_handle_t v) const noexcept {
+    return v.get()->pin_payload_ratio();
 }
 
 void graph_t::set_history_depth(vertex_handle_t v, std::uint32_t keep) {
     v.get()->set_history_depth(keep);
 }
 
-void graph_t::set_store_ref_min_bytes(vertex_handle_t v, std::uint32_t bytes) {
-    v.get()->set_store_ref_min_bytes(bytes);
+void graph_t::set_pin_payload_ratio(vertex_handle_t v, std::uint32_t k) {
+    v.get()->set_pin_payload_ratio(k);
 }
 
 void graph_t::set_subject_resolver(subject_resolver_t resolver) {
