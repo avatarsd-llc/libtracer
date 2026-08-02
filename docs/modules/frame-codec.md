@@ -93,9 +93,9 @@ call stack, so the walk keeps one open-node record per open level in a
 `walk_stack_t`. That stack starts in a caller-supplied inline span and, once those
 slots are used, relocates into geometrically grown blocks drawn from a spill
 source. **The inline span is a tuning knob, not a limit — overflowing it changes
-cost, not behaviour** (`grammar.hpp:210-216`). Exhausting the spill source rejects
+cost, not behaviour** (`grammar.hpp:220-226`). Exhausting the spill source rejects
 the frame with `TLV_NESTING_TOO_DEEP`, which means exactly "exceeds this receiver's
-decode resources" (`grammar.hpp:308-312`).
+decode resources" (`grammar.hpp:318-322`).
 
 The two decoders differ only in what they spill to, and therefore in what bounds
 them:
@@ -172,6 +172,7 @@ structural byte-builder in the tree share it instead of each hand-rolling
 | `emit_header(out, type, opt, body_len)` | the header alone; length is `u16` LE, or `u32` LE when `opt.ll` is set. The width follows `opt.ll` verbatim — the caller owns the LL decision |
 | `emit_tlv(out, type, opt, body)` | header + body, auto-setting `opt.ll` when `body` exceeds `0xFFFF` |
 | `emit_name(out, bytes)` / `emit_name(out, sv)` | a `NAME` TLV with default `opt` — the PATH-segment and metadata-tag workhorse; the `string_view` form needs no temporary buffer |
+| `emit_path_ref(out, elements)` | a `PATH_REF` TLV — the 4-byte envelope plus the bare 8-byte element array (RFC-0024 §4). Returns `false`, emitting nothing, past the 255-element bound: a route that long has no bound spelling and falls back to the canonical `PATH` |
 
 Building a PATH is `emit_name` per segment into one buffer; that concatenation of
 `NAME` encodings is exactly the canonical PATH key `path_key` produces from a
@@ -190,8 +191,8 @@ points.
 Alongside the owning `tlv_t` model, the codec ships a second decoder for the FWD
 terminus: **`wire::decode_into(span, tr::mem::block_source_t&) → tlv_arena_t`**
 (public header `tlv_arena.hpp`). It parses the same frames with the same
-validation — bounds, reserved bits, type `0x00`, trailer CRC, trailing bytes ⇒
-`FRAME_INVALID` — but the result is a **flat, pre-order array of `arena_tlv_t`
+validation — bounds, reserved bits, type `0x00`, the `PATH_REF` body shape, trailer
+CRC, trailing bytes ⇒ `FRAME_INVALID` — but the result is a **flat, pre-order array of `arena_tlv_t`
 span-nodes**: `{type, opt, wire (trailer-excluded), body, end, canonical_path}`.
 Every span borrows the input frame; every node is drawn from the injected
 `block_source_t`.
@@ -260,8 +261,8 @@ Exhaustion answers `TLV_NESTING_TOO_DEEP`, never `std::bad_alloc` — which on a
 
 ## API reference
 
-Headers: `frame.hpp`, `tlv.hpp`, `tlv_emit.hpp`, `tlv_arena.hpp`, `crc.hpp` — all
-under `core/include/libtracer/`.
+Headers: `frame.hpp`, `tlv.hpp`, `tlv_emit.hpp`, `tlv_arena.hpp`, `path_ref.hpp`,
+`crc.hpp` — all under `core/include/libtracer/`.
 
 `tr::wire::opt_t` — the option bits carried in every header — is documented once, on
 [wire format bits](wire-format-bits.md), alongside the bit layout it names.

@@ -67,8 +67,10 @@ CXX_FALLBACKS = [
 # generically, so the generator also emits the occasional unknown/user code.
 # 0x0F FWD / 0x10 FIELD are the RFC-0004 remote-operation frames; they are
 # structured TLVs the codec round-trips like any other, so adding them here fuzzes
-# all three cores on FWD/FIELD-shaped frames (ADR-0035 slice 1).
-REGISTRY_TYPES = [0x01, 0x02, 0x03, 0x04, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10]
+# all three cores on FWD/FIELD-shaped frames (ADR-0035 slice 1). 0x14 PATH_REF is the
+# bound-path form (RFC-0024 §4) — the one type with a body shape the generator must
+# honour, handled in `_gen_node`.
+REGISTRY_TYPES = [0x01, 0x02, 0x03, 0x04, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x14]
 # Depth is receiver-resource-bounded (RFC-0006, no codec cap); the generator
 # nests shallowly so every core parses these frames at any declared budget.
 MAX_GEN_DEPTH = 6  # how deep this generator nests
@@ -115,8 +117,18 @@ def _gen_node(rng: Random, depth: int) -> bytes:
     # Structured (PL) only while we have depth budget; bias toward leaves.
     structured = depth < MAX_GEN_DEPTH and rng.random() < 0.4
 
+    # PATH_REF (0x14) is the one type whose body is NOT self-describing: a bare array of
+    # fixed 8-byte elements, PL and LL both forbidden, at most 255 elements (RFC-0024
+    # §4.2/§4.3). A generator that ignored that would emit frames every conforming core
+    # rejects — correctly — and report the agreement as a mismatch.
+    path_ref = type_b == 0x14
+    if path_ref:
+        structured = False
+
     pl = structured
     ll = rng.random() < 0.5  # u32 length field even when it would fit in u16
+    if path_ref:
+        ll = False
     ts = rng.random() < 0.5
     cr = rng.random() < 0.5
     cw = rng.random() < 0.5 if cr else False  # CRC-16 vs CRC-32C
@@ -129,6 +141,8 @@ def _gen_node(rng: Random, depth: int) -> bytes:
         for _ in range(rng.randint(0, 3)):
             body += _gen_node(rng, depth + 1)
         body = bytes(body)
+    elif path_ref:
+        body = bytes(rng.randint(0, 0xFF) for _ in range(8 * rng.randint(0, 2)))
     else:
         body = bytes(rng.randint(0, 0xFF) for _ in range(rng.randint(0, 16)))
 

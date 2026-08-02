@@ -23,8 +23,8 @@ use libtracer::fwd::{fwd_kind, fwd_op, FieldSel};
 use libtracer::structured::{self, Ace, DeliveryPolicy};
 use libtracer::{
     decode, decode_fwd, encode, encode_field, encode_fwd, error_code, parse_error, parse_field_tlv,
-    reply_error_code, status_ok, status_with_errors, subscriber, value, value_opts, value_u32,
-    BuildError, ErrCode, FwdRequest, Opt, Tlv, ValueOptions,
+    path_ref, path_ref_element, reply_error_code, status_ok, status_with_errors, subscriber, value,
+    value_opts, value_u32, BuildError, ErrCode, FwdRequest, Opt, PathRefElement, Tlv, ValueOptions,
 };
 
 /* ----------------------------------------------------------------- helpers --- */
@@ -53,6 +53,11 @@ fn from_hex(s: &str) -> Vec<u8> {
         _ => panic!("bad hex digit {c}"),
     };
     b.chunks(2).map(|p| (n(p[0]) << 4) | n(p[1])).collect()
+}
+
+/** @brief Lowercase hex of @p bytes — the spelling the byte pins below are written in. */
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /**
@@ -102,6 +107,34 @@ fn assert_vector_consistent(name: &str) -> Vec<u8> {
     );
     let tlv = decode(&bin).unwrap_or_else(|e| panic!("{name}: decode failed: {:?}", e));
     assert_eq!(encode(&tlv), bin, "{name}: round-trip differs");
+    bin
+}
+
+/**
+ * @brief Assert a NEGATIVE vector: `hex` == reject.bin, and `decode` fails with the error
+ * `expected.json`'s `"reject"` field names.
+ */
+fn assert_vector_rejected(name: &str) -> Vec<u8> {
+    let dir = vectors_dir().join(name);
+    let bin =
+        fs::read(dir.join("reject.bin")).unwrap_or_else(|e| panic!("read {name}/reject.bin: {e}"));
+    let json = fs::read_to_string(dir.join("expected.json"))
+        .unwrap_or_else(|e| panic!("read {name}/expected.json: {e}"));
+    assert_eq!(
+        from_hex(&json_str(&json, "hex")),
+        bin,
+        "{name}: hex != reject.bin"
+    );
+    assert_eq!(
+        json_uint(&json, "total_bytes") as usize,
+        bin.len(),
+        "{name}: total_bytes != reject.bin length"
+    );
+    let want = json_str(&json, "reject");
+    match decode(&bin) {
+        Ok(_) => panic!("{name}: decode SUCCEEDED — it must fail with {want}"),
+        Err(e) => assert_eq!(e.name(), want, "{name}: wrong reject error"),
+    }
     bin
 }
 
@@ -389,6 +422,184 @@ fn path_builder_enforces_segment_count() {
     );
     let thirty_three = vec!["a"; 33];
     assert!(libtracer::tlv_builders::path(&thirty_three).is_ok());
+}
+
+/* ------------------------------------------------- RFC-0024 §4 — PATH_REF --- */
+
+/**
+ * @brief The minimal bound path: one element, 12 bytes, byte-pinned against the vector.
+ *
+ * The hex literal is the pin — a change to `path_ref` that no longer produces the published
+ * bytes fails here even if the vector file were regenerated alongside it.
+ */
+#[test]
+fn path_ref_1host() {
+    let bin = assert_vector_consistent("path-ref/ref-1host");
+    assert_eq!(hex(&bin), "140008000700000003000000");
+    let built = path_ref(&[PathRefElement {
+        index: 7,
+        generation: 3,
+    }])
+    .unwrap();
+    assert_eq!(encode(&built), bin);
+    let t = decode(&bin).unwrap();
+    assert_eq!(t.type_code, libtracer::type_code::PATH_REF);
+    // PL=0: the body is a fixed-stride record array, NOT children (RFC-0024 §4.2).
+    assert!(!t.opt.pl && t.children.is_empty());
+    // There is no count field on the wire — the count IS length / 8 (§4.3).
+    assert_eq!(t.payload.len() / libtracer::PATH_REF_ELEMENT_BYTES, 1);
+    assert_eq!(
+        path_ref_element(&t.payload, 0),
+        Some(PathRefElement {
+            index: 7,
+            generation: 3
+        })
+    );
+    assert_eq!(path_ref_element(&t.payload, 1), None);
+}
+
+/** @brief The direct-link bound path: `4 + 8H` = 20 bytes at H=2 (RFC-0024 §3.2). */
+#[test]
+fn path_ref_2host() {
+    let bin = assert_vector_consistent("path-ref/ref-2host");
+    assert_eq!(hex(&bin), "1400100007000000030000002a00000001000000");
+    let elems = [
+        PathRefElement {
+            index: 7,
+            generation: 3,
+        },
+        PathRefElement {
+            index: 42,
+            generation: 1,
+        },
+    ];
+    assert_eq!(encode(&path_ref(&elems).unwrap()), bin);
+    let t = decode(&bin).unwrap();
+    for (i, want) in elems.iter().enumerate() {
+        assert_eq!(path_ref_element(&t.payload, i).as_ref(), Some(want));
+    }
+}
+
+/** @brief The one-forwarder bound path: origin, forwarder, terminus — 28 bytes at H=3. */
+#[test]
+fn path_ref_3host() {
+    let bin = assert_vector_consistent("path-ref/ref-3host");
+    assert_eq!(
+        hex(&bin),
+        "140018000700000003000000130000000c0000002a00000001000000"
+    );
+    let elems = [
+        PathRefElement {
+            index: 7,
+            generation: 3,
+        },
+        PathRefElement {
+            index: 19,
+            generation: 12,
+        },
+        PathRefElement {
+            index: 42,
+            generation: 1,
+        },
+    ];
+    assert_eq!(encode(&path_ref(&elems).unwrap()), bin);
+    assert_eq!(
+        decode(&bin).unwrap().payload.len() / libtracer::PATH_REF_ELEMENT_BYTES,
+        3
+    );
+}
+
+/**
+ * @brief The normative maximum — 255 elements, a 2040-byte body, 2044 total (RFC-0024 §4.3).
+ *
+ * Pinned by its head and tail rather than 4088 hex characters: the first element, the last,
+ * and the envelope's `length` word are what an off-by-one in the bound would move.
+ */
+#[test]
+fn path_ref_255_elements() {
+    let bin = assert_vector_consistent("path-ref/ref-255-elements");
+    assert_eq!(bin.len(), 4 + 255 * 8);
+    assert_eq!(hex(&bin[..12]), "1400f8070000000000000000");
+    assert_eq!(hex(&bin[bin.len() - 8..]), "fe000000f2060000");
+    let elems: Vec<PathRefElement> = (0..255u32)
+        .map(|i| PathRefElement {
+            index: i,
+            generation: (i * 7) % 65536,
+        })
+        .collect();
+    assert_eq!(encode(&path_ref(&elems).unwrap()), bin);
+    // One over the bound has no bound spelling at all — the builder refuses rather than
+    // truncating, and the origin falls back to the canonical PATH it minted from.
+    let over = vec![PathRefElement::default(); 256];
+    assert_eq!(path_ref(&over).unwrap_err(), BuildError::TooManySegments);
+}
+
+/**
+ * @brief A `length` that is not a whole number of elements is `tr::frame::invalid`.
+ *
+ * Unlike `path/path-value-children-illegal` — a resolver rule whose bytes still round-trip —
+ * this is a shape error readable from the header alone, because the element count is not on
+ * the wire at all: it IS `length / 8`.
+ */
+#[test]
+fn path_ref_len_not_multiple_of_8() {
+    let bin = assert_vector_rejected("path-ref/ref-len-not-multiple-of-8");
+    assert_eq!(hex(&bin), "14000c000700000003000000aabbccdd");
+}
+
+/** @brief One element over the §4.3 bound: 256 elements / 2048 bytes ⇒ `tr::frame::invalid`. */
+#[test]
+fn path_ref_256_elements() {
+    let bin = assert_vector_rejected("path-ref/ref-256-elements");
+    assert_eq!(bin.len(), 4 + 256 * 8);
+    assert_eq!(hex(&bin[..4]), "14000008");
+}
+
+/**
+ * @brief `opt.PL = 1` on a PATH_REF is `tr::frame::invalid` — the body is not child TLVs.
+ *
+ * The same 16-byte body as `ref-2host`, one option bit different: a generic `PL = 1` walker
+ * would read the first element's index bytes as a TLV header and mis-frame the whole body.
+ */
+#[test]
+fn path_ref_pl_set() {
+    let bin = assert_vector_rejected("path-ref/ref-pl-set");
+    assert_eq!(hex(&bin), "1440100007000000030000002a00000001000000");
+    // The one differing byte, stated: ref-2host is the same frame with opt = 0x00.
+    let mut cleared = bin.clone();
+    cleared[1] = 0x00;
+    assert_eq!(cleared, assert_vector_consistent("path-ref/ref-2host"));
+}
+
+/**
+ * @brief `opt.LL = 1` on a PATH_REF is `tr::frame::invalid` — the u32 length is unreachable.
+ *
+ * `ref-1host`'s single element under the 6-byte header. 255 elements is 2040 bytes, three
+ * orders inside a u16, so a wide length can only ever be two wasted bytes; §4.2 forbids the
+ * bit so that one route has one byte spelling. Its own vector because the clause is
+ * independent of the `PL` one — a core that drops it still satisfies the other three rules.
+ */
+#[test]
+fn path_ref_ll_set() {
+    let bin = assert_vector_rejected("path-ref/ref-ll-set");
+    assert_eq!(hex(&bin), "1408080000000700000003000000");
+}
+
+/**
+ * @brief An empty body (`H = 0`) round-trips: §4.3's element bound is an upper one.
+ *
+ * `0 % 8 == 0` and `0 <= 2040`, and no clause demands a first element — so the codec carries
+ * the frame and a route naming no vertex is the router's to refuse (§5). The low end of the
+ * range whose high end `ref-255-elements` / `ref-256-elements` straddle.
+ */
+#[test]
+fn path_ref_empty() {
+    let bin = assert_vector_consistent("path-ref/ref-empty");
+    assert_eq!(hex(&bin), "14000000");
+    assert_eq!(encode(&path_ref(&[]).unwrap()), bin);
+    let t = decode(&bin).unwrap();
+    assert!(t.payload.is_empty());
+    assert_eq!(path_ref_element(&t.payload, 0), None);
 }
 
 /* -------------------------------------------------- Unit 3 — ERROR + STATUS --- */

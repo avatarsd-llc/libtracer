@@ -52,14 +52,17 @@ pub use fwd::{
     FieldSel, FwdRequest, ParsedFwd,
 };
 pub use tlv_builders::{
-    name, subscriber, validate_segment, value, value_opts, value_u16, value_u32, value_u64,
-    value_u8, BuildError, ValueOptions, MAX_PATH_BYTES, MAX_SEGMENTS, MAX_SEGMENT_BYTES,
+    name, path_ref, path_ref_element, subscriber, validate_segment, value, value_opts, value_u16,
+    value_u32, value_u64, value_u8, BuildError, PathRefElement, ValueOptions, MAX_PATH_BYTES,
+    MAX_SEGMENTS, MAX_SEGMENT_BYTES,
 };
 
 /**
  * @brief Core type-code registry (0x01-0x10). 0x05 is retired (was LIST, ADR-0003).
  * The codec treats every nonzero type generically, so these constants are a
- * convenience, not an exhaustive set.
+ * convenience, not an exhaustive set — with one exception: 0x14 PATH_REF (RFC-0024 §4)
+ * carries a bare fixed-stride 8-byte record array rather than a self-describing body, so
+ * the decoder checks its shape by type.
  */
 pub mod type_code {
     /** @brief Opaque scalar value. */
@@ -92,7 +95,20 @@ pub mod type_code {
     pub const FWD: u8 = 0x0f;
     /** @brief Control-plane `:field` selector (structured; RFC-0004 §C / ADR-0035). */
     pub const FIELD: u8 = 0x10;
+    /** @brief Bound path: a bare array of 8-byte node-scoped vertex refs (RFC-0024 §4). */
+    pub const PATH_REF: u8 = 0x14;
 }
+
+/**
+ * @brief The `PATH_REF` element stride — 8 bytes, `(u32 index, u32 generation)` LE
+ * (RFC-0024 §4.4).
+ */
+pub const PATH_REF_ELEMENT_BYTES: usize = 8;
+
+/**
+ * @brief The `PATH_REF` element-count bound — 255 elements / 2040 body bytes (RFC-0024 §4.3).
+ */
+pub const MAX_PATH_REF_ELEMENTS: usize = 255;
 
 /** @brief Reserved bits 7 and 0; a set reserved bit makes a frame invalid. */
 const RESERVED_MASK: u8 = 0b1000_0001;
@@ -320,6 +336,18 @@ fn parse_one(buf: &[u8]) -> Result<(Tlv, usize, &[u8]), Error> {
     }
 
     let length = read_le(buf, 2, if opt.ll { 4 } else { 2 });
+    // The one per-type structural rule (RFC-0024 §4.2/§4.3): a PATH_REF body is a bare
+    // fixed-stride 8-byte record array, so PL/LL are forbidden, the length is a whole
+    // number of elements, and the count is bounded at 255. Shape only — an element's
+    // MEANING is node-scoped and no codec can check it.
+    if type_b == type_code::PATH_REF
+        && (opt.pl
+            || opt.ll
+            || !length.is_multiple_of(PATH_REF_ELEMENT_BYTES as u64)
+            || length > (MAX_PATH_REF_ELEMENTS * PATH_REF_ELEMENT_BYTES) as u64)
+    {
+        return Err(Error::FrameInvalid);
+    }
     let ts_size = if opt.ts {
         if opt.tf {
             4u64

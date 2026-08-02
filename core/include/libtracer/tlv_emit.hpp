@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/path_ref.hpp"
 #include "libtracer/tlv.hpp"
 
 namespace tr::wire {
@@ -58,6 +59,32 @@ inline void emit_tlv(std::vector<std::byte>& out, type_t type, opt_t opt,
 /** @brief Append a NAME TLV over opaque bytes — the PATH-segment / metadata-tag workhorse. */
 inline void emit_name(std::vector<std::byte>& out, std::span<const std::byte> name) {
     emit_tlv(out, type_t::NAME, opt_t{}, name);
+}
+
+/**
+ * @brief Append a `PATH_REF` TLV over @p elements — the bound-path form (RFC-0024 §4).
+ *
+ * Emits the 4-byte envelope (`0x14`, `opt = 0x00` — `PL = 0` and `LL = 0` are both MUSTs of
+ * §4.2) followed by the bare 8-byte element array, in route order, with no per-element
+ * framing and no count field: the count IS `length / 8`.
+ *
+ * @return False — emitting nothing — when @p elements exceeds @ref kMaxPathRefElements, the
+ *         §4.3 bound. A caller with more hosts than that has no bound spelling and falls back
+ *         to the canonical `PATH`, which is the mint key and the fallback by construction.
+ */
+[[nodiscard]] inline bool emit_path_ref(std::vector<std::byte>& out,
+                                        std::span<const path_ref_element_t> elements) {
+    if (elements.size() > kMaxPathRefElements) return false;
+    const std::size_t body_len = elements.size() * kPathRefElementBytes;
+    emit_header(out, type_t::PATH_REF, opt_t{}, body_len);
+    const std::size_t base = out.size();
+    out.resize(base + body_len);
+    for (std::size_t i = 0; i < elements.size(); ++i) {
+        path_ref_store_element(std::span<std::byte>(out).subspan(base + i * kPathRefElementBytes,
+                                                                 kPathRefElementBytes),
+                               elements[i]);
+    }
+    return true;
 }
 
 /** @brief Append a NAME TLV over a text segment (no temporary buffer). */

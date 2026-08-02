@@ -1,0 +1,33 @@
+{
+  "name": "ref-1host",
+  "category": "path-ref",
+  "hex": "140008000700000003000000",
+  "total_bytes": 12,
+  "decoded": {
+    "type": "0x14 PATH_REF",
+    "opt": {
+      "raw": "0x00",
+      "PL": 0,
+      "TS": 0,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 8,
+    "element_count": 1,
+    "elements": [
+      {
+        "index": 7,
+        "generation": 3
+      }
+    ],
+    "trailer": {
+      "ts": null,
+      "crc": null
+    },
+    "meaning": "The minimal bound path: H=1, one element, the terminus vertex itself."
+  }
+}

@@ -14,6 +14,31 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`wire::type_t::PATH_REF` (`0x14`) and the bound-path element codec
+  ([RFC-0024](../docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §4).**
+  New header `core/include/libtracer/path_ref.hpp`: `path_ref_element_t`
+  (`{u32 index, u32 generation}`), the constants `kPathRefElementBytes` (8),
+  `kMaxPathRefElements` (255) and `kMaxPathRefBodyBytes` (2040), plus
+  `path_ref_element_count`, `path_ref_element_at`, `path_ref_store_element` and the structural
+  predicate `path_ref_body_valid`. `path_ref_element_at` / `path_ref_store_element` are
+  precondition-only and debug-assert their bound: a caller that cannot prove the index — anything
+  walking a foreign frame's elements — gates on `path_ref_element_count` first. `tlv_emit.hpp` gains `emit_path_ref(out, elements)`, which
+  refuses (returns `false`, emitting nothing) past the 255-element bound rather than truncating.
+  Purely additive — no existing declaration changes spelling or semantics.
+- **`grammar::parse_header` now enforces the `PATH_REF` body shape.** The one per-type rule in
+  the wire grammar: for `0x14`, `opt.PL` and `opt.LL` MUST be 0, `length` MUST be a multiple of
+  8, and the element count MUST be ≤ 255. A violation is `err_t::FRAME_INVALID`, the same
+  answer a set reserved bit gets. Because the rule lives in the shared header grammar it fires
+  at every nesting depth and through every decoder (the owning `tlv_t` tree, the terminus arena,
+  the lazy `tlv_view_t`). **Behaviour change, and the only one:** bytes that previously decoded
+  as an opaque unknown-type TLV with type `0x14` now reject. No frame any libtracer version has
+  ever emitted is affected — `0x14` was unassigned.
+
+Routing on a bound path — minting, per-hop validation, the NACK and the canonical fallback —
+is not implemented; this is the codec only.
+
 ## [0.7.0] — 2026-08-02
 
 ### Added

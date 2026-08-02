@@ -7,6 +7,20 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+### Added
+
+- **`TYPE.PATH_REF` (`0x14`) and its structural decode rule**
+  (`@avatarsd-llc/libtracer`, `src/codec.mjs`;
+  [RFC-0024](../../docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §4).
+  The bound-path address form: a bare array of fixed 8-byte `(u32 index, u32 generation)`
+  little-endian elements. New exports `PATH_REF_ELEMENT_BYTES` (8) and `MAX_PATH_REF_ELEMENTS`
+  (255), reachable from both the barrel entry and the `./wire` subpath.
+  `decode` now requires, for type `0x14`, that `opt.PL` and `opt.LL` are clear, that `length`
+  is a multiple of 8, and that the element count is at most 255 — a violation throws
+  `CodecError` with `code === ERROR.FRAME_INVALID`. **Behaviour change:** bytes that previously
+  decoded as an opaque unknown-type TLV with type `0x14` now throw. `0x14` was unassigned, so
+  no frame any libtracer version has emitted is affected.
+
 ## 0.7.0 — 2026-08-02
 
 ### Changed

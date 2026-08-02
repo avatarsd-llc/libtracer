@@ -1,0 +1,9 @@
+{
+  "name": "ref-len-not-multiple-of-8",
+  "category": "path-ref",
+  "hex": "14000C000700000003000000AABBCCDD",
+  "total_bytes": 16,
+  "reject": "FRAME_INVALID",
+  "decoded": null,
+  "meaning": "length=12 is not a whole number of 8-byte elements. The wire carries no element-count field \u2014 the count IS length / 8 \u2014 so a length not divisible by 8 has no reading and is tr::frame::invalid (RFC-0024 \u00a74.3). A successful decode of this frame is a conformance FAILURE."
+}

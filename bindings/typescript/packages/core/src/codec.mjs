@@ -24,6 +24,9 @@
  * 0x0E SPEC is the in-band vertex-creation spec. 0x0F FWD and 0x10 FIELD are the
  * remote-operation frames (RFC-0004 / ADR-0035, the v1 fast-track range
  * 0x0F-0x1F). All are structured (opt.PL=1) and handled generically by the codec.
+ * 0x14 PATH_REF is the bound-path address form (RFC-0024 §4) and the one exception:
+ * its body is a bare fixed-stride 8-byte record array (opt.PL=0), so the decoder
+ * checks its shape by type.
  *
  * @readonly
  * @enum {number}
@@ -44,7 +47,14 @@ export const TYPE = Object.freeze({
   SPEC: 0x0e,
   FWD: 0x0f,
   FIELD: 0x10,
+  PATH_REF: 0x14,
 });
+
+/** @brief The `PATH_REF` element stride — 8 bytes, `(u32 index, u32 generation)` LE (RFC-0024 §4.4). */
+export const PATH_REF_ELEMENT_BYTES = 8;
+
+/** @brief The `PATH_REF` element-count bound — 255 elements / 2040 body bytes (RFC-0024 §4.3). */
+export const MAX_PATH_REF_ELEMENTS = 255;
 
 /**
  * @brief Decode failure reasons, named after the C++ `tr::wire::error_t` enum.
@@ -308,6 +318,19 @@ function parseOne(buf) {
   if (buf.length < header) throw new CodecError(ERROR.FRAME_TRUNCATED);
 
   const length = readLe(buf, 2, opt.ll ? 4 : 2);
+  // The one per-type structural rule (RFC-0024 §4.2/§4.3): a PATH_REF body is a bare
+  // fixed-stride 8-byte record array, so PL/LL are forbidden, the length is a whole number
+  // of elements, and the count is bounded at 255. Shape only — an element's MEANING is
+  // node-scoped and no codec can check it.
+  if (
+    typeB === TYPE.PATH_REF &&
+    (opt.pl ||
+      opt.ll ||
+      length % PATH_REF_ELEMENT_BYTES !== 0 ||
+      length > MAX_PATH_REF_ELEMENTS * PATH_REF_ELEMENT_BYTES)
+  ) {
+    throw new CodecError(ERROR.FRAME_INVALID);
+  }
   const tsSize = opt.ts ? (opt.tf ? 4 : 8) : 0;
   const crcSize = opt.cr ? (opt.cw ? 2 : 4) : 0;
   const total = header + length + tsSize + crcSize;

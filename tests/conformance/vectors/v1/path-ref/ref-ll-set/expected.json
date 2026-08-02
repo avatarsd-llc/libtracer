@@ -1,0 +1,9 @@
+{
+  "name": "ref-ll-set",
+  "category": "path-ref",
+  "hex": "1408080000000700000003000000",
+  "total_bytes": 14,
+  "reject": "FRAME_INVALID",
+  "decoded": null,
+  "meaning": "opt.LL=1 widens the length field to u32, which a PATH_REF body can never need: 255 elements is 2040 bytes, three orders inside a u16. RFC-0024 \u00a74.2 forbids the bit rather than ignoring it, so one route has one byte spelling; a set LL is tr::frame::invalid. A successful decode of this frame is a conformance FAILURE."
+}

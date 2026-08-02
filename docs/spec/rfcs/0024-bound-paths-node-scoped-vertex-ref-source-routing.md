@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0024 |
 | **Title** | Bound paths: node-scoped vertex-ref source routing |
-| **Status** | **draft** (2026-08-02) |
+| **Status** | **accepted** (2026-08-03, maintainer-ratified, comment window waived). The whole document is ratified; it lands car by car. §4 (the `PATH_REF` wire form) is the **incorporated** part — `docs/spec/v1.md` §3 and `docs/reference/05-protocol-tlvs.md` §`0x14` cite it normatively as of the codec car ([#809](https://github.com/avatarsd-llc/libtracer/issues/809)). §5-§7 (validation, ACL re-check, minting and binding) are ratified but not yet incorporated: no normative text cites them until the routing car lands, so they are the design of record, not yet a peer obligation. |
 | **Author(s)** | AvatarSD (maintainer) — written up from the 2026-08-02 grill, in which the design below was **ruled**, not proposed |
 | **Created** | 2026-08-02 |
 | **Comment window** | waived by default while solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke explicitly if outside input is wanted. Verified: `docs/implementations.md:13` still reads `_(none yet)_`, so the waiver's revert trigger has not fired. |
@@ -655,8 +655,13 @@ implementation, per the standing ruling that a latency regression is never an ac
 
 ## 9. Proposed change
 
-Spec edits land **after acceptance, in a follow-up PR**; this PR adds only the RFC document and
-the two glossary entries (§11).
+Spec edits land **after acceptance, in a follow-up PR**; the RFC's own PR added only the RFC
+document and the two glossary entries (§11). Acceptance has since happened, and the edits land
+car by car — a spec bullet is incorporated in the same train as the code that honours it, so no
+normative text ever cites a clause with no implementation behind it. The codec car landed §9.1's
+`0x14` registry bullet and its `v1.md` §3 incorporation, and those two alone. The `FWD` bullet,
+the `03-addressing.md` two-forms text, the diameter row and the RFC-0004 §B amendment land with
+the routing car, which is what makes their clauses observable.
 
 ### 9.1 New normative text
 
@@ -698,7 +703,13 @@ The NACK spelling (§5.3): extend `HANDLE_NACK` with a hop-index child, or take 
   byte for byte.
 - `path-ref/ref-len-not-multiple-of-8` — reject.
 - `path-ref/ref-pl-set` — `opt.PL=1` on a `PATH_REF` ⇒ reject.
+- `path-ref/ref-ll-set` — `opt.LL=1` on a `PATH_REF` ⇒ reject. §4.2's second envelope MUST is a
+  separate clause from `PL`, so it needs its own vector: a core that drops it passes every other
+  vector in the category.
 - `path-ref/ref-256-elements` — over the normative cap ⇒ reject.
+- `path-ref/ref-empty` — a zero-element body (`length = 0`) round-trips. The other end of §4.3's
+  range: the count bound is an upper one, and a route with no hops is the router's to refuse
+  (§5), not the codec's, so a core that rejects it is as wrong as one that accepts 256.
 - **`acl/bound-vs-canonical-allow` and `acl/bound-vs-canonical-deny`** — §6.3's mandated pair,
   asserting byte-identical outcomes between the two spellings.
 - Zero existing vectors change: `PATH` is untouched, and every existing frame is canonical.

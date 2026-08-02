@@ -286,6 +286,69 @@ pub fn path(segments: &[&str]) -> Result<Tlv, BuildError> {
 }
 
 /**
+ * @brief One bound-path element: a node-scoped reference to one host's own vertex
+ * (RFC-0024 §4.4).
+ *
+ * Element 0 is the origin's reference to its first-hop connection vertex; the last element
+ * is the terminus host's reference to the target vertex itself. Nothing in an element means
+ * anything anywhere but on the host that minted it, so no codec can validate one — it is an
+ * address, never a capability.
+ */
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PathRefElement {
+    /** @brief The minting host's vertex-map index (u32 LE). */
+    pub index: u32,
+    /** @brief That vertex's retirement generation at mint time (u32 LE; saturates, never wraps). */
+    pub generation: u32,
+}
+
+/**
+ * @brief Build a PATH_REF TLV (`type=0x14`, `PL=0`, `LL=0`) — the bound-path form
+ * (RFC-0024 §4). Vector-pinned: `path-ref/ref-empty`, `ref-1host`, `ref-2host`, `ref-3host`.
+ *
+ * The body is a bare array of fixed 8-byte elements in route order: no per-element framing
+ * (element *i* is `body[8i .. 8i+8)`, computed rather than parsed) and no count field (the
+ * count **is** `length / 8`).
+ *
+ * # Errors
+ * [`BuildError::TooManySegments`] past [`crate::MAX_PATH_REF_ELEMENTS`] — the §4.3 bound. A
+ * route with more hosts than that has no bound spelling and falls back to the canonical
+ * [`path`], which every bound path is minted from.
+ */
+pub fn path_ref(elements: &[PathRefElement]) -> Result<Tlv, BuildError> {
+    if elements.len() > crate::MAX_PATH_REF_ELEMENTS {
+        return Err(BuildError::TooManySegments);
+    }
+    let mut payload = Vec::with_capacity(elements.len() * crate::PATH_REF_ELEMENT_BYTES);
+    for e in elements {
+        payload.extend_from_slice(&e.index.to_le_bytes());
+        payload.extend_from_slice(&e.generation.to_le_bytes());
+    }
+    Ok(Tlv {
+        type_code: type_code::PATH_REF,
+        opt: Opt::default(),
+        payload,
+        children: Vec::new(),
+        trailer: None,
+    })
+}
+
+/**
+ * @brief Read element @p `i` out of a decoded PATH_REF's payload (little-endian, both fields).
+ *
+ * Returns `None` when the payload is too short to hold element `i` — i.e. `i` is at or past
+ * `payload.len() / 8`.
+ */
+pub fn path_ref_element(payload: &[u8], i: usize) -> Option<PathRefElement> {
+    let start = i.checked_mul(crate::PATH_REF_ELEMENT_BYTES)?;
+    let e = payload.get(start..start + crate::PATH_REF_ELEMENT_BYTES)?;
+    Some(PathRefElement {
+        index: u32::from_le_bytes([e[0], e[1], e[2], e[3]]),
+        generation: u32::from_le_bytes([e[4], e[5], e[6], e[7]]),
+    })
+}
+
+/**
  * @brief Build a SUBSCRIBER TLV (`type=0x04`, `PL=1`) wrapping a target PATH — the
  * payload of a subscribe-write (reference/05 §0x04). Vector-pinned:
  * `subscriber-path` = `SUBSCRIBER{ PATH{ NAME "sensor", NAME "temp" } }`.

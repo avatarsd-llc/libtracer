@@ -1,0 +1,41 @@
+{
+  "name": "ref-3host",
+  "category": "path-ref",
+  "hex": "140018000700000003000000130000000C0000002A00000001000000",
+  "total_bytes": 28,
+  "decoded": {
+    "type": "0x14 PATH_REF",
+    "opt": {
+      "raw": "0x00",
+      "PL": 0,
+      "TS": 0,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 24,
+    "element_count": 3,
+    "elements": [
+      {
+        "index": 7,
+        "generation": 3
+      },
+      {
+        "index": 19,
+        "generation": 12
+      },
+      {
+        "index": 42,
+        "generation": 1
+      }
+    ],
+    "trailer": {
+      "ts": null,
+      "crc": null
+    },
+    "meaning": "A one-forwarder bound path: origin, forwarder, terminus \u2014 one element per host on the route."
+  }
+}

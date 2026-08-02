@@ -1,0 +1,28 @@
+{
+  "name": "ref-empty",
+  "category": "path-ref",
+  "hex": "14000000",
+  "total_bytes": 4,
+  "decoded": {
+    "type": "0x14 PATH_REF",
+    "opt": {
+      "raw": "0x00",
+      "PL": 0,
+      "TS": 0,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 0,
+    "element_count": 0,
+    "elements": [],
+    "trailer": {
+      "ts": null,
+      "crc": null
+    },
+    "meaning": "H=0: a bound path with no elements. Structurally valid \u2014 0 % 8 == 0 and 0 <= 2040, and RFC-0024 \u00a74.3's bound is an upper one \u2014 so the codec carries it; a route naming no vertex is the router's to refuse (\u00a75), not the codec's."
+  }
+}
